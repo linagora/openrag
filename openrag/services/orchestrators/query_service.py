@@ -49,6 +49,7 @@ from core.prompts import (
     format_web_context,
     prepend_system_prompt,
 )
+from core.utils.conts import is_internal_metadata_key
 from core.utils.exceptions import ValidationError, WorkspaceNotFoundError
 from core.utils.logging import get_logger
 from core.utils.source_filtering import (
@@ -157,6 +158,7 @@ class QueryService:
             config.rag.chat_history_depth if config.rag.chat_history_depth >= 1 else self._CHAT_HISTORY_DEPTH_DEFAULT
         )
         self._max_contextualized_query_len = config.rag.max_contextualized_query_len
+        self._expose_context = config.rag.expose_context
         # Sized on the assumption that retrieval returns ~reranker.top_k chunks,
         # but reranker_top_k is never actually applied as a cutoff in
         # RetrieverPipeline.retrieve_docs() on the no-map-reduce path — retrieval
@@ -700,6 +702,34 @@ class QueryService:
     # Public API (router = transport)
     # ------------------------------------------------------------------
 
+    def _context_payload(self, docs: list, metadata: dict) -> list[dict] | None:
+        """The exact document context the LLM was given, or ``None``.
+
+        Emitted only when the caller sends ``metadata: {"include_context": true}``
+        *and* the deployment sets ``rag.expose_context`` (``RAG_EXPOSE_CONTEXT``).
+        Returning ``None`` keeps the key absent rather than empty, so a client
+        can tell "not available" from "nothing retrieved".
+
+        By this point ``docs`` has been reranked, RRF-fused across sub-queries
+        and cut to the token budget, and it is in the same order as the
+        ``[Source N]`` blocks in the prompt — so this is the only faithful view
+        of what the model actually read. ``sources`` cannot serve that purpose
+        (it is filtered to the chunks the model cited) and ``GET /search``
+        cannot either (it skips reranking and fusion).
+
+        Document chunks only; web-search results are not included.
+        """
+        if not self._expose_context or not metadata.get("include_context"):
+            return None
+        return [
+            {
+                "source_index": index,
+                "text": doc.page_content,
+                "metadata": {k: v for k, v in (doc.metadata or {}).items() if not is_internal_metadata_key(k)},
+            }
+            for index, doc in enumerate(docs, start=1)
+        ]
+
     async def chat(
         self,
         *,
@@ -748,6 +778,9 @@ class QueryService:
         if metadata.get("attachments"):
             # Indicate which attachments were actually searched to generate the answer.
             extra["attachments"] = attachments
+        context = self._context_payload(docs, metadata)
+        if context is not None:
+            extra["context"] = context
         chunk["extra"] = json.dumps(extra)
         return chunk
 

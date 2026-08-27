@@ -106,6 +106,18 @@ class RAGConfig(ConfigMixin):
     chat_history_depth: int = 4
     max_contextualized_query_len: int = 512
 
+    #: Allow a caller to ask for the exact context the LLM was given, by sending
+    #: ``metadata: {"include_context": true}``. Off by default: the payload is
+    #: the full retrieved text, which is far larger than a normal completion and
+    #: is only wanted by offline evaluation. The request flag alone is not
+    #: enough — an operator must turn this on for the deployment.
+    #:
+    #: Retrieval quality cannot otherwise be measured from the API: the
+    #: ``sources`` field is filtered down to the chunks the model *cited*, and
+    #: ``GET /search`` skips the reranker and the multi-query RRF fusion, so it
+    #: cannot see a reranker change at all.
+    expose_context: bool = False
+
 
 # ---------------------------------------------------------------------------
 # Map-Reduce

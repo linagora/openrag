@@ -329,6 +329,12 @@ rag:
   mode: ChatBotRag
   chat_history_depth: 4
   max_contextualized_query_len: 512
+  # Let a caller request the exact context the LLM received, by sending
+  # `metadata: {"include_context": true}` on a non-streaming chat completion.
+  # Intended for offline retrieval evaluation (scripts/rag_eval.py); leave off
+  # in normal deployments, since the response then carries the full retrieved
+  # text rather than just the answer.
+  expose_context: false
 
 # --- Web Search ---
 # Env: WEBSEARCH_PROVIDER, WEBSEARCH_API_TOKEN, WEBSEARCH_BASE_URL,

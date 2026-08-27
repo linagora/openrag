@@ -46,10 +46,10 @@ from core.chunking.markdown_utils import (
     split_md_elements,
 )
 from core.chunking.recursive import (
-    _IMAGE_PLACEHOLDER_MARKER,
     _INLINE_ELEMENT_TOKEN_THRESHOLD,
     BaseChunker,
     dewrap_paragraphs,
+    is_placeholder_image,
 )
 from core.chunking.registry import chunking_registry
 from core.models.chunk import Chunk, ChunkType
@@ -156,6 +156,16 @@ _DEFAULT_LEAF_PATTERNS: tuple[str, ...] = (r"^\s*Art(?:icle|\.)\s*[LRDOlrdo]?\.?
 # nested under a real ``# Book`` heading still stacks sensibly.
 _MD_LEVEL_BASE = 0
 _KEYWORD_LEVEL_BASE = 100
+
+
+@dataclass
+class _Heading:
+    """A heading on the open stack. ``used`` records whether any unit was
+    flushed beneath it, i.e. whether its text ever reached a chunk."""
+
+    level: int
+    text: str
+    used: bool = False
 
 
 @dataclass
@@ -283,8 +293,10 @@ class StructuredSectionChunker(BaseChunker):
             if self.prepend_heading_path:
                 text = f"{header}\n\n{body}" if header else body
             else:
-                breadcrumb = " > ".join(unit.heading_path)
-                text = f"{breadcrumb}\n\n{body}" if breadcrumb else body
+                # No breadcrumb fallback needed any more — the heading lines are
+                # in the body themselves, so turning the preamble off no longer
+                # removes the document's structure from the index.
+                text = body
                 header = ""
             chunks.append(
                 Chunk(
@@ -319,7 +331,7 @@ class StructuredSectionChunker(BaseChunker):
         next marker becomes that section's intro unit.
         """
         units: list[_Unit] = []
-        stack: list[tuple[int, str]] = []  # (level, text)
+        stack: list[_Heading] = []
         page = 1
 
         # Current open leaf being accumulated (marker line + its body lines).
@@ -328,20 +340,30 @@ class StructuredSectionChunker(BaseChunker):
         buf_pages: set[int] = set()
         buf_marks: list[tuple[int, int]] = []
         buf_len = 0
+        buf_has_body = False
 
-        def add_line(line: str, line_page: int | None = None) -> None:
+        def add_line(line: str, line_page: int | None = None, *, heading: bool = False) -> None:
             """Append a body line, remembering where each page starts in it."""
-            nonlocal buf_len
+            nonlocal buf_len, buf_has_body
+            if not heading and line.strip():
+                buf_has_body = True
             if line_page is not None:
                 buf_marks.append((buf_len, line_page))
                 buf_pages.add(line_page)
             buf_lines.append(line)
             buf_len += len(line) + 1  # the "\n" the join will insert
 
-        def flush() -> None:
-            nonlocal buf_lines, buf_pages, buf_marks, buf_len
+        def flush(force: bool = False) -> None:
+            """Emit the open unit. A buffer holding only headings is kept, not
+            emitted: consecutive headings then pile into the unit their body
+            eventually opens, instead of becoming an orphan heading chunk."""
+            nonlocal buf_lines, buf_pages, buf_marks, buf_len, buf_has_body
+            if not (buf_has_body or force):
+                return
             text = "\n".join(buf_lines).strip()
             if text:
+                for entry in stack:
+                    entry.used = True
                 units.append(
                     _Unit(
                         heading_path=list(buf_path),
@@ -356,13 +378,14 @@ class StructuredSectionChunker(BaseChunker):
             buf_pages = set()
             buf_marks = []
             buf_len = 0
+            buf_has_body = False
 
         for element in split_md_elements(content):
             if element.type in ("table", "image"):
                 # Non-informative images (the captioner's "[Image Placeholder]")
                 # are dropped, matching the recursive chunker — otherwise every
                 # blank logo becomes a chunk.
-                if element.type == "image" and _IMAGE_PLACEHOLDER_MARKER in element.content.lower():
+                if element.type == "image" and is_placeholder_image(element.content):
                     continue
                 # Small tables / image captions inline with the surrounding prose
                 # (like recursive's _prepare_md_elements) so a slide's handful of
@@ -371,7 +394,9 @@ class StructuredSectionChunker(BaseChunker):
                 if self.length_function(element.content) <= self._inline_threshold:
                     add_line(element.content.strip(), element.page_number or page)
                 else:
-                    flush()
+                    flush(force=True)
+                    for entry in stack:
+                        entry.used = True
                     units.append(self._atomic_unit(element, list(stack_path(stack)), page))
                 continue
 
@@ -387,6 +412,16 @@ class StructuredSectionChunker(BaseChunker):
                     level, text = level_text
                     flush()
                     _push_heading(stack, level, text)
+                    # The heading opens the body of the unit it introduces, the
+                    # way recursive_splitter keeps heading lines inline. Holding
+                    # it only in the breadcrumb made the breadcrumb its sole
+                    # home, so every path-shortening step deleted it outright:
+                    # _merge_small taking a _common_prefix dropped the differing
+                    # leaf, a sibling heading popped it before any body flushed,
+                    # and prepend_heading_path=False removed the last copy.
+                    # Coverage against the source ran 91-99% where
+                    # recursive_splitter ran ~100%.
+                    add_line(text, page, heading=True)
                     buf_path = list(stack_path(stack))
                     continue
 
@@ -411,6 +446,7 @@ class StructuredSectionChunker(BaseChunker):
                     add_line("")
             flush()
 
+        flush(force=True)
         return units
 
     def _atomic_unit(self, element: MDElement, heading_path: list[str], page: int) -> _Unit:
@@ -750,14 +786,29 @@ class StructuredSectionChunker(BaseChunker):
 # ---------------------------------------------------------------------------
 # Free helpers (kept out of the class — pure, testable)
 # ---------------------------------------------------------------------------
-def stack_path(stack: list[tuple[int, str]]) -> list[str]:
-    return [text for _, text in stack]
+def stack_path(stack: list[_Heading]) -> list[str]:
+    return [entry.text for entry in stack]
 
 
-def _push_heading(stack: list[tuple[int, str]], level: int, text: str) -> None:
-    while stack and stack[-1][0] >= level:
-        stack.pop()
-    stack.append((level, text))
+def _push_heading(stack: list[_Heading], level: int, text: str) -> list[str]:
+    """Push a heading, returning any popped heading that never reached a chunk.
+
+    A heading only reaches the index through the breadcrumb of a unit flushed
+    beneath it. A heading immediately followed by a sibling — a run of
+    ``Chapitre`` titles in a legal code, or the stacked ``####`` lines that make
+    up a slide — is popped before any body is flushed, so its text appeared in
+    no chunk at all: not in ``text``, not in the header, not in
+    ``hierarchy_path``. That is silent content loss, measured at 7% of a slide
+    deck and ~1,200 words of a legal code. The caller keeps the returned text by
+    putting it in the next unit's body, in document order.
+    """
+    dropped: list[str] = []
+    while stack and stack[-1].level >= level:
+        popped = stack.pop()
+        if not popped.used:
+            dropped.append(popped.text)
+    stack.append(_Heading(level=level, text=text))
+    return dropped
 
 
 def _attribute_pages(unit: _Unit, pieces: list[str]) -> list[set[int]]:
@@ -813,6 +864,12 @@ def _absorb(cur: _Unit, unit: _Unit, *, path: list[str] | None = None) -> None:
     cur.pages |= unit.pages
     if unit.chunk_type is not ChunkType.TEXT and cur.chunk_type is ChunkType.TEXT:
         cur.chunk_type = unit.chunk_type
+    # Atomicity travels with the type. Without this a text unit that swallowed
+    # a table came out typed TABLE but atomic=False, so ``_may_absorb`` let it
+    # go on absorbing unrelated prose from other pages — the table protection
+    # applies to a unit that *is* a table, not to one that merely started as
+    # prose next to one.
+    cur.atomic = cur.atomic or unit.atomic
     if path is not None:
         cur.heading_path = list(path)
 

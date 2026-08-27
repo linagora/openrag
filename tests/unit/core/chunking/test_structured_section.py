@@ -88,14 +88,15 @@ def test_returns_chunks_with_structure_metadata():
 
 
 def test_no_orphan_heading_chunks():
-    # A bare heading (Titre/Chapitre) must never be emitted as its own chunk —
-    # it only sets context for the leaves beneath it.
+    # Heading lines live in the body (so they reach the index at all), so a
+    # chunk may legitimately *open* with its heading — what must never happen
+    # is a chunk that is nothing but headings, carrying no content of its own.
     chunks = _chunker(chunk_size=40).chunk(_doc(LEGAL))
     for c in chunks:
         body_lines = [ln for ln in (c.content or "").splitlines() if ln.strip()]
         assert body_lines, "chunk body should never be empty"
-        assert not body_lines[0].startswith("Titre")
-        assert not body_lines[0].startswith("Chapitre")
+        headings = [ln for ln in body_lines if ln.startswith(("Livre", "Titre", "Chapitre"))]
+        assert len(headings) < len(body_lines), f"chunk is only headings: {body_lines}"
 
 
 def _is_bare_marker(line: str) -> bool:

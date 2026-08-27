@@ -135,9 +135,14 @@ class FakeWorkspace:
         return [fid for fid in file_ids if fid in allowed]
 
 
-def _config(mode="SimpleRag"):
+def _config(mode="SimpleRag", expose_context=False):
     return SimpleNamespace(
-        rag=SimpleNamespace(mode=mode, chat_history_depth=4, max_contextualized_query_len=512),
+        rag=SimpleNamespace(
+            mode=mode,
+            chat_history_depth=4,
+            max_contextualized_query_len=512,
+            expose_context=expose_context,
+        ),
         reranker=SimpleNamespace(top_k=5),
         chunker=SimpleNamespace(chunk_size=512),
         map_reduce=SimpleNamespace(initial_batch_size=2, expansion_batch_size=2, max_total_documents=4),
@@ -148,11 +153,20 @@ def _config(mode="SimpleRag"):
     )
 
 
-def _svc(*, llm=None, retrieval=None, web=None, mode="SimpleRag", llm_factory=None, workspace=None) -> QueryService:
+def _svc(
+    *,
+    llm=None,
+    retrieval=None,
+    web=None,
+    mode="SimpleRag",
+    llm_factory=None,
+    workspace=None,
+    expose_context=False,
+) -> QueryService:
     return QueryService(
         retrieval_service=retrieval or FakeRetrieval(),
         llm=llm or FakeLLM(),
-        config=_config(mode),
+        config=_config(mode, expose_context=expose_context),
         web_search_service=web or FakeWeb(),
         workspace_service=workspace or FakeWorkspace(),
         prompt_service=_disk_prompt_service(),
@@ -345,6 +359,66 @@ async def test_chat_answers_with_partition_chat_llm():
     assert out["choices"][0]["message"]["content"] == "preset answer"
     assert len(preset_llm.chat_calls) == 1
     assert default_llm.chat_calls == []  # SimpleRag: no query-gen call either
+
+
+# --------------------------------------------------------------------------- #
+# rag.expose_context — the retrieval-evaluation escape hatch
+# --------------------------------------------------------------------------- #
+
+
+async def _chat_extra(*, expose_context: bool, include_context, chunks=None) -> dict:
+    """Run one chat completion and return the parsed ``extra`` envelope."""
+    svc = _svc(
+        llm=FakeLLM(chat_responses=["answer [Sources: none]"]),
+        retrieval=FakeRetrieval(chunks),
+        expose_context=expose_context,
+    )
+    metadata = {} if include_context is None else {"include_context": include_context}
+    out = await svc.chat(
+        partitions=["p"],
+        payload={"messages": [{"role": "user", "content": "q"}], "metadata": metadata},
+        prepare_sources=lambda d, w: [],
+        model_name="openrag-p",
+    )
+    return json.loads(out["extra"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("expose_context", "include_context"),
+    [
+        (False, True),  # operator has not enabled it — a client cannot opt in
+        (False, None),
+        (True, None),  # enabled but not requested — normal traffic stays lean
+        (True, False),
+    ],
+)
+async def test_context_is_absent_unless_enabled_and_requested(expose_context, include_context):
+    extra = await _chat_extra(expose_context=expose_context, include_context=include_context)
+    assert "context" not in extra
+    assert "sources" in extra
+
+
+@pytest.mark.asyncio
+async def test_context_exposes_prompt_order_and_strips_internal_metadata():
+    chunks = [
+        Chunk(id="c1", text="first chunk", metadata={"_id": "c1", "filename": "a.pdf", "_openrag_secret": "hide"}),
+        Chunk(id="c2", text="second chunk", metadata={"_id": "c2", "filename": "b.pdf"}),
+    ]
+    extra = await _chat_extra(expose_context=True, include_context=True, chunks=chunks)
+
+    assert [c["source_index"] for c in extra["context"]] == [1, 2]
+    assert [c["text"] for c in extra["context"]] == ["first chunk", "second chunk"]
+    # source_index must line up with the [Source N] numbering in the prompt.
+    assert extra["context"][0]["metadata"]["filename"] == "a.pdf"
+    assert not any(k.startswith("_openrag") for c in extra["context"] for k in c["metadata"])
+
+
+@pytest.mark.asyncio
+async def test_context_is_empty_list_when_nothing_was_retrieved():
+    # Distinguishable from "not available": the key exists but is empty.
+    extra = await _chat_extra(expose_context=True, include_context=True, chunks=[])
+    assert extra["context"] == []
 
 
 @pytest.mark.asyncio
