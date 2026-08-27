@@ -1006,3 +1006,52 @@ def test_overflow_warning_falls_back_to_token_count_without_a_counter():
     finally:
         _logger.remove(sink_id)
     assert any("truncated before embedding" in m for m in messages)
+
+
+def _pipeline_with_chunker_factory(factory):
+    """Minimal IndexingPipeline carrying only what _select_chunker touches."""
+    from services.workers.pipeline_builder import IndexingPipeline
+
+    return IndexingPipeline(
+        parser=object(),
+        chunker=object(),
+        embedder=object(),
+        vector_store=object(),
+        chunker_factory=factory,
+    )
+
+
+def test_chunker_factory_arity_is_decided_by_signature_not_by_catching():
+    """A compatible factory that raises TypeError internally must surface that
+    error, not be silently retried with one argument (building twice and
+    reporting the arity fallback instead of the real failure)."""
+    from types import SimpleNamespace
+
+    import pytest
+    from services.workers.pipeline_builder import _accepts_embedder_window
+
+    calls = []
+
+    def modern(config, window=None):
+        calls.append(window)
+        raise TypeError("boom inside the factory")
+
+    assert _accepts_embedder_window(modern) is True
+    assert _accepts_embedder_window(lambda config: None) is False
+    assert _accepts_embedder_window(lambda *args: None) is True
+
+    pipeline = _pipeline_with_chunker_factory(modern)
+    with pytest.raises(TypeError, match="boom inside the factory"):
+        pipeline._select_chunker(SimpleNamespace(chunking=object()), "default", 2047)
+    assert len(calls) == 1, "the factory must not be invoked twice"
+
+
+def test_legacy_single_argument_chunker_factory_still_works():
+    from types import SimpleNamespace
+
+    from services.workers.pipeline_builder import IndexingPipeline
+
+    sentinel = object()
+    pipeline = _pipeline_with_chunker_factory(lambda config: sentinel)
+    assert pipeline._select_chunker(SimpleNamespace(chunking=object()), "default", 2047) is sentinel
+    assert isinstance(pipeline, IndexingPipeline)

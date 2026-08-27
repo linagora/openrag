@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import time
 from collections.abc import Callable, MutableMapping
 from dataclasses import dataclass
@@ -45,6 +46,30 @@ class PipelineTimeouts:
     store: float | None = None
     store_per_chunk: float = 0.0
     topic_tag: float | None = None
+
+
+def _accepts_embedder_window(factory: Callable[..., Any]) -> bool:
+    """Whether ``factory`` takes the embedder-window second positional argument.
+
+    Signature inspection rather than call-and-catch: catching ``TypeError`` from
+    the two-argument call cannot tell an arity mismatch from a ``TypeError``
+    raised inside a perfectly compatible factory, and retrying the latter would
+    build the chunker twice and swallow the real error.
+
+    Unintrospectable callables (C builtins, some partials) are assumed modern —
+    the two-argument form is the current contract, and the fallback exists only
+    for factories written before it.
+    """
+    try:
+        params = list(inspect.signature(factory).parameters.values())
+    except (TypeError, ValueError):
+        return True
+    if any(p.kind is inspect.Parameter.VAR_POSITIONAL for p in params):
+        return True
+    positional = [
+        p for p in params if p.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+    ]
+    return len(positional) >= 2
 
 
 @dataclass(slots=True, frozen=True)
@@ -363,13 +388,16 @@ class IndexingPipeline:
         window: int | None = None,
     ) -> ChunkingStrategy:
         if config is not None and self.chunker_factory is not None:
-            try:
+            # Decided from the signature, never by calling and catching
+            # TypeError: a compatible factory that raises TypeError internally
+            # would then be invoked a second time, duplicating whatever it had
+            # already done and reporting the arity fallback instead of the real
+            # error.
+            if _accepts_embedder_window(self.chunker_factory):
                 return self.chunker_factory(config.chunking, window)
-            except TypeError:
-                # A factory that predates the window argument (older callers and
-                # tests inject a single-argument lambda) still works; it just
-                # falls back to the chunker's own default bound.
-                return self.chunker_factory(config.chunking)
+            # A factory predating the window argument still works; it just falls
+            # back to the chunker's own default bound.
+            return self.chunker_factory(config.chunking)
         return self.chunker
 
     def _select_embedder(self, row: MutableMapping[str, Any]) -> Embedder:
