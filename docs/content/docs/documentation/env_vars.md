@@ -105,7 +105,7 @@ For local whisper loader, here are the options to use
 ##### OpenAI-compatible audio Loader ( `OpenAIAudioLoader` )
 The `OpenAIAudioLoader` option can use any OpenAI-compatible transcription service. Configure its URL, credentials, and model with **`TRANSCRIBER_BASE_URL`**, **`TRANSCRIBER_API_KEY`**, and **`TRANSCRIBER_MODEL`**.
 
-On first startup, these values seed the default **STT** endpoint in the Admin UI's **Model Endpoints** page. Once an STT endpoint is saved, it is the editable source for `OpenAIAudioLoader`: use it to change the OpenAI-compatible `/v1` URL, model, API key, timeout, concurrency, and optional language hint for MOSS, Whisper, or another compatible provider. No OpenRAG restart is required; indexer workers refresh the endpoint registry within one minute. The transcription endpoint must implement `/audio/transcriptions`.
+On first startup, these values seed the default **STT** endpoint in the Admin UI's **Model Endpoints** page. Once an STT endpoint is saved, it is the editable source for `OpenAIAudioLoader`: use it to change the OpenAI-compatible `/v1` URL, model, API key, timeout, concurrency, optional language hint, and non-secret provider request options for MOSS, Whisper, or another compatible provider. No OpenRAG restart is required; indexer workers refresh the endpoint registry within one minute. The transcription endpoint must implement `/audio/transcriptions`.
 
 The audio is automatically segmented into chunks using silence detection, then transcribes these chunks in parallel for optimal speed and accuracy.
 
@@ -144,7 +144,7 @@ Here are some other variables related to openai-compatible endpoint.
 
 For a MOSS server bound to `127.0.0.1:8001`, use `http://127.0.0.1:8001/v1` only when OpenRAG runs on that host. A containerized OpenRAG needs a host-reachable address such as `http://host.docker.internal:8001/v1` (plus Docker's host-gateway mapping on Linux). Match `TRANSCRIBER_MAX_CONCURRENT_CHUNKS` to the vLLM capacity; with `--max-num-seqs 1`, set it to `1`.
 
-The bundled transcriber image is pinned for Whisper and predates MOSS support. Serve MOSS with the vLLM build specified by the model authors, then use it as the external transcription endpoint. Manage its instruction in **Admin UI → Prompt Library → Transcription**. Changes apply to the next transcription without a restart; leave its content empty to retain MOSS's built-in diarization prompt. When adding hotwords or a format instruction, include the desired timestamp and speaker-label format in the prompt as well.
+The bundled transcriber image is pinned for Whisper and predates MOSS support. Serve MOSS with the vLLM build specified by the model authors, then use it as the external transcription endpoint. Its advanced STT request options are sent unchanged to vLLM, which allows an appropriate output-token budget and deterministic JSON output to be managed with the endpoint. Manage its instruction in **Admin UI → Prompt Library → Transcription**. Changes apply to the next transcription without a restart; leave its content empty to retain MOSS's built-in diarization prompt. When adding hotwords or a format instruction, include the desired timestamp and speaker-label format in the prompt as well.
 :::
 
 :::note[About whisper with vLLM and language detection]

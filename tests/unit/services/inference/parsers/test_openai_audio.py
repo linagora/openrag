@@ -200,6 +200,40 @@ class TestParse:
         assert client._semaphore_for_endpoint(endpoint)._value == 3
 
     @pytest.mark.asyncio
+    async def test_stt_request_extra_is_forwarded_without_connection_metadata(self, mock_openai_client):
+        mock_openai_client.audio.transcriptions.create.return_value = MagicMock(text="bonjour")
+        endpoint = ModelEndpointConfig(
+            endpoint="http://x",
+            model_name="moss-transcribe-diarize",
+            batch_size=1,
+            timeout=120,
+            extra={
+                "api_key": "k",
+                "language": "fr",
+                "managed_by": "env",
+                "implementation": "vllm",
+                "file": "must-not-override-upload",
+                "model": "must-not-override-endpoint",
+                "prompt": "must-not-override-managed-prompt",
+                "stream": True,
+                "temperature": 0,
+                "response_format": "json",
+                "max_completion_tokens": 8192,
+            },
+        )
+        client = _client(mock_openai_client, transcription_endpoint_resolver=lambda: endpoint)
+
+        await client.parse(_audio_doc())
+
+        kwargs = mock_openai_client.audio.transcriptions.create.await_args.kwargs
+        assert kwargs["language"] == "fr"
+        assert kwargs["extra_body"] == {
+            "temperature": 0,
+            "response_format": "json",
+            "max_completion_tokens": 8192,
+        }
+
+    @pytest.mark.asyncio
     async def test_stt_endpoint_resolver_replaces_connection_and_model(self, monkeypatch):
         from services.inference.parsers import openai_audio as module
 
