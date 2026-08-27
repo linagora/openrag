@@ -1,13 +1,14 @@
-# 🦫 OpenRag — The Open RAG Experimentation Playground
+# 🦫 OpenRag — Sovereign, Open Source RAG
 
 ![RAG Architecture](./RAG_architecture.gif)
 
-[OpenRag](https://open-rag.ai/) is a lightweight, modular and extensible Retrieval-Augmented Generation (RAG) framework designed to explore and test advanced RAG techniques — 100% open source and focused on experimentation, not lock-in.
+[OpenRag](https://open-rag.ai/) is a modular, production-grade Retrieval-Augmented Generation (RAG) framework. It runs entirely on your own infrastructure, with every parser, chunking strategy and retrieval method configurable — 100% open source, no black boxes, no lock-in.
 
-> Built by the Linagora, OpenRag offers a sovereign-by-design alternative to mainstream RAG stacks.
+> Built by Linagora, OpenRag is a sovereign-by-design alternative to mainstream RAG stacks.
+> It is the RAG engine behind [Twake.ai](https://twake.ai).
 
 ## Table of Contents
-- [🦫 OpenRag — The Open RAG Experimentation Playground](#-openrag--the-open-rag-experimentation-playground)
+- [🦫 OpenRag — Sovereign, Open Source RAG](#-openrag--sovereign-open-source-rag)
 - [Table of Contents](#table-of-contents)
 - [🎯 Goals](#-goals)
 - [✨ Key Features](#-key-features)
@@ -21,9 +22,10 @@
 
 
 ## 🎯 Goals
-- Experiment with advanced RAG techniques
-- Develop evaluation metrics for RAG applications
-- Collaborate with the community to innovate and push the boundaries of RAG applications
+- Run state-of-the-art RAG in production, on infrastructure you control
+- Keep every component swappable — parsers, chunkers, retrievers, models
+- Make answers verifiable, with citations back to the source document and page
+- Build in the open, with the community
 
 ## ✨ Key Features
 ### 📁 Rich File Format Support

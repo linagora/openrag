@@ -265,6 +265,7 @@ For an opt-in named-volume profile, copy the values from `infra/compose/.env.nam
 | `VLLM_CACHE` | `/root/.cache/huggingface` | Hugging Face cache used by vLLM, reranker, and transcriber services. |
 | `DB_VOLUME` | `../../db` | PostgreSQL data mounted at `/var/lib/postgresql/data`. |
 | `MILVUS_VOLUME_DIRECTORY` | `./volumes` | Parent directory for Milvus, etcd, and MinIO host-path storage. |
+| `MILVUS_MQ_TYPE` | `default` | Milvus message queue. Keep the existing value during a version upgrade; fresh installations can use the default. |
 | `MILVUS_COMPOSE` | `milvus/milvus.yaml` | Milvus compose include. Use `milvus/milvus.named-volumes.yaml` for the named-volume profile. |
 | `ETCD_VOLUME` | `etcd` | Milvus etcd named volume, used only with `MILVUS_COMPOSE=milvus/milvus.named-volumes.yaml`. |
 | `MINIO_VOLUME` | `minio` | Milvus object storage named volume, used only with `MILVUS_COMPOSE=milvus/milvus.named-volumes.yaml`. |

@@ -24,6 +24,28 @@ def _load_env_example(path: Path) -> dict[str, str]:
     return values
 
 
+def _assert_milvus_initializer(services: dict) -> None:
+    """Assert that Milvus starts only after its storage is safe for UID 999."""
+    initializer = services["milvus-init"]
+    milvus = services["milvus"]
+
+    assert initializer["image"] == milvus["image"] == "milvusdb/milvus:v3.0.0"
+    assert initializer["user"] == "0:0"
+    assert initializer["environment"]["LD_PRELOAD"] == ""
+    assert initializer["entrypoint"] == ["/bin/sh", "-ec"]
+    assert initializer["volumes"] == milvus["volumes"]
+    assert initializer["read_only"] is True
+    assert initializer["cap_drop"] == ["ALL"]
+    assert initializer["cap_add"] == ["CHOWN", "DAC_READ_SEARCH"]
+
+    command = initializer["command"][0]
+    assert "! -uid 999" in command
+    assert "! -gid 999" in command
+    assert "exit 1" in command
+    assert "chown 999:999 /var/lib/milvus" in command
+    assert milvus["depends_on"]["milvus-init"]["condition"] == "service_completed_successfully"
+
+
 def test_compose_defaults_preserve_existing_host_paths() -> None:
     compose = _load_yaml(COMPOSE_DIR / "docker-compose.yaml")
 
@@ -48,10 +70,16 @@ def test_compose_defaults_preserve_existing_host_paths() -> None:
 
 def test_milvus_compose_defaults_preserve_existing_host_paths() -> None:
     compose = _load_yaml(COMPOSE_DIR / "milvus" / "milvus.yaml")
+    services = compose["services"]
 
-    assert compose["services"]["etcd"]["volumes"] == ["${MILVUS_VOLUME_DIRECTORY:-./volumes}/etcd:/etcd"]
-    assert compose["services"]["minio"]["volumes"] == ["${MILVUS_VOLUME_DIRECTORY:-./volumes}/minio:/minio_data"]
-    assert compose["services"]["milvus"]["volumes"] == ["${MILVUS_VOLUME_DIRECTORY:-./volumes}/milvus:/var/lib/milvus"]
+    assert services["etcd"]["volumes"] == ["${MILVUS_VOLUME_DIRECTORY:-./volumes}/etcd:/etcd"]
+    assert services["minio"]["volumes"] == ["${MILVUS_VOLUME_DIRECTORY:-./volumes}/minio:/minio_data"]
+    assert services["milvus"]["volumes"] == ["${MILVUS_VOLUME_DIRECTORY:-./volumes}/milvus:/var/lib/milvus"]
+
+    _assert_milvus_initializer(services)
+    assert services["milvus"]["environment"]["ETCD_AUTH_ENABLED"] == "false"
+    assert services["milvus"]["environment"]["MQ_TYPE"] == "${MILVUS_MQ_TYPE:-default}"
+    assert services["milvus"]["depends_on"]["milvus-init"]["condition"] == "service_completed_successfully"
 
 
 def test_named_volume_profile_is_opt_in() -> None:
@@ -72,7 +100,11 @@ def test_named_volume_profile_is_opt_in() -> None:
     assert named_milvus["services"]["etcd"]["volumes"] == ["${ETCD_VOLUME:-etcd}:/etcd"]
     assert named_milvus["services"]["minio"]["volumes"] == ["${MINIO_VOLUME:-minio}:/minio_data"]
     assert named_milvus["services"]["milvus"]["volumes"] == ["${MILVUS_VOLUME:-milvus}:/var/lib/milvus"]
+    assert named_milvus["services"]["milvus"]["image"] == "milvusdb/milvus:v3.0.0"
+    assert named_milvus["services"]["milvus"]["environment"]["ETCD_AUTH_ENABLED"] == "false"
+    assert named_milvus["services"]["milvus"]["environment"]["MQ_TYPE"] == "${MILVUS_MQ_TYPE:-default}"
     assert {"etcd", "minio", "milvus"} <= set(named_milvus["volumes"])
+    _assert_milvus_initializer(named_milvus["services"])
 
     minio_env = named_milvus["services"]["minio"]["environment"]
     milvus_env = named_milvus["services"]["milvus"]["environment"]
