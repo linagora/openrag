@@ -19,6 +19,11 @@ class ModelEndpointConfig(BaseModel):
       ``{"implementation": "ollama"}``  → OllamaEmbedder
       ``{"implementation": "infinity"}``→ InfinityReranker
       ``{"api_key": "sk-..."}``         → passed to client constructor
+      ``{"max_model_len": 8192}``       → embedders: this endpoint's context
+          window, mirroring the global ``embedder.max_model_len``. A partition
+          may point at an embedder with a different window than the deployment
+          default, and the chunker derives its hard safety bound from it (see
+          ``core.chunking.factory.create_chunker``). Absent → global value.
     """
 
     endpoint: str

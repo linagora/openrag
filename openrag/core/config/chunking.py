@@ -26,6 +26,12 @@ class ChunkerConfig(ConfigMixin):
     # detection generalize beyond French legal codes; None uses the built-ins.
     min_tokens: int | None = None
     max_tokens: int | None = None
+    # Safety bound for atomic units (figure captions), distinct from
+    # ``max_tokens``: it exists only to keep a pathological unit from
+    # overflowing the embedder's context window, so leaving it ``None`` lets
+    # ``create_chunker`` derive it from the embedder actually used by the
+    # partition (half its window). Set it explicitly only to override that.
+    hard_max_tokens: int | None = None
     prepend_heading_path: bool = True
     heading_keywords: list[str] | None = None
     leaf_patterns: list[str] | None = None
