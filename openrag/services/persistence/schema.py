@@ -61,7 +61,7 @@ model_endpoints = Table(
         nullable=False,
     ),
     CheckConstraint(
-        "model_type IN ('embedder','reranker','llm','vlm')",
+        "model_type IN ('embedder','reranker','llm','vlm','stt')",
         name="ck_model_endpoint_type",
     ),
 )

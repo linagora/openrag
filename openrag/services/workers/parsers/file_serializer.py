@@ -18,13 +18,19 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 
+from core.config.model_endpoints import ModelEndpointConfig
 from core.indexing.serializer import FileSerializer
 
 
 class ParserFileSerializer(FileSerializer):
     """Implements ``FileSerializer`` by running the parser dispatcher in-process."""
 
-    def __init__(self, *, transcription_prompt_resolver: Callable[[], Awaitable[str | None]] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        transcription_prompt_resolver: Callable[[], Awaitable[str | None]] | None = None,
+        transcription_endpoint_resolver: Callable[[], ModelEndpointConfig | None] | None = None,
+    ) -> None:
         from core.config import load_config
         from services.workers.parsers.parser_dispatcher import (
             build_caption_vlm,
@@ -36,6 +42,7 @@ class ParserFileSerializer(FileSerializer):
         self._dispatcher = build_parser_dispatcher(
             config,
             transcription_prompt_resolver=transcription_prompt_resolver,
+            transcription_endpoint_resolver=transcription_endpoint_resolver,
         )
         self._vlm = build_caption_vlm(config)
         self._caption_prompt = load_caption_prompt(config) if self._vlm is not None else None
@@ -72,10 +79,15 @@ class ParserFileSerializer(FileSerializer):
 
 
 def build_file_serializer(
-    *, transcription_prompt_resolver: Callable[[], Awaitable[str | None]] | None = None
+    *,
+    transcription_prompt_resolver: Callable[[], Awaitable[str | None]] | None = None,
+    transcription_endpoint_resolver: Callable[[], ModelEndpointConfig | None] | None = None,
 ) -> ParserFileSerializer:
     """Build the in-process file serializer. Convenience for the composition root."""
-    return ParserFileSerializer(transcription_prompt_resolver=transcription_prompt_resolver)
+    return ParserFileSerializer(
+        transcription_prompt_resolver=transcription_prompt_resolver,
+        transcription_endpoint_resolver=transcription_endpoint_resolver,
+    )
 
 
 __all__ = ["ParserFileSerializer", "build_file_serializer"]

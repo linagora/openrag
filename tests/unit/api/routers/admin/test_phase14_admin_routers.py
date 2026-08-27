@@ -783,3 +783,21 @@ async def test_update_non_llm_endpoint_accepts_same_named_extra_keys(async_clien
 
     assert response.status_code == 200
     assert model_service.calls[0][1]["extra"] == {key: "auto"}
+
+
+@pytest.mark.asyncio
+async def test_update_stt_endpoint_validates_model_and_language_hint(async_client_factory):
+    """The route knows the endpoint type that the generic update schema lacks."""
+    from api.error_handlers import register_error_handlers
+
+    model_service = FakeModelEndpointService()
+    app = _build_app(model_service=model_service)
+    register_error_handlers(app)
+
+    async with async_client_factory(app) as client:
+        invalid = await client.put("/model-endpoints/stt/default", json={"model_name": ""})
+        valid = await client.put("/model-endpoints/stt/default", json={"extra": {"language": "fr"}})
+
+    assert invalid.status_code == 422
+    assert valid.status_code == 200
+    assert model_service.calls == [("update", {"name": "default", "model_type": "stt", "extra": {"language": "fr"}})]

@@ -6,11 +6,11 @@ import re
 from datetime import datetime
 from typing import Any, Literal
 
-from core.config.model_endpoints import LLM_CONTEXT_SIZE_KEY, LLM_OUTPUT_TOKENS_KEY
+from core.config.model_endpoints import LLM_CONTEXT_SIZE_KEY, LLM_OUTPUT_TOKENS_KEY, STT_LANGUAGE_KEY
 from core.utils.redaction import redact_secret_mapping
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
-ModelEndpointType = Literal["embedder", "reranker", "llm", "vlm"]
+ModelEndpointType = Literal["embedder", "reranker", "llm", "vlm", "stt"]
 
 # LLM token budgets that the admin UI edits as first-class fields but stores in
 # ``extra`` — validated here so a typo can't persist a nonsensical value.
@@ -91,6 +91,22 @@ def validate_llm_token_extra(extra: dict[str, Any] | None) -> dict[str, Any] | N
     return extra
 
 
+def validate_stt_fields(model_name: str | None, extra: dict[str, Any] | None) -> None:
+    """Validate fields that are meaningful for an OpenAI-compatible STT endpoint.
+
+    ``model`` is required by ``/audio/transcriptions``.  A language hint is
+    intentionally permissive: providers accept either ISO 639-1 values such as
+    ``fr`` or broader BCP-47 tags, so the API only requires a non-empty string.
+    """
+    if not model_name or not model_name.strip():
+        raise ValueError("model_name is required for an STT endpoint")
+    if extra is None or STT_LANGUAGE_KEY not in extra:
+        return
+    language = extra[STT_LANGUAGE_KEY]
+    if not isinstance(language, str) or not language.strip():
+        raise ValueError(f"extra.{STT_LANGUAGE_KEY} must be a non-empty language code")
+
+
 class CreateModelEndpointRequest(BaseModel):
     """Request body for registering a model endpoint."""
 
@@ -129,6 +145,12 @@ class CreateModelEndpointRequest(BaseModel):
         if info.data.get("model_type") != "llm":
             return value
         return validate_llm_token_extra(value)
+
+    @model_validator(mode="after")
+    def validate_stt_endpoint(self) -> CreateModelEndpointRequest:
+        if self.model_type == "stt":
+            validate_stt_fields(self.model_name, self.extra)
+        return self
 
 
 class UpdateModelEndpointRequest(BaseModel):
@@ -257,4 +279,5 @@ __all__ = [
     "UpdateModelEndpointRequest",
     "ValidateEndpointRequest",
     "ValidateEndpointResponse",
+    "validate_stt_fields",
 ]

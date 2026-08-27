@@ -29,7 +29,7 @@ if TYPE_CHECKING:
 
 logger = get_logger()
 
-_VALID_TYPES = frozenset({"embedder", "reranker", "llm", "vlm"})
+_VALID_TYPES = frozenset({"embedder", "reranker", "llm", "vlm", "stt"})
 _SAMPLING_TYPES = frozenset({"llm", "vlm"})
 # `EMPTY` is the config's stand-in for "no key configured" (see endpoints.py), not
 # a credential. Treating it as one would let boot-time sync overwrite a real
@@ -45,6 +45,10 @@ _ENV_OWNED_TUNABLES: dict[str, dict[str, str]] = {
     "embedder": {"batch_size": "EMBEDDER_BATCH_SIZE", "timeout": "EMBEDDER_TIMEOUT"},
     "vlm": {"timeout": "VLM_TIMEOUT"},
     "reranker": {"timeout": "RERANKER_TIMEOUT"},
+    "stt": {
+        "batch_size": "TRANSCRIBER_MAX_CONCURRENT_CHUNKS",
+        "timeout": "TRANSCRIBER_TIMEOUT",
+    },
     "llm": {},
 }
 
@@ -293,6 +297,21 @@ class ModelEndpointService:
                 "timeout": s.reranker.timeout,
                 "extra": _with_api_key({"implementation": s.reranker.provider}, s.reranker.api_key),
             },
+            "stt": {
+                # Keep the existing TRANSCRIBER_* configuration as the source
+                # for the first seed, so upgrades preserve a working Whisper,
+                # MOSS, or other OpenAI-compatible transcription setup.
+                "endpoint": s.loader.transcriber.base_url,
+                "model_name": s.loader.transcriber.model_name,
+                # ``batch_size`` is the common registry column; for STT it is
+                # used as the concurrent-transcription limit by OpenAIAudioClient.
+                "batch_size": s.loader.transcriber.max_concurrent_chunks,
+                "timeout": s.loader.transcriber.timeout,
+                "extra": _with_api_key(
+                    {},
+                    None if s.loader.transcriber.api_key in _PLACEHOLDER_API_KEYS else s.loader.transcriber.api_key,
+                ),
+            },
         }
 
     async def _backfill_sampling_params(self, rows: list[ModelEndpointRow], llm_cfg: Any) -> None:
@@ -345,7 +364,7 @@ class ModelEndpointService:
             buckets[model_type]["default"] = default_cfg
 
         models = self._config.models
-        for attr in ("embedder", "reranker", "llm", "vlm"):
+        for attr in ("embedder", "reranker", "llm", "vlm", "stt"):
             target: dict = getattr(models, attr)
             target.clear()
             target.update(buckets[attr])
@@ -356,6 +375,7 @@ class ModelEndpointService:
             n_llm=len(buckets["llm"]),
             n_reranker=len(buckets["reranker"]),
             n_vlm=len(buckets["vlm"]),
+            n_stt=len(buckets["stt"]),
         )
 
     # ------------------------------------------------------------------
