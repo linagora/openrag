@@ -217,6 +217,21 @@ class StructuredSectionChunker(BaseChunker):
         # window by the caller, not from ``chunk_size``. ``None`` disables it:
         # atomic units are then never force-split.
         self.hard_max_tokens = hard_max_tokens
+        # The safety bound OUTRANKS the packing band. Left beside it, the bound
+        # was enforced in ``_pack`` and then undone by ``_merge_small`` — the
+        # split pieces land under ``min_tokens``, share a page, and fold back
+        # into a single unit whose only ceiling was the (larger) ``max_tokens``.
+        # It also never reached prose at all, since ``_enforce_ceiling`` runs
+        # only on atomic units. Collapsing the whole band under the bound closes
+        # both holes at once: every downstream budget derives from
+        # ``max_tokens``, so nothing can exceed the embedder's window again.
+        # A no-op in the normal case (768 packing ceiling vs a 1023 bound on a
+        # 2047-token window); it only bites on small-context embedders, which is
+        # exactly where the bound exists to matter.
+        if hard_max_tokens is not None and hard_max_tokens < self.max_tokens:
+            self.max_tokens = hard_max_tokens
+            self.target_tokens = min(self.target_tokens, self.max_tokens)
+            self.min_tokens = min(self.min_tokens, max(1, self.max_tokens // 4))
         # Tables / image captions at or below this many tokens are inlined with
         # surrounding prose instead of becoming standalone chunks (matches the
         # recursive chunker's inline threshold).
@@ -248,9 +263,13 @@ class StructuredSectionChunker(BaseChunker):
 
         chunks: list[Chunk] = []
         for idx, unit in enumerate(candidates):
-            header = self._build_header(filename, unit.heading_path, unit.pages)
+            # Only claim a header the chunk actually carries: ``header`` is
+            # persisted alongside ``text``, so populating it while
+            # ``prepend_heading_path`` is off would let a consumer rebuild
+            # ``header + content`` into a string that was never embedded.
+            header = self._build_header(filename, unit.heading_path, unit.pages) if self.prepend_heading_path else ""
             body = unit.text.strip()
-            text = f"{header}\n\n{body}" if (header and self.prepend_heading_path) else body
+            text = f"{header}\n\n{body}" if header else body
             chunks.append(
                 Chunk(
                     document_id=metadata.get("file_id", ""),
@@ -458,11 +477,16 @@ class StructuredSectionChunker(BaseChunker):
 
     def _packing_budget(self, filename: str, heading_path: list[str], pages: set[int]) -> int:
         """Body budget so a packed chunk lands near ``target`` *including* header."""
-        return max(self.min_tokens, self.target_tokens - self._header_reserve(filename, heading_path, pages))
+        # Floored at 1, not ``min_tokens``: these budgets are *body* budgets and
+        # the header is added on top, so a floor at ``min_tokens`` would hand
+        # back a budget that already exceeds the ceiling once the band has
+        # collapsed under ``hard_max_tokens``. In the normal band the floor
+        # never binds anyway (768 - a ~50-token header still clears 128).
+        return max(1, self.target_tokens - self._header_reserve(filename, heading_path, pages))
 
     def _effective_max(self, filename: str, heading_path: list[str], pages: set[int]) -> int:
         """Body ceiling so ``chunk.text`` (body + header) never exceeds ``max``."""
-        return max(self.min_tokens, self.max_tokens - self._header_reserve(filename, heading_path, pages))
+        return max(1, self.max_tokens - self._header_reserve(filename, heading_path, pages))
 
     def _emit_atomic(self, unit: _Unit, filename: str) -> list[_Unit]:
         """A table over the (header-adjusted) max is split by ``chunk_table``;
@@ -559,6 +583,9 @@ class StructuredSectionChunker(BaseChunker):
         reserve = self._header_reserve(filename, path, unit.pages)
         pieces = _greedy_split(
             unit.text,
+            # Floored at ``min_tokens`` like ``_packing_budget`` /
+            # ``_effective_max``: a floor of 1 let a long filename or deep
+            # breadcrumb eat the whole budget and emit one-token pieces.
             max(1, target - reserve) if target is not None else self._packing_budget(filename, path, unit.pages),
             max(1, ceiling - reserve) if ceiling is not None else self._effective_max(filename, path, unit.pages),
             self.length_function,
@@ -651,8 +678,12 @@ class StructuredSectionChunker(BaseChunker):
         won. On a slide the label belongs with the figure it labels, so letting
         the caption absorb it is also the semantically right answer.
 
-        Tables stay excluded at any size: a table fragment glued to unrelated
-        prose loses the column headers that make it readable.
+        Tables are excluded here, so a table fragment is never glued to
+        unrelated prose and left without the column headers that make it
+        readable. Note this gate governs only the *structural* route — the
+        same-page route in ``_may_merge`` returns before consulting it, so a
+        table may still absorb a label sharing its page. That is deliberate: on
+        a slide the label belongs to the table.
         """
         return not unit.atomic or unit.chunk_type is ChunkType.IMAGE_CAPTION
 

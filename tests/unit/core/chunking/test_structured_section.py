@@ -461,3 +461,43 @@ def test_non_positive_token_bounds_fail_at_config_load():
             ChunkerConfig(**{field: 0})
         with pytest.raises(ValueError):
             ChunkerConfig(**{field: -1})
+
+
+def test_hard_max_survives_the_small_merge_pass():
+    """_pack enforced the bound and _merge_small immediately undid it: the split
+    pieces land under min_tokens, share a page, take the permissive same-page
+    route, and fold back under the (larger) max_tokens ceiling. The band must
+    collapse under the bound so every downstream budget respects it."""
+    caption = " ".join(f"word{i}" for i in range(300))
+    doc = _doc(f"Article L1\nIntro.\n\n<image_description>{caption}</image_description>\n")
+    chunks = _chunker(chunk_size=512, hard_max_tokens=60).chunk(doc)
+    assert len(chunks) > 1, "the caption must stay split"
+    assert all(c.token_count <= 60 for c in chunks), [c.token_count for c in chunks]
+
+
+def test_hard_max_bounds_prose_not_just_atomic_units():
+    """_enforce_ceiling only runs on atomic units, so prose was bounded solely
+    by max_tokens (derived from chunk_size) and could overflow a small
+    embedder window untouched."""
+    prose = " ".join(f"clause{i}." for i in range(600))
+    chunks = _chunker(chunk_size=512, hard_max_tokens=60).chunk(_doc(f"Article L1\n{prose}"))
+    assert all(c.token_count <= 60 for c in chunks), max(c.token_count for c in chunks)
+
+
+def test_hard_max_above_the_band_changes_nothing():
+    """The normal case: a 2047-token window gives a 1023 bound, well above the
+    768 packing ceiling, so the band is untouched."""
+    prose = " ".join(f"clause{i}." for i in range(600))
+    doc = _doc(f"Article L1\n{prose}")
+    with_bound = _chunker(chunk_size=512, hard_max_tokens=1023).chunk(doc)
+    without = _chunker(chunk_size=512).chunk(doc)
+    assert [c.token_count for c in with_bound] == [c.token_count for c in without]
+
+
+def test_header_is_none_when_not_prepended():
+    """``header`` is persisted next to ``text``; claiming one the chunk does not
+    carry lets a consumer rebuild a string that was never embedded."""
+    doc = _doc("# Titre I\n\nArticle L1\nSome body text here.")
+    chunk = _chunker(chunk_size=512, prepend_heading_path=False).chunk(doc)[0]
+    assert chunk.header is None
+    assert not chunk.text.startswith("[Source")
