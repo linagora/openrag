@@ -57,6 +57,7 @@ def is_placeholder_image(content: str) -> bool:
     remainder = _IMAGE_PLACEHOLDER_RE.sub(" ", _IMAGE_BLOCK_TAG_RE.sub(" ", content))
     return not any(char.isalnum() for char in remainder)
 
+
 # Tables/images smaller than this token count are inlined with surrounding
 # text rather than emitted as standalone chunks.
 _INLINE_ELEMENT_TOKEN_THRESHOLD = 100
