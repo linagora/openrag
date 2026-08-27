@@ -418,3 +418,46 @@ def test_hard_max_tokens_derived_from_embedder_window():
     assert resolve_hard_max_tokens(cfg, None) is None
     # An explicit setting always wins.
     assert resolve_hard_max_tokens(SimpleNamespace(hard_max_tokens=777), 8192) == 777
+
+
+def test_hard_wrap_respects_target_for_token_dense_words():
+    """Word count only estimates token count. A slice of token-dense words
+    (URLs, long identifiers) tokenises far above the average, so slicing purely
+    on ceil(tokens/target) could emit a piece over the ceiling."""
+    from core.chunking.structured_section import _hard_wrap
+
+    # 4 tokens per "word", so a word-uniform slice overshoots a token budget.
+    def dense(text: str) -> int:
+        return len(text.split()) * 4
+
+    words = " ".join(f"w{i}" for i in range(40))
+    for piece in _hard_wrap(words, 20, dense):
+        assert dense(piece) <= 20, f"piece over target: {dense(piece)}"
+
+
+def test_hard_wrap_emits_an_oversize_single_word_alone():
+    from core.chunking.structured_section import _hard_wrap
+
+    pieces = _hard_wrap("short " + "x" * 400, 5, _words)
+    assert pieces, "must not drop the text"
+    assert any("x" * 400 in p for p in pieces), "the long word survives intact"
+
+
+def test_invalid_leaf_pattern_fails_at_config_load():
+    import pytest
+    from core.config.chunking import ChunkerConfig
+
+    ChunkerConfig(leaf_patterns=[r"^\s*Article\s+\d"])  # valid: no raise
+    with pytest.raises(ValueError, match="invalid leaf_patterns regex"):
+        ChunkerConfig(leaf_patterns=["^(unclosed"])
+
+
+def test_non_positive_token_bounds_fail_at_config_load():
+    import pytest
+    from core.config.chunking import ChunkerConfig
+
+    for field in ("min_tokens", "max_tokens", "hard_max_tokens"):
+        with pytest.raises(ValueError):
+            ChunkerConfig(**{field: 0})
+        with pytest.raises(ValueError):
+            ChunkerConfig(**{field: -1})

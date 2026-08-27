@@ -147,7 +147,6 @@ class IndexingPipeline:
                     ),
                 )
             await _timed("chunk", chunk_stage(row, chunker, timeout=self.timeouts.chunk))
-            self._warn_on_embedder_overflow(row, embedder_window)
             if contextualizer is not None:
                 await _timed(
                     "contextualize",
@@ -158,6 +157,10 @@ class IndexingPipeline:
                         per_chunk_timeout=self.timeouts.contextualize_per_chunk,
                     ),
                 )
+            # After contextualization, not before: the [CONTEXT] envelope is
+            # prepended here and is part of what gets embedded, so measuring
+            # earlier would miss exactly the chunks the envelope pushes over.
+            self._warn_on_embedder_overflow(row, embedder_window, getattr(chunker, "length_function", None))
             if topic_tagger is not None:
                 max_tags = config.max_topic_tags if config is not None else 7
                 await _timed(
@@ -298,7 +301,11 @@ class IndexingPipeline:
         return self.parser
 
     @staticmethod
-    def _warn_on_embedder_overflow(row: MutableMapping[str, Any], window: int | None) -> None:
+    def _warn_on_embedder_overflow(
+        row: MutableMapping[str, Any],
+        window: int | None,
+        length_function: Callable[[str], int] | None = None,
+    ) -> None:
         """Warn when a chunk will be silently truncated by the embedder.
 
         vLLM sends ``truncate_prompt_tokens = max_model_len - 1``, so anything
@@ -309,22 +316,29 @@ class IndexingPipeline:
         The chunker deliberately does not prevent every case: an indivisible
         unit (a table row larger than the window) is kept whole rather than cut
         into fragments that are no longer valid rows. This makes that trade
-        visible instead of silent. Counting uses the ``token_count`` the chunker
-        already computed, so nothing is re-tokenised here.
+        visible instead of silent.
 
-        Note the count excludes what later stages prepend — contextualization's
-        ``[CONTEXT]`` block — so a chunk just under the limit can still overflow.
-        That headroom is why the chunker's hard bound defaults to half the
-        window rather than all of it.
+        Measures ``chunk.text`` with the chunker's own token counter rather than
+        trusting ``chunk.token_count``: contextualization rewrites ``text`` with
+        the ``[CONTEXT]`` envelope via ``model_copy`` and does **not** refresh
+        ``token_count``, so the stored count is the pre-envelope one. Falls back
+        to ``token_count`` when no counter is available.
         """
         if not window or window <= 0:
             return
         limit = window - 1  # truncate_prompt_tokens
         chunks = row.get("chunks") or []
-        offenders = [c for c in chunks if (getattr(c, "token_count", 0) or 0) > limit]
+
+        def tokens(chunk: Any) -> int:
+            if length_function is not None and getattr(chunk, "text", None):
+                return length_function(chunk.text)
+            return getattr(chunk, "token_count", 0) or 0
+
+        sized = [(chunk, tokens(chunk)) for chunk in chunks]
+        offenders = [(chunk, count) for chunk, count in sized if count > limit]
         if not offenders:
             return
-        worst = max(offenders, key=lambda c: c.token_count)
+        worst, worst_tokens = max(offenders, key=lambda pair: pair[1])
         logger.bind(
             task_id=row.get("task_id"),
             filename=row.get("filename", ""),
@@ -333,12 +347,12 @@ class IndexingPipeline:
             truncate_at=limit,
             offending_chunks=len(offenders),
             total_chunks=len(chunks),
-            worst_tokens=worst.token_count,
+            worst_tokens=worst_tokens,
             worst_chunk_index=getattr(worst, "chunk_index", None),
             worst_chunk_type=getattr(getattr(worst, "chunk_type", None), "value", None),
         ).warning(
             f"{len(offenders)} chunk(s) exceed the embedder's {limit}-token limit "
-            f"(largest {worst.token_count}) and will be truncated before embedding — "
+            f"(largest {worst_tokens}) and will be truncated before embedding — "
             f"their tail will not be retrievable"
         )
 

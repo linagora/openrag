@@ -972,3 +972,37 @@ def test_no_warning_when_chunks_fit_or_window_unknown():
     finally:
         _logger.remove(sink_id)
     assert not [m for m in messages if "truncated before embedding" in m]
+
+
+def test_overflow_warning_measures_text_not_stale_token_count():
+    """Contextualization rewrites ``text`` with the [CONTEXT] envelope via
+    model_copy and does not refresh ``token_count``, so trusting the stored
+    count misses exactly the chunks the envelope pushes over the limit."""
+    from types import SimpleNamespace
+
+    from loguru import logger as _logger
+    from services.workers.pipeline_builder import IndexingPipeline
+
+    # token_count says 10 (pre-envelope); the actual text is 3000 tokens.
+    chunk = SimpleNamespace(token_count=10, text="x " * 3000, chunk_index=0, chunk_type=None)
+    messages, sink_id = _capture_warnings()
+    try:
+        IndexingPipeline._warn_on_embedder_overflow({"chunks": [chunk]}, 2047, lambda s: len(s.split()))
+    finally:
+        _logger.remove(sink_id)
+    assert any("truncated before embedding" in m for m in messages)
+
+
+def test_overflow_warning_falls_back_to_token_count_without_a_counter():
+    from types import SimpleNamespace
+
+    from loguru import logger as _logger
+    from services.workers.pipeline_builder import IndexingPipeline
+
+    chunk = SimpleNamespace(token_count=3000, text="short", chunk_index=0, chunk_type=None)
+    messages, sink_id = _capture_warnings()
+    try:
+        IndexingPipeline._warn_on_embedder_overflow({"chunks": [chunk]}, 2047, None)
+    finally:
+        _logger.remove(sink_id)
+    assert any("truncated before embedding" in m for m in messages)

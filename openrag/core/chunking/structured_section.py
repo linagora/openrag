@@ -10,10 +10,10 @@ with its heading path so the chunk is self-describing for retrieval.
 Why regex-on-lines rather than markdown ``#`` parsing: the default PDF parser
 (Marker) emits legal/structural headings (``Titre``, ``Chapitre``,
 ``Article L110-1`` …) as **plain-text lines, not** ``##`` headings, so a
-markdown-``#``-only detector would miss every boundary. Patterns are
-config-driven (``heading_patterns`` / ``leaf_patterns``) so the strategy
-generalizes beyond French legal codes; markdown ``#`` headings are recognized
-too.
+markdown-``#``-only detector would miss every boundary. Boundaries are
+config-driven — ``heading_keywords`` holds literal keywords (escaped by the
+constructor), ``leaf_patterns`` holds regexes — so the strategy generalizes
+beyond French legal codes; markdown ``#`` headings are recognized too.
 
 Design (in priority order), matching the redesign brief:
 1. Boundary detection on line content: markdown ``#``; keyword headings
@@ -823,11 +823,45 @@ def _rehome_trailing_headings(pieces: list[str]) -> list[str]:
 
 def _hard_wrap(text: str, target: int, length_function: Callable[[str], int]) -> list[str]:
     """Absolute last resort for a break-less blob (no paragraph/sentence breaks):
-    split the words into ``ceil(tokens / target)`` roughly equal groups so every
-    piece lands near ``target`` — never leaving a piece over ``max``."""
+    split the words into groups that each measure at or below ``target``.
+
+    The word count is only an *estimate* of the token count — a slice of
+    token-dense words (URLs, long identifiers, numeric tables, CJK) tokenises
+    far above the average, so slicing purely on ``ceil(tokens / target)`` could
+    emit a piece over the ceiling and quietly break the guarantee this function
+    exists to provide. So: slice on the estimate (cheap, one measurement), then
+    verify every piece and re-pack only the ones that actually overflow.
+    """
     words = text.split()
     if not words:
         return [text]
     groups = max(1, -(-length_function(text) // target))
     size = max(1, -(-len(words) // groups))
-    return [" ".join(words[i : i + size]) for i in range(0, len(words), size)]
+    out: list[str] = []
+    for start in range(0, len(words), size):
+        piece = " ".join(words[start : start + size])
+        if length_function(piece) <= target:
+            out.append(piece)
+        else:
+            out.extend(_pack_words(words[start : start + size], target, length_function))
+    return out
+
+
+def _pack_words(words: list[str], target: int, length_function: Callable[[str], int]) -> list[str]:
+    """Pack words one at a time, measuring as we go, so no piece exceeds
+    ``target``. A single word larger than ``target`` is emitted alone — there is
+    nothing below a word to split on without corrupting it."""
+    out: list[str] = []
+    buf: list[str] = []
+    size = 0
+    for word in words:
+        cost = length_function(word if not buf else f" {word}")
+        if buf and size + cost > target:
+            out.append(" ".join(buf))
+            buf, size = [], 0
+            cost = length_function(word)
+        buf.append(word)
+        size += cost
+    if buf:
+        out.append(" ".join(buf))
+    return out
