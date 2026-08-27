@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from core.chunking.registry import chunking_registry
 from core.chunking.structured_section import StructuredSectionChunker
 from core.models.chunk import ChunkType
@@ -556,3 +558,41 @@ def test_headings_reach_the_index_even_without_the_header():
     for heading in ("Livre Ier", "Titre Ier"):
         assert heading in joined, f"{heading!r} absent from every chunk's text"
     assert "[Source:" not in joined, "the verbose preamble should still be dropped"
+
+
+def test_split_pieces_report_the_pages_they_actually_cover():
+    """Copying the parent's page set into every piece made page_number the
+    unit's first page for all of them and page_range its full span — the
+    citation UI then points at page 1 of a four-page document."""
+    doc = ProcessedDocument(
+        document_id="d1",
+        text_blocks=[
+            TextBlock(text=" ".join(f"Page {p} sentence {i} about policy." for i in range(40)), page_number=p)
+            for p in (1, 2, 3, 4)
+        ],
+        metadata={"filename": "code.pdf"},
+    )
+    chunks = _chunker(chunk_size=120).chunk(doc)
+    assert len(chunks) > 1, "a four-page unit must split"
+    for chunk in chunks:
+        body = chunk.content or ""
+        opening_page = int(body.split()[1])  # "Page N sentence ..."
+        assert chunk.page_number == opening_page, f"page={chunk.page_number} for text on page {opening_page}"
+        assert chunk.metadata["page_range"] == str(opening_page)
+
+
+def test_paragraph_breaks_survive_into_the_body():
+    """Blank lines were dropped and the body joined with single newlines, so
+    _greedy_split's paragraph rung never matched: every oversize unit fell
+    through to the sentence ladder, which rejoins with ' ' and welds headings
+    into the middle of prose lines."""
+    src = "\n\n".join(
+        ["Intro sentence here."]
+        + [f"**Section {i}**\n\nBody {i} " + " ".join(f"filler{j}." for j in range(60)) for i in range(4)]
+    )
+    chunks = _chunker(chunk_size=120).chunk(_doc(src))
+    joined = "\n".join(c.content or "" for c in chunks)
+    assert "\n\n" in joined, "paragraph breaks erased"
+    # Same-line only: ".\n\n**Section**" is the correct shape, ". **Section**" is not.
+    welded = re.findall(r"\.[ \t]+\*\*[^*]+\*\*", joined)
+    assert not welded, f"headings welded into prose lines: {welded[:3]}"

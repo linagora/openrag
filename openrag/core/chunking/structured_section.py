@@ -166,6 +166,10 @@ class _Unit:
     text: str
     tokens: int
     pages: set[int] = field(default_factory=set)
+    #: ``(character offset in ``text``, page)`` for each line, so a piece of a
+    #: split unit can claim the pages it actually covers instead of inheriting
+    #: the parent's whole span.
+    page_marks: list[tuple[int, int]] = field(default_factory=list)
     chunk_type: ChunkType = ChunkType.TEXT
     atomic: bool = False  # table / image — never merged into prose, never split by us
 
@@ -322,9 +326,20 @@ class StructuredSectionChunker(BaseChunker):
         buf_path: list[str] = []
         buf_lines: list[str] = []
         buf_pages: set[int] = set()
+        buf_marks: list[tuple[int, int]] = []
+        buf_len = 0
+
+        def add_line(line: str, line_page: int | None = None) -> None:
+            """Append a body line, remembering where each page starts in it."""
+            nonlocal buf_len
+            if line_page is not None:
+                buf_marks.append((buf_len, line_page))
+                buf_pages.add(line_page)
+            buf_lines.append(line)
+            buf_len += len(line) + 1  # the "\n" the join will insert
 
         def flush() -> None:
-            nonlocal buf_lines, buf_pages
+            nonlocal buf_lines, buf_pages, buf_marks, buf_len
             text = "\n".join(buf_lines).strip()
             if text:
                 units.append(
@@ -333,11 +348,14 @@ class StructuredSectionChunker(BaseChunker):
                         text=text,
                         tokens=self.length_function(text),
                         pages=set(buf_pages) or {page},
+                        page_marks=list(buf_marks),
                         chunk_type=ChunkType.TEXT,
                     )
                 )
             buf_lines = []
             buf_pages = set()
+            buf_marks = []
+            buf_len = 0
 
         for element in split_md_elements(content):
             if element.type in ("table", "image"):
@@ -351,8 +369,7 @@ class StructuredSectionChunker(BaseChunker):
                 # logos don't each become their own tiny chunk; only large ones
                 # stay atomic (a big table splits via chunk_table downstream).
                 if self.length_function(element.content) <= self._inline_threshold:
-                    buf_lines.append(element.content.strip())
-                    buf_pages.add(element.page_number or page)
+                    add_line(element.content.strip(), element.page_number or page)
                 else:
                     flush()
                     units.append(self._atomic_unit(element, list(stack_path(stack)), page))
@@ -382,8 +399,16 @@ class StructuredSectionChunker(BaseChunker):
                     # rejected as non-structural (caption, sentence, …); keep its
                     # text as body but drop the ``#``/emphasis markup so the body
                     # reads clean and isn't re-detected as a heading downstream.
-                    buf_lines.append(_clean_heading(raw_line) if _MD_HEADING_RE.match(raw_line) else raw_line)
-                    buf_pages.add(page)
+                    add_line(_clean_heading(raw_line) if _MD_HEADING_RE.match(raw_line) else raw_line, page)
+                elif buf_lines and buf_lines[-1] != "":
+                    # Keep the paragraph break. Dropping blank lines left the
+                    # body joined by single newlines, so ``_greedy_split``'s
+                    # paragraph rung (``\n{2,}``) never matched and every
+                    # oversize unit fell straight through to the sentence
+                    # ladder, which rejoins with " " — welding headings into the
+                    # middle of prose lines where they stop being detectable as
+                    # headings at all.
+                    add_line("")
             flush()
 
         return units
@@ -602,16 +627,17 @@ class StructuredSectionChunker(BaseChunker):
             max(1, ceiling - reserve) if ceiling is not None else self._effective_max(filename, path, unit.pages),
             self.length_function,
         )
+        page_sets = _attribute_pages(unit, pieces)
         return [
             _Unit(
                 heading_path=list(unit.heading_path),
                 text=piece.strip(),
                 tokens=self.length_function(piece),
-                pages=set(unit.pages),
+                pages=pages,
                 chunk_type=chunk_type,
                 atomic=unit.atomic,
             )
-            for piece in pieces
+            for piece, pages in zip(pieces, page_sets, strict=True)
         ]
 
     @staticmethod
@@ -732,6 +758,42 @@ def _push_heading(stack: list[tuple[int, str]], level: int, text: str) -> None:
     while stack and stack[-1][0] >= level:
         stack.pop()
     stack.append((level, text))
+
+
+def _attribute_pages(unit: _Unit, pieces: list[str]) -> list[set[int]]:
+    """Pages each piece of a split unit actually covers.
+
+    Copying the parent's whole page set into every piece made
+    ``Chunk.page_number`` (``min(pages)``) the unit's *first* page for all of
+    them, and ``page_range`` its full span — so on a four-page unit every chunk
+    reported ``page=1, page_range='1-4'``, including pieces whose text is on
+    page 4. That is what the citation UI shows and what ``/extract`` anchors on,
+    so the error is user-visible and grows with document length.
+
+    ``_Unit.page_marks`` records where each page starts inside ``unit.text``, so
+    a piece can be located and given the pages spanning it — plus the page in
+    effect where it begins, which a piece starting mid-page would otherwise
+    miss. Pieces are located by their opening line rather than by arithmetic:
+    ``_greedy_split`` normalises whitespace, so offsets do not survive it.
+    """
+    if not unit.page_marks:
+        return [set(unit.pages) for _ in pieces]
+    text = unit.text
+    out: list[set[int]] = []
+    cursor = 0
+    for piece in pieces:
+        probe = next((line for line in piece.splitlines() if line.strip()), "")[:60]
+        start = text.find(probe, cursor) if probe else -1
+        if start < 0:
+            start = cursor
+        end = start + len(piece)
+        pages = {page for offset, page in unit.page_marks if start <= offset < end}
+        opening = [page for offset, page in unit.page_marks if offset <= start]
+        if opening:
+            pages.add(opening[-1])
+        out.append(pages or set(unit.pages))
+        cursor = max(cursor, start)
+    return out
 
 
 def _copy_unit(unit: _Unit) -> _Unit:
