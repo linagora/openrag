@@ -707,6 +707,38 @@ class TestPhase14ServiceWiring:
         assert service._repo is c.prompt_repo
 
     @pytest.mark.asyncio
+    async def test_conversion_stt_resolver_refreshes_registry_for_each_audio_request(self, monkeypatch):
+        """Keep direct extraction in every API replica aligned with Admin UI changes."""
+        import services.workers.parsers.file_serializer as serializer_module
+
+        settings = _settings()
+        endpoint = ModelEndpointConfig(
+            endpoint="http://moss:8000/v1",
+            model_name="moss-transcribe-diarize",
+        )
+        refreshes = []
+        captured = {}
+
+        class FakeEndpointService:
+            async def load_all(self):
+                refreshes.append(True)
+                settings.models.stt["default"] = endpoint
+
+        def build_file_serializer(**kwargs):
+            captured.update(kwargs)
+            return object()
+
+        monkeypatch.setattr(serializer_module, "build_file_serializer", build_file_serializer)
+        c = ServiceContainer(settings)
+        c._model_endpoint_service = FakeEndpointService()
+
+        _ = c.conversion_service
+        resolved = await captured["transcription_endpoint_resolver"]()
+
+        assert refreshes == [True]
+        assert resolved is endpoint
+
+    @pytest.mark.asyncio
     async def test_initialize_loads_phase14_registries_before_partitions(self, monkeypatch):
         """Load endpoints, then presets, then partitions after admin seeding."""
         calls = []
