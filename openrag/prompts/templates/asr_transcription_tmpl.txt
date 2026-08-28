@@ -1,1 +1,1 @@
-
+Transcribe the audio. Write each segment on its own line. For each segment, start with the timestamp and speaker ID ([S01], [S02], [S03], ...), then the spoken text, and end with the segment timestamp. Use this format: [HH:MM:SS.mmm] [S01] spoken text [HH:MM:SS.mmm]. Preserve the original spoken language. Hotwords: LINAGORA, OpenRAG, Twake, Instagram, Cozy, EONA-X.

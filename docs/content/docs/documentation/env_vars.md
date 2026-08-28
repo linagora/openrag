@@ -381,7 +381,7 @@ The RAG pipeline ships with preconfigured prompts bundled inside the package at 
 | `query_contextualizer_tmpl.txt` | Template for adding context to user queries |
 | `chunk_contextualizer_tmpl.txt` | Template for contextualizing document chunks during indexing |
 | `image_captioning_tmpl.txt` | Template for generating image descriptions using the VLM |
-| `asr_transcription_tmpl.txt` | Empty fallback for the external transcription model's native prompt |
+| `asr_transcription_tmpl.txt` | Default instruction for timestamped, speaker-labelled external transcription; editable in Prompt Library |
 | `hyde.txt` | Hypothetical Document Embeddings (HyDE) query expansion template |
 | `multi_query_pmpt_tmpl.txt` | Template for generating multiple query variations |
 

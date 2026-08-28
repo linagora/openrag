@@ -92,10 +92,11 @@ class TestSeeding:
         assert len(PROMPT_TYPE_KEYS) == 9
         for p in repo.prompts.values():
             assert p.is_default is True
-            if p.prompt_type == PromptType.ASR_TRANSCRIPTION.value:
-                assert not p.content.strip()
-            else:
-                assert p.content.strip()
+            assert p.content.strip()
+
+        asr_prompt = await repo.get_default(PromptType.ASR_TRANSCRIPTION.value)
+        assert asr_prompt is not None
+        assert "[HH:MM:SS.mmm] [S01]" in asr_prompt.content
 
     async def test_seeding_is_idempotent(self):
         repo = FakePromptRepo()
