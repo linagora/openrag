@@ -132,7 +132,15 @@ class TaskCompletionTracker:
                     await self._finish_cancellation(task_id)
                     return
 
-                if state in _TERMINAL_STATES and not (preserve_cancelled_submission and state == "CANCELLED"):
+                if state == "CANCELLED" and preserve_cancelled_submission:
+                    if await self._has_unsettled_cancelled_worker(task_state_manager, task_id):
+                        await asyncio.sleep(poll_interval)
+                        continue
+                    await self._record_finished_at(task_id)
+                    await self._finish_cancellation(task_id)
+                    return
+
+                if state in _TERMINAL_STATES:
                     await self._record_finished_at(task_id)
                     return
 
@@ -182,6 +190,20 @@ class TaskCompletionTracker:
                 task_id=task_id,
                 error=str(exc),
             )
+
+    async def _has_unsettled_cancelled_worker(self, task_state_manager: Any, task_id: str) -> bool:
+        method = getattr(task_state_manager, "has_unsettled_cancelled_worker", None)
+        remote = getattr(method, "remote", None)
+        if remote is None:
+            # A mixed-version actor cannot prove settlement. Keep the claim
+            # fenced until a compatible TaskStateManager is available.
+            return True
+        return bool(
+            await self._call_task_state(
+                lambda: remote(task_id),
+                f"has_unsettled_cancelled_worker({task_id})",
+            )
+        )
 
     def _task_state_manager(self) -> Any:
         return ray.get_actor("TaskStateManager", namespace=self._namespace)

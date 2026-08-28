@@ -169,10 +169,7 @@ def _cancelled_task_unsettled(info: TaskInfo) -> bool:
         return False
     object_ref = info.object_ref
     ref = object_ref.get("ref") if isinstance(object_ref, dict) else object_ref
-    submission_started_at = getattr(info, "submission_started_at", None)
-    return (
-        ref is not None or getattr(info, "worker_submitted", False) or isinstance(submission_started_at, (int, float))
-    )
+    return ref is not None or getattr(info, "worker_submitted", False)
 
 
 def _save_recoverable_task(task_id: str, info: TaskInfo) -> None:
@@ -297,13 +294,17 @@ class TaskStateManager:
     def _expire_refless_task_if_stale_locked(self, task_id: str, info: TaskInfo) -> bool:
         ref = info.object_ref.get("ref") if isinstance(info.object_ref, dict) else info.object_ref
         submission_started_at = getattr(info, "submission_started_at", None)
-        submission_in_progress = isinstance(submission_started_at, (int, float))
+        if isinstance(submission_started_at, (int, float)):
+            registration_expired = time.time() >= (
+                submission_started_at + _CONTENT_CLAIM_REGISTRATION_GRACE_SECONDS
+            )
+        else:
+            registration_expired = _content_claim_registration_expired(info.details or {})
         if (
             info.state not in CANCELLABLE_INDEXING_STATES
             or ref is not None
             or getattr(info, "worker_submitted", False)
-            or submission_in_progress
-            or not _content_claim_registration_expired(info.details or {})
+            or not registration_expired
         ):
             return False
         info.state = "FAILED"
@@ -509,6 +510,24 @@ class TaskStateManager:
             return True
 
     @ray.method(concurrency_group="set")
+    async def accept_worker_submission(self, task_id: str) -> bool:
+        """Replace the bounded handoff fence once the pool can launch work."""
+        with self.lock:
+            info = self.tasks.get(task_id)
+            if info is None:
+                return False
+            if info.state == "FAILED" and info.error == STALE_REFLESS_TASK_ERROR:
+                return False
+            if self._expire_refless_task_if_stale_locked(task_id, info):
+                return False
+            if info.state not in CANCELLABLE_INDEXING_STATES | TERMINAL_INDEXING_STATES:
+                return False
+            info.worker_submitted = True
+            info.submission_started_at = None
+            _save_recoverable_task(task_id, info)
+            return True
+
+    @ray.method(concurrency_group="set")
     async def set_object_ref(self, task_id: str, object_ref: ray.ObjectRef) -> bool:
         with self.lock:
             info = self._ensure_task(task_id)
@@ -578,6 +597,8 @@ class TaskStateManager:
         with self.lock:
             matches = set()
             for task_id, info in self.tasks.items():
+                if self._expire_refless_task_if_stale_locked(task_id, info):
+                    continue
                 worker_submitted = getattr(info, "worker_submitted", False)
                 submission_started_at = getattr(info, "submission_started_at", None)
                 submission_in_progress = isinstance(submission_started_at, (int, float))
@@ -596,7 +617,6 @@ class TaskStateManager:
                 if (
                     ref is None
                     and not worker_submitted
-                    and not submission_in_progress
                     and _content_claim_registration_expired(details)
                 ):
                     continue
@@ -604,6 +624,13 @@ class TaskStateManager:
                     continue
                 matches.add(task_id)
             return matches
+
+    @ray.method(concurrency_group="get")
+    async def has_unsettled_cancelled_worker(self, task_id: str) -> bool:
+        """Return whether cancellation still owns a worker submission fence."""
+        with self.lock:
+            info = self.tasks.get(task_id)
+            return info is not None and _cancelled_task_unsettled(info)
 
     def _matching_active_task_refs_locked(
         self,
@@ -613,6 +640,8 @@ class TaskStateManager:
     ) -> dict[str, ray.ObjectRef | None | str]:
         matches = {}
         for task_id, info in self.tasks.items():
+            if self._expire_refless_task_if_stale_locked(task_id, info):
+                continue
             if info.state not in CANCELLABLE_INDEXING_STATES and not _cancelled_task_unsettled(info):
                 continue
             details = info.details or {}

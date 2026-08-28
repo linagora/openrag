@@ -27,6 +27,7 @@ def _task_state_manager(
     tsm.set_details = _remote_mock()
     tsm.finish_cancellation = _remote_mock()
     tsm.expire_refless_task_if_stale = _remote_mock(False)
+    tsm.has_unsettled_cancelled_worker = _remote_mock(False)
     return tsm
 
 
@@ -236,6 +237,7 @@ async def test_tracker_waits_for_submitted_cancelled_worker_ref() -> None:
     tsm = _task_state_manager(state="CANCELLED")
     tsm.get_details.remote.return_value = details
     tsm.get_object_ref.remote.side_effect = [None, {"ref": ref}]
+    tsm.has_unsettled_cancelled_worker.remote.return_value = True
 
     with (
         patch("services.workers.task_completion.ray.get_actor", return_value=tsm),
@@ -250,6 +252,37 @@ async def test_tracker_waits_for_submitted_cancelled_worker_ref() -> None:
         )
 
     assert tsm.get_object_ref.remote.await_count == 2
+    tsm.set_details.remote.assert_awaited_once()
+    tsm.finish_cancellation.remote.assert_awaited_once_with("task-1")
+
+
+@pytest.mark.asyncio
+async def test_tracker_finishes_cancelled_submission_after_pool_clears_fence() -> None:
+    from services.workers.task_completion import TaskCompletionTracker
+
+    details = {
+        "file_id": "file-1",
+        "partition": "tenant-a",
+        "metadata": {"_openrag_job_created_at": "2026-07-20T08:00:00+00:00"},
+        "user_id": 42,
+    }
+    tsm = _task_state_manager(state="CANCELLED")
+    tsm.get_details.remote.return_value = details
+    tsm.has_unsettled_cancelled_worker.remote.side_effect = [True, False]
+
+    with (
+        patch("services.workers.task_completion.ray.get_actor", return_value=tsm),
+        patch("services.workers.task_completion._utc_now_iso", return_value="2026-07-20T08:01:05+00:00"),
+        patch("services.workers.task_completion.asyncio.sleep", AsyncMock()),
+    ):
+        tracker = TaskCompletionTracker()
+        await tracker.recover_refless(
+            "task-1",
+            poll_interval=0,
+            preserve_cancelled_submission=True,
+        )
+
+    assert tsm.has_unsettled_cancelled_worker.remote.await_count == 2
     tsm.set_details.remote.assert_awaited_once()
     tsm.finish_cancellation.remote.assert_awaited_once_with("task-1")
 

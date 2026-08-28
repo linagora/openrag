@@ -478,6 +478,8 @@ class IndexerPool:
         released when the task settles (success, failure, or cancellation).
         """
         task_id = str(kwargs.get("task_id") or "")
+        if not task_id:
+            raise ValueError("IndexerPool submission requires a task_id")
         metadata = kwargs.get("metadata") or {}
         content_sha256 = metadata.get("content_sha256")
         file_id = metadata.get("file_id")
@@ -507,6 +509,14 @@ class IndexerPool:
         # Keep a strong ref so the tracker isn't GC'd mid-flight (asyncio docs).
         self._release_tasks.add(task)
         task.add_done_callback(self._release_tasks.discard)
+        try:
+            accepted = await self._accept_worker_submission(task_id)
+        except BaseException:
+            await self._guard_rejected_worker(task_id, ref)
+            raise
+        if not accepted:
+            await self._guard_rejected_worker(task_id, ref)
+            raise RuntimeError(f"Task {task_id} was cancelled before the pool accepted it")
         try:
             registered = await self._register_worker_ref(task_id, ref)
         except BaseException:
@@ -561,14 +571,27 @@ class IndexerPool:
         )
 
     async def _register_worker_ref(self, task_id: str, ref: Any) -> bool:
-        if not task_id:
-            raise ValueError("IndexerPool submission requires a task_id")
         task_state_manager = self._task_state_actor()
         registered = await retry_idempotent_ray_actor_method(
             lambda: task_state_manager.set_object_ref.remote(task_id, {"ref": ref}),
             task_description=f"set_object_ref({task_id}) from indexer pool",
         )
         return registered is not False
+
+    async def _accept_worker_submission(self, task_id: str) -> bool:
+        task_state_manager = self._task_state_actor()
+        method_names = getattr(task_state_manager, "_ray_actor_method_names", None)
+        if isinstance(method_names, (frozenset, list, set, tuple)) and "accept_worker_submission" not in method_names:
+            return True
+        method = getattr(task_state_manager, "accept_worker_submission", None)
+        remote = getattr(method, "remote", None)
+        if remote is None:
+            return True
+        accepted = await retry_idempotent_ray_actor_method(
+            lambda: remote(task_id),
+            task_description=f"accept_worker_submission({task_id}) from indexer pool",
+        )
+        return accepted is True
 
     def _task_state_actor(self) -> Any:
         if self._task_state_manager is None:

@@ -1020,6 +1020,7 @@ def _bare_pool(workers: list) -> object:
     pool._claim_store_lock = asyncio.Lock()
     pool._namespace = "openrag"
     pool._task_state_manager = SimpleNamespace(
+        accept_worker_submission=SimpleNamespace(remote=AsyncMock(return_value=True)),
         set_object_ref=SimpleNamespace(remote=AsyncMock(return_value=True)),
         finish_rejected_submission=SimpleNamespace(remote=AsyncMock(return_value=True)),
     )
@@ -1083,6 +1084,7 @@ async def test_pool_dispatches_to_least_loaded_and_passes_ref_through() -> None:
     # The ObjectRef is passed through wrapped in a one-element list (the
     # dispatcher unwraps it; the wrapper stops Ray auto-dereferencing the ref).
     assert ref0 == [workers[0].futures[0]]
+    assert pool._task_state_manager.accept_worker_submission.remote.await_count == 3
     assert pool._task_state_manager.set_object_ref.remote.await_count == 3
     await _settle_pool_release_tasks(
         pool,
@@ -1090,6 +1092,31 @@ async def test_pool_dispatches_to_least_loaded_and_passes_ref_through() -> None:
         workers[1].futures[0],
         workers[0].futures[1],
     )
+
+
+@pytest.mark.asyncio
+async def test_pool_settles_worker_when_task_handoff_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    import services.workers.indexer_pool as module
+
+    worker = _FakeWorker()
+    pool = _bare_pool([worker])
+    pool._task_state_manager.accept_worker_submission.remote.return_value = False
+    cancellation_requested = asyncio.Event()
+    monkeypatch.setattr(
+        module.ray,
+        "cancel",
+        MagicMock(side_effect=lambda *_args, **_kwargs: cancellation_requested.set()),
+    )
+
+    submission = asyncio.create_task(pool.submit(task_id="task-1"))
+    await asyncio.wait_for(cancellation_requested.wait(), timeout=1)
+    assert len(worker.calls) == 1
+    worker.futures[0].set_result(None)
+
+    with pytest.raises(RuntimeError, match="cancelled before the pool accepted"):
+        await submission
+    assert pool._inflight == [0]
+    pool._task_state_manager.finish_rejected_submission.remote.assert_awaited_once_with("task-1")
 
 
 @pytest.mark.asyncio

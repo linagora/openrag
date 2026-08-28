@@ -273,6 +273,7 @@ async def test_submission_fence_persists_until_pool_reports_settlement(monkeypat
     )
 
     assert await manager.begin_worker_submission("task-1") is True
+    assert await manager.accept_worker_submission("task-1") is True
     await manager.set_details(
         "task-1",
         file_id="file-1",
@@ -285,8 +286,37 @@ async def test_submission_fence_persists_until_pool_reports_settlement(monkeypat
     assert await manager.expire_refless_task_if_stale("task-1") is False
     assert await manager.get_content_claim_task_ids(partition="tenant-a") == {"task-1"}
 
+    assert await manager.set_cancelled_if_active("task-1") is True
+    assert await manager.has_unsettled_cancelled_worker("task-1") is True
     assert await manager.finish_rejected_submission("task-1") is True
-    assert await manager.get_state("task-1") == "FAILED"
+    assert await manager.get_state("task-1") == "CANCELLED"
+    assert await manager.has_unsettled_cancelled_worker("task-1") is False
+    assert await manager.get_content_claim_task_ids(partition="tenant-a") == set()
+
+
+@pytest.mark.asyncio
+async def test_unaccepted_submission_fence_expires_after_handoff_grace(monkeypatch) -> None:
+    now = 100.0
+    monkeypatch.setattr(task_state_module.time, "time", lambda: now)
+    manager = _task_state_manager()
+    for task_id, file_id in (("claim-task", "file-1"), ("delete-task", "file-2")):
+        await manager.set_queued_details(
+            task_id,
+            file_id=file_id,
+            partition="tenant-a",
+            metadata={"_openrag_job_created_at": datetime.now(UTC).isoformat()},
+            user_id=None,
+        )
+        assert await manager.begin_worker_submission(task_id) is True
+    now += task_state_module._CONTENT_CLAIM_REGISTRATION_GRACE_SECONDS + 1
+
+    assert await manager.accept_worker_submission("claim-task") is False
+    assert await manager.get_state("claim-task") == "FAILED"
+    assert await manager.get_matching_active_task_refs_v2(
+        partition="tenant-a",
+        file_id="file-2",
+    ) == {}
+    assert await manager.get_state("delete-task") == "FAILED"
     assert await manager.get_content_claim_task_ids(partition="tenant-a") == set()
 
 
