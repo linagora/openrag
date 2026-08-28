@@ -30,7 +30,10 @@ _COMPACT_SEGMENT = re.compile(
     rf"(?=\s*(?:\[\s*{_TIMESTAMP}\s*\](?:\s*\[\s*{_SPEAKER}\s*\])?|\Z))",
     re.DOTALL,
 )
-_INCOMPLETE_DASH_RANGE = re.compile(r"\[\s*\d+(?:\.\d+)?\s*-\s*(?:\d+(?:\.\d*)?)?\s*$")
+# A trailing range without its speaker label is an incomplete MOSS segment,
+# whether its closing bracket has arrived or not. Treat it as a parser mismatch
+# so the caller receives the original response instead of partial normalization.
+_INCOMPLETE_DASH_RANGE = re.compile(r"\[\s*\d+(?:\.\d+)?\s*-\s*(?:\d+(?:\.\d*)?)?\s*\]?\s*$")
 
 
 @dataclass(frozen=True, slots=True)
