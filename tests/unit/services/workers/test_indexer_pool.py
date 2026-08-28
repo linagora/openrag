@@ -1148,6 +1148,24 @@ async def test_pool_drain_rejects_new_work_and_reports_accepted_work(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_pool_finalizes_prelaunch_rejection_with_legacy_task_state_actor() -> None:
+    from services.workers.indexer_pool import _REJECTED_SUBMISSION_ERROR
+
+    pool = _bare_pool([_FakeWorker()])
+    set_failed = AsyncMock(return_value=True)
+    pool._task_state_manager = SimpleNamespace(
+        _ray_actor_method_names={"set_failed_if_not_cancelled"},
+        set_failed_if_not_cancelled=SimpleNamespace(remote=set_failed),
+    )
+
+    await pool.begin_drain()
+    with pytest.raises(RuntimeError, match="draining"):
+        await pool.submit(task_id="legacy-rejected-task")
+
+    set_failed.assert_awaited_once_with("legacy-rejected-task", _REJECTED_SUBMISSION_ERROR)
+
+
+@pytest.mark.asyncio
 async def test_pool_abort_drain_restores_acceptance() -> None:
     worker = _FakeWorker()
     pool = _bare_pool([worker])

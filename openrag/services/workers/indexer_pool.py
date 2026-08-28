@@ -19,6 +19,7 @@ from openrag.core.config.root import Settings
 # of indexing throughput.
 _MODEL_REGISTRY_TTL_SECONDS = 60.0
 _CONTENT_CLAIM_RENEW_INTERVAL_SECONDS = 60 * 60
+_REJECTED_SUBMISSION_ERROR = "Indexer worker submission was rejected before the worker started."
 # Named detached actors survive API rolling deployments. Keep the dispatcher
 # and workers on the same protocol generation whenever their remote contract or
 # cross-process indexing semantics change, so new replicas cannot attach to a
@@ -552,16 +553,30 @@ class IndexerPool:
     async def _finish_rejected_submission(self, task_id: str) -> None:
         task_state_manager = self._task_state_actor()
         method_names = getattr(task_state_manager, "_ray_actor_method_names", None)
-        if isinstance(method_names, (frozenset, list, set, tuple)) and "finish_rejected_submission" not in method_names:
+        known_methods = set(method_names) if isinstance(method_names, (frozenset, list, set, tuple)) else None
+        if known_methods is None or "finish_rejected_submission" in known_methods:
+            method = getattr(task_state_manager, "finish_rejected_submission", None)
+            remote = getattr(method, "remote", None)
+            if remote is not None:
+                await retry_idempotent_ray_actor_method(
+                    lambda: remote(task_id),
+                    task_description=f"finish_rejected_submission({task_id}) from indexer pool",
+                )
+                return
+
+        # A TaskStateManager retained during a rolling deployment may predate
+        # the submission finalizer. It still exposes the atomic failure guard,
+        # which prevents rejected work from remaining QUEUED and consuming the
+        # uploader's pending-task quota indefinitely.
+        if known_methods is not None and "set_failed_if_not_cancelled" not in known_methods:
             return
-        method = getattr(task_state_manager, "finish_rejected_submission", None)
-        remote = getattr(method, "remote", None)
-        if remote is None:
-            return
-        await retry_idempotent_ray_actor_method(
-            lambda: remote(task_id),
-            task_description=f"finish_rejected_submission({task_id}) from indexer pool",
-        )
+        set_failed = getattr(task_state_manager, "set_failed_if_not_cancelled", None)
+        remote = getattr(set_failed, "remote", None)
+        if remote is not None:
+            await retry_idempotent_ray_actor_method(
+                lambda: remote(task_id, _REJECTED_SUBMISSION_ERROR),
+                task_description=f"set_failed_if_not_cancelled({task_id}) from indexer pool",
+            )
 
     async def _register_worker_ref(self, task_id: str, ref: Any) -> bool:
         task_state_manager = self._task_state_actor()
