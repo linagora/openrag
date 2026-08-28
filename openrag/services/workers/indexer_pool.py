@@ -477,19 +477,7 @@ class IndexerPool:
         one-element list — see the class docstring); in-flight bookkeeping is
         released when the task settles (success, failure, or cancellation).
         """
-        if not self._accepting_tasks:
-            raise RuntimeError("IndexerPool is draining and cannot accept new tasks")
         task_id = str(kwargs.get("task_id") or "")
-        idx = min(range(len(self._workers)), key=self._inflight.__getitem__)
-        self._inflight[idx] += 1
-        try:
-            ref = self._workers[idx].process_file.remote(**kwargs)
-        except Exception:
-            # Submission failed before a ref exists (e.g. unserializable args or
-            # a dead actor); roll back so load balancing stays accurate.
-            self._inflight[idx] -= 1
-            await self._finish_rejected_submission(task_id)
-            raise
         metadata = kwargs.get("metadata") or {}
         content_sha256 = metadata.get("content_sha256")
         file_id = metadata.get("file_id")
@@ -502,6 +490,19 @@ class IndexerPool:
                 "content_sha256": str(content_sha256),
                 "claim_token": str(claim_token),
             }
+        if not self._accepting_tasks:
+            await self._guard_prelaunch_rejection(task_id, claim)
+            raise RuntimeError("IndexerPool is draining and cannot accept new tasks")
+        idx = min(range(len(self._workers)), key=self._inflight.__getitem__)
+        self._inflight[idx] += 1
+        try:
+            ref = self._workers[idx].process_file.remote(**kwargs)
+        except Exception:
+            # Submission failed before a ref exists (e.g. unserializable args or
+            # a dead actor); roll back so load balancing stays accurate.
+            self._inflight[idx] -= 1
+            await self._guard_prelaunch_rejection(task_id, claim)
+            raise
         task = asyncio.get_running_loop().create_task(self._release(idx, ref, claim=claim))
         # Keep a strong ref so the tracker isn't GC'd mid-flight (asyncio docs).
         self._release_tasks.add(task)
@@ -521,6 +522,18 @@ class IndexerPool:
         self._release_tasks.add(settlement)
         settlement.add_done_callback(self._release_tasks.discard)
         await asyncio.shield(settlement)
+
+    async def _guard_prelaunch_rejection(self, task_id: str, claim: dict[str, str] | None) -> None:
+        cleanup = asyncio.create_task(self._finish_prelaunch_rejection(task_id, claim))
+        self._release_tasks.add(cleanup)
+        cleanup.add_done_callback(self._release_tasks.discard)
+        await asyncio.shield(cleanup)
+
+    async def _finish_prelaunch_rejection(self, task_id: str, claim: dict[str, str] | None) -> None:
+        try:
+            await self._finish_rejected_submission(task_id)
+        finally:
+            await self._release_content_claim(claim)
 
     async def _cancel_worker_and_wait(self, task_id: str, ref: Any) -> None:
         """Keep the submission fenced until a rejected worker has settled."""
@@ -569,17 +582,22 @@ class IndexerPool:
                 renewal_task.cancel()
                 await asyncio.gather(renewal_task, return_exceptions=True)
             if claim is not None:
-                try:
-                    repo = await self._claim_document_repo()
-                    await repo.release_content_sha256_claim(**claim)
-                except Exception as exc:  # noqa: BLE001 - stale claims expire automatically
-                    from core.utils.logging import get_logger
-
-                    get_logger().bind(file_id=claim["file_id"], partition=claim["partition"]).warning(
-                        "Failed to release settled content deduplication claim.",
-                        error=str(exc),
-                    )
+                await self._release_content_claim(claim)
             self._inflight[idx] -= 1
+
+    async def _release_content_claim(self, claim: dict[str, str] | None) -> None:
+        if claim is None:
+            return
+        try:
+            repo = await self._claim_document_repo()
+            await repo.release_content_sha256_claim(**claim)
+        except Exception as exc:  # noqa: BLE001 - stale claims expire automatically
+            from core.utils.logging import get_logger
+
+            get_logger().bind(file_id=claim["file_id"], partition=claim["partition"]).warning(
+                "Failed to release settled content deduplication claim.",
+                error=str(exc),
+            )
 
     async def _claim_document_repo(self) -> Any:
         if self._claim_store is None:

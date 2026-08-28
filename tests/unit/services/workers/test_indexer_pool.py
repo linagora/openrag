@@ -1096,6 +1096,8 @@ async def test_pool_dispatches_to_least_loaded_and_passes_ref_through() -> None:
 async def test_pool_drain_rejects_new_work_and_reports_accepted_work() -> None:
     worker = _FakeWorker()
     pool = _bare_pool([worker])
+    repo = SimpleNamespace(release_content_sha256_claim=AsyncMock())
+    pool._claim_store = SimpleNamespace(document_repo=repo)
 
     await pool.submit(task_id="accepted-before-drain")
 
@@ -1106,8 +1108,23 @@ async def test_pool_drain_rejects_new_work_and_reports_accepted_work() -> None:
         "worker_names": ["test-worker-0"],
     }
     with pytest.raises(RuntimeError, match="draining"):
-        await pool.submit(task_id="rejected-after-drain")
+        await pool.submit(
+            task_id="rejected-after-drain",
+            partition="tenant-a",
+            metadata={
+                "file_id": "file-1",
+                "content_sha256": "abc123",
+                CONTENT_CLAIM_TOKEN_METADATA_KEY: "attempt-1",
+            },
+        )
     assert len(worker.calls) == 1
+    pool._task_state_manager.finish_rejected_submission.remote.assert_awaited_once_with("rejected-after-drain")
+    repo.release_content_sha256_claim.assert_awaited_once_with(
+        file_id="file-1",
+        partition="tenant-a",
+        content_sha256="abc123",
+        claim_token="attempt-1",
+    )
 
     await _settle_pool_release_tasks(pool, worker.futures[0])
     assert await pool.status() == {
