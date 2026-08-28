@@ -25,7 +25,9 @@ import {
   mergeModelEndpointLlmContext,
   mergeModelEndpointMossTranscriptOutput,
   mergeModelEndpointSttLanguage,
+  MOSS_SPEAKER_AWARE_TRANSCRIPT_OUTPUT_FORMAT,
   MOSS_TIMESTAMPED_TRANSCRIPT_OUTPUT_FORMAT,
+  type MossTranscriptOutputFormat,
   prepareModelEndpointExtraForSubmit,
   RAW_TRANSCRIPT_OUTPUT_FORMAT,
   revealModelEndpointApiKey,
@@ -331,7 +333,9 @@ function EndpointDialog({
   const [maxContextSize, setMaxContextSize] = useState("");
   const [maxOutputTokens, setMaxOutputTokens] = useState("");
   const [languageHint, setLanguageHint] = useState("");
-  const [mossTimestamped, setMossTimestamped] = useState(false);
+  const [mossTranscriptOutputFormat, setMossTranscriptOutputFormat] = useState<MossTranscriptOutputFormat>(
+    RAW_TRANSCRIPT_OUTPUT_FORMAT,
+  );
   const [vendor, setVendor] = useState("");
   const [extraJson, setExtraJson] = useState("{}");
 
@@ -401,10 +405,10 @@ function EndpointDialog({
           editing.model_type === "stt"
             ? splitModelEndpointSttLanguage(apiExtra)
             : { languageHint: "", extra: apiExtra };
-        const { mossTimestamped: storedMossTimestamped, extra: mossExtra } =
+        const { mossTranscriptOutputFormat: storedMossTranscriptOutputFormat, extra: mossExtra } =
           editing.model_type === "stt"
             ? splitModelEndpointMossTranscriptOutput(sttExtra)
-            : { mossTimestamped: false, extra: sttExtra };
+            : { mossTranscriptOutputFormat: RAW_TRANSCRIPT_OUTPUT_FORMAT as MossTranscriptOutputFormat, extra: sttExtra };
         const { implementation, extra: implExtra } =
           editing.model_type === "stt"
             ? { implementation: "", extra: mossExtra }
@@ -426,7 +430,7 @@ function EndpointDialog({
         setMaxContextSize(llmContext.maxContextSize);
         setMaxOutputTokens(llmContext.maxOutputTokens);
         setLanguageHint(storedLanguageHint);
-        setMossTimestamped(storedMossTimestamped);
+        setMossTranscriptOutputFormat(storedMossTranscriptOutputFormat);
         setVendor(implementation || DEFAULT_VENDOR_BY_TYPE[editing.model_type]);
         setExtraJson(JSON.stringify(displayExtra, null, 2));
         setValidated(true);
@@ -445,7 +449,7 @@ function EndpointDialog({
         setMaxContextSize("");
         setMaxOutputTokens("");
         setLanguageHint("");
-        setMossTimestamped(false);
+        setMossTranscriptOutputFormat(RAW_TRANSCRIPT_OUTPUT_FORMAT);
         setVendor(DEFAULT_VENDOR_BY_TYPE[activeTab as ModelType]);
         setExtraJson("{}");
         setValidated(null);
@@ -724,7 +728,10 @@ function EndpointDialog({
     }
     if (isStt) {
       extra = mergeModelEndpointSttLanguage(extra, languageHint);
-      extra = mergeModelEndpointMossTranscriptOutput(extra, isMossStt && mossTimestamped);
+      extra = mergeModelEndpointMossTranscriptOutput(
+        extra,
+        isMossStt ? mossTranscriptOutputFormat : RAW_TRANSCRIPT_OUTPUT_FORMAT,
+      );
     } else {
       extra = mergeModelEndpointImplementation(extra, vendor);
     }
@@ -871,11 +878,11 @@ function EndpointDialog({
             <div className="space-y-2">
               <LabelWithInfo
                 label="MOSS transcript output"
-                tooltip="Choose how OpenRAG stores MOSS diarized segments. Timestamped speaker lines are formatted by OpenRAG after transcription and are never sent to the MOSS server."
+                tooltip="Choose how OpenRAG stores MOSS diarized segments. These formatting choices are applied after transcription and are never sent to the MOSS server."
               />
               <Select
-                value={mossTimestamped ? MOSS_TIMESTAMPED_TRANSCRIPT_OUTPUT_FORMAT : RAW_TRANSCRIPT_OUTPUT_FORMAT}
-                onValueChange={(value) => setMossTimestamped(value === MOSS_TIMESTAMPED_TRANSCRIPT_OUTPUT_FORMAT)}
+                value={mossTranscriptOutputFormat}
+                onValueChange={(value) => setMossTranscriptOutputFormat(value as MossTranscriptOutputFormat)}
               >
                 <SelectTrigger className="w-full">
                   <SelectValue />
@@ -885,10 +892,13 @@ function EndpointDialog({
                   <SelectItem value={MOSS_TIMESTAMPED_TRANSCRIPT_OUTPUT_FORMAT}>
                     Timestamped speaker lines
                   </SelectItem>
+                  <SelectItem value={MOSS_SPEAKER_AWARE_TRANSCRIPT_OUTPUT_FORMAT}>
+                    Speaker-aware lines
+                  </SelectItem>
                 </SelectContent>
               </Select>
               <p className="text-xs text-muted-foreground">
-                Timestamped speaker lines use one segment per line with millisecond timestamps and speaker labels.
+                Speaker-aware lines remove timecodes and keep speaker labels only when MOSS identifies more than one speaker.
               </p>
             </div>
           )}

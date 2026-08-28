@@ -9,7 +9,7 @@ from typing import Any, Literal
 from core.config.model_endpoints import (
     LLM_CONTEXT_SIZE_KEY,
     LLM_OUTPUT_TOKENS_KEY,
-    MOSS_TIMESTAMPED_TRANSCRIPT_OUTPUT_FORMAT,
+    MOSS_TRANSCRIPT_OUTPUT_FORMATS,
     STT_LANGUAGE_KEY,
     STT_TRANSCRIPT_OUTPUT_FORMAT_KEY,
 )
@@ -108,7 +108,8 @@ def validate_stt_fields(model_name: str | None, extra: dict[str, Any] | None) ->
     ``model`` is required by ``/audio/transcriptions``. A language hint is
     intentionally permissive: providers accept either ISO 639-1 values such as
     ``fr`` or broader BCP-47 tags, so the API only requires a non-empty string.
-    The optional response-format control has one supported MOSS-specific value.
+    The optional response-format control accepts the supported MOSS-specific
+    values only.
     """
     if not model_name or not model_name.strip():
         raise ValueError("model_name is required for an STT endpoint")
@@ -119,9 +120,9 @@ def validate_stt_fields(model_name: str | None, extra: dict[str, Any] | None) ->
 
     if extra is None or STT_TRANSCRIPT_OUTPUT_FORMAT_KEY not in extra:
         return
-    if extra[STT_TRANSCRIPT_OUTPUT_FORMAT_KEY] != MOSS_TIMESTAMPED_TRANSCRIPT_OUTPUT_FORMAT:
+    if extra[STT_TRANSCRIPT_OUTPUT_FORMAT_KEY] not in MOSS_TRANSCRIPT_OUTPUT_FORMATS:
         raise ValueError(
-            f"extra.{STT_TRANSCRIPT_OUTPUT_FORMAT_KEY} must be {MOSS_TIMESTAMPED_TRANSCRIPT_OUTPUT_FORMAT!r}"
+            f"extra.{STT_TRANSCRIPT_OUTPUT_FORMAT_KEY} must be one of {sorted(MOSS_TRANSCRIPT_OUTPUT_FORMATS)!r}"
         )
 
 
