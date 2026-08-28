@@ -684,3 +684,28 @@ def test_short_document_still_splits_when_sections_share_no_ancestor():
     chunks = _chunker(chunk_size=512).chunk(_doc(_MULTI_SECTION_PAGE))
     assert len(chunks) > 1
     assert all(c.metadata["hierarchy_path"] for c in chunks)
+
+
+def test_heading_before_a_figure_travels_with_it():
+    """A heading opens a unit with no body yet; a figure right after it used to
+    force-flush that heading-only unit, which _merge_small then folded BACKWARD
+    into the previous chunk — stranding the heading at the end of a section it
+    does not introduce, with its content in the next chunk."""
+    caption = " ".join(f"detail{i} of the figure" for i in range(80))
+    doc = _doc(
+        "## Section A\n\nBody of section A here.\n\n"
+        f"### 3.1.4 Interface conversationnelle\n\n<image_description>{caption}</image_description>\n"
+    )
+    chunks = _chunker(chunk_size=512).chunk(doc)
+    for chunk in chunks:
+        lines = [ln for ln in (chunk.content or "").splitlines() if ln.strip()]
+        assert not lines[-1].lstrip().startswith("#"), f"chunk ends on a heading: {lines[-1]!r}"
+    figure = next(c for c in chunks if "detail0" in (c.content or ""))
+    assert "3.1.4 Interface conversationnelle" in figure.content, "heading left its figure behind"
+
+
+def test_headings_only_unit_never_merges_backward():
+    from core.chunking.structured_section import _is_headings_only, _Unit
+
+    assert _is_headings_only(_Unit(heading_path=[], text="## Title\n\n### Sub", tokens=4))
+    assert not _is_headings_only(_Unit(heading_path=[], text="## Title\n\nBody line.", tokens=5))

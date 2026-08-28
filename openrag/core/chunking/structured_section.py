@@ -74,6 +74,12 @@ _EMPHASIS_RE = re.compile(r"[*_`\\]+")
 # Stricter than ``_HEADING_PREFIX_RE``: requires text after the hashes, so a
 # ``#hashtag`` line is not mistaken for a heading when re-homing split pieces.
 _CAPTION_HEADING_RE = re.compile(r"^\s*#{1,6}\s+\S")
+# A body line that is a heading — markdown, or a structural keyword the parsers
+# emit as plain text. Used to spot a unit that carries no body of its own.
+_HEADING_LINE_RE = re.compile(
+    r"^\s*(?:#{1,6}\s+\S|\*{0,2}(?:Livre|Titre|Chapitre|Section|Sous-section|Partie|Annexe)\b)",
+    re.IGNORECASE,
+)
 # Inline HTML the parsers leave in heading lines — chiefly Marker's page anchors
 # (``<span id="page-46-0"></span>Encadré 3 …``), which would otherwise ride into
 # the breadcrumb verbatim.
@@ -527,10 +533,27 @@ class StructuredSectionChunker(BaseChunker):
                 if self.length_function(element.content) <= self._inline_threshold:
                     add_line(element.content.strip(), element.page_number or page)
                 else:
-                    flush(force=True)
+                    # A heading immediately before a figure/table has opened a
+                    # unit that has no body yet. Force-flushing it here made it
+                    # a tiny heading-only unit, and _merge_small only merges
+                    # *backward*, so it folded into the PREVIOUS chunk — leaving
+                    # that chunk ending on a heading whose content is the next
+                    # chunk. The heading belongs to the block it introduces, so
+                    # carry it into the atomic unit instead.
+                    pending = "" if buf_has_body else "\n".join(buf_lines).strip()
+                    if buf_has_body:
+                        flush()
+                    else:
+                        buf_lines.clear()
+                        buf_marks.clear()
+                        buf_len = 0
                     for entry in stack:
                         entry.used = True
-                    units.append(self._atomic_unit(element, list(stack_path(stack)), page))
+                    atomic = self._atomic_unit(element, list(stack_path(stack)), page)
+                    if pending:
+                        atomic.text = f"{pending}\n\n{atomic.text}"
+                        atomic.tokens = self.length_function(atomic.text)
+                    units.append(atomic)
                 continue
 
             for raw_line in dewrap_paragraphs(element.content).split("\n"):
@@ -881,6 +904,12 @@ class StructuredSectionChunker(BaseChunker):
         """
         if prev.tokens >= self.min_tokens and unit.tokens >= self.min_tokens:
             return False
+        # Never fold a heading-only unit into the chunk before it: the heading
+        # introduces what comes *after*, so absorbing it backward leaves that
+        # chunk ending on a heading whose body is in the next one — the orphan
+        # this strategy exists to remove, arriving through the merge pass.
+        if _is_headings_only(unit):
+            return False
         if prev.tokens + unit.tokens > self._effective_max(filename, merged_path, prev.pages | unit.pages):
             return False
         if prev.pages & unit.pages and _keeps_context(prev.heading_path, unit.heading_path):
@@ -1015,6 +1044,12 @@ def _absorb(cur: _Unit, unit: _Unit, *, path: list[str] | None = None) -> None:
     cur.atomic = cur.atomic or unit.atomic
     if path is not None:
         cur.heading_path = list(path)
+
+
+def _is_headings_only(unit: _Unit) -> bool:
+    """A unit carrying nothing but heading lines — no body of its own."""
+    lines = [line for line in unit.text.splitlines() if line.strip()]
+    return bool(lines) and all(_HEADING_LINE_RE.match(line) for line in lines)
 
 
 def _keeps_context(a: list[str], b: list[str]) -> bool:
