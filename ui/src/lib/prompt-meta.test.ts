@@ -64,7 +64,7 @@ describe("validatePlaceholders", () => {
     expect(v.malformed).toBe(false);
   });
 
-  it("exposes the global ASR prompt without template restrictions", () => {
+  it("exposes the ASR prompt without template restrictions", () => {
     const transcription = PROMPT_GROUPS.find((group) => group.name === "Transcription");
     expect(transcription?.types).toEqual([{ value: "asr_transcription", label: "ASR transcription" }]);
 

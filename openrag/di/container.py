@@ -650,7 +650,7 @@ class ServiceContainer:
 
             settings = self._require_settings()
 
-            async def resolve_transcription_prompt() -> str | None:
+            async def resolve_transcription_prompt(_partition: str | None = None) -> str | None:
                 return await self.prompt_service.resolve_prompt("asr_transcription")
 
             async def resolve_transcription_endpoint():

@@ -10,7 +10,6 @@ import {
   Eye,
   AlertTriangle,
   Circle,
-  Globe2,
   Users,
 } from "lucide-react";
 import {
@@ -237,21 +236,13 @@ function PromptCard({
         <Badge
           variant="outline"
           className={
-            isAsrTranscription
-              ? "text-xs bg-sky-50 text-sky-700 border-sky-200 dark:bg-sky-950/30 dark:text-sky-100 dark:border-sky-900/60"
-              : used > 0
+            used > 0
               ? "text-xs bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-950/30 dark:text-amber-100 dark:border-amber-900/60"
               : "text-xs bg-muted text-muted-foreground border-transparent"
           }
         >
-          {isAsrTranscription ? <Globe2 className="mr-1 h-3 w-3" /> : <Users className="mr-1 h-3 w-3" />}
-          {isAsrTranscription
-            ? prompt.is_default
-              ? "Global default"
-              : "Inactive"
-            : used > 0
-              ? `${used} partition${used === 1 ? "" : "s"}`
-              : "Unused"}
+          <Users className="mr-1 h-3 w-3" />
+          {used > 0 ? `${used} partition${used === 1 ? "" : "s"}` : "Unused"}
         </Badge>
       </div>
       <CardHeader className="pb-2">
@@ -372,7 +363,7 @@ function PromptEditorSheet({
   // orphans every selection pointing at the old one — they fall back to the
   // global default. Warn before that happens instead of letting the drawer's
   // "changes apply everywhere" promise quietly become false.
-  const isRename = !!editing && !isAsrTranscription && name.trim() !== editing.name;
+  const isRename = !!editing && name.trim() !== editing.name;
   const renameBreaksRefs = isRename && (editing?.used_by ?? 0) > 0;
 
   const handleSubmit = (e: React.FormEvent) => {
@@ -419,7 +410,7 @@ function PromptEditorSheet({
           <SheetTitle>{editing ? "Edit prompt" : "New prompt"}</SheetTitle>
           <SheetDescription>
             {isAsrTranscription
-              ? "Changes apply to every external audio transcription on its next request."
+              ? "Changes apply to each partition that selects this prompt on its next audio transcription."
               : "Changes apply to every preset and partition that selects this prompt."}
           </SheetDescription>
         </SheetHeader>
@@ -464,12 +455,8 @@ function PromptEditorSheet({
 
           {editing && (
             <p className="flex items-center gap-1.5 rounded-md border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
-              {isAsrTranscription ? <Globe2 className="h-3.5 w-3.5" /> : <Users className="h-3.5 w-3.5" />}
-              {isAsrTranscription
-                ? editing.is_default
-                  ? "Applied globally to external audio transcription."
-                  : "Set this prompt as default to apply it globally."
-                : editing.used_by > 0
+              <Users className="h-3.5 w-3.5" />
+              {editing.used_by > 0
                 ? `Selected by ${editing.used_by} partition${editing.used_by === 1 ? "" : "s"}.`
                 : "Not selected by any partition yet."}
             </p>

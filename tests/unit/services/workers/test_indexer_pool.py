@@ -123,7 +123,7 @@ def test_build_indexer_pool_uses_current_protocol_dispatcher_name(
     opts = options_calls[0]
     # A protocol-specific name prevents a rolling deployment from attaching to
     # a detached actor that still runs the previous claim implementation.
-    assert opts["name"] == "IndexerPoolDispatcher-v5"
+    assert opts["name"] == "IndexerPoolDispatcher-v6"
     assert opts["namespace"] == "openrag"
     assert opts["get_if_exists"] is True
     assert opts["lifetime"] == "detached"
@@ -159,9 +159,9 @@ def test_indexer_pool_actor_spawns_pool_size_detached_workers(
     # One detached worker actor per pool_size slot, each capped at max_tasks_per_worker.
     assert len(pool._workers) == 3
     assert {c["name"] for c in calls} == {
-        "IndexerWorker-v5-0",
-        "IndexerWorker-v5-1",
-        "IndexerWorker-v5-2",
+        "IndexerWorker-v6-0",
+        "IndexerWorker-v6-1",
+        "IndexerWorker-v6-2",
     }
     for c in calls:
         assert c["lifetime"] == "detached"
@@ -1094,7 +1094,7 @@ async def test_pool_drain_rejects_new_work_and_reports_accepted_work() -> None:
     await pool.submit(task_id="accepted-before-drain")
 
     assert await pool.begin_drain() == {
-        "protocol_version": "v5",
+        "protocol_version": "v6",
         "accepting_tasks": False,
         "inflight_jobs": 1,
         "worker_names": ["test-worker-0"],
@@ -1105,7 +1105,7 @@ async def test_pool_drain_rejects_new_work_and_reports_accepted_work() -> None:
 
     await _settle_pool_release_tasks(pool, worker.futures[0])
     assert await pool.status() == {
-        "protocol_version": "v5",
+        "protocol_version": "v6",
         "accepting_tasks": False,
         "inflight_jobs": 0,
         "worker_names": ["test-worker-0"],
@@ -1122,7 +1122,7 @@ async def test_pool_abort_drain_restores_acceptance() -> None:
         await pool.submit(task_id="rejected-while-draining")
 
     assert await pool.abort_drain() == {
-        "protocol_version": "v5",
+        "protocol_version": "v6",
         "accepting_tasks": True,
         "inflight_jobs": 0,
         "worker_names": ["test-worker-0"],
@@ -1137,7 +1137,7 @@ async def test_pool_abort_drain_restores_acceptance() -> None:
 async def test_pool_reports_current_protocol_version() -> None:
     pool = _bare_pool([_FakeWorker()])
 
-    assert await pool.protocol_version() == "v5"
+    assert await pool.protocol_version() == "v6"
 
 
 @pytest.mark.asyncio
@@ -1474,6 +1474,7 @@ def _bare_worker_actor(*, save_uploaded_files: bool, worker: _RecordingWorker):
     actor._catalog_store = SimpleNamespace(
         workspace_repo=SimpleNamespace(),
         document_repo=SimpleNamespace(release_content_sha256_claim=AsyncMock()),
+        partition_repo=SimpleNamespace(get_partition_row=_AsyncReturn({})),
     )
     actor._save_uploaded_files = save_uploaded_files
     actor._logger = SimpleNamespace(debug=lambda *a, **k: None, warning=lambda *a, **k: None)
@@ -1487,10 +1488,24 @@ def _bare_worker_actor(*, save_uploaded_files: bool, worker: _RecordingWorker):
 
 
 @pytest.mark.asyncio
-async def test_actor_resolves_the_current_global_asr_prompt() -> None:
+async def test_actor_resolves_the_default_asr_prompt_without_a_partition_override() -> None:
     actor = _bare_worker_actor(save_uploaded_files=True, worker=_RecordingWorker())
 
     assert await actor._resolve_transcription_prompt() == "prompt"
+
+
+@pytest.mark.asyncio
+async def test_actor_resolves_the_partition_asr_prompt_before_the_default() -> None:
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=_RecordingWorker())
+    actor._catalog_store.partition_repo.get_partition_row = _AsyncReturn(
+        {"generation_prompt_names": {"asr_transcription": "meeting-diarization"}}
+    )
+    actor._prompt_service.resolve_prompt = AsyncMock(return_value="partition prompt")
+
+    assert await actor._resolve_transcription_prompt("meetings") == "partition prompt"
+    actor._prompt_service.resolve_prompt.assert_awaited_once_with(
+        "asr_transcription", names=["meeting-diarization"]
+    )
 
 
 @pytest.mark.asyncio

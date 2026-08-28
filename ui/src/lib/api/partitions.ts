@@ -66,8 +66,8 @@ export interface PartitionConfig {
   document_count: number;
   chat_history_depth: number;
   chat_llm: string | null;
-  // The final-answer prompt selected for this partition, keyed by prompt type
-  // (sys_prompt). Absent = the type's global default.
+  // Prompt selections for this partition (including final-answer and ASR
+  // transcription). An absent type uses that type's global default.
   generation_prompt_names: Record<string, string>;
 }
 

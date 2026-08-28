@@ -163,9 +163,10 @@ partitions = Table(
     Column("collection_name", String, nullable=True),
     Column("chat_history_depth", Integer, server_default="0", nullable=False),
     Column("chat_llm", String, nullable=True),
-    # {prompt_type: library_prompt_name} for generation prompts (sys_prompt,
-    # spoken_style_answer). Like chat_llm, generation config lives on the
-    # partition; indexation/retrieval prompts are named on their presets instead.
+    # {prompt_type: library_prompt_name} for prompts selected on a partition
+    # (sys_prompt, spoken_style_answer, asr_transcription). Like chat_llm,
+    # this config lives on the partition; indexation/retrieval prompts are
+    # named on their presets instead.
     Column(
         "generation_prompt_names",
         JSONB,

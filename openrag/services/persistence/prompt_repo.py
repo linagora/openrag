@@ -52,7 +52,8 @@ def _as_conflict(exc: asyncpg.UniqueViolationError, prompt_type: str) -> Validat
 
 
 # Indexation/retrieval preset config field -> the prompt_type it names. Partition
-# generation_prompt_names keys ARE prompt_type values, so they need no mapping.
+# prompt-map keys (final-answer and ASR transcription) ARE prompt_type values,
+# so they need no mapping.
 _PRESET_FIELD_TO_TYPE = {
     "contextualization_prompt_name": "chunk_contextualizer",
     "image_captioning_prompt_name": "image_captioning",
@@ -252,8 +253,8 @@ class PgPromptRepository(PromptRepository):
         existing = {(r["prompt_type"], r["name"]) for r in prompt_rows}
         default_name: dict[str, str] = {r["prompt_type"]: r["name"] for r in prompt_rows if r["is_default"]}
 
-        # Explicit overrides: partitions that name a prompt directly (generation
-        # prompts on the partition JSONB) or transitively (their active
+        # Explicit overrides: partitions that name a prompt directly (partition
+        # prompt selections on the JSONB) or transitively (their active
         # indexation/retrieval preset's *_prompt_name).
         overrides: dict[tuple[str, str], int] = {}
         part_rows = await self.pool.fetch(

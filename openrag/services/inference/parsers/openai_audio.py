@@ -57,7 +57,7 @@ _DEFAULT_DIRECT_UPLOAD_SUFFIXES: tuple[str, ...] = (".mp3", ".m4a", ".ogg", ".we
 _ANONYMOUS_API_KEY = "EMPTY"
 
 LanguageDetector = Callable[[Path], Awaitable[str | None]]
-TranscriptionPromptResolver = Callable[[], Awaitable[str | None]]
+TranscriptionPromptResolver = Callable[[str | None], Awaitable[str | None]]
 TranscriptionEndpointResolver = Callable[[], ModelEndpointConfig | None | Awaitable[ModelEndpointConfig | None]]
 
 # Endpoint ``extra`` holds both connection metadata and provider request options.
@@ -136,7 +136,7 @@ class OpenAIAudioClient(BaseClientParser):
                                 language = await self._language_detector(upload_path)
                             except Exception as exc:
                                 logger.bind(error=str(exc)).warning("Language detection failed")
-                        prompt = await self._resolve_prompt()
+                        prompt = await self._resolve_prompt(document.partition or None)
                         text = await self._transcribe(
                             upload_path,
                             language=language,
@@ -179,8 +179,8 @@ class OpenAIAudioClient(BaseClientParser):
         await asyncio.to_thread(sound.export, wav_path, format="wav")
         return wav_path, True
 
-    async def _resolve_prompt(self) -> str | None:
-        """Resolve the current managed transcription prompt, if one is wired.
+    async def _resolve_prompt(self, partition: str | None) -> str | None:
+        """Resolve the current managed transcription prompt for a partition.
 
         Prompt resolution happens for every file instead of at client creation
         time, so an Admin UI edit is visible to the next audio request without
@@ -190,7 +190,7 @@ class OpenAIAudioClient(BaseClientParser):
         if self._transcription_prompt_resolver is None:
             return None
         try:
-            prompt = await self._transcription_prompt_resolver()
+            prompt = await self._transcription_prompt_resolver(partition)
         except Exception as exc:  # noqa: BLE001 - prompt storage must not block transcription
             logger.bind(error=str(exc)).warning("Transcription prompt resolution failed")
             return None

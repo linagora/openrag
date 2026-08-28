@@ -22,7 +22,7 @@ _CONTENT_CLAIM_RENEW_INTERVAL_SECONDS = 60 * 60
 # and workers on the same protocol generation whenever their remote contract or
 # cross-process indexing semantics change, so new replicas cannot attach to a
 # partially compatible actor fleet left by the previous release.
-_INDEXER_ACTOR_PROTOCOL_VERSION = "v5"
+_INDEXER_ACTOR_PROTOCOL_VERSION = "v6"
 _INDEXER_POOL_DISPATCHER_ACTOR_NAME = f"IndexerPoolDispatcher-{_INDEXER_ACTOR_PROTOCOL_VERSION}"
 
 
@@ -179,15 +179,27 @@ class IndexerWorkerActor:
             )
         return self._prompt_service
 
-    async def _resolve_transcription_prompt(self) -> str | None:
-        """Return the current global ASR prompt without caching it in the worker.
+    async def _resolve_transcription_prompt(self, partition: str | None = None) -> str | None:
+        """Resolve this partition's ASR prompt without caching it in the worker.
 
         ``OpenAIAudioClient`` invokes this directly before each request. The
-        resulting database lookup makes an Admin UI save visible to the next
+        partition's named selection wins, with the ASR global default as the
+        fallback. Both lookups stay live, so an Admin UI save affects the next
         transcription even though the parser client itself is long-lived.
         """
+        selected_name: str | None = None
+        if partition:
+            try:
+                row = await self._catalog_store.partition_repo.get_partition_row(partition)
+                prompt_names = row.get("generation_prompt_names") if row else None
+                if isinstance(prompt_names, dict):
+                    candidate = prompt_names.get("asr_transcription")
+                    if isinstance(candidate, str) and candidate.strip():
+                        selected_name = candidate
+            except Exception as exc:  # noqa: BLE001 - a partition lookup must not fail a file
+                self._logger.warning(f"ASR prompt selection lookup failed (partition={partition}): {exc}")
         try:
-            return await self._get_prompt_service().resolve_prompt("asr_transcription")
+            return await self._get_prompt_service().resolve_prompt("asr_transcription", names=[selected_name])
         except Exception as exc:  # noqa: BLE001 - a prompt lookup must not fail a file
             self._logger.warning(f"ASR transcription prompt resolution failed: {exc}")
             return None
