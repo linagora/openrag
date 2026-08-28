@@ -324,9 +324,12 @@ def test_image_block_keeps_real_caption_beside_a_placeholder():
     tourism description went missing from the index on the test corpus."""
     from core.chunking.recursive import is_placeholder_image
 
+    # One wrapper holding both. wrap_caption() emits one wrapper per image, so
+    # this is the shape the bug actually takes: a composite figure the VLM
+    # partly described. Two *adjacent* wrappers were never affected — IMAGE_RE
+    # is non-greedy, so they parse as separate elements.
     mixed = (
-        "<image_description>\n\n[Image Placeholder]\n\n</image_description>\n"
-        "<image_description>\n\n92 000 COLLABORATEURS\n27 000 AVTOVAZ\n16 PAYS\n\n</image_description>"
+        "<image_description>\n\n[Image Placeholder]\n\n92 000 COLLABORATEURS\n27 000 AVTOVAZ\n\n</image_description>"
     )
     assert not is_placeholder_image(mixed)
 
@@ -339,8 +342,8 @@ def test_mixed_image_block_survives_chunking():
             TextBlock(
                 text=(
                     "Intro paragraph.\n\n"
-                    "<image_description>\n\n[Image Placeholder]\n\n</image_description>\n"
-                    "<image_description>\n\n92 000 COLLABORATEURS 27 000 AVTOVAZ\n\n</image_description>\n\n"
+                    "<image_description>\n\n[Image Placeholder]\n\n"
+                    "92 000 COLLABORATEURS 27 000 AVTOVAZ\n\n</image_description>\n\n"
                     "Closing paragraph."
                 ),
                 page_number=1,
@@ -350,3 +353,4 @@ def test_mixed_image_block_survives_chunking():
     )
     joined = "\n".join(c.text for c in splitter.chunk(doc, partition="p"))
     assert "92 000 COLLABORATEURS" in joined, "real caption text dropped alongside the placeholder"
+    assert "[Image Placeholder]" not in joined, "the marker reached the index as if it were caption text"
