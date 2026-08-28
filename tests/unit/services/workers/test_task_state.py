@@ -130,11 +130,11 @@ async def test_matching_active_task_refs_preserve_submitted_tasks_without_refs()
         user_id=42,
     )
     assert await manager.begin_worker_submission("task-1") is True
-    assert await manager.set_state("task-1", "SERIALIZING") is True
 
     expected = {"task-1": SUBMITTED_TASK_WITHOUT_REF}
     assert await manager.get_matching_active_task_refs_v2(partition="tenant-a", file_id="file-1") == expected
 
+    assert await manager.set_state("task-1", "SERIALIZING") is True
     assert await manager.set_cancelled_if_active("task-1") is True
     assert await manager.get_matching_active_task_refs_v2(partition="tenant-a", file_id="file-1") == expected
 
@@ -260,7 +260,7 @@ async def test_submitted_refless_task_keeps_claim_through_cancellation_and_regis
 
 
 @pytest.mark.asyncio
-async def test_unaccepted_submission_fence_expires(monkeypatch) -> None:
+async def test_submission_fence_persists_until_pool_reports_settlement(monkeypatch) -> None:
     now = 100.0
     monkeypatch.setattr(task_state_module.time, "time", lambda: now)
     manager = _task_state_manager()
@@ -282,7 +282,11 @@ async def test_unaccepted_submission_fence_expires(monkeypatch) -> None:
     )
     now += task_state_module._CONTENT_CLAIM_REGISTRATION_GRACE_SECONDS + 1
 
-    assert await manager.expire_refless_task_if_stale("task-1") is True
+    assert await manager.expire_refless_task_if_stale("task-1") is False
+    assert await manager.get_content_claim_task_ids(partition="tenant-a") == {"task-1"}
+
+    assert await manager.finish_rejected_submission("task-1") is True
+    assert await manager.get_state("task-1") == "FAILED"
     assert await manager.get_content_claim_task_ids(partition="tenant-a") == set()
 
 

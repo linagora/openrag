@@ -169,7 +169,10 @@ def _cancelled_task_unsettled(info: TaskInfo) -> bool:
         return False
     object_ref = info.object_ref
     ref = object_ref.get("ref") if isinstance(object_ref, dict) else object_ref
-    return ref is not None or getattr(info, "worker_submitted", False)
+    submission_started_at = getattr(info, "submission_started_at", None)
+    return (
+        ref is not None or getattr(info, "worker_submitted", False) or isinstance(submission_started_at, (int, float))
+    )
 
 
 def _save_recoverable_task(task_id: str, info: TaskInfo) -> None:
@@ -294,14 +297,12 @@ class TaskStateManager:
     def _expire_refless_task_if_stale_locked(self, task_id: str, info: TaskInfo) -> bool:
         ref = info.object_ref.get("ref") if isinstance(info.object_ref, dict) else info.object_ref
         submission_started_at = getattr(info, "submission_started_at", None)
-        submission_pending = isinstance(submission_started_at, (int, float)) and (
-            time.time() < submission_started_at + _CONTENT_CLAIM_REGISTRATION_GRACE_SECONDS
-        )
+        submission_in_progress = isinstance(submission_started_at, (int, float))
         if (
             info.state not in CANCELLABLE_INDEXING_STATES
             or ref is not None
             or getattr(info, "worker_submitted", False)
-            or submission_pending
+            or submission_in_progress
             or not _content_claim_registration_expired(info.details or {})
         ):
             return False
@@ -579,11 +580,10 @@ class TaskStateManager:
             for task_id, info in self.tasks.items():
                 worker_submitted = getattr(info, "worker_submitted", False)
                 submission_started_at = getattr(info, "submission_started_at", None)
-                submission_pending = isinstance(submission_started_at, (int, float)) and (
-                    time.time() < submission_started_at + _CONTENT_CLAIM_REGISTRATION_GRACE_SECONDS
-                )
+                submission_in_progress = isinstance(submission_started_at, (int, float))
                 owns_claim = info.state in CANCELLABLE_INDEXING_STATES or (
-                    info.state == "CANCELLED" and (info.object_ref is not None or worker_submitted)
+                    info.state == "CANCELLED"
+                    and (info.object_ref is not None or worker_submitted or submission_in_progress)
                 )
                 if not owns_claim:
                     continue
@@ -596,7 +596,7 @@ class TaskStateManager:
                 if (
                     ref is None
                     and not worker_submitted
-                    and not submission_pending
+                    and not submission_in_progress
                     and _content_claim_registration_expired(details)
                 ):
                     continue
@@ -623,7 +623,10 @@ class TaskStateManager:
                 continue
             if file_id is not None and details.get("file_id") != file_id:
                 continue
-            if info.object_ref is None and getattr(info, "worker_submitted", False):
+            submission_started_at = getattr(info, "submission_started_at", None)
+            if info.object_ref is None and (
+                getattr(info, "worker_submitted", False) or isinstance(submission_started_at, (int, float))
+            ):
                 matches[task_id] = SUBMITTED_TASK_WITHOUT_REF
             else:
                 matches[task_id] = info.object_ref
@@ -643,6 +646,7 @@ class TaskStateManager:
                     "error": info.error,
                     "details": info.details,
                     "worker_submitted": getattr(info, "worker_submitted", False),
+                    "submission_started_at": getattr(info, "submission_started_at", None),
                 }
                 for task_id, info in self.tasks.items()
             }

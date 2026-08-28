@@ -1269,8 +1269,7 @@ async def test_pool_rolls_back_inflight_when_submission_raises() -> None:
         await pool.submit(task_id="a")
 
     assert pool._inflight == [0]
-
-    assert pool._inflight == [0]
+    pool._task_state_manager.finish_rejected_submission.remote.assert_awaited_once_with("a")
 
 
 @pytest.mark.asyncio

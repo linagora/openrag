@@ -149,8 +149,9 @@ async def _get_matching_active_task_refs_legacy(
         if not isinstance(info, dict):
             continue
         state = info.get("state")
+        submission_started = isinstance(info.get("submission_started_at"), (int, float))
         cancelled_unsettled = state == "CANCELLED" and (
-            info.get("worker_submitted") is True or get_object_ref_remote is not None
+            info.get("worker_submitted") is True or submission_started or get_object_ref_remote is not None
         )
         if state not in CANCELLABLE_INDEXING_STATES and not cancelled_unsettled:
             continue
@@ -171,9 +172,14 @@ async def _get_matching_active_task_refs_legacy(
                 timeout=_remaining_timeout(deadline, partition=partition, file_id=file_id),
                 task_description=f"get_object_ref({task_id}) for delete cleanup",
             )
-        if state == "CANCELLED" and object_ref is None and info.get("worker_submitted") is not True:
+        if (
+            state == "CANCELLED"
+            and object_ref is None
+            and info.get("worker_submitted") is not True
+            and not submission_started
+        ):
             continue
-        if object_ref is None and info.get("worker_submitted") is True:
+        if object_ref is None and (info.get("worker_submitted") is True or submission_started):
             matches[task_id] = SUBMITTED_TASK_WITHOUT_REF
         else:
             matches[task_id] = object_ref

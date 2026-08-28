@@ -1930,7 +1930,8 @@ async def test_delete_file_legacy_lookup_blocks_submitted_task_without_ref() -> 
             "task-1": {
                 "state": "CANCELLED",
                 "details": {"partition": "tenant-a", "file_id": "file-1"},
-                "worker_submitted": True,
+                "worker_submitted": False,
+                "submission_started_at": 100.0,
             }
         }
     )

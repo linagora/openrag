@@ -479,6 +479,7 @@ class IndexerPool:
         """
         if not self._accepting_tasks:
             raise RuntimeError("IndexerPool is draining and cannot accept new tasks")
+        task_id = str(kwargs.get("task_id") or "")
         idx = min(range(len(self._workers)), key=self._inflight.__getitem__)
         self._inflight[idx] += 1
         try:
@@ -487,6 +488,7 @@ class IndexerPool:
             # Submission failed before a ref exists (e.g. unserializable args or
             # a dead actor); roll back so load balancing stays accurate.
             self._inflight[idx] -= 1
+            await self._finish_rejected_submission(task_id)
             raise
         metadata = kwargs.get("metadata") or {}
         content_sha256 = metadata.get("content_sha256")
@@ -504,7 +506,6 @@ class IndexerPool:
         # Keep a strong ref so the tracker isn't GC'd mid-flight (asyncio docs).
         self._release_tasks.add(task)
         task.add_done_callback(self._release_tasks.discard)
-        task_id = str(kwargs.get("task_id") or "")
         try:
             registered = await self._register_worker_ref(task_id, ref)
         except BaseException:
