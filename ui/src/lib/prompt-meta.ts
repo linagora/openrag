@@ -44,7 +44,7 @@ export const PROMPT_GROUPS: PromptGroup[] = [
   },
   {
     name: "Transcription",
-    description: "Global ASR instruction — used only when AUDIOLOADER=OpenAIAudioLoader",
+    description: "ASR instruction — selected per indexation preset when AUDIOLOADER=OpenAIAudioLoader",
     types: [{ value: "asr_transcription", label: "ASR transcription" }],
   },
 ];

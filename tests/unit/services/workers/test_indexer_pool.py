@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextvars import ContextVar
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -123,7 +124,7 @@ def test_build_indexer_pool_uses_current_protocol_dispatcher_name(
     opts = options_calls[0]
     # A protocol-specific name prevents a rolling deployment from attaching to
     # a detached actor that still runs the previous claim implementation.
-    assert opts["name"] == "IndexerPoolDispatcher-v6"
+    assert opts["name"] == "IndexerPoolDispatcher-v7"
     assert opts["namespace"] == "openrag"
     assert opts["get_if_exists"] is True
     assert opts["lifetime"] == "detached"
@@ -159,9 +160,9 @@ def test_indexer_pool_actor_spawns_pool_size_detached_workers(
     # One detached worker actor per pool_size slot, each capped at max_tasks_per_worker.
     assert len(pool._workers) == 3
     assert {c["name"] for c in calls} == {
-        "IndexerWorker-v6-0",
-        "IndexerWorker-v6-1",
-        "IndexerWorker-v6-2",
+        "IndexerWorker-v7-0",
+        "IndexerWorker-v7-1",
+        "IndexerWorker-v7-2",
     }
     for c in calls:
         assert c["lifetime"] == "detached"
@@ -565,6 +566,7 @@ def test_required_model_endpoint_names_include_embedder_vlm_and_stt() -> None:
         {
             "enable_image_captioning": True,
             "vlm": "vlm-fast",
+            "stt": "moss-transcribe-diarize",
             "enable_contextualization": True,
             "contextualization_llm": "ctx",
             "enable_topic_tagging": True,
@@ -577,7 +579,7 @@ def test_required_model_endpoint_names_include_embedder_vlm_and_stt() -> None:
         "embedder": ["embed-fast"],
         "llm": ["ctx", "tags"],
         "vlm": ["vlm-fast"],
-        "stt": ["default"],
+        "stt": ["moss-transcribe-diarize"],
     }
 
 
@@ -1094,7 +1096,7 @@ async def test_pool_drain_rejects_new_work_and_reports_accepted_work() -> None:
     await pool.submit(task_id="accepted-before-drain")
 
     assert await pool.begin_drain() == {
-        "protocol_version": "v6",
+        "protocol_version": "v7",
         "accepting_tasks": False,
         "inflight_jobs": 1,
         "worker_names": ["test-worker-0"],
@@ -1105,7 +1107,7 @@ async def test_pool_drain_rejects_new_work_and_reports_accepted_work() -> None:
 
     await _settle_pool_release_tasks(pool, worker.futures[0])
     assert await pool.status() == {
-        "protocol_version": "v6",
+        "protocol_version": "v7",
         "accepting_tasks": False,
         "inflight_jobs": 0,
         "worker_names": ["test-worker-0"],
@@ -1122,7 +1124,7 @@ async def test_pool_abort_drain_restores_acceptance() -> None:
         await pool.submit(task_id="rejected-while-draining")
 
     assert await pool.abort_drain() == {
-        "protocol_version": "v6",
+        "protocol_version": "v7",
         "accepting_tasks": True,
         "inflight_jobs": 0,
         "worker_names": ["test-worker-0"],
@@ -1137,7 +1139,7 @@ async def test_pool_abort_drain_restores_acceptance() -> None:
 async def test_pool_reports_current_protocol_version() -> None:
     pool = _bare_pool([_FakeWorker()])
 
-    assert await pool.protocol_version() == "v6"
+    assert await pool.protocol_version() == "v7"
 
 
 @pytest.mark.asyncio
@@ -1476,6 +1478,7 @@ def _bare_worker_actor(*, save_uploaded_files: bool, worker: _RecordingWorker):
         document_repo=SimpleNamespace(release_content_sha256_claim=AsyncMock()),
         partition_repo=SimpleNamespace(get_partition_row=_AsyncReturn({})),
     )
+    actor._active_indexation_config = ContextVar("test_active_indexation_config", default=None)
     actor._save_uploaded_files = save_uploaded_files
     actor._logger = SimpleNamespace(debug=lambda *a, **k: None, warning=lambda *a, **k: None)
     # These build the actor with __new__, so __init__ never runs. Captioning is
@@ -1508,17 +1511,47 @@ async def test_actor_uses_native_asr_prompt_when_resolution_fails() -> None:
 
 
 @pytest.mark.asyncio
-async def test_actor_resolves_the_partition_asr_prompt_before_the_default() -> None:
+async def test_actor_resolves_the_preset_asr_prompt_before_the_default() -> None:
     actor = _bare_worker_actor(save_uploaded_files=True, worker=_RecordingWorker())
-    actor._catalog_store.partition_repo.get_partition_row = _AsyncReturn(
-        {"generation_prompt_names": {"asr_transcription": "meeting-diarization"}}
-    )
     actor._prompt_service.resolve_prompt = AsyncMock(return_value="partition prompt")
 
-    assert await actor._resolve_transcription_prompt("meetings") == "partition prompt"
-    actor._prompt_service.resolve_prompt.assert_awaited_once_with(
-        "asr_transcription", names=["meeting-diarization"]
+    token = actor._active_indexation_config.set({"asr_transcription_prompt_name": "meeting-diarization"})
+    try:
+        assert await actor._resolve_transcription_prompt("meetings") == "partition prompt"
+    finally:
+        actor._active_indexation_config.reset(token)
+
+    actor._prompt_service.resolve_prompt.assert_awaited_once_with("asr_transcription", names=["meeting-diarization"])
+
+
+@pytest.mark.asyncio
+async def test_actor_keeps_a_legacy_partition_asr_prompt_as_a_fallback() -> None:
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=_RecordingWorker())
+    actor._catalog_store.partition_repo.get_partition_row = _AsyncReturn(
+        {"generation_prompt_names": {"asr_transcription": "legacy-meeting"}}
     )
+    actor._prompt_service.resolve_prompt = AsyncMock(return_value="legacy prompt")
+
+    assert await actor._resolve_transcription_prompt("meetings") == "legacy prompt"
+    actor._prompt_service.resolve_prompt.assert_awaited_once_with(
+        "asr_transcription",
+        names=["legacy-meeting"],
+    )
+
+
+def test_actor_resolves_the_preset_stt_endpoint_before_the_default() -> None:
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=_RecordingWorker())
+    default = ModelEndpointConfig(endpoint="http://whisper:8000/v1", model_name="whisper")
+    moss = ModelEndpointConfig(endpoint="http://moss:8000/v1", model_name="moss-transcribe-diarize")
+    actor._cfg = SimpleNamespace(models=SimpleNamespace(stt={"default": default, "moss": moss}))
+
+    assert actor._resolve_transcription_endpoint() is default
+
+    token = actor._active_indexation_config.set({"stt": "moss"})
+    try:
+        assert actor._resolve_transcription_endpoint() is moss
+    finally:
+        actor._active_indexation_config.reset(token)
 
 
 @pytest.mark.asyncio

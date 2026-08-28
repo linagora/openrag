@@ -144,7 +144,7 @@ Here are some other variables related to openai-compatible endpoint.
 
 For a MOSS server bound to `127.0.0.1:8001`, use `http://127.0.0.1:8001/v1` only when OpenRAG runs on that host. A containerized OpenRAG needs a host-reachable address such as `http://host.docker.internal:8001/v1` (plus Docker's host-gateway mapping on Linux). Match each OpenRAG worker's saved **Concurrency per worker** to the vLLM capacity; with `--max-num-seqs 1`, set it to `1` when one worker serves the endpoint, or lower it so all workers together stay within capacity. `TRANSCRIBER_MAX_CONCURRENT_CHUNKS` only controls the initial seed and fallback.
 
-The bundled transcriber image is pinned for Whisper and predates MOSS support. Serve MOSS with the vLLM build specified by the model authors, then use it as the external transcription endpoint. Manage its instruction in **Admin UI → Prompt Library → Transcription**. Changes apply to the next transcription without a restart. OpenRAG leaves this global prompt empty by default so Whisper, MOSS, and other providers keep their native behavior.
+The bundled transcriber image is pinned for Whisper and predates MOSS support. Serve MOSS with the vLLM build specified by the model authors, then use it as the external transcription endpoint. Manage instructions in **Admin UI → Prompt Library → Transcription**, then select the STT endpoint and instruction in **Admin UI → Presets → Indexation → Parsing**. Each partition uses its assigned indexation preset; leaving either selection at its default follows the global endpoint or ASR prompt. Changes apply to the next transcription without a restart. OpenRAG leaves the default ASR prompt empty so Whisper, MOSS, and other providers keep their native behavior.
 
 For a MOSS endpoint, **Admin UI → Model Endpoints** also offers an optional **Speaker-aware MOSS transcript** setting. It removes boundary timecodes when the complete diarized response is unambiguously recognized and retains normalized labels only when MOSS identifies more than one speaker. Leave it disabled to preserve the provider response unchanged. The setting also works with served-model aliases and is never sent to the provider.
 
@@ -437,7 +437,7 @@ The RAG pipeline ships with preconfigured prompts bundled inside the package at 
 | `query_contextualizer_tmpl.txt` | Template for adding context to user queries |
 | `chunk_contextualizer_tmpl.txt` | Template for contextualizing document chunks during indexing |
 | `image_captioning_tmpl.txt` | Template for generating image descriptions using the VLM |
-| `asr_transcription_tmpl.txt` | Empty by default so external transcription keeps the provider's native behavior. Configure it in Prompt Library when `AUDIOLOADER=OpenAIAudioLoader`. |
+| `asr_transcription_tmpl.txt` | Empty by default so external transcription keeps the provider's native behavior. Configure it in Prompt Library and select it on an indexation preset when `AUDIOLOADER=OpenAIAudioLoader`. |
 | `hyde.txt` | Hypothetical Document Embeddings (HyDE) query expansion template |
 | `multi_query_pmpt_tmpl.txt` | Template for generating multiple query variations |
 

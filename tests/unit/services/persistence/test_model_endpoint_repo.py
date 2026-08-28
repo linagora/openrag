@@ -419,6 +419,24 @@ async def test_rename_vlm_cascades_to_indexation_preset_only():
     assert p == (["vlm"], "new-vlm", "indexation", "vlm", "old-vlm")
 
 
+@pytest.mark.asyncio
+async def test_rename_stt_cascades_to_indexation_preset_only():
+    from services.persistence.model_endpoint_repo import PgModelEndpointRepository
+
+    pool = _FakePool()
+    pool.conn._fetchrow_result = {"name": "new-moss"}
+    repo = PgModelEndpointRepository(pool_getter=lambda: pool)
+
+    await repo.rename("old-moss", "stt", "new-moss")
+
+    queries = pool.conn.executed
+    assert not any("UPDATE partitions SET" in q for q, _ in queries)
+    preset_updates = [(q, p) for q, p in queries if "pipeline_presets" in q]
+    assert len(preset_updates) == 1
+    _, params = preset_updates[0]
+    assert params == (["stt"], "new-moss", "indexation", "stt", "old-moss")
+
+
 def _row(name, is_default):
     return {"name": name, "is_default": is_default}
 

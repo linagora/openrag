@@ -527,8 +527,7 @@ All routes are prefixed with **`/prompts`** and require the **admin** role. `pro
 |---|---|
 | `sys_prompt`, `spoken_style_answer` | partition — `generation_prompt_names` |
 | `query_contextualizer`, `hyde`, `multi_query` | retrieval preset — `*_prompt_name` |
-| `chunk_contextualizer`, `image_captioning`, `topic_tagger` | indexation preset — `*_prompt_name` |
-| `asr_transcription` | partition — selected in `generation_prompt_names`, with the global default as fallback |
+| `chunk_contextualizer`, `image_captioning`, `topic_tagger`, `asr_transcription` | indexation preset — `*_prompt_name` |
 
 #### Create a prompt
 ```http
@@ -577,7 +576,7 @@ curl -X PATCH http://localhost:8080/partition/my-partition \
   -d '{"generation_prompt_names": {"sys_prompt": "legal-assistant"}}'
 ```
 
-Preset-scoped prompts are selected the same way, by putting the `*_prompt_name` field in the preset's `config` (see [Pipeline Presets](#-pipeline-presets)).
+Preset-scoped prompts are selected the same way, by putting the `*_prompt_name` field in the preset's `config` (see [Pipeline Presets](#-pipeline-presets)). The indexation preset also selects the STT endpoint used for its audio files.
 
 ---
 

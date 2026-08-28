@@ -36,6 +36,7 @@ _RETRIEVAL_PRESET_KEYS_BY_TYPE = {"llm": ("llm",), "reranker": ("reranker",)}
 _INDEXATION_PRESET_KEYS_BY_TYPE = {
     "llm": ("contextualization_llm", "metadata_extraction_llm", "topic_tagging_llm"),
     "vlm": ("vlm",),
+    "stt": ("stt",),
 }
 
 
