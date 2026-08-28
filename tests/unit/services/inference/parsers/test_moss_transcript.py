@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pytest
 from services.inference.parsers.moss_transcript import normalize_moss_timestamped_transcript
 
 
@@ -27,7 +28,12 @@ def test_normalizes_moss_timestamps_across_hour_boundary():
     assert normalize_moss_timestamped_transcript(transcript) == "[01:00:00.000] [S01] Long recording. [01:00:01.000]"
 
 
-def test_preserves_unrecognized_or_incomplete_output():
-    transcript = "[1.12-2.32][S01] Complete.[2.68-"
-
+@pytest.mark.parametrize(
+    "transcript",
+    [
+        "[1.12-2.32][S01] Complete.[2.68-",
+        "[1.12-2.32][S01] Complete.[2.68-4.32]",
+    ],
+)
+def test_preserves_unrecognized_or_incomplete_output(transcript):
     assert normalize_moss_timestamped_transcript(transcript) == transcript
