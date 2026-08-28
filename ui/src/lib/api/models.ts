@@ -191,6 +191,9 @@ export function mergeModelEndpointApiKeyExtra(
 export const LLM_CONTEXT_SIZE_KEY = "max_llm_context_size";
 export const LLM_OUTPUT_TOKENS_KEY = "max_output_tokens";
 export const STT_LANGUAGE_KEY = "language";
+export const STT_TRANSCRIPT_OUTPUT_FORMAT_KEY = "transcript_output_format";
+export const MOSS_TIMESTAMPED_TRANSCRIPT_OUTPUT_FORMAT = "moss_timestamped";
+export const RAW_TRANSCRIPT_OUTPUT_FORMAT = "raw";
 
 export interface LlmContextFields {
   maxContextSize: string;
@@ -254,6 +257,34 @@ export function mergeModelEndpointSttLanguage(
   const normalized = languageHint.trim();
   if (normalized) result[STT_LANGUAGE_KEY] = normalized;
   else delete result[STT_LANGUAGE_KEY];
+  return result;
+}
+
+/** The MOSS-only UI control is shown for the published model ID and served aliases. */
+export function isMossTranscribeDiarizeModel(modelName: string | null | undefined): boolean {
+  return modelName?.trim().toLowerCase().includes("moss-transcribe-diarize") ?? false;
+}
+
+/** Pull MOSS response formatting out of raw endpoint extra for its dedicated control. */
+export function splitModelEndpointMossTranscriptOutput(extra: Record<string, unknown>): {
+  mossTimestamped: boolean;
+  extra: Record<string, unknown>;
+} {
+  const { [STT_TRANSCRIPT_OUTPUT_FORMAT_KEY]: outputFormat, ...rest } = extra;
+  return {
+    mossTimestamped: outputFormat === MOSS_TIMESTAMPED_TRANSCRIPT_OUTPUT_FORMAT,
+    extra: rest,
+  };
+}
+
+/** Store only the enabled MOSS formatter; absence preserves the raw response. */
+export function mergeModelEndpointMossTranscriptOutput(
+  extra: Record<string, unknown>,
+  enabled: boolean,
+): Record<string, unknown> {
+  const result = { ...extra };
+  if (enabled) result[STT_TRANSCRIPT_OUTPUT_FORMAT_KEY] = MOSS_TIMESTAMPED_TRANSCRIPT_OUTPUT_FORMAT;
+  else delete result[STT_TRANSCRIPT_OUTPUT_FORMAT_KEY];
   return result;
 }
 

@@ -31,12 +31,19 @@ import time
 from collections.abc import Awaitable, Callable, Iterable
 from pathlib import Path
 
-from core.config.model_endpoints import ENV_MANAGED_KEY, STT_LANGUAGE_KEY, ModelEndpointConfig
+from core.config.model_endpoints import (
+    ENV_MANAGED_KEY,
+    MOSS_TIMESTAMPED_TRANSCRIPT_OUTPUT_FORMAT,
+    STT_LANGUAGE_KEY,
+    STT_TRANSCRIPT_OUTPUT_FORMAT_KEY,
+    ModelEndpointConfig,
+)
 from core.indexing.parsers.document_parser import BaseClientParser
 from core.models.document import Document, DocumentType, ProcessedDocument, TextBlock
 from core.utils.logging import get_logger
 from openai import AsyncOpenAI
 from pydub import AudioSegment
+from services.inference.parsers.moss_transcript import normalize_moss_timestamped_transcript
 
 logger = get_logger()
 
@@ -59,6 +66,7 @@ _STT_REQUEST_CONTROL_EXTRA_KEYS = frozenset(
     {
         "api_key",
         STT_LANGUAGE_KEY,
+        STT_TRANSCRIPT_OUTPUT_FORMAT_KEY,
         ENV_MANAGED_KEY,
         "implementation",
         # These are owned by OpenRAG's configured endpoint / prompt plumbing.
@@ -261,6 +269,14 @@ class OpenAIAudioClient(BaseClientParser):
         text = getattr(response, "text", None)
         return text if isinstance(text, str) else ""
 
+    @staticmethod
+    def _uses_moss_timestamped_output(endpoint: ModelEndpointConfig | None) -> bool:
+        """Whether OpenRAG should normalize this endpoint's MOSS response."""
+        return bool(
+            endpoint
+            and endpoint.extra.get(STT_TRANSCRIPT_OUTPUT_FORMAT_KEY) == MOSS_TIMESTAMPED_TRANSCRIPT_OUTPUT_FORMAT
+        )
+
     def _is_fallback_endpoint(self, endpoint: ModelEndpointConfig) -> bool:
         """Whether *endpoint* is the legacy ``TRANSCRIBER_*`` destination."""
         return endpoint.endpoint.strip().rstrip("/") == self._base_url.strip().rstrip("/")
@@ -324,7 +340,11 @@ class OpenAIAudioClient(BaseClientParser):
         try:
             response = await client.audio.transcriptions.create(**kwargs)
             transcript = self._response_text(response)
-            return transcript
+            return (
+                normalize_moss_timestamped_transcript(transcript)
+                if self._uses_moss_timestamped_output(endpoint_config)
+                else transcript
+            )
         finally:
             if close_client:
                 try:

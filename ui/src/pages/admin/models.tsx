@@ -23,15 +23,20 @@ import {
   mergeModelEndpointApiKeyExtra,
   mergeModelEndpointImplementation,
   mergeModelEndpointLlmContext,
+  mergeModelEndpointMossTranscriptOutput,
   mergeModelEndpointSttLanguage,
+  MOSS_TIMESTAMPED_TRANSCRIPT_OUTPUT_FORMAT,
   prepareModelEndpointExtraForSubmit,
+  RAW_TRANSCRIPT_OUTPUT_FORMAT,
   revealModelEndpointApiKey,
   REDACTED_SECRET,
   setDefaultModelEndpoint,
   splitModelEndpointApiKeyExtra,
   splitModelEndpointImplementation,
   splitModelEndpointLlmContext,
+  splitModelEndpointMossTranscriptOutput,
   splitModelEndpointSttLanguage,
+  isMossTranscribeDiarizeModel,
   validateModelEndpoint,
   VENDOR_OPTIONS_BY_TYPE,
 } from "@/lib/api/models";
@@ -326,6 +331,7 @@ function EndpointDialog({
   const [maxContextSize, setMaxContextSize] = useState("");
   const [maxOutputTokens, setMaxOutputTokens] = useState("");
   const [languageHint, setLanguageHint] = useState("");
+  const [mossTimestamped, setMossTimestamped] = useState(false);
   const [vendor, setVendor] = useState("");
   const [extraJson, setExtraJson] = useState("{}");
 
@@ -347,6 +353,7 @@ function EndpointDialog({
   // LLM token-budget fields (max context / max output) apply to LLM endpoints only.
   const isLlm = modelType === "llm";
   const isStt = modelType === "stt";
+  const isMossStt = isStt && isMossTranscribeDiarizeModel(modelName);
   const vendorOptions = VENDOR_OPTIONS_BY_TYPE[modelType];
   const [validated, setValidated] = useState<boolean | null>(null);
   const [validating, setValidating] = useState(false);
@@ -377,10 +384,14 @@ function EndpointDialog({
           editing.model_type === "stt"
             ? splitModelEndpointSttLanguage(apiExtra)
             : { languageHint: "", extra: apiExtra };
+        const { mossTimestamped: storedMossTimestamped, extra: mossExtra } =
+          editing.model_type === "stt"
+            ? splitModelEndpointMossTranscriptOutput(sttExtra)
+            : { mossTimestamped: false, extra: sttExtra };
         const { implementation, extra: implExtra } =
           editing.model_type === "stt"
-            ? { implementation: "", extra: sttExtra }
-            : splitModelEndpointImplementation(sttExtra);
+            ? { implementation: "", extra: mossExtra }
+            : splitModelEndpointImplementation(mossExtra);
         // Only carve the LLM token-budget keys out of the editable extra for LLM
         // endpoints — the budget fields are LLM-only, and splitting for non-LLM
         // types would drop any same-named keys from their extra on save (they are
@@ -398,6 +409,7 @@ function EndpointDialog({
         setMaxContextSize(llmContext.maxContextSize);
         setMaxOutputTokens(llmContext.maxOutputTokens);
         setLanguageHint(storedLanguageHint);
+        setMossTimestamped(storedMossTimestamped);
         setVendor(implementation || DEFAULT_VENDOR_BY_TYPE[editing.model_type]);
         setExtraJson(JSON.stringify(displayExtra, null, 2));
         setValidated(true);
@@ -416,6 +428,7 @@ function EndpointDialog({
         setMaxContextSize("");
         setMaxOutputTokens("");
         setLanguageHint("");
+        setMossTimestamped(false);
         setVendor(DEFAULT_VENDOR_BY_TYPE[activeTab as ModelType]);
         setExtraJson("{}");
         setValidated(null);
@@ -434,10 +447,15 @@ function EndpointDialog({
         ? splitModelEndpointSttLanguage(editingExtra.extra).extra
         : editingExtra.extra
       : null;
-    const editingImplExtra = editingSttExtra
+    const editingMossExtra = editingSttExtra
       ? editing?.model_type === "stt"
-        ? editingSttExtra
-        : splitModelEndpointImplementation(editingSttExtra).extra
+        ? splitModelEndpointMossTranscriptOutput(editingSttExtra).extra
+        : editingSttExtra
+      : null;
+    const editingImplExtra = editingMossExtra
+      ? editing?.model_type === "stt"
+        ? editingMossExtra
+        : splitModelEndpointImplementation(editingMossExtra).extra
       : null;
     // Match the display path above: only strip the budget keys for LLM endpoints,
     // otherwise the "unchanged" comparison would treat a non-LLM endpoint's
@@ -650,6 +668,7 @@ function EndpointDialog({
     }
     if (isStt) {
       extra = mergeModelEndpointSttLanguage(extra, languageHint);
+      extra = mergeModelEndpointMossTranscriptOutput(extra, isMossStt && mossTimestamped);
     } else {
       extra = mergeModelEndpointImplementation(extra, vendor);
     }
@@ -792,6 +811,31 @@ function EndpointDialog({
               />
             </div>
           )}
+          {isMossStt && (
+            <div className="space-y-2">
+              <LabelWithInfo
+                label="MOSS transcript output"
+                tooltip="Choose how OpenRAG stores MOSS diarized segments. Timestamped speaker lines are formatted by OpenRAG after transcription and are never sent to the MOSS server."
+              />
+              <Select
+                value={mossTimestamped ? MOSS_TIMESTAMPED_TRANSCRIPT_OUTPUT_FORMAT : RAW_TRANSCRIPT_OUTPUT_FORMAT}
+                onValueChange={(value) => setMossTimestamped(value === MOSS_TIMESTAMPED_TRANSCRIPT_OUTPUT_FORMAT)}
+              >
+                <SelectTrigger className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={RAW_TRANSCRIPT_OUTPUT_FORMAT}>Raw MOSS response</SelectItem>
+                  <SelectItem value={MOSS_TIMESTAMPED_TRANSCRIPT_OUTPUT_FORMAT}>
+                    Timestamped speaker lines
+                  </SelectItem>
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-muted-foreground">
+                Timestamped speaker lines use one segment per line with millisecond timestamps and speaker labels.
+              </p>
+            </div>
+          )}
           <div className="space-y-2">
             <div className="flex items-center justify-between">
               <Label>API key</Label>
@@ -876,7 +920,7 @@ function EndpointDialog({
             />
             <p className="text-xs text-muted-foreground">
               {isStt
-                ? "Advanced non-secret request-body options sent to the transcription provider. The language hint and API key are handled separately above."
+                ? "Advanced non-secret request-body options sent to the transcription provider. The language hint, MOSS output setting, and API key are handled separately above."
                 : "Non-secret endpoint options only. The API key is handled separately above."}
             </p>
           </div>
