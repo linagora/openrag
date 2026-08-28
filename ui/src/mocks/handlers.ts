@@ -501,12 +501,13 @@ export const handlers = [
 
   // Draft validation of form values (before save).
   http.post(`${API}/model-endpoints/validate`, async ({ request }) => {
-    const body = (await request.json()) as { model_name?: string };
+    const body = (await request.json()) as { model_name?: string; model_type?: string };
     const served = modelEndpoints.map((m) => m.model_name);
     return HttpResponse.json({
       reachable: true,
       model_found: body.model_name ? served.includes(body.model_name) : null,
       models_served: served,
+      transcription_supported: body.model_type === "stt" ? true : null,
       detail: null,
     });
   }),

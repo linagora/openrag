@@ -108,6 +108,7 @@ describe("validateModelEndpoint", () => {
 
     await validateModelEndpoint({
       endpoint: "http://candidate:8000/v1",
+      model_type: "stt",
       model_name: "mistral-small",
       stored_api_key_model_type: "llm",
       stored_api_key_name: "private-llm",
@@ -116,6 +117,7 @@ describe("validateModelEndpoint", () => {
     const [, init] = fetchMock.mock.calls[0];
     expect(JSON.parse((init as RequestInit).body as string)).toEqual({
       endpoint: "http://candidate:8000/v1",
+      model_type: "stt",
       model_name: "mistral-small",
       stored_api_key_model_type: "llm",
       stored_api_key_name: "private-llm",

@@ -549,11 +549,13 @@ class ModelEndpointService:
         model_name: str | None = None,
         *,
         api_key: str | None = None,
+        model_type: str | None = None,
     ) -> dict[str, Any]:
-        """Probe ``{url}/models`` to verify the endpoint is reachable and serving.
+        """Probe an endpoint's model list and, for STT, transcription route.
 
         Returns a dict with ``reachable``, ``model_found``, ``models_served``,
-        and ``detail`` keys — suitable as a ``ValidateEndpointResponse`` payload.
+        ``transcription_supported``, and ``detail`` keys — suitable as a
+        ``ValidateEndpointResponse`` payload.
         """
         import httpx  # local import to avoid hard dep in tests that mock it
 
@@ -561,6 +563,7 @@ class ModelEndpointService:
             "reachable": False,
             "model_found": None,
             "models_served": None,
+            "transcription_supported": None,
             "detail": None,
         }
         try:
@@ -574,24 +577,47 @@ class ModelEndpointService:
         if parsed.username or parsed.password:
             result["detail"] = "Endpoint URL must not include credentials."
             return result
-        models_url = url.rstrip("/") + "/models"
+        base_url = url.rstrip("/")
+        models_url = base_url + "/models"
         headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
         try:
             async with httpx.AsyncClient(timeout=5.0, headers=headers, follow_redirects=False) as client:
                 resp = await client.get(models_url)
-            result["reachable"] = True
-            if resp.status_code == 200:
-                data = resp.json()
-                served = [m["id"] for m in data.get("data", []) if "id" in m]
-                result["models_served"] = served
-                if model_name is not None:
-                    result["model_found"] = model_name in served
-            else:
-                result["detail"] = f"HTTP {resp.status_code}"
+                result["reachable"] = True
+                if resp.status_code == 200:
+                    data = resp.json()
+                    served = [m["id"] for m in data.get("data", []) if "id" in m]
+                    result["models_served"] = served
+                    if model_name is not None:
+                        result["model_found"] = model_name in served
+                else:
+                    result["detail"] = f"HTTP {resp.status_code}"
+                if model_type == "stt":
+                    # This intentionally sends no audio. OpenAI-compatible
+                    # servers reject the incomplete request with 4xx when the
+                    # route exists; a missing or wrong-method route is 404/405.
+                    transcription_response = await client.post(base_url + "/audio/transcriptions")
+                    transcription_status = transcription_response.status_code
+                    if transcription_status in {404, 405}:
+                        result["transcription_supported"] = False
+                        result["detail"] = "Endpoint does not support OpenAI-compatible audio transcriptions."
+                    elif 300 <= transcription_status < 400 or transcription_status >= 500:
+                        result["transcription_supported"] = False
+                        result["detail"] = f"Transcription capability check returned HTTP {transcription_status}."
+                    else:
+                        result["transcription_supported"] = True
         except httpx.ConnectError as exc:
-            result["detail"] = f"Connection error: {exc}"
+            if result["reachable"] and model_type == "stt":
+                result["transcription_supported"] = False
+                result["detail"] = f"Transcription capability check failed: {exc}"
+            else:
+                result["detail"] = f"Connection error: {exc}"
         except httpx.TimeoutException:
-            result["detail"] = "Connection timed out"
+            if result["reachable"] and model_type == "stt":
+                result["transcription_supported"] = False
+                result["detail"] = "Transcription capability check timed out"
+            else:
+                result["detail"] = "Connection timed out"
         except Exception as exc:  # noqa: BLE001
             result["detail"] = str(exc)
         return result

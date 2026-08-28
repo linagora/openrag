@@ -229,6 +229,7 @@ class ValidateEndpointRequest(BaseModel):
     """Request body to validate endpoint values before they are saved (draft)."""
 
     endpoint: str
+    model_type: ModelEndpointType | None = None
     model_name: str | None = None
     api_key: str | None = None
     stored_api_key_model_type: ModelEndpointType | None = None
@@ -262,6 +263,7 @@ class ValidateEndpointResponse(BaseModel):
     reachable: bool
     model_found: bool | None = None
     models_served: list[str] | None = None
+    transcription_supported: bool | None = None
     detail: str | None = None
 
 
