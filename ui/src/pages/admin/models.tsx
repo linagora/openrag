@@ -578,12 +578,14 @@ function EndpointDialog({
       const res = canUseStoredSecret
         ? await validateModelEndpoint({
             endpoint,
+            model_type: modelType,
             model_name: modelName || undefined,
             stored_api_key_model_type: editing.model_type,
             stored_api_key_name: editing.name,
           })
         : await validateModelEndpoint({
             endpoint,
+            model_type: modelType,
             model_name: modelName || undefined,
             api_key: apiKey,
           });
@@ -601,10 +603,17 @@ function EndpointDialog({
         const msg = `Reachable, but "${modelName}" isn't served. Available: ${served}`;
         setValidationMsg(msg);
         toast.warning(msg);
+      } else if (isStt && res.transcription_supported === false) {
+        setValidated(false);
+        const msg = res.detail || "Endpoint does not support OpenAI-compatible audio transcriptions.";
+        setValidationMsg(msg);
+        toast.warning(msg);
       } else {
         setValidated(true);
         const msg = res.model_found
-          ? `Reachable — "${modelName}" is served.`
+          ? isStt
+            ? `Reachable — "${modelName}" is served and audio transcription is supported.`
+            : `Reachable — "${modelName}" is served.`
           : res.detail || "Reachable (couldn't confirm the model list).";
         setValidationMsg(msg);
         toast.success(msg);

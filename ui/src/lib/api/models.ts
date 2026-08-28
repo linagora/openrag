@@ -54,6 +54,7 @@ export interface ValidateModelEndpointResponse {
   reachable: boolean;
   model_found?: boolean | null;
   models_served?: string[] | null;
+  transcription_supported?: boolean | null;
   detail?: string | null;
 }
 
@@ -357,6 +358,7 @@ export function deleteModelEndpoint(modelType: ModelType, name: string) {
 
 export interface ValidateModelEndpointRequest {
   endpoint: string;
+  model_type?: ModelType;
   model_name?: string;
   api_key?: string;
   stored_api_key_model_type?: ModelType;

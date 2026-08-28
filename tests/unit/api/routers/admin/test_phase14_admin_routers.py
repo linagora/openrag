@@ -85,10 +85,19 @@ class FakeModelEndpointService:
         model_name: str | None = None,
         *,
         api_key: str | None = None,
+        model_type: str | None = None,
     ) -> dict[str, Any]:
         """Record endpoint validation."""
-        self.calls.append(("validate", {"url": url, "model_name": model_name, "api_key": api_key}))
-        return {"reachable": True, "model_found": True, "models_served": ["mistral"], "detail": None}
+        self.calls.append(
+            ("validate", {"url": url, "model_type": model_type, "model_name": model_name, "api_key": api_key})
+        )
+        return {
+            "reachable": True,
+            "model_found": True,
+            "models_served": ["mistral"],
+            "transcription_supported": model_type == "stt",
+            "detail": None,
+        }
 
 
 class FakePresetService:
@@ -292,7 +301,7 @@ async def test_validate_model_endpoint_uses_route_identity(async_client_factory)
     assert response.json()["reachable"] is True
     assert model_service.calls == [
         ("get", {"name": "default", "model_type": "llm"}),
-        ("validate", {"url": "http://llm:8000/v1", "model_name": "mistral", "api_key": None}),
+        ("validate", {"url": "http://llm:8000/v1", "model_type": "llm", "model_name": "mistral", "api_key": None}),
     ]
 
 
@@ -309,7 +318,10 @@ async def test_validate_model_endpoint_uses_stored_api_key(async_client_factory)
     assert response.status_code == 200
     assert model_service.calls == [
         ("get", {"name": "default", "model_type": "llm"}),
-        ("validate", {"url": "http://llm:8000/v1", "model_name": "mistral", "api_key": "secret-token"}),
+        (
+            "validate",
+            {"url": "http://llm:8000/v1", "model_type": "llm", "model_name": "mistral", "api_key": "secret-token"},
+        ),
     ]
 
 
@@ -325,6 +337,7 @@ async def test_validate_endpoint_draft_forwards_body_without_lookup(async_client
             "/model-endpoints/validate",
             json={
                 "endpoint": "http://candidate:8000/v1",
+                "model_type": "stt",
                 "model_name": "mistral-small",
                 "api_key": "draft-key",
             },
@@ -333,7 +346,15 @@ async def test_validate_endpoint_draft_forwards_body_without_lookup(async_client
     assert response.status_code == 200
     assert response.json()["reachable"] is True
     assert model_service.calls == [
-        ("validate", {"url": "http://candidate:8000/v1", "model_name": "mistral-small", "api_key": "draft-key"}),
+        (
+            "validate",
+            {
+                "url": "http://candidate:8000/v1",
+                "model_type": "stt",
+                "model_name": "mistral-small",
+                "api_key": "draft-key",
+            },
+        ),
     ]
 
 
@@ -357,7 +378,10 @@ async def test_validate_endpoint_draft_can_reuse_stored_api_key(async_client_fac
     assert response.status_code == 200
     assert model_service.calls == [
         ("get", {"name": "default", "model_type": "llm"}),
-        ("validate", {"url": "http://llm:8000/v1", "model_name": "mistral-small", "api_key": "secret-token"}),
+        (
+            "validate",
+            {"url": "http://llm:8000/v1", "model_type": None, "model_name": "mistral-small", "api_key": "secret-token"},
+        ),
     ]
 
 
@@ -399,7 +423,7 @@ async def test_validate_endpoint_draft_defaults_optional_fields(async_client_fac
 
     assert response.status_code == 200
     assert model_service.calls == [
-        ("validate", {"url": "http://candidate:8000/v1", "model_name": None, "api_key": None}),
+        ("validate", {"url": "http://candidate:8000/v1", "model_type": None, "model_name": None, "api_key": None}),
     ]
 
 

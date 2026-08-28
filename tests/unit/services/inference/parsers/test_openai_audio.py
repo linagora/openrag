@@ -249,7 +249,7 @@ class TestParse:
 
         client = _client(
             mock_openai_client,
-            api_key="EMPTY",
+            api_key="legacy-key",
             transcription_endpoint_resolver=lambda: endpoint,
         )
         unexpected_client = MagicMock(side_effect=AssertionError("a fallback endpoint must not create a new client"))
@@ -260,6 +260,46 @@ class TestParse:
         assert result.text_blocks[0].text == "transcribed"
         unexpected_client.assert_not_called()
         assert mock_openai_client.audio.transcriptions.create.await_args.kwargs["model"] == "moss-transcribe-diarize"
+
+    @pytest.mark.asyncio
+    async def test_keyless_stt_endpoint_does_not_receive_fallback_key_from_another_host(self, monkeypatch):
+        from services.inference.parsers import openai_audio as module
+
+        created: list[tuple[dict[str, object], MagicMock]] = []
+
+        def make_openai_client(**kwargs):
+            client = MagicMock()
+            client.audio = MagicMock()
+            client.audio.transcriptions = MagicMock()
+            client.audio.transcriptions.create = AsyncMock(return_value=MagicMock(text="transcribed"))
+            client.close = AsyncMock()
+            created.append((kwargs, client))
+            return client
+
+        endpoint = ModelEndpointConfig(
+            endpoint="http://moss:8000/v1",
+            model_name="moss-transcribe-diarize",
+            batch_size=1,
+            timeout=900,
+            extra={},
+        )
+        client = _client(
+            MagicMock(),
+            base_url="http://whisper:8000/v1",
+            api_key="legacy-key",
+            transcription_endpoint_resolver=lambda: endpoint,
+        )
+        monkeypatch.setattr(module, "AsyncOpenAI", make_openai_client)
+
+        result = await client.parse(_audio_doc())
+
+        assert result.text_blocks[0].text == "transcribed"
+        assert created[0][0] == {
+            "base_url": "http://moss:8000/v1",
+            "api_key": "EMPTY",
+            "timeout": 900,
+        }
+        created[0][1].close.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_stt_endpoint_resolver_replaces_connection_and_model(self, monkeypatch):
