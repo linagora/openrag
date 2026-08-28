@@ -60,6 +60,13 @@ LLM_OUTPUT_TOKENS_KEY = "max_output_tokens"
 # language detector.
 STT_LANGUAGE_KEY = "language"
 
+# Optional post-processing mode for an STT response. It is deliberately an
+# endpoint control rather than a provider request option: OpenRAG consumes it
+# after receiving the transcription, so it must never be forwarded to the
+# OpenAI-compatible server.
+STT_TRANSCRIPT_OUTPUT_FORMAT_KEY = "transcript_output_format"
+MOSS_TIMESTAMPED_TRANSCRIPT_OUTPUT_FORMAT = "moss_timestamped"
+
 # Provenance marker written into an endpoint's ``extra`` when the seeder creates
 # it from env. It is what lets boot-time sync find *its own* row again after the
 # configured model — and therefore the slug the row was named after — changes.
@@ -85,6 +92,7 @@ STT_REQUEST_CONTROL_EXTRA_KEYS = CONTROL_EXTRA_KEYS | frozenset(
     {
         "api_key",
         STT_LANGUAGE_KEY,
+        STT_TRANSCRIPT_OUTPUT_FORMAT_KEY,
         "file",
         "model",
         "prompt",
@@ -154,6 +162,8 @@ __all__ = [
     "LLM_OUTPUT_TOKENS_KEY",
     "STT_REQUEST_CONTROL_EXTRA_KEYS",
     "STT_LANGUAGE_KEY",
+    "STT_TRANSCRIPT_OUTPUT_FORMAT_KEY",
+    "MOSS_TIMESTAMPED_TRANSCRIPT_OUTPUT_FORMAT",
     "ModelEndpointConfig",
     "ModelsConfig",
     "ModelEndpointRow",

@@ -159,6 +159,8 @@ Preserve the original language and wording. Do not translate, summarize,
 paraphrase, correct, or invent missing words.
 ```
 
+For a MOSS model, **Admin UI → Model Endpoints** offers a MOSS transcript-output setting. **Timestamped speaker lines** normalizes recognized diarized segments into `[HH:MM:SS.mmm] [Sxx] text [HH:MM:SS.mmm]`; **Raw MOSS response** preserves the provider output unchanged.
+
 Add hotwords only when they are relevant to your own deployment. They bias recognition vocabulary and should not be part of OpenRAG's global default. When adding hotwords or a format instruction, include the desired timestamp and speaker-label format in the prompt as well.
 :::
 

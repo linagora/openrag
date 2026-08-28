@@ -1,8 +1,10 @@
 import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
 import {
   displayModelEndpointExtra,
+  isMossTranscribeDiarizeModel,
   mergeModelEndpointApiKeyExtra,
   mergeModelEndpointLlmContext,
+  mergeModelEndpointMossTranscriptOutput,
   mergeModelEndpointSttLanguage,
   pickDefaultEndpoint,
   prepareModelEndpointExtraForSubmit,
@@ -10,6 +12,7 @@ import {
   resolveEmbedderName,
   splitModelEndpointApiKeyExtra,
   splitModelEndpointLlmContext,
+  splitModelEndpointMossTranscriptOutput,
   splitModelEndpointSttLanguage,
   validateModelEndpoint,
 } from "./models";
@@ -341,5 +344,33 @@ describe("STT language-hint extra field", () => {
     expect(mergeModelEndpointSttLanguage({ language: "fr", diarization: true }, "  ")).toEqual({
       diarization: true,
     });
+  });
+});
+
+describe("MOSS transcript output extra field", () => {
+  it("recognizes the published model ID and OpenMOSS repository ID", () => {
+    expect(isMossTranscribeDiarizeModel("moss-transcribe-diarize")).toBe(true);
+    expect(isMossTranscribeDiarizeModel("OpenMOSS-Team/MOSS-Transcribe-Diarize")).toBe(true);
+    expect(isMossTranscribeDiarizeModel("openai/whisper-large-v3")).toBe(false);
+  });
+
+  it("splits and merges the MOSS-only response formatting control", () => {
+    const { mossTimestamped, extra } = splitModelEndpointMossTranscriptOutput({
+      transcript_output_format: "moss_timestamped",
+      temperature: 0,
+    });
+
+    expect(mossTimestamped).toBe(true);
+    expect(extra).toEqual({ temperature: 0 });
+    expect(mergeModelEndpointMossTranscriptOutput(extra, true)).toEqual({
+      temperature: 0,
+      transcript_output_format: "moss_timestamped",
+    });
+  });
+
+  it("removes the output control when raw MOSS response is selected", () => {
+    expect(
+      mergeModelEndpointMossTranscriptOutput({ transcript_output_format: "moss_timestamped", temperature: 0 }, false),
+    ).toEqual({ temperature: 0 });
   });
 });
