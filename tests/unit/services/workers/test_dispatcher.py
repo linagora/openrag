@@ -1410,6 +1410,7 @@ async def test_delete_file_cancels_active_matching_indexing_task_before_cleanup(
     tsm.get_matching_active_task_refs_v2.remote.assert_called_once_with(partition="tenant-a", file_id="file-1")
     cancel.assert_called_once_with(ref, recursive=True)
     tsm.set_state.remote.assert_any_call("task-1", "CANCELLED")
+    tsm.finish_cancellation.remote.assert_awaited_once_with("task-1")
 
 
 @pytest.mark.asyncio

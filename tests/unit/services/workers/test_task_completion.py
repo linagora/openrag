@@ -26,6 +26,7 @@ def _task_state_manager(
     tsm.get_details = _remote_mock()
     tsm.set_details = _remote_mock()
     tsm.finish_cancellation = _remote_mock()
+    tsm.expire_refless_task_if_stale = _remote_mock(False)
     return tsm
 
 
@@ -96,8 +97,9 @@ async def test_tracker_recovers_active_task_after_restart() -> None:
     tracker_handle.track.remote.assert_called_once_with("task-1", {"ref": ref})
 
 
+@pytest.mark.parametrize("bare_ref", [False, True], ids=["wrapped-ref", "bare-ref"])
 @pytest.mark.asyncio
-async def test_tracker_keeps_recovered_cancellation_tracked_until_worker_settles() -> None:
+async def test_tracker_keeps_recovered_cancellation_tracked_until_worker_settles(bare_ref: bool) -> None:
     from services.workers.task_completion import TaskCompletionTracker
 
     ref = asyncio.get_running_loop().create_future()
@@ -108,7 +110,7 @@ async def test_tracker_keeps_recovered_cancellation_tracked_until_worker_settles
     }
     tsm = _task_state_manager(
         all_info={"task-1": {"state": "CANCELLED", "details": details}},
-        object_ref={"ref": ref},
+        object_ref=ref if bare_ref else {"ref": ref},
     )
     tracker_handle = MagicMock()
 
@@ -183,6 +185,28 @@ async def test_tracker_records_recovered_refless_task_when_it_reaches_terminal_s
         },
         user_id=42,
     )
+
+
+@pytest.mark.asyncio
+async def test_tracker_expires_recovered_refless_task_after_registration_grace() -> None:
+    from services.workers.task_completion import TaskCompletionTracker
+
+    details = {
+        "file_id": "file-1",
+        "partition": "tenant-a",
+        "metadata": {"_openrag_job_created_at": "2000-01-01T00:00:00+00:00"},
+        "user_id": 42,
+    }
+    tsm = _task_state_manager(object_ref=None)
+    tsm.get_details.remote.return_value = details
+    tsm.expire_refless_task_if_stale.remote.return_value = True
+
+    with patch("services.workers.task_completion.ray.get_actor", return_value=tsm):
+        tracker = TaskCompletionTracker()
+        await tracker.recover_refless("task-1", poll_interval=0)
+
+    tsm.expire_refless_task_if_stale.remote.assert_awaited_once_with("task-1")
+    tsm.set_details.remote.assert_awaited_once()
 
 
 @pytest.mark.asyncio

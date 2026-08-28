@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
@@ -140,6 +141,11 @@ async def test_delete_cleanup_still_fences_legacy_indexing_states() -> None:
 @pytest.mark.asyncio
 async def test_content_claim_owners_include_only_unsettled_workers(monkeypatch) -> None:
     manager = _task_state_manager()
+    metadata_by_task = {
+        "finished-active-task": {"_openrag_job_finished_at": "2026-08-28T08:00:00+00:00"},
+        "recent-refless-task": {"_openrag_job_created_at": datetime.now(UTC).isoformat()},
+        "stale-refless-task": {"_openrag_job_created_at": "2000-01-01T00:00:00+00:00"},
+    }
 
     for task_id, partition in (
         ("active-task", "tenant-a"),
@@ -147,6 +153,8 @@ async def test_content_claim_owners_include_only_unsettled_workers(monkeypatch) 
         ("settled-cancelled-task", "tenant-a"),
         ("finished-active-task", "tenant-a"),
         ("ready-active-task", "tenant-a"),
+        ("recent-refless-task", "tenant-a"),
+        ("stale-refless-task", "tenant-a"),
         ("completed-task", "tenant-a"),
         ("other-partition-task", "tenant-b"),
     ):
@@ -154,9 +162,7 @@ async def test_content_claim_owners_include_only_unsettled_workers(monkeypatch) 
             task_id,
             file_id=f"{task_id}-file",
             partition=partition,
-            metadata=(
-                {"_openrag_job_finished_at": "2026-08-28T08:00:00+00:00"} if task_id == "finished-active-task" else {}
-            ),
+            metadata=metadata_by_task.get(task_id, {}),
             user_id=None,
         )
 
@@ -176,7 +182,25 @@ async def test_content_claim_owners_include_only_unsettled_workers(monkeypatch) 
     assert await manager.get_content_claim_task_ids(partition="tenant-a") == {
         "active-task",
         "cancelled-task",
+        "recent-refless-task",
     }
+
+
+@pytest.mark.asyncio
+async def test_stale_refless_task_rejects_late_worker_registration() -> None:
+    manager = _task_state_manager()
+    await manager.set_queued_details(
+        "task-1",
+        file_id="file-1",
+        partition="tenant-a",
+        metadata={"_openrag_job_created_at": "2000-01-01T00:00:00+00:00"},
+        user_id=None,
+    )
+
+    assert await manager.expire_refless_task_if_stale("task-1") is True
+    assert await manager.set_object_ref("task-1", {"ref": object()}) is False
+    assert await manager.get_state("task-1") == "FAILED"
+    assert await manager.get_object_ref("task-1") is None
 
 
 @pytest.mark.asyncio

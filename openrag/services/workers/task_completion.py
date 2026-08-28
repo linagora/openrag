@@ -53,8 +53,9 @@ class TaskCompletionTracker:
                     state = info.get("state")
                     if state == "CANCELLED":
                         object_ref = await task_state_manager.get_object_ref.remote(task_id)
-                        if isinstance(object_ref, dict) and object_ref.get("ref") is not None:
-                            tracker.track.remote(task_id, object_ref)
+                        normalized_ref = _normalize_object_ref(object_ref)
+                        if normalized_ref is not None:
+                            tracker.track.remote(task_id, normalized_ref)
                         elif not _has_finished_at(info.get("details")):
                             await self._record_finished_at(task_id)
                         continue
@@ -64,8 +65,9 @@ class TaskCompletionTracker:
                         await self._record_finished_at(task_id)
                         continue
                     object_ref = await task_state_manager.get_object_ref.remote(task_id)
-                    if isinstance(object_ref, dict) and object_ref.get("ref") is not None:
-                        tracker.track.remote(task_id, object_ref)
+                    normalized_ref = _normalize_object_ref(object_ref)
+                    if normalized_ref is not None:
+                        tracker.track.remote(task_id, normalized_ref)
                     else:
                         tracker.recover_refless.remote(task_id)
             except Exception as exc:
@@ -83,10 +85,17 @@ class TaskCompletionTracker:
                 if _has_finished_at(details):
                     return
 
+                expire_refless = getattr(task_state_manager, "expire_refless_task_if_stale", None)
+                expire_remote = getattr(expire_refless, "remote", None)
+                if expire_remote is not None and await expire_remote(task_id):
+                    await self._record_finished_at(task_id)
+                    return
+
                 state = await task_state_manager.get_state.remote(task_id)
                 object_ref = await task_state_manager.get_object_ref.remote(task_id)
-                ref = object_ref.get("ref") if isinstance(object_ref, dict) else None
-                if ref is not None:
+                normalized_ref = _normalize_object_ref(object_ref)
+                if normalized_ref is not None:
+                    ref = normalized_ref["ref"]
                     await asyncio.gather(ref, return_exceptions=True)
                     await self._record_finished_at(task_id)
                     await self._finish_cancellation(task_id)
@@ -151,6 +160,11 @@ def _has_finished_at(details: Any) -> bool:
         return False
     metadata = details.get("metadata")
     return isinstance(metadata, dict) and TASK_FINISHED_AT_METADATA_KEY in metadata
+
+
+def _normalize_object_ref(object_ref: Any) -> dict[str, Any] | None:
+    ref = object_ref.get("ref") if isinstance(object_ref, dict) else object_ref
+    return {"ref": ref} if ref is not None else None
 
 
 def _utc_now_iso() -> str:

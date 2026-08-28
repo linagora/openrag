@@ -5,10 +5,16 @@ import json
 import threading
 import time
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import ray
-from core.models.catalog import TASK_FINISHED_AT_METADATA_KEY, TERMINAL_TASK_STATES, DocumentStatus
+from core.models.catalog import (
+    TASK_CREATED_AT_METADATA_KEY,
+    TASK_FINISHED_AT_METADATA_KEY,
+    TERMINAL_TASK_STATES,
+    DocumentStatus,
+)
 
 ACTIVE_INDEXING_STATES = frozenset({"QUEUED", "SERIALIZING"})
 # Legacy indexing states removed from the public state machine in #721. Current
@@ -28,6 +34,10 @@ _LEGACY_FENCE_ID = "__legacy__"
 _RECOVERABLE_TASK_KV_PREFIX = b"recoverable-task-v1:"
 _CANCELLATION_TOMBSTONE_TTL_SECONDS = 24 * 60 * 60
 _FILE_DELETE_FENCE_TTL_SECONDS = 2 * 60
+_CONTENT_CLAIM_REGISTRATION_GRACE_SECONDS = 60
+STALE_REFLESS_TASK_ERROR = (
+    "Indexing task never exposed a worker reference within the registration grace period; marking it failed as stale."
+)
 
 
 def _task_state_storage_available() -> bool:
@@ -132,6 +142,9 @@ def _load_recoverable_tasks() -> dict[str, TaskInfo]:
 
 
 def _recovery_snapshot(info: TaskInfo, *, now: float | None = None) -> tuple[TaskInfo, float | None]:
+    if info.state == "FAILED" and info.error == STALE_REFLESS_TASK_ERROR:
+        timestamp = time.time() if now is None else now
+        return info, timestamp + _CANCELLATION_TOMBSTONE_TTL_SECONDS
     if info.state != "CANCELLED":
         return info, None
     timestamp = time.time() if now is None else now
@@ -151,7 +164,7 @@ def _save_recoverable_task(task_id: str, info: TaskInfo) -> None:
     if not _task_state_storage_available():
         return
     key = _recoverable_task_key(task_id)
-    if info.state in RECOVERABLE_TASK_STATES:
+    if info.state in RECOVERABLE_TASK_STATES or (info.state == "FAILED" and info.error == STALE_REFLESS_TASK_ERROR):
         snapshot, expires_at = _recovery_snapshot(info)
         _internal_kv_put(
             key,
@@ -200,6 +213,20 @@ def _object_ref_is_ready(object_ref: Any) -> bool:
     return bool(ready)
 
 
+def _content_claim_registration_expired(details: dict[str, Any]) -> bool:
+    metadata = details.get("metadata")
+    created_at = metadata.get(TASK_CREATED_AT_METADATA_KEY) if isinstance(metadata, dict) else None
+    if not isinstance(created_at, str):
+        return False
+    try:
+        created = datetime.fromisoformat(created_at)
+    except ValueError:
+        return False
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=UTC)
+    return datetime.now(UTC) >= created + timedelta(seconds=_CONTENT_CLAIM_REGISTRATION_GRACE_SECONDS)
+
+
 @ray.remote(concurrency_groups={"set": 1000, "get": 1000, "queue_info": 1000})
 class TaskStateManager:
     def __init__(self) -> None:
@@ -246,6 +273,19 @@ class TaskStateManager:
             return False
         self._prune_expired_file_delete_fences()
         return bool(self.file_delete_fences.get((partition, file_id)))
+
+    def _expire_refless_task_if_stale_locked(self, task_id: str, info: TaskInfo) -> bool:
+        ref = info.object_ref.get("ref") if isinstance(info.object_ref, dict) else info.object_ref
+        if (
+            info.state not in CANCELLABLE_INDEXING_STATES
+            or ref is not None
+            or not _content_claim_registration_expired(info.details or {})
+        ):
+            return False
+        info.state = "FAILED"
+        info.error = STALE_REFLESS_TASK_ERROR
+        _save_recoverable_task(task_id, info)
+        return True
 
     @ray.method(concurrency_group="set")
     async def begin_file_delete(self, *, partition: str, file_id: str, fence_id: str | None = None) -> None:
@@ -301,7 +341,10 @@ class TaskStateManager:
     async def set_state(self, task_id: str, state: str) -> None:
         with self.lock:
             info = self._ensure_task(task_id)
-            if info.state == DocumentStatus.CANCELLED and state != DocumentStatus.CANCELLED:
+            state_is_fenced = info.state == DocumentStatus.CANCELLED or (
+                info.state == "FAILED" and info.error == STALE_REFLESS_TASK_ERROR
+            )
+            if state_is_fenced and state != info.state:
                 return
             info.state = state
             _save_recoverable_task(task_id, info)
@@ -348,6 +391,12 @@ class TaskStateManager:
             info.object_ref = None
             _save_recoverable_task(task_id, info)
             return True
+
+    @ray.method(concurrency_group="set")
+    async def expire_refless_task_if_stale(self, task_id: str) -> bool:
+        with self.lock:
+            info = self.tasks.get(task_id)
+            return info is not None and self._expire_refless_task_if_stale_locked(task_id, info)
 
     @ray.method(concurrency_group="set")
     async def set_details(
@@ -405,6 +454,10 @@ class TaskStateManager:
     async def set_object_ref(self, task_id: str, object_ref: ray.ObjectRef) -> bool:
         with self.lock:
             info = self._ensure_task(task_id)
+            if info.state == "FAILED" and info.error == STALE_REFLESS_TASK_ERROR:
+                return False
+            if self._expire_refless_task_if_stale_locked(task_id, info):
+                return False
             info.object_ref = object_ref
             details = info.details or {}
             if self._file_delete_fenced(partition=details.get("partition"), file_id=details.get("file_id")):
@@ -475,6 +528,9 @@ class TaskStateManager:
                 if has_finished or _object_ref_is_ready(info.object_ref):
                     continue
                 details = info.details or {}
+                ref = info.object_ref.get("ref") if isinstance(info.object_ref, dict) else info.object_ref
+                if ref is None and _content_claim_registration_expired(details):
+                    continue
                 if details and details.get("partition") != partition:
                     continue
                 matches.add(task_id)
@@ -557,6 +613,7 @@ __all__ = [
     "CANCELLABLE_INDEXING_STATES",
     "LEGACY_ACTIVE_INDEXING_STATES",
     "PENDING_TASK_DETAILS",
+    "STALE_REFLESS_TASK_ERROR",
     "TERMINAL_INDEXING_STATES",
     "TaskInfo",
     "TaskStateManager",

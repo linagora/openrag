@@ -8,13 +8,10 @@ import ray
 from core.utils.logging import get_logger
 from ray.exceptions import TaskCancelledError
 from services.workers.ray_utils import call_ray_actor_method_with_timeout, call_ray_actor_with_timeout
-from services.workers.task_state import CANCELLABLE_INDEXING_STATES, PENDING_TASK_DETAILS
+from services.workers.task_state import CANCELLABLE_INDEXING_STATES, PENDING_TASK_DETAILS, STALE_REFLESS_TASK_ERROR
 
 logger = get_logger()
 _REF_WAIT_INTERVAL = 0.05
-_STALE_REFLESS_TASK_ERROR = (
-    "Indexing task never exposed a cancellable worker ref before delete cleanup; marking it failed as stale."
-)
 
 
 async def cancel_active_indexing_tasks(
@@ -205,6 +202,13 @@ async def _cancel_refs(
             timeout=remaining,
             task_description=f"set_state({task_id}, CANCELLED)",
         )
+        finish_cancellation_remote = _remote_actor_method(task_state_manager, "finish_cancellation")
+        if finish_cancellation_remote is not None:
+            await call_ray_actor_method_with_timeout(
+                submit=lambda task_id=task_id: finish_cancellation_remote(task_id),
+                timeout=_remaining_timeout(deadline, partition=partition, file_id=file_id),
+                task_description=f"finish_cancellation({task_id})",
+            )
         cancelled += 1
     return cancelled, pending_without_ref, pending_details
 
@@ -269,7 +273,7 @@ async def _mark_ref_less_tasks_failed(
     if set_failed is not None:
         for task_id in task_ids:
             await call_ray_actor_method_with_timeout(
-                submit=lambda task_id=task_id: set_failed.remote(task_id, _STALE_REFLESS_TASK_ERROR),
+                submit=lambda task_id=task_id: set_failed.remote(task_id, STALE_REFLESS_TASK_ERROR),
                 timeout=_remaining_timeout(deadline, partition=partition, file_id=file_id),
                 task_description=f"set_failed_if_not_cancelled({task_id})",
             )
