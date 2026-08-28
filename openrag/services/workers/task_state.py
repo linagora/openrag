@@ -152,7 +152,13 @@ def _recovery_snapshot(info: TaskInfo, *, now: float | None = None) -> tuple[Tas
     # restarts between the durable claim and ray.cancel(), a retry still needs
     # this reference to stop the live worker.
     return (
-        TaskInfo(state="CANCELLED", object_ref=info.object_ref),
+        TaskInfo(
+            state="CANCELLED",
+            details=info.details,
+            object_ref=info.object_ref,
+            worker_submitted=getattr(info, "worker_submitted", False),
+            submission_started_at=getattr(info, "submission_started_at", None),
+        ),
         timestamp + _CANCELLATION_TOMBSTONE_TTL_SECONDS,
     )
 
@@ -199,6 +205,7 @@ class TaskInfo:
     details: dict[str, Any] = field(default_factory=dict)
     object_ref: ray.ObjectRef | None = None
     worker_submitted: bool = False
+    submission_started_at: float | None = None
 
 
 def _object_ref_is_ready(object_ref: Any) -> bool:
@@ -277,10 +284,15 @@ class TaskStateManager:
 
     def _expire_refless_task_if_stale_locked(self, task_id: str, info: TaskInfo) -> bool:
         ref = info.object_ref.get("ref") if isinstance(info.object_ref, dict) else info.object_ref
+        submission_started_at = getattr(info, "submission_started_at", None)
+        submission_pending = isinstance(submission_started_at, (int, float)) and (
+            time.time() < submission_started_at + _CONTENT_CLAIM_REGISTRATION_GRACE_SECONDS
+        )
         if (
             info.state not in CANCELLABLE_INDEXING_STATES
             or ref is not None
             or getattr(info, "worker_submitted", False)
+            or submission_pending
             or not _content_claim_registration_expired(info.details or {})
         ):
             return False
@@ -340,16 +352,20 @@ class TaskStateManager:
             self.file_delete_fences = updated
 
     @ray.method(concurrency_group="set")
-    async def set_state(self, task_id: str, state: str) -> None:
+    async def set_state(self, task_id: str, state: str) -> bool:
         with self.lock:
             info = self._ensure_task(task_id)
             state_is_fenced = info.state == DocumentStatus.CANCELLED or (
                 info.state == "FAILED" and info.error == STALE_REFLESS_TASK_ERROR
             )
             if state_is_fenced and state != info.state:
-                return
+                return False
             info.state = state
+            if state == "SERIALIZING":
+                info.worker_submitted = True
+                info.submission_started_at = None
             _save_recoverable_task(task_id, info)
+            return True
 
     @ray.method(concurrency_group="set")
     async def set_error(self, task_id: str, tb_str: str) -> None:
@@ -391,6 +407,8 @@ class TaskStateManager:
             if ref is not None and not _object_ref_is_ready(object_ref):
                 return False
             info.object_ref = None
+            info.worker_submitted = False
+            info.submission_started_at = None
             _save_recoverable_task(task_id, info)
             return True
 
@@ -453,14 +471,14 @@ class TaskStateManager:
             return True
 
     @ray.method(concurrency_group="set")
-    async def mark_worker_submitted(self, task_id: str) -> bool:
+    async def begin_worker_submission(self, task_id: str) -> bool:
         with self.lock:
             info = self.tasks.get(task_id)
             if info is None or info.state not in CANCELLABLE_INDEXING_STATES:
                 return False
             if self._expire_refless_task_if_stale_locked(task_id, info):
                 return False
-            info.worker_submitted = True
+            info.submission_started_at = time.time()
             _save_recoverable_task(task_id, info)
             return True
 
@@ -473,6 +491,8 @@ class TaskStateManager:
             if self._expire_refless_task_if_stale_locked(task_id, info):
                 return False
             info.object_ref = object_ref
+            info.worker_submitted = True
+            info.submission_started_at = None
             details = info.details or {}
             if self._file_delete_fenced(partition=details.get("partition"), file_id=details.get("file_id")):
                 info.state = "CANCELLED"
@@ -533,6 +553,10 @@ class TaskStateManager:
             matches = set()
             for task_id, info in self.tasks.items():
                 worker_submitted = getattr(info, "worker_submitted", False)
+                submission_started_at = getattr(info, "submission_started_at", None)
+                submission_pending = isinstance(submission_started_at, (int, float)) and (
+                    time.time() < submission_started_at + _CONTENT_CLAIM_REGISTRATION_GRACE_SECONDS
+                )
                 owns_claim = info.state in CANCELLABLE_INDEXING_STATES or (
                     info.state == "CANCELLED" and (info.object_ref is not None or worker_submitted)
                 )
@@ -544,7 +568,12 @@ class TaskStateManager:
                     continue
                 details = info.details or {}
                 ref = info.object_ref.get("ref") if isinstance(info.object_ref, dict) else info.object_ref
-                if ref is None and not worker_submitted and _content_claim_registration_expired(details):
+                if (
+                    ref is None
+                    and not worker_submitted
+                    and not submission_pending
+                    and _content_claim_registration_expired(details)
+                ):
                     continue
                 if details and details.get("partition") != partition:
                     continue
@@ -585,6 +614,7 @@ class TaskStateManager:
                     "state": info.state,
                     "error": info.error,
                     "details": info.details,
+                    "worker_submitted": getattr(info, "worker_submitted", False),
                 }
                 for task_id, info in self.tasks.items()
             }

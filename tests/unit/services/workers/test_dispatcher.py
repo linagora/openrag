@@ -96,7 +96,7 @@ def _task_state_manager() -> MagicMock:
     tsm.get_content_claim_task_ids = _remote_mock(set())
     tsm.get_all_info = None
     tsm.set_queued_details = _remote_mock(True)
-    tsm.mark_worker_submitted = _remote_mock(True)
+    tsm.begin_worker_submission = _remote_mock(True)
     tsm.begin_file_delete = _remote_mock()
     tsm.renew_file_delete = _remote_mock(True)
     tsm.end_file_delete = _remote_mock()
@@ -461,7 +461,7 @@ async def test_dispatch_indexing_rejects_task_that_lost_submission_fence() -> No
     repo = _document_repo()
     pool = _pool_with_ref(object())
     tsm = _task_state_manager()
-    tsm.mark_worker_submitted.remote.return_value = False
+    tsm.begin_worker_submission.remote.return_value = False
     dispatcher = WorkerDispatcher(
         pool=pool,
         task_state_manager=tsm,
@@ -484,7 +484,7 @@ async def test_dispatch_indexing_rejects_task_that_lost_submission_fence() -> No
                 replace=False,
             )
 
-    tsm.mark_worker_submitted.remote.assert_awaited_once_with("task-1")
+    tsm.begin_worker_submission.remote.assert_awaited_once_with("task-1")
     pool.submit.remote.assert_not_awaited()
     tsm.set_failed_if_not_cancelled.remote.assert_awaited_once()
     repo.release_content_sha256_claim.assert_awaited_once_with(

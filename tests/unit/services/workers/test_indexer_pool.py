@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from core.config.model_endpoints import ModelEndpointConfig
@@ -1018,6 +1018,8 @@ def _bare_pool(workers: list) -> object:
     pool._release_tasks = set()
     pool._claim_store = None
     pool._claim_store_lock = asyncio.Lock()
+    pool._namespace = "openrag"
+    pool._task_state_manager = SimpleNamespace(set_object_ref=SimpleNamespace(remote=AsyncMock(return_value=True)))
     return pool
 
 
@@ -1078,6 +1080,7 @@ async def test_pool_dispatches_to_least_loaded_and_passes_ref_through() -> None:
     # The ObjectRef is passed through wrapped in a one-element list (the
     # dispatcher unwraps it; the wrapper stops Ray auto-dereferencing the ref).
     assert ref0 == [workers[0].futures[0]]
+    assert pool._task_state_manager.set_object_ref.remote.await_count == 3
     await _settle_pool_release_tasks(
         pool,
         workers[0].futures[0],
@@ -1138,6 +1141,25 @@ async def test_pool_reports_current_protocol_version() -> None:
     pool = _bare_pool([_FakeWorker()])
 
     assert await pool.protocol_version() == "v5"
+
+
+@pytest.mark.asyncio
+async def test_pool_cancels_worker_when_ref_registration_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import services.workers.indexer_pool as module
+
+    worker = _FakeWorker()
+    pool = _bare_pool([worker])
+    pool._task_state_manager.set_object_ref.remote.return_value = False
+    cancel = MagicMock()
+    monkeypatch.setattr(module.ray, "cancel", cancel)
+
+    with pytest.raises(RuntimeError, match="cancelled before worker ref registration"):
+        await pool.submit(task_id="task-1")
+
+    cancel.assert_called_once_with(worker.futures[0], recursive=True)
+    await _settle_pool_release_tasks(pool, worker.futures[0])
 
 
 @pytest.mark.asyncio

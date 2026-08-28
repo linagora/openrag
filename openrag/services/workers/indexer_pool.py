@@ -10,6 +10,7 @@ import ray
 from core.config.model_endpoints import CONTROL_EXTRA_KEYS
 from core.models.catalog import CONTENT_CLAIM_TOKEN_METADATA_KEY
 from services.workers.indexer_actor import IndexerWorker, delete_uploaded_file
+from services.workers.ray_utils import retry_idempotent_ray_actor_method
 
 from openrag.core.config.root import Settings
 
@@ -434,6 +435,8 @@ class IndexerPool:
         self._release_tasks: set[asyncio.Task[Any]] = set()
         self._claim_store: Any = None
         self._claim_store_lock = asyncio.Lock()
+        self._namespace = namespace
+        self._task_state_manager: Any = None
 
     async def size(self) -> int:
         return len(self._workers)
@@ -501,7 +504,26 @@ class IndexerPool:
         # Keep a strong ref so the tracker isn't GC'd mid-flight (asyncio docs).
         self._release_tasks.add(task)
         task.add_done_callback(self._release_tasks.discard)
+        try:
+            registered = await self._register_worker_ref(str(kwargs.get("task_id") or ""), ref)
+        except BaseException:
+            ray.cancel(ref, recursive=True)
+            raise
+        if not registered:
+            ray.cancel(ref, recursive=True)
+            raise RuntimeError(f"Task {kwargs.get('task_id')} was cancelled before worker ref registration")
         return [ref]
+
+    async def _register_worker_ref(self, task_id: str, ref: Any) -> bool:
+        if not task_id:
+            raise ValueError("IndexerPool submission requires a task_id")
+        if self._task_state_manager is None:
+            self._task_state_manager = ray.get_actor("TaskStateManager", namespace=self._namespace)
+        registered = await retry_idempotent_ray_actor_method(
+            lambda: self._task_state_manager.set_object_ref.remote(task_id, {"ref": ref}),
+            task_description=f"set_object_ref({task_id}) from indexer pool",
+        )
+        return registered is not False
 
     async def _release(self, idx: int, ref: Any, *, claim: dict[str, str] | None = None) -> None:
         renewal_task = None

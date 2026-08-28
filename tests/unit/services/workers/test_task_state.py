@@ -214,7 +214,8 @@ async def test_submitted_refless_task_keeps_claim_through_cancellation_and_regis
         user_id=None,
     )
 
-    assert await manager.mark_worker_submitted("task-1") is True
+    assert await manager.begin_worker_submission("task-1") is True
+    assert await manager.set_state("task-1", "SERIALIZING") is True
     await manager.set_details(
         "task-1",
         file_id="file-1",
@@ -231,6 +232,33 @@ async def test_submitted_refless_task_keeps_claim_through_cancellation_and_regis
     worker_ref = {"ref": object()}
     assert await manager.set_object_ref("task-1", worker_ref) is False
     assert await manager.get_object_ref("task-1") == worker_ref
+
+
+@pytest.mark.asyncio
+async def test_unaccepted_submission_fence_expires(monkeypatch) -> None:
+    now = 100.0
+    monkeypatch.setattr(task_state_module.time, "time", lambda: now)
+    manager = _task_state_manager()
+    await manager.set_queued_details(
+        "task-1",
+        file_id="file-1",
+        partition="tenant-a",
+        metadata={"_openrag_job_created_at": datetime.now(UTC).isoformat()},
+        user_id=None,
+    )
+
+    assert await manager.begin_worker_submission("task-1") is True
+    await manager.set_details(
+        "task-1",
+        file_id="file-1",
+        partition="tenant-a",
+        metadata={"_openrag_job_created_at": "2000-01-01T00:00:00+00:00"},
+        user_id=None,
+    )
+    now += task_state_module._CONTENT_CLAIM_REGISTRATION_GRACE_SECONDS + 1
+
+    assert await manager.expire_refless_task_if_stale("task-1") is True
+    assert await manager.get_content_claim_task_ids(partition="tenant-a") == set()
 
 
 @pytest.mark.asyncio
@@ -506,18 +534,55 @@ async def test_cancellation_tombstone_survives_actor_reconstruction(monkeypatch)
     assert stored["task-1"].state == "CANCELLED"
 
 
-def test_cancellation_recovery_snapshot_is_sanitized_and_expires() -> None:
+def test_cancellation_recovery_snapshot_preserves_claim_owner_and_expires() -> None:
     info = TaskInfo(
         state="CANCELLED",
         error="private traceback",
         details={"user_id": 42, "metadata": {"secret": "value"}},
         object_ref={"ref": object()},
+        worker_submitted=True,
     )
 
     snapshot, expires_at = task_state_module._recovery_snapshot(info, now=100.0)
 
-    assert snapshot == TaskInfo(state="CANCELLED", object_ref=info.object_ref)
+    assert snapshot == TaskInfo(
+        state="CANCELLED",
+        details=info.details,
+        object_ref=info.object_ref,
+        worker_submitted=True,
+    )
     assert expires_at == 100.0 + task_state_module._CANCELLATION_TOMBSTONE_TTL_SECONDS
+
+
+@pytest.mark.asyncio
+async def test_submitted_refless_cancellation_keeps_claim_after_reconstruction(monkeypatch) -> None:
+    stored: dict[str, TaskInfo] = {}
+    monkeypatch.setattr(task_state_module, "_load_recoverable_tasks", lambda: dict(stored))
+
+    def save(task_id: str, info: TaskInfo) -> None:
+        if info.state in task_state_module.RECOVERABLE_TASK_STATES:
+            stored[task_id] = task_state_module._recovery_snapshot(info)[0]
+        else:
+            stored.pop(task_id, None)
+
+    monkeypatch.setattr(task_state_module, "_save_recoverable_task", save)
+    first_incarnation = _task_state_manager()
+    await first_incarnation.set_queued_details(
+        "task-1",
+        file_id="file-1",
+        partition="tenant-a",
+        metadata={"_openrag_job_created_at": datetime.now(UTC).isoformat()},
+        user_id=42,
+    )
+    assert await first_incarnation.begin_worker_submission("task-1") is True
+    assert await first_incarnation.set_state("task-1", "SERIALIZING") is True
+    assert await first_incarnation.set_cancelled_if_active("task-1") is True
+
+    reconstructed = _task_state_manager()
+
+    assert await reconstructed.get_content_claim_task_ids(partition="tenant-a") == {"task-1"}
+    assert (await reconstructed.get_all_info())["task-1"]["worker_submitted"] is True
+    assert (await reconstructed.get_details("task-1"))["file_id"] == "file-1"
 
 
 @pytest.mark.asyncio
@@ -526,13 +591,14 @@ async def test_finished_cancellation_drops_recoverable_worker_reference(monkeypa
     monkeypatch.setattr(task_state_module, "_save_recoverable_task", lambda _task_id, info: saved.append(info))
     manager = _task_state_manager()
     ref = object()
-    manager.tasks["task-1"] = TaskInfo(state="CANCELLED", object_ref={"ref": ref})
+    manager.tasks["task-1"] = TaskInfo(state="CANCELLED", object_ref={"ref": ref}, worker_submitted=True)
 
     monkeypatch.setattr(task_state_module.ray, "wait", lambda *_args, **_kwargs: ([ref], []))
 
     assert await manager.finish_cancellation("task-1") is True
 
     assert manager.tasks["task-1"].object_ref is None
+    assert manager.tasks["task-1"].worker_submitted is False
     assert saved[-1].object_ref is None
 
 
