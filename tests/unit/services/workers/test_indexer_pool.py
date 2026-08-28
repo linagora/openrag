@@ -1152,14 +1152,46 @@ async def test_pool_cancels_worker_when_ref_registration_is_rejected(
     worker = _FakeWorker()
     pool = _bare_pool([worker])
     pool._task_state_manager.set_object_ref.remote.return_value = False
-    cancel = MagicMock()
+    cancellation_requested = asyncio.Event()
+    cancel = MagicMock(side_effect=lambda *_args, **_kwargs: cancellation_requested.set())
     monkeypatch.setattr(module.ray, "cancel", cancel)
 
-    with pytest.raises(RuntimeError, match="cancelled before worker ref registration"):
-        await pool.submit(task_id="task-1")
+    submission = asyncio.create_task(pool.submit(task_id="task-1"))
+    await asyncio.wait_for(cancellation_requested.wait(), timeout=1)
 
     cancel.assert_called_once_with(worker.futures[0], recursive=True)
-    await _settle_pool_release_tasks(pool, worker.futures[0])
+    assert submission.done() is False
+
+    worker.futures[0].set_result(None)
+    with pytest.raises(RuntimeError, match="cancelled before worker ref registration"):
+        await submission
+    await _settle_pool_release_tasks(pool)
+
+
+@pytest.mark.asyncio
+async def test_pool_waits_for_worker_when_ref_registration_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import services.workers.indexer_pool as module
+
+    worker = _FakeWorker()
+    pool = _bare_pool([worker])
+    pool._task_state_manager.set_object_ref.remote.side_effect = RuntimeError("task state unavailable")
+    cancellation_requested = asyncio.Event()
+    monkeypatch.setattr(
+        module.ray,
+        "cancel",
+        MagicMock(side_effect=lambda *_args, **_kwargs: cancellation_requested.set()),
+    )
+
+    submission = asyncio.create_task(pool.submit(task_id="task-1"))
+    await asyncio.wait_for(cancellation_requested.wait(), timeout=1)
+    assert submission.done() is False
+
+    worker.futures[0].set_result(None)
+    with pytest.raises(RuntimeError, match="task state unavailable"):
+        await submission
+    await _settle_pool_release_tasks(pool)
 
 
 @pytest.mark.asyncio

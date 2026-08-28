@@ -507,12 +507,22 @@ class IndexerPool:
         try:
             registered = await self._register_worker_ref(str(kwargs.get("task_id") or ""), ref)
         except BaseException:
-            ray.cancel(ref, recursive=True)
+            await self._cancel_worker_and_wait(ref)
             raise
         if not registered:
-            ray.cancel(ref, recursive=True)
+            await self._cancel_worker_and_wait(ref)
             raise RuntimeError(f"Task {kwargs.get('task_id')} was cancelled before worker ref registration")
         return [ref]
+
+    async def _cancel_worker_and_wait(self, ref: Any) -> None:
+        """Keep the submission fenced until a rejected worker has settled."""
+        try:
+            ray.cancel(ref, recursive=True)
+        except Exception:
+            # Cancellation is best-effort, but settlement is mandatory before
+            # the caller can safely release the content claim.
+            pass
+        await asyncio.gather(ref, return_exceptions=True)
 
     async def _register_worker_ref(self, task_id: str, ref: Any) -> bool:
         if not task_id:
