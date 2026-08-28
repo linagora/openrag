@@ -9,6 +9,7 @@ from typing import Any
 from core.indexing.dispatcher import IndexingDispatcher
 from core.models.catalog import (
     CONTENT_CLAIM_TOKEN_METADATA_KEY,
+    COPY_CONTENT_CLAIM_TOKEN_PREFIX,
     TASK_CREATED_AT_METADATA_KEY,
     TASK_FINISHED_AT_METADATA_KEY,
 )
@@ -127,6 +128,24 @@ class WorkerDispatcher(IndexingDispatcher):
         )
         return True
 
+    async def _active_content_claim_tokens(self, partition: str) -> set[str] | None:
+        """Return task tokens whose content reservations must be preserved.
+
+        ``None`` disables orphan recovery for an older TaskStateManager that
+        cannot provide the active-task lookup.  That fallback keeps rolling
+        deployments conservative.
+        """
+        remote = _remote_actor_method(self._tsm, "get_matching_active_task_refs_v2")
+        if remote is None:
+            return None
+        matches = await self._call_method(
+            lambda: remote(partition=partition),
+            task_description=f"get_active_content_claim_tokens({partition})",
+        )
+        if not isinstance(matches, dict):
+            raise RuntimeError("TaskStateManager returned invalid active tasks for content claim recovery")
+        return {str(task_id) for task_id in matches}
+
     async def _begin_file_delete_fence(self, *, file_id: str, partition: str, fence_id: str) -> None:
         remote = _remote_actor_method(self._tsm, "begin_file_delete")
         if remote is None:
@@ -197,12 +216,14 @@ class WorkerDispatcher(IndexingDispatcher):
         claimed_content = False
 
         if content_sha256:
+            active_claim_tokens = await self._active_content_claim_tokens(partition)
             conflicting_file_id = await self._document_repo.claim_content_sha256(
                 file_id=file_id,
                 partition=partition,
                 content_sha256=content_sha256,
                 claim_token=task_id,
                 replace=replace,
+                active_claim_tokens=active_claim_tokens,
             )
             if conflicting_file_id is not None:
                 raise ConflictError(
@@ -510,7 +531,7 @@ class WorkerDispatcher(IndexingDispatcher):
         target_partition = metadata.get("partition", partition)
         content_sha256 = metadata.get("content_sha256")
         claimed_content = False
-        claim_token = uuid.uuid4().hex
+        claim_token = f"{COPY_CONTENT_CLAIM_TOKEN_PREFIX}{uuid.uuid4().hex}"
         if content_sha256:
             conflicting_file_id = await self._document_repo.claim_content_sha256(
                 file_id=target_file_id,

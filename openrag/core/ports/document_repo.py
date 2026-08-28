@@ -53,8 +53,9 @@ class DocumentRepository(ABC):
         content_sha256: str,
         claim_token: str,
         replace: bool = False,
+        active_claim_tokens: set[str] | None = None,
     ) -> str | None:
-        """Reserve content for one indexing attempt, returning a conflicting file id."""
+        """Reserve content, recovering inactive claims when task state is available."""
         ...
 
     @abstractmethod

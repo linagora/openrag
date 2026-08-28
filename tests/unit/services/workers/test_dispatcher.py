@@ -399,8 +399,76 @@ async def test_dispatch_indexing_passes_attempt_token_to_claim_and_worker() -> N
         content_sha256="abc123",
         claim_token="task-1",
         replace=False,
+        active_claim_tokens=set(),
     )
     assert pool.submit.remote.await_args.kwargs["metadata"][CONTENT_CLAIM_TOKEN_METADATA_KEY] == "task-1"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_indexing_preserves_only_active_content_claims() -> None:
+    from services.workers.dispatcher import WorkerDispatcher
+
+    repo = _document_repo()
+    tsm = _task_state_manager()
+    tsm.get_matching_active_task_refs_v2.remote.return_value = {
+        "queued-task": object(),
+        "running-task": object(),
+    }
+    dispatcher = WorkerDispatcher(
+        pool=_pool_with_ref(object()),
+        task_state_manager=tsm,
+        completion_tracker=_completion_tracker(),
+        vector_store=_vector_store(),
+        document_repo=repo,
+        workspace_repo=_workspace_repo(),
+        collection="default",
+    )
+
+    with patch("services.workers.dispatcher.uuid") as mock_uuid:
+        mock_uuid.uuid4.return_value.hex = "new-task"
+        await dispatcher.dispatch_indexing(
+            path="/data/report.txt",
+            metadata={"file_id": "file-1", "content_sha256": "abc123"},
+            partition="tenant-a",
+            user={"id": 42},
+            workspace_ids=None,
+            replace=False,
+        )
+
+    assert repo.claim_content_sha256.await_args.kwargs["active_claim_tokens"] == {
+        "queued-task",
+        "running-task",
+    }
+    tsm.get_matching_active_task_refs_v2.remote.assert_awaited_once_with(partition="tenant-a")
+
+
+@pytest.mark.asyncio
+async def test_dispatch_indexing_disables_claim_recovery_for_legacy_task_state_manager() -> None:
+    from services.workers.dispatcher import WorkerDispatcher
+
+    repo = _document_repo()
+    tsm = _task_state_manager()
+    tsm.get_matching_active_task_refs_v2 = None
+    dispatcher = WorkerDispatcher(
+        pool=_pool_with_ref(object()),
+        task_state_manager=tsm,
+        completion_tracker=_completion_tracker(),
+        vector_store=_vector_store(),
+        document_repo=repo,
+        workspace_repo=_workspace_repo(),
+        collection="default",
+    )
+
+    await dispatcher.dispatch_indexing(
+        path="/data/report.txt",
+        metadata={"file_id": "file-1", "content_sha256": "abc123"},
+        partition="tenant-a",
+        user={"id": 42},
+        workspace_ids=None,
+        replace=False,
+    )
+
+    assert repo.claim_content_sha256.await_args.kwargs["active_claim_tokens"] is None
 
 
 @pytest.mark.asyncio
@@ -435,6 +503,48 @@ async def test_dispatch_indexing_releases_claim_when_queueing_fails() -> None:
         partition="tenant-a",
         content_sha256="abc123",
         claim_token=repo.claim_content_sha256.await_args.kwargs["claim_token"],
+    )
+
+
+@pytest.mark.asyncio
+async def test_copy_file_uses_non_task_content_claim_token() -> None:
+    from services.workers.dispatcher import WorkerDispatcher
+
+    repo = _document_repo()
+    dispatcher = WorkerDispatcher(
+        pool=_pool_with_ref(object()),
+        task_state_manager=_task_state_manager(),
+        completion_tracker=_completion_tracker(),
+        vector_store=_vector_store(),
+        document_repo=repo,
+        workspace_repo=_workspace_repo(),
+        collection="default",
+    )
+
+    with patch("services.workers.dispatcher.uuid") as mock_uuid:
+        mock_uuid.uuid4.return_value.hex = "copy-attempt"
+        await dispatcher.copy_file(
+            "file-1",
+            {
+                "file_id": "copy-1",
+                "partition": "tenant-b",
+                "content_sha256": "abc123",
+            },
+            "tenant-a",
+            user=None,
+        )
+
+    repo.claim_content_sha256.assert_awaited_once_with(
+        file_id="copy-1",
+        partition="tenant-b",
+        content_sha256="abc123",
+        claim_token="copy:copy-attempt",
+    )
+    repo.release_content_sha256_claim.assert_awaited_once_with(
+        file_id="copy-1",
+        partition="tenant-b",
+        content_sha256="abc123",
+        claim_token="copy:copy-attempt",
     )
 
 

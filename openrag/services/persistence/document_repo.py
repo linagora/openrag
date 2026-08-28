@@ -25,7 +25,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
-from core.models.catalog import DocumentRecord, DocumentStatus
+from core.models.catalog import COPY_CONTENT_CLAIM_TOKEN_PREFIX, DocumentRecord, DocumentStatus
 from core.ports.document_repo import DocumentRepository
 from core.utils.logging import get_logger
 from services.persistence.file_count import decrement_file_counts
@@ -277,6 +277,7 @@ class PgDocumentRepository(DocumentRepository):
         content_sha256: str,
         claim_token: str,
         replace: bool = False,
+        active_claim_tokens: set[str] | None = None,
     ) -> str | None:
         """Atomically reserve content while it is being indexed."""
         async with self.pool.acquire() as conn:
@@ -297,6 +298,27 @@ class PgDocumentRepository(DocumentRepository):
                 )
                 if existing_file_id is not None and not (replace and existing_file_id == file_id):
                     return existing_file_id
+
+                if active_claim_tokens is not None:
+                    # A claim starts with a 24-hour lease and is renewed to the
+                    # same horizon while its task is alive.  Once the owning
+                    # task has disappeared, allow a brief registration grace
+                    # before recovering the abandoned claim.  This closes the
+                    # crash/restart gap without allowing a concurrent upload to
+                    # steal a claim between its INSERT and QUEUED transition.
+                    await conn.execute(
+                        """
+                        DELETE FROM file_content_claims
+                        WHERE partition_name = $1 AND content_sha256 = $2
+                          AND NOT (claim_token = ANY($3::text[]))
+                          AND claim_token NOT LIKE $4
+                          AND expires_at <= NOW() + interval '23 hours 59 minutes'
+                        """,
+                        partition,
+                        content_sha256,
+                        sorted(active_claim_tokens),
+                        f"{COPY_CONTENT_CLAIM_TOKEN_PREFIX}%",
+                    )
 
                 await conn.execute(
                     """

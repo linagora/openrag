@@ -124,3 +124,126 @@ class TestDeleteByPartition:
         deleted = await repo.delete_documents_by_partition(partition)
         assert deleted == 2
         assert await repo.count_documents(partition=partition) == 0
+
+
+class TestContentClaims:
+    async def test_recovers_orphaned_claim_after_registration_grace(
+        self,
+        postgres_store: PostgresStore,
+    ):
+        partition = await _seed_partition(postgres_store)
+        repo = postgres_store.document_repo
+
+        assert (
+            await repo.claim_content_sha256(
+                file_id="abandoned-file",
+                partition=partition,
+                content_sha256="a" * 64,
+                claim_token="abandoned-task",
+            )
+            is None
+        )
+        assert (
+            await repo.claim_content_sha256(
+                file_id="early-retry",
+                partition=partition,
+                content_sha256="a" * 64,
+                claim_token="early-retry-task",
+                active_claim_tokens=set(),
+            )
+            == "abandoned-file"
+        )
+        await postgres_store.pool.execute(
+            """
+            UPDATE file_content_claims
+            SET expires_at = NOW() + interval '23 hours 58 minutes'
+            WHERE partition_name = $1 AND content_sha256 = $2
+            """,
+            partition,
+            "a" * 64,
+        )
+
+        assert (
+            await repo.claim_content_sha256(
+                file_id="retry-file",
+                partition=partition,
+                content_sha256="a" * 64,
+                claim_token="retry-task",
+                active_claim_tokens=set(),
+            )
+            is None
+        )
+
+    async def test_preserves_claim_owned_by_active_task(
+        self,
+        postgres_store: PostgresStore,
+    ):
+        partition = await _seed_partition(postgres_store)
+        repo = postgres_store.document_repo
+
+        assert (
+            await repo.claim_content_sha256(
+                file_id="active-file",
+                partition=partition,
+                content_sha256="b" * 64,
+                claim_token="active-task",
+            )
+            is None
+        )
+        await postgres_store.pool.execute(
+            """
+            UPDATE file_content_claims
+            SET expires_at = NOW() + interval '23 hours 58 minutes'
+            WHERE partition_name = $1 AND content_sha256 = $2
+            """,
+            partition,
+            "b" * 64,
+        )
+
+        assert (
+            await repo.claim_content_sha256(
+                file_id="duplicate-file",
+                partition=partition,
+                content_sha256="b" * 64,
+                claim_token="duplicate-task",
+                active_claim_tokens={"active-task"},
+            )
+            == "active-file"
+        )
+
+    async def test_preserves_non_task_claim(
+        self,
+        postgres_store: PostgresStore,
+    ):
+        partition = await _seed_partition(postgres_store)
+        repo = postgres_store.document_repo
+
+        assert (
+            await repo.claim_content_sha256(
+                file_id="copy-file",
+                partition=partition,
+                content_sha256="c" * 64,
+                claim_token="copy:active-copy",
+            )
+            is None
+        )
+        await postgres_store.pool.execute(
+            """
+            UPDATE file_content_claims
+            SET expires_at = NOW() + interval '23 hours 58 minutes'
+            WHERE partition_name = $1 AND content_sha256 = $2
+            """,
+            partition,
+            "c" * 64,
+        )
+
+        assert (
+            await repo.claim_content_sha256(
+                file_id="duplicate-file",
+                partition=partition,
+                content_sha256="c" * 64,
+                claim_token="duplicate-task",
+                active_claim_tokens=set(),
+            )
+            == "copy-file"
+        )

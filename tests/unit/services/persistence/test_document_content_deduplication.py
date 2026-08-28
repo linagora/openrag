@@ -76,10 +76,12 @@ async def test_claim_content_hash_returns_completed_duplicate() -> None:
         partition="tenant-a",
         content_sha256="abc123",
         claim_token="attempt-1",
+        active_claim_tokens=set(),
     )
 
     assert conflict == "existing-file"
     assert not any("INSERT INTO file_content_claims" in query for query, _ in pool.conn.executed)
+    assert not any("23 hours 59 minutes" in query for query, _ in pool.conn.executed)
 
 
 @pytest.mark.asyncio
@@ -97,6 +99,28 @@ async def test_claim_content_hash_returns_active_duplicate() -> None:
     )
 
     assert conflict == "active-file"
+
+
+@pytest.mark.asyncio
+async def test_claim_content_hash_recovers_old_claims_without_active_tasks() -> None:
+    from services.persistence.document_repo import PgDocumentRepository
+
+    pool = _ClaimPool([None, "new-file"])
+    repo = PgDocumentRepository(pool_getter=lambda: pool)
+
+    conflict = await repo.claim_content_sha256(
+        file_id="new-file",
+        partition="tenant-a",
+        content_sha256="abc123",
+        claim_token="attempt-2",
+        active_claim_tokens={"active-attempt"},
+    )
+
+    assert conflict is None
+    query, params = next((query, params) for query, params in pool.conn.executed if "23 hours 59 minutes" in query)
+    assert "claim_token = ANY($3::text[])" in query
+    assert "claim_token NOT LIKE $4" in query
+    assert params == ("tenant-a", "abc123", ["active-attempt"], "copy:%")
 
 
 @pytest.mark.asyncio
