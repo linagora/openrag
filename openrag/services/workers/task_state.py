@@ -599,13 +599,7 @@ class TaskStateManager:
             for task_id, info in self.tasks.items():
                 if self._expire_refless_task_if_stale_locked(task_id, info):
                     continue
-                worker_submitted = getattr(info, "worker_submitted", False)
-                submission_started_at = getattr(info, "submission_started_at", None)
-                submission_in_progress = isinstance(submission_started_at, (int, float))
-                owns_claim = info.state in CANCELLABLE_INDEXING_STATES or (
-                    info.state == "CANCELLED"
-                    and (info.object_ref is not None or worker_submitted or submission_in_progress)
-                )
+                owns_claim = info.state in CANCELLABLE_INDEXING_STATES or _cancelled_task_unsettled(info)
                 if not owns_claim:
                     continue
                 metadata = (info.details or {}).get("metadata")
@@ -613,13 +607,6 @@ class TaskStateManager:
                 if has_finished or _object_ref_is_ready(info.object_ref):
                     continue
                 details = info.details or {}
-                ref = info.object_ref.get("ref") if isinstance(info.object_ref, dict) else info.object_ref
-                if (
-                    ref is None
-                    and not worker_submitted
-                    and _content_claim_registration_expired(details)
-                ):
-                    continue
                 if details and details.get("partition") != partition:
                     continue
                 matches.add(task_id)

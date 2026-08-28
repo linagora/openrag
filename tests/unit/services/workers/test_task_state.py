@@ -308,6 +308,17 @@ async def test_unaccepted_submission_fence_expires_after_handoff_grace(monkeypat
             user_id=None,
         )
         assert await manager.begin_worker_submission(task_id) is True
+    await manager.set_details(
+        "claim-task",
+        file_id="file-1",
+        partition="tenant-a",
+        metadata={"_openrag_job_created_at": "2000-01-01T00:00:00+00:00"},
+        user_id=None,
+    )
+    assert await manager.get_content_claim_task_ids(partition="tenant-a") == {
+        "claim-task",
+        "delete-task",
+    }
     now += task_state_module._CONTENT_CLAIM_REGISTRATION_GRACE_SECONDS + 1
 
     assert await manager.accept_worker_submission("claim-task") is False
@@ -317,6 +328,24 @@ async def test_unaccepted_submission_fence_expires_after_handoff_grace(monkeypat
         file_id="file-2",
     ) == {}
     assert await manager.get_state("delete-task") == "FAILED"
+    assert await manager.get_content_claim_task_ids(partition="tenant-a") == set()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_unaccepted_handoff_does_not_keep_content_claim() -> None:
+    manager = _task_state_manager()
+    await manager.set_queued_details(
+        "task-1",
+        file_id="file-1",
+        partition="tenant-a",
+        metadata={"_openrag_job_created_at": datetime.now(UTC).isoformat()},
+        user_id=None,
+    )
+
+    assert await manager.begin_worker_submission("task-1") is True
+    assert await manager.set_cancelled_if_active("task-1") is True
+
+    assert await manager.has_unsettled_cancelled_worker("task-1") is False
     assert await manager.get_content_claim_task_ids(partition="tenant-a") == set()
 
 

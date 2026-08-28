@@ -68,6 +68,7 @@ class TaskCompletionTracker:
                             tracker.recover_refless.remote(task_id, preserve_cancelled_submission=True)
                         elif not _has_finished_at(info.get("details")):
                             await self._record_finished_at(task_id)
+                            await self._finish_cancellation(task_id)
                         continue
                     if _has_finished_at(info.get("details")):
                         continue
