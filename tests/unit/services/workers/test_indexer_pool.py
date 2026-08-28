@@ -1093,7 +1093,9 @@ async def test_pool_dispatches_to_least_loaded_and_passes_ref_through() -> None:
 
 
 @pytest.mark.asyncio
-async def test_pool_drain_rejects_new_work_and_reports_accepted_work() -> None:
+async def test_pool_drain_rejects_new_work_and_reports_accepted_work(monkeypatch: pytest.MonkeyPatch) -> None:
+    import services.workers.indexer_pool as module
+
     worker = _FakeWorker()
     pool = _bare_pool([worker])
     repo = SimpleNamespace(release_content_sha256_claim=AsyncMock())
@@ -1107,6 +1109,12 @@ async def test_pool_drain_rejects_new_work_and_reports_accepted_work() -> None:
         "inflight_jobs": 1,
         "worker_names": ["test-worker-0"],
     }
+    recovered_task_state_manager = SimpleNamespace(
+        finish_rejected_submission=SimpleNamespace(remote=AsyncMock(return_value=True))
+    )
+    pool._task_state_manager = None
+    get_actor = MagicMock(return_value=recovered_task_state_manager)
+    monkeypatch.setattr(module.ray, "get_actor", get_actor)
     with pytest.raises(RuntimeError, match="draining"):
         await pool.submit(
             task_id="rejected-after-drain",
@@ -1118,7 +1126,8 @@ async def test_pool_drain_rejects_new_work_and_reports_accepted_work() -> None:
             },
         )
     assert len(worker.calls) == 1
-    pool._task_state_manager.finish_rejected_submission.remote.assert_awaited_once_with("rejected-after-drain")
+    get_actor.assert_called_once_with("TaskStateManager", namespace="openrag")
+    recovered_task_state_manager.finish_rejected_submission.remote.assert_awaited_once_with("rejected-after-drain")
     repo.release_content_sha256_claim.assert_awaited_once_with(
         file_id="file-1",
         partition="tenant-a",

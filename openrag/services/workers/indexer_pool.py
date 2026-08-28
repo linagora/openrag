@@ -547,10 +547,11 @@ class IndexerPool:
         await self._finish_rejected_submission(task_id)
 
     async def _finish_rejected_submission(self, task_id: str) -> None:
-        method_names = getattr(self._task_state_manager, "_ray_actor_method_names", None)
+        task_state_manager = self._task_state_actor()
+        method_names = getattr(task_state_manager, "_ray_actor_method_names", None)
         if isinstance(method_names, (frozenset, list, set, tuple)) and "finish_rejected_submission" not in method_names:
             return
-        method = getattr(self._task_state_manager, "finish_rejected_submission", None)
+        method = getattr(task_state_manager, "finish_rejected_submission", None)
         remote = getattr(method, "remote", None)
         if remote is None:
             return
@@ -562,13 +563,17 @@ class IndexerPool:
     async def _register_worker_ref(self, task_id: str, ref: Any) -> bool:
         if not task_id:
             raise ValueError("IndexerPool submission requires a task_id")
-        if self._task_state_manager is None:
-            self._task_state_manager = ray.get_actor("TaskStateManager", namespace=self._namespace)
+        task_state_manager = self._task_state_actor()
         registered = await retry_idempotent_ray_actor_method(
-            lambda: self._task_state_manager.set_object_ref.remote(task_id, {"ref": ref}),
+            lambda: task_state_manager.set_object_ref.remote(task_id, {"ref": ref}),
             task_description=f"set_object_ref({task_id}) from indexer pool",
         )
         return registered is not False
+
+    def _task_state_actor(self) -> Any:
+        if self._task_state_manager is None:
+            self._task_state_manager = ray.get_actor("TaskStateManager", namespace=self._namespace)
+        return self._task_state_manager
 
     async def _release(self, idx: int, ref: Any, *, claim: dict[str, str] | None = None) -> None:
         renewal_task = None
