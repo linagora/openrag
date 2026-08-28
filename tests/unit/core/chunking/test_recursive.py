@@ -306,3 +306,29 @@ def test_dewrap_preserves_code_fence_verbatim():
     assert "    return 1" in lines  # indentation preserved
     assert "Intro wrapped across two lines." in lines  # prose still reflowed
     assert "Outro wrapped across two." in lines
+
+
+def test_dewrap_preserves_timestamped_diarized_transcript_lines():
+    """MOSS's normalized speaker segments are records, not wrapped prose."""
+    from core.chunking.recursive import dewrap_paragraphs
+
+    text = (
+        "[00:00:00.720] [S01] Hi, my name is LinTO. [00:00:04.010]\n"
+        "[00:00:04.560] [S02] Sorry, I am late. [00:00:06.640]"
+    )
+
+    assert dewrap_paragraphs(text) == text
+
+
+def test_recursive_splitter_keeps_timestamped_diarized_transcript_lines():
+    """Stored transcript chunks keep the segment boundaries supplied by MOSS."""
+    text = (
+        "[00:00:00.720] [S01] Hi, my name is LinTO. [00:00:04.010]\n"
+        "[00:00:04.560] [S02] Sorry, I am late. [00:00:06.640]"
+    )
+    splitter = RecursiveSplitter(chunk_size=100, chunk_overlap_rate=0.0, length_function=_word_tokens)
+    document = ProcessedDocument(document_id="d1", text_blocks=[TextBlock(text=text, page_number=1)])
+
+    chunks = splitter.chunk(document, partition="p1")
+
+    assert [chunk.text for chunk in chunks] == [text]

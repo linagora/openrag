@@ -38,8 +38,9 @@ _IMAGE_PLACEHOLDER_MARKER = "[image placeholder]"
 _INLINE_ELEMENT_TOKEN_THRESHOLD = 100
 
 # A line that begins a markdown block (heading, list item, blockquote, table
-# row, code fence, horizontal rule, or a synthetic [PAGE_N] marker). Such lines
-# must keep their own line — they are NOT prose to be joined into a paragraph.
+# row, code fence, horizontal rule, a timestamped diarized-transcript segment,
+# or a synthetic [PAGE_N] marker). Such lines must keep their own line — they
+# are NOT prose to be joined into a paragraph.
 _BLOCK_LINE_RE = re.compile(
     r"^\s*(?:"
     r"#{1,6}\s"  # heading
@@ -49,6 +50,7 @@ _BLOCK_LINE_RE = re.compile(
     r"|\|"  # table row
     r"|```|~~~"  # code fence
     r"|(?:-{3,}|\*{3,}|_{3,})\s*$"  # horizontal rule (---, ***, ___)
+    r"|\[\d{2}:\d{2}:\d{2}\.\d{3}\]\s+\[S\d+\]"  # diarized transcript segment
     r"|\[PAGE_\d+\]\s*$"  # synthetic page marker
     r")"
 )
@@ -65,8 +67,8 @@ def dewrap_paragraphs(text: str) -> str:
     mid-sentence ``\\n`` make the splitter break mid-sentence and read poorly
     once stored. We join consecutive prose lines with a space while preserving
     paragraph breaks (blank lines) and any markdown block line (heading, list
-    item, table row, code fence, blockquote, rule, page marker), which keep
-    their own line. See #579.
+    item, table row, code fence, blockquote, rule, timestamped diarized
+    segment, page marker), which keep their own line. See #579.
     """
     out: list[str] = []
     paragraph: list[str] = []
