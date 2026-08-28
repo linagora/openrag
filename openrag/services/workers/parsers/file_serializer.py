@@ -29,7 +29,9 @@ class ParserFileSerializer(FileSerializer):
         self,
         *,
         transcription_prompt_resolver: Callable[[], Awaitable[str | None]] | None = None,
-        transcription_endpoint_resolver: Callable[[], ModelEndpointConfig | None] | None = None,
+        transcription_endpoint_resolver: (
+            Callable[[], ModelEndpointConfig | None | Awaitable[ModelEndpointConfig | None]] | None
+        ) = None,
     ) -> None:
         from core.config import load_config
         from services.workers.parsers.parser_dispatcher import (
@@ -81,7 +83,9 @@ class ParserFileSerializer(FileSerializer):
 def build_file_serializer(
     *,
     transcription_prompt_resolver: Callable[[], Awaitable[str | None]] | None = None,
-    transcription_endpoint_resolver: Callable[[], ModelEndpointConfig | None] | None = None,
+    transcription_endpoint_resolver: (
+        Callable[[], ModelEndpointConfig | None | Awaitable[ModelEndpointConfig | None]] | None
+    ) = None,
 ) -> ParserFileSerializer:
     """Build the in-process file serializer. Convenience for the composition root."""
     return ParserFileSerializer(

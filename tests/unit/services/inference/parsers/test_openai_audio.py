@@ -234,6 +234,34 @@ class TestParse:
         }
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("extra", [{}, {"api_key": ""}, {"api_key": "   "}])
+    async def test_stt_endpoint_without_key_reuses_fallback_client(self, mock_openai_client, monkeypatch, extra):
+        from services.inference.parsers import openai_audio as module
+
+        mock_openai_client.audio.transcriptions.create.return_value = MagicMock(text="transcribed")
+        endpoint = ModelEndpointConfig(
+            endpoint="http://x",
+            model_name="moss-transcribe-diarize",
+            batch_size=1,
+            timeout=120,
+            extra=extra,
+        )
+
+        client = _client(
+            mock_openai_client,
+            api_key="EMPTY",
+            transcription_endpoint_resolver=lambda: endpoint,
+        )
+        unexpected_client = MagicMock(side_effect=AssertionError("a fallback endpoint must not create a new client"))
+        monkeypatch.setattr(module, "AsyncOpenAI", unexpected_client)
+
+        result = await client.parse(_audio_doc())
+
+        assert result.text_blocks[0].text == "transcribed"
+        unexpected_client.assert_not_called()
+        assert mock_openai_client.audio.transcriptions.create.await_args.kwargs["model"] == "moss-transcribe-diarize"
+
+    @pytest.mark.asyncio
     async def test_stt_endpoint_resolver_replaces_connection_and_model(self, monkeypatch):
         from services.inference.parsers import openai_audio as module
 
@@ -244,6 +272,7 @@ class TestParse:
             client.audio = MagicMock()
             client.audio.transcriptions = MagicMock()
             client.audio.transcriptions.create = AsyncMock(return_value=MagicMock(text="transcribed"))
+            client.close = AsyncMock()
             created.append((kwargs, client))
             return client
 
@@ -255,11 +284,15 @@ class TestParse:
             timeout=900,
             extra={"api_key": "endpoint-key"},
         )
+
+        async def resolve_endpoint():
+            return endpoint
+
         client = OpenAIAudioClient(
             base_url="http://whisper:8000/v1",
             api_key="legacy-key",
             model="whisper-model",
-            transcription_endpoint_resolver=lambda: endpoint,
+            transcription_endpoint_resolver=resolve_endpoint,
         )
 
         result = await client.parse(_audio_doc())
@@ -272,6 +305,7 @@ class TestParse:
         }
         request = created[1][1].audio.transcriptions.create.await_args.kwargs
         assert request["model"] == "moss-transcribe-diarize"
+        created[1][1].close.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_transcribe_exception_propagates(self, mock_openai_client):

@@ -26,6 +26,7 @@ ref-getter (now an injected callable).
 from __future__ import annotations
 
 import asyncio
+import inspect
 import time
 from collections.abc import Awaitable, Callable, Iterable
 from pathlib import Path
@@ -46,7 +47,7 @@ _DEFAULT_DIRECT_UPLOAD_SUFFIXES: tuple[str, ...] = (".mp3", ".m4a", ".ogg", ".we
 
 LanguageDetector = Callable[[Path], Awaitable[str | None]]
 TranscriptionPromptResolver = Callable[[], Awaitable[str | None]]
-TranscriptionEndpointResolver = Callable[[], ModelEndpointConfig | None]
+TranscriptionEndpointResolver = Callable[[], ModelEndpointConfig | None | Awaitable[ModelEndpointConfig | None]]
 
 # Endpoint ``extra`` holds both connection metadata and provider request options.
 # Only the latter belongs in the OpenAI-compatible transcription request body.
@@ -93,11 +94,11 @@ class OpenAIAudioClient(BaseClientParser):
         self._transcription_prompt_resolver = transcription_prompt_resolver
         self._transcription_endpoint_resolver = transcription_endpoint_resolver
         self._semaphore = asyncio.Semaphore(max(1, concurrency_limit))
-        # Config changes are rare, while transcription requests can be long.
-        # Keep one client/limiter per live endpoint configuration so a save in
-        # the Admin UI affects the next file without interrupting an in-flight
-        # request that still uses the previous connection.
-        self._endpoint_clients: dict[tuple[str, str, float], AsyncOpenAI] = {}
+        # Limiters deliberately outlive requests so a configured endpoint's
+        # concurrency limit applies across simultaneous files. Clients do not:
+        # dynamically configured clients are closed after their request, which
+        # prevents retired credentials and connection pools accumulating in
+        # long-lived worker processes.
         self._endpoint_semaphores: dict[tuple[str, str, int], asyncio.Semaphore] = {}
 
     def supported_types(self) -> list[str]:
@@ -113,7 +114,7 @@ class OpenAIAudioClient(BaseClientParser):
         start = time.time()
         try:
             async with document.as_temporary_file() as input_path:
-                endpoint_config = self._resolve_transcription_endpoint()
+                endpoint_config = await self._resolve_transcription_endpoint()
                 async with self._semaphore_for_endpoint(endpoint_config):
                     upload_path, cleanup = await self._prepare_upload(input_path)
                     try:
@@ -183,18 +184,19 @@ class OpenAIAudioClient(BaseClientParser):
             return None
         return prompt.strip() if prompt and prompt.strip() else None
 
-    def _resolve_transcription_endpoint(self) -> ModelEndpointConfig | None:
+    async def _resolve_transcription_endpoint(self) -> ModelEndpointConfig | None:
         """Resolve the current STT default, falling back safely to env config.
 
-        The resolver points at the mutable in-memory endpoint registry. That
-        lets API-process writes take effect immediately and indexer workers use
-        their normal registry refresh cycle, without putting database access in
-        the per-request audio client.
+        Indexer workers resolve from their refreshed local registry, while the
+        direct extraction path may await a fresh registry reload. Keeping that
+        distinction behind the resolver lets both paths share this client.
         """
         if self._transcription_endpoint_resolver is None:
             return None
         try:
             endpoint = self._transcription_endpoint_resolver()
+            if inspect.isawaitable(endpoint):
+                endpoint = await endpoint
         except Exception as exc:  # noqa: BLE001 - endpoint lookup must not block indexing
             logger.bind(error=str(exc)).warning("STT endpoint resolution failed")
             return None
@@ -242,30 +244,29 @@ class OpenAIAudioClient(BaseClientParser):
             return {}
         return {key: value for key, value in endpoint.extra.items() if key not in _STT_REQUEST_CONTROL_EXTRA_KEYS}
 
-    def _client_for_endpoint(self, endpoint: ModelEndpointConfig | None) -> tuple[AsyncOpenAI, str]:
-        """Return an OpenAI client and model for one transcription request."""
+    def _client_for_endpoint(self, endpoint: ModelEndpointConfig | None) -> tuple[AsyncOpenAI, str, bool]:
+        """Return an OpenAI client, model, and whether the client must be closed."""
         if endpoint is None:
-            return self._client, self._model
+            return self._client, self._model, False
 
         api_key = endpoint.extra.get("api_key")
-        resolved_api_key = api_key if isinstance(api_key, str) else ""
+        # The default STT seed intentionally omits a placeholder key such as
+        # ``EMPTY``. Preserve the legacy fallback key in that case so the
+        # seeded endpoint still reuses the configured fallback client.
+        resolved_api_key = api_key if isinstance(api_key, str) and api_key.strip() else self._api_key
         if (
             endpoint.endpoint == self._base_url
             and resolved_api_key == self._api_key
             and endpoint.timeout == self._timeout
         ):
-            return self._client, endpoint.model_name or self._model
+            return self._client, endpoint.model_name or self._model, False
 
-        key = (endpoint.endpoint, resolved_api_key, endpoint.timeout)
-        client = self._endpoint_clients.get(key)
-        if client is None:
-            client = AsyncOpenAI(
-                base_url=endpoint.endpoint,
-                api_key=resolved_api_key,
-                timeout=endpoint.timeout,
-            )
-            self._endpoint_clients[key] = client
-        return client, endpoint.model_name or self._model
+        client = AsyncOpenAI(
+            base_url=endpoint.endpoint,
+            api_key=resolved_api_key,
+            timeout=endpoint.timeout,
+        )
+        return client, endpoint.model_name or self._model, True
 
     async def _transcribe(
         self,
@@ -275,7 +276,7 @@ class OpenAIAudioClient(BaseClientParser):
         prompt: str | None,
         endpoint_config: ModelEndpointConfig | None = None,
     ) -> str:
-        client, model = self._client_for_endpoint(endpoint_config)
+        client, model, close_client = self._client_for_endpoint(endpoint_config)
         kwargs: dict[str, object] = {"model": model, "file": path}
         if prompt:
             kwargs["prompt"] = prompt
@@ -289,5 +290,12 @@ class OpenAIAudioClient(BaseClientParser):
             language=language or "auto",
             configured_stt_endpoint=endpoint_config is not None,
         ).info("Sending audio transcription request")
-        response = await client.audio.transcriptions.create(**kwargs)
-        return response.text or ""
+        try:
+            response = await client.audio.transcriptions.create(**kwargs)
+            return response.text or ""
+        finally:
+            if close_client:
+                try:
+                    await client.close()
+                except Exception as exc:  # noqa: BLE001 - cleanup must not hide a transcription result
+                    logger.bind(error=str(exc)).warning("Failed to close temporary STT client")
