@@ -6,7 +6,12 @@ from typing import Any
 
 import pytest
 import services.workers.task_state as task_state_module
-from services.workers.task_state import PENDING_TASK_DETAILS, TaskInfo, TaskStateManager
+from services.workers.task_state import (
+    PENDING_TASK_DETAILS,
+    SUBMITTED_TASK_WITHOUT_REF,
+    TaskInfo,
+    TaskStateManager,
+)
 
 
 def _task_state_manager() -> Any:
@@ -111,6 +116,26 @@ async def test_matching_active_task_refs_treat_detail_less_queued_tasks_as_pendi
     expected = {"queued-without-details": PENDING_TASK_DETAILS}
 
     assert await manager.get_matching_active_task_refs(partition="tenant-a", file_id="file-1") == expected
+    assert await manager.get_matching_active_task_refs_v2(partition="tenant-a", file_id="file-1") == expected
+
+
+@pytest.mark.asyncio
+async def test_matching_active_task_refs_preserve_submitted_tasks_without_refs() -> None:
+    manager = _task_state_manager()
+    await manager.set_queued_details(
+        "task-1",
+        file_id="file-1",
+        partition="tenant-a",
+        metadata={},
+        user_id=42,
+    )
+    assert await manager.begin_worker_submission("task-1") is True
+    assert await manager.set_state("task-1", "SERIALIZING") is True
+
+    expected = {"task-1": SUBMITTED_TASK_WITHOUT_REF}
+    assert await manager.get_matching_active_task_refs_v2(partition="tenant-a", file_id="file-1") == expected
+
+    assert await manager.set_cancelled_if_active("task-1") is True
     assert await manager.get_matching_active_task_refs_v2(partition="tenant-a", file_id="file-1") == expected
 
 
@@ -534,7 +559,7 @@ async def test_cancellation_tombstone_survives_actor_reconstruction(monkeypatch)
     assert stored["task-1"].state == "CANCELLED"
 
 
-def test_cancellation_recovery_snapshot_preserves_claim_owner_and_expires() -> None:
+def test_cancellation_recovery_snapshot_preserves_unsettled_claim_owner_without_expiry() -> None:
     info = TaskInfo(
         state="CANCELLED",
         error="private traceback",
@@ -551,7 +576,45 @@ def test_cancellation_recovery_snapshot_preserves_claim_owner_and_expires() -> N
         object_ref=info.object_ref,
         worker_submitted=True,
     )
+    assert expires_at is None
+
+
+def test_settled_cancellation_recovery_snapshot_expires() -> None:
+    snapshot, expires_at = task_state_module._recovery_snapshot(
+        TaskInfo(state="CANCELLED", details={"user_id": 42}),
+        now=100.0,
+    )
+
+    assert snapshot == TaskInfo(state="CANCELLED", details={"user_id": 42})
     assert expires_at == 100.0 + task_state_module._CANCELLATION_TOMBSTONE_TTL_SECONDS
+
+
+def test_expired_unsettled_cancellation_is_recovered(monkeypatch) -> None:
+    import ray.cloudpickle as cloudpickle
+    from ray.experimental import internal_kv
+
+    key = task_state_module._recoverable_task_key("task-1")
+    info = TaskInfo(
+        state="CANCELLED",
+        details={"partition": "tenant-a", "file_id": "file-1"},
+        worker_submitted=True,
+    )
+    payload = cloudpickle.dumps(("task-1", info, 99.0))
+    deleted: list[bytes] = []
+
+    monkeypatch.setattr(task_state_module, "_task_state_storage_available", lambda: True)
+    monkeypatch.setattr(task_state_module, "_task_state_kv_namespace", lambda: b"test")
+    monkeypatch.setattr(task_state_module.time, "time", lambda: 100.0)
+    monkeypatch.setattr(internal_kv, "_internal_kv_list", lambda *_args, **_kwargs: [key])
+    monkeypatch.setattr(internal_kv, "_internal_kv_get", lambda *_args, **_kwargs: payload)
+    monkeypatch.setattr(
+        internal_kv,
+        "_internal_kv_del",
+        lambda candidate, **_kwargs: deleted.append(candidate),
+    )
+
+    assert task_state_module._load_recoverable_tasks() == {"task-1": info}
+    assert deleted == []
 
 
 @pytest.mark.asyncio
@@ -615,3 +678,23 @@ async def test_unsettled_cancellation_keeps_recoverable_worker_reference(monkeyp
 
     assert manager.tasks["task-1"].object_ref == {"ref": ref}
     assert saved == []
+
+
+@pytest.mark.asyncio
+async def test_rejected_submission_is_only_unfenced_after_worker_settlement(monkeypatch) -> None:
+    saved: list[TaskInfo] = []
+    monkeypatch.setattr(task_state_module, "_save_recoverable_task", lambda _task_id, info: saved.append(info))
+    manager = _task_state_manager()
+    manager.tasks["task-1"] = TaskInfo(
+        state="SERIALIZING",
+        details={"partition": "tenant-a", "file_id": "file-1"},
+        worker_submitted=True,
+    )
+
+    assert await manager.finish_rejected_submission("task-1") is True
+
+    info = manager.tasks["task-1"]
+    assert info.state == "FAILED"
+    assert info.worker_submitted is False
+    assert info.object_ref is None
+    assert saved[-1] is info

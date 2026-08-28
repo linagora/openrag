@@ -28,6 +28,7 @@ CANCELLABLE_INDEXING_STATES = ACTIVE_INDEXING_STATES | LEGACY_ACTIVE_INDEXING_ST
 RECOVERABLE_TASK_STATES = CANCELLABLE_INDEXING_STATES | {"CANCELLED"}
 TERMINAL_INDEXING_STATES = frozenset({"COMPLETED", "FAILED"})
 PENDING_TASK_DETAILS = "__openrag_pending_task_details__"
+SUBMITTED_TASK_WITHOUT_REF = "__openrag_submitted_task_without_ref__"
 _FENCE_KV_KEY = b"file-delete-fences-v1"
 _TASK_STATE_KV_NAMESPACE = "openrag-task-state-manager"
 _LEGACY_FENCE_ID = "__legacy__"
@@ -134,7 +135,7 @@ def _load_recoverable_tasks() -> dict[str, TaskInfo]:
         if payload is None:
             continue
         task_id, info, expires_at = _decode_recoverable_task(payload)
-        if expires_at is not None and expires_at <= time.time():
+        if expires_at is not None and expires_at <= time.time() and not _cancelled_task_unsettled(info):
             _internal_kv_del(key, namespace=namespace)
             continue
         tasks[task_id] = info
@@ -147,20 +148,28 @@ def _recovery_snapshot(info: TaskInfo, *, now: float | None = None) -> tuple[Tas
         return info, timestamp + _CANCELLATION_TOMBSTONE_TTL_SECONDS
     if info.state != "CANCELLED":
         return info, None
-    timestamp = time.time() if now is None else now
     # Keep the worker reference until cancellation is confirmed. If the actor
     # restarts between the durable claim and ray.cancel(), a retry still needs
     # this reference to stop the live worker.
-    return (
-        TaskInfo(
-            state="CANCELLED",
-            details=info.details,
-            object_ref=info.object_ref,
-            worker_submitted=getattr(info, "worker_submitted", False),
-            submission_started_at=getattr(info, "submission_started_at", None),
-        ),
-        timestamp + _CANCELLATION_TOMBSTONE_TTL_SECONDS,
+    snapshot = TaskInfo(
+        state="CANCELLED",
+        details=info.details,
+        object_ref=info.object_ref,
+        worker_submitted=getattr(info, "worker_submitted", False),
+        submission_started_at=getattr(info, "submission_started_at", None),
     )
+    if _cancelled_task_unsettled(snapshot):
+        return snapshot, None
+    timestamp = time.time() if now is None else now
+    return snapshot, timestamp + _CANCELLATION_TOMBSTONE_TTL_SECONDS
+
+
+def _cancelled_task_unsettled(info: TaskInfo) -> bool:
+    if info.state != "CANCELLED":
+        return False
+    object_ref = info.object_ref
+    ref = object_ref.get("ref") if isinstance(object_ref, dict) else object_ref
+    return ref is not None or getattr(info, "worker_submitted", False)
 
 
 def _save_recoverable_task(task_id: str, info: TaskInfo) -> None:
@@ -413,6 +422,22 @@ class TaskStateManager:
             return True
 
     @ray.method(concurrency_group="set")
+    async def finish_rejected_submission(self, task_id: str) -> bool:
+        """Clear a submitted-task fence after the pool proves its worker settled."""
+        with self.lock:
+            info = self.tasks.get(task_id)
+            if info is None:
+                return False
+            info.object_ref = None
+            info.worker_submitted = False
+            info.submission_started_at = None
+            if info.state in CANCELLABLE_INDEXING_STATES:
+                info.state = "FAILED"
+                info.error = "Indexer worker submission was rejected after the worker settled."
+            _save_recoverable_task(task_id, info)
+            return True
+
+    @ray.method(concurrency_group="set")
     async def expire_refless_task_if_stale(self, task_id: str) -> bool:
         with self.lock:
             info = self.tasks.get(task_id)
@@ -588,7 +613,7 @@ class TaskStateManager:
     ) -> dict[str, ray.ObjectRef | None | str]:
         matches = {}
         for task_id, info in self.tasks.items():
-            if info.state not in CANCELLABLE_INDEXING_STATES:
+            if info.state not in CANCELLABLE_INDEXING_STATES and not _cancelled_task_unsettled(info):
                 continue
             details = info.details or {}
             if not details:
@@ -598,7 +623,10 @@ class TaskStateManager:
                 continue
             if file_id is not None and details.get("file_id") != file_id:
                 continue
-            matches[task_id] = info.object_ref
+            if info.object_ref is None and getattr(info, "worker_submitted", False):
+                matches[task_id] = SUBMITTED_TASK_WITHOUT_REF
+            else:
+                matches[task_id] = info.object_ref
         return matches
 
     @ray.method(concurrency_group="queue_info")
@@ -658,6 +686,7 @@ __all__ = [
     "CANCELLABLE_INDEXING_STATES",
     "LEGACY_ACTIVE_INDEXING_STATES",
     "PENDING_TASK_DETAILS",
+    "SUBMITTED_TASK_WITHOUT_REF",
     "STALE_REFLESS_TASK_ERROR",
     "TERMINAL_INDEXING_STATES",
     "TaskInfo",

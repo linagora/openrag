@@ -504,23 +504,24 @@ class IndexerPool:
         # Keep a strong ref so the tracker isn't GC'd mid-flight (asyncio docs).
         self._release_tasks.add(task)
         task.add_done_callback(self._release_tasks.discard)
+        task_id = str(kwargs.get("task_id") or "")
         try:
-            registered = await self._register_worker_ref(str(kwargs.get("task_id") or ""), ref)
+            registered = await self._register_worker_ref(task_id, ref)
         except BaseException:
-            await self._guard_rejected_worker(ref)
+            await self._guard_rejected_worker(task_id, ref)
             raise
         if not registered:
-            await self._guard_rejected_worker(ref)
+            await self._guard_rejected_worker(task_id, ref)
             raise RuntimeError(f"Task {kwargs.get('task_id')} was cancelled before worker ref registration")
         return [ref]
 
-    async def _guard_rejected_worker(self, ref: Any) -> None:
-        settlement = asyncio.create_task(self._cancel_worker_and_wait(ref))
+    async def _guard_rejected_worker(self, task_id: str, ref: Any) -> None:
+        settlement = asyncio.create_task(self._cancel_worker_and_wait(task_id, ref))
         self._release_tasks.add(settlement)
         settlement.add_done_callback(self._release_tasks.discard)
         await asyncio.shield(settlement)
 
-    async def _cancel_worker_and_wait(self, ref: Any) -> None:
+    async def _cancel_worker_and_wait(self, task_id: str, ref: Any) -> None:
         """Keep the submission fenced until a rejected worker has settled."""
         try:
             ray.cancel(ref, recursive=True)
@@ -529,6 +530,20 @@ class IndexerPool:
             # the caller can safely release the content claim.
             pass
         await asyncio.gather(ref, return_exceptions=True)
+        await self._finish_rejected_submission(task_id)
+
+    async def _finish_rejected_submission(self, task_id: str) -> None:
+        method_names = getattr(self._task_state_manager, "_ray_actor_method_names", None)
+        if isinstance(method_names, (frozenset, list, set, tuple)) and "finish_rejected_submission" not in method_names:
+            return
+        method = getattr(self._task_state_manager, "finish_rejected_submission", None)
+        remote = getattr(method, "remote", None)
+        if remote is None:
+            return
+        await retry_idempotent_ray_actor_method(
+            lambda: remote(task_id),
+            task_description=f"finish_rejected_submission({task_id}) from indexer pool",
+        )
 
     async def _register_worker_ref(self, task_id: str, ref: Any) -> bool:
         if not task_id:

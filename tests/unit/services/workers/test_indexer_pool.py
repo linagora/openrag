@@ -1019,7 +1019,10 @@ def _bare_pool(workers: list) -> object:
     pool._claim_store = None
     pool._claim_store_lock = asyncio.Lock()
     pool._namespace = "openrag"
-    pool._task_state_manager = SimpleNamespace(set_object_ref=SimpleNamespace(remote=AsyncMock(return_value=True)))
+    pool._task_state_manager = SimpleNamespace(
+        set_object_ref=SimpleNamespace(remote=AsyncMock(return_value=True)),
+        finish_rejected_submission=SimpleNamespace(remote=AsyncMock(return_value=True)),
+    )
     return pool
 
 
@@ -1165,6 +1168,7 @@ async def test_pool_cancels_worker_when_ref_registration_is_rejected(
     worker.futures[0].set_result(None)
     with pytest.raises(RuntimeError, match="cancelled before worker ref registration"):
         await submission
+    pool._task_state_manager.finish_rejected_submission.remote.assert_awaited_once_with("task-1")
     await _settle_pool_release_tasks(pool)
 
 
@@ -1191,6 +1195,7 @@ async def test_pool_waits_for_worker_when_ref_registration_fails(
     worker.futures[0].set_result(None)
     with pytest.raises(RuntimeError, match="task state unavailable"):
         await submission
+    pool._task_state_manager.finish_rejected_submission.remote.assert_awaited_once_with("task-1")
     await _settle_pool_release_tasks(pool)
 
 
@@ -1218,6 +1223,7 @@ async def test_rejected_worker_settlement_survives_submit_cancellation(
 
     assert worker.futures[0].done() is False
     await _settle_pool_release_tasks(pool, worker.futures[0])
+    pool._task_state_manager.finish_rejected_submission.remote.assert_awaited_once_with("task-1")
     assert pool._inflight == [0]
 
 
