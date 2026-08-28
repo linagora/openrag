@@ -295,9 +295,7 @@ class TaskStateManager:
         ref = info.object_ref.get("ref") if isinstance(info.object_ref, dict) else info.object_ref
         submission_started_at = getattr(info, "submission_started_at", None)
         if isinstance(submission_started_at, (int, float)):
-            registration_expired = time.time() >= (
-                submission_started_at + _CONTENT_CLAIM_REGISTRATION_GRACE_SECONDS
-            )
+            registration_expired = time.time() >= (submission_started_at + _CONTENT_CLAIM_REGISTRATION_GRACE_SECONDS)
         else:
             registration_expired = _content_claim_registration_expired(info.details or {})
         if (

@@ -324,10 +324,13 @@ async def test_unaccepted_submission_fence_expires_after_handoff_grace(monkeypat
 
     assert await manager.expire_refless_task_if_stale("claim-task") is True
     assert await manager.get_state("claim-task") == "FAILED"
-    assert await manager.get_matching_active_task_refs_v2(
-        partition="tenant-a",
-        file_id="file-2",
-    ) == {}
+    assert (
+        await manager.get_matching_active_task_refs_v2(
+            partition="tenant-a",
+            file_id="file-2",
+        )
+        == {}
+    )
     assert await manager.get_state("delete-task") == "FAILED"
     assert await manager.get_content_claim_task_ids(partition="tenant-a") == set()
 
