@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import ray
-from core.models.catalog import TERMINAL_TASK_STATES, DocumentStatus
+from core.models.catalog import TASK_FINISHED_AT_METADATA_KEY, TERMINAL_TASK_STATES, DocumentStatus
 
 ACTIVE_INDEXING_STATES = frozenset({"QUEUED", "SERIALIZING"})
 # Legacy indexing states removed from the public state machine in #721. Current
@@ -187,6 +187,19 @@ class TaskInfo:
     object_ref: ray.ObjectRef | None = None
 
 
+def _object_ref_is_ready(object_ref: Any) -> bool:
+    ref = object_ref.get("ref") if isinstance(object_ref, dict) else object_ref
+    if ref is None:
+        return False
+    try:
+        ready, _ = ray.wait([ref], num_returns=1, timeout=0)
+    except Exception:
+        # Readiness uncertainty must preserve the claim; reclaiming it could
+        # let a second upload run alongside a worker that is still active.
+        return False
+    return bool(ready)
+
+
 @ray.remote(concurrency_groups={"set": 1000, "get": 1000, "queue_info": 1000})
 class TaskStateManager:
     def __init__(self) -> None:
@@ -330,13 +343,8 @@ class TaskStateManager:
                 return False
             object_ref = info.object_ref
             ref = object_ref.get("ref") if isinstance(object_ref, dict) else object_ref
-            if ref is not None:
-                try:
-                    ready, _ = ray.wait([ref], num_returns=1, timeout=0)
-                except Exception:
-                    return False
-                if not ready:
-                    return False
+            if ref is not None and not _object_ref_is_ready(object_ref):
+                return False
             info.object_ref = None
             _save_recoverable_task(task_id, info)
             return True
@@ -461,6 +469,10 @@ class TaskStateManager:
                     info.state == "CANCELLED" and info.object_ref is not None
                 )
                 if not owns_claim:
+                    continue
+                metadata = (info.details or {}).get("metadata")
+                has_finished = isinstance(metadata, dict) and TASK_FINISHED_AT_METADATA_KEY in metadata
+                if has_finished or _object_ref_is_ready(info.object_ref):
                     continue
                 details = info.details or {}
                 if details and details.get("partition") != partition:

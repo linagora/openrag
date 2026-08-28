@@ -138,13 +138,15 @@ async def test_delete_cleanup_still_fences_legacy_indexing_states() -> None:
 
 
 @pytest.mark.asyncio
-async def test_content_claim_owners_include_unsettled_cancellations() -> None:
+async def test_content_claim_owners_include_only_unsettled_workers(monkeypatch) -> None:
     manager = _task_state_manager()
 
     for task_id, partition in (
         ("active-task", "tenant-a"),
         ("cancelled-task", "tenant-a"),
         ("settled-cancelled-task", "tenant-a"),
+        ("finished-active-task", "tenant-a"),
+        ("ready-active-task", "tenant-a"),
         ("completed-task", "tenant-a"),
         ("other-partition-task", "tenant-b"),
     ):
@@ -152,15 +154,24 @@ async def test_content_claim_owners_include_unsettled_cancellations() -> None:
             task_id,
             file_id=f"{task_id}-file",
             partition=partition,
-            metadata={},
+            metadata=(
+                {"_openrag_job_finished_at": "2026-08-28T08:00:00+00:00"} if task_id == "finished-active-task" else {}
+            ),
             user_id=None,
         )
 
     cancelled_ref = {"ref": object()}
+    ready_ref = object()
     await manager.set_object_ref("cancelled-task", cancelled_ref)
+    await manager.set_object_ref("ready-active-task", {"ref": ready_ref})
     await manager.set_cancelled_if_active("cancelled-task")
     await manager.set_cancelled_if_active("settled-cancelled-task")
     await manager.set_state("completed-task", "COMPLETED")
+    monkeypatch.setattr(
+        task_state_module.ray,
+        "wait",
+        lambda refs, **_kwargs: ([ready_ref], []) if refs == [ready_ref] else ([], refs),
+    )
 
     assert await manager.get_content_claim_task_ids(partition="tenant-a") == {
         "active-task",
