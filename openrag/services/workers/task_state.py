@@ -510,24 +510,6 @@ class TaskStateManager:
             return True
 
     @ray.method(concurrency_group="set")
-    async def accept_worker_submission(self, task_id: str) -> bool:
-        """Replace the bounded handoff fence once the pool can launch work."""
-        with self.lock:
-            info = self.tasks.get(task_id)
-            if info is None:
-                return False
-            if info.state == "FAILED" and info.error == STALE_REFLESS_TASK_ERROR:
-                return False
-            if self._expire_refless_task_if_stale_locked(task_id, info):
-                return False
-            if info.state not in CANCELLABLE_INDEXING_STATES | TERMINAL_INDEXING_STATES:
-                return False
-            info.worker_submitted = True
-            info.submission_started_at = None
-            _save_recoverable_task(task_id, info)
-            return True
-
-    @ray.method(concurrency_group="set")
     async def set_object_ref(self, task_id: str, object_ref: ray.ObjectRef) -> bool:
         with self.lock:
             info = self._ensure_task(task_id)

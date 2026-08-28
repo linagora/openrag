@@ -510,14 +510,6 @@ class IndexerPool:
         self._release_tasks.add(task)
         task.add_done_callback(self._release_tasks.discard)
         try:
-            accepted = await self._accept_worker_submission(task_id)
-        except BaseException:
-            await self._guard_rejected_worker(task_id, ref)
-            raise
-        if not accepted:
-            await self._guard_rejected_worker(task_id, ref)
-            raise RuntimeError(f"Task {task_id} was cancelled before the pool accepted it")
-        try:
             registered = await self._register_worker_ref(task_id, ref)
         except BaseException:
             await self._guard_rejected_worker(task_id, ref)
@@ -577,21 +569,6 @@ class IndexerPool:
             task_description=f"set_object_ref({task_id}) from indexer pool",
         )
         return registered is not False
-
-    async def _accept_worker_submission(self, task_id: str) -> bool:
-        task_state_manager = self._task_state_actor()
-        method_names = getattr(task_state_manager, "_ray_actor_method_names", None)
-        if isinstance(method_names, (frozenset, list, set, tuple)) and "accept_worker_submission" not in method_names:
-            return True
-        method = getattr(task_state_manager, "accept_worker_submission", None)
-        remote = getattr(method, "remote", None)
-        if remote is None:
-            return True
-        accepted = await retry_idempotent_ray_actor_method(
-            lambda: remote(task_id),
-            task_description=f"accept_worker_submission({task_id}) from indexer pool",
-        )
-        return accepted is True
 
     def _task_state_actor(self) -> Any:
         if self._task_state_manager is None:
