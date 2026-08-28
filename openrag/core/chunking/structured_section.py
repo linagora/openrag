@@ -50,6 +50,7 @@ from core.chunking.recursive import (
     BaseChunker,
     dewrap_paragraphs,
     is_placeholder_image,
+    strip_placeholder_markers,
 )
 from core.chunking.registry import chunking_registry
 from core.models.chunk import Chunk, ChunkType
@@ -385,8 +386,15 @@ class StructuredSectionChunker(BaseChunker):
                 # Non-informative images (the captioner's "[Image Placeholder]")
                 # are dropped, matching the recursive chunker — otherwise every
                 # blank logo becomes a chunk.
-                if element.type == "image" and is_placeholder_image(element.content):
-                    continue
+                if element.type == "image":
+                    if is_placeholder_image(element.content):
+                        continue
+                    # Keep the caption, not the marker: the dense vector is
+                    # computed over the chunk text and that text is what
+                    # reaches the LLM, so a retained "[Image Placeholder]"
+                    # would read as caption content. (#866 does the same on the
+                    # recursive path.)
+                    element.content = strip_placeholder_markers(element.content)
                 # Small tables / image captions inline with the surrounding prose
                 # (like recursive's _prepare_md_elements) so a slide's handful of
                 # logos don't each become their own tiny chunk; only large ones
@@ -421,7 +429,17 @@ class StructuredSectionChunker(BaseChunker):
                     # and prepend_heading_path=False removed the last copy.
                     # Coverage against the source ran 91-99% where
                     # recursive_splitter ran ~100%.
-                    add_line(text, page, heading=True)
+                    #
+                    # The body copy keeps the source line's markdown — the
+                    # ``#`` depth is the cheapest signal of nesting there is,
+                    # the chunk is markdown-rendered downstream, and
+                    # recursive_splitter keeps heading lines verbatim, so a
+                    # flattened copy would silently degrade every chunk of a
+                    # partition that switched. Only the inline HTML the parsers
+                    # leave behind (Marker's ``<span id="page-46-0">`` anchors)
+                    # is removed. ``_clean_heading`` output stays the right
+                    # thing for the breadcrumb and ``hierarchy_path``.
+                    add_line(_HTML_TAG_RE.sub("", raw_line).strip(), page, heading=True)
                     buf_path = list(stack_path(stack))
                     continue
 

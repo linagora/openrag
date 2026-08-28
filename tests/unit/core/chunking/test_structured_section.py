@@ -597,3 +597,33 @@ def test_paragraph_breaks_survive_into_the_body():
     # Same-line only: ".\n\n**Section**" is the correct shape, ". **Section**" is not.
     welded = re.findall(r"\.[ \t]+\*\*[^*]+\*\*", joined)
     assert not welded, f"headings welded into prose lines: {welded[:3]}"
+
+
+def test_heading_markdown_survives_into_the_body():
+    """The body copy of a heading keeps its ``#`` markers: the depth is the
+    cheapest signal of nesting, the chunk is markdown-rendered downstream, and
+    recursive_splitter keeps heading lines verbatim — a flattened copy would
+    silently degrade every chunk of a partition that switched."""
+    doc = _doc(
+        "### List of Figures\n\nFigure 1.1: Approaches ... 10\n\n### Acknowledgements\n\nThe authors thank the policymakers."
+    )
+    body = "\n".join(c.content or "" for c in _chunker(chunk_size=512).chunk(doc))
+    assert "### List of Figures" in body
+    assert "### Acknowledgements" in body
+
+
+def test_heading_body_copy_drops_parser_html_anchors():
+    """Marker leaves ``<span id="page-46-0">`` anchors in heading lines; those
+    are parser noise, unlike the markdown itself."""
+    doc = _doc('## <span id="page-5-0"></span>Corporate Responsibility\n\nWe have chosen to act.')
+    body = "\n".join(c.content or "" for c in _chunker(chunk_size=512).chunk(doc))
+    assert "## Corporate Responsibility" in body
+    assert "<span" not in body
+
+
+def test_image_placeholder_marker_never_reaches_the_chunk_text():
+    caption = "[Image Placeholder]\n\n92 000 COLLABORATEURS 27 000 AVTOVAZ " + " ".join(f"detail{i}" for i in range(60))
+    doc = _doc(f"Article L1\nIntro.\n\n<image_description>\n\n{caption}\n\n</image_description>\n")
+    joined = "\n".join(c.text for c in _chunker(chunk_size=512).chunk(doc))
+    assert "92 000 COLLABORATEURS" in joined
+    assert "[Image Placeholder]" not in joined
