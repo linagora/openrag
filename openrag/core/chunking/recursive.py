@@ -55,13 +55,16 @@ def is_placeholder_image(content: str) -> bool:
     one was dropped.)
 
     So a block is only skipped when nothing but the wrapper and the marker(s)
-    remains. Anything with actual characters left is real caption text and is
-    kept — see ``strip_placeholder_markers`` for removing the marker from it.
+    remains. Anything else is caption text and is kept — see
+    ``strip_placeholder_markers`` for removing the marker from it. The test is
+    whitespace, not alphanumerics: a caption reduced to "©" or an em dash is
+    still content, and a rule about not dropping content should not carve out
+    an exception for symbols.
     """
     if _IMAGE_PLACEHOLDER_MARKER not in content.lower():
         return False
     remainder = _IMAGE_PLACEHOLDER_RE.sub(" ", _IMAGE_BLOCK_TAG_RE.sub(" ", content))
-    return not any(char.isalnum() for char in remainder)
+    return not remainder.strip()
 
 
 def strip_placeholder_markers(content: str) -> str:

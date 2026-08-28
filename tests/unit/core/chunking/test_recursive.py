@@ -354,3 +354,13 @@ def test_mixed_image_block_survives_chunking():
     joined = "\n".join(c.text for c in splitter.chunk(doc, partition="p"))
     assert "92 000 COLLABORATEURS" in joined, "real caption text dropped alongside the placeholder"
     assert "[Image Placeholder]" not in joined, "the marker reached the index as if it were caption text"
+
+
+def test_symbol_only_caption_is_not_treated_as_a_placeholder():
+    """A caption reduced to punctuation is still content. Testing for
+    alphanumerics rather than whitespace would carve out an exception to the
+    rule this guard exists to enforce."""
+    from core.chunking.recursive import is_placeholder_image
+
+    assert not is_placeholder_image("<image_description>\n\n[Image Placeholder]\n\n©\n\n</image_description>")
+    assert is_placeholder_image("<image_description>\n\n[Image Placeholder]\n\n   \n\n</image_description>")
