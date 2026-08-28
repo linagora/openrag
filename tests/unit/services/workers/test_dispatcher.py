@@ -899,6 +899,46 @@ async def test_dispatch_indexing_marks_task_failed_when_submit_fails() -> None:
 
 
 @pytest.mark.asyncio
+async def test_dispatch_indexing_keeps_claim_when_submission_outcome_is_unknown() -> None:
+    from services.workers.dispatcher import WorkerDispatcher
+
+    repo = _document_repo()
+    pool = MagicMock()
+    pool.submit = MagicMock()
+    pool.submit.remote = AsyncMock(side_effect=TimeoutError("submit timed out"))
+    tsm = _task_state_manager()
+    dispatcher = WorkerDispatcher(
+        pool=pool,
+        task_state_manager=tsm,
+        completion_tracker=_completion_tracker(),
+        vector_store=_vector_store(),
+        document_repo=repo,
+        workspace_repo=_workspace_repo(),
+        collection="default",
+    )
+
+    with (
+        patch("services.workers.dispatcher.uuid") as mock_uuid,
+        patch("services.workers.ray_utils.ray.cancel"),
+    ):
+        mock_uuid.uuid4.return_value.hex = "task-1"
+        with pytest.raises(TimeoutError, match="submit timed out"):
+            await dispatcher.dispatch_indexing(
+                path="/data/report.txt",
+                metadata={"file_id": "file-1", "content_sha256": "abc123"},
+                partition="tenant-a",
+                user={"id": 42},
+                workspace_ids=None,
+                replace=False,
+            )
+
+    tsm.begin_worker_submission.remote.assert_awaited_once_with("task-1")
+    tsm.set_details.remote.assert_not_awaited()
+    tsm.set_failed_if_not_cancelled.remote.assert_not_awaited()
+    repo.release_content_sha256_claim.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_dispatch_indexing_cancels_worker_when_ref_registration_fails() -> None:
     from services.workers.dispatcher import WorkerDispatcher
 

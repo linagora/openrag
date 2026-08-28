@@ -507,12 +507,18 @@ class IndexerPool:
         try:
             registered = await self._register_worker_ref(str(kwargs.get("task_id") or ""), ref)
         except BaseException:
-            await self._cancel_worker_and_wait(ref)
+            await self._guard_rejected_worker(ref)
             raise
         if not registered:
-            await self._cancel_worker_and_wait(ref)
+            await self._guard_rejected_worker(ref)
             raise RuntimeError(f"Task {kwargs.get('task_id')} was cancelled before worker ref registration")
         return [ref]
+
+    async def _guard_rejected_worker(self, ref: Any) -> None:
+        settlement = asyncio.create_task(self._cancel_worker_and_wait(ref))
+        self._release_tasks.add(settlement)
+        settlement.add_done_callback(self._release_tasks.discard)
+        await asyncio.shield(settlement)
 
     async def _cancel_worker_and_wait(self, ref: Any) -> None:
         """Keep the submission fenced until a rejected worker has settled."""

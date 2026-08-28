@@ -1195,6 +1195,33 @@ async def test_pool_waits_for_worker_when_ref_registration_fails(
 
 
 @pytest.mark.asyncio
+async def test_rejected_worker_settlement_survives_submit_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import services.workers.indexer_pool as module
+
+    worker = _FakeWorker()
+    pool = _bare_pool([worker])
+    pool._task_state_manager.set_object_ref.remote.return_value = False
+    cancellation_requested = asyncio.Event()
+    monkeypatch.setattr(
+        module.ray,
+        "cancel",
+        MagicMock(side_effect=lambda *_args, **_kwargs: cancellation_requested.set()),
+    )
+
+    submission = asyncio.create_task(pool.submit(task_id="task-1"))
+    await asyncio.wait_for(cancellation_requested.wait(), timeout=1)
+    submission.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await submission
+
+    assert worker.futures[0].done() is False
+    await _settle_pool_release_tasks(pool, worker.futures[0])
+    assert pool._inflight == [0]
+
+
+@pytest.mark.asyncio
 async def test_pool_releases_inflight_when_task_settles() -> None:
     workers = [_FakeWorker(), _FakeWorker()]
     pool = _bare_pool(workers)

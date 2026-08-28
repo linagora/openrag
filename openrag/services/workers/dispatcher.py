@@ -284,6 +284,7 @@ class WorkerDispatcher(IndexingDispatcher):
             )
 
         task: Any | None = None
+        submission_started = False
         try:
             worker_metadata = dict(metadata)
             if claimed_content:
@@ -315,6 +316,7 @@ class WorkerDispatcher(IndexingDispatcher):
                     )
             if not await self._begin_worker_submission(task_id):
                 raise RuntimeError(f"Task {task_id} was rejected before worker submission")
+            submission_started = True
             task = await self._submit_indexing_task(
                 task_id,
                 submit_kwargs,
@@ -329,17 +331,19 @@ class WorkerDispatcher(IndexingDispatcher):
                 raise RuntimeError(f"Task {task_id} was cancelled before worker ref registration")
             self._track_completion(task_id, task)
         except BaseException:
-            mark_submit_failed = True
+            submission_outcome_unknown = claimed_content and submission_started and task is None
+            mark_submit_failed = not submission_outcome_unknown
             try:
                 if task is not None:
                     mark_submit_failed = await self._cancel_submitted_task(task_id, task)
                     if mark_submit_failed:
                         await self._cleanup_submitted_vectors(task_id, metadata=metadata, partition=partition)
-                await self._record_finished_at(task_id, task_details)
-                if mark_submit_failed:
-                    await self._mark_submit_failed(task_id, traceback.format_exc())
+                if not submission_outcome_unknown:
+                    await self._record_finished_at(task_id, task_details)
+                    if mark_submit_failed:
+                        await self._mark_submit_failed(task_id, traceback.format_exc())
             finally:
-                if claimed_content and (task is None or mark_submit_failed):
+                if claimed_content and not submission_outcome_unknown and (task is None or mark_submit_failed):
                     await self._document_repo.release_content_sha256_claim(
                         file_id=file_id,
                         partition=partition,
