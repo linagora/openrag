@@ -353,22 +353,22 @@ describe("MOSS transcript output extra field", () => {
   });
 
   it("splits and merges the MOSS-only response formatting control", () => {
-    const { mossTimestamped, extra } = splitModelEndpointMossTranscriptOutput({
+    const { mossTranscriptOutputFormat, extra } = splitModelEndpointMossTranscriptOutput({
       transcript_output_format: "moss_timestamped",
       temperature: 0,
     });
 
-    expect(mossTimestamped).toBe(true);
+    expect(mossTranscriptOutputFormat).toBe("moss_timestamped");
     expect(extra).toEqual({ temperature: 0 });
-    expect(mergeModelEndpointMossTranscriptOutput(extra, true)).toEqual({
+    expect(mergeModelEndpointMossTranscriptOutput(extra, "moss_speaker_aware")).toEqual({
       temperature: 0,
-      transcript_output_format: "moss_timestamped",
+      transcript_output_format: "moss_speaker_aware",
     });
   });
 
   it("removes the output control when raw MOSS response is selected", () => {
     expect(
-      mergeModelEndpointMossTranscriptOutput({ transcript_output_format: "moss_timestamped", temperature: 0 }, false),
+      mergeModelEndpointMossTranscriptOutput({ transcript_output_format: "moss_timestamped", temperature: 0 }, "raw"),
     ).toEqual({ temperature: 0 });
   });
 });
