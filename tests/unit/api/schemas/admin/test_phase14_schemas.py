@@ -46,6 +46,30 @@ def test_create_stt_endpoint_requires_a_model_and_accepts_language_hint():
         )
 
 
+def test_create_stt_endpoint_accepts_the_moss_timestamped_output_format():
+    request = CreateModelEndpointRequest(
+        name="moss",
+        model_type="stt",
+        endpoint="http://moss:8000/v1",
+        model_name="moss-transcribe-diarize",
+        extra={"transcript_output_format": "moss_timestamped"},
+    )
+
+    assert request.extra == {"transcript_output_format": "moss_timestamped"}
+
+
+@pytest.mark.parametrize("output_format", ["raw", "moss", "", True])
+def test_create_stt_endpoint_rejects_unknown_transcript_output_format(output_format):
+    with pytest.raises(ValidationError, match="extra.transcript_output_format"):
+        CreateModelEndpointRequest(
+            name="moss",
+            model_type="stt",
+            endpoint="http://moss:8000/v1",
+            model_name="moss-transcribe-diarize",
+            extra={"transcript_output_format": output_format},
+        )
+
+
 @pytest.mark.parametrize("model_type", ["embedding", "chat", "vision", ""])
 def test_create_model_endpoint_rejects_unknown_type(model_type):
     """Only supported endpoint types are accepted."""
