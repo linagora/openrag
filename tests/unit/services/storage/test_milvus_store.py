@@ -21,7 +21,7 @@ from pymilvus import MilvusException
 from openrag.core.config.infrastructure import VectorDBConfig
 from openrag.core.models.chunk import Chunk, ChunkType
 from openrag.core.utils.exceptions import VDBSearchError
-from openrag.services.storage.milvus_store import MilvusVectorStore
+from openrag.services.storage.milvus_store import MilvusVectorStore, analyzer_params
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -727,3 +727,33 @@ class TestParseSearchResponse:
 
     def test_empty_response_is_empty_list(self, store: MilvusVectorStore) -> None:
         assert store._parse_search_response([]) == []
+
+
+# ---------------------------------------------------------------------------
+# BM25 text analyzer
+# ---------------------------------------------------------------------------
+
+
+class TestAnalyzerParams:
+    """A missing filter here silently skews BM25 rather than raising."""
+
+    def test_declares_a_lowercase_filter(self) -> None:
+        # A custom analyzer inherits nothing; without this, `Rapport` and
+        # `rapport` are distinct BM25 terms.
+        assert "lowercase" in analyzer_params["filter"]
+
+    def test_lowercase_precedes_the_stop_filter(self) -> None:
+        # The `_english_` / `_french_` lists are lowercase, so they only match
+        # folded tokens.
+        filters = analyzer_params["filter"]
+        stop_index = next(i for i, f in enumerate(filters) if isinstance(f, dict) and f.get("type") == "stop")
+        assert filters.index("lowercase") < stop_index
+
+    def test_wired_onto_the_text_field(self, store: MilvusVectorStore) -> None:
+        store._embedding_dimension = 8
+        store._create_schema()
+
+        add_field = store._client.create_schema.return_value.add_field
+        text_calls = [c for c in add_field.call_args_list if c.kwargs.get("field_name") == "text"]
+        assert len(text_calls) == 1
+        assert text_calls[0].kwargs["analyzer_params"] is analyzer_params

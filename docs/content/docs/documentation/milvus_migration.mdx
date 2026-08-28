@@ -238,6 +238,40 @@ Migrations are versioned. The runner reads the current schema version stored in 
 Stop the OpenRAG application before running any migration.
 :::
 
+### Version 2 — case-insensitive BM25 analyzer
+
+Schema version 2 adds the `lowercase` filter to the `text` analyzer, so BM25 stops treating `Rapport` and `rapport` as different terms. Milvus applies the analyzer to the query as well as to the indexed text, so before this fix a case mismatch scored zero on the lexical leg.
+
+It **rebuilds** the collection rather than altering it: Milvus 3.0 refuses to change `analyzer_params` while `enable_match` is set (and `enable_match` is itself immutable), and [attaching a BM25 function](https://milvus.io/docs/add-fields-to-an-existing-collection.md) to an existing collection — which would backfill the sparse column — requires [Storage V3](https://milvus.io/docs/storage-v3.md), off by default. The migration copies the rows into `<collection>_v2_rebuild`, checks the counts, then swaps the names, keeping the old collection as `<collection>_v1_backup`.
+
+:::caution[Plan for the rebuild]
+- **Disk** — both copies exist at once; allow roughly twice the collection size until the backup is dropped.
+- **No re-embedding** — dense vectors are copied verbatim and the sparse ones are regenerated server-side on insert, which is what applies the new analyzer.
+- **Chunk IDs change** — `_id` is `auto_id`. Postgres keys on `file_id`, but a chunk ID handed out earlier by the MCP `get_chunk_by_id` tool no longer resolves.
+- **`hybrid_search: false`** deployments have no BM25 leg and are only re-stamped — no rebuild.
+- A failed copy leaves the original untouched; drop the partial `<collection>_v2_rebuild` and retry.
+- The version check runs on the indexing path only. An un-migrated deployment still boots and still answers searches — with the old analyzer — and fails the first upload with `Collection ... is at schema version 1 but the application requires version 2`.
+:::
+
+Once validated, drop the backup:
+
+```python
+from pymilvus import MilvusClient
+
+MilvusClient(uri="http://localhost:19530").drop_collection("<collection>_v1_backup")
+```
+
+:::note[Where to run these]
+The commands below run from `infra/compose/`. From the repo root, point Compose at the file (and at your project name, if you use one):
+
+```bash
+docker compose -p <project> -f infra/compose/docker-compose.yaml run --no-deps --rm --build --entrypoint "" openrag \
+    uv run python services/persistence/migrations/milvus/migrate.py --dry-run
+```
+
+The migration runner is a file, not a package — pass the full path to `migrate.py`, and keep Milvus running.
+:::
+
 ### Step 1 — Start only the Milvus container
 
 ```bash
@@ -267,7 +301,7 @@ docker compose --profile cpu run --no-deps --rm --build --entrypoint "" openrag-
   </TabItem>
 </Tabs>
 
-Review the output to confirm which migrations are pending and what changes they would apply.
+Review the output to confirm which migrations are pending and what changes they would apply. The migration scripts ship **inside the image**, which is why `--build` is there: if the `Discovered N migration(s)` line does not list the migration you expect, the image is stale — and on a shared host another checkout may have rebuilt the same `linagoraai/openrag` tag, so add `--build` to the apply step too.
 
 ### Step 3 — Apply all pending migrations
 
@@ -337,7 +371,10 @@ docker compose --profile cpu run --no-deps --rm --entrypoint "" openrag-cpu \
 
 ### Rollback
 
-Milvus does not support dropping fields. A downgrade only removes indexes and resets the version stamp — fields remain in the schema but are unused by the application:
+What a downgrade can undo depends on the migration:
+
+- **Version 2 → 1** swaps the `<collection>_v1_backup` collection back into place and sets the version stamp to 1. The version-2 collection is kept aside as `<collection>_v2_rolled_back` rather than dropped, so nothing is lost — but this is a point-in-time rollback: **rows indexed after the upgrade exist only in the collection set aside**. The rollback needs that backup collection; if it has already been dropped, the only way back is to recreate the collection with the old analyzer and re-index.
+- **Version 1 → 0** only removes indexes and resets the version stamp, since Milvus does not support dropping fields — they remain in the schema but are unused by the application.
 
 <Tabs>
   <TabItem label="GPU">

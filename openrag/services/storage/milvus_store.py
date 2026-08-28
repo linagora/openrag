@@ -115,12 +115,17 @@ _SEARCH_RESULT_DROPPED_KEYS = frozenset({"vector"})
 #: stays under Milvus's result-size cap for any realistic embedder.
 _UNKNOWN_VECTOR_DIM = 4096
 
-#: BM25 analyzer params for the ``text`` field — standard tokenizer plus
-#: OpenRAG-specific stop words so chunk-boundary / image-placeholder markers
-#: don't pollute lexical scores.
+#: BM25 analyzer for the ``text`` field. A custom analyzer (``tokenizer`` +
+#: ``filter``) inherits nothing, unlike the built-in ``{"type": "standard"}``,
+#: so ``lowercase`` is listed explicitly and must come first: Milvus runs this
+#: analyzer on the query too, and the ``_english_`` / ``_french_`` lists are
+#: lowercase. The marker stop words are inert — the tokenizer splits
+#: ``<image_description>`` into ``image`` + ``description`` — and are left as a
+#: no-op rather than stop-listed as those (far too common) words.
 analyzer_params: dict[str, Any] = {
     "tokenizer": "standard",
     "filter": [
+        "lowercase",
         {
             "type": "stop",
             "stop_words": [
@@ -133,7 +138,7 @@ analyzer_params: dict[str, Any] = {
                 "[CHUNK_END]",
                 "[CONTEXT]",
             ],
-        }
+        },
     ],
 }
 

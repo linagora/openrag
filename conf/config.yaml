@@ -66,7 +66,7 @@ vectordb:
   hybrid_search: true
   enable: true
   timeout: 120.0 # per-request timeout (s) for the Milvus sync/async clients
-  schema_version: 1 # Increment when the collection schema changes and a migration is required
+  schema_version: 2 # Increment when the collection schema changes and a migration is required
 
 # --- Relational Database (PostgreSQL) ---
 # Env: POSTGRES_HOST, POSTGRES_PORT, POSTGRES_USER, POSTGRES_PASSWORD,
