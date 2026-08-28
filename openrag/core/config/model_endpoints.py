@@ -61,6 +61,13 @@ STT_LANGUAGE_KEY = "language"
 # OpenAI-compatible server.
 STT_TRANSCRIPT_OUTPUT_FORMAT_KEY = "transcript_output_format"
 MOSS_TIMESTAMPED_TRANSCRIPT_OUTPUT_FORMAT = "moss_timestamped"
+MOSS_SPEAKER_AWARE_TRANSCRIPT_OUTPUT_FORMAT = "moss_speaker_aware"
+MOSS_TRANSCRIPT_OUTPUT_FORMATS = frozenset(
+    {
+        MOSS_TIMESTAMPED_TRANSCRIPT_OUTPUT_FORMAT,
+        MOSS_SPEAKER_AWARE_TRANSCRIPT_OUTPUT_FORMAT,
+    }
+)
 
 # Provenance marker written into an endpoint's ``extra`` when the seeder creates
 # it from env. It is what lets boot-time sync find *its own* row again after the
@@ -141,7 +148,9 @@ __all__ = [
     "LLM_OUTPUT_TOKENS_KEY",
     "STT_LANGUAGE_KEY",
     "STT_TRANSCRIPT_OUTPUT_FORMAT_KEY",
+    "MOSS_SPEAKER_AWARE_TRANSCRIPT_OUTPUT_FORMAT",
     "MOSS_TIMESTAMPED_TRANSCRIPT_OUTPUT_FORMAT",
+    "MOSS_TRANSCRIPT_OUTPUT_FORMATS",
     "ModelEndpointConfig",
     "ModelsConfig",
     "ModelEndpointRow",

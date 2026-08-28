@@ -46,16 +46,17 @@ def test_create_stt_endpoint_requires_a_model_and_accepts_language_hint():
         )
 
 
-def test_create_stt_endpoint_accepts_the_moss_timestamped_output_format():
+@pytest.mark.parametrize("output_format", ["moss_timestamped", "moss_speaker_aware"])
+def test_create_stt_endpoint_accepts_supported_moss_output_formats(output_format):
     request = CreateModelEndpointRequest(
         name="moss",
         model_type="stt",
         endpoint="http://moss:8000/v1",
         model_name="moss-transcribe-diarize",
-        extra={"transcript_output_format": "moss_timestamped"},
+        extra={"transcript_output_format": output_format},
     )
 
-    assert request.extra == {"transcript_output_format": "moss_timestamped"}
+    assert request.extra == {"transcript_output_format": output_format}
 
 
 @pytest.mark.parametrize("output_format", ["raw", "moss", "", True])

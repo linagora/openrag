@@ -27,6 +27,7 @@ if "pydub" not in sys.modules:
         sys.modules["pydub"] = fake_pydub
 
 from core.config.model_endpoints import (  # noqa: E402
+    MOSS_SPEAKER_AWARE_TRANSCRIPT_OUTPUT_FORMAT,
     MOSS_TIMESTAMPED_TRANSCRIPT_OUTPUT_FORMAT,
     STT_TRANSCRIPT_OUTPUT_FORMAT_KEY,
     ModelEndpointConfig,
@@ -259,6 +260,26 @@ class TestParse:
         assert result.text_blocks[0].text == (
             "[00:00:01.120] [S01] Hello everyone. [00:00:02.320]\n[00:00:02.680] [S02] This week. [00:00:04.320]"
         )
+
+    @pytest.mark.asyncio
+    async def test_moss_speaker_aware_output_hides_a_single_speaker(self, mock_openai_client):
+        mock_openai_client.audio.transcriptions.create.return_value = MagicMock(
+            text="[1.12-2.32][S1] Hello everyone.[2.68-4.32][S01] This week."
+        )
+        endpoint = ModelEndpointConfig(
+            endpoint="http://x",
+            model_name="moss-transcribe-diarize",
+            batch_size=1,
+            timeout=120,
+            extra={
+                "api_key": "k",
+                STT_TRANSCRIPT_OUTPUT_FORMAT_KEY: MOSS_SPEAKER_AWARE_TRANSCRIPT_OUTPUT_FORMAT,
+            },
+        )
+
+        result = await _client(mock_openai_client, transcription_endpoint_resolver=lambda: endpoint).parse(_audio_doc())
+
+        assert result.text_blocks[0].text == "Hello everyone.\nThis week."
 
     @pytest.mark.asyncio
     async def test_moss_output_stays_raw_without_the_moss_format_option(self, mock_openai_client):
