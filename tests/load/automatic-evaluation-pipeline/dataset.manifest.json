@@ -1,0 +1,101 @@
+{
+    "run_id": "gen-20260724-075730",
+    "created_at": "2026-07-24T08:09:52.357317+00:00",
+    "schema_version": "2.0",
+    "prompt_version": "qgen-v3",
+    "partition": "test4",
+    "generator_model": "Mistral-Small-3.2-24B-Instruct-2506-FP8",
+    "base_url": "https://chat.lucie.ovh.linagora.com/v1/",
+    "critic_model": "Mistral-Small-3.2-24B-Instruct-2506-FP8",
+    "critic_base_url": "https://chat.lucie.ovh.linagora.com/v1/",
+    "critic_is_generator": true,
+    "language": "en",
+    "profile": "capability_suite",
+    "clustering": {
+        "method": "hdbscan",
+        "umap_n_neighbors": 15,
+        "umap_n_components": 5,
+        "umap_min_dist": 0.1,
+        "umap_metric": "cosine",
+        "umap_random_state": 42,
+        "kmeans_random_state": 42,
+        "kmeans_n_init": 10,
+        "dbscan_eps": 0.1,
+        "dbscan_min_samples": 3,
+        "dbscan_metric": "cosine"
+    },
+    "generation_params": {
+        "temperature": 0.2,
+        "seed": 42,
+        "n_min": 1,
+        "n_max": 3,
+        "n_questions_per_cluster": 2,
+        "n_unanswerable_per_cluster": 1
+    },
+    "filtration": {
+        "enabled": true,
+        "answerability_threshold": 0.7,
+        "self_containment_threshold": 0.7,
+        "clarity_threshold": 0.6,
+        "require_faithful": true,
+        "max_quality_retries": 2,
+        "drop_failed": true,
+        "critic_temperature": 0.0
+    },
+    "typing": {
+        "enabled": true,
+        "distribution": {
+            "single_hop_specific": 0.4,
+            "multi_hop_specific": 0.25,
+            "reasoning": 0.2,
+            "comparative": 0.15
+        }
+    },
+    "chunk_filter": {
+        "enabled": true,
+        "min_chars": 200,
+        "boilerplate_fraction": 0.5,
+        "min_citation_lines": 3
+    },
+    "capability_suite": {
+        "per_category": 30,
+        "enabled_categories": [
+            "table_lookup",
+            "multi_hop_retrieval",
+            "cross_document_reasoning",
+            "citation_grounding",
+            "unanswerable",
+            "long_context_retrieval",
+            "numerical_reasoning"
+        ],
+        "count_overrides": {},
+        "oversample": 1.4,
+        "max_rounds": 8,
+        "long_context_min_chunks": 5,
+        "long_context_max_chunks": 10,
+        "numeric_min_tokens": 6
+    },
+    "counts": {
+        "total": 210,
+        "answerable": 180,
+        "unanswerable": 30,
+        "by_question_type": {
+            "table_lookup": 30,
+            "multi_hop_retrieval": 30,
+            "cross_document_reasoning": 30,
+            "citation_grounding": 30,
+            "unanswerable": 30,
+            "long_context_retrieval": 30,
+            "numerical_reasoning": 30
+        },
+        "failed_critic": 0,
+        "generation_errors": 0,
+        "chunks_total": 18253,
+        "chunks_kept": 16890,
+        "chunks_dropped_by_reason": {
+            "too_short": 74,
+            "boilerplate_section": 1271,
+            "copyright_boilerplate": 18
+        }
+    }
+}
