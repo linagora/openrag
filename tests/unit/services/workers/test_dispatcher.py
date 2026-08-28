@@ -65,6 +65,7 @@ def _vector_store() -> MagicMock:
 def _document_repo() -> MagicMock:
     repo = MagicMock()
     repo.claim_content_sha256 = AsyncMock(return_value=None)
+    repo.renew_content_sha256_claim = AsyncMock(return_value=True)
     repo.release_content_sha256_claim = AsyncMock()
     repo.remove_file_from_partition = AsyncMock()
     repo.update_file_metadata_in_db = AsyncMock(return_value=True)
@@ -402,7 +403,54 @@ async def test_dispatch_indexing_passes_attempt_token_to_claim_and_worker() -> N
         replace=False,
         active_claim_tokens=set(),
     )
+    repo.renew_content_sha256_claim.assert_awaited_once_with(
+        file_id="file-1",
+        partition="tenant-a",
+        content_sha256="abc123",
+        claim_token="task:task-1",
+    )
     assert pool.submit.remote.await_args.kwargs["metadata"][CONTENT_CLAIM_TOKEN_METADATA_KEY] == "task:task-1"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_indexing_rejects_lost_claim_before_worker_submission() -> None:
+    from core.utils.exceptions import ConflictError
+    from services.workers.dispatcher import WorkerDispatcher
+
+    repo = _document_repo()
+    repo.renew_content_sha256_claim.return_value = False
+    pool = _pool_with_ref(object())
+    tsm = _task_state_manager()
+    dispatcher = WorkerDispatcher(
+        pool=pool,
+        task_state_manager=tsm,
+        completion_tracker=_completion_tracker(),
+        vector_store=_vector_store(),
+        document_repo=repo,
+        workspace_repo=_workspace_repo(),
+        collection="default",
+    )
+
+    with patch("services.workers.dispatcher.uuid") as mock_uuid, pytest.raises(ConflictError) as exc:
+        mock_uuid.uuid4.return_value.hex = "task-1"
+        await dispatcher.dispatch_indexing(
+            path="/data/report.txt",
+            metadata={"file_id": "file-1", "content_sha256": "abc123"},
+            partition="tenant-a",
+            user={"id": 42},
+            workspace_ids=None,
+            replace=False,
+        )
+
+    assert exc.value.code == "DOCUMENT_CONTENT_CLAIM_LOST"
+    pool.submit.remote.assert_not_awaited()
+    tsm.set_failed_if_not_cancelled.remote.assert_awaited_once()
+    repo.release_content_sha256_claim.assert_awaited_once_with(
+        file_id="file-1",
+        partition="tenant-a",
+        content_sha256="abc123",
+        claim_token="task:task-1",
+    )
 
 
 @pytest.mark.asyncio

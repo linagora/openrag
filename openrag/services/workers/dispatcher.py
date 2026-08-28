@@ -288,6 +288,18 @@ class WorkerDispatcher(IndexingDispatcher):
             }
             if require_existing_partition:
                 submit_kwargs[_REQUIRE_EXISTING_PARTITION_KWARG] = True
+            if claimed_content:
+                still_owned = await self._document_repo.renew_content_sha256_claim(
+                    file_id=file_id,
+                    partition=partition,
+                    content_sha256=content_sha256,
+                    claim_token=content_claim_token,
+                )
+                if not still_owned:
+                    raise ConflictError(
+                        "The content reservation expired before indexing started. Please retry the upload.",
+                        code="DOCUMENT_CONTENT_CLAIM_LOST",
+                    )
             task = await self._submit_indexing_task(
                 task_id,
                 submit_kwargs,
