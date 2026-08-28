@@ -653,10 +653,15 @@ class ServiceContainer:
             async def resolve_transcription_prompt() -> str | None:
                 return await self.prompt_service.resolve_prompt("asr_transcription")
 
-            def resolve_transcription_endpoint():
-                # ``ModelEndpointService`` updates this mutable registry in
-                # place after each Admin UI write, so extract requests pick up
-                # a new MOSS/Whisper/OpenAI-compatible STT endpoint immediately.
+            async def resolve_transcription_endpoint():
+                # Unlike indexer actors, this parser lives in each API replica.
+                # Reload before every direct extract request so an Admin UI save
+                # made through another replica is visible on the next audio
+                # extraction as well.
+                try:
+                    await self.model_endpoint_service.load_all()
+                except Exception as exc:  # noqa: BLE001 - retain the last good endpoint during a DB outage
+                    logger.bind(error=str(exc)).warning("STT endpoint refresh failed; using last loaded endpoint")
                 return settings.models.stt.get("default")
 
             self._conversion_service = ConversionService(

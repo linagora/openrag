@@ -26,7 +26,7 @@ from core.utils.logging import get_logger
 logger = get_logger()
 
 TranscriptionPromptResolver = Callable[[], Awaitable[str | None]]
-TranscriptionEndpointResolver = Callable[[], ModelEndpointConfig | None]
+TranscriptionEndpointResolver = Callable[[], ModelEndpointConfig | None | Awaitable[ModelEndpointConfig | None]]
 
 # Translate the legacy ``file_loaders`` class-name values into new registry
 # backend names. Every pooled backend self-provisions its Ray pool on first
