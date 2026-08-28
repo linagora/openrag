@@ -210,6 +210,44 @@ async def test_tracker_expires_recovered_refless_task_after_registration_grace()
 
 
 @pytest.mark.asyncio
+async def test_tracker_bounds_refless_expiration_actor_call() -> None:
+    from services.workers.task_completion import TaskCompletionTracker
+
+    tsm = _task_state_manager(object_ref=None)
+    tsm.get_details.remote.return_value = {"metadata": {}}
+    bounded_call = AsyncMock(side_effect=TimeoutError)
+
+    with (
+        patch("services.workers.task_completion.ray.get_actor", return_value=tsm),
+        patch("services.workers.task_completion.call_ray_actor_method_with_timeout", bounded_call),
+    ):
+        tracker = TaskCompletionTracker()
+        await tracker.recover_refless("task-1", poll_interval=0)
+
+    assert "task-1" not in tracker._tracked_task_ids
+    assert bounded_call.await_args.kwargs["timeout"] == 30.0
+    assert bounded_call.await_args.kwargs["task_description"] == "expire_refless_task_if_stale(task-1)"
+
+
+@pytest.mark.asyncio
+async def test_tracker_bounds_cancellation_finalization_actor_call() -> None:
+    from services.workers.task_completion import TaskCompletionTracker
+
+    tsm = _task_state_manager()
+    bounded_call = AsyncMock(side_effect=TimeoutError)
+
+    with (
+        patch("services.workers.task_completion.ray.get_actor", return_value=tsm),
+        patch("services.workers.task_completion.call_ray_actor_method_with_timeout", bounded_call),
+    ):
+        tracker = TaskCompletionTracker()
+        await tracker._finish_cancellation("task-1")
+
+    assert bounded_call.await_args.kwargs["timeout"] == 30.0
+    assert bounded_call.await_args.kwargs["task_description"] == "finish_cancellation(task-1)"
+
+
+@pytest.mark.asyncio
 async def test_tracker_backfills_terminal_task_missed_during_api_restart() -> None:
     from services.workers.task_completion import TaskCompletionTracker
 

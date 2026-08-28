@@ -147,6 +147,19 @@ class WorkerDispatcher(IndexingDispatcher):
             raise RuntimeError("TaskStateManager returned invalid claim owners for content claim recovery")
         return {f"{INDEXING_CONTENT_CLAIM_TOKEN_PREFIX}{task_id}" for task_id in task_ids}
 
+    async def _mark_worker_submitted(self, task_id: str) -> bool:
+        remote = _remote_actor_method(self._tsm, "mark_worker_submitted")
+        if remote is None:
+            # Older task-state actors do not recover claims early, so their
+            # existing conservative behavior is safe during a rolling deploy.
+            return True
+        submitted = await retry_idempotent_ray_actor_method(
+            lambda: remote(task_id),
+            recovery_timeout=self._timeout,
+            task_description=f"mark_worker_submitted({task_id})",
+        )
+        return submitted is True
+
     async def _begin_file_delete_fence(self, *, file_id: str, partition: str, fence_id: str) -> None:
         remote = _remote_actor_method(self._tsm, "begin_file_delete")
         if remote is None:
@@ -300,6 +313,8 @@ class WorkerDispatcher(IndexingDispatcher):
                         "The content reservation expired before indexing started. Please retry the upload.",
                         code="DOCUMENT_CONTENT_CLAIM_LOST",
                     )
+            if not await self._mark_worker_submitted(task_id):
+                raise RuntimeError(f"Task {task_id} was rejected before worker submission")
             task = await self._submit_indexing_task(
                 task_id,
                 submit_kwargs,

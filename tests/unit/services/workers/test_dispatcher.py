@@ -96,6 +96,7 @@ def _task_state_manager() -> MagicMock:
     tsm.get_content_claim_task_ids = _remote_mock(set())
     tsm.get_all_info = None
     tsm.set_queued_details = _remote_mock(True)
+    tsm.mark_worker_submitted = _remote_mock(True)
     tsm.begin_file_delete = _remote_mock()
     tsm.renew_file_delete = _remote_mock(True)
     tsm.end_file_delete = _remote_mock()
@@ -443,6 +444,47 @@ async def test_dispatch_indexing_rejects_lost_claim_before_worker_submission() -
         )
 
     assert exc.value.code == "DOCUMENT_CONTENT_CLAIM_LOST"
+    pool.submit.remote.assert_not_awaited()
+    tsm.set_failed_if_not_cancelled.remote.assert_awaited_once()
+    repo.release_content_sha256_claim.assert_awaited_once_with(
+        file_id="file-1",
+        partition="tenant-a",
+        content_sha256="abc123",
+        claim_token="task:task-1",
+    )
+
+
+@pytest.mark.asyncio
+async def test_dispatch_indexing_rejects_task_that_lost_submission_fence() -> None:
+    from services.workers.dispatcher import WorkerDispatcher
+
+    repo = _document_repo()
+    pool = _pool_with_ref(object())
+    tsm = _task_state_manager()
+    tsm.mark_worker_submitted.remote.return_value = False
+    dispatcher = WorkerDispatcher(
+        pool=pool,
+        task_state_manager=tsm,
+        completion_tracker=_completion_tracker(),
+        vector_store=_vector_store(),
+        document_repo=repo,
+        workspace_repo=_workspace_repo(),
+        collection="default",
+    )
+
+    with patch("services.workers.dispatcher.uuid") as mock_uuid:
+        mock_uuid.uuid4.return_value.hex = "task-1"
+        with pytest.raises(RuntimeError, match="rejected before worker submission"):
+            await dispatcher.dispatch_indexing(
+                path="/data/report.txt",
+                metadata={"file_id": "file-1", "content_sha256": "abc123"},
+                partition="tenant-a",
+                user={"id": 42},
+                workspace_ids=None,
+                replace=False,
+            )
+
+    tsm.mark_worker_submitted.remote.assert_awaited_once_with("task-1")
     pool.submit.remote.assert_not_awaited()
     tsm.set_failed_if_not_cancelled.remote.assert_awaited_once()
     repo.release_content_sha256_claim.assert_awaited_once_with(

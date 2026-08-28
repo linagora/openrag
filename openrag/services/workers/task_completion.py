@@ -6,9 +6,11 @@ from typing import Any
 
 import ray
 from core.models.catalog import TASK_FINISHED_AT_METADATA_KEY, TERMINAL_TASK_STATES
+from services.workers.ray_utils import call_ray_actor_method_with_timeout
 
 _TERMINAL_STATES = frozenset(state.value for state in TERMINAL_TASK_STATES)
 _REFLESS_RECOVERY_POLL_SECONDS = 5.0
+_TASK_STATE_CALL_TIMEOUT_SECONDS = 30.0
 
 
 class TaskCompletionTracker:
@@ -87,7 +89,11 @@ class TaskCompletionTracker:
 
                 expire_refless = getattr(task_state_manager, "expire_refless_task_if_stale", None)
                 expire_remote = getattr(expire_refless, "remote", None)
-                if expire_remote is not None and await expire_remote(task_id):
+                if expire_remote is not None and await call_ray_actor_method_with_timeout(
+                    lambda: expire_remote(task_id),
+                    timeout=_TASK_STATE_CALL_TIMEOUT_SECONDS,
+                    task_description=f"expire_refless_task_if_stale({task_id})",
+                ):
                     await self._record_finished_at(task_id)
                     return
 
@@ -138,7 +144,11 @@ class TaskCompletionTracker:
             finish_cancellation = getattr(task_state_manager, "finish_cancellation", None)
             remote = getattr(finish_cancellation, "remote", None)
             if remote is not None:
-                await remote(task_id)
+                await call_ray_actor_method_with_timeout(
+                    lambda: remote(task_id),
+                    timeout=_TASK_STATE_CALL_TIMEOUT_SECONDS,
+                    task_description=f"finish_cancellation({task_id})",
+                )
         except Exception as exc:
             self._logger.warning(
                 "Failed to finalize indexing task cancellation",

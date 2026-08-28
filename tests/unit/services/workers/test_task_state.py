@@ -204,6 +204,36 @@ async def test_stale_refless_task_rejects_late_worker_registration() -> None:
 
 
 @pytest.mark.asyncio
+async def test_submitted_refless_task_keeps_claim_through_cancellation_and_registration() -> None:
+    manager = _task_state_manager()
+    await manager.set_queued_details(
+        "task-1",
+        file_id="file-1",
+        partition="tenant-a",
+        metadata={"_openrag_job_created_at": datetime.now(UTC).isoformat()},
+        user_id=None,
+    )
+
+    assert await manager.mark_worker_submitted("task-1") is True
+    await manager.set_details(
+        "task-1",
+        file_id="file-1",
+        partition="tenant-a",
+        metadata={"_openrag_job_created_at": "2000-01-01T00:00:00+00:00"},
+        user_id=None,
+    )
+    assert await manager.expire_refless_task_if_stale("task-1") is False
+    assert await manager.get_content_claim_task_ids(partition="tenant-a") == {"task-1"}
+
+    assert await manager.set_cancelled_if_active("task-1") is True
+    assert await manager.get_content_claim_task_ids(partition="tenant-a") == {"task-1"}
+
+    worker_ref = {"ref": object()}
+    assert await manager.set_object_ref("task-1", worker_ref) is False
+    assert await manager.get_object_ref("task-1") == worker_ref
+
+
+@pytest.mark.asyncio
 async def test_file_delete_fence_rejects_matching_queued_details() -> None:
     manager = _task_state_manager()
 

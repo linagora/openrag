@@ -198,6 +198,7 @@ class TaskInfo:
     error: str | None = None
     details: dict[str, Any] = field(default_factory=dict)
     object_ref: ray.ObjectRef | None = None
+    worker_submitted: bool = False
 
 
 def _object_ref_is_ready(object_ref: Any) -> bool:
@@ -279,6 +280,7 @@ class TaskStateManager:
         if (
             info.state not in CANCELLABLE_INDEXING_STATES
             or ref is not None
+            or getattr(info, "worker_submitted", False)
             or not _content_claim_registration_expired(info.details or {})
         ):
             return False
@@ -451,6 +453,18 @@ class TaskStateManager:
             return True
 
     @ray.method(concurrency_group="set")
+    async def mark_worker_submitted(self, task_id: str) -> bool:
+        with self.lock:
+            info = self.tasks.get(task_id)
+            if info is None or info.state not in CANCELLABLE_INDEXING_STATES:
+                return False
+            if self._expire_refless_task_if_stale_locked(task_id, info):
+                return False
+            info.worker_submitted = True
+            _save_recoverable_task(task_id, info)
+            return True
+
+    @ray.method(concurrency_group="set")
     async def set_object_ref(self, task_id: str, object_ref: ray.ObjectRef) -> bool:
         with self.lock:
             info = self._ensure_task(task_id)
@@ -518,8 +532,9 @@ class TaskStateManager:
         with self.lock:
             matches = set()
             for task_id, info in self.tasks.items():
+                worker_submitted = getattr(info, "worker_submitted", False)
                 owns_claim = info.state in CANCELLABLE_INDEXING_STATES or (
-                    info.state == "CANCELLED" and info.object_ref is not None
+                    info.state == "CANCELLED" and (info.object_ref is not None or worker_submitted)
                 )
                 if not owns_claim:
                     continue
@@ -529,7 +544,7 @@ class TaskStateManager:
                     continue
                 details = info.details or {}
                 ref = info.object_ref.get("ref") if isinstance(info.object_ref, dict) else info.object_ref
-                if ref is None and _content_claim_registration_expired(details):
+                if ref is None and not worker_submitted and _content_claim_registration_expired(details):
                     continue
                 if details and details.get("partition") != partition:
                     continue
