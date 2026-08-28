@@ -1604,6 +1604,10 @@ def _bare_worker_actor(*, save_uploaded_files: bool, worker: _RecordingWorker):
     actor._ensure_catalog = _noop
     actor._ensure_registry_fresh = _noop
     actor._worker = worker
+    actor._task_state_manager = SimpleNamespace(
+        get_object_ref=SimpleNamespace(remote=AsyncMock(return_value={"ref": object()})),
+        set_failed_if_not_cancelled=SimpleNamespace(remote=AsyncMock(return_value=True)),
+    )
     actor._catalog_store = SimpleNamespace(
         workspace_repo=SimpleNamespace(),
         document_repo=SimpleNamespace(release_content_sha256_claim=AsyncMock()),
@@ -1637,6 +1641,29 @@ async def test_actor_uses_native_asr_prompt_when_resolution_fails() -> None:
 
     assert await actor._resolve_transcription_prompt() is None
     resolve_prompt.assert_awaited_once_with("asr_transcription")
+
+
+@pytest.mark.asyncio
+async def test_actor_does_not_start_without_registered_worker_ref(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    import services.workers.indexer_pool as module
+
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"x")
+    worker = _RecordingWorker()
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=worker)
+    actor._task_state_manager.get_object_ref.remote.return_value = None
+    monkeypatch.setattr(module, "_WORKER_REF_REGISTRATION_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(module, "_WORKER_REF_REGISTRATION_POLL_SECONDS", 0.001)
+
+    with pytest.raises(RuntimeError, match="registered task reference"):
+        await actor.process_file(task_id="t", path=str(path), metadata={"file_id": "f"}, partition="p")
+
+    worker_ref_error = module._MISSING_WORKER_REF_ERROR
+    actor._task_state_manager.set_failed_if_not_cancelled.remote.assert_awaited_once_with("t", worker_ref_error)
+    assert worker.calls == 0
 
 
 @pytest.mark.asyncio

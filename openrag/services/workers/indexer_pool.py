@@ -19,7 +19,10 @@ from openrag.core.config.root import Settings
 # of indexing throughput.
 _MODEL_REGISTRY_TTL_SECONDS = 60.0
 _CONTENT_CLAIM_RENEW_INTERVAL_SECONDS = 60 * 60
+_WORKER_REF_REGISTRATION_TIMEOUT_SECONDS = 60.0
+_WORKER_REF_REGISTRATION_POLL_SECONDS = 0.05
 _REJECTED_SUBMISSION_ERROR = "Indexer worker submission was rejected before the worker started."
+_MISSING_WORKER_REF_ERROR = "Indexer worker did not receive a registered task reference before starting."
 # Named detached actors survive API rolling deployments. Keep the dispatcher
 # and workers on the same protocol generation whenever their remote contract or
 # cross-process indexing semantics change, so new replicas cannot attach to a
@@ -100,6 +103,7 @@ class IndexerWorkerActor:
         )
         self._vector_store = MilvusVectorStore(cfg.vectordb)
         task_state_manager = ray.get_actor("TaskStateManager", namespace=self._namespace)
+        self._task_state_manager = task_state_manager
         pipeline = build_indexing_pipeline(
             parser=parser,
             chunker=chunker,
@@ -336,6 +340,7 @@ class IndexerWorkerActor:
         content_claim_token = metadata.get(CONTENT_CLAIM_TOKEN_METADATA_KEY)
         worker_metadata = {key: value for key, value in metadata.items() if key != CONTENT_CLAIM_TOKEN_METADATA_KEY}
         try:
+            await self._await_worker_ref_registration(task_id)
             await self._ensure_catalog()
             await self._ensure_registry_fresh(_required_model_endpoint_names(indexation_config, embedder_name))
             # Resolve the enrichment-stage prompts once for this file (partition
@@ -388,6 +393,28 @@ class IndexerWorkerActor:
             # SERIALIZING state update) that never enter the worker's try block.
             if not self._save_uploaded_files:
                 await delete_uploaded_file(path, self._logger)
+
+    async def _await_worker_ref_registration(self, task_id: str) -> None:
+        """Do not start indexing until cancellation can target this worker."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + _WORKER_REF_REGISTRATION_TIMEOUT_SECONDS
+        while loop.time() < deadline:
+            remaining = max(0.01, deadline - loop.time())
+            object_ref = await retry_idempotent_ray_actor_method(
+                lambda: self._task_state_manager.get_object_ref.remote(task_id),
+                recovery_timeout=remaining,
+                task_description=f"get_object_ref({task_id}) before indexing",
+            )
+            ref = object_ref.get("ref") if isinstance(object_ref, dict) else object_ref
+            if ref is not None:
+                return
+            await asyncio.sleep(min(_WORKER_REF_REGISTRATION_POLL_SECONDS, remaining))
+
+        await retry_idempotent_ray_actor_method(
+            lambda: self._task_state_manager.set_failed_if_not_cancelled.remote(task_id, _MISSING_WORKER_REF_ERROR),
+            task_description=f"set_failed_if_not_cancelled({task_id}) after missing worker ref",
+        )
+        raise RuntimeError(_MISSING_WORKER_REF_ERROR)
 
 
 @ray.remote

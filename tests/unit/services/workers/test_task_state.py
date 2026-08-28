@@ -134,9 +134,9 @@ async def test_matching_active_task_refs_preserve_submitted_tasks_without_refs()
     expected = {"task-1": SUBMITTED_TASK_WITHOUT_REF}
     assert await manager.get_matching_active_task_refs_v2(partition="tenant-a", file_id="file-1") == expected
 
-    assert await manager.set_state("task-1", "SERIALIZING") is True
+    assert await manager.set_state("task-1", "SERIALIZING") is False
     assert await manager.set_cancelled_if_active("task-1") is True
-    assert await manager.get_matching_active_task_refs_v2(partition="tenant-a", file_id="file-1") == expected
+    assert await manager.get_matching_active_task_refs_v2(partition="tenant-a", file_id="file-1") == {}
 
 
 @pytest.mark.asyncio
@@ -230,7 +230,7 @@ async def test_stale_refless_task_rejects_late_worker_registration() -> None:
 
 
 @pytest.mark.asyncio
-async def test_submitted_refless_task_keeps_claim_through_cancellation_and_registration() -> None:
+async def test_worker_cannot_enter_serializing_before_ref_registration() -> None:
     manager = _task_state_manager()
     await manager.set_queued_details(
         "task-1",
@@ -241,22 +241,10 @@ async def test_submitted_refless_task_keeps_claim_through_cancellation_and_regis
     )
 
     assert await manager.begin_worker_submission("task-1") is True
-    assert await manager.set_state("task-1", "SERIALIZING") is True
-    await manager.set_details(
-        "task-1",
-        file_id="file-1",
-        partition="tenant-a",
-        metadata={"_openrag_job_created_at": "2000-01-01T00:00:00+00:00"},
-        user_id=None,
-    )
-    assert await manager.expire_refless_task_if_stale("task-1") is False
-    assert await manager.get_content_claim_task_ids(partition="tenant-a") == {"task-1"}
-
-    assert await manager.set_cancelled_if_active("task-1") is True
-    assert await manager.get_content_claim_task_ids(partition="tenant-a") == {"task-1"}
-
     worker_ref = {"ref": object()}
-    assert await manager.set_object_ref("task-1", worker_ref) is False
+    assert await manager.set_state("task-1", "SERIALIZING") is False
+    assert await manager.set_object_ref("task-1", worker_ref) is True
+    assert await manager.set_state("task-1", "SERIALIZING") is True
     assert await manager.get_object_ref("task-1") == worker_ref
 
 
@@ -274,6 +262,8 @@ async def test_submission_fence_persists_until_pool_reports_settlement(monkeypat
     )
 
     assert await manager.begin_worker_submission("task-1") is True
+    worker_ref = {"ref": object()}
+    assert await manager.set_object_ref("task-1", worker_ref) is True
     assert await manager.set_state("task-1", "SERIALIZING") is True
     await manager.set_details(
         "task-1",
@@ -685,7 +675,7 @@ def test_expired_unsettled_cancellation_is_recovered(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_submitted_refless_cancellation_keeps_claim_after_reconstruction(monkeypatch) -> None:
+async def test_submitted_cancellation_keeps_claim_after_reconstruction(monkeypatch) -> None:
     stored: dict[str, TaskInfo] = {}
     monkeypatch.setattr(task_state_module, "_load_recoverable_tasks", lambda: dict(stored))
 
@@ -705,6 +695,7 @@ async def test_submitted_refless_cancellation_keeps_claim_after_reconstruction(m
         user_id=42,
     )
     assert await first_incarnation.begin_worker_submission("task-1") is True
+    assert await first_incarnation.set_object_ref("task-1", {"ref": object()}) is True
     assert await first_incarnation.set_state("task-1", "SERIALIZING") is True
     assert await first_incarnation.set_cancelled_if_active("task-1") is True
 

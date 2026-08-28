@@ -369,6 +369,11 @@ class TaskStateManager:
             )
             if state_is_fenced and state != info.state:
                 return False
+            if state == "SERIALIZING":
+                object_ref = info.object_ref
+                ref = object_ref.get("ref") if isinstance(object_ref, dict) else object_ref
+                if ref is None:
+                    return False
             info.state = state
             if state == "SERIALIZING":
                 info.worker_submitted = True
