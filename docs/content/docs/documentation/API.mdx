@@ -528,7 +528,7 @@ All routes are prefixed with **`/prompts`** and require the **admin** role. `pro
 | `sys_prompt`, `spoken_style_answer` | partition — `generation_prompt_names` |
 | `query_contextualizer`, `hyde`, `multi_query` | retrieval preset — `*_prompt_name` |
 | `chunk_contextualizer`, `image_captioning`, `topic_tagger` | indexation preset — `*_prompt_name` |
-| `asr_transcription` | global default — applied to every external audio transcription |
+| `asr_transcription` | partition — selected in `generation_prompt_names`, with the global default as fallback |
 
 #### Create a prompt
 ```http

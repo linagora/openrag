@@ -25,7 +25,7 @@ from core.utils.logging import get_logger
 
 logger = get_logger()
 
-TranscriptionPromptResolver = Callable[[], Awaitable[str | None]]
+TranscriptionPromptResolver = Callable[[str | None], Awaitable[str | None]]
 TranscriptionEndpointResolver = Callable[[], ModelEndpointConfig | None | Awaitable[ModelEndpointConfig | None]]
 
 # Translate the legacy ``file_loaders`` class-name values into new registry

@@ -10,7 +10,6 @@ import {
   Eye,
   AlertTriangle,
   Circle,
-  Globe2,
   Users,
 } from "lucide-react";
 import {
@@ -237,21 +236,13 @@ function PromptCard({
         <Badge
           variant="outline"
           className={
-            isAsrTranscription
-              ? "text-xs bg-sky-50 text-sky-700 border-sky-200 dark:bg-sky-950/30 dark:text-sky-100 dark:border-sky-900/60"
-              : used > 0
+            used > 0
               ? "text-xs bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-950/30 dark:text-amber-100 dark:border-amber-900/60"
               : "text-xs bg-muted text-muted-foreground border-transparent"
           }
         >
-          {isAsrTranscription ? <Globe2 className="mr-1 h-3 w-3" /> : <Users className="mr-1 h-3 w-3" />}
-          {isAsrTranscription
-            ? prompt.is_default
-              ? "Global default"
-              : "Inactive"
-            : used > 0
-              ? `${used} partition${used === 1 ? "" : "s"}`
-              : "Unused"}
+          <Users className="mr-1 h-3 w-3" />
+          {used > 0 ? `${used} partition${used === 1 ? "" : "s"}` : "Unused"}
         </Badge>
       </div>
       <CardHeader className="pb-2">
@@ -372,7 +363,7 @@ function PromptEditorSheet({
   // orphans every selection pointing at the old one — they fall back to the
   // global default. Warn before that happens instead of letting the drawer's
   // "changes apply everywhere" promise quietly become false.
-  const isRename = !!editing && !isAsrTranscription && name.trim() !== editing.name;
+  const isRename = !!editing && name.trim() !== editing.name;
   const renameBreaksRefs = isRename && (editing?.used_by ?? 0) > 0;
 
   const handleSubmit = (e: React.FormEvent) => {
