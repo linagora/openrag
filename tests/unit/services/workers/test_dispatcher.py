@@ -92,6 +92,7 @@ def _task_state_manager() -> MagicMock:
     tsm.get_object_ref = _remote_mock({"ref": object()})
     tsm.get_matching_active_task_refs_v2 = _remote_mock({})
     tsm.get_matching_active_task_refs = _remote_mock({})
+    tsm.get_content_claim_task_ids = _remote_mock(set())
     tsm.get_all_info = None
     tsm.set_queued_details = _remote_mock(True)
     tsm.begin_file_delete = _remote_mock()
@@ -397,11 +398,11 @@ async def test_dispatch_indexing_passes_attempt_token_to_claim_and_worker() -> N
         file_id="file-1",
         partition="tenant-a",
         content_sha256="abc123",
-        claim_token="task-1",
+        claim_token="task:task-1",
         replace=False,
         active_claim_tokens=set(),
     )
-    assert pool.submit.remote.await_args.kwargs["metadata"][CONTENT_CLAIM_TOKEN_METADATA_KEY] == "task-1"
+    assert pool.submit.remote.await_args.kwargs["metadata"][CONTENT_CLAIM_TOKEN_METADATA_KEY] == "task:task-1"
 
 
 @pytest.mark.asyncio
@@ -410,10 +411,7 @@ async def test_dispatch_indexing_preserves_only_active_content_claims() -> None:
 
     repo = _document_repo()
     tsm = _task_state_manager()
-    tsm.get_matching_active_task_refs_v2.remote.return_value = {
-        "queued-task": object(),
-        "running-task": object(),
-    }
+    tsm.get_content_claim_task_ids.remote.return_value = {"queued-task", "running-task", "cancelled-task"}
     dispatcher = WorkerDispatcher(
         pool=_pool_with_ref(object()),
         task_state_manager=tsm,
@@ -436,10 +434,11 @@ async def test_dispatch_indexing_preserves_only_active_content_claims() -> None:
         )
 
     assert repo.claim_content_sha256.await_args.kwargs["active_claim_tokens"] == {
-        "queued-task",
-        "running-task",
+        "task:queued-task",
+        "task:running-task",
+        "task:cancelled-task",
     }
-    tsm.get_matching_active_task_refs_v2.remote.assert_awaited_once_with(partition="tenant-a")
+    tsm.get_content_claim_task_ids.remote.assert_awaited_once_with(partition="tenant-a")
 
 
 @pytest.mark.asyncio
@@ -448,7 +447,7 @@ async def test_dispatch_indexing_disables_claim_recovery_for_legacy_task_state_m
 
     repo = _document_repo()
     tsm = _task_state_manager()
-    tsm.get_matching_active_task_refs_v2 = None
+    tsm.get_content_claim_task_ids = None
     dispatcher = WorkerDispatcher(
         pool=_pool_with_ref(object()),
         task_state_manager=tsm,
@@ -1115,7 +1114,7 @@ async def test_cancel_task_uses_stored_pool_object_ref() -> None:
 
     assert result is True
     tsm.set_cancelled_if_active.remote.assert_called_once_with("task-1")
-    tsm.finish_cancellation.remote.assert_called_once_with("task-1")
+    tsm.finish_cancellation.remote.assert_not_called()
     cancel.assert_called_once_with(ref, recursive=True)
 
 
@@ -1169,7 +1168,7 @@ async def test_cancel_task_does_not_cancel_terminal_task() -> None:
 
 
 @pytest.mark.asyncio
-async def test_cancel_task_finishes_recovered_cancellation_claim() -> None:
+async def test_cancel_task_retries_recovered_cancellation_without_finishing_it() -> None:
     from services.workers.dispatcher import WorkerDispatcher
 
     ref = object()
@@ -1191,7 +1190,7 @@ async def test_cancel_task_finishes_recovered_cancellation_claim() -> None:
         assert await dispatcher.cancel_task("task-1") is True
 
     cancel.assert_called_once_with(ref, recursive=True)
-    tsm.finish_cancellation.remote.assert_called_once_with("task-1")
+    tsm.finish_cancellation.remote.assert_not_called()
 
 
 @pytest.mark.asyncio

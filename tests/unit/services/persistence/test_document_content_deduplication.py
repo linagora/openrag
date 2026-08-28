@@ -113,14 +113,14 @@ async def test_claim_content_hash_recovers_old_claims_without_active_tasks() -> 
         partition="tenant-a",
         content_sha256="abc123",
         claim_token="attempt-2",
-        active_claim_tokens={"active-attempt"},
+        active_claim_tokens={"task:active-attempt"},
     )
 
     assert conflict is None
     query, params = next((query, params) for query, params in pool.conn.executed if "23 hours 59 minutes" in query)
     assert "claim_token = ANY($3::text[])" in query
-    assert "claim_token NOT LIKE $4" in query
-    assert params == ("tenant-a", "abc123", ["active-attempt"], "copy:%")
+    assert "claim_token LIKE $4" in query
+    assert params == ("tenant-a", "abc123", ["task:active-attempt"], "task:%")
 
 
 @pytest.mark.asyncio

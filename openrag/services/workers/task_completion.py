@@ -39,6 +39,7 @@ class TaskCompletionTracker:
                 error=str(exc),
             )
         finally:
+            await self._finish_cancellation(task_id)
             self._tracked_task_ids.discard(task_id)
 
     async def recover(self) -> None:
@@ -49,9 +50,17 @@ class TaskCompletionTracker:
                 tracker = ray.get_actor("TaskCompletionTracker", namespace=self._namespace)
                 all_info = await task_state_manager.get_all_info.remote()
                 for task_id, info in all_info.items():
+                    state = info.get("state")
+                    if state == "CANCELLED":
+                        object_ref = await task_state_manager.get_object_ref.remote(task_id)
+                        if isinstance(object_ref, dict) and object_ref.get("ref") is not None:
+                            tracker.track.remote(task_id, object_ref)
+                        elif not _has_finished_at(info.get("details")):
+                            await self._record_finished_at(task_id)
+                        continue
                     if _has_finished_at(info.get("details")):
                         continue
-                    if info.get("state") in _TERMINAL_STATES:
+                    if state in _TERMINAL_STATES:
                         await self._record_finished_at(task_id)
                         continue
                     object_ref = await task_state_manager.get_object_ref.remote(task_id)
@@ -75,14 +84,15 @@ class TaskCompletionTracker:
                     return
 
                 state = await task_state_manager.get_state.remote(task_id)
-                if state in _TERMINAL_STATES:
-                    await self._record_finished_at(task_id)
-                    return
-
                 object_ref = await task_state_manager.get_object_ref.remote(task_id)
                 ref = object_ref.get("ref") if isinstance(object_ref, dict) else None
                 if ref is not None:
                     await asyncio.gather(ref, return_exceptions=True)
+                    await self._record_finished_at(task_id)
+                    await self._finish_cancellation(task_id)
+                    return
+
+                if state in _TERMINAL_STATES:
                     await self._record_finished_at(task_id)
                     return
 
@@ -112,6 +122,20 @@ class TaskCompletionTracker:
             metadata=metadata,
             user_id=details.get("user_id"),
         )
+
+    async def _finish_cancellation(self, task_id: str) -> None:
+        try:
+            task_state_manager = self._task_state_manager()
+            finish_cancellation = getattr(task_state_manager, "finish_cancellation", None)
+            remote = getattr(finish_cancellation, "remote", None)
+            if remote is not None:
+                await remote(task_id)
+        except Exception as exc:
+            self._logger.warning(
+                "Failed to finalize indexing task cancellation",
+                task_id=task_id,
+                error=str(exc),
+            )
 
     def _task_state_manager(self) -> Any:
         return ray.get_actor("TaskStateManager", namespace=self._namespace)

@@ -138,6 +138,37 @@ async def test_delete_cleanup_still_fences_legacy_indexing_states() -> None:
 
 
 @pytest.mark.asyncio
+async def test_content_claim_owners_include_unsettled_cancellations() -> None:
+    manager = _task_state_manager()
+
+    for task_id, partition in (
+        ("active-task", "tenant-a"),
+        ("cancelled-task", "tenant-a"),
+        ("settled-cancelled-task", "tenant-a"),
+        ("completed-task", "tenant-a"),
+        ("other-partition-task", "tenant-b"),
+    ):
+        await manager.set_queued_details(
+            task_id,
+            file_id=f"{task_id}-file",
+            partition=partition,
+            metadata={},
+            user_id=None,
+        )
+
+    cancelled_ref = {"ref": object()}
+    await manager.set_object_ref("cancelled-task", cancelled_ref)
+    await manager.set_cancelled_if_active("cancelled-task")
+    await manager.set_cancelled_if_active("settled-cancelled-task")
+    await manager.set_state("completed-task", "COMPLETED")
+
+    assert await manager.get_content_claim_task_ids(partition="tenant-a") == {
+        "active-task",
+        "cancelled-task",
+    }
+
+
+@pytest.mark.asyncio
 async def test_file_delete_fence_rejects_matching_queued_details() -> None:
     manager = _task_state_manager()
 
@@ -429,9 +460,27 @@ async def test_finished_cancellation_drops_recoverable_worker_reference(monkeypa
     saved: list[TaskInfo] = []
     monkeypatch.setattr(task_state_module, "_save_recoverable_task", lambda _task_id, info: saved.append(info))
     manager = _task_state_manager()
-    manager.tasks["task-1"] = TaskInfo(state="CANCELLED", object_ref={"ref": object()})
+    ref = object()
+    manager.tasks["task-1"] = TaskInfo(state="CANCELLED", object_ref={"ref": ref})
 
-    await manager.finish_cancellation("task-1")
+    monkeypatch.setattr(task_state_module.ray, "wait", lambda *_args, **_kwargs: ([ref], []))
+
+    assert await manager.finish_cancellation("task-1") is True
 
     assert manager.tasks["task-1"].object_ref is None
     assert saved[-1].object_ref is None
+
+
+@pytest.mark.asyncio
+async def test_unsettled_cancellation_keeps_recoverable_worker_reference(monkeypatch) -> None:
+    saved: list[TaskInfo] = []
+    monkeypatch.setattr(task_state_module, "_save_recoverable_task", lambda _task_id, info: saved.append(info))
+    manager = _task_state_manager()
+    ref = object()
+    manager.tasks["task-1"] = TaskInfo(state="CANCELLED", object_ref={"ref": ref})
+    monkeypatch.setattr(task_state_module.ray, "wait", lambda *_args, **_kwargs: ([], [ref]))
+
+    assert await manager.finish_cancellation("task-1") is False
+
+    assert manager.tasks["task-1"].object_ref == {"ref": ref}
+    assert saved == []

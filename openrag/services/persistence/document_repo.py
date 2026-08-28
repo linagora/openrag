@@ -25,7 +25,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
-from core.models.catalog import COPY_CONTENT_CLAIM_TOKEN_PREFIX, DocumentRecord, DocumentStatus
+from core.models.catalog import INDEXING_CONTENT_CLAIM_TOKEN_PREFIX, DocumentRecord, DocumentStatus
 from core.ports.document_repo import DocumentRepository
 from core.utils.logging import get_logger
 from services.persistence.file_count import decrement_file_counts
@@ -306,18 +306,20 @@ class PgDocumentRepository(DocumentRepository):
                     # before recovering the abandoned claim.  This closes the
                     # crash/restart gap without allowing a concurrent upload to
                     # steal a claim between its INSERT and QUEUED transition.
+                    # Bare legacy tokens are never recovered early because an
+                    # older replica may still own one for a synchronous copy.
                     await conn.execute(
                         """
                         DELETE FROM file_content_claims
                         WHERE partition_name = $1 AND content_sha256 = $2
                           AND NOT (claim_token = ANY($3::text[]))
-                          AND claim_token NOT LIKE $4
+                          AND claim_token LIKE $4
                           AND expires_at <= NOW() + interval '23 hours 59 minutes'
                         """,
                         partition,
                         content_sha256,
                         sorted(active_claim_tokens),
-                        f"{COPY_CONTENT_CLAIM_TOKEN_PREFIX}%",
+                        f"{INDEXING_CONTENT_CLAIM_TOKEN_PREFIX}%",
                     )
 
                 await conn.execute(

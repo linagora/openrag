@@ -323,13 +323,23 @@ class TaskStateManager:
             return True
 
     @ray.method(concurrency_group="set")
-    async def finish_cancellation(self, task_id: str) -> None:
+    async def finish_cancellation(self, task_id: str) -> bool:
         with self.lock:
             info = self.tasks.get(task_id)
             if info is None or info.state != "CANCELLED":
-                return
+                return False
+            object_ref = info.object_ref
+            ref = object_ref.get("ref") if isinstance(object_ref, dict) else object_ref
+            if ref is not None:
+                try:
+                    ready, _ = ray.wait([ref], num_returns=1, timeout=0)
+                except Exception:
+                    return False
+                if not ready:
+                    return False
             info.object_ref = None
             _save_recoverable_task(task_id, info)
+            return True
 
     @ray.method(concurrency_group="set")
     async def set_details(
@@ -440,6 +450,23 @@ class TaskStateManager:
     ) -> dict[str, ray.ObjectRef | None | str]:
         with self.lock:
             return self._matching_active_task_refs_locked(partition=partition, file_id=file_id)
+
+    @ray.method(concurrency_group="get")
+    async def get_content_claim_task_ids(self, *, partition: str) -> set[str]:
+        """Return active tasks and cancellations whose workers have not settled."""
+        with self.lock:
+            matches = set()
+            for task_id, info in self.tasks.items():
+                owns_claim = info.state in CANCELLABLE_INDEXING_STATES or (
+                    info.state == "CANCELLED" and info.object_ref is not None
+                )
+                if not owns_claim:
+                    continue
+                details = info.details or {}
+                if details and details.get("partition") != partition:
+                    continue
+                matches.add(task_id)
+            return matches
 
     def _matching_active_task_refs_locked(
         self,

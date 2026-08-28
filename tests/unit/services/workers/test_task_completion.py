@@ -25,6 +25,7 @@ def _task_state_manager(
     tsm.get_state = _remote_mock(state)
     tsm.get_details = _remote_mock()
     tsm.set_details = _remote_mock()
+    tsm.finish_cancellation = _remote_mock()
     return tsm
 
 
@@ -62,6 +63,7 @@ async def test_tracker_records_completion_after_worker_settles() -> None:
         },
         user_id=42,
     )
+    tsm.finish_cancellation.remote.assert_awaited_once_with("task-1")
 
 
 @pytest.mark.asyncio
@@ -80,6 +82,34 @@ async def test_tracker_recovers_active_task_after_restart() -> None:
         object_ref={"ref": ref},
     )
     tsm.get_details.remote.return_value = details
+    tracker_handle = MagicMock()
+
+    def get_actor(name: str, namespace: str):
+        assert namespace == "openrag"
+        return tsm if name == "TaskStateManager" else tracker_handle
+
+    with patch("services.workers.task_completion.ray.get_actor", side_effect=get_actor):
+        tracker = TaskCompletionTracker()
+        await tracker.recover()
+
+    tsm.get_object_ref.remote.assert_awaited_once_with("task-1")
+    tracker_handle.track.remote.assert_called_once_with("task-1", {"ref": ref})
+
+
+@pytest.mark.asyncio
+async def test_tracker_keeps_recovered_cancellation_tracked_until_worker_settles() -> None:
+    from services.workers.task_completion import TaskCompletionTracker
+
+    ref = asyncio.get_running_loop().create_future()
+    details = {
+        "metadata": {
+            "_openrag_job_finished_at": "2026-07-20T08:01:05+00:00",
+        }
+    }
+    tsm = _task_state_manager(
+        all_info={"task-1": {"state": "CANCELLED", "details": details}},
+        object_ref={"ref": ref},
+    )
     tracker_handle = MagicMock()
 
     def get_actor(name: str, namespace: str):

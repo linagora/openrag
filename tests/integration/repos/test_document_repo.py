@@ -139,7 +139,7 @@ class TestContentClaims:
                 file_id="abandoned-file",
                 partition=partition,
                 content_sha256="a" * 64,
-                claim_token="abandoned-task",
+                claim_token="task:abandoned-task",
             )
             is None
         )
@@ -148,7 +148,7 @@ class TestContentClaims:
                 file_id="early-retry",
                 partition=partition,
                 content_sha256="a" * 64,
-                claim_token="early-retry-task",
+                claim_token="task:early-retry-task",
                 active_claim_tokens=set(),
             )
             == "abandoned-file"
@@ -168,7 +168,7 @@ class TestContentClaims:
                 file_id="retry-file",
                 partition=partition,
                 content_sha256="a" * 64,
-                claim_token="retry-task",
+                claim_token="task:retry-task",
                 active_claim_tokens=set(),
             )
             is None
@@ -186,7 +186,7 @@ class TestContentClaims:
                 file_id="active-file",
                 partition=partition,
                 content_sha256="b" * 64,
-                claim_token="active-task",
+                claim_token="task:active-task",
             )
             is None
         )
@@ -205,13 +205,13 @@ class TestContentClaims:
                 file_id="duplicate-file",
                 partition=partition,
                 content_sha256="b" * 64,
-                claim_token="duplicate-task",
-                active_claim_tokens={"active-task"},
+                claim_token="task:duplicate-task",
+                active_claim_tokens={"task:active-task"},
             )
             == "active-file"
         )
 
-    async def test_preserves_non_task_claim(
+    async def test_preserves_legacy_non_task_claim(
         self,
         postgres_store: PostgresStore,
     ):
@@ -223,7 +223,7 @@ class TestContentClaims:
                 file_id="copy-file",
                 partition=partition,
                 content_sha256="c" * 64,
-                claim_token="copy:active-copy",
+                claim_token="legacy-copy-uuid",
             )
             is None
         )
@@ -242,7 +242,7 @@ class TestContentClaims:
                 file_id="duplicate-file",
                 partition=partition,
                 content_sha256="c" * 64,
-                claim_token="duplicate-task",
+                claim_token="task:duplicate-task",
                 active_claim_tokens=set(),
             )
             == "copy-file"
