@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from typing import Literal
 
 from pydantic import Field, field_validator
 
@@ -40,6 +41,12 @@ class ChunkerConfig(ConfigMixin):
     # partition (half its window). Set it explicitly only to override that.
     hard_max_tokens: int | None = Field(default=None, gt=0)
     prepend_heading_path: bool = True
+    # Layout of the source document, deciding whether a *page* is a meaningful
+    # chunk boundary. "auto" detects it from the parsed pages (see
+    # StructuredSectionChunker._looks_paginated); "paginated" and "flowing"
+    # force it. Deliberately conservative in auto: chunking a 400-page report
+    # per page would be far worse than not firing on a real deck.
+    layout: Literal["auto", "paginated", "flowing"] = "auto"
     heading_keywords: list[str] | None = None
     leaf_patterns: list[str] | None = None
 

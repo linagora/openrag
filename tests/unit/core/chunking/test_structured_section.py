@@ -274,11 +274,14 @@ def test_table_does_not_absorb_prose_from_another_page():
     # Off-page, only the structural route applies and it excludes tables, so a
     # stray label cannot be glued to a table it does not belong to. (On the same
     # page it may — see test_same_page_slide_collapses_across_atomic_types.)
+    # Large enough that the whole document does not collapse into one chunk —
+    # this exercises the structural merge route, not the short-document path.
     rows = "\n".join(f"| D{i} | {' '.join(['x'] * 12)} |" for i in range(8))
+    filler = " ".join(f"sentence{i} of ordinary prose." for i in range(400))
     doc = ProcessedDocument(
         document_id="d1",
         text_blocks=[
-            TextBlock(text=f"## Slide One\n\n| Domain | Value |\n|---|---|\n{rows}\n", page_number=2),
+            TextBlock(text=f"## Slide One\n\n| Domain | Value |\n|---|---|\n{rows}\n\n{filler}\n", page_number=2),
             TextBlock(text="## Slide One\n\nStray label", page_number=7),
         ],
         metadata={"filename": "code.pdf"},
@@ -627,3 +630,57 @@ def test_image_placeholder_marker_never_reaches_the_chunk_text():
     joined = "\n".join(c.text for c in _chunker(chunk_size=512).chunk(doc))
     assert "92 000 COLLABORATEURS" in joined
     assert "[Image Placeholder]" not in joined
+
+
+def _paged(pages: list[str]) -> ProcessedDocument:
+    return ProcessedDocument(
+        document_id="d1",
+        text_blocks=[TextBlock(text=t, page_number=i + 1) for i, t in enumerate(pages)],
+        metadata={"filename": "deck.pdf"},
+    )
+
+
+_SLIDES = [f"## Slide {i}\n\nHeadline {i} for this slide.\n\nA short supporting line." for i in range(12)]
+
+
+def test_paginated_document_is_chunked_one_per_page():
+    """A page in a deck IS a section, so the page is the right boundary there."""
+    chunks = _chunker(chunk_size=512).chunk(_paged(_SLIDES))
+    assert len(chunks) == len(_SLIDES), f"expected one chunk per slide, got {len(chunks)}"
+    assert [c.page_number for c in chunks] == list(range(1, len(_SLIDES) + 1))
+
+
+def test_dense_document_is_not_detected_as_paginated():
+    """Conservative on purpose: chunking a report per page is worse than not
+    firing on a real deck."""
+    dense = [f"## Section {i}\n\n" + " ".join(f"word{j}" for j in range(600)) for i in range(12)]
+    assert not _chunker(chunk_size=512)._looks_paginated(_paged(dense))
+    # …and a real deck is detected.
+    assert _chunker(chunk_size=512)._looks_paginated(_paged(_SLIDES))
+    # Too few pages to judge.
+    assert not _chunker(chunk_size=512)._looks_paginated(_paged(_SLIDES[:4]))
+
+
+def test_layout_can_be_forced_either_way():
+    forced_off = _chunker(chunk_size=512, layout="flowing").chunk(_paged(_SLIDES))
+    assert len(forced_off) < len(_SLIDES), "layout='flowing' must bypass detection"
+    dense = [f"## Section {i}\n\n" + " ".join(f"word{j}" for j in range(300)) for i in range(10)]
+    forced_on = _chunker(chunk_size=512, layout="paginated").chunk(_paged(dense))
+    assert len(forced_on) == len(dense), "layout='paginated' must force page boundaries"
+
+
+def test_short_document_is_not_split():
+    """Nothing to gain from splitting a document that already fits: the reader
+    loses the surrounding context and retrieval gains no precision."""
+    doc = _doc("# Note\n\n## Contexte\n\n" + " ".join(f"mot{i}" for i in range(120)) + "\n\n## Conclusion\n\nVoila.")
+    chunks = _chunker(chunk_size=512).chunk(doc)
+    assert len(chunks) == 1, f"a short document should stay whole, got {len(chunks)}"
+    assert "Contexte" in chunks[0].text and "Conclusion" in chunks[0].text
+
+
+def test_short_document_still_splits_when_sections_share_no_ancestor():
+    """The collapse must not erase breadcrumbs — four Titres sharing no ancestor
+    would land in one vector with hierarchy_path empty."""
+    chunks = _chunker(chunk_size=512).chunk(_doc(_MULTI_SECTION_PAGE))
+    assert len(chunks) > 1
+    assert all(c.metadata["hierarchy_path"] for c in chunks)

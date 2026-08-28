@@ -35,6 +35,7 @@ image-description blocks are treated as atomic units via the shared
 from __future__ import annotations
 
 import re
+import statistics
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -155,6 +156,19 @@ _DEFAULT_LEAF_PATTERNS: tuple[str, ...] = (r"^\s*Art(?:icle|\.)\s*[LRDOlrdo]?\.?
 # A markdown heading counts as its own nesting level (by ``#`` depth); keyword
 # headings get a level *below* every markdown heading so a plain-text ``Titre``
 # nested under a real ``# Book`` heading still stacks sensibly.
+# --- paginated-layout detection -------------------------------------------
+# A page in a deck *is* a section, so the page is the right chunk boundary
+# there and the wrong one everywhere else. Calibrated on the 30-document
+# marker corpus: the two decks sit at 86 and 190 median tokens/page with
+# 83%/87% of pages under _SHORT_PAGE, and the next document up is 276 / 77%,
+# then a cliff to 364 / 53%. Deliberately conservative — a false "paginated"
+# on a long report would chunk it per page, which is much worse than not
+# firing on a real deck.
+_SHORT_PAGE_TOKENS = 400
+_MAX_MEDIAN_TOKENS_PER_PAGE = 300
+_MIN_SHORT_PAGE_FRACTION = 0.7
+_MIN_PAGES_FOR_DETECTION = 8
+
 _MD_LEVEL_BASE = 0
 _KEYWORD_LEVEL_BASE = 100
 
@@ -206,6 +220,7 @@ class StructuredSectionChunker(BaseChunker):
         heading_keywords: tuple[str, ...] | list[str] | None = None,
         leaf_patterns: tuple[str, ...] | list[str] | None = None,
         prepend_heading_path: bool = True,
+        layout: str = "auto",
         **kwargs: Any,
     ) -> None:
         # Overlap is forced to 0: leaves are atomic, so replaying a tail would
@@ -252,6 +267,7 @@ class StructuredSectionChunker(BaseChunker):
         # recursive chunker's inline threshold).
         self._inline_threshold = inline_threshold if inline_threshold is not None else _INLINE_ELEMENT_TOKEN_THRESHOLD
         self.prepend_heading_path = prepend_heading_path
+        self.layout = layout
 
         keywords = tuple(k.lower() for k in (heading_keywords or _DEFAULT_HEADING_KEYWORDS))
         self._keyword_level = {kw: _KEYWORD_LEVEL_BASE + i for i, kw in enumerate(keywords)}
@@ -272,9 +288,18 @@ class StructuredSectionChunker(BaseChunker):
         metadata = self._chunk_metadata_base(document, partition)
         filename = str(metadata.get("filename") or metadata.get("source") or "")
 
-        units = self._build_units(content)
-        candidates = self._pack(units, filename)
-        candidates = self._merge_small(candidates, filename)
+        paginated = self.layout == "paginated" or (self.layout == "auto" and self._looks_paginated(document))
+        units = self._page_units(content) if paginated else self._build_units(content)
+        candidates = self._single_chunk(units, filename)
+        if candidates is None:
+            candidates = self._pack(units, filename)
+            # Not in paginated mode: a slide is routinely under min_tokens (the
+            # corpus decks sit at 86-190 median), so the under-min merge would
+            # fold the whole deck back into a handful of chunks and undo the
+            # page boundary this mode exists to honour. _pack still splits an
+            # oversize page.
+            if not paginated:
+                candidates = self._merge_small(candidates, filename)
 
         chunks: list[Chunk] = []
         for idx, unit in enumerate(candidates):
@@ -319,6 +344,106 @@ class StructuredSectionChunker(BaseChunker):
                 )
             )
         return chunks
+
+    # ------------------------------------------------------------------
+    # Layout
+    # ------------------------------------------------------------------
+    def _looks_paginated(self, document: ProcessedDocument) -> bool:
+        """Whether a *page* is this document's natural chunk boundary.
+
+        Measured on the parsed pages, not on file type: what matters is
+        whether a page is small and self-contained enough to be one chunk, not
+        whether it was authored in PowerPoint. A dense slide deck reads like a
+        report and should be chunked like one.
+
+        The median, not the mean: one appendix page must not drag a 24-slide
+        deck out of the bucket, and one title page must not drag a report into
+        it. ``short_page_fraction`` separates the two where the median is
+        close — a deck is uniformly sparse, a report has a few sparse pages
+        among dense ones.
+        """
+        pages = [b for b in document.text_blocks if (b.text or "").strip()]
+        if len(pages) < _MIN_PAGES_FOR_DETECTION:
+            return False
+        counts = [self.length_function(b.text) for b in pages]
+        if statistics.median(counts) > _MAX_MEDIAN_TOKENS_PER_PAGE:
+            return False
+        short = sum(1 for c in counts if c < _SHORT_PAGE_TOKENS) / len(counts)
+        return short >= _MIN_SHORT_PAGE_FRACTION
+
+    def _page_units(self, content: str) -> list[_Unit]:
+        """One unit per page, for a paginated document.
+
+        The heading stack is still tracked across pages so each page keeps a
+        breadcrumb, and headings stay in the body as everywhere else — only the
+        *boundary* rule changes. Size is still enforced downstream: an oversize
+        page splits and an under-min page merges with its neighbour, so
+        "one chunk per page" is the default shape rather than a guarantee.
+        """
+        units: list[_Unit] = []
+        stack: list[_Heading] = []
+        page = 1
+        buf: list[str] = []
+
+        def flush(page_number: int) -> None:
+            text = "\n".join(buf).strip()
+            if text:
+                units.append(
+                    _Unit(
+                        heading_path=list(stack_path(stack)),
+                        text=text,
+                        tokens=self.length_function(text),
+                        pages={page_number},
+                        page_marks=[(0, page_number)],
+                        chunk_type=ChunkType.TEXT,
+                    )
+                )
+            buf.clear()
+
+        for raw_line in content.split("\n"):
+            marker = PAGE_RE.fullmatch(raw_line.strip())
+            if marker:
+                flush(page)
+                page = int(marker.group(1)) + 1
+                continue
+            level_text = self._heading(raw_line)
+            if level_text is not None:
+                _push_heading(stack, level_text[0], level_text[1])
+            if raw_line.strip():
+                buf.append(_HTML_TAG_RE.sub("", raw_line).strip() if level_text is not None else raw_line)
+            elif buf and buf[-1] != "":
+                buf.append("")
+        flush(page)
+        return units
+
+    def _single_chunk(self, units: list[_Unit], filename: str) -> list[_Unit] | None:
+        """The whole document as one chunk when it already fits.
+
+        A short document has no boundary problem to solve: splitting it buys
+        nothing and costs the reader the context of the neighbouring text. Only
+        fires when everything fits under the ceiling *including* the header.
+        """
+        if not units:
+            return None
+        total = sum(u.tokens for u in units) + 2 * (len(units) - 1)
+        path = units[0].heading_path
+        for unit in units[1:]:
+            path = _common_prefix(path, unit.heading_path)
+        if total > self._effective_max(filename, path, {p for u in units for p in u.pages}):
+            return None
+        # Same guard as the merge routes: collapsing must not erase a section
+        # breadcrumb. Four articles under four different Titres share no
+        # ancestor, so folding them into one chunk would leave hierarchy_path
+        # empty and put unrelated sections in one vector — small document or
+        # not, that is the defect this strategy exists to remove.
+        if not path and any(u.heading_path for u in units):
+            return None
+        merged = _copy_unit(units[0])
+        merged.heading_path = list(path)
+        for unit in units[1:]:
+            _absorb(merged, unit, path=path)
+        merged.tokens = total
+        return [merged]
 
     # ------------------------------------------------------------------
     # Step 1 — parse the document into ordered structural units
