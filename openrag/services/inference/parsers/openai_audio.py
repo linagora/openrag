@@ -51,6 +51,10 @@ logger = get_logger()
 # Suffixes the transcription backend can ingest as-is, avoiding the ~10x
 # size inflation from WAV conversion (Scaleway cap: 100 MB; OpenAI: 25 MB).
 _DEFAULT_DIRECT_UPLOAD_SUFFIXES: tuple[str, ...] = (".mp3", ".m4a", ".ogg", ".webm", ".wav")
+# ``AsyncOpenAI`` requires a non-empty API key even when the upstream endpoint
+# is intentionally unauthenticated. This value is the application's established
+# non-secret placeholder (see ``TranscriberConfig``).
+_ANONYMOUS_API_KEY = "EMPTY"
 
 LanguageDetector = Callable[[Path], Awaitable[str | None]]
 TranscriptionPromptResolver = Callable[[], Awaitable[str | None]]
@@ -260,18 +264,30 @@ class OpenAIAudioClient(BaseClientParser):
             and endpoint.extra.get(STT_TRANSCRIPT_OUTPUT_FORMAT_KEY) == MOSS_TIMESTAMPED_TRANSCRIPT_OUTPUT_FORMAT
         )
 
+    def _is_fallback_endpoint(self, endpoint: ModelEndpointConfig) -> bool:
+        """Whether *endpoint* is the legacy ``TRANSCRIBER_*`` destination."""
+        return endpoint.endpoint.strip().rstrip("/") == self._base_url.strip().rstrip("/")
+
     def _client_for_endpoint(self, endpoint: ModelEndpointConfig | None) -> tuple[AsyncOpenAI, str, bool]:
         """Return an OpenAI client, model, and whether the client must be closed."""
         if endpoint is None:
             return self._client, self._model, False
 
         api_key = endpoint.extra.get("api_key")
-        # The default STT seed intentionally omits a placeholder key such as
-        # ``EMPTY``. Preserve the legacy fallback key in that case so the
-        # seeded endpoint still reuses the configured fallback client.
-        resolved_api_key = api_key if isinstance(api_key, str) and api_key.strip() else self._api_key
+        if isinstance(api_key, str) and api_key.strip():
+            resolved_api_key = api_key
+        elif self._is_fallback_endpoint(endpoint):
+            # The environment-managed seed deliberately omits ``EMPTY`` from
+            # its stored extras. It still targets the legacy endpoint, so it is
+            # safe to retain the configured fallback credential here.
+            resolved_api_key = self._api_key
+        else:
+            # An administrator may choose an unauthenticated or differently
+            # authenticated endpoint. Never disclose TRANSCRIBER_API_KEY to a
+            # different host merely because its own key field is blank.
+            resolved_api_key = _ANONYMOUS_API_KEY
         if (
-            endpoint.endpoint == self._base_url
+            self._is_fallback_endpoint(endpoint)
             and resolved_api_key == self._api_key
             and endpoint.timeout == self._timeout
         ):

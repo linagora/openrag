@@ -1391,7 +1391,111 @@ async def test_validate_endpoint_probes_url_and_model_name(monkeypatch):
         "reachable": True,
         "model_found": True,
         "models_served": ["mistral-small"],
+        "transcription_supported": None,
         "detail": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_validate_stt_endpoint_probes_transcription_capability(monkeypatch):
+    import httpx
+
+    svc = _make_service()
+    calls: list[tuple[str, str]] = []
+
+    class FakeResponse:
+        def __init__(self, status_code, data=None):
+            self.status_code = status_code
+            self._data = data or {}
+
+        def json(self):
+            return self._data
+
+    class FakeClient:
+        def __init__(self, *, timeout, headers, follow_redirects):
+            assert timeout == 5.0
+            assert headers == {}
+            assert follow_redirects is False
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, url):
+            calls.append(("get", url))
+            return FakeResponse(200, {"data": [{"id": "moss-transcribe-diarize"}]})
+
+        async def post(self, url):
+            calls.append(("post", url))
+            return FakeResponse(422)
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+    result = await svc.validate_endpoint(
+        "http://moss:8000/v1",
+        "moss-transcribe-diarize",
+        model_type="stt",
+    )
+
+    assert calls == [
+        ("get", "http://moss:8000/v1/models"),
+        ("post", "http://moss:8000/v1/audio/transcriptions"),
+    ]
+    assert result == {
+        "reachable": True,
+        "model_found": True,
+        "models_served": ["moss-transcribe-diarize"],
+        "transcription_supported": True,
+        "detail": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_validate_stt_endpoint_rejects_missing_transcription_route(monkeypatch):
+    import httpx
+
+    svc = _make_service()
+
+    class FakeResponse:
+        def __init__(self, status_code, data=None):
+            self.status_code = status_code
+            self._data = data or {}
+
+        def json(self):
+            return self._data
+
+    class FakeClient:
+        def __init__(self, *, timeout, headers, follow_redirects):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, url):
+            return FakeResponse(200, {"data": [{"id": "moss-transcribe-diarize"}]})
+
+        async def post(self, url):
+            return FakeResponse(404)
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+    result = await svc.validate_endpoint(
+        "http://moss:8000/v1",
+        "moss-transcribe-diarize",
+        model_type="stt",
+    )
+
+    assert result == {
+        "reachable": True,
+        "model_found": True,
+        "models_served": ["moss-transcribe-diarize"],
+        "transcription_supported": False,
+        "detail": "Endpoint does not support OpenAI-compatible audio transcriptions.",
     }
 
 
@@ -1446,6 +1550,7 @@ async def test_validate_endpoint_rejects_non_http_urls_without_request(monkeypat
         "reachable": False,
         "model_found": None,
         "models_served": None,
+        "transcription_supported": None,
         "detail": "Endpoint URL must be an absolute HTTP(S) URL.",
     }
 
@@ -1467,6 +1572,7 @@ async def test_validate_endpoint_rejects_malformed_urls_without_request(monkeypa
         "reachable": False,
         "model_found": None,
         "models_served": None,
+        "transcription_supported": None,
         "detail": "Endpoint URL must be an absolute HTTP(S) URL.",
     }
 
@@ -1488,5 +1594,6 @@ async def test_validate_endpoint_rejects_url_credentials_without_request(monkeyp
         "reachable": False,
         "model_found": None,
         "models_served": None,
+        "transcription_supported": None,
         "detail": "Endpoint URL must not include credentials.",
     }
