@@ -48,7 +48,7 @@ class IndexerWorkerActor:
     of these and load-balances across them.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, namespace: str = "openrag") -> None:
         import services.inference.ollama_client  # noqa: F401
         import services.inference.vllm_client  # noqa: F401
         from core.config import load_config
@@ -63,6 +63,7 @@ class IndexerWorkerActor:
         )
         from services.workers.pipeline_builder import build_indexing_pipeline
 
+        self._namespace = namespace
         cfg = load_config()
         parser = build_parser_dispatcher(
             cfg,
@@ -97,7 +98,7 @@ class IndexerWorkerActor:
             embed_concurrency=embed_cfg.embed_concurrency,
         )
         self._vector_store = MilvusVectorStore(cfg.vectordb)
-        task_state_manager = ray.get_actor("TaskStateManager", namespace="openrag")
+        task_state_manager = ray.get_actor("TaskStateManager", namespace=self._namespace)
         pipeline = build_indexing_pipeline(
             parser=parser,
             chunker=chunker,
@@ -426,7 +427,7 @@ class IndexerPool:
                 get_if_exists=True,
                 lifetime="detached",
                 max_concurrency=max_tasks_per_worker,
-            ).remote()
+            ).remote(namespace)
             for i in range(pool_size)
         ]
         self._worker_names = [_indexer_worker_actor_name(i) for i in range(pool_size)]

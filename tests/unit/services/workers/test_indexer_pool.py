@@ -139,12 +139,14 @@ def test_indexer_pool_actor_spawns_pool_size_detached_workers(
     import services.workers.indexer_pool as module
 
     calls = []
+    remote_calls = []
 
     class Options:
         def __init__(self, kwargs):
             self._kwargs = kwargs
 
-        def remote(self):
+        def remote(self, namespace):
+            remote_calls.append(namespace)
             return f"actor-{self._kwargs['name']}"
 
     def fake_options(**kwargs):
@@ -154,7 +156,7 @@ def test_indexer_pool_actor_spawns_pool_size_detached_workers(
     monkeypatch.setattr(module.IndexerWorkerActor, "options", fake_options)
 
     actor_class = module.IndexerPool.__ray_metadata__.modified_class
-    pool = actor_class(pool_size=3, max_tasks_per_worker=4)
+    pool = actor_class(pool_size=3, max_tasks_per_worker=4, namespace="tenant-ray")
 
     # One detached worker actor per pool_size slot, each capped at max_tasks_per_worker.
     assert len(pool._workers) == 3
@@ -167,7 +169,8 @@ def test_indexer_pool_actor_spawns_pool_size_detached_workers(
         assert c["lifetime"] == "detached"
         assert c["max_concurrency"] == 4
         assert c["get_if_exists"] is True
-        assert c["namespace"] == "openrag"
+        assert c["namespace"] == "tenant-ray"
+    assert remote_calls == ["tenant-ray", "tenant-ray", "tenant-ray"]
 
 
 def test_build_topic_tagger_factory_resolves_named_llm(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1377,7 +1380,7 @@ async def test_pool_keeps_content_claim_until_cancelled_task_settles() -> None:
     )
 
 
-def test_indexer_pool_wires_contextualizer_factory(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_indexer_pool_wires_contextualizer_factory_and_worker_namespace(monkeypatch: pytest.MonkeyPatch) -> None:
     import core.config
     import core.embeddings
     import services.storage.milvus_store as milvus_store
@@ -1451,11 +1454,11 @@ def test_indexer_pool_wires_contextualizer_factory(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(module, "IndexerWorker", Worker)
 
     actor_class = module.IndexerWorkerActor.__ray_metadata__.modified_class
-    actor_class()
+    actor_class(namespace="tenant-ray")
 
     assert actor_calls
     assert actor_calls[0][0][0] == "TaskStateManager"
-    assert actor_calls[0][1].get("namespace") == "openrag"
+    assert actor_calls[0][1].get("namespace") == "tenant-ray"
     assert captured["contextualizer_factory"] is contextualizer_factory
     assert captured["topic_tagger_factory"] is topic_tagger_factory
     assert captured["vlm_factory"] is vlm_factory
