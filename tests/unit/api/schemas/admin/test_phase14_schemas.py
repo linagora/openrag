@@ -244,10 +244,9 @@ def test_update_partition_requires_at_least_one_field():
         UpdatePartitionRequest()
 
 
-def test_update_partition_accepts_an_asr_prompt_selection():
-    request = UpdatePartitionRequest(generation_prompt_names={"asr_transcription": "meeting-diarization"})
-
-    assert request.generation_prompt_names == {"asr_transcription": "meeting-diarization"}
+def test_update_partition_rejects_an_asr_prompt_selection():
+    with pytest.raises(ValidationError):
+        UpdatePartitionRequest(generation_prompt_names={"asr_transcription": "meeting-diarization"})
 
 
 def test_update_partition_rejects_negative_chat_history_depth():

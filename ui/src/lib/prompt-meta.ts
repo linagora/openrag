@@ -44,7 +44,7 @@ export const PROMPT_GROUPS: PromptGroup[] = [
   },
   {
     name: "Transcription",
-    description: "ASR instruction — selected per partition for external audio transcription",
+    description: "ASR instruction — selected on the indexation preset for external audio transcription",
     types: [{ value: "asr_transcription", label: "ASR transcription" }],
   },
 ];

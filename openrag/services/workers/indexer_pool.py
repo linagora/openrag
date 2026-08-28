@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import threading
 import time
+from contextvars import ContextVar
 from types import SimpleNamespace
 from typing import Any
 
@@ -22,7 +23,7 @@ _CONTENT_CLAIM_RENEW_INTERVAL_SECONDS = 60 * 60
 # and workers on the same protocol generation whenever their remote contract or
 # cross-process indexing semantics change, so new replicas cannot attach to a
 # partially compatible actor fleet left by the previous release.
-_INDEXER_ACTOR_PROTOCOL_VERSION = "v6"
+_INDEXER_ACTOR_PROTOCOL_VERSION = "v7"
 _INDEXER_POOL_DISPATCHER_ACTOR_NAME = f"IndexerPoolDispatcher-{_INDEXER_ACTOR_PROTOCOL_VERSION}"
 
 
@@ -63,6 +64,13 @@ class IndexerWorkerActor:
         from services.workers.pipeline_builder import build_indexing_pipeline
 
         cfg = load_config()
+        # One actor can process several files concurrently. Keep the preset
+        # snapshot associated with the active file task, rather than on ``self``,
+        # so audio requests from different partitions never share STT settings.
+        self._active_indexation_config: ContextVar[dict[str, Any] | None] = ContextVar(
+            "active_indexation_config",
+            default=None,
+        )
         parser = build_parser_dispatcher(
             cfg,
             transcription_prompt_resolver=self._resolve_transcription_prompt,
@@ -179,42 +187,64 @@ class IndexerWorkerActor:
             )
         return self._prompt_service
 
-    async def _resolve_transcription_prompt(self, partition: str | None = None) -> str | None:
-        """Resolve this partition's ASR prompt without caching it in the worker.
+    def _current_indexation_config(self) -> dict[str, Any]:
+        """Return this task's dispatch-time indexation preset snapshot."""
+        context = getattr(self, "_active_indexation_config", None)
+        config = context.get() if context is not None else None
+        return config if isinstance(config, dict) else {}
 
-        ``OpenAIAudioClient`` invokes this directly before each request. The
-        partition's named selection wins, with the ASR global default as the
-        fallback. Both lookups stay live, so an Admin UI save affects the next
-        transcription even though the parser client itself is long-lived.
+    async def _resolve_transcription_prompt(self, partition: str | None = None) -> str | None:
+        """Resolve the active preset's ASR prompt, then the global default.
+
+        The preset name is captured when the file is dispatched, matching the
+        endpoint and the other indexation-stage settings. Prompt content itself
+        remains live: an Admin UI edit applies to the next transcription.
+
+        Older deployments may still have an ASR name in the partition prompt
+        map. It remains a read-only compatibility fallback until that partition
+        is moved to an explicit preset selection; new writes use the preset.
         """
-        selected_name: str | None = None
+        selected_name = self._current_indexation_config().get("asr_transcription_prompt_name")
+        legacy_name: str | None = None
         if partition:
             try:
                 row = await self._catalog_store.partition_repo.get_partition_row(partition)
                 prompt_names = row.get("generation_prompt_names") if row else None
-                if isinstance(prompt_names, dict):
-                    candidate = prompt_names.get("asr_transcription")
-                    if isinstance(candidate, str) and candidate.strip():
-                        selected_name = candidate
-            except Exception as exc:  # noqa: BLE001 - a partition lookup must not fail a file
-                self._logger.warning(f"ASR prompt selection lookup failed (partition={partition}): {exc}")
+                candidate = prompt_names.get("asr_transcription") if isinstance(prompt_names, dict) else None
+                legacy_name = candidate if isinstance(candidate, str) and candidate.strip() else None
+            except Exception as exc:  # noqa: BLE001 - a compatibility lookup must not fail a file
+                self._logger.warning(f"Legacy ASR prompt lookup failed (partition={partition}): {exc}")
         try:
-            return await self._get_prompt_service().resolve_prompt("asr_transcription", names=[selected_name])
+            return await self._get_prompt_service().resolve_prompt(
+                "asr_transcription",
+                names=[name for name in (selected_name, legacy_name) if isinstance(name, str) and name.strip()],
+            )
         except Exception as exc:  # noqa: BLE001 - a prompt lookup must not fail a file
-            self._logger.warning(f"ASR transcription prompt resolution failed: {exc}")
+            self._logger.warning(f"ASR transcription prompt resolution failed (partition={partition}): {exc}")
             return None
 
     def _resolve_transcription_endpoint(self) -> Any | None:
-        """Return the current default OpenAI-compatible STT endpoint.
+        """Return the active preset's OpenAI-compatible STT endpoint.
 
         The parser holds this resolver rather than a static client config. The
         indexer refreshes ``cfg.models`` from the endpoint registry on its
         existing bounded refresh cycle, so a saved Admin UI endpoint takes
-        effect without recreating the long-lived Ray actor.
+        effect without recreating the long-lived Ray actor. An unset or stale
+        preset selection safely falls back to the global default endpoint.
         """
         models = getattr(self._cfg, "models", None)
         stt = getattr(models, "stt", None)
-        return stt.get("default") if stt is not None else None
+        if stt is None:
+            return None
+        selected_name = self._current_indexation_config().get("stt")
+        endpoint = stt.get(selected_name or "default")
+        if endpoint is None and selected_name:
+            self._logger.warning(
+                f"STT endpoint '{selected_name}' from the active indexation preset is unavailable; "
+                "using the default endpoint."
+            )
+            return stt.get("default")
+        return endpoint
 
     async def _ensure_registry_fresh(self, required_model_names: dict[str, list[str]] | list[str]) -> None:
         """Hydrate ``cfg.models`` from the DB so named endpoints resolve here.
@@ -351,19 +381,25 @@ class IndexerWorkerActor:
             # boundary, so per-chunk work reuses one resolved string instead of
             # hitting the DB per chunk.
             resolved_prompts = await self._resolve_ingest_prompts(partition, indexation_config or {})
-            result = await self._worker.process_file(
-                task_id=task_id,
-                path=path,
-                metadata=worker_metadata,
-                partition=partition,
-                user=user,
-                workspace_ids=workspace_ids,
-                replace=replace,
-                indexation_config=indexation_config,
-                embedder_name=embedder_name,
-                require_existing_partition=require_existing_partition,
-                resolved_prompts=resolved_prompts,
-            )
+            context = getattr(self, "_active_indexation_config", None)
+            token = context.set(indexation_config) if context is not None else None
+            try:
+                result = await self._worker.process_file(
+                    task_id=task_id,
+                    path=path,
+                    metadata=worker_metadata,
+                    partition=partition,
+                    user=user,
+                    workspace_ids=workspace_ids,
+                    replace=replace,
+                    indexation_config=indexation_config,
+                    embedder_name=embedder_name,
+                    require_existing_partition=require_existing_partition,
+                    resolved_prompts=resolved_prompts,
+                )
+            finally:
+                if token is not None:
+                    context.reset(token)
             file_id = metadata.get("file_id", "")
             if workspace_ids and not replace and file_id:
                 try:
@@ -635,10 +671,10 @@ def _required_model_endpoint_names(
         "embedder": [],
         "llm": _required_llm_names(indexation_config),
         "vlm": [],
-        # Audio parsing resolves the global STT default at request time. Keep
-        # it in the refresh set so a worker with only file parsing (no LLM/VLM
-        # enrichment) still hydrates the newly editable endpoint registry.
-        "stt": ["default"],
+        # Audio parsing resolves the preset's selected STT endpoint (or the
+        # global default) at request time. Keep it in the refresh set so a
+        # worker with only file parsing still hydrates the endpoint registry.
+        "stt": [str(indexation_config.get("stt") or "default")] if indexation_config is not None else ["default"],
     }
     if embedder_name:
         names["embedder"].append(embedder_name)

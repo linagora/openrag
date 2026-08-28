@@ -26,7 +26,7 @@ vi.mock("@/lib/api/presets", async () => {
 });
 
 vi.mock("@/lib/api/prompts", () => ({
-  listPrompts: vi.fn().mockResolvedValue([]),
+  listAllPrompts: vi.fn().mockResolvedValue([]),
 }));
 
 vi.mock("@/lib/api/models", () => ({
@@ -37,6 +37,14 @@ vi.mock("@/lib/api/models", () => ({
 vi.mock("sonner", () => ({
   toast: { success: vi.fn(), error: vi.fn() },
 }));
+
+class ResizeObserverMock {
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+}
+
+vi.stubGlobal("ResizeObserver", ResizeObserverMock);
 
 const listPresetsMock = vi.mocked(listPresets);
 const deletePresetMock = vi.mocked(deletePreset);
@@ -116,5 +124,22 @@ describe("PresetsPage usage badge", () => {
         expect.stringContaining("used by 2 partition(s); reassign them before deleting"),
       ),
     );
+  });
+});
+
+describe("PresetsPage parsing configuration", () => {
+  beforeEach(() => {
+    listPresetsMock.mockReset();
+  });
+
+  it("selects the STT endpoint and transcription prompt on an indexation preset", async () => {
+    listPresetsMock.mockResolvedValue([]);
+    const user = userEvent.setup();
+
+    renderPage();
+    await user.click(await screen.findByRole("button", { name: /add preset/i }));
+
+    expect(await screen.findByText("STT endpoint")).toBeTruthy();
+    expect(screen.getByText("Transcription prompt")).toBeTruthy();
   });
 });

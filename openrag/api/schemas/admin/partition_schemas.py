@@ -70,10 +70,9 @@ class UpdatePartitionRequest(BaseModel):
     @classmethod
     def validate_generation_prompt_names(cls, value: dict[str, str] | None, info: ValidationInfo) -> dict[str, str]:
         value = _reject_explicit_null(info.field_name, value)
-        # Query transformation and enrichment prompts are selected on their
-        # respective presets. Final-answer and transcription prompts belong to
-        # the partition that owns the request/file.
-        allowed = {"sys_prompt", "spoken_style_answer", "asr_transcription"}
+        # Query transformation, parsing, and enrichment prompts are selected on
+        # their respective presets. Final-answer prompts belong to the partition.
+        allowed = {"sys_prompt", "spoken_style_answer"}
         bad = set(value) - allowed
         if bad:
             raise ValueError(f"generation_prompt_names keys must be one of {sorted(allowed)}; got {sorted(bad)}")

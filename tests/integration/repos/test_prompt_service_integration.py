@@ -66,24 +66,33 @@ class TestSeedAndResolve:
         await repo.create(Prompt(prompt_type="asr_transcription", name="d_asr", content="x", is_default=True))
         await repo.create(Prompt(prompt_type="asr_transcription", name="meeting", content="x"))
 
-        # An indexation preset naming ctx1, plus one naming a non-existent prompt.
-        await postgres_store.preset_repo.upsert("legalpreset", "indexation", {"contextualization_prompt_name": "ctx1"})
-        await postgres_store.preset_repo.upsert("orphan", "indexation", {"contextualization_prompt_name": "ghost"})
+        # An indexation preset naming ctx1 and the meeting ASR prompt, plus one
+        # naming non-existent alternatives.
+        await postgres_store.preset_repo.upsert(
+            "legalpreset",
+            "indexation",
+            {"contextualization_prompt_name": "ctx1", "asr_transcription_prompt_name": "meeting"},
+        )
+        await postgres_store.preset_repo.upsert(
+            "orphan",
+            "indexation",
+            {"contextualization_prompt_name": "ghost", "asr_transcription_prompt_name": "missing"},
+        )
 
-        # 3 partitions: rc1 overrides sys_prompt and ASR, and uses legalpreset;
-        # rc2 uses legalpreset with no partition override; rc3 names missing
-        # sys_prompt and ASR prompts (both fall back to their defaults).
+        # 3 partitions: rc1 overrides its final-answer prompt and uses
+        # legalpreset; rc2 also uses legalpreset; rc3 names a missing final
+        # answer prompt and uses orphan (both prompt types fall back to default).
         await partition_repo.create_partition("rc1")
         await partition_repo.update_partition(
             "rc1",
             indexation_preset="legalpreset",
-            generation_prompt_names={"sys_prompt": "legal", "asr_transcription": "meeting"},
+            generation_prompt_names={"sys_prompt": "legal"},
         )
         await partition_repo.create_partition("rc2")
         await partition_repo.update_partition("rc2", indexation_preset="legalpreset")
         await partition_repo.create_partition("rc3")
         await partition_repo.update_partition(
-            "rc3", generation_prompt_names={"sys_prompt": "missing", "asr_transcription": "missing"}
+            "rc3", indexation_preset="orphan", generation_prompt_names={"sys_prompt": "missing"}
         )
 
         counts = await repo.reference_counts()
@@ -94,12 +103,11 @@ class TestSeedAndResolve:
         # chunk_contextualizer: rc1 + rc2 -> ctx1 (via legalpreset); rc3 -> default.
         assert counts.get(("chunk_contextualizer", "ctx1")) == 2
         assert counts.get(("chunk_contextualizer", "d_ctx")) == 1
-        # asr_transcription: rc1 selects meeting; rc2 (no selection) and rc3
-        # (dangling selection) use the ASR default.
-        assert counts.get(("asr_transcription", "meeting")) == 1
-        assert counts.get(("asr_transcription", "d_asr")) == 2
-        # The "orphan" preset names a non-existent prompt and is used by no
-        # partition — it contributes to nothing.
+        # asr_transcription: rc1 + rc2 select meeting through legalpreset;
+        # rc3's dangling preset selection falls back to the ASR default.
+        assert counts.get(("asr_transcription", "meeting")) == 2
+        assert counts.get(("asr_transcription", "d_asr")) == 1
+        # The orphan preset's stale prompt name contributes nothing.
         assert counts.get(("chunk_contextualizer", "ghost")) is None
         # Per type the effective counts sum to the partition total (3).
         assert counts[("sys_prompt", "legal")] + counts[("sys_prompt", "d_sys")] == 3

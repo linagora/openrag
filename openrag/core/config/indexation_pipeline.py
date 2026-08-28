@@ -29,6 +29,12 @@ class IndexationPipelineConfig(BaseModel):
     # None => inherit the global PDFLOADER (see PARSING_STRATEGIES above).
     parsing_strategy: Literal["pymupdf", "marker", "docling"] | None = None
 
+    # Audio transcription. ``None`` uses the deployment's default STT endpoint
+    # and the ASR prompt type's global default, respectively. These live on the
+    # indexation preset because transcription is a parsing-stage concern.
+    stt: str | None = None  # endpoint name
+    asr_transcription_prompt_name: str | None = None
+
     # VLM / image captioning
     vlm: str | None = None  # endpoint name; None = use global default
     enable_image_captioning: bool = True

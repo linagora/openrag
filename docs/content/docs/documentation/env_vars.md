@@ -144,7 +144,7 @@ Here are some other variables related to openai-compatible endpoint.
 
 For a MOSS server bound to `127.0.0.1:8001`, use `http://127.0.0.1:8001/v1` only when OpenRAG runs on that host. A containerized OpenRAG needs a host-reachable address such as `http://host.docker.internal:8001/v1` (plus Docker's host-gateway mapping on Linux). Match the saved endpoint's **Concurrency** in **Admin UI → Model Endpoints** to the vLLM capacity; with `--max-num-seqs 1`, set it to `1`. `TRANSCRIBER_MAX_CONCURRENT_CHUNKS` only controls the initial seed and fallback.
 
-The bundled transcriber image is pinned for Whisper and predates MOSS support. Serve MOSS with the vLLM build specified by the model authors, then use it as the external transcription endpoint. Its advanced STT request options are sent unchanged to vLLM, which allows an appropriate output-token budget and deterministic JSON output to be managed with the endpoint. For a MOSS model, **Admin UI → Model Endpoints** also offers a MOSS transcript-output setting. Choose **Timestamped speaker lines** to normalize valid MOSS diarized segments into one line per segment using `[HH:MM:SS.mmm] [Sxx] text [HH:MM:SS.mmm]`; choose **Raw MOSS response** to keep the model output unchanged. Manage its instruction in **Admin UI → Prompt Library → Transcription**. Changes apply to the next transcription without a restart; leave its content empty to retain MOSS's built-in diarization prompt. When adding hotwords or a format instruction, include the desired timestamp and speaker-label format in the prompt as well.
+The bundled transcriber image is pinned for Whisper and predates MOSS support. Serve MOSS with the vLLM build specified by the model authors, then use it as the external transcription endpoint. Its advanced STT request options are sent unchanged to vLLM, which allows an appropriate output-token budget and deterministic JSON output to be managed with the endpoint. For a MOSS model, **Admin UI → Model Endpoints** also offers a MOSS transcript-output setting. Choose **Timestamped speaker lines** to normalize valid MOSS diarized segments into one line per segment using `[HH:MM:SS.mmm] [Sxx] text [HH:MM:SS.mmm]`; choose **Raw MOSS response** to keep the model output unchanged. Select the endpoint and instruction in **Admin UI → Presets → Indexation → Parsing**; each partition uses the choices from its assigned indexation preset. Leave either selection at its default to follow the global endpoint or prompt. When adding hotwords or a format instruction, include the desired timestamp and speaker-label format in the prompt as well.
 :::
 
 :::note[About whisper with vLLM and language detection]
@@ -381,7 +381,7 @@ The RAG pipeline ships with preconfigured prompts bundled inside the package at 
 | `query_contextualizer_tmpl.txt` | Template for adding context to user queries |
 | `chunk_contextualizer_tmpl.txt` | Template for contextualizing document chunks during indexing |
 | `image_captioning_tmpl.txt` | Template for generating image descriptions using the VLM |
-| `asr_transcription_tmpl.txt` | Default instruction for timestamped, speaker-labelled external transcription; editable in Prompt Library |
+| `asr_transcription_tmpl.txt` | Default instruction for timestamped, speaker-labelled external transcription; selected by the indexation preset |
 | `hyde.txt` | Hypothetical Document Embeddings (HyDE) query expansion template |
 | `multi_query_pmpt_tmpl.txt` | Template for generating multiple query variations |
 

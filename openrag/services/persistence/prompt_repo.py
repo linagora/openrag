@@ -52,8 +52,9 @@ def _as_conflict(exc: asyncpg.UniqueViolationError, prompt_type: str) -> Validat
 
 
 # Indexation/retrieval preset config field -> the prompt_type it names. Partition
-# prompt-map keys (final-answer and ASR transcription) ARE prompt_type values,
-# so they need no mapping.
+# prompt-map keys (final-answer prompts) ARE prompt_type values, so they need no
+# mapping. ASR is resolved separately below because it retains a legacy
+# partition-level fallback for existing deployments.
 _PRESET_FIELD_TO_TYPE = {
     "contextualization_prompt_name": "chunk_contextualizer",
     "image_captioning_prompt_name": "image_captioning",
@@ -253,15 +254,16 @@ class PgPromptRepository(PromptRepository):
         existing = {(r["prompt_type"], r["name"]) for r in prompt_rows}
         default_name: dict[str, str] = {r["prompt_type"]: r["name"] for r in prompt_rows if r["is_default"]}
 
-        # Explicit overrides: partitions that name a prompt directly (partition
-        # prompt selections on the JSONB) or transitively (their active
-        # indexation/retrieval preset's *_prompt_name).
+        # Explicit overrides: partitions that name a final-answer prompt
+        # directly, or transitively through their active indexation/retrieval
+        # preset's ``*_prompt_name`` setting. ASR is handled separately because
+        # older rows may still carry the previous partition-level selection.
         overrides: dict[tuple[str, str], int] = {}
         part_rows = await self.pool.fetch(
             """
             SELECT j.key AS prompt_type, j.value AS name, count(*)::int AS n
             FROM partitions p, jsonb_each_text(p.generation_prompt_names) j
-            WHERE j.value <> ''
+            WHERE j.value <> '' AND j.key <> 'asr_transcription'
             GROUP BY 1, 2
             """
         )
@@ -277,7 +279,7 @@ class PgPromptRepository(PromptRepository):
               ON (pre.preset_type = 'indexation' AND pre.name = part.indexation_preset)
               OR (pre.preset_type = 'retrieval'  AND pre.name = part.retrieval_preset)
             CROSS JOIN LATERAL jsonb_each_text(pre.config) c
-            WHERE c.value <> ''
+            WHERE c.value <> '' AND c.key <> 'asr_transcription_prompt_name'
             GROUP BY 1, 2
             """
         )
@@ -286,6 +288,21 @@ class PgPromptRepository(PromptRepository):
             if prompt_type:
                 key = (prompt_type, r["name"])
                 overrides[key] = overrides.get(key, 0) + r["n"]
+
+        # New ASR selections live on the indexation preset. A partition-level
+        # ASR name from the earlier configuration model is only a compatibility
+        # fallback, so evaluate both candidates per partition to preserve the
+        # same runtime precedence: preset -> legacy partition setting -> default.
+        asr_rows = await self.pool.fetch(
+            """
+            SELECT
+                pre.config->>'asr_transcription_prompt_name' AS preset_name,
+                p.generation_prompt_names->>'asr_transcription' AS legacy_name
+            FROM partitions p
+            LEFT JOIN pipeline_presets pre
+              ON pre.preset_type = 'indexation' AND pre.name = p.indexation_preset
+            """
+        )
 
         # A valid override (names an existing prompt) credits that prompt; a
         # dangling one falls through. Each type's default then absorbs every
@@ -296,6 +313,13 @@ class PgPromptRepository(PromptRepository):
             if (prompt_type, name) in existing:
                 counts[(prompt_type, name)] = counts.get((prompt_type, name), 0) + n
                 valid_overrides[prompt_type] = valid_overrides.get(prompt_type, 0) + n
+        for row in asr_rows:
+            for name in (row["preset_name"], row["legacy_name"]):
+                if isinstance(name, str) and ("asr_transcription", name) in existing:
+                    key = ("asr_transcription", name)
+                    counts[key] = counts.get(key, 0) + 1
+                    valid_overrides["asr_transcription"] = valid_overrides.get("asr_transcription", 0) + 1
+                    break
         for prompt_type, d_name in default_name.items():
             fallback = max(0, (total_partitions or 0) - valid_overrides.get(prompt_type, 0))
             if fallback:

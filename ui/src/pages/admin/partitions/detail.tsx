@@ -71,11 +71,10 @@ import {
 } from "./partition-member-identity";
 import { describePartitionMember } from "./partition-member";
 
-// Prompt types selected on a partition. Indexation/retrieval prompts belong to
-// their presets; final-answer and transcription prompts belong to the document
-// or chat partition itself.
+// Prompt types selected directly on a partition. Parsing, enrichment, and
+// retrieval prompts belong to their respective presets.
 const PARTITION_PROMPT_TYPES = PROMPT_GROUPS
-  .filter((g) => g.name === "Final Answer" || g.name === "Transcription")
+  .filter((g) => g.name === "Final Answer")
   .flatMap((g) => g.types);
 
 // --- General Tab ---
