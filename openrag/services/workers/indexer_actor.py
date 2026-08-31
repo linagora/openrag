@@ -86,13 +86,16 @@ class IndexerWorker:
         """
         file_id = metadata.get("file_id", "")
         log = logger.bind(file_id=file_id, partition=partition, task_id=task_id)
-        await retry_idempotent_ray_actor_method(
-            lambda: self._tsm.set_state.remote(task_id, "SERIALIZING"),
-            task_description=f"set_state({task_id}, SERIALIZING)",
-        )
         row: dict[str, Any] | None = None
         catalog_written = False
         try:
+            # Inside the try: the pool's pre-flight handler stops before this
+            # call, so a TaskStateManager outage here would otherwise fail the
+            # job without any callback at all.
+            await retry_idempotent_ray_actor_method(
+                lambda: self._tsm.set_state.remote(task_id, "SERIALIZING"),
+                task_description=f"set_state({task_id}, SERIALIZING)",
+            )
             document = await _load_document(path, metadata, partition)
             # One indexation timestamp for this file, shared by the Milvus chunks
             # (via the store stage) and the Postgres catalog row, so they agree.

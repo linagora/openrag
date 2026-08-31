@@ -1644,3 +1644,31 @@ async def test_preflight_failure_without_callback_url_stays_a_noop(tmp_path, mon
 
     callback.assert_awaited_once()
     assert callback.await_args[0][0] is None
+
+
+@pytest.mark.asyncio
+async def test_cancelled_preflight_sends_no_callback(tmp_path, monkeypatch) -> None:
+    """A cancelled task notifies nothing — the worker's gate says the same."""
+    import services.workers.indexer_pool as module
+
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"x")
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=_RecordingWorker())
+
+    async def _cancelled(*_a, **_k):
+        raise asyncio.CancelledError()
+
+    actor._ensure_catalog = _cancelled
+    callback = AsyncMock()
+    monkeypatch.setattr(module, "send_indexing_callback", callback)
+
+    with pytest.raises(asyncio.CancelledError):
+        await actor.process_file(
+            task_id="t",
+            path=str(path),
+            metadata={"file_id": "f"},
+            partition="p",
+            callback_url="https://cozy.example.com/ai/index/status",
+        )
+
+    callback.assert_not_awaited()

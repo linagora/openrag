@@ -310,9 +310,13 @@ class IndexerWorkerActor:
                 # boundary, so per-chunk work reuses one resolved string instead of
                 # hitting the DB per chunk.
                 resolved_prompts = await self._resolve_ingest_prompts(partition, indexation_config or {})
-            except BaseException:
+            except Exception:
                 # IndexerWorker.process_file sends the error callback, and it is
-                # never reached from here.
+                # never reached from here. Deliberately not BaseException: a
+                # task cancelled during pre-flight raises CancelledError, and a
+                # cancellation notifies nothing — same rule as the worker's
+                # set_failed_if_not_cancelled gate. Awaiting the callback inside
+                # a cancellation handler would also delay the cancel.
                 await send_indexing_callback(
                     callback_url,
                     partition,

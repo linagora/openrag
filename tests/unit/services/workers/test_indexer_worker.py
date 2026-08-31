@@ -975,3 +975,37 @@ async def test_process_file_rejects_malformed_topic_tags_before_delete(tmp_path:
     assert len(document_repo.add_calls) == 1
     assert vector_store.deleted_filters == []
     tsm.set_failed_if_not_cancelled.remote.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_serializing_state_failure_still_sends_the_error_callback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The pool's pre-flight handler stops short of this call — nobody else notifies."""
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"x")
+
+    processed = ProcessedDocument(document_id="d1", text_blocks=[TextBlock(text="x")])
+    pipeline = _make_pipeline(processed, [Chunk(id="c1", text="x")])
+    tsm = _fake_tsm()
+    # Not retryable, so the helper gives up at once instead of burning its budget.
+    tsm.set_state.remote = AsyncMock(side_effect=RuntimeError("task state manager is gone"))
+    worker = IndexerWorker(pipeline=pipeline, task_state_manager=tsm)
+
+    callback_mock = AsyncMock()
+    monkeypatch.setattr("services.workers.indexer_actor.send_indexing_callback", callback_mock)
+
+    metadata = {"file_id": "f1"}
+    with pytest.raises(RuntimeError, match="task state manager is gone"):
+        await worker.process_file(
+            task_id="t-serializing",
+            path=str(path),
+            metadata=metadata,
+            partition="p",
+            callback_url="https://cozy.example.com/ai/index/status",
+            callback_token="jwt",
+        )
+
+    callback_mock.assert_awaited_once_with(
+        "https://cozy.example.com/ai/index/status", "p", "f1", "error", metadata, callback_token="jwt"
+    )
