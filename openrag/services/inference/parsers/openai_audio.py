@@ -264,6 +264,7 @@ class OpenAIAudioClient(BaseClientParser):
     def _is_fallback_endpoint(self, endpoint: ModelEndpointConfig) -> bool:
         """Whether *endpoint* is the legacy ``TRANSCRIBER_*`` destination."""
         return endpoint.endpoint.strip().rstrip("/") == self._base_url.strip().rstrip("/")
+
     def _client_for_endpoint(self, endpoint: ModelEndpointConfig | None) -> tuple[AsyncOpenAI, str, bool]:
         """Return an OpenAI client, model, and whether the client must be closed."""
         if endpoint is None:
