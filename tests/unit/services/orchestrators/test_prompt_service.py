@@ -92,13 +92,12 @@ class TestSeeding:
         assert len(PROMPT_TYPE_KEYS) == 9
         for p in repo.prompts.values():
             assert p.is_default is True
-            assert p.content.strip()
+            if p.prompt_type != PromptType.ASR_TRANSCRIPTION.value:
+                assert p.content.strip()
 
         asr_prompt = await repo.get_default(PromptType.ASR_TRANSCRIPTION.value)
         assert asr_prompt is not None
-        assert "[S01]" in asr_prompt.content
-        assert "NEVER output timestamps" in asr_prompt.content
-        assert "multiple clearly distinct speakers" in asr_prompt.content
+        assert asr_prompt.content == ""
 
     async def test_seeding_is_idempotent(self):
         repo = FakePromptRepo()
@@ -230,6 +229,16 @@ class TestCrud:
 
         assert updated.content == ""
         assert (await repo.get(prompt.id)).content == ""
+
+    async def test_updating_non_asr_to_blank_content_is_rejected(self):
+        svc = _service()
+        prompt = await svc.create_prompt(prompt_type="sys_prompt", name="answer", content="Answer clearly.")
+
+        with pytest.raises(ValidationError) as exc:
+            await svc.update_prompt(prompt.id, content="   ")
+
+        assert exc.value.status_code == 422
+        assert exc.value.code == "PROMPT_CONTENT_EMPTY"
 
     async def test_non_asr_rejects_blank_content(self):
         with pytest.raises(ValidationError) as exc:
@@ -396,6 +405,18 @@ class TestResolveSurvivesRepositoryFailure:
         svc = _service(ExplodingRepo())
         content = await svc.resolve_prompt("sys_prompt", names=["whatever"])
         assert "{context}" in content  # the bundled sys_prompt template
+
+    async def test_an_asr_repo_error_uses_the_provider_native_prompt(self):
+        class ExplodingRepo(FakePromptRepo):
+            async def get_by_name(self, prompt_type, name):
+                raise RuntimeError("connection pool exhausted")
+
+            async def get_default(self, prompt_type):
+                raise RuntimeError("connection pool exhausted")
+
+        svc = _service(ExplodingRepo())
+
+        assert await svc.resolve_prompt(PromptType.ASR_TRANSCRIPTION.value) == ""
 
 
 class TestSeedingSurvivesAConcurrentReplica:

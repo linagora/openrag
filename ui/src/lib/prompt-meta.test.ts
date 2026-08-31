@@ -67,6 +67,7 @@ describe("validatePlaceholders", () => {
   it("exposes the global ASR prompt without template restrictions", () => {
     const transcription = PROMPT_GROUPS.find((group) => group.name === "Transcription");
     expect(transcription?.types).toEqual([{ value: "asr_transcription", label: "ASR transcription" }]);
+    expect(transcription?.description).toContain("AUDIOLOADER=OpenAIAudioLoader");
 
     const v = validatePlaceholders("Keep <speaker> labels and {literal braces}.", "asr_transcription");
     expect(v.unknown).toEqual([]);

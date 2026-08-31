@@ -253,10 +253,12 @@ class PromptService:
         chat and search paths that did not exist before — prompts used to be read
         from disk once at construction. A transient repository failure must
         therefore not become a 500: lookups are treated as best-effort here and a
-        failure degrades to the bundled disk template, logged once. Errors are
-        swallowed at this single choke point rather than at each of the callers,
-        so chat, query expansion, retrieval and indexing all get the same
-        guarantee.
+        failure degrades to the bundled disk template, logged once. ASR is the
+        exception: it degrades to an empty prompt so a database outage cannot
+        replace an operator's native-provider choice with bundled instructions.
+        Errors are swallowed at this single choke point rather than at each of
+        the callers, so chat, query expansion, retrieval and indexing all get
+        the same guarantee.
 
         Returns a string in every reachable case: boot seeds a default per type
         and deleting a type's default is refused, so reaching the disk seed is
@@ -279,6 +281,10 @@ class PromptService:
                 self._log_resolution(prompt_type, candidates, "default", default.name, default.content)
                 return default.content
         except Exception as exc:  # noqa: BLE001 - a DB blip must not fail the request
+            if prompt_type == PromptType.ASR_TRANSCRIPTION.value:
+                logger.warning(f"Prompt lookup failed for '{prompt_type}'; using the provider's native prompt: {exc}")
+                self._log_resolution(prompt_type, candidates, "native", None, "")
+                return ""
             logger.warning(f"Prompt lookup failed for '{prompt_type}'; falling back to the bundled template: {exc}")
         try:
             content = _validate_and_normalize_content(prompt_type, self._disk_seed(prompt_type))
@@ -298,8 +304,9 @@ class PromptService:
         retrieval / chat) actually used, and preview its text.
 
         ``source`` is how it resolved: ``named`` (a partition/preset selection),
-        ``default`` (the type's global default), or ``disk-seed`` (bundled
-        fallback). ``candidates`` are the names the caller offered, in order.
+        ``default`` (the type's global default), ``disk-seed`` (bundled
+        fallback), or ``native`` (ASR's empty provider-native fallback).
+        ``candidates`` are the names the caller offered, in order.
 
         DEBUG, not INFO: this fires on every chat request and every indexing
         job, and it carries prompt text. It pairs with the ``llm.call`` line

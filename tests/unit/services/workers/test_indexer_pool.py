@@ -1488,8 +1488,21 @@ def _bare_worker_actor(*, save_uploaded_files: bool, worker: _RecordingWorker):
 @pytest.mark.asyncio
 async def test_actor_resolves_the_current_global_asr_prompt() -> None:
     actor = _bare_worker_actor(save_uploaded_files=True, worker=_RecordingWorker())
+    resolve_prompt = AsyncMock(return_value="prompt")
+    actor._prompt_service = SimpleNamespace(resolve_prompt=resolve_prompt)
 
     assert await actor._resolve_transcription_prompt() == "prompt"
+    resolve_prompt.assert_awaited_once_with("asr_transcription")
+
+
+@pytest.mark.asyncio
+async def test_actor_uses_native_asr_prompt_when_resolution_fails() -> None:
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=_RecordingWorker())
+    resolve_prompt = AsyncMock(side_effect=RuntimeError("database unavailable"))
+    actor._prompt_service = SimpleNamespace(resolve_prompt=resolve_prompt)
+
+    assert await actor._resolve_transcription_prompt() is None
+    resolve_prompt.assert_awaited_once_with("asr_transcription")
 
 
 @pytest.mark.asyncio
