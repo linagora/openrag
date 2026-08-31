@@ -13,12 +13,15 @@ export interface ReleaseNotes {
 export const releaseNotes: ReleaseNotes = {
   version: "2.2.0",
   date: "2026-08-31",
-  summary: "OpenRAG 2.2 gives administrators more control over external audio transcription and indexing configuration.",
+  summary: "OpenRAG 2.2 improves deployment compatibility, OpenAI API support, and indexing quality while giving applications finer control over prompts, retrieval, and LLM routing.",
   whatsNew: [
-    "Manage transcription prompts directly from the Admin Console.",
-    "Configure OpenAI-compatible speech-to-text endpoints, including MOSS.",
-    "Choose the STT endpoint and transcription prompt for each indexation preset.",
-    "Select raw, timestamped, or speaker-aware output for MOSS transcripts.",
+    "Milvus 3.0 is now required. Follow the migration guide before upgrading an existing Milvus 2.x deployment.",
+    "Client-provided system instructions are preserved and safely integrated into RAG prompts.",
+    "Scope retrieval to selected indexed file IDs in OpenAI chat requests.",
+    "Optionally route a request to a custom HTTPS LLM endpoint, model, and credentials after enabling LLM_OVERRIDE_ALLOW_CUSTOM_ENDPOINT.",
+    "OpenAI-compatible tool calls, function calls, message names, and vendor-specific fields are forwarded to the model.",
+    "Strict OpenAI-compatible providers no longer receive disabled log-probability parameters.",
+    "Meaningful image captions next to placeholders are preserved during indexing.",
   ],
 };
 

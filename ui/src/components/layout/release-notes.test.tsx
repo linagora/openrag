@@ -31,6 +31,9 @@ describe("ReleaseNotes", () => {
     expect(dialog.textContent).toContain(`OpenRAG v${releaseNotes.version}`);
     expect(dialog.textContent).toContain("Released: August 31, 2026");
     expect(dialog.textContent).toContain("What's New");
+    expect(dialog.textContent).toContain("Milvus 3.0 is now required");
+    expect(dialog.textContent).toContain("custom HTTPS LLM endpoint");
+    expect(dialog.textContent).toContain("image captions next to placeholders");
     expect(screen.queryByRole("heading", { name: "Improvements" })).toBeNull();
     expect(screen.queryByRole("heading", { name: "Bug Fixes" })).toBeNull();
     expect(localStorage.getItem(LAST_VIEWED_RELEASE_NOTES_KEY)).toBe(releaseNotes.version);
