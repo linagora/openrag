@@ -79,13 +79,27 @@ gh run view "$RUN_ID" --json jobs \
 **FAIL** on any `skipped` — that is the v2.0.1 bug recurring. A hard gate:
 
 ```bash
-bad=$(gh run view "$RUN_ID" --json jobs \
-        --jq '[.jobs[] | select(.conclusion != "success")] | length') || exit 1
-if [ "$bad" -ne 0 ]; then
-  echo "FAIL: $bad job(s) did not conclude success — do not continue" >&2
-  exit 1
-fi
-echo "OK: every job concluded success"
+jobs=$(gh run view "$RUN_ID" --json jobs) || exit 1
+fail=0
+
+# Each required job must be PRESENT exactly once and conclude success. Checking
+# only the conclusions of the jobs GitHub returned is not enough: if a job never
+# ran at all it contributes no failing conclusion, so the gate passes on the
+# strength of the jobs that did run.
+for j in verify-tag build-and-push-image build-and-push-image-ray \
+         build-and-push-image-admin-ui; do
+  c=$(printf '%s' "$jobs" | jq -r --arg n "$j" \
+        '[.jobs[] | select(.name == $n)]
+         | if length == 1 then .[0].conclusion else "MISSING(\(length))" end')
+  [ "$c" = success ] && echo "OK    $j" || { echo "FAIL  $j -> $c"; fail=1; }
+done
+
+# And nothing else in the run may have failed either.
+bad=$(printf '%s' "$jobs" \
+        | jq '[.jobs[] | select(.conclusion != "success")] | length')
+[ "$bad" -eq 0 ] || { echo "FAIL  $bad job(s) did not conclude success"; fail=1; }
+
+[ "$fail" -eq 0 ] && echo "step 1 PASS" || { echo "step 1 FAIL" >&2; exit 1; }
 ```
 
 Written as a gate, not a print: a command that only reports the count still
@@ -157,10 +171,21 @@ Steps 2–4 read metadata. This proves the bytes are actually fetchable.
 `sha256:…` — strip the repository prefix before comparing, or the two can never
 match literally.
 
+Gate on the pull itself. If the pull fails while that tag is already in the
+local cache, `docker image inspect` happily reads the **stale** image and the
+step can print `OK` for bytes that were never fetched. And select the
+`RepoDigests` entry **by repository**: it is an unordered list with one entry
+per registry the image has been pulled from or pushed to, so `index 0` is not
+necessarily the repository asked for.
+
 ```bash
-docker pull "linagoraai/openrag:$VER"
+docker pull "linagoraai/openrag:$VER" \
+  || { echo "FAIL: pull failed — the local cache may hold an older image" >&2; exit 1; }
 pulled=$(docker image inspect "linagoraai/openrag:$VER" \
-           --format '{{index .RepoDigests 0}}' | cut -d@ -f2)
+           --format '{{range .RepoDigests}}{{println .}}{{end}}' \
+           | awk -F@ '$1 == "linagoraai/openrag" { print $2; exit }')
+[ -n "$pulled" ] \
+  || { echo "FAIL: no RepoDigest for linagoraai/openrag" >&2; exit 1; }
 registry=$(dg "linagoraai/openrag:$VER") || { echo "FAIL: tag not in registry" >&2; exit 1; }
 [ "$pulled" = "$registry" ] \
   && echo "OK: pulled digest matches the registry ($pulled)" \
@@ -222,26 +247,69 @@ got_app=$(git show "$VER:infra/charts/openrag-stack/Chart.yaml" \
   && echo "OK    appVersion=$got_app" \
   || { echo "FAIL  appVersion=$got_app want=$want_app"; fail=1; }
 
+# Read the `tag:` that is a sibling of `repository: "<repo>"` within the same
+# `image:` block. Comments are stripped first and the repository must occur
+# exactly once, so a commented-out or duplicated pin cannot steer the lookup at
+# a neighbouring block's tag. Prints "<occurrences>\t<tag>".
+pin_for() {
+  awk -v want="$1" '
+    { sub(/#.*/, "") }
+    match($0, /^[[:space:]]*repository:[[:space:]]*"[^"]*"[[:space:]]*$/) {
+      ind = index($0, "repository") - 1
+      v = $0; sub(/^[^"]*"/, "", v); sub(/".*$/, "", v)
+      if (v == want) { n++; pend = 1; pind = ind } else { pend = 0 }
+      next
+    }
+    pend && match($0, /^[[:space:]]*tag:[[:space:]]*"[^"]*"[[:space:]]*$/) {
+      if (index($0, "tag") - 1 == pind) {
+        v = $0; sub(/^[^"]*"/, "", v); sub(/".*$/, "", v)
+        tag = v; pend = 0
+      }
+      next
+    }
+    END { printf "%d\t%s\n", n + 0, tag }
+  '
+}
+
 # Each OpenRag image in the chart, checked by repository. Do NOT just count
 # version-shaped tags: values.yaml also pins third-party images (vllm, milvus,
 # infinity) whose versions have nothing to do with this release.
 # An empty result means the values layout changed and this check no longer finds
 # the pin — that is a FAIL, not a pass.
+values=$(git show "$VER:infra/charts/openrag-stack/values.yaml")
 for repo in 'linagora/openrag-ray' 'linagoraai/openrag-admin-ui' 'linagoraai/openrag'; do
-  got=$(git show "$VER:infra/charts/openrag-stack/values.yaml" \
-          | grep -A4 "repository: \"$repo\"$" \
-          | awk -F'"' '/^[[:space:]]*tag:/{print $2; exit}')
-  [ "$got" = "$VER" ] \
-    && echo "OK    $repo -> $got" \
-    || { echo "FAIL  $repo -> ${got:-NOT FOUND} (want $VER)"; fail=1; }
+  IFS=$'\t' read -r n got < <(printf '%s\n' "$values" | pin_for "$repo")
+  if [ "$n" -ne 1 ]; then
+    echo "FAIL  $repo -> $n active repository entries (want exactly 1)"; fail=1
+  elif [ "$got" = "$VER" ]; then
+    echo "OK    $repo -> $got"
+  else
+    echo "FAIL  $repo -> ${got:-NO SIBLING tag:} (want $VER)"; fail=1
+  fi
 done
 
-# compose pins (2 expected: openrag, openrag-admin-ui)
-cpins=$(git show "$VER:infra/compose/docker-compose.yaml" \
-          | grep -cE "image: linagoraai/openrag(-admin-ui)?:$VER$")
-[ "$cpins" -eq 2 ] \
-  && echo "OK    2 compose pins at $VER" \
-  || { echo "FAIL  $cpins compose pins at $VER (expected 2)"; fail=1; }
+# compose pins. Take the value of every *active* `image:` field, then match it
+# as a fixed whole string: interpolating $VER into a regex would let the dots in
+# v2.1.0 match any character, so a pin reading v2x1y0 would satisfy the check.
+cimg=$(git show "$VER:infra/compose/docker-compose.yaml" | sed 's/#.*//' \
+         | sed -n 's/^[[:space:]]*image:[[:space:]]*\([^[:space:]]*\).*$/\1/p')
+
+# Exactly one pin per expected repository — a count of two is also reached by
+# two copies of the same pin with the other one missing entirely.
+for repo in linagoraai/openrag linagoraai/openrag-admin-ui; do
+  n=$(printf '%s\n' "$cimg" | grep -Fxc "$repo:$VER" || true)
+  [ "$n" -eq 1 ] \
+    && echo "OK    compose $repo:$VER" \
+    || { echo "FAIL  compose $repo:$VER -> $n active pin(s) (want 1)"; fail=1; }
+done
+
+# And no other OpenRag image may be pinned at some other version.
+stray=$(printf '%s\n' "$cimg" | grep -F 'linagoraai/openrag' \
+          | grep -Fxv "linagoraai/openrag:$VER" \
+          | grep -Fxv "linagoraai/openrag-admin-ui:$VER" || true)
+[ -z "$stray" ] \
+  && echo "OK    no stray OpenRag compose pins" \
+  || { echo "FAIL  stray OpenRag compose pin(s): $stray"; fail=1; }
 
 [ "$fail" -eq 0 ] && echo "step 8 PASS" || { echo "step 8 FAIL" >&2; exit 1; }
 ```
