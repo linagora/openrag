@@ -76,18 +76,6 @@ dev = [
 lint = [
     "ruff>=0.14.1",
 ]
-# Offline RAG evaluation only (scripts/rag_eval.py). Deliberately a dependency
-# group, not a runtime dependency: it must never land in the shipped image.
-#
-# Pinned to the same fork+rev as the eval-promptfoo repo. The metrics live in
-# ``ragas.metrics.collections`` (the "v2" API), which upstream PyPI ragas does
-# not expose — and matching the rev is what makes the scores here directly
-# comparable with that harness rather than merely similar.
-#
-#   uv sync --group eval
-eval = [
-    "ragas",
-]
 
 [build-system]
 requires = ["setuptools>=61.0"]
@@ -162,9 +150,3 @@ markers = [
     "unit: Unit tests that run without external dependencies",
     "slow: Slow tests and load/performance benchmarks",
 ]
-
-[tool.uv.sources]
-# Same fork+rev as eval-promptfoo — the ``ragas.metrics.collections`` v2 API
-# used by scripts/rag_eval.py does not exist in upstream PyPI ragas, and
-# matching the rev is what keeps scores comparable between the two harnesses.
-ragas = { git = "https://github.com/idostik/ragas", rev = "561262ffa47358d7b7d619adbfc5c5b784e56c65" }

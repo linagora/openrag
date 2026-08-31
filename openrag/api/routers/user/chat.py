@@ -468,11 +468,6 @@ Returns OpenAI-compatible response with additional `extra` field containing:
   by citation or context-budget truncation — only included when the request's
   `metadata.include_all_retrieved_sources` is `true` (off by default; this is
   debug/evaluation telemetry and can be large)
-- `context`: Only when `metadata: {"include_context": true}` is sent **and** the
-  deployment enables `rag.expose_context` (`RAG_EXPOSE_CONTEXT=true`). The exact
-  document context the LLM received — post-reranking, post-fusion and
-  post-token-budget — as `[{source_index, text, metadata}]` in prompt order.
-  Intended for offline retrieval evaluation; non-streaming responses only.
 
 **Streaming:**
 Set `stream: true` for Server-Sent Events (SSE) streaming responses.
