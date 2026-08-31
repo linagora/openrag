@@ -22,7 +22,7 @@ export const releaseNotes: ReleaseNotes = {
   version: "2.2.0",
   date: "2026-08-31",
   summary:
-    "OpenRAG 2.2 introduces structure-aware chunking, strengthens OpenAI API compatibility, and gives applications more precise retrieval and control over prompts and LLM routing.",
+    "OpenRAG 2.2 gives administrators more control over document chunking and speech-to-text configuration directly from the Admin Console.",
   breakingChanges: {
     title: "Breaking Changes",
     calloutTitle: "Milvus 3.0 migration required",
@@ -30,11 +30,11 @@ export const releaseNotes: ReleaseNotes = {
     action: "Back up your data and follow the Milvus migration guide before starting the new version.",
   },
   newFeatures: [
-    "Add structured_section, an opt-in, structure-aware chunking strategy that keeps headings, tables, captions, and page boundaries together.",
-    "Limit retrieval to selected indexed file IDs in OpenAI chat requests.",
-    "Safely include client-provided system instructions in RAG prompts.",
-    "Forward OpenAI-compatible tool calls, function calls, message names, and vendor-specific fields to the model.",
-    "Optionally route a request to a custom HTTPS LLM endpoint, model, and credentials after enabling LLM_OVERRIDE_ALLOW_CUSTOM_ENDPOINT.",
+    "Choose the new structured_section chunking strategy from indexation presets to keep document sections, headings, tables, and captions together.",
+    "Register, validate, and choose OpenAI-compatible STT endpoints such as Whisper or MOSS from Model Endpoints.",
+    "Create and update transcription prompts in the prompt library without restarting OpenRAG.",
+    "Set an STT endpoint and transcription prompt per indexation preset, so each partition can use the appropriate speech-to-text behavior.",
+    "Choose how MOSS diarized transcripts are formatted: raw output, timestamped speaker lines, or speaker-aware lines.",
   ],
 };
 

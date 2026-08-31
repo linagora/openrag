@@ -35,8 +35,11 @@ describe("ReleaseNotes", () => {
     expect(dialog.textContent).toContain("New Features");
     expect(dialog.textContent).toContain("Breaking Changes");
     expect(dialog.textContent).toContain("Milvus 3.0 migration required");
-    expect(dialog.textContent).toContain("structure-aware chunking strategy");
-    expect(dialog.textContent).toContain("custom HTTPS LLM endpoint");
+    expect(dialog.textContent).toContain("structured_section chunking strategy");
+    expect(dialog.textContent).toContain("OpenAI-compatible STT endpoints");
+    expect(dialog.textContent).toContain("transcription prompts in the prompt library");
+    expect(dialog.textContent).toContain("per indexation preset");
+    expect(dialog.textContent).toContain("MOSS diarized transcripts");
     expect(screen.getByRole("heading", { name: "What's New" })).toBeTruthy();
     expect(screen.getByRole("heading", { name: "New Features" })).toBeTruthy();
     expect(screen.queryByRole("heading", { name: "Fixes" })).toBeNull();
