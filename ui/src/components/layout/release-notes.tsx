@@ -1,5 +1,4 @@
 import { useState } from "react";
-import { ScrollText } from "lucide-react";
 import {
   Dialog,
   DialogContent,
@@ -41,7 +40,7 @@ export function ReleaseNotesButton({ hasNew, isOpen, onOpen, className }: Releas
   const label = `Release Notes · v${releaseNotes.version}`;
 
   return (
-    <SidebarMenuItem>
+    <SidebarMenuItem className="group-data-[collapsible=icon]:hidden">
       <button
         type="button"
         title={hasNew ? `${label} — New` : label}
@@ -55,10 +54,9 @@ export function ReleaseNotesButton({ hasNew, isOpen, onOpen, className }: Releas
             : "text-sidebar-foreground/70 hover:bg-sidebar-accent/60 hover:text-sidebar-accent-foreground"
         }`}
       >
-        <ScrollText className="h-4.5 w-4.5 shrink-0" />
-        <span className="min-w-0 flex-1 truncate group-data-[collapsible=icon]:hidden">{label}</span>
+        <span className="min-w-0 flex-1 truncate">{label}</span>
         {hasNew && (
-          <span className="ml-auto shrink-0 rounded-full bg-sidebar-primary/15 px-1.5 py-0.5 text-[0.6rem] font-semibold leading-none text-sidebar-primary group-data-[collapsible=icon]:hidden">
+          <span className="ml-auto shrink-0 rounded-full bg-sidebar-primary/15 px-1.5 py-0.5 text-[0.6rem] font-semibold leading-none text-sidebar-primary">
             New
           </span>
         )}

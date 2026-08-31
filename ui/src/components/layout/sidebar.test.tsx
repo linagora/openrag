@@ -128,7 +128,12 @@ describe("AppSidebar", () => {
     const releaseNotes = screen.getByRole("button", { name: /open release notes/i });
     const settings = screen.getByRole("link", { name: "Settings" });
 
-    expect(releaseNotes.closest("li")?.nextElementSibling).toBe(settings.closest("li"));
+    expect(releaseNotes.querySelector("svg")).toBeNull();
+    expect(releaseNotes.className).toContain("h-7");
+    expect(releaseNotes.closest("[data-slot='sidebar-release-notes']")?.nextElementSibling).toBe(
+      screen.getByTestId("sidebar-footer"),
+    );
+    expect(screen.getByTestId("sidebar-content").compareDocumentPosition(releaseNotes) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(settings.getAttribute("href")).toBe("/settings");
   });
 });
