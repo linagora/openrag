@@ -35,6 +35,16 @@ def test_preserves_mixed_moss_segment_syntax(normalize):
     assert normalize(transcript) == transcript
 
 
+@pytest.mark.parametrize(
+    "normalize",
+    [normalize_moss_timestamped_transcript, normalize_moss_speaker_aware_transcript],
+)
+def test_preserves_mixed_output_when_its_compact_turn_is_truncated(normalize):
+    transcript = "[1-2][S01] Hello [2][S02] there"
+
+    assert normalize(transcript) == transcript
+
+
 def test_normalizes_moss_timestamps_across_hour_boundary():
     transcript = "[3599.9995-3601][S01] Long recording."
 
@@ -63,6 +73,12 @@ def test_speaker_aware_output_removes_clock_timecodes_from_raw_lines():
     transcript = "[00:00:01.120] [S01] Hello everyone. [00:00:02.320]\n[00:00:02.680] [S1] This week. [00:00:04.320]"
 
     assert normalize_moss_speaker_aware_transcript(transcript) == "Hello everyone.\nThis week."
+
+
+def test_speaker_aware_output_preserves_spoken_bracketed_numbers():
+    transcript = "[00:00:01.000] [S01] The [2024] roadmap is ready. [00:00:02.000]"
+
+    assert normalize_moss_speaker_aware_transcript(transcript) == "The [2024] roadmap is ready."
 
 
 def test_speaker_aware_output_preserves_unrecognized_text_without_speaker_labels():
