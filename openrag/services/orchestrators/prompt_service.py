@@ -184,7 +184,7 @@ class PromptService:
                 # bundled template with a bad placeholder must not become a
                 # type's global default: every request falling back to it would
                 # raise inside .format() at the point of use.
-                _validate_template(prompt_type, content)
+                _validate_content(prompt_type, content)
             except ValidationError as exc:
                 logger.warning(f"Bundled template for '{prompt_type}' is not a valid template; not seeding: {exc}")
                 continue

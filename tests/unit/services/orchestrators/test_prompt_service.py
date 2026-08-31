@@ -108,6 +108,22 @@ class TestSeeding:
         assert (await repo.get_default("sys_prompt")).content == "OPERATOR EDIT"
         assert len(repo.prompts) == 9
 
+    async def test_seeding_skips_blank_non_asr_template(self, monkeypatch):
+        repo = FakePromptRepo()
+        svc = _service(repo)
+        disk_seed = svc._disk_seed
+
+        monkeypatch.setattr(
+            svc,
+            "_disk_seed",
+            lambda prompt_type: "" if prompt_type == PromptType.SYS_PROMPT.value else disk_seed(prompt_type),
+        )
+
+        await svc.seed_defaults()
+
+        assert await repo.get_default(PromptType.SYS_PROMPT.value) is None
+        assert await repo.get_default(PromptType.ASR_TRANSCRIPTION.value) is not None
+
     async def test_type_set_matches_enum(self):
         assert set(PROMPT_TYPE_KEYS) == {t.value for t in PromptType}
 
