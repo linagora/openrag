@@ -7,28 +7,19 @@ export interface ReleaseNotes {
   version: string;
   date: string;
   summary: string;
-  features: readonly string[];
-  improvements: readonly string[];
-  fixes: readonly string[];
-  breakingChanges: readonly string[];
+  whatsNew: readonly string[];
 }
 
 export const releaseNotes: ReleaseNotes = {
   version: "2.2.0",
   date: "2026-08-31",
   summary: "OpenRAG 2.2 gives administrators more control over external audio transcription and indexing configuration.",
-  features: [
+  whatsNew: [
     "Manage transcription prompts directly from the Admin Console.",
     "Configure OpenAI-compatible speech-to-text endpoints, including MOSS.",
     "Choose the STT endpoint and transcription prompt for each indexation preset.",
     "Select raw, timestamped, or speaker-aware output for MOSS transcripts.",
   ],
-  improvements: [
-    "Show clearer validation feedback while configuring transcription endpoints.",
-    "Allow an empty transcription prompt to use the provider's native behavior.",
-  ],
-  fixes: ["Preserve unrecognized MOSS transcript responses instead of partially rewriting them."],
-  breakingChanges: [],
 };
 
 export const LAST_VIEWED_RELEASE_NOTES_KEY = "openrag:last-viewed-release-notes-version";

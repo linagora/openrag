@@ -13,21 +13,7 @@ import {
   hasViewedRelease,
   markReleaseAsViewed,
   releaseNotes,
-  type ReleaseNotes,
 } from "@/lib/release-notes";
-
-interface ReleaseNoteSection {
-  id: string;
-  title: string;
-  entries: readonly string[];
-}
-
-const releaseNoteSections = (notes: ReleaseNotes): ReleaseNoteSection[] => [
-  { id: "whats-new", title: "What's New", entries: notes.features },
-  { id: "improvements", title: "Improvements", entries: notes.improvements },
-  { id: "bug-fixes", title: "Bug Fixes", entries: notes.fixes },
-  { id: "breaking-changes", title: "Breaking Changes", entries: notes.breakingChanges },
-];
 
 interface ReleaseNotesButtonProps {
   hasNew: boolean;
@@ -81,27 +67,18 @@ export function ReleaseNotesDialog({ open, onOpenChange }: ReleaseNotesDialogPro
         </DialogHeader>
 
         <div className="min-h-0 flex-1 overflow-y-auto px-6 py-5" data-testid="release-notes-content">
-          <div className="space-y-6">
-            {releaseNoteSections(releaseNotes)
-              .filter((section) => section.entries.length > 0)
-              .map((section) => (
-                <section key={section.id} aria-labelledby={`release-notes-${section.id}`}>
-                  <h3
-                    id={`release-notes-${section.id}`}
-                    className="text-sm font-semibold text-foreground"
-                  >
-                    {section.title}
-                  </h3>
-                  <ul className="mt-2 space-y-2 text-sm leading-6 text-muted-foreground">
-                    {section.entries.map((entry) => (
-                      <li key={entry} className="relative pl-4 before:absolute before:left-0 before:text-sidebar-primary before:content-['•']">
-                        {entry}
-                      </li>
-                    ))}
-                  </ul>
-                </section>
+          <section aria-labelledby="release-notes-whats-new">
+            <h3 id="release-notes-whats-new" className="text-sm font-semibold text-foreground">
+              What's New
+            </h3>
+            <ul className="mt-2 space-y-2 text-sm leading-6 text-muted-foreground">
+              {releaseNotes.whatsNew.map((entry) => (
+                <li key={entry} className="relative pl-4 before:absolute before:left-0 before:text-sidebar-primary before:content-['•']">
+                  {entry}
+                </li>
               ))}
-          </div>
+            </ul>
+          </section>
         </div>
 
         <DialogFooter className="shrink-0 border-t px-6 py-4" showCloseButton />
