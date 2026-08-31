@@ -141,6 +141,37 @@ async def test_create_default_demotes_existing_in_same_transaction():
 
 
 @pytest.mark.asyncio
+async def test_create_maps_duplicate_to_typed_conflict():
+    import asyncpg
+    from core.config.model_endpoints import ModelEndpointRow
+    from core.utils.exceptions import ValidationError
+    from services.persistence.model_endpoint_repo import PgModelEndpointRepository
+
+    pool = _FakePool()
+
+    async def raise_duplicate(*_args, **_kwargs):
+        raise asyncpg.UniqueViolationError("duplicate endpoint")
+
+    pool.conn.fetchrow = raise_duplicate
+    repo = PgModelEndpointRepository(pool_getter=lambda: pool)
+
+    row = ModelEndpointRow(
+        name="default",
+        model_type="embedder",
+        endpoint="http://vllm:8000/v1",
+        is_default=False,
+        created_at=_NOW,
+        updated_at=_NOW,
+    )
+
+    with pytest.raises(ValidationError) as exc_info:
+        await repo.create(row)
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.code == "ENDPOINT_EXISTS"
+
+
+@pytest.mark.asyncio
 async def test_get_returns_none_when_missing():
     from services.persistence.model_endpoint_repo import PgModelEndpointRepository
 

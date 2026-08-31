@@ -142,6 +142,30 @@ async def test_seed_defaults_skips_type_when_rows_exist():
 
 
 @pytest.mark.asyncio
+async def test_seed_defaults_ignores_concurrent_create_conflict():
+    """A replica that loses the initial seed race must still finish booting."""
+    from core.utils.exceptions import ValidationError
+
+    attempted: list[str] = []
+
+    class RacingRepo(_FakeEndpointRepo):
+        async def create(self, row):
+            attempted.append(row.model_type)
+            if row.model_type == "stt":
+                raise ValidationError(
+                    "already exists",
+                    status_code=409,
+                    code="ENDPOINT_EXISTS",
+                )
+            return await super().create(row)
+
+    repo = RacingRepo()
+    await _make_service(repo).seed_defaults()
+
+    assert "stt" in attempted
+
+
+@pytest.mark.asyncio
 async def test_seed_defaults_skips_empty_endpoint(monkeypatch):
     # Settings().llm.base_url defaults to "" and Settings().llm.model to "".
     # As long as no LLM_ENDPOINT env var is set, seed_defaults should skip llm.
@@ -1497,6 +1521,109 @@ async def test_validate_stt_endpoint_rejects_missing_transcription_route(monkeyp
         "transcription_supported": False,
         "detail": "Endpoint does not support OpenAI-compatible audio transcriptions.",
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_payload", [ValueError("invalid JSON"), {"data": "not-a-list"}])
+async def test_validate_stt_endpoint_probes_audio_when_model_list_is_invalid(monkeypatch, model_payload):
+    import httpx
+
+    svc = _make_service()
+    calls: list[tuple[str, str]] = []
+
+    class FakeResponse:
+        def __init__(self, status_code, payload=None):
+            self.status_code = status_code
+            self._payload = payload
+
+        def json(self):
+            if isinstance(self._payload, Exception):
+                raise self._payload
+            return self._payload
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, url):
+            calls.append(("get", url))
+            return FakeResponse(200, model_payload)
+
+        async def post(self, url):
+            calls.append(("post", url))
+            return FakeResponse(422)
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+    result = await svc.validate_endpoint(
+        "http://moss:8000/v1",
+        "moss-transcribe-diarize",
+        model_type="stt",
+    )
+
+    assert calls == [
+        ("get", "http://moss:8000/v1/models"),
+        ("post", "http://moss:8000/v1/audio/transcriptions"),
+    ]
+    assert result == {
+        "reachable": True,
+        "model_found": None,
+        "models_served": None,
+        "transcription_supported": True,
+        "detail": "Endpoint returned an invalid model list.",
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status_code", [401, 403])
+async def test_validate_stt_endpoint_rejects_auth_failure_on_audio_probe(monkeypatch, status_code):
+    import httpx
+
+    svc = _make_service()
+
+    class FakeResponse:
+        def __init__(self, status_code, payload=None):
+            self.status_code = status_code
+            self._payload = payload
+
+        def json(self):
+            return self._payload
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, url):
+            return FakeResponse(200, {"data": [{"id": "moss-transcribe-diarize"}]})
+
+        async def post(self, url):
+            return FakeResponse(status_code)
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+    result = await svc.validate_endpoint(
+        "http://moss:8000/v1",
+        "moss-transcribe-diarize",
+        api_key="bad-key",
+        model_type="stt",
+    )
+
+    assert result["reachable"] is True
+    assert result["model_found"] is True
+    assert result["transcription_supported"] is False
+    assert result["detail"] == f"Transcription capability check was rejected with HTTP {status_code}. Check the API key."
 
 
 @pytest.mark.asyncio

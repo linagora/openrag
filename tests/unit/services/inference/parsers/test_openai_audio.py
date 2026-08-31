@@ -233,11 +233,29 @@ class TestParse:
 
         kwargs = mock_openai_client.audio.transcriptions.create.await_args.kwargs
         assert kwargs["language"] == "fr"
+        assert kwargs["response_format"] == "json"
         assert kwargs["extra_body"] == {
             "temperature": 0,
-            "response_format": "json",
             "max_completion_tokens": 8192,
         }
+
+    @pytest.mark.asyncio
+    async def test_text_response_format_accepts_plain_string_response(self, mock_openai_client):
+        mock_openai_client.audio.transcriptions.create.return_value = "bonjour"
+        endpoint = ModelEndpointConfig(
+            endpoint="http://x",
+            model_name="moss-transcribe-diarize",
+            batch_size=1,
+            timeout=120,
+            extra={"api_key": "k", "response_format": "text"},
+        )
+
+        result = await _client(mock_openai_client, transcription_endpoint_resolver=lambda: endpoint).parse(_audio_doc())
+
+        assert result.text_blocks[0].text == "bonjour"
+        kwargs = mock_openai_client.audio.transcriptions.create.await_args.kwargs
+        assert kwargs["response_format"] == "text"
+        assert "extra_body" not in kwargs
 
     @pytest.mark.asyncio
     async def test_moss_timestamped_output_is_normalized_after_transcription(self, mock_openai_client):

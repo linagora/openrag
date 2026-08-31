@@ -8,14 +8,11 @@ replaces the earlier stub with real SQL.
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import TYPE_CHECKING
 
+import asyncpg
 from core.config.model_endpoints import ModelEndpointRow
 from core.ports.model_endpoint_repo import ModelEndpointRepository
-from core.utils.exceptions import NotFoundError
-
-if TYPE_CHECKING:
-    import asyncpg
+from core.utils.exceptions import NotFoundError, ValidationError
 
 # 'is_default' is deliberately excluded: a bare ``UPDATE ... SET is_default = true``
 # cannot clear the previous default in the same statement, so it would leave two
@@ -74,29 +71,39 @@ class PgModelEndpointRepository(ModelEndpointRepository):
         # rows for one model_type (same hazard the update path avoids by routing
         # through set_default). Demote any existing default in the SAME transaction
         # as the insert so the new endpoint becomes the sole default atomically.
-        async with self.pool.acquire() as conn:
-            async with conn.transaction():
-                if row.is_default:
-                    await conn.execute(
-                        "UPDATE model_endpoints SET is_default = false, updated_at = now() WHERE model_type = $1",
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.transaction():
+                    if row.is_default:
+                        await conn.execute(
+                            "UPDATE model_endpoints SET is_default = false, updated_at = now() WHERE model_type = $1",
+                            row.model_type,
+                        )
+                    rec = await conn.fetchrow(
+                        """
+                        INSERT INTO model_endpoints
+                            (name, model_type, endpoint, model_name, batch_size, timeout, extra, is_default)
+                        VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8)
+                        RETURNING *
+                        """,
+                        row.name,
                         row.model_type,
+                        row.endpoint,
+                        row.model_name,
+                        row.batch_size,
+                        row.timeout,
+                        row.extra,
+                        row.is_default,
                     )
-                rec = await conn.fetchrow(
-                    """
-                    INSERT INTO model_endpoints
-                        (name, model_type, endpoint, model_name, batch_size, timeout, extra, is_default)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8)
-                    RETURNING *
-                    """,
-                    row.name,
-                    row.model_type,
-                    row.endpoint,
-                    row.model_name,
-                    row.batch_size,
-                    row.timeout,
-                    row.extra,
-                    row.is_default,
-                )
+        except asyncpg.UniqueViolationError as exc:
+            # The service's preflight check cannot make a concurrent create
+            # atomic. Surface the same typed 409 to both an admin race and a
+            # startup-seeding race instead of leaking a database exception.
+            raise ValidationError(
+                f"Endpoint '{row.name}' of type '{row.model_type}' already exists.",
+                status_code=409,
+                code="ENDPOINT_EXISTS",
+            ) from exc
         return self._to_model(rec)
 
     async def get(self, name: str, model_type: str) -> ModelEndpointRow | None:
