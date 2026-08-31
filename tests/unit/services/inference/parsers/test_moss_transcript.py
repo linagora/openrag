@@ -39,6 +39,16 @@ def test_preserves_mixed_moss_segment_syntax(normalize):
     "normalize",
     [normalize_moss_timestamped_transcript, normalize_moss_speaker_aware_transcript],
 )
+def test_preserves_mixed_output_with_a_speakerless_compact_turn(normalize):
+    transcript = "[1] Hello [2][2-3][S02] There"
+
+    assert normalize(transcript) == transcript
+
+
+@pytest.mark.parametrize(
+    "normalize",
+    [normalize_moss_timestamped_transcript, normalize_moss_speaker_aware_transcript],
+)
 def test_preserves_mixed_output_when_its_compact_turn_is_truncated(normalize):
     transcript = "[1-2][S01] Hello [2][S02] there"
 

@@ -31,6 +31,15 @@ _COMPACT_SEGMENT = re.compile(
     rf"(?=\s*(?:\[\s*{_TIMESTAMP}\s*\](?:\s*\[\s*{_SPEAKER}\s*\])?|\Z))",
     re.DOTALL,
 )
+# A compact turn nested beside dash-style output may be complete even when its
+# optional speaker label is absent. The full compact parser intentionally
+# rejects mixed syntax, so this lightweight fragment detects the ambiguity.
+_COMPACT_TURN_FRAGMENT = re.compile(
+    rf"\[\s*{_TIMESTAMP}\s*\]\s*"
+    rf"(?:\[\s*[Ss]\d*\s*\]\s*)?"
+    rf".+?\[\s*{_TIMESTAMP}\s*\]",
+    re.DOTALL,
+)
 # A compact turn may be cut off before its closing timestamp. Its complete or
 # partial speaker marker still makes it distinct from dash-style transcript text.
 _COMPACT_SPEAKER_TURN_START = re.compile(rf"\[\s*{_TIMESTAMP}\s*\]\s*\[\s*[Ss]\d*\s*\]?")
@@ -116,7 +125,10 @@ def _has_mixed_segment_syntax(transcript: str) -> bool:
     """
     if _DASH_SEGMENT.search(transcript) is None:
         return False
-    return _COMPACT_SEGMENT.search(transcript) is not None or _COMPACT_SPEAKER_TURN_START.search(transcript) is not None
+    return (
+        _COMPACT_TURN_FRAGMENT.search(transcript) is not None
+        or _COMPACT_SPEAKER_TURN_START.search(transcript) is not None
+    )
 
 
 def _parse_segments_with_pattern(
