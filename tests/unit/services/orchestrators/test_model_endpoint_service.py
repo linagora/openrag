@@ -1629,6 +1629,55 @@ async def test_validate_stt_endpoint_rejects_auth_failure_on_audio_probe(monkeyp
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("status_code", [401, 403])
+async def test_validate_stt_endpoint_stops_after_model_list_auth_failure(monkeypatch, status_code):
+    import httpx
+
+    svc = _make_service()
+    calls: list[tuple[str, str]] = []
+
+    class FakeResponse:
+        def __init__(self, response_status):
+            self.status_code = response_status
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, url):
+            calls.append(("get", url))
+            return FakeResponse(status_code)
+
+        async def post(self, url):
+            calls.append(("post", url))
+            return FakeResponse(422)
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+    result = await svc.validate_endpoint(
+        "http://moss:8000/v1",
+        "moss-transcribe-diarize",
+        api_key="bad-key",
+        model_type="stt",
+    )
+
+    assert calls == [("get", "http://moss:8000/v1/models")]
+    assert result == {
+        "reachable": False,
+        "model_found": None,
+        "models_served": None,
+        "transcription_supported": False,
+        "detail": f"Model list request was rejected with HTTP {status_code}. Check the API key.",
+    }
+
+
+@pytest.mark.asyncio
 async def test_validate_endpoint_sends_api_key(monkeypatch):
     import httpx
 
