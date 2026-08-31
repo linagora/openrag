@@ -248,6 +248,59 @@ Optional web search augmentation via the Staan API, allowing the LLM to combine 
 - `openrag/services/orchestrators/query_service.py` — `_prepare_for_web_only()`, web search logic in `_prepare_for_chat_completion()`
 - `openrag/api/routers/user/chat.py` — `__prepare_sources()` merges document and web sources
 
+### Indexing Status Callbacks
+
+Indexing is asynchronous, so a client can either poll the task-status URL or
+hand OpenRag a URL to notify once the task settles.
+
+**Request fields** (multipart form, on `POST` and `PUT /indexer/partition/{partition}/file/{file_id}`):
+- `callback_url` — POSTed once the task reaches a terminal state
+- `callback_token` — sent as `Authorization: Bearer <token>` on that POST; requires an `https`
+  `callback_url` (both the router and the sender refuse a token over plain HTTP)
+
+**Body:** `{"partition", "file_id", "status": "success"|"error", "timestamp", "metadata": {"file_rev", "datetime", "doctype"}}`.
+The three metadata fields are echoed verbatim from the upload metadata — never recomputed from the
+stored copy. `file_rev` is the file's CouchDB revision on the cozy side, used by the receiving
+route for its staleness check, so a *stale* revision is dropped as outdated while an absent one is
+accepted as current content. The three fields are a deliberate whitelist, not a pass-through:
+`_build_metadata` also puts `source` (the server's on-disk path), `content_sha256` and `file_size`
+in that dict, and the callback target is a caller-supplied URL.
+
+**Guarantees:** one attempt, no retries, two independent 5 s deadlines (the DNS check, then the
+request), never raises — a failed callback is logged and cannot change the indexing outcome. No
+`callback_url` → strict no-op. A user-cancelled task sends nothing (only a real failure notifies
+`"error"`), which is why the sender keys off the return value of `set_failed_if_not_cancelled` and
+the pool's pre-flight handler catches `Exception`, not `BaseException`.
+
+**Not guaranteed:** delivery. The send is awaited on the worker's slot, so a blackholing target costs
+up to 10 s of indexing throughput per file, and an actor lost before the task settles notifies
+nothing at all. Clients keep a timeout and fall back to polling the task-status URL.
+
+**Rolling deploys:** the worker actors are named, detached and `get_if_exists`, so changing
+`process_file`'s remote contract requires bumping `_INDEXER_ACTOR_PROTOCOL_VERSION` in
+`indexer_pool.py` (v3 → v4 for `callback_url`/`callback_token`). Without the bump, new replicas
+attach to the previous release's actors and every submit raises `TypeError`. Old generations are
+retired with `services/workers/retire_indexer_generation.py`.
+
+**SSRF guard:** `callback_url` is caller-supplied and fetched by the server, so it goes through
+`is_safe_url()` plus a DNS check twice — in the router (immediate `400`) and again in the sender (a
+direct caller bypasses the router). Both run in the router too: accepting a hostname the sender will
+later refuse queues a job whose callback can never arrive. `INDEXING_CALLBACK_ALLOW_PRIVATE_URLS=true` /
+`indexing_callback.allow_private_urls` lifts the *address* half of the guard for dev stacks whose
+target is a local instance; the scheme check always applies. Keep it off in production: with it on,
+any user allowed to upload can make the server POST to an internal address.
+
+**Key files:**
+- `openrag/services/workers/indexing_callback.py` — `send_indexing_callback()` (was `webhook.py`; the
+  target is a normal authenticated route now, not an unauthenticated webhook trigger)
+- `openrag/core/utils/url_safety.py` — `is_safe_url(url, *, allow_private_hosts=False)`, shared with
+  the web-search content fetcher and the MCP `index_url` tool (both keep the strict default)
+- `openrag/core/config/indexation.py` — `IndexingCallbackConfig`
+
+Both fields travel the same chain as the rest of an indexing job: `api/routers/admin/indexing.py` →
+`services/orchestrators/indexing_service.py` → `core/indexing/dispatcher.py` (port) →
+`services/workers/dispatcher.py` → `indexer_pool.py` → `indexer_actor.py` → `indexing_callback.py`.
+
 ### File Quota System
 
 Per-user file quota enforcement tracked via the `file_count` and `file_quota` columns on `users`, and `created_by` on `files`.
