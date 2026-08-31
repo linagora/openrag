@@ -31,14 +31,19 @@ _COMPACT_SEGMENT = re.compile(
     rf"(?=\s*(?:\[\s*{_TIMESTAMP}\s*\](?:\s*\[\s*{_SPEAKER}\s*\])?|\Z))",
     re.DOTALL,
 )
+# A compact turn may be cut off before its closing timestamp. Its speaker
+# marker still makes it unambiguously distinct from dash-style transcript text.
+_COMPACT_SPEAKER_TURN_START = re.compile(rf"\[\s*{_TIMESTAMP}\s*\]\s*\[\s*{_SPEAKER}\s*\]")
 # A trailing range without its speaker label is an incomplete MOSS segment,
 # whether its closing bracket has arrived or not. Treat it as a parser mismatch
 # so the caller receives the original response instead of partial normalization.
 _INCOMPLETE_DASH_RANGE = re.compile(r"\[\s*\d+(?:\.\d+)?\s*-\s*(?:\d+(?:\.\d*)?)?\s*\]?\s*$")
-_TIMECODE = re.compile(
+_TIMECODE_TOKEN = (
     rf"\[\s*(?:{_CLOCK_TIMESTAMP}|{_TIMESTAMP})"
     rf"(?:\s*-\s*(?:{_CLOCK_TIMESTAMP}|{_TIMESTAMP}))?\s*\]"
 )
+_TIMECODE_BEFORE_SPEAKER_LABEL = re.compile(rf"{_TIMECODE_TOKEN}\s*(?=\[\s*{_SPEAKER}\s*\])")
+_TIMECODE_AT_TURN_END = re.compile(rf"\s*{_TIMECODE_TOKEN}(?=\s*(?:\[\s*{_SPEAKER}\s*\]|\Z))")
 _SPEAKER_LABEL = re.compile(rf"\[\s*(?P<speaker>{_SPEAKER})\s*\]")
 
 
@@ -101,10 +106,13 @@ def _has_mixed_segment_syntax(transcript: str) -> bool:
     """Reject a response that combines the two MOSS segment encodings.
 
     Each parser intentionally consumes only one complete encoding. Treating a
-    compact turn as text inside a dash-range match would silently discard its
-    speaker boundary, so leave the original response untouched instead.
+    compact turn — including a visibly started, truncated one — as text inside
+    a dash-range match would silently discard its speaker boundary, so leave
+    the original response untouched instead.
     """
-    return _DASH_SEGMENT.search(transcript) is not None and _COMPACT_SEGMENT.search(transcript) is not None
+    if _DASH_SEGMENT.search(transcript) is None:
+        return False
+    return _COMPACT_SEGMENT.search(transcript) is not None or _COMPACT_SPEAKER_TURN_START.search(transcript) is not None
 
 
 def _parse_segments_with_pattern(
@@ -165,7 +173,7 @@ def _normalize_unparsed_speaker_aware_transcript(transcript: str) -> str:
     if not _SPEAKER_LABEL.search(transcript):
         return transcript
 
-    without_timecodes = _TIMECODE.sub("", transcript)
+    without_timecodes = _strip_boundary_timecodes(transcript)
     labels = list(_SPEAKER_LABEL.finditer(without_timecodes))
     if not labels:
         return transcript
@@ -185,6 +193,21 @@ def _normalize_unparsed_speaker_aware_transcript(transcript: str) -> str:
     speakers = {speaker for speaker, _ in turns if speaker is not None}
     include_speakers = len(speakers) > 1
     return "\n".join(f"[{speaker}] {text}" if include_speakers and speaker else text for speaker, text in turns)
+
+
+def _strip_boundary_timecodes(transcript: str) -> str:
+    """Remove only MOSS timecodes adjacent to a speaker-turn boundary.
+
+    A global timecode substitution would also erase spoken bracketed values
+    such as ``[2024]`` inside a turn. Boundary markers may be adjacent after
+    one another is removed, so repeat until the text is stable.
+    """
+    while True:
+        normalized = _TIMECODE_BEFORE_SPEAKER_LABEL.sub("", transcript)
+        normalized = _TIMECODE_AT_TURN_END.sub("", normalized)
+        if normalized == transcript:
+            return normalized
+        transcript = normalized
 
 
 def _normalize_text(text: str) -> str:
