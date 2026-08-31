@@ -57,6 +57,8 @@ def normalize_moss_timestamped_transcript(transcript: str) -> str:
     cannot be recognized as MOSS output, the original transcription is
     returned unchanged.
     """
+    if _has_mixed_segment_syntax(transcript):
+        return transcript
     segments = _parse_moss_segments(transcript)
     if not segments:
         return transcript
@@ -75,6 +77,8 @@ def normalize_moss_speaker_aware_transcript(transcript: str) -> str:
     ``[Sxx]`` labels. Raw output that cannot be parsed as timestamped MOSS
     segments is handled conservatively, preserving its text and line order.
     """
+    if _has_mixed_segment_syntax(transcript):
+        return transcript
     segments = _parse_moss_segments(transcript)
     if segments:
         speakers = {segment.speaker for segment in segments}
@@ -91,6 +95,16 @@ def _parse_moss_segments(transcript: str) -> list[_MossSegment]:
         if segments:
             return segments
     return []
+
+
+def _has_mixed_segment_syntax(transcript: str) -> bool:
+    """Reject a response that combines the two MOSS segment encodings.
+
+    Each parser intentionally consumes only one complete encoding. Treating a
+    compact turn as text inside a dash-range match would silently discard its
+    speaker boundary, so leave the original response untouched instead.
+    """
+    return _DASH_SEGMENT.search(transcript) is not None and _COMPACT_SEGMENT.search(transcript) is not None
 
 
 def _parse_segments_with_pattern(

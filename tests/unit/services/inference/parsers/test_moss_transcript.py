@@ -25,6 +25,16 @@ def test_normalizes_compact_moss_output_and_defaults_missing_speaker():
     )
 
 
+@pytest.mark.parametrize(
+    "normalize",
+    [normalize_moss_timestamped_transcript, normalize_moss_speaker_aware_transcript],
+)
+def test_preserves_mixed_moss_segment_syntax(normalize):
+    transcript = "[1-2][S01] Hello [2][S02] there [3]"
+
+    assert normalize(transcript) == transcript
+
+
 def test_normalizes_moss_timestamps_across_hour_boundary():
     transcript = "[3599.9995-3601][S01] Long recording."
 
