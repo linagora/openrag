@@ -29,13 +29,18 @@ describe("ReleaseNotes", () => {
 
     const dialog = await screen.findByRole("dialog");
     expect(dialog.textContent).toContain(`OpenRAG v${releaseNotes.version}`);
-    expect(dialog.textContent).toContain("Released: August 31, 2026");
-    expect(dialog.textContent).toContain("What's New");
-    expect(dialog.textContent).toContain("Milvus 3.0 is now required");
+    expect(dialog.textContent).toContain("Latest release");
+    expect(dialog.textContent).toContain("Released August 31, 2026");
+    expect(dialog.textContent).toContain("Highlights");
+    expect(dialog.textContent).toContain("Breaking Changes");
+    expect(dialog.textContent).toContain("Milvus 3.0 migration required");
+    expect(dialog.textContent).toContain("OpenAI API");
+    expect(dialog.textContent).toContain("Indexing");
+    expect(dialog.textContent).toContain("Improvements");
+    expect(dialog.textContent).toContain("Fixes");
     expect(dialog.textContent).toContain("custom HTTPS LLM endpoint");
     expect(dialog.textContent).toContain("image captions next to placeholders");
-    expect(screen.queryByRole("heading", { name: "Improvements" })).toBeNull();
-    expect(screen.queryByRole("heading", { name: "Bug Fixes" })).toBeNull();
+    expect(screen.queryByRole("heading", { name: "What's New" })).toBeNull();
     expect(localStorage.getItem(LAST_VIEWED_RELEASE_NOTES_KEY)).toBe(releaseNotes.version);
     expect(button.textContent).not.toContain("New");
   });
