@@ -236,8 +236,10 @@ every row; with it, the same change is three calls and a short backfill.
 
 The settings live in `infra/compose/milvus/user.yaml`, mounted read-only at
 `/milvus/configs/user.yaml` (the image merges `user.yaml` over its own `milvus.yaml`). Every
-compose stack — deployment, integration tests, load tests — mounts that one file; Helm carries
-the same content in `milvus.extraConfigFiles`, and a unit test asserts the two never drift.
+compose stack — deployment, integration tests, load tests — mounts that one file; Helm cannot read a
+file outside its chart, so it carries the same content in `milvus.extraConfigFiles."user.yaml"` in
+`infra/charts/openrag-stack/values.yaml`. **Changing one means changing the other** — a unit test
+fails if they drift.
 
 :::danger[Enabling Storage V3 is irreversible]
 Milvus writes the new on-disk format and cannot be downgraded to a version that does not
