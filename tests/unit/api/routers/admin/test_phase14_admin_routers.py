@@ -820,16 +820,27 @@ async def test_update_stt_endpoint_validates_model_and_language_hint(async_clien
 
     async with async_client_factory(app) as client:
         invalid = await client.put("/model-endpoints/stt/default", json={"model_name": ""})
-        invalid_output_format = await client.put(
-            "/model-endpoints/stt/default", json={"extra": {"transcript_output_format": "raw"}}
+        invalid_speaker_setting = await client.put(
+            "/model-endpoints/stt/default", json={"extra": {"moss_speaker_aware": "true"}}
         )
-        invalid_structured_output_format = await client.put(
-            "/model-endpoints/stt/default", json={"extra": {"transcript_output_format": []}}
+        invalid_structured_speaker_setting = await client.put(
+            "/model-endpoints/stt/default", json={"extra": {"moss_speaker_aware": []}}
         )
-        valid = await client.put("/model-endpoints/stt/default", json={"extra": {"language": "fr"}})
+        valid = await client.put(
+            "/model-endpoints/stt/default", json={"extra": {"language": "fr", "moss_speaker_aware": True}}
+        )
 
     assert invalid.status_code == 422
-    assert invalid_output_format.status_code == 422
-    assert invalid_structured_output_format.status_code == 422
+    assert invalid_speaker_setting.status_code == 422
+    assert invalid_structured_speaker_setting.status_code == 422
     assert valid.status_code == 200
-    assert model_service.calls == [("update", {"name": "default", "model_type": "stt", "extra": {"language": "fr"}})]
+    assert model_service.calls == [
+        (
+            "update",
+            {
+                "name": "default",
+                "model_type": "stt",
+                "extra": {"language": "fr", "moss_speaker_aware": True},
+            },
+        )
+    ]

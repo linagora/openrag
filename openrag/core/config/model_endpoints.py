@@ -55,19 +55,10 @@ LLM_OUTPUT_TOKENS_KEY = "max_output_tokens"
 # language detector.
 STT_LANGUAGE_KEY = "language"
 
-# Optional post-processing mode for an STT response. It is deliberately an
+# Optional post-processing for MOSS diarized output. It is deliberately an
 # endpoint control rather than a provider request option: OpenRAG consumes it
-# after receiving the transcription, so it must never be forwarded to the
-# OpenAI-compatible server.
-STT_TRANSCRIPT_OUTPUT_FORMAT_KEY = "transcript_output_format"
-MOSS_TIMESTAMPED_TRANSCRIPT_OUTPUT_FORMAT = "moss_timestamped"
-MOSS_SPEAKER_AWARE_TRANSCRIPT_OUTPUT_FORMAT = "moss_speaker_aware"
-MOSS_TRANSCRIPT_OUTPUT_FORMATS = frozenset(
-    {
-        MOSS_TIMESTAMPED_TRANSCRIPT_OUTPUT_FORMAT,
-        MOSS_SPEAKER_AWARE_TRANSCRIPT_OUTPUT_FORMAT,
-    }
-)
+# after transcription, so it must never be forwarded to the provider.
+MOSS_SPEAKER_AWARE_KEY = "moss_speaker_aware"
 
 # Provenance marker written into an endpoint's ``extra`` when the seeder creates
 # it from env. It is what lets boot-time sync find *its own* row again after the
@@ -146,11 +137,8 @@ class ModelEndpointRow(BaseModel):
 __all__ = [
     "LLM_CONTEXT_SIZE_KEY",
     "LLM_OUTPUT_TOKENS_KEY",
+    "MOSS_SPEAKER_AWARE_KEY",
     "STT_LANGUAGE_KEY",
-    "STT_TRANSCRIPT_OUTPUT_FORMAT_KEY",
-    "MOSS_SPEAKER_AWARE_TRANSCRIPT_OUTPUT_FORMAT",
-    "MOSS_TIMESTAMPED_TRANSCRIPT_OUTPUT_FORMAT",
-    "MOSS_TRANSCRIPT_OUTPUT_FORMATS",
     "ModelEndpointConfig",
     "ModelsConfig",
     "ModelEndpointRow",
