@@ -358,14 +358,14 @@ function IndexationPresetForm({
       {/* Parsing */}
       <section className="space-y-3">
         <h4 className="text-sm font-medium">Parsing</h4>
-        <div className="grid gap-3 md:grid-cols-3">
-          <div className="space-y-1.5">
+        <div className="grid gap-3 sm:grid-cols-2">
+          <div className="min-w-0 space-y-1.5">
             <Label className="text-xs">Strategy</Label>
             <Select
               value={configGet(config, "parsing_strategy", PARSING_STRATEGY_INHERIT)}
               onValueChange={(v) => onChange(applyParsingStrategyChange(config, v))}
             >
-              <SelectTrigger size="sm">
+              <SelectTrigger size="sm" className="w-full min-w-0">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -378,13 +378,13 @@ function IndexationPresetForm({
               </SelectContent>
             </Select>
           </div>
-          <div className="space-y-1.5">
+          <div className="min-w-0 space-y-1.5">
             <Label className="text-xs">STT endpoint</Label>
             <Select
               value={configGet(config, "stt", STT_ENDPOINT_DEFAULT_OPTION)}
               onValueChange={(v) => onChange(applySttEndpointChange(config, v))}
             >
-              <SelectTrigger size="sm">
+              <SelectTrigger size="sm" className="w-full min-w-0">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -399,12 +399,15 @@ function IndexationPresetForm({
               </SelectContent>
             </Select>
           </div>
-          <PromptSelect
-            label="Transcription prompt"
-            prompts={promptsByType("asr_transcription")}
-            value={configGet(config, "asr_transcription_prompt_name", "")}
-            onChange={(v) => set("asr_transcription_prompt_name", v || null)}
-          />
+          <div className="min-w-0 sm:col-span-2">
+            <PromptSelect
+              label="Transcription prompt"
+              prompts={promptsByType("asr_transcription")}
+              value={configGet(config, "asr_transcription_prompt_name", "")}
+              onChange={(v) => set("asr_transcription_prompt_name", v || null)}
+              selectTriggerClassName="w-full min-w-0"
+            />
+          </div>
         </div>
       </section>
 
@@ -647,11 +650,13 @@ function PromptSelect({
   prompts,
   value,
   onChange,
+  selectTriggerClassName,
 }: {
   label: string;
   prompts: PromptResponse[];
   value: string;
   onChange: (v: string) => void;
+  selectTriggerClassName?: string;
 }) {
   return (
     <div className="space-y-1.5">
@@ -663,7 +668,7 @@ function PromptSelect({
         value={promptSelectValue(value)}
         onValueChange={(v) => onChange(promptOptionToName(v))}
       >
-        <SelectTrigger size="sm">
+        <SelectTrigger size="sm" className={selectTriggerClassName}>
           <SelectValue />
         </SelectTrigger>
         <SelectContent>

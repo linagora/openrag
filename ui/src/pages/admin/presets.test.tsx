@@ -142,4 +142,19 @@ describe("PresetsPage parsing configuration", () => {
     expect(await screen.findByText("STT endpoint")).toBeTruthy();
     expect(screen.getByText("Transcription prompt")).toBeTruthy();
   });
+
+  it("keeps parsing controls within the preset dialog width", async () => {
+    listPresetsMock.mockResolvedValue([]);
+    const user = userEvent.setup();
+
+    renderPage();
+    await user.click(await screen.findByRole("button", { name: /add preset/i }));
+
+    const parsing = screen.getByText("Parsing").closest("section");
+    const prompt = screen.getByText("Transcription prompt");
+    const promptTrigger = prompt.parentElement?.parentElement?.querySelector('[data-slot="select-trigger"]');
+
+    expect(parsing?.querySelector(".grid")?.className).toContain("sm:grid-cols-2");
+    expect(promptTrigger?.className).toContain("w-full");
+  });
 });
