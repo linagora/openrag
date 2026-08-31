@@ -97,8 +97,8 @@ class TestSeeding:
         asr_prompt = await repo.get_default(PromptType.ASR_TRANSCRIPTION.value)
         assert asr_prompt is not None
         assert "[S01]" in asr_prompt.content
-        assert "Never output timestamps" in asr_prompt.content
-        assert "one speaker" in asr_prompt.content
+        assert "NEVER output timestamps" in asr_prompt.content
+        assert "multiple clearly distinct speakers" in asr_prompt.content
 
     async def test_seeding_is_idempotent(self):
         repo = FakePromptRepo()
