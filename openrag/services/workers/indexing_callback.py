@@ -93,7 +93,10 @@ async def send_indexing_callback(
         netloc = parsed.hostname or ""
         if parsed.port:
             netloc = f"{netloc}:{parsed.port}"
-        safe_url = f"{parsed.scheme}://{netloc}{parsed.path}"
+        # Path dropped too: a webhook secret conventionally lives there
+        # ("/hooks/T000/B000/XXXX"), the same class of leak as userinfo and the
+        # query string. Scheme and host are enough to identify the target.
+        safe_url = f"{parsed.scheme}://{netloc}"
         # httpx puts the full URL, userinfo included, in its exception messages.
         # Collected here so a malformed URL cannot crash the handler below.
         url_secrets = _url_credentials(callback_url, parsed)
@@ -172,6 +175,10 @@ async def send_indexing_callback(
             error_message = error_message.replace(secret, "REDACTED")
         if callback_token:
             error_message = error_message.replace(callback_token, "REDACTED")
+        if len(parsed.path) > 1:
+            # httpx echoes the full URL, path included. Guarded on length so a
+            # bare "/" does not rewrite every slash in the message.
+            error_message = error_message.replace(parsed.path, "/REDACTED")
         if parsed.query:
             # httpx percent-encodes the query, so the message may embed either
             # spelling. Raw first — that one cannot fail.

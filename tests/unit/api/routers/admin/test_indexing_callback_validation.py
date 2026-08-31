@@ -1,5 +1,6 @@
 """The upload routes must reject an unusable callback_url before queueing."""
 
+import asyncio
 import socket
 from types import SimpleNamespace
 
@@ -86,3 +87,32 @@ async def test_the_dev_opt_in_skips_resolution(monkeypatch) -> None:
     monkeypatch.setattr(socket, "getaddrinfo", _never)
 
     await _validate_callback_url("http://cozy.localhost:8080/cb", "jwt", _config(allow_private=True))
+
+
+@pytest.mark.parametrize("callback_url", ["http://[::1/cb", "https://cozy.example.com:abc/cb"])
+@pytest.mark.asyncio
+async def test_malformed_callback_url_is_a_bad_request_not_a_crash(callback_url: str) -> None:
+    """urlparse and .port both raise ValueError; unguarded that is a 500."""
+    with pytest.raises(HTTPException) as exc:
+        await _validate_callback_url(callback_url, None, _config())
+
+    assert exc.value.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_a_hanging_resolver_is_rejected_rather_than_holding_the_request(monkeypatch) -> None:
+    """getaddrinfo runs on the shared default executor; an unbounded wait starves it."""
+    import api.routers.admin.indexing as module
+
+    monkeypatch.setattr(module, "_CALLBACK_DNS_TIMEOUT", 0.01)
+
+    async def _never_resolves(*_a, **_k):
+        await asyncio.sleep(5)
+        return True
+
+    monkeypatch.setattr(module, "resolves_to_public_addresses", _never_resolves)
+
+    with pytest.raises(HTTPException) as exc:
+        await _validate_callback_url("https://slow.example.com/cb", None, _config())
+
+    assert exc.value.status_code == 400

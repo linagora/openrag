@@ -11,6 +11,7 @@ guards whose exact non-bracketed ``{"detail": ...}`` body the legacy
 endpoints returned via ``HTTPException``.
 """
 
+import asyncio
 import json
 from pathlib import Path
 from typing import Any
@@ -53,6 +54,11 @@ from fastapi.responses import JSONResponse
 
 logger = get_logger()
 
+# Matches the sender's deadline. getaddrinfo runs on the loop's shared default
+# executor, so an unbounded lookup here pins one of its threads for the full
+# resolver timeout and starves every other asyncio.to_thread in the process.
+_CALLBACK_DNS_TIMEOUT = 5.0
+
 
 async def _validate_callback_url(callback_url: str | None, callback_token: str | None, config) -> None:
     """Reject a callback_url the server must not POST to.
@@ -65,10 +71,23 @@ async def _validate_callback_url(callback_url: str | None, callback_token: str |
     if not callback_url:
         return
     allow_private = bool(getattr(getattr(config, "indexing_callback", None), "allow_private_urls", False))
-    parsed = urlparse(callback_url)
+    try:
+        parsed = urlparse(callback_url)
+        # ``.port`` is where a non-numeric port raises, not ``urlparse`` itself.
+        port = parsed.port
+    except ValueError as exc:
+        # e.g. an unterminated IPv6 literal or "host:abc" — a bad request, not a 500.
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="callback_url is not a valid URL",
+        ) from exc
     unsafe = not is_safe_url(callback_url, allow_private_hosts=allow_private)
     if not unsafe and not allow_private:
-        unsafe = not await resolves_to_public_addresses(parsed.scheme, parsed.hostname or "", parsed.port)
+        try:
+            async with asyncio.timeout(_CALLBACK_DNS_TIMEOUT):
+                unsafe = not await resolves_to_public_addresses(parsed.scheme, parsed.hostname or "", port)
+        except TimeoutError:
+            unsafe = True
     if unsafe:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

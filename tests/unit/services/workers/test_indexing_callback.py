@@ -208,7 +208,7 @@ async def test_callback_error_redacts_query_string_from_logged_exception(monkeyp
 
         mock_logger.warning.assert_called_once()
         call_args = mock_logger.warning.call_args
-        assert call_args[1]["callback_url"] == "https://cozy.example.com/rag/callback"
+        assert call_args[1]["callback_url"] == "https://cozy.example.com"
         assert "SECRETVALUE" not in call_args[1]["error"]
 
 
@@ -573,3 +573,25 @@ async def test_timestamp_is_rfc3339_with_z_and_milliseconds(captured_body: dict)
     assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z", timestamp), timestamp
     # Still round-trips: a "Z" suffix is accepted from Python 3.11 on.
     assert datetime.fromisoformat(timestamp).tzinfo is not None
+
+
+@pytest.mark.asyncio
+async def test_a_secret_in_the_callback_path_is_not_logged(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Webhook secrets conventionally live in the path, not the query."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500)
+
+    _patch_async_client(monkeypatch, handler)
+
+    with mock.patch("services.workers.indexing_callback.logger") as mock_logger:
+        await send_indexing_callback(
+            "https://cozy.example.com/hooks/T000/B000/SECRETPATH", "p", "f1", "success", {"file_rev": "abc"}
+        )
+
+        mock_logger.warning.assert_called_once()
+        logged = mock_logger.warning.call_args[1]
+        assert "SECRETPATH" not in logged["callback_url"]
+        assert "SECRETPATH" not in logged["error"]
+        # The host is still there: redaction must not cost us the diagnostics.
+        assert "cozy.example.com" in logged["error"]
