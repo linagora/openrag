@@ -33,55 +33,6 @@ from core.utils.text import sanitize_text
 # they don't pollute the index.
 _IMAGE_PLACEHOLDER_MARKER = "[image placeholder]"
 
-# Strips the block's own wrapper so only the caption text is weighed.
-_IMAGE_BLOCK_TAG_RE = re.compile(r"</?image_description>", re.IGNORECASE)
-_IMAGE_PLACEHOLDER_RE = re.compile(re.escape(_IMAGE_PLACEHOLDER_MARKER), re.IGNORECASE)
-# Removing a marker leaves the blank lines that surrounded it.
-_COLLAPSE_BLANK_RE = re.compile(r"\n{3,}")
-
-
-def is_placeholder_image(content: str) -> bool:
-    """True when an image block carries no caption beyond the placeholder.
-
-    ``wrap_caption`` emits one wrapper per image, so the shape that matters is
-    the marker and real caption text inside the *same* wrapper: a composite
-    figure where the VLM could describe some parts and not others. Dropping the
-    whole block on any occurrence of the marker deleted that caption text along
-    with it — on the corpus, a 132-token chart caption
-    ("92 000 COLLABORATEURS…") and 225 words of a tourism description,
-    silently, from the index, and from *both* chunkers since they share this
-    test. (Two *adjacent* wrappers were never affected: ``IMAGE_RE`` is
-    non-greedy, so they parse as separate elements and only the placeholder-only
-    one was dropped.)
-
-    So a block is only skipped when nothing but the wrapper and the marker(s)
-    remains. Anything else is caption text and is kept — see
-    ``strip_placeholder_markers`` for removing the marker from it. The test is
-    whitespace, not alphanumerics: a caption reduced to "©" or an em dash is
-    still content, and a rule about not dropping content should not carve out
-    an exception for symbols.
-    """
-    if _IMAGE_PLACEHOLDER_MARKER not in content.lower():
-        return False
-    remainder = _IMAGE_PLACEHOLDER_RE.sub(" ", _IMAGE_BLOCK_TAG_RE.sub(" ", content))
-    return not remainder.strip()
-
-
-def strip_placeholder_markers(content: str) -> str:
-    """Drop the marker(s) from a block that also carries real caption text.
-
-    Keeping the caption must not smuggle the marker into the index with it: the
-    dense vector is computed over the chunk text, and that text is what
-    ``format_context`` puts in front of the LLM, so the marker would read as
-    caption content. (The BM25 stop-word list in ``milvus_store`` already
-    ignores it, so only the dense side and the prompt are affected.)
-
-    Stripping before the size test also makes the inline-vs-standalone decision
-    measure the caption rather than the marker's tokens.
-    """
-    return _COLLAPSE_BLANK_RE.sub("\n\n", _IMAGE_PLACEHOLDER_RE.sub("", content)).strip()
-
-
 # Tables/images smaller than this token count are inlined with surrounding
 # text rather than emitted as standalone chunks.
 _INLINE_ELEMENT_TOKEN_THRESHOLD = 100
@@ -277,10 +228,8 @@ class BaseChunker(ChunkingStrategy):
 
         for element in md_elements:
             if element.type in ("table", "image"):
-                if element.type == "image":
-                    if is_placeholder_image(element.content):
-                        continue
-                    element.content = strip_placeholder_markers(element.content)
+                if element.type == "image" and _IMAGE_PLACEHOLDER_MARKER in element.content.lower():
+                    continue
                 if self.length_function(element.content) <= _INLINE_ELEMENT_TOKEN_THRESHOLD:
                     texts.append(element)
                 else:
