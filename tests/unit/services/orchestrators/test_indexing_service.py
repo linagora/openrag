@@ -56,6 +56,8 @@ class FakeDispatcher:
         replace,
         indexation_config=None,
         embedder_name=None,
+        callback_url=None,
+        callback_token=None,
         require_existing_partition=False,
         allow_legacy_require_existing_partition_retry=False,
     ):
@@ -69,6 +71,8 @@ class FakeDispatcher:
                 "replace": replace,
                 "indexation_config": indexation_config,
                 "embedder_name": embedder_name,
+                "callback_url": callback_url,
+                "callback_token": callback_token,
                 "require_existing_partition": require_existing_partition,
                 "allow_legacy_require_existing_partition_retry": allow_legacy_require_existing_partition_retry,
             }

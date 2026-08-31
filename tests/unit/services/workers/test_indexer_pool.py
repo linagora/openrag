@@ -123,7 +123,7 @@ def test_build_indexer_pool_uses_current_protocol_dispatcher_name(
     opts = options_calls[0]
     # A protocol-specific name prevents a rolling deployment from attaching to
     # a detached actor that still runs the previous claim implementation.
-    assert opts["name"] == "IndexerPoolDispatcher-v3"
+    assert opts["name"] == "IndexerPoolDispatcher-v4"
     assert opts["namespace"] == "openrag"
     assert opts["get_if_exists"] is True
     assert opts["lifetime"] == "detached"
@@ -159,9 +159,9 @@ def test_indexer_pool_actor_spawns_pool_size_detached_workers(
     # One detached worker actor per pool_size slot, each capped at max_tasks_per_worker.
     assert len(pool._workers) == 3
     assert {c["name"] for c in calls} == {
-        "IndexerWorker-v3-0",
-        "IndexerWorker-v3-1",
-        "IndexerWorker-v3-2",
+        "IndexerWorker-v4-0",
+        "IndexerWorker-v4-1",
+        "IndexerWorker-v4-2",
     }
     for c in calls:
         assert c["lifetime"] == "detached"
@@ -1093,7 +1093,7 @@ async def test_pool_drain_rejects_new_work_and_reports_accepted_work() -> None:
     await pool.submit(task_id="accepted-before-drain")
 
     assert await pool.begin_drain() == {
-        "protocol_version": "v3",
+        "protocol_version": "v4",
         "accepting_tasks": False,
         "inflight_jobs": 1,
         "worker_names": ["test-worker-0"],
@@ -1104,7 +1104,7 @@ async def test_pool_drain_rejects_new_work_and_reports_accepted_work() -> None:
 
     await _settle_pool_release_tasks(pool, worker.futures[0])
     assert await pool.status() == {
-        "protocol_version": "v3",
+        "protocol_version": "v4",
         "accepting_tasks": False,
         "inflight_jobs": 0,
         "worker_names": ["test-worker-0"],
@@ -1121,7 +1121,7 @@ async def test_pool_abort_drain_restores_acceptance() -> None:
         await pool.submit(task_id="rejected-while-draining")
 
     assert await pool.abort_drain() == {
-        "protocol_version": "v3",
+        "protocol_version": "v4",
         "accepting_tasks": True,
         "inflight_jobs": 0,
         "worker_names": ["test-worker-0"],
@@ -1136,7 +1136,7 @@ async def test_pool_abort_drain_restores_acceptance() -> None:
 async def test_pool_reports_current_protocol_version() -> None:
     pool = _bare_pool([_FakeWorker()])
 
-    assert await pool.protocol_version() == "v3"
+    assert await pool.protocol_version() == "v4"
 
 
 @pytest.mark.asyncio
@@ -1588,3 +1588,59 @@ async def test_actor_keeps_upload_on_pre_worker_failure_when_saving(tmp_path) ->
         await actor.process_file(task_id="t", path=str(path), metadata={"file_id": "f"}, partition="p")
 
     assert path.exists()
+
+
+@pytest.mark.asyncio
+async def test_preflight_failure_sends_the_error_callback(tmp_path, monkeypatch) -> None:
+    """IndexerWorker.process_file owns the error callback and is never reached."""
+    import services.workers.indexer_pool as module
+
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"x")
+    worker = _RecordingWorker()
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=worker)
+
+    async def _boom(*_a, **_k):
+        raise RuntimeError("postgres down")
+
+    actor._ensure_catalog = _boom
+    callback = AsyncMock()
+    monkeypatch.setattr(module, "send_indexing_callback", callback)
+
+    metadata = {"file_id": "f", "file_rev": "3-abc"}
+    with pytest.raises(RuntimeError, match="postgres down"):
+        await actor.process_file(
+            task_id="t",
+            path=str(path),
+            metadata=metadata,
+            partition="p",
+            callback_url="https://cozy.example.com/ai/index/status",
+            callback_token="jwt",
+        )
+
+    assert worker.calls == 0
+    callback.assert_awaited_once_with(
+        "https://cozy.example.com/ai/index/status", "p", "f", "error", metadata, callback_token="jwt"
+    )
+
+
+@pytest.mark.asyncio
+async def test_preflight_failure_without_callback_url_stays_a_noop(tmp_path, monkeypatch) -> None:
+    import services.workers.indexer_pool as module
+
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"x")
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=_RecordingWorker())
+
+    async def _boom(*_a, **_k):
+        raise RuntimeError("postgres down")
+
+    actor._ensure_catalog = _boom
+    callback = AsyncMock()
+    monkeypatch.setattr(module, "send_indexing_callback", callback)
+
+    with pytest.raises(RuntimeError, match="postgres down"):
+        await actor.process_file(task_id="t", path=str(path), metadata={"file_id": "f"}, partition="p")
+
+    callback.assert_awaited_once()
+    assert callback.await_args[0][0] is None

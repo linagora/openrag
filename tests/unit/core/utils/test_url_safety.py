@@ -35,3 +35,35 @@ def test_blocks_unsafe(url):
 )
 def test_allows_public(url):
     assert is_safe_url(url) is True
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://127.0.0.1:8080/ai/index/status",
+        "http://localhost:8080/ai/index/status",
+        "http://cozy.localhost:8080/ai/index/status",
+        "http://192.168.1.10:8080/x",
+        "http://[::1]:8080/x",
+    ],
+)
+def test_allow_private_hosts_opt_in_permits_private_targets(url):
+    assert is_safe_url(url, allow_private_hosts=True) is True
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "ftp://example.com/x",
+        "file:///etc/passwd",
+        "not a url",
+        "https://",
+    ],
+)
+def test_allow_private_hosts_still_rejects_bad_schemes_and_hosts(url):
+    assert is_safe_url(url, allow_private_hosts=True) is False
+
+
+def test_allow_private_hosts_defaults_to_off():
+    """Existing callers (web-search fetch, MCP index_url) keep the strict guard."""
+    assert is_safe_url("http://169.254.169.254/latest/meta-data") is False

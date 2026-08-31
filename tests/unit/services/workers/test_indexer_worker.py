@@ -612,6 +612,139 @@ async def test_process_file_stores_indexation_config_snapshot_on_replace(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_process_file_success_sends_callback_with_status_and_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"content")
+    processed = ProcessedDocument(document_id="d1", text_blocks=[TextBlock(text="content")])
+    chunks = [Chunk(id="c1", text="content", partition="p")]
+    worker = IndexerWorker(pipeline=_make_pipeline(processed, chunks), task_state_manager=_fake_tsm())
+
+    callback_mock = AsyncMock()
+    monkeypatch.setattr("services.workers.indexer_actor.send_indexing_callback", callback_mock)
+
+    metadata = {"file_id": "f1", "file_rev": "abc123", "datetime": "2026-01-01T00:00:00Z", "doctype": "text"}
+    await worker.process_file(
+        task_id="t-cb",
+        path=str(path),
+        metadata=metadata,
+        partition="p",
+        callback_url="https://cozy.example.com/callback",
+    )
+
+    callback_mock.assert_awaited_once_with(
+        "https://cozy.example.com/callback", "p", "f1", "success", metadata, callback_token=None
+    )
+
+
+@pytest.mark.asyncio
+async def test_process_file_failure_sends_error_callback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    path = tmp_path / "bad.txt"
+    path.write_bytes(b"x")
+
+    class BrokenParser:
+        async def parse(self, document: Document) -> ProcessedDocument:
+            raise RuntimeError("parser exploded")
+
+        def supported_types(self) -> list[str]:
+            return [DocumentType.TEXT.value]
+
+    pipeline = build_indexing_pipeline(
+        parser=BrokenParser(),
+        chunker=FakeChunker([]),
+        embedder=FakeEmbedder(),
+        vector_store=FakeVectorStore(),
+    )
+    worker = IndexerWorker(pipeline=pipeline, task_state_manager=_fake_tsm())
+
+    callback_mock = AsyncMock()
+    monkeypatch.setattr("services.workers.indexer_actor.send_indexing_callback", callback_mock)
+
+    metadata = {"file_id": "f1", "file_rev": "abc123"}
+    with pytest.raises(RuntimeError, match="parser exploded"):
+        await worker.process_file(
+            task_id="t-cb-fail",
+            path=str(path),
+            metadata=metadata,
+            partition="p",
+            callback_url="https://cozy.example.com/callback",
+        )
+
+    callback_mock.assert_awaited_once_with(
+        "https://cozy.example.com/callback", "p", "f1", "error", metadata, callback_token=None
+    )
+
+
+@pytest.mark.asyncio
+async def test_process_file_success_forwards_callback_token(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The uploader's token must reach the sender, or the status is lost to a 401."""
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"content")
+    processed = ProcessedDocument(document_id="d1", text_blocks=[TextBlock(text="content")])
+    chunks = [Chunk(id="c1", text="content", partition="p")]
+    worker = IndexerWorker(pipeline=_make_pipeline(processed, chunks), task_state_manager=_fake_tsm())
+
+    callback_mock = AsyncMock()
+    monkeypatch.setattr("services.workers.indexer_actor.send_indexing_callback", callback_mock)
+
+    metadata = {"file_id": "f1", "file_rev": "abc123"}
+    await worker.process_file(
+        task_id="t-cb-token",
+        path=str(path),
+        metadata=metadata,
+        partition="p",
+        callback_url="https://cozy.example.com/ai/index/status",
+        callback_token="jwt-token",
+    )
+
+    callback_mock.assert_awaited_once_with(
+        "https://cozy.example.com/ai/index/status", "p", "f1", "success", metadata, callback_token="jwt-token"
+    )
+    # A credential, not payload: never in the metadata echoed back.
+    assert "callback_token" not in metadata
+
+
+@pytest.mark.asyncio
+async def test_process_file_failure_forwards_callback_token(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    path = tmp_path / "bad.txt"
+    path.write_bytes(b"x")
+
+    class BrokenParser:
+        async def parse(self, document: Document) -> ProcessedDocument:
+            raise RuntimeError("parser exploded")
+
+        def supported_types(self) -> list[str]:
+            return [DocumentType.TEXT.value]
+
+    pipeline = build_indexing_pipeline(
+        parser=BrokenParser(),
+        chunker=FakeChunker([]),
+        embedder=FakeEmbedder(),
+        vector_store=FakeVectorStore(),
+    )
+    worker = IndexerWorker(pipeline=pipeline, task_state_manager=_fake_tsm())
+
+    callback_mock = AsyncMock()
+    monkeypatch.setattr("services.workers.indexer_actor.send_indexing_callback", callback_mock)
+
+    metadata = {"file_id": "f1"}
+    with pytest.raises(RuntimeError, match="parser exploded"):
+        await worker.process_file(
+            task_id="t-cb-token-fail",
+            path=str(path),
+            metadata=metadata,
+            partition="p",
+            callback_url="https://cozy.example.com/ai/index/status",
+            callback_token="jwt-token",
+        )
+
+    callback_mock.assert_awaited_once_with(
+        "https://cozy.example.com/ai/index/status", "p", "f1", "error", metadata, callback_token="jwt-token"
+    )
+
+
+@pytest.mark.asyncio
 async def test_process_file_catalog_failure_sets_failed_state(tmp_path: Path) -> None:
     path = tmp_path / "doc.txt"
     path.write_bytes(b"content")
