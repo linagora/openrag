@@ -133,14 +133,16 @@ export function AppSidebar() {
           </SidebarGroupContent>
         </SidebarGroup>
       </SidebarContent>
-      <div
-        data-slot="sidebar-release-notes"
-        className="shrink-0 px-3 pb-3 group-data-[collapsible=icon]:px-1.5"
-      >
-        <SidebarMenu>
-          <ReleaseNotes className={releaseNotesItemClassName} />
-        </SidebarMenu>
-      </div>
+      {perms.isAdmin && (
+        <div
+          data-slot="sidebar-release-notes"
+          className="shrink-0 px-3 pb-3 group-data-[collapsible=icon]:px-1.5"
+        >
+          <SidebarMenu>
+            <ReleaseNotes className={releaseNotesItemClassName} />
+          </SidebarMenu>
+        </div>
+      )}
       <SidebarFooter className="px-3 py-3 border-t border-sidebar-border group-data-[collapsible=icon]:px-1.5">
         <SidebarMenu>{renderItem(settingsItem)}</SidebarMenu>
       </SidebarFooter>

@@ -6,29 +6,30 @@ import { SidebarProvider } from "@/components/ui/sidebar";
 import { AppSidebar } from "./sidebar";
 
 const activeJobs = vi.hoisted(() => ({ count: 7 }));
+const permissions = vi.hoisted(() => ({
+  isAdmin: true,
+  superAdmin: true,
+  superAdminModeResolved: true,
+  canViewPlatform: true,
+  canViewSystem: true,
+  canManageUsers: true,
+  canManageModels: true,
+  canManagePresets: true,
+  canManagePrompts: true,
+  canManagePartitions: true,
+  canCreatePartition: true,
+  canRead: () => true,
+  canWrite: () => true,
+  canManageMembers: () => true,
+  canConfigurePartition: () => true,
+}));
 
 vi.mock("@/lib/jobs-queries", () => ({
   useActiveJobsCount: () => activeJobs.count,
 }));
 
 vi.mock("@/lib/permissions", () => ({
-  usePermissions: () => ({
-    isAdmin: true,
-    superAdmin: true,
-    superAdminModeResolved: true,
-    canViewPlatform: true,
-    canViewSystem: true,
-    canManageUsers: true,
-    canManageModels: true,
-    canManagePresets: true,
-    canManagePrompts: true,
-    canManagePartitions: true,
-    canCreatePartition: true,
-    canRead: () => true,
-    canWrite: () => true,
-    canManageMembers: () => true,
-    canConfigurePartition: () => true,
-  }),
+  usePermissions: () => permissions,
 }));
 
 function LocationProbe() {
@@ -67,6 +68,7 @@ beforeAll(() => {
 describe("AppSidebar Jobs badge", () => {
   beforeEach(() => {
     activeJobs.count = 7;
+    permissions.isAdmin = true;
   });
 
   it.each([
@@ -122,7 +124,11 @@ describe("AppSidebar Jobs badge", () => {
 });
 
 describe("AppSidebar", () => {
-  it("keeps Release Notes directly above the unchanged Settings link", () => {
+  beforeEach(() => {
+    permissions.isAdmin = true;
+  });
+
+  it("keeps the compact Release Notes button above the Settings separator", () => {
     renderSidebar();
 
     const releaseNotes = screen.getByRole("button", { name: /open release notes/i });
@@ -135,5 +141,12 @@ describe("AppSidebar", () => {
     );
     expect(screen.getByTestId("sidebar-content").compareDocumentPosition(releaseNotes) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(settings.getAttribute("href")).toBe("/settings");
+  });
+
+  it("hides Release Notes from non-admin users", () => {
+    permissions.isAdmin = false;
+    renderSidebar();
+
+    expect(screen.queryByRole("button", { name: /open release notes/i })).toBeNull();
   });
 });
