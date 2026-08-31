@@ -226,6 +226,30 @@ docker inspect milvus-standalone --format '{{ .Config.Image }}'
 
 After verifying that the collections are readable and searchable on 2.6.11, continue with the 2.6-to-3.0 procedure above.
 
+## Storage V3
+
+Milvus 3.0 ships a versioned storage layout, "Storage V3" (Loon), which is **off by default**.
+OpenRAG turns it on because it gates `add_function_field` — the API that re-attaches the BM25
+function to an existing collection and backfills its sparse column through background
+compaction. Without it, changing the text analyzer means rebuilding the collection and copying
+every row; with it, the same change is three calls and a short backfill.
+
+The settings live in `infra/compose/milvus/user.yaml`, mounted read-only at
+`/milvus/configs/user.yaml` (the image merges `user.yaml` over its own `milvus.yaml`). Every
+compose stack — deployment, integration tests, load tests — mounts that one file; Helm carries
+the same content in `milvus.extraConfigFiles`, and a unit test asserts the two never drift.
+
+:::danger[Enabling Storage V3 is irreversible]
+Milvus writes the new on-disk format and cannot be downgraded to a version that does not
+understand it. Disabling the flag later does not convert data already written. Before the first
+start with V3 enabled, stop the stack and back up the `milvus`, `etcd` and `minio` volumes **as
+one set** — a partial copy leaves metadata and segments inconsistent.
+:::
+
+Existing collections do not need to be reindexed or recreated: a collection created before the
+flag was turned on accepts the new schema operations as soon as the server restarts with V3.
+New writes and compaction output adopt the new format; older segments convert in the background.
+
 ## Schema Migrations
 
 OpenRAG ships a generic migration runner that discovers and applies all pending Milvus schema migrations in order. You never need to invoke individual migration scripts by hand.

@@ -271,6 +271,8 @@ For an opt-in named-volume profile, copy the values from `infra/compose/.env.nam
 | `MINIO_VOLUME` | `minio` | Milvus object storage named volume, used only with `MILVUS_COMPOSE=milvus/milvus.named-volumes.yaml`. |
 | `MILVUS_VOLUME` | `milvus` | Milvus named volume, used only with `MILVUS_COMPOSE=milvus/milvus.named-volumes.yaml`. |
 
+Milvus *server* settings are not env vars: they live in `infra/compose/milvus/user.yaml`, mounted at `/milvus/configs/user.yaml`. That file enables Storage V3 — see [Milvus Migrations](/openrag/documentation/milvus_migration/) before changing it, as it is irreversible.
+
 ## Chat Pipeline
 ### LLM & VLM Configuration
 The system uses two types of language models:

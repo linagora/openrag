@@ -1,0 +1,25 @@
+# Milvus server overrides, merged over the image's own /milvus/configs/milvus.yaml.
+# Mounted at /milvus/configs/user.yaml by every compose stack that runs Milvus;
+# the Helm path carries the same content in milvus.extraConfigFiles.
+#
+# Storage V3 ("Loon") is off by default in Milvus 3.0. It gates the schema
+# evolution OpenRAG's Milvus migrations rely on — chiefly `add_function_field`,
+# which re-attaches the BM25 function and backfills its sparse column over
+# existing rows through background compaction, instead of rebuilding the
+# collection.
+#
+# WARNING: enabling this is irreversible. Milvus writes the new on-disk format
+# and cannot be downgraded to a version that does not understand it. Back up the
+# milvus, etcd and minio volumes as one set before the first start.
+common:
+  storage:
+    useLoonFFI: true
+
+# Both compaction settings are required for the backfill: without them Milvus
+# rejects adding a function field to an existing collection.
+dataCoord:
+  compaction:
+    bumpSchemaVersion:
+      enabled: true
+    storageVersion:
+      enabled: true
