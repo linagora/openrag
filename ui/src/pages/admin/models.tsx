@@ -38,7 +38,6 @@ import {
   splitModelEndpointLlmContext,
   splitModelEndpointMossTranscriptOutput,
   splitModelEndpointSttLanguage,
-  isMossTranscribeDiarizeModel,
   validateModelEndpoint,
   VENDOR_OPTIONS_BY_TYPE,
 } from "@/lib/api/models";
@@ -357,7 +356,6 @@ function EndpointDialog({
   // LLM token-budget fields (max context / max output) apply to LLM endpoints only.
   const isLlm = modelType === "llm";
   const isStt = modelType === "stt";
-  const isMossStt = isStt && isMossTranscribeDiarizeModel(modelName);
   const sttValidationTimeout = isStt ? timeout : null;
   const sttValidationLanguageHint = isStt ? languageHint.trim() : null;
   const validationDraft = JSON.stringify([
@@ -728,10 +726,10 @@ function EndpointDialog({
     }
     if (isStt) {
       extra = mergeModelEndpointSttLanguage(extra, languageHint);
-      extra = mergeModelEndpointMossTranscriptOutput(
-        extra,
-        isMossStt ? mossTranscriptOutputFormat : RAW_TRANSCRIPT_OUTPUT_FORMAT,
-      );
+      // MOSS deployments can expose arbitrary served-model aliases. Keep this
+      // explicit control on every STT endpoint (raw is a no-op) so an alias
+      // never hides or deletes an existing MOSS formatting choice.
+      extra = mergeModelEndpointMossTranscriptOutput(extra, mossTranscriptOutputFormat);
     } else {
       extra = mergeModelEndpointImplementation(extra, vendor);
     }
@@ -874,11 +872,11 @@ function EndpointDialog({
               />
             </div>
           )}
-          {isMossStt && (
+          {isStt && (
             <div className="space-y-2">
               <LabelWithInfo
-                label="MOSS transcript output"
-                tooltip="Choose how OpenRAG stores MOSS diarized segments. These formatting choices are applied after transcription and are never sent to the MOSS server."
+                label="MOSS transcript output (optional)"
+                tooltip="Choose how OpenRAG stores MOSS diarized segments. This also supports a MOSS served-model alias; raw leaves every transcription model unchanged. Formatting is applied after transcription and is never sent to the server."
               />
               <Select
                 value={mossTranscriptOutputFormat}
