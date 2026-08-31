@@ -82,10 +82,11 @@ async def get_workspace(ws=Depends(require_workspace_in_partition)):
 async def delete_workspace(
     partition: str,
     workspace_id: str,
+    keep_files: bool = False,
     _ws=Depends(require_workspace_in_partition),
     service=Depends(get_workspace_service),
 ):
-    result = await service.delete_workspace(partition, workspace_id)
+    result = await service.delete_workspace(partition, workspace_id, keep_files=keep_files)
     return {"status": "deleted", **result}
 
 

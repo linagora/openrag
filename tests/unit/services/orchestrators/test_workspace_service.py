@@ -123,7 +123,7 @@ async def test_delete_workspace_no_orphans():
     drepo = FakeDocumentRepo()
     vstore = FakeVectorStore()
     out = await _svc(wrepo=wrepo, drepo=drepo, vstore=vstore).delete_workspace("p", "w1")
-    assert out == {"orphaned_files_deleted": 0, "orphaned_files_failed": []}
+    assert out == {"orphaned_files_deleted": 0, "orphaned_files_failed": [], "kept_files": 0}
     assert wrepo.deleted == ["w1"]
     assert vstore.deleted == []
     assert drepo.removed == []
@@ -136,7 +136,7 @@ async def test_delete_workspace_cleans_orphans_vectors_and_rows():
     vstore = FakeVectorStore(ids_by_file={"fA": ["c1", "c2"], "fB": []})
     out = await _svc(wrepo=wrepo, drepo=drepo, vstore=vstore).delete_workspace("p", "w1")
 
-    assert out == {"orphaned_files_deleted": 2, "orphaned_files_failed": []}
+    assert out == {"orphaned_files_deleted": 2, "orphaned_files_failed": [], "kept_files": 0}
     # fA had chunks -> a delete call; fB had none -> no delete call.
     assert vstore.deleted == [["c1", "c2"]]
     assert set(drepo.removed) == {("fA", "p"), ("fB", "p")}
@@ -152,6 +152,47 @@ async def test_delete_workspace_collects_per_file_failures():
 
     assert out["orphaned_files_deleted"] == 1
     assert out["orphaned_files_failed"] == ["bad"]
+    assert out["kept_files"] == 0
+
+
+# --------------------------------------------------------------------------- #
+# keep_files — opt out of the orphan cleanup
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_delete_workspace_keep_files_skips_file_deletion():
+    """The workspace still goes, but the orphans stay indexed and are counted."""
+    wrepo = FakeWorkspaceRepo(orphaned=["fA", "fB"])
+    drepo = FakeDocumentRepo()
+    vstore = FakeVectorStore(ids_by_file={"fA": ["c1"], "fB": ["c2"]})
+    svc = _svc(wrepo=wrepo, drepo=drepo, vstore=vstore)
+
+    out = await svc.delete_workspace("p", "w1", keep_files=True)
+
+    assert out == {"orphaned_files_deleted": 0, "orphaned_files_failed": [], "kept_files": 2}
+    assert wrepo.deleted == ["w1"]
+    # No file touched: no vector delete, no catalog row removal, no detach.
+    assert vstore.deleted == []
+    assert drepo.removed == []
+    assert wrepo.removed_from_all == []
+
+
+@pytest.mark.asyncio
+async def test_delete_workspace_keep_files_with_no_orphans():
+    wrepo = FakeWorkspaceRepo(orphaned=[])
+    out = await _svc(wrepo=wrepo).delete_workspace("p", "w1", keep_files=True)
+    assert out == {"orphaned_files_deleted": 0, "orphaned_files_failed": [], "kept_files": 0}
+
+
+@pytest.mark.asyncio
+async def test_delete_workspace_keep_files_false_matches_default():
+    wrepo = FakeWorkspaceRepo(orphaned=["fA"])
+    drepo = FakeDocumentRepo()
+    vstore = FakeVectorStore(ids_by_file={"fA": ["c1"]})
+    out = await _svc(wrepo=wrepo, drepo=drepo, vstore=vstore).delete_workspace("p", "w1", keep_files=False)
+    assert out == {"orphaned_files_deleted": 1, "orphaned_files_failed": [], "kept_files": 0}
+    assert vstore.deleted == [["c1"]]
 
 
 # --------------------------------------------------------------------------- #
