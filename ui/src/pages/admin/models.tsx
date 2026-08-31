@@ -23,20 +23,16 @@ import {
   mergeModelEndpointApiKeyExtra,
   mergeModelEndpointImplementation,
   mergeModelEndpointLlmContext,
-  mergeModelEndpointMossTranscriptOutput,
+  mergeModelEndpointMossSpeakerAware,
   mergeModelEndpointSttLanguage,
-  MOSS_SPEAKER_AWARE_TRANSCRIPT_OUTPUT_FORMAT,
-  MOSS_TIMESTAMPED_TRANSCRIPT_OUTPUT_FORMAT,
-  type MossTranscriptOutputFormat,
   prepareModelEndpointExtraForSubmit,
-  RAW_TRANSCRIPT_OUTPUT_FORMAT,
   revealModelEndpointApiKey,
   REDACTED_SECRET,
   setDefaultModelEndpoint,
   splitModelEndpointApiKeyExtra,
   splitModelEndpointImplementation,
   splitModelEndpointLlmContext,
-  splitModelEndpointMossTranscriptOutput,
+  splitModelEndpointMossSpeakerAware,
   splitModelEndpointSttLanguage,
   validateModelEndpoint,
   VENDOR_OPTIONS_BY_TYPE,
@@ -63,6 +59,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { VendorIcon } from "@/components/ui/vendor-icon";
 import { Badge } from "@/components/ui/badge";
@@ -332,9 +329,7 @@ function EndpointDialog({
   const [maxContextSize, setMaxContextSize] = useState("");
   const [maxOutputTokens, setMaxOutputTokens] = useState("");
   const [languageHint, setLanguageHint] = useState("");
-  const [mossTranscriptOutputFormat, setMossTranscriptOutputFormat] = useState<MossTranscriptOutputFormat>(
-    RAW_TRANSCRIPT_OUTPUT_FORMAT,
-  );
+  const [mossSpeakerAware, setMossSpeakerAware] = useState(false);
   const [vendor, setVendor] = useState("");
   const [extraJson, setExtraJson] = useState("{}");
 
@@ -403,10 +398,10 @@ function EndpointDialog({
           editing.model_type === "stt"
             ? splitModelEndpointSttLanguage(apiExtra)
             : { languageHint: "", extra: apiExtra };
-        const { mossTranscriptOutputFormat: storedMossTranscriptOutputFormat, extra: mossExtra } =
+        const { mossSpeakerAware: storedMossSpeakerAware, extra: mossExtra } =
           editing.model_type === "stt"
-            ? splitModelEndpointMossTranscriptOutput(sttExtra)
-            : { mossTranscriptOutputFormat: RAW_TRANSCRIPT_OUTPUT_FORMAT as MossTranscriptOutputFormat, extra: sttExtra };
+            ? splitModelEndpointMossSpeakerAware(sttExtra)
+            : { mossSpeakerAware: false, extra: sttExtra };
         const { implementation, extra: implExtra } =
           editing.model_type === "stt"
             ? { implementation: "", extra: mossExtra }
@@ -428,7 +423,7 @@ function EndpointDialog({
         setMaxContextSize(llmContext.maxContextSize);
         setMaxOutputTokens(llmContext.maxOutputTokens);
         setLanguageHint(storedLanguageHint);
-        setMossTranscriptOutputFormat(storedMossTranscriptOutputFormat);
+        setMossSpeakerAware(storedMossSpeakerAware);
         setVendor(implementation || DEFAULT_VENDOR_BY_TYPE[editing.model_type]);
         setExtraJson(JSON.stringify(displayExtra, null, 2));
         setValidated(true);
@@ -447,7 +442,7 @@ function EndpointDialog({
         setMaxContextSize("");
         setMaxOutputTokens("");
         setLanguageHint("");
-        setMossTranscriptOutputFormat(RAW_TRANSCRIPT_OUTPUT_FORMAT);
+        setMossSpeakerAware(false);
         setVendor(DEFAULT_VENDOR_BY_TYPE[activeTab as ModelType]);
         setExtraJson("{}");
         setValidated(null);
@@ -470,7 +465,7 @@ function EndpointDialog({
     const editingSttExtra = editingSttFields?.extra ?? null;
     const editingMossExtra = editingSttExtra
       ? editing?.model_type === "stt"
-        ? splitModelEndpointMossTranscriptOutput(editingSttExtra).extra
+        ? splitModelEndpointMossSpeakerAware(editingSttExtra).extra
         : editingSttExtra
       : null;
     const editingImplExtra = editingMossExtra
@@ -726,10 +721,9 @@ function EndpointDialog({
     }
     if (isStt) {
       extra = mergeModelEndpointSttLanguage(extra, languageHint);
-      // MOSS deployments can expose arbitrary served-model aliases. Keep this
-      // explicit control on every STT endpoint (raw is a no-op) so an alias
-      // never hides or deletes an existing MOSS formatting choice.
-      extra = mergeModelEndpointMossTranscriptOutput(extra, mossTranscriptOutputFormat);
+      // MOSS deployments can expose arbitrary served-model aliases, so this
+      // behavior is an explicit endpoint setting rather than a model-name check.
+      extra = mergeModelEndpointMossSpeakerAware(extra, mossSpeakerAware);
     } else {
       extra = mergeModelEndpointImplementation(extra, vendor);
     }
@@ -873,31 +867,21 @@ function EndpointDialog({
             </div>
           )}
           {isStt && (
-            <div className="space-y-2">
-              <LabelWithInfo
-                label="MOSS transcript output (optional)"
-                tooltip="Choose how OpenRAG stores MOSS diarized segments. This also supports a MOSS served-model alias; raw leaves every transcription model unchanged. Formatting is applied after transcription and is never sent to the server."
+            <div className="flex items-center justify-between gap-4 rounded-md border p-3">
+              <div className="space-y-1">
+                <LabelWithInfo
+                  label="Speaker-aware MOSS transcript"
+                  tooltip="Normalize complete MOSS diarized responses after transcription. This also works with a served-model alias and is never sent to the provider."
+                />
+                <p className="text-xs text-muted-foreground">
+                  Remove timecodes and keep speaker labels only when MOSS identifies more than one speaker.
+                </p>
+              </div>
+              <Switch
+                checked={mossSpeakerAware}
+                onCheckedChange={setMossSpeakerAware}
+                aria-label="Enable speaker-aware MOSS transcript normalization"
               />
-              <Select
-                value={mossTranscriptOutputFormat}
-                onValueChange={(value) => setMossTranscriptOutputFormat(value as MossTranscriptOutputFormat)}
-              >
-                <SelectTrigger className="w-full">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value={RAW_TRANSCRIPT_OUTPUT_FORMAT}>Raw MOSS response</SelectItem>
-                  <SelectItem value={MOSS_TIMESTAMPED_TRANSCRIPT_OUTPUT_FORMAT}>
-                    Timestamped speaker lines
-                  </SelectItem>
-                  <SelectItem value={MOSS_SPEAKER_AWARE_TRANSCRIPT_OUTPUT_FORMAT}>
-                    Speaker-aware lines
-                  </SelectItem>
-                </SelectContent>
-              </Select>
-              <p className="text-xs text-muted-foreground">
-                Speaker-aware lines remove timecodes and keep speaker labels only when MOSS identifies more than one speaker.
-              </p>
             </div>
           )}
           <div className="space-y-2">
@@ -984,7 +968,7 @@ function EndpointDialog({
             />
             <p className="text-xs text-muted-foreground">
               {isStt
-                ? "Advanced non-secret request-body options sent to the transcription provider. The language hint, MOSS output setting, and API key are handled separately above."
+                ? "Advanced non-secret request-body options sent to the transcription provider. The language hint, MOSS speaker setting, and API key are handled separately above."
                 : "Non-secret endpoint options only. The API key is handled separately above."}
             </p>
           </div>

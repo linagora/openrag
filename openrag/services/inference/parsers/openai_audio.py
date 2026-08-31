@@ -34,11 +34,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from core.config.model_endpoints import (
-    MOSS_SPEAKER_AWARE_TRANSCRIPT_OUTPUT_FORMAT,
-    MOSS_TIMESTAMPED_TRANSCRIPT_OUTPUT_FORMAT,
+    MOSS_SPEAKER_AWARE_KEY,
     STT_LANGUAGE_KEY,
     STT_REQUEST_CONTROL_EXTRA_KEYS,
-    STT_TRANSCRIPT_OUTPUT_FORMAT_KEY,
     ModelEndpointConfig,
 )
 from core.indexing.parsers.document_parser import BaseClientParser
@@ -46,10 +44,7 @@ from core.models.document import Document, DocumentType, ProcessedDocument, Text
 from core.utils.logging import get_logger
 from openai import AsyncOpenAI
 from pydub import AudioSegment
-from services.inference.parsers.moss_transcript import (
-    normalize_moss_speaker_aware_transcript,
-    normalize_moss_timestamped_transcript,
-)
+from services.inference.parsers.moss_transcript import normalize_moss_speaker_aware_transcript
 
 logger = get_logger()
 
@@ -345,17 +340,9 @@ class OpenAIAudioClient(BaseClientParser):
         return text if isinstance(text, str) else ""
 
     @staticmethod
-    def _moss_transcript_output_format(endpoint: ModelEndpointConfig | None) -> str | None:
-        """Return the selected OpenRAG-owned MOSS output mode, if any."""
-        if endpoint is None:
-            return None
-        output_format = endpoint.extra.get(STT_TRANSCRIPT_OUTPUT_FORMAT_KEY)
-        if isinstance(output_format, str) and output_format in {
-            MOSS_TIMESTAMPED_TRANSCRIPT_OUTPUT_FORMAT,
-            MOSS_SPEAKER_AWARE_TRANSCRIPT_OUTPUT_FORMAT,
-        }:
-            return output_format
-        return None
+    def _moss_speaker_aware_enabled(endpoint: ModelEndpointConfig | None) -> bool:
+        """Whether OpenRAG should normalize a MOSS diarized response."""
+        return endpoint is not None and endpoint.extra.get(MOSS_SPEAKER_AWARE_KEY) is True
 
     def _is_fallback_endpoint(self, endpoint: ModelEndpointConfig) -> bool:
         """Whether *endpoint* is the legacy ``TRANSCRIBER_*`` destination."""
@@ -477,9 +464,6 @@ class OpenAIAudioClient(BaseClientParser):
             ).info("Sending audio transcription request")
             response = await client.audio.transcriptions.create(**kwargs)
             transcript = self._response_text(response)
-            output_format = self._moss_transcript_output_format(endpoint_config)
-            if output_format == MOSS_TIMESTAMPED_TRANSCRIPT_OUTPUT_FORMAT:
-                return normalize_moss_timestamped_transcript(transcript)
-            if output_format == MOSS_SPEAKER_AWARE_TRANSCRIPT_OUTPUT_FORMAT:
+            if self._moss_speaker_aware_enabled(endpoint_config):
                 return normalize_moss_speaker_aware_transcript(transcript)
             return transcript

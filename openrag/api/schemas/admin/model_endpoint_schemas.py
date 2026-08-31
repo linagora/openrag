@@ -9,9 +9,8 @@ from typing import Any, Literal
 from core.config.model_endpoints import (
     LLM_CONTEXT_SIZE_KEY,
     LLM_OUTPUT_TOKENS_KEY,
-    MOSS_TRANSCRIPT_OUTPUT_FORMATS,
+    MOSS_SPEAKER_AWARE_KEY,
     STT_LANGUAGE_KEY,
-    STT_TRANSCRIPT_OUTPUT_FORMAT_KEY,
 )
 from core.utils.redaction import redact_secret_mapping
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
@@ -108,8 +107,8 @@ def validate_stt_fields(model_name: str | None, extra: dict[str, Any] | None) ->
     ``model`` is required by ``/audio/transcriptions``. A language hint is
     intentionally permissive: providers accept either ISO 639-1 values such as
     ``fr`` or broader BCP-47 tags, so the API only requires a non-empty string.
-    The optional response-format control accepts the supported MOSS-specific
-    values only.
+    Speaker-aware MOSS normalization is an explicit boolean so it cannot be
+    confused with a provider request option.
     """
     if not model_name or not model_name.strip():
         raise ValueError("model_name is required for an STT endpoint")
@@ -118,13 +117,10 @@ def validate_stt_fields(model_name: str | None, extra: dict[str, Any] | None) ->
         if not isinstance(language, str) or not language.strip():
             raise ValueError(f"extra.{STT_LANGUAGE_KEY} must be a non-empty language code")
 
-    if extra is None or STT_TRANSCRIPT_OUTPUT_FORMAT_KEY not in extra:
+    if extra is None or MOSS_SPEAKER_AWARE_KEY not in extra:
         return
-    output_format = extra[STT_TRANSCRIPT_OUTPUT_FORMAT_KEY]
-    if not isinstance(output_format, str) or output_format not in MOSS_TRANSCRIPT_OUTPUT_FORMATS:
-        raise ValueError(
-            f"extra.{STT_TRANSCRIPT_OUTPUT_FORMAT_KEY} must be one of {sorted(MOSS_TRANSCRIPT_OUTPUT_FORMATS)!r}"
-        )
+    if not isinstance(extra[MOSS_SPEAKER_AWARE_KEY], bool):
+        raise ValueError(f"extra.{MOSS_SPEAKER_AWARE_KEY} must be a boolean")
 
 
 class CreateModelEndpointRequest(BaseModel):

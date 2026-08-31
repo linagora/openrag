@@ -1,239 +1,123 @@
-"""Safe normalization for MOSS diarized transcription output.
-
-MOSS can return either compact ``[start-end][Sxx] text`` segments or the
-equivalent ``[start][Sxx] text [end]`` form. This module is intentionally
-independent of the MOSS client package so OpenRAG deployments do not need that
-package merely to use the OpenAI-compatible endpoint.
-"""
+"""Conservative normalization for MOSS diarized transcription output."""
 
 from __future__ import annotations
 
-import math
 import re
 from dataclasses import dataclass
 
-_TIMESTAMP = r"\d+(?:\.\d+)?"
-_CLOCK_TIMESTAMP = r"\d{1,2}:\d{2}:\d{2}(?:[.,]\d+)?"
+_SECONDS = r"\d+(?:\.\d+)?"
+_CLOCK = r"\d{1,2}:\d{2}:\d{2}(?:[.,]\d+)?"
+_TIME = rf"(?:{_CLOCK}|{_SECONDS})"
+_TIME_TOKEN = rf"\[\s*{_TIME}\s*\]"
 _SPEAKER = r"[Ss]\d+"
 
-_DASH_SEGMENT = re.compile(
-    rf"\[\s*(?P<start>{_TIMESTAMP})\s*-\s*(?P<end>{_TIMESTAMP})\s*\]"
-    rf"\s*\[\s*(?P<speaker>{_SPEAKER})\s*\]\s*"
-    rf"(?P<text>.*?)"
-    rf"(?=\s*\[\s*{_TIMESTAMP}\s*-\s*{_TIMESTAMP}\s*\]\s*\[\s*{_SPEAKER}\s*\]|\s*\Z)",
-    re.DOTALL,
+_DASH_START = re.compile(
+    rf"\[\s*{_SECONDS}\s*-\s*{_SECONDS}\s*\]\s*"
+    rf"\[\s*(?P<speaker>{_SPEAKER})\s*\]",
 )
-_COMPACT_SEGMENT = re.compile(
-    rf"\[\s*(?P<start>{_TIMESTAMP})\s*\]\s*"
-    rf"(?:\[\s*(?P<speaker>{_SPEAKER})\s*\]\s*)?"
-    rf"(?P<text>.*?)"
-    rf"\[\s*(?P<end>{_TIMESTAMP})\s*\]"
-    rf"(?=\s*(?:\[\s*{_TIMESTAMP}\s*\](?:\s*\[\s*{_SPEAKER}\s*\])?|\Z))",
-    re.DOTALL,
+_DASH_TOKEN = re.compile(rf"\[\s*{_SECONDS}\s*-\s*{_SECONDS}\s*\]")
+_PARTIAL_DASH_TOKEN = re.compile(r"\[\s*\d+(?:\.\d+)?\s*-\s*(?:\d+(?:\.\d*)?)?\s*\]?")
+_COMPACT_START = re.compile(
+    rf"{_TIME_TOKEN}\s*\[\s*(?P<speaker>{_SPEAKER})\s*\]",
 )
-# A compact turn nested beside dash-style output may be complete even when its
-# optional speaker label is absent. The full compact parser intentionally
-# rejects mixed syntax, so this lightweight fragment detects the ambiguity.
-_COMPACT_TURN_FRAGMENT = re.compile(
-    rf"\[\s*{_TIMESTAMP}\s*\]\s*"
-    rf"(?:\[\s*[Ss]\d*\s*\]\s*)?"
-    rf".+?\[\s*{_TIMESTAMP}\s*\]",
-    re.DOTALL,
-)
-# A compact turn may be cut off before its closing timestamp. Its complete or
-# partial speaker marker still makes it distinct from dash-style transcript text.
-_COMPACT_SPEAKER_TURN_START = re.compile(rf"\[\s*{_TIMESTAMP}\s*\]\s*\[\s*[Ss]\d*\s*\]?")
-# A trailing range without its speaker label is an incomplete MOSS segment,
-# whether its closing bracket has arrived or not. Treat it as a parser mismatch
-# so the caller receives the original response instead of partial normalization.
-_INCOMPLETE_DASH_RANGE = re.compile(r"\[\s*\d+(?:\.\d+)?\s*-\s*(?:\d+(?:\.\d*)?)?\s*\]?\s*$")
-# A partial speaker label after a complete dash range is likewise an incomplete
-# second turn, not text belonging to the preceding speaker.
-_INCOMPLETE_DASH_SPEAKER_LABEL = re.compile(rf"\[\s*{_TIMESTAMP}\s*-\s*{_TIMESTAMP}\s*\]\s*\[\s*[Ss]?\d*\s*$")
-_TIMECODE_TOKEN = (
-    rf"\[\s*(?:{_CLOCK_TIMESTAMP}|{_TIMESTAMP})"
-    rf"(?:\s*-\s*(?:{_CLOCK_TIMESTAMP}|{_TIMESTAMP}))?\s*\]"
-)
-_TIMECODE_BEFORE_SPEAKER_LABEL = re.compile(rf"{_TIMECODE_TOKEN}\s*(?=\[\s*{_SPEAKER}\s*\])")
-_TIMECODE_AT_TURN_END = re.compile(rf"\s*{_TIMECODE_TOKEN}(?=\s*(?:\[\s*{_SPEAKER}\s*\]|\Z))")
+_INITIAL_TIME = re.compile(rf"^\s*{_TIME_TOKEN}")
+_TRAILING_TIME = re.compile(rf"(?P<end>{_TIME_TOKEN})\s*$")
 _SPEAKER_LABEL = re.compile(rf"\[\s*(?P<speaker>{_SPEAKER})\s*\]")
-_TRAILING_SPEAKER_LABEL_FRAGMENT = re.compile(r"\[\s*[Ss]\d*\s*\]?\s*$")
+_PARTIAL_SPEAKER_LABEL = re.compile(r"\[\s*[Ss]\d*\s*\]?\s*$")
 
 
 @dataclass(frozen=True, slots=True)
 class _MossSegment:
-    start: float
-    end: float
     speaker: str
     text: str
 
 
-def normalize_moss_timestamped_transcript(transcript: str) -> str:
-    """Render valid MOSS diarized output as one timestamped line per segment.
+def normalize_moss_speaker_aware_transcript(transcript: str) -> str:
+    """Remove timecodes from complete MOSS turns and retain useful labels.
 
-    A parser mismatch must never discard an STT response. When the full text
-    cannot be recognized as MOSS output, the original transcription is
-    returned unchanged.
+    A response is normalized only when one supported syntax consumes it in
+    full. Ambiguous or incomplete output is returned unchanged so transcript
+    content is never mistaken for a MOSS boundary.
     """
-    if _has_mixed_segment_syntax(transcript):
-        return transcript
-    segments = _parse_moss_segments(transcript)
+    segments = _parse_dash_segments(transcript)
+    if not segments:
+        segments = _parse_compact_segments(transcript)
+    if not segments:
+        segments = _parse_speaker_only_segments(transcript)
     if not segments:
         return transcript
+
+    include_speakers = len({segment.speaker for segment in segments}) > 1
     return "\n".join(
-        f"[{_format_timestamp(segment.start)}] [{segment.speaker}] {segment.text} [{_format_timestamp(segment.end)}]"
-        for segment in segments
+        f"[{segment.speaker}] {segment.text}" if include_speakers else segment.text for segment in segments
     )
 
 
-def normalize_moss_speaker_aware_transcript(transcript: str) -> str:
-    """Remove MOSS timecodes and hide labels when it found one speaker.
-
-    MOSS is still asked to diarize every turn. That makes the decision
-    deterministic after transcription: ``S1`` and ``S01`` are one speaker,
-    so all labels are removed; two or more distinct IDs retain normalized
-    ``[Sxx]`` labels. Raw output that cannot be parsed as timestamped MOSS
-    segments is handled conservatively, preserving its text and line order.
-    """
-    if _has_mixed_segment_syntax(transcript):
-        return transcript
-    segments = _parse_moss_segments(transcript)
-    if segments:
-        speakers = {segment.speaker for segment in segments}
-        include_speakers = len(speakers) > 1
-        return "\n".join(
-            f"[{segment.speaker}] {segment.text}" if include_speakers else segment.text for segment in segments
-        )
-    return _normalize_unparsed_speaker_aware_transcript(transcript)
-
-
-def _parse_moss_segments(transcript: str) -> list[_MossSegment]:
-    for pattern, default_speaker in ((_DASH_SEGMENT, None), (_COMPACT_SEGMENT, "S01")):
-        segments = _parse_segments_with_pattern(transcript, pattern, default_speaker=default_speaker)
-        if segments:
-            return segments
-    return []
-
-
-def _has_mixed_segment_syntax(transcript: str) -> bool:
-    """Reject a response that combines the two MOSS segment encodings.
-
-    Each parser intentionally consumes only one complete encoding. Treating a
-    compact turn — including a visibly started, truncated one — as text inside
-    a dash-range match would silently discard its speaker boundary, so leave
-    the original response untouched instead.
-    """
-    if _DASH_SEGMENT.search(transcript) is None:
-        return False
-    return (
-        _COMPACT_TURN_FRAGMENT.search(transcript) is not None
-        or _COMPACT_SPEAKER_TURN_START.search(transcript) is not None
-    )
-
-
-def _parse_segments_with_pattern(
-    transcript: str,
-    pattern: re.Pattern[str],
-    *,
-    default_speaker: str | None,
-) -> list[_MossSegment]:
-    matches = list(pattern.finditer(transcript))
-    if not matches:
+def _parse_dash_segments(transcript: str) -> list[_MossSegment]:
+    starts = list(_DASH_START.finditer(transcript))
+    if not starts or transcript[: starts[0].start()].strip() or _PARTIAL_SPEAKER_LABEL.search(transcript):
         return []
 
     segments: list[_MossSegment] = []
-    cursor = 0
-    for match in matches:
-        if transcript[cursor : match.start()].strip():
+    for index, start in enumerate(starts):
+        end = starts[index + 1].start() if index + 1 < len(starts) else len(transcript)
+        text = _normalize_text(transcript[start.end() : end])
+        if not text or _DASH_TOKEN.search(text) or _PARTIAL_DASH_TOKEN.search(text) or _COMPACT_START.search(text):
             return []
-        start = float(match.group("start"))
-        end = float(match.group("end"))
-        speaker = match.group("speaker") or default_speaker
-        text = " ".join(match.group("text").split())
-        if (
-            not (math.isfinite(start) and math.isfinite(end))
-            or start < 0
-            or end < start
-            or not speaker
-            or not text
-            or _has_incomplete_dash_fragment(text)
-        ):
+        segments.append(_MossSegment(_normalize_speaker_id(start.group("speaker")), text))
+    return segments
+
+
+def _parse_compact_segments(transcript: str) -> list[_MossSegment]:
+    starts = list(_COMPACT_START.finditer(transcript))
+    if not starts or _DASH_TOKEN.search(transcript) or _PARTIAL_DASH_TOKEN.search(transcript):
+        return []
+
+    regions: list[tuple[str, int, int]] = []
+    initial_time = _INITIAL_TIME.match(transcript)
+    if initial_time and initial_time.end() <= starts[0].start():
+        regions.append(("S01", initial_time.end(), starts[0].start()))
+    elif transcript[: starts[0].start()].strip():
+        return []
+
+    for index, start in enumerate(starts):
+        end = starts[index + 1].start() if index + 1 < len(starts) else len(transcript)
+        regions.append((start.group("speaker"), start.end(), end))
+
+    segments: list[_MossSegment] = []
+    for speaker, start, end in regions:
+        region = transcript[start:end]
+        trailing_time = _TRAILING_TIME.search(region)
+        if trailing_time is None:
             return []
-        segments.append(_MossSegment(start=start, end=end, speaker=_normalize_speaker_id(speaker), text=text))
-        cursor = match.end()
+        text = _normalize_text(region[: trailing_time.start()])
+        if not text or _COMPACT_START.search(text) or _DASH_TOKEN.search(text):
+            return []
+        segments.append(_MossSegment(_normalize_speaker_id(speaker), text))
+    return segments
 
-    return segments if not transcript[cursor:].strip() else []
 
+def _parse_speaker_only_segments(transcript: str) -> list[_MossSegment]:
+    labels = list(_SPEAKER_LABEL.finditer(transcript))
+    if not labels or transcript[: labels[0].start()].strip() or _PARTIAL_SPEAKER_LABEL.search(transcript):
+        return []
 
-def _format_timestamp(seconds: float) -> str:
-    milliseconds_total = int(round(seconds * 1000))
-    hours, remainder = divmod(milliseconds_total, 3_600_000)
-    minutes, remainder = divmod(remainder, 60_000)
-    seconds_part, milliseconds = divmod(remainder, 1000)
-    return f"{hours:02d}:{minutes:02d}:{seconds_part:02d}.{milliseconds:03d}"
+    segments: list[_MossSegment] = []
+    for index, label in enumerate(labels):
+        end = labels[index + 1].start() if index + 1 < len(labels) else len(transcript)
+        text = _normalize_text(transcript[label.end() : end])
+        if not text or _DASH_TOKEN.search(text) or _COMPACT_START.search(text):
+            return []
+        segments.append(_MossSegment(_normalize_speaker_id(label.group("speaker")), text))
+    return segments
 
 
 def _normalize_speaker_id(speaker: str) -> str:
-    """Canonicalize equivalent MOSS IDs such as ``S1`` and ``S01``."""
     return f"S{int(speaker[1:]):02d}"
-
-
-def _normalize_unparsed_speaker_aware_transcript(transcript: str) -> str:
-    """Clean MOSS-like raw output without losing an unrecognized response."""
-    if (
-        _has_incomplete_dash_fragment(transcript)
-        or _COMPACT_SPEAKER_TURN_START.search(transcript)
-        or _TRAILING_SPEAKER_LABEL_FRAGMENT.search(transcript)
-    ):
-        return transcript
-
-    # Without a diarization marker this is not safely identifiable as MOSS
-    # output. In particular, a genuine transcript can contain bracketed
-    # numbers such as "[2024]"; stripping them would corrupt its content.
-    if not _SPEAKER_LABEL.search(transcript):
-        return transcript
-
-    without_timecodes = _strip_boundary_timecodes(transcript)
-    labels = list(_SPEAKER_LABEL.finditer(without_timecodes))
-    if not labels:
-        return transcript
-
-    turns: list[tuple[str | None, str]] = []
-    leading_text = _normalize_text(without_timecodes[: labels[0].start()])
-    if leading_text:
-        turns.append((None, leading_text))
-    for index, label in enumerate(labels):
-        end = labels[index + 1].start() if index + 1 < len(labels) else len(without_timecodes)
-        text = _normalize_text(without_timecodes[label.end() : end])
-        if text:
-            turns.append((_normalize_speaker_id(label.group("speaker")), text))
-
-    if not turns:
-        return transcript
-    speakers = {speaker for speaker, _ in turns if speaker is not None}
-    include_speakers = len(speakers) > 1
-    return "\n".join(f"[{speaker}] {text}" if include_speakers and speaker else text for speaker, text in turns)
-
-
-def _strip_boundary_timecodes(transcript: str) -> str:
-    """Remove only MOSS timecodes adjacent to a speaker-turn boundary.
-
-    A global timecode substitution would also erase spoken bracketed values
-    such as ``[2024]`` inside a turn. Remove start markers first, then make
-    one end-marker pass; re-scanning would turn a spoken value that preceded a
-    real boundary marker into a false boundary after that marker is removed.
-    """
-    without_start_timecodes = _TIMECODE_BEFORE_SPEAKER_LABEL.sub("", transcript)
-    return _TIMECODE_AT_TURN_END.sub("", without_start_timecodes)
-
-
-def _has_incomplete_dash_fragment(text: str) -> bool:
-    """Whether *text* ends inside a dash-style MOSS turn boundary."""
-    return _INCOMPLETE_DASH_RANGE.search(text) is not None or _INCOMPLETE_DASH_SPEAKER_LABEL.search(text) is not None
 
 
 def _normalize_text(text: str) -> str:
     return " ".join(text.split())
 
 
-__all__ = ["normalize_moss_speaker_aware_transcript", "normalize_moss_timestamped_transcript"]
+__all__ = ["normalize_moss_speaker_aware_transcript"]

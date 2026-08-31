@@ -198,15 +198,7 @@ export function mergeModelEndpointApiKeyExtra(
 export const LLM_CONTEXT_SIZE_KEY = "max_llm_context_size";
 export const LLM_OUTPUT_TOKENS_KEY = "max_output_tokens";
 export const STT_LANGUAGE_KEY = "language";
-export const STT_TRANSCRIPT_OUTPUT_FORMAT_KEY = "transcript_output_format";
-export const MOSS_TIMESTAMPED_TRANSCRIPT_OUTPUT_FORMAT = "moss_timestamped";
-export const MOSS_SPEAKER_AWARE_TRANSCRIPT_OUTPUT_FORMAT = "moss_speaker_aware";
-export const RAW_TRANSCRIPT_OUTPUT_FORMAT = "raw";
-
-export type MossTranscriptOutputFormat =
-  | typeof RAW_TRANSCRIPT_OUTPUT_FORMAT
-  | typeof MOSS_TIMESTAMPED_TRANSCRIPT_OUTPUT_FORMAT
-  | typeof MOSS_SPEAKER_AWARE_TRANSCRIPT_OUTPUT_FORMAT;
+export const MOSS_SPEAKER_AWARE_KEY = "moss_speaker_aware";
 
 export interface LlmContextFields {
   maxContextSize: string;
@@ -273,30 +265,26 @@ export function mergeModelEndpointSttLanguage(
   return result;
 }
 
-/** Pull MOSS response formatting out of raw endpoint extra for its dedicated control. */
-export function splitModelEndpointMossTranscriptOutput(extra: Record<string, unknown>): {
-  mossTranscriptOutputFormat: MossTranscriptOutputFormat;
+/** Pull MOSS speaker normalization out of raw endpoint extra for its dedicated control. */
+export function splitModelEndpointMossSpeakerAware(extra: Record<string, unknown>): {
+  mossSpeakerAware: boolean;
   extra: Record<string, unknown>;
 } {
-  const { [STT_TRANSCRIPT_OUTPUT_FORMAT_KEY]: outputFormat, ...rest } = extra;
+  const { [MOSS_SPEAKER_AWARE_KEY]: speakerAware, ...rest } = extra;
   return {
-    mossTranscriptOutputFormat:
-      outputFormat === MOSS_TIMESTAMPED_TRANSCRIPT_OUTPUT_FORMAT ||
-      outputFormat === MOSS_SPEAKER_AWARE_TRANSCRIPT_OUTPUT_FORMAT
-        ? outputFormat
-        : RAW_TRANSCRIPT_OUTPUT_FORMAT,
+    mossSpeakerAware: speakerAware === true,
     extra: rest,
   };
 }
 
-/** Store a MOSS output mode; absence preserves the raw provider response. */
-export function mergeModelEndpointMossTranscriptOutput(
+/** Enable MOSS speaker normalization; absence preserves the raw provider response. */
+export function mergeModelEndpointMossSpeakerAware(
   extra: Record<string, unknown>,
-  outputFormat: MossTranscriptOutputFormat,
+  enabled: boolean,
 ): Record<string, unknown> {
   const result = { ...extra };
-  if (outputFormat === RAW_TRANSCRIPT_OUTPUT_FORMAT) delete result[STT_TRANSCRIPT_OUTPUT_FORMAT_KEY];
-  else result[STT_TRANSCRIPT_OUTPUT_FORMAT_KEY] = outputFormat;
+  if (enabled) result[MOSS_SPEAKER_AWARE_KEY] = true;
+  else delete result[MOSS_SPEAKER_AWARE_KEY];
   return result;
 }
 

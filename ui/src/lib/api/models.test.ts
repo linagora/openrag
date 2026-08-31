@@ -3,7 +3,7 @@ import {
   displayModelEndpointExtra,
   mergeModelEndpointApiKeyExtra,
   mergeModelEndpointLlmContext,
-  mergeModelEndpointMossTranscriptOutput,
+  mergeModelEndpointMossSpeakerAware,
   mergeModelEndpointSttLanguage,
   pickDefaultEndpoint,
   prepareModelEndpointExtraForSubmit,
@@ -11,7 +11,7 @@ import {
   resolveEmbedderName,
   splitModelEndpointApiKeyExtra,
   splitModelEndpointLlmContext,
-  splitModelEndpointMossTranscriptOutput,
+  splitModelEndpointMossSpeakerAware,
   splitModelEndpointSttLanguage,
   validateModelEndpoint,
 } from "./models";
@@ -346,24 +346,28 @@ describe("STT language-hint extra field", () => {
   });
 });
 
-describe("MOSS transcript output extra field", () => {
-  it("splits and merges the MOSS-only response formatting control", () => {
-    const { mossTranscriptOutputFormat, extra } = splitModelEndpointMossTranscriptOutput({
-      transcript_output_format: "moss_timestamped",
+describe("MOSS speaker-aware extra field", () => {
+  it("splits and merges the MOSS-only normalization control", () => {
+    const { mossSpeakerAware, extra } = splitModelEndpointMossSpeakerAware({
+      moss_speaker_aware: true,
       temperature: 0,
     });
 
-    expect(mossTranscriptOutputFormat).toBe("moss_timestamped");
+    expect(mossSpeakerAware).toBe(true);
     expect(extra).toEqual({ temperature: 0 });
-    expect(mergeModelEndpointMossTranscriptOutput(extra, "moss_speaker_aware")).toEqual({
+    expect(mergeModelEndpointMossSpeakerAware(extra, true)).toEqual({
       temperature: 0,
-      transcript_output_format: "moss_speaker_aware",
+      moss_speaker_aware: true,
     });
   });
 
-  it("removes the output control when raw MOSS response is selected", () => {
-    expect(
-      mergeModelEndpointMossTranscriptOutput({ transcript_output_format: "moss_timestamped", temperature: 0 }, "raw"),
-    ).toEqual({ temperature: 0 });
+  it("treats malformed values as disabled and removes the dedicated key", () => {
+    const { mossSpeakerAware, extra } = splitModelEndpointMossSpeakerAware({
+      moss_speaker_aware: "true",
+      temperature: 0,
+    });
+
+    expect(mossSpeakerAware).toBe(false);
+    expect(mergeModelEndpointMossSpeakerAware(extra, false)).toEqual({ temperature: 0 });
   });
 });
