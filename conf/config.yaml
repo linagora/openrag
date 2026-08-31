@@ -276,6 +276,13 @@ loader:
     concurrency_limit: 20
     enable_thinking: null
 
+# --- Indexing callback ---
+# Env: INDEXING_CALLBACK_ALLOW_PRIVATE_URLS
+indexing_callback:
+  # Dev only. Keep false in production: it disables the SSRF guard on a
+  # caller-supplied URL.
+  allow_private_urls: false
+
 # --- Ray ---
 ray:
   indexer:

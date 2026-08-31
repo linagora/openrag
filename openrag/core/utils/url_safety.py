@@ -10,7 +10,9 @@ private target.
 
 from __future__ import annotations
 
+import asyncio
 import ipaddress
+import socket
 from urllib.parse import urlparse
 
 
@@ -32,13 +34,16 @@ def is_blocked_address(addr: ipaddress.IPv4Address | ipaddress.IPv6Address) -> b
     )
 
 
-def is_safe_url(url: str) -> bool:
+def is_safe_url(url: str, *, allow_private_hosts: bool = False) -> bool:
     """Return True only if *url* is safe for a server-side fetch.
 
     Blocks non-HTTP(S) schemes, ``localhost``, IPv4/IPv6 literals in
     private/loopback/link-local/reserved ranges, and decimal-integer-encoded
     IPv4 (e.g. ``2130706433`` == ``127.0.0.1``). Regular hostnames pass — the
     caller must re-check each redirect hop.
+
+    ``allow_private_hosts`` keeps the scheme check but skips the address checks.
+    Never enable it for a fetch target an end user controls.
     """
     try:
         parsed = urlparse(url)
@@ -51,6 +56,9 @@ def is_safe_url(url: str) -> bool:
     host = parsed.hostname
     if not host:
         return False
+
+    if allow_private_hosts:
+        return True
 
     if host.lower() == "localhost":
         return False
@@ -72,4 +80,35 @@ def is_safe_url(url: str) -> bool:
     return True
 
 
-__all__ = ["is_blocked_address", "is_safe_url"]
+async def resolves_to_public_addresses(scheme: str, host: str, port: int | None) -> bool:
+    """True only if every A/AAAA record for *host* is an address we may contact.
+
+    ``is_safe_url`` inspects the literal host, so a public-looking name pointing
+    at 169.254.169.254 passes it.
+
+    Not a rebinding fix: the record can change before the connect, and closing
+    that needs the socket pinned to the validated address, which httpx does not
+    expose. Accepted here — the body is fixed and its response never reaches
+    the caller.
+    """
+    default_port = 443 if scheme == "https" else 80
+    try:
+        infos = await asyncio.get_running_loop().getaddrinfo(host, port or default_port, proto=socket.IPPROTO_TCP)
+    except Exception:
+        # Unresolvable — the request could not have succeeded anyway.
+        return False
+    addresses = {info[4][0] for info in infos}
+    if not addresses:
+        return False
+    for address in addresses:
+        try:
+            # Strip any IPv6 scope id ("fe80::1%eth0") before parsing.
+            parsed_address = ipaddress.ip_address(address.split("%", 1)[0])
+        except ValueError:
+            return False
+        if is_blocked_address(parsed_address):
+            return False
+    return True
+
+
+__all__ = ["is_blocked_address", "is_safe_url", "resolves_to_public_addresses"]

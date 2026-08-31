@@ -14,6 +14,7 @@ endpoints returned via ``HTTPException``.
 import json
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from api.dependencies.auth import (
     check_user_file_quota,
@@ -36,6 +37,7 @@ from core.utils.exceptions import OpenRAGError
 from core.utils.filename import sanitize_filename
 from core.utils.log_tail import app_log_file
 from core.utils.logging import get_logger
+from core.utils.url_safety import is_safe_url, resolves_to_public_addresses
 from di.providers import get_auth_service, get_config, get_indexing_service, get_partition_service
 from fastapi import (
     APIRouter,
@@ -50,6 +52,33 @@ from fastapi import (
 from fastapi.responses import JSONResponse
 
 logger = get_logger()
+
+
+async def _validate_callback_url(callback_url: str | None, callback_token: str | None, config) -> None:
+    """Reject a callback_url the server must not POST to.
+
+    The sender re-checks; this is only so the caller hears about it now rather
+    than losing the callback silently. That includes the DNS check: accepting a
+    hostname the sender will later refuse queues a job whose callback can never
+    arrive, and the caller has been told to wait for one.
+    """
+    if not callback_url:
+        return
+    allow_private = bool(getattr(getattr(config, "indexing_callback", None), "allow_private_urls", False))
+    parsed = urlparse(callback_url)
+    unsafe = not is_safe_url(callback_url, allow_private_hosts=allow_private)
+    if not unsafe and not allow_private:
+        unsafe = not await resolves_to_public_addresses(parsed.scheme, parsed.hostname or "", parsed.port)
+    if unsafe:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="callback_url must be a public http(s) URL",
+        )
+    if callback_token and not allow_private and parsed.scheme != "https":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="callback_url must use https when callback_token is set",
+        )
 
 
 def build_url(request: Request, route_name: str, *, preferred_url_scheme: str | None = None, **path_params) -> str:
@@ -126,11 +155,18 @@ async def add_file(
     file: UploadFile = Depends(validate_file_format),
     metadata: dict = Depends(validate_metadata),
     workspace_ids: str | None = Form(None, description="JSON array of workspace IDs to add the file to"),
+    callback_url: str | None = Form(None, description="Optional URL notified when async indexing finishes"),
+    callback_token: str | None = Form(
+        None,
+        description="Optional bearer token sent as `Authorization` on the callback_url request",
+    ),
     user=Depends(require_partition_editor),
     _quota_check=Depends(check_user_file_quota),
     config=Depends(get_config),
     service=Depends(get_indexing_service),
 ):
+    await _validate_callback_url(callback_url, callback_token, config)
+
     if await service.file_exists(file_id, partition):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -195,6 +231,8 @@ async def add_file(
             user=user,
             workspace_ids=parsed_workspace_ids,
             content_sha256=content_sha256,
+            callback_url=callback_url,
+            callback_token=callback_token,
         )
     except BaseException:
         file_path.unlink(missing_ok=True)
@@ -280,10 +318,17 @@ async def put_file(
     file_id: str = Depends(validate_file_id),
     file: UploadFile = Depends(validate_file_format),
     metadata: dict = Depends(validate_metadata),
+    callback_url: str | None = Form(None, description="Optional URL notified when async indexing finishes"),
+    callback_token: str | None = Form(
+        None,
+        description="Optional bearer token sent as `Authorization` on the callback_url request",
+    ),
     user=Depends(require_partition_editor),
     config=Depends(get_config),
     service=Depends(get_indexing_service),
 ):
+    await _validate_callback_url(callback_url, callback_token, config)
+
     if not await service.file_exists(file_id, partition):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -330,6 +375,8 @@ async def put_file(
             user=user,
             replace=True,
             content_sha256=content_sha256,
+            callback_url=callback_url,
+            callback_token=callback_token,
         )
     except BaseException:
         file_path.unlink(missing_ok=True)

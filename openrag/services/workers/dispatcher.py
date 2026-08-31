@@ -188,6 +188,8 @@ class WorkerDispatcher(IndexingDispatcher):
         replace: bool,
         indexation_config: dict | None = None,
         embedder_name: str | None = None,
+        callback_url: str | None = None,
+        callback_token: str | None = None,
         require_existing_partition: bool = False,
         allow_legacy_require_existing_partition_retry: bool = False,
     ) -> str:
@@ -262,6 +264,8 @@ class WorkerDispatcher(IndexingDispatcher):
                 "replace": replace,
                 "indexation_config": indexation_config,
                 "embedder_name": embedder_name,
+                "callback_url": callback_url,
+                "callback_token": callback_token,
             }
             if require_existing_partition:
                 submit_kwargs[_REQUIRE_EXISTING_PARTITION_KWARG] = True

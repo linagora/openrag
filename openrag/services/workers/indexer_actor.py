@@ -8,6 +8,7 @@ from typing import Any
 
 from core.models.document import Document
 from core.utils.logging import get_logger
+from services.workers.indexing_callback import send_indexing_callback
 from services.workers.pipeline_builder import (
     REPLACE_OLD_CHUNK_COLLECTION_ROW_KEY,
     REPLACE_OLD_CHUNK_IDS_ROW_KEY,
@@ -66,6 +67,8 @@ class IndexerWorker:
         replace: bool = False,
         indexation_config: dict[str, Any] | None = None,
         embedder_name: str | None = None,
+        callback_url: str | None = None,
+        callback_token: str | None = None,
         require_existing_partition: bool = False,
         resolved_prompts: dict[str, str] | None = None,
     ) -> dict[str, Any]:
@@ -74,7 +77,15 @@ class IndexerWorker:
         Returns a plain dict ``{"stored_count": int, "stage": "stored"}``
         on success.  On failure, state is set to FAILED and the exception
         is re-raised so the Ray task is marked as errored.
+
+        When *callback_url* is provided, a best-effort ``POST`` notification is
+        sent to that URL after the task reaches a terminal state (``success`` or
+        ``error``).  *callback_token*, when set, is sent as that request's
+        ``Authorization`` bearer.  The callback never affects the indexing
+        outcome.
         """
+        file_id = metadata.get("file_id", "")
+        log = logger.bind(file_id=file_id, partition=partition, task_id=task_id)
         await retry_idempotent_ray_actor_method(
             lambda: self._tsm.set_state.remote(task_id, "SERIALIZING"),
             task_description=f"set_state({task_id}, SERIALIZING)",
@@ -136,6 +147,10 @@ class IndexerWorker:
                 lambda: self._tsm.set_state.remote(task_id, "COMPLETED"),
                 task_description=f"set_state({task_id}, COMPLETED)",
             )
+            log.info("File indexed successfully.")
+            await send_indexing_callback(
+                callback_url, partition, file_id, "success", metadata, callback_token=callback_token
+            )
             return {"stored_count": row.get("stored_count", 0), "stage": row.get("stage", "")}
         except Exception:
             should_cleanup_vectors = row is not None and (
@@ -150,10 +165,14 @@ class IndexerWorker:
                     task_id=task_id,
                 )
             tb = traceback.format_exc()
-            await retry_idempotent_ray_actor_method(
+            was_failed = await retry_idempotent_ray_actor_method(
                 lambda: self._tsm.set_failed_if_not_cancelled.remote(task_id, tb),
                 task_description=f"set_failed_if_not_cancelled({task_id})",
             )
+            if was_failed:
+                await send_indexing_callback(
+                    callback_url, partition, file_id, "error", metadata, callback_token=callback_token
+                )
             raise
         # The raw upload is purged (when configured) by the enclosing actor, not
         # here: cleanup must also cover failures that happen *before* this method

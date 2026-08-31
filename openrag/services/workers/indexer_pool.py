@@ -10,6 +10,7 @@ import ray
 from core.config.model_endpoints import CONTROL_EXTRA_KEYS
 from core.models.catalog import CONTENT_CLAIM_TOKEN_METADATA_KEY
 from services.workers.indexer_actor import IndexerWorker, delete_uploaded_file
+from services.workers.indexing_callback import send_indexing_callback
 
 from openrag.core.config.root import Settings
 
@@ -22,7 +23,8 @@ _CONTENT_CLAIM_RENEW_INTERVAL_SECONDS = 60 * 60
 # and workers on the same protocol generation whenever their remote contract or
 # cross-process indexing semantics change, so new replicas cannot attach to a
 # partially compatible actor fleet left by the previous release.
-_INDEXER_ACTOR_PROTOCOL_VERSION = "v3"
+# v4: process_file gained callback_url/callback_token; a v3 worker rejects them.
+_INDEXER_ACTOR_PROTOCOL_VERSION = "v4"
 _INDEXER_POOL_DISPATCHER_ACTOR_NAME = f"IndexerPoolDispatcher-{_INDEXER_ACTOR_PROTOCOL_VERSION}"
 
 
@@ -293,18 +295,33 @@ class IndexerWorkerActor:
         replace: bool = False,
         indexation_config: dict[str, Any] | None = None,
         embedder_name: str | None = None,
+        callback_url: str | None = None,
+        callback_token: str | None = None,
         require_existing_partition: bool = False,
     ) -> dict[str, Any]:
         content_claim_token = metadata.get(CONTENT_CLAIM_TOKEN_METADATA_KEY)
         worker_metadata = {key: value for key, value in metadata.items() if key != CONTENT_CLAIM_TOKEN_METADATA_KEY}
         try:
-            await self._ensure_catalog()
-            await self._ensure_registry_fresh(_required_model_endpoint_names(indexation_config, embedder_name))
-            # Resolve the enrichment-stage prompts once for this file (partition
-            # override → global default → disk seed). Done here, at the job
-            # boundary, so per-chunk work reuses one resolved string instead of
-            # hitting the DB per chunk.
-            resolved_prompts = await self._resolve_ingest_prompts(partition, indexation_config or {})
+            try:
+                await self._ensure_catalog()
+                await self._ensure_registry_fresh(_required_model_endpoint_names(indexation_config, embedder_name))
+                # Resolve the enrichment-stage prompts once for this file (partition
+                # override → global default → disk seed). Done here, at the job
+                # boundary, so per-chunk work reuses one resolved string instead of
+                # hitting the DB per chunk.
+                resolved_prompts = await self._resolve_ingest_prompts(partition, indexation_config or {})
+            except BaseException:
+                # IndexerWorker.process_file sends the error callback, and it is
+                # never reached from here.
+                await send_indexing_callback(
+                    callback_url,
+                    partition,
+                    metadata.get("file_id", ""),
+                    "error",
+                    metadata,
+                    callback_token=callback_token,
+                )
+                raise
             result = await self._worker.process_file(
                 task_id=task_id,
                 path=path,
@@ -315,6 +332,8 @@ class IndexerWorkerActor:
                 replace=replace,
                 indexation_config=indexation_config,
                 embedder_name=embedder_name,
+                callback_url=callback_url,
+                callback_token=callback_token,
                 require_existing_partition=require_existing_partition,
                 resolved_prompts=resolved_prompts,
             )

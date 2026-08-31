@@ -201,3 +201,18 @@ class LoaderConfig(ConfigMixin):
     # Max depth of nested .eml-in-.eml attachments the EmlLoader will descend
     # into. Bounds recursion when .eml files are nested inside one another.
     eml_max_recursion_depth: int = 5
+
+
+# ---------------------------------------------------------------------------
+# Indexing callback (optional status POST when a task reaches a terminal state)
+# ---------------------------------------------------------------------------
+
+
+class IndexingCallbackConfig(ConfigMixin):
+    """Server-side policy for the caller-supplied per-upload ``callback_url``.
+
+    With ``allow_private_urls`` on, anyone allowed to upload can make the
+    server POST to an internal address. Dev stacks only.
+    """
+
+    allow_private_urls: bool = False
