@@ -628,13 +628,11 @@ function PromptSelect({
   prompts,
   value,
   onChange,
-  selectTriggerClassName,
 }: {
   label: string;
   prompts: PromptResponse[];
   value: string;
   onChange: (v: string) => void;
-  selectTriggerClassName?: string;
 }) {
   return (
     <div className="space-y-1.5">
@@ -646,7 +644,7 @@ function PromptSelect({
         value={promptSelectValue(value)}
         onValueChange={(v) => onChange(promptOptionToName(v))}
       >
-        <SelectTrigger size="sm" className={selectTriggerClassName}>
+        <SelectTrigger size="sm">
           <SelectValue />
         </SelectTrigger>
         <SelectContent>
