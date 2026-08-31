@@ -1623,7 +1623,9 @@ async def test_validate_stt_endpoint_rejects_auth_failure_on_audio_probe(monkeyp
     assert result["reachable"] is True
     assert result["model_found"] is True
     assert result["transcription_supported"] is False
-    assert result["detail"] == f"Transcription capability check was rejected with HTTP {status_code}. Check the API key."
+    assert (
+        result["detail"] == f"Transcription capability check was rejected with HTTP {status_code}. Check the API key."
+    )
 
 
 @pytest.mark.asyncio
