@@ -70,38 +70,33 @@ interface ReleaseNotesDialogProps {
   onOpenChange: (open: boolean) => void;
 }
 
-function ReleaseNotesSection({ section }: { section: ReleaseNoteSection }) {
+function ReleaseNotesCategory({ section }: { section: ReleaseNoteSection }) {
   const Icon = releaseNoteSectionIcons[section.id];
   const headingId = `release-notes-${section.id}`;
 
   return (
-    <section aria-labelledby={headingId} className="rounded-xl border bg-card p-4 shadow-sm">
-      <div className="flex items-start gap-3">
-        <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
-          <Icon aria-hidden="true" className="size-4" />
-        </span>
-        <div className="min-w-0">
-          <h3 id={headingId} className="text-sm font-semibold text-foreground">
-            {section.title}
-          </h3>
-          <ul className="mt-2 space-y-2 text-sm leading-6 text-muted-foreground">
-            {section.items.map((entry) => (
-              <li key={entry} className="flex gap-2">
-                <span aria-hidden="true" className="mt-2 size-1.5 shrink-0 rounded-full bg-primary/70" />
-                <span>{entry}</span>
-              </li>
-            ))}
-          </ul>
-        </div>
+    <article aria-labelledby={headingId} className="flex gap-3 py-4 first:pt-0 last:pb-0">
+      <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+        <Icon aria-hidden="true" className="size-4" />
+      </span>
+      <div className="min-w-0">
+        <h4 id={headingId} className="text-sm font-semibold text-foreground">
+          {section.title}
+        </h4>
+        <ul className="mt-2 space-y-2 text-sm leading-6 text-muted-foreground">
+          {section.items.map((entry) => (
+            <li key={entry} className="flex gap-2">
+              <span aria-hidden="true" className="mt-2 size-1.5 shrink-0 rounded-full bg-primary/70" />
+              <span>{entry}</span>
+            </li>
+          ))}
+        </ul>
       </div>
-    </section>
+    </article>
   );
 }
 
 export function ReleaseNotesDialog({ open, onOpenChange }: ReleaseNotesDialogProps) {
-  const highlights = releaseNotes.sections.find((section) => section.id === "highlights");
-  const remainingSections = releaseNotes.sections.filter((section) => section.id !== "highlights");
-
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="flex max-h-[calc(100vh-2rem)] flex-col gap-0 overflow-hidden p-0 sm:max-w-3xl">
@@ -123,8 +118,22 @@ export function ReleaseNotesDialog({ open, onOpenChange }: ReleaseNotesDialogPro
         </DialogHeader>
 
         <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-6 py-6 sm:px-8" data-testid="release-notes-content">
-          <div className="space-y-4">
-            {highlights && <ReleaseNotesSection section={highlights} />}
+          <div className="space-y-6">
+            <section aria-labelledby="release-notes-whats-new">
+              <div className="flex items-center gap-2">
+                <span className="flex size-8 items-center justify-center rounded-lg bg-primary/10 text-primary">
+                  <Sparkles aria-hidden="true" className="size-4" />
+                </span>
+                <h3 id="release-notes-whats-new" className="text-base font-semibold text-foreground">
+                  What's New
+                </h3>
+              </div>
+              <div className="mt-4 divide-y border-y">
+                {releaseNotes.sections.map((section) => (
+                  <ReleaseNotesCategory key={section.id} section={section} />
+                ))}
+              </div>
+            </section>
 
             <section aria-labelledby="release-notes-breaking-changes">
               <Alert className="border-amber-200 bg-amber-50 text-amber-950 dark:border-amber-900/60 dark:bg-amber-950/30 dark:text-amber-100">
@@ -141,12 +150,6 @@ export function ReleaseNotesDialog({ open, onOpenChange }: ReleaseNotesDialogPro
                 </AlertDescription>
               </Alert>
             </section>
-
-            <div className="grid gap-4 sm:grid-cols-2">
-              {remainingSections.map((section) => (
-                <ReleaseNotesSection key={section.id} section={section} />
-              ))}
-            </div>
           </div>
         </div>
 
