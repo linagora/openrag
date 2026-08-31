@@ -300,9 +300,48 @@ These are external services to provide !!!
 | `API_KEY` | str | _(unset)_ | API key for authenticating with the LLM service |
 | `LLM_ENABLE_THINKING` | bool | _(unset)_ | Optional chat-template control for models that support `enable_thinking`; leave unset for Mistral tokenizers, set `false` to suppress Qwen-style reasoning traces |
 | `LLM_SEMAPHORE` | int | 10 | Maximum number of concurrent requests to allow for the LLM service |
+| `LLM_OVERRIDE_ALLOW_CUSTOM_ENDPOINT` | bool | `false` | Honor a client-supplied `base_url`/`api_key` in `metadata.llm_override`. Off by default; read the trade-off below before enabling. |
 | `MAX_LLM_CONTEXT_SIZE` | `int` | `8192` | Fallback maximum token limit for chat/completion requests. At startup, the `/v1/models` endpoint is queried for the model's `max_model_len`; if that query fails this value is used instead. Requests whose total token count (prompt + `max_tokens`) exceeds the limit are rejected with a **413** error. |
 | `MAX_OUTPUT_TOKENS` | `int` | `1024` | Default output-token budget (`max_tokens`) applied to chat completions when the request doesn't set one explicitly. |
 
+
+#### Client-supplied LLM endpoints
+
+A client can always override the **model name** for a single request via
+`metadata.llm_override` (see the [API reference](/openrag/documentation/api/#extra-arguments)).
+`LLM_OVERRIDE_ALLOW_CUSTOM_ENDPOINT=true` additionally honors `base_url` and
+`api_key` from that object, so the request is served by a provider of the
+client's choosing rather than the configured one.
+
+It exists for deployments whose clients already send the full object and would
+otherwise break. Prefer registering a named endpoint under `/model-endpoints`
+and binding it to the partition (`chat_llm`) — same outcome, none of the
+trade-off below.
+
+**What enabling it means.** Any caller who can reach `/v1/chat/completions` can
+make the server issue https POSTs from inside your network. The request shape is
+pinned, which is what bounds the exposure:
+
+- `https` only — plaintext internal services are unreachable.
+- The path is always `{base_url}/chat/completions` (`{base_url}/completions` for
+  the legacy `/v1/completions` route); a query string, fragment or `..` segment
+  — percent-encoded or not — is rejected with a **400**, so the override cannot
+  be aimed at an arbitrary internal path.
+- Redirects are not followed, so a target cannot bounce the server elsewhere.
+- The server's own API key is never forwarded; an override without `api_key`
+  sends no `Authorization` header at all.
+
+What remains reachable is therefore essentially *other https LLM gateways* —
+including an internal one that trusts its network rather than a credential, which
+such a caller could then use without holding its key.
+
+**What it does not change.** It grants no read access a caller does not already
+have: `/search` returns the same partition content directly. What changes is the
+way data leaves — as outbound LLM traffic from the server's egress rather than as
+a user read. That matters against a DLP or approved-subprocessor constraint, not
+against a caller who was never authorized in the first place.
+
+Enable only where every API caller is already trusted with both.
 
 #### VLM Configuration
 

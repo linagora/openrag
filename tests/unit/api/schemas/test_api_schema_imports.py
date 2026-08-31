@@ -114,6 +114,64 @@ def test_chat_request_passes_through_extra_openai_params():
     assert dump["seed"] == 42
 
 
+def test_chat_message_passes_through_extra_openai_fields():
+    """An OpenAI message is more than role/content: `name` disambiguates speakers
+    and `tool_calls`/`tool_call_id` carry function calling. Dropping them here
+    silently truncated the history sent to the LLM
+    """
+    request = OpenAIChatCompletionRequest.model_validate(
+        {
+            "messages": [
+                {"role": "user", "content": "hi", "name": "alice"},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "f", "arguments": "{}"}}],
+                },
+            ]
+        }
+    )
+    messages = request.model_dump(exclude_none=True)["messages"]
+
+    assert messages[0]["name"] == "alice"
+    assert messages[1]["tool_calls"][0]["id"] == "c1"
+
+
+def test_sanitize_messages_keeps_tool_calls_reaching_it():
+    """_sanitize_messages leaves a content-free assistant turn alone when it
+    carries tool_calls — reachable only now that the schema forwards the field
+    """
+    from services.orchestrators.query_service import QueryService
+
+    request = OpenAIChatCompletionRequest.model_validate(
+        {
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "f", "arguments": "{}"}}],
+                }
+            ]
+        }
+    )
+    sanitized = QueryService._sanitize_messages(request.model_dump(exclude_none=True)["messages"])
+
+    assert sanitized[0]["content"] == ""
+
+
+def test_completion_request_passes_through_extra_openai_params():
+    """Legacy /completions mirrors the chat request: undeclared vendor params are
+    forwarded, while the declared bounds on n/best_of still apply
+    """
+    request = OpenAICompletionRequest.model_validate({"prompt": "hi", "suffix": "!", "user": "alice"})
+    dump = request.model_dump(exclude_none=True)
+
+    assert dump["suffix"] == "!"
+    assert dump["user"] == "alice"
+    with pytest.raises(ValidationError):
+        OpenAICompletionRequest.model_validate({"prompt": "hi", "n": 9, "user": "alice"})
+
+
 def test_completion_request_omits_unset_nulls():
     """The /completions router dumps with exclude_none=True (matching chat), so
     optional params left unset are not sent as explicit null to strict providers
@@ -167,3 +225,74 @@ def test_completion_request_bounds_n_and_best_of():
     for bad in ({"n": 0}, {"n": 9}, {"best_of": 0}, {"best_of": 9}):
         with pytest.raises(ValidationError):
             OpenAICompletionRequest(prompt="x", **bad)
+
+
+def test_chat_message_accepts_tool_role_with_tool_call_id():
+    """A tool-result turn is `role="tool"` + `tool_call_id`. `extra="allow"` only
+    preserves undeclared fields *after* the declared ones validate, so an
+    unlisted role rejected the whole message before its extras mattered
+    """
+    message = OpenAIMessage.model_validate({"role": "tool", "content": "42", "tool_call_id": "c1"})
+    dump = message.model_dump()
+
+    assert dump["role"] == "tool"
+    assert dump["tool_call_id"] == "c1"
+
+
+def test_chat_message_accepts_null_content_with_tool_calls():
+    """The assistant turn that *carries* tool_calls has `content: null` in the
+    OpenAI API — the exact shape `_sanitize_messages` documents as legitimately
+    content-free. A required `content: str` rejected it before it got there
+    """
+    message = OpenAIMessage.model_validate(
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "f", "arguments": "{}"}}],
+        }
+    )
+
+    assert message.content is None
+    assert message.model_dump()["tool_calls"][0]["id"] == "c1"
+
+
+def test_chat_message_accepts_developer_role():
+    """`developer` is OpenAI's replacement for `system` on newer models; rejecting
+    it 422s a request the downstream LLM would have accepted
+    """
+    assert OpenAIMessage.model_validate({"role": "developer", "content": "be terse"}).role == "developer"
+
+
+def test_chat_request_accepts_replayed_tool_call_history():
+    """The realistic end-to-end shape: a client replaying a conversation that
+    already used tools, then asking a new question. Every intermediate turn must
+    survive parsing for the history reaching the LLM to stay faithful
+    """
+    request = OpenAIChatCompletionRequest.model_validate(
+        {
+            "messages": [
+                {"role": "user", "content": "weather in Paris?"},
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "c1",
+                            "type": "function",
+                            "function": {"name": "get_weather", "arguments": '{"c":"Paris"}'},
+                        }
+                    ],
+                },
+                {"role": "tool", "content": "18C", "tool_call_id": "c1"},
+                {"role": "assistant", "content": "It's 18C in Paris."},
+                {"role": "user", "content": "and tomorrow?"},
+            ]
+        }
+    )
+    messages = request.model_dump(exclude_none=True)["messages"]
+
+    assert [m["role"] for m in messages] == ["user", "assistant", "tool", "assistant", "user"]
+    assert messages[1]["tool_calls"][0]["function"]["name"] == "get_weather"
+    assert messages[2]["tool_call_id"] == "c1"
+    # exclude_none drops the null content rather than forwarding `content: null`
+    assert "content" not in messages[1]

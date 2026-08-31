@@ -715,7 +715,7 @@ OpenAI-compatible text completion endpoint.
 | `websearch` | `bool` | `false` | Augments the RAG context with live web search results. When used with a partition (`openrag-{partition}`), document and web results are combined. When used without a partition (direct LLM mode), web results are the sole context. Requires `WEBSEARCH_API_TOKEN` to be configured. See [web search configuration](/openrag/documentation/env_vars/#web-search-configuration). |
 | `spoken_style_answer` | `bool` | `false` | Generates a succinct spoken-style conversational answer based on the retrieved documents. |
 | `use_map_reduce` | `bool` | `false` | Uses a map-reduce strategy to aggregate information from multiple documents. See [map-reduce configuration](/openrag/documentation/env_vars/#map--reduce-configuration). |
-| `llm_override` | `object` | `null` | Overrides only the downstream LLM model name while still using OpenRAG's configured LLM endpoint and credentials. Accepts: `model` (string). Endpoint URL and API key are server-side configuration and cannot be changed by a client request. |
+| `llm_override` | `object` | `null` | Overrides the downstream LLM for this request. Accepts `model` (string), always honored. Also accepts `base_url` and `api_key`, which are honored **only** when the deployment sets `LLM_OVERRIDE_ALLOW_CUSTOM_ENDPOINT` — otherwise they are ignored and the request goes to the server's configured endpoint. See [custom LLM endpoints](/openrag/documentation/env_vars/#client-supplied-llm-endpoints). |
 | `attachments` | `list[{"id": string}]` | `null` | Scopes RAG retrieval to a specific list of file IDs within the target partition, instead of searching the whole partition. Unknown or unindexed IDs are silently dropped; duplicates are deduplicated. The response's `extra.attachments` reports which IDs were actually used. |
 
 Examples:
@@ -802,6 +802,30 @@ curl -X 'POST' 'http://localhost:8080/v1/chat/completions' \
   }
 }'
 ```
+
+With `LLM_OVERRIDE_ALLOW_CUSTOM_ENDPOINT=true`, the same object may also carry the
+endpoint and its credential, sending the request to a provider of the client's
+choosing instead of the configured one:
+
+```json title="metadata.llm_override with a client-supplied endpoint"
+{
+  "llm_override": {
+    "base_url": "https://api.openai.com/v1",
+    "api_key": "sk-...",
+    "model": "gpt-4o"
+  }
+}
+```
+
+`base_url` must be `https`, must carry no query string, fragment or `..` path
+segment (percent-encoded or not), and is always requested as
+`{base_url}/chat/completions` — `{base_url}/completions` when the request comes
+in on the legacy `/v1/completions` route; anything else is rejected with a
+**400**. The server's own API key is never forwarded — an override without
+`api_key` sends no `Authorization` header at all. When the flag
+is off, `base_url`/`api_key` are ignored (a warning is logged) and only `model`
+applies, which typically surfaces as an "unknown model" error from the configured
+provider.
 
 ```bash title="Scoping retrieval to specific attachments"
 curl -X 'POST' 'http://localhost:8080/v1/chat/completions' \
