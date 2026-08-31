@@ -271,18 +271,12 @@ class OpenAIAudioClient(BaseClientParser):
             return self._client, self._model, False
 
         api_key = endpoint.extra.get("api_key")
-        if isinstance(api_key, str) and api_key.strip():
-            resolved_api_key = api_key
-        elif self._is_fallback_endpoint(endpoint):
-            # The environment-managed seed deliberately omits ``EMPTY`` from
-            # its stored extras. It still targets the legacy endpoint, so it is
-            # safe to retain the configured fallback credential here.
-            resolved_api_key = self._api_key
-        else:
-            # An administrator may choose an unauthenticated or differently
-            # authenticated endpoint. Never disclose TRANSCRIBER_API_KEY to a
-            # different host merely because its own key field is blank.
-            resolved_api_key = _ANONYMOUS_API_KEY
+        # A resolved registry endpoint owns its credentials. In particular, an
+        # administrator clearing its key must not silently restore the legacy
+        # TRANSCRIBER_API_KEY merely because the endpoint URL happens to match.
+        # The environment fallback remains available only when no endpoint was
+        # resolved above.
+        resolved_api_key = api_key.strip() if isinstance(api_key, str) and api_key.strip() else _ANONYMOUS_API_KEY
         if (
             self._is_fallback_endpoint(endpoint)
             and resolved_api_key == self._api_key

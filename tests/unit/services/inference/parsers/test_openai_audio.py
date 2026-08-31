@@ -253,10 +253,20 @@ class TestParse:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("extra", [{}, {"api_key": ""}, {"api_key": "   "}])
-    async def test_stt_endpoint_without_key_reuses_fallback_client(self, mock_openai_client, monkeypatch, extra):
+    async def test_stt_endpoint_without_key_does_not_receive_fallback_credential(self, monkeypatch, extra):
         from services.inference.parsers import openai_audio as module
 
-        mock_openai_client.audio.transcriptions.create.return_value = MagicMock(text="transcribed")
+        created: list[tuple[dict[str, object], MagicMock]] = []
+
+        def make_openai_client(**kwargs):
+            temporary_client = MagicMock()
+            temporary_client.audio = MagicMock()
+            temporary_client.audio.transcriptions = MagicMock()
+            temporary_client.audio.transcriptions.create = AsyncMock(return_value=MagicMock(text="transcribed"))
+            temporary_client.close = AsyncMock()
+            created.append((kwargs, temporary_client))
+            return temporary_client
+
         endpoint = ModelEndpointConfig(
             endpoint="http://x",
             model_name="moss-transcribe-diarize",
@@ -266,18 +276,22 @@ class TestParse:
         )
 
         client = _client(
-            mock_openai_client,
+            MagicMock(),
             api_key="legacy-key",
             transcription_endpoint_resolver=lambda: endpoint,
         )
-        unexpected_client = MagicMock(side_effect=AssertionError("a fallback endpoint must not create a new client"))
-        monkeypatch.setattr(module, "AsyncOpenAI", unexpected_client)
+        monkeypatch.setattr(module, "AsyncOpenAI", make_openai_client)
 
         result = await client.parse(_audio_doc())
 
         assert result.text_blocks[0].text == "transcribed"
-        unexpected_client.assert_not_called()
-        assert mock_openai_client.audio.transcriptions.create.await_args.kwargs["model"] == "moss-transcribe-diarize"
+        assert created[0][0] == {
+            "base_url": "http://x",
+            "api_key": "EMPTY",
+            "timeout": 120,
+        }
+        assert created[0][1].audio.transcriptions.create.await_args.kwargs["model"] == "moss-transcribe-diarize"
+        created[0][1].close.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_keyless_stt_endpoint_does_not_receive_fallback_key_from_another_host(self, monkeypatch):
