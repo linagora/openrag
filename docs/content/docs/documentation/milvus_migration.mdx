@@ -5,9 +5,11 @@ title: Milvus Migrations
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 
 # Milvus Upgrade
-OpenRAG has been upgraded from Milvus **2.5.4** to **2.6.11** to leverage the enhancements introduced in the latest releases, particularly the new temporal querying capabilities added in version **2.6.6+**.
+OpenRAG now uses Milvus **3.0.0** with PyMilvus **3.0.1**. Existing Milvus 2.6 deployments can keep their data, but they must prepare the Milvus data directory before starting the new image because Milvus 3 runs as a non-root user.
 
-## What's New in 2.6.x
+Fresh installations need no manual ownership step. The Compose stack initializes empty bind mounts and named volumes before the server starts. If existing files are not already owned by the Milvus 3 user, startup stops with a migration error instead of risking a partially writable deployment. The procedure below remains mandatory for existing data in either storage mode because all files created by Milvus 2.6 must be transferred to the Milvus 3 user.
+
+## Temporal support introduced in 2.6.x
 
 Milvus 2.6.6+ introduced the **`TIMESTAMPTZ`** field type, which enables:
 
@@ -46,12 +48,115 @@ results = client.query(
 ## Milvus Version Upgrade Steps
 
 :::danger[Who needs this migration?]
-This migration is only required if you are upgrading from **OpenRAG &lt;= 1.1.7**, which shipped with Milvus &lt;= 2.5.x. If your deployment already runs Milvus 2.6.x, skip this section.
+Do not skip this migration when upgrading an existing deployment:
+
+- If you already run Milvus **2.6.x**, follow the 2.6-to-3.0 procedure below.
+- If you run OpenRAG **1.1.7 or earlier with Milvus 2.5.x**, first complete the legacy intermediate upgrade to 2.6.11, then follow the 2.6-to-3.0 procedure.
+- If your Milvus server is **earlier than 2.5.x**, do not use the legacy path below. Determine the required intermediate and metadata migrations from the official guide before continuing.
 :::
 
 > For the full official reference, see the [Milvus upgrade guide](https://milvus.io/docs/upgrade_milvus_standalone-docker.md#Upgrade-process).
 
-### Step 1 — Upgrade Milvus to 2.5.16 (intermediate step)
+### Upgrade from Milvus 2.6.x to 3.0.0
+
+Milvus 2.6 containers ran as root, so existing bind-mounted files and Docker named-volume contents are commonly owned by `root:root`. Milvus 3 runs as UID/GID `999:999` and cannot start until it owns the directory mounted at `/var/lib/milvus`.
+
+The message-queue type must also remain unchanged during the upgrade. Before stopping Milvus 2.6, inspect its startup logs and identify the effective `mqType` or `walName`:
+
+```bash
+docker compose logs --no-color milvus \
+  | grep -E 'mqType=|walName=' \
+  | tail -20
+```
+
+Set `MILVUS_MQ_TYPE` in the Compose `.env` file to the detected value, such as `rocksmq` or `woodpecker`. If the logs do not show a clear value, confirm it in the Milvus WebUI configuration view before continuing. Do not combine the version upgrade with a queue migration; use the separate [Milvus queue-switch procedure](https://milvus.io/docs/switch-rocksmq-woodpecker.md) after version 3 is healthy.
+
+:::danger[Back up before changing ownership]
+Stop writes and create a verified backup of the Milvus, etcd, and MinIO data before continuing. An image-only downgrade is not a safe rollback after Milvus 3 has written data.
+:::
+
+Run the procedure for the storage profile selected in `infra/compose/.env`.
+
+#### Bind-mounted storage
+
+While the Milvus 2.6 stack still exists, confirm that `/var/lib/milvus` is a bind mount:
+
+```bash
+MILVUS_CONTAINER="$(docker compose ps -q milvus)"
+docker inspect "$MILVUS_CONTAINER" \
+  --format '{{range .Mounts}}{{if eq .Destination "/var/lib/milvus"}}type={{.Type}} source={{.Source}}{{end}}{{end}}'
+# Expected: type=bind
+```
+
+Stop the stack, take the backup described above, and then transfer ownership from a temporary service container. Running the change through Docker makes it apply to the daemon-side mount and preserves the correct ownership mapping with remote, rootless, and user-namespaced Docker. Do not add `--volumes` to the shutdown command.
+
+```bash
+docker compose down
+docker compose run --rm --no-deps --user 0:0 \
+  --entrypoint chown milvus -R 999:999 /var/lib/milvus
+```
+
+#### Docker named-volume storage
+
+Docker Desktop and remote Docker contexts do not expose a named volume's daemon-side path to the local machine. Stop the stack without removing volumes, take the backup described above, and transfer ownership from a temporary service container instead:
+
+```bash
+docker compose down
+docker compose run --rm --no-deps --user 0:0 \
+  --entrypoint chown milvus -R 999:999 /var/lib/milvus
+```
+
+The command must run with `MILVUS_COMPOSE=milvus/milvus.named-volumes.yaml`, matching the existing deployment. Do not use `docker compose down --volumes` during this procedure.
+
+Update OpenRAG, then pull and start the dependencies followed by Milvus:
+
+```bash
+docker compose pull milvus
+docker compose up -d etcd minio
+docker compose up -d milvus
+```
+
+Do not restart OpenRAG until Milvus is healthy and the logs contain no permission or migration errors:
+
+```bash
+docker compose ps milvus
+docker compose logs --tail 100 milvus
+docker inspect "$(docker compose ps -q milvus)" --format '{{.Config.Image}}'
+# Expected: milvusdb/milvus:v3.0.0
+```
+
+Once those checks pass, start the complete stack:
+
+```bash
+docker compose up -d
+```
+
+### Helm deployments
+
+The bundled Helm chart now installs the Milvus 3-compatible chart and image. Before upgrading an existing release, stop writes and back up the MinIO and etcd volumes, together with any standalone or log volume enabled through custom values.
+
+The upstream repository index does not yet publish chart 5.0.26, so OpenRAG currently uses chart 5.0.25 with the Milvus 3 image selected explicitly. Resources rendered by that chart can therefore retain the label `app.kubernetes.io/version: "2.6.21"`. This label describes the chart's default application version, not the running server; verify the container image as shown below.
+
+Milvus 3 runs with GID `999`. The chart sets `fsGroup: 999` with the `Always` policy so Kubernetes recursively makes supported mounted volumes writable before Milvus starts. The first startup can therefore take longer when a volume contains many files.
+
+Some storage drivers do not support `fsGroup` ownership changes. Check the driver's `fsGroupPolicy` before upgrading. If it is `None`, migrate the affected Milvus volume to group `999` using the storage provider's procedure before starting Milvus 3; otherwise the pods can fail with permission errors.
+
+OpenShift's restricted security context constraints normally assign an `fsGroup` from the project's permitted range and can reject the fixed group `999`. On those clusters, set `milvus.securityContext` to `null` in the OpenRAG values so admission can assign the allowed group. Confirm the admitted pod security context and volume ownership in a staging namespace before upgrading production.
+
+After the upgrade, confirm that every Milvus workload is ready and uses the expected image:
+
+```bash
+kubectl get pods -n <namespace> -l app.kubernetes.io/name=milvus
+kubectl get pods -n <namespace> -l app.kubernetes.io/name=milvus \
+  -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.spec.containers[*].image}{"\n"}{end}'
+# Expected Milvus image: milvusdb/milvus:v3.0.0
+```
+
+### Legacy path: upgrade Milvus 2.5.x to 2.6.11
+
+This intermediate path is only for deployments upgrading from **OpenRAG &lt;= 1.1.7 whose current Milvus server is 2.5.x**. Do not jump directly from Milvus 2.5.x to 3.0.0. Earlier Milvus versions can require additional intermediate or metadata migrations that are outside this procedure.
+
+#### Step 1 — Upgrade Milvus to 2.5.16
 
 :::caution[Do not update OpenRAG yet]
 During this step, keep your current version of OpenRAG (&lt; 1.1.7) running. Only the Milvus image is changed here. OpenRAG itself is updated in Step 2.
@@ -82,9 +187,19 @@ docker inspect milvus-standalone --format '{{ .Config.Image }}'
 # Expected: milvusdb/milvus:v2.5.16
 ```
 
-### Step 2 — Update OpenRAG
+#### Preserve the message queue
 
-Once Milvus 2.5.16 is healthy, stop all services and update OpenRAG to the new version. The updated `infra/compose/milvus/milvus.yaml` already includes Milvus 2.6.11 and the required MinIO and etcd upgrades.
+OpenRAG 2.5 standalone deployments normally use RocksMQ, but verify the effective source queue using the log check in the 2.6-to-3.0 procedure above. Keep that detected value in every Compose configuration used for the 2.6.11 and 3.0.0 steps.
+
+Before starting the intermediate OpenRAG release, add `MQ_TYPE: <detected-value>` to the Milvus service's environment. When moving to the current release, set the corresponding value in the Compose `.env` file and keep it until the upgrade is validated:
+
+```bash
+MILVUS_MQ_TYPE=<detected-value>
+```
+
+#### Step 2 — Upgrade Milvus to 2.6.11
+
+Once Milvus 2.5.16 is healthy, stop all services and move to an OpenRAG release that still packages Milvus 2.6.11, such as OpenRAG 2.1.0. This intermediate release also provides the required MinIO and etcd versions.
 
 ```bash
 docker compose down
@@ -108,6 +223,8 @@ Confirm the running Milvus version:
 docker inspect milvus-standalone --format '{{ .Config.Image }}'
 # Expected: milvusdb/milvus:v2.6.11
 ```
+
+After verifying that the collections are readable and searchable on 2.6.11, continue with the 2.6-to-3.0 procedure above.
 
 ## Schema Migrations
 

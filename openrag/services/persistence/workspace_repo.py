@@ -250,6 +250,22 @@ class PgWorkspaceRepository(WorkspaceRepository):
         )
         return {r["file_id"] for r in rows}
 
+    async def get_existing_file_ids_any_partition(self, file_ids: list[str]) -> set[str]:
+        """Return the subset of ``file_ids`` that exist in *any* partition.
+
+        Unscoped by design — only for the ``SUPER_ADMIN_MODE`` ``"all"`` wildcard.
+        """
+        if not file_ids:
+            return set()
+        rows = await self.pool.fetch(
+            """
+            SELECT DISTINCT file_id FROM files
+            WHERE file_id = ANY($1::text[])
+            """,
+            file_ids,
+        )
+        return {r["file_id"] for r in rows}
+
     async def remove_file_from_all_workspaces(
         self,
         file_id: str,

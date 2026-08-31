@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from core.models.chunk import Chunk
 from core.models.document import Document, DocumentType, ProcessedDocument, TextBlock
+from ray.exceptions import ActorUnavailableError
 from services.workers.indexer_actor import IndexerWorker, _load_document
 from services.workers.pipeline_builder import (
     REPLACE_OLD_CHUNK_COLLECTION_ROW_KEY,
@@ -210,6 +211,31 @@ async def test_process_file_success_sets_state_and_returns_count(tmp_path: Path)
     assert ("t1", "SERIALIZING") in state_calls
     assert ("t1", "COMPLETED") in state_calls
     tsm.set_failed_if_not_cancelled.remote.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_process_file_retries_state_write_during_actor_reconstruction(tmp_path: Path) -> None:
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"content")
+    processed = ProcessedDocument(document_id="d1", text_blocks=[TextBlock(text="content")])
+    pipeline = _make_pipeline(processed, [Chunk(id="c1", text="content", partition="p")])
+    tsm = _fake_tsm()
+    tsm.set_state.remote.side_effect = [
+        ActorUnavailableError("actor is restarting", actor_id=None),
+        None,
+        None,
+    ]
+
+    worker = IndexerWorker(pipeline=pipeline, task_state_manager=tsm)
+    result = await worker.process_file(
+        task_id="t1",
+        path=str(path),
+        metadata={"file_id": "f1"},
+        partition="p",
+    )
+
+    assert result["stored_count"] == 1
+    assert tsm.set_state.remote.await_count == 3
 
 
 @pytest.mark.asyncio

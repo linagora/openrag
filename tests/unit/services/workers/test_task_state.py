@@ -1,13 +1,40 @@
 from __future__ import annotations
 
+import threading
 from typing import Any
 
 import pytest
-from services.workers.task_state import PENDING_TASK_DETAILS, TaskStateManager
+import services.workers.task_state as task_state_module
+from services.workers.task_state import PENDING_TASK_DETAILS, TaskInfo, TaskStateManager
 
 
 def _task_state_manager() -> Any:
     return TaskStateManager.__ray_metadata__.modified_class()
+
+
+def test_lock_is_safe_across_ray_concurrency_group_event_loops() -> None:
+    manager = _task_state_manager()
+
+    assert isinstance(manager.lock, type(threading.Lock()))
+
+
+def test_legacy_recoverable_task_record_has_no_expiry() -> None:
+    import ray.cloudpickle as cloudpickle
+
+    info = TaskInfo(state="QUEUED")
+
+    assert task_state_module._decode_recoverable_task(cloudpickle.dumps(("task-1", info))) == (
+        "task-1",
+        info,
+        None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_reports_support_for_in_place_restart() -> None:
+    manager = _task_state_manager()
+
+    assert await manager.supports_in_place_restart() is True
 
 
 @pytest.mark.asyncio
@@ -206,3 +233,205 @@ async def test_file_delete_fence_is_counted_for_overlapping_deletes() -> None:
         )
         is True
     )
+
+
+@pytest.mark.asyncio
+async def test_file_delete_fence_survives_actor_reconstruction(monkeypatch) -> None:
+    stored: dict[tuple[str, str], dict[str, int]] = {}
+
+    monkeypatch.setattr(task_state_module, "_load_file_delete_fences", lambda: dict(stored))
+
+    def save(fences: dict[tuple[str, str], dict[str, int]]) -> None:
+        stored.clear()
+        stored.update(fences)
+
+    monkeypatch.setattr(task_state_module, "_save_file_delete_fences", save)
+
+    first_incarnation = _task_state_manager()
+    await first_incarnation.begin_file_delete(partition="tenant-a", file_id="file-1", fence_id="delete-1")
+
+    reconstructed = _task_state_manager()
+    accepted = await reconstructed.set_queued_details(
+        "task-1",
+        file_id="file-1",
+        partition="tenant-a",
+        metadata={},
+        user_id=None,
+    )
+
+    assert accepted is False
+    await reconstructed.end_file_delete(partition="tenant-a", file_id="file-1", fence_id="delete-1")
+    assert stored == {}
+
+
+@pytest.mark.asyncio
+async def test_file_delete_fence_token_makes_retries_idempotent() -> None:
+    manager = _task_state_manager()
+
+    await manager.begin_file_delete(partition="tenant-a", file_id="file-1", fence_id="delete-1")
+    await manager.begin_file_delete(partition="tenant-a", file_id="file-1", fence_id="delete-1")
+    await manager.end_file_delete(partition="tenant-a", file_id="file-1", fence_id="delete-1")
+
+    assert await manager.set_queued_details(
+        "task-1",
+        file_id="file-1",
+        partition="tenant-a",
+        metadata={},
+        user_id=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_file_delete_fence_lease_expires_and_unblocks_indexing(monkeypatch) -> None:
+    now = 100.0
+    monkeypatch.setattr(task_state_module.time, "time", lambda: now)
+    manager = _task_state_manager()
+    await manager.begin_file_delete(partition="tenant-a", file_id="file-1", fence_id="abandoned-delete")
+
+    now += task_state_module._FILE_DELETE_FENCE_TTL_SECONDS + 1
+
+    assert await manager.set_queued_details(
+        "task-1",
+        file_id="file-1",
+        partition="tenant-a",
+        metadata={},
+        user_id=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_file_delete_fence_renewal_extends_lease(monkeypatch) -> None:
+    now = 100.0
+    monkeypatch.setattr(task_state_module.time, "time", lambda: now)
+    manager = _task_state_manager()
+    await manager.begin_file_delete(partition="tenant-a", file_id="file-1", fence_id="delete-1")
+
+    now += task_state_module._FILE_DELETE_FENCE_TTL_SECONDS - 1
+    assert await manager.renew_file_delete(partition="tenant-a", file_id="file-1", fence_id="delete-1")
+    now += 2
+
+    assert (
+        await manager.set_queued_details(
+            "task-1",
+            file_id="file-1",
+            partition="tenant-a",
+            metadata={},
+            user_id=None,
+        )
+        is False
+    )
+
+
+def test_pre_lease_file_delete_fence_gets_migration_grace_period() -> None:
+    fences = {("tenant-a", "file-1"): {"old-delete": 1}}
+
+    normalized, changed = task_state_module._normalize_file_delete_fences(fences, now=100.0)
+
+    assert changed is True
+    assert normalized == {
+        ("tenant-a", "file-1"): {
+            "old-delete": 100.0 + task_state_module._FILE_DELETE_FENCE_TTL_SECONDS,
+        }
+    }
+
+
+@pytest.mark.asyncio
+async def test_active_task_registry_survives_actor_reconstruction(monkeypatch) -> None:
+    stored: dict[str, TaskInfo] = {}
+    monkeypatch.setattr(task_state_module, "_load_recoverable_tasks", lambda: dict(stored))
+
+    def save(task_id: str, info: TaskInfo) -> None:
+        if info.state in task_state_module.RECOVERABLE_TASK_STATES:
+            stored[task_id] = TaskInfo(
+                state=info.state,
+                error=info.error,
+                details=dict(info.details),
+                object_ref=info.object_ref,
+            )
+        else:
+            stored.pop(task_id, None)
+
+    monkeypatch.setattr(task_state_module, "_save_recoverable_task", save)
+
+    first_incarnation = _task_state_manager()
+    task_ref = {"ref": object()}
+    await first_incarnation.set_queued_details(
+        "task-1",
+        file_id="file-1",
+        partition="tenant-a",
+        metadata={},
+        user_id=42,
+    )
+    await first_incarnation.set_object_ref("task-1", task_ref)
+
+    reconstructed = _task_state_manager()
+
+    assert await reconstructed.get_matching_active_task_refs_v2(partition="tenant-a", file_id="file-1") == {
+        "task-1": task_ref
+    }
+    assert "task-1" in await reconstructed.get_all_user_info(42)
+
+    await reconstructed.set_state("task-1", "COMPLETED")
+    assert stored == {}
+
+
+@pytest.mark.asyncio
+async def test_cancellation_tombstone_survives_actor_reconstruction(monkeypatch) -> None:
+    stored: dict[str, TaskInfo] = {}
+    monkeypatch.setattr(task_state_module, "_load_recoverable_tasks", lambda: dict(stored))
+
+    def save(task_id: str, info: TaskInfo) -> None:
+        if info.state in task_state_module.RECOVERABLE_TASK_STATES:
+            stored[task_id] = TaskInfo(
+                state=info.state,
+                error=info.error,
+                details=dict(info.details),
+                object_ref=info.object_ref,
+            )
+        else:
+            stored.pop(task_id, None)
+
+    monkeypatch.setattr(task_state_module, "_save_recoverable_task", save)
+
+    first_incarnation = _task_state_manager()
+    await first_incarnation.set_queued_details(
+        "task-1",
+        file_id="file-1",
+        partition="tenant-a",
+        metadata={},
+        user_id=42,
+    )
+    assert await first_incarnation.set_cancelled_if_active("task-1") is True
+
+    reconstructed = _task_state_manager()
+    await reconstructed.set_state("task-1", "COMPLETED")
+
+    assert await reconstructed.get_state("task-1") == "CANCELLED"
+    assert stored["task-1"].state == "CANCELLED"
+
+
+def test_cancellation_recovery_snapshot_is_sanitized_and_expires() -> None:
+    info = TaskInfo(
+        state="CANCELLED",
+        error="private traceback",
+        details={"user_id": 42, "metadata": {"secret": "value"}},
+        object_ref={"ref": object()},
+    )
+
+    snapshot, expires_at = task_state_module._recovery_snapshot(info, now=100.0)
+
+    assert snapshot == TaskInfo(state="CANCELLED", object_ref=info.object_ref)
+    assert expires_at == 100.0 + task_state_module._CANCELLATION_TOMBSTONE_TTL_SECONDS
+
+
+@pytest.mark.asyncio
+async def test_finished_cancellation_drops_recoverable_worker_reference(monkeypatch) -> None:
+    saved: list[TaskInfo] = []
+    monkeypatch.setattr(task_state_module, "_save_recoverable_task", lambda _task_id, info: saved.append(info))
+    manager = _task_state_manager()
+    manager.tasks["task-1"] = TaskInfo(state="CANCELLED", object_ref={"ref": object()})
+
+    await manager.finish_cancellation("task-1")
+
+    assert manager.tasks["task-1"].object_ref is None
+    assert saved[-1].object_ref is None

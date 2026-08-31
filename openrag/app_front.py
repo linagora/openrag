@@ -690,7 +690,12 @@ async def on_message(message: cl.Message):
             async for chunk in stream:
                 if chunk.extra:
                     extra = json.loads(chunk.extra)
-                    if "sources" in extra:
+                    if "cited_sources" in extra:
+                        # Strictly what the model cited; fall back to
+                        # everything it was shown when nothing was cited
+                        # (e.g. it didn't report citations at all).
+                        sources = extra["cited_sources"] or extra.get("presented_sources")
+                    elif "sources" in extra:
                         sources = extra["sources"]
 
                 if chunk.choices and chunk.choices[0].delta.content:

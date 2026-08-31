@@ -4,7 +4,7 @@ These tests instantiate the store with both Milvus clients mocked out, so they
 exercise filter-expression construction, ID coercion, entity layering, and the
 ``collection`` argument discipline without touching a live Milvus.
 
-Integration tests that round-trip through a real Milvus 2.6 container live in
+Integration tests that round-trip through a real Milvus 3.0 container live in
 :mod:`test_milvus_store_integration` and are gated by the ``integration``
 pytest marker.
 """
@@ -16,6 +16,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from pymilvus import MilvusException
 
 from openrag.core.config.infrastructure import VectorDBConfig
 from openrag.core.models.chunk import Chunk, ChunkType
@@ -166,7 +167,7 @@ class TestBuildFilterExpr:
     def test_empty_list_field_matches_nothing(self, store: MilvusVectorStore) -> None:
         # An empty IN list cannot be expressed in Milvus, so short-circuit to
         # an always-false comparison — callers get an empty result set instead
-        # of a syntax error. A bare ``false`` literal is rejected by Milvus 2.6
+        # of a syntax error. A bare ``false`` literal is rejected by Milvus 3.0
         # ("predicate is not a boolean expression"), so it must be ``1 == 0``.
         assert store._build_filter_expr({"file_id": []}) == "1 == 0"
 
@@ -321,7 +322,7 @@ class TestSafeBatchSize:
         assert store._safe_batch_size(["partition", "file_id"]) == 16_000
 
     def test_wildcard_is_treated_as_vector_inclusive(self, store: MilvusVectorStore) -> None:
-        # Milvus 2.6 returns the dense vector for ``["*"]`` too, so a wildcard
+        # Milvus 3.0 returns the dense vector for ``["*"]`` too, so a wildcard
         # page must shrink even without an explicit ``"vector"`` field.
         _set_schema_dim(store, 1024)
         assert store._safe_batch_size(["*"]) == 3_276
@@ -562,6 +563,137 @@ class TestHybridDispatch:
         with pytest.raises(VDBSearchError, match="query_text"):
             await store.search([0.1, 0.2], collection="default")
 
+    @pytest.mark.asyncio
+    async def test_empty_filtered_hybrid_search_returns_no_results(
+        self, store: MilvusVectorStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        logger = MagicMock()
+        monkeypatch.setattr("openrag.services.storage.milvus_store.logger", logger)
+        store._async_client.hybrid_search = AsyncMock(  # type: ignore[attr-defined]
+            side_effect=MilvusException(5, "service internal error: unsupported ID type")
+        )
+        store._async_client.search = AsyncMock(side_effect=[[[]], [[]]])  # type: ignore[attr-defined]
+
+        result = await store.search(
+            [0.1, 0.2],
+            query_text="query",
+            filters={"partition": "empty"},
+        )
+
+        assert result == []
+        assert store._async_client.search.await_count == 2  # type: ignore[attr-defined]
+        logger.bind.assert_called_once_with(
+            collection_name="test_collection",
+            filter='partition == "empty"',
+            reason="empty_ann_result",
+            error_code=5,
+        )
+        logger.bind.return_value.warning.assert_called_once_with("Milvus search error verified as an empty result")
+
+    @pytest.mark.asyncio
+    async def test_missing_collection_search_returns_no_results(
+        self, store: MilvusVectorStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        logger = MagicMock()
+        monkeypatch.setattr("openrag.services.storage.milvus_store.logger", logger)
+        store._async_client.hybrid_search = AsyncMock(  # type: ignore[attr-defined]
+            side_effect=MilvusException(100, "collection not found[database=default][collection=test_collection]")
+        )
+        store._client.has_collection.return_value = False  # type: ignore[attr-defined]
+
+        result = await store.search(
+            [0.1, 0.2],
+            query_text="query",
+            filters={"partition": "default"},
+        )
+
+        assert result == []
+        store._client.has_collection.assert_called_once_with("test_collection")  # type: ignore[attr-defined]
+        logger.bind.assert_called_once_with(
+            collection_name="test_collection",
+            filter='partition == "default"',
+            reason="missing_collection",
+            error_code=100,
+        )
+        logger.bind.return_value.warning.assert_called_once_with("Milvus search error verified as an empty result")
+
+    @pytest.mark.asyncio
+    async def test_missing_collection_dense_search_returns_no_results(self, store: MilvusVectorStore) -> None:
+        store._hybrid = False
+        store._async_client.search = AsyncMock(  # type: ignore[attr-defined]
+            side_effect=MilvusException(100, "collection not found[database=default][collection=test_collection]")
+        )
+        store._client.has_collection.return_value = False  # type: ignore[attr-defined]
+
+        result = await store.search(
+            [0.1, 0.2],
+            filters={"partition": "default"},
+        )
+
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_missing_collection_error_is_preserved_when_collection_exists(self, store: MilvusVectorStore) -> None:
+        store._async_client.hybrid_search = AsyncMock(  # type: ignore[attr-defined]
+            side_effect=MilvusException(100, "collection not found[database=default][collection=test_collection]")
+        )
+        store._client.has_collection.return_value = True  # type: ignore[attr-defined]
+
+        with pytest.raises(VDBSearchError, match="collection not found"):
+            await store.search(
+                [0.1, 0.2],
+                query_text="query",
+                filters={"partition": "default"},
+            )
+
+    @pytest.mark.asyncio
+    async def test_empty_result_verification_failure_preserves_search_error(self, store: MilvusVectorStore) -> None:
+        store._async_client.hybrid_search = AsyncMock(  # type: ignore[attr-defined]
+            side_effect=MilvusException(5, "service internal error: unsupported ID type")
+        )
+        store._async_client.search = AsyncMock(  # type: ignore[attr-defined]
+            side_effect=RuntimeError("verification unavailable")
+        )
+
+        with pytest.raises(VDBSearchError, match="unsupported ID type"):
+            await store.search(
+                [0.1, 0.2],
+                query_text="query",
+                filters={"partition": "empty"},
+            )
+
+    @pytest.mark.asyncio
+    async def test_hybrid_search_error_is_preserved_when_an_ann_leg_has_results(self, store: MilvusVectorStore) -> None:
+        store._async_client.hybrid_search = AsyncMock(  # type: ignore[attr-defined]
+            side_effect=MilvusException(5, "service internal error: unsupported ID type")
+        )
+        store._async_client.search = AsyncMock(  # type: ignore[attr-defined]
+            side_effect=[[[{"_id": 1}]], [[]]]
+        )
+
+        with pytest.raises(VDBSearchError, match="unsupported ID type"):
+            await store.search(
+                [0.1, 0.2],
+                query_text="query",
+                filters={"partition": "populated"},
+            )
+
+    @pytest.mark.asyncio
+    async def test_populated_filter_with_no_ann_results_returns_no_results(self, store: MilvusVectorStore) -> None:
+        store._async_client.hybrid_search = AsyncMock(  # type: ignore[attr-defined]
+            side_effect=MilvusException(5, "service internal error: unsupported ID type")
+        )
+        store._async_client.search = AsyncMock(side_effect=[[[]], [[]]])  # type: ignore[attr-defined]
+
+        result = await store.search(
+            [0.1, 0.2],
+            query_text="query with no candidates",
+            filters={"partition": "populated"},
+            similarity_threshold=0.99,
+        )
+
+        assert result == []
+
 
 # ---------------------------------------------------------------------------
 # _parse_search_response
@@ -569,7 +701,7 @@ class TestHybridDispatch:
 
 
 class TestParseSearchResponse:
-    """Milvus 2.6 exposes the ``_id`` auto-id PK on the hit (and in the entity),
+    """Milvus 3.0 exposes the ``_id`` auto-id PK on the hit (and in the entity),
     never under the generic ``id`` key — the parser must surface the real id."""
 
     def test_id_taken_from_hit_underscore_id(self, store: MilvusVectorStore) -> None:

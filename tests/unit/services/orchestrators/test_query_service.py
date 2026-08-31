@@ -110,14 +110,29 @@ class FakeWeb:
 
 
 class FakeWorkspace:
-    def __init__(self, scope=None):
+    def __init__(self, scope=None, existing=None):
         self._scope = scope
+        # None => every requested file_id is indexed in any partition (default);
+        # dict {partition: set(file_ids)} => partition-scoped existence.
+        self._existing = existing
 
     async def get_workspace(self, wid):
         return None
 
     async def resolve_scope(self, workspace_id, allowed_partitions):
         return self._scope
+
+    async def get_existing_file_ids(self, partition, file_ids):
+        if self._existing is None:
+            return list(file_ids)
+        allowed = self._existing.get(partition, set())
+        return [fid for fid in file_ids if fid in allowed]
+
+    async def get_existing_file_ids_any_partition(self, file_ids):
+        if self._existing is None:
+            return list(file_ids)
+        allowed = {fid for partition_ids in self._existing.values() for fid in partition_ids}
+        return [fid for fid in file_ids if fid in allowed]
 
 
 def _config(mode="SimpleRag"):
@@ -388,6 +403,33 @@ async def test_generate_query_chatbotrag_falls_back_on_garbage():
     assert sq.query_list[0].query == "raw question"  # fallback to raw user query
 
 
+@pytest.mark.asyncio
+async def test_generate_query_renders_history_with_a_content_free_turn():
+    """The chat-history string is built over *every* message, so the assistant
+    turn that carries ``tool_calls`` — no ``content`` at all once the router
+    dumps with ``exclude_none=True`` — reaches it too. ChatBotRag is the default
+    ``rag.mode``, so the SimpleRag early return is no shield: reading the key
+    unguarded 500s on a plain tool-call replay.
+    """
+    llm = FakeLLM(chat_responses=['{"requires_retrieval": true, "query_list": [{"query": "q"}]}'])
+    svc = _svc(llm=llm, mode="ChatBotRag")
+
+    sq = await svc.generate_query(
+        [
+            {"role": "user", "content": "weather in Paris?"},
+            {"role": "assistant", "tool_calls": [{"id": "c1"}]},
+            {"role": "tool", "content": "18C", "tool_call_id": "c1"},
+            {"role": "user", "content": "and tomorrow?"},
+        ]
+    )
+
+    assert sq.query_list[0].query == "q"
+    # The turn is still rendered (role kept, empty body) rather than skipped, so
+    # the history handed to the contextualizer keeps its shape.
+    history = llm.chat_calls[0][0][1]["content"]
+    assert "assistant: \n" in history
+
+
 # --------------------------------------------------------------------------- #
 # chat / complete
 # --------------------------------------------------------------------------- #
@@ -407,7 +449,7 @@ async def test_chat_direct_mode_skips_retrieval():
     out = await svc.chat(
         partitions=None,
         payload={"messages": [{"role": "user", "content": "hi"}], "metadata": {}},
-        prepare_sources=lambda d, w: [{"source_type": "document"}],
+        prepare_sources=lambda d, w: [{"source_type": "document"}] if d or w else [],
         model_name="m1",
     )
     assert called["n"] == 0  # no retrieval in direct mode
@@ -454,12 +496,123 @@ async def test_chat_with_partition_retrieves_and_filters_sources():
     sources = [{"source_type": "document", "n": 1}, {"source_type": "document", "n": 2}]
     out = await svc.chat(
         partitions=["p"],
+        payload={
+            "messages": [{"role": "user", "content": "q"}],
+            "metadata": {"include_all_retrieved_sources": True},
+        },
+        prepare_sources=lambda d, w: sources,
+        model_name="m",
+    )
+    extra = json.loads(out["extra"])
+    assert extra["sources"] == [{"source_type": "document", "n": 1}]  # only cited source 1
+    assert extra["presented_sources"] == sources  # everything shown to the model
+    assert extra["cited_sources"] == [{"source_type": "document", "n": 1}]  # strictly what was cited
+    assert extra["all_retrieved_sources"] == sources  # opted in: unfiltered, everything retrieved
+
+
+@pytest.mark.asyncio
+async def test_chat_all_retrieved_sources_omitted_by_default():
+    """#847 follow-up: all_retrieved_sources is debug/eval telemetry, gated
+    behind metadata.include_all_retrieved_sources — absent unless requested."""
+    svc = _svc(llm=FakeLLM(chat_responses=["answer [Sources: 1]"]))
+    sources = [{"source_type": "document", "n": 1}]
+
+    out = await svc.chat(
+        partitions=["p"],
         payload={"messages": [{"role": "user", "content": "q"}], "metadata": {}},
         prepare_sources=lambda d, w: sources,
         model_name="m",
     )
-    filtered = json.loads(out["extra"])["sources"]
-    assert filtered == [{"source_type": "document", "n": 1}]  # only cited source 1
+
+    extra = json.loads(out["extra"])
+    assert "all_retrieved_sources" not in extra
+    assert extra["sources"] == sources
+    assert extra["presented_sources"] == sources
+    assert extra["cited_sources"] == sources
+
+
+@pytest.mark.asyncio
+async def test_chat_all_retrieved_sources_survives_context_budget_truncation():
+    """#847 review: all_retrieved_sources must reflect the complete retrieval
+    set, not just the docs that fit the prompt's context-token budget — a
+    doc dropped only for lack of room must still show up there."""
+    chunks = [
+        Chunk(id="c1", text="short", metadata={"_id": "c1"}),
+        Chunk(id="c2", text="this one does not fit the token budget", metadata={"_id": "c2"}),
+    ]
+    svc = _svc(retrieval=FakeRetrieval(chunks=chunks), llm=FakeLLM(chat_responses=["answer [Sources: 1]"]))
+    svc._max_context_tokens = qs.get_num_tokens()("[Source 1]\nshort")
+
+    out = await svc.chat(
+        partitions=["p"],
+        payload={
+            "messages": [{"role": "user", "content": "q"}],
+            "metadata": {"include_all_retrieved_sources": True},
+        },
+        prepare_sources=lambda d, w: [{"id": doc.metadata.get("_id")} for doc in d],
+        model_name="m",
+    )
+
+    extra = json.loads(out["extra"])
+    assert extra["sources"] == [{"id": "c1"}]  # only the doc that fit the prompt and was cited
+    assert extra["all_retrieved_sources"] == [{"id": "c1"}, {"id": "c2"}]  # both, unfiltered
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_all_retrieved_sources_survives_context_budget_truncation():
+    chunks = [
+        Chunk(id="c1", text="short", metadata={"_id": "c1"}),
+        Chunk(id="c2", text="this one does not fit the token budget", metadata={"_id": "c2"}),
+    ]
+    stream_lines = [
+        'data: {"choices":[{"delta":{"content":"answer [Sources: 1]"},"finish_reason":null}]}\n\n',
+        'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n',
+        "data: [DONE]\n\n",
+    ]
+    svc = _svc(retrieval=FakeRetrieval(chunks=chunks), llm=FakeLLM(stream_lines=stream_lines))
+    svc._max_context_tokens = qs.get_num_tokens()("[Source 1]\nshort")
+
+    lines = [
+        line
+        async for line in svc.chat_stream(
+            partitions=["p"],
+            payload={
+                "messages": [{"role": "user", "content": "q"}],
+                "metadata": {"include_all_retrieved_sources": True},
+            },
+            prepare_sources=lambda d, w: [{"id": doc.metadata.get("_id")} for doc in d],
+            model_name="m",
+        )
+    ]
+    chunks_out = [
+        json.loads(line[len("data: ") :])
+        for line in lines
+        if line.startswith("data: ") and line.strip() != "data: [DONE]"
+    ]
+    extra = next(json.loads(c["extra"]) for c in reversed(chunks_out) if c.get("extra") not in (None, "{}"))
+
+    assert extra["sources"] == [{"id": "c1"}]
+    assert extra["all_retrieved_sources"] == [{"id": "c1"}, {"id": "c2"}]
+
+
+@pytest.mark.asyncio
+async def test_complete_all_retrieved_sources_survives_context_budget_truncation():
+    chunks = [
+        Chunk(id="c1", text="short", metadata={"_id": "c1"}),
+        Chunk(id="c2", text="this one does not fit the token budget", metadata={"_id": "c2"}),
+    ]
+    svc = _svc(retrieval=FakeRetrieval(chunks=chunks), llm=FakeLLM(gen_text="answer\n[Sources: 1]"))
+    svc._max_context_tokens = qs.get_num_tokens()("[Source 1]\nshort")
+
+    out = await svc.complete(
+        partitions=["p"],
+        payload={"prompt": "q", "metadata": {"include_all_retrieved_sources": True}},
+        prepare_sources=lambda d, w: [{"id": doc.metadata.get("_id")} for doc in d],
+    )
+
+    extra = json.loads(out["extra"])
+    assert extra["sources"] == [{"id": "c1"}]
+    assert extra["all_retrieved_sources"] == [{"id": "c1"}, {"id": "c2"}]
 
 
 @pytest.mark.asyncio
@@ -487,7 +640,7 @@ async def test_chat_conversational_request_skips_partition_retrieval():
     out = await svc.chat(
         partitions=["p"],
         payload={"messages": [{"role": "user", "content": "How can you help me?"}], "metadata": {}},
-        prepare_sources=lambda d, w: [{"source_type": "document"}],
+        prepare_sources=lambda d, w: [{"source_type": "document"}] if d or w else [],
         model_name="m",
     )
 
@@ -569,7 +722,8 @@ async def test_chat_inconsistent_classifier_result_prefers_supplied_query():
 
 
 @pytest.mark.asyncio
-async def test_chat_without_citation_does_not_attribute_retrieved_sources():
+async def test_chat_without_citation_keeps_retrieved_sources():
+    """No tag at all means the model didn't report citations, not that the answer is unsourced."""
     svc = _svc(llm=FakeLLM(chat_responses=["A general answer with no citation marker."]))
     sources = [{"source_type": "document", "filename": "unrelated.pdf"}]
 
@@ -580,7 +734,16 @@ async def test_chat_without_citation_does_not_attribute_retrieved_sources():
         model_name="m",
     )
 
-    assert json.loads(out["extra"])["sources"] == []
+    extra = json.loads(out["extra"])
+    assert extra["sources"] == sources
+    # No tag at all → not reported, even though `sources` ends up covering
+    # everything, same as if the model had explicitly cited all of them (#847 review).
+    assert extra["citations_reported"] is False
+    # presented_sources always shows what the model saw; cited_sources — unlike
+    # legacy `sources` — never falls back and stays empty when nothing was
+    # actually reported cited.
+    assert extra["presented_sources"] == sources
+    assert extra["cited_sources"] == []
 
 
 @pytest.mark.asyncio
@@ -595,7 +758,9 @@ async def test_chat_invalid_citation_does_not_fallback_to_unrelated_sources():
         model_name="m",
     )
 
-    assert json.loads(out["extra"])["sources"] == []
+    extra = json.loads(out["extra"])
+    assert extra["sources"] == []
+    assert extra["citations_reported"] is True  # a tag was present, just out of range
 
 
 @pytest.mark.asyncio
@@ -694,14 +859,21 @@ async def test_structured_websearch_returns_only_sources_included_in_context():
         partitions=None,
         payload={
             "messages": [{"role": "user", "content": "Question"}],
-            "metadata": {"websearch": True},
+            "metadata": {"websearch": True, "include_all_retrieved_sources": True},
             "response_format": {"type": "json_object"},
         },
         prepare_sources=lambda _docs, results: [{"url": result.url} for result in results],
         model_name="m",
     )
 
-    assert json.loads(out["extra"])["sources"] == [{"url": "https://example.test/included"}]
+    extra = json.loads(out["extra"])
+    assert extra["sources"] == [{"url": "https://example.test/included"}]
+    # #847 review: excluded (didn't fit the web token budget) still shows up
+    # in all_retrieved_sources.
+    assert extra["all_retrieved_sources"] == [
+        {"url": "https://example.test/included"},
+        {"url": "https://example.test/excluded"},
+    ]
 
 
 @pytest.mark.asyncio
@@ -733,9 +905,10 @@ async def test_websearch_with_partition_fuses_docs_via_retrieve_multi():
     retrieval = FakeRetrieval()
     web_result = SimpleNamespace(url="https://ex.com", title="T", content="web body", snippet="")
     svc = _svc(retrieval=retrieval, web=FakeWeb(results=[web_result]))
-    _payload, _docs, web, _citation_protocol_active = await svc._prepare_chat(
+    result = await svc._prepare_chat(
         ["p"], {"messages": [{"role": "user", "content": "q"}], "metadata": {"websearch": True}}
     )
+    web = result.web_results
     assert len(retrieval.retrieve_multi_calls) == 1  # doc branch fused via the rrf_k-aware retrieve_multi
     assert retrieval.retrieve_per_query_calls == []  # legacy per-query + fuse()@60 path NOT used
     assert web and web[0].url == "https://ex.com"  # websearch branch actually taken
@@ -759,9 +932,8 @@ async def test_answer_system_prompt_comes_from_prompt_service():
     marker = MarkerPromptService()
     svc._prompt_service = marker
 
-    payload, _docs, _web, _citation_protocol_active = await svc._prepare_chat(
-        ["p"], {"messages": [{"role": "user", "content": "q"}], "metadata": {}}
-    )
+    result = await svc._prepare_chat(["p"], {"messages": [{"role": "user", "content": "q"}], "metadata": {}})
+    payload = result.payload
 
     assert payload["messages"][0]["role"] == "system"
     assert payload["messages"][0]["content"].startswith("MARKER-SYS::")
@@ -959,6 +1131,240 @@ async def test_chat_without_workspace_unaffected():
     assert call["filter_params"] is None
 
 
+# --------------------------------------------------------------------------- #
+# attachment scoping (metadata.attachments = [{"id": ...}])
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_chat_with_valid_attachments_scopes_search_to_file_ids():
+    retrieval = FakeRetrieval()
+    svc = _svc(retrieval=retrieval, llm=FakeLLM(chat_responses=["answer [Sources: none]"]))
+    await svc.chat(
+        partitions=["p1"],
+        payload={
+            "messages": [{"role": "user", "content": "q"}],
+            "metadata": {"attachments": [{"id": "fa"}, {"id": "fb"}]},
+        },
+        prepare_sources=lambda d, w: [],
+        model_name="m",
+    )
+    call = retrieval.retrieve_multi_calls[0]
+    assert call["partitions"] == ["p1"]  # attachments do NOT narrow the partition
+    assert call["filter_params"] == {"file_id": ["fa", "fb"]}
+
+
+@pytest.mark.asyncio
+async def test_chat_attachments_force_retrieval_even_when_classifier_skips():
+    # Regression: an attached file must not be silently dropped just because
+    # the query-classifier judges the turn conversational.
+    query_json = json.dumps({"requires_retrieval": False, "query_list": []})
+    llm = FakeLLM(chat_responses=[query_json, "answer [Sources: none]"])
+    retrieval = FakeRetrieval()
+    svc = _svc(mode="ChatBotRag", llm=llm, retrieval=retrieval)
+
+    await svc.chat(
+        partitions=["p1"],
+        payload={
+            "messages": [{"role": "user", "content": "thanks!"}],
+            "metadata": {"attachments": [{"id": "fa"}]},
+        },
+        prepare_sources=lambda d, w: [],
+        model_name="m",
+    )
+
+    assert len(retrieval.retrieve_multi_calls) == 1
+    assert retrieval.retrieve_multi_calls[0]["filter_params"] == {"file_id": ["fa"]}
+
+
+@pytest.mark.asyncio
+async def test_chat_attachments_malformed_ignored():
+    # Items without a usable id (or not dicts) are skipped; an all-malformed
+    # attachments blob degrades to a normal unscoped chat, never raises.
+    retrieval = FakeRetrieval()
+    svc = _svc(retrieval=retrieval, llm=FakeLLM(chat_responses=["answer [Sources: none]"]))
+    await svc.chat(
+        partitions=["p1"],
+        payload={
+            "messages": [{"role": "user", "content": "q"}],
+            "metadata": {"attachments": [{"nope": "x"}, "raw-string", 123, {"id": ""}]},
+        },
+        prepare_sources=lambda d, w: [],
+        model_name="m",
+    )
+    call = retrieval.retrieve_multi_calls[0]
+    assert call["filter_params"] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad", [123, True, "abc", {"id": "x"}])
+async def test_chat_attachments_scalar_payload_is_unscoped(bad):
+    # A non-list attachments payload must degrade to a normal unscoped chat,
+    # never raise (a scalar like 123 is not iterable).
+    retrieval = FakeRetrieval()
+    svc = _svc(retrieval=retrieval, llm=FakeLLM(chat_responses=["answer [Sources: none]"]))
+    await svc.chat(
+        partitions=["p1"],
+        payload={"messages": [{"role": "user", "content": "q"}], "metadata": {"attachments": bad}},
+        prepare_sources=lambda d, w: [],
+        model_name="m",
+    )
+    assert retrieval.retrieve_multi_calls[0]["filter_params"] is None
+
+
+@pytest.mark.asyncio
+async def test_chat_attachments_non_string_ids_ignored():
+    retrieval = FakeRetrieval()
+    svc = _svc(retrieval=retrieval, llm=FakeLLM(chat_responses=["answer [Sources: none]"]))
+    await svc.chat(
+        partitions=["p1"],
+        payload={
+            "messages": [{"role": "user", "content": "q"}],
+            "metadata": {"attachments": [{"id": 123}, {"id": None}, {"id": ["x"]}]},
+        },
+        prepare_sources=lambda d, w: [],
+        model_name="m",
+    )
+    assert retrieval.retrieve_multi_calls[0]["filter_params"] is None
+
+
+@pytest.mark.asyncio
+async def test_chat_empty_attachments_unaffected():
+    retrieval = FakeRetrieval()
+    svc = _svc(retrieval=retrieval, llm=FakeLLM(chat_responses=["answer [Sources: none]"]))
+    await svc.chat(
+        partitions=["p1"],
+        payload={"messages": [{"role": "user", "content": "q"}], "metadata": {"attachments": []}},
+        prepare_sources=lambda d, w: [],
+        model_name="m",
+    )
+    call = retrieval.retrieve_multi_calls[0]
+    assert call["filter_params"] is None
+
+
+@pytest.mark.asyncio
+async def test_chat_workspace_and_attachments_both_present_workspace_wins():
+    # workspace is checked first (elif) — when both are present the workspace
+    # scope wins and the attachments are ignored.
+    scope = WorkspaceScope(workspace_id="w1", partition="p1", file_ids=["wsa", "wsb"])
+    retrieval = FakeRetrieval()
+    svc = _svc(
+        retrieval=retrieval, llm=FakeLLM(chat_responses=["answer [Sources: none]"]), workspace=FakeWorkspace(scope)
+    )
+    await svc.chat(
+        partitions=["p1"],
+        payload={
+            "messages": [{"role": "user", "content": "q"}],
+            "metadata": {"workspace": "w1", "attachments": [{"id": "att"}]},
+        },
+        prepare_sources=lambda d, w: [],
+        model_name="m",
+    )
+    call = retrieval.retrieve_multi_calls[0]
+    assert call["filter_params"] == {"file_id": ["wsa", "wsb"]}
+
+
+@pytest.mark.asyncio
+async def test_chat_attachments_drops_unindexed_and_reports_in_extra():
+    retrieval = FakeRetrieval()
+    svc = _svc(
+        retrieval=retrieval,
+        llm=FakeLLM(chat_responses=["answer [Sources: none]"]),
+        workspace=FakeWorkspace(existing={"p1": {"fa"}}),  # only fa is indexed; fb is not
+    )
+    chunk = await svc.chat(
+        partitions=["p1"],
+        payload={
+            "messages": [{"role": "user", "content": "q"}],
+            "metadata": {"attachments": [{"id": "fa"}, {"id": "fb"}]},
+        },
+        prepare_sources=lambda d, w: [],
+        model_name="m",
+    )
+    # Only the indexed id drives the filter...
+    assert retrieval.retrieve_multi_calls[0]["filter_params"] == {"file_id": ["fa"]}
+    # ...and the same validated list is reported back to the client in extra.
+    assert json.loads(chunk["extra"])["attachments"] == ["fa"]
+
+
+@pytest.mark.asyncio
+async def test_chat_attachments_duplicate_ids_deduped():
+    retrieval = FakeRetrieval()
+    svc = _svc(
+        retrieval=retrieval,
+        llm=FakeLLM(chat_responses=["answer [Sources: none]"]),
+        workspace=FakeWorkspace(existing={"p1": {"fa"}}),
+    )
+    chunk = await svc.chat(
+        partitions=["p1"],
+        payload={
+            "messages": [{"role": "user", "content": "q"}],
+            "metadata": {"attachments": [{"id": "fa"}, {"id": "fa"}]},
+        },
+        prepare_sources=lambda d, w: [],
+        model_name="m",
+    )
+    assert retrieval.retrieve_multi_calls[0]["filter_params"] == {"file_id": ["fa"]}
+    assert json.loads(chunk["extra"])["attachments"] == ["fa"]
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_reports_indexed_attachments_in_extra():
+    svc = _svc(workspace=FakeWorkspace(existing={"p1": {"fa"}}))  # only fa indexed in p1
+    out = "".join(
+        [
+            line
+            async for line in svc.chat_stream(
+                partitions=["p1"],
+                payload={
+                    "messages": [{"role": "user", "content": "q"}],
+                    "metadata": {"attachments": [{"id": "fa"}, {"id": "fb"}]},
+                },
+                prepare_sources=lambda d, w: [],
+                model_name="m",
+            )
+        ]
+    )
+    assert "attachments" in out and "fa" in out
+    assert "fb" not in out  # unindexed id dropped, never reported
+
+
+@pytest.mark.asyncio
+async def test_chat_attachments_all_partition_looks_up_any_partition():
+    retrieval = FakeRetrieval()
+    svc = _svc(
+        retrieval=retrieval,
+        llm=FakeLLM(chat_responses=["answer [Sources: none]"]),
+        workspace=FakeWorkspace(existing={"p1": {"fa"}}),
+    )
+    chunk = await svc.chat(
+        partitions=["all"],
+        payload={
+            "messages": [{"role": "user", "content": "q"}],
+            "metadata": {"attachments": [{"id": "fa"}, {"id": "fb"}]},
+        },
+        prepare_sources=lambda d, w: [],
+        model_name="m",
+    )
+    assert retrieval.retrieve_multi_calls[0]["filter_params"] == {"file_id": ["fa"]}
+    assert json.loads(chunk["extra"])["attachments"] == ["fa"]
+
+
+@pytest.mark.asyncio
+async def test_chat_attachments_all_mixed_with_explicit_partition_raises():
+    svc = _svc(workspace=FakeWorkspace(existing={"p1": {"fa"}}))
+    with pytest.raises(ValueError):
+        await svc.chat(
+            partitions=["all", "p1"],
+            payload={
+                "messages": [{"role": "user", "content": "q"}],
+                "metadata": {"attachments": [{"id": "fa"}]},
+            },
+            prepare_sources=lambda d, w: [],
+            model_name="m",
+        )
+
+
 @pytest.mark.asyncio
 async def test_complete_direct_mode_preserves_literal_source_marker():
     answer = "text body\n[Sources: none]"
@@ -966,7 +1372,7 @@ async def test_complete_direct_mode_preserves_literal_source_marker():
     out = await svc.complete(
         partitions=None,
         payload={"prompt": "do x"},
-        prepare_sources=lambda d, w: [{"x": 1}],
+        prepare_sources=lambda d, w: [{"x": 1}] if d or w else [],
     )
     assert out["choices"][0]["text"] == answer
     assert json.loads(out["extra"])["sources"] == []
@@ -1006,11 +1412,35 @@ async def test_complete_partition_request_keeps_context_and_filters_citations():
         prepare_sources=lambda d, w: sources,
     )
 
+    extra = json.loads(out["extra"])
     assert out["choices"][0]["text"] == "The answer is grounded."
-    assert json.loads(out["extra"])["sources"] == sources
+    assert extra["sources"] == sources
+    assert extra["citations_reported"] is True
     answer_prompt = llm.generate_calls[0][0]
     assert "ctx" in answer_prompt
     assert "What does the report say?" in answer_prompt
+
+
+@pytest.mark.asyncio
+async def test_complete_without_citation_keeps_retrieved_sources():
+    """complete()'s equivalent of test_chat_without_citation_keeps_retrieved_sources
+    (#847 review: test coverage asymmetry between chat and complete)."""
+    llm = FakeLLM(gen_text="A general answer with no citation marker.")
+    svc = _svc(llm=llm)
+    sources = [{"source_type": "document", "filename": "unrelated.pdf"}]
+
+    out = await svc.complete(
+        partitions=["p"],
+        payload={"prompt": "What does the report say?"},
+        prepare_sources=lambda d, w: sources,
+    )
+
+    extra = json.loads(out["extra"])
+    assert out["choices"][0]["text"] == "A general answer with no citation marker."
+    assert extra["sources"] == sources
+    assert extra["citations_reported"] is False
+    assert extra["presented_sources"] == sources
+    assert extra["cited_sources"] == []
 
 
 @pytest.mark.asyncio
@@ -1044,6 +1474,43 @@ async def test_map_reduce_keeps_relevant_drops_irrelevant():
     out = await svc._map_reduce("q", docs)
     assert len(out) == 1
     assert out[0].page_content == "kept"
+
+
+@pytest.mark.asyncio
+async def test_chat_all_retrieved_sources_survives_map_reduce_replacement():
+    """#847 follow-up review: map-reduce replaces `docs` with LLM-generated
+    summaries before the prompt is built. all_retrieved_sources must still
+    reflect what retrieval actually returned, not those summaries."""
+    chunks = [
+        Chunk(id="c1", text="original text one", metadata={"_id": "c1"}),
+        Chunk(id="c2", text="original text two", metadata={"_id": "c2"}),
+    ]
+    rel1 = json.dumps({"relevancy": True, "summary": "summary one"})
+    rel2 = json.dumps({"relevancy": True, "summary": "summary two"})
+    answer = "Grounded answer. [Sources: 1, 2]"
+    svc = _svc(retrieval=FakeRetrieval(chunks=chunks), llm=FakeLLM(chat_responses=[rel1, rel2, answer]))
+
+    out = await svc.chat(
+        partitions=["p"],
+        payload={
+            "messages": [{"role": "user", "content": "q"}],
+            "metadata": {"use_map_reduce": True, "include_all_retrieved_sources": True},
+        },
+        prepare_sources=lambda d, w: [{"id": doc.metadata.get("_id"), "text": doc.page_content} for doc in d],
+        model_name="m",
+    )
+
+    extra = json.loads(out["extra"])
+    # What the LLM actually saw and cited: the map-reduce summaries.
+    assert extra["sources"] == [
+        {"id": "c1", "text": "summary one"},
+        {"id": "c2", "text": "summary two"},
+    ]
+    # The real retrieval, unreplaced by summarization.
+    assert extra["all_retrieved_sources"] == [
+        {"id": "c1", "text": "original text one"},
+        {"id": "c2", "text": "original text two"},
+    ]
 
 
 # --------------------------------------------------------------------------- #
@@ -1226,9 +1693,8 @@ async def test_conversational_reply_resolves_its_prompt_from_the_library():
         "p": SimpleNamespace(generation_prompt_names={"sys_prompt": "chatty"}, chat_history_depth=4)
     }
 
-    out, docs, web, _ = await svc._prepare_chat(
-        ["p"], {"messages": [{"role": "user", "content": "hello!"}], "metadata": {}}
-    )
+    result = await svc._prepare_chat(["p"], {"messages": [{"role": "user", "content": "hello!"}], "metadata": {}})
+    out, docs, web = result.payload, result.docs, result.web_results
 
     # Resolved from the library, honouring the partition's selection, and no
     # retrieval happened.
@@ -1236,3 +1702,35 @@ async def test_conversational_reply_resolves_its_prompt_from_the_library():
     assert docs == [] and web == []
     assert out["messages"][0]["role"] == "system"
     assert "CONVERSATIONAL" in out["messages"][0]["content"]
+
+
+def test_split_leading_system_prompt_tolerates_content_free_system_turn():
+    """``OpenAIMessage`` allows a null content and the router dumps with
+    ``exclude_none=True``, so a leading system message can reach here with no
+    ``content`` key at all. Reading it unguarded raised KeyError — a 500 on a
+    request the schema had just accepted.
+    """
+    raw = [
+        {"role": "system"},
+        {"role": "system", "content": "be terse"},
+        {"role": "user", "content": "hi"},
+    ]
+
+    pinned, rest = qs._split_leading_system_prompt(raw, raw)
+
+    # The content-free turn is still consumed by the leading run (stripped from
+    # the history) — it just contributes nothing to the pinned prompt.
+    assert pinned == "be terse"
+    assert rest == [{"role": "user", "content": "hi"}]
+
+
+def test_split_leading_system_prompt_returns_none_when_every_system_turn_is_empty():
+    """A leading run made only of content-free system messages pins nothing,
+    rather than joining empty strings into a blank custom prompt.
+    """
+    raw = [{"role": "system"}, {"role": "system", "content": ""}, {"role": "user", "content": "hi"}]
+
+    pinned, rest = qs._split_leading_system_prompt(raw, raw)
+
+    assert pinned is None
+    assert rest == [{"role": "user", "content": "hi"}]

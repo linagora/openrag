@@ -7,7 +7,7 @@ from typing import Any
 import ray
 from core.utils.logging import get_logger
 from ray.exceptions import TaskCancelledError
-from services.workers.ray_utils import call_ray_actor_with_timeout
+from services.workers.ray_utils import call_ray_actor_method_with_timeout, call_ray_actor_with_timeout
 from services.workers.task_state import CANCELLABLE_INDEXING_STATES, PENDING_TASK_DETAILS
 
 logger = get_logger()
@@ -94,8 +94,8 @@ async def _get_matching_active_task_refs(
     remote = _remote_actor_method(task_state_manager, "get_matching_active_task_refs_v2")
     suffix = " final" if final else ""
     if remote is not None:
-        return await call_ray_actor_with_timeout(
-            future=remote(partition=partition, file_id=file_id),
+        return await call_ray_actor_method_with_timeout(
+            submit=lambda: remote(partition=partition, file_id=file_id),
             timeout=_remaining_timeout(deadline, partition=partition, file_id=file_id),
             task_description=f"get_matching_active_task_refs_v2({partition}, {file_id}){suffix}",
         )
@@ -126,8 +126,8 @@ async def _get_matching_active_task_refs_legacy(
         raise RuntimeError("TaskStateManager does not expose active-task lookup for delete cleanup")
 
     suffix = " final" if final else ""
-    all_info = await call_ray_actor_with_timeout(
-        future=get_all_info_remote(),
+    all_info = await call_ray_actor_method_with_timeout(
+        submit=get_all_info_remote,
         timeout=_remaining_timeout(deadline, partition=partition, file_id=file_id),
         task_description=f"get_all_info_for_active_task_refs({partition}, {file_id}){suffix}",
     )
@@ -153,8 +153,8 @@ async def _get_matching_active_task_refs_legacy(
             continue
         object_ref = None
         if get_object_ref_remote is not None:
-            object_ref = await call_ray_actor_with_timeout(
-                future=get_object_ref_remote(task_id),
+            object_ref = await call_ray_actor_method_with_timeout(
+                submit=lambda task_id=task_id: get_object_ref_remote(task_id),
                 timeout=_remaining_timeout(deadline, partition=partition, file_id=file_id),
                 task_description=f"get_object_ref({task_id}) for delete cleanup",
             )
@@ -200,8 +200,8 @@ async def _cancel_refs(
             file_id=file_id,
         )
         remaining = _remaining_timeout(deadline, partition=partition, file_id=file_id)
-        await call_ray_actor_with_timeout(
-            future=task_state_manager.set_state.remote(task_id, "CANCELLED"),
+        await call_ray_actor_method_with_timeout(
+            submit=lambda task_id=task_id: task_state_manager.set_state.remote(task_id, "CANCELLED"),
             timeout=remaining,
             task_description=f"set_state({task_id}, CANCELLED)",
         )
@@ -268,8 +268,8 @@ async def _mark_ref_less_tasks_failed(
     set_failed = getattr(task_state_manager, "set_failed_if_not_cancelled", None)
     if set_failed is not None:
         for task_id in task_ids:
-            await call_ray_actor_with_timeout(
-                future=set_failed.remote(task_id, _STALE_REFLESS_TASK_ERROR),
+            await call_ray_actor_method_with_timeout(
+                submit=lambda task_id=task_id: set_failed.remote(task_id, _STALE_REFLESS_TASK_ERROR),
                 timeout=_remaining_timeout(deadline, partition=partition, file_id=file_id),
                 task_description=f"set_failed_if_not_cancelled({task_id})",
             )
@@ -281,8 +281,8 @@ async def _mark_ref_less_tasks_failed(
         )
         return
     for task_id in task_ids:
-        await call_ray_actor_with_timeout(
-            future=task_state_manager.set_state.remote(task_id, "FAILED"),
+        await call_ray_actor_method_with_timeout(
+            submit=lambda task_id=task_id: task_state_manager.set_state.remote(task_id, "FAILED"),
             timeout=_remaining_timeout(deadline, partition=partition, file_id=file_id),
             task_description=f"set_state({task_id}, FAILED)",
         )

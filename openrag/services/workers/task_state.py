@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-import asyncio
+import base64
+import json
+import threading
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -16,8 +19,149 @@ ACTIVE_INDEXING_STATES = frozenset({"QUEUED", "SERIALIZING"})
 # the public active counts and the DocumentStatus enum on purpose — fencing only.
 LEGACY_ACTIVE_INDEXING_STATES = frozenset({"CHUNKING", "INSERTING"})
 CANCELLABLE_INDEXING_STATES = ACTIVE_INDEXING_STATES | LEGACY_ACTIVE_INDEXING_STATES
+RECOVERABLE_TASK_STATES = CANCELLABLE_INDEXING_STATES | {"CANCELLED"}
 TERMINAL_INDEXING_STATES = frozenset({"COMPLETED", "FAILED"})
 PENDING_TASK_DETAILS = "__openrag_pending_task_details__"
+_FENCE_KV_KEY = b"file-delete-fences-v1"
+_TASK_STATE_KV_NAMESPACE = "openrag-task-state-manager"
+_LEGACY_FENCE_ID = "__legacy__"
+_RECOVERABLE_TASK_KV_PREFIX = b"recoverable-task-v1:"
+_CANCELLATION_TOMBSTONE_TTL_SECONDS = 24 * 60 * 60
+_FILE_DELETE_FENCE_TTL_SECONDS = 2 * 60
+
+
+def _task_state_storage_available() -> bool:
+    from ray.experimental.internal_kv import _internal_kv_initialized
+
+    return _internal_kv_initialized() and ray.get_runtime_context().get_actor_id() is not None
+
+
+def _task_state_kv_namespace() -> bytes:
+    ray_namespace = base64.urlsafe_b64encode(ray.get_runtime_context().namespace.encode()).rstrip(b"=")
+    return _TASK_STATE_KV_NAMESPACE.encode() + b"-" + ray_namespace
+
+
+def _normalize_file_delete_fences(
+    fences: dict[tuple[str, str], dict[str, int | float]],
+    *,
+    now: float | None = None,
+) -> tuple[dict[tuple[str, str], dict[str, int | float]], bool]:
+    timestamp = time.time() if now is None else now
+    normalized: dict[tuple[str, str], dict[str, int | float]] = {}
+    changed = False
+    for key, holders in fences.items():
+        active: dict[str, int | float] = {}
+        for holder, value in holders.items():
+            if holder == _LEGACY_FENCE_ID:
+                active[holder] = int(value)
+            elif isinstance(value, int) and not isinstance(value, bool):
+                # Upgrade the pre-lease format without dropping a deletion that
+                # may still be running during a rolling deployment.
+                active[holder] = timestamp + _FILE_DELETE_FENCE_TTL_SECONDS
+                changed = True
+            elif isinstance(value, float) and value > timestamp:
+                active[holder] = value
+            else:
+                changed = True
+        if active:
+            normalized[key] = active
+        elif holders:
+            changed = True
+    return normalized, changed
+
+
+def _load_file_delete_fences() -> dict[tuple[str, str], dict[str, int | float]]:
+    from ray.experimental.internal_kv import _internal_kv_get
+
+    if not _task_state_storage_available():
+        return {}
+    payload = _internal_kv_get(_FENCE_KV_KEY, namespace=_task_state_kv_namespace())
+    if payload is None:
+        return {}
+    fences = {(partition, file_id): holders for partition, file_id, holders in json.loads(payload)}
+    normalized, changed = _normalize_file_delete_fences(fences)
+    if changed:
+        _save_file_delete_fences(normalized)
+    return normalized
+
+
+def _save_file_delete_fences(fences: dict[tuple[str, str], dict[str, int | float]]) -> None:
+    from ray.experimental.internal_kv import _internal_kv_put
+
+    if not _task_state_storage_available():
+        return
+    payload = json.dumps(
+        [[partition, file_id, holders] for (partition, file_id), holders in sorted(fences.items())],
+        separators=(",", ":"),
+    )
+    _internal_kv_put(_FENCE_KV_KEY, payload, overwrite=True, namespace=_task_state_kv_namespace())
+
+
+def _recoverable_task_key(task_id: str) -> bytes:
+    return _RECOVERABLE_TASK_KV_PREFIX + base64.urlsafe_b64encode(task_id.encode())
+
+
+def _decode_recoverable_task(payload: bytes) -> tuple[str, TaskInfo, float | None]:
+    import ray.cloudpickle as cloudpickle
+
+    record = cloudpickle.loads(payload)
+    if len(record) == 2:
+        task_id, info = record
+        return task_id, info, None
+    task_id, info, expires_at = record
+    return task_id, info, expires_at
+
+
+def _load_recoverable_tasks() -> dict[str, TaskInfo]:
+    from ray.experimental.internal_kv import _internal_kv_del, _internal_kv_get, _internal_kv_list
+
+    if not _task_state_storage_available():
+        return {}
+    tasks: dict[str, TaskInfo] = {}
+    namespace = _task_state_kv_namespace()
+    for key in _internal_kv_list(_RECOVERABLE_TASK_KV_PREFIX, namespace=namespace):
+        payload = _internal_kv_get(key, namespace=namespace)
+        if payload is None:
+            continue
+        task_id, info, expires_at = _decode_recoverable_task(payload)
+        if expires_at is not None and expires_at <= time.time():
+            _internal_kv_del(key, namespace=namespace)
+            continue
+        tasks[task_id] = info
+    return tasks
+
+
+def _recovery_snapshot(info: TaskInfo, *, now: float | None = None) -> tuple[TaskInfo, float | None]:
+    if info.state != "CANCELLED":
+        return info, None
+    timestamp = time.time() if now is None else now
+    # Keep the worker reference until cancellation is confirmed. If the actor
+    # restarts between the durable claim and ray.cancel(), a retry still needs
+    # this reference to stop the live worker.
+    return (
+        TaskInfo(state="CANCELLED", object_ref=info.object_ref),
+        timestamp + _CANCELLATION_TOMBSTONE_TTL_SECONDS,
+    )
+
+
+def _save_recoverable_task(task_id: str, info: TaskInfo) -> None:
+    import ray.cloudpickle as cloudpickle
+    from ray.experimental.internal_kv import _internal_kv_del, _internal_kv_put
+
+    if not _task_state_storage_available():
+        return
+    key = _recoverable_task_key(task_id)
+    if info.state in RECOVERABLE_TASK_STATES:
+        snapshot, expires_at = _recovery_snapshot(info)
+        _internal_kv_put(
+            key,
+            cloudpickle.dumps((task_id, snapshot, expires_at)),
+            overwrite=True,
+            namespace=_task_state_kv_namespace(),
+        )
+    else:
+        _internal_kv_del(key, namespace=_task_state_kv_namespace())
+
 
 try:
     from core.config import load_config as _load_config
@@ -46,12 +190,16 @@ class TaskInfo:
 @ray.remote(concurrency_groups={"set": 1000, "get": 1000, "queue_info": 1000})
 class TaskStateManager:
     def __init__(self) -> None:
-        self.tasks: dict[str, TaskInfo] = {}
+        self.tasks = _load_recoverable_tasks()
         self.user_index: dict[int | None, set[str]] = {}
-        self.file_delete_fences: dict[tuple[str, str], int] = {}
-        self.lock = asyncio.Lock()
+        for task_id, info in self.tasks.items():
+            self.user_index.setdefault(info.details.get("user_id"), set()).add(task_id)
+        self.file_delete_fences = _load_file_delete_fences()
+        # Ray runs each concurrency group on a separate event loop. A single
+        # asyncio lock cannot safely coordinate methods across those loops.
+        self.lock = threading.Lock()
 
-    async def _ensure_task(self, task_id: str) -> TaskInfo:
+    def _ensure_task(self, task_id: str) -> TaskInfo:
         if task_id not in self.tasks:
             self.tasks[task_id] = TaskInfo()
         return self.tasks[task_id]
@@ -74,60 +222,114 @@ class TaskStateManager:
         }
         self.user_index.setdefault(user_id, set()).add(task_id)
 
+    def _prune_expired_file_delete_fences(self) -> None:
+        updated, changed = _normalize_file_delete_fences(self.file_delete_fences)
+        if changed:
+            _save_file_delete_fences(updated)
+            self.file_delete_fences = updated
+
     def _file_delete_fenced(self, *, partition: str | None, file_id: str | None) -> bool:
         if partition is None or file_id is None:
             return False
-        return self.file_delete_fences.get((partition, file_id), 0) > 0
+        self._prune_expired_file_delete_fences()
+        return bool(self.file_delete_fences.get((partition, file_id)))
 
     @ray.method(concurrency_group="set")
-    async def begin_file_delete(self, *, partition: str, file_id: str) -> None:
-        async with self.lock:
+    async def begin_file_delete(self, *, partition: str, file_id: str, fence_id: str | None = None) -> None:
+        with self.lock:
+            self._prune_expired_file_delete_fences()
             key = (partition, file_id)
-            self.file_delete_fences[key] = self.file_delete_fences.get(key, 0) + 1
+            updated = dict(self.file_delete_fences)
+            holders = dict(updated.get(key, {}))
+            holder = fence_id or _LEGACY_FENCE_ID
+            holders[holder] = (
+                time.time() + _FILE_DELETE_FENCE_TTL_SECONDS if fence_id else int(holders.get(holder, 0)) + 1
+            )
+            updated[key] = holders
+            _save_file_delete_fences(updated)
+            self.file_delete_fences = updated
 
     @ray.method(concurrency_group="set")
-    async def end_file_delete(self, *, partition: str, file_id: str) -> None:
-        async with self.lock:
+    async def renew_file_delete(self, *, partition: str, file_id: str, fence_id: str) -> bool:
+        with self.lock:
+            self._prune_expired_file_delete_fences()
             key = (partition, file_id)
-            remaining = self.file_delete_fences.get(key, 0) - 1
-            if remaining > 0:
-                self.file_delete_fences[key] = remaining
+            holders = dict(self.file_delete_fences.get(key, {}))
+            if fence_id not in holders:
+                return False
+            holders[fence_id] = time.time() + _FILE_DELETE_FENCE_TTL_SECONDS
+            updated = dict(self.file_delete_fences)
+            updated[key] = holders
+            _save_file_delete_fences(updated)
+            self.file_delete_fences = updated
+            return True
+
+    @ray.method(concurrency_group="set")
+    async def end_file_delete(self, *, partition: str, file_id: str, fence_id: str | None = None) -> None:
+        with self.lock:
+            self._prune_expired_file_delete_fences()
+            key = (partition, file_id)
+            updated = dict(self.file_delete_fences)
+            holders = dict(updated.get(key, {}))
+            holder = fence_id or _LEGACY_FENCE_ID
+            remaining = holders.get(holder, 0) - 1
+            if fence_id or remaining <= 0:
+                holders.pop(holder, None)
             else:
-                self.file_delete_fences.pop(key, None)
+                holders[holder] = remaining
+            if holders:
+                updated[key] = holders
+            else:
+                updated.pop(key, None)
+            _save_file_delete_fences(updated)
+            self.file_delete_fences = updated
 
     @ray.method(concurrency_group="set")
     async def set_state(self, task_id: str, state: str) -> None:
-        async with self.lock:
-            info = await self._ensure_task(task_id)
+        with self.lock:
+            info = self._ensure_task(task_id)
             if info.state == DocumentStatus.CANCELLED and state != DocumentStatus.CANCELLED:
                 return
             info.state = state
+            _save_recoverable_task(task_id, info)
 
     @ray.method(concurrency_group="set")
     async def set_error(self, task_id: str, tb_str: str) -> None:
-        async with self.lock:
-            info = await self._ensure_task(task_id)
+        with self.lock:
+            info = self._ensure_task(task_id)
             info.error = tb_str
+            _save_recoverable_task(task_id, info)
 
     @ray.method(concurrency_group="set")
     async def set_failed_if_not_cancelled(self, task_id: str, tb_str: str) -> bool:
         """Atomically set state to FAILED and record the traceback, unless already CANCELLED."""
-        async with self.lock:
+        with self.lock:
             info = self.tasks.get(task_id)
             if info is None or info.state == "CANCELLED":
                 return False
             info.state = "FAILED"
             info.error = tb_str
+            _save_recoverable_task(task_id, info)
             return True
 
     @ray.method(concurrency_group="set")
     async def set_cancelled_if_active(self, task_id: str) -> bool:
-        async with self.lock:
+        with self.lock:
             info = self.tasks.get(task_id)
             if info is None or info.state in TERMINAL_TASK_STATES:
                 return False
             info.state = "CANCELLED"
+            _save_recoverable_task(task_id, info)
             return True
+
+    @ray.method(concurrency_group="set")
+    async def finish_cancellation(self, task_id: str) -> None:
+        with self.lock:
+            info = self.tasks.get(task_id)
+            if info is None or info.state != "CANCELLED":
+                return
+            info.object_ref = None
+            _save_recoverable_task(task_id, info)
 
     @ray.method(concurrency_group="set")
     async def set_details(
@@ -139,8 +341,8 @@ class TaskStateManager:
         metadata: dict[str, Any],
         user_id: int | None,
     ) -> None:
-        async with self.lock:
-            info = await self._ensure_task(task_id)
+        with self.lock:
+            info = self._ensure_task(task_id)
             self._record_details(
                 task_id,
                 info,
@@ -149,6 +351,7 @@ class TaskStateManager:
                 metadata=metadata,
                 user_id=user_id,
             )
+            _save_recoverable_task(task_id, info)
 
     @ray.method(concurrency_group="set")
     async def set_queued_details(
@@ -160,8 +363,8 @@ class TaskStateManager:
         metadata: dict[str, Any],
         user_id: int | None,
     ) -> bool:
-        async with self.lock:
-            info = await self._ensure_task(task_id)
+        with self.lock:
+            info = self._ensure_task(task_id)
             if info.state == DocumentStatus.CANCELLED:
                 return False
             self._record_details(
@@ -174,42 +377,47 @@ class TaskStateManager:
             )
             if self._file_delete_fenced(partition=partition, file_id=file_id):
                 info.state = "CANCELLED"
+                _save_recoverable_task(task_id, info)
                 return False
             info.state = "QUEUED"
+            _save_recoverable_task(task_id, info)
             return True
 
     @ray.method(concurrency_group="set")
     async def set_object_ref(self, task_id: str, object_ref: ray.ObjectRef) -> bool:
-        async with self.lock:
-            info = await self._ensure_task(task_id)
+        with self.lock:
+            info = self._ensure_task(task_id)
             info.object_ref = object_ref
             details = info.details or {}
             if self._file_delete_fenced(partition=details.get("partition"), file_id=details.get("file_id")):
                 info.state = "CANCELLED"
+                _save_recoverable_task(task_id, info)
                 return False
-            return info.state in ACTIVE_INDEXING_STATES or info.state in TERMINAL_INDEXING_STATES
+            accepted = info.state in ACTIVE_INDEXING_STATES or info.state in TERMINAL_INDEXING_STATES
+            _save_recoverable_task(task_id, info)
+            return accepted
 
     @ray.method(concurrency_group="get")
     async def get_state(self, task_id: str) -> str | None:
-        async with self.lock:
+        with self.lock:
             info = self.tasks.get(task_id)
             return info.state if info else None
 
     @ray.method(concurrency_group="get")
     async def get_error(self, task_id: str) -> str | None:
-        async with self.lock:
+        with self.lock:
             info = self.tasks.get(task_id)
             return info.error if info else None
 
     @ray.method(concurrency_group="get")
     async def get_details(self, task_id: str) -> dict | None:
-        async with self.lock:
+        with self.lock:
             info = self.tasks.get(task_id)
             return info.details if info else None
 
     @ray.method(concurrency_group="get")
     async def get_object_ref(self, task_id: str) -> ray.ObjectRef | None:
-        async with self.lock:
+        with self.lock:
             info = self.tasks.get(task_id)
             return info.object_ref if info else None
 
@@ -220,7 +428,7 @@ class TaskStateManager:
         partition: str,
         file_id: str | None = None,
     ) -> dict[str, ray.ObjectRef | None | str]:
-        async with self.lock:
+        with self.lock:
             return self._matching_active_task_refs_locked(partition=partition, file_id=file_id)
 
     @ray.method(concurrency_group="get")
@@ -230,7 +438,7 @@ class TaskStateManager:
         partition: str,
         file_id: str | None = None,
     ) -> dict[str, ray.ObjectRef | None | str]:
-        async with self.lock:
+        with self.lock:
             return self._matching_active_task_refs_locked(partition=partition, file_id=file_id)
 
     def _matching_active_task_refs_locked(
@@ -256,12 +464,12 @@ class TaskStateManager:
 
     @ray.method(concurrency_group="queue_info")
     async def get_all_states(self) -> dict[str, str | None]:
-        async with self.lock:
+        with self.lock:
             return {tid: info.state for tid, info in self.tasks.items()}
 
     @ray.method(concurrency_group="queue_info")
     async def get_all_info(self) -> dict[str, dict]:
-        async with self.lock:
+        with self.lock:
             return {
                 task_id: {
                     "state": info.state,
@@ -273,7 +481,7 @@ class TaskStateManager:
 
     @ray.method(concurrency_group="queue_info")
     async def get_all_user_info(self, user_id: int) -> dict[str, dict]:
-        async with self.lock:
+        with self.lock:
             task_ids = self.user_index.get(user_id, set())
             return {
                 tid: {
@@ -294,8 +502,13 @@ class TaskStateManager:
         }
 
     @ray.method(concurrency_group="queue_info")
+    async def supports_in_place_restart(self) -> bool:
+        """Identify actors created with the restart policy introduced by #841."""
+        return True
+
+    @ray.method(concurrency_group="queue_info")
     async def get_user_pending_task_count(self, user_id: int) -> int:
-        async with self.lock:
+        with self.lock:
             task_ids = self.user_index.get(user_id, set())
             return sum(1 for tid in task_ids if (info := self.tasks.get(tid)) and info.state in ACTIVE_INDEXING_STATES)
 
