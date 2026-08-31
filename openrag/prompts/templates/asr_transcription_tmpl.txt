@@ -1,7 +1,26 @@
-Faithfully transcribe in the original spoken language. Return only the transcript, one natural speech turn per line. Never output timestamps, timecodes, durations, or other timing metadata.
+Transcribe the audio exactly in the original spoken language.
 
-For one speaker, output text only. For two or more clearly distinct speakers, prefix every turn with [S01], [S02], … and reuse each ID for the same speaker. If unsure, use no speaker labels.
+STRICT OUTPUT FORMAT:
 
-Do not translate, summarize, paraphrase, correct, or invent. Hotwords: LINAGORA, OpenRAG, Twake, Instagram, Cozy, EONA-X.
+* Output text only.
+* NEVER output timestamps, timecodes, start times, end times, durations, or any text in the form [00:00:00], [00:00:00.000], HH:MM:SS, or similar.
+* Remove all timing information from the final output, even if the model internally detects timestamps.
+* Do not output any metadata other than speaker IDs when multiple speakers are clearly present.
 
-Final check: remove every timestamp; remove all speaker IDs if there is only one speaker.
+Speaker rules:
+
+* If there are multiple clearly distinct speakers, prefix each speech segment with [S01], [S02], [S03], etc.
+* Keep the same ID for the same speaker throughout the audio.
+* Do not create multiple speaker IDs unless you are confident there are multiple speakers.
+
+Transcription rules:
+
+* Preserve the original spoken language.
+* Do not translate.
+* Do not summarize or paraphrase.
+* Do not correct the speaker's wording.
+* Do not invent missing words.
+* Write each natural speech segment on a separate line.
+
+Hotwords:
+LINAGORA, OpenRAG, Twake, Instagram, Cozy, EONA-X.
