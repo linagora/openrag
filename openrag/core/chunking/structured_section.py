@@ -733,7 +733,15 @@ class StructuredSectionChunker(BaseChunker):
         ``_enforce_ceiling``."""
         emax = self._effective_max(filename, unit.heading_path, unit.pages)
         if unit.chunk_type is ChunkType.TABLE and unit.tokens > emax:
-            element = MDElement(type="table", content=unit.text, page_number=unit.start_page)
+            # chunk_table reads the *leading* lines as the column header and
+            # replays them on every piece. Since a heading now travels into the
+            # atomic unit, those leading lines can be the heading — which was
+            # then replayed instead of the column header, leaving every
+            # continuation piece a wall of unlabelled numbers. Split the table
+            # alone and re-attach the heading to the first piece, which is the
+            # one it introduces.
+            lead, table_text = _split_leading_headings(unit.text)
+            element = MDElement(type="table", content=table_text, page_number=unit.start_page)
             subs = chunk_table(element, chunk_size=emax, length_function=self.length_function)
             pieces = [
                 _Unit(
@@ -746,6 +754,9 @@ class StructuredSectionChunker(BaseChunker):
                 )
                 for s in subs
             ]
+            if lead and pieces:
+                pieces[0].text = f"{lead}\n\n{pieces[0].text}"
+                pieces[0].tokens = self.length_function(pieces[0].text)
         else:
             pieces = [unit]
         return self._enforce_ceiling(pieces, filename)
@@ -1044,6 +1055,18 @@ def _absorb(cur: _Unit, unit: _Unit, *, path: list[str] | None = None) -> None:
     cur.atomic = cur.atomic or unit.atomic
     if path is not None:
         cur.heading_path = list(path)
+
+
+def _split_leading_headings(text: str) -> tuple[str, str]:
+    """Separate a block's leading heading lines from its content."""
+    lines = text.splitlines()
+    cut = 0
+    lead: list[str] = []
+    while cut < len(lines) and (not lines[cut].strip() or _HEADING_LINE_RE.match(lines[cut])):
+        if lines[cut].strip():
+            lead.append(lines[cut].strip())
+        cut += 1
+    return "\n\n".join(lead), "\n".join(lines[cut:]).strip()
 
 
 def _is_headings_only(unit: _Unit) -> bool:

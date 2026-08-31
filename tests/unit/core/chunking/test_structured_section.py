@@ -709,3 +709,16 @@ def test_headings_only_unit_never_merges_backward():
 
     assert _is_headings_only(_Unit(heading_path=[], text="## Title\n\n### Sub", tokens=4))
     assert not _is_headings_only(_Unit(heading_path=[], text="## Title\n\nBody line.", tokens=5))
+
+
+def test_split_table_keeps_its_column_header_on_every_piece():
+    """chunk_table replays the block's leading lines as the column header. Once
+    a heading travelled into the atomic unit, the heading was replayed instead
+    and every continuation piece became unlabelled numbers."""
+    rows = "\n".join(f"| Region {i} | {i * 11} | {i * 12} | {i * 13} |" for i in range(60))
+    doc = _doc(f"## Regional breakdown\n\n| Region | Q1 | Q2 | Q3 |\n|---|---|---|---|\n{rows}\n")
+    tables = [c for c in _chunker(chunk_size=200).chunk(doc) if c.chunk_type == ChunkType.TABLE]
+    assert len(tables) > 1, "the table must split"
+    for piece in tables:
+        assert "| Region | Q1 | Q2 | Q3 |" in piece.text, f"column header missing: {piece.text[:70]!r}"
+    assert "Regional breakdown" in tables[0].text, "the heading should lead the first piece"
