@@ -3,7 +3,7 @@
  * Update this object for each release; the sidebar label, unread state, and
  * dialog content are derived from it.
  */
-export type ReleaseNoteSectionId = "highlights" | "openai-api" | "indexing" | "improvements" | "fixes";
+export type ReleaseNoteSectionId = "highlights" | "openai-api" | "indexing" | "improvements";
 
 export interface ReleaseNoteSection {
   id: ReleaseNoteSectionId;
@@ -63,11 +63,6 @@ export const releaseNotes: ReleaseNotes = {
       id: "improvements",
       title: "Improvements",
       items: ["Keep custom HTTPS LLM overrides isolated from the shared LLM circuit breaker."],
-    },
-    {
-      id: "fixes",
-      title: "Fixes",
-      items: ["Do not send disabled log-probability parameters to strict OpenAI-compatible providers."],
     },
   ],
 };

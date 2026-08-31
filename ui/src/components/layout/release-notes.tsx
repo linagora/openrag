@@ -1,6 +1,5 @@
 import { useState } from "react";
-import type { LucideIcon } from "lucide-react";
-import { AlertTriangle, Braces, Bug, CalendarDays, FileSearch, Gauge, Sparkles } from "lucide-react";
+import { AlertTriangle, CalendarDays, Sparkles } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -18,16 +17,7 @@ import {
   markReleaseAsViewed,
   releaseNotes,
   type ReleaseNoteSection,
-  type ReleaseNoteSectionId,
 } from "@/lib/release-notes";
-
-const releaseNoteSectionIcons: Record<ReleaseNoteSectionId, LucideIcon> = {
-  highlights: Sparkles,
-  "openai-api": Braces,
-  indexing: FileSearch,
-  improvements: Gauge,
-  fixes: Bug,
-};
 
 interface ReleaseNotesButtonProps {
   hasNew: boolean;
@@ -70,33 +60,45 @@ interface ReleaseNotesDialogProps {
   onOpenChange: (open: boolean) => void;
 }
 
-function ReleaseNotesCategory({ section }: { section: ReleaseNoteSection }) {
-  const Icon = releaseNoteSectionIcons[section.id];
+interface ReleaseNotesSectionProps {
+  section: ReleaseNoteSection;
+  featured?: boolean;
+  className?: string;
+}
+
+function ReleaseNotesSection({ section, featured = false, className = "" }: ReleaseNotesSectionProps) {
   const headingId = `release-notes-${section.id}`;
 
   return (
-    <article aria-labelledby={headingId} className="flex gap-3 py-4 first:pt-0 last:pb-0">
-      <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
-        <Icon aria-hidden="true" className="size-4" />
-      </span>
-      <div className="min-w-0">
-        <h4 id={headingId} className="text-sm font-semibold text-foreground">
-          {section.title}
-        </h4>
-        <ul className="mt-2 space-y-2 text-sm leading-6 text-muted-foreground">
-          {section.items.map((entry) => (
-            <li key={entry} className="flex gap-2">
-              <span aria-hidden="true" className="mt-2 size-1.5 shrink-0 rounded-full bg-primary/70" />
-              <span>{entry}</span>
-            </li>
-          ))}
-        </ul>
-      </div>
+    <article
+      aria-labelledby={headingId}
+      className={`rounded-xl p-5 sm:p-6 ${
+        featured ? "border border-primary/15 bg-primary/[0.04]" : "border border-border/60 bg-muted/35"
+      } ${className}`}
+    >
+      {featured && <p className="text-xs font-semibold uppercase tracking-[0.14em] text-primary">Featured</p>}
+      <h4 id={headingId} className={`${featured ? "mt-2 text-lg" : "text-sm"} font-semibold text-foreground`}>
+        {section.title}
+      </h4>
+      <ul className={`${featured ? "mt-4 grid gap-3 sm:grid-cols-2" : "mt-3 space-y-3"} text-sm leading-6 text-muted-foreground`}>
+        {section.items.map((entry) => (
+          <li key={entry} className="flex gap-2.5">
+            <span
+              aria-hidden="true"
+              className={`mt-2 size-1.5 shrink-0 rounded-full ${featured ? "bg-primary" : "bg-muted-foreground/55"}`}
+            />
+            <span>{entry}</span>
+          </li>
+        ))}
+      </ul>
     </article>
   );
 }
 
 export function ReleaseNotesDialog({ open, onOpenChange }: ReleaseNotesDialogProps) {
+  const highlights = releaseNotes.sections.find((section) => section.id === "highlights");
+  const supportingSections = releaseNotes.sections.filter((section) => section.id !== "highlights");
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="flex max-h-[calc(100vh-2rem)] flex-col gap-0 overflow-hidden p-0 sm:max-w-3xl">
@@ -120,18 +122,20 @@ export function ReleaseNotesDialog({ open, onOpenChange }: ReleaseNotesDialogPro
         <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-6 py-6 sm:px-8" data-testid="release-notes-content">
           <div className="space-y-6">
             <section aria-labelledby="release-notes-whats-new">
-              <div className="flex items-center gap-2">
-                <span className="flex size-8 items-center justify-center rounded-lg bg-primary/10 text-primary">
-                  <Sparkles aria-hidden="true" className="size-4" />
-                </span>
-                <h3 id="release-notes-whats-new" className="text-base font-semibold text-foreground">
-                  What's New
-                </h3>
-              </div>
-              <div className="mt-4 divide-y border-y">
-                {releaseNotes.sections.map((section) => (
-                  <ReleaseNotesCategory key={section.id} section={section} />
-                ))}
+              <h3 id="release-notes-whats-new" className="text-base font-semibold text-foreground">
+                What's New
+              </h3>
+              <div className="mt-4 space-y-4">
+                {highlights && <ReleaseNotesSection section={highlights} featured />}
+                <div className="grid gap-4 sm:grid-cols-2">
+                  {supportingSections.map((section) => (
+                    <ReleaseNotesSection
+                      key={section.id}
+                      section={section}
+                      className={section.id === "openai-api" ? "sm:col-span-2" : ""}
+                    />
+                  ))}
+                </div>
               </div>
             </section>
 
