@@ -25,6 +25,7 @@ import { Badge } from "@/components/ui/badge";
 import { APP_NAME } from "@/lib/brand";
 import { useActiveJobsCount } from "@/lib/jobs-queries";
 import { usePermissions, type Permissions } from "@/lib/permissions";
+import { ReleaseNotes } from "./release-notes";
 
 interface NavItem {
   title: string;
@@ -49,6 +50,10 @@ const navItems: NavItem[] = [
 ];
 
 const settingsItem: NavItem = { title: "Settings", href: "/settings", icon: UserCog };
+
+const sidebarItemClassName =
+  "relative flex items-center gap-3 px-3 py-2 rounded-xl text-sm font-medium transition-colors overflow-hidden group-data-[collapsible=icon]:justify-center group-data-[collapsible=icon]:px-0";
+const sidebarItemInactiveClassName = "text-sidebar-foreground/70 hover:bg-sidebar-accent/60 hover:text-sidebar-accent-foreground";
 
 export function AppSidebar() {
   const location = useLocation();
@@ -77,12 +82,12 @@ export function AppSidebar() {
               ? `${item.title}, ${badgeCount} active job${badgeCount === 1 ? "" : "s"}`
               : undefined
           }
-          className={`relative flex items-center gap-3 px-3 py-2 rounded-xl text-sm font-medium transition-colors overflow-hidden group-data-[collapsible=icon]:justify-center group-data-[collapsible=icon]:px-0 ${
+          className={`${sidebarItemClassName} ${
             badgeCount > 0 ? "pr-11 group-data-[collapsible=icon]:pr-0" : ""
           } ${
             active
               ? "bg-sidebar-accent text-sidebar-accent-foreground shadow-sm"
-              : "text-sidebar-foreground/70 hover:bg-sidebar-accent/60 hover:text-sidebar-accent-foreground"
+              : sidebarItemInactiveClassName
           }`}
         >
           <item.icon className="h-4.5 w-4.5 shrink-0" />
@@ -127,7 +132,10 @@ export function AppSidebar() {
         </SidebarGroup>
       </SidebarContent>
       <SidebarFooter className="px-3 py-3 border-t border-sidebar-border group-data-[collapsible=icon]:px-1.5">
-        <SidebarMenu>{renderItem(settingsItem)}</SidebarMenu>
+        <SidebarMenu>
+          <ReleaseNotes className={sidebarItemClassName} />
+          {renderItem(settingsItem)}
+        </SidebarMenu>
       </SidebarFooter>
     </Sidebar>
   );

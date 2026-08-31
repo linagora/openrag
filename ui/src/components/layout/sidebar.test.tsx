@@ -120,3 +120,15 @@ describe("AppSidebar Jobs badge", () => {
     expect(screen.getByLabelText("Current route").textContent).toBe("/jobs");
   });
 });
+
+describe("AppSidebar", () => {
+  it("keeps Release Notes directly above the unchanged Settings link", () => {
+    renderSidebar();
+
+    const releaseNotes = screen.getByRole("button", { name: /open release notes/i });
+    const settings = screen.getByRole("link", { name: "Settings" });
+
+    expect(releaseNotes.closest("li")?.nextElementSibling).toBe(settings.closest("li"));
+    expect(settings.getAttribute("href")).toBe("/settings");
+  });
+});
