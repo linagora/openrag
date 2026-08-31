@@ -2,30 +2,12 @@ from __future__ import annotations
 
 import json
 import re
-import socket
 from datetime import datetime
 from unittest import mock
 
 import httpx
 import pytest
 from services.workers.indexing_callback import send_indexing_callback
-
-
-def _patch_resolver(monkeypatch: pytest.MonkeyPatch, *addresses: str, error: Exception | None = None) -> None:
-    """``loop.getaddrinfo`` defers here, so this exercises the real path."""
-
-    def _resolve(host, port, *_a, **_k):
-        if error is not None:
-            raise error
-        return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", (addr, port)) for addr in addresses]
-
-    monkeypatch.setattr(socket, "getaddrinfo", _resolve)
-
-
-@pytest.fixture(autouse=True)
-def _public_dns(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep the suite off real DNS; the guard's own tests re-patch the resolver."""
-    _patch_resolver(monkeypatch, "93.184.216.34")
 
 
 def _patch_async_client(monkeypatch: pytest.MonkeyPatch, handler) -> None:
@@ -451,118 +433,6 @@ async def test_username_redaction_does_not_leave_password_behind(monkeypatch: py
 
         error = mock_logger.warning.call_args[1]["error"]
         assert "bobsecret" not in error
-
-
-@pytest.mark.asyncio
-async def test_public_hostname_resolving_internally_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
-    def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover - must never be called
-        raise AssertionError("no HTTP call should be made to a host resolving internally")
-
-    _patch_async_client(monkeypatch, handler)
-    _patch_resolver(monkeypatch, "169.254.169.254")
-
-    with mock.patch("services.workers.indexing_callback.logger") as mock_logger:
-        await send_indexing_callback("https://evil.example.com/cb", "p", "f1", "success", {"file_rev": "abc"})
-        mock_logger.warning.assert_called_once()
-
-
-@pytest.mark.asyncio
-async def test_one_internal_record_among_public_ones_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
-    def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover - must never be called
-        raise AssertionError("no HTTP call should be made when any record is internal")
-
-    _patch_async_client(monkeypatch, handler)
-    _patch_resolver(monkeypatch, "93.184.216.34", "10.0.0.5")
-
-    with mock.patch("services.workers.indexing_callback.logger") as mock_logger:
-        await send_indexing_callback("https://cozy.example.com/cb", "p", "f1", "success", {"file_rev": "abc"})
-        mock_logger.warning.assert_called_once()
-
-
-@pytest.mark.asyncio
-async def test_publicly_resolving_hostname_is_sent(monkeypatch: pytest.MonkeyPatch, captured_body: dict) -> None:
-    _patch_resolver(monkeypatch, "93.184.216.34")
-
-    await send_indexing_callback("https://cozy.example.com/cb", "p", "f1", "success", {"file_rev": "abc"})
-
-    assert captured_body["body"]["file_id"] == "f1"
-
-
-@pytest.mark.asyncio
-async def test_unresolvable_hostname_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
-    def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover - must never be called
-        raise AssertionError("no HTTP call should be made for an unresolvable host")
-
-    _patch_async_client(monkeypatch, handler)
-
-    _patch_resolver(monkeypatch, error=socket.gaierror("nope"))
-
-    with mock.patch("services.workers.indexing_callback.logger") as mock_logger:
-        await send_indexing_callback("https://nowhere.example.com/cb", "p", "f1", "success", {"file_rev": "abc"})
-        mock_logger.warning.assert_called_once()
-
-
-@pytest.mark.asyncio
-async def test_opting_in_to_private_urls_skips_resolution(monkeypatch: pytest.MonkeyPatch, captured_body: dict) -> None:
-    monkeypatch.setattr("services.workers.indexing_callback._allow_private_callback_urls", lambda: True)
-
-    _patch_resolver(monkeypatch, error=AssertionError("resolution must be skipped for private URLs"))
-
-    await send_indexing_callback("http://cozy.localhost:8080/ai/index/status", "p", "f1", "success", {"file_rev": "a"})
-
-    assert captured_body["body"]["file_id"] == "f1"
-
-
-@pytest.mark.asyncio
-async def test_tokenized_http_callback_is_not_sent(monkeypatch: pytest.MonkeyPatch) -> None:
-    def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover - must never be called
-        raise AssertionError("no HTTP call should be made for a tokenized http:// callback")
-
-    _patch_async_client(monkeypatch, handler)
-
-    with mock.patch("services.workers.indexing_callback.logger") as mock_logger:
-        await send_indexing_callback(
-            "http://cozy.example.com/ai/index/status",
-            "p",
-            "f1",
-            "success",
-            {"file_rev": "abc"},
-            callback_token="s3cret-token",
-        )
-
-        mock_logger.warning.assert_called_once()
-        # The refusal itself must not echo the token it is protecting.
-        assert "s3cret-token" not in str(mock_logger.warning.call_args)
-
-
-@pytest.mark.asyncio
-async def test_untokenized_http_callback_is_still_sent(captured_body: dict) -> None:
-    """Back-compat: only token-bearing callbacks gain the https requirement."""
-    await send_indexing_callback("http://cozy.example.com/rag/callback", "p", "f1", "success", {"file_rev": "abc"})
-
-    assert captured_body["body"]["file_id"] == "f1"
-
-
-@pytest.mark.asyncio
-async def test_tokenized_https_callback_is_unaffected(captured_request: dict) -> None:
-    await send_indexing_callback(
-        "https://cozy.example.com/ai/index/status", "p", "f1", "success", {"file_rev": "abc"}, callback_token="jwt"
-    )
-
-    assert captured_request["request"].headers["Authorization"] == "Bearer jwt"
-
-
-@pytest.mark.asyncio
-async def test_tokenized_http_callback_allowed_by_the_dev_opt_in(
-    monkeypatch: pytest.MonkeyPatch, captured_request: dict
-) -> None:
-    monkeypatch.setattr("services.workers.indexing_callback._allow_private_callback_urls", lambda: True)
-
-    await send_indexing_callback(
-        "http://cozy.localhost:8080/ai/index/status", "p", "f1", "success", {"file_rev": "abc"}, callback_token="jwt"
-    )
-
-    assert captured_request["request"].headers["Authorization"] == "Bearer jwt"
 
 
 @pytest.mark.asyncio

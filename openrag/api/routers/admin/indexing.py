@@ -11,7 +11,6 @@ guards whose exact non-bracketed ``{"detail": ...}`` body the legacy
 endpoints returned via ``HTTPException``.
 """
 
-import asyncio
 import json
 from pathlib import Path
 from typing import Any
@@ -38,7 +37,7 @@ from core.utils.exceptions import OpenRAGError
 from core.utils.filename import sanitize_filename
 from core.utils.log_tail import app_log_file
 from core.utils.logging import get_logger
-from core.utils.url_safety import is_safe_url, resolves_to_public_addresses
+from core.utils.url_safety import is_safe_url
 from di.providers import get_auth_service, get_config, get_indexing_service, get_partition_service
 from fastapi import (
     APIRouter,
@@ -54,49 +53,30 @@ from fastapi.responses import JSONResponse
 
 logger = get_logger()
 
-# Matches the sender's deadline. getaddrinfo runs on the loop's shared default
-# executor, so an unbounded lookup here pins one of its threads for the full
-# resolver timeout and starves every other asyncio.to_thread in the process.
-_CALLBACK_DNS_TIMEOUT = 5.0
 
-
-async def _validate_callback_url(callback_url: str | None, callback_token: str | None, config) -> None:
+def _validate_callback_url(callback_url: str | None, config) -> None:
     """Reject a callback_url the server must not POST to.
 
     The sender re-checks; this is only so the caller hears about it now rather
-    than losing the callback silently. That includes the DNS check: accepting a
-    hostname the sender will later refuse queues a job whose callback can never
-    arrive, and the caller has been told to wait for one.
+    than losing the callback silently.
     """
     if not callback_url:
         return
     allow_private = bool(getattr(getattr(config, "indexing_callback", None), "allow_private_urls", False))
     try:
-        parsed = urlparse(callback_url)
-        # ``.port`` is where a non-numeric port raises, not ``urlparse`` itself.
-        port = parsed.port
+        # ``.port`` is where a non-numeric port raises, not ``urlparse`` itself —
+        # and it is the one thing ``is_safe_url`` never touches.
+        urlparse(callback_url).port
     except ValueError as exc:
         # e.g. an unterminated IPv6 literal or "host:abc" — a bad request, not a 500.
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="callback_url is not a valid URL",
         ) from exc
-    unsafe = not is_safe_url(callback_url, allow_private_hosts=allow_private)
-    if not unsafe and not allow_private:
-        try:
-            async with asyncio.timeout(_CALLBACK_DNS_TIMEOUT):
-                unsafe = not await resolves_to_public_addresses(parsed.scheme, parsed.hostname or "", port)
-        except TimeoutError:
-            unsafe = True
-    if unsafe:
+    if not is_safe_url(callback_url, allow_private_hosts=allow_private):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="callback_url must be a public http(s) URL",
-        )
-    if callback_token and not allow_private and parsed.scheme != "https":
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="callback_url must use https when callback_token is set",
         )
 
 
@@ -184,7 +164,7 @@ async def add_file(
     config=Depends(get_config),
     service=Depends(get_indexing_service),
 ):
-    await _validate_callback_url(callback_url, callback_token, config)
+    _validate_callback_url(callback_url, config)
 
     if await service.file_exists(file_id, partition):
         raise HTTPException(
@@ -346,7 +326,7 @@ async def put_file(
     config=Depends(get_config),
     service=Depends(get_indexing_service),
 ):
-    await _validate_callback_url(callback_url, callback_token, config)
+    _validate_callback_url(callback_url, config)
 
     if not await service.file_exists(file_id, partition):
         raise HTTPException(

@@ -24,7 +24,7 @@ from urllib.parse import ParseResult, urlparse
 import httpx
 from core.config import load_config
 from core.utils.logging import get_logger
-from core.utils.url_safety import is_safe_url, resolves_to_public_addresses
+from core.utils.url_safety import is_safe_url
 
 logger = get_logger()
 
@@ -112,30 +112,10 @@ async def send_indexing_callback(
         )
         return
 
-    allow_private = _allow_private_callback_urls()
     # Re-checked here, not just in the router: a direct caller bypasses that.
-    unsafe = not is_safe_url(callback_url, allow_private_hosts=allow_private)
-    if not unsafe and not allow_private:
-        try:
-            async with asyncio.timeout(_CALLBACK_TIMEOUT):
-                unsafe = not await resolves_to_public_addresses(parsed.scheme, parsed.hostname or "", parsed.port)
-        except TimeoutError:
-            unsafe = True
-    if unsafe:
+    if not is_safe_url(callback_url, allow_private_hosts=_allow_private_callback_urls()):
         logger.warning(
             "Indexing callback_url is not a safe server-side target; skipping callback",
-            callback_url=safe_url,
-            partition=partition,
-            file_id=file_id,
-            status=status,
-        )
-        return
-
-    if callback_token and parsed.scheme != "https" and not allow_private:
-        # A bearer over plain HTTP is a credential on the wire. The dev opt-in
-        # is the exception: a local cozy serves http and still checks the token.
-        logger.warning(
-            "Refusing to send callback_token over plain HTTP; skipping callback",
             callback_url=safe_url,
             partition=partition,
             file_id=file_id,
