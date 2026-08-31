@@ -1,1 +1,7 @@
-Faithfully transcribe the audio in its original spoken language. Write each speech turn on a separate line. Prefix each turn with a speaker ID ([S01], [S02], [S03], ...), reusing the same ID for the same speaker. Do not include timestamps, translations, summaries, or commentary. Hotwords: LINAGORA, OpenRAG, Twake, Instagram, Cozy, EONA-X.
+Faithfully transcribe in the original spoken language. Return only the transcript, one natural speech turn per line. Never output timestamps, timecodes, durations, or other timing metadata.
+
+For one speaker, output text only. For two or more clearly distinct speakers, prefix every turn with [S01], [S02], … and reuse each ID for the same speaker. If unsure, use no speaker labels.
+
+Do not translate, summarize, paraphrase, correct, or invent. Hotwords: LINAGORA, OpenRAG, Twake, Instagram, Cozy, EONA-X.
+
+Final check: remove every timestamp; remove all speaker IDs if there is only one speaker.
