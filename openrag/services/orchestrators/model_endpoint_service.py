@@ -593,6 +593,13 @@ class ModelEndpointService:
         try:
             async with httpx.AsyncClient(timeout=5.0, headers=headers, follow_redirects=False) as client:
                 resp = await client.get(models_url)
+                if resp.status_code in {401, 403}:
+                    if model_type == "stt":
+                        result["transcription_supported"] = False
+                    result["detail"] = (
+                        f"Model list request was rejected with HTTP {resp.status_code}. Check the API key."
+                    )
+                    return result
                 result["reachable"] = True
                 if resp.status_code == 200:
                     try:
