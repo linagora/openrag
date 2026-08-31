@@ -607,9 +607,7 @@ class ModelEndpointService:
                         result["detail"] = "Endpoint returned an invalid model list."
                     else:
                         served = [
-                            item["id"]
-                            for item in models
-                            if isinstance(item, dict) and isinstance(item.get("id"), str)
+                            item["id"] for item in models if isinstance(item, dict) and isinstance(item.get("id"), str)
                         ]
                         result["models_served"] = served
                         if model_name is not None:
