@@ -193,6 +193,11 @@ class IndexerWorkerActor:
         config = context.get() if context is not None else None
         return config if isinstance(config, dict) else {}
 
+    def _has_active_indexation_config(self) -> bool:
+        """Whether this transcription was dispatched with a preset snapshot."""
+        context = getattr(self, "_active_indexation_config", None)
+        return isinstance(context.get(), dict) if context is not None else False
+
     async def _resolve_transcription_prompt(self, partition: str | None = None) -> str | None:
         """Resolve the active preset's ASR prompt, then the global default.
 
@@ -200,13 +205,14 @@ class IndexerWorkerActor:
         endpoint and the other indexation-stage settings. Prompt content itself
         remains live: an Admin UI edit applies to the next transcription.
 
-        Older deployments may still have an ASR name in the partition prompt
-        map. It remains a read-only compatibility fallback until that partition
-        is moved to an explicit preset selection; new writes use the preset.
+        Older integrations can still invoke a parser without a dispatch-time
+        preset snapshot. Only those legacy calls consult a partition-level ASR
+        name. An active preset with no prompt explicitly selects the global
+        default and must not revive that retired setting.
         """
         selected_name = self._current_indexation_config().get("asr_transcription_prompt_name")
         legacy_name: str | None = None
-        if partition:
+        if partition and not self._has_active_indexation_config():
             try:
                 row = await self._catalog_store.partition_repo.get_partition_row(partition)
                 prompt_names = row.get("generation_prompt_names") if row else None

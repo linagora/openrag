@@ -290,14 +290,16 @@ class PgPromptRepository(PromptRepository):
                 overrides[key] = overrides.get(key, 0) + r["n"]
 
         # New ASR selections live on the indexation preset. A partition-level
-        # ASR name from the earlier configuration model is only a compatibility
-        # fallback, so evaluate both candidates per partition to preserve the
-        # same runtime precedence: preset -> legacy partition setting -> default.
+        # ASR name is only used by legacy calls that have no matching preset;
+        # an existing preset without a selection deliberately resolves to the
+        # global default.
         asr_rows = await self.pool.fetch(
             """
             SELECT
                 pre.config->>'asr_transcription_prompt_name' AS preset_name,
-                p.generation_prompt_names->>'asr_transcription' AS legacy_name
+                CASE WHEN pre.name IS NULL
+                    THEN p.generation_prompt_names->>'asr_transcription'
+                END AS legacy_name
             FROM partitions p
             LEFT JOIN pipeline_presets pre
               ON pre.preset_type = 'indexation' AND pre.name = p.indexation_preset

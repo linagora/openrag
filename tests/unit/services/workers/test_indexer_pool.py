@@ -1539,6 +1539,23 @@ async def test_actor_keeps_a_legacy_partition_asr_prompt_as_a_fallback() -> None
     )
 
 
+@pytest.mark.asyncio
+async def test_actor_uses_the_global_asr_prompt_when_an_active_preset_has_no_selection() -> None:
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=_RecordingWorker())
+    actor._catalog_store.partition_repo.get_partition_row = _AsyncReturn(
+        {"generation_prompt_names": {"asr_transcription": "legacy-meeting"}}
+    )
+    actor._prompt_service.resolve_prompt = AsyncMock(return_value="global prompt")
+
+    token = actor._active_indexation_config.set({})
+    try:
+        assert await actor._resolve_transcription_prompt("meetings") == "global prompt"
+    finally:
+        actor._active_indexation_config.reset(token)
+
+    actor._prompt_service.resolve_prompt.assert_awaited_once_with("asr_transcription", names=[])
+
+
 def test_actor_resolves_the_preset_stt_endpoint_before_the_default() -> None:
     actor = _bare_worker_actor(save_uploaded_files=True, worker=_RecordingWorker())
     default = ModelEndpointConfig(endpoint="http://whisper:8000/v1", model_name="whisper")
