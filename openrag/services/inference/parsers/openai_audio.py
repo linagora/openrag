@@ -212,7 +212,12 @@ class OpenAIAudioClient(BaseClientParser):
         return endpoint
 
     def _semaphore_for_endpoint(self, endpoint: ModelEndpointConfig | None) -> asyncio.Semaphore:
-        """Return the concurrency limiter selected by the current STT endpoint."""
+        """Return the current client's per-worker STT concurrency limiter.
+
+        Each indexing worker owns its own client and therefore its own limiter.
+        The endpoint value bounds requests from that worker; it is not a
+        cluster-wide quota across OpenRAG replicas.
+        """
         if endpoint is None:
             return self._semaphore
         limit = max(1, endpoint.batch_size)
@@ -247,6 +252,14 @@ class OpenAIAudioClient(BaseClientParser):
         if endpoint is None:
             return {}
         return {key: value for key, value in endpoint.extra.items() if key not in _STT_REQUEST_CONTROL_EXTRA_KEYS}
+
+    @staticmethod
+    def _response_text(response: object) -> str:
+        """Extract transcript text from JSON and plain-text OpenAI responses."""
+        if isinstance(response, str):
+            return response
+        text = getattr(response, "text", None)
+        return text if isinstance(text, str) else ""
 
     def _is_fallback_endpoint(self, endpoint: ModelEndpointConfig) -> bool:
         """Whether *endpoint* is the legacy ``TRANSCRIBER_*`` destination."""
@@ -298,6 +311,14 @@ class OpenAIAudioClient(BaseClientParser):
         if language:
             kwargs["language"] = language
         request_extra = self._request_extra(endpoint_config)
+        # The OpenAI SDK returns a plain string for ``response_format=text``.
+        # Pass that standard option through its typed argument so both its
+        # request encoding and response handling stay compatible with the SDK.
+        response_format = request_extra.pop("response_format", None)
+        if isinstance(response_format, str) and response_format.strip():
+            kwargs["response_format"] = response_format
+        elif response_format is not None:
+            request_extra["response_format"] = response_format
         if request_extra:
             kwargs["extra_body"] = request_extra
         logger.bind(
@@ -307,7 +328,8 @@ class OpenAIAudioClient(BaseClientParser):
         ).info("Sending audio transcription request")
         try:
             response = await client.audio.transcriptions.create(**kwargs)
-            return response.text or ""
+            transcript = self._response_text(response)
+            return transcript
         finally:
             if close_client:
                 try:

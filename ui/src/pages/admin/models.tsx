@@ -237,7 +237,7 @@ export default function ModelsPage() {
                           </div>
                           <div className="flex justify-between">
                             <span className="text-muted-foreground">
-                              {ep.model_type === "stt" ? "Concurrency" : "Batch Size"}
+                              {ep.model_type === "stt" ? "Concurrency per worker" : "Batch Size"}
                             </span>
                             <span>{ep.batch_size}</span>
                           </div>
@@ -603,9 +603,9 @@ function EndpointDialog({
         const msg = `Reachable, but "${modelName}" isn't served. Available: ${served}`;
         setValidationMsg(msg);
         toast.warning(msg);
-      } else if (isStt && res.transcription_supported === false) {
+      } else if (isStt && res.transcription_supported !== true) {
         setValidated(false);
-        const msg = res.detail || "Endpoint does not support OpenAI-compatible audio transcriptions.";
+        const msg = res.detail || "Could not verify OpenAI-compatible audio transcription support.";
         setValidationMsg(msg);
         toast.warning(msg);
       } else {
@@ -614,7 +614,9 @@ function EndpointDialog({
           ? isStt
             ? `Reachable — "${modelName}" is served and audio transcription is supported.`
             : `Reachable — "${modelName}" is served.`
-          : res.detail || "Reachable (couldn't confirm the model list).";
+          : isStt
+            ? "Reachable — audio transcription is supported (couldn't confirm the model list)."
+            : res.detail || "Reachable (couldn't confirm the model list).";
         setValidationMsg(msg);
         toast.success(msg);
       }
@@ -725,7 +727,14 @@ function EndpointDialog({
           </div>
           <div className="grid grid-cols-2 gap-4">
             <div className="space-y-2">
-              <Label>{isStt ? "Concurrent requests" : "Batch Size"}</Label>
+              {isStt ? (
+                <LabelWithInfo
+                  label="Concurrent requests per worker"
+                  tooltip="Maximum parallel transcription requests from each OpenRAG worker. Multiple workers or replicas each have their own limit, so size it for the transcription server's total capacity."
+                />
+              ) : (
+                <Label>Batch Size</Label>
+              )}
               <Input type="number" min="1" value={batchSize} onChange={(e) => setBatchSize(e.target.value)} />
             </div>
             <div className="space-y-2">

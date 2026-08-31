@@ -206,7 +206,16 @@ class ModelEndpointService:
                 created_at=now,
                 updated_at=now,
             )
-            await self._repo.create(row)
+            try:
+                await self._repo.create(row)
+            except ValidationError as exc:
+                if exc.status_code != 409:
+                    raise
+                # Another replica can seed the same empty endpoint type
+                # between our read above and this insert. The winner's row is
+                # the desired default, so losing that race must not fail boot.
+                logger.info(f"Default {model_type} endpoint was seeded concurrently; skipping.")
+                continue
             logger.info(f"Seeded default {model_type} endpoint '{row.name}'.")
 
     async def _sync_env_managed(self, row: ModelEndpointRow, model_type: str, data: dict[str, Any]) -> None:
@@ -304,7 +313,8 @@ class ModelEndpointService:
                 "endpoint": s.loader.transcriber.base_url,
                 "model_name": s.loader.transcriber.model_name,
                 # ``batch_size`` is the common registry column; for STT it is
-                # used as the concurrent-transcription limit by OpenAIAudioClient.
+                # the per-worker concurrent-transcription limit used by
+                # OpenAIAudioClient.
                 "batch_size": s.loader.transcriber.max_concurrent_chunks,
                 "timeout": s.loader.transcriber.timeout,
                 "extra": _with_api_key(
@@ -585,20 +595,40 @@ class ModelEndpointService:
                 resp = await client.get(models_url)
                 result["reachable"] = True
                 if resp.status_code == 200:
-                    data = resp.json()
-                    served = [m["id"] for m in data.get("data", []) if "id" in m]
-                    result["models_served"] = served
-                    if model_name is not None:
-                        result["model_found"] = model_name in served
+                    try:
+                        data = resp.json()
+                        models = data.get("data") if isinstance(data, dict) else None
+                        if not isinstance(models, list):
+                            raise ValueError("missing list-valued data field")
+                    except (TypeError, ValueError):
+                        # A reachable endpoint may expose a non-standard or
+                        # broken /models response while still implementing the
+                        # audio route. Do not let that prevent the STT probe.
+                        result["detail"] = "Endpoint returned an invalid model list."
+                    else:
+                        served = [
+                            item["id"]
+                            for item in models
+                            if isinstance(item, dict) and isinstance(item.get("id"), str)
+                        ]
+                        result["models_served"] = served
+                        if model_name is not None:
+                            result["model_found"] = model_name in served
                 else:
-                    result["detail"] = f"HTTP {resp.status_code}"
+                    result["detail"] = f"Model list returned HTTP {resp.status_code}."
                 if model_type == "stt":
                     # This intentionally sends no audio. OpenAI-compatible
                     # servers reject the incomplete request with 4xx when the
                     # route exists; a missing or wrong-method route is 404/405.
                     transcription_response = await client.post(base_url + "/audio/transcriptions")
                     transcription_status = transcription_response.status_code
-                    if transcription_status in {404, 405}:
+                    if transcription_status in {401, 403}:
+                        result["transcription_supported"] = False
+                        result["detail"] = (
+                            f"Transcription capability check was rejected with HTTP {transcription_status}. "
+                            "Check the API key."
+                        )
+                    elif transcription_status in {404, 405}:
                         result["transcription_supported"] = False
                         result["detail"] = "Endpoint does not support OpenAI-compatible audio transcriptions."
                     elif 300 <= transcription_status < 400 or transcription_status >= 500:
