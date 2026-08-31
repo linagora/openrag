@@ -91,8 +91,7 @@ Upload a new file to a specific partition for indexing.
 
 **Responses:**
 - `201 Created`: Returns task status URL
-- `400 Bad Request`: `callback_url` is malformed, is not a public `http(s)` URL, or carries a
-  `callback_token` without `https`
+- `400 Bad Request`: `callback_url` is malformed or not a public `http(s)` URL
 - `409 Conflict`: File already exists in partition
 
 ##### Indexing status callback
@@ -111,23 +110,20 @@ once the task settles, so a client can wait instead of polling:
 ```
 
 `status` is `"success"` or `"error"`; a user-cancelled task sends nothing.
-`file_rev`/`datetime`/`doctype` are echoed verbatim from the metadata you sent at
-upload, so the receiver can detect a status that refers to stale content. Only
-these three are echoed — server-side keys added during indexing (the on-disk
-path, content hash, file size) are never sent to the callback target.
+`file_rev`/`datetime`/`doctype` are echoed verbatim from the upload metadata,
+letting the receiver detect a stale status. Server-side keys (on-disk path,
+content hash, file size) are never sent.
 
-When the target route is authenticated, pass `callback_token` — it is sent as
-`Authorization: Bearer <token>` on that POST, never in the URL or the payload.
-A `callback_url` carrying a token must be `https`, or the request is rejected
-with a `400`: a bearer over plain HTTP is a credential on the wire.
+For an authenticated target, pass `callback_token` — sent as `Authorization:
+Bearer <token>`, never in the URL or the payload. Picking a safe scheme for it
+is on the caller: `callback_url` is otherwise unchecked beyond the public
+`http(s)` requirement below.
 
-The callback is best-effort: one attempt, no retries, a 5 s deadline on each of
-the DNS check and the request, and any failure is logged without affecting the
-indexing result. Delivery is not guaranteed — a worker lost before the task
-settles notifies nothing — so keep a timeout and fall back to polling the
-task-status URL rather than waiting on the callback forever. The `callback_url` is a
-caller-supplied URL that the server fetches, so it is checked against the SSRF
-guard and must be a public `http(s)` address — see
+Best-effort: one attempt, no retries, a 5 s deadline, and any failure is
+logged without affecting the indexing result. Delivery is not guaranteed, so
+keep a client-side timeout and fall back to polling the task-status URL. The
+`callback_url` is checked against the SSRF guard and must be a public
+`http(s)` address — see
 [`INDEXING_CALLBACK_ALLOW_PRIVATE_URLS`](/openrag/documentation/env_vars) to
 target a local instance in development.
 

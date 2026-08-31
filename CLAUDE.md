@@ -255,8 +255,7 @@ hand OpenRag a URL to notify once the task settles.
 
 **Request fields** (multipart form, on `POST` and `PUT /indexer/partition/{partition}/file/{file_id}`):
 - `callback_url` — POSTed once the task reaches a terminal state
-- `callback_token` — sent as `Authorization: Bearer <token>` on that POST; requires an `https`
-  `callback_url` (both the router and the sender refuse a token over plain HTTP)
+- `callback_token` — sent as `Authorization: Bearer <token>` on that POST
 
 **Body:** `{"partition", "file_id", "status": "success"|"error", "timestamp", "metadata": {"file_rev", "datetime", "doctype"}}`.
 The three metadata fields are echoed verbatim from the upload metadata — never recomputed from the
@@ -266,15 +265,20 @@ accepted as current content. The three fields are a deliberate whitelist, not a 
 `_build_metadata` also puts `source` (the server's on-disk path), `content_sha256` and `file_size`
 in that dict, and the callback target is a caller-supplied URL.
 
-**Guarantees:** one attempt, no retries, two independent 5 s deadlines (the DNS check, then the
-request), never raises — a failed callback is logged and cannot change the indexing outcome. No
-`callback_url` → strict no-op. A user-cancelled task sends nothing (only a real failure notifies
-`"error"`), which is why the sender keys off the return value of `set_failed_if_not_cancelled` and
-the pool's pre-flight handler catches `Exception`, not `BaseException`.
+**Guarantees:** one attempt, no retries, a 5 s deadline on the request, never raises — a failed
+callback is logged and cannot change the indexing outcome. No `callback_url` → strict no-op. A
+user-cancelled task sends nothing (only a real failure notifies `"error"`), which is why the sender
+keys off the return value of `set_failed_if_not_cancelled` and the pool's pre-flight handler catches
+`Exception`, not `BaseException`.
 
 **Not guaranteed:** delivery. The send is awaited on the worker's slot, so a blackholing target costs
-up to 10 s of indexing throughput per file, and an actor lost before the task settles notifies
+up to 5 s of indexing throughput per file, and an actor lost before the task settles notifies
 nothing at all. Clients keep a timeout and fall back to polling the task-status URL.
+
+`callback_url` is checked against the SSRF guard (`is_safe_url` — scheme, loopback/private/link-local,
+decimal/hex/octal/short-form IPv4 literals) but not resolved: neither a DNS lookup nor an https
+requirement is enforced beyond that literal check, deliberately — the URL is caller-supplied, so
+picking a safe target is the caller's call, not OpenRag's to police.
 
 **Rolling deploys:** the worker actors are named, detached and `get_if_exists`, so changing
 `process_file`'s remote contract requires bumping `_INDEXER_ACTOR_PROTOCOL_VERSION` in
