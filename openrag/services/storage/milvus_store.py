@@ -1,4 +1,4 @@
-"""Milvus 2.6 vector store adapter implementing :class:`VectorStore`.
+"""Milvus 3.0 vector store adapter implementing :class:`VectorStore`.
 
 Scope:
     Pure vector operations against a single Milvus collection (the one named
@@ -13,7 +13,7 @@ Collection model:
     collection name. ``ensure_collection`` / ``drop_collection`` operate at
     partition-row granularity.
 
-Client split (Milvus 2.6):
+Client split (Milvus 3.0):
     ``AsyncMilvusClient`` covers the data plane (``insert``, ``search``,
     ``hybrid_search``, ``query``, ``delete``, ``upsert``). The admin/lifecycle
     plane (``has_collection``, ``create_collection``, ``load_collection``,
@@ -22,7 +22,7 @@ Client split (Milvus 2.6):
     :class:`MilvusClient` is kept alongside.
 
 Hybrid BM25:
-    Milvus 2.6 native ``Function(FunctionType.BM25)`` computes the sparse
+    Milvus 3.0 native ``Function(FunctionType.BM25)`` computes the sparse
     vector server-side from the ``text`` field at both insert and query time.
     Hybrid is config-driven, not a separate entry point: :meth:`search`
     dispatches to :meth:`_hybrid_search` when ``config.hybrid_search`` is on
@@ -36,11 +36,11 @@ from __future__ import annotations
 import asyncio
 import secrets
 import time
-from collections.abc import Iterator
-from contextlib import contextmanager
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any
 
+from core.utils.logging import get_logger
 from pymilvus import (
     AnnSearchRequest,
     AsyncMilvusClient,
@@ -64,6 +64,8 @@ from openrag.core.utils.exceptions import (
     VDBSearchError,
 )
 from openrag.core.vector_stores import VectorStore
+
+logger = get_logger()
 
 # ---------------------------------------------------------------------------
 # Module constants — lifted verbatim from the legacy MilvusDB so the schema
@@ -99,7 +101,7 @@ DEFAULT_BM25_SEARCH_PARAMS: dict[str, Any] = {
     "params": {"drop_ratio_build": 0.2},
 }
 
-#: Native Milvus 2.6 RRF fusion constant — k=100 matches the legacy MilvusDB
+#: Native Milvus 3.0 RRF fusion constant — k=100 matches the legacy MilvusDB
 #: tuning and the rank-fusion literature default.
 RRF_K = 100
 
@@ -137,7 +139,7 @@ analyzer_params: dict[str, Any] = {
 
 
 class MilvusVectorStore(VectorStore):
-    """Milvus 2.6 implementation of :class:`VectorStore`.
+    """Milvus 3.0 implementation of :class:`VectorStore`.
 
     The store is constructed cheaply (no I/O); the collection is materialised
     on the first :meth:`initialize` call. ``initialize`` is idempotent and
@@ -169,9 +171,9 @@ class MilvusVectorStore(VectorStore):
         self._schema_vector_dim: int | None = None
         self._loaded = False
         self._load_lock = asyncio.Lock()
-        # Connection healing: pymilvus 2.6 exposes no documented client-level
+        # Connection healing: PyMilvus 3.0 exposes no documented client-level
         # reconnect knob (no retry/keepalive params on MilvusClient or
-        # AsyncMilvusClient — see api-reference v2.6.x). Trust the gRPC
+        # AsyncMilvusClient). Trust the gRPC
         # channel's internal handling, same as the legacy MilvusDB. If
         # production drops surface a real issue, revisit with evidence
         # rather than racing pymilvus's internal channel state.
@@ -203,7 +205,7 @@ class MilvusVectorStore(VectorStore):
     def _ensure_loaded(self) -> None:
         """Create-if-absent + load the configured collection.
 
-        Synchronous because the Milvus 2.6 admin/lifecycle endpoints
+        Synchronous because the Milvus 3.0 admin/lifecycle endpoints
         (``has_collection``, ``create_collection``, ``load_collection``,
         ``alter_collection_properties``, ``describe_collection``) have no
         async equivalents.
@@ -445,7 +447,7 @@ class MilvusVectorStore(VectorStore):
     # must go through :meth:`drop_collection`.
     _TAUTOLOGICAL_EXPRS = frozenset({"true", "1==1"})
 
-    # Always-false predicate for an empty ``IN`` list. Milvus 2.6 rejects a
+    # Always-false predicate for an empty ``IN`` list. Milvus 3.0 rejects a
     # bare ``false`` literal ("predicate is not a boolean expression"), so the
     # match-nothing sentinel must be a comparison it can plan.
     _MATCH_NOTHING_EXPR = "1 == 0"
@@ -541,7 +543,7 @@ class MilvusVectorStore(VectorStore):
         return " and ".join(f"({part})" for part in parts)
 
     # ------------------------------------------------------------------
-    # Sync paginated query helper (Milvus 2.6 query_iterator is sync-only)
+    # Sync paginated query helper (Milvus 3.0 query_iterator is sync-only)
     # ------------------------------------------------------------------
 
     def _vector_dim(self) -> int:
@@ -588,7 +590,7 @@ class MilvusVectorStore(VectorStore):
 
         Only matters when the dense ``vector`` rides along (~dim*4 bytes/row);
         explicit scalar projections are small, so they keep the large default.
-        Milvus 2.6 returns the vector for the ``"*"`` wildcard too — the search
+        Milvus 3.0 returns the vector for the ``"*"`` wildcard too — the search
         path strips it post-hoc via ``_SEARCH_RESULT_DROPPED_KEYS`` and
         ``query_chunks_by_filter(["*"])`` leaks it — so ``"*"`` counts as
         vector-inclusive here. The dimension comes from :meth:`_vector_dim`, not
@@ -608,7 +610,7 @@ class MilvusVectorStore(VectorStore):
         output_fields: list[str],
         batch_size: int | None = None,
     ) -> list[dict[str, Any]]:
-        """Drain a Milvus 2.6 ``query_iterator`` into a list.
+        """Drain a Milvus 3.0 ``query_iterator`` into a list.
 
         ``batch_size`` defaults to :meth:`_safe_batch_size`, which shrinks the
         page for vector-inclusive projections so one page stays under Milvus's
@@ -781,12 +783,12 @@ class MilvusVectorStore(VectorStore):
                 collection_name=self._collection_name,
             ) from e
 
-        # Milvus 2.6 returns {"insert_count": N, "ids": [...], "cost": ...}.
+        # Milvus 3.0 returns {"insert_count": N, "ids": [...], "cost": ...}.
         # Fall back to len(entities) if the server omits insert_count.
         return int(result.get("insert_count", len(entities))) if isinstance(result, dict) else len(entities)
 
     def _parse_search_response(self, response: Any) -> list[dict[str, Any]]:
-        """Normalise a Milvus 2.6 search/hybrid_search response to raw dicts.
+        """Normalise a Milvus 3.0 search/hybrid_search response to raw dicts.
 
         Each record has ``id`` (stringified for :class:`Chunk` round-trip),
         ``score`` (distance for dense, fused RRF score for hybrid), and the
@@ -810,28 +812,6 @@ class MilvusVectorStore(VectorStore):
             out.append(record)
         return out
 
-    @contextmanager
-    def _search_errors(self, kind: str) -> Iterator[None]:
-        """Map Milvus failures from a search call to the VDB error taxonomy.
-
-        Wraps the ``await`` site so :meth:`search` and :meth:`hybrid_search`
-        don't each repeat the same two-arm ``MilvusException`` /
-        ``Exception`` translation. ``kind`` names the operation for the
-        message (``"dense search"`` / ``"hybrid search"``).
-        """
-        try:
-            yield
-        except MilvusException as e:
-            raise VDBSearchError(
-                f"Milvus {kind} failed: {e!s}",
-                collection_name=self._collection_name,
-            ) from e
-        except Exception as e:
-            raise UnexpectedVDBError(
-                f"Unexpected error during Milvus {kind}: {e!s}",
-                collection_name=self._collection_name,
-            ) from e
-
     def _dense_search_params(self, similarity_threshold: float | None) -> dict[str, Any]:
         """Build the dense COSINE search params, optionally range-filtered.
 
@@ -848,6 +828,74 @@ class MilvusVectorStore(VectorStore):
             params["radius"] = similarity_threshold
             params["range_filter"] = COSINE_RANGE_FILTER_MAX
         return {"metric_type": DEFAULT_DENSE_SEARCH_PARAMS["metric_type"], "params": params}
+
+    async def _search_error_is_empty_result(
+        self,
+        error: MilvusException,
+        expr: str,
+        verify_empty_result: Callable[[], Awaitable[bool]] | None = None,
+    ) -> bool:
+        """Verify Milvus 3.0 server errors before treating them as no results.
+
+        This is a compatibility workaround, not a stable Milvus API contract.
+        The v3.0.0 result converter emits the generic ``unsupported ID type``
+        internal error when a filtered hybrid request produces no IDs:
+        https://github.com/milvus-io/milvus/blob/v3.0.0/internal/util/function/chain/converter.go#L385
+
+        The error code and message are therefore never sufficient on their
+        own. A second server call must prove that the collection is absent or
+        that every ANN leg returned no IDs. Verification failures return
+        ``False`` so the original error remains visible. Remove this
+        workaround when the supported Milvus release returns an empty search
+        result directly.
+        """
+        message = str(error)
+        if error.code == 100 and "collection not found" in message:
+            try:
+                exists = await asyncio.to_thread(self._client.has_collection, self._collection_name)
+            except Exception:
+                return False
+            if not exists:
+                logger.bind(
+                    collection_name=self._collection_name,
+                    filter=expr,
+                    reason="missing_collection",
+                    error_code=error.code,
+                ).warning("Milvus search error verified as an empty result")
+                return True
+            return False
+
+        if error.code == 5 and "unsupported ID type" in message and verify_empty_result is not None:
+            try:
+                is_empty = await verify_empty_result()
+            except Exception:
+                return False
+            if is_empty:
+                logger.bind(
+                    collection_name=self._collection_name,
+                    filter=expr,
+                    reason="empty_ann_result",
+                    error_code=error.code,
+                ).warning("Milvus search error verified as an empty result")
+                return True
+            return False
+
+        return False
+
+    async def _search_error_or_empty(
+        self,
+        error: MilvusException,
+        kind: str,
+        expr: str,
+        verify_empty_result: Callable[[], Awaitable[bool]] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return no results for a verified empty scope, otherwise map the error."""
+        if await self._search_error_is_empty_result(error, expr, verify_empty_result):
+            return []
+        raise VDBSearchError(
+            f"Milvus {kind} failed: {error!s}",
+            collection_name=self._collection_name,
+        ) from error
 
     async def search(
         self,
@@ -875,6 +923,37 @@ class MilvusVectorStore(VectorStore):
             return await self._hybrid_search(embedding, query_text, top_k, collection, filters, similarity_threshold)
         return await self._dense_search(embedding, top_k, collection, filters, similarity_threshold)
 
+    async def _hybrid_search_legs_are_empty(
+        self,
+        embedding: list[float],
+        query_text: str,
+        top_k: int,
+        expr: str,
+        similarity_threshold: float | None,
+    ) -> bool:
+        """Verify that dense and BM25 searches both produced no candidates."""
+        dense_response, sparse_response = await asyncio.gather(
+            self._async_client.search(
+                collection_name=self._collection_name,
+                data=[embedding],
+                anns_field="vector",
+                search_params=self._dense_search_params(similarity_threshold),
+                limit=top_k,
+                filter=expr,
+                output_fields=["_id"],
+            ),
+            self._async_client.search(
+                collection_name=self._collection_name,
+                data=[query_text],
+                anns_field="sparse",
+                search_params=DEFAULT_BM25_SEARCH_PARAMS,
+                limit=top_k,
+                filter=expr,
+                output_fields=["_id"],
+            ),
+        )
+        return all(not response or not response[0] for response in (dense_response, sparse_response))
+
     async def _dense_search(
         self,
         embedding: list[float],
@@ -891,7 +970,7 @@ class MilvusVectorStore(VectorStore):
         self._resolve_collection(collection)
         expr = self._build_filter_expr(filters)
 
-        with self._search_errors("dense search"):
+        try:
             response = await self._async_client.search(
                 collection_name=self._collection_name,
                 data=[embedding],
@@ -901,6 +980,13 @@ class MilvusVectorStore(VectorStore):
                 filter=expr,
                 output_fields=["*"],
             )
+        except MilvusException as e:
+            return await self._search_error_or_empty(e, "dense search", expr)
+        except Exception as e:
+            raise UnexpectedVDBError(
+                f"Unexpected error during Milvus dense search: {e!s}",
+                collection_name=self._collection_name,
+            ) from e
 
         return self._parse_search_response(response)
 
@@ -953,7 +1039,7 @@ class MilvusVectorStore(VectorStore):
             expr=expr,
         )
 
-        with self._search_errors("hybrid search"):
+        try:
             response = await self._async_client.hybrid_search(
                 collection_name=self._collection_name,
                 reqs=[dense_req, sparse_req],
@@ -961,6 +1047,24 @@ class MilvusVectorStore(VectorStore):
                 limit=top_k,
                 output_fields=["*"],
             )
+        except MilvusException as e:
+            return await self._search_error_or_empty(
+                e,
+                "hybrid search",
+                expr,
+                lambda: self._hybrid_search_legs_are_empty(
+                    embedding,
+                    query_text,
+                    top_k,
+                    expr,
+                    similarity_threshold,
+                ),
+            )
+        except Exception as e:
+            raise UnexpectedVDBError(
+                f"Unexpected error during Milvus hybrid search: {e!s}",
+                collection_name=self._collection_name,
+            ) from e
 
         return self._parse_search_response(response)
 
@@ -1168,7 +1272,7 @@ class MilvusVectorStore(VectorStore):
     ) -> list[str]:
         """Return ``Chunk.id`` strings for every row matching ``filters``.
 
-        Uses Milvus 2.6 ``query_iterator`` under the hood so result-set size
+        Uses Milvus 3.0 ``query_iterator`` under the hood so result-set size
         is bounded only by Milvus pagination, not by a server-side
         ``limit``. The returned IDs are the INT64 ``_id`` values stringified
         for round-trip with :class:`Chunk`.
@@ -1186,7 +1290,7 @@ class MilvusVectorStore(VectorStore):
     ) -> list[dict[str, Any]]:
         """Return full row data for every chunk matching ``filters``.
 
-        ``output_fields`` defaults to ``["*"]``, which in Milvus 2.6 includes
+        ``output_fields`` defaults to ``["*"]``, which in Milvus 3.0 includes
         the dense ``vector`` field (unlike :meth:`search`, which strips it via
         ``_SEARCH_RESULT_DROPPED_KEYS``). Callers that don't want the vector
         should pass an explicit scalar projection instead of ``["*"]``.

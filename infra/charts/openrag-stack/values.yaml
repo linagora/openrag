@@ -171,8 +171,17 @@ milvus:
   # note on it above. Without this, the milvus sub-chart names its own proxy
   # Service from the real Release.Name instead, which won't match VDB_HOST.
   fullnameOverride: "openrag-milvus"
+  # Chart 5.0.25 still defaults to Milvus 2.6.21. This override can be removed
+  # when the upstream 5.0.26 chart is available from its repository index.
   image:
-    all: { tag: "v2.6.0" }
+    all: { tag: "v3.0.0" }
+  # Milvus 3 runs as UID/GID 999. Applying this group on every mount lets
+  # Kubernetes migrate supported existing volumes before the non-root process
+  # starts. Storage drivers that do not support fsGroup require an
+  # administrator-managed ownership migration before the Helm upgrade.
+  securityContext:
+    fsGroup: 999
+    fsGroupChangePolicy: Always
   cluster: { enabled: true }
   pulsarv3: { enabled: false }
   woodpecker: { enabled: true }

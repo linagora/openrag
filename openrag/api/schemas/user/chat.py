@@ -4,8 +4,15 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class OpenAIMessage(BaseModel):
-    role: Literal["user", "assistant", "system"]
-    content: str
+    # Allow to have extra openAI attributes, like  `tool_calls`,
+    # `function_call`, etc. Pydantic's default `extra="ignore"`
+    # drops them.
+    model_config = ConfigDict(extra="allow")
+
+    role: Literal["user", "assistant", "system", "tool", "developer"]
+
+    # content can be None when using `tool_calls`
+    content: str | None = None
 
 
 class OpenAIChatCompletionRequest(BaseModel):
@@ -45,8 +52,14 @@ class OpenAIChatCompletionRequest(BaseModel):
             "llm_override": None,
             "include_all_retrieved_sources": False,
         },
-        description="Extra custom parameters. Supports 'llm_override' object with an optional 'model' to override the downstream model name. The LLM endpoint and credentials are fixed by server configuration and cannot be overridden by the client. "
-        "'include_all_retrieved_sources' (default false) adds the full, unfiltered retrieval set to the response's extra.all_retrieved_sources — off by default since it can be large; opt in only for debugging/evaluation.",
+        description=(
+            "Extra custom parameters. Supports an 'llm_override' object with an optional 'model' "
+            "to override the downstream model name; its 'base_url' and 'api_key' are honored only "
+            "when the deployment sets LLM_OVERRIDE_ALLOW_CUSTOM_ENDPOINT, and ignored otherwise. "
+            "'include_all_retrieved_sources' (default false) adds the full, unfiltered retrieval "
+            "set to the response's extra.all_retrieved_sources — off by default since it can be "
+            "large; opt in only for debugging/evaluation."
+        ),
     )
 
     @model_validator(mode="after")
@@ -63,6 +76,9 @@ class OpenAIChatCompletionRequest(BaseModel):
 
 
 class OpenAICompletionRequest(BaseModel):
+    # Mirrors OpenAIChatCompletionRequest
+    model_config = ConfigDict(extra="allow")
+
     model: str | None = Field(None, description="model name")
     prompt: str
     # Bound n/best_of: each multiplies generation cost, so leaving them unbounded
@@ -92,6 +108,12 @@ class OpenAICompletionRequest(BaseModel):
             "llm_override": None,
             "include_all_retrieved_sources": False,
         },
-        description="Extra custom parameters. Supports 'llm_override' object with an optional 'model' to override the downstream model name. The LLM endpoint and credentials are fixed by server configuration and cannot be overridden by the client. "
-        "'include_all_retrieved_sources' (default false) adds the full, unfiltered retrieval set to the response's extra.all_retrieved_sources — off by default since it can be large; opt in only for debugging/evaluation.",
+        description=(
+            "Extra custom parameters. Supports an 'llm_override' object with an optional 'model' "
+            "to override the downstream model name; its 'base_url' and 'api_key' are honored only "
+            "when the deployment sets LLM_OVERRIDE_ALLOW_CUSTOM_ENDPOINT, and ignored otherwise. "
+            "'include_all_retrieved_sources' (default false) adds the full, unfiltered retrieval "
+            "set to the response's extra.all_retrieved_sources — off by default since it can be "
+            "large; opt in only for debugging/evaluation."
+        ),
     )

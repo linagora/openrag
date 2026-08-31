@@ -649,3 +649,18 @@ class TestApplyDefaultMaxTokens:
         req = OpenAIChatCompletionRequest(messages=[{"role": "user", "content": "hello"}], max_tokens=7)
         chat._apply_default_max_tokens(req, s, None)
         assert req.max_tokens == 7
+
+    @pytest.mark.parametrize("llm_override", ["gpt-5.1", ["gpt-5.1"], 7])
+    def test_non_mapping_llm_override_falls_back_to_the_server_default(self, llm_override):
+        """``metadata`` is validated only as ``dict[str, Any]``, so this reaches the
+        read; ``.get`` on it would raise ``AttributeError`` — a 500."""
+        import api.routers.user.chat as chat
+        from core.config.model_endpoints import LLM_OUTPUT_TOKENS_KEY
+
+        s = _settings_with_default_llm(**{LLM_OUTPUT_TOKENS_KEY: 1024})
+        req = OpenAIChatCompletionRequest(
+            messages=[{"role": "user", "content": "hello"}],
+            metadata={"llm_override": llm_override},
+        )
+        chat._apply_default_max_tokens(req, s, None)
+        assert req.max_tokens == 1024
