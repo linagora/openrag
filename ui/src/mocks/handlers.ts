@@ -73,6 +73,7 @@ const modelEndpoints = [
   { name: "bge-reranker-v2", model_type: "reranker", endpoint: "http://tei-reranker:8080", model_name: "BAAI/bge-reranker-v2-m3", batch_size: 32, timeout: 30, extra: {}, is_default: true, created_at: "2024-12-15T00:00:00Z", updated_at: "2025-01-10T00:00:00Z" },
   { name: "llama-3.1", model_type: "llm", endpoint: "http://vllm:8000/v1", model_name: "meta-llama/Llama-3.1-8B-Instruct", batch_size: 1, timeout: 120, extra: { max_tokens: 2048 }, is_default: true, created_at: "2024-12-20T00:00:00Z", updated_at: "2025-01-12T00:00:00Z" },
   { name: "qwen-vl", model_type: "vlm", endpoint: "http://vllm-vlm:8000/v1", model_name: "Qwen/Qwen2-VL-7B-Instruct", batch_size: 1, timeout: 60, extra: {}, is_default: true, created_at: "2025-01-05T00:00:00Z", updated_at: "2025-01-05T00:00:00Z" },
+  { name: "moss-transcribe-diarize", model_type: "stt", endpoint: "http://moss:8000/v1", model_name: "moss-transcribe-diarize", batch_size: 1, timeout: 900, extra: {}, is_default: true, created_at: "2025-01-05T00:00:00Z", updated_at: "2025-01-05T00:00:00Z" },
 ];
 
 const presets = [
