@@ -514,6 +514,24 @@ class TestParse:
         assert "extra_body" not in kwargs
 
     @pytest.mark.asyncio
+    async def test_malformed_saved_moss_output_format_leaves_the_transcript_raw(self, mock_openai_client):
+        transcript = "[1.12-2.32][S01] Hello everyone."
+        mock_openai_client.audio.transcriptions.create.return_value = MagicMock(text=transcript)
+        endpoint = ModelEndpointConfig(
+            endpoint="http://x",
+            model_name="moss-transcribe-diarize",
+            batch_size=1,
+            timeout=120,
+            extra={"api_key": "k", STT_TRANSCRIPT_OUTPUT_FORMAT_KEY: []},
+        )
+
+        result = await _client(mock_openai_client, transcription_endpoint_resolver=lambda: endpoint).parse(_audio_doc())
+
+        assert result.text_blocks[0].text == transcript
+        kwargs = mock_openai_client.audio.transcriptions.create.await_args.kwargs
+        assert "extra_body" not in kwargs
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize("extra", [{}, {"api_key": ""}, {"api_key": "   "}])
     async def test_stt_endpoint_without_key_does_not_receive_fallback_credential(self, monkeypatch, extra):
         from services.inference.parsers import openai_audio as module

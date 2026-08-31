@@ -1,7 +1,6 @@
 import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
 import {
   displayModelEndpointExtra,
-  isMossTranscribeDiarizeModel,
   mergeModelEndpointApiKeyExtra,
   mergeModelEndpointLlmContext,
   mergeModelEndpointMossTranscriptOutput,
@@ -348,12 +347,6 @@ describe("STT language-hint extra field", () => {
 });
 
 describe("MOSS transcript output extra field", () => {
-  it("recognizes the published model ID and OpenMOSS repository ID", () => {
-    expect(isMossTranscribeDiarizeModel("moss-transcribe-diarize")).toBe(true);
-    expect(isMossTranscribeDiarizeModel("OpenMOSS-Team/MOSS-Transcribe-Diarize")).toBe(true);
-    expect(isMossTranscribeDiarizeModel("openai/whisper-large-v3")).toBe(false);
-  });
-
   it("splits and merges the MOSS-only response formatting control", () => {
     const { mossTranscriptOutputFormat, extra } = splitModelEndpointMossTranscriptOutput({
       transcript_output_format: "moss_timestamped",

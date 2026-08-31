@@ -159,10 +159,16 @@ def _normalize_unparsed_speaker_aware_transcript(transcript: str) -> str:
     if _INCOMPLETE_DASH_RANGE.search(transcript):
         return transcript
 
+    # Without a diarization marker this is not safely identifiable as MOSS
+    # output. In particular, a genuine transcript can contain bracketed
+    # numbers such as "[2024]"; stripping them would corrupt its content.
+    if not _SPEAKER_LABEL.search(transcript):
+        return transcript
+
     without_timecodes = _TIMECODE.sub("", transcript)
     labels = list(_SPEAKER_LABEL.finditer(without_timecodes))
     if not labels:
-        return _normalize_lines(without_timecodes) or transcript
+        return transcript
 
     turns: list[tuple[str | None, str]] = []
     leading_text = _normalize_text(without_timecodes[: labels[0].start()])
@@ -179,10 +185,6 @@ def _normalize_unparsed_speaker_aware_transcript(transcript: str) -> str:
     speakers = {speaker for speaker, _ in turns if speaker is not None}
     include_speakers = len(speakers) > 1
     return "\n".join(f"[{speaker}] {text}" if include_speakers and speaker else text for speaker, text in turns)
-
-
-def _normalize_lines(text: str) -> str:
-    return "\n".join(line for raw_line in text.splitlines() if (line := _normalize_text(raw_line)))
 
 
 def _normalize_text(text: str) -> str:
