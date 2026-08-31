@@ -226,7 +226,7 @@ class StructuredSectionChunker(BaseChunker):
         heading_keywords: tuple[str, ...] | list[str] | None = None,
         leaf_patterns: tuple[str, ...] | list[str] | None = None,
         prepend_heading_path: bool = True,
-        layout: str = "auto",
+        layout: str = "flowing",
         **kwargs: Any,
     ) -> None:
         # Overlap is forced to 0: leaves are atomic, so replaying a tail would

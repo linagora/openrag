@@ -644,8 +644,10 @@ _SLIDES = [f"## Slide {i}\n\nHeadline {i} for this slide.\n\nA short supporting 
 
 
 def test_paginated_document_is_chunked_one_per_page():
-    """A page in a deck IS a section, so the page is the right boundary there."""
-    chunks = _chunker(chunk_size=512).chunk(_paged(_SLIDES))
+    """A page in a deck IS a section, so the page is the right boundary there.
+    Opt-in: the default is "flowing" until this path carries the same contract
+    as the main one (table typing, chunk_table, dewrap_paragraphs)."""
+    chunks = _chunker(chunk_size=512, layout="auto").chunk(_paged(_SLIDES))
     assert len(chunks) == len(_SLIDES), f"expected one chunk per slide, got {len(chunks)}"
     assert [c.page_number for c in chunks] == list(range(1, len(_SLIDES) + 1))
 
@@ -664,6 +666,8 @@ def test_dense_document_is_not_detected_as_paginated():
 def test_layout_can_be_forced_either_way():
     forced_off = _chunker(chunk_size=512, layout="flowing").chunk(_paged(_SLIDES))
     assert len(forced_off) < len(_SLIDES), "layout='flowing' must bypass detection"
+    # And "flowing" is the default, so a deck is NOT page-chunked unless asked.
+    assert len(_chunker(chunk_size=512).chunk(_paged(_SLIDES))) == len(forced_off)
     dense = [f"## Section {i}\n\n" + " ".join(f"word{j}" for j in range(300)) for i in range(10)]
     forced_on = _chunker(chunk_size=512, layout="paginated").chunk(_paged(dense))
     assert len(forced_on) == len(dense), "layout='paginated' must force page boundaries"

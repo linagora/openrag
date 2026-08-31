@@ -46,7 +46,7 @@ class ChunkerConfig(ConfigMixin):
     # StructuredSectionChunker._looks_paginated); "paginated" and "flowing"
     # force it. Deliberately conservative in auto: chunking a 400-page report
     # per page would be far worse than not firing on a real deck.
-    layout: Literal["auto", "paginated", "flowing"] = "auto"
+    layout: Literal["auto", "paginated", "flowing"] = "flowing"
     heading_keywords: list[str] | None = None
     leaf_patterns: list[str] | None = None
 
