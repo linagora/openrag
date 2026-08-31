@@ -823,9 +823,13 @@ async def test_update_stt_endpoint_validates_model_and_language_hint(async_clien
         invalid_output_format = await client.put(
             "/model-endpoints/stt/default", json={"extra": {"transcript_output_format": "raw"}}
         )
+        invalid_structured_output_format = await client.put(
+            "/model-endpoints/stt/default", json={"extra": {"transcript_output_format": []}}
+        )
         valid = await client.put("/model-endpoints/stt/default", json={"extra": {"language": "fr"}})
 
     assert invalid.status_code == 422
     assert invalid_output_format.status_code == 422
+    assert invalid_structured_output_format.status_code == 422
     assert valid.status_code == 200
     assert model_service.calls == [("update", {"name": "default", "model_type": "stt", "extra": {"language": "fr"}})]

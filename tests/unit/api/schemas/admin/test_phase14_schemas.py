@@ -59,7 +59,7 @@ def test_create_stt_endpoint_accepts_supported_moss_output_formats(output_format
     assert request.extra == {"transcript_output_format": output_format}
 
 
-@pytest.mark.parametrize("output_format", ["raw", "moss", "", True])
+@pytest.mark.parametrize("output_format", ["raw", "moss", "", True, [], {}])
 def test_create_stt_endpoint_rejects_unknown_transcript_output_format(output_format):
     with pytest.raises(ValidationError, match="extra.transcript_output_format"):
         CreateModelEndpointRequest(

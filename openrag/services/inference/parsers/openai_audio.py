@@ -279,7 +279,7 @@ class OpenAIAudioClient(BaseClientParser):
         if endpoint is None:
             return None
         output_format = endpoint.extra.get(STT_TRANSCRIPT_OUTPUT_FORMAT_KEY)
-        if output_format in {
+        if isinstance(output_format, str) and output_format in {
             MOSS_TIMESTAMPED_TRANSCRIPT_OUTPUT_FORMAT,
             MOSS_SPEAKER_AWARE_TRANSCRIPT_OUTPUT_FORMAT,
         }:

@@ -115,7 +115,8 @@ def validate_stt_fields(model_name: str | None, extra: dict[str, Any] | None) ->
 
     if extra is None or STT_TRANSCRIPT_OUTPUT_FORMAT_KEY not in extra:
         return
-    if extra[STT_TRANSCRIPT_OUTPUT_FORMAT_KEY] not in MOSS_TRANSCRIPT_OUTPUT_FORMATS:
+    output_format = extra[STT_TRANSCRIPT_OUTPUT_FORMAT_KEY]
+    if not isinstance(output_format, str) or output_format not in MOSS_TRANSCRIPT_OUTPUT_FORMATS:
         raise ValueError(
             f"extra.{STT_TRANSCRIPT_OUTPUT_FORMAT_KEY} must be one of {sorted(MOSS_TRANSCRIPT_OUTPUT_FORMATS)!r}"
         )

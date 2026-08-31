@@ -266,11 +266,6 @@ export function mergeModelEndpointSttLanguage(
   return result;
 }
 
-/** The MOSS-only UI control is shown for the published model ID and served aliases. */
-export function isMossTranscribeDiarizeModel(modelName: string | null | undefined): boolean {
-  return modelName?.trim().toLowerCase().includes("moss-transcribe-diarize") ?? false;
-}
-
 /** Pull MOSS response formatting out of raw endpoint extra for its dedicated control. */
 export function splitModelEndpointMossTranscriptOutput(extra: Record<string, unknown>): {
   mossTranscriptOutputFormat: MossTranscriptOutputFormat;

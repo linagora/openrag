@@ -65,6 +65,12 @@ def test_speaker_aware_output_removes_clock_timecodes_from_raw_lines():
     assert normalize_moss_speaker_aware_transcript(transcript) == "Hello everyone.\nThis week."
 
 
+def test_speaker_aware_output_preserves_unrecognized_text_without_speaker_labels():
+    transcript = "The [2024] roadmap is ready."
+
+    assert normalize_moss_speaker_aware_transcript(transcript) == transcript
+
+
 @pytest.mark.parametrize(
     "transcript",
     [
