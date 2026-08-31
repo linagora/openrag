@@ -31,13 +31,16 @@ _COMPACT_SEGMENT = re.compile(
     rf"(?=\s*(?:\[\s*{_TIMESTAMP}\s*\](?:\s*\[\s*{_SPEAKER}\s*\])?|\Z))",
     re.DOTALL,
 )
-# A compact turn may be cut off before its closing timestamp. Its speaker
-# marker still makes it unambiguously distinct from dash-style transcript text.
-_COMPACT_SPEAKER_TURN_START = re.compile(rf"\[\s*{_TIMESTAMP}\s*\]\s*\[\s*{_SPEAKER}\s*\]")
+# A compact turn may be cut off before its closing timestamp. Its complete or
+# partial speaker marker still makes it distinct from dash-style transcript text.
+_COMPACT_SPEAKER_TURN_START = re.compile(rf"\[\s*{_TIMESTAMP}\s*\]\s*\[\s*[Ss]\d*\s*\]?")
 # A trailing range without its speaker label is an incomplete MOSS segment,
 # whether its closing bracket has arrived or not. Treat it as a parser mismatch
 # so the caller receives the original response instead of partial normalization.
 _INCOMPLETE_DASH_RANGE = re.compile(r"\[\s*\d+(?:\.\d+)?\s*-\s*(?:\d+(?:\.\d*)?)?\s*\]?\s*$")
+# A partial speaker label after a complete dash range is likewise an incomplete
+# second turn, not text belonging to the preceding speaker.
+_INCOMPLETE_DASH_SPEAKER_LABEL = re.compile(rf"\[\s*{_TIMESTAMP}\s*-\s*{_TIMESTAMP}\s*\]\s*\[\s*[Ss]?\d*\s*$")
 _TIMECODE_TOKEN = (
     rf"\[\s*(?:{_CLOCK_TIMESTAMP}|{_TIMESTAMP})"
     rf"(?:\s*-\s*(?:{_CLOCK_TIMESTAMP}|{_TIMESTAMP}))?\s*\]"
@@ -45,6 +48,7 @@ _TIMECODE_TOKEN = (
 _TIMECODE_BEFORE_SPEAKER_LABEL = re.compile(rf"{_TIMECODE_TOKEN}\s*(?=\[\s*{_SPEAKER}\s*\])")
 _TIMECODE_AT_TURN_END = re.compile(rf"\s*{_TIMECODE_TOKEN}(?=\s*(?:\[\s*{_SPEAKER}\s*\]|\Z))")
 _SPEAKER_LABEL = re.compile(rf"\[\s*(?P<speaker>{_SPEAKER})\s*\]")
+_TRAILING_SPEAKER_LABEL_FRAGMENT = re.compile(r"\[\s*[Ss]\d*\s*\]?\s*$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -140,7 +144,7 @@ def _parse_segments_with_pattern(
             or end < start
             or not speaker
             or not text
-            or _INCOMPLETE_DASH_RANGE.search(text)
+            or _has_incomplete_dash_fragment(text)
         ):
             return []
         segments.append(_MossSegment(start=start, end=end, speaker=_normalize_speaker_id(speaker), text=text))
@@ -164,7 +168,11 @@ def _normalize_speaker_id(speaker: str) -> str:
 
 def _normalize_unparsed_speaker_aware_transcript(transcript: str) -> str:
     """Clean MOSS-like raw output without losing an unrecognized response."""
-    if _INCOMPLETE_DASH_RANGE.search(transcript):
+    if (
+        _has_incomplete_dash_fragment(transcript)
+        or _COMPACT_SPEAKER_TURN_START.search(transcript)
+        or _TRAILING_SPEAKER_LABEL_FRAGMENT.search(transcript)
+    ):
         return transcript
 
     # Without a diarization marker this is not safely identifiable as MOSS
@@ -199,15 +207,17 @@ def _strip_boundary_timecodes(transcript: str) -> str:
     """Remove only MOSS timecodes adjacent to a speaker-turn boundary.
 
     A global timecode substitution would also erase spoken bracketed values
-    such as ``[2024]`` inside a turn. Boundary markers may be adjacent after
-    one another is removed, so repeat until the text is stable.
+    such as ``[2024]`` inside a turn. Remove start markers first, then make
+    one end-marker pass; re-scanning would turn a spoken value that preceded a
+    real boundary marker into a false boundary after that marker is removed.
     """
-    while True:
-        normalized = _TIMECODE_BEFORE_SPEAKER_LABEL.sub("", transcript)
-        normalized = _TIMECODE_AT_TURN_END.sub("", normalized)
-        if normalized == transcript:
-            return normalized
-        transcript = normalized
+    without_start_timecodes = _TIMECODE_BEFORE_SPEAKER_LABEL.sub("", transcript)
+    return _TIMECODE_AT_TURN_END.sub("", without_start_timecodes)
+
+
+def _has_incomplete_dash_fragment(text: str) -> bool:
+    """Whether *text* ends inside a dash-style MOSS turn boundary."""
+    return _INCOMPLETE_DASH_RANGE.search(text) is not None or _INCOMPLETE_DASH_SPEAKER_LABEL.search(text) is not None
 
 
 def _normalize_text(text: str) -> str:

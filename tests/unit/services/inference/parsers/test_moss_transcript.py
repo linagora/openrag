@@ -45,6 +45,42 @@ def test_preserves_mixed_output_when_its_compact_turn_is_truncated(normalize):
     assert normalize(transcript) == transcript
 
 
+@pytest.mark.parametrize(
+    "normalize",
+    [normalize_moss_timestamped_transcript, normalize_moss_speaker_aware_transcript],
+)
+def test_preserves_mixed_output_when_its_compact_speaker_label_is_truncated(normalize):
+    transcript = "[1-2][S01] Hello [2][S02"
+
+    assert normalize(transcript) == transcript
+
+
+@pytest.mark.parametrize(
+    "normalize",
+    [normalize_moss_timestamped_transcript, normalize_moss_speaker_aware_transcript],
+)
+def test_preserves_dash_output_when_its_next_speaker_label_is_truncated(normalize):
+    transcript = "[1-2][S01] Hello [3-4][S02"
+
+    assert normalize(transcript) == transcript
+
+
+def test_speaker_aware_output_preserves_standalone_truncated_compact_turn():
+    transcript = "[1][S01] Hello"
+
+    assert normalize_moss_speaker_aware_transcript(transcript) == transcript
+
+
+@pytest.mark.parametrize(
+    "normalize",
+    [normalize_moss_timestamped_transcript, normalize_moss_speaker_aware_transcript],
+)
+def test_preserves_output_with_an_empty_trailing_speaker_turn(normalize):
+    transcript = "[1-2][S01] Hello [3-4][S02]"
+
+    assert normalize(transcript) == transcript
+
+
 def test_normalizes_moss_timestamps_across_hour_boundary():
     transcript = "[3599.9995-3601][S01] Long recording."
 
@@ -79,6 +115,12 @@ def test_speaker_aware_output_preserves_spoken_bracketed_numbers():
     transcript = "[00:00:01.000] [S01] The [2024] roadmap is ready. [00:00:02.000]"
 
     assert normalize_moss_speaker_aware_transcript(transcript) == "The [2024] roadmap is ready."
+
+
+def test_speaker_aware_output_does_not_cascade_into_spoken_bracketed_numbers():
+    transcript = "[00:00:01] [S01] Read section [2] [00:00:02]\n[00:00:02] [S02] Continue. [00:00:03]"
+
+    assert normalize_moss_speaker_aware_transcript(transcript) == "[S01] Read section [2]\n[S02] Continue."
 
 
 def test_speaker_aware_output_preserves_unrecognized_text_without_speaker_labels():
