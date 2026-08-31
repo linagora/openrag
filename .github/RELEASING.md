@@ -237,6 +237,9 @@ Compare against `$VER` exactly. A filter that merely matches something
 version-shaped is satisfied by a stale pin left at the previous release — which
 is the regression this step is meant to catch.
 
+The chart half needs `python3` with PyYAML (`pip install pyyaml`). If it is
+missing the check exits non-zero and step 8 fails — it does not skip.
+
 ```bash
 fail=0
 # appVersion must be $VER without its leading v
@@ -247,46 +250,96 @@ got_app=$(git show "$VER:infra/charts/openrag-stack/Chart.yaml" \
   && echo "OK    appVersion=$got_app" \
   || { echo "FAIL  appVersion=$got_app want=$want_app"; fail=1; }
 
-# Read the `tag:` that is a sibling of `repository: "<repo>"` within the same
-# `image:` block. Comments are stripped first and the repository must occur
-# exactly once, so a commented-out or duplicated pin cannot steer the lookup at
-# a neighbouring block's tag. Prints "<occurrences>\t<tag>".
-pin_for() {
-  awk -v want="$1" '
-    { sub(/#.*/, "") }
-    match($0, /^[[:space:]]*repository:[[:space:]]*"[^"]*"[[:space:]]*$/) {
-      ind = index($0, "repository") - 1
-      v = $0; sub(/^[^"]*"/, "", v); sub(/".*$/, "", v)
-      if (v == want) { n++; pend = 1; pind = ind } else { pend = 0 }
-      next
-    }
-    pend && match($0, /^[[:space:]]*tag:[[:space:]]*"[^"]*"[[:space:]]*$/) {
-      if (index($0, "tag") - 1 == pind) {
-        v = $0; sub(/^[^"]*"/, "", v); sub(/".*$/, "", v)
-        tag = v; pend = 0
-      }
-      next
-    }
-    END { printf "%d\t%s\n", n + 0, tag }
-  '
+# The chart pins are read with a real YAML parser, not by pattern-matching
+# lines. Two earlier text-based attempts both shipped false passes: `grep -A4`
+# matched a repository named inside a comment, and an awk scanner whose
+# `pending` state outlived its `image:` block consumed a *later* block's tag —
+# so a repository with no `tag:` at all reported the next block's version and
+# the gate passed. Parsing structurally removes that whole class: comments are
+# gone by construction, block boundaries are real, and a duplicate key raises
+# instead of silently resolving to one of the two values.
+#
+# Duplicate keys matter here: YAML resolves them last-wins, which is the value
+# Helm would deploy, while a scanner that stops at the first match reads the
+# other one. Rather than pick a side, reject the file.
+chart_pins() {
+  # NB: the program is held in a variable and run with `-c`. Writing
+  # `python3 - "$1"` would read the *program* from stdin, leaving nothing for
+  # the piped values.yaml — the check then finds no image blocks at all.
+  local prog
+  prog=$(cat <<'PY'
+import sys, yaml
+
+VER = sys.argv[1]
+
+
+class StrictLoader(yaml.SafeLoader):
+    pass
+
+
+def no_duplicates(loader, node, deep=False):
+    seen = {}
+    for key_node, value_node in node.value:
+        key = loader.construct_object(key_node, deep=deep)
+        if key in seen:
+            raise ValueError(
+                f"duplicate key {key!r} at line {key_node.start_mark.line + 1} "
+                "— refusing to guess which value Helm would use"
+            )
+        seen[key] = loader.construct_object(value_node, deep=deep)
+    return seen
+
+
+StrictLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, no_duplicates
+)
+
+
+def image_blocks(node):
+    """Every mapping that declares a `repository` key."""
+    if isinstance(node, dict):
+        if "repository" in node:
+            yield node
+        for value in node.values():
+            yield from image_blocks(value)
+    elif isinstance(node, list):
+        for value in node:
+            yield from image_blocks(value)
+
+
+try:
+    doc = yaml.load(sys.stdin.read(), Loader=StrictLoader)
+except Exception as exc:
+    print(f"FAIL  values.yaml did not parse: {exc}")
+    sys.exit(1)
+
+# Checked by repository. Do NOT just count version-shaped tags: values.yaml
+# also pins third-party images (vllm, milvus, infinity) whose versions have
+# nothing to do with this release.
+fail = 0
+for repo in ("linagora/openrag-ray", "linagoraai/openrag-admin-ui", "linagoraai/openrag"):
+    found = [b for b in image_blocks(doc) if b.get("repository") == repo]
+    if len(found) != 1:
+        print(f"FAIL  {repo} -> {len(found)} image block(s) (want exactly 1)")
+        fail = 1
+        continue
+    tag = found[0].get("tag")
+    if tag is None:
+        print(f"FAIL  {repo} -> no sibling tag: (image is unpinned)")
+        fail = 1
+    elif tag != VER:
+        print(f"FAIL  {repo} -> {tag} (want {VER})")
+        fail = 1
+    else:
+        print(f"OK    {repo} -> {tag}")
+
+sys.exit(fail)
+PY
+)
+  python3 -c "$prog" "$1"
 }
 
-# Each OpenRag image in the chart, checked by repository. Do NOT just count
-# version-shaped tags: values.yaml also pins third-party images (vllm, milvus,
-# infinity) whose versions have nothing to do with this release.
-# An empty result means the values layout changed and this check no longer finds
-# the pin — that is a FAIL, not a pass.
-values=$(git show "$VER:infra/charts/openrag-stack/values.yaml")
-for repo in 'linagora/openrag-ray' 'linagoraai/openrag-admin-ui' 'linagoraai/openrag'; do
-  IFS=$'\t' read -r n got < <(printf '%s\n' "$values" | pin_for "$repo")
-  if [ "$n" -ne 1 ]; then
-    echo "FAIL  $repo -> $n active repository entries (want exactly 1)"; fail=1
-  elif [ "$got" = "$VER" ]; then
-    echo "OK    $repo -> $got"
-  else
-    echo "FAIL  $repo -> ${got:-NO SIBLING tag:} (want $VER)"; fail=1
-  fi
-done
+git show "$VER:infra/charts/openrag-stack/values.yaml" | chart_pins "$VER" || fail=1
 
 # compose pins. Take the value of every *active* `image:` field, then match it
 # as a fixed whole string: interpolating $VER into a regex would let the dots in
