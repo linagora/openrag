@@ -30,6 +30,12 @@ def test_normalizes_initial_speakerless_turn_with_a_shared_boundary():
     assert normalize_moss_speaker_aware_transcript(transcript) == "[S01] Hello\n[S02] Hi"
 
 
+def test_normalizes_labelled_compact_turns_with_a_shared_boundary():
+    transcript = "[0][S01] A [1][S02] B [2]"
+
+    assert normalize_moss_speaker_aware_transcript(transcript) == "[S01] A\n[S02] B"
+
+
 def test_compact_boundaries_do_not_consume_spoken_bracketed_numbers():
     transcript = "[1][S01] Read section [2] [3][3][S02] Next [4]"
 
