@@ -147,6 +147,21 @@ describe("PresetsPage parsing configuration", () => {
     listModelEndpointsMock.mockReset();
   });
 
+  it("marks both STT parsing controls as new", async () => {
+    listPresetsMock.mockResolvedValue([makePreset()]);
+    listAllPromptsMock.mockResolvedValue([]);
+    listModelEndpointsMock.mockResolvedValue([]);
+    const user = userEvent.setup();
+
+    renderPage();
+    await user.click(await screen.findByRole("button", { name: "Edit" }));
+
+    for (const label of ["STT endpoint", "Transcription prompt"]) {
+      const labelNode = screen.getByText(label);
+      expect(within(labelNode.parentElement!).getByText("NEW")).toBeTruthy();
+    }
+  });
+
   it("submits explicit STT selections and can clear both back to inherited defaults", async () => {
     listPresetsMock.mockResolvedValue([makePreset()]);
     updatePresetMock.mockResolvedValue(makePreset());

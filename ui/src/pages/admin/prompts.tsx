@@ -31,6 +31,7 @@ import {
 } from "@/lib/prompt-meta";
 import { PageHeader } from "@/components/shared/page-header";
 import { ConfirmDialog } from "@/components/shared/confirm-dialog";
+import { NewBadge } from "@/components/shared/new-badge";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
@@ -179,8 +180,11 @@ export default function PromptsPage() {
             return (
               <section key={group.name}>
                 <div className="mb-3">
-                  <h2 className="text-xs font-bold uppercase tracking-wider text-muted-foreground">
+                  <h2 className="flex items-center gap-1.5 text-xs font-bold uppercase tracking-wider text-muted-foreground">
                     {group.name}
+                    {group.types.some((type) => type.value === "asr_transcription") && (
+                      <NewBadge feature="prompts.asr_transcription" />
+                    )}
                   </h2>
                   <p className="text-xs text-muted-foreground/70">{group.description}</p>
                 </div>

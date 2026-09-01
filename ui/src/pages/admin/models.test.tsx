@@ -58,6 +58,21 @@ describe("ModelsPage STT validation", () => {
     });
   });
 
+  it("marks the STT entry point and MOSS speaker-aware option as new", async () => {
+    const user = userEvent.setup();
+    renderPage();
+
+    await screen.findByText("No embedder endpoints configured.");
+    const sttTab = screen.getByRole("tab", { name: /stt/i });
+    expect(within(sttTab).getByText("NEW")).toBeTruthy();
+
+    await user.click(sttTab);
+    await user.click(screen.getByRole("button", { name: /add endpoint/i }));
+
+    const mossLabel = within(screen.getByRole("dialog")).getByText("Speaker-aware MOSS transcript");
+    expect(within(mossLabel.parentElement!).getByText("NEW")).toBeTruthy();
+  });
+
   it("validates an STT draft with the timeout currently entered in the form", async () => {
     const user = userEvent.setup();
     renderPage();

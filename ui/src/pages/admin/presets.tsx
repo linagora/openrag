@@ -15,7 +15,7 @@ import type { PromptResponse } from "@/lib/api/prompts";
 import { listModelEndpoints, pickDefaultEndpoint } from "@/lib/api/models";
 import { PageHeader } from "@/components/shared/page-header";
 import { ConfirmDialog } from "@/components/shared/confirm-dialog";
-import { useNewOptions } from "@/components/shared/new-badge";
+import { NewBadge, useNewOptions } from "@/components/shared/new-badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -394,7 +394,10 @@ function IndexationPresetForm({
             </Select>
           </div>
           <div className="min-w-0 space-y-1.5">
-            <Label className="text-xs">STT endpoint</Label>
+            <Label className="flex items-center gap-1.5 text-xs">
+              STT endpoint
+              <NewBadge feature="presets.stt_endpoint" />
+            </Label>
             <Select
               value={configGet(config, "stt", STT_ENDPOINT_DEFAULT_OPTION)}
               onValueChange={(v) => set("stt", v === STT_ENDPOINT_DEFAULT_OPTION ? null : v)}
@@ -417,6 +420,7 @@ function IndexationPresetForm({
           <div className="min-w-0 sm:col-span-2">
             <PromptSelect
               label="Transcription prompt"
+              newFeature="presets.asr_transcription_prompt"
               prompts={promptsByType("asr_transcription")}
               value={configGet(config, "asr_transcription_prompt_name", "")}
               onChange={(v) => set("asr_transcription_prompt_name", v || null)}
@@ -662,12 +666,14 @@ function FeatureToggle({
 
 function PromptSelect({
   label,
+  newFeature,
   prompts,
   value,
   onChange,
   selectTriggerClassName,
 }: {
   label: string;
+  newFeature?: string;
   prompts: PromptResponse[];
   value: string;
   onChange: (v: string) => void;
@@ -677,6 +683,7 @@ function PromptSelect({
     <div className="space-y-1.5">
       <div className="flex items-center gap-1">
         <Label className="text-xs">{label}</Label>
+        {newFeature && <NewBadge feature={newFeature} />}
         {prompts.length > 0 && <PromptViewButton prompts={prompts} selectedName={value} />}
       </div>
       <Select

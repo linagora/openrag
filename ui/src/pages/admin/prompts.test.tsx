@@ -58,6 +58,15 @@ describe("PromptsPage ASR prompt scope", () => {
     listAllPromptsMock.mockReset();
   });
 
+  it("marks the transcription prompt section as new", async () => {
+    listAllPromptsMock.mockResolvedValue([makeAsrPrompt()]);
+
+    renderPage();
+
+    const heading = await screen.findByRole("heading", { name: /transcription/i });
+    expect(within(heading).getByText("NEW")).toBeTruthy();
+  });
+
   it("explains inherited and explicitly selected ASR prompts differently", async () => {
     listAllPromptsMock.mockResolvedValue([
       makeAsrPrompt(),

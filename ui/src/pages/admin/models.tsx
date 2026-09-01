@@ -45,6 +45,7 @@ import type {
 } from "@/lib/api/models";
 import { PageHeader } from "@/components/shared/page-header";
 import { ConfirmDialog } from "@/components/shared/confirm-dialog";
+import { NewBadge } from "@/components/shared/new-badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -92,10 +93,19 @@ const NAME_MAX_LENGTH = 128;
 // a given deployment's actual default.
 const BUDGET_PLACEHOLDER = "System default";
 
-function LabelWithInfo({ label, tooltip }: { label: string; tooltip: string }) {
+function LabelWithInfo({
+  label,
+  tooltip,
+  newFeature,
+}: {
+  label: string;
+  tooltip: string;
+  newFeature?: string;
+}) {
   return (
     <div className="flex items-center gap-1.5">
       <Label>{label}</Label>
+      {newFeature && <NewBadge feature={newFeature} />}
       <TooltipProvider>
         <Tooltip>
           <TooltipTrigger asChild>
@@ -194,8 +204,9 @@ export default function ModelsPage() {
       <Tabs value={activeTab} onValueChange={setActiveTab}>
         <TabsList>
           {MODEL_TYPES.map((t) => (
-            <TabsTrigger key={t} value={t} className="capitalize">
+            <TabsTrigger key={t} value={t} aria-label={t} className="capitalize">
               {t}
+              <NewBadge feature={`models.${t}`} />
             </TabsTrigger>
           ))}
         </TabsList>
@@ -863,6 +874,7 @@ function EndpointDialog({
                 <LabelWithInfo
                   label="Speaker-aware MOSS transcript"
                   tooltip="Normalize complete MOSS diarized responses after transcription. This also works with a served-model alias and is never sent to the provider."
+                  newFeature="models.stt.moss_speaker_aware"
                 />
                 <p className="text-xs text-muted-foreground">
                   Remove timecodes and keep speaker labels only when MOSS identifies more than one speaker.

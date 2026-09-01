@@ -23,11 +23,13 @@ import {
 } from "@/components/ui/sidebar";
 import { APP_NAME } from "@/lib/brand";
 import { usePermissions, type Permissions } from "@/lib/permissions";
+import { NewBadge } from "@/components/shared/new-badge";
 
 interface NavItem {
   title: string;
   href: string;
   icon: React.ComponentType<{ className?: string }>;
+  newFeature?: string;
   // Visible to everyone if absent; otherwise only when the capability passes.
   requires?: (p: Permissions) => boolean;
 }
@@ -38,7 +40,7 @@ const navItems: NavItem[] = [
   { title: "Overview", href: "/", icon: LayoutDashboard },
   { title: "Partitions", href: "/partitions", icon: Database },
   { title: "Documents", href: "/documents", icon: FileText },
-  { title: "Jobs", href: "/jobs", icon: Clock },
+  { title: "Jobs", href: "/jobs", icon: Clock, newFeature: "nav.jobs" },
   { title: "Models", href: "/models", icon: Cpu, requires: (p) => p.canManageModels },
   { title: "Presets", href: "/presets", icon: Settings, requires: (p) => p.canManagePresets },
   { title: "Prompts", href: "/prompts", icon: MessageSquareText, requires: (p) => p.canManagePrompts },
@@ -65,6 +67,7 @@ export function AppSidebar() {
         <Link
           to={item.href}
           title={item.title}
+          aria-label={item.newFeature ? item.title : undefined}
           className={`relative flex items-center gap-3 px-3 py-2 rounded-xl text-sm font-medium transition-colors overflow-hidden group-data-[collapsible=icon]:justify-center group-data-[collapsible=icon]:px-0 ${
             active
               ? "bg-sidebar-accent text-sidebar-accent-foreground shadow-sm"
@@ -73,6 +76,12 @@ export function AppSidebar() {
         >
           <item.icon className="h-4.5 w-4.5 shrink-0" />
           <span className="truncate group-data-[collapsible=icon]:hidden">{item.title}</span>
+          {item.newFeature && (
+            <NewBadge
+              feature={item.newFeature}
+              className="group-data-[collapsible=icon]:hidden"
+            />
+          )}
           {active && (
             <span className="absolute right-3 h-1.5 w-1.5 rounded-full bg-sidebar-primary shrink-0 group-data-[collapsible=icon]:hidden" />
           )}
