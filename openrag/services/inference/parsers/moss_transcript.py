@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
 from decimal import Decimal
 
 _SECONDS = r"\d+(?:\.\d+)?"
@@ -16,148 +15,118 @@ _DASH_START = re.compile(
     rf"\[\s*(?P<start>{_SECONDS})\s*-\s*(?P<end>{_SECONDS})\s*\]\s*"
     rf"\[\s*(?P<speaker>{_SPEAKER})\s*\]",
 )
-_DASH_TOKEN = re.compile(rf"\[\s*{_SECONDS}\s*-\s*{_SECONDS}\s*\]")
-_PARTIAL_DASH_TOKEN = re.compile(r"\[\s*\d+(?:\.\d+)?\s*-\s*(?:\d+(?:\.\d*)?)?\s*\]?")
+_DASH_MARKER = re.compile(r"\[\s*\d+(?:\.\d+)?\s*-")
+_DASH_CONTENT_MARKER = re.compile(rf"{_TIME_TOKEN}|\[\s*(?:[Ss]\d*|\d+(?:\.\d+)?\s*-)")
 _COMPACT_START = re.compile(
     rf"\[\s*(?P<start>{_TIME})\s*\]\s*\[\s*(?P<speaker>{_SPEAKER})\s*\]",
 )
 _INITIAL_TIME = re.compile(rf"^\s*\[\s*(?P<start>{_TIME})\s*\]")
 _TRAILING_TIME = re.compile(rf"\[\s*(?P<end>{_TIME})\s*\]\s*$")
-_ADJACENT_TIME_TOKENS = re.compile(rf"{_TIME_TOKEN}\s*{_TIME_TOKEN}")
+_ADJACENT_TIMES = re.compile(rf"{_TIME_TOKEN}\s*{_TIME_TOKEN}")
 _SPEAKER_LABEL = re.compile(rf"\[\s*(?P<speaker>{_SPEAKER})\s*\]")
 _SPEAKER_MARKER = re.compile(r"\[\s*[Ss]\d*")
-_PARTIAL_SPEAKER_LABEL = re.compile(r"\[\s*[Ss]\d*\s*\]?\s*$")
 
-
-@dataclass(frozen=True, slots=True)
-class _MossSegment:
-    speaker: str
-    text: str
+_Segment = tuple[str, str]
 
 
 def normalize_moss_speaker_aware_transcript(transcript: str) -> str:
-    """Remove timecodes from complete MOSS turns and retain useful labels.
-
-    A response is normalized only when one supported syntax consumes it in
-    full. Ambiguous or incomplete output is returned unchanged so transcript
-    content is never mistaken for a MOSS boundary.
-    """
-    segments = _parse_dash_segments(transcript)
-    if not segments:
-        segments = _parse_compact_segments(transcript)
-    if not segments:
-        segments = _parse_speaker_only_segments(transcript)
-    if not segments:
+    """Remove boundaries only when the complete MOSS syntax is recognized."""
+    for parser in (_parse_dash, _parse_compact, _parse_speaker_only):
+        segments = parser(transcript)
+        if segments:
+            break
+    else:
         return transcript
 
-    include_speakers = len({segment.speaker for segment in segments}) > 1
-    return "\n".join(
-        f"[{segment.speaker}] {segment.text}" if include_speakers else segment.text for segment in segments
-    )
+    include_speakers = len({speaker for speaker, _ in segments}) > 1
+    return "\n".join(f"[{speaker}] {text}" if include_speakers else text for speaker, text in segments)
 
 
-def _parse_dash_segments(transcript: str) -> list[_MossSegment]:
+def _parse_dash(transcript: str) -> list[_Segment]:
     starts = list(_DASH_START.finditer(transcript))
-    if not starts or transcript[: starts[0].start()].strip() or _PARTIAL_SPEAKER_LABEL.search(transcript):
+    if not starts or transcript[: starts[0].start()].strip():
         return []
 
-    segments: list[_MossSegment] = []
-    for index, start in enumerate(starts):
-        if Decimal(start.group("end")) < Decimal(start.group("start")):
+    segments: list[_Segment] = []
+    for index, match in enumerate(starts):
+        if Decimal(match["end"]) < Decimal(match["start"]):
             return []
         end = starts[index + 1].start() if index + 1 < len(starts) else len(transcript)
-        text = _normalize_text(transcript[start.end() : end])
-        if (
-            not text
-            or _DASH_TOKEN.search(text)
-            or _PARTIAL_DASH_TOKEN.search(text)
-            or _COMPACT_START.search(text)
-            or _SPEAKER_MARKER.search(text)
-        ):
+        text = _normalize_text(transcript[match.end() : end])
+        if not text or _DASH_CONTENT_MARKER.search(text):
             return []
-        segments.append(_MossSegment(_normalize_speaker_id(start.group("speaker")), text))
+        segments.append((_normalize_speaker(match["speaker"]), text))
     return segments
 
 
-def _parse_compact_segments(transcript: str) -> list[_MossSegment]:
+def _parse_compact(transcript: str) -> list[_Segment]:
     starts = list(_COMPACT_START.finditer(transcript))
-    if not starts or _DASH_TOKEN.search(transcript) or _PARTIAL_DASH_TOKEN.search(transcript):
+    if not starts or _DASH_MARKER.search(transcript):
         return []
 
     regions: list[tuple[str, str, int, int]] = []
-    initial_time = _INITIAL_TIME.match(transcript)
-    if initial_time and initial_time.end() <= starts[0].start():
-        regions.append(("S01", initial_time.group("start"), initial_time.end(), starts[0].start()))
+    initial = _INITIAL_TIME.match(transcript)
+    if initial and initial.end() <= starts[0].start():
+        regions.append(("S01", initial["start"], initial.end(), starts[0].start()))
     elif transcript[: starts[0].start()].strip():
         return []
 
-    for index, start in enumerate(starts):
+    for index, match in enumerate(starts):
         end = starts[index + 1].start() if index + 1 < len(starts) else len(transcript)
-        regions.append((start.group("speaker"), start.group("start"), start.end(), end))
+        regions.append((match["speaker"], match["start"], match.end(), end))
 
-    segments: list[_MossSegment] = []
+    segments: list[_Segment] = []
     for speaker, start_time, start, end in regions:
         region = transcript[start:end]
-        trailing_time = _TRAILING_TIME.search(region)
-        if trailing_time is None or not _is_valid_time_range(start_time, trailing_time.group("end")):
+        trailing = _TRAILING_TIME.search(region)
+        if trailing is None or not _valid_range(start_time, trailing["end"]):
             return []
-        text = _normalize_text(region[: trailing_time.start()])
-        if (
-            not text
-            or _ADJACENT_TIME_TOKENS.search(text)
-            or _COMPACT_START.search(text)
-            or _DASH_TOKEN.search(text)
-            or _SPEAKER_MARKER.search(text)
-        ):
+        text = _normalize_text(region[: trailing.start()])
+        if not text or _ADJACENT_TIMES.search(text) or _SPEAKER_MARKER.search(text):
             return []
-        segments.append(_MossSegment(_normalize_speaker_id(speaker), text))
+        segments.append((_normalize_speaker(speaker), text))
     return segments
 
 
-def _parse_speaker_only_segments(transcript: str) -> list[_MossSegment]:
+def _parse_speaker_only(transcript: str) -> list[_Segment]:
     labels = list(_SPEAKER_LABEL.finditer(transcript))
-    markers = list(_SPEAKER_MARKER.finditer(transcript))
     if (
         not labels
-        or len(markers) != len(labels)
+        or len(labels) != len(_SPEAKER_MARKER.findall(transcript))
         or transcript[: labels[0].start()].strip()
-        or _PARTIAL_SPEAKER_LABEL.search(transcript)
-        or _DASH_TOKEN.search(transcript)
+        or _DASH_MARKER.search(transcript)
         or _COMPACT_START.search(transcript)
     ):
         return []
 
-    segments: list[_MossSegment] = []
+    segments: list[_Segment] = []
     for index, label in enumerate(labels):
         end = labels[index + 1].start() if index + 1 < len(labels) else len(transcript)
         text = _normalize_text(transcript[label.end() : end])
-        if not text or _DASH_TOKEN.search(text) or _COMPACT_START.search(text):
+        if not text:
             return []
-        segments.append(_MossSegment(_normalize_speaker_id(label.group("speaker")), text))
+        segments.append((_normalize_speaker(label["speaker"]), text))
     return segments
 
 
-def _normalize_speaker_id(speaker: str) -> str:
+def _normalize_speaker(speaker: str) -> str:
     digits = speaker[1:].lstrip("0") or "0"
     return f"S{digits.zfill(2)}"
 
 
-def _is_valid_time_range(start: str, end: str) -> bool:
-    start_seconds = _time_in_seconds(start)
-    end_seconds = _time_in_seconds(end)
+def _valid_range(start: str, end: str) -> bool:
+    start_seconds = _seconds(start)
+    end_seconds = _seconds(end)
     return start_seconds is not None and end_seconds is not None and end_seconds >= start_seconds
 
 
-def _time_in_seconds(value: str) -> Decimal | None:
+def _seconds(value: str) -> Decimal | None:
     if ":" not in value:
         return Decimal(value)
-
     hours, minutes, seconds = value.replace(",", ".").split(":")
-    minute_value = int(minutes)
-    second_value = Decimal(seconds)
-    if minute_value >= 60 or second_value >= 60:
+    if int(minutes) >= 60 or Decimal(seconds) >= 60:
         return None
-    return Decimal(hours) * 3600 + Decimal(minute_value) * 60 + second_value
+    return Decimal(hours) * 3600 + Decimal(minutes) * 60 + Decimal(seconds)
 
 
 def _normalize_text(text: str) -> str:
