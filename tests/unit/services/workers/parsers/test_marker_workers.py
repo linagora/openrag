@@ -19,6 +19,23 @@ def test_marker_num_gpus_uses_ray_cluster_resources_when_cuda_is_hidden(monkeypa
     assert marker_workers._marker_num_gpus(_config()) == 0.25
 
 
+def test_split_pages_preserves_canonical_breaks_inside_pipe_tables():
+    markdown = "[PAGE_SEP]\n| Header<br />Legend | Value<BR>Unit |\n|---|---|\n| Alpha<br/>Beta | 22 |\n{1}[PAGE_SEP]"
+
+    assert marker_workers.MarkerLoader._split_pages(markdown) == [
+        (
+            1,
+            "| Header<br>Legend | Value<br>Unit |\n|---|---|\n| Alpha<br>Beta | 22 |",
+        )
+    ]
+
+
+def test_split_pages_removes_breaks_outside_pipe_tables():
+    markdown = "[PAGE_SEP]\nFirst<br>paragraph.<br />\nSecond<BR/>paragraph.\n{1}[PAGE_SEP]"
+
+    assert marker_workers.MarkerLoader._split_pages(markdown) == [(1, "Firstparagraph.\nSecondparagraph.")]
+
+
 # ---------------------------------------------------------------------------
 # _force_kill_executor — reclaiming a wedged Marker worker (#659)
 # ---------------------------------------------------------------------------

@@ -15,16 +15,14 @@ Threading note: PyMuPDF is **not** thread-safe — concurrent calls to
 ``page.get_text`` / ``pymupdf4llm.to_markdown`` from different threads
 can raise ``ValueError: not a textpage of this page`` (upstream
 maintainer position: documented limitation, won't fix). We therefore
-serialize all pymupdf work onto a single dedicated worker thread via
-``_PYMUPDF_EXECUTOR``. The async ``parse`` method stays concurrent —
-multiple callers will queue on the executor, but only one pymupdf
-operation runs at a time.
+serialize all PyMuPDF parsing and layout-evidence work onto the shared
+executor in ``pymupdf_runtime``. The async ``parse`` method stays concurrent:
+multiple callers queue on that executor, but only one PyMuPDF operation runs
+at a time.
 """
 
 from __future__ import annotations
 
-import asyncio
-from concurrent.futures import ThreadPoolExecutor
 from typing import Literal
 
 import pymupdf
@@ -34,13 +32,11 @@ from core.utils.logging import get_logger
 from ....models.document import Document, DocumentType, ImageBlock, ProcessedDocument, TextBlock
 from ..document_parser import DocumentParser
 from ..registry import parser_registry
+from .pymupdf_runtime import run_pymupdf
 
 ParseMode = Literal["markdown", "text"]
 
 logger = get_logger()
-
-# Single dedicated worker for pymupdf — see "Threading note" in module docstring.
-_PYMUPDF_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="pymupdf")
 
 
 def _extract_text(raw: bytes, filename: str) -> tuple[list[str], list[ImageBlock]]:
@@ -111,9 +107,7 @@ class PyMuPDFParser(DocumentParser):
                 metadata=dict(document.metadata),
             )
 
-        pages, images = await asyncio.get_running_loop().run_in_executor(
-            _PYMUPDF_EXECUTOR, self._extract, document.raw_bytes, document.filename
-        )
+        pages, images = await run_pymupdf(self._extract, document.raw_bytes, document.filename)
         # Keep one TextBlock per source page (including empties) so callers
         # can preserve a 1-to-1 mapping with the original PDF's pagination.
         text_blocks = [TextBlock(text=text, page_number=i) for i, text in enumerate(pages, start=1)]

@@ -10,6 +10,7 @@ from core.config.indexation_pipeline import IndexationPipelineConfig
 from core.embeddings.embedder import Embedder
 from core.indexing.contextualize import ChunkContextualizer
 from core.indexing.parsers.document_parser import DocumentParser
+from core.indexing.structure_normalizer import DocumentStructureNormalizer
 from core.indexing.topic_tags import TopicTagger
 from core.models.document import Document, DocumentType
 from core.utils.logging import get_logger
@@ -20,6 +21,7 @@ from services.workers.stages.caption import caption_stage
 from services.workers.stages.chunk import chunk_stage
 from services.workers.stages.contextualize import contextualize_stage
 from services.workers.stages.embed import embed_stage
+from services.workers.stages.normalize_structure import normalize_structure_stage
 from services.workers.stages.parse import parse_stage
 from services.workers.stages.store import store_stage
 from services.workers.stages.topic_tag import topic_tag_stage
@@ -35,6 +37,7 @@ class PipelineTimeouts:
     """Per-stage timeout configuration for an indexing pipeline row."""
 
     parse: float | None = None
+    normalize_structure: float | None = None
     caption: float | None = None
     caption_per_image: float = 0.0
     chunk: float | None = None
@@ -59,6 +62,7 @@ class IndexingPipeline:
     caption_prompt: str | None = None
     contextualizer: ChunkContextualizer | None = None
     topic_tagger: TopicTagger | None = None
+    structure_normalizer: DocumentStructureNormalizer | None = None
     timeouts: PipelineTimeouts = PipelineTimeouts()
     indexation_config: IndexationPipelineConfig | None = None
     parser_factory: Callable[[str], DocumentParser] | None = None
@@ -105,7 +109,23 @@ class IndexingPipeline:
                 timings[name] = (time.perf_counter() - start) * 1000.0
 
         try:
-            await _timed("parse", parse_stage(row, parser, timeout=self.timeouts.parse))
+            reconstruction = config.table_reconstruction if config is not None else None
+            should_normalize = (
+                reconstruction is not None
+                and reconstruction.mode == "automatic"
+                and self.structure_normalizer is not None
+                and isinstance(row.get("document"), Document)
+                and row["document"].content_type is DocumentType.PDF
+            )
+            await _timed(
+                "parse",
+                parse_stage(
+                    row,
+                    parser,
+                    timeout=self.timeouts.parse,
+                    preserve_raw_blocks=should_normalize,
+                ),
+            )
             # The caption decision needs the parsed document (standalone images
             # always caption), so the VLM is resolved after parse.
             vlm, vlm_name = self._select_vlm(config) if self._should_caption(row, config) else (None, None)
@@ -138,6 +158,16 @@ class IndexingPipeline:
                         vlm,
                         timeout=self.timeouts.caption,
                         per_image_timeout=self.timeouts.caption_per_image,
+                    ),
+                )
+            if should_normalize and self.structure_normalizer is not None and reconstruction is not None:
+                await _timed(
+                    "normalize_structure",
+                    normalize_structure_stage(
+                        row,
+                        self.structure_normalizer,
+                        reconstruction,
+                        timeout=self.timeouts.normalize_structure,
                     ),
                 )
             await _timed("chunk", chunk_stage(row, chunker, timeout=self.timeouts.chunk))
@@ -387,6 +417,7 @@ def build_indexing_pipeline(
     caption_prompt: str | None = None,
     contextualizer: ChunkContextualizer | None = None,
     topic_tagger: TopicTagger | None = None,
+    structure_normalizer: DocumentStructureNormalizer | None = None,
     timeouts: PipelineTimeouts | None = None,
     indexation_config: IndexationPipelineConfig | None = None,
     parser_factory: Callable[[str], DocumentParser] | None = None,
@@ -408,6 +439,7 @@ def build_indexing_pipeline(
         caption_prompt=caption_prompt,
         contextualizer=contextualizer,
         topic_tagger=topic_tagger,
+        structure_normalizer=structure_normalizer,
         timeouts=timeouts or PipelineTimeouts(),
         indexation_config=indexation_config,
         parser_factory=parser_factory,

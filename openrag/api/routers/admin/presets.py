@@ -10,6 +10,7 @@ from api.schemas.admin.preset_schemas import (
 )
 from core.chunking import chunking_registry
 from core.config.indexation_pipeline import PARSING_STRATEGIES
+from core.config.table_reconstruction import TABLE_RECONSTRUCTION_MODES
 from core.rerankers.registry import reranker_registry
 from core.retrieval import retriever_registry
 from di.providers import get_preset_service
@@ -37,6 +38,7 @@ async def get_preset_options():
     return PresetOptionsResponse(
         chunking_strategies=chunking_registry.list_registered(),
         parsing_strategies=_PARSING_STRATEGIES,
+        table_reconstruction_modes=list(TABLE_RECONSTRUCTION_MODES),
         retrieval_types=retriever_registry.list_registered(),
         reranker_providers=_registered_or_default(
             reranker_registry.list_registered(),

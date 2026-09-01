@@ -6,7 +6,7 @@ import pytest
 from core.chunking.chunking_strategy import ChunkingStrategy
 from core.embeddings.embedder import Embedder
 from core.indexing.contextualize import ChunkContextualizer
-from core.models.chunk import Chunk
+from core.models.chunk import Chunk, ChunkType
 from core.models.document import ImageBlock, ProcessedDocument, TextBlock
 from core.prompts.vlm_prompt_builder import wrap_caption
 from core.vector_stores.vector_store import VectorStore
@@ -310,6 +310,39 @@ async def test_embed_stage_attaches_vectors_by_chunk_order():
     assert [chunk.embedding for chunk in row["chunks"]] == [[1.0, 0.0], [0.0, 1.0]]
     assert row["stage"] == "embedded"
     assert "secret" not in row
+
+
+@pytest.mark.asyncio
+async def test_embed_stage_preserves_table_text_and_row_metadata():
+    text = (
+        "In table “Table A”, the first row (row 1) has the value “22” in column “aa”, "
+        "the value “Paris” in column “bb”, and the value “Active” in column “cc”."
+    )
+    metadata = {
+        "table_id": "table-a",
+        "row_id": "row-a-1",
+        "row_index": 1,
+        "table_title": "Table A",
+        "table_content_kind": "row",
+        "table_text_serialization_version": "natural-language-v1",
+    }
+    chunk = Chunk(
+        id="table-chunk",
+        text=text,
+        chunk_type=ChunkType.TABLE,
+        metadata=metadata,
+    )
+    embedder = FakeEmbedder([[0.25, 0.75]])
+    row = {"chunks": [chunk]}
+
+    await embed_stage(row, embedder)
+
+    [embedded] = row["chunks"]
+    assert embedder.text_batches == [[text]]
+    assert embedded.text == text
+    assert embedded.metadata == metadata
+    assert embedded.chunk_type is ChunkType.TABLE
+    assert embedded.embedding == [0.25, 0.75]
 
 
 @pytest.mark.asyncio

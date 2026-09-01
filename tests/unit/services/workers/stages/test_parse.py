@@ -49,6 +49,24 @@ async def test_parse_stage_mutates_row_with_processed_document_and_scrubs_creden
 
 
 @pytest.mark.asyncio
+async def test_parse_stage_can_preserve_an_independent_raw_block_snapshot():
+    document = Document(id="doc-1", filename="sample.pdf", content_type=DocumentType.PDF)
+    processed = ProcessedDocument(
+        document_id="doc-1",
+        text_blocks=[TextBlock(text="parser output", page_number=1)],
+    )
+    row = {"document": document}
+
+    await parse_stage(row, FakeParser(output=processed), preserve_raw_blocks=True)
+
+    result = row["processed_document"]
+    assert result.raw_text_blocks == processed.text_blocks
+    assert result.raw_text_blocks is not processed.text_blocks
+    result.text_blocks[0].text = "working output changed"
+    assert result.raw_text_blocks[0].text == "parser output"
+
+
+@pytest.mark.asyncio
 async def test_parse_stage_marks_error_and_scrubs_credentials_when_parser_fails():
     document = Document(id="doc-1", filename="note.txt", content_type=DocumentType.TEXT, text="hello")
     row = {"document": document, "api_key": "secret"}

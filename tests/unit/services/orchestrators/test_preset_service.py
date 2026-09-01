@@ -357,6 +357,19 @@ async def test_create_preset_rejects_invalid_config():
 
 
 @pytest.mark.asyncio
+async def test_create_preset_rejects_invalid_table_reconstruction_config():
+    from core.utils.exceptions import ValidationError
+
+    svc = _make_service()
+    with pytest.raises(ValidationError, match="Invalid indexation preset config"):
+        await svc.create_preset(
+            "bad-table-mode",
+            "indexation",
+            {"table_reconstruction": {"mode": "automatic", "unknown_threshold": 0.9}},
+        )
+
+
+@pytest.mark.asyncio
 async def test_create_preset_inserts_and_returns_row():
     repo = _FakePresetRepo()
     svc = _make_service(repo)

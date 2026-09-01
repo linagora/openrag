@@ -88,6 +88,7 @@ class PresetOptionsResponse(BaseModel):
 
     chunking_strategies: list[str]
     parsing_strategies: list[str]
+    table_reconstruction_modes: list[str]
     retrieval_types: list[str]
     reranker_providers: list[str]
 

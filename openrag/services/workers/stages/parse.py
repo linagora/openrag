@@ -13,6 +13,7 @@ async def parse_stage(
     parser: DocumentParser,
     *,
     timeout: float | None = None,
+    preserve_raw_blocks: bool = False,
 ) -> MutableMapping[str, Any]:
     """Parse ``row["document"]`` and mutate the row with the stage result."""
 
@@ -22,6 +23,12 @@ async def parse_stage(
             raise ValueError("parse_stage row must contain a Document under 'document'")
 
         processed = await _parse_with_timeout(parser, document, timeout)
+        if preserve_raw_blocks:
+            processed = processed.model_copy(
+                update={
+                    "raw_text_blocks": [block.model_copy(deep=True) for block in processed.text_blocks],
+                }
+            )
         row["processed_document"] = processed
         row["stage"] = "parsed"
         row.pop("error", None)

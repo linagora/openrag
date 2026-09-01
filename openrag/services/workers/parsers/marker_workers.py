@@ -403,6 +403,7 @@ class MarkerPool:
 
 
 _MARKER_KEY_PAGE_RE = re.compile(r"_page_(\d+)_")
+_HTML_BREAK_RE = re.compile(r"<br\s*/?>", re.IGNORECASE)
 
 
 def _marker_key_to_page(key: str) -> int | None:
@@ -420,6 +421,17 @@ def _marker_key_to_page(key: str) -> int | None:
         return int(match.group(1)) + 1
     except (TypeError, ValueError):
         return None
+
+
+def _clean_marker_breaks(markdown: str) -> str:
+    """Keep cell-internal breaks in pipe tables and remove them elsewhere."""
+    cleaned_lines: list[str] = []
+    for line in markdown.splitlines(keepends=True):
+        content = line.rstrip("\r\n")
+        stripped = content.strip()
+        replacement = "<br>" if stripped.startswith("|") and stripped.endswith("|") else ""
+        cleaned_lines.append(_HTML_BREAK_RE.sub(replacement, line))
+    return "".join(cleaned_lines)
 
 
 class MarkerLoader(BasePooledParser):
@@ -531,8 +543,9 @@ class MarkerLoader(BasePooledParser):
 
         Marker emits ``<page1>{1}[PAGE_SEP]<page2>{2}[PAGE_SEP]…``. We
         drop the leading ``[PAGE_SEP]`` segment (Marker prefixes one),
-        strip ``<br>``, then split on each ``{N}[PAGE_SEP]`` marker —
-        the captured ``N`` is the 1-indexed page that just ended.
+        preserve canonical ``<br>`` tags inside Markdown pipe-table rows,
+        remove them elsewhere, then split on each ``{N}[PAGE_SEP]`` marker.
+        The captured ``N`` is the 1-indexed page that just ended.
 
         Blank pages are preserved (text=``""``) so ``page_number`` and
         ``page_count`` reflect the source document, not just the
@@ -544,7 +557,7 @@ class MarkerLoader(BasePooledParser):
             return []
         if cls.PAGE_SEP in markdown:
             markdown = markdown.split(cls.PAGE_SEP, 1)[1]
-        markdown = markdown.replace("<br>", "")
+        markdown = _clean_marker_breaks(markdown)
 
         pairs: list[tuple[int, str]] = []
         cursor = 0

@@ -2,6 +2,7 @@ from contextlib import asynccontextmanager
 
 import pytest
 from core.config.indexation_pipeline import IndexationPipelineConfig
+from core.indexing.structure_normalizer import DocumentStructureNormalizer
 from core.models.chunk import Chunk
 from core.models.document import Document, DocumentType, ImageBlock, ProcessedDocument, TextBlock
 from services.workers.pipeline_builder import build_indexing_pipeline
@@ -108,6 +109,17 @@ class FakeTopicTagger:
         return self.tags
 
 
+class FakeStructureNormalizer(DocumentStructureNormalizer):
+    def __init__(self) -> None:
+        self.calls = []
+
+    async def normalize(self, document, processed_document, config):
+        self.calls.append((document, processed_document, config))
+        return processed_document.model_copy(
+            update={"normalized_text_blocks": [TextBlock(text="normalized row", page_number=1)]}
+        )
+
+
 @pytest.mark.asyncio
 async def test_pipeline_runs_required_stages_in_order_and_keeps_row_object():
     document = Document(filename="note.txt", text="hello", partition="tenant-a")
@@ -192,6 +204,61 @@ async def test_pipeline_indexation_config_disables_caption_and_contextualization
     assert vlm.calls == []
     assert contextualizer.calls == []
     assert row["stage"] == "stored"
+
+
+@pytest.mark.asyncio
+async def test_pipeline_normalizes_automatic_pdf_after_preserving_raw_blocks():
+    document = Document(
+        filename="table.pdf",
+        content_type=DocumentType.PDF,
+        raw_bytes=b"pdf",
+        partition="tenant-a",
+    )
+    processed = ProcessedDocument(
+        document_id=document.id,
+        text_blocks=[TextBlock(text="parser row", page_number=1)],
+        page_count=1,
+    )
+    normalizer = FakeStructureNormalizer()
+    chunker = FakeChunker([Chunk(id="c1", text="normalized row", partition="tenant-a")])
+    pipeline = build_indexing_pipeline(
+        parser=FakeParser(processed),
+        chunker=chunker,
+        embedder=FakeEmbedder([[1.0]]),
+        vector_store=FakeVectorStore(),
+        structure_normalizer=normalizer,
+        indexation_config=IndexationPipelineConfig(
+            table_reconstruction={"mode": "automatic"},
+            enable_image_captioning=False,
+        ),
+    )
+
+    await pipeline.run({"document": document, "partition": "tenant-a"})
+
+    assert len(normalizer.calls) == 1
+    normalized_input = normalizer.calls[0][1]
+    assert normalized_input.raw_text_blocks[0].text == "parser row"
+    assert chunker.calls[0][0].effective_text_blocks()[0].text == "normalized row"
+
+
+@pytest.mark.asyncio
+async def test_pipeline_does_not_allocate_or_normalize_when_feature_is_disabled():
+    document = Document(filename="table.pdf", content_type=DocumentType.PDF, raw_bytes=b"pdf")
+    processed = ProcessedDocument(text_blocks=[TextBlock(text="parser row", page_number=1)])
+    normalizer = FakeStructureNormalizer()
+    pipeline = build_indexing_pipeline(
+        parser=FakeParser(processed),
+        chunker=FakeChunker([Chunk(id="c1", text="parser row")]),
+        embedder=FakeEmbedder([[1.0]]),
+        vector_store=FakeVectorStore(),
+        structure_normalizer=normalizer,
+        indexation_config=IndexationPipelineConfig(enable_image_captioning=False),
+    )
+
+    await pipeline.run({"document": document})
+
+    assert normalizer.calls == []
+    assert pipeline.parser.processed.raw_text_blocks is None
 
 
 def _caption_pipeline(vlm: FakeVLM, caption_prompt: str | None):

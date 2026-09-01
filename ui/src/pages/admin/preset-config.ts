@@ -28,6 +28,7 @@ export function configUnset(prev: Config, key: string): Config {
 // Mirrors the retrieval form's "__none__" convention so the shown value always
 // matches what gets persisted (WYSIWYG).
 export const PARSING_STRATEGY_INHERIT = "__inherit__";
+export const TABLE_RECONSTRUCTION_DISABLED = "disabled";
 
 // Map a parsing-strategy selection to the next config. Kept pure so the
 // persistence behavior is unit-testable without driving the Radix Select.
@@ -57,4 +58,34 @@ export function applyParsingStrategyChange(config: Config, value: string): Confi
   if (leavingPymupdf) next = configUnset(next, "enable_image_captioning");
 
   return next;
+}
+
+export function getTableReconstructionMode(config: Config): string {
+  const tableReconstruction = config.table_reconstruction;
+  if (!tableReconstruction || typeof tableReconstruction !== "object") {
+    return TABLE_RECONSTRUCTION_DISABLED;
+  }
+  return configGet(
+    tableReconstruction as Config,
+    "mode",
+    TABLE_RECONSTRUCTION_DISABLED,
+  );
+}
+
+export function applyTableReconstructionMode(
+  config: Config,
+  mode: string,
+): Config {
+  const current =
+    config.table_reconstruction &&
+    typeof config.table_reconstruction === "object"
+      ? (config.table_reconstruction as Config)
+      : {};
+  return {
+    ...config,
+    table_reconstruction: {
+      ...current,
+      mode,
+    },
+  };
 }

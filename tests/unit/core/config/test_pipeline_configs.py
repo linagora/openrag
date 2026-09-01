@@ -46,6 +46,27 @@ def test_indexation_pipeline_topic_tagging_defaults_off():
     assert IndexationPipelineConfig().enable_topic_tagging is False
 
 
+def test_table_reconstruction_defaults_to_disabled():
+    config = IndexationPipelineConfig()
+
+    assert config.table_reconstruction.mode == "disabled"
+    assert config.table_reconstruction.algorithm_version == "adjacent-layout-v1"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"mode": "strict"},
+        {"mode": "automatic", "same_table_min_confidence": 0.79},
+        {"mode": "automatic", "row_continuation_min_confidence": 1.01},
+        {"mode": "automatic", "unknown_threshold": 0.9},
+    ],
+)
+def test_table_reconstruction_rejects_unsupported_or_unsafe_config(payload: dict):
+    with pytest.raises(ValidationError):
+        IndexationPipelineConfig(table_reconstruction=payload)
+
+
 def test_retrieval_pipeline_rejects_unknown_type():
     """Retrieval presets reject unsupported retrieval modes."""
     with pytest.raises(ValidationError):

@@ -12,9 +12,9 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class DocumentType(str, Enum):
@@ -31,6 +31,121 @@ class DocumentType(str, Enum):
     EML = "eml"
 
 
+class SourceFragment(BaseModel):
+    """A trace from normalized content back to its original evidence.
+
+    ``parser_text`` fragments identify text copied from an untouched parser
+    block. ``pdf_layout`` fragments identify text recovered from PDF geometry;
+    their character range is a visual anchor in the parser block
+    (for example, Marker's original image placeholder), while ``bbox`` and
+    ``evidence_provider`` identify the canonical evidence.
+    """
+
+    source_block_index: int = Field(ge=0)
+    page_number: int = Field(ge=1)
+    char_start: int = Field(ge=0)
+    char_end: int = Field(gt=0)
+    source_kind: Literal["parser_text", "pdf_layout"] = "parser_text"
+    evidence_provider: str | None = None
+    source_ref: str | None = None
+    bbox: tuple[float, float, float, float] | None = None
+    text_start: int = Field(default=0, ge=0)
+    text_end: int | None = Field(default=None, gt=0)
+
+    @model_validator(mode="after")
+    def validate_ranges(self) -> SourceFragment:
+        if self.char_end <= self.char_start:
+            raise ValueError("char_end must be greater than char_start")
+        if self.text_end is not None and self.text_end <= self.text_start:
+            raise ValueError("text_end must be greater than text_start")
+        if self.source_kind == "pdf_layout":
+            if self.bbox is None:
+                raise ValueError("pdf_layout fragments require a bbox")
+            if not self.evidence_provider:
+                raise ValueError("pdf_layout fragments require an evidence_provider")
+        return self
+
+
+class PageBoundaryDecision(BaseModel):
+    """Independent evidence recorded for one adjacent-page decision."""
+
+    previous_page: int = Field(ge=1)
+    next_page: int = Field(ge=1)
+    same_table_confidence: float = Field(ge=0.0, le=1.0)
+    row_continuation_confidence: float = Field(ge=0.0, le=1.0)
+    decision: Literal["merged", "preserved"]
+    reason: str
+
+
+class TableCellData(BaseModel):
+    """One logical cell assembled from source fragments."""
+
+    column_index: int = Field(ge=0)
+    column_name: str | None = None
+    text: str = ""
+    source_fragments: list[SourceFragment] = Field(default_factory=list)
+    assignment_confidence: float = Field(default=1.0, ge=0.0, le=1.0)
+    column_span: int = Field(default=1, ge=1)
+    row_span: int = Field(default=1, ge=1)
+    inherited: bool = False
+    inherited_from: tuple[int, int] | None = None
+    explicit_empty: bool = False
+    covered_by: tuple[int, int] | None = None
+
+
+class TableRowData(BaseModel):
+    """A logical table row, potentially reconstructed across several pages."""
+
+    table_id: str
+    row_id: str
+    algorithm_version: str
+    table_title: str | None = None
+    section_path: list[str] = Field(default_factory=list)
+    scope_fragments: list[SourceFragment] = Field(default_factory=list)
+    cells: list[TableCellData] = Field(default_factory=list)
+    identity_columns: list[int] = Field(default_factory=list)
+    row_index: int = Field(default=1, ge=1)
+    page_start: int = Field(ge=1)
+    page_end: int = Field(ge=1)
+    boundary_decisions: list[PageBoundaryDecision] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_page_range(self) -> TableRowData:
+        if self.page_end < self.page_start:
+            raise ValueError("page_end must be greater than or equal to page_start")
+        return self
+
+
+class TableLegendEntry(BaseModel):
+    """One abbreviation definition extracted from a table header."""
+
+    abbreviation: str
+    meaning: str
+    source_fragments: list[SourceFragment] = Field(default_factory=list)
+
+
+class TableLegendData(BaseModel):
+    """A table legend kept separate from its data rows."""
+
+    table_id: str
+    algorithm_version: str
+    table_title: str | None = None
+    section_path: list[str] = Field(default_factory=list)
+    scope_fragments: list[SourceFragment] = Field(default_factory=list)
+    entries: list[TableLegendEntry] = Field(default_factory=list)
+    page_number: int = Field(ge=1)
+
+
+class NormalizationReport(BaseModel):
+    """Debug record for structural normalization decisions."""
+
+    algorithm_version: str
+    status: Literal["unchanged", "normalized", "partial_fallback"]
+    boundary_decisions: list[PageBoundaryDecision] = Field(default_factory=list)
+    reconstructed_row_count: int = Field(default=0, ge=0)
+    fallback_reasons: list[str] = Field(default_factory=list)
+
+
 class TextBlock(BaseModel):
     """A block of text extracted from a document."""
 
@@ -38,6 +153,9 @@ class TextBlock(BaseModel):
     page_number: int | None = None
     block_type: str = "paragraph"
     metadata: dict[str, Any] = Field(default_factory=dict)
+    source_fragments: list[SourceFragment] = Field(default_factory=list)
+    table_row: TableRowData | None = None
+    table_legend: TableLegendData | None = None
 
 
 class ImageBlock(BaseModel):
@@ -225,6 +343,13 @@ class ProcessedDocument(BaseModel):
 
     document_id: str = ""
     text_blocks: list[TextBlock] = Field(default_factory=list)
+    raw_text_blocks: list[TextBlock] | None = None
+    normalized_text_blocks: list[TextBlock] | None = None
+    normalization_report: NormalizationReport | None = None
     images: list[ImageBlock] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
     page_count: int = 0
+
+    def effective_text_blocks(self) -> list[TextBlock]:
+        """Return the complete block view downstream chunkers should consume."""
+        return self.normalized_text_blocks if self.normalized_text_blocks is not None else self.text_blocks

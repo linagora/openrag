@@ -47,9 +47,11 @@ import {
 } from "@/lib/prompt-meta";
 import {
   type Config,
+  applyTableReconstructionMode,
   configGet,
   configSet,
   applyParsingStrategyChange,
+  getTableReconstructionMode,
   PARSING_STRATEGY_INHERIT,
 } from "./preset-config";
 
@@ -255,6 +257,7 @@ function IndexationPresetForm({
   onChange,
   chunkingStrategies,
   parsingStrategies,
+  tableReconstructionModes,
   vlms,
   llms,
   prompts,
@@ -265,6 +268,7 @@ function IndexationPresetForm({
   onChange: (c: Config) => void;
   chunkingStrategies: string[];
   parsingStrategies: string[];
+  tableReconstructionModes: string[];
   vlms: string[];
   llms: string[];
   prompts: PromptResponse[];
@@ -370,6 +374,30 @@ function IndexationPresetForm({
               ))}
             </SelectContent>
           </Select>
+        </div>
+        <div className="space-y-1.5">
+          <Label className="text-xs">Cross-page table reconstruction</Label>
+          <Select
+            value={getTableReconstructionMode(config)}
+            onValueChange={(value) =>
+              onChange(applyTableReconstructionMode(config, value))
+            }
+          >
+            <SelectTrigger size="sm">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {tableReconstructionModes.map((mode) => (
+                <SelectItem key={mode} value={mode}>
+                  {mode === "disabled" ? "Disabled" : "Automatic"}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <p className="text-xs text-muted-foreground">
+            Automatic mode conservatively rebuilds table rows that continue
+            across PDF pages. Uncertain cases keep the parser output.
+          </p>
         </div>
       </section>
 
@@ -959,6 +987,9 @@ function PresetDialog({
               onChange={setConfig}
               chunkingStrategies={options?.chunking_strategies ?? []}
               parsingStrategies={options?.parsing_strategies ?? ["marker", "pymupdf"]}
+              tableReconstructionModes={
+                options?.table_reconstruction_modes ?? ["disabled", "automatic"]
+              }
               vlms={vlms}
               llms={llms}
               prompts={allPrompts}

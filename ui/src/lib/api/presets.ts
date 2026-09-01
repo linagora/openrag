@@ -37,6 +37,8 @@ export interface PresetOptionsResponse {
   chunking_strategies: string[];
   // Optional: older backends don't return this (UI falls back to a default list).
   parsing_strategies?: string[];
+  // Optional during rolling upgrades; missing means the UI offers safe defaults.
+  table_reconstruction_modes?: string[];
   retrieval_types: string[];
   reranker_providers: string[];
 }

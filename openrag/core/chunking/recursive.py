@@ -24,8 +24,9 @@ from core.chunking.markdown_utils import (
     split_md_elements,
 )
 from core.chunking.registry import chunking_registry
+from core.chunking.table_rows import chunk_table_legend, chunk_table_row
 from core.models.chunk import Chunk, ChunkType
-from core.models.document import ProcessedDocument
+from core.models.document import ProcessedDocument, TextBlock
 from core.utils.text import sanitize_text
 
 # Substring (case-insensitive) marking a "no useful content" image caption.
@@ -179,12 +180,19 @@ class BaseChunker(ChunkingStrategy):
     # ------------------------------------------------------------------
     def chunk(self, document: ProcessedDocument, partition: str = "default") -> list[Chunk]:
         """Split a processed document into ``Chunk`` objects."""
-        content = self._content_from(document)
-        if not content.strip():
-            return []
-
         metadata = self._chunk_metadata_base(document, partition)
-        md_chunks = self._get_chunks(content=content.strip(), metadata=metadata)
+        blocks = document.effective_text_blocks()
+        if any(
+            (block.block_type == "table_row" and block.table_row is not None)
+            or (block.block_type == "table_legend" and block.table_legend is not None)
+            for block in blocks
+        ):
+            md_chunks = self._get_block_aware_chunks(blocks, metadata)
+        else:
+            content = self._content_from_blocks(blocks)
+            if not content.strip():
+                return []
+            md_chunks = self._get_chunks(content=content.strip(), metadata=metadata)
 
         return [
             Chunk(
@@ -204,6 +212,10 @@ class BaseChunker(ChunkingStrategy):
     # ------------------------------------------------------------------
     @staticmethod
     def _content_from(document: ProcessedDocument) -> str:
+        return BaseChunker._content_from_blocks(document.effective_text_blocks())
+
+    @staticmethod
+    def _content_from_blocks(blocks: list[TextBlock]) -> str:
         """Reconstruct chunkable markdown from a ProcessedDocument.
 
         Single-block documents on page 1 (or with no page metadata) flow
@@ -216,14 +228,14 @@ class BaseChunker(ChunkingStrategy):
         new page begins, and we also prepend a marker for the first block if
         it doesn't start on page 1.
         """
-        if not document.text_blocks:
+        if not blocks:
             return ""
-        if len(document.text_blocks) == 1 and document.text_blocks[0].page_number in (None, 1):
-            return document.text_blocks[0].text
+        if len(blocks) == 1 and blocks[0].page_number in (None, 1):
+            return blocks[0].text
 
         parts: list[str] = []
         last_page: int | None = None
-        for index, block in enumerate(document.text_blocks):
+        for index, block in enumerate(blocks):
             if block.page_number is not None:
                 # Emit `[PAGE_{block.page_number - 1}]` immediately *before*
                 # this block's text so downstream resolution lands on
@@ -241,6 +253,61 @@ class BaseChunker(ChunkingStrategy):
             if block.page_number is not None:
                 last_page = block.page_number
         return "\n\n".join(parts)
+
+    def _get_block_aware_chunks(
+        self,
+        blocks: list[TextBlock],
+        metadata: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        chunks: list[dict[str, Any]] = []
+        ordinary: list[TextBlock] = []
+
+        def flush_ordinary() -> None:
+            if not ordinary:
+                return
+            content = self._content_from_blocks(ordinary)
+            if content.strip():
+                chunks.extend(self._get_chunks(content.strip(), metadata))
+            ordinary.clear()
+
+        for block in blocks:
+            if block.block_type == "table_legend" and block.table_legend is not None:
+                flush_ordinary()
+                chunks.extend(
+                    {
+                        **metadata,
+                        **legend_chunk.metadata,
+                        "page_content": legend_chunk.text,
+                        "page": legend_chunk.page_number,
+                        "chunk_type": "table",
+                    }
+                    for legend_chunk in chunk_table_legend(
+                        block.table_legend,
+                        chunk_size=self.chunk_size,
+                        length_function=self.length_function,
+                    )
+                )
+                continue
+            if block.block_type != "table_row" or block.table_row is None:
+                ordinary.append(block)
+                continue
+            flush_ordinary()
+            chunks.extend(
+                {
+                    **metadata,
+                    **row_chunk.metadata,
+                    "page_content": row_chunk.text,
+                    "page": row_chunk.page_number,
+                    "chunk_type": "table",
+                }
+                for row_chunk in chunk_table_row(
+                    block.table_row,
+                    chunk_size=self.chunk_size,
+                    length_function=self.length_function,
+                )
+            )
+        flush_ordinary()
+        return chunks
 
     @staticmethod
     def _chunk_metadata_base(document: ProcessedDocument, partition: str) -> dict[str, Any]:
