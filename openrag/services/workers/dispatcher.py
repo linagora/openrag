@@ -324,7 +324,7 @@ class WorkerDispatcher(IndexingDispatcher):
             )
             self._track_completion(task_id, task)
         except BaseException:
-            submission_outcome_unknown = claimed_content and submission_started and task is None
+            submission_outcome_unknown = submission_started and task is None
             mark_submit_failed = not submission_outcome_unknown
             try:
                 if task is not None:

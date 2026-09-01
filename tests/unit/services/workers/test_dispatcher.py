@@ -800,7 +800,7 @@ async def test_dispatch_indexing_retries_without_require_existing_partition_for_
 
 
 @pytest.mark.asyncio
-async def test_dispatch_indexing_does_not_drop_required_partition_guard_for_legacy_actor() -> None:
+async def test_dispatch_indexing_keeps_required_guard_and_preserves_unknown_submission() -> None:
     from services.workers.dispatcher import WorkerDispatcher
 
     legacy_error = RuntimeError("submit(task-1) failed")
@@ -835,11 +835,11 @@ async def test_dispatch_indexing_does_not_drop_required_partition_guard_for_lega
     pool.submit.remote.assert_called_once()
     assert pool.submit.remote.call_args.kwargs["require_existing_partition"] is True
     tsm.set_object_ref.remote.assert_not_called()
-    tsm.set_failed_if_not_cancelled.remote.assert_called_once()
+    tsm.set_failed_if_not_cancelled.remote.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_dispatch_indexing_marks_task_failed_when_submit_fails() -> None:
+async def test_dispatch_indexing_preserves_task_when_submit_outcome_is_unknown() -> None:
     from services.workers.dispatcher import WorkerDispatcher
 
     pool = MagicMock()
@@ -858,10 +858,7 @@ async def test_dispatch_indexing_marks_task_failed_when_submit_fails() -> None:
 
     with (
         patch("services.workers.dispatcher.uuid") as mock_uuid,
-        patch(
-            "services.workers.dispatcher._utc_now_iso",
-            side_effect=["2026-07-20T08:00:00+00:00", "2026-07-20T08:00:02+00:00"],
-        ),
+        patch("services.workers.dispatcher._utc_now_iso", return_value="2026-07-20T08:00:00+00:00"),
     ):
         mock_uuid.uuid4.return_value.hex = "task-1"
         with pytest.raises(RuntimeError, match="submit failed"):
@@ -876,19 +873,8 @@ async def test_dispatch_indexing_marks_task_failed_when_submit_fails() -> None:
 
     tsm.set_queued_details.remote.assert_called_once()
     tsm.set_state.remote.assert_not_called()
-    tsm.set_details.remote.assert_awaited_once_with(
-        "task-1",
-        file_id="file-1",
-        partition="tenant-a",
-        metadata={
-            "_openrag_job_created_at": "2026-07-20T08:00:00+00:00",
-            "_openrag_job_finished_at": "2026-07-20T08:00:02+00:00",
-        },
-        user_id=42,
-    )
-    tsm.set_failed_if_not_cancelled.remote.assert_called_once()
-    assert tsm.set_failed_if_not_cancelled.remote.call_args.args[0] == "task-1"
-    assert "submit failed" in tsm.set_failed_if_not_cancelled.remote.call_args.args[1]
+    tsm.set_details.remote.assert_not_awaited()
+    tsm.set_failed_if_not_cancelled.remote.assert_not_called()
     tsm.set_object_ref.remote.assert_not_called()
 
 
@@ -930,6 +916,44 @@ async def test_dispatch_indexing_keeps_claim_when_submission_outcome_is_unknown(
     tsm.set_details.remote.assert_not_awaited()
     tsm.set_failed_if_not_cancelled.remote.assert_not_awaited()
     repo.release_content_sha256_claim.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_indexing_preserves_unknown_submission_without_content_claim() -> None:
+    from services.workers.dispatcher import WorkerDispatcher
+
+    pool = MagicMock()
+    pool.submit = MagicMock()
+    pool.submit.remote = AsyncMock(side_effect=TimeoutError("submit timed out"))
+    tsm = _task_state_manager()
+    dispatcher = WorkerDispatcher(
+        pool=pool,
+        task_state_manager=tsm,
+        completion_tracker=_completion_tracker(),
+        vector_store=_vector_store(),
+        document_repo=_document_repo(),
+        workspace_repo=_workspace_repo(),
+        collection="default",
+    )
+
+    with (
+        patch("services.workers.dispatcher.uuid") as mock_uuid,
+        patch("services.workers.ray_utils.ray.cancel"),
+    ):
+        mock_uuid.uuid4.return_value.hex = "task-1"
+        with pytest.raises(TimeoutError, match="submit timed out"):
+            await dispatcher.dispatch_indexing(
+                path="/data/report.txt",
+                metadata={"file_id": "file-1", "source": "/data/report.txt"},
+                partition="tenant-a",
+                user={"id": 42},
+                workspace_ids=None,
+                replace=False,
+            )
+
+    tsm.begin_worker_submission.remote.assert_awaited_once_with("task-1")
+    tsm.set_details.remote.assert_not_awaited()
+    tsm.set_failed_if_not_cancelled.remote.assert_not_awaited()
 
 
 @pytest.mark.asyncio
