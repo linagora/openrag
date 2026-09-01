@@ -136,7 +136,7 @@ export function AppSidebar() {
       {perms.isAdmin && (
         <div
           data-slot="sidebar-release-notes"
-          className="shrink-0 px-3 pb-3 group-data-[collapsible=icon]:px-1.5"
+          className="shrink-0 px-3 pb-3 group-data-[collapsible=icon]:hidden"
         >
           <SidebarMenu>
             <ReleaseNotes className={releaseNotesItemClassName} />

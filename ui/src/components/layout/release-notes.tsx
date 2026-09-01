@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { forwardRef, type ComponentProps, type ReactNode, useState } from "react";
 import { AlertTriangle, CalendarDays, Sparkles } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -9,6 +9,7 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
+  DialogTrigger,
 } from "@/components/ui/dialog";
 import { SidebarMenuItem } from "@/components/ui/sidebar";
 import {
@@ -18,50 +19,52 @@ import {
   releaseNotes,
 } from "@/lib/release-notes";
 
-interface ReleaseNotesButtonProps {
+interface ReleaseNotesButtonProps extends ComponentProps<"button"> {
   hasNew: boolean;
   isOpen: boolean;
-  onOpen: () => void;
-  className: string;
 }
 
-export function ReleaseNotesButton({ hasNew, isOpen, onOpen, className }: ReleaseNotesButtonProps) {
+export const ReleaseNotesButton = forwardRef<HTMLButtonElement, ReleaseNotesButtonProps>(function ReleaseNotesButton(
+  { hasNew, isOpen, className, ...buttonProps },
+  ref,
+) {
   const label = `Release Notes · v${releaseNotes.version}`;
 
   return (
-    <SidebarMenuItem className="group-data-[collapsible=icon]:hidden">
-      <button
-        type="button"
-        title={hasNew ? `${label} — New` : label}
-        aria-label={hasNew ? `Open ${label}, new` : `Open ${label}`}
-        aria-haspopup="dialog"
-        aria-expanded={isOpen}
-        onClick={onOpen}
-        className={`${className} ${
-          isOpen
-            ? "bg-sidebar-accent text-sidebar-accent-foreground shadow-sm"
-            : "text-sidebar-foreground/70 hover:bg-sidebar-accent/60 hover:text-sidebar-accent-foreground"
-        }`}
-      >
-        <span className="min-w-0 flex-1 truncate">{label}</span>
-        {hasNew && (
-          <span className="ml-auto shrink-0 rounded-full bg-sidebar-primary/15 px-1.5 py-0.5 text-[0.6rem] font-semibold leading-none text-sidebar-primary">
-            New
-          </span>
-        )}
-      </button>
-    </SidebarMenuItem>
+    <button
+      ref={ref}
+      type="button"
+      title={hasNew ? `${label} — New` : label}
+      aria-label={hasNew ? `Open ${label}, new` : `Open ${label}`}
+      aria-haspopup="dialog"
+      aria-expanded={isOpen}
+      {...buttonProps}
+      className={`${className} ${
+        isOpen
+          ? "bg-sidebar-accent text-sidebar-accent-foreground shadow-sm"
+          : "text-sidebar-foreground/70 hover:bg-sidebar-accent/60 hover:text-sidebar-accent-foreground"
+      }`}
+    >
+      <span className="min-w-0 flex-1 truncate">{label}</span>
+      {hasNew && (
+        <span className="ml-auto shrink-0 rounded-full bg-sidebar-primary/15 px-1.5 py-0.5 text-[0.6rem] font-semibold leading-none text-sidebar-primary">
+          New
+        </span>
+      )}
+    </button>
   );
-}
+});
 
 interface ReleaseNotesDialogProps {
+  children: ReactNode;
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }
 
-export function ReleaseNotesDialog({ open, onOpenChange }: ReleaseNotesDialogProps) {
+export function ReleaseNotesDialog({ children, open, onOpenChange }: ReleaseNotesDialogProps) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
+      {children}
       <DialogContent className="flex max-h-[calc(100vh-2rem)] flex-col gap-0 overflow-hidden p-0 sm:max-w-3xl">
         <DialogHeader className="shrink-0 border-b bg-gradient-to-br from-primary/10 via-background to-background px-6 py-6 pr-14 sm:px-8">
           <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
@@ -142,9 +145,12 @@ export function ReleaseNotes({ className }: ReleaseNotesProps) {
   };
 
   return (
-    <>
-      <ReleaseNotesButton hasNew={hasNew} isOpen={open} onOpen={() => handleOpenChange(true)} className={className} />
-      <ReleaseNotesDialog open={open} onOpenChange={handleOpenChange} />
-    </>
+    <ReleaseNotesDialog open={open} onOpenChange={handleOpenChange}>
+      <SidebarMenuItem className="group-data-[collapsible=icon]:hidden">
+        <DialogTrigger asChild>
+          <ReleaseNotesButton hasNew={hasNew} isOpen={open} className={className} />
+        </DialogTrigger>
+      </SidebarMenuItem>
+    </ReleaseNotesDialog>
   );
 }

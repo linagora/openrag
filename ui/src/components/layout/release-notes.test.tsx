@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it } from "vitest";
 import { LAST_VIEWED_RELEASE_NOTES_KEY, releaseNotes } from "@/lib/release-notes";
@@ -58,10 +58,12 @@ describe("ReleaseNotes", () => {
     const user = userEvent.setup();
     renderReleaseNotes();
 
-    await user.click(screen.getByRole("button", { name: new RegExp(`Open Release Notes · v${releaseNotes.version}`) }));
+    const button = screen.getByRole("button", { name: new RegExp(`Open Release Notes · v${releaseNotes.version}`) });
+    await user.click(button);
     await screen.findByRole("dialog");
     await user.keyboard("{Escape}");
 
     expect(screen.queryByRole("dialog")).toBeNull();
+    await waitFor(() => expect(document.activeElement).toBe(button));
   });
 });

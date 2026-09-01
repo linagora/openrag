@@ -136,6 +136,7 @@ describe("AppSidebar", () => {
 
     expect(releaseNotes.querySelector("svg")).toBeNull();
     expect(releaseNotes.className).toContain("h-7");
+    expect(releaseNotes.closest("[data-slot='sidebar-release-notes']")?.className).toContain("group-data-[collapsible=icon]:hidden");
     expect(releaseNotes.closest("[data-slot='sidebar-release-notes']")?.nextElementSibling).toBe(
       screen.getByTestId("sidebar-footer"),
     );
