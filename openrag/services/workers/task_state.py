@@ -591,13 +591,12 @@ class TaskStateManager:
             accepted = info.state in CANCELLABLE_INDEXING_STATES or info.state in TERMINAL_INDEXING_STATES
             if not accepted:
                 return False
+            details = info.details or {}
+            if self._file_delete_fenced(partition=details.get("partition"), file_id=details.get("file_id")):
+                return False
             info.object_ref = object_ref
             info.worker_submitted = True
             info.submission_started_at = None
-            details = info.details or {}
-            if self._file_delete_fenced(partition=details.get("partition"), file_id=details.get("file_id")):
-                self._set_cancelled_locked(task_id, info)
-                return False
             _save_recoverable_task(task_id, info)
             return True
 

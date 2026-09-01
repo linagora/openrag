@@ -462,10 +462,12 @@ async def test_file_delete_fence_rejects_late_object_ref_registration() -> None:
         metadata={},
         user_id=None,
     )
+    assert await manager.begin_worker_submission("task-1") is True
     await manager.begin_file_delete(partition="tenant-a", file_id="file-1")
+    before = deepcopy(manager.tasks["task-1"])
 
     assert await manager.set_object_ref("task-1", {"ref": object()}) is False
-    assert await manager.get_state("task-1") == "CANCELLED"
+    assert manager.tasks["task-1"] == before
 
 
 @pytest.mark.asyncio
