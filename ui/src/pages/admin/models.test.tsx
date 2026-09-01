@@ -217,4 +217,96 @@ describe("ModelsPage STT validation", () => {
 
     expect(createButton.disabled).toBe(true);
   });
+
+  it("ignores a validation response from a previously edited endpoint", async () => {
+    listModelEndpointsMock.mockResolvedValue([
+      {
+        name: "moss-a",
+        model_type: "stt",
+        endpoint: "http://moss:8000/v1",
+        model_name: "moss-transcribe-diarize",
+        batch_size: 1,
+        timeout: 3600,
+        extra: { api_key: "sk-a********" },
+        has_api_key: true,
+        is_default: true,
+        created_at: "2026-01-01T00:00:00+00:00",
+        updated_at: "2026-01-01T00:00:00+00:00",
+      },
+      {
+        name: "moss-b",
+        model_type: "stt",
+        endpoint: "http://moss:8000/v1",
+        model_name: "moss-transcribe-diarize",
+        batch_size: 1,
+        timeout: 3600,
+        extra: { api_key: "sk-b********" },
+        has_api_key: true,
+        is_default: false,
+        created_at: "2026-01-01T00:00:00+00:00",
+        updated_at: "2026-01-01T00:00:00+00:00",
+      },
+    ]);
+
+    let resolveFirst!: (value: {
+      reachable: boolean;
+      model_found?: boolean;
+      transcription_supported?: boolean;
+    }) => void;
+    let resolveSecond!: (value: {
+      reachable: boolean;
+      detail?: string;
+    }) => void;
+    validateModelEndpointMock
+      .mockReturnValueOnce(
+        new Promise((resolve) => {
+          resolveFirst = resolve;
+        }),
+      )
+      .mockReturnValueOnce(
+        new Promise((resolve) => {
+          resolveSecond = resolve;
+        }),
+      );
+
+    const user = userEvent.setup();
+    renderPage();
+
+    await screen.findByText("No embedder endpoints configured.");
+    await user.click(screen.getByRole("tab", { name: "stt" }));
+    await screen.findByText("moss-a");
+
+    await user.click(screen.getAllByRole("button", { name: "Edit" })[0]);
+    let dialog = screen.getByRole("dialog");
+    await user.click(within(dialog).getByRole("button", { name: "Validate" }));
+    await waitFor(() => expect(validateModelEndpointMock).toHaveBeenCalledTimes(1));
+    expect(validateModelEndpointMock).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ stored_api_key_name: "moss-a" }),
+    );
+
+    await user.click(within(dialog).getByRole("button", { name: "Close" }));
+    await user.click(screen.getAllByRole("button", { name: "Edit" })[1]);
+    dialog = screen.getByRole("dialog");
+    await user.click(within(dialog).getByRole("button", { name: "Validate" }));
+    await waitFor(() => expect(validateModelEndpointMock).toHaveBeenCalledTimes(2));
+    expect(validateModelEndpointMock).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ stored_api_key_name: "moss-b" }),
+    );
+
+    await act(async () => {
+      resolveFirst({ reachable: true, model_found: true, transcription_supported: true });
+    });
+    const validateButton = within(dialog).getByRole("button", { name: "Validate" }) as HTMLButtonElement;
+    expect(validateButton.disabled).toBe(true);
+    expect(within(dialog).queryByText(/Reachable —/)).toBeNull();
+
+    await act(async () => {
+      resolveSecond({ reachable: false, detail: "Endpoint B rejected its stored credential." });
+    });
+    const updateButton = within(dialog).getByRole("button", { name: "Update" }) as HTMLButtonElement;
+    await waitFor(() => expect(updateButton.disabled).toBe(true));
+    expect(within(dialog).getByText("Endpoint B rejected its stored credential.")).toBeTruthy();
+  });
 });

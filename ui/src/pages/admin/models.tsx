@@ -359,9 +359,11 @@ function EndpointDialog({
     sttValidationLanguageHint,
   ]);
   const currentValidationDraft = useRef(validationDraft);
+  const validationGeneration = useRef(0);
   useLayoutEffect(() => {
     currentValidationDraft.current = validationDraft;
-  }, [validationDraft]);
+    validationGeneration.current += 1;
+  }, [validationDraft, open, editing?.name]);
   const vendorOptions = VENDOR_OPTIONS_BY_TYPE[modelType];
   const [validated, setValidated] = useState<boolean | null>(null);
   const [validating, setValidating] = useState(false);
@@ -595,6 +597,10 @@ function EndpointDialog({
     setValidating(true);
     setValidationMsg(null);
     const submittedDraft = currentValidationDraft.current;
+    const submittedGeneration = ++validationGeneration.current;
+    const validationIsCurrent = () =>
+      submittedGeneration === validationGeneration.current &&
+      submittedDraft === currentValidationDraft.current;
     try {
       const isClearingStoredApiKey = editing?.has_api_key === true && submittedApiKey === "";
       if (
@@ -634,7 +640,7 @@ function EndpointDialog({
             extra: validationExtra,
             api_key: apiKey,
           });
-      if (submittedDraft !== currentValidationDraft.current) return;
+      if (!validationIsCurrent()) return;
       if (!res.reachable) {
         setValidated(false);
         const msg = res.detail || "Endpoint is unreachable.";
@@ -667,13 +673,15 @@ function EndpointDialog({
         toast.success(msg);
       }
     } catch (e) {
-      if (submittedDraft !== currentValidationDraft.current) return;
+      if (!validationIsCurrent()) return;
       setValidated(false);
       const msg = e instanceof Error ? e.message : "Validation failed";
       setValidationMsg(msg);
       toast.error(msg);
     } finally {
-      setValidating(false);
+      if (validationIsCurrent()) {
+        setValidating(false);
+      }
     }
   };
 
