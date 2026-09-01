@@ -109,18 +109,30 @@ RRF_K = 100
 #: noisy and large; ``text`` stays in the payload (callers need it).
 _SEARCH_RESULT_DROPPED_KEYS = frozenset({"vector"})
 
+#: Per-call timeout for the construction-time schema-version probe. Deliberately
+#: short and independent of ``VectorDBConfig.timeout``: the probe only produces a
+#: log line, so a slow metadata RPC must not hold up building the store. An
+#: *unreachable* server is already handled — ``MilvusClient`` connects eagerly in
+#: ``__init__`` and raises :class:`VDBConnectionError` before the probe runs.
+_SCHEMA_PROBE_TIMEOUT = 5.0
+
 #: Fallback dense-vector dimension for page sizing when the real one is
 #: unknown — i.e. a read-only process that never ran ``initialize`` AND the
 #: collection-schema probe also failed. Conservatively large so a vector page
 #: stays under Milvus's result-size cap for any realistic embedder.
 _UNKNOWN_VECTOR_DIM = 4096
 
-#: BM25 analyzer params for the ``text`` field — standard tokenizer plus
-#: OpenRAG-specific stop words so chunk-boundary / image-placeholder markers
-#: don't pollute lexical scores.
+#: BM25 analyzer for the ``text`` field. A custom analyzer (``tokenizer`` +
+#: ``filter``) inherits nothing, unlike the built-in ``{"type": "standard"}``,
+#: so ``lowercase`` is listed explicitly and must come first: Milvus runs this
+#: analyzer on the query too, and the ``_english_`` / ``_french_`` lists are
+#: lowercase. The marker stop words are inert — the tokenizer splits
+#: ``<image_description>`` into ``image`` + ``description`` — and are left as a
+#: no-op rather than stop-listed as those (far too common) words.
 analyzer_params: dict[str, Any] = {
     "tokenizer": "standard",
     "filter": [
+        "lowercase",
         {
             "type": "stop",
             "stop_words": [
@@ -133,7 +145,7 @@ analyzer_params: dict[str, Any] = {
                 "[CHUNK_END]",
                 "[CONTEXT]",
             ],
-        }
+        },
     ],
 }
 
@@ -141,10 +153,11 @@ analyzer_params: dict[str, Any] = {
 class MilvusVectorStore(VectorStore):
     """Milvus 3.0 implementation of :class:`VectorStore`.
 
-    The store is constructed cheaply (no I/O); the collection is materialised
-    on the first :meth:`initialize` call. ``initialize`` is idempotent and
-    takes the embedding dimension as an argument so the schema does not need
-    to import the embedder.
+    Construction is cheap — one best-effort, short-timeout schema-version probe
+    to report a pending migration in the startup logs, and nothing else; the
+    collection is materialised on the first :meth:`initialize` call.
+    ``initialize`` is idempotent and takes the embedding dimension as an
+    argument so the schema does not need to import the embedder.
     """
 
     def __init__(self, config: VectorDBConfig) -> None:
@@ -177,6 +190,12 @@ class MilvusVectorStore(VectorStore):
         # channel's internal handling, same as the legacy MilvusDB. If
         # production drops surface a real issue, revisit with evidence
         # rather than racing pymilvus's internal channel state.
+
+        # One describe_collection at construction so a pending migration shows
+        # up in the startup logs. The API process builds this store while
+        # wiring the container and never calls `initialize` afterwards, so
+        # without this the mismatch stays invisible until the first upload.
+        self.warn_if_migration_pending()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -280,7 +299,6 @@ class MilvusVectorStore(VectorStore):
             field_name="text",
             datatype=DataType.VARCHAR,
             enable_analyzer=True,
-            enable_match=True,
             max_length=MAX_LENGTH,
             analyzer_params=analyzer_params,
         )
@@ -376,22 +394,76 @@ class MilvusVectorStore(VectorStore):
             properties={SCHEMA_VERSION_PROPERTY_KEY: str(self._config.schema_version)},
         )
 
+    def _read_schema_version(self, *, timeout: float | None = None) -> int:
+        """The schema version stamped on the live collection.
+
+        Missing or unparseable values read as ``0`` so existing pre-versioning
+        collections always look out of date rather than silently passing.
+        ``timeout`` overrides the client default for callers that must not
+        block, such as the construction-time probe.
+        """
+        desc = self._client.describe_collection(self._collection_name, timeout=timeout)
+        raw = desc.get("properties", {}).get(SCHEMA_VERSION_PROPERTY_KEY)
+        try:
+            return int(raw) if raw is not None else 0
+        except (ValueError, TypeError):
+            return 0
+
+    def _schema_mismatch_warning(self, stored_version: int, expected_version: int) -> str:
+        """Operator-facing description of a schema-version mismatch."""
+        if stored_version < expected_version:
+            return (
+                f"Collection `{self._collection_name}` is at schema version {stored_version}, but this build "
+                f"expects {expected_version}. Indexing fails until the pending migration(s) are applied. "
+                "Run, with OpenRAG stopped: uv run python "
+                "services/persistence/migrations/milvus/migrate.py --dry-run (then without --dry-run)."
+            )
+        return (
+            f"Collection `{self._collection_name}` is at schema version {stored_version}, ahead of the "
+            f"{expected_version} this build expects. It was migrated by a newer OpenRAG: run that version, "
+            "or downgrade the collection with the migration runner."
+        )
+
+    def warn_if_migration_pending(self) -> None:
+        """Log a warning when the collection is not at the configured version.
+
+        The non-raising counterpart to :meth:`_check_schema_version`, for
+        callers that want the mismatch visible in the logs without failing —
+        a startup probe, say. Best-effort throughout: a collection that does
+        not exist yet is not a mismatch, and an unreachable or unreadable
+        Milvus is logged and swallowed, because a warning must never be the
+        thing that stops the caller. Both RPCs carry
+        :data:`_SCHEMA_PROBE_TIMEOUT`, so a server that answers slowly cannot
+        hold up construction either.
+        """
+        try:
+            if not self._client.has_collection(self._collection_name, timeout=_SCHEMA_PROBE_TIMEOUT):
+                return
+            stored_version = self._read_schema_version(timeout=_SCHEMA_PROBE_TIMEOUT)
+        except Exception as e:
+            logger.warning(
+                f"Could not read the schema version of collection `{self._collection_name}`: {e!s}. "
+                "Skipping the schema-version check."
+            )
+            return
+
+        expected_version = self._config.schema_version
+        if stored_version == expected_version:
+            logger.info(f"Collection `{self._collection_name}` is at schema version {expected_version}.")
+            return
+        logger.warning(self._schema_mismatch_warning(stored_version, expected_version))
+
     def _check_schema_version(self) -> None:
         """Compare stored vs. configured schema version; raise on mismatch.
 
-        Missing or unparseable values default to ``0`` so existing
-        pre-versioning collections always trigger an explicit migration step
-        rather than silently working on a stale schema.
+        Logs the mismatch before raising: the exception surfaces to the caller
+        as an API error, while the log line carries the command that fixes it.
         """
         expected_version = self._config.schema_version
-        desc = self._client.describe_collection(self._collection_name)
-        raw = desc.get("properties", {}).get(SCHEMA_VERSION_PROPERTY_KEY)
-        try:
-            stored_version = int(raw) if raw is not None else 0
-        except (ValueError, TypeError):
-            stored_version = 0
+        stored_version = self._read_schema_version()
 
         if stored_version != expected_version:
+            logger.warning(self._schema_mismatch_warning(stored_version, expected_version))
             raise VDBSchemaMigrationRequiredError(
                 f"Collection `{self._collection_name}` is at schema version "
                 f"{stored_version} but the application requires version "
