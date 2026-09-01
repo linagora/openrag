@@ -8,7 +8,10 @@ so the system works without any admin interaction.
 
 from __future__ import annotations
 
+import io
 import os
+import wave
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
@@ -16,6 +19,8 @@ from urllib.parse import urlsplit
 from core.config.model_endpoints import (
     ENV_MANAGED_KEY,
     ENV_MANAGED_VALUE,
+    STT_LANGUAGE_KEY,
+    STT_REQUEST_CONTROL_EXTRA_KEYS,
     ModelEndpointConfig,
     ModelEndpointRow,
 )
@@ -35,6 +40,7 @@ _SAMPLING_TYPES = frozenset({"llm", "vlm"})
 # a credential. Treating it as one would let boot-time sync overwrite a real
 # hand-set key with a placeholder the moment sync_on_boot was switched on.
 _PLACEHOLDER_API_KEYS = frozenset({"", "EMPTY"})
+_STT_VALIDATION_TIMEOUT_SECONDS = 15.0
 # Which env var, if any, owns a given tunable per model type. `_build_default_seeds`
 # always fills these from Settings, so their presence in the seed says nothing about
 # whether the *environment* set them — without this table sync would write the config
@@ -51,6 +57,67 @@ _ENV_OWNED_TUNABLES: dict[str, dict[str, str]] = {
     },
     "llm": {},
 }
+
+
+def _build_stt_validation_wav() -> bytes:
+    """Build a portable one-second WAV sample for STT endpoint validation."""
+    sample_rate = 16_000
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(sample_rate)
+        wav.writeframes(b"\x00\x00" * sample_rate)
+    return buffer.getvalue()
+
+
+# Created once rather than encoding/transcoding a file for each Admin UI validation.
+_STT_VALIDATION_WAV = _build_stt_validation_wav()
+
+
+def _flatten_multipart_field(key: str, value: Any) -> list[tuple[str, str]]:
+    """Serialize JSON-like values as OpenAI-style multipart form fields."""
+    if isinstance(value, Mapping):
+        return [
+            item
+            for nested_key, nested_value in value.items()
+            for item in _flatten_multipart_field(f"{key}[{nested_key}]", nested_value)
+        ]
+    if isinstance(value, (list, tuple)):
+        return [item for nested_value in value for item in _flatten_multipart_field(f"{key}[]", nested_value)]
+    if value is True:
+        serialized = "true"
+    elif value is False:
+        serialized = "false"
+    elif value is None:
+        serialized = ""
+    else:
+        serialized = str(value)
+    return [(key, serialized)] if serialized else []
+
+
+def _stt_validation_form_data(model_name: str, extra: dict[str, Any] | None) -> dict[str, Any]:
+    """Build the sanitized multipart fields used by an STT runtime request."""
+    request_options: dict[str, Any] = {"model": model_name}
+    if extra:
+        language = extra.get(STT_LANGUAGE_KEY)
+        if isinstance(language, str) and language.strip():
+            request_options[STT_LANGUAGE_KEY] = language.strip()
+        request_options.update(
+            {key: value for key, value in extra.items() if key not in STT_REQUEST_CONTROL_EXTRA_KEYS}
+        )
+
+    serialized: dict[str, Any] = {}
+    for key, value in request_options.items():
+        for field_name, field_value in _flatten_multipart_field(key, value):
+            existing = serialized.get(field_name)
+            if existing is None:
+                serialized[field_name] = field_value
+            elif isinstance(existing, list):
+                existing.append(field_value)
+            else:
+                serialized[field_name] = [existing, field_value]
+    return serialized
 
 
 def _slug(model_name: str) -> str:
@@ -560,6 +627,8 @@ class ModelEndpointService:
         *,
         api_key: str | None = None,
         model_type: str | None = None,
+        timeout: float | None = None,
+        extra: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Probe an endpoint's model list and, for STT, transcription route.
 
@@ -576,6 +645,11 @@ class ModelEndpointService:
             "transcription_supported": None,
             "detail": None,
         }
+        normalized_model_name = model_name.strip() if model_name is not None else None
+        if model_type == "stt" and not normalized_model_name:
+            result["transcription_supported"] = False
+            result["detail"] = "A model name is required to validate audio transcription."
+            return result
         try:
             parsed = urlsplit(url)
         except ValueError:
@@ -592,44 +666,75 @@ class ModelEndpointService:
         headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
         try:
             async with httpx.AsyncClient(timeout=5.0, headers=headers, follow_redirects=False) as client:
-                resp = await client.get(models_url)
-                if resp.status_code in {401, 403} and model_type == "stt":
-                    result["transcription_supported"] = False
-                    result["detail"] = (
-                        f"Model list request was rejected with HTTP {resp.status_code}. Check the API key."
-                    )
-                    return result
-                result["reachable"] = True
-                if resp.status_code == 200:
-                    try:
-                        data = resp.json()
-                        models = data.get("data") if isinstance(data, dict) else None
-                        if not isinstance(models, list):
-                            raise ValueError("missing list-valued data field")
-                    except (TypeError, ValueError):
-                        # A reachable endpoint may expose a non-standard or
-                        # broken /models response while still implementing the
-                        # audio route. Do not let that prevent the STT probe.
-                        result["detail"] = "Endpoint returned an invalid model list."
-                    else:
-                        served = [
-                            item["id"] for item in models if isinstance(item, dict) and isinstance(item.get("id"), str)
-                        ]
-                        result["models_served"] = served
-                        if model_name is not None:
-                            result["model_found"] = model_name in served
+                try:
+                    resp = await client.get(models_url)
+                except httpx.TimeoutException:
+                    if model_type != "stt":
+                        raise
+                    # Model discovery is intentionally short. STT validation
+                    # can still be proven by the real audio request below.
+                    result["detail"] = "Model list request timed out."
                 else:
-                    result["detail"] = f"Model list returned HTTP {resp.status_code}."
+                    if resp.status_code in {401, 403} and model_type == "stt":
+                        result["transcription_supported"] = False
+                        result["detail"] = (
+                            f"Model list request was rejected with HTTP {resp.status_code}. Check the API key."
+                        )
+                        return result
+                    result["reachable"] = True
+                    if resp.status_code == 200:
+                        try:
+                            data = resp.json()
+                            models = data.get("data") if isinstance(data, dict) else None
+                            if not isinstance(models, list):
+                                raise ValueError("missing list-valued data field")
+                        except (TypeError, ValueError):
+                            # A reachable endpoint may expose a non-standard or
+                            # broken /models response while still implementing the
+                            # audio route. Do not let that prevent the STT probe.
+                            result["detail"] = "Endpoint returned an invalid model list."
+                        else:
+                            served = [
+                                item["id"]
+                                for item in models
+                                if isinstance(item, dict) and isinstance(item.get("id"), str)
+                            ]
+                            result["models_served"] = served
+                            if normalized_model_name is not None:
+                                result["model_found"] = normalized_model_name in served
+                    else:
+                        result["detail"] = f"Model list returned HTTP {resp.status_code}."
                 if model_type == "stt":
-                    # This intentionally sends no audio. OpenAI-compatible
-                    # servers reject the incomplete request with 4xx when the
-                    # route exists; a missing or wrong-method route is 404/405.
+                    # The UI already rejects an unavailable model, so avoid a
+                    # needless upload and inference request in that case.
+                    if result["model_found"] is False:
+                        return result
+                    # A well-formed request is required to validate credentials:
+                    # some providers reject a missing file/model with 400/422
+                    # before they authenticate the request.
                     transcription_response = await client.post(
                         base_url + "/audio/transcriptions",
+                        data=_stt_validation_form_data(normalized_model_name, extra),
+                        files={
+                            "file": (
+                                "openrag-stt-validation.wav",
+                                _STT_VALIDATION_WAV,
+                                "audio/wav",
+                            )
+                        },
                         follow_redirects=True,
+                        timeout=httpx.Timeout(
+                            connect=5.0,
+                            read=timeout if timeout is not None else _STT_VALIDATION_TIMEOUT_SECONDS,
+                            write=5.0,
+                            pool=5.0,
+                        ),
                     )
+                    result["reachable"] = True
                     transcription_status = transcription_response.status_code
-                    if transcription_status in {401, 403}:
+                    if 200 <= transcription_status < 300:
+                        result["transcription_supported"] = True
+                    elif transcription_status in {401, 403}:
                         result["transcription_supported"] = False
                         result["detail"] = (
                             f"Transcription capability check was rejected with HTTP {transcription_status}. "
@@ -642,7 +747,8 @@ class ModelEndpointService:
                         result["transcription_supported"] = False
                         result["detail"] = f"Transcription capability check returned HTTP {transcription_status}."
                     else:
-                        result["transcription_supported"] = True
+                        result["transcription_supported"] = False
+                        result["detail"] = f"Transcription validation request returned HTTP {transcription_status}."
         except httpx.ConnectError as exc:
             if result["reachable"] and model_type == "stt":
                 result["transcription_supported"] = False

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
@@ -351,6 +351,21 @@ function EndpointDialog({
   // LLM token-budget fields (max context / max output) apply to LLM endpoints only.
   const isLlm = modelType === "llm";
   const isStt = modelType === "stt";
+  const sttValidationTimeout = isStt ? timeout : null;
+  const sttValidationLanguageHint = isStt ? languageHint.trim() : null;
+  const validationDraft = JSON.stringify([
+    endpoint,
+    modelType,
+    modelName,
+    apiKey,
+    extraJson,
+    sttValidationTimeout,
+    sttValidationLanguageHint,
+  ]);
+  const currentValidationDraft = useRef(validationDraft);
+  useLayoutEffect(() => {
+    currentValidationDraft.current = validationDraft;
+  }, [validationDraft]);
   const vendorOptions = VENDOR_OPTIONS_BY_TYPE[modelType];
   const [validated, setValidated] = useState<boolean | null>(null);
   const [validating, setValidating] = useState(false);
@@ -439,11 +454,12 @@ function EndpointDialog({
   // raw extra is compared with them stripped out (as the textarea shows them).
   useEffect(() => {
     const editingExtra = editing ? splitModelEndpointApiKeyExtra(editing.extra) : null;
-    const editingSttExtra = editingExtra
+    const editingSttFields = editingExtra
       ? editing?.model_type === "stt"
-        ? splitModelEndpointSttLanguage(editingExtra.extra).extra
-        : editingExtra.extra
+        ? splitModelEndpointSttLanguage(editingExtra.extra)
+        : { languageHint: "", extra: editingExtra.extra }
       : null;
+    const editingSttExtra = editingSttFields?.extra ?? null;
     const editingMossExtra = editingSttExtra
       ? editing?.model_type === "stt"
         ? splitModelEndpointMossSpeakerAware(editingSttExtra).extra
@@ -466,6 +482,10 @@ function EndpointDialog({
       editing &&
       endpoint === editing.endpoint &&
       (modelName || "") === (editing.model_name || "") &&
+      sttValidationTimeout ===
+        (editing.model_type === "stt" ? String(editing.timeout) : null) &&
+      sttValidationLanguageHint ===
+        (editing.model_type === "stt" ? editingSttFields?.languageHint.trim() || "" : null) &&
       apiKey === editingExtra?.apiKey &&
       extraJson === JSON.stringify(editingRawExtra, null, 2)
     ) {
@@ -479,7 +499,7 @@ function EndpointDialog({
     }
     setValidated(null);
     setValidationMsg(null);
-  }, [endpoint, modelName, apiKey, extraJson, editing]);
+  }, [endpoint, modelName, sttValidationTimeout, sttValidationLanguageHint, apiKey, extraJson, editing]);
 
   const apiKeySubmitValue = () =>
     prepareModelEndpointExtraForSubmit({ api_key: apiKey.trim() }).api_key;
@@ -555,6 +575,25 @@ function EndpointDialog({
       toast.error("Enter an endpoint URL first");
       return;
     }
+    let validationExtra: Record<string, unknown> | undefined;
+    if (isStt) {
+      try {
+        const parsedExtra: unknown = JSON.parse(extraJson);
+        if (typeof parsedExtra !== "object" || parsedExtra === null || Array.isArray(parsedExtra)) {
+          throw new Error("Extra must be a JSON object");
+        }
+        validationExtra = mergeModelEndpointSttLanguage(
+          parsedExtra as Record<string, unknown>,
+          languageHint,
+        );
+      } catch {
+        const msg = "Invalid JSON in extra field";
+        setValidated(false);
+        setValidationMsg(msg);
+        toast.error(msg);
+        return;
+      }
+    }
     let apiKey: string | undefined;
     let submittedApiKey: string | undefined;
     try {
@@ -570,6 +609,7 @@ function EndpointDialog({
     }
     setValidating(true);
     setValidationMsg(null);
+    const submittedDraft = currentValidationDraft.current;
     try {
       const isClearingStoredApiKey = editing?.has_api_key === true && submittedApiKey === "";
       if (
@@ -590,11 +630,14 @@ function EndpointDialog({
         !isClearingStoredApiKey &&
         !apiKey &&
         (!submittedApiKey || submittedApiKey === REDACTED_SECRET);
+      const validationTimeout = numOr(timeout, isStt ? 3600 : 30);
       const res = canUseStoredSecret
         ? await validateModelEndpoint({
             endpoint,
             model_type: modelType,
             model_name: modelName || undefined,
+            timeout: validationTimeout,
+            extra: validationExtra,
             stored_api_key_model_type: editing.model_type,
             stored_api_key_name: editing.name,
           })
@@ -602,8 +645,11 @@ function EndpointDialog({
             endpoint,
             model_type: modelType,
             model_name: modelName || undefined,
+            timeout: validationTimeout,
+            extra: validationExtra,
             api_key: apiKey,
           });
+      if (submittedDraft !== currentValidationDraft.current) return;
       if (!res.reachable) {
         setValidated(false);
         const msg = res.detail || "Endpoint is unreachable.";
@@ -636,6 +682,7 @@ function EndpointDialog({
         toast.success(msg);
       }
     } catch (e) {
+      if (submittedDraft !== currentValidationDraft.current) return;
       setValidated(false);
       const msg = e instanceof Error ? e.message : "Validation failed";
       setValidationMsg(msg);

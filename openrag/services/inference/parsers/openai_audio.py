@@ -28,13 +28,15 @@ from __future__ import annotations
 import asyncio
 import inspect
 import time
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from pathlib import Path
 
 from core.config.model_endpoints import (
-    CONTROL_EXTRA_KEYS,
     MOSS_SPEAKER_AWARE_KEY,
     STT_LANGUAGE_KEY,
+    STT_REQUEST_CONTROL_EXTRA_KEYS,
     ModelEndpointConfig,
 )
 from core.indexing.parsers.document_parser import BaseClientParser
@@ -50,31 +52,13 @@ logger = get_logger()
 # Suffixes the transcription backend can ingest as-is, avoiding the ~10x
 # size inflation from WAV conversion (Scaleway cap: 100 MB; OpenAI: 25 MB).
 _DEFAULT_DIRECT_UPLOAD_SUFFIXES: tuple[str, ...] = (".mp3", ".m4a", ".ogg", ".webm", ".wav")
-# ``AsyncOpenAI`` requires a non-empty API key even when the upstream endpoint
-# is intentionally unauthenticated. This value is the application's established
-# non-secret placeholder (see ``TranscriberConfig``).
-_ANONYMOUS_API_KEY = "EMPTY"
+# ``AsyncOpenAI`` accepts an empty string and omits its Authorization header,
+# which is required for endpoints that deliberately reject authentication.
+_ANONYMOUS_API_KEY = ""
 
 LanguageDetector = Callable[[Path], Awaitable[str | None]]
 TranscriptionPromptResolver = Callable[[], Awaitable[str | None]]
 TranscriptionEndpointResolver = Callable[[], ModelEndpointConfig | None | Awaitable[ModelEndpointConfig | None]]
-
-# Endpoint ``extra`` holds both connection metadata and provider request options.
-# Only the latter belongs in the OpenAI-compatible transcription request body.
-_STT_REQUEST_CONTROL_EXTRA_KEYS = CONTROL_EXTRA_KEYS | frozenset(
-    {
-        "api_key",
-        MOSS_SPEAKER_AWARE_KEY,
-        STT_LANGUAGE_KEY,
-        # These are owned by OpenRAG's configured endpoint / prompt plumbing.
-        # Streaming is deliberately unsupported because this parser expects one
-        # complete transcription response.
-        "file",
-        "model",
-        "prompt",
-        "stream",
-    }
-)
 
 
 class _EndpointConcurrencyLimiter:
@@ -108,6 +92,14 @@ class _EndpointConcurrencyLimiter:
             self._condition.notify_all()
 
 
+@dataclass
+class _EndpointLimiterEntry:
+    """Limiter plus the active-or-queued leases that keep it reusable."""
+
+    limiter: _EndpointConcurrencyLimiter
+    leases: int = 0
+
+
 class OpenAIAudioClient(BaseClientParser):
     """OpenAI-compatible audio transcription client."""
 
@@ -134,11 +126,9 @@ class OpenAIAudioClient(BaseClientParser):
         self._transcription_prompt_resolver = transcription_prompt_resolver
         self._transcription_endpoint_resolver = transcription_endpoint_resolver
         self._semaphore = asyncio.Semaphore(max(1, concurrency_limit))
-        # Keep only the current dynamically resolved endpoint limiter. Existing
-        # requests retain a local reference while they finish, but retired
-        # endpoints do not accumulate in long-lived worker processes.
-        self._endpoint_limiter: _EndpointConcurrencyLimiter | None = None
-        self._endpoint_limiter_key: tuple[str, str] | None = None
+        self._endpoint_limiters: dict[tuple[str, str], _EndpointLimiterEntry] = {}
+        self._endpoint_registry_lock = asyncio.Lock()
+        self._current_endpoint_limiter_key: tuple[str, str] | None = None
 
     def supported_types(self) -> list[str]:
         return [DocumentType.AUDIO.value, DocumentType.VIDEO.value]
@@ -154,8 +144,7 @@ class OpenAIAudioClient(BaseClientParser):
         try:
             async with document.as_temporary_file() as input_path:
                 endpoint_config = await self._resolve_transcription_endpoint()
-                limiter = await self._semaphore_for_endpoint(endpoint_config)
-                async with limiter:
+                async with self._transcription_slot(endpoint_config):
                     upload_path, cleanup = await self._prepare_upload(input_path)
                     try:
                         language = self._language_hint(endpoint_config)
@@ -247,29 +236,64 @@ class OpenAIAudioClient(BaseClientParser):
             return None
         return endpoint
 
-    async def _semaphore_for_endpoint(
-        self, endpoint: ModelEndpointConfig | None
-    ) -> asyncio.Semaphore | _EndpointConcurrencyLimiter:
-        """Return the current client's per-worker STT concurrency limiter.
+    @staticmethod
+    def _endpoint_limiter_key(endpoint: ModelEndpointConfig) -> tuple[str, str]:
+        """Return the effective serving identity used for concurrency scope."""
+        return (endpoint.endpoint.strip().rstrip("/"), (endpoint.model_name or "").strip())
 
-        Each indexing worker owns its own client and therefore its own limiter.
-        The endpoint value bounds requests from that worker; it is not a
-        cluster-wide quota across OpenRAG replicas. Updating a configured
-        limit changes the existing limiter, so lowering it never starts extra
-        work through a newly minted semaphore.
+    def _prune_endpoint_limiters(self) -> None:
+        """Drop drained entries except the endpoint currently selected."""
+        retired = [
+            key
+            for key, entry in self._endpoint_limiters.items()
+            if key != self._current_endpoint_limiter_key and entry.leases == 0
+        ]
+        for key in retired:
+            del self._endpoint_limiters[key]
+
+    async def _release_endpoint_lease(self, key: tuple[str, str], entry: _EndpointLimiterEntry) -> None:
+        """Release one registered lease and prune a drained retired entry."""
+        async with self._endpoint_registry_lock:
+            entry.leases -= 1
+            self._prune_endpoint_limiters()
+
+    @asynccontextmanager
+    async def _transcription_slot(self, endpoint: ModelEndpointConfig | None) -> AsyncIterator[None]:
+        """Limit one request without replacing a limiter still in use.
+
+        Registry bookkeeping is serialized, but waiting for endpoint capacity
+        happens after releasing the registry lock. Each worker owns its own
+        registry, so configured limits remain per worker rather than global.
         """
         if endpoint is None:
-            self._endpoint_limiter = None
-            self._endpoint_limiter_key = None
-            return self._semaphore
-        limit = max(1, endpoint.batch_size)
-        key = (endpoint.endpoint, endpoint.model_name or "")
-        if self._endpoint_limiter is None or self._endpoint_limiter_key != key:
-            self._endpoint_limiter = _EndpointConcurrencyLimiter(limit)
-            self._endpoint_limiter_key = key
-        elif self._endpoint_limiter.limit != limit:
-            await self._endpoint_limiter.set_limit(limit)
-        return self._endpoint_limiter
+            async with self._endpoint_registry_lock:
+                self._current_endpoint_limiter_key = None
+                self._prune_endpoint_limiters()
+            async with self._semaphore:
+                yield
+            return
+
+        key = self._endpoint_limiter_key(endpoint)
+        entry: _EndpointLimiterEntry | None = None
+        lease_registered = False
+        try:
+            async with self._endpoint_registry_lock:
+                entry = self._endpoint_limiters.get(key)
+                if entry is None:
+                    entry = _EndpointLimiterEntry(_EndpointConcurrencyLimiter(endpoint.batch_size))
+                    self._endpoint_limiters[key] = entry
+                elif entry.limiter.limit != endpoint.batch_size:
+                    await entry.limiter.set_limit(endpoint.batch_size)
+                entry.leases += 1
+                lease_registered = True
+                self._current_endpoint_limiter_key = key
+                self._prune_endpoint_limiters()
+
+            async with entry.limiter:
+                yield
+        finally:
+            if lease_registered and entry is not None:
+                await self._release_endpoint_lease(key, entry)
 
     @staticmethod
     def _language_hint(endpoint: ModelEndpointConfig | None) -> str | None:
@@ -294,7 +318,7 @@ class OpenAIAudioClient(BaseClientParser):
         """
         if endpoint is None:
             return {}
-        return {key: value for key, value in endpoint.extra.items() if key not in _STT_REQUEST_CONTROL_EXTRA_KEYS}
+        return {key: value for key, value in endpoint.extra.items() if key not in STT_REQUEST_CONTROL_EXTRA_KEYS}
 
     @staticmethod
     def _response_text(response: object) -> str:

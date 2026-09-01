@@ -77,6 +77,22 @@ ENV_MANAGED_VALUE = "env"
 # factory already stripped.
 CONTROL_EXTRA_KEYS = frozenset({"implementation", ENV_MANAGED_KEY, LLM_CONTEXT_SIZE_KEY, LLM_OUTPUT_TOKENS_KEY})
 
+# Connection metadata and OpenRAG-owned fields must not leak into an STT
+# provider's multipart request. Shared by runtime transcription and the Admin
+# UI validation probe so a saved endpoint is tested with the payload it will
+# actually receive.
+STT_REQUEST_CONTROL_EXTRA_KEYS = CONTROL_EXTRA_KEYS | frozenset(
+    {
+        "api_key",
+        MOSS_SPEAKER_AWARE_KEY,
+        STT_LANGUAGE_KEY,
+        "file",
+        "model",
+        "prompt",
+        "stream",
+    }
+)
+
 
 class ModelsConfig(ConfigMixin):
     """Named endpoint dictionaries — one per model type.
@@ -138,6 +154,7 @@ __all__ = [
     "LLM_CONTEXT_SIZE_KEY",
     "LLM_OUTPUT_TOKENS_KEY",
     "MOSS_SPEAKER_AWARE_KEY",
+    "STT_REQUEST_CONTROL_EXTRA_KEYS",
     "STT_LANGUAGE_KEY",
     "ModelEndpointConfig",
     "ModelsConfig",

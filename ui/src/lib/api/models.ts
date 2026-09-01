@@ -384,6 +384,8 @@ export interface ValidateModelEndpointRequest {
   endpoint: string;
   model_type?: ModelType;
   model_name?: string;
+  timeout?: number;
+  extra?: Record<string, unknown>;
   api_key?: string;
   stored_api_key_model_type?: ModelType;
   stored_api_key_name?: string;

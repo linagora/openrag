@@ -146,7 +146,7 @@ For a MOSS server bound to `127.0.0.1:8001`, use `http://127.0.0.1:8001/v1` only
 
 The bundled transcriber image is pinned for Whisper and predates MOSS support. Serve MOSS with the vLLM build specified by the model authors, then use it as the external transcription endpoint. Manage its instruction in **Admin UI → Prompt Library → Transcription**. Changes apply to the next transcription without a restart. OpenRAG leaves this global prompt empty by default so Whisper, MOSS, and other providers keep their native behavior.
 
-For a MOSS endpoint, **Admin UI → Model Endpoints** also offers an optional **Speaker-aware MOSS transcript** setting. It removes timecodes from complete diarized responses and retains normalized labels only when MOSS identifies more than one speaker. Leave it disabled to preserve the provider response unchanged. The setting also works with served-model aliases and is never sent to the provider.
+For a MOSS endpoint, **Admin UI → Model Endpoints** also offers an optional **Speaker-aware MOSS transcript** setting. It removes boundary timecodes when the complete diarized response is unambiguously recognized and retains normalized labels only when MOSS identifies more than one speaker. Leave it disabled to preserve the provider response unchanged. The setting also works with served-model aliases and is never sent to the provider.
 
 On a deployment dedicated to MOSS, you can paste an instruction like this into the Prompt Library:
 

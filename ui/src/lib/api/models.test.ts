@@ -112,6 +112,7 @@ describe("validateModelEndpoint", () => {
       endpoint: "http://candidate:8000/v1",
       model_type: "stt",
       model_name: "mistral-small",
+      timeout: 900,
       stored_api_key_model_type: "llm",
       stored_api_key_name: "private-llm",
     });
@@ -121,6 +122,7 @@ describe("validateModelEndpoint", () => {
       endpoint: "http://candidate:8000/v1",
       model_type: "stt",
       model_name: "mistral-small",
+      timeout: 900,
       stored_api_key_model_type: "llm",
       stored_api_key_name: "private-llm",
     });
