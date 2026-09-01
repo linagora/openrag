@@ -56,6 +56,20 @@ def _audio_doc(raw: bytes = b"audio-bytes", filename: str = "x.mp3") -> Document
     return Document(filename=filename, content_type=DocumentType.AUDIO, raw_bytes=raw)
 
 
+async def _wait_for_endpoint_leases(
+    client: OpenAIAudioClient,
+    key: tuple[str, str],
+    expected: int,
+) -> None:
+    """Wait until a request has registered as active or queued."""
+    for _ in range(10):
+        entry = client._endpoint_limiters.get(key)
+        if entry is not None and entry.leases == expected:
+            return
+        await asyncio.sleep(0)
+    raise AssertionError(f"Expected {expected} leases for {key}")
+
+
 # ---- _prepare_upload -------------------------------------------------------
 
 
@@ -198,7 +212,6 @@ class TestParse:
         kwargs = mock_openai_client.audio.transcriptions.create.await_args.kwargs
         assert kwargs["model"] == "moss-transcribe-diarize"
         assert kwargs["language"] == "fr"
-        assert (await client._semaphore_for_endpoint(endpoint)).limit == 3
 
     @pytest.mark.asyncio
     async def test_stt_request_extra_is_forwarded_without_connection_metadata(self, mock_openai_client):
@@ -237,44 +250,201 @@ class TestParse:
         }
 
     @pytest.mark.asyncio
-    async def test_stt_endpoint_limiter_applies_a_lowered_limit_without_parallel_limiter(self, mock_openai_client):
+    async def test_stt_endpoint_limiter_reuses_active_entry_across_a_b_a_switch(self, mock_openai_client):
+        client = _client(mock_openai_client)
+        endpoint_a = ModelEndpointConfig(
+            endpoint="http://moss-a:8000/v1",
+            model_name="moss",
+            batch_size=1,
+            timeout=120,
+        )
+        endpoint_b = endpoint_a.model_copy(update={"endpoint": "http://moss-b:8000/v1"})
+        endpoint_a_alias = endpoint_a.model_copy(
+            update={"endpoint": "http://moss-a:8000/v1/", "model_name": "  moss  "}
+        )
+        first_entered = asyncio.Event()
+        second_entered = asyncio.Event()
+        release_first = asyncio.Event()
+
+        async def first_request() -> None:
+            async with client._transcription_slot(endpoint_a):
+                first_entered.set()
+                await release_first.wait()
+
+        async def second_request() -> None:
+            async with client._transcription_slot(endpoint_a_alias):
+                second_entered.set()
+
+        first = asyncio.create_task(first_request())
+        await asyncio.wait_for(first_entered.wait(), timeout=0.5)
+        async with client._transcription_slot(endpoint_b):
+            pass
+
+        second = asyncio.create_task(second_request())
+        await _wait_for_endpoint_leases(client, ("http://moss-a:8000/v1", "moss"), 2)
+        assert not second_entered.is_set()
+
+        release_first.set()
+        await asyncio.gather(first, second)
+        assert second_entered.is_set()
+
+    @pytest.mark.asyncio
+    async def test_stt_endpoint_limiter_applies_a_lowered_limit_to_active_work(self, mock_openai_client):
         client = _client(mock_openai_client)
         endpoint = ModelEndpointConfig(
             endpoint="http://moss:8000/v1",
-            model_name="moss-transcribe-diarize",
+            model_name="moss",
             batch_size=2,
             timeout=120,
         )
-        limiter = await client._semaphore_for_endpoint(endpoint)
-        assert limiter.limit == 2
 
         first_entered = asyncio.Event()
         second_entered = asyncio.Event()
-        release = asyncio.Event()
+        third_entered = asyncio.Event()
+        release_first = asyncio.Event()
+        release_second = asyncio.Event()
 
-        async def hold_slot(entered: asyncio.Event) -> None:
-            async with limiter:
+        async def hold_slot(entered: asyncio.Event, release: asyncio.Event, config: ModelEndpointConfig) -> None:
+            async with client._transcription_slot(config):
                 entered.set()
                 await release.wait()
 
-        first = asyncio.create_task(hold_slot(first_entered))
-        second = asyncio.create_task(hold_slot(second_entered))
-        await first_entered.wait()
-        await second_entered.wait()
+        first = asyncio.create_task(hold_slot(first_entered, release_first, endpoint))
+        second = asyncio.create_task(hold_slot(second_entered, release_second, endpoint))
+        await asyncio.wait_for(first_entered.wait(), timeout=0.5)
+        await asyncio.wait_for(second_entered.wait(), timeout=0.5)
 
         lowered_endpoint = endpoint.model_copy(update={"batch_size": 1})
-        lowered_limiter = await client._semaphore_for_endpoint(lowered_endpoint)
-        assert lowered_limiter is limiter
-        assert lowered_limiter.limit == 1
+        third = asyncio.create_task(hold_slot(third_entered, asyncio.Event(), lowered_endpoint))
+        await _wait_for_endpoint_leases(client, ("http://moss:8000/v1", "moss"), 3)
+        assert not third_entered.is_set()
 
-        third_entered = asyncio.Event()
-        third = asyncio.create_task(hold_slot(third_entered))
+        release_first.set()
+        await first
         await asyncio.sleep(0)
         assert not third_entered.is_set()
 
-        release.set()
-        await asyncio.gather(first, second, third)
-        assert third_entered.is_set()
+        release_second.set()
+        await second
+        await asyncio.wait_for(third_entered.wait(), timeout=0.5)
+        third.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await third
+
+    @pytest.mark.asyncio
+    async def test_stt_endpoint_limiter_releases_a_cancelled_queued_lease(self, mock_openai_client):
+        client = _client(mock_openai_client)
+        endpoint_a = ModelEndpointConfig(
+            endpoint="http://moss-a:8000/v1",
+            model_name="moss",
+            batch_size=1,
+            timeout=120,
+        )
+        endpoint_b = endpoint_a.model_copy(update={"endpoint": "http://moss-b:8000/v1"})
+        first_entered = asyncio.Event()
+        release_first = asyncio.Event()
+
+        async def hold_first() -> None:
+            async with client._transcription_slot(endpoint_a):
+                first_entered.set()
+                await release_first.wait()
+
+        async def queue_second() -> None:
+            async with client._transcription_slot(endpoint_a):
+                pass
+
+        first = asyncio.create_task(hold_first())
+        await asyncio.wait_for(first_entered.wait(), timeout=0.5)
+        queued = asyncio.create_task(queue_second())
+        await _wait_for_endpoint_leases(client, ("http://moss-a:8000/v1", "moss"), 2)
+        queued.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await queued
+
+        async with client._transcription_slot(endpoint_b):
+            pass
+        release_first.set()
+        await first
+
+        assert set(client._endpoint_limiters) == {("http://moss-b:8000/v1", "moss")}
+
+    @pytest.mark.asyncio
+    async def test_stt_endpoint_capacity_wait_does_not_hold_the_registry_lock(self, mock_openai_client):
+        client = _client(mock_openai_client)
+        endpoint_a = ModelEndpointConfig(
+            endpoint="http://moss-a:8000/v1",
+            model_name="moss",
+            batch_size=1,
+            timeout=120,
+        )
+        endpoint_b = endpoint_a.model_copy(update={"endpoint": "http://moss-b:8000/v1"})
+        first_entered = asyncio.Event()
+        release_first = asyncio.Event()
+
+        async def hold_first() -> None:
+            async with client._transcription_slot(endpoint_a):
+                first_entered.set()
+                await release_first.wait()
+
+        async def queue_second() -> None:
+            async with client._transcription_slot(endpoint_a):
+                pass
+
+        first = asyncio.create_task(hold_first())
+        await asyncio.wait_for(first_entered.wait(), timeout=0.5)
+        queued = asyncio.create_task(queue_second())
+        key_a = ("http://moss-a:8000/v1", "moss")
+        await _wait_for_endpoint_leases(client, key_a, 2)
+
+        async def use_endpoint_b() -> None:
+            async with client._transcription_slot(endpoint_b):
+                pass
+
+        await asyncio.wait_for(use_endpoint_b(), timeout=0.5)
+
+        queued.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await queued
+        release_first.set()
+        await first
+
+    @pytest.mark.asyncio
+    async def test_stt_endpoint_limiter_releases_an_active_exception(self, mock_openai_client):
+        client = _client(mock_openai_client)
+        endpoint_a = ModelEndpointConfig(
+            endpoint="http://moss-a:8000/v1",
+            model_name="moss",
+            batch_size=1,
+            timeout=120,
+        )
+        endpoint_b = endpoint_a.model_copy(update={"endpoint": "http://moss-b:8000/v1"})
+
+        with pytest.raises(RuntimeError, match="transcription failed"):
+            async with client._transcription_slot(endpoint_a):
+                raise RuntimeError("transcription failed")
+        async with client._transcription_slot(endpoint_b):
+            pass
+
+        assert set(client._endpoint_limiters) == {("http://moss-b:8000/v1", "moss")}
+
+    @pytest.mark.asyncio
+    async def test_stt_endpoint_limiter_preserves_fallback_and_prunes_after_drain(self, mock_openai_client):
+        client = _client(mock_openai_client, concurrency_limit=1)
+        endpoint = ModelEndpointConfig(
+            endpoint="http://moss:8000/v1",
+            model_name="moss",
+            batch_size=1,
+            timeout=120,
+        )
+
+        async with client._transcription_slot(None):
+            pass
+        async with client._transcription_slot(endpoint):
+            pass
+        async with client._transcription_slot(None):
+            pass
+
+        assert client._endpoint_limiters == {}
 
     @pytest.mark.asyncio
     async def test_text_response_format_accepts_plain_string_response(self, mock_openai_client):
