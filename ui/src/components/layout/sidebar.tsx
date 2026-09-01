@@ -22,7 +22,9 @@ import {
   SidebarFooter,
 } from "@/components/ui/sidebar";
 import { APP_NAME } from "@/lib/brand";
+import { useActiveJobsCount } from "@/lib/jobs-queries";
 import { usePermissions, type Permissions } from "@/lib/permissions";
+import { JobsBadge } from "./jobs-badge";
 
 interface NavItem {
   title: string;
@@ -51,6 +53,7 @@ const settingsItem: NavItem = { title: "Settings", href: "/settings", icon: User
 export function AppSidebar() {
   const location = useLocation();
   const perms = usePermissions();
+  const activeJobs = useActiveJobsCount();
   const visibleItems = navItems.filter((item) => !item.requires || item.requires(perms));
 
   const isActive = (href: string) => {
@@ -60,12 +63,15 @@ export function AppSidebar() {
 
   const renderItem = (item: NavItem) => {
     const active = isActive(item.href);
+    const isJobs = item.href === "/jobs";
     return (
       <SidebarMenuItem key={item.href}>
         <Link
           to={item.href}
           title={item.title}
           className={`relative flex items-center gap-3 px-3 py-2 rounded-xl text-sm font-medium transition-colors overflow-hidden group-data-[collapsible=icon]:justify-center group-data-[collapsible=icon]:px-0 ${
+            isJobs ? "pr-11 group-data-[collapsible=icon]:pr-0" : ""
+          } ${
             active
               ? "bg-sidebar-accent text-sidebar-accent-foreground shadow-sm"
               : "text-sidebar-foreground/70 hover:bg-sidebar-accent/60 hover:text-sidebar-accent-foreground"
@@ -73,7 +79,8 @@ export function AppSidebar() {
         >
           <item.icon className="h-4.5 w-4.5 shrink-0" />
           <span className="truncate group-data-[collapsible=icon]:hidden">{item.title}</span>
-          {active && (
+          {isJobs && <JobsBadge result={activeJobs} />}
+          {active && !isJobs && (
             <span className="absolute right-3 h-1.5 w-1.5 rounded-full bg-sidebar-primary shrink-0 group-data-[collapsible=icon]:hidden" />
           )}
         </Link>

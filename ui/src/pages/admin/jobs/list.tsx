@@ -4,6 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { ColumnDef, RowSelectionState } from "@tanstack/react-table";
 import { Ban, Download, RefreshCw, Search } from "lucide-react";
 import { toast } from "sonner";
+import { useAuth } from "@/lib/auth";
 import { usePermissions } from "@/lib/permissions";
 
 import { PageHeader } from "@/components/shared/page-header";
@@ -21,13 +22,13 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
-import { cancelTask, getQueueInfo, isActiveState, listTasks, type QueueInfo, type TaskListItem } from "@/lib/api/jobs";
+import { cancelTask, isActiveState, listTasks, type QueueInfo, type TaskListItem } from "@/lib/api/jobs";
 import { downloadCsv } from "@/lib/csv";
+import { jobsQueueInfoQueryOptions, jobsTaskListQueryOptions } from "@/lib/jobs-queries";
 import { formatDate } from "@/lib/utils";
 
 // OpenRag exposes per-file indexing tasks (TaskStateManager), not batch "jobs".
 const STATUS_TABS = ["ALL", "ACTIVE", "COMPLETED", "FAILED", "CANCELLED"] as const;
-const JOBS_REFETCH_INTERVAL_MS = 5000;
 const JOB_SEARCH_DEBOUNCE_MS = 250;
 const ALL_PARTITIONS_FILTER = "__openrag/all_partitions__";
 
@@ -154,6 +155,7 @@ const columns: ColumnDef<TaskListItem, unknown>[] = [
 
 export default function JobListPage() {
   const { isAdmin } = usePermissions();
+  const { user } = useAuth();
   const queryClient = useQueryClient();
   const [statusTab, setStatusTab] = useState<string>("ALL");
   const [search, setSearch] = useState("");
@@ -162,6 +164,7 @@ export default function JobListPage() {
   const [rowSelection, setRowSelection] = useState<RowSelectionState>({});
   const [manualRefreshing, setManualRefreshing] = useState(false);
   const taskStatusFilter = statusTab === "ALL" ? undefined : statusTab === "ACTIVE" ? "active" : statusTab;
+  const queryScope = { userId: user?.id ?? 0, isAdmin };
 
   useEffect(() => {
     const timeout = window.setTimeout(() => setDebouncedSearch(search), JOB_SEARCH_DEBOUNCE_MS);
@@ -169,15 +172,16 @@ export default function JobListPage() {
   }, [search]);
 
   const tasksQuery = useQuery({
-    queryKey: ["tasks", statusTab],
-    queryFn: () => listTasks(taskStatusFilter),
-    refetchInterval: JOBS_REFETCH_INTERVAL_MS, // poll — OpenRag has no task SSE
+    ...jobsTaskListQueryOptions(queryScope, taskStatusFilter, {
+      // The sidebar already polls this exact user-scoped query.
+      poll: isAdmin || taskStatusFilter !== "active",
+    }),
+    enabled: !!user,
   });
   const queueInfoQuery = useQuery({
-    queryKey: ["queue-info"],
-    queryFn: getQueueInfo,
-    enabled: isAdmin,
-    refetchInterval: JOBS_REFETCH_INTERVAL_MS,
+    // The sidebar owns the polling observer; this page shares its raw cache.
+    ...jobsQueueInfoQueryOptions(queryScope, { poll: false }),
+    enabled: !!user && isAdmin,
   });
 
   const tasks = useMemo(() => tasksQuery.data?.tasks ?? [], [tasksQuery.data?.tasks]);

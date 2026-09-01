@@ -16,11 +16,18 @@ vi.mock("sonner", () => ({
 }));
 
 const permissions = vi.hoisted(() => ({ isAdmin: true }));
+const auth = vi.hoisted(() => ({
+  user: { id: 7, is_admin: true },
+}));
 
 vi.mock("@/lib/permissions", () => ({
   usePermissions: () => ({
     isAdmin: permissions.isAdmin,
   }),
+}));
+
+vi.mock("@/lib/auth", () => ({
+  useAuth: () => auth,
 }));
 
 vi.mock("@/lib/api/jobs", async () => {
@@ -84,18 +91,26 @@ function renderJobs() {
     },
   });
 
-  return render(
+  const rendered = render(
     <QueryClientProvider client={queryClient}>
       <MemoryRouter>
         <JobListPage />
       </MemoryRouter>
     </QueryClientProvider>,
   );
+
+  return { ...rendered, queryClient };
+}
+
+function queryRefetchInterval(queryClient: QueryClient, queryKey: readonly unknown[]) {
+  const query = queryClient.getQueryCache().find({ queryKey, exact: true });
+  return (query?.options as { refetchInterval?: number | false } | undefined)?.refetchInterval;
 }
 
 describe("JobListPage filters", () => {
   beforeEach(() => {
     permissions.isAdmin = true;
+    auth.user = { id: 7, is_admin: true };
     vi.clearAllMocks();
     cancelTaskMock.mockResolvedValue({ message: "Cancellation signal sent" });
     getQueueInfoMock.mockResolvedValue({
@@ -132,6 +147,22 @@ describe("JobListPage filters", () => {
 
     await waitFor(() => expect(search.value).toBe(""));
     expect(await screen.findByText("failed.pdf")).not.toBeNull();
+  });
+
+  it("scopes shared Jobs queries by the current administrator identity", async () => {
+    const { queryClient } = renderJobs();
+
+    await screen.findByText("completed.pdf");
+
+    const queryKeys = queryClient
+      .getQueryCache()
+      .findAll()
+      .map((query) => query.queryKey);
+
+    expect(queryKeys).toContainEqual(["tasks", 7, "admin", "all"]);
+    expect(queryKeys).toContainEqual(["queue-info", 7, "admin"]);
+    expect(queryRefetchInterval(queryClient, ["tasks", 7, "admin", "all"])).toBe(5_000);
+    expect(queryRefetchInterval(queryClient, ["queue-info", 7, "admin"])).toBe(false);
   });
 
   it("bulk-cancels only selected active jobs", async () => {
@@ -345,6 +376,7 @@ describe("JobListPage filters", () => {
 
   it("does not fetch admin-only queue information for non-admin users", async () => {
     permissions.isAdmin = false;
+    auth.user = { id: 7, is_admin: false };
 
     renderJobs();
 
@@ -358,5 +390,17 @@ describe("JobListPage filters", () => {
 
     await waitFor(() => expect(listTasksMock.mock.calls.length).toBeGreaterThan(initialTaskRequests));
     expect(getQueueInfoMock).not.toHaveBeenCalled();
+  });
+
+  it("observes the sidebar-polled active-task cache without adding another interval", async () => {
+    permissions.isAdmin = false;
+    auth.user = { id: 7, is_admin: false };
+    const { queryClient } = renderJobs();
+
+    await screen.findByText("completed.pdf");
+    await userEvent.click(screen.getByRole("tab", { name: "Active" }));
+    await waitFor(() => expect(listTasksMock).toHaveBeenCalledWith("active"));
+
+    expect(queryRefetchInterval(queryClient, ["tasks", 7, "user", "active"])).toBe(false);
   });
 });
