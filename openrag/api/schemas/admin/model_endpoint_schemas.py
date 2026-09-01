@@ -249,6 +249,7 @@ class ValidateEndpointRequest(BaseModel):
     model_type: ModelEndpointType | None = None
     model_name: str | None = None
     timeout: float | None = Field(default=None, gt=0)
+    extra: dict[str, Any] = Field(default_factory=dict)
     api_key: str | None = None
     stored_api_key_model_type: ModelEndpointType | None = None
     stored_api_key_name: str | None = None

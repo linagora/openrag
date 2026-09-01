@@ -11,6 +11,7 @@ from __future__ import annotations
 import io
 import os
 import wave
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
@@ -18,6 +19,8 @@ from urllib.parse import urlsplit
 from core.config.model_endpoints import (
     ENV_MANAGED_KEY,
     ENV_MANAGED_VALUE,
+    STT_LANGUAGE_KEY,
+    STT_REQUEST_CONTROL_EXTRA_KEYS,
     ModelEndpointConfig,
     ModelEndpointRow,
 )
@@ -70,6 +73,51 @@ def _build_stt_validation_wav() -> bytes:
 
 # Created once rather than encoding/transcoding a file for each Admin UI validation.
 _STT_VALIDATION_WAV = _build_stt_validation_wav()
+
+
+def _flatten_multipart_field(key: str, value: Any) -> list[tuple[str, str]]:
+    """Serialize JSON-like values as OpenAI-style multipart form fields."""
+    if isinstance(value, Mapping):
+        return [
+            item
+            for nested_key, nested_value in value.items()
+            for item in _flatten_multipart_field(f"{key}[{nested_key}]", nested_value)
+        ]
+    if isinstance(value, (list, tuple)):
+        return [item for nested_value in value for item in _flatten_multipart_field(f"{key}[]", nested_value)]
+    if value is True:
+        serialized = "true"
+    elif value is False:
+        serialized = "false"
+    elif value is None:
+        serialized = ""
+    else:
+        serialized = str(value)
+    return [(key, serialized)] if serialized else []
+
+
+def _stt_validation_form_data(model_name: str, extra: dict[str, Any] | None) -> dict[str, Any]:
+    """Build the sanitized multipart fields used by an STT runtime request."""
+    request_options: dict[str, Any] = {"model": model_name}
+    if extra:
+        language = extra.get(STT_LANGUAGE_KEY)
+        if isinstance(language, str) and language.strip():
+            request_options[STT_LANGUAGE_KEY] = language.strip()
+        request_options.update(
+            {key: value for key, value in extra.items() if key not in STT_REQUEST_CONTROL_EXTRA_KEYS}
+        )
+
+    serialized: dict[str, Any] = {}
+    for key, value in request_options.items():
+        for field_name, field_value in _flatten_multipart_field(key, value):
+            existing = serialized.get(field_name)
+            if existing is None:
+                serialized[field_name] = field_value
+            elif isinstance(existing, list):
+                existing.append(field_value)
+            else:
+                serialized[field_name] = [existing, field_value]
+    return serialized
 
 
 def _slug(model_name: str) -> str:
@@ -580,6 +628,7 @@ class ModelEndpointService:
         api_key: str | None = None,
         model_type: str | None = None,
         timeout: float | None = None,
+        extra: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Probe an endpoint's model list and, for STT, transcription route.
 
@@ -655,7 +704,7 @@ class ModelEndpointService:
                     # before they authenticate the request.
                     transcription_response = await client.post(
                         base_url + "/audio/transcriptions",
-                        data={"model": normalized_model_name},
+                        data=_stt_validation_form_data(normalized_model_name, extra),
                         files={
                             "file": (
                                 "openrag-stt-validation.wav",

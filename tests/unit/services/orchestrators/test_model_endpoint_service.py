@@ -1453,7 +1453,14 @@ async def test_validate_stt_endpoint_probes_transcription_capability_with_redire
 
         async def post(self, url, *, data, files, follow_redirects, timeout):
             calls.append(("post", url))
-            assert data == {"model": "moss-transcribe-diarize"}
+            assert data == {
+                "model": "moss-transcribe-diarize",
+                "language": "fr",
+                "response_format": "json",
+                "temperature": "0",
+                "timestamp_granularities[]": ["segment", "word"],
+                "provider[diarize]": "true",
+            }
             assert files["file"][0] == "openrag-stt-validation.wav"
             assert files["file"][2] == "audio/wav"
             assert files["file"][1][:4] == b"RIFF"
@@ -1472,6 +1479,16 @@ async def test_validate_stt_endpoint_probes_transcription_capability_with_redire
         "moss-transcribe-diarize",
         model_type="stt",
         timeout=180,
+        extra={
+            "language": "fr",
+            "response_format": "json",
+            "temperature": 0,
+            "timestamp_granularities": ["segment", "word"],
+            "provider": {"diarize": True},
+            "api_key": "must-not-be-forwarded",
+            "implementation": "must-not-be-forwarded",
+            "prompt": "must-not-be-forwarded",
+        },
     )
 
     assert calls == [
