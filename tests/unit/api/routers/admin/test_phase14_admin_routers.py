@@ -97,11 +97,14 @@ class FakeModelEndpointService:
         api_key: str | None = None,
         model_type: str | None = None,
         timeout: float | None = None,
+        extra: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Record endpoint validation."""
         payload = {"url": url, "model_type": model_type, "model_name": model_name, "api_key": api_key}
         if timeout is not None:
             payload["timeout"] = timeout
+        if extra is not None:
+            payload["extra"] = extra
         self.calls.append(("validate", payload))
         return {
             "reachable": True,
@@ -353,6 +356,41 @@ async def test_validate_model_endpoint_uses_stored_api_key(async_client_factory)
 
 
 @pytest.mark.asyncio
+async def test_validate_stored_stt_endpoint_forwards_request_options(async_client_factory):
+    model_service = FakeModelEndpointService()
+    model_service.endpoint_model_name = "moss-transcribe-diarize"
+    model_service.endpoint_extra = {
+        "api_key": "secret-token",
+        "language": "fr",
+        "response_format": "json",
+    }
+    app = _build_app(model_service=model_service)
+
+    async with async_client_factory(app) as client:
+        response = await client.post("/model-endpoints/stt/moss/validate")
+
+    assert response.status_code == 200
+    assert model_service.calls == [
+        ("get", {"name": "moss", "model_type": "stt"}),
+        (
+            "validate",
+            {
+                "url": "http://llm:8000/v1",
+                "model_type": "stt",
+                "model_name": "moss-transcribe-diarize",
+                "api_key": "secret-token",
+                "timeout": 30.0,
+                "extra": {
+                    "api_key": "secret-token",
+                    "language": "fr",
+                    "response_format": "json",
+                },
+            },
+        ),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_validate_endpoint_draft_forwards_body_without_lookup(async_client_factory):
     """The draft-validate route probes arbitrary *unsaved* values: it forwards the
     request body straight to the service with no prior endpoint lookup/persist."""
@@ -368,6 +406,7 @@ async def test_validate_endpoint_draft_forwards_body_without_lookup(async_client
                 "model_name": "mistral-small",
                 "api_key": "draft-key",
                 "timeout": 900,
+                "extra": {"language": "fr", "response_format": "json"},
             },
         )
 
@@ -382,6 +421,7 @@ async def test_validate_endpoint_draft_forwards_body_without_lookup(async_client
                 "model_name": "mistral-small",
                 "api_key": "draft-key",
                 "timeout": 900.0,
+                "extra": {"language": "fr", "response_format": "json"},
             },
         ),
     ]

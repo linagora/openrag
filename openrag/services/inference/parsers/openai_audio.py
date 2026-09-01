@@ -33,7 +33,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
-from core.config.model_endpoints import CONTROL_EXTRA_KEYS, STT_LANGUAGE_KEY, ModelEndpointConfig
+from core.config.model_endpoints import STT_LANGUAGE_KEY, STT_REQUEST_CONTROL_EXTRA_KEYS, ModelEndpointConfig
 from core.indexing.parsers.document_parser import BaseClientParser
 from core.models.document import Document, DocumentType, ProcessedDocument, TextBlock
 from core.utils.logging import get_logger
@@ -54,22 +54,6 @@ _ANONYMOUS_API_KEY = "EMPTY"
 LanguageDetector = Callable[[Path], Awaitable[str | None]]
 TranscriptionPromptResolver = Callable[[], Awaitable[str | None]]
 TranscriptionEndpointResolver = Callable[[], ModelEndpointConfig | None | Awaitable[ModelEndpointConfig | None]]
-
-# Endpoint ``extra`` holds both connection metadata and provider request options.
-# Only the latter belongs in the OpenAI-compatible transcription request body.
-_STT_REQUEST_CONTROL_EXTRA_KEYS = CONTROL_EXTRA_KEYS | frozenset(
-    {
-        "api_key",
-        STT_LANGUAGE_KEY,
-        # These are owned by OpenRAG's configured endpoint / prompt plumbing.
-        # Streaming is deliberately unsupported because this parser expects one
-        # complete transcription response.
-        "file",
-        "model",
-        "prompt",
-        "stream",
-    }
-)
 
 
 class _EndpointConcurrencyLimiter:
@@ -329,7 +313,7 @@ class OpenAIAudioClient(BaseClientParser):
         """
         if endpoint is None:
             return {}
-        return {key: value for key, value in endpoint.extra.items() if key not in _STT_REQUEST_CONTROL_EXTRA_KEYS}
+        return {key: value for key, value in endpoint.extra.items() if key not in STT_REQUEST_CONTROL_EXTRA_KEYS}
 
     @staticmethod
     def _response_text(response: object) -> str:

@@ -248,6 +248,7 @@ async def validate_endpoint_draft(
         model_name=body.model_name,
         api_key=api_key,
         timeout=body.timeout,
+        extra=body.extra if body.model_type == "stt" else None,
     )
 
 
@@ -265,4 +266,5 @@ async def validate_model_endpoint(
         model_name=endpoint.model_name,
         api_key=endpoint.extra.get("api_key"),
         timeout=endpoint.timeout,
+        extra=endpoint.extra if model_type == "stt" else None,
     )

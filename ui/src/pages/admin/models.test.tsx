@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { listModelEndpoints, validateModelEndpoint } from "@/lib/api/models";
@@ -70,6 +70,11 @@ describe("ModelsPage STT validation", () => {
     const textboxes = within(dialog).getAllByRole("textbox");
     await user.type(textboxes[1], "http://moss:8000/v1");
     await user.type(textboxes[2], "moss-transcribe-diarize");
+    await user.type(within(dialog).getByPlaceholderText("fr"), "fr");
+    const extraInput = within(dialog).getByDisplayValue("{}");
+    fireEvent.change(extraInput, {
+      target: { value: JSON.stringify({ response_format: "json", temperature: 0 }) },
+    });
     const numberInputs = within(dialog).getAllByRole("spinbutton");
     await user.clear(numberInputs[1]);
     await user.type(numberInputs[1], "725");
@@ -82,6 +87,11 @@ describe("ModelsPage STT validation", () => {
           model_type: "stt",
           model_name: "moss-transcribe-diarize",
           timeout: 725,
+          extra: {
+            language: "fr",
+            response_format: "json",
+            temperature: 0,
+          },
         }),
       ),
     );
@@ -143,5 +153,68 @@ describe("ModelsPage STT validation", () => {
     await user.type(timeoutInput, "725");
 
     await waitFor(() => expect(updateButton.disabled).toBe(true));
+  });
+
+  it("requires revalidation after changing an STT language hint", async () => {
+    const user = userEvent.setup();
+    renderPage();
+
+    await screen.findByText("No embedder endpoints configured.");
+    await user.click(screen.getByRole("tab", { name: "stt" }));
+    await user.click(screen.getByRole("button", { name: /add endpoint/i }));
+
+    const dialog = screen.getByRole("dialog");
+    const textboxes = within(dialog).getAllByRole("textbox");
+    await user.type(textboxes[1], "http://moss:8000/v1");
+    await user.type(textboxes[2], "moss-transcribe-diarize");
+    await user.click(within(dialog).getByRole("button", { name: "Validate" }));
+
+    const createButton = within(dialog).getByRole("button", { name: "Create" }) as HTMLButtonElement;
+    await waitFor(() => expect(createButton.disabled).toBe(false));
+
+    await user.type(within(dialog).getByPlaceholderText("fr"), "fr");
+
+    await waitFor(() => expect(createButton.disabled).toBe(true));
+  });
+
+  it("ignores a validation response for an outdated STT draft", async () => {
+    let resolveValidation!: (value: {
+      reachable: boolean;
+      model_found: boolean;
+      transcription_supported: boolean;
+    }) => void;
+    validateModelEndpointMock.mockReturnValue(
+      new Promise((resolve) => {
+        resolveValidation = resolve;
+      }),
+    );
+    const user = userEvent.setup();
+    renderPage();
+
+    await screen.findByText("No embedder endpoints configured.");
+    await user.click(screen.getByRole("tab", { name: "stt" }));
+    await user.click(screen.getByRole("button", { name: /add endpoint/i }));
+
+    const dialog = screen.getByRole("dialog");
+    const textboxes = within(dialog).getAllByRole("textbox");
+    await user.type(textboxes[1], "http://moss:8000/v1");
+    await user.type(textboxes[2], "moss-transcribe-diarize");
+    await user.click(within(dialog).getByRole("button", { name: "Validate" }));
+    await waitFor(() => expect(validateModelEndpointMock).toHaveBeenCalledOnce());
+
+    const createButton = within(dialog).getByRole("button", { name: "Create" }) as HTMLButtonElement;
+    const timeoutInput = within(dialog).getAllByRole("spinbutton")[1];
+    await user.clear(timeoutInput);
+    await user.type(timeoutInput, "725");
+
+    await act(async () => {
+      resolveValidation({
+        reachable: true,
+        model_found: true,
+        transcription_supported: true,
+      });
+    });
+
+    expect(createButton.disabled).toBe(true);
   });
 });
