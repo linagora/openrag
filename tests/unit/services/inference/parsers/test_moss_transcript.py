@@ -53,6 +53,8 @@ def test_preserves_spoken_bracketed_numbers_in_a_complete_turn():
     [
         "The [2024] roadmap is ready.",
         "[1][S01] Hello",
+        "[1][S01] A [2][2] B [3][3][S02] C [4]",
+        "[4-2][S01] Hello",
         "[1-2][S01] Hello [2][S02] there [3]",
         "[1] Hello [2][2-3][S02] There",
         "[1-2][S01] Hello [2][S02] there",

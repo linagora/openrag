@@ -12,7 +12,7 @@ _TIME_TOKEN = rf"\[\s*{_TIME}\s*\]"
 _SPEAKER = r"[Ss]\d+"
 
 _DASH_START = re.compile(
-    rf"\[\s*{_SECONDS}\s*-\s*{_SECONDS}\s*\]\s*"
+    rf"\[\s*(?P<start>{_SECONDS})\s*-\s*(?P<end>{_SECONDS})\s*\]\s*"
     rf"\[\s*(?P<speaker>{_SPEAKER})\s*\]",
 )
 _DASH_TOKEN = re.compile(rf"\[\s*{_SECONDS}\s*-\s*{_SECONDS}\s*\]")
@@ -22,6 +22,7 @@ _COMPACT_START = re.compile(
 )
 _INITIAL_TIME = re.compile(rf"^\s*{_TIME_TOKEN}")
 _TRAILING_TIME = re.compile(rf"(?P<end>{_TIME_TOKEN})\s*$")
+_ADJACENT_TIME_TOKENS = re.compile(rf"{_TIME_TOKEN}\s*{_TIME_TOKEN}")
 _SPEAKER_LABEL = re.compile(rf"\[\s*(?P<speaker>{_SPEAKER})\s*\]")
 _PARTIAL_SPEAKER_LABEL = re.compile(r"\[\s*[Ss]\d*\s*\]?\s*$")
 
@@ -60,6 +61,8 @@ def _parse_dash_segments(transcript: str) -> list[_MossSegment]:
 
     segments: list[_MossSegment] = []
     for index, start in enumerate(starts):
+        if float(start.group("end")) < float(start.group("start")):
+            return []
         end = starts[index + 1].start() if index + 1 < len(starts) else len(transcript)
         text = _normalize_text(transcript[start.end() : end])
         if not text or _DASH_TOKEN.search(text) or _PARTIAL_DASH_TOKEN.search(text) or _COMPACT_START.search(text):
@@ -91,7 +94,7 @@ def _parse_compact_segments(transcript: str) -> list[_MossSegment]:
         if trailing_time is None:
             return []
         text = _normalize_text(region[: trailing_time.start()])
-        if not text or _COMPACT_START.search(text) or _DASH_TOKEN.search(text):
+        if not text or _ADJACENT_TIME_TOKENS.search(text) or _COMPACT_START.search(text) or _DASH_TOKEN.search(text):
             return []
         segments.append(_MossSegment(_normalize_speaker_id(speaker), text))
     return segments
