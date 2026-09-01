@@ -68,15 +68,17 @@ def _parse_compact(transcript: str) -> list[_Segment]:
     regions: list[tuple[str, str, int, int]] = []
     initial = _INITIAL_TIME.match(transcript)
     if initial and initial.end() <= starts[0].start():
-        initial_end = starts[0].start()
-        if _TRAILING_TIME.search(transcript[initial.end() : initial_end]) is None:
-            initial_end = starts[0].end("start_token")
+        initial_end = _compact_region_end(transcript, initial.end(), starts[0])
         regions.append(("S01", initial["start"], initial.end(), initial_end))
     elif transcript[: starts[0].start()].strip():
         return []
 
     for index, match in enumerate(starts):
-        end = starts[index + 1].start() if index + 1 < len(starts) else len(transcript)
+        end = (
+            _compact_region_end(transcript, match.end(), starts[index + 1])
+            if index + 1 < len(starts)
+            else len(transcript)
+        )
         regions.append((match["speaker"], match["start"], match.end(), end))
 
     segments: list[_Segment] = []
@@ -90,6 +92,13 @@ def _parse_compact(transcript: str) -> list[_Segment]:
             return []
         segments.append((_normalize_speaker(speaker), text))
     return segments
+
+
+def _compact_region_end(transcript: str, text_start: int, next_start: re.Match[str]) -> int:
+    end = next_start.start()
+    if _TRAILING_TIME.search(transcript[text_start:end]) is None:
+        return next_start.end("start_token")
+    return end
 
 
 def _parse_speaker_only(transcript: str) -> list[_Segment]:
