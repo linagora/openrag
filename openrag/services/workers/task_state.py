@@ -4,6 +4,7 @@ import base64
 import json
 import threading
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -370,6 +371,12 @@ class TaskStateManager:
         _save_recoverable_task(task_id, info)
         return True
 
+    def _expire_refless_tasks_if_stale_locked(self, task_ids: Iterable[str] | None = None) -> None:
+        for task_id in self.tasks if task_ids is None else task_ids:
+            info = self.tasks.get(task_id)
+            if info is not None:
+                self._expire_refless_task_if_stale_locked(task_id, info)
+
     @ray.method(concurrency_group="set")
     async def begin_file_delete(self, *, partition: str, file_id: str, fence_id: str | None = None) -> None:
         with self.lock:
@@ -604,6 +611,8 @@ class TaskStateManager:
     async def get_state(self, task_id: str) -> str | None:
         with self.lock:
             info = self.tasks.get(task_id)
+            if info is not None:
+                self._expire_refless_task_if_stale_locked(task_id, info)
             return info.state if info else None
 
     @ray.method(concurrency_group="get")
@@ -710,11 +719,13 @@ class TaskStateManager:
     @ray.method(concurrency_group="queue_info")
     async def get_all_states(self) -> dict[str, str | None]:
         with self.lock:
+            self._expire_refless_tasks_if_stale_locked()
             return {tid: info.state for tid, info in self.tasks.items()}
 
     @ray.method(concurrency_group="queue_info")
     async def get_all_info(self) -> dict[str, dict]:
         with self.lock:
+            self._expire_refless_tasks_if_stale_locked()
             return {
                 task_id: {
                     "state": info.state,
@@ -730,6 +741,7 @@ class TaskStateManager:
     async def get_all_user_info(self, user_id: int) -> dict[str, dict]:
         with self.lock:
             task_ids = self.user_index.get(user_id, set())
+            self._expire_refless_tasks_if_stale_locked(task_ids)
             return {
                 tid: {
                     "state": self.tasks[tid].state,
@@ -757,6 +769,7 @@ class TaskStateManager:
     async def get_user_pending_task_count(self, user_id: int) -> int:
         with self.lock:
             task_ids = self.user_index.get(user_id, set())
+            self._expire_refless_tasks_if_stale_locked(task_ids)
             return sum(1 for tid in task_ids if (info := self.tasks.get(tid)) and info.state in ACTIVE_INDEXING_STATES)
 
 

@@ -254,6 +254,56 @@ async def test_stale_refless_task_rejects_late_worker_registration() -> None:
 
 
 @pytest.mark.asyncio
+async def test_pending_count_expires_stale_refless_submission_after_grace(monkeypatch) -> None:
+    manager = _task_state_manager()
+    monkeypatch.setattr(task_state_module.time, "time", lambda: 1_000.0)
+    await manager.set_queued_details(
+        "task-1",
+        file_id="file-1",
+        partition="tenant-a",
+        metadata={},
+        user_id=42,
+    )
+    assert await manager.begin_worker_submission("task-1") is True
+
+    monkeypatch.setattr(task_state_module.time, "time", lambda: 1_059.0)
+    assert await manager.get_user_pending_task_count(42) == 1
+
+    monkeypatch.setattr(task_state_module.time, "time", lambda: 1_060.0)
+    assert await manager.get_user_pending_task_count(42) == 0
+    assert await manager.get_state("task-1") == "FAILED"
+
+
+@pytest.mark.parametrize(
+    "method_name",
+    ["get_state", "get_all_states", "get_all_info", "get_all_user_info"],
+)
+@pytest.mark.asyncio
+async def test_queue_views_expire_stale_refless_submissions(monkeypatch, method_name: str) -> None:
+    manager = _task_state_manager()
+    monkeypatch.setattr(task_state_module.time, "time", lambda: 1_000.0)
+    await manager.set_queued_details(
+        "task-1",
+        file_id="file-1",
+        partition="tenant-a",
+        metadata={},
+        user_id=42,
+    )
+    assert await manager.begin_worker_submission("task-1") is True
+
+    monkeypatch.setattr(task_state_module.time, "time", lambda: 1_060.0)
+    method = getattr(manager, method_name)
+    if method_name == "get_state":
+        state = await method("task-1")
+    else:
+        result = await method(42) if method_name == "get_all_user_info" else await method()
+        task = result["task-1"]
+        state = task if method_name == "get_all_states" else task["state"]
+
+    assert state == "FAILED"
+
+
+@pytest.mark.asyncio
 async def test_worker_cannot_enter_serializing_before_ref_registration() -> None:
     manager = _task_state_manager()
     await manager.set_queued_details(
