@@ -26,7 +26,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from core.models.catalog import INDEXING_CONTENT_CLAIM_TOKEN_PREFIX, DocumentRecord, DocumentStatus
-from core.ports.document_repo import DocumentRepository
+from core.ports.document_repo import ContentClaimLease, DocumentRepository
 from core.utils.logging import get_logger
 from services.persistence.file_count import decrement_file_counts
 
@@ -277,7 +277,6 @@ class PgDocumentRepository(DocumentRepository):
         content_sha256: str,
         claim_token: str,
         replace: bool = False,
-        active_claim_tokens: set[str] | None = None,
     ) -> str | None:
         """Atomically reserve content while it is being indexed."""
         async with self.pool.acquire() as conn:
@@ -298,29 +297,6 @@ class PgDocumentRepository(DocumentRepository):
                 )
                 if existing_file_id is not None and not (replace and existing_file_id == file_id):
                     return existing_file_id
-
-                if active_claim_tokens is not None:
-                    # A claim starts with a 24-hour lease and is renewed to the
-                    # same horizon while its task is alive.  Once the owning
-                    # task has disappeared, allow a brief registration grace
-                    # before recovering the abandoned claim.  This closes the
-                    # crash/restart gap without allowing a concurrent upload to
-                    # steal a claim between its INSERT and QUEUED transition.
-                    # Bare legacy tokens are never recovered early because an
-                    # older replica may still own one for a synchronous copy.
-                    await conn.execute(
-                        """
-                        DELETE FROM file_content_claims
-                        WHERE partition_name = $1 AND content_sha256 = $2
-                          AND NOT (claim_token = ANY($3::text[]))
-                          AND claim_token LIKE $4
-                          AND expires_at <= NOW() + interval '23 hours 59 minutes'
-                        """,
-                        partition,
-                        content_sha256,
-                        sorted(active_claim_tokens),
-                        f"{INDEXING_CONTENT_CLAIM_TOKEN_PREFIX}%",
-                    )
 
                 await conn.execute(
                     """
@@ -352,6 +328,60 @@ class PgDocumentRepository(DocumentRepository):
                     partition,
                     content_sha256,
                 )
+
+    async def get_recoverable_content_sha256_claim(
+        self,
+        *,
+        partition: str,
+        content_sha256: str,
+    ) -> ContentClaimLease | None:
+        row = await self.pool.fetchrow(
+            """
+            SELECT file_id, partition_name, content_sha256, claim_token, expires_at
+            FROM file_content_claims
+            WHERE partition_name = $1 AND content_sha256 = $2
+              AND claim_token LIKE $3
+              AND expires_at <= NOW() + interval '23 hours 59 minutes'
+            """,
+            partition,
+            content_sha256,
+            f"{INDEXING_CONTENT_CLAIM_TOKEN_PREFIX}%",
+        )
+        if row is None:
+            return None
+        return ContentClaimLease(
+            file_id=row["file_id"],
+            partition=row["partition_name"],
+            content_sha256=row["content_sha256"],
+            claim_token=row["claim_token"],
+            expires_at=row["expires_at"],
+        )
+
+    async def release_recoverable_content_sha256_claim(self, lease: ContentClaimLease) -> bool:
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                await conn.execute(
+                    "SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))",
+                    lease.partition,
+                    lease.content_sha256,
+                )
+                result = await conn.execute(
+                    """
+                    DELETE FROM file_content_claims
+                    WHERE partition_name = $1 AND content_sha256 = $2
+                      AND file_id = $3 AND claim_token = $4
+                      AND expires_at = $5
+                      AND claim_token LIKE $6
+                      AND expires_at <= NOW() + interval '23 hours 59 minutes'
+                    """,
+                    lease.partition,
+                    lease.content_sha256,
+                    lease.file_id,
+                    lease.claim_token,
+                    lease.expires_at,
+                    f"{INDEXING_CONTENT_CLAIM_TOKEN_PREFIX}%",
+                )
+                return result.endswith(" 1")
 
     async def renew_content_sha256_claim(
         self,

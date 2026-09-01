@@ -149,7 +149,6 @@ class TestContentClaims:
                 partition=partition,
                 content_sha256="a" * 64,
                 claim_token="task:early-retry-task",
-                active_claim_tokens=set(),
             )
             == "abandoned-file"
         )
@@ -169,7 +168,21 @@ class TestContentClaims:
                 partition=partition,
                 content_sha256="a" * 64,
                 claim_token="task:retry-task",
-                active_claim_tokens=set(),
+            )
+            == "abandoned-file"
+        )
+        lease = await repo.get_recoverable_content_sha256_claim(
+            partition=partition,
+            content_sha256="a" * 64,
+        )
+        assert lease is not None
+        assert await repo.release_recoverable_content_sha256_claim(lease) is True
+        assert (
+            await repo.claim_content_sha256(
+                file_id="retry-file",
+                partition=partition,
+                content_sha256="a" * 64,
+                claim_token="task:retry-task",
             )
             is None
         )
@@ -200,13 +213,27 @@ class TestContentClaims:
             "b" * 64,
         )
 
+        lease = await repo.get_recoverable_content_sha256_claim(
+            partition=partition,
+            content_sha256="b" * 64,
+        )
+        assert lease is not None
+        assert (
+            await repo.renew_content_sha256_claim(
+                file_id="active-file",
+                partition=partition,
+                content_sha256="b" * 64,
+                claim_token="task:active-task",
+            )
+            is True
+        )
+        assert await repo.release_recoverable_content_sha256_claim(lease) is False
         assert (
             await repo.claim_content_sha256(
                 file_id="duplicate-file",
                 partition=partition,
                 content_sha256="b" * 64,
                 claim_token="task:duplicate-task",
-                active_claim_tokens={"task:active-task"},
             )
             == "active-file"
         )
@@ -238,12 +265,18 @@ class TestContentClaims:
         )
 
         assert (
+            await repo.get_recoverable_content_sha256_claim(
+                partition=partition,
+                content_sha256="c" * 64,
+            )
+            is None
+        )
+        assert (
             await repo.claim_content_sha256(
                 file_id="duplicate-file",
                 partition=partition,
                 content_sha256="c" * 64,
                 claim_token="task:duplicate-task",
-                active_claim_tokens=set(),
             )
             == "copy-file"
         )

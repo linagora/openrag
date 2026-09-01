@@ -147,6 +147,24 @@ class WorkerDispatcher(IndexingDispatcher):
             raise RuntimeError("TaskStateManager returned invalid claim owners for content claim recovery")
         return {f"{INDEXING_CONTENT_CLAIM_TOKEN_PREFIX}{task_id}" for task_id in task_ids}
 
+    async def _recover_inactive_content_claim(self, *, partition: str, content_sha256: str) -> bool:
+        get_lease = getattr(self._document_repo, "get_recoverable_content_sha256_claim", None)
+        release_lease = getattr(self._document_repo, "release_recoverable_content_sha256_claim", None)
+        if not callable(get_lease) or not callable(release_lease):
+            return False
+
+        lease = await get_lease(partition=partition, content_sha256=content_sha256)
+        if lease is None:
+            return False
+        active_claim_tokens = await self._active_content_claim_tokens(partition)
+        if active_claim_tokens is None or lease.claim_token in active_claim_tokens:
+            return False
+
+        # The lease contains the expiry value observed before the fresh owner
+        # lookup. A concurrent renewal changes that value, so the repository's
+        # conditional delete fails instead of reclaiming a live reservation.
+        return bool(await release_lease(lease))
+
     async def _begin_worker_submission(self, task_id: str) -> bool:
         remote = _remote_actor_method(self._tsm, "begin_worker_submission")
         if remote is None:
@@ -231,15 +249,19 @@ class WorkerDispatcher(IndexingDispatcher):
         claimed_content = False
 
         if content_sha256:
-            active_claim_tokens = await self._active_content_claim_tokens(partition)
-            conflicting_file_id = await self._document_repo.claim_content_sha256(
-                file_id=file_id,
+            claim_kwargs = {
+                "file_id": file_id,
+                "partition": partition,
+                "content_sha256": content_sha256,
+                "claim_token": content_claim_token,
+                "replace": replace,
+            }
+            conflicting_file_id = await self._document_repo.claim_content_sha256(**claim_kwargs)
+            if conflicting_file_id is not None and await self._recover_inactive_content_claim(
                 partition=partition,
                 content_sha256=content_sha256,
-                claim_token=content_claim_token,
-                replace=replace,
-                active_claim_tokens=active_claim_tokens,
-            )
+            ):
+                conflicting_file_id = await self._document_repo.claim_content_sha256(**claim_kwargs)
             if conflicting_file_id is not None:
                 raise ConflictError(
                     f"This document already exists in partition '{partition}'.",

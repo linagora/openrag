@@ -59,6 +59,8 @@ def _vector_store() -> MagicMock:
 def _document_repo() -> MagicMock:
     repo = MagicMock()
     repo.claim_content_sha256 = AsyncMock(return_value=None)
+    repo.get_recoverable_content_sha256_claim = AsyncMock(return_value=None)
+    repo.release_recoverable_content_sha256_claim = AsyncMock(return_value=False)
     repo.renew_content_sha256_claim = AsyncMock(return_value=True)
     repo.release_content_sha256_claim = AsyncMock()
     repo.remove_file_from_partition = AsyncMock()
@@ -396,7 +398,6 @@ async def test_dispatch_indexing_passes_attempt_token_to_claim_and_worker() -> N
         content_sha256="abc123",
         claim_token="task:task-1",
         replace=False,
-        active_claim_tokens=set(),
     )
     repo.renew_content_sha256_claim.assert_awaited_once_with(
         file_id="file-1",
@@ -490,12 +491,40 @@ async def test_dispatch_indexing_rejects_task_that_lost_submission_fence() -> No
 
 
 @pytest.mark.asyncio
-async def test_dispatch_indexing_preserves_only_active_content_claims() -> None:
+async def test_dispatch_indexing_recovers_only_after_refreshing_claim_owners() -> None:
     from services.workers.dispatcher import WorkerDispatcher
 
     repo = _document_repo()
+    lease = MagicMock(
+        file_id="abandoned-file",
+        claim_token="task:abandoned-task",
+        expires_at=object(),
+    )
+    events: list[str] = []
+    claim_results = iter(["abandoned-file", None])
+
+    def claim(**_kwargs):
+        events.append("claim")
+        return next(claim_results)
+
+    def inspect_lease(**_kwargs):
+        events.append("inspect")
+        return lease
+
+    def release_lease(_lease):
+        events.append("release")
+        return True
+
+    repo.claim_content_sha256.side_effect = claim
+    repo.get_recoverable_content_sha256_claim.side_effect = inspect_lease
+    repo.release_recoverable_content_sha256_claim.side_effect = release_lease
     tsm = _task_state_manager()
-    tsm.get_content_claim_task_ids.remote.return_value = {"queued-task", "running-task", "cancelled-task"}
+
+    def active_owners(**_kwargs):
+        events.append("owners")
+        return {"queued-task", "running-task", "cancelled-task"}
+
+    tsm.get_content_claim_task_ids.remote.side_effect = active_owners
     dispatcher = WorkerDispatcher(
         pool=_pool_with_ref(object()),
         task_state_manager=tsm,
@@ -517,19 +546,107 @@ async def test_dispatch_indexing_preserves_only_active_content_claims() -> None:
             replace=False,
         )
 
-    assert repo.claim_content_sha256.await_args.kwargs["active_claim_tokens"] == {
-        "task:queued-task",
-        "task:running-task",
-        "task:cancelled-task",
-    }
+    assert repo.claim_content_sha256.await_count == 2
+    assert all("active_claim_tokens" not in call.kwargs for call in repo.claim_content_sha256.await_args_list)
+    repo.get_recoverable_content_sha256_claim.assert_awaited_once_with(
+        partition="tenant-a",
+        content_sha256="abc123",
+    )
     tsm.get_content_claim_task_ids.remote.assert_awaited_once_with(partition="tenant-a")
+    repo.release_recoverable_content_sha256_claim.assert_awaited_once_with(lease)
+    assert events == ["claim", "inspect", "owners", "release", "claim"]
+
+
+@pytest.mark.asyncio
+async def test_dispatch_indexing_keeps_claim_when_its_owner_becomes_active() -> None:
+    from core.utils.exceptions import ConflictError
+    from services.workers.dispatcher import WorkerDispatcher
+
+    repo = _document_repo()
+    lease = MagicMock(
+        file_id="active-file",
+        claim_token="task:active-task",
+        expires_at=object(),
+    )
+    repo.claim_content_sha256.return_value = "active-file"
+    repo.get_recoverable_content_sha256_claim.return_value = lease
+    tsm = _task_state_manager()
+    tsm.get_content_claim_task_ids.remote.return_value = {"active-task"}
+    dispatcher = WorkerDispatcher(
+        pool=_pool_with_ref(object()),
+        task_state_manager=tsm,
+        completion_tracker=_completion_tracker(),
+        vector_store=_vector_store(),
+        document_repo=repo,
+        workspace_repo=_workspace_repo(),
+        collection="default",
+    )
+
+    with pytest.raises(ConflictError):
+        await dispatcher.dispatch_indexing(
+            path="/data/report.txt",
+            metadata={"file_id": "file-1", "content_sha256": "abc123"},
+            partition="tenant-a",
+            user={"id": 42},
+            workspace_ids=None,
+            replace=False,
+        )
+
+    tsm.get_content_claim_task_ids.remote.assert_awaited_once_with(partition="tenant-a")
+    repo.release_recoverable_content_sha256_claim.assert_not_awaited()
+    assert repo.claim_content_sha256.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_dispatch_indexing_does_not_retry_when_claim_lease_changed() -> None:
+    from core.utils.exceptions import ConflictError
+    from services.workers.dispatcher import WorkerDispatcher
+
+    repo = _document_repo()
+    lease = MagicMock(
+        file_id="active-file",
+        claim_token="task:owner-not-yet-registered",
+        expires_at=object(),
+    )
+    repo.claim_content_sha256.return_value = "active-file"
+    repo.get_recoverable_content_sha256_claim.return_value = lease
+    repo.release_recoverable_content_sha256_claim.return_value = False
+    dispatcher = WorkerDispatcher(
+        pool=_pool_with_ref(object()),
+        task_state_manager=_task_state_manager(),
+        completion_tracker=_completion_tracker(),
+        vector_store=_vector_store(),
+        document_repo=repo,
+        workspace_repo=_workspace_repo(),
+        collection="default",
+    )
+
+    with pytest.raises(ConflictError):
+        await dispatcher.dispatch_indexing(
+            path="/data/report.txt",
+            metadata={"file_id": "file-1", "content_sha256": "abc123"},
+            partition="tenant-a",
+            user={"id": 42},
+            workspace_ids=None,
+            replace=False,
+        )
+
+    repo.release_recoverable_content_sha256_claim.assert_awaited_once_with(lease)
+    assert repo.claim_content_sha256.await_count == 1
 
 
 @pytest.mark.asyncio
 async def test_dispatch_indexing_disables_claim_recovery_for_legacy_task_state_manager() -> None:
+    from core.utils.exceptions import ConflictError
     from services.workers.dispatcher import WorkerDispatcher
 
     repo = _document_repo()
+    repo.claim_content_sha256.return_value = "existing-file"
+    repo.get_recoverable_content_sha256_claim.return_value = MagicMock(
+        file_id="existing-file",
+        claim_token="task:legacy-owner",
+        expires_at=object(),
+    )
     tsm = _task_state_manager()
     tsm.get_content_claim_task_ids = None
     dispatcher = WorkerDispatcher(
@@ -542,16 +659,21 @@ async def test_dispatch_indexing_disables_claim_recovery_for_legacy_task_state_m
         collection="default",
     )
 
-    await dispatcher.dispatch_indexing(
-        path="/data/report.txt",
-        metadata={"file_id": "file-1", "content_sha256": "abc123"},
-        partition="tenant-a",
-        user={"id": 42},
-        workspace_ids=None,
-        replace=False,
-    )
+    with pytest.raises(ConflictError):
+        await dispatcher.dispatch_indexing(
+            path="/data/report.txt",
+            metadata={"file_id": "file-1", "content_sha256": "abc123"},
+            partition="tenant-a",
+            user={"id": 42},
+            workspace_ids=None,
+            replace=False,
+        )
 
-    assert repo.claim_content_sha256.await_args.kwargs["active_claim_tokens"] is None
+    repo.get_recoverable_content_sha256_claim.assert_awaited_once_with(
+        partition="tenant-a",
+        content_sha256="abc123",
+    )
+    repo.release_recoverable_content_sha256_claim.assert_not_awaited()
 
 
 @pytest.mark.asyncio

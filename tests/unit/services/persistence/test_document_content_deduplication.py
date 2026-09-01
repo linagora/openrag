@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import deque
+from datetime import UTC, datetime
 
 import pytest
 
@@ -20,6 +21,7 @@ class _ClaimConnection:
     def __init__(self, fetch_values):
         self.fetch_values = deque(fetch_values)
         self.executed: list[tuple[str, tuple]] = []
+        self.execute_result = "DELETE 0"
 
     def transaction(self):
         return _AsyncContext(self)
@@ -28,9 +30,13 @@ class _ClaimConnection:
         self.executed.append((query, params))
         return self.fetch_values.popleft()
 
+    async def fetchrow(self, query: str, *params):
+        self.executed.append((query, params))
+        return self.fetch_values.popleft()
+
     async def execute(self, query: str, *params):
         self.executed.append((query, params))
-        return "DELETE 0"
+        return self.execute_result
 
 
 class _ClaimPool:
@@ -40,6 +46,9 @@ class _ClaimPool:
 
     def acquire(self):
         return _AsyncContext(self.conn)
+
+    async def fetchrow(self, query: str, *params):
+        return await self.conn.fetchrow(query, *params)
 
     async def execute(self, query: str, *params):
         self.executed.append((query, params))
@@ -76,7 +85,6 @@ async def test_claim_content_hash_returns_completed_duplicate() -> None:
         partition="tenant-a",
         content_sha256="abc123",
         claim_token="attempt-1",
-        active_claim_tokens=set(),
     )
 
     assert conflict == "existing-file"
@@ -102,10 +110,10 @@ async def test_claim_content_hash_returns_active_duplicate() -> None:
 
 
 @pytest.mark.asyncio
-async def test_claim_content_hash_recovers_old_claims_without_active_tasks() -> None:
+async def test_claim_content_hash_does_not_recover_nonexpired_claim_from_a_snapshot() -> None:
     from services.persistence.document_repo import PgDocumentRepository
 
-    pool = _ClaimPool([None, "new-file"])
+    pool = _ClaimPool([None, None, "abandoned-file"])
     repo = PgDocumentRepository(pool_getter=lambda: pool)
 
     conflict = await repo.claim_content_sha256(
@@ -113,14 +121,78 @@ async def test_claim_content_hash_recovers_old_claims_without_active_tasks() -> 
         partition="tenant-a",
         content_sha256="abc123",
         claim_token="attempt-2",
-        active_claim_tokens={"task:active-attempt"},
     )
 
-    assert conflict is None
-    query, params = next((query, params) for query, params in pool.conn.executed if "23 hours 59 minutes" in query)
-    assert "claim_token = ANY($3::text[])" in query
-    assert "claim_token LIKE $4" in query
-    assert params == ("tenant-a", "abc123", ["task:active-attempt"], "task:%")
+    assert conflict == "abandoned-file"
+    assert not any("23 hours 59 minutes" in query for query, _ in pool.conn.executed)
+
+
+@pytest.mark.asyncio
+async def test_recoverable_claim_exposes_the_lease_version() -> None:
+    from services.persistence.document_repo import PgDocumentRepository
+
+    expires_at = datetime(2026, 9, 2, tzinfo=UTC)
+    pool = _ClaimPool(
+        [
+            {
+                "file_id": "abandoned-file",
+                "partition_name": "tenant-a",
+                "content_sha256": "abc123",
+                "claim_token": "task:abandoned-task",
+                "expires_at": expires_at,
+            }
+        ]
+    )
+    repo = PgDocumentRepository(pool_getter=lambda: pool)
+
+    lease = await repo.get_recoverable_content_sha256_claim(
+        partition="tenant-a",
+        content_sha256="abc123",
+    )
+
+    assert lease is not None
+    assert lease.file_id == "abandoned-file"
+    assert lease.claim_token == "task:abandoned-task"
+    assert lease.expires_at == expires_at
+    query, params = pool.conn.executed[0]
+    assert "claim_token LIKE" in query
+    assert "23 hours 59 minutes" in query
+    assert params == ("tenant-a", "abc123", "task:%")
+
+
+@pytest.mark.asyncio
+async def test_recoverable_claim_release_requires_the_same_lease_version() -> None:
+    from core.ports.document_repo import ContentClaimLease
+    from services.persistence.document_repo import PgDocumentRepository
+
+    expires_at = datetime(2026, 9, 2, tzinfo=UTC)
+    lease = ContentClaimLease(
+        file_id="abandoned-file",
+        partition="tenant-a",
+        content_sha256="abc123",
+        claim_token="task:abandoned-task",
+        expires_at=expires_at,
+    )
+    pool = _ClaimPool([])
+    pool.conn.execute_result = "DELETE 1"
+    repo = PgDocumentRepository(pool_getter=lambda: pool)
+
+    assert await repo.release_recoverable_content_sha256_claim(lease) is True
+
+    query, params = next(
+        (query, params) for query, params in pool.conn.executed if "DELETE FROM file_content_claims" in query
+    )
+    assert "claim_token = $4" in query
+    assert "expires_at = $5" in query
+    assert "23 hours 59 minutes" in query
+    assert params == (
+        "tenant-a",
+        "abc123",
+        "abandoned-file",
+        "task:abandoned-task",
+        expires_at,
+        "task:%",
+    )
 
 
 @pytest.mark.asyncio
