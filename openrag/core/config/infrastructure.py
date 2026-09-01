@@ -123,3 +123,4 @@ class PromptsConfig(ConfigMixin):
     hyde: str = "hyde.txt"
     multi_query: str = "multi_query_pmpt_tmpl.txt"
     topic_tagger: str = "topic_tagger_tmpl.txt"
+    asr_transcription: str = "asr_transcription_tmpl.txt"

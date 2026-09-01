@@ -7,7 +7,8 @@ Pipeline:
 2. If the file's suffix is in ``direct_upload_suffixes``, send it to the
    transcription endpoint as-is. Otherwise, decode through
    ``pydub.AudioSegment`` and re-encode as WAV (libsndfile-friendly).
-3. Optionally run a caller-provided language detector against the
+3. Optionally resolve a caller-provided transcription prompt and run a
+   caller-provided language detector against the
    prepared file (its result is forwarded to the OpenAI ``language``
    param). The detector is a plain async callable so this client stays
    free of Ray / model-loader coupling — the wiring layer can plug in a
@@ -43,6 +44,7 @@ logger = logging.getLogger(__name__)
 _DEFAULT_DIRECT_UPLOAD_SUFFIXES: tuple[str, ...] = (".mp3", ".m4a", ".ogg", ".webm", ".wav")
 
 LanguageDetector = Callable[[Path], Awaitable[str | None]]
+TranscriptionPromptResolver = Callable[[], Awaitable[str | None]]
 
 
 class OpenAIAudioClient(BaseClientParser):
@@ -57,12 +59,14 @@ class OpenAIAudioClient(BaseClientParser):
         timeout: float = 120.0,
         direct_upload_suffixes: Iterable[str] = _DEFAULT_DIRECT_UPLOAD_SUFFIXES,
         language_detector: LanguageDetector | None = None,
+        transcription_prompt_resolver: TranscriptionPromptResolver | None = None,
         concurrency_limit: int = 1,
     ) -> None:
         self._client = AsyncOpenAI(base_url=base_url, api_key=api_key, timeout=timeout)
         self._model = model
         self._direct_upload_suffixes = {s.lower() for s in direct_upload_suffixes}
         self._language_detector = language_detector
+        self._transcription_prompt_resolver = transcription_prompt_resolver
         self._semaphore = asyncio.Semaphore(max(1, concurrency_limit))
 
     def supported_types(self) -> list[str]:
@@ -87,7 +91,8 @@ class OpenAIAudioClient(BaseClientParser):
                                 language = await self._language_detector(upload_path)
                             except Exception as exc:
                                 logger.warning("Language detection failed: %s", exc)
-                        text = await self._transcribe(upload_path, language=language)
+                        prompt = await self._resolve_prompt()
+                        text = await self._transcribe(upload_path, language=language, prompt=prompt)
                     finally:
                         if cleanup:
                             await asyncio.to_thread(upload_path.unlink, True)
@@ -122,8 +127,27 @@ class OpenAIAudioClient(BaseClientParser):
         await asyncio.to_thread(sound.export, wav_path, format="wav")
         return wav_path, True
 
-    async def _transcribe(self, path: Path, *, language: str | None) -> str:
+    async def _resolve_prompt(self) -> str | None:
+        """Resolve the current managed transcription prompt, if one is wired.
+
+        Prompt resolution happens for every file instead of at client creation
+        time, so an Admin UI edit is visible to the next audio request without
+        a worker restart. A lookup failure degrades to the endpoint's native
+        transcription behaviour rather than failing indexing.
+        """
+        if self._transcription_prompt_resolver is None:
+            return None
+        try:
+            prompt = await self._transcription_prompt_resolver()
+        except Exception as exc:  # noqa: BLE001 - prompt storage must not block transcription
+            logger.warning("Transcription prompt resolution failed: %s", exc)
+            return None
+        return prompt.strip() if prompt and prompt.strip() else None
+
+    async def _transcribe(self, path: Path, *, language: str | None, prompt: str | None) -> str:
         kwargs: dict[str, object] = {"model": self._model, "file": path}
+        if prompt:
+            kwargs["prompt"] = prompt
         if language:
             kwargs["language"] = language
         response = await self._client.audio.transcriptions.create(**kwargs)

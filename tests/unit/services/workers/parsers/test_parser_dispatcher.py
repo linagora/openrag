@@ -36,7 +36,21 @@ def _config(
         concurrency_limit=20,
         enable_thinking=openai_loader_enable_thinking,
     )
-    loader = SimpleNamespace(file_loaders=file_loaders, image_captioning=image_captioning, openai=openai)
+    transcriber = SimpleNamespace(
+        base_url="http://transcriber:8000/v1",
+        api_key="k",
+        model_name="asr-model",
+        timeout=60,
+        direct_upload_suffixes={".mp3", ".wav"},
+        use_whisper_lang_detector=False,
+        max_concurrent_chunks=1,
+    )
+    loader = SimpleNamespace(
+        file_loaders=file_loaders,
+        image_captioning=image_captioning,
+        openai=openai,
+        transcriber=transcriber,
+    )
     vlm = SimpleNamespace(
         base_url=vlm_base_url,
         model="m",
@@ -95,6 +109,22 @@ def test_resolve_pdf_backend_variants() -> None:
 def test_resolve_audio_backend_openai() -> None:
     disp = ParserDispatcher(_config(audio="OpenAIAudioLoader"))
     assert disp._resolve_audio_backend("mp3") == "audio_client"
+
+
+def test_audio_client_receives_live_transcription_prompt_resolver(monkeypatch: pytest.MonkeyPatch) -> None:
+    import services.workers.parsers.parser_dispatcher as dispatcher
+
+    async def resolver() -> str | None:
+        return "Keep speaker labels."
+
+    monkeypatch.setattr(dispatcher, "_create", lambda _module, _name, **kwargs: kwargs["client"])
+
+    client = ParserDispatcher(
+        _config(audio="OpenAIAudioLoader"),
+        transcription_prompt_resolver=resolver,
+    )._build_audio_client()
+
+    assert client._transcription_prompt_resolver is resolver
 
 
 def test_unsupported_pdf_config_raises() -> None:
