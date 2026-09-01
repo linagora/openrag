@@ -223,14 +223,27 @@ class MilvusVectorStore(VectorStore):
                         consistency_level="Strong",
                         index_params=index_params,
                         enable_dynamic_field=True,
+                        # Stamped by the request that creates the collection,
+                        # not by a follow-up alter_collection_properties.
+                        # Between those two calls the collection exists with no
+                        # version property, and a concurrent worker reading it
+                        # in that window gets 0 and is told to migrate a
+                        # collection that was created milliseconds ago.
+                        properties={SCHEMA_VERSION_PROPERTY_KEY: str(self._config.schema_version)},
                     )
                 except MilvusException as e:
-                    raise VDBCreateOrLoadCollectionError(
-                        f"Failed to create collection `{self._collection_name}`: {e!s}",
-                        collection_name=self._collection_name,
-                        operation="create_collection",
-                    ) from e
-                self._store_schema_version()
+                    # Another worker won the race between has_collection()
+                    # above and this call. That is the ordinary case when
+                    # several files are indexed into a cold collection at
+                    # once, not a failure: the collection is now someone
+                    # else's to have created, and ours to validate.
+                    if not self._client.has_collection(self._collection_name):
+                        raise VDBCreateOrLoadCollectionError(
+                            f"Failed to create collection `{self._collection_name}`: {e!s}",
+                            collection_name=self._collection_name,
+                            operation="create_collection",
+                        ) from e
+                    self._check_schema_version()
 
             try:
                 self._client.load_collection(self._collection_name)
@@ -368,13 +381,6 @@ class MilvusVectorStore(VectorStore):
     # ------------------------------------------------------------------
     # Schema versioning
     # ------------------------------------------------------------------
-
-    def _store_schema_version(self) -> None:
-        """Persist the configured schema version as a Milvus collection property."""
-        self._client.alter_collection_properties(
-            collection_name=self._collection_name,
-            properties={SCHEMA_VERSION_PROPERTY_KEY: str(self._config.schema_version)},
-        )
 
     def _check_schema_version(self) -> None:
         """Compare stored vs. configured schema version; raise on mismatch.

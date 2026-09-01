@@ -20,8 +20,15 @@ from pymilvus import MilvusException
 
 from openrag.core.config.infrastructure import VectorDBConfig
 from openrag.core.models.chunk import Chunk, ChunkType
-from openrag.core.utils.exceptions import VDBSearchError
-from openrag.services.storage.milvus_store import MilvusVectorStore
+from openrag.core.utils.exceptions import (
+    VDBCreateOrLoadCollectionError,
+    VDBSchemaMigrationRequiredError,
+    VDBSearchError,
+)
+from openrag.services.storage.milvus_store import (
+    SCHEMA_VERSION_PROPERTY_KEY,
+    MilvusVectorStore,
+)
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -727,3 +734,62 @@ class TestParseSearchResponse:
 
     def test_empty_response_is_empty_list(self, store: MilvusVectorStore) -> None:
         assert store._parse_search_response([]) == []
+
+
+# ---------------------------------------------------------------------------
+# _ensure_loaded — concurrent first use of a collection
+# ---------------------------------------------------------------------------
+
+
+class TestEnsureLoadedConcurrentCreation:
+    """Two workers indexing into a cold collection must not lose a file.
+
+    Indexer workers are separate Ray processes, so ``_load_lock`` (an asyncio
+    lock, per instance) does not serialise them against each other. Both call
+    ``_ensure_loaded``; whichever loses a race used to fail its file, and the
+    file was silently absent from the index.
+    """
+
+    def test_a_new_collection_is_stamped_in_the_create_request(self, store: MilvusVectorStore):
+        """The version has to arrive with the collection, not after it: in
+        between, the collection exists at version 0 and any concurrent reader
+        is told to run a migration."""
+        store._embedding_dimension = 8
+        store._client.has_collection.return_value = False
+
+        store._ensure_loaded()
+
+        properties = store._client.create_collection.call_args.kwargs["properties"]
+        assert properties == {SCHEMA_VERSION_PROPERTY_KEY: "1"}
+        store._client.alter_collection_properties.assert_not_called()
+
+    def test_losing_the_create_race_validates_the_winners_collection(self, store: MilvusVectorStore):
+        """has_collection() said no, another worker created it, our create
+        raised. The collection is there and correctly stamped, so there is
+        nothing to fail."""
+        store._embedding_dimension = 8
+        store._client.has_collection.side_effect = [False, True]
+        store._client.create_collection.side_effect = MilvusException(message="collection already exists")
+        store._client.describe_collection.return_value = {"properties": {SCHEMA_VERSION_PROPERTY_KEY: "1"}}
+
+        store._ensure_loaded()
+
+        store._client.load_collection.assert_called_once_with(store._collection_name)
+
+    def test_a_create_failure_that_is_not_a_race_still_raises(self, store: MilvusVectorStore):
+        """No collection afterwards means the create genuinely failed."""
+        store._embedding_dimension = 8
+        store._client.has_collection.side_effect = [False, False]
+        store._client.create_collection.side_effect = MilvusException(message="disk full")
+
+        with pytest.raises(VDBCreateOrLoadCollectionError):
+            store._ensure_loaded()
+
+    def test_an_existing_collection_at_the_wrong_version_still_demands_migration(self, store: MilvusVectorStore):
+        """The guard this race was hiding behind stays intact: a genuinely
+        stale collection is still refused."""
+        store._client.has_collection.return_value = True
+        store._client.describe_collection.return_value = {"properties": {}}
+
+        with pytest.raises(VDBSchemaMigrationRequiredError):
+            store._ensure_loaded()
