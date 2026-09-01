@@ -10,6 +10,7 @@ import {
   Eye,
   AlertTriangle,
   Circle,
+  Globe2,
   Users,
 } from "lucide-react";
 import {
@@ -458,8 +459,8 @@ function PromptEditorSheet({
               {isAsrTranscription ? <Globe2 className="h-3.5 w-3.5" /> : <Users className="h-3.5 w-3.5" />}
               {isAsrTranscription
                 ? editing.is_default
-                  ? "Applied globally when AUDIOLOADER=OpenAIAudioLoader."
-                  : "Set this prompt as default for AUDIOLOADER=OpenAIAudioLoader."
+                  ? "Used by direct extraction and indexation presets without an explicit ASR prompt selection when AUDIOLOADER=OpenAIAudioLoader."
+                  : "Used only by indexation presets that explicitly select this prompt when AUDIOLOADER=OpenAIAudioLoader."
                 : editing.used_by > 0
                 ? `Selected by ${editing.used_by} partition${editing.used_by === 1 ? "" : "s"}.`
                 : "Not selected by any partition yet."}

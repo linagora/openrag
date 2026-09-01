@@ -203,10 +203,15 @@ class IndexerWorkerActor:
         stays live: ``resolve_prompt`` re-reads it, so an Admin UI edit applies to
         the next transcription without recreating the long-lived parser client.
         """
+        selected_name = _current_indexation_config().get("asr_transcription_prompt_name")
         try:
+            if isinstance(selected_name, str) and selected_name.strip():
+                return await self._get_prompt_service().resolve_prompt(
+                    "asr_transcription",
+                    names=[selected_name],
+                )
             return await self._get_prompt_service().resolve_prompt(
                 "asr_transcription",
-                names=[_current_indexation_config().get("asr_transcription_prompt_name")],
             )
         except Exception as exc:  # noqa: BLE001 - a prompt lookup must not fail a file
             self._logger.warning(f"ASR transcription prompt resolution failed: {exc}")

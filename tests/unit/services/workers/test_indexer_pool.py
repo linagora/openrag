@@ -1539,8 +1539,8 @@ async def test_actor_uses_the_global_asr_prompt_when_an_active_preset_has_no_sel
     with _active_indexation_config({}):
         assert await actor._resolve_transcription_prompt() == "global prompt"
 
-    # An empty candidate is skipped, so the type's global default is used.
-    actor._prompt_service.resolve_prompt.assert_awaited_once_with("asr_transcription", names=[None])
+    # An absent preset selection takes the prompt service's global-default path.
+    actor._prompt_service.resolve_prompt.assert_awaited_once_with("asr_transcription")
 
 
 def test_actor_resolves_the_preset_stt_endpoint_before_the_default() -> None:
