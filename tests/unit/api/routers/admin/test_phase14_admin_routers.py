@@ -47,6 +47,7 @@ class FakeModelEndpointService:
         """Initialize the call log."""
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self.endpoint_extra: dict[str, Any] = {}
+        self.endpoint_model_name: str | None = "mistral"
 
     async def create_model_endpoint(self, row: Any) -> dict[str, Any]:
         """Record endpoint creation (from a ModelEndpointRow) and echo a row."""
@@ -64,7 +65,14 @@ class FakeModelEndpointService:
         from core.config.model_endpoints import ModelEndpointRow
 
         self.calls.append(("get", {"name": name, "model_type": model_type}))
-        return ModelEndpointRow(**_model_endpoint_row(name=name, model_type=model_type, extra=self.endpoint_extra))
+        return ModelEndpointRow(
+            **_model_endpoint_row(
+                name=name,
+                model_type=model_type,
+                model_name=self.endpoint_model_name,
+                extra=self.endpoint_extra,
+            )
+        )
 
     async def update_model_endpoint(self, name: str, model_type: str, **fields: Any) -> dict[str, Any]:
         """Record endpoint updates and echo the merged response row."""
@@ -824,4 +832,25 @@ async def test_update_stt_endpoint_validates_model_and_language_hint(async_clien
 
     assert invalid.status_code == 422
     assert valid.status_code == 200
-    assert model_service.calls == [("update", {"name": "default", "model_type": "stt", "extra": {"language": "fr"}})]
+    assert model_service.calls == [
+        ("get", {"name": "default", "model_type": "stt"}),
+        ("update", {"name": "default", "model_type": "stt", "extra": {"language": "fr"}}),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_update_stt_endpoint_rejects_extra_only_update_without_stored_model(async_client_factory):
+    """Extra-only STT writes must not leave an incomplete endpoint silently ignored."""
+    from api.error_handlers import register_error_handlers
+
+    model_service = FakeModelEndpointService()
+    model_service.endpoint_model_name = None
+    app = _build_app(model_service=model_service)
+    register_error_handlers(app)
+
+    async with async_client_factory(app) as client:
+        response = await client.put("/model-endpoints/stt/default", json={"extra": {"temperature": 0}})
+
+    assert response.status_code == 422
+    assert "model_name is required" in response.text
+    assert model_service.calls == [("get", {"name": "default", "model_type": "stt"})]

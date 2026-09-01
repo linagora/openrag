@@ -411,7 +411,7 @@ function EndpointDialog({
         setEndpoint("");
         setModelName("");
         setBatchSize(activeTab === "stt" ? "1" : "32");
-        setTimeout("30");
+        setTimeout(activeTab === "stt" ? "3600" : "30");
         setApiKey("");
         setMaxContextSize("");
         setMaxOutputTokens("");
@@ -659,7 +659,7 @@ function EndpointDialog({
         endpoint,
         model_name: modelName || undefined,
         batch_size: intOr(batchSize, isStt ? 1 : 32),
-        timeout: numOr(timeout, 30),
+        timeout: numOr(timeout, isStt ? 3600 : 30),
         extra,
       };
       if (trimmedName !== editing.name) {
@@ -673,7 +673,7 @@ function EndpointDialog({
         endpoint,
         model_name: modelName || undefined,
         batch_size: intOr(batchSize, isStt ? 1 : 32),
-        timeout: numOr(timeout, 30),
+        timeout: numOr(timeout, isStt ? 3600 : 30),
         extra,
       });
     }

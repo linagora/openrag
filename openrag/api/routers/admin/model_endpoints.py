@@ -101,17 +101,20 @@ def _reject_non_llm_token_budgets(model_type: str, extra: dict | None) -> None:
         raise ValidationError(str(exc)) from exc
 
 
-def _reject_invalid_stt_fields(model_type: str, fields: dict) -> None:
-    """Validate STT-only fields once the update route knows its endpoint type."""
+async def _reject_invalid_stt_fields(model_type: str, name: str, fields: dict, service) -> None:
+    """Validate STT-only fields, including the model retained by a partial update."""
     if model_type != "stt":
         return
     if "model_name" not in fields and "extra" not in fields:
         return
     try:
-        # An omitted model name is valid on update: retain the stored model.
-        # A supplied empty value is not, because ``/audio/transcriptions``
-        # requires a model for every request.
-        model_name = fields.get("model_name", "existing")
+        if "model_name" in fields:
+            model_name = fields["model_name"]
+        else:
+            # ``extra``-only writes retain the stored model name. Fetch it so
+            # an env-seeded endpoint with no model cannot be updated into a
+            # silently ignored STT configuration.
+            model_name = (await service.get_model_endpoint(name=name, model_type=model_type)).model_name
         validate_stt_fields(model_name, fields.get("extra"))
     except ValueError as exc:
         raise ValidationError(str(exc)) from exc
@@ -165,7 +168,7 @@ async def update_model_endpoint(
     """Update a registered inference endpoint."""
     fields = body.model_dump(exclude_unset=True)
     _reject_non_llm_token_budgets(model_type, fields.get("extra"))
-    _reject_invalid_stt_fields(model_type, fields)
+    await _reject_invalid_stt_fields(model_type, name, fields, service)
     if "name" in fields:
         fields["new_name"] = fields.pop("name")
     result = await service.update_model_endpoint(
