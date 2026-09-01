@@ -34,6 +34,7 @@ _TASK_STATE_KV_NAMESPACE = "openrag-task-state-manager"
 _LEGACY_FENCE_ID = "__legacy__"
 _RECOVERABLE_TASK_KV_PREFIX = b"recoverable-task-v1:"
 _CANCELLATION_TOMBSTONE_TTL_SECONDS = 24 * 60 * 60
+_CANCELLATION_SETTLEMENT_TTL_SECONDS = 24 * 60 * 60
 _FILE_DELETE_FENCE_TTL_SECONDS = 2 * 60
 _CONTENT_CLAIM_REGISTRATION_GRACE_SECONDS = 60
 STALE_REFLESS_TASK_ERROR = (
@@ -130,14 +131,24 @@ def _load_recoverable_tasks() -> dict[str, TaskInfo]:
         return {}
     tasks: dict[str, TaskInfo] = {}
     namespace = _task_state_kv_namespace()
+    now = time.time()
     for key in _internal_kv_list(_RECOVERABLE_TASK_KV_PREFIX, namespace=namespace):
         payload = _internal_kv_get(key, namespace=namespace)
         if payload is None:
             continue
         task_id, info, expires_at = _decode_recoverable_task(payload)
-        if expires_at is not None and expires_at <= time.time() and not _cancelled_task_unsettled(info):
+        if expires_at is not None and expires_at <= now:
             _internal_kv_del(key, namespace=namespace)
             continue
+        if _cancelled_task_has_worker_fence(info) and not _valid_timestamp(
+            getattr(info, "cancellation_settlement_expires_at", None)
+        ):
+            # Persist the migration immediately. Otherwise each actor restart
+            # would grant the legacy fence another full settlement period.
+            info.cancellation_settlement_expires_at = (
+                expires_at if _valid_timestamp(expires_at) else now + _CANCELLATION_SETTLEMENT_TTL_SECONDS
+            )
+            _save_recoverable_task(task_id, info)
         tasks[task_id] = info
     return tasks
 
@@ -157,19 +168,46 @@ def _recovery_snapshot(info: TaskInfo, *, now: float | None = None) -> tuple[Tas
         object_ref=info.object_ref,
         worker_submitted=getattr(info, "worker_submitted", False),
         submission_started_at=getattr(info, "submission_started_at", None),
+        cancellation_settlement_expires_at=getattr(info, "cancellation_settlement_expires_at", None),
     )
-    if _cancelled_task_unsettled(snapshot):
-        return snapshot, None
     timestamp = time.time() if now is None else now
+    if _cancelled_task_has_worker_fence(snapshot):
+        deadline = _ensure_cancellation_settlement_deadline(snapshot, now=timestamp)
+        return snapshot, deadline
+    snapshot.cancellation_settlement_expires_at = None
     return snapshot, timestamp + _CANCELLATION_TOMBSTONE_TTL_SECONDS
 
 
-def _cancelled_task_unsettled(info: TaskInfo) -> bool:
+def _valid_timestamp(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _cancelled_task_has_worker_fence(info: TaskInfo) -> bool:
     if info.state != "CANCELLED":
         return False
     object_ref = info.object_ref
     ref = object_ref.get("ref") if isinstance(object_ref, dict) else object_ref
     return ref is not None or getattr(info, "worker_submitted", False)
+
+
+def _ensure_cancellation_settlement_deadline(info: TaskInfo, *, now: float | None = None) -> float:
+    deadline = getattr(info, "cancellation_settlement_expires_at", None)
+    if _valid_timestamp(deadline):
+        return float(deadline)
+    timestamp = time.time() if now is None else now
+    deadline = timestamp + _CANCELLATION_SETTLEMENT_TTL_SECONDS
+    info.cancellation_settlement_expires_at = deadline
+    return deadline
+
+
+def _cancelled_task_unsettled(info: TaskInfo, *, now: float | None = None) -> bool:
+    if not _cancelled_task_has_worker_fence(info):
+        return False
+    deadline = getattr(info, "cancellation_settlement_expires_at", None)
+    if not _valid_timestamp(deadline):
+        return True
+    timestamp = time.time() if now is None else now
+    return float(deadline) > timestamp
 
 
 def _save_recoverable_task(task_id: str, info: TaskInfo) -> None:
@@ -215,6 +253,7 @@ class TaskInfo:
     object_ref: ray.ObjectRef | None = None
     worker_submitted: bool = False
     submission_started_at: float | None = None
+    cancellation_settlement_expires_at: float | None = None
 
 
 def _object_ref_is_ready(object_ref: Any) -> bool:
@@ -290,6 +329,27 @@ class TaskStateManager:
             return False
         self._prune_expired_file_delete_fences()
         return bool(self.file_delete_fences.get((partition, file_id)))
+
+    def _set_cancelled_locked(self, task_id: str, info: TaskInfo) -> None:
+        info.state = "CANCELLED"
+        _ensure_cancellation_settlement_deadline(info)
+        _save_recoverable_task(task_id, info)
+
+    def _expire_cancellation_fence_if_stale_locked(self, task_id: str, info: TaskInfo) -> bool:
+        if not _cancelled_task_has_worker_fence(info):
+            return False
+        deadline_was_missing = not _valid_timestamp(getattr(info, "cancellation_settlement_expires_at", None))
+        deadline = _ensure_cancellation_settlement_deadline(info)
+        if deadline > time.time():
+            if deadline_was_missing:
+                _save_recoverable_task(task_id, info)
+            return False
+        info.object_ref = None
+        info.worker_submitted = False
+        info.submission_started_at = None
+        info.cancellation_settlement_expires_at = None
+        _save_recoverable_task(task_id, info)
+        return True
 
     def _expire_refless_task_if_stale_locked(self, task_id: str, info: TaskInfo) -> bool:
         ref = info.object_ref.get("ref") if isinstance(info.object_ref, dict) else info.object_ref
@@ -369,6 +429,9 @@ class TaskStateManager:
             )
             if state_is_fenced and state != info.state:
                 return False
+            if state == "CANCELLED":
+                self._set_cancelled_locked(task_id, info)
+                return True
             if state == "SERIALIZING":
                 object_ref = info.object_ref
                 ref = object_ref.get("ref") if isinstance(object_ref, dict) else object_ref
@@ -406,8 +469,7 @@ class TaskStateManager:
             info = self.tasks.get(task_id)
             if info is None or info.state in TERMINAL_TASK_STATES:
                 return False
-            info.state = "CANCELLED"
-            _save_recoverable_task(task_id, info)
+            self._set_cancelled_locked(task_id, info)
             return True
 
     @ray.method(concurrency_group="set")
@@ -416,6 +478,8 @@ class TaskStateManager:
             info = self.tasks.get(task_id)
             if info is None or info.state != "CANCELLED":
                 return False
+            if self._expire_cancellation_fence_if_stale_locked(task_id, info):
+                return True
             object_ref = info.object_ref
             ref = object_ref.get("ref") if isinstance(object_ref, dict) else object_ref
             if ref is not None and not _object_ref_is_ready(object_ref):
@@ -423,6 +487,7 @@ class TaskStateManager:
             info.object_ref = None
             info.worker_submitted = False
             info.submission_started_at = None
+            info.cancellation_settlement_expires_at = None
             _save_recoverable_task(task_id, info)
             return True
 
@@ -436,6 +501,8 @@ class TaskStateManager:
             info.object_ref = None
             info.worker_submitted = False
             info.submission_started_at = None
+            if info.state == "CANCELLED":
+                info.cancellation_settlement_expires_at = None
             if info.state in CANCELLABLE_INDEXING_STATES:
                 info.state = "FAILED"
                 info.error = "Indexer worker submission was rejected after the worker settled."
@@ -493,8 +560,7 @@ class TaskStateManager:
                 user_id=user_id,
             )
             if self._file_delete_fenced(partition=partition, file_id=file_id):
-                info.state = "CANCELLED"
-                _save_recoverable_task(task_id, info)
+                self._set_cancelled_locked(task_id, info)
                 return False
             info.state = "QUEUED"
             _save_recoverable_task(task_id, info)
@@ -515,22 +581,25 @@ class TaskStateManager:
     @ray.method(concurrency_group="set")
     async def set_object_ref(self, task_id: str, object_ref: ray.ObjectRef) -> bool:
         with self.lock:
-            info = self._ensure_task(task_id)
+            info = self.tasks.get(task_id)
+            if info is None:
+                return False
             if info.state == "FAILED" and info.error == STALE_REFLESS_TASK_ERROR:
                 return False
             if self._expire_refless_task_if_stale_locked(task_id, info):
+                return False
+            accepted = info.state in CANCELLABLE_INDEXING_STATES or info.state in TERMINAL_INDEXING_STATES
+            if not accepted:
                 return False
             info.object_ref = object_ref
             info.worker_submitted = True
             info.submission_started_at = None
             details = info.details or {}
             if self._file_delete_fenced(partition=details.get("partition"), file_id=details.get("file_id")):
-                info.state = "CANCELLED"
-                _save_recoverable_task(task_id, info)
+                self._set_cancelled_locked(task_id, info)
                 return False
-            accepted = info.state in ACTIVE_INDEXING_STATES or info.state in TERMINAL_INDEXING_STATES
             _save_recoverable_task(task_id, info)
-            return accepted
+            return True
 
     @ray.method(concurrency_group="get")
     async def get_state(self, task_id: str) -> str | None:
@@ -554,6 +623,8 @@ class TaskStateManager:
     async def get_object_ref(self, task_id: str) -> ray.ObjectRef | None:
         with self.lock:
             info = self.tasks.get(task_id)
+            if info is not None:
+                self._expire_cancellation_fence_if_stale_locked(task_id, info)
             return info.object_ref if info else None
 
     @ray.method(concurrency_group="get")
@@ -584,6 +655,7 @@ class TaskStateManager:
             for task_id, info in self.tasks.items():
                 if self._expire_refless_task_if_stale_locked(task_id, info):
                     continue
+                self._expire_cancellation_fence_if_stale_locked(task_id, info)
                 owns_claim = info.state in CANCELLABLE_INDEXING_STATES or _cancelled_task_unsettled(info)
                 if not owns_claim:
                     continue
@@ -602,6 +674,8 @@ class TaskStateManager:
         """Return whether cancellation still owns a worker submission fence."""
         with self.lock:
             info = self.tasks.get(task_id)
+            if info is not None:
+                self._expire_cancellation_fence_if_stale_locked(task_id, info)
             return info is not None and _cancelled_task_unsettled(info)
 
     def _matching_active_task_refs_locked(
@@ -614,6 +688,7 @@ class TaskStateManager:
         for task_id, info in self.tasks.items():
             if self._expire_refless_task_if_stale_locked(task_id, info):
                 continue
+            self._expire_cancellation_fence_if_stale_locked(task_id, info)
             if info.state not in CANCELLABLE_INDEXING_STATES and not _cancelled_task_unsettled(info):
                 continue
             details = info.details or {}

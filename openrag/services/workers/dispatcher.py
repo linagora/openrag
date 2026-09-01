@@ -322,13 +322,6 @@ class WorkerDispatcher(IndexingDispatcher):
                 submit_kwargs,
                 allow_legacy_retry=allow_legacy_require_existing_partition_retry,
             )
-
-            registered = await self._call_method(
-                lambda: self._tsm.set_object_ref.remote(task_id, {"ref": task}),
-                task_description=f"set_object_ref({task_id})",
-            )
-            if registered is False:
-                raise RuntimeError(f"Task {task_id} was cancelled before worker ref registration")
             self._track_completion(task_id, task)
         except BaseException:
             submission_outcome_unknown = claimed_content and submission_started and task is None
