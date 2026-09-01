@@ -495,7 +495,7 @@ curl -X POST http://localhost:8080/presets/ \
   }'
 ```
 
-An indexation `config` instead accepts keys such as `chunking` (`{name, chunk_size, chunk_overlap_rate}`), `parsing_strategy`, `stt` (a named STT endpoint), `asr_transcription_prompt_name`, `enable_image_captioning`, `enable_contextualization`, and `contextualization_mode`. Omitting `stt` or `asr_transcription_prompt_name` uses the corresponding global default.
+An indexation `config` instead accepts keys such as `chunking` (`{name, chunk_size, chunk_overlap_rate}`), `parsing_strategy`, `stt` (a named STT endpoint), `asr_transcription_prompt_name`, `enable_image_captioning`, `enable_contextualization`, and `contextualization_mode`. Omitting `stt` or `asr_transcription_prompt_name` uses the corresponding global default. The STT and ASR prompt selections apply only to audio or video files routed to `OpenAIAudioLoader`; `LocalWhisperLoader` does not use them.
 
 #### List presets
 ```http
@@ -527,7 +527,8 @@ All routes are prefixed with **`/prompts`** and require the **admin** role. `pro
 |---|---|
 | `sys_prompt`, `spoken_style_answer` | partition — `generation_prompt_names` |
 | `query_contextualizer`, `hyde`, `multi_query` | retrieval preset — `*_prompt_name` |
-| `chunk_contextualizer`, `image_captioning`, `topic_tagger`, `asr_transcription` | indexation preset — `*_prompt_name` |
+| `chunk_contextualizer`, `image_captioning`, `topic_tagger` | indexation preset — `*_prompt_name` |
+| `asr_transcription` | indexation preset — `asr_transcription_prompt_name` for audio or video files routed to `OpenAIAudioLoader` |
 
 #### Create a prompt
 ```http
@@ -576,7 +577,7 @@ curl -X PATCH http://localhost:8080/partition/my-partition \
   -d '{"generation_prompt_names": {"sys_prompt": "legal-assistant"}}'
 ```
 
-Preset-scoped prompts are selected the same way, by putting the `*_prompt_name` field in the preset's `config` (see [Pipeline Presets](#-pipeline-presets)). The indexation preset also selects the STT endpoint used for its audio files.
+Preset-scoped prompts are selected the same way, by putting the `*_prompt_name` field in the preset's `config` (see [Pipeline Presets](#-pipeline-presets)). For audio or video files routed to `OpenAIAudioLoader`, the indexation preset also selects the ASR prompt and STT endpoint. `LocalWhisperLoader` uses neither setting.
 
 ---
 

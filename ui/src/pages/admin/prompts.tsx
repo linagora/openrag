@@ -231,19 +231,24 @@ function PromptCard({
 }) {
   const used = prompt.used_by;
   const isAsrTranscription = prompt.prompt_type === "asr_transcription";
+  const isInheritedAsrFallback = isAsrTranscription && prompt.is_default && used === 0;
   return (
     <Card className="relative flex flex-col">
       <div className="absolute right-3 top-3">
         <Badge
           variant="outline"
           className={
-            used > 0
+            used > 0 || isInheritedAsrFallback
               ? "text-xs bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-950/30 dark:text-amber-100 dark:border-amber-900/60"
               : "text-xs bg-muted text-muted-foreground border-transparent"
           }
         >
           <Users className="mr-1 h-3 w-3" />
-          {used > 0 ? `${used} partition${used === 1 ? "" : "s"}` : "Unused"}
+          {used > 0
+            ? `${used} partition${used === 1 ? "" : "s"}`
+            : isInheritedAsrFallback
+              ? "Default fallback"
+              : "Unused"}
         </Badge>
       </div>
       <CardHeader className="pb-2">

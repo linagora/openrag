@@ -26,21 +26,6 @@ _CONTENT_CLAIM_RENEW_INTERVAL_SECONDS = 60 * 60
 _INDEXER_ACTOR_PROTOCOL_VERSION = "v6"
 _INDEXER_POOL_DISPATCHER_ACTOR_NAME = f"IndexerPoolDispatcher-{_INDEXER_ACTOR_PROTOCOL_VERSION}"
 
-# One actor can process several files concurrently, so the dispatch-time preset
-# snapshot belongs to the file's task rather than to the actor: audio requests
-# from different partitions must never share STT settings. Set in process_file,
-# read by the transcription resolvers the parser holds.
-_ACTIVE_INDEXATION_CONFIG: ContextVar[dict[str, Any] | None] = ContextVar(
-    "active_indexation_config",
-    default=None,
-)
-
-
-def _current_indexation_config() -> dict[str, Any]:
-    """Return the running file task's indexation preset snapshot."""
-    config = _ACTIVE_INDEXATION_CONFIG.get()
-    return config if isinstance(config, dict) else {}
-
 
 def _explicit_indexation_selection(config: dict[str, Any] | None, key: str) -> str | None:
     """Return a nonblank named resource selected by an indexation preset."""
@@ -150,6 +135,14 @@ class IndexerWorkerActor:
         # unpicklable). Created here, in the actor process, it is never pickled.
         self._logger = get_logger()
         self._cfg = cfg
+        # One actor can process several files concurrently, so the preset
+        # snapshot must stay task-local. Construct the ContextVar inside the
+        # worker process: a module-level instance makes Ray's actor class
+        # unpicklable and prevents the pool from starting.
+        self._active_indexation_config: ContextVar[dict[str, Any] | None] = ContextVar(
+            "active_indexation_config",
+            default=None,
+        )
         # Whether "default" resolves via global env/config fallbacks. This keeps
         # reload-on-miss from looping forever when no is_default row exists for a
         # type but the legacy config block can still serve the default endpoint.
@@ -210,7 +203,7 @@ class IndexerWorkerActor:
         the next transcription without recreating the long-lived parser client.
         """
         selected_name = _explicit_indexation_selection(
-            _current_indexation_config(),
+            self._active_indexation_config.get(),
             "asr_transcription_prompt_name",
         )
         try:
@@ -239,7 +232,7 @@ class IndexerWorkerActor:
         stt = getattr(models, "stt", None)
         if stt is None:
             return None
-        selected_name = _explicit_indexation_selection(_current_indexation_config(), "stt")
+        selected_name = _explicit_indexation_selection(self._active_indexation_config.get(), "stt")
         endpoint = stt.get(selected_name or "default")
         if endpoint is None and selected_name:
             self._logger.warning(
@@ -395,7 +388,7 @@ class IndexerWorkerActor:
             # boundary, so per-chunk work reuses one resolved string instead of
             # hitting the DB per chunk.
             resolved_prompts = await self._resolve_ingest_prompts(partition, indexation_config or {})
-            token = _ACTIVE_INDEXATION_CONFIG.set(indexation_config)
+            token = self._active_indexation_config.set(indexation_config)
             try:
                 result = await self._worker.process_file(
                     task_id=task_id,
@@ -411,7 +404,7 @@ class IndexerWorkerActor:
                     resolved_prompts=resolved_prompts,
                 )
             finally:
-                _ACTIVE_INDEXATION_CONFIG.reset(token)
+                self._active_indexation_config.reset(token)
             file_id = metadata.get("file_id", "")
             if workspace_ids and not replace and file_id:
                 try:

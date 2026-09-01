@@ -80,4 +80,19 @@ describe("PromptsPage ASR prompt scope", () => {
       screen.getByText(/used only by indexation presets that explicitly select this prompt/i),
     ).toBeTruthy();
   });
+
+  it("shows that an unreferenced default ASR prompt remains the inherited fallback", async () => {
+    listAllPromptsMock.mockResolvedValue([
+      makeAsrPrompt(),
+      makeAsrPrompt({ id: "asr-custom", name: "meeting-notes", is_default: false }),
+    ]);
+
+    renderPage();
+
+    const defaultCard = (await screen.findByText("default-asr")).closest<HTMLElement>("div[class*='relative']")!;
+    const customCard = screen.getByText("meeting-notes").closest<HTMLElement>("div[class*='relative']")!;
+
+    expect(within(defaultCard).getByText("Default fallback")).toBeTruthy();
+    expect(within(customCard).getByText("Unused")).toBeTruthy();
+  });
 });

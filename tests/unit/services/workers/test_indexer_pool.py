@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import contextmanager
+from contextvars import ContextVar
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -21,6 +22,13 @@ class _BrokenChunker:
 
 class _NonCallableChunker:
     chunk = None
+
+
+def test_indexer_worker_actor_is_ray_serializable() -> None:
+    import ray.cloudpickle as cloudpickle
+    from services.workers.indexer_pool import IndexerWorkerActor
+
+    cloudpickle.dumps(IndexerWorkerActor.__ray_metadata__.modified_class)
 
 
 def test_build_pipeline_timeouts_bounds_parse_from_config() -> None:
@@ -1534,6 +1542,7 @@ def _bare_worker_actor(*, save_uploaded_files: bool, worker: _RecordingWorker):
     )
     actor._save_uploaded_files = save_uploaded_files
     actor._logger = SimpleNamespace(debug=lambda *a, **k: None, warning=lambda *a, **k: None)
+    actor._active_indexation_config = ContextVar("test_active_indexation_config", default=None)
     # These build the actor with __new__, so __init__ never runs. Captioning is
     # enabled by default, so ingest now resolves its prompt even for a config
     # that omits the flag — stub the service these tests don't exercise.
@@ -1544,15 +1553,13 @@ def _bare_worker_actor(*, save_uploaded_files: bool, worker: _RecordingWorker):
 
 
 @contextmanager
-def _active_indexation_config(config):
+def _active_indexation_config(actor, config):
     """Run the block as if a file carrying *config* were dispatched to the actor."""
-    from services.workers.indexer_pool import _ACTIVE_INDEXATION_CONFIG
-
-    token = _ACTIVE_INDEXATION_CONFIG.set(config)
+    token = actor._active_indexation_config.set(config)
     try:
         yield
     finally:
-        _ACTIVE_INDEXATION_CONFIG.reset(token)
+        actor._active_indexation_config.reset(token)
 
 
 @pytest.mark.asyncio
@@ -1580,7 +1587,7 @@ async def test_actor_resolves_the_preset_asr_prompt_before_the_default() -> None
     actor = _bare_worker_actor(save_uploaded_files=True, worker=_RecordingWorker())
     actor._prompt_service.resolve_prompt = AsyncMock(return_value="preset prompt")
 
-    with _active_indexation_config({"asr_transcription_prompt_name": "meeting-diarization"}):
+    with _active_indexation_config(actor, {"asr_transcription_prompt_name": "meeting-diarization"}):
         assert await actor._resolve_transcription_prompt() == "preset prompt"
 
     actor._prompt_service.resolve_prompt.assert_awaited_once_with("asr_transcription", names=["meeting-diarization"])
@@ -1591,7 +1598,7 @@ async def test_actor_uses_the_global_asr_prompt_when_an_active_preset_has_no_sel
     actor = _bare_worker_actor(save_uploaded_files=True, worker=_RecordingWorker())
     actor._prompt_service.resolve_prompt = AsyncMock(return_value="global prompt")
 
-    with _active_indexation_config({}):
+    with _active_indexation_config(actor, {}):
         assert await actor._resolve_transcription_prompt() == "global prompt"
 
     # An absent preset selection takes the prompt service's global-default path.
@@ -1606,11 +1613,11 @@ def test_actor_resolves_the_preset_stt_endpoint_before_the_default() -> None:
 
     assert actor._resolve_transcription_endpoint() is default
 
-    with _active_indexation_config({"stt": "moss"}):
+    with _active_indexation_config(actor, {"stt": "moss"}):
         assert actor._resolve_transcription_endpoint() is moss
 
     # A selection that no longer resolves degrades to the default endpoint.
-    with _active_indexation_config({"stt": "retired"}):
+    with _active_indexation_config(actor, {"stt": "retired"}):
         assert actor._resolve_transcription_endpoint() is default
 
 
