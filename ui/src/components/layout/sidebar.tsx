@@ -26,6 +26,7 @@ import { APP_NAME } from "@/lib/brand";
 import { useActiveJobsCount } from "@/lib/jobs-queries";
 import { usePermissions, type Permissions } from "@/lib/permissions";
 import { ReleaseNotes } from "./release-notes";
+import { sidebarItemInactiveClassName } from "./sidebar-item";
 
 interface NavItem {
   title: string;
@@ -53,9 +54,6 @@ const settingsItem: NavItem = { title: "Settings", href: "/settings", icon: User
 
 const sidebarItemClassName =
   "relative flex items-center gap-3 px-3 py-2 rounded-xl text-sm font-medium transition-colors overflow-hidden group-data-[collapsible=icon]:justify-center group-data-[collapsible=icon]:px-0";
-const sidebarItemInactiveClassName = "text-sidebar-foreground/70 hover:bg-sidebar-accent/60 hover:text-sidebar-accent-foreground";
-const releaseNotesItemClassName =
-  "flex h-7 w-full items-center gap-1.5 rounded-md px-2 text-xs font-medium transition-colors";
 
 export function AppSidebar() {
   const location = useLocation();
@@ -138,9 +136,7 @@ export function AppSidebar() {
           data-slot="sidebar-release-notes"
           className="shrink-0 px-3 pb-3 group-data-[collapsible=icon]:hidden"
         >
-          <SidebarMenu>
-            <ReleaseNotes className={releaseNotesItemClassName} />
-          </SidebarMenu>
+          <ReleaseNotes />
         </div>
       )}
       <SidebarFooter className="px-3 py-3 border-t border-sidebar-border group-data-[collapsible=icon]:px-1.5">

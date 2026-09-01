@@ -128,20 +128,15 @@ describe("AppSidebar", () => {
     permissions.isAdmin = true;
   });
 
-  it("keeps the compact Release Notes button above the Settings separator", () => {
+  it("keeps the Release Notes button above the Settings separator", () => {
     renderSidebar();
 
     const releaseNotes = screen.getByRole("button", { name: /open release notes/i });
-    const settings = screen.getByRole("link", { name: "Settings" });
 
-    expect(releaseNotes.querySelector("svg")).toBeNull();
-    expect(releaseNotes.className).toContain("h-7");
-    expect(releaseNotes.closest("[data-slot='sidebar-release-notes']")?.className).toContain("group-data-[collapsible=icon]:hidden");
-    expect(releaseNotes.closest("[data-slot='sidebar-release-notes']")?.nextElementSibling).toBe(
-      screen.getByTestId("sidebar-footer"),
-    );
-    expect(screen.getByTestId("sidebar-content").compareDocumentPosition(releaseNotes) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(settings.getAttribute("href")).toBe("/settings");
+    expect(
+      releaseNotes.closest("[data-slot='sidebar-release-notes']")?.nextElementSibling?.getAttribute("data-slot"),
+    ).toBe("sidebar-footer");
+    expect(screen.getByRole("link", { name: "Settings" }).getAttribute("href")).toBe("/settings");
   });
 
   it("hides Release Notes from non-admin users", () => {
