@@ -267,6 +267,8 @@ describe("ModelsPage STT validation", () => {
     });
 
     expect(createButton.disabled).toBe(true);
+    const validateButton = within(dialog).getByRole("button", { name: "Validate" }) as HTMLButtonElement;
+    await waitFor(() => expect(validateButton.disabled).toBe(false));
   });
 
   it("ignores a validation response from a previously edited endpoint", async () => {

@@ -97,9 +97,15 @@ def _flatten_multipart_field(key: str, value: Any) -> list[tuple[str, str]]:
     return [(key, serialized)] if serialized else []
 
 
-def _stt_validation_form_data(model_name: str, extra: dict[str, Any] | None) -> dict[str, Any]:
+def _stt_validation_form_data(
+    model_name: str,
+    extra: dict[str, Any] | None,
+    prompt: str | None = None,
+) -> dict[str, Any]:
     """Build the sanitized multipart fields used by an STT runtime request."""
     request_options: dict[str, Any] = {"model": model_name}
+    if prompt and prompt.strip():
+        request_options["prompt"] = prompt.strip()
     if extra:
         language = extra.get(STT_LANGUAGE_KEY)
         if isinstance(language, str) and language.strip():
@@ -199,13 +205,26 @@ class ModelEndpointService:
         config: Settings,
         partition_service: Any = None,
         preset_service: Any = None,
+        prompt_service: Any = None,
         client_caches: dict[str, dict[str, Any]] | None = None,
     ) -> None:
         self._repo = model_endpoint_repo
         self._config = config
         self._partition_service = partition_service
         self._preset_service = preset_service
+        self._prompt_service = prompt_service
         self._client_caches: dict[str, dict[str, Any]] = client_caches or {}
+
+    async def _resolve_stt_validation_prompt(self) -> str | None:
+        """Resolve the same managed prompt used by runtime transcription."""
+        if self._prompt_service is None:
+            return None
+        try:
+            prompt = await self._prompt_service.resolve_prompt("asr_transcription")
+        except Exception as exc:  # noqa: BLE001 - match runtime's provider-native fallback
+            logger.bind(error=str(exc)).warning("STT validation prompt resolution failed")
+            return None
+        return prompt.strip() if prompt and prompt.strip() else None
 
     # ------------------------------------------------------------------
     # Startup lifecycle
@@ -722,12 +741,13 @@ class ModelEndpointService:
                     # needless upload and inference request in that case.
                     if result["model_found"] is False:
                         return result
+                    prompt = await self._resolve_stt_validation_prompt()
                     # A well-formed request is required to validate credentials:
                     # some providers reject a missing file/model with 400/422
                     # before they authenticate the request.
                     transcription_response = await client.post(
                         base_url + "/audio/transcriptions",
-                        data=_stt_validation_form_data(normalized_model_name, extra),
+                        data=_stt_validation_form_data(normalized_model_name, extra, prompt),
                         files={
                             "file": (
                                 "openrag-stt-validation.wav",

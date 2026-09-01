@@ -94,6 +94,15 @@ class _EndpointLimiterEntry:
     leases: int = 0
 
 
+@dataclass
+class _EndpointClientEntry:
+    """Reusable HTTP client plus the requests that keep it alive."""
+
+    client: AsyncOpenAI
+    leases: int = 0
+    retired: bool = False
+
+
 class OpenAIAudioClient(BaseClientParser):
     """OpenAI-compatible audio transcription client."""
 
@@ -123,6 +132,8 @@ class OpenAIAudioClient(BaseClientParser):
         self._endpoint_limiters: dict[tuple[str, str], _EndpointLimiterEntry] = {}
         self._endpoint_registry_lock = asyncio.Lock()
         self._current_endpoint_limiter_key: tuple[str, str] | None = None
+        self._endpoint_clients: dict[tuple[str, str, float], _EndpointClientEntry] = {}
+        self._endpoint_client_lock = asyncio.Lock()
 
     def supported_types(self) -> list[str]:
         return [DocumentType.AUDIO.value, DocumentType.VIDEO.value]
@@ -326,31 +337,89 @@ class OpenAIAudioClient(BaseClientParser):
         """Whether *endpoint* is the legacy ``TRANSCRIBER_*`` destination."""
         return endpoint.endpoint.strip().rstrip("/") == self._base_url.strip().rstrip("/")
 
-    def _client_for_endpoint(self, endpoint: ModelEndpointConfig | None) -> tuple[AsyncOpenAI, str, bool]:
-        """Return an OpenAI client, model, and whether the client must be closed."""
-        if endpoint is None:
-            return self._client, self._model, False
-
+    @staticmethod
+    def _endpoint_client_key(endpoint: ModelEndpointConfig) -> tuple[str, str, float]:
+        """Return the effective connection identity for a configured endpoint."""
         api_key = endpoint.extra.get("api_key")
+        resolved_api_key = api_key.strip() if isinstance(api_key, str) and api_key.strip() else _ANONYMOUS_API_KEY
+        return (endpoint.endpoint.strip().rstrip("/"), resolved_api_key, float(endpoint.timeout))
+
+    def _retire_endpoint_clients(self, current_key: tuple[str, str, float] | None) -> list[AsyncOpenAI]:
+        """Mark old configurations retired and detach those with no users."""
+        closable: list[AsyncOpenAI] = []
+        for key, entry in list(self._endpoint_clients.items()):
+            entry.retired = key != current_key
+            if entry.retired and entry.leases == 0:
+                del self._endpoint_clients[key]
+                closable.append(entry.client)
+        return closable
+
+    @staticmethod
+    async def _close_endpoint_clients(clients: Iterable[AsyncOpenAI]) -> None:
+        """Close retired clients without masking the active transcription."""
+        for client in clients:
+            try:
+                await client.close()
+            except Exception as exc:  # noqa: BLE001 - cleanup must not fail a request
+                logger.bind(error=str(exc)).warning("Failed to close retired STT client")
+
+    @asynccontextmanager
+    async def _transcription_client(
+        self,
+        endpoint: ModelEndpointConfig | None,
+    ) -> AsyncIterator[tuple[AsyncOpenAI, str]]:
+        """Lease a pooled client and retire changed endpoint configurations safely."""
+        if endpoint is None:
+            async with self._endpoint_client_lock:
+                closable = self._retire_endpoint_clients(None)
+            await self._close_endpoint_clients(closable)
+            yield self._client, self._model
+            return
+
+        key = self._endpoint_client_key(endpoint)
+        resolved_base_url, resolved_api_key, resolved_timeout = key
         # A resolved registry endpoint owns its credentials. In particular, an
         # administrator clearing its key must not silently restore the legacy
         # TRANSCRIBER_API_KEY merely because the endpoint URL happens to match.
         # The environment fallback remains available only when no endpoint was
         # resolved above.
-        resolved_api_key = api_key.strip() if isinstance(api_key, str) and api_key.strip() else _ANONYMOUS_API_KEY
         if (
             self._is_fallback_endpoint(endpoint)
             and resolved_api_key == self._api_key
             and endpoint.timeout == self._timeout
         ):
-            return self._client, endpoint.model_name or self._model, False
+            async with self._endpoint_client_lock:
+                closable = self._retire_endpoint_clients(None)
+            await self._close_endpoint_clients(closable)
+            yield self._client, endpoint.model_name or self._model
+            return
 
-        client = AsyncOpenAI(
-            base_url=endpoint.endpoint,
-            api_key=resolved_api_key,
-            timeout=endpoint.timeout,
-        )
-        return client, endpoint.model_name or self._model, True
+        entry: _EndpointClientEntry | None = None
+        try:
+            async with self._endpoint_client_lock:
+                entry = self._endpoint_clients.get(key)
+                if entry is None:
+                    entry = _EndpointClientEntry(
+                        AsyncOpenAI(
+                            base_url=resolved_base_url,
+                            api_key=resolved_api_key,
+                            timeout=resolved_timeout,
+                        )
+                    )
+                    self._endpoint_clients[key] = entry
+                entry.leases += 1
+                closable = self._retire_endpoint_clients(key)
+            await self._close_endpoint_clients(closable)
+            yield entry.client, endpoint.model_name or self._model
+        finally:
+            if entry is not None:
+                async with self._endpoint_client_lock:
+                    entry.leases -= 1
+                    closable = []
+                    if entry.retired and entry.leases == 0 and self._endpoint_clients.get(key) is entry:
+                        del self._endpoint_clients[key]
+                        closable.append(entry.client)
+                await self._close_endpoint_clients(closable)
 
     async def _transcribe(
         self,
@@ -360,35 +429,28 @@ class OpenAIAudioClient(BaseClientParser):
         prompt: str | None,
         endpoint_config: ModelEndpointConfig | None = None,
     ) -> str:
-        client, model, close_client = self._client_for_endpoint(endpoint_config)
-        kwargs: dict[str, object] = {"model": model, "file": path}
-        if prompt:
-            kwargs["prompt"] = prompt
-        if language:
-            kwargs["language"] = language
-        request_extra = self._request_extra(endpoint_config)
-        # The OpenAI SDK returns a plain string for ``response_format=text``.
-        # Pass that standard option through its typed argument so both its
-        # request encoding and response handling stay compatible with the SDK.
-        response_format = request_extra.pop("response_format", None)
-        if isinstance(response_format, str) and response_format.strip():
-            kwargs["response_format"] = response_format
-        elif response_format is not None:
-            request_extra["response_format"] = response_format
-        if request_extra:
-            kwargs["extra_body"] = request_extra
-        logger.bind(
-            model=model,
-            language=language or "auto",
-            configured_stt_endpoint=endpoint_config is not None,
-        ).info("Sending audio transcription request")
-        try:
+        async with self._transcription_client(endpoint_config) as (client, model):
+            kwargs: dict[str, object] = {"model": model, "file": path}
+            if prompt:
+                kwargs["prompt"] = prompt
+            if language:
+                kwargs["language"] = language
+            request_extra = self._request_extra(endpoint_config)
+            # The OpenAI SDK returns a plain string for ``response_format=text``.
+            # Pass that standard option through its typed argument so both its
+            # request encoding and response handling stay compatible with the SDK.
+            response_format = request_extra.pop("response_format", None)
+            if isinstance(response_format, str) and response_format.strip():
+                kwargs["response_format"] = response_format
+            elif response_format is not None:
+                request_extra["response_format"] = response_format
+            if request_extra:
+                kwargs["extra_body"] = request_extra
+            logger.bind(
+                model=model,
+                language=language or "auto",
+                configured_stt_endpoint=endpoint_config is not None,
+            ).info("Sending audio transcription request")
             response = await client.audio.transcriptions.create(**kwargs)
             transcript = self._response_text(response)
             return transcript
-        finally:
-            if close_client:
-                try:
-                    await client.close()
-                except Exception as exc:  # noqa: BLE001 - cleanup must not hide a transcription result
-                    logger.bind(error=str(exc)).warning("Failed to close temporary STT client")

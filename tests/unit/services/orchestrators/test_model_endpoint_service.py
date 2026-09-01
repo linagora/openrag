@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -103,7 +105,14 @@ class _FakeEndpointRepo:
         return ("ok", promoted)
 
 
-def _make_service(repo=None, rows=None, settings=None, partition_service=None, preset_service=None):
+def _make_service(
+    repo=None,
+    rows=None,
+    settings=None,
+    partition_service=None,
+    preset_service=None,
+    prompt_service=None,
+):
     from core.config.root import Settings
     from services.orchestrators.model_endpoint_service import ModelEndpointService
 
@@ -112,6 +121,7 @@ def _make_service(repo=None, rows=None, settings=None, partition_service=None, p
         config=settings or Settings(),
         partition_service=partition_service,
         preset_service=preset_service,
+        prompt_service=prompt_service,
     )
 
 
@@ -1424,7 +1434,8 @@ async def test_validate_endpoint_probes_url_and_model_name(monkeypatch):
 async def test_validate_stt_endpoint_probes_transcription_capability_with_redirects_enabled(monkeypatch):
     import httpx
 
-    svc = _make_service()
+    prompt_service = SimpleNamespace(resolve_prompt=AsyncMock(return_value="  Prefer OpenRAG terms.  "))
+    svc = _make_service(prompt_service=prompt_service)
     calls: list[tuple[str, str]] = []
 
     class FakeResponse:
@@ -1455,6 +1466,7 @@ async def test_validate_stt_endpoint_probes_transcription_capability_with_redire
             calls.append(("post", url))
             assert data == {
                 "model": "moss-transcribe-diarize",
+                "prompt": "Prefer OpenRAG terms.",
                 "language": "fr",
                 "response_format": "json",
                 "temperature": "0",
@@ -1495,6 +1507,7 @@ async def test_validate_stt_endpoint_probes_transcription_capability_with_redire
         ("get", "http://moss:8000/v1/models"),
         ("post", "http://moss:8000/v1/audio/transcriptions"),
     ]
+    prompt_service.resolve_prompt.assert_awaited_once_with("asr_transcription")
     assert result == {
         "reachable": True,
         "model_found": True,

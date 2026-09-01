@@ -504,7 +504,7 @@ class TestParse:
             "timeout": 120,
         }
         assert created[0][1].audio.transcriptions.create.await_args.kwargs["model"] == "moss-transcribe-diarize"
-        created[0][1].close.assert_awaited_once()
+        created[0][1].close.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_keyless_stt_endpoint_does_not_receive_fallback_key_from_another_host(self, monkeypatch):
@@ -544,7 +544,7 @@ class TestParse:
             "api_key": "",
             "timeout": 900,
         }
-        created[0][1].close.assert_awaited_once()
+        created[0][1].close.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_stt_endpoint_resolver_replaces_connection_and_model(self, monkeypatch):
@@ -590,7 +590,146 @@ class TestParse:
         }
         request = created[1][1].audio.transcriptions.create.await_args.kwargs
         assert request["model"] == "moss-transcribe-diarize"
-        created[1][1].close.assert_awaited_once()
+        created[1][1].close.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_resolved_stt_endpoint_reuses_its_http_client(self, monkeypatch):
+        from services.inference.parsers import openai_audio as module
+
+        created: list[MagicMock] = []
+
+        def make_openai_client(**_kwargs):
+            client = MagicMock()
+            client.audio = MagicMock()
+            client.audio.transcriptions = MagicMock()
+            client.audio.transcriptions.create = AsyncMock(return_value=MagicMock(text="transcribed"))
+            client.close = AsyncMock()
+            created.append(client)
+            return client
+
+        endpoint = ModelEndpointConfig(
+            endpoint="http://moss:8000/v1",
+            model_name="moss-transcribe-diarize",
+            timeout=900,
+            extra={"api_key": "endpoint-key"},
+        )
+        client = _client(
+            MagicMock(),
+            transcription_endpoint_resolver=lambda: endpoint,
+        )
+        monkeypatch.setattr(module, "AsyncOpenAI", make_openai_client)
+
+        await client.parse(_audio_doc())
+        await client.parse(_audio_doc())
+
+        assert len(created) == 1
+        assert created[0].audio.transcriptions.create.await_count == 2
+        created[0].close.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "updated_fields",
+        [
+            {"extra": {"api_key": "rotated-key"}},
+            {"timeout": 901},
+        ],
+    )
+    async def test_resolved_stt_endpoint_replaces_changed_connection_settings(self, monkeypatch, updated_fields):
+        from services.inference.parsers import openai_audio as module
+
+        created: list[MagicMock] = []
+
+        def make_openai_client(**_kwargs):
+            client = MagicMock()
+            client.audio = MagicMock()
+            client.audio.transcriptions = MagicMock()
+            client.audio.transcriptions.create = AsyncMock(return_value=MagicMock(text="transcribed"))
+            client.close = AsyncMock()
+            created.append(client)
+            return client
+
+        endpoint = ModelEndpointConfig(
+            endpoint="http://moss:8000/v1",
+            model_name="moss-transcribe-diarize",
+            timeout=900,
+            extra={"api_key": "endpoint-key"},
+        )
+        selected = [endpoint]
+        client = _client(
+            MagicMock(),
+            transcription_endpoint_resolver=lambda: selected[0],
+        )
+        monkeypatch.setattr(module, "AsyncOpenAI", make_openai_client)
+
+        await client.parse(_audio_doc())
+        selected[0] = endpoint.model_copy(update=updated_fields)
+        await client.parse(_audio_doc())
+
+        assert len(created) == 2
+        created[0].close.assert_awaited_once()
+        created[1].close.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_resolved_stt_endpoint_closes_a_retired_client_after_its_last_request(self, monkeypatch):
+        from services.inference.parsers import openai_audio as module
+
+        created: dict[str, MagicMock] = {}
+        first_started = asyncio.Event()
+        release_first = asyncio.Event()
+
+        def make_openai_client(**kwargs):
+            base_url = str(kwargs["base_url"])
+            client = MagicMock()
+            client.audio = MagicMock()
+            client.audio.transcriptions = MagicMock()
+            client.close = AsyncMock()
+            if base_url == "http://moss-a:8000/v1":
+
+                async def transcribe_a(**_request):
+                    first_started.set()
+                    await release_first.wait()
+                    return MagicMock(text="from a")
+
+                client.audio.transcriptions.create = AsyncMock(side_effect=transcribe_a)
+            else:
+                client.audio.transcriptions.create = AsyncMock(return_value=MagicMock(text="from b"))
+            created[base_url] = client
+            return client
+
+        endpoint = ModelEndpointConfig(
+            endpoint="http://moss-a:8000/v1",
+            model_name="moss",
+            timeout=900,
+            extra={"api_key": "key-a"},
+        )
+        selected = [endpoint]
+        client = _client(
+            MagicMock(),
+            transcription_endpoint_resolver=lambda: selected[0],
+        )
+        monkeypatch.setattr(module, "AsyncOpenAI", make_openai_client)
+
+        first = asyncio.create_task(client.parse(_audio_doc()))
+        await asyncio.wait_for(first_started.wait(), timeout=0.5)
+
+        selected[0] = endpoint.model_copy(
+            update={
+                "endpoint": "http://moss-b:8000/v1",
+                "extra": {"api_key": "key-b"},
+            }
+        )
+        second = await client.parse(_audio_doc())
+
+        assert second.text_blocks[0].text == "from b"
+        created["http://moss-a:8000/v1"].close.assert_not_awaited()
+        created["http://moss-b:8000/v1"].close.assert_not_awaited()
+
+        release_first.set()
+        first_result = await first
+
+        assert first_result.text_blocks[0].text == "from a"
+        created["http://moss-a:8000/v1"].close.assert_awaited_once()
+        created["http://moss-b:8000/v1"].close.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_transcribe_exception_propagates(self, mock_openai_client):

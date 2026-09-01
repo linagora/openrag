@@ -445,6 +445,7 @@ function EndpointDialog({
   // don't affect endpoint reachability, so they're deliberately excluded — the
   // raw extra is compared with them stripped out (as the textarea shows them).
   useEffect(() => {
+    setValidating(false);
     const editingExtra = editing ? splitModelEndpointApiKeyExtra(editing.extra) : null;
     const editingSttFields = editingExtra
       ? editing?.model_type === "stt"
