@@ -47,6 +47,8 @@ class FakePromptService:
         return _prompt(id=prompt_id)
 
     async def update_prompt(self, prompt_id: str, **fields: Any) -> Prompt:
+        if self.error:
+            raise self.error
         self.calls.append(("update", {"prompt_id": prompt_id, **fields}))
         return _prompt(id=prompt_id, **{k: v for k, v in fields.items() if k in ("name", "content", "is_default")})
 
@@ -89,9 +91,21 @@ class TestLibraryRoutes:
     async def test_create_rejects_empty_content(self, async_client_factory):
         svc = FakePromptService()
         async with async_client_factory(_build_app(svc)) as client:
-            resp = await client.post("/prompts/", json={"prompt_type": "sys_prompt", "content": "   "})
+            resp = await client.post("/prompts/", json={"prompt_type": "sys_prompt", "name": "blank", "content": "   "})
         assert resp.status_code == 422
         assert svc.calls == []
+
+    async def test_create_allows_blank_asr_content(self, async_client_factory):
+        svc = FakePromptService()
+        async with async_client_factory(_build_app(svc)) as client:
+            resp = await client.post(
+                "/prompts/",
+                json={"prompt_type": "asr_transcription", "name": "native", "content": "   "},
+            )
+        assert resp.status_code == 201
+        assert svc.calls == [
+            ("create", {"prompt_type": "asr_transcription", "name": "native", "content": "", "is_default": False})
+        ]
 
     async def test_create_rejects_unknown_type(self, async_client_factory):
         svc = FakePromptService()
@@ -126,6 +140,18 @@ class TestLibraryRoutes:
         async with async_client_factory(_build_app(svc)) as client:
             resp = await client.patch("/prompts/pid", json={})
         assert resp.status_code == 422
+
+    async def test_patch_blank_non_asr_content_maps_to_422(self, async_client_factory):
+        svc = FakePromptService()
+        svc.error = ValidationError(
+            "content must be non-empty",
+            status_code=422,
+            code="PROMPT_CONTENT_EMPTY",
+        )
+        async with async_client_factory(_build_app(svc)) as client:
+            resp = await client.patch("/prompts/pid", json={"content": "   "})
+        assert resp.status_code == 422
+        assert svc.calls == []
 
     async def test_set_default(self, async_client_factory):
         svc = FakePromptService()

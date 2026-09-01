@@ -13,7 +13,7 @@ export interface PromptTypeEntry {
 export interface PromptGroup {
   // Concern this group of prompts belongs to.
   name: string;
-  // Where a prompt of this concern is *selected* (presets vs partition).
+  // Where a prompt of this concern applies (preset, partition, or globally).
   description: string;
   types: PromptTypeEntry[];
 }
@@ -42,6 +42,11 @@ export const PROMPT_GROUPS: PromptGroup[] = [
       { value: "multi_query", label: "Multi-query" },
     ],
   },
+  {
+    name: "Transcription",
+    description: "Global ASR instruction — used only when AUDIOLOADER=OpenAIAudioLoader",
+    types: [{ value: "asr_transcription", label: "ASR transcription" }],
+  },
 ];
 
 export const PROMPT_TYPES: PromptTypeEntry[] = PROMPT_GROUPS.flatMap((g) => g.types);
@@ -61,8 +66,8 @@ export interface TemplateVariable {
 }
 
 // Placeholders each template understands, keyed by prompt type. Empty arrays are
-// intentional: those prompts are system messages sent with the chunk/image
-// attached as a separate message — they take no inline placeholders.
+// intentional: those prompts are sent verbatim (or, for ASR, as the
+// transcription prompt) and take no inline placeholders.
 export const PROMPT_TYPE_VARIABLES: Record<string, TemplateVariable[]> = {
   sys_prompt: [
     { name: "context", description: "Retrieved document chunks injected by the pipeline", sample: "[Source 1] Employees are entitled to 20 days of paid vacation per year, accrued monthly." },
@@ -81,6 +86,7 @@ export const PROMPT_TYPE_VARIABLES: Record<string, TemplateVariable[]> = {
   chunk_contextualizer: [],
   image_captioning: [],
   topic_tagger: [],
+  asr_transcription: [],
   hyde: [
     { name: "question", description: "The user's search query", sample: "How do I configure SSL certificates?" },
   ],

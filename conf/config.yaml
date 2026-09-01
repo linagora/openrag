@@ -151,6 +151,7 @@ prompts:
   spoken_style_answer: spoken_style_answer_tmpl.txt
   hyde: hyde.txt
   multi_query: multi_query_pmpt_tmpl.txt
+  asr_transcription: asr_transcription_tmpl.txt
 
 # --- Document loader ---
 loader:

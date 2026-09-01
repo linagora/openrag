@@ -19,6 +19,7 @@ PromptTypeName = Literal[
     "multi_query",
     "spoken_style_answer",
     "topic_tagger",
+    "asr_transcription",
 ]
 
 
@@ -39,10 +40,21 @@ class CreatePromptRequest(BaseModel):
     content: str
     is_default: bool = False
 
-    @field_validator("name", "content")
+    @field_validator("name")
     @classmethod
     def validate_non_empty(cls, value: str, info: ValidationInfo) -> str:
         return _require_non_empty(info.field_name, value)
+
+    @field_validator("content")
+    @classmethod
+    def normalize_content(cls, value: str) -> str:
+        return value.strip()
+
+    @model_validator(mode="after")
+    def validate_content_for_type(self) -> CreatePromptRequest:
+        if self.prompt_type != "asr_transcription":
+            self.content = _require_non_empty("content", self.content)
+        return self
 
 
 class UpdatePromptRequest(BaseModel):
@@ -59,7 +71,10 @@ class UpdatePromptRequest(BaseModel):
     def validate_content(cls, value: str | None, info: ValidationInfo) -> str | None:
         if value is None:
             raise ValueError(f"{info.field_name} cannot be null")
-        return _require_non_empty("content", value)
+        # The service validates non-empty content after it knows the stored
+        # prompt type. ASR transcription alone may be deliberately blank to
+        # select the model's built-in prompt.
+        return value.strip()
 
     @field_validator("name")
     @classmethod
