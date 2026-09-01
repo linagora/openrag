@@ -64,6 +64,11 @@ def _normalize_endpoint(value: str) -> str:
     return normalized
 
 
+def _normalize_model_name(value: str | None) -> str | None:
+    """Trim an optional provider model name without inventing a value."""
+    return value.strip() if value is not None else None
+
+
 def validate_llm_token_extra(extra: dict[str, Any] | None) -> dict[str, Any] | None:
     """Reject non-positive-int LLM token budgets carried in ``extra``.
 
@@ -133,6 +138,12 @@ class CreateModelEndpointRequest(BaseModel):
         """Normalize the endpoint URL."""
         return _normalize_endpoint(value)
 
+    @field_validator("model_name")
+    @classmethod
+    def validate_model_name(cls, value: str | None) -> str | None:
+        """Persist the same model name used by validation and inference."""
+        return _normalize_model_name(value)
+
     @field_validator("extra")
     @classmethod
     def validate_extra_token_budgets(cls, value: dict[str, Any], info: ValidationInfo) -> dict[str, Any]:
@@ -179,6 +190,12 @@ class UpdateModelEndpointRequest(BaseModel):
         if value is None:
             return None
         return _normalize_endpoint(value)
+
+    @field_validator("model_name")
+    @classmethod
+    def validate_model_name(cls, value: str | None) -> str | None:
+        """Normalize an optional replacement model name."""
+        return _normalize_model_name(value)
 
     # NOTE: no ``extra`` token-budget validator here on purpose. This schema
     # carries no ``model_type`` (it is a path parameter), so it cannot tell an
@@ -231,6 +248,7 @@ class ValidateEndpointRequest(BaseModel):
     endpoint: str
     model_type: ModelEndpointType | None = None
     model_name: str | None = None
+    timeout: float | None = Field(default=None, gt=0)
     api_key: str | None = None
     stored_api_key_model_type: ModelEndpointType | None = None
     stored_api_key_name: str | None = None
@@ -240,6 +258,12 @@ class ValidateEndpointRequest(BaseModel):
     def validate_endpoint(cls, value: str) -> str:
         """Normalize the draft endpoint URL before probing it."""
         return _normalize_endpoint(value)
+
+    @field_validator("model_name")
+    @classmethod
+    def validate_model_name(cls, value: str | None) -> str | None:
+        """Probe the normalized model name that would be persisted."""
+        return _normalize_model_name(value)
 
     @field_validator("stored_api_key_name")
     @classmethod

@@ -579,6 +579,7 @@ class ModelEndpointService:
         *,
         api_key: str | None = None,
         model_type: str | None = None,
+        timeout: float | None = None,
     ) -> dict[str, Any]:
         """Probe an endpoint's model list and, for STT, transcription route.
 
@@ -595,8 +596,8 @@ class ModelEndpointService:
             "transcription_supported": None,
             "detail": None,
         }
-        stt_model_name = model_name.strip() if model_type == "stt" and model_name else None
-        if model_type == "stt" and not stt_model_name:
+        normalized_model_name = model_name.strip() if model_name is not None else None
+        if model_type == "stt" and not normalized_model_name:
             result["transcription_supported"] = False
             result["detail"] = "A model name is required to validate audio transcription."
             return result
@@ -640,8 +641,8 @@ class ModelEndpointService:
                             item["id"] for item in models if isinstance(item, dict) and isinstance(item.get("id"), str)
                         ]
                         result["models_served"] = served
-                        if model_name is not None:
-                            result["model_found"] = model_name in served
+                        if normalized_model_name is not None:
+                            result["model_found"] = normalized_model_name in served
                 else:
                     result["detail"] = f"Model list returned HTTP {resp.status_code}."
                 if model_type == "stt":
@@ -654,7 +655,7 @@ class ModelEndpointService:
                     # before they authenticate the request.
                     transcription_response = await client.post(
                         base_url + "/audio/transcriptions",
-                        data={"model": stt_model_name},
+                        data={"model": normalized_model_name},
                         files={
                             "file": (
                                 "openrag-stt-validation.wav",
@@ -663,7 +664,12 @@ class ModelEndpointService:
                             )
                         },
                         follow_redirects=True,
-                        timeout=_STT_VALIDATION_TIMEOUT_SECONDS,
+                        timeout=httpx.Timeout(
+                            connect=5.0,
+                            read=timeout if timeout is not None else _STT_VALIDATION_TIMEOUT_SECONDS,
+                            write=5.0,
+                            pool=5.0,
+                        ),
                     )
                     transcription_status = transcription_response.status_code
                     if 200 <= transcription_status < 300:

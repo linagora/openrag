@@ -48,6 +48,7 @@ class FakeModelEndpointService:
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self.endpoint_extra: dict[str, Any] = {}
         self.endpoint_model_name: str | None = "mistral"
+        self.endpoint_timeout = 30.0
 
     async def create_model_endpoint(self, row: Any) -> dict[str, Any]:
         """Record endpoint creation (from a ModelEndpointRow) and echo a row."""
@@ -70,6 +71,7 @@ class FakeModelEndpointService:
                 name=name,
                 model_type=model_type,
                 model_name=self.endpoint_model_name,
+                timeout=self.endpoint_timeout,
                 extra=self.endpoint_extra,
             )
         )
@@ -94,11 +96,13 @@ class FakeModelEndpointService:
         *,
         api_key: str | None = None,
         model_type: str | None = None,
+        timeout: float | None = None,
     ) -> dict[str, Any]:
         """Record endpoint validation."""
-        self.calls.append(
-            ("validate", {"url": url, "model_type": model_type, "model_name": model_name, "api_key": api_key})
-        )
+        payload = {"url": url, "model_type": model_type, "model_name": model_name, "api_key": api_key}
+        if timeout is not None:
+            payload["timeout"] = timeout
+        self.calls.append(("validate", payload))
         return {
             "reachable": True,
             "model_found": True,
@@ -309,7 +313,16 @@ async def test_validate_model_endpoint_uses_route_identity(async_client_factory)
     assert response.json()["reachable"] is True
     assert model_service.calls == [
         ("get", {"name": "default", "model_type": "llm"}),
-        ("validate", {"url": "http://llm:8000/v1", "model_type": "llm", "model_name": "mistral", "api_key": None}),
+        (
+            "validate",
+            {
+                "url": "http://llm:8000/v1",
+                "model_type": "llm",
+                "model_name": "mistral",
+                "api_key": None,
+                "timeout": 30.0,
+            },
+        ),
     ]
 
 
@@ -328,7 +341,13 @@ async def test_validate_model_endpoint_uses_stored_api_key(async_client_factory)
         ("get", {"name": "default", "model_type": "llm"}),
         (
             "validate",
-            {"url": "http://llm:8000/v1", "model_type": "llm", "model_name": "mistral", "api_key": "secret-token"},
+            {
+                "url": "http://llm:8000/v1",
+                "model_type": "llm",
+                "model_name": "mistral",
+                "api_key": "secret-token",
+                "timeout": 30.0,
+            },
         ),
     ]
 
@@ -348,6 +367,7 @@ async def test_validate_endpoint_draft_forwards_body_without_lookup(async_client
                 "model_type": "stt",
                 "model_name": "mistral-small",
                 "api_key": "draft-key",
+                "timeout": 900,
             },
         )
 
@@ -361,6 +381,7 @@ async def test_validate_endpoint_draft_forwards_body_without_lookup(async_client
                 "model_type": "stt",
                 "model_name": "mistral-small",
                 "api_key": "draft-key",
+                "timeout": 900.0,
             },
         ),
     ]
