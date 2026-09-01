@@ -666,34 +666,44 @@ class ModelEndpointService:
         headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
         try:
             async with httpx.AsyncClient(timeout=5.0, headers=headers, follow_redirects=False) as client:
-                resp = await client.get(models_url)
-                if resp.status_code in {401, 403} and model_type == "stt":
-                    result["transcription_supported"] = False
-                    result["detail"] = (
-                        f"Model list request was rejected with HTTP {resp.status_code}. Check the API key."
-                    )
-                    return result
-                result["reachable"] = True
-                if resp.status_code == 200:
-                    try:
-                        data = resp.json()
-                        models = data.get("data") if isinstance(data, dict) else None
-                        if not isinstance(models, list):
-                            raise ValueError("missing list-valued data field")
-                    except (TypeError, ValueError):
-                        # A reachable endpoint may expose a non-standard or
-                        # broken /models response while still implementing the
-                        # audio route. Do not let that prevent the STT probe.
-                        result["detail"] = "Endpoint returned an invalid model list."
-                    else:
-                        served = [
-                            item["id"] for item in models if isinstance(item, dict) and isinstance(item.get("id"), str)
-                        ]
-                        result["models_served"] = served
-                        if normalized_model_name is not None:
-                            result["model_found"] = normalized_model_name in served
+                try:
+                    resp = await client.get(models_url)
+                except httpx.TimeoutException:
+                    if model_type != "stt":
+                        raise
+                    # Model discovery is intentionally short. STT validation
+                    # can still be proven by the real audio request below.
+                    result["detail"] = "Model list request timed out."
                 else:
-                    result["detail"] = f"Model list returned HTTP {resp.status_code}."
+                    if resp.status_code in {401, 403} and model_type == "stt":
+                        result["transcription_supported"] = False
+                        result["detail"] = (
+                            f"Model list request was rejected with HTTP {resp.status_code}. Check the API key."
+                        )
+                        return result
+                    result["reachable"] = True
+                    if resp.status_code == 200:
+                        try:
+                            data = resp.json()
+                            models = data.get("data") if isinstance(data, dict) else None
+                            if not isinstance(models, list):
+                                raise ValueError("missing list-valued data field")
+                        except (TypeError, ValueError):
+                            # A reachable endpoint may expose a non-standard or
+                            # broken /models response while still implementing the
+                            # audio route. Do not let that prevent the STT probe.
+                            result["detail"] = "Endpoint returned an invalid model list."
+                        else:
+                            served = [
+                                item["id"]
+                                for item in models
+                                if isinstance(item, dict) and isinstance(item.get("id"), str)
+                            ]
+                            result["models_served"] = served
+                            if normalized_model_name is not None:
+                                result["model_found"] = normalized_model_name in served
+                    else:
+                        result["detail"] = f"Model list returned HTTP {resp.status_code}."
                 if model_type == "stt":
                     # The UI already rejects an unavailable model, so avoid a
                     # needless upload and inference request in that case.
@@ -720,6 +730,7 @@ class ModelEndpointService:
                             pool=5.0,
                         ),
                     )
+                    result["reachable"] = True
                     transcription_status = transcription_response.status_code
                     if 200 <= transcription_status < 300:
                         result["transcription_supported"] = True
