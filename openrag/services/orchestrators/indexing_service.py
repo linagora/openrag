@@ -111,7 +111,13 @@ class IndexingService:
         original_filename: str | None,
         content_sha256: str | None,
     ) -> dict:
-        """Assemble the indexing metadata exactly as the legacy router did."""
+        """Assemble the indexing metadata exactly as the legacy router did.
+
+        The keys added below (plus the temporal-field normalization) must match
+        ``UPLOAD_METADATA_SERVER_KEYS`` exactly — the indexing-status callback
+        echoes this dict's caller-supplied fields to a caller-chosen URL and
+        relies on that constant to exclude everything added here.
+        """
         metadata = dict(metadata or {})
         metadata.update(
             {

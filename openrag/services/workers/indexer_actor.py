@@ -150,11 +150,6 @@ class IndexerWorker:
                 lambda: self._tsm.set_state.remote(task_id, "COMPLETED"),
                 task_description=f"set_state({task_id}, COMPLETED)",
             )
-            log.info("File indexed successfully.")
-            await send_indexing_callback(
-                callback_url, partition, file_id, "success", metadata, callback_token=callback_token
-            )
-            return {"stored_count": row.get("stored_count", 0), "stage": row.get("stage", "")}
         except Exception:
             should_cleanup_vectors = row is not None and (
                 row.get("stored_count", 0) > 0 or row.get("stage") == "store_failed"
@@ -168,15 +163,37 @@ class IndexerWorker:
                     task_id=task_id,
                 )
             tb = traceback.format_exc()
-            was_failed = await retry_idempotent_ray_actor_method(
-                lambda: self._tsm.set_failed_if_not_cancelled.remote(task_id, tb),
-                task_description=f"set_failed_if_not_cancelled({task_id})",
-            )
+            try:
+                was_failed = await retry_idempotent_ray_actor_method(
+                    lambda: self._tsm.set_failed_if_not_cancelled.remote(task_id, tb),
+                    task_description=f"set_failed_if_not_cancelled({task_id})",
+                )
+            except Exception:
+                # The TSM is still unreachable — most likely why the exception
+                # being handled here happened in the first place (e.g. the
+                # earlier SERIALIZING write above already timed out against it).
+                # Letting this second call's own error replace the original
+                # traceback via a bare ``raise`` below would both hide the real
+                # failure and, before this fix, skip the callback outright.
+                was_failed = True
             if was_failed:
                 await send_indexing_callback(
                     callback_url, partition, file_id, "error", metadata, callback_token=callback_token
                 )
             raise
+        else:
+            # ``else``, not the end of the ``try``: the file is already
+            # COMPLETED at this point, so anything raised from here on (e.g.
+            # a cancellation reaching send_indexing_callback's own internal
+            # "never raises" guard) must not fall into the ``except`` above and
+            # get reinterpreted as this indexing run having failed — that would
+            # flip an already-successful task to FAILED and fire a spurious
+            # "error" callback right after "success" was sent.
+            log.info("File indexed successfully.")
+            await send_indexing_callback(
+                callback_url, partition, file_id, "success", metadata, callback_token=callback_token
+            )
+            return {"stored_count": row.get("stored_count", 0), "stage": row.get("stage", "")}
         # The raw upload is purged (when configured) by the enclosing actor, not
         # here: cleanup must also cover failures that happen *before* this method
         # runs (catalog/registry init, the SERIALIZING state update). See

@@ -105,14 +105,17 @@ once the task settles, so a client can wait instead of polling:
   "file_id": "file-123",
   "status": "success",
   "timestamp": "2026-01-01T12:00:00.000Z",
-  "metadata": {"file_rev": "<file revision>", "datetime": "...", "doctype": "..."}
+  "metadata": {"doc_rev": "<revision>", "datetime": "...", "doctype": "..."}
 }
 ```
 
 `status` is `"success"` or `"error"`; a user-cancelled task sends nothing.
-`file_rev`/`datetime`/`doctype` are echoed verbatim from the upload metadata,
-letting the receiver detect a stale status. Server-side keys (on-disk path,
-content hash, file size) are never sent.
+`metadata` is whatever you sent at upload, echoed back unchanged — including
+a revision-tracking field under any name you like, if that's how your receiver
+orders these callbacks (the example above uses `doc_rev`). A field you didn't
+send is simply absent, not sent back as `null`. Only server-computed keys are
+held back: the on-disk path, content hash, file size, filenames, and
+`file_id` (already a top-level field).
 
 For an authenticated target, pass `callback_token` — sent as `Authorization:
 Bearer <token>`, never in the URL or the payload. Picking a safe scheme for it

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import threading
 import time
+import traceback
 from types import SimpleNamespace
 from typing import Any
 
@@ -11,6 +12,7 @@ from core.config.model_endpoints import CONTROL_EXTRA_KEYS
 from core.models.catalog import CONTENT_CLAIM_TOKEN_METADATA_KEY
 from services.workers.indexer_actor import IndexerWorker, delete_uploaded_file
 from services.workers.indexing_callback import send_indexing_callback
+from services.workers.ray_utils import retry_idempotent_ray_actor_method
 
 from openrag.core.config.root import Settings
 
@@ -143,6 +145,11 @@ class IndexerWorkerActor:
         self._last_miss_reload_key: tuple[tuple[str, tuple[str, ...]], ...] | None = None
         self._registry_lock = asyncio.Lock()
         self._registry_reload_task: asyncio.Task[None] | None = None
+        # Held here too, not just inside the worker: a pre-flight failure below
+        # (before IndexerWorker.process_file starts) has to report its own
+        # terminal state and error callback, since the worker's own except
+        # block is never reached for it.
+        self._tsm = task_state_manager
         self._worker = IndexerWorker(
             pipeline=pipeline,
             task_state_manager=task_state_manager,
@@ -311,20 +318,34 @@ class IndexerWorkerActor:
                 # hitting the DB per chunk.
                 resolved_prompts = await self._resolve_ingest_prompts(partition, indexation_config or {})
             except Exception:
-                # IndexerWorker.process_file sends the error callback, and it is
-                # never reached from here. Deliberately not BaseException: a
-                # task cancelled during pre-flight raises CancelledError, and a
-                # cancellation notifies nothing — same rule as the worker's
-                # set_failed_if_not_cancelled gate. Awaiting the callback inside
-                # a cancellation handler would also delay the cancel.
-                await send_indexing_callback(
-                    callback_url,
-                    partition,
-                    metadata.get("file_id", ""),
-                    "error",
-                    metadata,
-                    callback_token=callback_token,
-                )
+                # IndexerWorker.process_file sends the error callback and sets
+                # FAILED, and neither is ever reached from here. Deliberately
+                # not BaseException: a task cancelled during pre-flight raises
+                # CancelledError, and a cancellation notifies nothing — same
+                # rule as the worker's set_failed_if_not_cancelled gate.
+                # Awaiting the callback inside a cancellation handler would
+                # also delay the cancel.
+                tb = traceback.format_exc()
+                try:
+                    was_failed = await retry_idempotent_ray_actor_method(
+                        lambda: self._tsm.set_failed_if_not_cancelled.remote(task_id, tb),
+                        task_description=f"set_failed_if_not_cancelled({task_id})",
+                    )
+                except Exception:
+                    # The TSM is unreachable, so the task state stays whatever
+                    # it last was (most likely QUEUED) — same as before this
+                    # fix, but at least the caller now hears about the failure
+                    # instead of both the callback and the state going silent.
+                    was_failed = True
+                if was_failed:
+                    await send_indexing_callback(
+                        callback_url,
+                        partition,
+                        metadata.get("file_id", ""),
+                        "error",
+                        metadata,
+                        callback_token=callback_token,
+                    )
                 raise
             result = await self._worker.process_file(
                 task_id=task_id,

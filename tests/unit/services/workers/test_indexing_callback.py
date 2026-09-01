@@ -46,25 +46,29 @@ def captured_request(monkeypatch: pytest.MonkeyPatch) -> dict:
 
 
 @pytest.mark.asyncio
-async def test_success_callback_echoes_file_rev_verbatim(captured_body: dict) -> None:
-    """file_rev is cozy's CouchDB revision: opaque, and stale if transformed."""
-    file_rev = "3-a1b2C3d4E5f6/g7+h8=="
+async def test_success_callback_echoes_caller_metadata_verbatim(captured_body: dict) -> None:
+    """Pass-through, not a fixed schema: whatever revision key a caller uses
+    (cozy-stack's is doc_rev) travels through opaque and unchanged — this
+    module has no opinion on its name or shape."""
+    doc_rev = "3-a1b2C3d4E5f6/g7+h8=="
 
     await send_indexing_callback(
         "https://cozy.example.com/rag/callback",
         "alice.mycozy.cloud",
         "file-123",
         "success",
-        {"file_rev": file_rev, "datetime": "2026-01-01T00:00:00Z", "doctype": "io.cozy.files"},
+        {"doc_rev": doc_rev, "datetime": "2026-01-01T00:00:00Z", "doctype": "io.cozy.files"},
     )
 
     body = captured_body["body"]
     assert body["partition"] == "alice.mycozy.cloud"
     assert body["file_id"] == "file-123"
     assert body["status"] == "success"
-    assert body["metadata"]["file_rev"] == file_rev
-    assert body["metadata"]["datetime"] == "2026-01-01T00:00:00Z"
-    assert body["metadata"]["doctype"] == "io.cozy.files"
+    assert body["metadata"] == {
+        "doc_rev": doc_rev,
+        "datetime": "2026-01-01T00:00:00Z",
+        "doctype": "io.cozy.files",
+    }
     # `timestamp` is generated at send time and must be a valid ISO8601 string.
     datetime.fromisoformat(body["timestamp"])
 
@@ -76,14 +80,43 @@ async def test_error_callback_uses_error_status_and_echoes_metadata(captured_bod
         "p",
         "f1",
         "error",
-        {"file_rev": "deadbeef"},
+        {"doc_rev": "deadbeef"},
     )
 
     body = captured_body["body"]
     assert body["status"] == "error"
-    assert body["metadata"]["file_rev"] == "deadbeef"
-    assert body["metadata"]["datetime"] is None
-    assert body["metadata"]["doctype"] is None
+    assert body["metadata"] == {"doc_rev": "deadbeef"}
+
+
+@pytest.mark.asyncio
+async def test_server_computed_keys_are_excluded_from_the_echo(captured_body: dict) -> None:
+    """The upload metadata also holds source/content_sha256/file_size/file_id/
+    filename/original_filename by the time it reaches this function — none of
+    those may reach a caller-supplied URL. Everything else the caller sent,
+    including fields this module has never heard of, passes through."""
+    await send_indexing_callback(
+        "https://cozy.example.com/rag/callback",
+        "p",
+        "f1",
+        "success",
+        {
+            "doc_rev": "3-abc",
+            "md5sum": "d41d8cd98f00b204",
+            "app_specific_tag": "keep-me",
+            "source": "/var/data/tenant42/uploads/xyz.pdf",
+            "content_sha256": "9f86d081",
+            "file_size": "42.00 B",
+            "file_id": "f1",
+            "filename": "sanitized.pdf",
+            "original_filename": "Original Name.pdf",
+        },
+    )
+
+    assert captured_body["body"]["metadata"] == {
+        "doc_rev": "3-abc",
+        "md5sum": "d41d8cd98f00b204",
+        "app_specific_tag": "keep-me",
+    }
 
 
 @pytest.mark.asyncio
@@ -93,7 +126,7 @@ async def test_no_callback_url_is_a_strict_noop(monkeypatch: pytest.MonkeyPatch)
 
     _patch_async_client(monkeypatch, handler)
 
-    await send_indexing_callback(None, "p", "f1", "success", {"file_rev": "abc"})
+    await send_indexing_callback(None, "p", "f1", "success", {"doc_rev": "abc"})
 
 
 @pytest.mark.asyncio
@@ -104,7 +137,7 @@ async def test_unsafe_callback_url_is_skipped_not_sent(monkeypatch: pytest.Monke
     _patch_async_client(monkeypatch, handler)
 
     with mock.patch("services.workers.indexing_callback.logger") as mock_logger:
-        await send_indexing_callback("http://127.0.0.1:9999/x", "p", "f1", "success", {"file_rev": "abc"})
+        await send_indexing_callback("http://127.0.0.1:9999/x", "p", "f1", "success", {"doc_rev": "abc"})
         mock_logger.warning.assert_called_once()
 
 
@@ -117,7 +150,7 @@ async def test_callback_url_credentials_are_not_logged(monkeypatch: pytest.Monke
 
     with mock.patch("services.workers.indexing_callback.logger") as mock_logger:
         await send_indexing_callback(
-            "https://leakme:hunter2@127.0.0.1/callback", "p", "f1", "success", {"file_rev": "abc"}
+            "https://leakme:hunter2@127.0.0.1/callback", "p", "f1", "success", {"doc_rev": "abc"}
         )
         mock_logger.warning.assert_called_once()
         logged_url = mock_logger.warning.call_args[1]["callback_url"]
@@ -135,7 +168,7 @@ async def test_callback_error_with_bad_port_and_query_does_not_crash(monkeypatch
     _patch_async_client(monkeypatch, handler)
 
     await send_indexing_callback(
-        "https://cozy.example.com:abc/callback?token=SECRET", "p", "f1", "success", {"file_rev": "abc"}
+        "https://cozy.example.com:abc/callback?token=SECRET", "p", "f1", "success", {"doc_rev": "abc"}
     )
 
 
@@ -149,7 +182,7 @@ async def test_callback_error_with_non_printable_char_does_not_crash(monkeypatch
     _patch_async_client(monkeypatch, handler)
 
     await send_indexing_callback(
-        "https://cozy.example.com/callback?token=x\x00y", "p", "f1", "success", {"file_rev": "abc"}
+        "https://cozy.example.com/callback?token=x\x00y", "p", "f1", "success", {"doc_rev": "abc"}
     )
 
 
@@ -166,7 +199,7 @@ async def test_callback_failure_is_swallowed(monkeypatch: pytest.MonkeyPatch) ->
         "p",
         "f1",
         "success",
-        {"file_rev": "abc"},
+        {"doc_rev": "abc"},
     )
 
 
@@ -185,7 +218,7 @@ async def test_callback_error_redacts_query_string_from_logged_exception(monkeyp
             "p",
             "f1",
             "success",
-            {"file_rev": "abc"},
+            {"doc_rev": "abc"},
         )
 
         mock_logger.warning.assert_called_once()
@@ -204,7 +237,7 @@ async def test_malformed_callback_url_is_swallowed_not_raised(monkeypatch: pytes
     _patch_async_client(monkeypatch, handler)
 
     with mock.patch("services.workers.indexing_callback.logger") as mock_logger:
-        await send_indexing_callback("http://[::1", "p", "f1", "success", {"file_rev": "abc"})
+        await send_indexing_callback("http://[::1", "p", "f1", "success", {"doc_rev": "abc"})
         mock_logger.warning.assert_called_once()
         assert "callback_url" in mock_logger.warning.call_args[0][0].lower()
 
@@ -226,7 +259,7 @@ async def test_callback_error_redacts_percent_encoded_query_from_logged_exceptio
             "p",
             "f1",
             "success",
-            {"file_rev": "abc"},
+            {"doc_rev": "abc"},
         )
 
         mock_logger.warning.assert_called_once()
@@ -235,31 +268,26 @@ async def test_callback_error_redacts_percent_encoded_query_from_logged_exceptio
 
 
 @pytest.mark.asyncio
-async def test_missing_metadata_defaults_to_none_fields(captured_body: dict) -> None:
+async def test_missing_metadata_is_an_empty_dict_not_null_placeholders(captured_body: dict) -> None:
+    """Pass-through echoes whatever the caller sent, or nothing — it no longer
+    synthesizes a fixed set of ``None``-valued keys for a schema that doesn't
+    exist any more."""
     await send_indexing_callback("https://cozy.example.com/rag/callback", "p", "f1", "success", None)
 
     body = captured_body["body"]
-    assert body["metadata"] == {"file_rev": None, "datetime": None, "doctype": None}
+    assert body["metadata"] == {}
 
 
 @pytest.mark.asyncio
-async def test_missing_file_rev_is_sent_without_warning(captured_body: dict) -> None:
-    """cozy-stack only compares a non-empty revision, so an empty one is current."""
+async def test_absent_or_present_caller_fields_never_log_a_warning(captured_body: dict) -> None:
+    """This module has no opinion on any caller field's presence or name —
+    whether the receiver treats a missing one as an error (e.g. cozy-stack
+    ordering callbacks on a revision) is entirely the receiver's call."""
     with mock.patch("services.workers.indexing_callback.logger") as mock_logger:
         await send_indexing_callback(
             "https://cozy.example.com/rag/callback", "p", "f1", "success", {"doctype": "io.cozy.files"}
         )
-
-        mock_logger.warning.assert_not_called()
-
-    # The callback is still sent even though the metadata is incomplete.
-    assert captured_body["body"]["metadata"]["file_rev"] is None
-
-
-@pytest.mark.asyncio
-async def test_present_file_rev_does_not_log_warning(captured_body: dict) -> None:
-    with mock.patch("services.workers.indexing_callback.logger") as mock_logger:
-        await send_indexing_callback("https://cozy.example.com/rag/callback", "p", "f1", "success", {"file_rev": "abc"})
+        await send_indexing_callback("https://cozy.example.com/rag/callback", "p", "f1", "success", {"doc_rev": "abc"})
 
         mock_logger.warning.assert_not_called()
 
@@ -271,7 +299,7 @@ async def test_callback_token_is_sent_as_bearer_header(captured_request: dict) -
         "alice.mycozy.cloud",
         "file-123",
         "success",
-        {"file_rev": "abc"},
+        {"doc_rev": "abc"},
         callback_token="jwt-abc.def.ghi",
     )
 
@@ -286,7 +314,7 @@ async def test_callback_token_never_reaches_url_or_payload(captured_request: dic
         "p",
         "f1",
         "success",
-        {"file_rev": "abc"},
+        {"doc_rev": "abc"},
         callback_token="s3cret-token",
     )
 
@@ -299,7 +327,7 @@ async def test_callback_token_never_reaches_url_or_payload(captured_request: dic
 @pytest.mark.asyncio
 async def test_no_callback_token_sends_no_authorization_header(captured_request: dict) -> None:
     """Back-compat: an unauthenticated endpoint sees the request it saw before."""
-    await send_indexing_callback("https://cozy.example.com/rag/callback", "p", "f1", "success", {"file_rev": "abc"})
+    await send_indexing_callback("https://cozy.example.com/rag/callback", "p", "f1", "success", {"doc_rev": "abc"})
 
     assert "Authorization" not in captured_request["request"].headers
 
@@ -317,7 +345,7 @@ async def test_callback_token_is_redacted_from_logged_errors(monkeypatch: pytest
             "p",
             "f1",
             "success",
-            {"file_rev": "abc"},
+            {"doc_rev": "abc"},
             callback_token="s3cret-token",
         )
 
@@ -332,7 +360,7 @@ async def test_private_callback_url_is_sent_when_operator_opts_in(
 ) -> None:
     monkeypatch.setattr("services.workers.indexing_callback._allow_private_callback_urls", lambda: True)
 
-    await send_indexing_callback("http://localhost:8080/ai/index/status", "p", "f1", "success", {"file_rev": "abc"})
+    await send_indexing_callback("http://localhost:8080/ai/index/status", "p", "f1", "success", {"doc_rev": "abc"})
 
     assert str(captured_request["request"].url) == "http://localhost:8080/ai/index/status"
 
@@ -345,7 +373,7 @@ async def test_private_callback_url_still_blocked_by_default(monkeypatch: pytest
     _patch_async_client(monkeypatch, handler)
 
     with mock.patch("services.workers.indexing_callback.logger") as mock_logger:
-        await send_indexing_callback("http://localhost:8080/ai/index/status", "p", "f1", "success", {"file_rev": "abc"})
+        await send_indexing_callback("http://localhost:8080/ai/index/status", "p", "f1", "success", {"doc_rev": "abc"})
         mock_logger.warning.assert_called_once()
 
 
@@ -359,7 +387,7 @@ async def test_opting_in_to_private_urls_still_rejects_non_http_schemes(monkeypa
     _patch_async_client(monkeypatch, handler)
 
     with mock.patch("services.workers.indexing_callback.logger") as mock_logger:
-        await send_indexing_callback("file:///etc/passwd", "p", "f1", "success", {"file_rev": "abc"})
+        await send_indexing_callback("file:///etc/passwd", "p", "f1", "success", {"doc_rev": "abc"})
         mock_logger.warning.assert_called_once()
 
 
@@ -387,7 +415,7 @@ async def test_url_credentials_are_redacted_from_logged_errors(monkeypatch: pyte
 
     with mock.patch("services.workers.indexing_callback.logger") as mock_logger:
         await send_indexing_callback(
-            "https://leakme:hunter2@cozy.example.com/cb", "p", "f1", "success", {"file_rev": "abc"}
+            "https://leakme:hunter2@cozy.example.com/cb", "p", "f1", "success", {"doc_rev": "abc"}
         )
 
         mock_logger.warning.assert_called_once()
@@ -410,7 +438,7 @@ async def test_url_credentials_with_reserved_chars_are_redacted(monkeypatch: pyt
 
     with mock.patch("services.workers.indexing_callback.logger") as mock_logger:
         await send_indexing_callback(
-            "https://user:p%40ss word@cozy.example.com/cb", "p", "f1", "success", {"file_rev": "abc"}
+            "https://user:p%40ss word@cozy.example.com/cb", "p", "f1", "success", {"doc_rev": "abc"}
         )
 
         mock_logger.warning.assert_called_once()
@@ -428,7 +456,7 @@ async def test_username_redaction_does_not_leave_password_behind(monkeypatch: py
 
     with mock.patch("services.workers.indexing_callback.logger") as mock_logger:
         await send_indexing_callback(
-            "https://bob:bobsecret@cozy.example.com/cb", "p", "f1", "success", {"file_rev": "abc"}
+            "https://bob:bobsecret@cozy.example.com/cb", "p", "f1", "success", {"doc_rev": "abc"}
         )
 
         error = mock_logger.warning.call_args[1]["error"]
@@ -437,7 +465,7 @@ async def test_username_redaction_does_not_leave_password_behind(monkeypatch: py
 
 @pytest.mark.asyncio
 async def test_timestamp_is_rfc3339_with_z_and_milliseconds(captured_body: dict) -> None:
-    await send_indexing_callback("https://cozy.example.com/rag/callback", "p", "f1", "success", {"file_rev": "3-abc"})
+    await send_indexing_callback("https://cozy.example.com/rag/callback", "p", "f1", "success", {"doc_rev": "3-abc"})
 
     timestamp = captured_body["body"]["timestamp"]
     assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z", timestamp), timestamp
@@ -456,7 +484,7 @@ async def test_a_secret_in_the_callback_path_is_not_logged(monkeypatch: pytest.M
 
     with mock.patch("services.workers.indexing_callback.logger") as mock_logger:
         await send_indexing_callback(
-            "https://cozy.example.com/hooks/T000/B000/SECRETPATH", "p", "f1", "success", {"file_rev": "abc"}
+            "https://cozy.example.com/hooks/T000/B000/SECRETPATH", "p", "f1", "success", {"doc_rev": "abc"}
         )
 
         mock_logger.warning.assert_called_once()
@@ -464,4 +492,30 @@ async def test_a_secret_in_the_callback_path_is_not_logged(monkeypatch: pytest.M
         assert "SECRETPATH" not in logged["callback_url"]
         assert "SECRETPATH" not in logged["error"]
         # The host is still there: redaction must not cost us the diagnostics.
+        assert "cozy.example.com" in logged["error"]
+
+
+@pytest.mark.asyncio
+async def test_a_percent_encoded_secret_in_the_callback_path_is_not_logged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """httpx percent-encodes the path the same way it does the query — a raw,
+    unencoded substring match misses a secret containing a space or other
+    character httpx re-encodes before it ever reaches the exception message."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500)
+
+    _patch_async_client(monkeypatch, handler)
+
+    with mock.patch("services.workers.indexing_callback.logger") as mock_logger:
+        await send_indexing_callback(
+            "https://cozy.example.com/hooks/SECRET PATH/x", "p", "f1", "success", {"doc_rev": "abc"}
+        )
+
+        mock_logger.warning.assert_called_once()
+        logged = mock_logger.warning.call_args[1]
+        assert "SECRET" not in logged["error"]
+        assert "PATH" not in logged["error"]
+        assert "%20" not in logged["error"]
         assert "cozy.example.com" in logged["error"]

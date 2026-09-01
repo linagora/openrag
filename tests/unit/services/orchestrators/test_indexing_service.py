@@ -727,3 +727,36 @@ async def test_copy_file_drops_protected_keys():
     assert md["author"] == "bob"
     assert md["file_id"] == "dst"
     assert md["partition"] == "p2"
+
+
+def test_build_metadata_only_adds_keys_in_upload_metadata_server_keys(tmp_path):
+    """The indexing-status callback echoes this dict's caller-supplied fields to
+    a caller-chosen URL, excluding exactly UPLOAD_METADATA_SERVER_KEYS. If this
+    method ever starts injecting a new server-computed key without adding it to
+    that constant too, the new key leaks into every callback going forward —
+    this test is the safety net for that drift."""
+    from core.utils.conts import UPLOAD_METADATA_SERVER_KEYS
+
+    file_path = tmp_path / "doc.pdf"
+    file_path.write_bytes(b"content")
+
+    svc = _service()
+    caller_metadata = {"doc_rev": "3-abc", "app_tag": "x"}
+    full = svc._build_metadata(
+        metadata=caller_metadata,
+        file_path=str(file_path),
+        file_id="file-1",
+        sanitized_filename="doc.pdf",
+        original_filename="Original.pdf",
+        content_sha256="9f86d081",
+    )
+
+    injected_keys = set(full) - set(caller_metadata)
+    assert injected_keys <= UPLOAD_METADATA_SERVER_KEYS, (
+        f"_build_metadata injected {injected_keys - UPLOAD_METADATA_SERVER_KEYS}, "
+        "not covered by UPLOAD_METADATA_SERVER_KEYS — the indexing-status "
+        "callback would now leak it to a caller-supplied URL"
+    )
+    # And the caller's own fields must survive untouched.
+    assert full["doc_rev"] == "3-abc"
+    assert full["app_tag"] == "x"

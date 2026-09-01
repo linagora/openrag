@@ -8,10 +8,12 @@ route (``POST /ai/index/status``) that 401s without a bearer token, hence
 Never raises, no retries, one notification per file, 5 s timeout, strict no-op
 without a ``callback_url`` — a callback must never affect the indexing outcome.
 
-``file_rev`` is the file's CouchDB revision on the cozy side, compared there
-against its own copy — recomputing it here would defeat that check. The
-whitelist is deliberate: the upload metadata also holds ``source``,
-``content_sha256`` and ``file_size``, and the target is a caller-supplied URL.
+``metadata`` is echoed back verbatim except for ``UPLOAD_METADATA_SERVER_KEYS``
+(``source``, ``content_sha256``, ``file_size``, ...): the caller learns nothing
+new from getting its own fields back, but those server-computed ones — the
+on-disk path chief among them — must not reach a caller-supplied URL. Any
+revision-tracking field a caller sends (e.g. cozy-stack's ``doc_rev``) travels
+through unchanged; this module has no opinion on its name.
 """
 
 from __future__ import annotations
@@ -23,6 +25,7 @@ from urllib.parse import ParseResult, urlparse
 
 import httpx
 from core.config import load_config
+from core.utils.conts import UPLOAD_METADATA_SERVER_KEYS
 from core.utils.logging import get_logger
 from core.utils.url_safety import is_safe_url
 
@@ -30,8 +33,6 @@ logger = get_logger()
 
 _CALLBACK_TIMEOUT = 5.0
 _TIMEOUT = httpx.Timeout(_CALLBACK_TIMEOUT)
-
-_ECHOED_METADATA_FIELDS = ("file_rev", "datetime", "doctype")
 
 
 def _allow_private_callback_urls() -> bool:
@@ -77,7 +78,8 @@ async def send_indexing_callback(
     """POST the indexing outcome to *callback_url*.
 
     Body: ``{"partition", "file_id", "status": "success"|"error",
-    "timestamp": <ISO8601 UTC>, "metadata": {"file_rev", "datetime", "doctype"}}``.
+    "timestamp": <ISO8601 UTC>, "metadata": <upload metadata minus
+    UPLOAD_METADATA_SERVER_KEYS>}``.
 
     *callback_token* is sent as ``Authorization: Bearer <token>``; without one no
     header is added, which is the pre-existing behaviour for unauthenticated
@@ -124,11 +126,13 @@ async def send_indexing_callback(
         return
 
     metadata = metadata or {}
-    # No client-side skip on a missing file_rev: cozy-stack orders callbacks on
-    # it and now 400s an empty one rather than risk applying it out of order.
-    # Always present in echoed_metadata (None if absent) — the round-trip is
-    # the receiver's call, not ours to shortcut.
-    echoed_metadata = {field: metadata.get(field) for field in _ECHOED_METADATA_FIELDS}
+    # Exclusion, not a fixed field list: any caller-supplied key (a revision
+    # marker, an app-specific tag, whatever they sent at upload) travels
+    # through as-is. We don't second-guess how the receiver validates it —
+    # e.g. cozy-stack now 400s an empty revision rather than apply it out of
+    # order, which is exactly the receiver's call to make, not ours to
+    # pre-empt by dropping or defaulting the field ourselves.
+    echoed_metadata = {key: value for key, value in metadata.items() if key not in UPLOAD_METADATA_SERVER_KEYS}
 
     payload = {
         "partition": partition,
@@ -159,6 +163,18 @@ async def send_indexing_callback(
             # httpx echoes the full URL, path included. Guarded on length so a
             # bare "/" does not rewrite every slash in the message.
             error_message = error_message.replace(parsed.path, "/REDACTED")
+            # httpx percent-encodes the path the same way it does the query
+            # (spaces, non-ASCII, etc.), so the raw substring above misses a
+            # secret-in-path (a webhook-style URL) containing those characters.
+            try:
+                # ``raw_path`` is "path?query" together; keep only the path
+                # half so this does not also eat the query string, which the
+                # block below redacts (and logs) on its own.
+                encoded_path = httpx.URL(callback_url).raw_path.split(b"?", 1)[0].decode("ascii", errors="ignore")
+                if encoded_path and encoded_path != parsed.path:
+                    error_message = error_message.replace(encoded_path, "/REDACTED")
+            except Exception:
+                pass
         if parsed.query:
             # httpx percent-encodes the query, so the message may embed either
             # spelling. Raw first — that one cannot fail.

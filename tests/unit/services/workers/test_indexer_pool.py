@@ -1476,6 +1476,10 @@ def _bare_worker_actor(*, save_uploaded_files: bool, worker: _RecordingWorker):
     )
     actor._save_uploaded_files = save_uploaded_files
     actor._logger = SimpleNamespace(debug=lambda *a, **k: None, warning=lambda *a, **k: None)
+    # Not cancelled by default: a bare RuntimeError from _ensure_catalog etc.
+    # goes through set_failed_if_not_cancelled, which real tests override when
+    # they need to assert on the call or simulate cancellation/TSM outage.
+    actor._tsm = SimpleNamespace(set_failed_if_not_cancelled=SimpleNamespace(remote=lambda *a: "ref"))
     # These build the actor with __new__, so __init__ never runs. Captioning is
     # enabled by default, so ingest now resolves its prompt even for a config
     # that omits the flag — stub the service these tests don't exercise.
@@ -1591,8 +1595,11 @@ async def test_actor_keeps_upload_on_pre_worker_failure_when_saving(tmp_path) ->
 
 
 @pytest.mark.asyncio
-async def test_preflight_failure_sends_the_error_callback(tmp_path, monkeypatch) -> None:
-    """IndexerWorker.process_file owns the error callback and is never reached."""
+async def test_preflight_failure_sends_the_error_callback_and_sets_failed(tmp_path, monkeypatch) -> None:
+    """IndexerWorker.process_file owns the success-path callback and is never
+    reached here, but the pre-flight path must still report a terminal state —
+    otherwise the callback says "error" while GET task-status shows QUEUED
+    forever, and a client trusting either source disagrees with the other."""
     import services.workers.indexer_pool as module
 
     path = tmp_path / "doc.txt"
@@ -1606,8 +1613,10 @@ async def test_preflight_failure_sends_the_error_callback(tmp_path, monkeypatch)
     actor._ensure_catalog = _boom
     callback = AsyncMock()
     monkeypatch.setattr(module, "send_indexing_callback", callback)
+    mark_failed = AsyncMock(return_value=True)
+    monkeypatch.setattr(module, "retry_idempotent_ray_actor_method", mark_failed)
 
-    metadata = {"file_id": "f", "file_rev": "3-abc"}
+    metadata = {"file_id": "f", "doc_rev": "3-abc"}
     with pytest.raises(RuntimeError, match="postgres down"):
         await actor.process_file(
             task_id="t",
@@ -1619,13 +1628,15 @@ async def test_preflight_failure_sends_the_error_callback(tmp_path, monkeypatch)
         )
 
     assert worker.calls == 0
+    mark_failed.assert_awaited_once()
+    assert mark_failed.await_args.kwargs["task_description"] == "set_failed_if_not_cancelled(t)"
     callback.assert_awaited_once_with(
         "https://cozy.example.com/ai/index/status", "p", "f", "error", metadata, callback_token="jwt"
     )
 
 
 @pytest.mark.asyncio
-async def test_preflight_failure_without_callback_url_stays_a_noop(tmp_path, monkeypatch) -> None:
+async def test_preflight_failure_without_callback_url_still_sets_failed(tmp_path, monkeypatch) -> None:
     import services.workers.indexer_pool as module
 
     path = tmp_path / "doc.txt"
@@ -1638,12 +1649,47 @@ async def test_preflight_failure_without_callback_url_stays_a_noop(tmp_path, mon
     actor._ensure_catalog = _boom
     callback = AsyncMock()
     monkeypatch.setattr(module, "send_indexing_callback", callback)
+    mark_failed = AsyncMock(return_value=True)
+    monkeypatch.setattr(module, "retry_idempotent_ray_actor_method", mark_failed)
 
     with pytest.raises(RuntimeError, match="postgres down"):
         await actor.process_file(task_id="t", path=str(path), metadata={"file_id": "f"}, partition="p")
 
+    mark_failed.assert_awaited_once()
     callback.assert_awaited_once()
     assert callback.await_args[0][0] is None
+
+
+@pytest.mark.asyncio
+async def test_preflight_failure_still_notifies_when_the_tsm_is_unreachable(tmp_path, monkeypatch) -> None:
+    """If the TSM is down, set_failed_if_not_cancelled can't run either, but a
+    client waiting on the callback must not be left with neither signal."""
+    import services.workers.indexer_pool as module
+
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"x")
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=_RecordingWorker())
+
+    async def _boom(*_a, **_k):
+        raise RuntimeError("postgres down")
+
+    actor._ensure_catalog = _boom
+    callback = AsyncMock()
+    monkeypatch.setattr(module, "send_indexing_callback", callback)
+    monkeypatch.setattr(
+        module, "retry_idempotent_ray_actor_method", AsyncMock(side_effect=RuntimeError("tsm unreachable"))
+    )
+
+    with pytest.raises(RuntimeError, match="postgres down"):
+        await actor.process_file(
+            task_id="t",
+            path=str(path),
+            metadata={"file_id": "f"},
+            partition="p",
+            callback_url="https://cozy.example.com/ai/index/status",
+        )
+
+    callback.assert_awaited_once()
 
 
 @pytest.mark.asyncio
