@@ -1,4 +1,4 @@
-import { queryOptions, useQuery } from "@tanstack/react-query";
+import { queryOptions, useQuery, type QueryClient } from "@tanstack/react-query";
 import { getQueueInfo, listTasks } from "@/lib/api/jobs";
 import { useAuth } from "@/lib/auth";
 
@@ -13,10 +13,19 @@ const scopeKey = (scope: JobsQueryScope) =>
   [scope.userId, scope.isAdmin ? "admin" : "user"] as const;
 
 export const jobsQueryKeys = {
+  allTasks: ["tasks"] as const,
   tasks: (scope: JobsQueryScope, taskStatus?: string) =>
     ["tasks", ...scopeKey(scope), taskStatus?.toLowerCase() ?? "all"] as const,
+  allQueueInfo: ["queue-info"] as const,
   queueInfo: (scope: JobsQueryScope) => ["queue-info", ...scopeKey(scope)] as const,
 };
+
+export function invalidateJobsQueries(queryClient: QueryClient) {
+  return Promise.all([
+    queryClient.invalidateQueries({ queryKey: jobsQueryKeys.allTasks }),
+    queryClient.invalidateQueries({ queryKey: jobsQueryKeys.allQueueInfo }),
+  ]);
+}
 
 interface JobsPollingOptions {
   poll: boolean;

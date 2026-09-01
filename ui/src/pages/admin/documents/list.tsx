@@ -30,6 +30,7 @@ import {
 import { formatDate } from "@/lib/utils";
 import { listPartitionFiles, type PartitionFile } from "@/lib/api/documents";
 import { uploadFile, deleteFile, newFileId } from "@/lib/api/indexing";
+import { invalidateJobsQueries } from "@/lib/jobs-queries";
 import { listPartitions } from "@/lib/api/partitions";
 import { usePermissions } from "@/lib/permissions";
 import { downloadCsv } from "@/lib/csv";
@@ -261,6 +262,7 @@ export default function DocumentListPage() {
     },
     onSuccess: ({ ok, errors }) => {
       if (ok) {
+        void invalidateJobsQueries(queryClient);
         toast.success(`${ok} file(s) queued for indexing.`, {
           action: {
             label: "View Jobs",
