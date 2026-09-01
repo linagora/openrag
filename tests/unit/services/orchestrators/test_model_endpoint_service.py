@@ -1421,7 +1421,7 @@ async def test_validate_endpoint_probes_url_and_model_name(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_validate_stt_endpoint_probes_transcription_capability(monkeypatch):
+async def test_validate_stt_endpoint_probes_transcription_capability_with_redirects_enabled(monkeypatch):
     import httpx
 
     svc = _make_service()
@@ -1451,8 +1451,9 @@ async def test_validate_stt_endpoint_probes_transcription_capability(monkeypatch
             calls.append(("get", url))
             return FakeResponse(200, {"data": [{"id": "moss-transcribe-diarize"}]})
 
-        async def post(self, url):
+        async def post(self, url, *, follow_redirects):
             calls.append(("post", url))
+            assert follow_redirects is True
             return FakeResponse(422)
 
     monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
@@ -1503,7 +1504,7 @@ async def test_validate_stt_endpoint_rejects_missing_transcription_route(monkeyp
         async def get(self, url):
             return FakeResponse(200, {"data": [{"id": "moss-transcribe-diarize"}]})
 
-        async def post(self, url):
+        async def post(self, url, **_kwargs):
             return FakeResponse(404)
 
     monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
@@ -1555,7 +1556,7 @@ async def test_validate_stt_endpoint_probes_audio_when_model_list_is_invalid(mon
             calls.append(("get", url))
             return FakeResponse(200, model_payload)
 
-        async def post(self, url):
+        async def post(self, url, **_kwargs):
             calls.append(("post", url))
             return FakeResponse(422)
 
@@ -1608,7 +1609,7 @@ async def test_validate_stt_endpoint_rejects_auth_failure_on_audio_probe(monkeyp
         async def get(self, url):
             return FakeResponse(200, {"data": [{"id": "moss-transcribe-diarize"}]})
 
-        async def post(self, url):
+        async def post(self, url, **_kwargs):
             return FakeResponse(status_code)
 
     monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
@@ -1626,6 +1627,98 @@ async def test_validate_stt_endpoint_rejects_auth_failure_on_audio_probe(monkeyp
     assert (
         result["detail"] == f"Transcription capability check was rejected with HTTP {status_code}. Check the API key."
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status_code", [401, 403])
+async def test_validate_stt_endpoint_stops_after_model_list_auth_failure(monkeypatch, status_code):
+    import httpx
+
+    svc = _make_service()
+    calls: list[tuple[str, str]] = []
+
+    class FakeResponse:
+        def __init__(self, response_status):
+            self.status_code = response_status
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, url):
+            calls.append(("get", url))
+            return FakeResponse(status_code)
+
+        async def post(self, url, **_kwargs):
+            calls.append(("post", url))
+            return FakeResponse(422)
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+    result = await svc.validate_endpoint(
+        "http://moss:8000/v1",
+        "moss-transcribe-diarize",
+        api_key="bad-key",
+        model_type="stt",
+    )
+
+    assert calls == [("get", "http://moss:8000/v1/models")]
+    assert result == {
+        "reachable": False,
+        "model_found": None,
+        "models_served": None,
+        "transcription_supported": False,
+        "detail": f"Model list request was rejected with HTTP {status_code}. Check the API key.",
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status_code", [401, 403])
+async def test_validate_non_stt_endpoint_keeps_auth_gated_model_list_reachable(monkeypatch, status_code):
+    """An HTTP response proves reachability even when a non-STT model list is scoped."""
+    import httpx
+
+    svc = _make_service()
+
+    class FakeResponse:
+        def __init__(self, response_status):
+            self.status_code = response_status
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, url):
+            return FakeResponse(status_code)
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+    result = await svc.validate_endpoint(
+        "http://llm:8000/v1",
+        "mistral-small",
+        api_key="scoped-key",
+        model_type="llm",
+    )
+
+    assert result == {
+        "reachable": True,
+        "model_found": None,
+        "models_served": None,
+        "transcription_supported": None,
+        "detail": f"Model list returned HTTP {status_code}.",
+    }
 
 
 @pytest.mark.asyncio

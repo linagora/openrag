@@ -32,7 +32,7 @@ from collections.abc import Awaitable, Callable, Iterable
 from pathlib import Path
 
 from core.config.model_endpoints import (
-    ENV_MANAGED_KEY,
+    CONTROL_EXTRA_KEYS,
     MOSS_SPEAKER_AWARE_KEY,
     STT_LANGUAGE_KEY,
     ModelEndpointConfig,
@@ -61,13 +61,11 @@ TranscriptionEndpointResolver = Callable[[], ModelEndpointConfig | None | Awaita
 
 # Endpoint ``extra`` holds both connection metadata and provider request options.
 # Only the latter belongs in the OpenAI-compatible transcription request body.
-_STT_REQUEST_CONTROL_EXTRA_KEYS = frozenset(
+_STT_REQUEST_CONTROL_EXTRA_KEYS = CONTROL_EXTRA_KEYS | frozenset(
     {
         "api_key",
         MOSS_SPEAKER_AWARE_KEY,
         STT_LANGUAGE_KEY,
-        ENV_MANAGED_KEY,
-        "implementation",
         # These are owned by OpenRAG's configured endpoint / prompt plumbing.
         # Streaming is deliberately unsupported because this parser expects one
         # complete transcription response.
@@ -77,6 +75,37 @@ _STT_REQUEST_CONTROL_EXTRA_KEYS = frozenset(
         "stream",
     }
 )
+
+
+class _EndpointConcurrencyLimiter:
+    """An async limiter whose capacity can change without replacing active work."""
+
+    def __init__(self, limit: int) -> None:
+        self._limit = max(1, limit)
+        self._active = 0
+        self._condition = asyncio.Condition()
+
+    @property
+    def limit(self) -> int:
+        """Return the current maximum number of concurrent requests."""
+        return self._limit
+
+    async def set_limit(self, limit: int) -> None:
+        """Apply a new limit before allowing any further queued request."""
+        async with self._condition:
+            self._limit = max(1, limit)
+            self._condition.notify_all()
+
+    async def __aenter__(self) -> _EndpointConcurrencyLimiter:
+        async with self._condition:
+            await self._condition.wait_for(lambda: self._active < self._limit)
+            self._active += 1
+        return self
+
+    async def __aexit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        async with self._condition:
+            self._active -= 1
+            self._condition.notify_all()
 
 
 class OpenAIAudioClient(BaseClientParser):
@@ -105,12 +134,11 @@ class OpenAIAudioClient(BaseClientParser):
         self._transcription_prompt_resolver = transcription_prompt_resolver
         self._transcription_endpoint_resolver = transcription_endpoint_resolver
         self._semaphore = asyncio.Semaphore(max(1, concurrency_limit))
-        # Limiters deliberately outlive requests so a configured endpoint's
-        # concurrency limit applies across simultaneous files. Clients do not:
-        # dynamically configured clients are closed after their request, which
-        # prevents retired credentials and connection pools accumulating in
-        # long-lived worker processes.
-        self._endpoint_semaphores: dict[tuple[str, str, int], asyncio.Semaphore] = {}
+        # Keep only the current dynamically resolved endpoint limiter. Existing
+        # requests retain a local reference while they finish, but retired
+        # endpoints do not accumulate in long-lived worker processes.
+        self._endpoint_limiter: _EndpointConcurrencyLimiter | None = None
+        self._endpoint_limiter_key: tuple[str, str] | None = None
 
     def supported_types(self) -> list[str]:
         return [DocumentType.AUDIO.value, DocumentType.VIDEO.value]
@@ -126,7 +154,8 @@ class OpenAIAudioClient(BaseClientParser):
         try:
             async with document.as_temporary_file() as input_path:
                 endpoint_config = await self._resolve_transcription_endpoint()
-                async with self._semaphore_for_endpoint(endpoint_config):
+                limiter = await self._semaphore_for_endpoint(endpoint_config)
+                async with limiter:
                     upload_path, cleanup = await self._prepare_upload(input_path)
                     try:
                         language = self._language_hint(endpoint_config)
@@ -218,22 +247,29 @@ class OpenAIAudioClient(BaseClientParser):
             return None
         return endpoint
 
-    def _semaphore_for_endpoint(self, endpoint: ModelEndpointConfig | None) -> asyncio.Semaphore:
+    async def _semaphore_for_endpoint(
+        self, endpoint: ModelEndpointConfig | None
+    ) -> asyncio.Semaphore | _EndpointConcurrencyLimiter:
         """Return the current client's per-worker STT concurrency limiter.
 
         Each indexing worker owns its own client and therefore its own limiter.
         The endpoint value bounds requests from that worker; it is not a
-        cluster-wide quota across OpenRAG replicas.
+        cluster-wide quota across OpenRAG replicas. Updating a configured
+        limit changes the existing limiter, so lowering it never starts extra
+        work through a newly minted semaphore.
         """
         if endpoint is None:
+            self._endpoint_limiter = None
+            self._endpoint_limiter_key = None
             return self._semaphore
         limit = max(1, endpoint.batch_size)
-        key = (endpoint.endpoint, endpoint.model_name or "", limit)
-        semaphore = self._endpoint_semaphores.get(key)
-        if semaphore is None:
-            semaphore = asyncio.Semaphore(limit)
-            self._endpoint_semaphores[key] = semaphore
-        return semaphore
+        key = (endpoint.endpoint, endpoint.model_name or "")
+        if self._endpoint_limiter is None or self._endpoint_limiter_key != key:
+            self._endpoint_limiter = _EndpointConcurrencyLimiter(limit)
+            self._endpoint_limiter_key = key
+        else:
+            await self._endpoint_limiter.set_limit(limit)
+        return self._endpoint_limiter
 
     @staticmethod
     def _language_hint(endpoint: ModelEndpointConfig | None) -> str | None:

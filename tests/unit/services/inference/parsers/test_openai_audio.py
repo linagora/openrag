@@ -9,6 +9,7 @@ client is needed.
 
 from __future__ import annotations
 
+import asyncio
 import sys
 import types
 from pathlib import Path
@@ -200,7 +201,7 @@ class TestParse:
         kwargs = mock_openai_client.audio.transcriptions.create.await_args.kwargs
         assert kwargs["model"] == "moss-transcribe-diarize"
         assert kwargs["language"] == "fr"
-        assert client._semaphore_for_endpoint(endpoint)._value == 3
+        assert (await client._semaphore_for_endpoint(endpoint)).limit == 3
 
     @pytest.mark.asyncio
     async def test_stt_request_extra_is_forwarded_without_connection_metadata(self, mock_openai_client):
@@ -220,6 +221,8 @@ class TestParse:
                 "prompt": "must-not-override-managed-prompt",
                 "stream": True,
                 MOSS_SPEAKER_AWARE_KEY: True,
+                "max_llm_context_size": 8192,
+                "max_output_tokens": 1024,
                 "temperature": 0,
                 "response_format": "json",
                 "max_completion_tokens": 8192,
@@ -236,6 +239,46 @@ class TestParse:
             "temperature": 0,
             "max_completion_tokens": 8192,
         }
+
+    @pytest.mark.asyncio
+    async def test_stt_endpoint_limiter_applies_a_lowered_limit_without_parallel_limiter(self, mock_openai_client):
+        client = _client(mock_openai_client)
+        endpoint = ModelEndpointConfig(
+            endpoint="http://moss:8000/v1",
+            model_name="moss-transcribe-diarize",
+            batch_size=2,
+            timeout=120,
+        )
+        limiter = await client._semaphore_for_endpoint(endpoint)
+        assert limiter.limit == 2
+
+        first_entered = asyncio.Event()
+        second_entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def hold_slot(entered: asyncio.Event) -> None:
+            async with limiter:
+                entered.set()
+                await release.wait()
+
+        first = asyncio.create_task(hold_slot(first_entered))
+        second = asyncio.create_task(hold_slot(second_entered))
+        await first_entered.wait()
+        await second_entered.wait()
+
+        lowered_endpoint = endpoint.model_copy(update={"batch_size": 1})
+        lowered_limiter = await client._semaphore_for_endpoint(lowered_endpoint)
+        assert lowered_limiter is limiter
+        assert lowered_limiter.limit == 1
+
+        third_entered = asyncio.Event()
+        third = asyncio.create_task(hold_slot(third_entered))
+        await asyncio.sleep(0)
+        assert not third_entered.is_set()
+
+        release.set()
+        await asyncio.gather(first, second, third)
+        assert third_entered.is_set()
 
     @pytest.mark.asyncio
     async def test_text_response_format_accepts_plain_string_response(self, mock_openai_client):
