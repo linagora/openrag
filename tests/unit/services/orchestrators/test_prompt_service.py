@@ -92,11 +92,12 @@ class TestSeeding:
         assert len(PROMPT_TYPE_KEYS) == 9
         for p in repo.prompts.values():
             assert p.is_default is True
-            assert p.content.strip()
+            if p.prompt_type != PromptType.ASR_TRANSCRIPTION.value:
+                assert p.content.strip()
 
         asr_prompt = await repo.get_default(PromptType.ASR_TRANSCRIPTION.value)
         assert asr_prompt is not None
-        assert "[HH:MM:SS.mmm] [S01]" in asr_prompt.content
+        assert asr_prompt.content == ""
 
     async def test_seeding_is_idempotent(self):
         repo = FakePromptRepo()
@@ -123,6 +124,26 @@ class TestSeeding:
 
         assert await repo.get_default(PromptType.SYS_PROMPT.value) is None
         assert await repo.get_default(PromptType.ASR_TRANSCRIPTION.value) is not None
+        with pytest.raises(ConfigError) as exc:
+            await svc.resolve_prompt(PromptType.SYS_PROMPT.value)
+        assert exc.value.code == "PROMPT_UNAVAILABLE"
+
+    async def test_seeding_normalizes_whitespace_only_asr_template(self, monkeypatch):
+        repo = FakePromptRepo()
+        svc = _service(repo)
+        disk_seed = svc._disk_seed
+
+        monkeypatch.setattr(
+            svc,
+            "_disk_seed",
+            lambda prompt_type: " \n\t "
+            if prompt_type == PromptType.ASR_TRANSCRIPTION.value
+            else disk_seed(prompt_type),
+        )
+
+        await svc.seed_defaults()
+
+        assert (await repo.get_default(PromptType.ASR_TRANSCRIPTION.value)).content == ""
 
     async def test_type_set_matches_enum(self):
         assert set(PROMPT_TYPE_KEYS) == {t.value for t in PromptType}
@@ -180,6 +201,44 @@ class TestCrud:
 
         assert created.content == ""
         assert await svc.resolve_prompt(PromptType.ASR_TRANSCRIPTION.value) == ""
+
+    async def test_asr_whitespace_content_is_stored_as_the_native_prompt_choice(self):
+        repo = FakePromptRepo()
+        svc = _service(repo)
+
+        created = await svc.create_prompt(
+            prompt_type=PromptType.ASR_TRANSCRIPTION.value,
+            name="native-model-prompt",
+            content=" \n\t ",
+            is_default=True,
+        )
+
+        assert created.content == ""
+        assert (await repo.get(created.id)).content == ""
+
+    async def test_updating_asr_to_whitespace_selects_the_native_prompt(self):
+        repo = FakePromptRepo()
+        svc = _service(repo)
+        prompt = await svc.create_prompt(
+            prompt_type=PromptType.ASR_TRANSCRIPTION.value,
+            name="custom-instruction",
+            content="Keep speaker labels.",
+        )
+
+        updated = await svc.update_prompt(prompt.id, content=" \n\t ")
+
+        assert updated.content == ""
+        assert (await repo.get(prompt.id)).content == ""
+
+    async def test_updating_non_asr_to_blank_content_is_rejected(self):
+        svc = _service()
+        prompt = await svc.create_prompt(prompt_type="sys_prompt", name="answer", content="Answer clearly.")
+
+        with pytest.raises(ValidationError) as exc:
+            await svc.update_prompt(prompt.id, content="   ")
+
+        assert exc.value.status_code == 422
+        assert exc.value.code == "PROMPT_CONTENT_EMPTY"
 
     async def test_non_asr_rejects_blank_content(self):
         with pytest.raises(ValidationError) as exc:
@@ -346,6 +405,18 @@ class TestResolveSurvivesRepositoryFailure:
         svc = _service(ExplodingRepo())
         content = await svc.resolve_prompt("sys_prompt", names=["whatever"])
         assert "{context}" in content  # the bundled sys_prompt template
+
+    async def test_an_asr_repo_error_uses_the_provider_native_prompt(self):
+        class ExplodingRepo(FakePromptRepo):
+            async def get_by_name(self, prompt_type, name):
+                raise RuntimeError("connection pool exhausted")
+
+            async def get_default(self, prompt_type):
+                raise RuntimeError("connection pool exhausted")
+
+        svc = _service(ExplodingRepo())
+
+        assert await svc.resolve_prompt(PromptType.ASR_TRANSCRIPTION.value) == ""
 
 
 class TestSeedingSurvivesAConcurrentReplica:

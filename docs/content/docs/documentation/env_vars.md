@@ -140,11 +140,26 @@ Here are some other variables related to openai-compatible endpoint.
 
 :::tip[MOSS-Transcribe-Diarize with vLLM]
 
-`OpenMOSS-Team/MOSS-Transcribe-Diarize` uses this same endpoint and produces timestamped, speaker-labelled text, so no new OpenRAG loader is needed. Set `AUDIOLOADER=OpenAIAudioLoader`, point the STT endpoint at the vLLM server, and use the model name advertised by `/v1/models`. For example, when vLLM is started with `--served-model-name moss-transcribe-diarize`, enter `moss-transcribe-diarize` rather than the Hugging Face repository ID. Set `USE_WHISPER_LANG_DETECTOR=false` when you do not need the local Whisper language detector.
+`OpenMOSS-Team/MOSS-Transcribe-Diarize` uses this same endpoint and produces speaker-labelled text, so no new OpenRAG loader is needed. Set `AUDIOLOADER=OpenAIAudioLoader`, configure the STT endpoint with the vLLM server, and use the model name advertised by `/v1/models`. For example, when vLLM is started with `--served-model-name moss-transcribe-diarize`, enter `moss-transcribe-diarize` rather than the Hugging Face repository ID. Set `USE_WHISPER_LANG_DETECTOR=false` when you do not need the local Whisper language detector.
 
 For a MOSS server bound to `127.0.0.1:8001`, use `http://127.0.0.1:8001/v1` only when OpenRAG runs on that host. A containerized OpenRAG needs a host-reachable address such as `http://host.docker.internal:8001/v1` (plus Docker's host-gateway mapping on Linux). Match each OpenRAG worker's saved **Concurrency per worker** to the vLLM capacity; with `--max-num-seqs 1`, set it to `1` when one worker serves the endpoint, or lower it so all workers together stay within capacity. `TRANSCRIBER_MAX_CONCURRENT_CHUNKS` only controls the initial seed and fallback.
 
-The bundled transcriber image is pinned for Whisper and predates MOSS support. Serve MOSS with the vLLM build specified by the model authors, then use it as the external transcription endpoint. Its advanced STT request options are sent unchanged to vLLM, which allows an appropriate output-token budget and deterministic JSON output to be managed with the endpoint. Manage its instruction in **Admin UI → Prompt Library → Transcription**. Changes apply to the next transcription without a restart; leave its content empty to retain MOSS's built-in diarization prompt. When adding hotwords or a format instruction, include the desired timestamp and speaker-label format in the prompt as well.
+The bundled transcriber image is pinned for Whisper and predates MOSS support. Serve MOSS with the vLLM build specified by the model authors, then use it as the external transcription endpoint. Manage its instruction in **Admin UI → Prompt Library → Transcription**. Changes apply to the next transcription without a restart. OpenRAG leaves this global prompt empty by default so Whisper, MOSS, and other providers keep their native behavior.
+
+On a deployment dedicated to MOSS, you can paste an instruction like this into the Prompt Library:
+
+```text
+Transcribe the audio exactly in the original spoken language.
+
+Output text only. Never output timestamps, timecodes, or durations.
+When multiple speakers are clearly present, prefix each speech segment with
+[S01], [S02], [S03], and keep the same ID for the same speaker.
+
+Preserve the original language and wording. Do not translate, summarize,
+paraphrase, correct, or invent missing words.
+```
+
+Add hotwords only when they are relevant to your own deployment. They bias recognition vocabulary and should not be part of OpenRAG's global default.
 :::
 
 :::note[About whisper with vLLM and language detection]
@@ -420,7 +435,7 @@ The RAG pipeline ships with preconfigured prompts bundled inside the package at 
 | `query_contextualizer_tmpl.txt` | Template for adding context to user queries |
 | `chunk_contextualizer_tmpl.txt` | Template for contextualizing document chunks during indexing |
 | `image_captioning_tmpl.txt` | Template for generating image descriptions using the VLM |
-| `asr_transcription_tmpl.txt` | Default instruction for timestamped, speaker-labelled external transcription; editable in Prompt Library |
+| `asr_transcription_tmpl.txt` | Empty by default so external transcription keeps the provider's native behavior. Configure it in Prompt Library when `AUDIOLOADER=OpenAIAudioLoader`. |
 | `hyde.txt` | Hypothetical Document Embeddings (HyDE) query expansion template |
 | `multi_query_pmpt_tmpl.txt` | Template for generating multiple query variations |
 
