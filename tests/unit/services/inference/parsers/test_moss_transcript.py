@@ -60,6 +60,7 @@ def test_preserves_spoken_bracketed_numbers_in_a_complete_turn():
         "[1-2][S01] Hello [S02] there",
         "[1][S01] Hello [S02] there [2]",
         "[S01] Hello [2][S02] there [3]",
+        "[1-2][S01] A [2] B [3][4-5][S02] C",
         "[1-2][S01] Hello [2][S02] there [3]",
         "[1] Hello [2][2-3][S02] There",
         "[1-2][S01] Hello [2][S02] there",
