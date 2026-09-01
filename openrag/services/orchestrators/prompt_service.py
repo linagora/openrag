@@ -152,6 +152,20 @@ def _validate_content(prompt_type: str, content: str) -> None:
     _validate_template(prompt_type, content)
 
 
+def _validate_and_normalize_content(prompt_type: str, content: str) -> str:
+    """Validate prompt content and canonicalize ASR's native-prompt choice.
+
+    A blank ASR prompt is meaningful: it tells the audio client to omit the
+    OpenAI ``prompt`` field and let the transcription endpoint use its native
+    instruction. Store every whitespace-only spelling of that choice as the
+    same empty string, while preserving nonblank prompt content verbatim.
+    """
+    _validate_content(prompt_type, content)
+    if prompt_type == PromptType.ASR_TRANSCRIPTION.value and not content.strip():
+        return ""
+    return content
+
+
 class PromptService:
     """CRUD, resolution, and lifecycle for DB-backed prompts."""
 
@@ -184,7 +198,7 @@ class PromptService:
                 # bundled template with a bad placeholder must not become a
                 # type's global default: every request falling back to it would
                 # raise inside .format() at the point of use.
-                _validate_content(prompt_type, content)
+                content = _validate_and_normalize_content(prompt_type, content)
             except ValidationError as exc:
                 logger.warning(f"Bundled template for '{prompt_type}' is not a valid template; not seeding: {exc}")
                 continue
@@ -239,10 +253,12 @@ class PromptService:
         chat and search paths that did not exist before — prompts used to be read
         from disk once at construction. A transient repository failure must
         therefore not become a 500: lookups are treated as best-effort here and a
-        failure degrades to the bundled disk template, logged once. Errors are
-        swallowed at this single choke point rather than at each of the callers,
-        so chat, query expansion, retrieval and indexing all get the same
-        guarantee.
+        failure degrades to the bundled disk template, logged once. ASR is the
+        exception: it degrades to an empty prompt so a database outage cannot
+        replace an operator's native-provider choice with bundled instructions.
+        Errors are swallowed at this single choke point rather than at each of
+        the callers, so chat, query expansion, retrieval and indexing all get
+        the same guarantee.
 
         Returns a string in every reachable case: boot seeds a default per type
         and deleting a type's default is refused, so reaching the disk seed is
@@ -265,10 +281,14 @@ class PromptService:
                 self._log_resolution(prompt_type, candidates, "default", default.name, default.content)
                 return default.content
         except Exception as exc:  # noqa: BLE001 - a DB blip must not fail the request
+            if prompt_type == PromptType.ASR_TRANSCRIPTION.value:
+                logger.warning(f"Prompt lookup failed for '{prompt_type}'; using the provider's native prompt: {exc}")
+                self._log_resolution(prompt_type, candidates, "native", None, "")
+                return ""
             logger.warning(f"Prompt lookup failed for '{prompt_type}'; falling back to the bundled template: {exc}")
         try:
-            content = self._disk_seed(prompt_type)
-        except (FileNotFoundError, ValueError, KeyError) as exc:
+            content = _validate_and_normalize_content(prompt_type, self._disk_seed(prompt_type))
+        except (FileNotFoundError, ValueError, KeyError, ValidationError) as exc:
             raise ConfigError(
                 f"No prompt available for type '{prompt_type}': no library default and "
                 f"no readable bundled template ({exc}).",
@@ -284,8 +304,9 @@ class PromptService:
         retrieval / chat) actually used, and preview its text.
 
         ``source`` is how it resolved: ``named`` (a partition/preset selection),
-        ``default`` (the type's global default), or ``disk-seed`` (bundled
-        fallback). ``candidates`` are the names the caller offered, in order.
+        ``default`` (the type's global default), ``disk-seed`` (bundled
+        fallback), or ``native`` (ASR's empty provider-native fallback).
+        ``candidates`` are the names the caller offered, in order.
 
         DEBUG, not INFO: this fires on every chat request and every indexing
         job, and it carries prompt text. It pairs with the ``llm.call`` line
@@ -318,7 +339,7 @@ class PromptService:
 
     async def create_prompt(self, *, prompt_type: str, name: str, content: str, is_default: bool = False) -> Prompt:
         self._validate_type(prompt_type)
-        _validate_content(prompt_type, content)
+        content = _validate_and_normalize_content(prompt_type, content)
         if await self._repo.get_by_name(prompt_type, name) is not None:
             raise ValidationError(
                 f"A '{prompt_type}' prompt named '{name}' already exists.",
@@ -358,7 +379,7 @@ class PromptService:
 
         new_content = fields.get("content")
         if new_content is not None:
-            _validate_content(existing.prompt_type, str(new_content))
+            fields["content"] = _validate_and_normalize_content(existing.prompt_type, str(new_content))
 
         new_name = fields.get("name")
         if new_name is not None and new_name != existing.name:

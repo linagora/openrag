@@ -419,7 +419,7 @@ function PromptEditorSheet({
           <SheetTitle>{editing ? "Edit prompt" : "New prompt"}</SheetTitle>
           <SheetDescription>
             {isAsrTranscription
-              ? "Changes apply to every external audio transcription on its next request."
+              ? "Changes apply on the next request when AUDIOLOADER=OpenAIAudioLoader."
               : "Changes apply to every preset and partition that selects this prompt."}
           </SheetDescription>
         </SheetHeader>
@@ -467,8 +467,8 @@ function PromptEditorSheet({
               {isAsrTranscription ? <Globe2 className="h-3.5 w-3.5" /> : <Users className="h-3.5 w-3.5" />}
               {isAsrTranscription
                 ? editing.is_default
-                  ? "Applied globally to external audio transcription."
-                  : "Set this prompt as default to apply it globally."
+                  ? "Applied globally when AUDIOLOADER=OpenAIAudioLoader."
+                  : "Set this prompt as default for AUDIOLOADER=OpenAIAudioLoader."
                 : editing.used_by > 0
                 ? `Selected by ${editing.used_by} partition${editing.used_by === 1 ? "" : "s"}.`
                 : "Not selected by any partition yet."}
@@ -615,7 +615,7 @@ function PromptTemplateEditor({
           {!hasVariables && (
             <p className="text-xs text-muted-foreground">
               {isAsrTranscription
-                ? "This instruction is sent as the OpenAI transcription prompt. Leave it empty to use the model's native prompt."
+                ? "Used only with AUDIOLOADER=OpenAIAudioLoader. Leave it empty to use the model's native prompt."
                 : "This prompt is sent as a system message; the document, chunk, or image content is attached separately at runtime. No placeholders needed."}
             </p>
           )}

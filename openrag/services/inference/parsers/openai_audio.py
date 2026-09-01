@@ -267,7 +267,7 @@ class OpenAIAudioClient(BaseClientParser):
         if self._endpoint_limiter is None or self._endpoint_limiter_key != key:
             self._endpoint_limiter = _EndpointConcurrencyLimiter(limit)
             self._endpoint_limiter_key = key
-        else:
+        elif self._endpoint_limiter.limit != limit:
             await self._endpoint_limiter.set_limit(limit)
         return self._endpoint_limiter
 
