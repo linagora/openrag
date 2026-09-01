@@ -360,36 +360,7 @@ async def test_submission_fence_persists_until_pool_reports_settlement(monkeypat
 
 
 @pytest.mark.asyncio
-async def test_cancellation_settlement_deadline_is_assigned_once(monkeypatch) -> None:
-    now = 100.0
-    monkeypatch.setattr(task_state_module.time, "time", lambda: now)
-    manager = _task_state_manager()
-    await manager.set_queued_details(
-        "task-1",
-        file_id="file-1",
-        partition="tenant-a",
-        metadata={},
-        user_id=42,
-    )
-    assert await manager.set_object_ref("task-1", {"ref": object()}) is True
-
-    assert await manager.set_cancelled_if_active("task-1") is True
-    expected_deadline = 100.0 + task_state_module._CANCELLATION_SETTLEMENT_TTL_SECONDS
-    assert manager.tasks["task-1"].cancellation_settlement_expires_at == expected_deadline
-
-    now = 200.0
-    await manager.set_details(
-        "task-1",
-        file_id="file-1",
-        partition="tenant-a",
-        metadata={"updated": True},
-        user_id=42,
-    )
-    assert manager.tasks["task-1"].cancellation_settlement_expires_at == expected_deadline
-
-
-@pytest.mark.asyncio
-async def test_expired_cancellation_releases_live_worker_fences(monkeypatch) -> None:
+async def test_elapsed_time_does_not_release_unready_worker_fences(monkeypatch) -> None:
     now = 100.0
     monkeypatch.setattr(task_state_module.time, "time", lambda: now)
     manager = _task_state_manager()
@@ -411,13 +382,16 @@ async def test_expired_cancellation_releases_live_worker_fences(monkeypatch) -> 
         "task-1": {"ref": worker_ref}
     }
 
-    now += task_state_module._CANCELLATION_SETTLEMENT_TTL_SECONDS + 1
+    now += task_state_module._CANCELLATION_TOMBSTONE_TTL_SECONDS + 1
 
-    assert await manager.has_unsettled_cancelled_worker("task-1") is False
-    assert await manager.get_content_claim_task_ids(partition="tenant-a") == set()
-    assert await manager.get_matching_active_task_refs_v2(partition="tenant-a", file_id="file-1") == {}
-    assert await manager.get_object_ref("task-1") is None
-    assert manager.tasks["task-1"].worker_submitted is False
+    assert await manager.finish_cancellation("task-1") is False
+    assert await manager.has_unsettled_cancelled_worker("task-1") is True
+    assert await manager.get_content_claim_task_ids(partition="tenant-a") == {"task-1"}
+    assert await manager.get_matching_active_task_refs_v2(partition="tenant-a", file_id="file-1") == {
+        "task-1": {"ref": worker_ref}
+    }
+    assert await manager.get_object_ref("task-1") == {"ref": worker_ref}
+    assert manager.tasks["task-1"].worker_submitted is True
 
 
 @pytest.mark.asyncio
@@ -753,7 +727,7 @@ async def test_cancellation_tombstone_survives_actor_reconstruction(monkeypatch)
     assert stored["task-1"].state == "CANCELLED"
 
 
-def test_cancellation_recovery_snapshot_preserves_unsettled_claim_owner_with_fixed_expiry() -> None:
+def test_cancellation_recovery_snapshot_preserves_unsettled_claim_owner_without_expiry() -> None:
     info = TaskInfo(
         state="CANCELLED",
         error="private traceback",
@@ -769,9 +743,8 @@ def test_cancellation_recovery_snapshot_preserves_unsettled_claim_owner_with_fix
         details=info.details,
         object_ref=info.object_ref,
         worker_submitted=True,
-        cancellation_settlement_expires_at=100.0 + task_state_module._CANCELLATION_SETTLEMENT_TTL_SECONDS,
     )
-    assert expires_at == 100.0 + task_state_module._CANCELLATION_SETTLEMENT_TTL_SECONDS
+    assert expires_at is None
 
 
 def test_settled_cancellation_recovery_snapshot_expires() -> None:
@@ -784,7 +757,7 @@ def test_settled_cancellation_recovery_snapshot_expires() -> None:
     assert expires_at == 100.0 + task_state_module._CANCELLATION_TOMBSTONE_TTL_SECONDS
 
 
-def test_expired_unsettled_cancellation_is_removed_during_recovery(monkeypatch) -> None:
+def test_expired_unsettled_cancellation_is_preserved_during_recovery(monkeypatch) -> None:
     import ray.cloudpickle as cloudpickle
     from ray.experimental import internal_kv
 
@@ -808,11 +781,37 @@ def test_expired_unsettled_cancellation_is_removed_during_recovery(monkeypatch) 
         lambda candidate, **_kwargs: deleted.append(candidate),
     )
 
+    recovered = task_state_module._load_recoverable_tasks()
+
+    assert recovered["task-1"].state == "CANCELLED"
+    assert recovered["task-1"].worker_submitted is True
+    assert deleted == []
+
+
+def test_expired_settled_cancellation_is_removed_during_recovery(monkeypatch) -> None:
+    import ray.cloudpickle as cloudpickle
+    from ray.experimental import internal_kv
+
+    key = task_state_module._recoverable_task_key("task-1")
+    payload = cloudpickle.dumps(("task-1", TaskInfo(state="CANCELLED"), 99.0))
+    deleted: list[bytes] = []
+
+    monkeypatch.setattr(task_state_module, "_task_state_storage_available", lambda: True)
+    monkeypatch.setattr(task_state_module, "_task_state_kv_namespace", lambda: b"test")
+    monkeypatch.setattr(task_state_module.time, "time", lambda: 100.0)
+    monkeypatch.setattr(internal_kv, "_internal_kv_list", lambda *_args, **_kwargs: [key])
+    monkeypatch.setattr(internal_kv, "_internal_kv_get", lambda *_args, **_kwargs: payload)
+    monkeypatch.setattr(
+        internal_kv,
+        "_internal_kv_del",
+        lambda candidate, **_kwargs: deleted.append(candidate),
+    )
+
     assert task_state_module._load_recoverable_tasks() == {}
     assert deleted == [key]
 
 
-def test_legacy_unsettled_cancellation_gets_one_persisted_deadline(monkeypatch) -> None:
+def test_legacy_unsettled_cancellation_remains_unexpired(monkeypatch) -> None:
     import ray.cloudpickle as cloudpickle
     from ray.experimental import internal_kv
 
@@ -830,27 +829,15 @@ def test_legacy_unsettled_cancellation_gets_one_persisted_deadline(monkeypatch) 
             )
         )
     }
-    now = 100.0
-
     monkeypatch.setattr(task_state_module, "_task_state_storage_available", lambda: True)
     monkeypatch.setattr(task_state_module, "_task_state_kv_namespace", lambda: b"test")
-    monkeypatch.setattr(task_state_module.time, "time", lambda: now)
     monkeypatch.setattr(internal_kv, "_internal_kv_list", lambda *_args, **_kwargs: list(storage))
     monkeypatch.setattr(internal_kv, "_internal_kv_get", lambda candidate, **_kwargs: storage.get(candidate))
-    monkeypatch.setattr(
-        internal_kv,
-        "_internal_kv_put",
-        lambda candidate, payload, **_kwargs: storage.__setitem__(candidate, payload),
-    )
     monkeypatch.setattr(internal_kv, "_internal_kv_del", lambda candidate, **_kwargs: storage.pop(candidate, None))
 
-    first = task_state_module._load_recoverable_tasks()["task-1"]
-    expected_deadline = 100.0 + task_state_module._CANCELLATION_SETTLEMENT_TTL_SECONDS
-    assert first.cancellation_settlement_expires_at == expected_deadline
+    recovered = task_state_module._load_recoverable_tasks()["task-1"]
 
-    now = 200.0
-    second = task_state_module._load_recoverable_tasks()["task-1"]
-    assert second.cancellation_settlement_expires_at == expected_deadline
+    assert getattr(recovered, "cancellation_settlement_expires_at", None) is None
 
 
 @pytest.mark.asyncio
@@ -906,7 +893,6 @@ async def test_finished_cancellation_drops_recoverable_worker_reference(monkeypa
 async def test_unsettled_cancellation_keeps_recoverable_worker_reference(monkeypatch) -> None:
     saved: list[TaskInfo] = []
     monkeypatch.setattr(task_state_module, "_save_recoverable_task", lambda _task_id, info: saved.append(info))
-    monkeypatch.setattr(task_state_module.time, "time", lambda: 100.0)
     manager = _task_state_manager()
     ref = object()
     manager.tasks["task-1"] = TaskInfo(state="CANCELLED", object_ref={"ref": ref})
@@ -915,9 +901,26 @@ async def test_unsettled_cancellation_keeps_recoverable_worker_reference(monkeyp
     assert await manager.finish_cancellation("task-1") is False
 
     assert manager.tasks["task-1"].object_ref == {"ref": ref}
-    assert saved[-1].cancellation_settlement_expires_at == (
-        100.0 + task_state_module._CANCELLATION_SETTLEMENT_TTL_SECONDS
+    assert saved == []
+
+
+@pytest.mark.asyncio
+async def test_ref_less_submitted_cancellation_stays_fenced_until_settlement_is_proven(monkeypatch) -> None:
+    saved: list[TaskInfo] = []
+    monkeypatch.setattr(task_state_module, "_save_recoverable_task", lambda _task_id, info: saved.append(info))
+    manager = _task_state_manager()
+    manager.tasks["task-1"] = TaskInfo(
+        state="CANCELLED",
+        details={"partition": "tenant-a", "file_id": "file-1"},
+        worker_submitted=True,
     )
+
+    assert await manager.finish_cancellation("task-1") is False
+
+    assert manager.tasks["task-1"].worker_submitted is True
+    assert await manager.has_unsettled_cancelled_worker("task-1") is True
+    assert await manager.get_content_claim_task_ids(partition="tenant-a") == {"task-1"}
+    assert saved == []
 
 
 @pytest.mark.asyncio
