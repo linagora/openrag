@@ -176,6 +176,13 @@ export function mergeModelEndpointApiKeyExtra(
 ): Record<string, unknown> {
   const prepared = prepareModelEndpointExtraForSubmit(extra);
   const normalizedApiKey = prepareModelEndpointExtraForSubmit({ api_key: apiKey.trim() }).api_key;
+  if (
+    normalizedApiKey === REDACTED_SECRET &&
+    typeof prepared.api_key === "string" &&
+    prepared.api_key !== REDACTED_SECRET
+  ) {
+    return prepared;
+  }
   if (typeof normalizedApiKey === "string" && normalizedApiKey) {
     return { ...prepared, api_key: normalizedApiKey };
   }

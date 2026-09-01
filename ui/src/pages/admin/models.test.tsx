@@ -2,7 +2,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { listModelEndpoints, validateModelEndpoint } from "@/lib/api/models";
+import { listModelEndpoints, updateModelEndpoint, validateModelEndpoint } from "@/lib/api/models";
 import ModelsPage from "./models";
 
 vi.mock("@/lib/api/models", async () => {
@@ -24,6 +24,7 @@ vi.mock("sonner", () => ({
 }));
 
 const listModelEndpointsMock = vi.mocked(listModelEndpoints);
+const updateModelEndpointMock = vi.mocked(updateModelEndpoint);
 const validateModelEndpointMock = vi.mocked(validateModelEndpoint);
 
 beforeAll(() => {
@@ -51,11 +52,61 @@ function renderPage() {
 describe("ModelsPage STT validation", () => {
   beforeEach(() => {
     listModelEndpointsMock.mockReset().mockResolvedValue([]);
+    updateModelEndpointMock.mockReset();
     validateModelEndpointMock.mockReset().mockResolvedValue({
       reachable: true,
       model_found: true,
       transcription_supported: true,
     });
+  });
+
+  it("persists the STT API key used by draft validation", async () => {
+    listModelEndpointsMock.mockResolvedValue([
+      {
+        name: "moss",
+        model_type: "stt",
+        endpoint: "http://moss:8000/v1",
+        model_name: "moss-transcribe-diarize",
+        batch_size: 1,
+        timeout: 3600,
+        extra: { api_key: "sk-o********" },
+        has_api_key: true,
+        is_default: true,
+        created_at: "2026-01-01T00:00:00+00:00",
+        updated_at: "2026-01-01T00:00:00+00:00",
+      },
+    ]);
+    const user = userEvent.setup();
+    renderPage();
+
+    await screen.findByText("No embedder endpoints configured.");
+    await user.click(screen.getByRole("tab", { name: "stt" }));
+    await screen.findByText("moss-transcribe-diarize");
+    await user.click(screen.getByRole("button", { name: "Edit" }));
+
+    const dialog = screen.getByRole("dialog");
+    const extraInput = within(dialog).getByDisplayValue("{}");
+    fireEvent.change(extraInput, {
+      target: { value: JSON.stringify({ api_key: "replacement-key" }) },
+    });
+    await user.click(within(dialog).getByRole("button", { name: "Validate" }));
+
+    await waitFor(() =>
+      expect(validateModelEndpointMock).toHaveBeenCalledWith(
+        expect.objectContaining({ extra: { api_key: "replacement-key" } }),
+      ),
+    );
+    const updateButton = within(dialog).getByRole("button", { name: "Update" }) as HTMLButtonElement;
+    await waitFor(() => expect(updateButton.disabled).toBe(false));
+    await user.click(updateButton);
+
+    await waitFor(() =>
+      expect(updateModelEndpointMock).toHaveBeenCalledWith(
+        "stt",
+        "moss",
+        expect.objectContaining({ extra: { api_key: "replacement-key" } }),
+      ),
+    );
   });
 
   it("validates an STT draft with the timeout currently entered in the form", async () => {
