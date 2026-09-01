@@ -138,7 +138,7 @@ class TestParse:
 
         await _client(mock_openai_client, transcription_prompt_resolver=resolver).parse(_audio_doc())
 
-        resolver.assert_awaited_once_with("default")
+        resolver.assert_awaited_once()
         kwargs = mock_openai_client.audio.transcriptions.create.await_args.kwargs
         assert kwargs["prompt"] == prompt
 

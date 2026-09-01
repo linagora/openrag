@@ -34,13 +34,6 @@ export const PARSING_STRATEGY_INHERIT = "__inherit__";
 // sentinel that is never persisted as an endpoint name.
 export const STT_ENDPOINT_DEFAULT_OPTION = "__use_default_stt_endpoint__";
 
-/** Persist an explicit STT endpoint or clear it to inherit the global default. */
-export function applySttEndpointChange(config: Config, value: string): Config {
-  return value === STT_ENDPOINT_DEFAULT_OPTION
-    ? configUnset(config, "stt")
-    : configSet(config, "stt", value);
-}
-
 // Map a parsing-strategy selection to the next config. Kept pure so the
 // persistence behavior is unit-testable without driving the Radix Select.
 //

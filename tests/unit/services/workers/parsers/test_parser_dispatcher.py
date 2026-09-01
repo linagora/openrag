@@ -114,7 +114,7 @@ def test_resolve_audio_backend_openai() -> None:
 def test_audio_client_receives_live_transcription_prompt_resolver(monkeypatch: pytest.MonkeyPatch) -> None:
     import services.workers.parsers.parser_dispatcher as dispatcher
 
-    async def resolver(_partition: str | None) -> str | None:
+    async def resolver() -> str | None:
         return "Keep speaker labels."
 
     monkeypatch.setattr(dispatcher, "_create", lambda _module, _name, **kwargs: kwargs["client"])

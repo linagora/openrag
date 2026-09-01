@@ -1,10 +1,5 @@
 import { describe, it, expect } from "vitest";
-import {
-  applyParsingStrategyChange,
-  applySttEndpointChange,
-  PARSING_STRATEGY_INHERIT,
-  STT_ENDPOINT_DEFAULT_OPTION,
-} from "./preset-config";
+import { applyParsingStrategyChange, PARSING_STRATEGY_INHERIT } from "./preset-config";
 
 // Regression guard for the bug where the parsing Strategy dropdown displayed a
 // fabricated "marker" default that was never written to config unless the user
@@ -71,19 +66,5 @@ describe("applyParsingStrategyChange", () => {
     const input = { parsing_strategy: "marker" };
     applyParsingStrategyChange(input, PARSING_STRATEGY_INHERIT);
     expect(input).toEqual({ parsing_strategy: "marker" });
-  });
-});
-
-describe("applySttEndpointChange", () => {
-  it("persists an explicitly selected STT endpoint", () => {
-    expect(applySttEndpointChange({}, "moss-transcribe-diarize")).toEqual({
-      stt: "moss-transcribe-diarize",
-    });
-  });
-
-  it("clears the endpoint when choosing the global default", () => {
-    expect(
-      applySttEndpointChange({ stt: "moss-transcribe-diarize" }, STT_ENDPOINT_DEFAULT_OPTION),
-    ).toEqual({});
   });
 });

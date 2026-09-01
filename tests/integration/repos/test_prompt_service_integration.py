@@ -80,22 +80,17 @@ class TestSeedAndResolve:
         )
 
         # 3 partitions: rc1 overrides its final-answer prompt and uses
-        # legalpreset; rc2 also uses legalpreset; rc3 names a missing final
-        # answer prompt and uses orphan (both prompt types fall back to default,
-        # even if it retains a legacy ASR selection).
+        # legalpreset; rc2 also uses legalpreset; rc3 names a missing final-answer
+        # prompt and uses orphan, so both of its types fall back to the default.
         await partition_repo.create_partition("rc1")
         await partition_repo.update_partition(
-            "rc1",
-            indexation_preset="legalpreset",
-            generation_prompt_names={"sys_prompt": "legal"},
+            "rc1", indexation_preset="legalpreset", generation_prompt_names={"sys_prompt": "legal"}
         )
         await partition_repo.create_partition("rc2")
         await partition_repo.update_partition("rc2", indexation_preset="legalpreset")
         await partition_repo.create_partition("rc3")
         await partition_repo.update_partition(
-            "rc3",
-            indexation_preset="orphan",
-            generation_prompt_names={"sys_prompt": "missing", "asr_transcription": "meeting"},
+            "rc3", indexation_preset="orphan", generation_prompt_names={"sys_prompt": "missing"}
         )
 
         counts = await repo.reference_counts()

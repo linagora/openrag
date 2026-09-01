@@ -49,7 +49,6 @@ import {
   type Config,
   configGet,
   configSet,
-  applySttEndpointChange,
   applyParsingStrategyChange,
   PARSING_STRATEGY_INHERIT,
   STT_ENDPOINT_DEFAULT_OPTION,
@@ -382,7 +381,7 @@ function IndexationPresetForm({
             <Label className="text-xs">STT endpoint</Label>
             <Select
               value={configGet(config, "stt", STT_ENDPOINT_DEFAULT_OPTION)}
-              onValueChange={(v) => onChange(applySttEndpointChange(config, v))}
+              onValueChange={(v) => set("stt", v === STT_ENDPOINT_DEFAULT_OPTION ? null : v)}
             >
               <SelectTrigger size="sm" className="w-full min-w-0">
                 <SelectValue />

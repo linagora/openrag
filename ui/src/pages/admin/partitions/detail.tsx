@@ -71,11 +71,9 @@ import {
 } from "./partition-member-identity";
 import { describePartitionMember } from "./partition-member";
 
-// Prompt types selected directly on a partition. Parsing, enrichment, and
-// retrieval prompts belong to their respective presets.
-const PARTITION_PROMPT_TYPES = PROMPT_GROUPS
-  .filter((g) => g.name === "Final Answer")
-  .flatMap((g) => g.types);
+// The answer prompt is selected on the partition (keyed by prompt type). Mirrors
+// the "Final Answer" concern in the prompt library.
+const GENERATION_PROMPT_TYPES = PROMPT_GROUPS.find((g) => g.name === "Final Answer")!.types;
 
 // --- General Tab ---
 
@@ -96,10 +94,10 @@ function GeneralTab({ partition }: { partition: PartitionConfig }) {
   const [indexationPreset, setIndexationPreset] = useState(partition.indexation_preset);
   const [retrievalPreset, setRetrievalPreset] = useState(partition.retrieval_preset);
   const [chatLlm, setChatLlm] = useState(partition.chat_llm ?? "__default__");
-  // Only carry the prompt types this editor manages — a stale key (e.g. a
+  // Only carry the generation types this editor manages — a stale key (e.g. a
   // pre-move query_contextualizer) would be rejected by the partition PATCH.
   const initialGenerationPrompts = useMemo(() => {
-    const allowed = new Set<string>(PARTITION_PROMPT_TYPES.map((t) => t.value));
+    const allowed = new Set<string>(GENERATION_PROMPT_TYPES.map((t) => t.value));
     return Object.fromEntries(
       Object.entries(partition.generation_prompt_names ?? {}).filter(([k]) => allowed.has(k)),
     );
@@ -332,7 +330,7 @@ function GeneralTab({ partition }: { partition: PartitionConfig }) {
                 </SelectContent>
               </Select>
             </div>
-            {PARTITION_PROMPT_TYPES.map((t) => {
+            {GENERATION_PROMPT_TYPES.map((t) => {
               const options = promptsByType(t.value);
               return (
                 <div key={t.value} className="space-y-2">

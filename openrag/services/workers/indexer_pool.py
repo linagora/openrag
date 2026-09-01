@@ -23,8 +23,23 @@ _CONTENT_CLAIM_RENEW_INTERVAL_SECONDS = 60 * 60
 # and workers on the same protocol generation whenever their remote contract or
 # cross-process indexing semantics change, so new replicas cannot attach to a
 # partially compatible actor fleet left by the previous release.
-_INDEXER_ACTOR_PROTOCOL_VERSION = "v7"
+_INDEXER_ACTOR_PROTOCOL_VERSION = "v6"
 _INDEXER_POOL_DISPATCHER_ACTOR_NAME = f"IndexerPoolDispatcher-{_INDEXER_ACTOR_PROTOCOL_VERSION}"
+
+# One actor can process several files concurrently, so the dispatch-time preset
+# snapshot belongs to the file's task rather than to the actor: audio requests
+# from different partitions must never share STT settings. Set in process_file,
+# read by the transcription resolvers the parser holds.
+_ACTIVE_INDEXATION_CONFIG: ContextVar[dict[str, Any] | None] = ContextVar(
+    "active_indexation_config",
+    default=None,
+)
+
+
+def _current_indexation_config() -> dict[str, Any]:
+    """Return the running file task's indexation preset snapshot."""
+    config = _ACTIVE_INDEXATION_CONFIG.get()
+    return config if isinstance(config, dict) else {}
 
 
 def _indexer_worker_actor_name(index: int) -> str:
@@ -64,13 +79,6 @@ class IndexerWorkerActor:
         from services.workers.pipeline_builder import build_indexing_pipeline
 
         cfg = load_config()
-        # One actor can process several files concurrently. Keep the preset
-        # snapshot associated with the active file task, rather than on ``self``,
-        # so audio requests from different partitions never share STT settings.
-        self._active_indexation_config: ContextVar[dict[str, Any] | None] = ContextVar(
-            "active_indexation_config",
-            default=None,
-        )
         parser = build_parser_dispatcher(
             cfg,
             transcription_prompt_resolver=self._resolve_transcription_prompt,
@@ -187,46 +195,21 @@ class IndexerWorkerActor:
             )
         return self._prompt_service
 
-    def _current_indexation_config(self) -> dict[str, Any]:
-        """Return this task's dispatch-time indexation preset snapshot."""
-        context = getattr(self, "_active_indexation_config", None)
-        config = context.get() if context is not None else None
-        return config if isinstance(config, dict) else {}
-
-    def _has_active_indexation_config(self) -> bool:
-        """Whether this transcription was dispatched with a preset snapshot."""
-        context = getattr(self, "_active_indexation_config", None)
-        return isinstance(context.get(), dict) if context is not None else False
-
-    async def _resolve_transcription_prompt(self, partition: str | None = None) -> str | None:
-        """Resolve the active preset's ASR prompt, then the global default.
+    async def _resolve_transcription_prompt(self) -> str | None:
+        """Resolve the active preset's ASR prompt, else the type's global default.
 
         The preset name is captured when the file is dispatched, matching the
         endpoint and the other indexation-stage settings. Prompt content itself
-        remains live: an Admin UI edit applies to the next transcription.
-
-        Older integrations can still invoke a parser without a dispatch-time
-        preset snapshot. Only those legacy calls consult a partition-level ASR
-        name. An active preset with no prompt explicitly selects the global
-        default and must not revive that retired setting.
+        stays live: ``resolve_prompt`` re-reads it, so an Admin UI edit applies to
+        the next transcription without recreating the long-lived parser client.
         """
-        selected_name = self._current_indexation_config().get("asr_transcription_prompt_name")
-        legacy_name: str | None = None
-        if partition and not self._has_active_indexation_config():
-            try:
-                row = await self._catalog_store.partition_repo.get_partition_row(partition)
-                prompt_names = row.get("generation_prompt_names") if row else None
-                candidate = prompt_names.get("asr_transcription") if isinstance(prompt_names, dict) else None
-                legacy_name = candidate if isinstance(candidate, str) and candidate.strip() else None
-            except Exception as exc:  # noqa: BLE001 - a compatibility lookup must not fail a file
-                self._logger.warning(f"Legacy ASR prompt lookup failed (partition={partition}): {exc}")
         try:
             return await self._get_prompt_service().resolve_prompt(
                 "asr_transcription",
-                names=[name for name in (selected_name, legacy_name) if isinstance(name, str) and name.strip()],
+                names=[_current_indexation_config().get("asr_transcription_prompt_name")],
             )
         except Exception as exc:  # noqa: BLE001 - a prompt lookup must not fail a file
-            self._logger.warning(f"ASR transcription prompt resolution failed (partition={partition}): {exc}")
+            self._logger.warning(f"ASR transcription prompt resolution failed: {exc}")
             return None
 
     def _resolve_transcription_endpoint(self) -> Any | None:
@@ -242,7 +225,7 @@ class IndexerWorkerActor:
         stt = getattr(models, "stt", None)
         if stt is None:
             return None
-        selected_name = self._current_indexation_config().get("stt")
+        selected_name = _current_indexation_config().get("stt")
         endpoint = stt.get(selected_name or "default")
         if endpoint is None and selected_name:
             self._logger.warning(
@@ -387,8 +370,7 @@ class IndexerWorkerActor:
             # boundary, so per-chunk work reuses one resolved string instead of
             # hitting the DB per chunk.
             resolved_prompts = await self._resolve_ingest_prompts(partition, indexation_config or {})
-            context = getattr(self, "_active_indexation_config", None)
-            token = context.set(indexation_config) if context is not None else None
+            token = _ACTIVE_INDEXATION_CONFIG.set(indexation_config)
             try:
                 result = await self._worker.process_file(
                     task_id=task_id,
@@ -404,8 +386,7 @@ class IndexerWorkerActor:
                     resolved_prompts=resolved_prompts,
                 )
             finally:
-                if token is not None:
-                    context.reset(token)
+                _ACTIVE_INDEXATION_CONFIG.reset(token)
             file_id = metadata.get("file_id", "")
             if workspace_ids and not replace and file_id:
                 try:
@@ -677,10 +658,11 @@ def _required_model_endpoint_names(
         "embedder": [],
         "llm": _required_llm_names(indexation_config),
         "vlm": [],
-        # Audio parsing resolves the preset's selected STT endpoint (or the
-        # global default) at request time. Keep it in the refresh set so a
-        # worker with only file parsing still hydrates the endpoint registry.
-        "stt": [str(indexation_config.get("stt") or "default")] if indexation_config is not None else ["default"],
+        # Audio parsing resolves the preset's selected STT endpoint at request
+        # time, falling back to the global default when it is gone. Both names
+        # are required so a worker with only file parsing still hydrates the
+        # endpoint registry, and so the fallback can't itself be missing.
+        "stt": sorted({"default", str((indexation_config or {}).get("stt") or "default")}),
     }
     if embedder_name:
         names["embedder"].append(embedder_name)

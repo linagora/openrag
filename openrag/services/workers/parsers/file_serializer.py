@@ -28,7 +28,7 @@ class ParserFileSerializer(FileSerializer):
     def __init__(
         self,
         *,
-        transcription_prompt_resolver: Callable[[str | None], Awaitable[str | None]] | None = None,
+        transcription_prompt_resolver: Callable[[], Awaitable[str | None]] | None = None,
         transcription_endpoint_resolver: (
             Callable[[], ModelEndpointConfig | None | Awaitable[ModelEndpointConfig | None]] | None
         ) = None,
@@ -82,7 +82,7 @@ class ParserFileSerializer(FileSerializer):
 
 def build_file_serializer(
     *,
-    transcription_prompt_resolver: Callable[[str | None], Awaitable[str | None]] | None = None,
+    transcription_prompt_resolver: Callable[[], Awaitable[str | None]] | None = None,
     transcription_endpoint_resolver: (
         Callable[[], ModelEndpointConfig | None | Awaitable[ModelEndpointConfig | None]] | None
     ) = None,
