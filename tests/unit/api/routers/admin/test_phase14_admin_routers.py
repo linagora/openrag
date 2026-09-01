@@ -570,7 +570,7 @@ async def test_preset_options_return_registered_choices(async_client_factory):
 
     assert response.status_code == 200
     body = response.json()
-    assert body["chunking_strategies"] == ["recursive_splitter"]
+    assert body["chunking_strategies"] == ["recursive_splitter", "structured_section"]
     assert set(body["retrieval_types"]) == {"single", "multiQuery", "hyde"}
     assert body["reranker_providers"] == ["infinity", "openai", "tei"]
 
