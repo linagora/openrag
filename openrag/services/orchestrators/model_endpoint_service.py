@@ -593,9 +593,8 @@ class ModelEndpointService:
         try:
             async with httpx.AsyncClient(timeout=5.0, headers=headers, follow_redirects=False) as client:
                 resp = await client.get(models_url)
-                if resp.status_code in {401, 403}:
-                    if model_type == "stt":
-                        result["transcription_supported"] = False
+                if resp.status_code in {401, 403} and model_type == "stt":
+                    result["transcription_supported"] = False
                     result["detail"] = (
                         f"Model list request was rejected with HTTP {resp.status_code}. Check the API key."
                     )
@@ -625,7 +624,10 @@ class ModelEndpointService:
                     # This intentionally sends no audio. OpenAI-compatible
                     # servers reject the incomplete request with 4xx when the
                     # route exists; a missing or wrong-method route is 404/405.
-                    transcription_response = await client.post(base_url + "/audio/transcriptions")
+                    transcription_response = await client.post(
+                        base_url + "/audio/transcriptions",
+                        follow_redirects=True,
+                    )
                     transcription_status = transcription_response.status_code
                     if transcription_status in {401, 403}:
                         result["transcription_supported"] = False
