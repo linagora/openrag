@@ -149,7 +149,7 @@ describe("JobListPage filters", () => {
     expect(await screen.findByText("failed.pdf")).not.toBeNull();
   });
 
-  it("scopes its queries by account and polls them itself", async () => {
+  it("scopes its queries by account and authorization role and polls them itself", async () => {
     const { queryClient } = renderJobs();
 
     await screen.findByText("completed.pdf");
@@ -159,10 +159,10 @@ describe("JobListPage filters", () => {
       .findAll()
       .map((query) => query.queryKey);
 
-    expect(queryKeys).toContainEqual(["tasks", 7, "all"]);
-    expect(queryKeys).toContainEqual(["queue-info", 7]);
-    expect(queryRefetchInterval(queryClient, ["tasks", 7, "all"])).toBe(5_000);
-    expect(queryRefetchInterval(queryClient, ["queue-info", 7])).toBe(5_000);
+    expect(queryKeys).toContainEqual(["tasks", 7, "admin", "all"]);
+    expect(queryKeys).toContainEqual(["queue-info", 7, "admin"]);
+    expect(queryRefetchInterval(queryClient, ["tasks", 7, "admin", "all"])).toBe(5_000);
+    expect(queryRefetchInterval(queryClient, ["queue-info", 7, "admin"])).toBe(5_000);
   });
 
   it("bulk-cancels only selected active jobs", async () => {

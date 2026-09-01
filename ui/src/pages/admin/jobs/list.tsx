@@ -169,6 +169,7 @@ export default function JobListPage() {
   const [manualRefreshing, setManualRefreshing] = useState(false);
   const taskStatusFilter = statusTab === "ALL" ? undefined : statusTab === "ACTIVE" ? "active" : statusTab;
   const userId = user?.id ?? 0;
+  const queryScope = { userId, isAdmin };
 
   useEffect(() => {
     const timeout = window.setTimeout(() => setDebouncedSearch(search), JOB_SEARCH_DEBOUNCE_MS);
@@ -176,11 +177,11 @@ export default function JobListPage() {
   }, [search]);
 
   const tasksQuery = useQuery({
-    ...jobsTaskListQueryOptions(userId, taskStatusFilter),
+    ...jobsTaskListQueryOptions(queryScope, taskStatusFilter),
     enabled: !!user,
   });
   const queueInfoQuery = useQuery({
-    ...jobsQueueInfoQueryOptions(userId),
+    ...jobsQueueInfoQueryOptions(queryScope),
     enabled: !!user && isAdmin,
   });
 

@@ -34,6 +34,14 @@ function createWrapper(queryClient = new QueryClient({ defaultOptions: { queries
   };
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
+
 describe("useActiveJobsCount", () => {
   it("counts the server-filtered active tasks", async () => {
     listTasksMock.mockResolvedValue({ tasks: [task("a"), task("b")] });
@@ -76,7 +84,30 @@ describe("useActiveJobsCount", () => {
     rerender();
 
     expect(result.current).toBe(0);
-    expect(jobsQueryKeys.tasks(7, "active")).not.toEqual(jobsQueryKeys.tasks(8, "active"));
+    expect(jobsQueryKeys.tasks({ userId: 7, isAdmin: false }, "active")).not.toEqual(
+      jobsQueryKeys.tasks({ userId: 8, isAdmin: false }, "active"),
+    );
+  });
+
+  it("does not expose an administrator count after a same-account role downgrade", async () => {
+    auth.user = { id: 7, is_admin: true };
+    const regularUserTasks = deferred<Awaited<ReturnType<typeof listTasks>>>();
+    listTasksMock
+      .mockResolvedValueOnce({ tasks: [task("a", 1), task("b", 2), task("c", 3)] })
+      .mockReturnValueOnce(regularUserTasks.promise);
+    const { result, rerender } = renderHook(() => useActiveJobsCount(), {
+      wrapper: createWrapper(),
+    });
+    await waitFor(() => expect(result.current).toBe(3));
+
+    auth.user = { id: 7, is_admin: false };
+    rerender();
+
+    expect(result.current).toBe(0);
+    expect(listTasksMock).toHaveBeenCalledTimes(2);
+
+    regularUserTasks.resolve({ tasks: [task("own-task")] });
+    await waitFor(() => expect(result.current).toBe(1));
   });
 
   it("refreshes the count every five seconds", async () => {
@@ -101,7 +132,9 @@ describe("useActiveJobsCount", () => {
     await waitFor(() => expect(result.current).toBe(4));
 
     await act(async () => {
-      await queryClient.refetchQueries({ queryKey: jobsQueryKeys.tasks(7, "active") });
+      await queryClient.refetchQueries({
+        queryKey: jobsQueryKeys.tasks({ userId: 7, isAdmin: false }, "active"),
+      });
     });
 
     expect(result.current).toBe(4);
@@ -109,11 +142,32 @@ describe("useActiveJobsCount", () => {
 });
 
 describe("jobsQueryKeys", () => {
-  it("separates caches by account and status, and stays under the shared prefixes", () => {
-    expect(jobsQueryKeys.tasks(7, "ACTIVE")).toEqual(["tasks", 7, "active"]);
-    expect(jobsQueryKeys.tasks(7)).toEqual(["tasks", 7, "all"]);
-    expect(jobsQueryKeys.queueInfo(7)).toEqual(["queue-info", 7]);
-    expect(jobsQueryKeys.tasks(7, "active").slice(0, 1)).toEqual([...jobsQueryKeys.allTasks]);
-    expect(jobsQueryKeys.queueInfo(7).slice(0, 1)).toEqual([...jobsQueryKeys.allQueueInfo]);
+  it("separates caches by account, authorization scope, and status", () => {
+    expect(jobsQueryKeys.tasks({ userId: 7, isAdmin: false }, "ACTIVE")).toEqual([
+      "tasks",
+      7,
+      "user",
+      "active",
+    ]);
+    expect(jobsQueryKeys.tasks({ userId: 7, isAdmin: true })).toEqual([
+      "tasks",
+      7,
+      "admin",
+      "all",
+    ]);
+    expect(jobsQueryKeys.queueInfo({ userId: 7, isAdmin: true })).toEqual([
+      "queue-info",
+      7,
+      "admin",
+    ]);
+  });
+
+  it("keeps scoped entries under the shared invalidation prefixes", () => {
+    expect(
+      jobsQueryKeys.tasks({ userId: 7, isAdmin: false }, "active").slice(0, 1),
+    ).toEqual([...jobsQueryKeys.allTasks]);
+    expect(jobsQueryKeys.queueInfo({ userId: 7, isAdmin: true }).slice(0, 1)).toEqual([
+      ...jobsQueryKeys.allQueueInfo,
+    ]);
   });
 });

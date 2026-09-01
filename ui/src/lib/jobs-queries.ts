@@ -4,14 +4,22 @@ import { useAuth } from "@/lib/auth";
 
 export const JOBS_REFETCH_INTERVAL_MS = 5_000;
 
-// Keys carry the user id because the QueryClient outlives a token-mode logout:
-// without it, switching accounts in the same tab shows the previous user's tasks.
+export interface JobsQueryScope {
+  userId: number;
+  isAdmin: boolean;
+}
+
+const scopeKey = ({ userId, isAdmin }: JobsQueryScope) =>
+  [userId, isAdmin ? "admin" : "user"] as const;
+
+// The QueryClient outlives account and role changes, so keys must include both
+// the user identity and the server-side authorization scope of each response.
 export const jobsQueryKeys = {
   allTasks: ["tasks"] as const,
-  tasks: (userId: number, taskStatus?: string) =>
-    ["tasks", userId, taskStatus?.toLowerCase() ?? "all"] as const,
+  tasks: (scope: JobsQueryScope, taskStatus?: string) =>
+    ["tasks", ...scopeKey(scope), taskStatus?.toLowerCase() ?? "all"] as const,
   allQueueInfo: ["queue-info"] as const,
-  queueInfo: (userId: number) => ["queue-info", userId] as const,
+  queueInfo: (scope: JobsQueryScope) => ["queue-info", ...scopeKey(scope)] as const,
 };
 
 export function invalidateJobsQueries(queryClient: QueryClient) {
@@ -21,18 +29,18 @@ export function invalidateJobsQueries(queryClient: QueryClient) {
   ]);
 }
 
-export function jobsTaskListQueryOptions(userId: number, taskStatus?: string) {
+export function jobsTaskListQueryOptions(scope: JobsQueryScope, taskStatus?: string) {
   return queryOptions({
-    queryKey: jobsQueryKeys.tasks(userId, taskStatus),
+    queryKey: jobsQueryKeys.tasks(scope, taskStatus),
     queryFn: () => listTasks(taskStatus),
     refetchInterval: JOBS_REFETCH_INTERVAL_MS, // poll — OpenRag has no task SSE
     staleTime: JOBS_REFETCH_INTERVAL_MS,
   });
 }
 
-export function jobsQueueInfoQueryOptions(userId: number) {
+export function jobsQueueInfoQueryOptions(scope: JobsQueryScope) {
   return queryOptions({
-    queryKey: jobsQueryKeys.queueInfo(userId),
+    queryKey: jobsQueryKeys.queueInfo(scope),
     queryFn: getQueueInfo,
     refetchInterval: JOBS_REFETCH_INTERVAL_MS,
     staleTime: JOBS_REFETCH_INTERVAL_MS,
@@ -46,8 +54,9 @@ export function jobsQueueInfoQueryOptions(userId: number) {
  */
 export function useActiveJobsCount(): number {
   const { user } = useAuth();
+  const scope = { userId: user?.id ?? 0, isAdmin: user?.is_admin === true };
   const { data } = useQuery({
-    ...jobsTaskListQueryOptions(user?.id ?? 0, "active"),
+    ...jobsTaskListQueryOptions(scope, "active"),
     enabled: !!user,
   });
   return data?.tasks.length ?? 0;
