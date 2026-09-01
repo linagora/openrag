@@ -67,15 +67,15 @@ describe("PromptsPage ASR prompt scope", () => {
 
     renderPage();
 
-    const defaultCard = (await screen.findByText("default-asr")).closest("div[class*='relative']")!;
-    await user.click(within(defaultCard).getByRole("button", { name: "Edit", exact: true }));
+    const defaultCard = (await screen.findByText("default-asr")).closest<HTMLElement>("div[class*='relative']")!;
+    await user.click(within(defaultCard).getByRole("button", { name: "Edit" }));
     expect(
       screen.getByText(/used by direct extraction and indexation presets without an explicit ASR prompt selection/i),
     ).toBeTruthy();
 
     await user.click(screen.getByRole("button", { name: "Cancel" }));
-    const customCard = screen.getByText("meeting-notes").closest("div[class*='relative']")!;
-    await user.click(within(customCard).getByRole("button", { name: "Edit", exact: true }));
+    const customCard = screen.getByText("meeting-notes").closest<HTMLElement>("div[class*='relative']")!;
+    await user.click(within(customCard).getByRole("button", { name: "Edit" }));
     expect(
       screen.getByText(/used only by indexation presets that explicitly select this prompt/i),
     ).toBeTruthy();

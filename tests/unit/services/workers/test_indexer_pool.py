@@ -583,6 +583,16 @@ def test_required_model_endpoint_names_include_embedder_vlm_and_stt() -> None:
     }
 
 
+def test_required_model_endpoint_names_treat_blank_stt_selection_as_default() -> None:
+    from services.workers.indexer_pool import _required_model_endpoint_names
+
+    required = _required_model_endpoint_names({"stt": "   "}, embedder_name=None)
+
+    # A blank selection already resolves through the global endpoint. It must
+    # not masquerade as a named resource and trigger a registry miss reload.
+    assert required["stt"] == ["default"]
+
+
 def test_registry_reload_decision_guards() -> None:
     from services.workers.indexer_pool import _registry_reload_decision
 

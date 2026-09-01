@@ -42,6 +42,12 @@ def _current_indexation_config() -> dict[str, Any]:
     return config if isinstance(config, dict) else {}
 
 
+def _explicit_indexation_selection(config: dict[str, Any] | None, key: str) -> str | None:
+    """Return a nonblank named resource selected by an indexation preset."""
+    value = config.get(key) if config is not None else None
+    return value if isinstance(value, str) and value.strip() else None
+
+
 def _indexer_worker_actor_name(index: int) -> str:
     return f"IndexerWorker-{_INDEXER_ACTOR_PROTOCOL_VERSION}-{index}"
 
@@ -203,9 +209,12 @@ class IndexerWorkerActor:
         stays live: ``resolve_prompt`` re-reads it, so an Admin UI edit applies to
         the next transcription without recreating the long-lived parser client.
         """
-        selected_name = _current_indexation_config().get("asr_transcription_prompt_name")
+        selected_name = _explicit_indexation_selection(
+            _current_indexation_config(),
+            "asr_transcription_prompt_name",
+        )
         try:
-            if isinstance(selected_name, str) and selected_name.strip():
+            if selected_name is not None:
                 return await self._get_prompt_service().resolve_prompt(
                     "asr_transcription",
                     names=[selected_name],
@@ -230,7 +239,7 @@ class IndexerWorkerActor:
         stt = getattr(models, "stt", None)
         if stt is None:
             return None
-        selected_name = _current_indexation_config().get("stt")
+        selected_name = _explicit_indexation_selection(_current_indexation_config(), "stt")
         endpoint = stt.get(selected_name or "default")
         if endpoint is None and selected_name:
             self._logger.warning(
@@ -659,6 +668,10 @@ def _required_model_endpoint_names(
     indexation_config: dict[str, Any] | None,
     embedder_name: str | None,
 ) -> dict[str, list[str]]:
+    selected_stt = _explicit_indexation_selection(indexation_config, "stt")
+    required_stt = (
+        ["default"] if selected_stt is None or selected_stt == "default" else sorted(["default", selected_stt])
+    )
     names: dict[str, list[str]] = {
         "embedder": [],
         "llm": _required_llm_names(indexation_config),
@@ -667,7 +680,7 @@ def _required_model_endpoint_names(
         # time, falling back to the global default when it is gone. Both names
         # are required so a worker with only file parsing still hydrates the
         # endpoint registry, and so the fallback can't itself be missing.
-        "stt": sorted({"default", str((indexation_config or {}).get("stt") or "default")}),
+        "stt": required_stt,
     }
     if embedder_name:
         names["embedder"].append(embedder_name)
