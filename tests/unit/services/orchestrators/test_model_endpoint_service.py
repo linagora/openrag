@@ -1470,7 +1470,7 @@ async def test_validate_stt_endpoint_probes_transcription_capability_with_redire
             assert timeout.write == 5.0
             assert timeout.pool == 5.0
             assert timeout.read == 180.0
-            return FakeResponse(200)
+            return FakeResponse(200, {"text": ""})
 
     monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
 
@@ -1502,6 +1502,67 @@ async def test_validate_stt_endpoint_probes_transcription_capability_with_redire
         "transcription_supported": True,
         "detail": None,
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("extra", "audio_payload", "expected_supported"),
+    [
+        ({}, {}, False),
+        ({"response_format": "text"}, None, True),
+    ],
+)
+async def test_validate_stt_endpoint_checks_success_response_shape(
+    monkeypatch,
+    extra,
+    audio_payload,
+    expected_supported,
+):
+    import httpx
+
+    svc = _make_service()
+
+    class FakeResponse:
+        status_code = 200
+        text = ""
+
+        def __init__(self, payload):
+            self._payload = payload
+
+        def json(self):
+            if self._payload is None:
+                raise ValueError("not JSON")
+            return self._payload
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, _url):
+            return FakeResponse({"data": [{"id": "moss-transcribe-diarize"}]})
+
+        async def post(self, _url, **_kwargs):
+            return FakeResponse(audio_payload)
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+    result = await svc.validate_endpoint(
+        "http://moss:8000/v1",
+        "moss-transcribe-diarize",
+        model_type="stt",
+        extra=extra,
+    )
+
+    assert result["transcription_supported"] is expected_supported
+    assert result["detail"] == (
+        None if expected_supported else "Transcription endpoint returned an incompatible response."
+    )
 
 
 @pytest.mark.asyncio
@@ -1735,7 +1796,7 @@ async def test_validate_stt_endpoint_probes_audio_when_model_list_is_invalid(mon
 
         async def post(self, url, **_kwargs):
             calls.append(("post", url))
-            return FakeResponse(200)
+            return FakeResponse(200, {"text": ""})
 
     monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
 
@@ -1767,6 +1828,9 @@ async def test_validate_stt_endpoint_probes_audio_when_model_list_times_out(monk
 
     class FakeResponse:
         status_code = 200
+
+        def json(self):
+            return {"text": ""}
 
     class FakeClient:
         def __init__(self, **_kwargs):

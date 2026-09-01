@@ -41,6 +41,7 @@ _SAMPLING_TYPES = frozenset({"llm", "vlm"})
 # hand-set key with a placeholder the moment sync_on_boot was switched on.
 _PLACEHOLDER_API_KEYS = frozenset({"", "EMPTY"})
 _STT_VALIDATION_TIMEOUT_SECONDS = 15.0
+_STT_TEXT_RESPONSE_FORMATS = frozenset({"text", "srt", "vtt"})
 # Which env var, if any, owns a given tunable per model type. `_build_default_seeds`
 # always fills these from Settings, so their presence in the seed says nothing about
 # whether the *environment* set them — without this table sync would write the config
@@ -118,6 +119,18 @@ def _stt_validation_form_data(model_name: str, extra: dict[str, Any] | None) -> 
             else:
                 serialized[field_name] = [existing, field_value]
     return serialized
+
+
+def _stt_validation_response_is_compatible(response: Any, extra: dict[str, Any] | None) -> bool:
+    """Check that the probe response has the shape consumed at runtime."""
+    response_format = extra.get("response_format") if extra else None
+    if response_format in _STT_TEXT_RESPONSE_FORMATS:
+        return isinstance(response.text, str)
+    try:
+        payload = response.json()
+    except (TypeError, ValueError):
+        return False
+    return isinstance(payload, Mapping) and isinstance(payload.get("text"), str)
 
 
 def _slug(model_name: str) -> str:
@@ -733,7 +746,11 @@ class ModelEndpointService:
                     result["reachable"] = True
                     transcription_status = transcription_response.status_code
                     if 200 <= transcription_status < 300:
-                        result["transcription_supported"] = True
+                        if _stt_validation_response_is_compatible(transcription_response, extra):
+                            result["transcription_supported"] = True
+                        else:
+                            result["transcription_supported"] = False
+                            result["detail"] = "Transcription endpoint returned an incompatible response."
                     elif transcription_status in {401, 403}:
                         result["transcription_supported"] = False
                         result["detail"] = (
