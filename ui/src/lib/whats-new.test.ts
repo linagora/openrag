@@ -62,6 +62,10 @@ describe("isNewSince — the version window", () => {
     // so a repeated or out-of-order run is as malformed as a bare typo.
     expect(isNewSince("2.2.0", "2.2.0.dev1.post1.dev5")).toBe(false);
     expect(isNewSince("2.2.0", "2.2.0.post1a1")).toBe(false);
+    // The two grammars are alternatives, not a menu: a string wearing a PEP 440
+    // marker *and* a SemVer pre-release belongs to neither scheme.
+    expect(isNewSince("2.2.0", "2.2.0rc1-beta")).toBe(false);
+    expect(isNewSince("2.2.0", "2.2.0.post1-rc.1")).toBe(false);
     expect(isNewSince("2.2.0", "2.2.0.x9")).toBe(false);
     expect(isNewSince("2.2.0", "2.2.0 wat")).toBe(false);
     expect(isNewSince("2.2.0", "2.2.0-")).toBe(false);
@@ -82,6 +86,9 @@ describe("isNewSince — the version window", () => {
     expect(isNewSince("2.2.0", "2.2.0.1")).toBe(true);
     expect(isNewSince("2.2.0", "2.2.0a1.post2.dev3")).toBe(true);
     expect(isNewSince("2.2.0", "2.2.0-next.3")).toBe(true);
+    // A `+build` segment is legal after either grammar, so the alternation must
+    // leave it outside itself.
+    expect(isNewSince("2.2.0", "2.2.0-rc.1+build.7")).toBe(true);
   });
 
   it("tolerates a v prefix, a missing patch, and pre-release suffixes", () => {

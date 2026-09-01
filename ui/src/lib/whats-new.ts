@@ -87,18 +87,23 @@ type Version = { major: number; minor: number };
  * as 2.2, which is the prefix hole again, one dot along. In order:
  *
  *   1. numeric segments — `2.2`, `2.2.0`, or more;
- *   2. PEP 440 markers in their defined order — at most one pre-release
- *      (`a` `b` `rc`), then at most one `post`, then at most one `dev`, each
- *      attached or separated by `.` `-` `_` (`2.2.0rc1`, `2.1.1.post1`,
- *      `2.2.0a1.post2.dev3`). Ordering them is what makes the grammar reject
- *      `2.2.0.dev1.post1.dev5` and `2.2.0.post1a1`, which are version-shaped but
- *      not versions;
- *   3. an optional SemVer pre-release — `-` then dot-separated alphanumerics,
- *      which is how a hand-written registry pin spells `2.2.0-rc.1`;
- *   4. an optional `+` build or local segment (`+build.7`, `+local.7`).
+ *   2. then **either** grammar's pre-release notation, never both — they are
+ *      alternatives, not a menu, and a string wearing one of each belongs to
+ *      neither scheme:
+ *      - PEP 440 markers in their defined order — at most one pre-release
+ *        (`a` `b` `rc`), then at most one `post`, then at most one `dev`, each
+ *        attached or separated by `.` `-` `_` (`2.2.0rc1`, `2.1.1.post1`,
+ *        `2.2.0a1.post2.dev3`). Ordering them is what rejects
+ *        `2.2.0.dev1.post1.dev5` and `2.2.0.post1a1`;
+ *      - or a SemVer pre-release — `-` then dot-separated alphanumerics, which
+ *        is how a hand-written registry pin spells `2.2.0-rc.1`.
+ *      Making these alternatives is what rejects `2.2.0rc1-beta` and
+ *      `2.2.0.post1-rc.1`, hybrids that are version-shaped but not versions;
+ *   3. an optional `+` build or local segment, legal after either
+ *      (`2.2.0.dev3+local.7`, `2.2.0-rc.1+build.7`).
  */
 const VERSION_PATTERN =
-  /^\s*v?(\d+)\.(\d+)(?:\.\d+)*(?:[._-]?(?:a|b|rc)\d*)?(?:[._-]?post\d*)?(?:[._-]?dev\d*)?(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?\s*$/i;
+  /^\s*v?(\d+)\.(\d+)(?:\.\d+)*(?:(?:[._-]?(?:a|b|rc)\d*)?(?:[._-]?post\d*)?(?:[._-]?dev\d*)?|-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?\s*$/i;
 
 function parseVersion(raw: string | undefined | null): Version | null {
   if (!raw) return null;
