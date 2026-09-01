@@ -18,12 +18,12 @@ _DASH_START = re.compile(
 _DASH_MARKER = re.compile(r"\[\s*\d+(?:\.\d+)?\s*-")
 _DASH_CONTENT_MARKER = re.compile(rf"{_TIME_TOKEN}|\[\s*(?:[Ss]\d*|\d+(?:\.\d+)?\s*-)")
 _COMPACT_START = re.compile(
-    rf"\[\s*(?P<start>{_TIME})\s*\]\s*\[\s*(?P<speaker>{_SPEAKER})\s*\]",
+    rf"(?P<start_token>\[\s*(?P<start>{_TIME})\s*\])\s*\[\s*(?P<speaker>{_SPEAKER})\s*\]",
 )
 _INITIAL_TIME = re.compile(rf"^\s*\[\s*(?P<start>{_TIME})\s*\]")
 _TRAILING_TIME = re.compile(rf"\[\s*(?P<end>{_TIME})\s*\]\s*$")
 _ADJACENT_TIMES = re.compile(rf"{_TIME_TOKEN}\s*{_TIME_TOKEN}")
-_TIME_TOKEN_PAIR = re.compile(rf"{_TIME_TOKEN}.*{_TIME_TOKEN}", re.DOTALL)
+_TIME_TOKEN_MARKER = re.compile(_TIME_TOKEN)
 _SPEAKER_LABEL = re.compile(rf"\[\s*(?P<speaker>{_SPEAKER})\s*\]")
 _SPEAKER_MARKER = re.compile(r"\[\s*[Ss]\d*")
 
@@ -68,7 +68,10 @@ def _parse_compact(transcript: str) -> list[_Segment]:
     regions: list[tuple[str, str, int, int]] = []
     initial = _INITIAL_TIME.match(transcript)
     if initial and initial.end() <= starts[0].start():
-        regions.append(("S01", initial["start"], initial.end(), starts[0].start()))
+        initial_end = starts[0].start()
+        if _TRAILING_TIME.search(transcript[initial.end() : initial_end]) is None:
+            initial_end = starts[0].end("start_token")
+        regions.append(("S01", initial["start"], initial.end(), initial_end))
     elif transcript[: starts[0].start()].strip():
         return []
 
@@ -97,7 +100,7 @@ def _parse_speaker_only(transcript: str) -> list[_Segment]:
         or transcript[: labels[0].start()].strip()
         or _DASH_MARKER.search(transcript)
         or _COMPACT_START.search(transcript)
-        or _TIME_TOKEN_PAIR.search(transcript)
+        or _TIME_TOKEN_MARKER.search(transcript)
     ):
         return []
 

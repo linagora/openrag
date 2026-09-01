@@ -24,6 +24,12 @@ def test_normalizes_compact_output_with_an_initial_speakerless_turn():
     assert normalize_moss_speaker_aware_transcript(transcript) == "[S01] Bonjour\n[S02] Bienvenue sur Twake"
 
 
+def test_normalizes_initial_speakerless_turn_with_a_shared_boundary():
+    transcript = "[0] Hello [1][S02] Hi [2]"
+
+    assert normalize_moss_speaker_aware_transcript(transcript) == "[S01] Hello\n[S02] Hi"
+
+
 def test_compact_boundaries_do_not_consume_spoken_bracketed_numbers():
     transcript = "[1][S01] Read section [2] [3][3][S02] Next [4]"
 
@@ -44,6 +50,12 @@ def test_normalizes_speaker_only_lines():
 
 def test_preserves_speaker_only_output_with_a_trailing_unlabeled_compact_turn():
     transcript = "[S01] A [S02] C [2] B [3]"
+
+    assert normalize_moss_speaker_aware_transcript(transcript) == transcript
+
+
+def test_preserves_speaker_only_output_with_an_incomplete_unlabeled_compact_turn():
+    transcript = "[S01] A [S02] C [2] B"
 
     assert normalize_moss_speaker_aware_transcript(transcript) == transcript
 
