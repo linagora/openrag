@@ -1759,6 +1759,54 @@ async def test_validate_stt_endpoint_probes_audio_when_model_list_is_invalid(mon
 
 
 @pytest.mark.asyncio
+async def test_validate_stt_endpoint_probes_audio_when_model_list_times_out(monkeypatch):
+    import httpx
+
+    svc = _make_service()
+    calls: list[str] = []
+
+    class FakeResponse:
+        status_code = 200
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, request_url):
+            calls.append("get")
+            raise httpx.ReadTimeout("model list cold start")
+
+        async def post(self, request_url, **kwargs):
+            calls.append("post")
+            assert kwargs["timeout"].read == 900
+            return FakeResponse()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+    result = await svc.validate_endpoint(
+        "http://moss:8000/v1",
+        "moss-transcribe-diarize",
+        model_type="stt",
+        timeout=900,
+    )
+
+    assert calls == ["get", "post"]
+    assert result == {
+        "reachable": True,
+        "model_found": None,
+        "models_served": None,
+        "transcription_supported": True,
+        "detail": "Model list request timed out.",
+    }
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("status_code", [401, 403])
 async def test_validate_stt_endpoint_rejects_auth_failure_on_audio_probe(monkeypatch, status_code):
     import httpx
