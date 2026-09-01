@@ -8,7 +8,9 @@ so the system works without any admin interaction.
 
 from __future__ import annotations
 
+import io
 import os
+import wave
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
@@ -35,6 +37,7 @@ _SAMPLING_TYPES = frozenset({"llm", "vlm"})
 # a credential. Treating it as one would let boot-time sync overwrite a real
 # hand-set key with a placeholder the moment sync_on_boot was switched on.
 _PLACEHOLDER_API_KEYS = frozenset({"", "EMPTY"})
+_STT_VALIDATION_TIMEOUT_SECONDS = 15.0
 # Which env var, if any, owns a given tunable per model type. `_build_default_seeds`
 # always fills these from Settings, so their presence in the seed says nothing about
 # whether the *environment* set them — without this table sync would write the config
@@ -51,6 +54,22 @@ _ENV_OWNED_TUNABLES: dict[str, dict[str, str]] = {
     },
     "llm": {},
 }
+
+
+def _build_stt_validation_wav() -> bytes:
+    """Build a portable one-second WAV sample for STT endpoint validation."""
+    sample_rate = 16_000
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(sample_rate)
+        wav.writeframes(b"\x00\x00" * sample_rate)
+    return buffer.getvalue()
+
+
+# Created once rather than encoding/transcoding a file for each Admin UI validation.
+_STT_VALIDATION_WAV = _build_stt_validation_wav()
 
 
 def _slug(model_name: str) -> str:
@@ -576,6 +595,11 @@ class ModelEndpointService:
             "transcription_supported": None,
             "detail": None,
         }
+        stt_model_name = model_name.strip() if model_type == "stt" and model_name else None
+        if model_type == "stt" and not stt_model_name:
+            result["transcription_supported"] = False
+            result["detail"] = "A model name is required to validate audio transcription."
+            return result
         try:
             parsed = urlsplit(url)
         except ValueError:
@@ -621,15 +645,30 @@ class ModelEndpointService:
                 else:
                     result["detail"] = f"Model list returned HTTP {resp.status_code}."
                 if model_type == "stt":
-                    # This intentionally sends no audio. OpenAI-compatible
-                    # servers reject the incomplete request with 4xx when the
-                    # route exists; a missing or wrong-method route is 404/405.
+                    # The UI already rejects an unavailable model, so avoid a
+                    # needless upload and inference request in that case.
+                    if result["model_found"] is False:
+                        return result
+                    # A well-formed request is required to validate credentials:
+                    # some providers reject a missing file/model with 400/422
+                    # before they authenticate the request.
                     transcription_response = await client.post(
                         base_url + "/audio/transcriptions",
+                        data={"model": stt_model_name},
+                        files={
+                            "file": (
+                                "openrag-stt-validation.wav",
+                                _STT_VALIDATION_WAV,
+                                "audio/wav",
+                            )
+                        },
                         follow_redirects=True,
+                        timeout=_STT_VALIDATION_TIMEOUT_SECONDS,
                     )
                     transcription_status = transcription_response.status_code
-                    if transcription_status in {401, 403}:
+                    if 200 <= transcription_status < 300:
+                        result["transcription_supported"] = True
+                    elif transcription_status in {401, 403}:
                         result["transcription_supported"] = False
                         result["detail"] = (
                             f"Transcription capability check was rejected with HTTP {transcription_status}. "
@@ -642,7 +681,8 @@ class ModelEndpointService:
                         result["transcription_supported"] = False
                         result["detail"] = f"Transcription capability check returned HTTP {transcription_status}."
                     else:
-                        result["transcription_supported"] = True
+                        result["transcription_supported"] = False
+                        result["detail"] = f"Transcription validation request returned HTTP {transcription_status}."
         except httpx.ConnectError as exc:
             if result["reachable"] and model_type == "stt":
                 result["transcription_supported"] = False
