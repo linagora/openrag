@@ -347,6 +347,7 @@ function EndpointDialog({
   // LLM token-budget fields (max context / max output) apply to LLM endpoints only.
   const isLlm = modelType === "llm";
   const isStt = modelType === "stt";
+  const sttValidationTimeout = isStt ? timeout : null;
   const vendorOptions = VENDOR_OPTIONS_BY_TYPE[modelType];
   const [validated, setValidated] = useState<boolean | null>(null);
   const [validating, setValidating] = useState(false);
@@ -451,6 +452,8 @@ function EndpointDialog({
       editing &&
       endpoint === editing.endpoint &&
       (modelName || "") === (editing.model_name || "") &&
+      sttValidationTimeout ===
+        (editing.model_type === "stt" ? String(editing.timeout) : null) &&
       apiKey === editingExtra?.apiKey &&
       extraJson === JSON.stringify(editingRawExtra, null, 2)
     ) {
@@ -464,7 +467,7 @@ function EndpointDialog({
     }
     setValidated(null);
     setValidationMsg(null);
-  }, [endpoint, modelName, apiKey, extraJson, editing]);
+  }, [endpoint, modelName, sttValidationTimeout, apiKey, extraJson, editing]);
 
   const apiKeySubmitValue = () =>
     prepareModelEndpointExtraForSubmit({ api_key: apiKey.trim() }).api_key;
