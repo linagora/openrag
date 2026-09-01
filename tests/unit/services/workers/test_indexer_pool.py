@@ -593,6 +593,46 @@ def test_required_model_endpoint_names_treat_blank_stt_selection_as_default() ->
     assert required["stt"] == ["default"]
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("path", "original_filename", "audio_loader", "expected_stt_names"),
+    [
+        ("document.pdf", None, "OpenAIAudioLoader", ["default"]),
+        ("recording.wav", None, "LocalWhisperLoader", ["default"]),
+        ("opaque-upload", "recording.wav", "OpenAIAudioLoader", ["default", "retired-moss"]),
+    ],
+)
+async def test_actor_hydrates_selected_stt_only_for_external_audio(
+    path: str,
+    original_filename: str | None,
+    audio_loader: str,
+    expected_stt_names: list[str],
+) -> None:
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=_RecordingWorker())
+    actor._cfg = SimpleNamespace(
+        loader=SimpleNamespace(
+            file_loaders=SimpleNamespace(wav=audio_loader, mp3=audio_loader),
+        ),
+    )
+    required_registry_names = None
+
+    async def record_registry_names(required):
+        nonlocal required_registry_names
+        required_registry_names = required
+
+    actor._ensure_registry_fresh = record_registry_names
+
+    await actor.process_file(
+        task_id="t",
+        path=path,
+        metadata={"file_id": "f", "original_filename": original_filename},
+        partition="p",
+        indexation_config={"stt": "retired-moss"},
+    )
+
+    assert required_registry_names["stt"] == expected_stt_names
+
+
 def test_registry_reload_decision_guards() -> None:
     from services.workers.indexer_pool import _registry_reload_decision
 
@@ -1483,6 +1523,11 @@ def _bare_worker_actor(*, save_uploaded_files: bool, worker: _RecordingWorker):
     actor._ensure_catalog = _noop
     actor._ensure_registry_fresh = _noop
     actor._worker = worker
+    actor._cfg = SimpleNamespace(
+        loader=SimpleNamespace(
+            file_loaders=SimpleNamespace(wav="LocalWhisperLoader", mp3="LocalWhisperLoader"),
+        ),
+    )
     actor._catalog_store = SimpleNamespace(
         workspace_repo=SimpleNamespace(),
         document_repo=SimpleNamespace(release_content_sha256_claim=AsyncMock()),

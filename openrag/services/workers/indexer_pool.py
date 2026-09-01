@@ -10,7 +10,7 @@ from typing import Any
 import ray
 from core.config.model_endpoints import CONTROL_EXTRA_KEYS
 from core.models.catalog import CONTENT_CLAIM_TOKEN_METADATA_KEY
-from services.workers.indexer_actor import IndexerWorker, delete_uploaded_file
+from services.workers.indexer_actor import IndexerWorker, _display_filename, delete_uploaded_file
 
 from openrag.core.config.root import Settings
 
@@ -378,7 +378,18 @@ class IndexerWorkerActor:
         worker_metadata = {key: value for key, value in metadata.items() if key != CONTENT_CLAIM_TOKEN_METADATA_KEY}
         try:
             await self._ensure_catalog()
-            await self._ensure_registry_fresh(_required_model_endpoint_names(indexation_config, embedder_name))
+            from services.workers.parsers.parser_dispatcher import routes_to_openai_audio_loader
+
+            await self._ensure_registry_fresh(
+                _required_model_endpoint_names(
+                    indexation_config,
+                    embedder_name,
+                    include_selected_stt=routes_to_openai_audio_loader(
+                        self._cfg,
+                        _display_filename(path, metadata),
+                    ),
+                )
+            )
             # Resolve the enrichment-stage prompts once for this file (partition
             # override → global default → disk seed). Done here, at the job
             # boundary, so per-chunk work reuses one resolved string instead of
@@ -667,8 +678,10 @@ def _required_llm_names(indexation_config: dict[str, Any] | None) -> list[str]:
 def _required_model_endpoint_names(
     indexation_config: dict[str, Any] | None,
     embedder_name: str | None,
+    *,
+    include_selected_stt: bool = True,
 ) -> dict[str, list[str]]:
-    selected_stt = _explicit_indexation_selection(indexation_config, "stt")
+    selected_stt = _explicit_indexation_selection(indexation_config, "stt") if include_selected_stt else None
     required_stt = (
         ["default"] if selected_stt is None or selected_stt == "default" else sorted(["default", selected_stt])
     )
