@@ -171,7 +171,6 @@ def setup_milvus(client: MilvusClient):
         DataType.VARCHAR,
         max_length=65535,
         enable_analyzer=True,
-        enable_match=True,
     )
     schema.add_field("partition", DataType.VARCHAR, max_length=65535, is_partition_key=True)
     schema.add_field("file_id", DataType.VARCHAR, max_length=65535)
