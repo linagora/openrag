@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import pytest
-from api.schemas.admin.model_endpoint_schemas import CreateModelEndpointRequest, UpdateModelEndpointRequest
+from api.schemas.admin.model_endpoint_schemas import (
+    CreateModelEndpointRequest,
+    UpdateModelEndpointRequest,
+    ValidateEndpointRequest,
+)
 from api.schemas.admin.partition_schemas import CreatePartitionRequest, UpdatePartitionRequest
 from api.schemas.admin.preset_schemas import CreatePresetRequest, UpdatePresetRequest
 from pydantic import ValidationError
@@ -44,6 +48,43 @@ def test_create_stt_endpoint_requires_a_model_and_accepts_language_hint():
             model_name="moss-transcribe-diarize",
             extra={"language": "   "},
         )
+
+
+def test_model_endpoint_requests_normalize_model_names():
+    """Every write and draft probe must use the model name that will run."""
+    create = CreateModelEndpointRequest(
+        name="moss",
+        model_type="stt",
+        endpoint="http://moss:8000/v1",
+        model_name="  moss-transcribe-diarize  ",
+    )
+    update = UpdateModelEndpointRequest(model_name="  moss-transcribe-diarize  ")
+    validate = ValidateEndpointRequest(
+        endpoint="http://moss:8000/v1",
+        model_type="stt",
+        model_name="  moss-transcribe-diarize  ",
+    )
+
+    assert create.model_name == "moss-transcribe-diarize"
+    assert update.model_name == "moss-transcribe-diarize"
+    assert validate.model_name == "moss-transcribe-diarize"
+
+
+def test_validate_endpoint_request_accepts_a_positive_timeout():
+    request = ValidateEndpointRequest(
+        endpoint="http://moss:8000/v1",
+        model_type="stt",
+        model_name="moss-transcribe-diarize",
+        timeout=900,
+    )
+
+    assert request.timeout == 900
+
+
+@pytest.mark.parametrize("timeout", [0, -1])
+def test_validate_endpoint_request_rejects_non_positive_timeout(timeout):
+    with pytest.raises(ValidationError):
+        ValidateEndpointRequest(endpoint="http://moss:8000/v1", timeout=timeout)
 
 
 @pytest.mark.parametrize("model_type", ["embedding", "chat", "vision", ""])

@@ -1459,7 +1459,10 @@ async def test_validate_stt_endpoint_probes_transcription_capability_with_redire
             assert files["file"][1][:4] == b"RIFF"
             assert len(files["file"][1]) == 32_044
             assert follow_redirects is True
-            assert timeout == 15.0
+            assert timeout.connect == 5.0
+            assert timeout.write == 5.0
+            assert timeout.pool == 5.0
+            assert timeout.read == 180.0
             return FakeResponse(200)
 
     monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
@@ -1468,6 +1471,7 @@ async def test_validate_stt_endpoint_probes_transcription_capability_with_redire
         "http://moss:8000/v1",
         "moss-transcribe-diarize",
         model_type="stt",
+        timeout=180,
     )
 
     assert calls == [
@@ -1481,6 +1485,52 @@ async def test_validate_stt_endpoint_probes_transcription_capability_with_redire
         "transcription_supported": True,
         "detail": None,
     }
+
+
+@pytest.mark.asyncio
+async def test_validate_stt_endpoint_uses_one_normalized_model_name(monkeypatch):
+    """Model discovery and the authenticated probe must agree on the model."""
+    import httpx
+
+    svc = _make_service()
+    probed_models: list[str] = []
+
+    class FakeResponse:
+        status_code = 200
+
+        def __init__(self, payload=None):
+            self._payload = payload
+
+        def json(self):
+            return self._payload
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, _url):
+            return FakeResponse({"data": [{"id": "moss-transcribe-diarize"}]})
+
+        async def post(self, _url, *, data, **_kwargs):
+            probed_models.append(data["model"])
+            return FakeResponse()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+    result = await svc.validate_endpoint(
+        "http://moss:8000/v1",
+        "  moss-transcribe-diarize  ",
+        model_type="stt",
+    )
+
+    assert result["model_found"] is True
+    assert probed_models == ["moss-transcribe-diarize"]
 
 
 @pytest.mark.asyncio

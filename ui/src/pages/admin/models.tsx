@@ -575,11 +575,13 @@ function EndpointDialog({
         !isClearingStoredApiKey &&
         !apiKey &&
         (!submittedApiKey || submittedApiKey === REDACTED_SECRET);
+      const validationTimeout = numOr(timeout, isStt ? 3600 : 30);
       const res = canUseStoredSecret
         ? await validateModelEndpoint({
             endpoint,
             model_type: modelType,
             model_name: modelName || undefined,
+            timeout: validationTimeout,
             stored_api_key_model_type: editing.model_type,
             stored_api_key_name: editing.name,
           })
@@ -587,6 +589,7 @@ function EndpointDialog({
             endpoint,
             model_type: modelType,
             model_name: modelName || undefined,
+            timeout: validationTimeout,
             api_key: apiKey,
           });
       if (!res.reachable) {
