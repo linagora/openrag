@@ -24,7 +24,11 @@ import {
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { cancelTask, isActiveState, listTasks, type QueueInfo, type TaskListItem } from "@/lib/api/jobs";
 import { downloadCsv } from "@/lib/csv";
-import { jobsQueueInfoQueryOptions, jobsTaskListQueryOptions } from "@/lib/jobs-queries";
+import {
+  invalidateJobsQueries,
+  jobsQueueInfoQueryOptions,
+  jobsTaskListQueryOptions,
+} from "@/lib/jobs-queries";
 import { formatDate } from "@/lib/utils";
 
 // OpenRag exposes per-file indexing tasks (TaskStateManager), not batch "jobs".
@@ -164,7 +168,7 @@ export default function JobListPage() {
   const [rowSelection, setRowSelection] = useState<RowSelectionState>({});
   const [manualRefreshing, setManualRefreshing] = useState(false);
   const taskStatusFilter = statusTab === "ALL" ? undefined : statusTab === "ACTIVE" ? "active" : statusTab;
-  const queryScope = { userId: user?.id ?? 0, isAdmin };
+  const userId = user?.id ?? 0;
 
   useEffect(() => {
     const timeout = window.setTimeout(() => setDebouncedSearch(search), JOB_SEARCH_DEBOUNCE_MS);
@@ -172,15 +176,11 @@ export default function JobListPage() {
   }, [search]);
 
   const tasksQuery = useQuery({
-    ...jobsTaskListQueryOptions(queryScope, taskStatusFilter, {
-      // The sidebar already polls this exact user-scoped query.
-      poll: isAdmin || taskStatusFilter !== "active",
-    }),
+    ...jobsTaskListQueryOptions(userId, taskStatusFilter),
     enabled: !!user,
   });
   const queueInfoQuery = useQuery({
-    // The sidebar owns the polling observer; this page shares its raw cache.
-    ...jobsQueueInfoQueryOptions(queryScope, { poll: false }),
+    ...jobsQueueInfoQueryOptions(userId),
     enabled: !!user && isAdmin,
   });
 
@@ -226,7 +226,7 @@ export default function JobListPage() {
       if (failed) toast.error(`${failed} task(s) failed to cancel`);
       if (skipped) toast.error(`${skipped} task(s) were no longer active`);
       setRowSelection({});
-      queryClient.invalidateQueries({ queryKey: ["tasks"] });
+      void invalidateJobsQueries(queryClient);
     },
     onError: (error: Error) => toast.error(`Bulk cancel failed: ${error.message}`),
   });

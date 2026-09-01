@@ -7,7 +7,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { toast } from "sonner";
 import type { Action } from "sonner";
 import { deleteFile, uploadFile } from "@/lib/api/indexing";
-import { getQueueInfo } from "@/lib/api/jobs";
+import { listTasks, type TaskListItem } from "@/lib/api/jobs";
 import { downloadCsv } from "@/lib/csv";
 import { useActiveJobsCount } from "@/lib/jobs-queries";
 import DocumentListPage from "./list";
@@ -34,7 +34,7 @@ vi.mock("@/lib/auth", () => ({
 
 vi.mock("@/lib/api/jobs", async () => {
   const actual = await vi.importActual<typeof import("@/lib/api/jobs")>("@/lib/api/jobs");
-  return { ...actual, getQueueInfo: vi.fn() };
+  return { ...actual, listTasks: vi.fn() };
 });
 
 vi.mock("@/lib/api/partitions", () => ({
@@ -84,19 +84,17 @@ vi.mock("@/lib/csv", () => ({
 
 const deleteFileMock = vi.mocked(deleteFile);
 const uploadFileMock = vi.mocked(uploadFile);
-const getQueueInfoMock = vi.mocked(getQueueInfo);
+const listTasksMock = vi.mocked(listTasks);
 const downloadCsvMock = vi.mocked(downloadCsv);
 const toastSuccessMock = vi.mocked(toast.success);
 
-const queueInfo = (active: number) => ({
-  workers: { total_slots: 4, pool_size: 2, max_per_actor: 2 },
-  tasks: {
-    active,
-    active_statuses: { QUEUED: active, SERIALIZING: 0 },
-    total_completed: 0,
-    total_cancelled: 0,
-    total_failed: 0,
-  },
+const activeTasks = (count: number) => ({
+  tasks: Array.from({ length: count }, (_, i): TaskListItem => ({
+    task_id: `task-${i}`,
+    state: "QUEUED",
+    details: { file_id: `file-${i}`, partition: "docs", metadata: {}, user_id: 7 },
+    url: `/indexer/task/task-${i}`,
+  })),
 });
 
 function LocationProbe() {
@@ -105,8 +103,7 @@ function LocationProbe() {
 }
 
 function ActiveJobsProbe() {
-  const jobs = useActiveJobsCount();
-  return <output data-testid="active-jobs">{jobs.hasResolvedOnce ? jobs.count : "pending"}</output>;
+  return <output data-testid="active-jobs">{useActiveJobsCount()}</output>;
 }
 
 function renderDocuments(initialEntries = ["/documents"], includeJobsProbe = false) {
@@ -139,7 +136,7 @@ describe("DocumentListPage", () => {
     permissions.superAdminModeResolved = true;
     deleteFileMock.mockClear();
     uploadFileMock.mockReset();
-    getQueueInfoMock.mockReset();
+    listTasksMock.mockReset();
     downloadCsvMock.mockClear();
     toastSuccessMock.mockClear();
   });
@@ -304,11 +301,12 @@ describe("DocumentListPage", () => {
 
   it("refreshes the active Jobs count as soon as uploads are accepted", async () => {
     uploadFileMock.mockResolvedValue({ task_status_url: "/queue/task-1" });
-    getQueueInfoMock.mockResolvedValueOnce(queueInfo(0)).mockResolvedValue(queueInfo(3));
+    listTasksMock.mockResolvedValueOnce(activeTasks(0)).mockResolvedValue(activeTasks(3));
     renderDocuments(["/documents"], true);
 
-    await waitFor(() => expect(screen.getByTestId("active-jobs").textContent).toBe("0"));
-    await userEvent.click(screen.getByRole("button", { name: "Upload" }));
+    await waitFor(() => expect(listTasksMock).toHaveBeenCalledTimes(1));
+    expect(screen.getByTestId("active-jobs").textContent).toBe("0");
+    await userEvent.click(await screen.findByRole("button", { name: "Upload" }));
     await userEvent.upload(screen.getByLabelText("Files"), [
       new File(["first"], "first.txt", { type: "text/plain" }),
       new File(["second"], "second.txt", { type: "text/plain" }),

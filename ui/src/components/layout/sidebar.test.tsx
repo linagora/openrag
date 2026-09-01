@@ -5,15 +5,10 @@ import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { SidebarProvider } from "@/components/ui/sidebar";
 import { AppSidebar } from "./sidebar";
 
-const activeJobs = vi.hoisted(() => ({
-  count: 7,
-  isInitialLoading: false,
-  hasResolvedOnce: true,
-  isError: false,
-}));
+const activeJobs = vi.hoisted(() => ({ count: 7 }));
 
 vi.mock("@/lib/jobs-queries", () => ({
-  useActiveJobsCount: () => activeJobs,
+  useActiveJobsCount: () => activeJobs.count,
 }));
 
 vi.mock("@/lib/permissions", () => ({
@@ -51,6 +46,8 @@ function renderSidebar(initialEntry = "/", defaultOpen = true) {
   );
 }
 
+const jobsBadge = () => screen.getByTitle("Jobs").querySelector('[data-slot="jobs-badge"]');
+
 beforeAll(() => {
   Object.defineProperty(window, "matchMedia", {
     writable: true,
@@ -70,46 +67,55 @@ beforeAll(() => {
 describe("AppSidebar Jobs badge", () => {
   beforeEach(() => {
     activeJobs.count = 7;
-    activeJobs.isInitialLoading = false;
-    activeJobs.hasResolvedOnce = true;
-    activeJobs.isError = false;
   });
 
-  it("shows the active count without changing Jobs navigation", async () => {
-    const user = userEvent.setup();
+  it.each([
+    [1, "1", "Jobs, 1 active job"],
+    [9, "9", "Jobs, 9 active jobs"],
+    [99, "99", "Jobs, 99 active jobs"],
+    [100, "99+", "Jobs, 100 active jobs"],
+  ])("shows %i as %s and announces the exact total", (count, shown, name) => {
+    activeJobs.count = count;
     renderSidebar();
 
-    const jobsLink = screen.getByTitle("Jobs");
-    expect(screen.getByText("7")).not.toBeNull();
-
-    await user.click(jobsLink);
-
-    expect(screen.getByLabelText("Current route").textContent).toBe("/jobs");
-    expect(jobsLink.className).toContain("bg-sidebar-accent");
+    expect(jobsBadge()?.textContent).toBe(shown);
+    expect(screen.getByRole("link", { name })).toBe(screen.getByTitle("Jobs"));
   });
 
-  it("replaces only the Jobs active dot and leaves other navigation indicators unchanged", () => {
+  it("shows no badge at zero and leaves the active dot in place", () => {
     activeJobs.count = 0;
-    const firstRender = renderSidebar("/jobs");
+    renderSidebar("/jobs");
 
     const jobsLink = screen.getByTitle("Jobs");
+    expect(jobsBadge()).toBeNull();
     expect(jobsLink.className).toContain("bg-sidebar-accent");
-    expect(jobsLink.querySelector(".bg-sidebar-primary")).toBeNull();
+    expect(jobsLink.querySelector(".bg-sidebar-primary")).not.toBeNull();
+    expect(screen.getByRole("link", { name: "Jobs" })).toBe(jobsLink);
+  });
 
-    firstRender.unmount();
+  it("hands the right edge to the badge while it is showing", () => {
+    renderSidebar("/jobs");
+
+    const jobsLink = screen.getByTitle("Jobs");
+    expect(jobsBadge()).not.toBeNull();
+    expect(jobsLink.querySelector(".bg-sidebar-primary")).toBeNull();
+    expect(screen.getByTitle("Partitions").querySelector(".bg-sidebar-primary")).toBeNull();
+  });
+
+  it("leaves other navigation indicators unchanged", () => {
     renderSidebar("/partitions");
 
     expect(screen.getByTitle("Partitions").querySelector(".bg-sidebar-primary")).not.toBeNull();
+    expect(screen.getByTitle("Partitions").querySelector('[data-slot="jobs-badge"]')).toBeNull();
   });
 
-  it("keeps the badge accessible and the Jobs link clickable when collapsed", async () => {
+  it("keeps the badge visible and the Jobs link clickable when collapsed", async () => {
     const user = userEvent.setup();
     renderSidebar("/", false);
 
     const jobsLink = screen.getByRole("link", { name: "Jobs, 7 active jobs" });
-    const badge = jobsLink.querySelector('[data-slot="jobs-badge"]');
+    expect(jobsBadge()?.className).not.toContain("group-data-[collapsible=icon]:hidden");
 
-    expect(badge?.className).not.toContain("group-data-[collapsible=icon]:hidden");
     await user.click(jobsLink);
     expect(screen.getByLabelText("Current route").textContent).toBe("/jobs");
   });

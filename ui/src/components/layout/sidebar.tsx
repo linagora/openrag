@@ -21,10 +21,10 @@ import {
   SidebarHeader,
   SidebarFooter,
 } from "@/components/ui/sidebar";
+import { Badge } from "@/components/ui/badge";
 import { APP_NAME } from "@/lib/brand";
 import { useActiveJobsCount } from "@/lib/jobs-queries";
 import { usePermissions, type Permissions } from "@/lib/permissions";
-import { JobsBadge } from "./jobs-badge";
 
 interface NavItem {
   title: string;
@@ -63,14 +63,22 @@ export function AppSidebar() {
 
   const renderItem = (item: NavItem) => {
     const active = isActive(item.href);
-    const isJobs = item.href === "/jobs";
+    // The badge and the active dot share the right edge, so only one shows.
+    const badgeCount = item.href === "/jobs" ? activeJobs : 0;
     return (
       <SidebarMenuItem key={item.href}>
         <Link
           to={item.href}
           title={item.title}
+          // Collapsed, the label is display:none and drops out of the
+          // accessible name, so the count is spelled out on the link itself.
+          aria-label={
+            badgeCount > 0
+              ? `${item.title}, ${badgeCount} active job${badgeCount === 1 ? "" : "s"}`
+              : undefined
+          }
           className={`relative flex items-center gap-3 px-3 py-2 rounded-xl text-sm font-medium transition-colors overflow-hidden group-data-[collapsible=icon]:justify-center group-data-[collapsible=icon]:px-0 ${
-            isJobs ? "pr-11 group-data-[collapsible=icon]:pr-0" : ""
+            badgeCount > 0 ? "pr-11 group-data-[collapsible=icon]:pr-0" : ""
           } ${
             active
               ? "bg-sidebar-accent text-sidebar-accent-foreground shadow-sm"
@@ -79,8 +87,17 @@ export function AppSidebar() {
         >
           <item.icon className="h-4.5 w-4.5 shrink-0" />
           <span className="truncate group-data-[collapsible=icon]:hidden">{item.title}</span>
-          {isJobs && <JobsBadge result={activeJobs} />}
-          {active && !isJobs && (
+          {badgeCount > 0 && (
+            <Badge
+              variant="destructive"
+              aria-hidden="true"
+              data-slot="jobs-badge"
+              className="pointer-events-none absolute right-2 top-1/2 h-5 min-w-5 -translate-y-1/2 px-1.5 text-[10px] leading-none font-bold tabular-nums group-data-[collapsible=icon]:right-0 group-data-[collapsible=icon]:top-0 group-data-[collapsible=icon]:h-4 group-data-[collapsible=icon]:min-w-4 group-data-[collapsible=icon]:translate-y-0 group-data-[collapsible=icon]:px-1 group-data-[collapsible=icon]:text-[9px]"
+            >
+              {badgeCount > 99 ? "99+" : badgeCount}
+            </Badge>
+          )}
+          {active && badgeCount === 0 && (
             <span className="absolute right-3 h-1.5 w-1.5 rounded-full bg-sidebar-primary shrink-0 group-data-[collapsible=icon]:hidden" />
           )}
         </Link>
