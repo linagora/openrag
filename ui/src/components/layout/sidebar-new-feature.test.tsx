@@ -9,6 +9,10 @@ vi.mock("@/lib/api/system", () => ({
   getVersion: vi.fn().mockResolvedValue({ version: "2.2.0" }),
 }));
 
+vi.mock("@/lib/jobs-queries", () => ({
+  useActiveJobsCount: () => 0,
+}));
+
 vi.mock("@/lib/permissions", () => ({
   usePermissions: () => ({
     isAdmin: true,
