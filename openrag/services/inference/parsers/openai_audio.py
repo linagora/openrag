@@ -46,10 +46,9 @@ logger = get_logger()
 # Suffixes the transcription backend can ingest as-is, avoiding the ~10x
 # size inflation from WAV conversion (Scaleway cap: 100 MB; OpenAI: 25 MB).
 _DEFAULT_DIRECT_UPLOAD_SUFFIXES: tuple[str, ...] = (".mp3", ".m4a", ".ogg", ".webm", ".wav")
-# ``AsyncOpenAI`` requires a non-empty API key even when the upstream endpoint
-# is intentionally unauthenticated. This value is the application's established
-# non-secret placeholder (see ``TranscriberConfig``).
-_ANONYMOUS_API_KEY = "EMPTY"
+# ``AsyncOpenAI`` accepts an empty string and omits its Authorization header,
+# which is required for endpoints that deliberately reject authentication.
+_ANONYMOUS_API_KEY = ""
 
 LanguageDetector = Callable[[Path], Awaitable[str | None]]
 TranscriptionPromptResolver = Callable[[], Awaitable[str | None]]

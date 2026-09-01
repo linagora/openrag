@@ -500,7 +500,7 @@ class TestParse:
         assert result.text_blocks[0].text == "transcribed"
         assert created[0][0] == {
             "base_url": "http://x",
-            "api_key": "EMPTY",
+            "api_key": "",
             "timeout": 120,
         }
         assert created[0][1].audio.transcriptions.create.await_args.kwargs["model"] == "moss-transcribe-diarize"
@@ -541,7 +541,7 @@ class TestParse:
         assert result.text_blocks[0].text == "transcribed"
         assert created[0][0] == {
             "base_url": "http://moss:8000/v1",
-            "api_key": "EMPTY",
+            "api_key": "",
             "timeout": 900,
         }
         created[0][1].close.assert_awaited_once()
