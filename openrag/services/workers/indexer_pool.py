@@ -85,7 +85,7 @@ class IndexerWorkerActor:
         # degrades to None on any load failure, so there's no safety
         # trade-off in always calling it.
         caption_prompt = load_caption_prompt(cfg)
-        chunker = _build_chunker(cfg)
+        chunker = _build_chunker(cfg, _build_embedder_window_resolver(cfg)())
         embedder_factory = _build_embedder_factory(cfg)
         vlm_factory = _build_vlm_factory(cfg)
         contextualizer_factory = _build_contextualizer_factory(cfg)
@@ -113,6 +113,7 @@ class IndexerWorkerActor:
             caption_prompt=caption_prompt,
             timeouts=_build_pipeline_timeouts(cfg),
             chunker_factory=_build_chunker_from_config,
+            embedder_window_resolver=_build_embedder_window_resolver(cfg),
             parser_factory=parser_factory,
             embedder_factory=embedder_factory,
             vlm_factory=vlm_factory,
@@ -745,17 +746,45 @@ def _registry_reload_decision(
     return None
 
 
-def _build_chunker(cfg: Any) -> Any:
+def _build_chunker(cfg: Any, embedder_window: int | None = None) -> Any:
     from core.chunking.factory import create_chunker
 
-    chunker = create_chunker(cfg)
+    chunker = create_chunker(cfg, embedder_window)
     if not callable(getattr(chunker, "chunk", None)):
         raise TypeError("Configured chunker does not expose a chunk(document, partition) method")
     return chunker
 
 
-def _build_chunker_from_config(chunker_config: Any) -> Any:
-    return _build_chunker(SimpleNamespace(chunker=chunker_config))
+def _build_chunker_from_config(chunker_config: Any, embedder_window: int | None = None) -> Any:
+    return _build_chunker(SimpleNamespace(chunker=chunker_config), embedder_window)
+
+
+def _build_embedder_window_resolver(cfg: Settings) -> Any:
+    """Context window of the embedder a partition indexes with, in tokens.
+
+    The chunker derives its hard safety bound from this (see
+    ``core.chunking.factory.resolve_hard_max_tokens``): content past the window
+    is silently truncated before it is ever embedded, and a partition may point
+    at an embedder whose window differs from the deployment default. Resolution
+    mirrors ``_build_embedder_factory``: the endpoint's ``extra`` wins, then the
+    global ``embedder.max_model_len``.
+    """
+    models = getattr(cfg, "models", None)
+    named_embedders = models.embedder if models is not None else {}
+    fallback_cfg = _global_embedder_endpoint_config(cfg)
+    global_default = getattr(getattr(cfg, "embedder", None), "max_model_len", None)
+
+    def resolve(name: str = "default") -> int | None:
+        model_cfg = named_embedders.get(name)
+        if model_cfg is None and name == "default":
+            model_cfg = fallback_cfg
+        if model_cfg is not None:
+            window = model_cfg.extra.get("max_model_len")
+            if window:
+                return int(window)
+        return int(global_default) if global_default else None
+
+    return resolve
 
 
 def _build_parser_factory(parser: Any) -> Any:

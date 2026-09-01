@@ -48,7 +48,7 @@ def test_build_chunker_returns_native_chunker(monkeypatch: pytest.MonkeyPatch) -
     from services.workers.indexer_pool import _build_chunker
 
     native = _NativeChunker()
-    monkeypatch.setattr(factory, "create_chunker", lambda _cfg: native)
+    monkeypatch.setattr(factory, "create_chunker", lambda _cfg, _window=None: native)
 
     assert _build_chunker(object()) is native
 
@@ -57,7 +57,7 @@ def test_build_chunker_rejects_invalid_chunker(monkeypatch: pytest.MonkeyPatch) 
     import core.chunking.factory as factory
     from services.workers.indexer_pool import _build_chunker
 
-    monkeypatch.setattr(factory, "create_chunker", lambda _cfg: _BrokenChunker())
+    monkeypatch.setattr(factory, "create_chunker", lambda _cfg, _window=None: _BrokenChunker())
 
     with pytest.raises(TypeError, match="chunk"):
         _build_chunker(object())
@@ -67,7 +67,7 @@ def test_build_chunker_rejects_non_callable_chunk_attr(monkeypatch: pytest.Monke
     import core.chunking.factory as factory
     from services.workers.indexer_pool import _build_chunker
 
-    monkeypatch.setattr(factory, "create_chunker", lambda _cfg: _NonCallableChunker())
+    monkeypatch.setattr(factory, "create_chunker", lambda _cfg, _window=None: _NonCallableChunker())
 
     with pytest.raises(TypeError, match="chunk"):
         _build_chunker(object())
@@ -1378,7 +1378,7 @@ def test_indexer_pool_wires_contextualizer_factory(monkeypatch: pytest.MonkeyPat
         return Store()
 
     monkeypatch.setattr(core.config, "load_config", lambda: cfg)
-    monkeypatch.setattr(module, "_build_chunker", lambda _cfg: object())
+    monkeypatch.setattr(module, "_build_chunker", lambda _cfg, _window=None: object())
     monkeypatch.setattr(module, "_build_embedder_factory", lambda _cfg: object())
     monkeypatch.setattr(module, "_build_vlm_factory", lambda _cfg: vlm_factory)
     monkeypatch.setattr(module, "_build_contextualizer_factory", lambda _cfg: contextualizer_factory)
@@ -1461,7 +1461,7 @@ def test_indexer_pool_loads_caption_prompt_without_global_vlm_default(monkeypatc
         return object()
 
     monkeypatch.setattr(core.config, "load_config", lambda: cfg)
-    monkeypatch.setattr(module, "_build_chunker", lambda _cfg: object())
+    monkeypatch.setattr(module, "_build_chunker", lambda _cfg, _window=None: object())
     monkeypatch.setattr(module, "_build_embedder_factory", lambda _cfg: object())
     monkeypatch.setattr(module, "_build_vlm_factory", lambda _cfg: object())
     monkeypatch.setattr(module, "_build_contextualizer_factory", lambda _cfg: object())

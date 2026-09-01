@@ -15,6 +15,7 @@ import type { PromptResponse } from "@/lib/api/prompts";
 import { listModelEndpoints, pickDefaultEndpoint } from "@/lib/api/models";
 import { PageHeader } from "@/components/shared/page-header";
 import { ConfirmDialog } from "@/components/shared/confirm-dialog";
+import { useNewOptions } from "@/components/shared/new-badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -298,6 +299,11 @@ function IndexationPresetForm({
 
   const promptsByType = (type: string) => prompts.filter((p) => p.prompt_type === type);
 
+  // Keyed "<group>.<value>", so registering an option in whats-new.ts is the
+  // whole change. The values come from the API, so a strategy this backend
+  // does not offer renders no option and therefore no marker.
+  const chunkingNew = useNewOptions("chunking", chunkingStrategies);
+
   return (
     <div className="space-y-5">
       {/* Chunking */}
@@ -305,7 +311,13 @@ function IndexationPresetForm({
         <h4 className="text-sm font-medium">Chunking</h4>
         <div className={String(configGet(chunking as Config, "name", "")) !== "markdown_section" ? "grid grid-cols-[3fr_1fr_1fr] gap-3" : "max-w-xs"}>
           <div className="space-y-1.5">
-            <Label className="text-xs">Strategy</Label>
+            {/* The marker sits on the label as well as on the option: one
+                visible only inside an opened dropdown aids no discovery, since
+                the reader has to be looking at it already. */}
+            <Label className="flex items-center gap-1.5 text-xs">
+              Strategy
+              {chunkingNew.dot}
+            </Label>
             <Select
               value={configGet(chunking as Config, "name", "")}
               onValueChange={(v) => setChunking("name", v)}
@@ -315,8 +327,12 @@ function IndexationPresetForm({
               </SelectTrigger>
               <SelectContent>
                 {chunkingStrategies.map((s) => (
-                  <SelectItem key={s} value={s}>
-                    {s}
+                  // textValue keeps the marker out of Radix's typeahead text.
+                  <SelectItem key={s} value={s} textValue={s}>
+                    <span className="flex items-center gap-1.5">
+                      {s}
+                      {chunkingNew.badgeFor(s)}
+                    </span>
                   </SelectItem>
                 ))}
               </SelectContent>
