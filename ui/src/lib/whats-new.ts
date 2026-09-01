@@ -59,12 +59,11 @@ export const UNRELEASED = "UNRELEASED";
  * or `UNRELEASED` until a release pins it.
  */
 export const NEW_SINCE: Readonly<Record<string, string>> = {
-  // Nothing is marked right now. Entries look like this — see FEATURE_TAG.md:
-  //   "chunking.structured_section": "UNRELEASED",
-  //   "models.reranker": "2.4.0",
   // A commented example is invisible to both the release one-liner and the CI
   // gate: each anchors on a whole registry line, which starts with the quoted
-  // key and nothing else.
+  // key and nothing else — see FEATURE_TAG.md.
+  //   "models.reranker": "2.4.0",
+  "chunking.structured_section": "UNRELEASED",
 };
 
 type Version = { major: number; minor: number };
