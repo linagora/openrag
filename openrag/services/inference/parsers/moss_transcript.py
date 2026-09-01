@@ -23,6 +23,7 @@ _COMPACT_START = re.compile(
 _INITIAL_TIME = re.compile(rf"^\s*\[\s*(?P<start>{_TIME})\s*\]")
 _TRAILING_TIME = re.compile(rf"\[\s*(?P<end>{_TIME})\s*\]\s*$")
 _ADJACENT_TIMES = re.compile(rf"{_TIME_TOKEN}\s*{_TIME_TOKEN}")
+_TIME_TOKEN_PAIR = re.compile(rf"{_TIME_TOKEN}.*{_TIME_TOKEN}", re.DOTALL)
 _SPEAKER_LABEL = re.compile(rf"\[\s*(?P<speaker>{_SPEAKER})\s*\]")
 _SPEAKER_MARKER = re.compile(r"\[\s*[Ss]\d*")
 
@@ -96,6 +97,7 @@ def _parse_speaker_only(transcript: str) -> list[_Segment]:
         or transcript[: labels[0].start()].strip()
         or _DASH_MARKER.search(transcript)
         or _COMPACT_START.search(transcript)
+        or _TIME_TOKEN_PAIR.search(transcript)
     ):
         return []
 
