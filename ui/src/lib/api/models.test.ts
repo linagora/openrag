@@ -3,6 +3,7 @@ import {
   displayModelEndpointExtra,
   mergeModelEndpointApiKeyExtra,
   mergeModelEndpointLlmContext,
+  mergeModelEndpointMossSpeakerAware,
   mergeModelEndpointSttLanguage,
   pickDefaultEndpoint,
   prepareModelEndpointExtraForSubmit,
@@ -10,6 +11,7 @@ import {
   resolveEmbedderName,
   splitModelEndpointApiKeyExtra,
   splitModelEndpointLlmContext,
+  splitModelEndpointMossSpeakerAware,
   splitModelEndpointSttLanguage,
   validateModelEndpoint,
 } from "./models";
@@ -341,5 +343,31 @@ describe("STT language-hint extra field", () => {
     expect(mergeModelEndpointSttLanguage({ language: "fr", diarization: true }, "  ")).toEqual({
       diarization: true,
     });
+  });
+});
+
+describe("MOSS speaker-aware extra field", () => {
+  it("splits and merges the MOSS-only normalization control", () => {
+    const { mossSpeakerAware, extra } = splitModelEndpointMossSpeakerAware({
+      moss_speaker_aware: true,
+      temperature: 0,
+    });
+
+    expect(mossSpeakerAware).toBe(true);
+    expect(extra).toEqual({ temperature: 0 });
+    expect(mergeModelEndpointMossSpeakerAware(extra, true)).toEqual({
+      temperature: 0,
+      moss_speaker_aware: true,
+    });
+  });
+
+  it("treats malformed values as disabled and removes the dedicated key", () => {
+    const { mossSpeakerAware, extra } = splitModelEndpointMossSpeakerAware({
+      moss_speaker_aware: "true",
+      temperature: 0,
+    });
+
+    expect(mossSpeakerAware).toBe(false);
+    expect(mergeModelEndpointMossSpeakerAware(extra, false)).toEqual({ temperature: 0 });
   });
 });

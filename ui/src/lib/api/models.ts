@@ -198,6 +198,7 @@ export function mergeModelEndpointApiKeyExtra(
 export const LLM_CONTEXT_SIZE_KEY = "max_llm_context_size";
 export const LLM_OUTPUT_TOKENS_KEY = "max_output_tokens";
 export const STT_LANGUAGE_KEY = "language";
+export const MOSS_SPEAKER_AWARE_KEY = "moss_speaker_aware";
 
 export interface LlmContextFields {
   maxContextSize: string;
@@ -261,6 +262,29 @@ export function mergeModelEndpointSttLanguage(
   const normalized = languageHint.trim();
   if (normalized) result[STT_LANGUAGE_KEY] = normalized;
   else delete result[STT_LANGUAGE_KEY];
+  return result;
+}
+
+/** Pull MOSS speaker normalization out of raw endpoint extra for its dedicated control. */
+export function splitModelEndpointMossSpeakerAware(extra: Record<string, unknown>): {
+  mossSpeakerAware: boolean;
+  extra: Record<string, unknown>;
+} {
+  const { [MOSS_SPEAKER_AWARE_KEY]: speakerAware, ...rest } = extra;
+  return {
+    mossSpeakerAware: speakerAware === true,
+    extra: rest,
+  };
+}
+
+/** Enable MOSS speaker normalization; absence preserves the raw provider response. */
+export function mergeModelEndpointMossSpeakerAware(
+  extra: Record<string, unknown>,
+  enabled: boolean,
+): Record<string, unknown> {
+  const result = { ...extra };
+  if (enabled) result[MOSS_SPEAKER_AWARE_KEY] = true;
+  else delete result[MOSS_SPEAKER_AWARE_KEY];
   return result;
 }
 

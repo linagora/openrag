@@ -50,6 +50,31 @@ def test_create_stt_endpoint_requires_a_model_and_accepts_language_hint():
         )
 
 
+@pytest.mark.parametrize("speaker_aware", [True, False])
+def test_create_stt_endpoint_accepts_moss_speaker_aware_setting(speaker_aware):
+    request = CreateModelEndpointRequest(
+        name="moss",
+        model_type="stt",
+        endpoint="http://moss:8000/v1",
+        model_name="moss-transcribe-diarize",
+        extra={"moss_speaker_aware": speaker_aware},
+    )
+
+    assert request.extra == {"moss_speaker_aware": speaker_aware}
+
+
+@pytest.mark.parametrize("speaker_aware", ["true", 1, None, [], {}])
+def test_create_stt_endpoint_rejects_non_boolean_moss_speaker_setting(speaker_aware):
+    with pytest.raises(ValidationError, match="extra.moss_speaker_aware"):
+        CreateModelEndpointRequest(
+            name="moss",
+            model_type="stt",
+            endpoint="http://moss:8000/v1",
+            model_name="moss-transcribe-diarize",
+            extra={"moss_speaker_aware": speaker_aware},
+        )
+
+
 def test_model_endpoint_requests_normalize_model_names():
     """Every write and draft probe must use the model name that will run."""
     create = CreateModelEndpointRequest(

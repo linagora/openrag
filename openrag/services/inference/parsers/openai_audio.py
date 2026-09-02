@@ -33,12 +33,18 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
-from core.config.model_endpoints import STT_LANGUAGE_KEY, STT_REQUEST_CONTROL_EXTRA_KEYS, ModelEndpointConfig
+from core.config.model_endpoints import (
+    MOSS_SPEAKER_AWARE_KEY,
+    STT_LANGUAGE_KEY,
+    STT_REQUEST_CONTROL_EXTRA_KEYS,
+    ModelEndpointConfig,
+)
 from core.indexing.parsers.document_parser import BaseClientParser
 from core.models.document import Document, DocumentType, ProcessedDocument, TextBlock
 from core.utils.logging import get_logger
 from openai import AsyncOpenAI
 from pydub import AudioSegment
+from services.inference.parsers.moss_transcript import normalize_moss_speaker_aware_transcript
 
 logger = get_logger()
 
@@ -333,6 +339,11 @@ class OpenAIAudioClient(BaseClientParser):
         text = getattr(response, "text", None)
         return text if isinstance(text, str) else ""
 
+    @staticmethod
+    def _moss_speaker_aware_enabled(endpoint: ModelEndpointConfig | None) -> bool:
+        """Whether OpenRAG should normalize a MOSS diarized response."""
+        return endpoint is not None and endpoint.extra.get(MOSS_SPEAKER_AWARE_KEY) is True
+
     def _is_fallback_endpoint(self, endpoint: ModelEndpointConfig) -> bool:
         """Whether *endpoint* is the legacy ``TRANSCRIBER_*`` destination."""
         return endpoint.endpoint.strip().rstrip("/") == self._base_url.strip().rstrip("/")
@@ -453,4 +464,6 @@ class OpenAIAudioClient(BaseClientParser):
             ).info("Sending audio transcription request")
             response = await client.audio.transcriptions.create(**kwargs)
             transcript = self._response_text(response)
+            if self._moss_speaker_aware_enabled(endpoint_config):
+                return normalize_moss_speaker_aware_transcript(transcript)
             return transcript

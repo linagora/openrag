@@ -148,6 +148,32 @@ describe("ModelsPage STT validation", () => {
     );
   });
 
+  it("includes speaker-aware MOSS normalization in STT draft validation", async () => {
+    const user = userEvent.setup();
+    renderPage();
+
+    await screen.findByText("No embedder endpoints configured.");
+    await user.click(screen.getByRole("tab", { name: "stt" }));
+    await user.click(screen.getByRole("button", { name: /add endpoint/i }));
+
+    const dialog = screen.getByRole("dialog");
+    const textboxes = within(dialog).getAllByRole("textbox");
+    await user.type(textboxes[1], "http://moss:8000/v1");
+    await user.type(textboxes[2], "moss-transcribe-diarize");
+    await user.click(
+      within(dialog).getByRole("switch", {
+        name: "Enable speaker-aware MOSS transcript normalization",
+      }),
+    );
+    await user.click(within(dialog).getByRole("button", { name: "Validate" }));
+
+    await waitFor(() =>
+      expect(validateModelEndpointMock).toHaveBeenCalledWith(
+        expect.objectContaining({ extra: { moss_speaker_aware: true } }),
+      ),
+    );
+  });
+
   it("requires revalidation after changing an STT draft timeout", async () => {
     const user = userEvent.setup();
     renderPage();
@@ -224,6 +250,32 @@ describe("ModelsPage STT validation", () => {
     await waitFor(() => expect(createButton.disabled).toBe(false));
 
     await user.type(within(dialog).getByPlaceholderText("fr"), "fr");
+
+    await waitFor(() => expect(createButton.disabled).toBe(true));
+  });
+
+  it("requires revalidation after changing speaker-aware MOSS normalization", async () => {
+    const user = userEvent.setup();
+    renderPage();
+
+    await screen.findByText("No embedder endpoints configured.");
+    await user.click(screen.getByRole("tab", { name: "stt" }));
+    await user.click(screen.getByRole("button", { name: /add endpoint/i }));
+
+    const dialog = screen.getByRole("dialog");
+    const textboxes = within(dialog).getAllByRole("textbox");
+    await user.type(textboxes[1], "http://moss:8000/v1");
+    await user.type(textboxes[2], "moss-transcribe-diarize");
+    await user.click(within(dialog).getByRole("button", { name: "Validate" }));
+
+    const createButton = within(dialog).getByRole("button", { name: "Create" }) as HTMLButtonElement;
+    await waitFor(() => expect(createButton.disabled).toBe(false));
+
+    await user.click(
+      within(dialog).getByRole("switch", {
+        name: "Enable speaker-aware MOSS transcript normalization",
+      }),
+    );
 
     await waitFor(() => expect(createButton.disabled).toBe(true));
   });

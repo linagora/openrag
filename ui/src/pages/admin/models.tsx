@@ -23,6 +23,7 @@ import {
   mergeModelEndpointApiKeyExtra,
   mergeModelEndpointImplementation,
   mergeModelEndpointLlmContext,
+  mergeModelEndpointMossSpeakerAware,
   mergeModelEndpointSttLanguage,
   prepareModelEndpointExtraForSubmit,
   revealModelEndpointApiKey,
@@ -31,6 +32,7 @@ import {
   splitModelEndpointApiKeyExtra,
   splitModelEndpointImplementation,
   splitModelEndpointLlmContext,
+  splitModelEndpointMossSpeakerAware,
   splitModelEndpointSttLanguage,
   validateModelEndpoint,
   VENDOR_OPTIONS_BY_TYPE,
@@ -57,6 +59,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { VendorIcon } from "@/components/ui/vendor-icon";
 import { Badge } from "@/components/ui/badge";
@@ -326,6 +329,7 @@ function EndpointDialog({
   const [maxContextSize, setMaxContextSize] = useState("");
   const [maxOutputTokens, setMaxOutputTokens] = useState("");
   const [languageHint, setLanguageHint] = useState("");
+  const [mossSpeakerAware, setMossSpeakerAware] = useState(false);
   const [vendor, setVendor] = useState("");
   const [extraJson, setExtraJson] = useState("{}");
 
@@ -349,6 +353,7 @@ function EndpointDialog({
   const isStt = modelType === "stt";
   const sttValidationTimeout = isStt ? timeout : null;
   const sttValidationLanguageHint = isStt ? languageHint.trim() : null;
+  const sttValidationMossSpeakerAware = isStt ? mossSpeakerAware : null;
   const validationDraft = JSON.stringify([
     endpoint,
     modelType,
@@ -357,6 +362,7 @@ function EndpointDialog({
     extraJson,
     sttValidationTimeout,
     sttValidationLanguageHint,
+    sttValidationMossSpeakerAware,
   ]);
   const currentValidationDraft = useRef(validationDraft);
   const validationGeneration = useRef(0);
@@ -394,10 +400,14 @@ function EndpointDialog({
           editing.model_type === "stt"
             ? splitModelEndpointSttLanguage(apiExtra)
             : { languageHint: "", extra: apiExtra };
+        const { mossSpeakerAware: storedMossSpeakerAware, extra: mossExtra } =
+          editing.model_type === "stt"
+            ? splitModelEndpointMossSpeakerAware(sttExtra)
+            : { mossSpeakerAware: false, extra: sttExtra };
         const { implementation, extra: implExtra } =
           editing.model_type === "stt"
-            ? { implementation: "", extra: sttExtra }
-            : splitModelEndpointImplementation(sttExtra);
+            ? { implementation: "", extra: mossExtra }
+            : splitModelEndpointImplementation(mossExtra);
         // Only carve the LLM token-budget keys out of the editable extra for LLM
         // endpoints — the budget fields are LLM-only, and splitting for non-LLM
         // types would drop any same-named keys from their extra on save (they are
@@ -415,6 +425,7 @@ function EndpointDialog({
         setMaxContextSize(llmContext.maxContextSize);
         setMaxOutputTokens(llmContext.maxOutputTokens);
         setLanguageHint(storedLanguageHint);
+        setMossSpeakerAware(storedMossSpeakerAware);
         setVendor(implementation || DEFAULT_VENDOR_BY_TYPE[editing.model_type]);
         setExtraJson(JSON.stringify(displayExtra, null, 2));
         setValidated(true);
@@ -433,6 +444,7 @@ function EndpointDialog({
         setMaxContextSize("");
         setMaxOutputTokens("");
         setLanguageHint("");
+        setMossSpeakerAware(false);
         setVendor(DEFAULT_VENDOR_BY_TYPE[activeTab as ModelType]);
         setExtraJson("{}");
         setValidated(null);
@@ -453,10 +465,16 @@ function EndpointDialog({
         : { languageHint: "", extra: editingExtra.extra }
       : null;
     const editingSttExtra = editingSttFields?.extra ?? null;
-    const editingImplExtra = editingSttExtra
+    const editingMossFields = editingSttExtra
       ? editing?.model_type === "stt"
-        ? editingSttExtra
-        : splitModelEndpointImplementation(editingSttExtra).extra
+        ? splitModelEndpointMossSpeakerAware(editingSttExtra)
+        : { mossSpeakerAware: false, extra: editingSttExtra }
+      : null;
+    const editingMossExtra = editingMossFields?.extra ?? null;
+    const editingImplExtra = editingMossExtra
+      ? editing?.model_type === "stt"
+        ? editingMossExtra
+        : splitModelEndpointImplementation(editingMossExtra).extra
       : null;
     // Match the display path above: only strip the budget keys for LLM endpoints,
     // otherwise the "unchanged" comparison would treat a non-LLM endpoint's
@@ -474,6 +492,8 @@ function EndpointDialog({
         (editing.model_type === "stt" ? String(editing.timeout) : null) &&
       sttValidationLanguageHint ===
         (editing.model_type === "stt" ? editingSttFields?.languageHint.trim() || "" : null) &&
+      sttValidationMossSpeakerAware ===
+        (editing.model_type === "stt" ? editingMossFields?.mossSpeakerAware || false : null) &&
       apiKey === editingExtra?.apiKey &&
       extraJson === JSON.stringify(editingRawExtra, null, 2)
     ) {
@@ -487,7 +507,16 @@ function EndpointDialog({
     }
     setValidated(null);
     setValidationMsg(null);
-  }, [endpoint, modelName, sttValidationTimeout, sttValidationLanguageHint, apiKey, extraJson, editing]);
+  }, [
+    endpoint,
+    modelName,
+    sttValidationTimeout,
+    sttValidationLanguageHint,
+    sttValidationMossSpeakerAware,
+    apiKey,
+    extraJson,
+    editing,
+  ]);
 
   const apiKeySubmitValue = () =>
     prepareModelEndpointExtraForSubmit({ api_key: apiKey.trim() }).api_key;
@@ -570,9 +599,9 @@ function EndpointDialog({
         if (typeof parsedExtra !== "object" || parsedExtra === null || Array.isArray(parsedExtra)) {
           throw new Error("Extra must be a JSON object");
         }
-        validationExtra = mergeModelEndpointSttLanguage(
-          parsedExtra as Record<string, unknown>,
-          languageHint,
+        validationExtra = mergeModelEndpointMossSpeakerAware(
+          mergeModelEndpointSttLanguage(parsedExtra as Record<string, unknown>, languageHint),
+          mossSpeakerAware,
         );
       } catch {
         const msg = "Invalid JSON in extra field";
@@ -706,6 +735,9 @@ function EndpointDialog({
     }
     if (isStt) {
       extra = mergeModelEndpointSttLanguage(extra, languageHint);
+      // MOSS deployments can expose arbitrary served-model aliases, so this
+      // behavior is an explicit endpoint setting rather than a model-name check.
+      extra = mergeModelEndpointMossSpeakerAware(extra, mossSpeakerAware);
     } else {
       extra = mergeModelEndpointImplementation(extra, vendor);
     }
@@ -848,6 +880,24 @@ function EndpointDialog({
               />
             </div>
           )}
+          {isStt && (
+            <div className="flex items-center justify-between gap-4 rounded-md border p-3">
+              <div className="space-y-1">
+                <LabelWithInfo
+                  label="Speaker-aware MOSS transcript"
+                  tooltip="Normalize complete MOSS diarized responses after transcription. This also works with a served-model alias and is never sent to the provider."
+                />
+                <p className="text-xs text-muted-foreground">
+                  Remove timecodes and keep speaker labels only when MOSS identifies more than one speaker.
+                </p>
+              </div>
+              <Switch
+                checked={mossSpeakerAware}
+                onCheckedChange={setMossSpeakerAware}
+                aria-label="Enable speaker-aware MOSS transcript normalization"
+              />
+            </div>
+          )}
           <div className="space-y-2">
             <div className="flex items-center justify-between">
               <Label>API key</Label>
@@ -932,7 +982,7 @@ function EndpointDialog({
             />
             <p className="text-xs text-muted-foreground">
               {isStt
-                ? "Advanced non-secret request-body options sent to the transcription provider. The language hint and API key are handled separately above."
+                ? "Advanced non-secret request-body options sent to the transcription provider. The language hint, MOSS speaker setting, and API key are handled separately above."
                 : "Non-secret endpoint options only. The API key is handled separately above."}
             </p>
           </div>

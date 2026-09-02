@@ -159,6 +159,8 @@ Preserve the original language and wording. Do not translate, summarize,
 paraphrase, correct, or invent missing words.
 ```
 
+For a MOSS model, **Admin UI → Model Endpoints** offers an optional **Speaker-aware MOSS transcript** setting. It removes boundary timecodes when the response is unambiguously recognized as a supported MOSS transcript and keeps labels only when more than one speaker is present. Ambiguous responses are preserved unchanged to prevent content loss. This also works with served-model aliases and is never sent to the provider.
+
 Add hotwords only when they are relevant to your own deployment. They bias recognition vocabulary and should not be part of OpenRAG's global default. When adding hotwords or a format instruction, include the desired timestamp and speaker-label format in the prompt as well.
 :::
 
