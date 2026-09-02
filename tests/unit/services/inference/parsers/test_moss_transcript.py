@@ -48,6 +48,12 @@ def test_normalizes_clock_timecodes():
     assert normalize_moss_speaker_aware_transcript(transcript) == "Hello everyone.\nThis week."
 
 
+def test_preserves_unsupported_clock_formatted_dash_ranges():
+    transcript = "[00:00:01.120 - 00:00:02.320][S01] Hello everyone."
+
+    assert normalize_moss_speaker_aware_transcript(transcript) == transcript
+
+
 def test_normalizes_speaker_only_lines():
     transcript = "[S1] Hello everyone.\n[S01] This is still the same speaker."
 

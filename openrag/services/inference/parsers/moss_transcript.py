@@ -11,6 +11,8 @@ _TIME = rf"(?:{_CLOCK}|{_SECONDS})"
 _TIME_TOKEN = rf"\[\s*{_TIME}\s*\]"
 _SPEAKER = r"[Ss]\d+"
 
+# MOSS documents and emits dash ranges in seconds. Clock-formatted dash ranges
+# remain unsupported so an unfamiliar provider response is preserved verbatim.
 _DASH_START = re.compile(
     rf"\[\s*(?P<start>{_SECONDS})\s*-\s*(?P<end>{_SECONDS})\s*\]\s*"
     rf"\[\s*(?P<speaker>{_SPEAKER})\s*\]",
