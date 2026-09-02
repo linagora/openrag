@@ -757,6 +757,5 @@ def test_build_metadata_only_adds_keys_in_upload_metadata_server_keys(tmp_path):
         "not covered by UPLOAD_METADATA_SERVER_KEYS — the indexing-status "
         "callback would now leak it to a caller-supplied URL"
     )
-    # And the caller's own fields must survive untouched.
     assert full["doc_rev"] == "3-abc"
     assert full["app_tag"] == "x"

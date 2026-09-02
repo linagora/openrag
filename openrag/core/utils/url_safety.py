@@ -69,15 +69,10 @@ def is_safe_url(url: str, *, allow_private_hosts: bool = False) -> bool:
     except ValueError:
         pass
 
-    # Every other legacy numeric form glibc's resolver accepts — decimal
-    # ("2130706433"), hex ("0x7f000001"), octal ("0177.0.0.1"), short forms
-    # ("127.1") — goes through inet_aton, which truncates mod 2**32 exactly
-    # like the real resolver. ip_address(int(host)) used to handle the decimal
-    # case on its own, but for a host string above 2**32-1 it silently built
-    # an IPv6Address instead of raising, so a 38-digit decimal host crafted to
-    # land in a public IPv6 range passed this guard while every real resolver
-    # still truncated it down to a blocked IPv4 address underneath. inet_aton
-    # never does that: it only ever produces an IPv4 address or raises.
+    # inet_aton covers decimal/hex/octal/short-form IPv4 the same way glibc's
+    # resolver does. Unlike ip_address(int(host)), it never overflows a large
+    # decimal host into a false-negative IPv6 address — it only ever produces
+    # an IPv4 address or raises.
     try:
         packed = socket.inet_aton(host)
     except OSError:

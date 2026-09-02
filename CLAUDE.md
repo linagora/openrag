@@ -257,7 +257,7 @@ hand OpenRag a URL to notify once the task settles.
 - `callback_url` — POSTed once the task reaches a terminal state
 - `callback_token` — sent as `Authorization: Bearer <token>` on that POST
 
-**Body:** `{"partition", "file_id", "status": "success"|"error", "timestamp", "metadata"}`. `metadata` is
+**Body:** `{"partition", "file_id", "status": "success"|"error", "metadata"}`. `metadata` is
 the upload metadata echoed back **minus** `UPLOAD_METADATA_SERVER_KEYS` (`core/utils/conts.py`:
 `source`, `filename`, `original_filename`, `file_size`, `file_id`, `content_sha256`) — an exclusion,
 not a fixed field list, so any caller-supplied field (cozy-stack's revision marker is `doc_rev`)

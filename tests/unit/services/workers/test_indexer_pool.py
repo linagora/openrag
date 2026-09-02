@@ -1476,9 +1476,6 @@ def _bare_worker_actor(*, save_uploaded_files: bool, worker: _RecordingWorker):
     )
     actor._save_uploaded_files = save_uploaded_files
     actor._logger = SimpleNamespace(debug=lambda *a, **k: None, warning=lambda *a, **k: None)
-    # Not cancelled by default: a bare RuntimeError from _ensure_catalog etc.
-    # goes through set_failed_if_not_cancelled, which real tests override when
-    # they need to assert on the call or simulate cancellation/TSM outage.
     actor._tsm = SimpleNamespace(set_failed_if_not_cancelled=SimpleNamespace(remote=lambda *a: "ref"))
     # These build the actor with __new__, so __init__ never runs. Captioning is
     # enabled by default, so ingest now resolves its prompt even for a config

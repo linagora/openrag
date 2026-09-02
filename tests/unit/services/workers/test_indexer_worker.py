@@ -666,9 +666,7 @@ async def test_a_broken_success_callback_does_not_flip_a_completed_task_to_faile
             callback_url="https://cozy.example.com/callback",
         )
 
-    # COMPLETED was already set before the callback ran; it must stay COMPLETED
-    # (set_state is also used for the earlier SERIALIZING transition, hence the
-    # call-list filter rather than assert_awaited_once_with).
+    # set_state is also called for SERIALIZING, hence the call-list filter.
     completed_calls = [
         call for call in tsm.set_state.remote.call_args_list if call.args == ("t-cb-broken", "COMPLETED")
     ]
@@ -746,8 +744,6 @@ async def test_process_file_still_reports_the_original_failure_when_the_tsm_is_u
     monkeypatch.setattr("services.workers.indexer_actor.send_indexing_callback", callback_mock)
 
     async def _serializing_ok_report_fails(submit, task_description: str = "") -> None:
-        # SERIALIZING (before the pipeline runs) succeeds — the parser fails
-        # afterwards — and only the *report* of that failure hits a down TSM.
         if "SERIALIZING" in task_description:
             return None
         raise RuntimeError("tsm unreachable")

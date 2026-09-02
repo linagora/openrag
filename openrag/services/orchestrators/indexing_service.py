@@ -113,10 +113,7 @@ class IndexingService:
     ) -> dict:
         """Assemble the indexing metadata exactly as the legacy router did.
 
-        The keys added below (plus the temporal-field normalization) must match
-        ``UPLOAD_METADATA_SERVER_KEYS`` exactly — the indexing-status callback
-        echoes this dict's caller-supplied fields to a caller-chosen URL and
-        relies on that constant to exclude everything added here.
+        The keys added below must match ``UPLOAD_METADATA_SERVER_KEYS`` exactly.
         """
         metadata = dict(metadata or {})
         metadata.update(
@@ -232,11 +229,7 @@ class IndexingService:
 
         Workspace association happens inside the worker's ``add_file``
         after a successful index — the router only pre-validates the ids.
-
-        When *callback_url* is provided it is forwarded to the worker, which
-        sends a best-effort ``POST`` notification once the task reaches a
-        terminal state. *callback_token*, when set, travels with it and is sent
-        as the ``Authorization`` bearer of that notification.
+        *callback_url*/*callback_token* are forwarded to the worker as-is.
         """
         if self._deduplication_enabled() and content_sha256 is None:
             content_sha256 = await asyncio.to_thread(_sha256_file, file_path)

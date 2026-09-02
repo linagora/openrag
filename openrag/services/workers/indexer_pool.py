@@ -145,10 +145,8 @@ class IndexerWorkerActor:
         self._last_miss_reload_key: tuple[tuple[str, tuple[str, ...]], ...] | None = None
         self._registry_lock = asyncio.Lock()
         self._registry_reload_task: asyncio.Task[None] | None = None
-        # Held here too, not just inside the worker: a pre-flight failure below
-        # (before IndexerWorker.process_file starts) has to report its own
-        # terminal state and error callback, since the worker's own except
-        # block is never reached for it.
+        # Held here too: a pre-flight failure below runs before the worker's own
+        # except block, so it must report its own terminal state and callback.
         self._tsm = task_state_manager
         self._worker = IndexerWorker(
             pipeline=pipeline,
@@ -318,13 +316,8 @@ class IndexerWorkerActor:
                 # hitting the DB per chunk.
                 resolved_prompts = await self._resolve_ingest_prompts(partition, indexation_config or {})
             except Exception:
-                # IndexerWorker.process_file sends the error callback and sets
-                # FAILED, and neither is ever reached from here. Deliberately
-                # not BaseException: a task cancelled during pre-flight raises
-                # CancelledError, and a cancellation notifies nothing — same
-                # rule as the worker's set_failed_if_not_cancelled gate.
-                # Awaiting the callback inside a cancellation handler would
-                # also delay the cancel.
+                # Not BaseException: a cancellation here must not notify or be
+                # reported as failed (same rule as set_failed_if_not_cancelled).
                 tb = traceback.format_exc()
                 try:
                     was_failed = await retry_idempotent_ray_actor_method(
@@ -332,10 +325,6 @@ class IndexerWorkerActor:
                         task_description=f"set_failed_if_not_cancelled({task_id})",
                     )
                 except Exception:
-                    # The TSM is unreachable, so the task state stays whatever
-                    # it last was (most likely QUEUED) — same as before this
-                    # fix, but at least the caller now hears about the failure
-                    # instead of both the callback and the state going silent.
                     was_failed = True
                 if was_failed:
                     await send_indexing_callback(

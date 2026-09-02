@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import json
-import re
-from datetime import datetime
 from unittest import mock
 
 import httpx
@@ -69,8 +67,6 @@ async def test_success_callback_echoes_caller_metadata_verbatim(captured_body: d
         "datetime": "2026-01-01T00:00:00Z",
         "doctype": "io.cozy.files",
     }
-    # `timestamp` is generated at send time and must be a valid ISO8601 string.
-    datetime.fromisoformat(body["timestamp"])
 
 
 @pytest.mark.asyncio
@@ -321,7 +317,7 @@ async def test_callback_token_never_reaches_url_or_payload(captured_request: dic
     request = captured_request["request"]
     assert "s3cret-token" not in str(request.url)
     assert "s3cret-token" not in request.content.decode()
-    assert json.loads(request.content).keys() == {"partition", "file_id", "status", "timestamp", "metadata"}
+    assert json.loads(request.content).keys() == {"partition", "file_id", "status", "metadata"}
 
 
 @pytest.mark.asyncio
@@ -461,16 +457,6 @@ async def test_username_redaction_does_not_leave_password_behind(monkeypatch: py
 
         error = mock_logger.warning.call_args[1]["error"]
         assert "bobsecret" not in error
-
-
-@pytest.mark.asyncio
-async def test_timestamp_is_rfc3339_with_z_and_milliseconds(captured_body: dict) -> None:
-    await send_indexing_callback("https://cozy.example.com/rag/callback", "p", "f1", "success", {"doc_rev": "3-abc"})
-
-    timestamp = captured_body["body"]["timestamp"]
-    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z", timestamp), timestamp
-    # Still round-trips: a "Z" suffix is accepted from Python 3.11 on.
-    assert datetime.fromisoformat(timestamp).tzinfo is not None
 
 
 @pytest.mark.asyncio

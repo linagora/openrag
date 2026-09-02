@@ -64,11 +64,9 @@ def _validate_callback_url(callback_url: str | None, config) -> None:
         return
     allow_private = bool(getattr(getattr(config, "indexing_callback", None), "allow_private_urls", False))
     try:
-        # ``.port`` is where a non-numeric port raises, not ``urlparse`` itself —
-        # and it is the one thing ``is_safe_url`` never touches.
+        # is_safe_url never touches the port; a non-numeric one raises here.
         urlparse(callback_url).port
     except ValueError as exc:
-        # e.g. an unterminated IPv6 literal or "host:abc" — a bad request, not a 500.
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="callback_url is not a valid URL",

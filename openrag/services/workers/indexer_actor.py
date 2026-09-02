@@ -79,19 +79,16 @@ class IndexerWorker:
         is re-raised so the Ray task is marked as errored.
 
         When *callback_url* is provided, a best-effort ``POST`` notification is
-        sent to that URL after the task reaches a terminal state (``success`` or
-        ``error``).  *callback_token*, when set, is sent as that request's
-        ``Authorization`` bearer.  The callback never affects the indexing
-        outcome.
+        sent to it once the task reaches a terminal state; never affects the
+        indexing outcome.
         """
         file_id = metadata.get("file_id", "")
         log = logger.bind(file_id=file_id, partition=partition, task_id=task_id)
         row: dict[str, Any] | None = None
         catalog_written = False
         try:
-            # Inside the try: the pool's pre-flight handler stops before this
-            # call, so a TaskStateManager outage here would otherwise fail the
-            # job without any callback at all.
+            # Inside the try so a TaskStateManager outage here still reaches
+            # the except block below and sends the error callback.
             await retry_idempotent_ray_actor_method(
                 lambda: self._tsm.set_state.remote(task_id, "SERIALIZING"),
                 task_description=f"set_state({task_id}, SERIALIZING)",
@@ -169,12 +166,7 @@ class IndexerWorker:
                     task_description=f"set_failed_if_not_cancelled({task_id})",
                 )
             except Exception:
-                # The TSM is still unreachable — most likely why the exception
-                # being handled here happened in the first place (e.g. the
-                # earlier SERIALIZING write above already timed out against it).
-                # Letting this second call's own error replace the original
-                # traceback via a bare ``raise`` below would both hide the real
-                # failure and, before this fix, skip the callback outright.
+                # TSM still unreachable: treat as failed so the callback still fires.
                 was_failed = True
             if was_failed:
                 await send_indexing_callback(
@@ -182,13 +174,9 @@ class IndexerWorker:
                 )
             raise
         else:
-            # ``else``, not the end of the ``try``: the file is already
-            # COMPLETED at this point, so anything raised from here on (e.g.
-            # a cancellation reaching send_indexing_callback's own internal
-            # "never raises" guard) must not fall into the ``except`` above and
-            # get reinterpreted as this indexing run having failed — that would
-            # flip an already-successful task to FAILED and fire a spurious
-            # "error" callback right after "success" was sent.
+            # else, not end-of-try: the file is already COMPLETED here, so any
+            # error past this point must not be caught above and reported as
+            # a failed run.
             log.info("File indexed successfully.")
             await send_indexing_callback(
                 callback_url, partition, file_id, "success", metadata, callback_token=callback_token

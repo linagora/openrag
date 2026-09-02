@@ -203,11 +203,6 @@ class LoaderConfig(ConfigMixin):
     eml_max_recursion_depth: int = 5
 
 
-# ---------------------------------------------------------------------------
-# Indexing callback (optional status POST when a task reaches a terminal state)
-# ---------------------------------------------------------------------------
-
-
 class IndexingCallbackConfig(ConfigMixin):
     """Server-side policy for the caller-supplied per-upload ``callback_url``.
 
