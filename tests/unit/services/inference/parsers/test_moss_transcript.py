@@ -36,6 +36,18 @@ def test_normalizes_a_complete_speakerless_compact_turn():
     assert normalize_moss_speaker_aware_transcript(transcript) == "Hello"
 
 
+def test_normalizes_repeated_speakerless_compact_turns_with_shared_boundaries():
+    transcript = "[1] A [2][2] B [3]"
+
+    assert normalize_moss_speaker_aware_transcript(transcript) == "A\nB"
+
+
+def test_preserves_speakerless_compact_turns_without_shared_boundaries():
+    transcript = "[1] A [2][3] B [4]"
+
+    assert normalize_moss_speaker_aware_transcript(transcript) == transcript
+
+
 def test_normalizes_labelled_compact_turns_with_a_shared_boundary():
     transcript = "[0][S01] A [1][S02] B [2]"
 

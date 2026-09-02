@@ -102,20 +102,35 @@ def _parse_compact(transcript: str) -> list[_Segment]:
 
 
 def _parse_speakerless_compact(transcript: str) -> list[_Segment]:
-    """Recognize one complete compact turn when MOSS omits a speaker label."""
-    match = _SPEAKERLESS_COMPACT.fullmatch(transcript)
-    if match is None or _DASH_MARKER.search(transcript):
+    """Recognize complete speakerless compact turns with shared boundaries."""
+    matches = list(_SPEAKERLESS_COMPACT.finditer(transcript))
+    if not matches or _DASH_MARKER.search(transcript):
         return []
 
-    text = _normalize_text(match["text"])
-    if (
-        not _valid_range(match["start"], match["end"])
-        or not text
-        or _TIME_TOKEN_MARKER.search(text)
-        or _SPEAKER_MARKER.search(text)
-    ):
-        return []
-    return [("S01", text)]
+    segments: list[_Segment] = []
+    cursor = 0
+    previous_end: Decimal | None = None
+    for match in matches:
+        if transcript[cursor : match.start()].strip():
+            return []
+        start = _seconds(match["start"])
+        end = _seconds(match["end"])
+        text = _normalize_text(match["text"])
+        if (
+            start is None
+            or end is None
+            or end < start
+            or (previous_end is not None and start != previous_end)
+            or not text
+            or _TIME_TOKEN_MARKER.search(text)
+            or _SPEAKER_MARKER.search(text)
+        ):
+            return []
+        segments.append(("S01", text))
+        previous_end = end
+        cursor = match.end()
+
+    return segments if not transcript[cursor:].strip() else []
 
 
 def _compact_region_end(transcript: str, text_start: int, next_start: re.Match[str]) -> int:
