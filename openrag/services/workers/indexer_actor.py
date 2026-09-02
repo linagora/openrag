@@ -75,10 +75,12 @@ class IndexerWorker:
         on success.  On failure, state is set to FAILED and the exception
         is re-raised so the Ray task is marked as errored.
         """
-        await retry_idempotent_ray_actor_method(
+        accepted = await retry_idempotent_ray_actor_method(
             lambda: self._tsm.set_state.remote(task_id, "SERIALIZING"),
             task_description=f"set_state({task_id}, SERIALIZING)",
         )
+        if accepted is False:
+            raise RuntimeError(f"Task {task_id} was cancelled before indexing started")
         row: dict[str, Any] | None = None
         catalog_written = False
         try:

@@ -8,13 +8,15 @@ import ray
 from core.utils.logging import get_logger
 from ray.exceptions import TaskCancelledError
 from services.workers.ray_utils import call_ray_actor_method_with_timeout, call_ray_actor_with_timeout
-from services.workers.task_state import CANCELLABLE_INDEXING_STATES, PENDING_TASK_DETAILS
+from services.workers.task_state import (
+    CANCELLABLE_INDEXING_STATES,
+    PENDING_TASK_DETAILS,
+    STALE_REFLESS_TASK_ERROR,
+    SUBMITTED_TASK_WITHOUT_REF,
+)
 
 logger = get_logger()
 _REF_WAIT_INTERVAL = 0.05
-_STALE_REFLESS_TASK_ERROR = (
-    "Indexing task never exposed a cancellable worker ref before delete cleanup; marking it failed as stale."
-)
 
 
 async def cancel_active_indexing_tasks(
@@ -34,7 +36,7 @@ async def cancel_active_indexing_tasks(
             partition=partition,
             file_id=file_id,
         )
-        cancelled_now, pending_without_ref, pending_details = await _cancel_refs(
+        cancelled_now, pending_without_ref, pending_details, submitted_without_ref = await _cancel_refs(
             task_state_manager,
             matches,
             deadline=deadline,
@@ -42,7 +44,7 @@ async def cancel_active_indexing_tasks(
             file_id=file_id,
         )
         cancelled += cancelled_now
-        if not pending_without_ref and not pending_details:
+        if not pending_without_ref and not pending_details and not submitted_without_ref:
             return cancelled
         logger.info(
             "Waiting for active indexing tasks to finish registration before delete cleanup",
@@ -50,6 +52,7 @@ async def cancel_active_indexing_tasks(
             file_id=file_id,
             pending_without_ref=pending_without_ref,
             pending_details=pending_details,
+            submitted_without_ref=submitted_without_ref,
         )
         remaining = deadline - monotonic()
         if remaining <= _REF_WAIT_INTERVAL:
@@ -60,7 +63,7 @@ async def cancel_active_indexing_tasks(
                 file_id=file_id,
                 final=True,
             )
-            cancelled_now, pending_without_ref, pending_details = await _cancel_refs(
+            cancelled_now, pending_without_ref, pending_details, submitted_without_ref = await _cancel_refs(
                 task_state_manager,
                 final_matches,
                 deadline=deadline,
@@ -70,6 +73,12 @@ async def cancel_active_indexing_tasks(
             cancelled += cancelled_now
             if pending_details:
                 _raise_pending_details_timeout(pending_details, partition=partition, file_id=file_id)
+            if submitted_without_ref:
+                _raise_submitted_without_ref_timeout(
+                    submitted_without_ref,
+                    partition=partition,
+                    file_id=file_id,
+                )
             if not pending_without_ref:
                 return cancelled
             await _mark_ref_less_tasks_failed(
@@ -139,7 +148,12 @@ async def _get_matching_active_task_refs_legacy(
     for task_id, info in all_info.items():
         if not isinstance(info, dict):
             continue
-        if info.get("state") not in CANCELLABLE_INDEXING_STATES:
+        state = info.get("state")
+        submission_started = isinstance(info.get("submission_started_at"), (int, float))
+        cancelled_unsettled = state == "CANCELLED" and (
+            info.get("worker_submitted") is True or submission_started or get_object_ref_remote is not None
+        )
+        if state not in CANCELLABLE_INDEXING_STATES and not cancelled_unsettled:
             continue
         details = info.get("details") or {}
         if not isinstance(details, dict):
@@ -158,7 +172,17 @@ async def _get_matching_active_task_refs_legacy(
                 timeout=_remaining_timeout(deadline, partition=partition, file_id=file_id),
                 task_description=f"get_object_ref({task_id}) for delete cleanup",
             )
-        matches[task_id] = object_ref
+        if (
+            state == "CANCELLED"
+            and object_ref is None
+            and info.get("worker_submitted") is not True
+            and not submission_started
+        ):
+            continue
+        if object_ref is None and (info.get("worker_submitted") is True or submission_started):
+            matches[task_id] = SUBMITTED_TASK_WITHOUT_REF
+        else:
+            matches[task_id] = object_ref
     return matches
 
 
@@ -169,13 +193,17 @@ async def _cancel_refs(
     deadline: float,
     partition: str,
     file_id: str | None,
-) -> tuple[int, list[str], list[str]]:
+) -> tuple[int, list[str], list[str], list[str]]:
     cancelled = 0
     pending_without_ref: list[str] = []
     pending_details: list[str] = []
+    submitted_without_ref: list[str] = []
     for task_id, object_ref in matches.items():
         if _task_details_pending(object_ref):
             pending_details.append(task_id)
+            continue
+        if _task_submitted_without_ref(object_ref):
+            submitted_without_ref.append(task_id)
             continue
         ref = _task_ref(object_ref)
         if ref is None:
@@ -205,12 +233,23 @@ async def _cancel_refs(
             timeout=remaining,
             task_description=f"set_state({task_id}, CANCELLED)",
         )
+        finish_cancellation_remote = _remote_actor_method(task_state_manager, "finish_cancellation")
+        if finish_cancellation_remote is not None:
+            await call_ray_actor_method_with_timeout(
+                submit=lambda task_id=task_id: finish_cancellation_remote(task_id),
+                timeout=_remaining_timeout(deadline, partition=partition, file_id=file_id),
+                task_description=f"finish_cancellation({task_id})",
+            )
         cancelled += 1
-    return cancelled, pending_without_ref, pending_details
+    return cancelled, pending_without_ref, pending_details, submitted_without_ref
 
 
 def _task_details_pending(object_ref: Any) -> bool:
     return object_ref == PENDING_TASK_DETAILS
+
+
+def _task_submitted_without_ref(object_ref: Any) -> bool:
+    return object_ref == SUBMITTED_TASK_WITHOUT_REF
 
 
 def _task_ref(object_ref: Any) -> Any | None:
@@ -269,7 +308,7 @@ async def _mark_ref_less_tasks_failed(
     if set_failed is not None:
         for task_id in task_ids:
             await call_ray_actor_method_with_timeout(
-                submit=lambda task_id=task_id: set_failed.remote(task_id, _STALE_REFLESS_TASK_ERROR),
+                submit=lambda task_id=task_id: set_failed.remote(task_id, STALE_REFLESS_TASK_ERROR),
                 timeout=_remaining_timeout(deadline, partition=partition, file_id=file_id),
                 task_description=f"set_failed_if_not_cancelled({task_id})",
             )
@@ -307,5 +346,12 @@ def _remaining_timeout(deadline: float, *, partition: str, file_id: str | None) 
 def _raise_pending_details_timeout(task_ids: list[str], *, partition: str, file_id: str | None) -> None:
     raise TimeoutError(
         "Timed out waiting for active indexing tasks to record routing details "
+        f"before deleting partition={partition!r}, file_id={file_id!r}, task_ids={task_ids!r}"
+    )
+
+
+def _raise_submitted_without_ref_timeout(task_ids: list[str], *, partition: str, file_id: str | None) -> None:
+    raise TimeoutError(
+        "Timed out waiting for submitted indexing tasks to expose worker references or settle "
         f"before deleting partition={partition!r}, file_id={file_id!r}, task_ids={task_ids!r}"
     )

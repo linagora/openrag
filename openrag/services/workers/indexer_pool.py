@@ -10,6 +10,7 @@ import ray
 from core.config.model_endpoints import CONTROL_EXTRA_KEYS
 from core.models.catalog import CONTENT_CLAIM_TOKEN_METADATA_KEY
 from services.workers.indexer_actor import IndexerWorker, delete_uploaded_file
+from services.workers.ray_utils import retry_idempotent_ray_actor_method
 
 from openrag.core.config.root import Settings
 
@@ -18,6 +19,10 @@ from openrag.core.config.root import Settings
 # of indexing throughput.
 _MODEL_REGISTRY_TTL_SECONDS = 60.0
 _CONTENT_CLAIM_RENEW_INTERVAL_SECONDS = 60 * 60
+_WORKER_REF_REGISTRATION_TIMEOUT_SECONDS = 60.0
+_WORKER_REF_REGISTRATION_POLL_SECONDS = 0.05
+_REJECTED_SUBMISSION_ERROR = "Indexer worker submission was rejected before the worker started."
+_MISSING_WORKER_REF_ERROR = "Indexer worker did not receive a registered task reference before starting."
 # Named detached actors survive API rolling deployments. Keep the dispatcher
 # and workers on the same protocol generation whenever their remote contract or
 # cross-process indexing semantics change, so new replicas cannot attach to a
@@ -47,7 +52,7 @@ class IndexerWorkerActor:
     of these and load-balances across them.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, namespace: str = "openrag") -> None:
         import services.inference.ollama_client  # noqa: F401
         import services.inference.vllm_client  # noqa: F401
         from core.config import load_config
@@ -62,6 +67,7 @@ class IndexerWorkerActor:
         )
         from services.workers.pipeline_builder import build_indexing_pipeline
 
+        self._namespace = namespace
         cfg = load_config()
         parser = build_parser_dispatcher(
             cfg,
@@ -96,7 +102,8 @@ class IndexerWorkerActor:
             embed_concurrency=embed_cfg.embed_concurrency,
         )
         self._vector_store = MilvusVectorStore(cfg.vectordb)
-        task_state_manager = ray.get_actor("TaskStateManager", namespace="openrag")
+        task_state_manager = ray.get_actor("TaskStateManager", namespace=self._namespace)
+        self._task_state_manager = task_state_manager
         pipeline = build_indexing_pipeline(
             parser=parser,
             chunker=chunker,
@@ -333,6 +340,7 @@ class IndexerWorkerActor:
         content_claim_token = metadata.get(CONTENT_CLAIM_TOKEN_METADATA_KEY)
         worker_metadata = {key: value for key, value in metadata.items() if key != CONTENT_CLAIM_TOKEN_METADATA_KEY}
         try:
+            await self._await_worker_ref_registration(task_id)
             await self._ensure_catalog()
             await self._ensure_registry_fresh(_required_model_endpoint_names(indexation_config, embedder_name))
             # Resolve the enrichment-stage prompts once for this file (partition
@@ -386,6 +394,28 @@ class IndexerWorkerActor:
             if not self._save_uploaded_files:
                 await delete_uploaded_file(path, self._logger)
 
+    async def _await_worker_ref_registration(self, task_id: str) -> None:
+        """Do not start indexing until cancellation can target this worker."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + _WORKER_REF_REGISTRATION_TIMEOUT_SECONDS
+        while loop.time() < deadline:
+            remaining = max(0.01, deadline - loop.time())
+            object_ref = await retry_idempotent_ray_actor_method(
+                lambda: self._task_state_manager.get_object_ref.remote(task_id),
+                recovery_timeout=remaining,
+                task_description=f"get_object_ref({task_id}) before indexing",
+            )
+            ref = object_ref.get("ref") if isinstance(object_ref, dict) else object_ref
+            if ref is not None:
+                return
+            await asyncio.sleep(min(_WORKER_REF_REGISTRATION_POLL_SECONDS, remaining))
+
+        await retry_idempotent_ray_actor_method(
+            lambda: self._task_state_manager.set_failed_if_not_cancelled.remote(task_id, _MISSING_WORKER_REF_ERROR),
+            task_description=f"set_failed_if_not_cancelled({task_id}) after missing worker ref",
+        )
+        raise RuntimeError(_MISSING_WORKER_REF_ERROR)
+
 
 @ray.remote
 class IndexerPool:
@@ -425,7 +455,7 @@ class IndexerPool:
                 get_if_exists=True,
                 lifetime="detached",
                 max_concurrency=max_tasks_per_worker,
-            ).remote()
+            ).remote(namespace)
             for i in range(pool_size)
         ]
         self._worker_names = [_indexer_worker_actor_name(i) for i in range(pool_size)]
@@ -434,6 +464,8 @@ class IndexerPool:
         self._release_tasks: set[asyncio.Task[Any]] = set()
         self._claim_store: Any = None
         self._claim_store_lock = asyncio.Lock()
+        self._namespace = namespace
+        self._task_state_manager: Any = None
 
     async def size(self) -> int:
         return len(self._workers)
@@ -474,17 +506,9 @@ class IndexerPool:
         one-element list — see the class docstring); in-flight bookkeeping is
         released when the task settles (success, failure, or cancellation).
         """
-        if not self._accepting_tasks:
-            raise RuntimeError("IndexerPool is draining and cannot accept new tasks")
-        idx = min(range(len(self._workers)), key=self._inflight.__getitem__)
-        self._inflight[idx] += 1
-        try:
-            ref = self._workers[idx].process_file.remote(**kwargs)
-        except Exception:
-            # Submission failed before a ref exists (e.g. unserializable args or
-            # a dead actor); roll back so load balancing stays accurate.
-            self._inflight[idx] -= 1
-            raise
+        task_id = str(kwargs.get("task_id") or "")
+        if not task_id:
+            raise ValueError("IndexerPool submission requires a task_id")
         metadata = kwargs.get("metadata") or {}
         content_sha256 = metadata.get("content_sha256")
         file_id = metadata.get("file_id")
@@ -497,11 +521,102 @@ class IndexerPool:
                 "content_sha256": str(content_sha256),
                 "claim_token": str(claim_token),
             }
+        if not self._accepting_tasks:
+            await self._guard_prelaunch_rejection(task_id, claim)
+            raise RuntimeError("IndexerPool is draining and cannot accept new tasks")
+        idx = min(range(len(self._workers)), key=self._inflight.__getitem__)
+        self._inflight[idx] += 1
+        try:
+            ref = self._workers[idx].process_file.remote(**kwargs)
+        except Exception:
+            # Submission failed before a ref exists (e.g. unserializable args or
+            # a dead actor); roll back so load balancing stays accurate.
+            self._inflight[idx] -= 1
+            await self._guard_prelaunch_rejection(task_id, claim)
+            raise
         task = asyncio.get_running_loop().create_task(self._release(idx, ref, claim=claim))
         # Keep a strong ref so the tracker isn't GC'd mid-flight (asyncio docs).
         self._release_tasks.add(task)
         task.add_done_callback(self._release_tasks.discard)
+        try:
+            registered = await self._register_worker_ref(task_id, ref)
+        except BaseException:
+            await self._guard_rejected_worker(task_id, ref)
+            raise
+        if not registered:
+            await self._guard_rejected_worker(task_id, ref)
+            raise RuntimeError(f"Task {kwargs.get('task_id')} was cancelled before worker ref registration")
         return [ref]
+
+    async def _guard_rejected_worker(self, task_id: str, ref: Any) -> None:
+        settlement = asyncio.create_task(self._cancel_worker_and_wait(task_id, ref))
+        self._release_tasks.add(settlement)
+        settlement.add_done_callback(self._release_tasks.discard)
+        await asyncio.shield(settlement)
+
+    async def _guard_prelaunch_rejection(self, task_id: str, claim: dict[str, str] | None) -> None:
+        cleanup = asyncio.create_task(self._finish_prelaunch_rejection(task_id, claim))
+        self._release_tasks.add(cleanup)
+        cleanup.add_done_callback(self._release_tasks.discard)
+        await asyncio.shield(cleanup)
+
+    async def _finish_prelaunch_rejection(self, task_id: str, claim: dict[str, str] | None) -> None:
+        try:
+            await self._finish_rejected_submission(task_id)
+        finally:
+            await self._release_content_claim(claim)
+
+    async def _cancel_worker_and_wait(self, task_id: str, ref: Any) -> None:
+        """Keep the submission fenced until a rejected worker has settled."""
+        try:
+            ray.cancel(ref, recursive=True)
+        except Exception:
+            # Cancellation is best-effort, but settlement is mandatory before
+            # the caller can safely release the content claim.
+            pass
+        await asyncio.gather(ref, return_exceptions=True)
+        await self._finish_rejected_submission(task_id)
+
+    async def _finish_rejected_submission(self, task_id: str) -> None:
+        task_state_manager = self._task_state_actor()
+        method_names = getattr(task_state_manager, "_ray_actor_method_names", None)
+        known_methods = set(method_names) if isinstance(method_names, (frozenset, list, set, tuple)) else None
+        if known_methods is None or "finish_rejected_submission" in known_methods:
+            method = getattr(task_state_manager, "finish_rejected_submission", None)
+            remote = getattr(method, "remote", None)
+            if remote is not None:
+                await retry_idempotent_ray_actor_method(
+                    lambda: remote(task_id),
+                    task_description=f"finish_rejected_submission({task_id}) from indexer pool",
+                )
+                return
+
+        # A TaskStateManager retained during a rolling deployment may predate
+        # the submission finalizer. It still exposes the atomic failure guard,
+        # which prevents rejected work from remaining QUEUED and consuming the
+        # uploader's pending-task quota indefinitely.
+        if known_methods is not None and "set_failed_if_not_cancelled" not in known_methods:
+            return
+        set_failed = getattr(task_state_manager, "set_failed_if_not_cancelled", None)
+        remote = getattr(set_failed, "remote", None)
+        if remote is not None:
+            await retry_idempotent_ray_actor_method(
+                lambda: remote(task_id, _REJECTED_SUBMISSION_ERROR),
+                task_description=f"set_failed_if_not_cancelled({task_id}) from indexer pool",
+            )
+
+    async def _register_worker_ref(self, task_id: str, ref: Any) -> bool:
+        task_state_manager = self._task_state_actor()
+        registered = await retry_idempotent_ray_actor_method(
+            lambda: task_state_manager.set_object_ref.remote(task_id, {"ref": ref}),
+            task_description=f"set_object_ref({task_id}) from indexer pool",
+        )
+        return registered is not False
+
+    def _task_state_actor(self) -> Any:
+        if self._task_state_manager is None:
+            self._task_state_manager = ray.get_actor("TaskStateManager", namespace=self._namespace)
+        return self._task_state_manager
 
     async def _release(self, idx: int, ref: Any, *, claim: dict[str, str] | None = None) -> None:
         renewal_task = None
@@ -515,17 +630,22 @@ class IndexerPool:
                 renewal_task.cancel()
                 await asyncio.gather(renewal_task, return_exceptions=True)
             if claim is not None:
-                try:
-                    repo = await self._claim_document_repo()
-                    await repo.release_content_sha256_claim(**claim)
-                except Exception as exc:  # noqa: BLE001 - stale claims expire automatically
-                    from core.utils.logging import get_logger
-
-                    get_logger().bind(file_id=claim["file_id"], partition=claim["partition"]).warning(
-                        "Failed to release settled content deduplication claim.",
-                        error=str(exc),
-                    )
+                await self._release_content_claim(claim)
             self._inflight[idx] -= 1
+
+    async def _release_content_claim(self, claim: dict[str, str] | None) -> None:
+        if claim is None:
+            return
+        try:
+            repo = await self._claim_document_repo()
+            await repo.release_content_sha256_claim(**claim)
+        except Exception as exc:  # noqa: BLE001 - stale claims expire automatically
+            from core.utils.logging import get_logger
+
+            get_logger().bind(file_id=claim["file_id"], partition=claim["partition"]).warning(
+                "Failed to release settled content deduplication claim.",
+                error=str(exc),
+            )
 
     async def _claim_document_repo(self) -> Any:
         if self._claim_store is None:

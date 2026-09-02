@@ -15,7 +15,7 @@ from api.dependencies.auth import check_user_file_quota, require_partition_edito
 from api.dependencies.files import validate_file_format, validate_file_id, validate_metadata
 from api.error_handlers import register_error_handlers
 from api.routers.admin.indexing import router as indexer_router
-from core.utils.exceptions import ConflictError
+from core.utils.exceptions import ConflictError, mark_indexing_worker_may_be_running
 from di.providers import get_config, get_indexing_service
 from fastapi import FastAPI, UploadFile
 
@@ -187,3 +187,49 @@ async def test_put_file_save_failure_returns_safe_error(
     assert resp.json() == {"detail": "Failed to save uploaded file."}
     assert "private path" not in resp.text
     assert service.dispatched is False
+
+
+class _UnknownOutcomeService(_FakeIndexingService):
+    """Dispatcher gave up on the submit RPC but a worker may already be live."""
+
+    async def add_file(self, **_kwargs):
+        exc = TimeoutError("submit timed out")
+        mark_indexing_worker_may_be_running(exc)
+        raise exc
+
+
+class _UnknownOutcomePutService(_ExistingFileService):
+    async def add_file(self, **_kwargs):
+        exc = TimeoutError("submit timed out")
+        mark_indexing_worker_may_be_running(exc)
+        raise exc
+
+
+@pytest.mark.asyncio
+async def test_add_file_keeps_upload_when_worker_may_still_be_running(tmp_path, monkeypatch):
+    """A worker launched before the submit response was lost still needs the file.
+
+    ``IndexerPool.submit`` starts ``process_file`` before it returns, and the
+    worker does not read the path until after its ref registration, so deleting
+    the upload here would fail an indexing run that could still succeed.
+    """
+    app = _build_app(tmp_path, monkeypatch, content=b"same", service=_UnknownOutcomeService())
+    transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        resp = await client.post("/indexer/partition/p1/file/f1", data={"_": "1"})
+
+    assert resp.status_code == 500
+    assert len(list((tmp_path / "data").iterdir())) == 1
+
+
+@pytest.mark.asyncio
+async def test_put_file_keeps_upload_when_worker_may_still_be_running(tmp_path, monkeypatch):
+    app = _build_app(tmp_path, monkeypatch, content=b"same", service=_UnknownOutcomePutService())
+    transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        resp = await client.put("/indexer/partition/p1/file/f1", data={"_": "1"})
+
+    assert resp.status_code == 500
+    assert len(list((tmp_path / "data").iterdir())) == 1

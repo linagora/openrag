@@ -214,6 +214,28 @@ async def test_process_file_success_sets_state_and_returns_count(tmp_path: Path)
 
 
 @pytest.mark.asyncio
+async def test_process_file_stops_when_task_was_cancelled_before_start(tmp_path: Path) -> None:
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"content")
+    pipeline = AsyncMock()
+    tsm = _fake_tsm()
+    tsm.set_state.remote.return_value = False
+
+    worker = IndexerWorker(pipeline=pipeline, task_state_manager=tsm)
+
+    with pytest.raises(RuntimeError, match="cancelled before indexing started"):
+        await worker.process_file(
+            task_id="t1",
+            path=str(path),
+            metadata={"file_id": "f1"},
+            partition="p",
+        )
+
+    pipeline.run.assert_not_called()
+    tsm.set_failed_if_not_cancelled.remote.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_process_file_retries_state_write_during_actor_reconstruction(tmp_path: Path) -> None:
     path = tmp_path / "doc.txt"
     path.write_bytes(b"content")
