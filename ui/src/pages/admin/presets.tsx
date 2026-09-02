@@ -50,6 +50,7 @@ import {
   type Config,
   configGet,
   configSet,
+  configUnset,
   applyParsingStrategyChange,
   PARSING_STRATEGY_INHERIT,
 } from "./preset-config";
@@ -669,6 +670,8 @@ function RetrievalPresetForm({
   rerankers,
   llms,
   prompts,
+  compressionAvailable,
+  compressionBackend,
 }: {
   config: Config;
   onChange: (c: Config) => void;
@@ -676,6 +679,8 @@ function RetrievalPresetForm({
   rerankers: string[];
   llms: string[];
   prompts: PromptResponse[];
+  compressionAvailable: boolean;
+  compressionBackend: string;
 }) {
   const set = (key: string, value: unknown) => onChange(configSet(config, key, value));
   const pipelineType: string = configGet(config, "type", "single");
@@ -836,6 +841,65 @@ function RetrievalPresetForm({
 
       <Separator />
 
+      {/* Context compression */}
+      <section className="space-y-3">
+        <div className="flex items-center justify-between">
+          <h4 className="text-sm font-medium">Context compression</h4>
+          <Switch
+            checked={configGet(config, "compression_enabled", false) as boolean}
+            onCheckedChange={(on) => set("compression_enabled", on)}
+            disabled={!compressionAvailable}
+            size="sm"
+          />
+        </div>
+        <p className="text-[0.7rem] text-muted-foreground">
+          {compressionAvailable
+            ? `Shrink retrieved text before it reaches the LLM (backend: ${compressionBackend}). More sources fit the context budget, at the cost of some latency per query.`
+            : "Disabled for this deployment. Set compression.enabled in the server config to turn it on."}
+        </p>
+        <div className="space-y-1.5 max-w-xs">
+          <Label className="text-xs">Target ratio</Label>
+          <p className="text-[0.7rem] text-muted-foreground">
+            Fraction of each source to keep (0–1). Empty = let the backend decide.
+          </p>
+          <Input
+            type="number"
+            min={0.05}
+            max={1}
+            step={0.05}
+            value={configGet(config, "compression_target_ratio", "") as string | number}
+            onChange={(e) =>
+              e.target.value === ""
+                ? onChange(configUnset(config, "compression_target_ratio"))
+                : set("compression_target_ratio", numOr(e.target.value, 0.5))
+            }
+            disabled={!compressionAvailable || !configGet(config, "compression_enabled", false)}
+          />
+        </div>
+        <div className="flex items-center justify-between">
+          <Label className="text-xs">Also compress chat history</Label>
+          <Switch
+            checked={configGet(config, "compress_history", false) as boolean}
+            onCheckedChange={(on) => set("compress_history", on)}
+            disabled={!compressionAvailable || !configGet(config, "compression_enabled", false)}
+            size="sm"
+          />
+        </div>
+        <div className="space-y-1.5 max-w-xs">
+          <Label className="text-xs">Keep recent turns uncompressed</Label>
+          <Input
+            type="number"
+            min={0}
+            max={50}
+            value={configGet(config, "compress_history_keep_recent", 2)}
+            onChange={(e) => set("compress_history_keep_recent", intOr(e.target.value, 2))}
+            disabled={!compressionAvailable || !configGet(config, "compress_history", false)}
+          />
+        </div>
+      </section>
+
+      <Separator />
+
       {/* Advanced Pipeline Settings */}
       <section className="space-y-3">
         <button
@@ -989,6 +1053,8 @@ function PresetDialog({
               rerankers={rerankers}
               llms={llms}
               prompts={allPrompts}
+              compressionAvailable={options?.compression_available ?? false}
+              compressionBackend={options?.compression_backend ?? "noop"}
             />
           )}
 

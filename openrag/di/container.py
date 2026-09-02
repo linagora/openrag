@@ -24,11 +24,13 @@ import os
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
+from core.compression import Compressor
 from core.embeddings import embedder_registry
 from core.llm import llm_registry
 from core.rerankers import reranker_registry
 from core.utils.logging import get_logger
 from core.vlm import vlm_registry
+from di.compressors import create_compressor, register_compressors
 from di.embedders import register_embedders
 from di.factories import make_component_factory
 from di.llms import register_llms
@@ -88,6 +90,7 @@ class ServiceContainer:
         register_llms()
         register_rerankers()
         register_vlms()
+        register_compressors()
 
         # Validate + freeze the OIDC env config now so misconfiguration
         # (AUTH_MODE=oidc with missing OIDC_*, invalid claim_source,
@@ -112,6 +115,7 @@ class ServiceContainer:
         self.vlm_factory = self._missing_named_factory("vlm")
         self._catalog_store: CatalogStore | None = create_catalog_store(settings) if settings is not None else None
         self._vector_store: VectorStore | None = create_vector_store(settings) if settings is not None else None
+        self._compressor: Compressor | None = create_compressor(settings) if settings is not None else None
         self._auth_service: AuthService | None = None
         self._user_service: UserService | None = None
         self._partition_service: PartitionService | None = None
@@ -243,6 +247,8 @@ class ServiceContainer:
                 for client in list(cache.values()):
                     await self._close_inference_client(client, seen_client_ids)
                 cache.clear()
+            if self._compressor is not None:
+                await self._close_inference_client(self._compressor, seen_client_ids)
             if self._catalog_store is not None:
                 await self._catalog_store.shutdown()
         finally:
@@ -276,6 +282,13 @@ class ServiceContainer:
     # ------------------------------------------------------------------
     # Storage adapters
     # ------------------------------------------------------------------
+
+    @property
+    def compressor(self) -> Compressor:
+        """The configured context compressor, or a passthrough when disabled."""
+        if self._compressor is None:
+            raise RuntimeError(_NO_SETTINGS_MESSAGE)
+        return self._compressor
 
     @property
     def catalog_store(self) -> CatalogStore:
@@ -585,6 +598,7 @@ class ServiceContainer:
                 **{k: v for k, v in llm_cfg.items() if k not in ("base_url", "model", "api_key")},
             )
             self._query_service = QueryService(
+                compressor=self.compressor,
                 retrieval_service=self.retrieval_service,
                 llm=llm,
                 config=settings,
