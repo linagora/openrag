@@ -56,6 +56,22 @@ class TestCrud:
         assert updated is not None
         assert (updated.name, updated.content) == ("new", "new-body")
 
+    async def test_renaming_asr_prompt_preserves_indexation_preset_selection(self, postgres_store: PostgresStore):
+        repo = postgres_store.prompt_repo
+        prompt = await repo.create(_prompt("asr_transcription", name="meeting-notes"))
+        await postgres_store.preset_repo.upsert(
+            "audio-indexing",
+            "indexation",
+            {"asr_transcription_prompt_name": " meeting-notes "},
+        )
+
+        renamed = await repo.update(prompt.id, name="meeting-notes-v2")
+
+        assert renamed is not None and renamed.name == "meeting-notes-v2"
+        preset = await postgres_store.preset_repo.get("audio-indexing", "indexation")
+        assert preset is not None
+        assert preset["config"]["asr_transcription_prompt_name"] == "meeting-notes-v2"
+
     async def test_update_ignores_non_whitelisted_fields(self, postgres_store: PostgresStore):
         repo = postgres_store.prompt_repo
         created = await repo.create(_prompt(prompt_type="sys_prompt", is_default=False))

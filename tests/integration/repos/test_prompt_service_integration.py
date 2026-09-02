@@ -71,7 +71,7 @@ class TestSeedAndResolve:
         await postgres_store.preset_repo.upsert(
             "legalpreset",
             "indexation",
-            {"contextualization_prompt_name": "ctx1", "asr_transcription_prompt_name": "meeting"},
+            {"contextualization_prompt_name": "ctx1", "asr_transcription_prompt_name": " meeting "},
         )
         await postgres_store.preset_repo.upsert(
             "orphan",

@@ -64,6 +64,8 @@ _PRESET_FIELD_TO_TYPE = {
     "query_contextualizer_prompt_name": "query_contextualizer",
 }
 
+_ASR_TRANSCRIPTION_PRESET_FIELD = "asr_transcription_prompt_name"
+
 
 class PgPromptRepository(PromptRepository):
     """asyncpg-backed implementation of :class:`PromptRepository`."""
@@ -171,10 +173,40 @@ class PgPromptRepository(PromptRepository):
             sets.append(f"{col} = ${len(params)}")
 
         try:
-            rec = await self.pool.fetchrow(
-                f"UPDATE prompts SET {', '.join(sets)}, updated_at = now() WHERE id = $1 RETURNING {_SELECT_COLS}",
-                *params,
-            )
+            if "name" not in updates:
+                rec = await self.pool.fetchrow(
+                    f"UPDATE prompts SET {', '.join(sets)}, updated_at = now() WHERE id = $1 RETURNING {_SELECT_COLS}",
+                    *params,
+                )
+            else:
+                async with self.pool.acquire() as conn:
+                    async with conn.transaction():
+                        existing = await conn.fetchrow(
+                            "SELECT prompt_type, name FROM prompts WHERE id = $1 FOR UPDATE",
+                            prompt_id,
+                        )
+                        if existing is None:
+                            return None
+                        rec = await conn.fetchrow(
+                            f"UPDATE prompts SET {', '.join(sets)}, updated_at = now() "
+                            f"WHERE id = $1 RETURNING {_SELECT_COLS}",
+                            *params,
+                        )
+                        if rec is None:
+                            return None
+                        if existing["prompt_type"] == "asr_transcription" and existing["name"] != rec["name"]:
+                            await conn.execute(
+                                """
+                                UPDATE pipeline_presets
+                                SET config = jsonb_set(config, $1::text[], to_jsonb($2::text)), updated_at = now()
+                                WHERE preset_type = $3 AND btrim(config->>$4) = $5
+                                """,
+                                [_ASR_TRANSCRIPTION_PRESET_FIELD],
+                                rec["name"],
+                                "indexation",
+                                _ASR_TRANSCRIPTION_PRESET_FIELD,
+                                existing["name"],
+                            )
         except asyncpg.UniqueViolationError as exc:
             # A rename racing another rename/create onto the same name.
             existing = await self.get(prompt_id)
@@ -272,7 +304,9 @@ class PgPromptRepository(PromptRepository):
         # if two of its presets happened to name it.
         preset_rows = await self.pool.fetch(
             """
-            SELECT c.key AS field, c.value AS name, count(DISTINCT part.partition)::int AS n
+            SELECT c.key AS field,
+                   CASE WHEN c.key = 'asr_transcription_prompt_name' THEN btrim(c.value) ELSE c.value END AS name,
+                   count(DISTINCT part.partition)::int AS n
             FROM partitions part
             JOIN pipeline_presets pre
               ON (pre.preset_type = 'indexation' AND pre.name = part.indexation_preset)

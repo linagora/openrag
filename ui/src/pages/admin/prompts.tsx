@@ -365,12 +365,11 @@ function PromptEditorSheet({
   const effectiveType = editing?.prompt_type ?? promptType;
   const isAsrTranscription = effectiveType === "asr_transcription";
   const templateCheck = validatePlaceholders(content, effectiveType);
-  // Presets and partitions reference a prompt by *name*, so a rename silently
-  // orphans every selection pointing at the old one — they fall back to the
-  // global default. Warn before that happens instead of letting the drawer's
-  // "changes apply everywhere" promise quietly become false.
+  // ASR prompt references are rewritten with their prompt rename. Other prompt
+  // selections still reference the old name and fall back to their defaults.
   const isRename = !!editing && name.trim() !== editing.name;
-  const renameBreaksRefs = isRename && (editing?.used_by ?? 0) > 0;
+  const renamePreservesAsrSelections = isRename && isAsrTranscription && (editing?.used_by ?? 0) > 0;
+  const renameBreaksRefs = isRename && !isAsrTranscription && (editing?.used_by ?? 0) > 0;
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -430,6 +429,9 @@ function PromptEditorSheet({
                 onChange={(e) => setName(e.target.value)}
                 required
               />
+              {renamePreservesAsrSelections && (
+                <p className="text-xs text-muted-foreground">Renaming updates their selections.</p>
+              )}
               {renameBreaksRefs && (
                 <p className="text-xs text-amber-600 dark:text-amber-500">
                   Selected by {editing?.used_by} partition(s) — renaming drops those selections.

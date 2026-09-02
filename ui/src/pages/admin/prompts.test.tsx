@@ -95,4 +95,38 @@ describe("PromptsPage ASR prompt scope", () => {
     expect(within(defaultCard).getByText("Default fallback")).toBeTruthy();
     expect(within(customCard).getByText("Unused")).toBeTruthy();
   });
+
+  it("explains that renaming a selected ASR prompt preserves its preset selections", async () => {
+    listAllPromptsMock.mockResolvedValue([
+      makeAsrPrompt({ id: "asr-custom", name: "meeting-notes", is_default: false, used_by: 2 }),
+    ]);
+    const user = userEvent.setup();
+
+    renderPage();
+
+    const card = (await screen.findByText("meeting-notes")).closest<HTMLElement>("div[class*='relative']")!;
+    await user.click(within(card).getByRole("button", { name: "Edit" }));
+    const name = screen.getByDisplayValue("meeting-notes");
+    await user.clear(name);
+    await user.type(name, "meeting-notes-v2");
+
+    expect(screen.getByText(/renaming updates their selections/i)).toBeTruthy();
+    expect(screen.queryByText(/renaming drops those selections/i)).toBeNull();
+  });
+
+  it("explains that renaming an explicitly selected default ASR prompt preserves selections", async () => {
+    listAllPromptsMock.mockResolvedValue([makeAsrPrompt({ used_by: 2 })]);
+    const user = userEvent.setup();
+
+    renderPage();
+
+    const card = (await screen.findByText("default-asr")).closest<HTMLElement>("div[class*='relative']")!;
+    await user.click(within(card).getByRole("button", { name: "Edit" }));
+    const name = screen.getByDisplayValue("default-asr");
+    await user.clear(name);
+    await user.type(name, "default-asr-v2");
+
+    expect(screen.getByText(/renaming updates their selections/i)).toBeTruthy();
+    expect(screen.queryByText(/renaming drops those selections/i)).toBeNull();
+  });
 });

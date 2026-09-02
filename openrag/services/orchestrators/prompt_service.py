@@ -28,6 +28,8 @@ if TYPE_CHECKING:
 
     from core.config.root import Settings
     from core.ports.prompt_repo import PromptRepository
+    from services.orchestrators.partition_service import PartitionService
+    from services.orchestrators.preset_service import PresetService
 
 logger = get_logger()
 
@@ -169,9 +171,18 @@ def _validate_and_normalize_content(prompt_type: str, content: str) -> str:
 class PromptService:
     """CRUD, resolution, and lifecycle for DB-backed prompts."""
 
-    def __init__(self, *, prompt_repo: PromptRepository, config: Settings) -> None:
+    def __init__(
+        self,
+        *,
+        prompt_repo: PromptRepository,
+        config: Settings,
+        preset_service: PresetService | None = None,
+        partition_service: PartitionService | None = None,
+    ) -> None:
         self._repo = prompt_repo
         self._config = config
+        self._preset_service = preset_service
+        self._partition_service = partition_service
 
     # ------------------------------------------------------------------
     # Startup lifecycle
@@ -396,6 +407,9 @@ class PromptService:
             fields["content"] = _validate_and_normalize_content(existing.prompt_type, str(new_content))
 
         new_name = fields.get("name")
+        refresh_asr_dispatch_config = (
+            existing.prompt_type == PromptType.ASR_TRANSCRIPTION.value and new_name is not None
+        )
         if new_name is not None and new_name != existing.name:
             clash = await self._repo.get_by_name(existing.prompt_type, new_name)
             if clash is not None and clash.id != prompt_id:
@@ -409,6 +423,13 @@ class PromptService:
         updated = existing
         if fields:
             updated = await self._repo.update(prompt_id, **fields) or existing
+        if refresh_asr_dispatch_config and updated.name == new_name and self._preset_service is not None:
+            # The repository cascades the persisted indexation-preset references.
+            # Rebuild both live caches before returning so the next upload does
+            # not dispatch the retired prompt name from Settings.partitions.
+            await self._preset_service.load_all()
+            if self._partition_service is not None:
+                await self._partition_service.load_partitions()
         if promote_to_default:
             updated = await self._repo.set_default(prompt_id) or updated
         return updated
