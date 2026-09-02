@@ -432,3 +432,28 @@ class VDBSchemaMigrationRequiredError(VDBError):
 class UnexpectedVDBError(VDBError):
     def __init__(self, message: str, **kwargs):
         super().__init__(message, code="VDB_UNEXPECTED_ERROR", status_code=500, **kwargs)
+
+
+# ``IndexerPool.submit`` launches the worker task before it returns, so a lost
+# or timed-out submit response can leave a worker running against the uploaded
+# file. The dispatcher preserves the task and its content claim in that case
+# (``submission_outcome_unknown``) and marks the propagating exception, so
+# upload handlers keep the file instead of unlinking input the live worker has
+# not read yet. The worker deletes its own input once it settles — see
+# ``services.workers.indexer_actor.delete_uploaded_file``.
+_INDEXING_WORKER_MAY_BE_RUNNING_ATTR = "_openrag_indexing_worker_may_be_running"
+
+
+def mark_indexing_worker_may_be_running(exc: BaseException) -> None:
+    """Flag ``exc`` as propagating while an indexing worker may still be live."""
+    try:
+        setattr(exc, _INDEXING_WORKER_MAY_BE_RUNNING_ATTR, True)
+    except AttributeError:
+        # A few built-in exceptions forbid attribute assignment; losing the
+        # marker only restores the previous (delete-the-upload) behaviour.
+        pass
+
+
+def indexing_worker_may_be_running(exc: BaseException) -> bool:
+    """Whether ``exc`` was raised while an indexing worker may still be live."""
+    return getattr(exc, _INDEXING_WORKER_MAY_BE_RUNNING_ATTR, False) is True

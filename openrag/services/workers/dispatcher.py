@@ -15,7 +15,7 @@ from core.models.catalog import (
     TASK_FINISHED_AT_METADATA_KEY,
 )
 from core.utils.conts import is_internal_metadata_key, strip_internal_metadata
-from core.utils.exceptions import ConflictError
+from core.utils.exceptions import ConflictError, mark_indexing_worker_may_be_running
 from core.utils.logging import get_logger
 from ray.exceptions import TaskCancelledError
 from services.workers.ray_utils import call_ray_actor_with_timeout, retry_idempotent_ray_actor_method
@@ -345,7 +345,7 @@ class WorkerDispatcher(IndexingDispatcher):
                 allow_legacy_retry=allow_legacy_require_existing_partition_retry,
             )
             self._track_completion(task_id, task)
-        except BaseException:
+        except BaseException as exc:
             submission_outcome_unknown = submission_started and task is None
             mark_submit_failed = not submission_outcome_unknown
             try:
@@ -365,6 +365,10 @@ class WorkerDispatcher(IndexingDispatcher):
                         content_sha256=content_sha256,
                         claim_token=content_claim_token,
                     )
+            if submission_outcome_unknown:
+                # The pool may have launched a worker that has not read the
+                # uploaded file yet; tell the caller to keep it on disk.
+                mark_indexing_worker_may_be_running(exc)
             raise
         return task_id
 

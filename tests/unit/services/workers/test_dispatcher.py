@@ -2045,3 +2045,80 @@ async def test_delete_file_reports_failure_when_post_delete_cleanup_fails() -> N
     workspace_repo.remove_file_from_all_workspaces.assert_called_once_with("file-1", "tenant-a")
     document_repo.remove_file_from_partition.assert_called_once_with(file_id="file-1", partition="tenant-a")
     assert vector_store.delete_by_filter.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_dispatch_indexing_marks_unknown_submission_so_upload_is_kept() -> None:
+    """An unknown submit outcome must tell the caller to keep the uploaded file.
+
+    The pool launches ``process_file`` before ``submit`` returns, so the worker
+    may still be waiting on ref registration and has not read the path yet.
+    """
+    from core.utils.exceptions import indexing_worker_may_be_running
+    from services.workers.dispatcher import WorkerDispatcher
+
+    pool = MagicMock()
+    pool.submit = MagicMock()
+    pool.submit.remote = AsyncMock(side_effect=TimeoutError("submit timed out"))
+    dispatcher = WorkerDispatcher(
+        pool=pool,
+        task_state_manager=_task_state_manager(),
+        completion_tracker=_completion_tracker(),
+        vector_store=_vector_store(),
+        document_repo=_document_repo(),
+        workspace_repo=_workspace_repo(),
+        collection="default",
+    )
+
+    with (
+        patch("services.workers.dispatcher.uuid") as mock_uuid,
+        patch("services.workers.ray_utils.ray.cancel"),
+    ):
+        mock_uuid.uuid4.return_value.hex = "task-1"
+        with pytest.raises(TimeoutError) as excinfo:
+            await dispatcher.dispatch_indexing(
+                path="/data/report.txt",
+                metadata={"file_id": "file-1", "content_sha256": "abc123"},
+                partition="tenant-a",
+                user={"id": 42},
+                workspace_ids=None,
+                replace=False,
+            )
+
+    assert indexing_worker_may_be_running(excinfo.value) is True
+
+
+@pytest.mark.asyncio
+async def test_dispatch_indexing_does_not_mark_failure_before_worker_submission() -> None:
+    """A failure before the worker was submitted leaves no worker to protect."""
+    from core.utils.exceptions import indexing_worker_may_be_running
+    from services.workers.dispatcher import WorkerDispatcher
+
+    tsm = _task_state_manager()
+    tsm.begin_worker_submission.remote = AsyncMock(return_value=False)
+    dispatcher = WorkerDispatcher(
+        pool=MagicMock(),
+        task_state_manager=tsm,
+        completion_tracker=_completion_tracker(),
+        vector_store=_vector_store(),
+        document_repo=_document_repo(),
+        workspace_repo=_workspace_repo(),
+        collection="default",
+    )
+
+    with (
+        patch("services.workers.dispatcher.uuid") as mock_uuid,
+        patch("services.workers.ray_utils.ray.cancel"),
+    ):
+        mock_uuid.uuid4.return_value.hex = "task-1"
+        with pytest.raises(RuntimeError) as excinfo:
+            await dispatcher.dispatch_indexing(
+                path="/data/report.txt",
+                metadata={"file_id": "file-1", "content_sha256": "abc123"},
+                partition="tenant-a",
+                user={"id": 42},
+                workspace_ids=None,
+                replace=False,
+            )
+
+    assert indexing_worker_may_be_running(excinfo.value) is False
