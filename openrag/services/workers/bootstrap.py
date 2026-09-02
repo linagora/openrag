@@ -36,6 +36,7 @@ logger = get_logger()
 
 actor_creation_map: dict[str, callable] = {}
 _settings: "Settings | None" = None
+_TRACKER_PROTOCOL_TIMEOUT_SECONDS = 5
 
 
 def _require_settings() -> "Settings":
@@ -113,18 +114,56 @@ def _supports_task_state_recovery(actor) -> bool:
 
 
 def get_task_completion_tracker(namespace: str = "openrag"):
+    from time import monotonic, sleep
+
+    import ray
     from services.workers.task_completion import TaskCompletionTrackerActor
 
-    tracker = get_or_create_actor(
-        "TaskCompletionTracker",
-        TaskCompletionTrackerActor,
-        namespace=namespace,
-        remote_args=(namespace,),
-        lifetime="detached",
-    )
+    def create_or_get():
+        return get_or_create_actor(
+            "TaskCompletionTracker",
+            TaskCompletionTrackerActor,
+            namespace=namespace,
+            remote_args=(namespace,),
+            lifetime="detached",
+        )
+
+    tracker = create_or_get()
+    if not _supports_task_completion_recovery(tracker):
+        logger.warning("Replacing legacy TaskCompletionTracker without cancellation recovery")
+        ray.kill(tracker, no_restart=True)
+        deadline = monotonic() + 30
+        while monotonic() < deadline:
+            try:
+                current = ray.get_actor("TaskCompletionTracker", namespace=namespace)
+            except ValueError:
+                tracker = create_or_get()
+                break
+            if _supports_task_completion_recovery(current):
+                tracker = current
+                break
+            sleep(0.05)
+        else:
+            raise RuntimeError("Timed out replacing legacy TaskCompletionTracker")
     tracker.recover.remote()
     actor_creation_map["TaskCompletionTracker"] = lambda: get_task_completion_tracker(namespace=namespace)
     return tracker
+
+
+def _supports_task_completion_recovery(actor) -> bool:
+    method_names = getattr(actor, "_ray_actor_method_names", None)
+    if isinstance(method_names, (frozenset, list, set, tuple)) and "supports_cancellation_recovery" not in method_names:
+        return False
+    method = getattr(actor, "supports_cancellation_recovery", None)
+    remote = getattr(method, "remote", None)
+    if remote is None:
+        return False
+    try:
+        import ray
+
+        return ray.get(remote(), timeout=_TRACKER_PROTOCOL_TIMEOUT_SECONDS) is True
+    except Exception:
+        return False
 
 
 def register_parser_pool_restart_factories() -> None:
