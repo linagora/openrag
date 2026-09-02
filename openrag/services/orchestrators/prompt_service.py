@@ -241,13 +241,21 @@ class PromptService:
     # Resolution — the single seam
     # ------------------------------------------------------------------
 
-    async def resolve_prompt(self, prompt_type: str, names: Sequence[str | None] | None = None) -> str:
+    async def resolve_prompt(
+        self,
+        prompt_type: str,
+        names: Sequence[str | None] | None = None,
+        *,
+        strict_names: bool = False,
+    ) -> str:
         """Resolve the effective prompt text for ``prompt_type``.
 
         Tries each candidate ``name`` in order (a preset- or partition-named
         library prompt), then the global default, then the on-disk seed.
         ``names`` entries may be ``None``/empty (skipped) so callers can pass
-        optional config values directly.
+        optional config values directly. With ``strict_names=True``, a supplied
+        candidate must resolve; the global default is used only when no named
+        selection was requested.
 
         Resolution happens per request, which put a Postgres round-trip on the
         chat and search paths that did not exist before — prompts used to be read
@@ -270,22 +278,28 @@ class PromptService:
         disk-loaded prompt.
         """
         candidates = [n for n in (names or ()) if n]
+        missing_strict_selection = False
         try:
             for name in candidates:
                 prompt = await self._repo.get_by_name(prompt_type, name)
                 if prompt is not None:
                     self._log_resolution(prompt_type, candidates, "named", name, prompt.content)
                     return prompt.content
-            default = await self._repo.get_default(prompt_type)
-            if default is not None:
-                self._log_resolution(prompt_type, candidates, "default", default.name, default.content)
-                return default.content
+            if strict_names and candidates:
+                missing_strict_selection = True
+            else:
+                default = await self._repo.get_default(prompt_type)
+                if default is not None:
+                    self._log_resolution(prompt_type, candidates, "default", default.name, default.content)
+                    return default.content
         except Exception as exc:  # noqa: BLE001 - a DB blip must not fail the request
             if prompt_type == PromptType.ASR_TRANSCRIPTION.value:
                 logger.warning(f"Prompt lookup failed for '{prompt_type}'; using the provider's native prompt: {exc}")
                 self._log_resolution(prompt_type, candidates, "native", None, "")
                 return ""
             logger.warning(f"Prompt lookup failed for '{prompt_type}'; falling back to the bundled template: {exc}")
+        if missing_strict_selection:
+            raise NotFoundError(f"Selected prompt '{candidates[0]}' for type '{prompt_type}' no longer exists.")
         try:
             content = _validate_and_normalize_content(prompt_type, self._disk_seed(prompt_type))
         except (FileNotFoundError, ValueError, KeyError, ValidationError) as exc:

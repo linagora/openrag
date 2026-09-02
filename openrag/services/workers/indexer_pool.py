@@ -10,6 +10,7 @@ from typing import Any
 import ray
 from core.config.model_endpoints import CONTROL_EXTRA_KEYS
 from core.models.catalog import CONTENT_CLAIM_TOKEN_METADATA_KEY
+from core.utils.exceptions import NotFoundError
 from services.workers.indexer_actor import IndexerWorker, _display_filename, delete_uploaded_file
 from services.workers.ray_utils import retry_idempotent_ray_actor_method
 
@@ -209,6 +210,8 @@ class IndexerWorkerActor:
         endpoint and the other indexation-stage settings. Prompt content itself
         stays live: ``resolve_prompt`` re-reads it, so an Admin UI edit applies to
         the next transcription without recreating the long-lived parser client.
+        A selected prompt that no longer exists fails the file rather than
+        silently changing its transcription instructions.
         """
         selected_name = _explicit_indexation_selection(
             self._active_indexation_config.get(),
@@ -219,10 +222,13 @@ class IndexerWorkerActor:
                 return await self._get_prompt_service().resolve_prompt(
                     "asr_transcription",
                     names=[selected_name],
+                    strict_names=True,
                 )
             return await self._get_prompt_service().resolve_prompt(
                 "asr_transcription",
             )
+        except NotFoundError:
+            raise
         except Exception as exc:  # noqa: BLE001 - a prompt lookup must not fail a file
             self._logger.warning(f"ASR transcription prompt resolution failed: {exc}")
             return None
@@ -233,21 +239,20 @@ class IndexerWorkerActor:
         The parser holds this resolver rather than a static client config. The
         indexer refreshes ``cfg.models`` from the endpoint registry on its
         existing bounded refresh cycle, so a saved Admin UI endpoint takes
-        effect without recreating the long-lived Ray actor. An unset or stale
-        preset selection safely falls back to the global default endpoint.
+        effect without recreating the long-lived Ray actor. An unset selection
+        uses the global default; a stale selected endpoint fails the file rather
+        than silently switching providers.
         """
         models = getattr(self._cfg, "models", None)
         stt = getattr(models, "stt", None)
-        if stt is None:
-            return None
         selected_name = _explicit_indexation_selection(self._active_indexation_config.get(), "stt")
+        if stt is None:
+            if selected_name:
+                raise KeyError(f"Unknown STT endpoint '{selected_name}': the endpoint registry is unavailable.")
+            return None
         endpoint = stt.get(selected_name or "default")
         if endpoint is None and selected_name:
-            self._logger.warning(
-                f"STT endpoint '{selected_name}' from the active indexation preset is unavailable; "
-                "using the default endpoint."
-            )
-            return stt.get("default")
+            raise KeyError(f"Unknown STT endpoint '{selected_name}'. Available: {list(stt)}")
         return endpoint
 
     async def _ensure_registry_fresh(self, required_model_names: dict[str, list[str]] | list[str]) -> None:
@@ -804,9 +809,9 @@ def _required_model_endpoint_names(
         "llm": _required_llm_names(indexation_config),
         "vlm": [],
         # Audio parsing resolves the preset's selected STT endpoint at request
-        # time, falling back to the global default when it is gone. Both names
-        # are required so a worker with only file parsing still hydrates the
-        # endpoint registry, and so the fallback can't itself be missing.
+        # time and fails the file if that selection is gone. Both names are
+        # required so a worker with only file parsing still hydrates the
+        # endpoint registry before resolving the selection.
         "stt": required_stt,
     }
     if embedder_name:

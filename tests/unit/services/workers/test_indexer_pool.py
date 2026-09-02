@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from core.config.model_endpoints import ModelEndpointConfig
 from core.models.catalog import CONTENT_CLAIM_TOKEN_METADATA_KEY
+from core.utils.exceptions import NotFoundError
 
 
 class _NativeChunker:
@@ -48,9 +49,33 @@ def test_build_chunker_returns_native_chunker(monkeypatch: pytest.MonkeyPatch) -
     from services.workers.indexer_pool import _build_chunker
 
     native = _NativeChunker()
-    monkeypatch.setattr(factory, "create_chunker", lambda _cfg, _window=None: native)
+    seen_windows: list[int | None] = []
 
-    assert _build_chunker(object()) is native
+    def create_chunker(_cfg, window: int | None = None):
+        seen_windows.append(window)
+        return native
+
+    monkeypatch.setattr(factory, "create_chunker", create_chunker)
+
+    assert _build_chunker(object(), 4096) is native
+    assert seen_windows == [4096]
+
+
+def test_build_chunker_from_config_forwards_embedder_window(monkeypatch: pytest.MonkeyPatch) -> None:
+    import core.chunking.factory as factory
+    from services.workers.indexer_pool import _build_chunker_from_config
+
+    native = _NativeChunker()
+    seen_windows: list[int | None] = []
+
+    def create_chunker(_cfg, window: int | None = None):
+        seen_windows.append(window)
+        return native
+
+    monkeypatch.setattr(factory, "create_chunker", create_chunker)
+
+    assert _build_chunker_from_config(object(), 2048) is native
+    assert seen_windows == [2048]
 
 
 def test_build_chunker_rejects_invalid_chunker(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1727,7 +1752,34 @@ async def test_actor_resolves_the_preset_asr_prompt_before_the_default() -> None
     with _active_indexation_config(actor, {"asr_transcription_prompt_name": "meeting-diarization"}):
         assert await actor._resolve_transcription_prompt() == "preset prompt"
 
-    actor._prompt_service.resolve_prompt.assert_awaited_once_with("asr_transcription", names=["meeting-diarization"])
+    actor._prompt_service.resolve_prompt.assert_awaited_once_with(
+        "asr_transcription",
+        names=["meeting-diarization"],
+        strict_names=True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_actor_rejects_an_unavailable_selected_asr_prompt() -> None:
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=_RecordingWorker())
+
+    class PromptService:
+        async def resolve_prompt(
+            self,
+            _prompt_type: str,
+            names: list[str] | None = None,
+            *,
+            strict_names: bool = False,
+        ) -> str:
+            if names == ["retired-asr"] and strict_names:
+                raise NotFoundError("Selected ASR prompt 'retired-asr' no longer exists")
+            return "default prompt"
+
+    actor._prompt_service = PromptService()
+
+    with _active_indexation_config(actor, {"asr_transcription_prompt_name": "retired-asr"}):
+        with pytest.raises(NotFoundError, match="retired-asr"):
+            await actor._resolve_transcription_prompt()
 
 
 @pytest.mark.asyncio
@@ -1753,9 +1805,24 @@ def test_actor_resolves_the_preset_stt_endpoint_before_the_default() -> None:
     with _active_indexation_config(actor, {"stt": "moss"}):
         assert actor._resolve_transcription_endpoint() is moss
 
-    # A selection that no longer resolves degrades to the default endpoint.
-    with _active_indexation_config(actor, {"stt": "retired"}):
-        assert actor._resolve_transcription_endpoint() is default
+
+def test_actor_rejects_an_unavailable_selected_stt_endpoint() -> None:
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=_RecordingWorker())
+    default = ModelEndpointConfig(endpoint="http://whisper:8000/v1", model_name="whisper")
+    actor._cfg = SimpleNamespace(models=SimpleNamespace(stt={"default": default}))
+
+    with _active_indexation_config(actor, {"stt": "retired-moss"}):
+        with pytest.raises(KeyError, match="retired-moss"):
+            actor._resolve_transcription_endpoint()
+
+
+def test_actor_rejects_a_selected_stt_endpoint_when_the_registry_is_unavailable() -> None:
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=_RecordingWorker())
+    actor._cfg = SimpleNamespace(models=SimpleNamespace(stt=None))
+
+    with _active_indexation_config(actor, {"stt": "moss"}):
+        with pytest.raises(KeyError, match="moss"):
+            actor._resolve_transcription_endpoint()
 
 
 def test_actor_trims_a_preset_stt_selection_before_resolving_it() -> None:
@@ -1772,13 +1839,101 @@ def test_actor_trims_a_preset_stt_selection_before_resolving_it() -> None:
 async def test_actor_trims_a_preset_asr_prompt_selection_before_resolving_it() -> None:
     actor = _bare_worker_actor(save_uploaded_files=True, worker=_RecordingWorker())
 
-    async def resolve_prompt(_prompt_type: str, names: list[str] | None = None) -> str:
+    async def resolve_prompt(
+        _prompt_type: str,
+        names: list[str] | None = None,
+        *,
+        strict_names: bool = False,
+    ) -> str:
         return "meeting prompt" if names == ["meeting"] else "default prompt"
 
     actor._prompt_service = SimpleNamespace(resolve_prompt=resolve_prompt)
 
     with _active_indexation_config(actor, {"asr_transcription_prompt_name": " meeting "}):
         assert await actor._resolve_transcription_prompt() == "meeting prompt"
+
+
+@pytest.mark.asyncio
+async def test_actor_keeps_concurrent_preset_transcription_settings_task_local(tmp_path) -> None:
+    """A parse timeout must not lose or cross-contaminate task-local preset settings."""
+    from core.models.document import Document, ProcessedDocument
+    from services.workers.indexer_actor import IndexerWorker
+    from services.workers.stages.parse import parse_stage
+
+    seen: dict[str, tuple[str, str]] = {}
+    barrier = asyncio.Barrier(2)
+
+    class ResolverParser:
+        async def parse(self, document: Document) -> ProcessedDocument:
+            await barrier.wait()
+            endpoint = actor._resolve_transcription_endpoint()
+            prompt = await actor._resolve_transcription_prompt()
+            assert endpoint is not None
+            assert prompt is not None
+            seen[document.id] = (endpoint.model_name or "", prompt)
+            return ProcessedDocument(document_id=document.id)
+
+    class ParsingPipeline:
+        async def run(self, row: dict[str, object]) -> dict[str, object]:
+            await parse_stage(row, ResolverParser(), timeout=0.5)
+            row["stored_count"] = 0
+            row["stage"] = "stored"
+            return row
+
+    worker_task_state = SimpleNamespace(
+        set_state=SimpleNamespace(remote=AsyncMock(return_value=True)),
+        set_failed_if_not_cancelled=SimpleNamespace(remote=AsyncMock(return_value=True)),
+    )
+    worker = IndexerWorker(pipeline=ParsingPipeline(), task_state_manager=worker_task_state)
+
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=worker)
+    actor._cfg = SimpleNamespace(
+        loader=SimpleNamespace(file_loaders=SimpleNamespace(wav="LocalWhisperLoader", mp3="LocalWhisperLoader")),
+        models=SimpleNamespace(
+            stt={
+                "default": ModelEndpointConfig(endpoint="http://default:8000/v1", model_name="default"),
+                "moss-a": ModelEndpointConfig(endpoint="http://moss-a:8000/v1", model_name="moss-a"),
+                "moss-b": ModelEndpointConfig(endpoint="http://moss-b:8000/v1", model_name="moss-b"),
+            }
+        ),
+    )
+
+    async def resolve_prompt(
+        _prompt_type: str,
+        names: list[str] | None = None,
+        *,
+        strict_names: bool = False,
+    ) -> str:
+        return f"prompt:{names[0]}" if names else "prompt:default"
+
+    actor._prompt_service = SimpleNamespace(resolve_prompt=resolve_prompt)
+    actor._resolve_ingest_prompts = _AsyncReturn({})
+    first_path = tmp_path / "a.mp3"
+    second_path = tmp_path / "b.mp3"
+    first_path.write_bytes(b"audio")
+    second_path.write_bytes(b"audio")
+
+    await asyncio.gather(
+        actor.process_file(
+            task_id="a",
+            path=str(first_path),
+            metadata={"file_id": "a"},
+            partition="a",
+            indexation_config={"stt": "moss-a", "asr_transcription_prompt_name": "prompt-a"},
+        ),
+        actor.process_file(
+            task_id="b",
+            path=str(second_path),
+            metadata={"file_id": "b"},
+            partition="b",
+            indexation_config={"stt": "moss-b", "asr_transcription_prompt_name": "prompt-b"},
+        ),
+    )
+
+    assert seen == {
+        "a": ("moss-a", "prompt:prompt-a"),
+        "b": ("moss-b", "prompt:prompt-b"),
+    }
 
 
 @pytest.mark.asyncio

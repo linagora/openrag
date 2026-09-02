@@ -174,6 +174,25 @@ class TestResolution:
         assert await svc.resolve_prompt("sys_prompt", names=["missing"]) == "DEFAULT"
         assert await svc.resolve_prompt("sys_prompt", names=[None]) == "DEFAULT"
 
+    async def test_strict_named_resolution_rejects_a_missing_selection(self):
+        repo = FakePromptRepo()
+        svc = _service(repo)
+        await repo.create(
+            Prompt(
+                prompt_type=PromptType.ASR_TRANSCRIPTION.value,
+                name="default-asr",
+                content="DEFAULT",
+                is_default=True,
+            )
+        )
+
+        with pytest.raises(NotFoundError, match="retired-asr"):
+            await svc.resolve_prompt(
+                PromptType.ASR_TRANSCRIPTION.value,
+                names=["retired-asr"],
+                strict_names=True,
+            )
+
     async def test_first_resolvable_name_wins(self):
         repo = FakePromptRepo()
         svc = _service(repo)

@@ -14,6 +14,10 @@ ModelEndpointType = Literal["embedder", "reranker", "llm", "vlm", "stt"]
 class ModelEndpointConfig(BaseModel):
     """A single registered inference endpoint.
 
+    ``name`` is the stable registry identity when this config came from the
+    model-endpoint registry. It stays absent for legacy environment-only
+    configuration, which has no independently managed registration.
+
     ``extra`` holds implementation-specific keys:
       ``{"implementation": "vllm"}``    → VLLMEmbedder
       ``{"implementation": "ollama"}``  → OllamaEmbedder
@@ -26,6 +30,7 @@ class ModelEndpointConfig(BaseModel):
           ``core.chunking.factory.create_chunker``). Absent → global value.
     """
 
+    name: str | None = None
     endpoint: str
     model_name: str | None = None
     batch_size: int = Field(default=32, gt=0)

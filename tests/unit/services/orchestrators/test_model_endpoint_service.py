@@ -861,6 +861,8 @@ async def test_load_all_populates_config_models():
     assert "default" in settings.models.llm
     assert "moss" in settings.models.stt
     assert "default" in settings.models.stt
+    assert settings.models.stt["moss"].name == "moss"
+    assert settings.models.stt["default"].name == "moss"
 
 
 @pytest.mark.asyncio

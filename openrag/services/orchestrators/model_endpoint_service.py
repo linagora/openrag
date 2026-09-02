@@ -459,6 +459,7 @@ class ModelEndpointService:
             if bucket is None:
                 continue
             cfg = ModelEndpointConfig(
+                name=row.name,
                 endpoint=row.endpoint,
                 model_name=row.model_name,
                 batch_size=row.batch_size,
@@ -830,6 +831,7 @@ class ModelEndpointService:
         if bucket is None:
             return
         cfg = ModelEndpointConfig(
+            name=row.name,
             endpoint=row.endpoint,
             model_name=row.model_name,
             batch_size=row.batch_size,
