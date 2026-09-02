@@ -238,6 +238,47 @@ Migrations are versioned. The runner reads the current schema version stored in 
 Stop the OpenRAG application before running any migration.
 :::
 
+### Version 2 — case-insensitive BM25 analyzer
+
+Schema version 2 makes two changes to the `text` field:
+
+- adds the `lowercase` filter to the analyzer, so BM25 stops treating `Rapport` and `rapport` as different terms. Milvus applies the analyzer to the query as well as to the indexed text, so before this fix a case mismatch scored zero on the lexical leg;
+- drops `enable_match`. Nothing in OpenRAG issues a `TEXT_MATCH` query, and while it is set Milvus refuses to alter the analyzer.
+
+It **rebuilds** the collection rather than altering it, because both changes are refused in place: `analyzer_params` cannot change while text match is enabled, and `enable_match` itself cannot be turned off. The migration copies the rows into `<collection>_v2_rebuild`, checks the counts, then swaps the names, keeping the old collection as `<collection>_v1_backup`.
+
+This is the last rebuild. Once `enable_match` is gone, a later analyzer change is [three calls on the live collection](https://milvus.io/docs/add-fields-to-an-existing-collection.md) with the sparse column backfilled by compaction — provided [Storage V3](https://milvus.io/docs/storage-v3.md) is enabled.
+
+:::caution[Plan for the rebuild]
+- **Disk** — both copies exist at once; allow roughly twice the collection size until the backup is dropped.
+- **Memory** — checking the row counts loads both collections, and a rename does not unload one, so the migration releases the backup from query-node memory after the swap. The doubling above is disk, not RAM.
+- **No re-embedding** — dense vectors are copied verbatim and the sparse ones are regenerated server-side on insert, which is what applies the new analyzer.
+- **Chunk IDs are preserved** — `_id` is `auto_id`, which normally refuses caller-supplied keys, so the rebuild collection carries `allow_insert_auto_id` for the duration of the copy and drops it again before the swap. A chunk ID handed out earlier by the MCP `get_chunk_by_id` tool still resolves.
+- **Stop OpenRAG first**, as the banner above says — the copy reads a snapshot, so a row written while it runs would be missing from the rebuild. The migration re-counts the source afterwards and aborts, leaving the original untouched, if the count moved.
+- **`hybrid_search: false`** deployments have no BM25 leg and are only re-stamped — no rebuild, and no backup collection, in either direction.
+- A failed copy leaves the original untouched; drop the partial `<collection>_v2_rebuild` and retry.
+- The version check runs on the indexing path only. An un-migrated deployment still boots and still answers searches — with the old analyzer — and fails the first upload with `Collection ... is at schema version 1 but the application requires version 2`.
+:::
+
+Once validated, drop the backup:
+
+```python
+from pymilvus import MilvusClient
+
+MilvusClient(uri="http://localhost:19530").drop_collection("<collection>_v1_backup")
+```
+
+:::note[Where to run these]
+The commands below run from `infra/compose/`. From the repo root, point Compose at the file (and at your project name, if you use one):
+
+```bash
+docker compose -p <project> -f infra/compose/docker-compose.yaml run --no-deps --rm --build --entrypoint "" openrag \
+    uv run python services/persistence/migrations/milvus/migrate.py --dry-run
+```
+
+The migration runner is a file, not a package — pass the full path to `migrate.py`, and keep Milvus running.
+:::
+
 ### Step 1 — Start only the Milvus container
 
 ```bash
@@ -267,20 +308,20 @@ docker compose --profile cpu run --no-deps --rm --build --entrypoint "" openrag-
   </TabItem>
 </Tabs>
 
-Review the output to confirm which migrations are pending and what changes they would apply.
+Review the output to confirm which migrations are pending and what changes they would apply. The migration scripts ship **inside the image**, which is why `--build` is there: if the `Discovered N migration(s)` line does not list the migration you expect, the image is stale — and on a shared host another checkout may have rebuilt the same `linagoraai/openrag` tag, so add `--build` to the apply step too.
 
 ### Step 3 — Apply all pending migrations
 
 <Tabs>
   <TabItem label="GPU">
 ```bash
-docker compose run --no-deps --rm --entrypoint "" openrag \
+docker compose run --no-deps --rm --build --entrypoint "" openrag \
     uv run python services/persistence/migrations/milvus/migrate.py
 ```
   </TabItem>
   <TabItem label="CPU">
 ```bash
-docker compose --profile cpu run --no-deps --rm --entrypoint "" openrag-cpu \
+docker compose --profile cpu run --no-deps --rm --build --entrypoint "" openrag-cpu \
     uv run python services/persistence/migrations/milvus/migrate.py
 ```
   </TabItem>
@@ -314,22 +355,22 @@ To upgrade or downgrade to a specific schema version rather than the latest:
   <TabItem label="GPU">
 ```bash
 # Upgrade to version 2 only
-docker compose run --no-deps --rm --entrypoint "" openrag \
+docker compose run --no-deps --rm --build --entrypoint "" openrag \
     uv run python services/persistence/migrations/milvus/migrate.py --target 2
 
 # Downgrade to version 0 (resets version stamp and drops indexes)
-docker compose run --no-deps --rm --entrypoint "" openrag \
+docker compose run --no-deps --rm --build --entrypoint "" openrag \
     uv run python services/persistence/migrations/milvus/migrate.py --downgrade --target 0
 ```
   </TabItem>
   <TabItem label="CPU">
 ```bash
 # Upgrade to version 2 only
-docker compose --profile cpu run --no-deps --rm --entrypoint "" openrag-cpu \
+docker compose --profile cpu run --no-deps --rm --build --entrypoint "" openrag-cpu \
     uv run python services/persistence/migrations/milvus/migrate.py --target 2
 
 # Downgrade to version 0 (resets version stamp and drops indexes)
-docker compose --profile cpu run --no-deps --rm --entrypoint "" openrag-cpu \
+docker compose --profile cpu run --no-deps --rm --build --entrypoint "" openrag-cpu \
     uv run python services/persistence/migrations/milvus/migrate.py --downgrade --target 0
 ```
   </TabItem>
@@ -337,18 +378,29 @@ docker compose --profile cpu run --no-deps --rm --entrypoint "" openrag-cpu \
 
 ### Rollback
 
-Milvus does not support dropping fields. A downgrade only removes indexes and resets the version stamp — fields remain in the schema but are unused by the application:
+What a downgrade can undo depends on the migration:
+
+- **Version 2 → 1** swaps the `<collection>_v1_backup` collection back into place and sets the version stamp to 1. The version-2 collection is kept aside as `<collection>_v2_rolled_back` rather than dropped, so nothing is lost — but this is a point-in-time rollback: **rows indexed after the upgrade exist only in the collection set aside**.
+
+  The rollback needs that backup collection. If it is gone, the downgrade fails rather than reporting a rollback it did not perform, and there are three ways forward:
+
+  - Restore `<collection>_v1_backup` from a Milvus backup and re-run the downgrade.
+  - Re-create the collection with the v1 schema and re-index it.
+  - Move the version stamp back by hand — but **only** if you know this collection was re-stamped rather than rebuilt. A collection that already had the v2 analyzer and no text match before the upgrade was moved to version 2 by the stamp alone, so it correctly has no backup. Afterwards it is indistinguishable from one that was rebuilt and lost its backup, which is why the migration refuses to guess between them.
+
+  A `hybrid_search: false` collection never had a backup — it was only re-stamped on the way up, so the rollback moves its stamp back and nothing else.
+- **Version 1 → 0** only removes indexes and resets the version stamp, since Milvus does not support dropping fields — they remain in the schema but are unused by the application.
 
 <Tabs>
   <TabItem label="GPU">
 ```bash
-docker compose run --no-deps --rm --entrypoint "" openrag \
+docker compose run --no-deps --rm --build --entrypoint "" openrag \
     uv run python services/persistence/migrations/milvus/migrate.py --downgrade
 ```
   </TabItem>
   <TabItem label="CPU">
 ```bash
-docker compose --profile cpu run --no-deps --rm --entrypoint "" openrag-cpu \
+docker compose --profile cpu run --no-deps --rm --build --entrypoint "" openrag-cpu \
     uv run python services/persistence/migrations/milvus/migrate.py --downgrade
 ```
   </TabItem>
@@ -368,9 +420,10 @@ Files must follow the pattern `N.short_description.py`, where `N` is the **targe
 
 ```
 openrag/services/persistence/migrations/milvus/
-  1.add_temporal_fields.py    ← brings the schema to version 1
-  2.your_new_migration.py     ← brings the schema to version 2
-  migrate.py                  ← generic runner (do not rename)
+  1.add_created_at_temporal_fields.py  ← brings the schema to version 1
+  2.rebuild_text_analyzer.py           ← brings the schema to version 2
+  3.your_new_migration.py              ← brings the schema to version 3
+  migrate.py                           ← generic runner (do not rename)
 ```
 
 The numeric prefix determines execution order. Never reuse or change an existing version number.
@@ -383,7 +436,7 @@ Each migration script must expose the following at module level:
 |------|------|-------------|
 | `TARGET_VERSION` | `int` | The schema version this script brings the collection to |
 | `upgrade(client, collection_name, dry_run)` | `function` | Applies the migration |
-| `downgrade(client, collection_name, dry_run)` | `function` | Reverts the migration (indexes only — fields cannot be dropped) |
+| `downgrade(client, collection_name, dry_run)` | `function` | Reverts the migration, as far as Milvus allows — a field added in `upgrade` cannot be dropped, so such a migration only removes its indexes and resets the stamp |
 
 ### Minimal template
 

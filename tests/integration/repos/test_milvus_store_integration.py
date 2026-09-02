@@ -29,7 +29,7 @@ import pytest
 
 from openrag.core.config.infrastructure import VectorDBConfig
 from openrag.core.models.chunk import Chunk, ChunkType
-from openrag.services.storage.milvus_store import MilvusVectorStore
+from openrag.services.storage.milvus_store import MilvusVectorStore, analyzer_params
 
 pytestmark = pytest.mark.integration
 
@@ -329,6 +329,46 @@ class TestHybridSearch:
         )
 
         assert hits == []
+
+
+class TestCaseInsensitiveBM25:
+    """The lexical leg must fold case — issue #870.
+
+    Milvus runs the analyzer on the query as well as on the indexed text, so a
+    missing ``lowercase`` filter makes a lowercase query score zero against
+    capitalised source text instead of raising.
+    """
+
+    @pytest.mark.asyncio
+    async def test_analyzer_folds_case(self, hybrid_store: MilvusVectorStore) -> None:
+        tokens = hybrid_store._client.run_analyzer(
+            ["Le Rapport annuel de PARIS"],
+            analyzer_params=analyzer_params,
+        )[0].tokens
+
+        assert tokens == [t.lower() for t in tokens]
+        assert "rapport" in tokens
+        assert "paris" in tokens
+        # `le` / `de` are only stripped because the fold runs before the
+        # `_french_` stop list, which is itself lowercase.
+        assert "le" not in tokens
+
+    @pytest.mark.asyncio
+    async def test_lowercase_query_matches_capitalised_text(self, hybrid_store: MilvusVectorStore) -> None:
+        await hybrid_store.initialize(_EMBEDDING_DIM)
+        await hybrid_store.upsert([_chunk("Le Rapport annuel de PARIS", "p1", 1.0)])
+
+        # The dense leg is range-filtered out (far vector, threshold 0.99), so
+        # anything returned came from BM25 alone.
+        hits = await hybrid_store.search(
+            [-1.0, -1.1, -1.2, -1.3],
+            query_text="rapport paris",
+            top_k=5,
+            filters={"partition": "p1"},
+            similarity_threshold=0.99,
+        )
+
+        assert [hit["text"] for hit in hits] == ["Le Rapport annuel de PARIS"]
 
 
 class TestDeleteByFilter:

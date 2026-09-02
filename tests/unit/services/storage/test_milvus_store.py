@@ -20,8 +20,8 @@ from pymilvus import MilvusException
 
 from openrag.core.config.infrastructure import VectorDBConfig
 from openrag.core.models.chunk import Chunk, ChunkType
-from openrag.core.utils.exceptions import VDBSearchError
-from openrag.services.storage.milvus_store import MilvusVectorStore
+from openrag.core.utils.exceptions import VDBSchemaMigrationRequiredError, VDBSearchError
+from openrag.services.storage.milvus_store import MilvusVectorStore, analyzer_params
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -61,7 +61,11 @@ def store(vdb_config: VectorDBConfig, monkeypatch: pytest.MonkeyPatch) -> Milvus
 
     monkeypatch.setattr(_store_mod, "MilvusClient", MagicMock())
     monkeypatch.setattr(_store_mod, "AsyncMilvusClient", MagicMock())
-    return MilvusVectorStore(vdb_config)
+    built = MilvusVectorStore(vdb_config)
+    # Construction probes the schema version for the startup warning; that is
+    # setup noise, not something a test asserting on client calls should see.
+    built._client.reset_mock()
+    return built
 
 
 # ---------------------------------------------------------------------------
@@ -727,3 +731,160 @@ class TestParseSearchResponse:
 
     def test_empty_response_is_empty_list(self, store: MilvusVectorStore) -> None:
         assert store._parse_search_response([]) == []
+
+
+# ---------------------------------------------------------------------------
+# BM25 text analyzer
+# ---------------------------------------------------------------------------
+
+
+class TestAnalyzerParams:
+    """A missing filter here silently skews BM25 rather than raising."""
+
+    def test_declares_a_lowercase_filter(self) -> None:
+        # A custom analyzer inherits nothing; without this, `Rapport` and
+        # `rapport` are distinct BM25 terms.
+        assert "lowercase" in analyzer_params["filter"]
+
+    def test_lowercase_precedes_the_stop_filter(self) -> None:
+        # The `_english_` / `_french_` lists are lowercase, so they only match
+        # folded tokens.
+        filters = analyzer_params["filter"]
+        stop_index = next(i for i, f in enumerate(filters) if isinstance(f, dict) and f.get("type") == "stop")
+        assert filters.index("lowercase") < stop_index
+
+    def test_wired_onto_the_text_field(self, store: MilvusVectorStore) -> None:
+        store._embedding_dimension = 8
+        store._create_schema()
+
+        add_field = store._client.create_schema.return_value.add_field
+        text_calls = [c for c in add_field.call_args_list if c.kwargs.get("field_name") == "text"]
+        assert len(text_calls) == 1
+        assert text_calls[0].kwargs["analyzer_params"] is analyzer_params
+
+    def test_text_match_is_not_enabled(self, store: MilvusVectorStore) -> None:
+        # Nothing queries TEXT_MATCH, and while `enable_match` is set Milvus
+        # refuses to alter the analyzer — which is what forced the v2 rebuild.
+        store._embedding_dimension = 8
+        store._create_schema()
+
+        add_field = store._client.create_schema.return_value.add_field
+        text_call = next(c for c in add_field.call_args_list if c.kwargs.get("field_name") == "text")
+        assert "enable_match" not in text_call.kwargs
+
+
+# ---------------------------------------------------------------------------
+# Schema-version reporting
+# ---------------------------------------------------------------------------
+
+
+class _LogRecorder:
+    """Stands in for the module logger so warnings can be asserted."""
+
+    def __init__(self) -> None:
+        self.warnings: list[str] = []
+        self.infos: list[str] = []
+
+    def warning(self, message: str, **kwargs) -> None:
+        self.warnings.append(message)
+
+    def info(self, message: str, **kwargs) -> None:
+        self.infos.append(message)
+
+
+@pytest.fixture
+def logs(monkeypatch: pytest.MonkeyPatch) -> _LogRecorder:
+    import openrag.services.storage.milvus_store as _store_mod
+
+    recorder = _LogRecorder()
+    monkeypatch.setattr(_store_mod, "logger", recorder)
+    return recorder
+
+
+def _describes(store: MilvusVectorStore, version: str | None) -> None:
+    properties = {} if version is None else {"openrag.schema_version": version}
+    store._client.has_collection.return_value = True
+    store._client.describe_collection.return_value = {"properties": properties}
+
+
+class TestWarnIfMigrationPending:
+    """A mismatch has to be visible in the logs, not just at the first upload."""
+
+    def test_matching_version_does_not_warn(self, store: MilvusVectorStore, logs: _LogRecorder) -> None:
+        _describes(store, "1")
+
+        store.warn_if_migration_pending()
+
+        assert logs.warnings == []
+
+    def test_stale_collection_warns_with_the_runner_command(self, store: MilvusVectorStore, logs: _LogRecorder) -> None:
+        _describes(store, None)  # unstamped reads as version 0
+
+        store.warn_if_migration_pending()
+
+        (warning,) = logs.warnings
+        assert "schema version 0" in warning
+        assert "expects 1" in warning
+        assert "migrate.py" in warning
+
+    def test_collection_ahead_of_the_build_warns(self, store: MilvusVectorStore, logs: _LogRecorder) -> None:
+        # Rolling an image back is the usual cause; the fix is the opposite one.
+        _describes(store, "3")
+
+        store.warn_if_migration_pending()
+
+        (warning,) = logs.warnings
+        assert "ahead of the 1" in warning
+
+    def test_absent_collection_is_not_a_mismatch(self, store: MilvusVectorStore, logs: _LogRecorder) -> None:
+        store._client.has_collection.return_value = False
+
+        store.warn_if_migration_pending()
+
+        assert logs.warnings == []
+
+    def test_the_probe_cannot_block_construction(self, store: MilvusVectorStore, logs: _LogRecorder) -> None:
+        # A slow metadata RPC must not hold up building the store, so the probe
+        # carries its own short timeout rather than the client's (120s default).
+        import openrag.services.storage.milvus_store as _store_mod
+
+        _describes(store, "1")
+
+        store.warn_if_migration_pending()
+
+        assert store._client.has_collection.call_args.kwargs["timeout"] == _store_mod._SCHEMA_PROBE_TIMEOUT
+        assert store._client.describe_collection.call_args.kwargs["timeout"] == _store_mod._SCHEMA_PROBE_TIMEOUT
+
+    def test_the_indexing_path_keeps_the_configured_timeout(self, store: MilvusVectorStore) -> None:
+        # _check_schema_version is not a probe: it must use the client default.
+        _describes(store, "1")
+
+        store._check_schema_version()
+
+        assert store._client.describe_collection.call_args.kwargs["timeout"] is None
+
+    def test_an_unreachable_milvus_is_logged_not_raised(self, store: MilvusVectorStore, logs: _LogRecorder) -> None:
+        # A warning must never be the thing that stops the caller.
+        store._client.has_collection.side_effect = MilvusException(message="no route to host")
+
+        store.warn_if_migration_pending()
+
+        assert "Could not read the schema version" in logs.warnings[0]
+
+
+class TestCheckSchemaVersion:
+    def test_logs_the_mismatch_before_raising(self, store: MilvusVectorStore, logs: _LogRecorder) -> None:
+        # The exception reaches the API caller; the log line carries the fix.
+        _describes(store, None)
+
+        with pytest.raises(VDBSchemaMigrationRequiredError):
+            store._check_schema_version()
+
+        assert "migrate.py" in logs.warnings[0]
+
+    def test_matching_version_passes_quietly(self, store: MilvusVectorStore, logs: _LogRecorder) -> None:
+        _describes(store, "1")
+
+        store._check_schema_version()
+
+        assert logs.warnings == []
