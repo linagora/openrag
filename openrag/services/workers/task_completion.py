@@ -24,6 +24,10 @@ class TaskCompletionTracker:
         self._tracked_task_ids: set[str] = set()
         self._recovery_lock = asyncio.Lock()
 
+    def supports_cancellation_recovery(self) -> bool:
+        """Identify trackers that preserve unsettled cancellation fences."""
+        return True
+
     async def track(self, task_id: str, object_ref: dict[str, Any]) -> None:
         ref = object_ref.get("ref")
         if ref is None:
