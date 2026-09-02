@@ -831,7 +831,12 @@ class ModelEndpointService:
         if bucket is None:
             return
         cfg = ModelEndpointConfig(
-            name=row.name,
+            # ``row`` predates the rename (it is the pre-rename read, or the
+            # update applied before it), so ``row.name`` is still ``old_name``.
+            # The registry identity after the rename is ``new_name`` — and it is
+            # what keys the STT limiter/client caches — so name the config for
+            # what the DB now calls it, not for the alias it is also filed under.
+            name=new_name,
             endpoint=row.endpoint,
             model_name=row.model_name,
             batch_size=row.batch_size,

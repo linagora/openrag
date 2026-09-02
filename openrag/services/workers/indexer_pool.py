@@ -39,6 +39,23 @@ def _explicit_indexation_selection(config: dict[str, Any] | None, key: str) -> s
     return value.strip() if isinstance(value, str) and value.strip() else None
 
 
+def _is_usable_stt_endpoint(endpoint: Any) -> bool:
+    """Whether a resolved STT endpoint carries what a transcription request needs.
+
+    ``OpenAIAudioClient`` treats an endpoint missing either field as *unset* and
+    silently degrades to the ``TRANSCRIBER_*`` fallback, dropping the endpoint's
+    ``extra`` request options along with its model. For an explicit preset
+    selection that means the file succeeds while a different provider produces
+    the transcript — the exact silent substitution a named selection exists to
+    prevent, and worse than a stale name because nothing fails to surface it.
+    Rows written by ``seed_defaults`` bypass the API's ``validate_stt_fields``
+    guard, so an empty ``TRANSCRIBER_MODEL`` can persist such a row.
+    """
+    return bool(
+        (getattr(endpoint, "endpoint", "") or "").strip() and (getattr(endpoint, "model_name", "") or "").strip()
+    )
+
+
 def _indexer_worker_actor_name(index: int) -> str:
     return f"IndexerWorker-{_INDEXER_ACTOR_PROTOCOL_VERSION}-{index}"
 
@@ -240,8 +257,8 @@ class IndexerWorkerActor:
         indexer refreshes ``cfg.models`` from the endpoint registry on its
         existing bounded refresh cycle, so a saved Admin UI endpoint takes
         effect without recreating the long-lived Ray actor. An unset selection
-        uses the global default; a stale selected endpoint fails the file rather
-        than silently switching providers.
+        uses the global default; a selected endpoint that is stale *or*
+        incomplete fails the file rather than silently switching providers.
         """
         models = getattr(self._cfg, "models", None)
         stt = getattr(models, "stt", None)
@@ -251,8 +268,16 @@ class IndexerWorkerActor:
                 raise KeyError(f"Unknown STT endpoint '{selected_name}': the endpoint registry is unavailable.")
             return None
         endpoint = stt.get(selected_name or "default")
-        if endpoint is None and selected_name:
-            raise KeyError(f"Unknown STT endpoint '{selected_name}'. Available: {list(stt)}")
+        if selected_name:
+            if endpoint is None:
+                raise KeyError(f"Unknown STT endpoint '{selected_name}'. Available: {list(stt)}")
+            if not _is_usable_stt_endpoint(endpoint):
+                raise KeyError(
+                    f"STT endpoint '{selected_name}' selected by the active indexation preset is incomplete: "
+                    "both an endpoint URL and a model name are required."
+                )
+        # An unset selection keeps the historical contract: the global default may
+        # be absent or incomplete, and the parser falls back to TRANSCRIBER_*.
         return endpoint
 
     async def _ensure_registry_fresh(self, required_model_names: dict[str, list[str]] | list[str]) -> None:

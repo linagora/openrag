@@ -1816,6 +1816,45 @@ def test_actor_rejects_an_unavailable_selected_stt_endpoint() -> None:
             actor._resolve_transcription_endpoint()
 
 
+@pytest.mark.parametrize(
+    ("model_name", "endpoint_url"),
+    [(None, "http://moss:8000/v1"), ("", "http://moss:8000/v1"), ("   ", "http://moss:8000/v1"), ("moss", "   ")],
+)
+def test_actor_rejects_an_incomplete_selected_stt_endpoint(model_name: str | None, endpoint_url: str) -> None:
+    """An incomplete selection must fail the file, not degrade to TRANSCRIBER_*.
+
+    OpenAIAudioClient reads a missing endpoint/model as "no endpoint configured"
+    and transcribes with the env fallback, dropping the selection's ``extra``
+    request options too — so the file would *succeed* while a different provider
+    produced the transcript. seed_defaults writes STT rows straight from
+    TRANSCRIBER_MODEL, bypassing the API's validate_stt_fields guard, so a blank
+    model name can reach the registry.
+    """
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=_RecordingWorker())
+    default = ModelEndpointConfig(endpoint="http://whisper:8000/v1", model_name="whisper")
+    incomplete = ModelEndpointConfig(endpoint=endpoint_url, model_name=model_name)
+    actor._cfg = SimpleNamespace(models=SimpleNamespace(stt={"default": default, "moss": incomplete}))
+
+    with _active_indexation_config(actor, {"stt": "moss"}):
+        with pytest.raises(KeyError, match="incomplete"):
+            actor._resolve_transcription_endpoint()
+
+
+def test_actor_keeps_an_incomplete_global_default_stt_endpoint() -> None:
+    """Without an explicit selection the parser's TRANSCRIBER_* fallback stands.
+
+    Only a *named* selection carries the promise that this exact provider runs;
+    the unset path must keep degrading rather than failing files on deployments
+    that never registered a complete STT endpoint.
+    """
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=_RecordingWorker())
+    incomplete = ModelEndpointConfig(endpoint="http://whisper:8000/v1", model_name=None)
+    actor._cfg = SimpleNamespace(models=SimpleNamespace(stt={"default": incomplete}))
+
+    with _active_indexation_config(actor, {}):
+        assert actor._resolve_transcription_endpoint() is incomplete
+
+
 def test_actor_rejects_a_selected_stt_endpoint_when_the_registry_is_unavailable() -> None:
     actor = _bare_worker_actor(save_uploaded_files=True, worker=_RecordingWorker())
     actor._cfg = SimpleNamespace(models=SimpleNamespace(stt=None))

@@ -1098,6 +1098,36 @@ async def test_update_model_endpoint_rename_with_field_change_aliases_the_new_va
 
 
 @pytest.mark.asyncio
+async def test_update_model_endpoint_rename_aliases_carry_the_new_registry_name():
+    """The aliased config must be named for what the DB now calls the row.
+
+    ``_alias_renamed_name`` is handed the pre-rename row, so naming the config
+    from it left ``name`` at ``old_name`` under both aliases until the final
+    ``load_all()``. ``ModelEndpointConfig.name`` is the stable registry identity
+    — and for STT it keys OpenAIAudioClient's limiter/client caches — so a
+    request landing in that window would key its caches under the retired name.
+    """
+    existing = _make_row(name="old-name", model_type="stt", endpoint="http://old:8000/v1")
+    repo = _FakeEndpointRepo(rows=[existing])
+    svc = _make_service(repo)
+    await svc.load_all()
+
+    class _FailingPresetService:
+        async def load_all(self):
+            raise RuntimeError("db blip")
+
+    svc._preset_service = _FailingPresetService()
+
+    with pytest.raises(RuntimeError):
+        await svc.update_model_endpoint("old-name", "stt", new_name="new-name")
+
+    assert svc._config.models.stt.get("new-name").name == "new-name"
+    # The old name stays resolvable for in-flight references, but it is an alias
+    # to the renamed row — not a claim that the row is still called that.
+    assert svc._config.models.stt.get("old-name").name == "new-name"
+
+
+@pytest.mark.asyncio
 async def test_update_model_endpoint_rename_evicts_stale_client_cache_before_failed_reload():
     """A cached *client instance* under old_name predates this call and can't
     know about a field change baked into the same rename — the factory checks
