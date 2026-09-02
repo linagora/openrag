@@ -330,9 +330,9 @@ class IndexerWorkerActor:
                     await send_indexing_callback(
                         callback_url,
                         partition,
-                        metadata.get("file_id", ""),
+                        worker_metadata.get("file_id", ""),
                         "error",
-                        metadata,
+                        worker_metadata,
                         callback_token=callback_token,
                     )
                 raise

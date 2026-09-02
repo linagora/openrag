@@ -302,14 +302,20 @@ class TaskStateManager:
 
     @ray.method(concurrency_group="set")
     async def set_failed_if_not_cancelled(self, task_id: str, tb_str: str) -> bool:
-        """Atomically set state to FAILED and record the traceback, unless already CANCELLED."""
+        """Atomically set state to FAILED and record the traceback, unless already CANCELLED.
+
+        Returns whether the caller should treat this as a failure to report (e.g. send an
+        error callback) — true even when ``task_id`` is unknown to this TSM, since that is
+        not a cancellation and the caller still needs to hear about the failure.
+        """
         with self.lock:
             info = self.tasks.get(task_id)
-            if info is None or info.state == "CANCELLED":
+            if info is not None and info.state == "CANCELLED":
                 return False
-            info.state = "FAILED"
-            info.error = tb_str
-            _save_recoverable_task(task_id, info)
+            if info is not None:
+                info.state = "FAILED"
+                info.error = tb_str
+                _save_recoverable_task(task_id, info)
             return True
 
     @ray.method(concurrency_group="set")
