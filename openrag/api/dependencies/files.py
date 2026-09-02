@@ -5,8 +5,8 @@ from pathlib import Path
 from typing import Any
 
 import aiofiles
-import consts
 from core.indexing import validators as core_validators
+from core.utils import consts
 from core.utils.exceptions import ValidationError
 from core.utils.filename import make_unique_filename
 from di.providers import get_config
