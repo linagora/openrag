@@ -30,7 +30,7 @@ compression:
   backend: noop        # noop | headroom
   target_ratio: null   # fraction of each source to keep; null = backend decides
   min_chars: 1000      # texts shorter than this are passed through
-  timeout_s: 5.0
+  timeout_s: 15.0
   extra: {}            # backend kwargs, e.g. {model: gpt-4o}
 ```
 
@@ -53,14 +53,52 @@ Compression needs a single owning partition. Multi-partition requests and the
 
 `headroom` uses [Headroom](https://github.com/headroomlabs-ai/headroom), which
 routes content to a per-type compressor: statistical folding for JSON and
-logs, a small ModernBERT model for prose. It runs on CPU and needs no GPU.
+logs, a small ModernBERT model for prose. Retrieved chunks are prose, so the
+model path is the one that matters here. It runs on CPU and needs no GPU.
 
-> **Not installable alongside the Infinity reranker client today.**
-> `headroom-ai` depends on `litellm`, which requires `httpx>=0.28`, while
-> `infinity-client` pins `httpx<0.28`. The package is therefore not declared
-> in `pyproject.toml`. A deployment that wants it must either not use
-> `infinity-client`, or override the `httpx` pin deliberately. Until then the
-> backend degrades to passthrough, which is safe but does nothing.
+### Installing it
+
+`headroom-ai` is declared as an optional extra:
+
+```bash
+uv sync --extra compression
+```
+
+It also declares `litellm`, which requires `httpx>=0.28` and so collides with
+`infinity-client`'s `httpx<0.28` pin. Headroom uses litellm only for its model
+registry and non-core providers, all lazily imported and ImportError-guarded;
+the compression path never touches it, and upstream itself ships without it on
+Python 3.14. A uv override in `pyproject.toml` therefore drops it. Everything
+else the prose compressor needs (transformers, onnxruntime, huggingface-hub)
+is already in the dependency set.
+
+The model is fetched from HuggingFace on first use. Construction kicks off a
+background load so the download never blocks startup, which means the first
+few requests in a fresh process pass through uncompressed. Set
+`extra: {warmup: false}` to skip it, and pre-seed the HuggingFace cache in the
+image if you need compression active from the first request.
+
+### What it costs
+
+Measured on a 10-core CPU, 400-word chunks:
+
+| target_ratio | Tokens saved | Latency |
+| --- | --- | --- |
+| null (model decides) | ~13% | ~490 ms per chunk |
+| 0.7 | ~19% | ~490 ms per chunk |
+| 0.5 | ~43% | ~490 ms per chunk |
+| 0.3 | ~57% | ~490 ms per chunk |
+
+Latency is linear in the number of chunks and independent of the ratio, so a
+partition retrieving `top_n: 10` pays roughly five seconds per query. Size
+`timeout_s` above that or the compressor will spend the time and then pass the
+originals through anyway. This is why compression is off by default and why it
+is worth enabling mainly where the retrieval set would otherwise be truncated,
+or on partitions where answer latency is not interactive.
+
+Compression is lossy. At aggressive ratios it strips function words, so
+sources read as clipped notes rather than prose. Check answer quality on your
+own corpus before turning it on widely.
 
 ## Adding a backend
 

@@ -46,10 +46,10 @@ def stub(monkeypatch):
     return stub
 
 
-def _compressor():
+def _compressor(**kwargs):
     from services.compression.headroom_compressor import HeadroomCompressor
 
-    return HeadroomCompressor()
+    return HeadroomCompressor(warmup=False, **kwargs)
 
 
 async def test_compresses_each_text(stub):
@@ -99,3 +99,13 @@ async def test_missing_dependency_raises_at_construction(monkeypatch):
 
     with pytest.raises(RuntimeError, match="headroom-ai is not installed"):
         HeadroomCompressor()
+
+
+async def test_warmup_failure_does_not_break_construction(stub, monkeypatch):
+    """A model that cannot load must leave a working passthrough, not an error."""
+    from services.compression.headroom_compressor import HeadroomCompressor
+
+    monkeypatch.setitem(sys.modules, "headroom.transforms.kompress_compressor", None)
+    compressor = HeadroomCompressor()
+    result = await compressor.compress(["aaaa"], options=OPTIONS)
+    assert result.texts == ["aa"]

@@ -3,16 +3,25 @@
 Headroom (https://github.com/headroomlabs-ai/headroom) routes content to a
 per-type compressor: statistical folding for JSON and logs, a small ModernBERT
 model for prose. Retrieved chunks are prose, so the model path is the one that
-does the work here. It runs on CPU by default.
+does the work here. It runs on CPU and needs no GPU.
 
 ``headroom.compress`` is synchronous and CPU-bound, so it is called in a worker
 thread. Each text is sent as its own user message in one batched call, which
 keeps us on the public API instead of reaching into Headroom's router.
 
-``headroom-ai`` is not an OpenRAG dependency: it requires litellm, which
-requires httpx>=0.28, while infinity-client pins httpx<0.28. Import is
-therefore deferred to construction, and ``di.compressors.create_compressor``
-falls back to the noop backend when it fails.
+Two behaviours of the upstream package this adapter has to account for:
+
+* Compression is gated on an in-process model cache, not the on-disk one, so a
+  fresh worker silently compresses nothing until the model is loaded.
+  ``ensure_background_load`` primes it without blocking construction.
+* Prose compression costs roughly 500 ms per 400-word chunk on CPU, so a
+  ``top_n`` of 10 adds several seconds. Size ``compression.timeout_s``
+  accordingly; the base class passes content through when it is exceeded.
+
+``headroom-ai`` also declares ``litellm``, which collides with the httpx pin of
+``infinity-client``; the dependency is dropped via a uv override (see
+``pyproject.toml``). Import is deferred to construction regardless, and
+``di.compressors.create_compressor`` falls back to noop when it fails.
 """
 
 from __future__ import annotations
@@ -35,7 +44,7 @@ class HeadroomCompressor(Compressor):
 
     name = "headroom"
 
-    def __init__(self, *, model: str = DEFAULT_MODEL, **extra: Any) -> None:
+    def __init__(self, *, model: str = DEFAULT_MODEL, warmup: bool = True, **extra: Any) -> None:
         try:
             from headroom import CompressConfig, compress
         except ImportError as exc:
@@ -45,6 +54,22 @@ class HeadroomCompressor(Compressor):
         self._config_cls = CompressConfig
         self._model = model
         self._extra = extra
+        if warmup:
+            self._warmup()
+
+    def _warmup(self) -> None:
+        """Prime the prose model off the calling thread.
+
+        Without this the first requests in every process route to a no-op: the
+        readiness gate reads an in-process cache that only a load populates.
+        Downloading is someone else's thread, so construction stays I/O-free.
+        """
+        try:
+            from headroom.transforms.kompress_compressor import KompressCompressor
+
+            KompressCompressor().ensure_background_load()
+        except Exception as exc:
+            logger.warning(f"Headroom model warmup failed; compression stays inactive until it loads: {exc}")
 
     async def _compress(self, texts: list[str], *, options: CompressionOptions) -> list[str]:
         indices = [i for i, t in enumerate(texts) if len(t) >= options.min_chars]

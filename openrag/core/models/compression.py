@@ -12,7 +12,7 @@ class CompressionOptions(BaseModel):
 
     target_ratio: float | None = Field(default=None, gt=0.0, le=1.0)
     min_chars: int = Field(default=1000, ge=0)
-    timeout_s: float = Field(default=5.0, gt=0.0)
+    timeout_s: float = Field(default=15.0, gt=0.0)
 
 
 class CompressionResult(BaseModel):
