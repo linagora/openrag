@@ -88,6 +88,15 @@ An entry left unresolved badges every user forever, and nobody notices, because 
 dropdown expecting an option *not* to say NEW. So `verify-tag` in `.github/workflows/build.yml`
 refuses to publish GA images while any entry is still unresolved.
 
+#### Writing the release notes
+
+`ui/src/lib/release-notes.ts` backs the Release Notes dialog in the admin sidebar. Unlike
+`whats-new.ts`, it can't be resolved mechanically: its `version`, `summary`, and `newFeatures`
+describe the shipped release in prose, and only a human can write that. Feature PRs leave those
+fields empty; writing them is release-preparation work, done on `release/X.Y.Z` once the feature
+set for `X.Y.Z` is actually final — so the notes describe what shipped, not what a feature PR
+predicted would ship.
+
 When the release is ready:
 
 1. Merge `release/X.Y.Z` into `main`.
