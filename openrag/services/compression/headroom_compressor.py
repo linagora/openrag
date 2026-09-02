@@ -8,6 +8,11 @@ does the work here. It runs on CPU by default.
 ``headroom.compress`` is synchronous and CPU-bound, so it is called in a worker
 thread. Each text is sent as its own user message in one batched call, which
 keeps us on the public API instead of reaching into Headroom's router.
+
+``headroom-ai`` is not an OpenRAG dependency: it requires litellm, which
+requires httpx>=0.28, while infinity-client pins httpx<0.28. Import is
+therefore deferred to construction, and ``di.compressors.create_compressor``
+falls back to the noop backend when it fails.
 """
 
 from __future__ import annotations

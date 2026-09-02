@@ -371,7 +371,8 @@ mcp:
 # Shrinks retrieved text (and optionally chat history) before it reaches the
 # LLM. Deployment-wide kill switch; whether a request compresses is decided by
 # its partition's retrieval preset. Backends: noop, headroom.
-# headroom needs the headroom-ai package and runs on CPU.
+# headroom needs the headroom-ai package (not installed by default, see
+# docs/content/docs/documentation/context_compression.md) and runs on CPU.
 compression:
   enabled: false
   backend: noop
