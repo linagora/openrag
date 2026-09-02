@@ -3,12 +3,14 @@ import {
   displayModelEndpointExtra,
   mergeModelEndpointApiKeyExtra,
   mergeModelEndpointLlmContext,
+  mergeModelEndpointSttLanguage,
   pickDefaultEndpoint,
   prepareModelEndpointExtraForSubmit,
   revealModelEndpointApiKey,
   resolveEmbedderName,
   splitModelEndpointApiKeyExtra,
   splitModelEndpointLlmContext,
+  splitModelEndpointSttLanguage,
   validateModelEndpoint,
 } from "./models";
 import type { ModelEndpointResponse } from "./models";
@@ -106,7 +108,9 @@ describe("validateModelEndpoint", () => {
 
     await validateModelEndpoint({
       endpoint: "http://candidate:8000/v1",
+      model_type: "stt",
       model_name: "mistral-small",
+      timeout: 900,
       stored_api_key_model_type: "llm",
       stored_api_key_name: "private-llm",
     });
@@ -114,7 +118,9 @@ describe("validateModelEndpoint", () => {
     const [, init] = fetchMock.mock.calls[0];
     expect(JSON.parse((init as RequestInit).body as string)).toEqual({
       endpoint: "http://candidate:8000/v1",
+      model_type: "stt",
       model_name: "mistral-small",
+      timeout: 900,
       stored_api_key_model_type: "llm",
       stored_api_key_name: "private-llm",
     });
@@ -312,6 +318,28 @@ describe("LLM context token-budget extra fields", () => {
       implementation: "vllm",
       api_key: "sk-x",
       max_output_tokens: 512,
+    });
+  });
+});
+
+describe("STT language-hint extra field", () => {
+  it("splits and merges a language hint without touching provider options", () => {
+    const { languageHint, extra } = splitModelEndpointSttLanguage({
+      language: "fr",
+      diarization: true,
+    });
+
+    expect(languageHint).toBe("fr");
+    expect(extra).toEqual({ diarization: true });
+    expect(mergeModelEndpointSttLanguage(extra, "en")).toEqual({
+      diarization: true,
+      language: "en",
+    });
+  });
+
+  it("removes the language key when the dedicated field is blank", () => {
+    expect(mergeModelEndpointSttLanguage({ language: "fr", diarization: true }, "  ")).toEqual({
+      diarization: true,
     });
   });
 });

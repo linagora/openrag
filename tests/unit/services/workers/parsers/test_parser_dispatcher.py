@@ -127,6 +127,25 @@ def test_audio_client_receives_live_transcription_prompt_resolver(monkeypatch: p
     assert client._transcription_prompt_resolver is resolver
 
 
+def test_audio_client_receives_live_stt_endpoint_resolver(monkeypatch: pytest.MonkeyPatch) -> None:
+    import services.workers.parsers.parser_dispatcher as dispatcher
+    from core.config.model_endpoints import ModelEndpointConfig
+
+    endpoint = ModelEndpointConfig(endpoint="http://moss:8000/v1", model_name="moss-transcribe-diarize")
+
+    def resolver() -> ModelEndpointConfig:
+        return endpoint
+
+    monkeypatch.setattr(dispatcher, "_create", lambda _module, _name, **kwargs: kwargs["client"])
+
+    client = ParserDispatcher(
+        _config(audio="OpenAIAudioLoader"),
+        transcription_endpoint_resolver=resolver,
+    )._build_audio_client()
+
+    assert client._transcription_endpoint_resolver is resolver
+
+
 def test_unsupported_pdf_config_raises() -> None:
     with pytest.raises(ValueError, match="Unsupported PDF loader"):
         ParserDispatcher(_config(pdf="NopeLoader"))._resolve_pdf_backend()

@@ -1,4 +1,4 @@
-"""Named model endpoint registry — multi-endpoint config for embedders, LLMs, rerankers, VLMs."""
+"""Named model endpoint registry — embedders, rerankers, LLMs, VLMs, and STT."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from typing import Any, Literal
 from core.config.base import ConfigMixin
 from pydantic import BaseModel, Field
 
-ModelEndpointType = Literal["embedder", "reranker", "llm", "vlm"]
+ModelEndpointType = Literal["embedder", "reranker", "llm", "vlm", "stt"]
 
 
 class ModelEndpointConfig(BaseModel):
@@ -54,6 +54,12 @@ def _positive_int(value: Any) -> int | None:
 LLM_CONTEXT_SIZE_KEY = "max_llm_context_size"
 LLM_OUTPUT_TOKENS_KEY = "max_output_tokens"
 
+# Optional language hint for OpenAI-compatible speech-to-text endpoints. It is
+# stored in ``extra`` because it applies only to STT requests and needs no
+# schema column; when set it takes precedence over the optional Whisper-based
+# language detector.
+STT_LANGUAGE_KEY = "language"
+
 # Provenance marker written into an endpoint's ``extra`` when the seeder creates
 # it from env. It is what lets boot-time sync find *its own* row again after the
 # configured model — and therefore the slug the row was named after — changes.
@@ -71,6 +77,21 @@ ENV_MANAGED_VALUE = "env"
 # factory already stripped.
 CONTROL_EXTRA_KEYS = frozenset({"implementation", ENV_MANAGED_KEY, LLM_CONTEXT_SIZE_KEY, LLM_OUTPUT_TOKENS_KEY})
 
+# Connection metadata and OpenRAG-owned fields must not leak into an STT
+# provider's multipart request. Shared by runtime transcription and the Admin
+# UI validation probe so a saved endpoint is tested with the payload it will
+# actually receive.
+STT_REQUEST_CONTROL_EXTRA_KEYS = CONTROL_EXTRA_KEYS | frozenset(
+    {
+        "api_key",
+        STT_LANGUAGE_KEY,
+        "file",
+        "model",
+        "prompt",
+        "stream",
+    }
+)
+
 
 class ModelsConfig(ConfigMixin):
     """Named endpoint dictionaries — one per model type.
@@ -84,6 +105,7 @@ class ModelsConfig(ConfigMixin):
     reranker: dict[str, ModelEndpointConfig] = Field(default_factory=dict)
     llm: dict[str, ModelEndpointConfig] = Field(default_factory=dict)
     vlm: dict[str, ModelEndpointConfig] = Field(default_factory=dict)
+    stt: dict[str, ModelEndpointConfig] = Field(default_factory=dict)
 
     # When True, the endpoint the seeder created from env is refreshed from
     # Settings/env on every boot instead of only on first seed — lets operators
@@ -130,6 +152,8 @@ class ModelEndpointRow(BaseModel):
 __all__ = [
     "LLM_CONTEXT_SIZE_KEY",
     "LLM_OUTPUT_TOKENS_KEY",
+    "STT_REQUEST_CONTROL_EXTRA_KEYS",
+    "STT_LANGUAGE_KEY",
     "ModelEndpointConfig",
     "ModelsConfig",
     "ModelEndpointRow",

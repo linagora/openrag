@@ -105,6 +105,8 @@ For local whisper loader, here are the options to use
 ##### OpenAI-compatible audio Loader ( `OpenAIAudioLoader` )
 The `OpenAIAudioLoader` option can use any OpenAI-compatible transcription service. Configure its URL, credentials, and model with **`TRANSCRIBER_BASE_URL`**, **`TRANSCRIBER_API_KEY`**, and **`TRANSCRIBER_MODEL`**.
 
+On first startup, these values seed the default **STT** endpoint in the Admin UI's **Model Endpoints** page. Once an STT endpoint is saved, it is the editable source for `OpenAIAudioLoader`: use it to change the OpenAI-compatible `/v1` URL, model, API key, timeout, concurrency, optional language hint, and non-secret provider request options for MOSS, Whisper, or another compatible provider. No OpenRAG restart is required: direct extraction reloads the endpoint before each audio request, and indexer workers refresh it within one minute. The transcription endpoint must implement `/audio/transcriptions`.
+
 The audio is automatically segmented into chunks using silence detection, then transcribes these chunks in parallel for optimal speed and accuracy.
 
 :::tip[Whisper deployment as vLLM server]
@@ -128,7 +130,7 @@ Here are some other variables related to openai-compatible endpoint.
 | `TRANSCRIBER_BASE_URL` | `str` | `http://transcriber:8000/v1` | Base URL for the transcriber API (OpenAI-compatible endpoint). |
 | `TRANSCRIBER_API_KEY` | `str` | `EMPTY` | Authentication key for transcriber service requests. |
 | `TRANSCRIBER_MODEL` | `str` | `openai/whisper-large-v3-turbo` | Model identifier exposed by the transcription endpoint. |
-| `TRANSCRIBER_MAX_CONCURRENT_CHUNKS` | `int` | `20` | Maximum number of audio chunks processed simultaneously. Increasing this value improves throughput when sufficient GPU resources are available. |
+| `TRANSCRIBER_MAX_CONCURRENT_CHUNKS` | `int` | `20` | Per-worker concurrency for the initial STT endpoint seed and the fallback when no saved STT endpoint is available. For a saved endpoint, set **Concurrency per worker** in **Admin UI → Model Endpoints**. |
 | `TRANSCRIBER_TIMEOUT` | `int` | `3600` | Maximum duration in seconds allowed for a single transcription request. |
 | `TRANSCRIBER_DIRECT_UPLOAD_SUFFIXES` | `str` | `.wav\|.flac\|.ogg\|.mp3\|.mp4\|.m4a\|.webm\|.mpeg\|.mpga` | Pipe-delimited list of audio file suffixes uploaded to the transcriber as-is (no WAV conversion). Other formats are re-encoded to WAV before upload. Trim this list when your transcriber backend (e.g. vLLM/libsndfile) only accepts a subset. |
 | `USE_WHISPER_LANG_DETECTOR` | `bool` | `true` | When enabled, uses a local Whisper-based language detector to identify the source audio language before transcription. |
@@ -138,11 +140,11 @@ Here are some other variables related to openai-compatible endpoint.
 
 :::tip[MOSS-Transcribe-Diarize with vLLM]
 
-`OpenMOSS-Team/MOSS-Transcribe-Diarize` uses this same endpoint and produces speaker-labelled text, so no new OpenRAG loader is needed. Set `AUDIOLOADER=OpenAIAudioLoader`, point `TRANSCRIBER_BASE_URL` at the vLLM server, set `TRANSCRIBER_MODEL=OpenMOSS-Team/MOSS-Transcribe-Diarize`, and set `USE_WHISPER_LANG_DETECTOR=false` so OpenRAG does not keep a local Whisper model solely for language detection.
+`OpenMOSS-Team/MOSS-Transcribe-Diarize` uses this same endpoint and produces timestamped, speaker-labelled text, so no new OpenRAG loader is needed. Set `AUDIOLOADER=OpenAIAudioLoader`, point the STT endpoint at the vLLM server, and use the model name advertised by `/v1/models`. For example, when vLLM is started with `--served-model-name moss-transcribe-diarize`, enter `moss-transcribe-diarize` rather than the Hugging Face repository ID. Set `USE_WHISPER_LANG_DETECTOR=false` when you do not need the local Whisper language detector.
 
-For a MOSS server bound to `127.0.0.1:8001`, use `http://127.0.0.1:8001/v1` only when OpenRAG runs on that host. A containerized OpenRAG needs a host-reachable address such as `http://host.docker.internal:8001/v1` (plus Docker's host-gateway mapping on Linux). Match `TRANSCRIBER_MAX_CONCURRENT_CHUNKS` to the vLLM capacity; with `--max-num-seqs 1`, set it to `1`.
+For a MOSS server bound to `127.0.0.1:8001`, use `http://127.0.0.1:8001/v1` only when OpenRAG runs on that host. A containerized OpenRAG needs a host-reachable address such as `http://host.docker.internal:8001/v1` (plus Docker's host-gateway mapping on Linux). Match each OpenRAG worker's saved **Concurrency per worker** to the vLLM capacity; with `--max-num-seqs 1`, set it to `1` when one worker serves the endpoint, or lower it so all workers together stay within capacity. `TRANSCRIBER_MAX_CONCURRENT_CHUNKS` only controls the initial seed and fallback.
 
-The bundled transcriber image is pinned for Whisper and predates MOSS support. Serve MOSS with the vLLM build specified by the model authors, then use it as the external transcription endpoint. Manage its instruction in **Admin UI → Prompt Library → Transcription**. Changes apply to the next transcription without a restart. OpenRAG leaves this global prompt empty by default so Whisper, MOSS, and other providers keep their native behavior.
+The bundled transcriber image is pinned for Whisper and predates MOSS support. Serve MOSS with the vLLM build specified by the model authors, then use it as the external transcription endpoint. Its advanced STT request options are sent unchanged to vLLM, so configure an appropriate output-token budget and deterministic JSON output on the endpoint. Manage its instruction in **Admin UI → Prompt Library → Transcription**. Changes apply to the next transcription without a restart. OpenRAG leaves this global prompt empty by default so Whisper, MOSS, and other providers keep their native behavior.
 
 On a deployment dedicated to MOSS, you can paste an instruction like this into the Prompt Library:
 
@@ -157,7 +159,7 @@ Preserve the original language and wording. Do not translate, summarize,
 paraphrase, correct, or invent missing words.
 ```
 
-Add hotwords only when they are relevant to your own deployment. They bias recognition vocabulary and should not be part of OpenRAG's global default.
+Add hotwords only when they are relevant to your own deployment. They bias recognition vocabulary and should not be part of OpenRAG's global default. When adding hotwords or a format instruction, include the desired timestamp and speaker-label format in the prompt as well.
 :::
 
 :::note[About whisper with vLLM and language detection]
