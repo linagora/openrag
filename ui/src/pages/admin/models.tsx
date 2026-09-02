@@ -353,6 +353,7 @@ function EndpointDialog({
   const isStt = modelType === "stt";
   const sttValidationTimeout = isStt ? timeout : null;
   const sttValidationLanguageHint = isStt ? languageHint.trim() : null;
+  const sttValidationMossSpeakerAware = isStt ? mossSpeakerAware : null;
   const validationDraft = JSON.stringify([
     endpoint,
     modelType,
@@ -361,6 +362,7 @@ function EndpointDialog({
     extraJson,
     sttValidationTimeout,
     sttValidationLanguageHint,
+    sttValidationMossSpeakerAware,
   ]);
   const currentValidationDraft = useRef(validationDraft);
   const validationGeneration = useRef(0);
@@ -463,11 +465,12 @@ function EndpointDialog({
         : { languageHint: "", extra: editingExtra.extra }
       : null;
     const editingSttExtra = editingSttFields?.extra ?? null;
-    const editingMossExtra = editingSttExtra
+    const editingMossFields = editingSttExtra
       ? editing?.model_type === "stt"
-        ? splitModelEndpointMossSpeakerAware(editingSttExtra).extra
-        : editingSttExtra
+        ? splitModelEndpointMossSpeakerAware(editingSttExtra)
+        : { mossSpeakerAware: false, extra: editingSttExtra }
       : null;
+    const editingMossExtra = editingMossFields?.extra ?? null;
     const editingImplExtra = editingMossExtra
       ? editing?.model_type === "stt"
         ? editingMossExtra
@@ -489,6 +492,8 @@ function EndpointDialog({
         (editing.model_type === "stt" ? String(editing.timeout) : null) &&
       sttValidationLanguageHint ===
         (editing.model_type === "stt" ? editingSttFields?.languageHint.trim() || "" : null) &&
+      sttValidationMossSpeakerAware ===
+        (editing.model_type === "stt" ? editingMossFields?.mossSpeakerAware || false : null) &&
       apiKey === editingExtra?.apiKey &&
       extraJson === JSON.stringify(editingRawExtra, null, 2)
     ) {
@@ -502,7 +507,16 @@ function EndpointDialog({
     }
     setValidated(null);
     setValidationMsg(null);
-  }, [endpoint, modelName, sttValidationTimeout, sttValidationLanguageHint, apiKey, extraJson, editing]);
+  }, [
+    endpoint,
+    modelName,
+    sttValidationTimeout,
+    sttValidationLanguageHint,
+    sttValidationMossSpeakerAware,
+    apiKey,
+    extraJson,
+    editing,
+  ]);
 
   const apiKeySubmitValue = () =>
     prepareModelEndpointExtraForSubmit({ api_key: apiKey.trim() }).api_key;
@@ -585,9 +599,9 @@ function EndpointDialog({
         if (typeof parsedExtra !== "object" || parsedExtra === null || Array.isArray(parsedExtra)) {
           throw new Error("Extra must be a JSON object");
         }
-        validationExtra = mergeModelEndpointSttLanguage(
-          parsedExtra as Record<string, unknown>,
-          languageHint,
+        validationExtra = mergeModelEndpointMossSpeakerAware(
+          mergeModelEndpointSttLanguage(parsedExtra as Record<string, unknown>, languageHint),
+          mossSpeakerAware,
         );
       } catch {
         const msg = "Invalid JSON in extra field";
