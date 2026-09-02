@@ -1,0 +1,39 @@
+name: UI tests
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+
+jobs:
+  ui-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    permissions:
+      contents: read
+
+    defaults:
+      run:
+        working-directory: ui
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run vitest
+        # vite.config.ts sets passWithNoTests: true for local runs; in CI an empty
+        # test discovery means something broke, so make it a failure.
+        run: npm test -- --passWithNoTests=false
