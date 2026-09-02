@@ -140,13 +140,11 @@ Here are some other variables related to openai-compatible endpoint.
 
 :::tip[MOSS-Transcribe-Diarize with vLLM]
 
-`OpenMOSS-Team/MOSS-Transcribe-Diarize` uses this same endpoint and produces speaker-labelled text, so no new OpenRAG loader is needed. Set `AUDIOLOADER=OpenAIAudioLoader`, configure the STT endpoint with the vLLM server, and use the model name advertised by `/v1/models`. For example, when vLLM is started with `--served-model-name moss-transcribe-diarize`, enter `moss-transcribe-diarize` rather than the Hugging Face repository ID. Set `USE_WHISPER_LANG_DETECTOR=false` when you do not need the local Whisper language detector.
+`OpenMOSS-Team/MOSS-Transcribe-Diarize` uses this same endpoint and produces timestamped, speaker-labelled text, so no new OpenRAG loader is needed. Set `AUDIOLOADER=OpenAIAudioLoader`, point the STT endpoint at the vLLM server, and use the model name advertised by `/v1/models`. For example, when vLLM is started with `--served-model-name moss-transcribe-diarize`, enter `moss-transcribe-diarize` rather than the Hugging Face repository ID. Set `USE_WHISPER_LANG_DETECTOR=false` when you do not need the local Whisper language detector.
 
 For a MOSS server bound to `127.0.0.1:8001`, use `http://127.0.0.1:8001/v1` only when OpenRAG runs on that host. A containerized OpenRAG needs a host-reachable address such as `http://host.docker.internal:8001/v1` (plus Docker's host-gateway mapping on Linux). Match each OpenRAG worker's saved **Concurrency per worker** to the vLLM capacity; with `--max-num-seqs 1`, set it to `1` when one worker serves the endpoint, or lower it so all workers together stay within capacity. `TRANSCRIBER_MAX_CONCURRENT_CHUNKS` only controls the initial seed and fallback.
 
-The bundled transcriber image is pinned for Whisper and predates MOSS support. Serve MOSS with the vLLM build specified by the model authors, then use it as the external transcription endpoint. Manage instructions in **Admin UI → Prompt Library → Transcription**, then select the STT endpoint and instruction in **Admin UI → Presets → Indexation → Parsing**. Each partition uses its assigned indexation preset; leaving either selection at its default follows the global endpoint or ASR prompt. Direct extraction (`/extract`) has no partition and always uses the global endpoint and default ASR prompt. Changes apply to the next transcription without a restart. OpenRAG leaves the default ASR prompt empty so Whisper, MOSS, and other providers keep their native behavior.
-
-For a MOSS endpoint, **Admin UI → Model Endpoints** also offers an optional **Speaker-aware MOSS transcript** setting. It removes boundary timecodes when the complete diarized response is unambiguously recognized and retains normalized labels only when MOSS identifies more than one speaker. Leave it disabled to preserve the provider response unchanged. The setting also works with served-model aliases and is never sent to the provider.
+The bundled transcriber image is pinned for Whisper and predates MOSS support. Serve MOSS with the vLLM build specified by the model authors, then use it as the external transcription endpoint. Its advanced STT request options are sent unchanged to vLLM, so configure an appropriate output-token budget and deterministic JSON output on the endpoint. Manage instructions in **Admin UI → Prompt Library → Transcription**, then select the STT endpoint and instruction in **Admin UI → Presets → Indexation → Parsing**. Each partition uses its assigned indexation preset; leaving either selection at its default follows the global endpoint or ASR prompt. Direct extraction (`/extract`) has no partition and always uses the global endpoint and default ASR prompt. Changes apply to the next transcription without a restart. OpenRAG leaves the default ASR prompt empty so Whisper, MOSS, and other providers keep their native behavior.
 
 On a deployment dedicated to MOSS, you can paste an instruction like this into the Prompt Library:
 
@@ -161,7 +159,9 @@ Preserve the original language and wording. Do not translate, summarize,
 paraphrase, correct, or invent missing words.
 ```
 
-Add hotwords only when they are relevant to your own deployment. They bias recognition vocabulary and should not be part of OpenRAG's global default.
+For a MOSS model, **Admin UI → Model Endpoints** offers an optional **Speaker-aware MOSS transcript** setting. It removes boundary timecodes when the response is unambiguously recognized as a supported MOSS transcript and keeps labels only when more than one speaker is present. Ambiguous responses are preserved unchanged to prevent content loss. This also works with served-model aliases and is never sent to the provider.
+
+Add hotwords only when they are relevant to your own deployment. They bias recognition vocabulary and should not be part of OpenRAG's global default. When adding hotwords or a format instruction, include the desired timestamp and speaker-label format in the prompt as well.
 :::
 
 :::note[About whisper with vLLM and language detection]

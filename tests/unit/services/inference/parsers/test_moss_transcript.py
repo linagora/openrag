@@ -30,6 +30,24 @@ def test_normalizes_initial_speakerless_turn_with_a_shared_boundary():
     assert normalize_moss_speaker_aware_transcript(transcript) == "[S01] Hello\n[S02] Hi"
 
 
+def test_normalizes_a_complete_speakerless_compact_turn():
+    transcript = "[1] Hello [2]"
+
+    assert normalize_moss_speaker_aware_transcript(transcript) == "Hello"
+
+
+def test_normalizes_repeated_speakerless_compact_turns_with_shared_boundaries():
+    transcript = "[1] A [2][2] B [3]"
+
+    assert normalize_moss_speaker_aware_transcript(transcript) == "A\nB"
+
+
+def test_preserves_speakerless_compact_turns_without_shared_boundaries():
+    transcript = "[1] A [2][3] B [4]"
+
+    assert normalize_moss_speaker_aware_transcript(transcript) == transcript
+
+
 def test_normalizes_labelled_compact_turns_with_a_shared_boundary():
     transcript = "[0][S01] A [1][S02] B [2]"
 
@@ -46,6 +64,24 @@ def test_normalizes_clock_timecodes():
     transcript = "[00:00:01.120] [S01] Hello everyone. [00:00:02.320]\n[00:00:02.680] [S1] This week. [00:00:04.320]"
 
     assert normalize_moss_speaker_aware_transcript(transcript) == "Hello everyone.\nThis week."
+
+
+def test_preserves_unsupported_clock_formatted_dash_ranges():
+    transcript = "[00:00:01.120 - 00:00:02.320][S01] Hello everyone."
+
+    assert normalize_moss_speaker_aware_transcript(transcript) == transcript
+
+
+def test_preserves_speakerless_compact_output_with_an_unsupported_clock_dash_range():
+    transcript = "[1] Hello [00:00:02 - 00:00:03] [4]"
+
+    assert normalize_moss_speaker_aware_transcript(transcript) == transcript
+
+
+def test_preserves_dash_output_with_an_unsupported_clock_dash_range():
+    transcript = "[1-2][S01] Hello [00:00:03 - 00:00:04]"
+
+    assert normalize_moss_speaker_aware_transcript(transcript) == transcript
 
 
 def test_normalizes_speaker_only_lines():

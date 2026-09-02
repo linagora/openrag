@@ -428,6 +428,37 @@ async def test_validate_endpoint_draft_forwards_body_without_lookup(async_client
 
 
 @pytest.mark.asyncio
+async def test_validate_endpoint_draft_uses_api_key_from_stt_extra(async_client_factory):
+    model_service = FakeModelEndpointService()
+    app = _build_app(model_service=model_service)
+
+    async with async_client_factory(app) as client:
+        response = await client.post(
+            "/model-endpoints/validate",
+            json={
+                "endpoint": "http://candidate:8000/v1",
+                "model_type": "stt",
+                "model_name": "moss-transcribe-diarize",
+                "extra": {"api_key": "extra-key"},
+            },
+        )
+
+    assert response.status_code == 200
+    assert model_service.calls == [
+        (
+            "validate",
+            {
+                "url": "http://candidate:8000/v1",
+                "model_type": "stt",
+                "model_name": "moss-transcribe-diarize",
+                "api_key": "extra-key",
+                "extra": {"api_key": "extra-key"},
+            },
+        ),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_validate_endpoint_draft_can_reuse_stored_api_key(async_client_factory):
     model_service = FakeModelEndpointService()
     model_service.endpoint_extra = {"api_key": "secret-token"}
@@ -663,7 +694,7 @@ async def test_preset_options_return_registered_choices(async_client_factory):
 
     assert response.status_code == 200
     body = response.json()
-    assert body["chunking_strategies"] == ["recursive_splitter"]
+    assert body["chunking_strategies"] == ["recursive_splitter", "structured_section"]
     assert set(body["retrieval_types"]) == {"single", "multiQuery", "hyde"}
     assert body["reranker_providers"] == ["infinity", "openai", "tei"]
 
@@ -903,15 +934,19 @@ async def test_update_stt_endpoint_validates_model_and_language_hint(async_clien
     assert invalid_speaker_setting.status_code == 422
     assert invalid_structured_speaker_setting.status_code == 422
     assert valid.status_code == 200
-    assert model_service.calls[:-1] == [("get", {"name": "default", "model_type": "stt"})] * 3
-    assert model_service.calls[-1] == (
-        "update",
-        {
-            "name": "default",
-            "model_type": "stt",
-            "extra": {"language": "fr", "moss_speaker_aware": True},
-        },
-    )
+    assert model_service.calls == [
+        ("get", {"name": "default", "model_type": "stt"}),
+        ("get", {"name": "default", "model_type": "stt"}),
+        ("get", {"name": "default", "model_type": "stt"}),
+        (
+            "update",
+            {
+                "name": "default",
+                "model_type": "stt",
+                "extra": {"language": "fr", "moss_speaker_aware": True},
+            },
+        ),
+    ]
 
 
 @pytest.mark.asyncio

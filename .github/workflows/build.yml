@@ -52,6 +52,54 @@ jobs:
             exit 1
           fi
 
+      # A NEW badge is data, not markup: each entry in ui/src/lib/whats-new.ts
+      # records the version its feature shipped in, and the badge expires on its
+      # own once the running version is far enough past it. An entry still
+      # reading UNRELEASED has no version to expire against, so it badges every
+      # user forever — and silently, because nobody inspects a dropdown
+      # expecting an option *not* to say NEW. Resolving them belongs to the
+      # release branch, in the same commit that bumps pyproject.toml (see
+      # "Releases" in CONTRIBUTING.md). This is the gate that turns forgetting
+      # that step into a failed release rather than a permanent badge.
+      - name: Verify every NEW badge has been resolved to a version
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          registry=ui/src/lib/whats-new.ts
+
+          # A registry we cannot read is not a clean registry. Asked as an `if`
+          # condition, grep's "file missing" (exit 2) is indistinguishable from
+          # "no matches" (exit 1), so a moved or renamed file would report OK
+          # here and the backstop would be gone without anyone noticing.
+          if [ ! -r "$registry" ]; then
+            echo "::error::$registry is missing or unreadable, so the NEW badge gate cannot run. If the registry moved, update this step."
+            exit 1
+          fi
+
+          # Anchored to a whole registry line — indent, quoted key, colon, and
+          # an optional trailing comma, which the last entry in the object may
+          # legally omit — so the sentinel's own definition and the prose that
+          # explains it cannot trip the gate, and an entry written without the
+          # comma cannot slip past it.
+          set +e
+          unresolved=$(grep -nE '^ *"[^"]+": *"UNRELEASED",? *$' "$registry")
+          status=$?
+          set -e
+
+          if [ "$status" -eq 0 ]; then
+            echo "::error::$registry has unresolved NEW badge entries; they would badge forever. Set them to ${TAG_NAME#v} on the release branch (CONTRIBUTING.md -> Releases) before tagging."
+            echo "$unresolved"
+            exit 1
+          fi
+
+          # Only exit 1 means a genuine no-match; anything else is grep failing.
+          if [ "$status" -ne 1 ]; then
+            echo "::error::could not search $registry for unresolved NEW badge entries (grep exited $status)."
+            exit 1
+          fi
+
+          echo "OK: no unresolved NEW badge entries"
+
   build-and-push-image:
     needs: verify-tag
     runs-on: ubuntu-latest

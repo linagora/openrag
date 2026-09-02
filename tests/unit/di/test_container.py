@@ -679,6 +679,7 @@ class TestPhase14ServiceWiring:
         assert service._client_caches["reranker"] is c._reranker_cache
         assert service._client_caches["llm"] is c._llm_cache
         assert service._client_caches["vlm"] is c._vlm_cache
+        assert service._prompt_service is c.prompt_service
 
     def test_preset_service_is_lazy_cached_with_partition_back_reference(self):
         """Expose PresetService with the config-aware PartitionService reference."""

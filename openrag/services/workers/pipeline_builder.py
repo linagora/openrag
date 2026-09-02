@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import time
 from collections.abc import Callable, MutableMapping
 from dataclasses import dataclass
@@ -26,6 +27,12 @@ from services.workers.stages.topic_tag import topic_tag_stage
 
 logger = get_logger()
 
+#: Tokens a later stage may prepend to a chunk before it is embedded — the
+#: ``[CONTEXT]`` block plus the ``[CHUNK_START]``/filename envelope, measured at
+#: ~56 tokens on the marker corpus. Generously over-estimated: it only decides
+#: how close to the limit a chunk must be to be worth re-tokenising.
+_ENVELOPE_HEADROOM_TOKENS = 512
+
 REPLACE_OLD_CHUNK_COLLECTION_ROW_KEY = "_replace_old_chunk_collection"
 REPLACE_OLD_CHUNK_IDS_ROW_KEY = "_replace_old_chunk_ids"
 
@@ -47,6 +54,30 @@ class PipelineTimeouts:
     topic_tag: float | None = None
 
 
+def _accepts_embedder_window(factory: Callable[..., Any]) -> bool:
+    """Whether ``factory`` takes the embedder-window second positional argument.
+
+    Signature inspection rather than call-and-catch: catching ``TypeError`` from
+    the two-argument call cannot tell an arity mismatch from a ``TypeError``
+    raised inside a perfectly compatible factory, and retrying the latter would
+    build the chunker twice and swallow the real error.
+
+    Unintrospectable callables (C builtins, some partials) are assumed modern —
+    the two-argument form is the current contract, and the fallback exists only
+    for factories written before it.
+    """
+    try:
+        params = list(inspect.signature(factory).parameters.values())
+    except (TypeError, ValueError):
+        return True
+    if any(p.kind is inspect.Parameter.VAR_POSITIONAL for p in params):
+        return True
+    positional = [
+        p for p in params if p.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+    ]
+    return len(positional) >= 2
+
+
 @dataclass(slots=True, frozen=True)
 class IndexingPipeline:
     """Sequential indexing pipeline assembled from worker stage functions."""
@@ -62,8 +93,12 @@ class IndexingPipeline:
     timeouts: PipelineTimeouts = PipelineTimeouts()
     indexation_config: IndexationPipelineConfig | None = None
     parser_factory: Callable[[str], DocumentParser] | None = None
-    chunker_factory: Callable[[Any], ChunkingStrategy] | None = None
+    chunker_factory: Callable[..., ChunkingStrategy] | None = None
     embedder_factory: Callable[[str], Embedder] | None = None
+    # Resolves an embedder endpoint name to its context window, so the chunker
+    # can derive a hard safety bound from the embedder this partition actually
+    # uses rather than from the deployment default.
+    embedder_window_resolver: Callable[[str], int | None] | None = None
     vlm_factory: Callable[[str], VLM] | None = None
     contextualizer_factory: Callable[[str], ChunkContextualizer] | None = None
     topic_tagger_factory: Callable[[str], TopicTagger] | None = None
@@ -90,7 +125,9 @@ class IndexingPipeline:
         """
         config = self._effective_indexation_config(row)
         parser = self._select_parser(config)
-        chunker = self._select_chunker(config)
+        embedder_name = str(row.get("embedder_name") or "default")
+        embedder_window = self.embedder_window_resolver(embedder_name) if self.embedder_window_resolver else None
+        chunker = self._select_chunker(config, embedder_name, embedder_window)
         embedder = self._select_embedder(row)
         contextualizer, contextualization_llm = self._select_contextualizer(config)
         topic_tagger, topic_tagging_llm = self._select_topic_tagger(config)
@@ -151,6 +188,10 @@ class IndexingPipeline:
                         per_chunk_timeout=self.timeouts.contextualize_per_chunk,
                     ),
                 )
+            # After contextualization, not before: the [CONTEXT] envelope is
+            # prepended here and is part of what gets embedded, so measuring
+            # earlier would miss exactly the chunks the envelope pushes over.
+            self._warn_on_embedder_overflow(row, embedder_window, getattr(chunker, "length_function", None))
             if topic_tagger is not None:
                 max_tags = config.max_topic_tags if config is not None else 7
                 await _timed(
@@ -290,8 +331,91 @@ class IndexingPipeline:
             return self.parser_factory(config.parsing_strategy)
         return self.parser
 
-    def _select_chunker(self, config: IndexationPipelineConfig | None) -> ChunkingStrategy:
+    @staticmethod
+    def _warn_on_embedder_overflow(
+        row: MutableMapping[str, Any],
+        window: int | None,
+        length_function: Callable[[str], int] | None = None,
+    ) -> None:
+        """Warn when a chunk will be silently truncated by the embedder.
+
+        vLLM sends ``truncate_prompt_tokens = max_model_len - 1``, so anything
+        past that is dropped *before* it is embedded — no error, no log, just a
+        vector that describes part of the chunk while the store keeps all of it.
+        Retrieval then misses text the chunk visibly contains.
+
+        The chunker deliberately does not prevent every case: an indivisible
+        unit (a table row larger than the window) is kept whole rather than cut
+        into fragments that are no longer valid rows. This makes that trade
+        visible instead of silent.
+
+        ``chunk.token_count`` is a *lower bound* on what actually gets embedded:
+        contextualization rewrites ``text`` with the ``[CONTEXT]`` envelope via
+        ``model_copy`` without refreshing the count, and the envelope only adds.
+        So the stored count settles almost every chunk on its own — over the
+        limit is already conclusive, and far enough under it cannot be pushed
+        over by an envelope. Only the band in between is re-tokenised.
+
+        That matters because this runs synchronously on the actor's event loop,
+        unconditionally, for every file — including partitions on
+        ``recursive_splitter`` that use nothing else here. Re-tokenising every
+        chunk cost ~360 ms per 3000-chunk document (more than double that with
+        the production ``ChatOpenAI`` counter), freezing every other in-flight
+        file's continuation. The adjacent chunk stage goes out of its way to
+        avoid exactly this, running the chunker under ``asyncio.to_thread``.
+        """
+        if not window or window <= 0:
+            return
+        limit = window - 1  # truncate_prompt_tokens
+        chunks = row.get("chunks") or []
+
+        def tokens(chunk: Any) -> int:
+            stored = getattr(chunk, "token_count", 0) or 0
+            if length_function is None or not getattr(chunk, "text", None):
+                return stored
+            # Conclusive on the stored count alone: already over, or too far
+            # under for any envelope to close the gap.
+            if stored > limit or stored <= limit - _ENVELOPE_HEADROOM_TOKENS:
+                return stored
+            return length_function(chunk.text)
+
+        offenders = [(chunk, count) for chunk in chunks if (count := tokens(chunk)) > limit]
+        if not offenders:
+            return
+        worst, worst_tokens = max(offenders, key=lambda pair: pair[1])
+        logger.bind(
+            task_id=row.get("task_id"),
+            filename=row.get("filename", ""),
+            partition=row.get("partition"),
+            embedder_window=window,
+            truncate_at=limit,
+            offending_chunks=len(offenders),
+            total_chunks=len(chunks),
+            worst_tokens=worst_tokens,
+            worst_chunk_index=getattr(worst, "chunk_index", None),
+            worst_chunk_type=getattr(getattr(worst, "chunk_type", None), "value", None),
+        ).warning(
+            f"{len(offenders)} chunk(s) exceed the embedder's {limit}-token limit "
+            f"(largest {worst_tokens}) and will be truncated before embedding — "
+            f"their tail will not be retrievable"
+        )
+
+    def _select_chunker(
+        self,
+        config: IndexationPipelineConfig | None,
+        embedder_name: str = "default",
+        window: int | None = None,
+    ) -> ChunkingStrategy:
         if config is not None and self.chunker_factory is not None:
+            # Decided from the signature, never by calling and catching
+            # TypeError: a compatible factory that raises TypeError internally
+            # would then be invoked a second time, duplicating whatever it had
+            # already done and reporting the arity fallback instead of the real
+            # error.
+            if _accepts_embedder_window(self.chunker_factory):
+                return self.chunker_factory(config.chunking, window)
+            # A factory predating the window argument still works; it just falls
+            # back to the chunker's own default bound.
             return self.chunker_factory(config.chunking)
         return self.chunker
 
@@ -390,7 +514,8 @@ def build_indexing_pipeline(
     timeouts: PipelineTimeouts | None = None,
     indexation_config: IndexationPipelineConfig | None = None,
     parser_factory: Callable[[str], DocumentParser] | None = None,
-    chunker_factory: Callable[[Any], ChunkingStrategy] | None = None,
+    chunker_factory: Callable[..., ChunkingStrategy] | None = None,
+    embedder_window_resolver: Callable[[str], int | None] | None = None,
     embedder_factory: Callable[[str], Embedder] | None = None,
     vlm_factory: Callable[[str], VLM] | None = None,
     contextualizer_factory: Callable[[str], ChunkContextualizer] | None = None,
@@ -412,6 +537,7 @@ def build_indexing_pipeline(
         indexation_config=indexation_config,
         parser_factory=parser_factory,
         chunker_factory=chunker_factory,
+        embedder_window_resolver=embedder_window_resolver,
         embedder_factory=embedder_factory,
         vlm_factory=vlm_factory,
         contextualizer_factory=contextualizer_factory,

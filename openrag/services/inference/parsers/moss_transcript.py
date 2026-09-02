@@ -11,14 +11,21 @@ _TIME = rf"(?:{_CLOCK}|{_SECONDS})"
 _TIME_TOKEN = rf"\[\s*{_TIME}\s*\]"
 _SPEAKER = r"[Ss]\d+"
 
+# MOSS documents and emits dash ranges in seconds. Clock-formatted dash ranges
+# remain unsupported so an unfamiliar provider response is preserved verbatim.
 _DASH_START = re.compile(
     rf"\[\s*(?P<start>{_SECONDS})\s*-\s*(?P<end>{_SECONDS})\s*\]\s*"
     rf"\[\s*(?P<speaker>{_SPEAKER})\s*\]",
 )
-_DASH_MARKER = re.compile(r"\[\s*\d+(?:\.\d+)?\s*-")
+_DASH_MARKER = re.compile(rf"\[\s*{_TIME}\s*-")
+_UNSUPPORTED_CLOCK_DASH_MARKER = re.compile(rf"\[\s*{_CLOCK}\s*-")
 _DASH_CONTENT_MARKER = re.compile(rf"{_TIME_TOKEN}|\[\s*(?:[Ss]\d*|\d+(?:\.\d+)?\s*-)")
 _COMPACT_START = re.compile(
     rf"(?P<start_token>\[\s*(?P<start>{_TIME})\s*\])\s*\[\s*(?P<speaker>{_SPEAKER})\s*\]",
+)
+_SPEAKERLESS_COMPACT = re.compile(
+    rf"\s*\[\s*(?P<start>{_TIME})\s*\]\s*(?P<text>.*?)\s*\[\s*(?P<end>{_TIME})\s*\]\s*",
+    re.DOTALL,
 )
 _INITIAL_TIME = re.compile(rf"^\s*\[\s*(?P<start>{_TIME})\s*\]")
 _TRAILING_TIME = re.compile(rf"\[\s*(?P<end>{_TIME})\s*\]\s*$")
@@ -32,7 +39,7 @@ _Segment = tuple[str, str]
 
 def normalize_moss_speaker_aware_transcript(transcript: str) -> str:
     """Remove boundaries only when the complete MOSS syntax is recognized."""
-    for parser in (_parse_dash, _parse_compact, _parse_speaker_only):
+    for parser in (_parse_dash, _parse_compact, _parse_speakerless_compact, _parse_speaker_only):
         segments = parser(transcript)
         if segments:
             break
@@ -45,7 +52,7 @@ def normalize_moss_speaker_aware_transcript(transcript: str) -> str:
 
 def _parse_dash(transcript: str) -> list[_Segment]:
     starts = list(_DASH_START.finditer(transcript))
-    if not starts or transcript[: starts[0].start()].strip():
+    if not starts or transcript[: starts[0].start()].strip() or _UNSUPPORTED_CLOCK_DASH_MARKER.search(transcript):
         return []
 
     segments: list[_Segment] = []
@@ -92,6 +99,38 @@ def _parse_compact(transcript: str) -> list[_Segment]:
             return []
         segments.append((_normalize_speaker(speaker), text))
     return segments
+
+
+def _parse_speakerless_compact(transcript: str) -> list[_Segment]:
+    """Recognize complete speakerless compact turns with shared boundaries."""
+    matches = list(_SPEAKERLESS_COMPACT.finditer(transcript))
+    if not matches or _DASH_MARKER.search(transcript):
+        return []
+
+    segments: list[_Segment] = []
+    cursor = 0
+    previous_end: Decimal | None = None
+    for match in matches:
+        if transcript[cursor : match.start()].strip():
+            return []
+        start = _seconds(match["start"])
+        end = _seconds(match["end"])
+        text = _normalize_text(match["text"])
+        if (
+            start is None
+            or end is None
+            or end < start
+            or (previous_end is not None and start != previous_end)
+            or not text
+            or _TIME_TOKEN_MARKER.search(text)
+            or _SPEAKER_MARKER.search(text)
+        ):
+            return []
+        segments.append(("S01", text))
+        previous_end = end
+        cursor = match.end()
+
+    return segments if not transcript[cursor:].strip() else []
 
 
 def _compact_region_end(transcript: str, text_start: int, next_start: re.Match[str]) -> int:

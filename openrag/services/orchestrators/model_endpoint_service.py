@@ -41,6 +41,7 @@ _SAMPLING_TYPES = frozenset({"llm", "vlm"})
 # hand-set key with a placeholder the moment sync_on_boot was switched on.
 _PLACEHOLDER_API_KEYS = frozenset({"", "EMPTY"})
 _STT_VALIDATION_TIMEOUT_SECONDS = 15.0
+_STT_TEXT_RESPONSE_FORMATS = frozenset({"text", "srt", "vtt"})
 # Which env var, if any, owns a given tunable per model type. `_build_default_seeds`
 # always fills these from Settings, so their presence in the seed says nothing about
 # whether the *environment* set them — without this table sync would write the config
@@ -96,9 +97,15 @@ def _flatten_multipart_field(key: str, value: Any) -> list[tuple[str, str]]:
     return [(key, serialized)] if serialized else []
 
 
-def _stt_validation_form_data(model_name: str, extra: dict[str, Any] | None) -> dict[str, Any]:
+def _stt_validation_form_data(
+    model_name: str,
+    extra: dict[str, Any] | None,
+    prompt: str | None = None,
+) -> dict[str, Any]:
     """Build the sanitized multipart fields used by an STT runtime request."""
     request_options: dict[str, Any] = {"model": model_name}
+    if prompt and prompt.strip():
+        request_options["prompt"] = prompt.strip()
     if extra:
         language = extra.get(STT_LANGUAGE_KEY)
         if isinstance(language, str) and language.strip():
@@ -118,6 +125,18 @@ def _stt_validation_form_data(model_name: str, extra: dict[str, Any] | None) -> 
             else:
                 serialized[field_name] = [existing, field_value]
     return serialized
+
+
+def _stt_validation_response_is_compatible(response: Any, extra: dict[str, Any] | None) -> bool:
+    """Check that the probe response has the shape consumed at runtime."""
+    response_format = extra.get("response_format") if extra else None
+    if response_format in _STT_TEXT_RESPONSE_FORMATS:
+        return isinstance(response.text, str)
+    try:
+        payload = response.json()
+    except (TypeError, ValueError):
+        return False
+    return isinstance(payload, Mapping) and isinstance(payload.get("text"), str)
 
 
 def _slug(model_name: str) -> str:
@@ -186,13 +205,26 @@ class ModelEndpointService:
         config: Settings,
         partition_service: Any = None,
         preset_service: Any = None,
+        prompt_service: Any = None,
         client_caches: dict[str, dict[str, Any]] | None = None,
     ) -> None:
         self._repo = model_endpoint_repo
         self._config = config
         self._partition_service = partition_service
         self._preset_service = preset_service
+        self._prompt_service = prompt_service
         self._client_caches: dict[str, dict[str, Any]] = client_caches or {}
+
+    async def _resolve_stt_validation_prompt(self) -> str | None:
+        """Resolve the same managed prompt used by runtime transcription."""
+        if self._prompt_service is None:
+            return None
+        try:
+            prompt = await self._prompt_service.resolve_prompt("asr_transcription")
+        except Exception as exc:  # noqa: BLE001 - match runtime's provider-native fallback
+            logger.bind(error=str(exc)).warning("STT validation prompt resolution failed")
+            return None
+        return prompt.strip() if prompt and prompt.strip() else None
 
     # ------------------------------------------------------------------
     # Startup lifecycle
@@ -709,12 +741,13 @@ class ModelEndpointService:
                     # needless upload and inference request in that case.
                     if result["model_found"] is False:
                         return result
+                    prompt = await self._resolve_stt_validation_prompt()
                     # A well-formed request is required to validate credentials:
                     # some providers reject a missing file/model with 400/422
                     # before they authenticate the request.
                     transcription_response = await client.post(
                         base_url + "/audio/transcriptions",
-                        data=_stt_validation_form_data(normalized_model_name, extra),
+                        data=_stt_validation_form_data(normalized_model_name, extra, prompt),
                         files={
                             "file": (
                                 "openrag-stt-validation.wav",
@@ -733,7 +766,11 @@ class ModelEndpointService:
                     result["reachable"] = True
                     transcription_status = transcription_response.status_code
                     if 200 <= transcription_status < 300:
-                        result["transcription_supported"] = True
+                        if _stt_validation_response_is_compatible(transcription_response, extra):
+                            result["transcription_supported"] = True
+                        else:
+                            result["transcription_supported"] = False
+                            result["detail"] = "Transcription endpoint returned an incompatible response."
                     elif transcription_status in {401, 403}:
                         result["transcription_supported"] = False
                         result["detail"] = (

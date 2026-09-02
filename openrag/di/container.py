@@ -445,6 +445,7 @@ class ServiceContainer:
                 config=self._require_settings(),
                 partition_service=self.partition_service,
                 preset_service=self.preset_service,
+                prompt_service=self.prompt_service,
                 client_caches={
                     "embedder": self._embedder_cache,
                     "reranker": self._reranker_cache,

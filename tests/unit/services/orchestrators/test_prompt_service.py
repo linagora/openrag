@@ -9,8 +9,10 @@ up with the on-disk filenames for all managed types.
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import get_args
 
 import pytest
+from api.schemas.admin.prompt_schemas import PromptTypeName
 from core.config.infrastructure import PathsConfig, PromptsConfig
 from core.models.prompt import Prompt, PromptType
 from core.utils.exceptions import ConfigError, NotFoundError, ValidationError
@@ -147,6 +149,9 @@ class TestSeeding:
 
     async def test_type_set_matches_enum(self):
         assert set(PROMPT_TYPE_KEYS) == {t.value for t in PromptType}
+
+    async def test_api_prompt_type_names_match_enum(self):
+        assert set(get_args(PromptTypeName)) == {t.value for t in PromptType}
 
 
 class TestResolution:

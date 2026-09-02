@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -103,7 +105,14 @@ class _FakeEndpointRepo:
         return ("ok", promoted)
 
 
-def _make_service(repo=None, rows=None, settings=None, partition_service=None, preset_service=None):
+def _make_service(
+    repo=None,
+    rows=None,
+    settings=None,
+    partition_service=None,
+    preset_service=None,
+    prompt_service=None,
+):
     from core.config.root import Settings
     from services.orchestrators.model_endpoint_service import ModelEndpointService
 
@@ -112,6 +121,7 @@ def _make_service(repo=None, rows=None, settings=None, partition_service=None, p
         config=settings or Settings(),
         partition_service=partition_service,
         preset_service=preset_service,
+        prompt_service=prompt_service,
     )
 
 
@@ -1424,7 +1434,8 @@ async def test_validate_endpoint_probes_url_and_model_name(monkeypatch):
 async def test_validate_stt_endpoint_probes_transcription_capability_with_redirects_enabled(monkeypatch):
     import httpx
 
-    svc = _make_service()
+    prompt_service = SimpleNamespace(resolve_prompt=AsyncMock(return_value="  Prefer OpenRAG terms.  "))
+    svc = _make_service(prompt_service=prompt_service)
     calls: list[tuple[str, str]] = []
 
     class FakeResponse:
@@ -1455,6 +1466,7 @@ async def test_validate_stt_endpoint_probes_transcription_capability_with_redire
             calls.append(("post", url))
             assert data == {
                 "model": "moss-transcribe-diarize",
+                "prompt": "Prefer OpenRAG terms.",
                 "language": "fr",
                 "response_format": "json",
                 "temperature": "0",
@@ -1470,7 +1482,7 @@ async def test_validate_stt_endpoint_probes_transcription_capability_with_redire
             assert timeout.write == 5.0
             assert timeout.pool == 5.0
             assert timeout.read == 180.0
-            return FakeResponse(200)
+            return FakeResponse(200, {"text": ""})
 
     monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
 
@@ -1495,6 +1507,7 @@ async def test_validate_stt_endpoint_probes_transcription_capability_with_redire
         ("get", "http://moss:8000/v1/models"),
         ("post", "http://moss:8000/v1/audio/transcriptions"),
     ]
+    prompt_service.resolve_prompt.assert_awaited_once_with("asr_transcription")
     assert result == {
         "reachable": True,
         "model_found": True,
@@ -1502,6 +1515,67 @@ async def test_validate_stt_endpoint_probes_transcription_capability_with_redire
         "transcription_supported": True,
         "detail": None,
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("extra", "audio_payload", "expected_supported"),
+    [
+        ({}, {}, False),
+        ({"response_format": "text"}, None, True),
+    ],
+)
+async def test_validate_stt_endpoint_checks_success_response_shape(
+    monkeypatch,
+    extra,
+    audio_payload,
+    expected_supported,
+):
+    import httpx
+
+    svc = _make_service()
+
+    class FakeResponse:
+        status_code = 200
+        text = ""
+
+        def __init__(self, payload):
+            self._payload = payload
+
+        def json(self):
+            if self._payload is None:
+                raise ValueError("not JSON")
+            return self._payload
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, _url):
+            return FakeResponse({"data": [{"id": "moss-transcribe-diarize"}]})
+
+        async def post(self, _url, **_kwargs):
+            return FakeResponse(audio_payload)
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+    result = await svc.validate_endpoint(
+        "http://moss:8000/v1",
+        "moss-transcribe-diarize",
+        model_type="stt",
+        extra=extra,
+    )
+
+    assert result["transcription_supported"] is expected_supported
+    assert result["detail"] == (
+        None if expected_supported else "Transcription endpoint returned an incompatible response."
+    )
 
 
 @pytest.mark.asyncio
@@ -1735,7 +1809,7 @@ async def test_validate_stt_endpoint_probes_audio_when_model_list_is_invalid(mon
 
         async def post(self, url, **_kwargs):
             calls.append(("post", url))
-            return FakeResponse(200)
+            return FakeResponse(200, {"text": ""})
 
     monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
 
@@ -1767,6 +1841,9 @@ async def test_validate_stt_endpoint_probes_audio_when_model_list_times_out(monk
 
     class FakeResponse:
         status_code = 200
+
+        def json(self):
+            return {"text": ""}
 
     class FakeClient:
         def __init__(self, **_kwargs):

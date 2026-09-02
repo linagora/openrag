@@ -2,7 +2,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { listModelEndpoints, validateModelEndpoint } from "@/lib/api/models";
+import { listModelEndpoints, updateModelEndpoint, validateModelEndpoint } from "@/lib/api/models";
 import ModelsPage from "./models";
 
 vi.mock("@/lib/api/models", async () => {
@@ -24,6 +24,7 @@ vi.mock("sonner", () => ({
 }));
 
 const listModelEndpointsMock = vi.mocked(listModelEndpoints);
+const updateModelEndpointMock = vi.mocked(updateModelEndpoint);
 const validateModelEndpointMock = vi.mocked(validateModelEndpoint);
 
 beforeAll(() => {
@@ -51,11 +52,61 @@ function renderPage() {
 describe("ModelsPage STT validation", () => {
   beforeEach(() => {
     listModelEndpointsMock.mockReset().mockResolvedValue([]);
+    updateModelEndpointMock.mockReset();
     validateModelEndpointMock.mockReset().mockResolvedValue({
       reachable: true,
       model_found: true,
       transcription_supported: true,
     });
+  });
+
+  it("persists the STT API key used by draft validation", async () => {
+    listModelEndpointsMock.mockResolvedValue([
+      {
+        name: "moss",
+        model_type: "stt",
+        endpoint: "http://moss:8000/v1",
+        model_name: "moss-transcribe-diarize",
+        batch_size: 1,
+        timeout: 3600,
+        extra: { api_key: "sk-o********" },
+        has_api_key: true,
+        is_default: true,
+        created_at: "2026-01-01T00:00:00+00:00",
+        updated_at: "2026-01-01T00:00:00+00:00",
+      },
+    ]);
+    const user = userEvent.setup();
+    renderPage();
+
+    await screen.findByText("No embedder endpoints configured.");
+    await user.click(screen.getByRole("tab", { name: "stt" }));
+    await screen.findByText("moss-transcribe-diarize");
+    await user.click(screen.getByRole("button", { name: "Edit" }));
+
+    const dialog = screen.getByRole("dialog");
+    const extraInput = within(dialog).getByDisplayValue("{}");
+    fireEvent.change(extraInput, {
+      target: { value: JSON.stringify({ api_key: "replacement-key" }) },
+    });
+    await user.click(within(dialog).getByRole("button", { name: "Validate" }));
+
+    await waitFor(() =>
+      expect(validateModelEndpointMock).toHaveBeenCalledWith(
+        expect.objectContaining({ extra: { api_key: "replacement-key" } }),
+      ),
+    );
+    const updateButton = within(dialog).getByRole("button", { name: "Update" }) as HTMLButtonElement;
+    await waitFor(() => expect(updateButton.disabled).toBe(false));
+    await user.click(updateButton);
+
+    await waitFor(() =>
+      expect(updateModelEndpointMock).toHaveBeenCalledWith(
+        "stt",
+        "moss",
+        expect.objectContaining({ extra: { api_key: "replacement-key" } }),
+      ),
+    );
   });
 
   it("validates an STT draft with the timeout currently entered in the form", async () => {
@@ -93,6 +144,32 @@ describe("ModelsPage STT validation", () => {
             temperature: 0,
           },
         }),
+      ),
+    );
+  });
+
+  it("includes speaker-aware MOSS normalization in STT draft validation", async () => {
+    const user = userEvent.setup();
+    renderPage();
+
+    await screen.findByText("No embedder endpoints configured.");
+    await user.click(screen.getByRole("tab", { name: "stt" }));
+    await user.click(screen.getByRole("button", { name: /add endpoint/i }));
+
+    const dialog = screen.getByRole("dialog");
+    const textboxes = within(dialog).getAllByRole("textbox");
+    await user.type(textboxes[1], "http://moss:8000/v1");
+    await user.type(textboxes[2], "moss-transcribe-diarize");
+    await user.click(
+      within(dialog).getByRole("switch", {
+        name: "Enable speaker-aware MOSS transcript normalization",
+      }),
+    );
+    await user.click(within(dialog).getByRole("button", { name: "Validate" }));
+
+    await waitFor(() =>
+      expect(validateModelEndpointMock).toHaveBeenCalledWith(
+        expect.objectContaining({ extra: { moss_speaker_aware: true } }),
       ),
     );
   });
@@ -177,6 +254,32 @@ describe("ModelsPage STT validation", () => {
     await waitFor(() => expect(createButton.disabled).toBe(true));
   });
 
+  it("requires revalidation after changing speaker-aware MOSS normalization", async () => {
+    const user = userEvent.setup();
+    renderPage();
+
+    await screen.findByText("No embedder endpoints configured.");
+    await user.click(screen.getByRole("tab", { name: "stt" }));
+    await user.click(screen.getByRole("button", { name: /add endpoint/i }));
+
+    const dialog = screen.getByRole("dialog");
+    const textboxes = within(dialog).getAllByRole("textbox");
+    await user.type(textboxes[1], "http://moss:8000/v1");
+    await user.type(textboxes[2], "moss-transcribe-diarize");
+    await user.click(within(dialog).getByRole("button", { name: "Validate" }));
+
+    const createButton = within(dialog).getByRole("button", { name: "Create" }) as HTMLButtonElement;
+    await waitFor(() => expect(createButton.disabled).toBe(false));
+
+    await user.click(
+      within(dialog).getByRole("switch", {
+        name: "Enable speaker-aware MOSS transcript normalization",
+      }),
+    );
+
+    await waitFor(() => expect(createButton.disabled).toBe(true));
+  });
+
   it("ignores a validation response for an outdated STT draft", async () => {
     let resolveValidation!: (value: {
       reachable: boolean;
@@ -216,5 +319,99 @@ describe("ModelsPage STT validation", () => {
     });
 
     expect(createButton.disabled).toBe(true);
+    const validateButton = within(dialog).getByRole("button", { name: "Validate" }) as HTMLButtonElement;
+    await waitFor(() => expect(validateButton.disabled).toBe(false));
+  });
+
+  it("ignores a validation response from a previously edited endpoint", async () => {
+    listModelEndpointsMock.mockResolvedValue([
+      {
+        name: "moss-a",
+        model_type: "stt",
+        endpoint: "http://moss:8000/v1",
+        model_name: "moss-transcribe-diarize",
+        batch_size: 1,
+        timeout: 3600,
+        extra: { api_key: "sk-a********" },
+        has_api_key: true,
+        is_default: true,
+        created_at: "2026-01-01T00:00:00+00:00",
+        updated_at: "2026-01-01T00:00:00+00:00",
+      },
+      {
+        name: "moss-b",
+        model_type: "stt",
+        endpoint: "http://moss:8000/v1",
+        model_name: "moss-transcribe-diarize",
+        batch_size: 1,
+        timeout: 3600,
+        extra: { api_key: "sk-b********" },
+        has_api_key: true,
+        is_default: false,
+        created_at: "2026-01-01T00:00:00+00:00",
+        updated_at: "2026-01-01T00:00:00+00:00",
+      },
+    ]);
+
+    let resolveFirst!: (value: {
+      reachable: boolean;
+      model_found?: boolean;
+      transcription_supported?: boolean;
+    }) => void;
+    let resolveSecond!: (value: {
+      reachable: boolean;
+      detail?: string;
+    }) => void;
+    validateModelEndpointMock
+      .mockReturnValueOnce(
+        new Promise((resolve) => {
+          resolveFirst = resolve;
+        }),
+      )
+      .mockReturnValueOnce(
+        new Promise((resolve) => {
+          resolveSecond = resolve;
+        }),
+      );
+
+    const user = userEvent.setup();
+    renderPage();
+
+    await screen.findByText("No embedder endpoints configured.");
+    await user.click(screen.getByRole("tab", { name: "stt" }));
+    await screen.findByText("moss-a");
+
+    await user.click(screen.getAllByRole("button", { name: "Edit" })[0]);
+    let dialog = screen.getByRole("dialog");
+    await user.click(within(dialog).getByRole("button", { name: "Validate" }));
+    await waitFor(() => expect(validateModelEndpointMock).toHaveBeenCalledTimes(1));
+    expect(validateModelEndpointMock).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ stored_api_key_name: "moss-a" }),
+    );
+
+    await user.click(within(dialog).getByRole("button", { name: "Close" }));
+    await user.click(screen.getAllByRole("button", { name: "Edit" })[1]);
+    dialog = screen.getByRole("dialog");
+    await user.click(within(dialog).getByRole("button", { name: "Validate" }));
+    await waitFor(() => expect(validateModelEndpointMock).toHaveBeenCalledTimes(2));
+    expect(validateModelEndpointMock).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ stored_api_key_name: "moss-b" }),
+    );
+
+    await act(async () => {
+      resolveFirst({ reachable: true, model_found: true, transcription_supported: true });
+    });
+    const validateButton = within(dialog).getByRole("button", { name: "Validate" }) as HTMLButtonElement;
+    expect(validateButton.disabled).toBe(true);
+    expect(within(dialog).queryByText(/Reachable —/)).toBeNull();
+
+    await act(async () => {
+      resolveSecond({ reachable: false, detail: "Endpoint B rejected its stored credential." });
+    });
+    const updateButton = within(dialog).getByRole("button", { name: "Update" }) as HTMLButtonElement;
+    await waitFor(() => expect(updateButton.disabled).toBe(true));
+    expect(within(dialog).getByText("Endpoint B rejected its stored credential.")).toBeTruthy();
   });
 });
