@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { Plus, Trash2, Pencil, Eye } from "lucide-react";
+import { NewBadge } from "@/components/shared/new-badge";
 import {
   listPresets,
   createPreset,
@@ -394,7 +395,10 @@ function IndexationPresetForm({
             </Select>
           </div>
           <div className="min-w-0 space-y-1.5">
-            <Label className="text-xs">STT endpoint</Label>
+            <Label className="flex items-center gap-1.5 text-xs">
+              STT endpoint
+              <NewBadge feature="models.stt" />
+            </Label>
             <Select
               value={configGet(config, "stt", STT_ENDPOINT_DEFAULT_OPTION)}
               onValueChange={(v) => set("stt", v === STT_ENDPOINT_DEFAULT_OPTION ? null : v)}
@@ -417,6 +421,7 @@ function IndexationPresetForm({
           <div className="min-w-0 sm:col-span-2">
             <PromptSelect
               label="Transcription prompt"
+              feature="prompts.asr_transcription"
               prompts={promptsByType("asr_transcription")}
               value={configGet(config, "asr_transcription_prompt_name", "")}
               onChange={(v) => set("asr_transcription_prompt_name", v || null)}
@@ -666,17 +671,20 @@ function PromptSelect({
   value,
   onChange,
   selectTriggerClassName,
+  feature,
 }: {
   label: string;
   prompts: PromptResponse[];
   value: string;
   onChange: (v: string) => void;
   selectTriggerClassName?: string;
+  feature?: string;
 }) {
   return (
     <div className="space-y-1.5">
       <div className="flex items-center gap-1">
         <Label className="text-xs">{label}</Label>
+        {feature && <NewBadge feature={feature} />}
         {prompts.length > 0 && <PromptViewButton prompts={prompts} selectedName={value} />}
       </div>
       <Select
