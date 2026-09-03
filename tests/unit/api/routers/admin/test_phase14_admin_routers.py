@@ -47,6 +47,8 @@ class FakeModelEndpointService:
         """Initialize the call log."""
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self.endpoint_extra: dict[str, Any] = {}
+        self.endpoint_model_name: str | None = "mistral"
+        self.endpoint_timeout = 30.0
 
     async def create_model_endpoint(self, row: Any) -> dict[str, Any]:
         """Record endpoint creation (from a ModelEndpointRow) and echo a row."""
@@ -64,7 +66,15 @@ class FakeModelEndpointService:
         from core.config.model_endpoints import ModelEndpointRow
 
         self.calls.append(("get", {"name": name, "model_type": model_type}))
-        return ModelEndpointRow(**_model_endpoint_row(name=name, model_type=model_type, extra=self.endpoint_extra))
+        return ModelEndpointRow(
+            **_model_endpoint_row(
+                name=name,
+                model_type=model_type,
+                model_name=self.endpoint_model_name,
+                timeout=self.endpoint_timeout,
+                extra=self.endpoint_extra,
+            )
+        )
 
     async def update_model_endpoint(self, name: str, model_type: str, **fields: Any) -> dict[str, Any]:
         """Record endpoint updates and echo the merged response row."""
@@ -85,10 +95,24 @@ class FakeModelEndpointService:
         model_name: str | None = None,
         *,
         api_key: str | None = None,
+        model_type: str | None = None,
+        timeout: float | None = None,
+        extra: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Record endpoint validation."""
-        self.calls.append(("validate", {"url": url, "model_name": model_name, "api_key": api_key}))
-        return {"reachable": True, "model_found": True, "models_served": ["mistral"], "detail": None}
+        payload = {"url": url, "model_type": model_type, "model_name": model_name, "api_key": api_key}
+        if timeout is not None:
+            payload["timeout"] = timeout
+        if extra is not None:
+            payload["extra"] = extra
+        self.calls.append(("validate", payload))
+        return {
+            "reachable": True,
+            "model_found": True,
+            "models_served": ["mistral"],
+            "transcription_supported": model_type == "stt",
+            "detail": None,
+        }
 
 
 class FakePresetService:
@@ -292,7 +316,16 @@ async def test_validate_model_endpoint_uses_route_identity(async_client_factory)
     assert response.json()["reachable"] is True
     assert model_service.calls == [
         ("get", {"name": "default", "model_type": "llm"}),
-        ("validate", {"url": "http://llm:8000/v1", "model_name": "mistral", "api_key": None}),
+        (
+            "validate",
+            {
+                "url": "http://llm:8000/v1",
+                "model_type": "llm",
+                "model_name": "mistral",
+                "api_key": None,
+                "timeout": 30.0,
+            },
+        ),
     ]
 
 
@@ -309,7 +342,51 @@ async def test_validate_model_endpoint_uses_stored_api_key(async_client_factory)
     assert response.status_code == 200
     assert model_service.calls == [
         ("get", {"name": "default", "model_type": "llm"}),
-        ("validate", {"url": "http://llm:8000/v1", "model_name": "mistral", "api_key": "secret-token"}),
+        (
+            "validate",
+            {
+                "url": "http://llm:8000/v1",
+                "model_type": "llm",
+                "model_name": "mistral",
+                "api_key": "secret-token",
+                "timeout": 30.0,
+            },
+        ),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_validate_stored_stt_endpoint_forwards_request_options(async_client_factory):
+    model_service = FakeModelEndpointService()
+    model_service.endpoint_model_name = "moss-transcribe-diarize"
+    model_service.endpoint_extra = {
+        "api_key": "secret-token",
+        "language": "fr",
+        "response_format": "json",
+    }
+    app = _build_app(model_service=model_service)
+
+    async with async_client_factory(app) as client:
+        response = await client.post("/model-endpoints/stt/moss/validate")
+
+    assert response.status_code == 200
+    assert model_service.calls == [
+        ("get", {"name": "moss", "model_type": "stt"}),
+        (
+            "validate",
+            {
+                "url": "http://llm:8000/v1",
+                "model_type": "stt",
+                "model_name": "moss-transcribe-diarize",
+                "api_key": "secret-token",
+                "timeout": 30.0,
+                "extra": {
+                    "api_key": "secret-token",
+                    "language": "fr",
+                    "response_format": "json",
+                },
+            },
+        ),
     ]
 
 
@@ -325,15 +402,59 @@ async def test_validate_endpoint_draft_forwards_body_without_lookup(async_client
             "/model-endpoints/validate",
             json={
                 "endpoint": "http://candidate:8000/v1",
+                "model_type": "stt",
                 "model_name": "mistral-small",
                 "api_key": "draft-key",
+                "timeout": 900,
+                "extra": {"language": "fr", "response_format": "json"},
             },
         )
 
     assert response.status_code == 200
     assert response.json()["reachable"] is True
     assert model_service.calls == [
-        ("validate", {"url": "http://candidate:8000/v1", "model_name": "mistral-small", "api_key": "draft-key"}),
+        (
+            "validate",
+            {
+                "url": "http://candidate:8000/v1",
+                "model_type": "stt",
+                "model_name": "mistral-small",
+                "api_key": "draft-key",
+                "timeout": 900.0,
+                "extra": {"language": "fr", "response_format": "json"},
+            },
+        ),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_validate_endpoint_draft_uses_api_key_from_stt_extra(async_client_factory):
+    model_service = FakeModelEndpointService()
+    app = _build_app(model_service=model_service)
+
+    async with async_client_factory(app) as client:
+        response = await client.post(
+            "/model-endpoints/validate",
+            json={
+                "endpoint": "http://candidate:8000/v1",
+                "model_type": "stt",
+                "model_name": "moss-transcribe-diarize",
+                "extra": {"api_key": "extra-key"},
+            },
+        )
+
+    assert response.status_code == 200
+    assert model_service.calls == [
+        (
+            "validate",
+            {
+                "url": "http://candidate:8000/v1",
+                "model_type": "stt",
+                "model_name": "moss-transcribe-diarize",
+                "api_key": "extra-key",
+                "extra": {"api_key": "extra-key"},
+            },
+        ),
     ]
 
 
@@ -357,7 +478,10 @@ async def test_validate_endpoint_draft_can_reuse_stored_api_key(async_client_fac
     assert response.status_code == 200
     assert model_service.calls == [
         ("get", {"name": "default", "model_type": "llm"}),
-        ("validate", {"url": "http://llm:8000/v1", "model_name": "mistral-small", "api_key": "secret-token"}),
+        (
+            "validate",
+            {"url": "http://llm:8000/v1", "model_type": None, "model_name": "mistral-small", "api_key": "secret-token"},
+        ),
     ]
 
 
@@ -399,7 +523,7 @@ async def test_validate_endpoint_draft_defaults_optional_fields(async_client_fac
 
     assert response.status_code == 200
     assert model_service.calls == [
-        ("validate", {"url": "http://candidate:8000/v1", "model_name": None, "api_key": None}),
+        ("validate", {"url": "http://candidate:8000/v1", "model_type": None, "model_name": None, "api_key": None}),
     ]
 
 
@@ -783,3 +907,61 @@ async def test_update_non_llm_endpoint_accepts_same_named_extra_keys(async_clien
 
     assert response.status_code == 200
     assert model_service.calls[0][1]["extra"] == {key: "auto"}
+
+
+@pytest.mark.asyncio
+async def test_update_stt_endpoint_validates_model_and_language_hint(async_client_factory):
+    """The route knows the endpoint type that the generic update schema lacks."""
+    from api.error_handlers import register_error_handlers
+
+    model_service = FakeModelEndpointService()
+    app = _build_app(model_service=model_service)
+    register_error_handlers(app)
+
+    async with async_client_factory(app) as client:
+        invalid = await client.put("/model-endpoints/stt/default", json={"model_name": ""})
+        invalid_speaker_setting = await client.put(
+            "/model-endpoints/stt/default", json={"extra": {"moss_speaker_aware": "true"}}
+        )
+        invalid_structured_speaker_setting = await client.put(
+            "/model-endpoints/stt/default", json={"extra": {"moss_speaker_aware": []}}
+        )
+        valid = await client.put(
+            "/model-endpoints/stt/default", json={"extra": {"language": "fr", "moss_speaker_aware": True}}
+        )
+
+    assert invalid.status_code == 422
+    assert invalid_speaker_setting.status_code == 422
+    assert invalid_structured_speaker_setting.status_code == 422
+    assert valid.status_code == 200
+    assert model_service.calls == [
+        ("get", {"name": "default", "model_type": "stt"}),
+        ("get", {"name": "default", "model_type": "stt"}),
+        ("get", {"name": "default", "model_type": "stt"}),
+        (
+            "update",
+            {
+                "name": "default",
+                "model_type": "stt",
+                "extra": {"language": "fr", "moss_speaker_aware": True},
+            },
+        ),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_update_stt_endpoint_rejects_extra_only_update_without_stored_model(async_client_factory):
+    """Extra-only STT writes must not leave an incomplete endpoint silently ignored."""
+    from api.error_handlers import register_error_handlers
+
+    model_service = FakeModelEndpointService()
+    model_service.endpoint_model_name = None
+    app = _build_app(model_service=model_service)
+    register_error_handlers(app)
+
+    async with async_client_factory(app) as client:
+        response = await client.put("/model-endpoints/stt/default", json={"extra": {"temperature": 0}})
+
+    assert response.status_code == 422
+    assert "model_name is required" in response.text
+    assert model_service.calls == [("get", {"name": "default", "model_type": "stt"})]

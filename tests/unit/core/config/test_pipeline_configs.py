@@ -46,6 +46,16 @@ def test_indexation_pipeline_topic_tagging_defaults_off():
     assert IndexationPipelineConfig().enable_topic_tagging is False
 
 
+def test_indexation_pipeline_accepts_preset_scoped_stt_and_asr_prompt():
+    cfg = IndexationPipelineConfig(
+        stt="moss-transcribe-diarize",
+        asr_transcription_prompt_name="meeting-diarization",
+    )
+
+    assert cfg.stt == "moss-transcribe-diarize"
+    assert cfg.asr_transcription_prompt_name == "meeting-diarization"
+
+
 def test_retrieval_pipeline_rejects_unknown_type():
     """Retrieval presets reject unsupported retrieval modes."""
     with pytest.raises(ValidationError):

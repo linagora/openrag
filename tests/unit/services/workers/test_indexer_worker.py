@@ -214,6 +214,28 @@ async def test_process_file_success_sets_state_and_returns_count(tmp_path: Path)
 
 
 @pytest.mark.asyncio
+async def test_process_file_stops_when_task_was_cancelled_before_start(tmp_path: Path) -> None:
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"content")
+    pipeline = AsyncMock()
+    tsm = _fake_tsm()
+    tsm.set_state.remote.return_value = False
+
+    worker = IndexerWorker(pipeline=pipeline, task_state_manager=tsm)
+
+    with pytest.raises(RuntimeError, match="cancelled before indexing started"):
+        await worker.process_file(
+            task_id="t1",
+            path=str(path),
+            metadata={"file_id": "f1"},
+            partition="p",
+        )
+
+    pipeline.run.assert_not_called()
+    tsm.set_failed_if_not_cancelled.remote.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_process_file_retries_state_write_during_actor_reconstruction(tmp_path: Path) -> None:
     path = tmp_path / "doc.txt"
     path.write_bytes(b"content")
@@ -612,6 +634,231 @@ async def test_process_file_stores_indexation_config_snapshot_on_replace(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_process_file_success_sends_callback_with_status_and_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"content")
+    processed = ProcessedDocument(document_id="d1", text_blocks=[TextBlock(text="content")])
+    chunks = [Chunk(id="c1", text="content", partition="p")]
+    worker = IndexerWorker(pipeline=_make_pipeline(processed, chunks), task_state_manager=_fake_tsm())
+
+    callback_mock = AsyncMock()
+    monkeypatch.setattr("services.workers.indexer_actor.send_indexing_callback", callback_mock)
+
+    metadata = {"file_id": "f1", "doc_rev": "abc123", "datetime": "2026-01-01T00:00:00Z", "doctype": "text"}
+    await worker.process_file(
+        task_id="t-cb",
+        path=str(path),
+        metadata=metadata,
+        partition="p",
+        callback_url="https://cozy.example.com/callback",
+    )
+
+    callback_mock.assert_awaited_once_with(
+        "https://cozy.example.com/callback", "p", "f1", "success", metadata, callback_token=None
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_broken_success_callback_does_not_flip_a_completed_task_to_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """send_indexing_callback is documented to never raise for Exception, but if it
+    ever did (or the process is cancelled mid-await), the file is already COMPLETED
+    at that point — the except block above must not reinterpret that as a failed
+    indexing run, flip the state to FAILED, or fire a spurious "error" callback
+    right after "success" was attempted."""
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"content")
+    processed = ProcessedDocument(document_id="d1", text_blocks=[TextBlock(text="content")])
+    chunks = [Chunk(id="c1", text="content", partition="p")]
+    tsm = _fake_tsm()
+    worker = IndexerWorker(pipeline=_make_pipeline(processed, chunks), task_state_manager=tsm)
+
+    callback_mock = AsyncMock(side_effect=RuntimeError("boom"))
+    monkeypatch.setattr("services.workers.indexer_actor.send_indexing_callback", callback_mock)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        await worker.process_file(
+            task_id="t-cb-broken",
+            path=str(path),
+            metadata={"file_id": "f1"},
+            partition="p",
+            callback_url="https://cozy.example.com/callback",
+        )
+
+    # set_state is also called for SERIALIZING, hence the call-list filter.
+    completed_calls = [
+        call for call in tsm.set_state.remote.call_args_list if call.args == ("t-cb-broken", "COMPLETED")
+    ]
+    assert len(completed_calls) == 1
+    tsm.set_failed_if_not_cancelled.remote.assert_not_awaited()
+    # Only the one (failing) "success" attempt — no follow-up "error" callback.
+    callback_mock.assert_awaited_once()
+    assert callback_mock.await_args[0][3] == "success"
+
+
+@pytest.mark.asyncio
+async def test_process_file_failure_sends_error_callback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    path = tmp_path / "bad.txt"
+    path.write_bytes(b"x")
+
+    class BrokenParser:
+        async def parse(self, document: Document) -> ProcessedDocument:
+            raise RuntimeError("parser exploded")
+
+        def supported_types(self) -> list[str]:
+            return [DocumentType.TEXT.value]
+
+    pipeline = build_indexing_pipeline(
+        parser=BrokenParser(),
+        chunker=FakeChunker([]),
+        embedder=FakeEmbedder(),
+        vector_store=FakeVectorStore(),
+    )
+    worker = IndexerWorker(pipeline=pipeline, task_state_manager=_fake_tsm())
+
+    callback_mock = AsyncMock()
+    monkeypatch.setattr("services.workers.indexer_actor.send_indexing_callback", callback_mock)
+
+    metadata = {"file_id": "f1", "doc_rev": "abc123"}
+    with pytest.raises(RuntimeError, match="parser exploded"):
+        await worker.process_file(
+            task_id="t-cb-fail",
+            path=str(path),
+            metadata=metadata,
+            partition="p",
+            callback_url="https://cozy.example.com/callback",
+        )
+
+    callback_mock.assert_awaited_once_with(
+        "https://cozy.example.com/callback", "p", "f1", "error", metadata, callback_token=None
+    )
+
+
+@pytest.mark.asyncio
+async def test_process_file_still_reports_the_original_failure_when_the_tsm_is_unreachable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """set_failed_if_not_cancelled itself raising (TSM down at report time — the
+    likely cause of the original failure too) must not replace the real error
+    with a TSM-unavailability one, and must not cost the client its callback."""
+    path = tmp_path / "bad.txt"
+    path.write_bytes(b"x")
+
+    class BrokenParser:
+        async def parse(self, document: Document) -> ProcessedDocument:
+            raise RuntimeError("parser exploded")
+
+        def supported_types(self) -> list[str]:
+            return [DocumentType.TEXT.value]
+
+    pipeline = build_indexing_pipeline(
+        parser=BrokenParser(),
+        chunker=FakeChunker([]),
+        embedder=FakeEmbedder(),
+        vector_store=FakeVectorStore(),
+    )
+    worker = IndexerWorker(pipeline=pipeline, task_state_manager=_fake_tsm())
+
+    callback_mock = AsyncMock()
+    monkeypatch.setattr("services.workers.indexer_actor.send_indexing_callback", callback_mock)
+
+    async def _serializing_ok_report_fails(submit, task_description: str = "") -> None:
+        if "SERIALIZING" in task_description:
+            return None
+        raise RuntimeError("tsm unreachable")
+
+    monkeypatch.setattr(
+        "services.workers.indexer_actor.retry_idempotent_ray_actor_method",
+        _serializing_ok_report_fails,
+    )
+
+    metadata = {"file_id": "f1", "doc_rev": "abc123"}
+    with pytest.raises(RuntimeError, match="parser exploded"):
+        await worker.process_file(
+            task_id="t-cb-fail",
+            path=str(path),
+            metadata=metadata,
+            partition="p",
+            callback_url="https://cozy.example.com/callback",
+        )
+
+    callback_mock.assert_awaited_once_with(
+        "https://cozy.example.com/callback", "p", "f1", "error", metadata, callback_token=None
+    )
+
+
+@pytest.mark.asyncio
+async def test_process_file_success_forwards_callback_token(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The uploader's token must reach the sender, or the status is lost to a 401."""
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"content")
+    processed = ProcessedDocument(document_id="d1", text_blocks=[TextBlock(text="content")])
+    chunks = [Chunk(id="c1", text="content", partition="p")]
+    worker = IndexerWorker(pipeline=_make_pipeline(processed, chunks), task_state_manager=_fake_tsm())
+
+    callback_mock = AsyncMock()
+    monkeypatch.setattr("services.workers.indexer_actor.send_indexing_callback", callback_mock)
+
+    metadata = {"file_id": "f1", "doc_rev": "abc123"}
+    await worker.process_file(
+        task_id="t-cb-token",
+        path=str(path),
+        metadata=metadata,
+        partition="p",
+        callback_url="https://cozy.example.com/ai/index/status",
+        callback_token="jwt-token",
+    )
+
+    callback_mock.assert_awaited_once_with(
+        "https://cozy.example.com/ai/index/status", "p", "f1", "success", metadata, callback_token="jwt-token"
+    )
+    # A credential, not payload: never in the metadata echoed back.
+    assert "callback_token" not in metadata
+
+
+@pytest.mark.asyncio
+async def test_process_file_failure_forwards_callback_token(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    path = tmp_path / "bad.txt"
+    path.write_bytes(b"x")
+
+    class BrokenParser:
+        async def parse(self, document: Document) -> ProcessedDocument:
+            raise RuntimeError("parser exploded")
+
+        def supported_types(self) -> list[str]:
+            return [DocumentType.TEXT.value]
+
+    pipeline = build_indexing_pipeline(
+        parser=BrokenParser(),
+        chunker=FakeChunker([]),
+        embedder=FakeEmbedder(),
+        vector_store=FakeVectorStore(),
+    )
+    worker = IndexerWorker(pipeline=pipeline, task_state_manager=_fake_tsm())
+
+    callback_mock = AsyncMock()
+    monkeypatch.setattr("services.workers.indexer_actor.send_indexing_callback", callback_mock)
+
+    metadata = {"file_id": "f1"}
+    with pytest.raises(RuntimeError, match="parser exploded"):
+        await worker.process_file(
+            task_id="t-cb-token-fail",
+            path=str(path),
+            metadata=metadata,
+            partition="p",
+            callback_url="https://cozy.example.com/ai/index/status",
+            callback_token="jwt-token",
+        )
+
+    callback_mock.assert_awaited_once_with(
+        "https://cozy.example.com/ai/index/status", "p", "f1", "error", metadata, callback_token="jwt-token"
+    )
+
+
+@pytest.mark.asyncio
 async def test_process_file_catalog_failure_sets_failed_state(tmp_path: Path) -> None:
     path = tmp_path / "doc.txt"
     path.write_bytes(b"content")
@@ -842,3 +1089,37 @@ async def test_process_file_rejects_malformed_topic_tags_before_delete(tmp_path:
     assert len(document_repo.add_calls) == 1
     assert vector_store.deleted_filters == []
     tsm.set_failed_if_not_cancelled.remote.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_serializing_state_failure_still_sends_the_error_callback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The pool's pre-flight handler stops short of this call — nobody else notifies."""
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"x")
+
+    processed = ProcessedDocument(document_id="d1", text_blocks=[TextBlock(text="x")])
+    pipeline = _make_pipeline(processed, [Chunk(id="c1", text="x")])
+    tsm = _fake_tsm()
+    # Not retryable, so the helper gives up at once instead of burning its budget.
+    tsm.set_state.remote = AsyncMock(side_effect=RuntimeError("task state manager is gone"))
+    worker = IndexerWorker(pipeline=pipeline, task_state_manager=tsm)
+
+    callback_mock = AsyncMock()
+    monkeypatch.setattr("services.workers.indexer_actor.send_indexing_callback", callback_mock)
+
+    metadata = {"file_id": "f1"}
+    with pytest.raises(RuntimeError, match="task state manager is gone"):
+        await worker.process_file(
+            task_id="t-serializing",
+            path=str(path),
+            metadata=metadata,
+            partition="p",
+            callback_url="https://cozy.example.com/ai/index/status",
+            callback_token="jwt",
+        )
+
+    callback_mock.assert_awaited_once_with(
+        "https://cozy.example.com/ai/index/status", "p", "f1", "error", metadata, callback_token="jwt"
+    )

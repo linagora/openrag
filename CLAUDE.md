@@ -248,6 +248,70 @@ Optional web search augmentation via the Staan API, allowing the LLM to combine 
 - `openrag/services/orchestrators/query_service.py` — `_prepare_for_web_only()`, web search logic in `_prepare_for_chat_completion()`
 - `openrag/api/routers/user/chat.py` — `__prepare_sources()` merges document and web sources
 
+### Indexing Status Callbacks
+
+Indexing is asynchronous, so a client can either poll the task-status URL or
+hand OpenRag a URL to notify once the task settles.
+
+**Request fields** (multipart form, on `POST` and `PUT /indexer/partition/{partition}/file/{file_id}`):
+- `callback_url` — POSTed once the task reaches a terminal state
+- `callback_token` — sent as `Authorization: Bearer <token>` on that POST
+
+**Body:** `{"partition", "file_id", "status": "success"|"error", "metadata"}`. `metadata` is
+the upload metadata echoed back **minus** `UPLOAD_METADATA_SERVER_KEYS` (`core/utils/consts.py`:
+`source`, `filename`, `original_filename`, `file_size`, `file_id`, `content_sha256`) — an exclusion,
+not a fixed field list, so any caller-supplied field (cozy-stack's revision marker is `doc_rev`)
+travels through unrecomputed and under whatever name the caller gave it; a key the caller never sent
+is simply absent, not echoed back as `null`. The exclusion exists because the target is a
+caller-supplied URL and `_build_metadata` merges those server-computed keys into the same dict —
+`source` (the server's on-disk path) is the load-bearing one. `test_build_metadata_only_adds_keys_in_upload_metadata_server_keys`
+(`tests/unit/services/orchestrators/test_indexing_service.py`) fails the build if `_build_metadata`
+ever injects a key the constant doesn't cover.
+
+**Guarantees:** one attempt, no retries, a 5 s deadline on the request, never raises — a failed
+callback is logged and cannot change the indexing outcome. No `callback_url` → strict no-op. A
+user-cancelled task sends nothing (only a real failure notifies `"error"`), which is why the sender
+keys off the return value of `set_failed_if_not_cancelled` and the pool's pre-flight handler catches
+`Exception`, not `BaseException`.
+
+**Not guaranteed:** delivery. The send is awaited on the worker's slot, so a blackholing target costs
+up to 5 s of indexing throughput per file, and an actor lost before the task settles notifies
+nothing at all. Clients keep a timeout and fall back to polling the task-status URL.
+
+`callback_url` is checked against the SSRF guard (`is_safe_url` — scheme, loopback/private/link-local,
+decimal/hex/octal/short-form IPv4 literals, all normalized through `socket.inet_aton` so a legacy
+numeric spelling can't overflow `ipaddress.ip_address(int(...))` into a false-negative IPv6 address)
+but not resolved: neither a DNS lookup nor an https requirement is enforced beyond that literal
+check, deliberately — the URL is caller-supplied, so picking a safe target is the caller's call, not
+OpenRag's to police. Checked twice — in the router (immediate `400`) and again in the sender (a
+direct caller bypasses the router) — so accepting a hostname the sender would refuse never happens.
+`INDEXING_CALLBACK_ALLOW_PRIVATE_URLS=true` / `indexing_callback.allow_private_urls` lifts the
+*address* half of the guard for dev stacks whose target is a local instance; the scheme check always
+applies. Keep it off in production: with it on, any user allowed to upload can make the server POST
+to an internal address.
+
+**Rolling deploys:** the worker actors are named, detached and `get_if_exists`, so changing
+`process_file`'s remote contract requires bumping `_INDEXER_ACTOR_PROTOCOL_VERSION` in
+`indexer_pool.py` (v3 → v4 for `callback_url`/`callback_token`; v5 added worker-ref-registration wait
+and TSM `set_state` fencing; v7 folds in a second, independent v6 lineage — STT-preset-aware registry
+hydration plus the `_active_indexation_config` contextvar — that landed on `develop` under the same
+version string while this branch's own v6 was in flight). Without the bump, new replicas attach to the
+previous release's actors and every submit raises `TypeError`. Old generations are retired with
+`services/workers/retire_indexer_generation.py`.
+
+**Key files:**
+- `openrag/services/workers/indexing_callback.py` — `send_indexing_callback()` (was `webhook.py`; the
+  target is a normal authenticated route now, not an unauthenticated webhook trigger)
+- `openrag/core/utils/url_safety.py` — `is_safe_url(url, *, allow_private_hosts=False)`, shared with
+  the MCP `index_url` tool (which keeps the strict default). The web-search content fetcher
+  (`services/websearch/content_fetcher.py`) does **not** import this — it has its own older,
+  un-synced `_is_safe_url`, so hardening this module does not automatically harden that one.
+- `openrag/core/config/indexation.py` — `IndexingCallbackConfig`
+
+Both fields travel the same chain as the rest of an indexing job: `api/routers/admin/indexing.py` →
+`services/orchestrators/indexing_service.py` → `core/indexing/dispatcher.py` (port) →
+`services/workers/dispatcher.py` → `indexer_pool.py` → `indexer_actor.py` → `indexing_callback.py`.
+
 ### File Quota System
 
 Per-user file quota enforcement tracked via the `file_count` and `file_quota` columns on `users`, and `created_by` on `files`.

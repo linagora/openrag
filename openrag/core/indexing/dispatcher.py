@@ -37,6 +37,8 @@ class IndexingDispatcher(ABC):
         replace: bool,
         indexation_config: dict | None = None,
         embedder_name: str | None = None,
+        callback_url: str | None = None,
+        callback_token: str | None = None,
         require_existing_partition: bool = False,
         allow_legacy_require_existing_partition_retry: bool = False,
     ) -> str:

@@ -3,9 +3,22 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 from openrag.core.models.catalog import DocumentRecord
+
+
+@dataclass(frozen=True, slots=True)
+class ContentClaimLease:
+    """Versioned content reservation eligible for orphan recovery."""
+
+    file_id: str
+    partition: str
+    content_sha256: str
+    claim_token: str
+    expires_at: datetime
 
 
 class DocumentRepository(ABC):
@@ -54,7 +67,22 @@ class DocumentRepository(ABC):
         claim_token: str,
         replace: bool = False,
     ) -> str | None:
-        """Reserve content for one indexing attempt, returning a conflicting file id."""
+        """Reserve content and return the conflicting file ID when occupied."""
+        ...
+
+    @abstractmethod
+    async def get_recoverable_content_sha256_claim(
+        self,
+        *,
+        partition: str,
+        content_sha256: str,
+    ) -> ContentClaimLease | None:
+        """Return an aged indexing lease that may be orphaned."""
+        ...
+
+    @abstractmethod
+    async def release_recoverable_content_sha256_claim(self, lease: ContentClaimLease) -> bool:
+        """Release the lease only if its owner and version are unchanged."""
         ...
 
     @abstractmethod

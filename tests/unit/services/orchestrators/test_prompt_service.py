@@ -9,8 +9,10 @@ up with the on-disk filenames for all managed types.
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import get_args
 
 import pytest
+from api.schemas.admin.prompt_schemas import PromptTypeName
 from core.config.infrastructure import PathsConfig, PromptsConfig
 from core.models.prompt import Prompt, PromptType
 from core.utils.exceptions import ConfigError, NotFoundError, ValidationError
@@ -83,16 +85,53 @@ def _service(repo: FakePromptRepo | None = None) -> PromptService:
     return PromptService(prompt_repo=repo or FakePromptRepo(), config=config)
 
 
+class _ReloadRecorder:
+    def __init__(self, calls: list[str], name: str) -> None:
+        self._calls = calls
+        self._name = name
+
+    async def refresh_if_stale(self) -> bool:
+        self._calls.append(self._name)
+        return True
+
+
+class _FailOncePresetReload:
+    def __init__(self, calls: list[str]) -> None:
+        self._calls = calls
+        self._failed = False
+
+    async def refresh_if_stale(self) -> bool:
+        self._calls.append("presets")
+        if not self._failed:
+            self._failed = True
+            raise RuntimeError("temporary preset reload failure")
+        return True
+
+
+class _RefreshRecorder:
+    def __init__(self, calls: list[str]) -> None:
+        self._calls = calls
+
+    async def refresh_if_stale(self) -> bool:
+        self._calls.append("presets")
+        return True
+
+
 class TestSeeding:
-    async def test_seeds_all_eight_types_from_disk(self):
+    async def test_seeds_all_prompt_types_from_disk(self):
         repo = FakePromptRepo()
         await _service(repo).seed_defaults()
         seeded_types = {p.prompt_type for p in repo.prompts.values()}
         assert seeded_types == set(PROMPT_TYPE_KEYS)
-        assert len(PROMPT_TYPE_KEYS) == 8
+        assert len(PROMPT_TYPE_KEYS) == 9
         for p in repo.prompts.values():
             assert p.is_default is True
-            assert p.content.strip()
+            if p.prompt_type != PromptType.ASR_TRANSCRIPTION.value:
+                assert p.content.strip()
+
+        asr_prompt = await repo.get_default(PromptType.ASR_TRANSCRIPTION.value)
+        assert asr_prompt is not None
+        assert asr_prompt.content == ""
 
     async def test_seeding_is_idempotent(self):
         repo = FakePromptRepo()
@@ -102,10 +141,49 @@ class TestSeeding:
         sysp.content = "OPERATOR EDIT"
         await svc.seed_defaults()
         assert (await repo.get_default("sys_prompt")).content == "OPERATOR EDIT"
-        assert len(repo.prompts) == 8
+        assert len(repo.prompts) == 9
+
+    async def test_seeding_skips_blank_non_asr_template(self, monkeypatch):
+        repo = FakePromptRepo()
+        svc = _service(repo)
+        disk_seed = svc._disk_seed
+
+        monkeypatch.setattr(
+            svc,
+            "_disk_seed",
+            lambda prompt_type: "" if prompt_type == PromptType.SYS_PROMPT.value else disk_seed(prompt_type),
+        )
+
+        await svc.seed_defaults()
+
+        assert await repo.get_default(PromptType.SYS_PROMPT.value) is None
+        assert await repo.get_default(PromptType.ASR_TRANSCRIPTION.value) is not None
+        with pytest.raises(ConfigError) as exc:
+            await svc.resolve_prompt(PromptType.SYS_PROMPT.value)
+        assert exc.value.code == "PROMPT_UNAVAILABLE"
+
+    async def test_seeding_normalizes_whitespace_only_asr_template(self, monkeypatch):
+        repo = FakePromptRepo()
+        svc = _service(repo)
+        disk_seed = svc._disk_seed
+
+        monkeypatch.setattr(
+            svc,
+            "_disk_seed",
+            lambda prompt_type: " \n\t "
+            if prompt_type == PromptType.ASR_TRANSCRIPTION.value
+            else disk_seed(prompt_type),
+        )
+
+        await svc.seed_defaults()
+
+        assert (await repo.get_default(PromptType.ASR_TRANSCRIPTION.value)).content == ""
 
     async def test_type_set_matches_enum(self):
         assert set(PROMPT_TYPE_KEYS) == {t.value for t in PromptType}
+
+    async def test_api_prompt_type_names_match_enum(self):
+        assert set(get_args(PromptTypeName)) == {t.value for t in PromptType}
 
 
 class TestResolution:
@@ -128,6 +206,25 @@ class TestResolution:
         assert await svc.resolve_prompt("sys_prompt", names=["missing"]) == "DEFAULT"
         assert await svc.resolve_prompt("sys_prompt", names=[None]) == "DEFAULT"
 
+    async def test_strict_named_resolution_rejects_a_missing_selection(self):
+        repo = FakePromptRepo()
+        svc = _service(repo)
+        await repo.create(
+            Prompt(
+                prompt_type=PromptType.ASR_TRANSCRIPTION.value,
+                name="default-asr",
+                content="DEFAULT",
+                is_default=True,
+            )
+        )
+
+        with pytest.raises(NotFoundError, match="retired-asr"):
+            await svc.resolve_prompt(
+                PromptType.ASR_TRANSCRIPTION.value,
+                names=["retired-asr"],
+                strict_names=True,
+            )
+
     async def test_first_resolvable_name_wins(self):
         repo = FakePromptRepo()
         svc = _service(repo)
@@ -136,11 +233,73 @@ class TestResolution:
         # future per-user tier prepended ahead of the partition/preset name).
         assert await svc.resolve_prompt("hyde", names=["a", "b"]) == "B"
 
+    async def test_asr_falls_back_to_native_prompt_when_custom_dir_has_no_template(self, tmp_path):
+        config = SimpleNamespace(paths=PathsConfig(prompts_dir=tmp_path), prompts=PromptsConfig())
+        svc = PromptService(prompt_repo=FakePromptRepo(), config=config)
+
+        assert await svc.resolve_prompt(PromptType.ASR_TRANSCRIPTION.value) == ""
+
 
 class TestCrud:
     async def test_create_validates_type(self):
         with pytest.raises(ValidationError):
             await _service().create_prompt(prompt_type="not_a_type", name="x", content="y")
+
+    async def test_asr_allows_blank_content_to_select_the_model_prompt(self):
+        svc = _service()
+
+        created = await svc.create_prompt(
+            prompt_type=PromptType.ASR_TRANSCRIPTION.value,
+            name="native-model-prompt",
+            content="",
+            is_default=True,
+        )
+
+        assert created.content == ""
+        assert await svc.resolve_prompt(PromptType.ASR_TRANSCRIPTION.value) == ""
+
+    async def test_asr_whitespace_content_is_stored_as_the_native_prompt_choice(self):
+        repo = FakePromptRepo()
+        svc = _service(repo)
+
+        created = await svc.create_prompt(
+            prompt_type=PromptType.ASR_TRANSCRIPTION.value,
+            name="native-model-prompt",
+            content=" \n\t ",
+            is_default=True,
+        )
+
+        assert created.content == ""
+        assert (await repo.get(created.id)).content == ""
+
+    async def test_updating_asr_to_whitespace_selects_the_native_prompt(self):
+        repo = FakePromptRepo()
+        svc = _service(repo)
+        prompt = await svc.create_prompt(
+            prompt_type=PromptType.ASR_TRANSCRIPTION.value,
+            name="custom-instruction",
+            content="Keep speaker labels.",
+        )
+
+        updated = await svc.update_prompt(prompt.id, content=" \n\t ")
+
+        assert updated.content == ""
+        assert (await repo.get(prompt.id)).content == ""
+
+    async def test_updating_non_asr_to_blank_content_is_rejected(self):
+        svc = _service()
+        prompt = await svc.create_prompt(prompt_type="sys_prompt", name="answer", content="Answer clearly.")
+
+        with pytest.raises(ValidationError) as exc:
+            await svc.update_prompt(prompt.id, content="   ")
+
+        assert exc.value.status_code == 422
+        assert exc.value.code == "PROMPT_CONTENT_EMPTY"
+
+    async def test_non_asr_rejects_blank_content(self):
+        with pytest.raises(ValidationError) as exc:
+            await _service().create_prompt(prompt_type="sys_prompt", name="blank", content="   ")
+        assert exc.value.status_code == 422
 
     async def test_get_missing_raises(self):
         with pytest.raises(NotFoundError):
@@ -162,6 +321,47 @@ class TestCrud:
         b = await svc.create_prompt(prompt_type="sys_prompt", name="b", content="b")
         with pytest.raises(ValidationError):
             await svc.update_prompt(b.id, name="a")
+
+    async def test_renaming_asr_prompt_refreshes_presets_and_partitions(self):
+        repo = FakePromptRepo()
+        calls: list[str] = []
+        svc = PromptService(
+            prompt_repo=repo,
+            config=SimpleNamespace(paths=PathsConfig(), prompts=PromptsConfig()),
+            preset_service=_ReloadRecorder(calls, "presets"),
+            partition_service=_ReloadRecorder(calls, "partitions"),
+        )
+        prompt = await svc.create_prompt(
+            prompt_type=PromptType.ASR_TRANSCRIPTION.value,
+            name="meeting-notes",
+            content="Keep speaker labels.",
+        )
+
+        await svc.update_prompt(prompt.id, name="meeting-notes-v2")
+
+        assert calls == ["presets"]
+
+    async def test_retrying_an_asr_rename_refreshes_caches_after_a_reload_failure(self):
+        repo = FakePromptRepo()
+        calls: list[str] = []
+        svc = PromptService(
+            prompt_repo=repo,
+            config=SimpleNamespace(paths=PathsConfig(), prompts=PromptsConfig()),
+            preset_service=_FailOncePresetReload(calls),
+            partition_service=_ReloadRecorder(calls, "partitions"),
+        )
+        prompt = await svc.create_prompt(
+            prompt_type=PromptType.ASR_TRANSCRIPTION.value,
+            name="meeting-notes",
+            content="Keep speaker labels.",
+        )
+
+        with pytest.raises(RuntimeError, match="temporary preset reload failure"):
+            await svc.update_prompt(prompt.id, name="meeting-notes-v2")
+
+        await svc.update_prompt(prompt.id, name="meeting-notes-v2")
+
+        assert calls == ["presets", "presets"]
 
     async def test_create_accepts_valid_template_placeholders(self):
         svc = _service()
@@ -253,6 +453,25 @@ class TestCrud:
         await svc.delete_prompt(p.id)
         assert await repo.get(p.id) is None
 
+    async def test_deleting_asr_prompt_refreshes_preset_configuration(self):
+        repo = FakePromptRepo()
+        calls: list[str] = []
+        svc = PromptService(
+            prompt_repo=repo,
+            config=SimpleNamespace(paths=PathsConfig(), prompts=PromptsConfig()),
+            preset_service=_RefreshRecorder(calls),
+            partition_service=_ReloadRecorder(calls, "partitions"),
+        )
+        prompt = await svc.create_prompt(
+            prompt_type=PromptType.ASR_TRANSCRIPTION.value,
+            name="meeting-notes",
+            content="Keep speaker labels.",
+        )
+
+        await svc.delete_prompt(prompt.id)
+
+        assert calls == ["presets"]
+
     async def test_set_default_missing_raises(self):
         with pytest.raises(NotFoundError):
             await _service().set_default("nope")
@@ -302,6 +521,18 @@ class TestResolveSurvivesRepositoryFailure:
         svc = _service(ExplodingRepo())
         content = await svc.resolve_prompt("sys_prompt", names=["whatever"])
         assert "{context}" in content  # the bundled sys_prompt template
+
+    async def test_an_asr_repo_error_uses_the_provider_native_prompt(self):
+        class ExplodingRepo(FakePromptRepo):
+            async def get_by_name(self, prompt_type, name):
+                raise RuntimeError("connection pool exhausted")
+
+            async def get_default(self, prompt_type):
+                raise RuntimeError("connection pool exhausted")
+
+        svc = _service(ExplodingRepo())
+
+        assert await svc.resolve_prompt(PromptType.ASR_TRANSCRIPTION.value) == ""
 
 
 class TestSeedingSurvivesAConcurrentReplica:
@@ -375,9 +606,11 @@ class TestErrorPathsAreExercised:
         with pytest.raises(ValidationError):
             await svc.delete_prompt(p.id)
 
-    async def test_seeding_skips_a_type_whose_template_is_missing(self, tmp_path):
+    async def test_seeding_keeps_the_native_asr_default_when_custom_templates_are_missing(self, tmp_path):
         repo = FakePromptRepo()
         svc = _service(repo)
         svc._config = SimpleNamespace(paths=PathsConfig(prompts_dir=tmp_path), prompts=PromptsConfig())
         await svc.seed_defaults()  # warns per type, never raises
-        assert repo.prompts == {}
+        assert [(p.prompt_type, p.content, p.is_default) for p in repo.prompts.values()] == [
+            (PromptType.ASR_TRANSCRIPTION.value, "", True)
+        ]

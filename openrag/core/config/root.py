@@ -14,7 +14,7 @@ from .endpoints import (
     SemaphoreConfig,
     VLMConfig,
 )
-from .indexation import LoaderConfig
+from .indexation import IndexingCallbackConfig, LoaderConfig
 from .infrastructure import (
     PathsConfig,
     PromptsConfig,
@@ -60,6 +60,7 @@ class Settings(ConfigMixin):
     paths: PathsConfig = Field(default_factory=PathsConfig)
     prompts: PromptsConfig = Field(default_factory=PromptsConfig)
     loader: LoaderConfig = Field(default_factory=LoaderConfig)
+    indexing_callback: IndexingCallbackConfig = Field(default_factory=IndexingCallbackConfig)
     ray: RayConfig = Field(default_factory=RayConfig)
     chunker: ChunkerConfig = Field(default_factory=ChunkerConfig)
     retriever: RetrieverConfig = Field(default_factory=SingleRetrieverConfig)

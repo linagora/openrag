@@ -15,7 +15,6 @@ import asyncio
 import json
 from typing import TYPE_CHECKING
 
-import consts
 from api.dependencies.auth import (
     current_user,
     current_user_or_admin_partitions,
@@ -31,6 +30,7 @@ from api.schemas.user.chat import OpenAIChatCompletionRequest, OpenAICompletionR
 from core.config import load_config
 from core.config.endpoints import client_llm_override, custom_endpoint_override_enabled
 from core.models.preset import resolve_partition_chat_llm
+from core.utils import consts
 from core.utils.exceptions import OpenRAGError
 from core.utils.logging import get_logger
 from core.utils.text import get_num_tokens, sanitize_text

@@ -10,6 +10,7 @@ import {
   Eye,
   AlertTriangle,
   Circle,
+  Globe2,
   Users,
 } from "lucide-react";
 import {
@@ -120,7 +121,7 @@ export default function PromptsPage() {
     <div>
       <PageHeader
         title="Prompt Library"
-        description="Author the prompts your presets and partitions select. Edits take effect on the next request — no redeploy."
+        description="Author the prompts that steer answers, indexing, and transcription. Edits take effect on the next request — no redeploy."
         actions={
           <Button onClick={openCreate}>
             <Plus className="mr-2 h-4 w-4" /> New Prompt
@@ -229,19 +230,25 @@ function PromptCard({
   onDelete: () => void;
 }) {
   const used = prompt.used_by;
+  const isAsrTranscription = prompt.prompt_type === "asr_transcription";
+  const isInheritedAsrFallback = isAsrTranscription && prompt.is_default && used === 0;
   return (
     <Card className="relative flex flex-col">
       <div className="absolute right-3 top-3">
         <Badge
           variant="outline"
           className={
-            used > 0
+            used > 0 || isInheritedAsrFallback
               ? "text-xs bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-950/30 dark:text-amber-100 dark:border-amber-900/60"
               : "text-xs bg-muted text-muted-foreground border-transparent"
           }
         >
           <Users className="mr-1 h-3 w-3" />
-          {used > 0 ? `${used} partition${used === 1 ? "" : "s"}` : "Unused"}
+          {used > 0
+            ? `${used} partition${used === 1 ? "" : "s"}`
+            : isInheritedAsrFallback
+              ? "Default fallback"
+              : "Unused"}
         </Badge>
       </div>
       <CardHeader className="pb-2">
@@ -255,7 +262,7 @@ function PromptCard({
       </CardHeader>
       <CardContent className="flex flex-1 flex-col text-sm">
         <p className="mb-3 line-clamp-2 flex-1 border-l-2 border-muted pl-2.5 text-xs text-muted-foreground">
-          {prompt.content.slice(0, 160) || "(empty)"}
+          {prompt.content.trim().slice(0, 160) || (isAsrTranscription ? "Uses the model's built-in prompt" : "(empty)")}
         </p>
         <div className="text-[0.7rem] text-muted-foreground">Updated {formatDate(prompt.updated_at)}</div>
         <div className="flex flex-wrap gap-2 pt-3">
@@ -356,13 +363,13 @@ function PromptEditorSheet({
 
   const loading = createMut.isPending || updateMut.isPending;
   const effectiveType = editing?.prompt_type ?? promptType;
+  const isAsrTranscription = effectiveType === "asr_transcription";
   const templateCheck = validatePlaceholders(content, effectiveType);
-  // Presets and partitions reference a prompt by *name*, so a rename silently
-  // orphans every selection pointing at the old one — they fall back to the
-  // global default. Warn before that happens instead of letting the drawer's
-  // "changes apply everywhere" promise quietly become false.
+  // ASR prompt references are rewritten with their prompt rename. Other prompt
+  // selections still reference the old name and fall back to their defaults.
   const isRename = !!editing && name.trim() !== editing.name;
-  const renameBreaksRefs = isRename && (editing?.used_by ?? 0) > 0;
+  const renamePreservesAsrSelections = isRename && isAsrTranscription && (editing?.used_by ?? 0) > 0;
+  const renameBreaksRefs = isRename && !isAsrTranscription && (editing?.used_by ?? 0) > 0;
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -370,7 +377,7 @@ function PromptEditorSheet({
       toast.error("Name is required");
       return;
     }
-    if (!content.trim()) {
+    if (!content.trim() && !isAsrTranscription) {
       toast.error("Content is required");
       return;
     }
@@ -407,7 +414,9 @@ function PromptEditorSheet({
         <SheetHeader>
           <SheetTitle>{editing ? "Edit prompt" : "New prompt"}</SheetTitle>
           <SheetDescription>
-            Changes apply to every preset and partition that selects this prompt.
+            {isAsrTranscription
+              ? "Changes apply on the next request when AUDIOLOADER=OpenAIAudioLoader."
+              : "Changes apply to every preset and partition that selects this prompt."}
           </SheetDescription>
         </SheetHeader>
         <form onSubmit={handleSubmit} className="flex flex-1 flex-col gap-4 overflow-y-auto px-4 py-4">
@@ -420,6 +429,9 @@ function PromptEditorSheet({
                 onChange={(e) => setName(e.target.value)}
                 required
               />
+              {renamePreservesAsrSelections && (
+                <p className="text-xs text-muted-foreground">Renaming updates their selections.</p>
+              )}
               {renameBreaksRefs && (
                 <p className="text-xs text-amber-600 dark:text-amber-500">
                   Selected by {editing?.used_by} partition(s) — renaming drops those selections.
@@ -451,8 +463,12 @@ function PromptEditorSheet({
 
           {editing && (
             <p className="flex items-center gap-1.5 rounded-md border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
-              <Users className="h-3.5 w-3.5" />
-              {editing.used_by > 0
+              {isAsrTranscription ? <Globe2 className="h-3.5 w-3.5" /> : <Users className="h-3.5 w-3.5" />}
+              {isAsrTranscription
+                ? editing.is_default
+                  ? "Used by direct extraction and indexation presets without an explicit ASR prompt selection when AUDIOLOADER=OpenAIAudioLoader."
+                  : "Used only by indexation presets that explicitly select this prompt when AUDIOLOADER=OpenAIAudioLoader."
+                : editing.used_by > 0
                 ? `Selected by ${editing.used_by} partition${editing.used_by === 1 ? "" : "s"}.`
                 : "Not selected by any partition yet."}
             </p>
@@ -487,6 +503,7 @@ function PromptTemplateEditor({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const variables = PROMPT_TYPE_VARIABLES[promptType] ?? [];
   const hasVariables = variables.length > 0;
+  const isAsrTranscription = promptType === "asr_transcription";
 
   const validation = useMemo(() => validatePlaceholders(value, promptType), [value, promptType]);
   const preview = useMemo(() => renderPreview(value, promptType), [value, promptType]);
@@ -556,11 +573,13 @@ function PromptTemplateEditor({
             rows={14}
             className="min-h-[260px] resize-y font-mono text-sm"
             placeholder={
-              hasVariables
+              isAsrTranscription
+                ? "Leave empty to use the transcription model's built-in prompt, or write an ASR instruction here..."
+                : hasVariables
                 ? `Write your prompt template here.\nUse ${variables.map((v) => `{${v.name}}`).join(", ")} as placeholders.`
                 : "Write your prompt here..."
             }
-            required
+            required={!isAsrTranscription}
           />
           {(validation.unknown.length > 0 || validation.missing.length > 0) && (
             <div className="space-y-1.5">
@@ -594,8 +613,9 @@ function PromptTemplateEditor({
           )}
           {!hasVariables && (
             <p className="text-xs text-muted-foreground">
-              This prompt is sent as a system message; the document, chunk, or image content is attached
-              separately at runtime. No placeholders needed.
+              {isAsrTranscription
+                ? "Used only with AUDIOLOADER=OpenAIAudioLoader. Leave it empty to use the model's native prompt."
+                : "This prompt is sent as a system message; the document, chunk, or image content is attached separately at runtime. No placeholders needed."}
             </p>
           )}
         </>
@@ -603,7 +623,9 @@ function PromptTemplateEditor({
         <div className="min-h-[240px] rounded-md border bg-muted/30 p-4">
           {!value.trim() ? (
             <p className="py-8 text-center text-sm text-muted-foreground">
-              Nothing to preview — write some content first.
+              {isAsrTranscription
+                ? "The model's built-in transcription prompt will be used."
+                : "Nothing to preview — write some content first."}
             </p>
           ) : hasVariables ? (
             <div className="space-y-3">

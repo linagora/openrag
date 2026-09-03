@@ -35,7 +35,7 @@ from core.config.indexation_pipeline import IndexationPipelineConfig
 from core.config.retrieval_pipeline import RetrievalPipelineConfig
 from core.indexing.validators import validate_partition_name
 from core.models.preset import PartitionConfig
-from core.utils.conts import is_internal_metadata_key
+from core.utils.consts import is_internal_metadata_key
 from core.utils.exceptions import (
     ConfigError,
     ConflictError,

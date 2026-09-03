@@ -1,6 +1,0 @@
-from core.utils.conts import (  # noqa: F401,F403
-    FILE_READ_CHUNK_SIZE,
-    IMAGE_PLACEHOLDER,
-    LEGACY_PARTITION_PREFIX,
-    PARTITION_PREFIX,
-)
