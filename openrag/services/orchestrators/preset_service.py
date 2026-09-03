@@ -12,7 +12,6 @@ so all affected partitions pick up the change without a restart.
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 from core.config.indexation_pipeline import IndexationPipelineConfig
@@ -109,7 +108,7 @@ class PresetService:
         self._config = config
         self._partition_service = partition_service
         self._reload_lock = asyncio.Lock()
-        self._loaded_revision: datetime | None = None
+        self._loaded_revision: int | None = None
 
     # ------------------------------------------------------------------
     # Startup lifecycle
@@ -197,11 +196,11 @@ class PresetService:
         reload happens only when the database holds a newer (or deleted)
         preset revision than this process has loaded.
         """
-        if await self._repo.latest_updated_at() == self._loaded_revision:
+        if await self._repo.latest_revision() == self._loaded_revision:
             return False
 
         async with self._reload_lock:
-            if await self._repo.latest_updated_at() == self._loaded_revision:
+            if await self._repo.latest_revision() == self._loaded_revision:
                 return False
             revision = await self._load_all(remember_revision=False)
             if self._partition_service is not None:
@@ -209,8 +208,8 @@ class PresetService:
             self._loaded_revision = revision
             return True
 
-    async def _load_all(self, *, remember_revision: bool = True) -> datetime | None:
-        rows = await self._repo.list_all()
+    async def _load_all(self, *, remember_revision: bool = True) -> int:
+        rows, revision = await self._repo.load_all_with_revision()
         idx_bucket: dict[str, dict[str, Any]] = {}
         ret_bucket: dict[str, dict[str, Any]] = {}
 
@@ -225,7 +224,6 @@ class PresetService:
         presets.indexation.update(idx_bucket)
         presets.retrieval.clear()
         presets.retrieval.update(ret_bucket)
-        revision = max((row["updated_at"] for row in rows), default=None)
         if remember_revision:
             self._loaded_revision = revision
 
@@ -306,10 +304,7 @@ class PresetService:
             result = await self._repo.rename(name, effective_name, preset_type, effective_config)
         else:
             result = await self._repo.upsert(effective_name, preset_type, effective_config)
-        await self.load_all()
-
-        if self._partition_service is not None:
-            await self._partition_service.load_partitions()
+        await self.refresh_if_stale()
 
         return result
 

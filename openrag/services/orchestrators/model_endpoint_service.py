@@ -590,8 +590,8 @@ class ModelEndpointService:
             self._invalidate_client_cache(model_type, name)
             self._invalidate_client_cache(model_type, new_name)
             if self._preset_service is not None:
-                await self._preset_service.load_all()
-            if self._partition_service is not None:
+                await self._preset_service.refresh_if_stale()
+            elif self._partition_service is not None:
                 await self._partition_service.load_partitions()
 
         if promote_to_default:

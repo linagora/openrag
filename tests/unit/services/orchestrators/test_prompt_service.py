@@ -90,11 +90,9 @@ class _ReloadRecorder:
         self._calls = calls
         self._name = name
 
-    async def load_all(self) -> None:
+    async def refresh_if_stale(self) -> bool:
         self._calls.append(self._name)
-
-    async def load_partitions(self) -> None:
-        self._calls.append(self._name)
+        return True
 
 
 class _FailOncePresetReload:
@@ -102,11 +100,12 @@ class _FailOncePresetReload:
         self._calls = calls
         self._failed = False
 
-    async def load_all(self) -> None:
+    async def refresh_if_stale(self) -> bool:
         self._calls.append("presets")
         if not self._failed:
             self._failed = True
             raise RuntimeError("temporary preset reload failure")
+        return True
 
 
 class _RefreshRecorder:
@@ -340,7 +339,7 @@ class TestCrud:
 
         await svc.update_prompt(prompt.id, name="meeting-notes-v2")
 
-        assert calls == ["presets", "partitions"]
+        assert calls == ["presets"]
 
     async def test_retrying_an_asr_rename_refreshes_caches_after_a_reload_failure(self):
         repo = FakePromptRepo()
@@ -362,7 +361,7 @@ class TestCrud:
 
         await svc.update_prompt(prompt.id, name="meeting-notes-v2")
 
-        assert calls == ["presets", "presets", "partitions"]
+        assert calls == ["presets", "presets"]
 
     async def test_create_accepts_valid_template_placeholders(self):
         svc = _service()

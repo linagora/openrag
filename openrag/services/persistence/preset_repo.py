@@ -8,7 +8,6 @@ stub with real SQL.
 from __future__ import annotations
 
 from collections.abc import Callable
-from datetime import datetime
 from typing import TYPE_CHECKING
 
 from core.ports.preset_repo import PresetRepository
@@ -81,8 +80,31 @@ class PgPresetRepository(PresetRepository):
             )
         return [self._row_to_dict(r) for r in rows]
 
-    async def latest_updated_at(self) -> datetime | None:
-        return await self.pool.fetchval("SELECT max(updated_at) FROM pipeline_presets")
+    async def latest_revision(self) -> int:
+        revision = await self.pool.fetchval(
+            "SELECT revision FROM preset_configuration_revision WHERE singleton",
+        )
+        if revision is None:
+            raise RuntimeError("Preset configuration revision row is missing.")
+        return int(revision)
+
+    async def load_all_with_revision(self) -> tuple[list[dict], int]:
+        """Read the cache payload and its revision from one SQL snapshot."""
+        rows = await self.pool.fetch(
+            """
+            SELECT p.name, p.preset_type, p.config, p.created_at, p.updated_at, r.revision
+            FROM preset_configuration_revision AS r
+            LEFT JOIN pipeline_presets AS p ON true
+            WHERE r.singleton
+            ORDER BY p.preset_type NULLS LAST, p.name NULLS LAST
+            """,
+        )
+        if not rows:
+            raise RuntimeError("Preset configuration revision row is missing.")
+        return (
+            [self._row_to_dict(row) for row in rows if row["name"] is not None],
+            int(rows[0]["revision"]),
+        )
 
     async def upsert(self, name: str, preset_type: str, config: dict) -> dict:
         rec = await self.pool.fetchrow(

@@ -427,9 +427,7 @@ class PromptService:
             # The repository cascades the persisted indexation-preset references.
             # Rebuild both live caches before returning so the next upload does
             # not dispatch the retired prompt name from Settings.partitions.
-            await self._preset_service.load_all()
-            if self._partition_service is not None:
-                await self._partition_service.load_partitions()
+            await self._preset_service.refresh_if_stale()
         if promote_to_default:
             updated = await self._repo.set_default(prompt_id) or updated
         return updated

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from datetime import datetime
 
 
 class PresetRepository(ABC):
@@ -16,8 +15,13 @@ class PresetRepository(ABC):
     async def list_all(self, preset_type: str | None = None) -> list[dict]: ...
 
     @abstractmethod
-    async def latest_updated_at(self) -> datetime | None:
-        """Return the revision timestamp of the newest preset, if any."""
+    async def latest_revision(self) -> int:
+        """Return the transaction-ordered preset configuration revision."""
+        ...
+
+    @abstractmethod
+    async def load_all_with_revision(self) -> tuple[list[dict], int]:
+        """Return all presets and their revision from one database snapshot."""
         ...
 
     @abstractmethod

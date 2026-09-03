@@ -974,10 +974,11 @@ async def test_update_model_endpoint_renames_and_evicts_cache():
 
 class _FakePresetServiceForReload:
     def __init__(self):
-        self.load_all_calls = 0
+        self.refresh_calls = 0
 
-    async def load_all(self):
-        self.load_all_calls += 1
+    async def refresh_if_stale(self):
+        self.refresh_calls += 1
+        return True
 
 
 class _FakePartitionServiceForReload:
@@ -1002,8 +1003,8 @@ async def test_update_model_endpoint_rename_reloads_presets_then_partitions():
 
     await svc.update_model_endpoint("old-name", "llm", new_name="new-name")
 
-    assert preset_service.load_all_calls == 1
-    assert partition_service.load_partitions_calls == 1
+    assert preset_service.refresh_calls == 1
+    assert partition_service.load_partitions_calls == 0
 
 
 @pytest.mark.asyncio
@@ -1018,7 +1019,7 @@ async def test_update_model_endpoint_without_rename_skips_preset_and_partition_r
 
     await svc.update_model_endpoint("jina", "embedder", endpoint="http://new:8000/v1")
 
-    assert preset_service.load_all_calls == 0
+    assert preset_service.refresh_calls == 0
     assert partition_service.load_partitions_calls == 0
 
 
@@ -1036,9 +1037,10 @@ async def test_update_model_endpoint_rename_aliases_new_name_before_reload_await
     seen_during_reload = {}
 
     class _SnoopingPresetService:
-        async def load_all(self):
+        async def refresh_if_stale(self):
             seen_during_reload["new-name"] = svc._config.models.llm.get("new-name")
             seen_during_reload["old-name"] = svc._config.models.llm.get("old-name")
+            return True
 
     svc._preset_service = _SnoopingPresetService()
 
@@ -1060,7 +1062,7 @@ async def test_update_model_endpoint_rename_keeps_both_names_resolvable_after_fa
     await svc.load_all()
 
     class _FailingPresetService:
-        async def load_all(self):
+        async def refresh_if_stale(self):
             raise RuntimeError("db blip")
 
     svc._preset_service = _FailingPresetService()
@@ -1085,7 +1087,7 @@ async def test_update_model_endpoint_rename_with_field_change_aliases_the_new_va
     await svc.load_all()
 
     class _FailingPresetService:
-        async def load_all(self):
+        async def refresh_if_stale(self):
             raise RuntimeError("db blip")
 
     svc._preset_service = _FailingPresetService()
@@ -1113,7 +1115,7 @@ async def test_update_model_endpoint_rename_aliases_carry_the_new_registry_name(
     await svc.load_all()
 
     class _FailingPresetService:
-        async def load_all(self):
+        async def refresh_if_stale(self):
             raise RuntimeError("db blip")
 
     svc._preset_service = _FailingPresetService()
@@ -1143,7 +1145,7 @@ async def test_update_model_endpoint_rename_evicts_stale_client_cache_before_fai
     svc._client_caches["llm"] = cache
 
     class _FailingPresetService:
-        async def load_all(self):
+        async def refresh_if_stale(self):
             raise RuntimeError("db blip")
 
     svc._preset_service = _FailingPresetService()

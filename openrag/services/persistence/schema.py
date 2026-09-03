@@ -15,6 +15,7 @@ from datetime import datetime
 
 from sqlalchemy import (
     JSON,
+    BigInteger,
     Boolean,
     CheckConstraint,
     Column,
@@ -89,6 +90,18 @@ pipeline_presets = Table(
         "preset_type IN ('indexation','retrieval')",
         name="ck_pipeline_preset_type",
     ),
+)
+
+
+# A single, transaction-ordered revision for the preset cache. A PostgreSQL
+# trigger increments it whenever ``pipeline_presets`` changes, including the
+# direct cascades made by prompt and endpoint repositories.
+preset_configuration_revision = Table(
+    "preset_configuration_revision",
+    metadata,
+    Column("singleton", Boolean, primary_key=True, server_default="true"),
+    Column("revision", BigInteger, server_default="0", nullable=False),
+    CheckConstraint("singleton", name="ck_preset_configuration_revision_singleton"),
 )
 
 
