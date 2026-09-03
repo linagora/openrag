@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import threading
 import time
+import traceback
 from contextvars import ContextVar
 from types import SimpleNamespace
 from typing import Any
@@ -12,6 +13,7 @@ from core.config.model_endpoints import CONTROL_EXTRA_KEYS
 from core.models.catalog import CONTENT_CLAIM_TOKEN_METADATA_KEY
 from core.utils.exceptions import NotFoundError
 from services.workers.indexer_actor import IndexerWorker, _display_filename, delete_uploaded_file
+from services.workers.indexing_callback import send_indexing_callback
 from services.workers.ray_utils import retry_idempotent_ray_actor_method
 
 from openrag.core.config.root import Settings
@@ -29,7 +31,14 @@ _MISSING_WORKER_REF_ERROR = "Indexer worker did not receive a registered task re
 # and workers on the same protocol generation whenever their remote contract or
 # cross-process indexing semantics change, so new replicas cannot attach to a
 # partially compatible actor fleet left by the previous release.
-_INDEXER_ACTOR_PROTOCOL_VERSION = "v6"
+# v4: process_file gained callback_url/callback_token; a v3 worker rejects them.
+# v5 (develop): worker-ref-registration wait + TSM set_state fencing semantics.
+# v6 (this branch): merge of v4 + v5.
+# v6 (develop, independently): STT-preset-aware registry hydration + the
+# _active_indexation_config contextvar — a different contract that happened
+# to reuse the same version string on its own branch.
+# v7: merge of both v6 lineages — neither alone is compatible with this one.
+_INDEXER_ACTOR_PROTOCOL_VERSION = "v7"
 _INDEXER_POOL_DISPATCHER_ACTOR_NAME = f"IndexerPoolDispatcher-{_INDEXER_ACTOR_PROTOCOL_VERSION}"
 
 
@@ -187,6 +196,9 @@ class IndexerWorkerActor:
         self._last_miss_reload_key: tuple[tuple[str, tuple[str, ...]], ...] | None = None
         self._registry_lock = asyncio.Lock()
         self._registry_reload_task: asyncio.Task[None] | None = None
+        # Held here too: a pre-flight failure below runs before the worker's own
+        # except block, so it must report its own terminal state and callback.
+        self._tsm = task_state_manager
         self._worker = IndexerWorker(
             pipeline=pipeline,
             task_state_manager=task_state_manager,
@@ -403,30 +415,54 @@ class IndexerWorkerActor:
         replace: bool = False,
         indexation_config: dict[str, Any] | None = None,
         embedder_name: str | None = None,
+        callback_url: str | None = None,
+        callback_token: str | None = None,
         require_existing_partition: bool = False,
     ) -> dict[str, Any]:
         content_claim_token = metadata.get(CONTENT_CLAIM_TOKEN_METADATA_KEY)
         worker_metadata = {key: value for key, value in metadata.items() if key != CONTENT_CLAIM_TOKEN_METADATA_KEY}
         try:
-            await self._await_worker_ref_registration(task_id)
-            await self._ensure_catalog()
-            from services.workers.parsers.parser_dispatcher import routes_to_openai_audio_loader
+            try:
+                await self._await_worker_ref_registration(task_id)
+                await self._ensure_catalog()
+                from services.workers.parsers.parser_dispatcher import routes_to_openai_audio_loader
 
-            await self._ensure_registry_fresh(
-                _required_model_endpoint_names(
-                    indexation_config,
-                    embedder_name,
-                    include_selected_stt=routes_to_openai_audio_loader(
-                        self._cfg,
-                        _display_filename(path, metadata),
-                    ),
+                await self._ensure_registry_fresh(
+                    _required_model_endpoint_names(
+                        indexation_config,
+                        embedder_name,
+                        include_selected_stt=routes_to_openai_audio_loader(
+                            self._cfg,
+                            _display_filename(path, metadata),
+                        ),
+                    )
                 )
-            )
-            # Resolve the enrichment-stage prompts once for this file (partition
-            # override → global default → disk seed). Done here, at the job
-            # boundary, so per-chunk work reuses one resolved string instead of
-            # hitting the DB per chunk.
-            resolved_prompts = await self._resolve_ingest_prompts(partition, indexation_config or {})
+                # Resolve the enrichment-stage prompts once for this file (partition
+                # override → global default → disk seed). Done here, at the job
+                # boundary, so per-chunk work reuses one resolved string instead of
+                # hitting the DB per chunk.
+                resolved_prompts = await self._resolve_ingest_prompts(partition, indexation_config or {})
+            except Exception:
+                # Not BaseException: a cancellation here must not notify or be
+                # reported as failed (same rule as set_failed_if_not_cancelled).
+                tb = traceback.format_exc()
+                try:
+                    was_failed = await retry_idempotent_ray_actor_method(
+                        lambda: self._tsm.set_failed_if_not_cancelled.remote(task_id, tb),
+                        task_description=f"set_failed_if_not_cancelled({task_id})",
+                    )
+                except Exception:
+                    was_failed = True
+                if was_failed:
+                    await send_indexing_callback(
+                        callback_url,
+                        partition,
+                        worker_metadata.get("file_id", ""),
+                        "error",
+                        worker_metadata,
+                        callback_token=callback_token,
+                    )
+                raise
             token = self._active_indexation_config.set(indexation_config)
             try:
                 result = await self._worker.process_file(
@@ -439,6 +475,8 @@ class IndexerWorkerActor:
                     replace=replace,
                     indexation_config=indexation_config,
                     embedder_name=embedder_name,
+                    callback_url=callback_url,
+                    callback_token=callback_token,
                     require_existing_partition=require_existing_partition,
                     resolved_prompts=resolved_prompts,
                 )
