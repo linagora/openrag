@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import socket
-
 import pytest
 from core.utils.url_safety import is_safe_url
 
@@ -79,12 +77,23 @@ def test_blocks_decimal_host_overflowing_into_a_public_ipv6_address():
     """ipaddress.ip_address(int(host)) used to accept any integer up to
     2**128-1, silently building an IPv6Address once the value exceeded
     2**32-1 instead of raising. A 38-digit decimal host crafted to land in a
-    public IPv6 range therefore passed as "safe", while every real resolver
-    (confirmed against socket.getaddrinfo) truncates it mod 2**32 down to
-    127.0.0.1 underneath — an SSRF bypass into loopback."""
+    public IPv6 range therefore passed as "safe".
+
+    inet_aton's own overflow handling is not portable enough to rely on here:
+    glibc rejects a host this large outright (confirmed against
+    socket.getaddrinfo — it fails to resolve, so there is no real bypass on
+    Linux), but at least one other libc (BSD/macOS) silently wraps it mod
+    2**32 into 127.0.0.1 instead of raising, which the guard must catch
+    regardless of the platform it runs on. Hence the dedicated
+    _bare_numeric_host_value overflow check ahead of inet_aton."""
     host = "42535295865117307932921825931101732865"
-    assert socket.inet_aton(host) == socket.inet_aton("127.0.0.1")
+    assert int(host) > 0xFFFFFFFF
     assert is_safe_url(f"http://{host}/x") is False
+
+
+def test_blocks_hex_host_overflowing_past_32_bits():
+    """Same overflow class as the decimal case above, hex-spelled."""
+    assert is_safe_url("http://0xfffffffff/x") is False
 
 
 def test_decimal_ipv4_form_still_blocked_without_the_removed_branch():

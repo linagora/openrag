@@ -15,6 +15,26 @@ import socket
 from urllib.parse import urlparse
 
 
+def _bare_numeric_host_value(host: str) -> int | None:
+    """Parse *host* as a single C-style integer literal (decimal, ``0x`` hex,
+    or ``0``-prefixed octal) — the form ``inet_aton`` accepts when a host has
+    no dots. Returns ``None`` if *host* contains a dot or isn't purely such a
+    literal.
+    """
+    if "." in host:
+        return None
+    try:
+        if host.lower().startswith("0x"):
+            return int(host, 16)
+        if len(host) > 1 and host[0] == "0" and host.isdigit():
+            return int(host, 8)
+        if host.isdigit():
+            return int(host, 10)
+    except ValueError:
+        return None
+    return None
+
+
 def is_blocked_address(addr: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     """True for any IP a server-side fetcher must not contact.
 
@@ -69,10 +89,20 @@ def is_safe_url(url: str, *, allow_private_hosts: bool = False) -> bool:
     except ValueError:
         pass
 
+    # A bare (undotted) numeric host that doesn't fit in 32 bits: block it
+    # ourselves rather than trust inet_aton's overflow handling, which is not
+    # portable — glibc rejects such a host outright (matching the real
+    # resolver, confirmed via getaddrinfo), but at least one other libc has
+    # been observed to silently wrap it mod 2**32 into a blocked address
+    # instead of raising. Relying on ip_address(int(host)) here would have
+    # the opposite problem: it never raises for a value this large, it just
+    # silently builds an unrelated, often-public-looking IPv6 address.
+    numeric_value = _bare_numeric_host_value(host)
+    if numeric_value is not None and numeric_value > 0xFFFFFFFF:
+        return False
+
     # inet_aton covers decimal/hex/octal/short-form IPv4 the same way glibc's
-    # resolver does. Unlike ip_address(int(host)), it never overflows a large
-    # decimal host into a false-negative IPv6 address — it only ever produces
-    # an IPv4 address or raises.
+    # resolver does, for every in-range value.
     try:
         packed = socket.inet_aton(host)
     except OSError:
