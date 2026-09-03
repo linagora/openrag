@@ -15,6 +15,7 @@ from datetime import datetime
 
 from sqlalchemy import (
     JSON,
+    BigInteger,
     Boolean,
     CheckConstraint,
     Column,
@@ -92,6 +93,18 @@ pipeline_presets = Table(
 )
 
 
+# A single, transaction-ordered revision for the preset cache. A PostgreSQL
+# trigger increments it whenever ``pipeline_presets`` changes, including the
+# direct cascades made by prompt and endpoint repositories.
+preset_configuration_revision = Table(
+    "preset_configuration_revision",
+    metadata,
+    Column("singleton", Boolean, primary_key=True, server_default="true"),
+    Column("revision", BigInteger, server_default="0", nullable=False),
+    CheckConstraint("singleton", name="ck_preset_configuration_revision_singleton"),
+)
+
+
 # The canonical prompt types — kept in sync with core.models.prompt.PromptType.
 # Used by the CHECK constraint on the prompts table so a junk type can never be
 # stored. (Mirrors the ck_model_endpoint_type / ck_pipeline_preset_type pattern.)
@@ -163,9 +176,9 @@ partitions = Table(
     Column("collection_name", String, nullable=True),
     Column("chat_history_depth", Integer, server_default="0", nullable=False),
     Column("chat_llm", String, nullable=True),
-    # {prompt_type: library_prompt_name} for generation prompts (sys_prompt,
-    # spoken_style_answer). Like chat_llm, generation config lives on the
-    # partition; indexation/retrieval prompts are named on their presets instead.
+    # {prompt_type: library_prompt_name} for final-answer prompts selected on a
+    # partition (sys_prompt, spoken_style_answer). Parsing, indexation, and
+    # retrieval prompts are named on their respective presets instead.
     Column(
         "generation_prompt_names",
         JSONB,

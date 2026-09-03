@@ -52,15 +52,19 @@ def _as_conflict(exc: asyncpg.UniqueViolationError, prompt_type: str) -> Validat
 
 
 # Indexation/retrieval preset config field -> the prompt_type it names. Partition
-# generation_prompt_names keys ARE prompt_type values, so they need no mapping.
+# prompt-map keys (final-answer prompts) ARE prompt_type values, so they need no
+# mapping.
 _PRESET_FIELD_TO_TYPE = {
     "contextualization_prompt_name": "chunk_contextualizer",
+    "asr_transcription_prompt_name": "asr_transcription",
     "image_captioning_prompt_name": "image_captioning",
     "topic_tagging_prompt_name": "topic_tagger",
     "hyde_prompt_name": "hyde",
     "multi_query_prompt_name": "multi_query",
     "query_contextualizer_prompt_name": "query_contextualizer",
 }
+
+_ASR_TRANSCRIPTION_PRESET_FIELD = "asr_transcription_prompt_name"
 
 
 class PgPromptRepository(PromptRepository):
@@ -169,10 +173,40 @@ class PgPromptRepository(PromptRepository):
             sets.append(f"{col} = ${len(params)}")
 
         try:
-            rec = await self.pool.fetchrow(
-                f"UPDATE prompts SET {', '.join(sets)}, updated_at = now() WHERE id = $1 RETURNING {_SELECT_COLS}",
-                *params,
-            )
+            if "name" not in updates:
+                rec = await self.pool.fetchrow(
+                    f"UPDATE prompts SET {', '.join(sets)}, updated_at = now() WHERE id = $1 RETURNING {_SELECT_COLS}",
+                    *params,
+                )
+            else:
+                async with self.pool.acquire() as conn:
+                    async with conn.transaction():
+                        existing = await conn.fetchrow(
+                            "SELECT prompt_type, name FROM prompts WHERE id = $1 FOR UPDATE",
+                            prompt_id,
+                        )
+                        if existing is None:
+                            return None
+                        rec = await conn.fetchrow(
+                            f"UPDATE prompts SET {', '.join(sets)}, updated_at = now() "
+                            f"WHERE id = $1 RETURNING {_SELECT_COLS}",
+                            *params,
+                        )
+                        if rec is None:
+                            return None
+                        if existing["prompt_type"] == "asr_transcription" and existing["name"] != rec["name"]:
+                            await conn.execute(
+                                """
+                                UPDATE pipeline_presets
+                                SET config = jsonb_set(config, $1::text[], to_jsonb($2::text)), updated_at = now()
+                                WHERE preset_type = $3 AND btrim(config->>$4) = $5
+                                """,
+                                [_ASR_TRANSCRIPTION_PRESET_FIELD],
+                                rec["name"],
+                                "indexation",
+                                _ASR_TRANSCRIPTION_PRESET_FIELD,
+                                existing["name"],
+                            )
         except asyncpg.UniqueViolationError as exc:
             # A rename racing another rename/create onto the same name.
             existing = await self.get(prompt_id)
@@ -180,11 +214,30 @@ class PgPromptRepository(PromptRepository):
         return self._to_model(rec) if rec else None
 
     async def delete(self, prompt_id: str) -> bool:
-        # Presets/partitions reference prompts by *name* (soft refs in JSONB), so
-        # there is no FK cascade: a deleted prompt's stale references simply
-        # resolve to the global default. The service guards against deleting a
-        # default; callers surface usage counts before offering delete.
-        result = await self.pool.execute("DELETE FROM prompts WHERE id = $1", prompt_id)
+        # Presets reference prompts by name in JSONB, rather than through a FK.
+        # ASR selection is strict at indexing time, so clearing a deleted ASR
+        # prompt's selection in this transaction is necessary to restore the
+        # normal default fallback before the prompt row becomes invisible.
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                existing = await conn.fetchrow(
+                    "SELECT prompt_type, name FROM prompts WHERE id = $1 FOR UPDATE",
+                    prompt_id,
+                )
+                if existing is None:
+                    return False
+                if existing["prompt_type"] == "asr_transcription":
+                    await conn.execute(
+                        """
+                        UPDATE pipeline_presets
+                        SET config = config - $1::text, updated_at = now()
+                        WHERE preset_type = $2 AND btrim(config->>$1::text) = $3
+                        """,
+                        _ASR_TRANSCRIPTION_PRESET_FIELD,
+                        "indexation",
+                        existing["name"],
+                    )
+                result = await conn.execute("DELETE FROM prompts WHERE id = $1", prompt_id)
         return result == "DELETE 1"
 
     # ------------------------------------------------------------------
@@ -252,9 +305,9 @@ class PgPromptRepository(PromptRepository):
         existing = {(r["prompt_type"], r["name"]) for r in prompt_rows}
         default_name: dict[str, str] = {r["prompt_type"]: r["name"] for r in prompt_rows if r["is_default"]}
 
-        # Explicit overrides: partitions that name a prompt directly (generation
-        # prompts on the partition JSONB) or transitively (their active
-        # indexation/retrieval preset's *_prompt_name).
+        # Explicit overrides: partitions that name a final-answer prompt
+        # directly, or transitively through their active indexation/retrieval
+        # preset's ``*_prompt_name`` setting.
         overrides: dict[tuple[str, str], int] = {}
         part_rows = await self.pool.fetch(
             """
@@ -270,7 +323,9 @@ class PgPromptRepository(PromptRepository):
         # if two of its presets happened to name it.
         preset_rows = await self.pool.fetch(
             """
-            SELECT c.key AS field, c.value AS name, count(DISTINCT part.partition)::int AS n
+            SELECT c.key AS field,
+                   CASE WHEN c.key = 'asr_transcription_prompt_name' THEN btrim(c.value) ELSE c.value END AS name,
+                   count(DISTINCT part.partition)::int AS n
             FROM partitions part
             JOIN pipeline_presets pre
               ON (pre.preset_type = 'indexation' AND pre.name = part.indexation_preset)

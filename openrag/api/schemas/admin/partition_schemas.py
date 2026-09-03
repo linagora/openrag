@@ -62,16 +62,16 @@ class UpdatePartitionRequest(BaseModel):
     retrieval_preset: str | None = None
     chat_history_depth: int | None = Field(default=None, ge=1)
     chat_llm: str | None = None
-    # {prompt_type: library_prompt_name} for this partition's generation prompts.
-    # Keys are restricted to the generation types; ``{}`` clears all overrides.
+    # {prompt_type: library_prompt_name} for prompts selected on this partition.
+    # ``{}`` clears every partition-level prompt override.
     generation_prompt_names: dict[str, str] | None = None
 
     @field_validator("generation_prompt_names")
     @classmethod
     def validate_generation_prompt_names(cls, value: dict[str, str] | None, info: ValidationInfo) -> dict[str, str]:
         value = _reject_explicit_null(info.field_name, value)
-        # query_contextualizer is a query-side prompt selected on the retrieval
-        # preset, not a partition generation prompt (see RetrievalPipelineConfig).
+        # Query transformation, parsing, and enrichment prompts are selected on
+        # their respective presets. Final-answer prompts belong to the partition.
         allowed = {"sys_prompt", "spoken_style_answer"}
         bad = set(value) - allowed
         if bad:

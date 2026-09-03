@@ -292,9 +292,11 @@ to an internal address.
 
 **Rolling deploys:** the worker actors are named, detached and `get_if_exists`, so changing
 `process_file`'s remote contract requires bumping `_INDEXER_ACTOR_PROTOCOL_VERSION` in
-`indexer_pool.py` (v3 → v4 for `callback_url`/`callback_token`; v6 folds in v5's worker-ref-registration
-wait and TSM `set_state` fencing semantics). Without the bump, new replicas attach to the previous
-release's actors and every submit raises `TypeError`. Old generations are retired with
+`indexer_pool.py` (v3 → v4 for `callback_url`/`callback_token`; v5 added worker-ref-registration wait
+and TSM `set_state` fencing; v7 folds in a second, independent v6 lineage — STT-preset-aware registry
+hydration plus the `_active_indexation_config` contextvar — that landed on `develop` under the same
+version string while this branch's own v6 was in flight). Without the bump, new replicas attach to the
+previous release's actors and every submit raises `TypeError`. Old generations are retired with
 `services/workers/retire_indexer_generation.py`.
 
 **Key files:**

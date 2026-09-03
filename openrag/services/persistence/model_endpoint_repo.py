@@ -36,6 +36,7 @@ _RETRIEVAL_PRESET_KEYS_BY_TYPE = {"llm": ("llm",), "reranker": ("reranker",)}
 _INDEXATION_PRESET_KEYS_BY_TYPE = {
     "llm": ("contextualization_llm", "metadata_extraction_llm", "topic_tagging_llm"),
     "vlm": ("vlm",),
+    "stt": ("stt",),
 }
 
 
@@ -207,11 +208,15 @@ class PgModelEndpointRepository(ModelEndpointRepository):
                     ("indexation", _INDEXATION_PRESET_KEYS_BY_TYPE.get(model_type, ())),
                 ):
                     for key in keys:
+                        # Indexation workers trim explicit STT selections before
+                        # lookup, so the cascade must recognize the same stored
+                        # whitespace-padded value during a rename.
+                        reference_match = "btrim(config->>$4) = $5" if key == "stt" else "config->>$4 = $5"
                         await conn.execute(
-                            """
+                            f"""
                             UPDATE pipeline_presets
                             SET config = jsonb_set(config, $1::text[], to_jsonb($2::text)), updated_at = now()
-                            WHERE preset_type = $3 AND config->>$4 = $5
+                            WHERE preset_type = $3 AND {reference_match}
                             """,
                             [key],
                             new_name,
@@ -259,6 +264,45 @@ class PgModelEndpointRepository(ModelEndpointRepository):
                     model_type,
                 )
 
+    @staticmethod
+    async def _clear_preset_references(conn: asyncpg.Connection, name: str, model_type: str) -> None:
+        """Drop every preset selection naming *name*, restoring the default fallback.
+
+        Presets reference endpoints by name in JSONB rather than through a FK, so
+        nothing in the schema clears those when the row goes away. Indexation
+        resolves an explicit selection *strictly* — a named endpoint that no
+        longer exists fails the file instead of silently switching provider — so
+        a dangling reference is not a soft fallback but a permanent break: every
+        audio upload on a preset whose ``stt`` names the deleted endpoint fails
+        until an admin edits the preset, with nothing surfaced at delete time.
+
+        Clearing the key here (rather than repointing it at the survivor) is the
+        same resolution ``PgPromptRepository.delete`` already uses for a deleted
+        ASR prompt: an absent selection is the documented "use the default"
+        state, so the preset lands back on the normal fallback path. Runs in the
+        caller's transaction, before the DELETE, so no window exists where a
+        preset names a row that is already gone.
+        """
+        for preset_type, keys in (
+            ("retrieval", _RETRIEVAL_PRESET_KEYS_BY_TYPE.get(model_type, ())),
+            ("indexation", _INDEXATION_PRESET_KEYS_BY_TYPE.get(model_type, ())),
+        ):
+            for key in keys:
+                # Indexation workers trim explicit STT selections before lookup, so
+                # the stored value may be whitespace-padded — match it the same way
+                # ``rename`` does, or a padded reference survives the delete.
+                reference_match = "btrim(config->>$1) = $3" if key == "stt" else "config->>$1 = $3"
+                await conn.execute(
+                    f"""
+                    UPDATE pipeline_presets
+                    SET config = config - $1::text, updated_at = now()
+                    WHERE preset_type = $2 AND {reference_match}
+                    """,
+                    key,
+                    preset_type,
+                    name,
+                )
+
     async def delete_and_promote_default(self, name: str, model_type: str) -> tuple[str, str | None]:
         """Delete an endpoint and, if it was the default, promote a survivor to
         default — all atomically and decided under a row lock.
@@ -290,6 +334,7 @@ class PgModelEndpointRepository(ModelEndpointRepository):
                 if len(names) <= 1:
                     return ("last", None)
                 was_default = next(r["is_default"] for r in rows if r["name"] == name)
+                await self._clear_preset_references(conn, name, model_type)
                 await conn.execute(
                     "DELETE FROM model_endpoints WHERE name = $1 AND model_type = $2",
                     name,

@@ -172,6 +172,22 @@ class FakePartitionService:
         return list(self._members.get(partition, []))
 
 
+class _RefreshingPresetService:
+    def __init__(self, config) -> None:
+        self.calls = 0
+        self._config = config
+
+    async def refresh_if_stale(self) -> bool:
+        self.calls += 1
+        self._config.partitions["tenant-a"] = PartitionConfig(
+            name="tenant-a",
+            embedder="embed-fast",
+            indexation=IndexationPipelineConfig(asr_transcription_prompt_name="meeting-notes-v2"),
+            retrieval=RetrievalPipelineConfig(),
+        )
+        return True
+
+
 class RaceLostPartitionService(FakePartitionService):
     def __init__(self, config, *, grant_owner: bool = True):
         super().__init__(config)
@@ -190,14 +206,17 @@ class RaceLostPartitionService(FakePartitionService):
         )
 
 
-def _service(*, doc=None, ws=None, disp=None, config=None, partition_service=None):
-    return IndexingService(
-        document_repo=doc or FakeDocumentRepo(),
-        workspace_repo=ws or FakeWorkspaceRepo(),
-        dispatcher=disp or FakeDispatcher(),
-        config=config,
-        partition_service=partition_service,
-    )
+def _service(*, doc=None, ws=None, disp=None, config=None, partition_service=None, preset_service=None):
+    kwargs = {
+        "document_repo": doc or FakeDocumentRepo(),
+        "workspace_repo": ws or FakeWorkspaceRepo(),
+        "dispatcher": disp or FakeDispatcher(),
+        "config": config,
+        "partition_service": partition_service,
+    }
+    if preset_service is not None:
+        kwargs["preset_service"] = preset_service
+    return IndexingService(**kwargs)
 
 
 @pytest.mark.asyncio
@@ -422,6 +441,36 @@ async def test_add_file_dispatches_partition_indexation_config_and_embedder(tmp_
     assert sent["indexation_config"]["contextualization_llm"] == "llm-context"
     assert sent["require_existing_partition"] is True
     assert sent["allow_legacy_require_existing_partition_retry"] is True
+
+
+@pytest.mark.asyncio
+async def test_add_file_refreshes_stale_preset_configuration_before_dispatch(tmp_path):
+    file_path = tmp_path / "audio.mp3"
+    file_path.write_text("x")
+    config = _config_with_partition("tenant-a")
+    partition_service = FakePartitionService(config, db_partitions={"tenant-a"})
+    preset_service = _RefreshingPresetService(config)
+    dispatcher = FakeDispatcher()
+    service = _service(
+        disp=dispatcher,
+        config=config,
+        partition_service=partition_service,
+        preset_service=preset_service,
+    )
+
+    await service.add_file(
+        file_path=str(file_path),
+        file_id="f1",
+        partition="tenant-a",
+        metadata={},
+        sanitized_filename="audio.mp3",
+        original_filename="audio.mp3",
+        user=None,
+    )
+
+    assert preset_service.calls == 1
+    assert partition_service.loaded == 0
+    assert dispatcher.dispatched[0]["indexation_config"]["asr_transcription_prompt_name"] == "meeting-notes-v2"
 
 
 @pytest.mark.asyncio
@@ -759,3 +808,57 @@ def test_build_metadata_only_adds_keys_in_upload_metadata_server_keys(tmp_path):
     )
     assert full["doc_rev"] == "3-abc"
     assert full["app_tag"] == "x"
+
+
+class _ExplodingPresetService:
+    """PresetService whose revision probe fails the way a DB blip does.
+
+    ``PgPresetRepository.latest_revision`` raises outright when the
+    ``preset_configuration_revision`` row is missing, and asyncpg surfaces any
+    transient connection fault the same way.
+    """
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def refresh_if_stale(self) -> bool:
+        self.calls += 1
+        raise RuntimeError("Preset configuration revision row is missing.")
+
+
+@pytest.mark.asyncio
+async def test_add_file_survives_a_failing_preset_staleness_probe(tmp_path):
+    """A failed revision probe must not fail the upload.
+
+    Regression: the probe runs inside ``add_file``'s admission block, so leaving
+    it unguarded turned any transient DB fault — or a missing revision row — into
+    a 500 on *every* upload, of every file type, in every partition. It is an
+    optimization for noticing another replica's preset writes, never a
+    precondition for accepting a file, so a failure falls through to the cached
+    config and the dispatch still happens.
+    """
+    file_path = tmp_path / "doc.txt"
+    file_path.write_text("x")
+    config = _config_with_partition("tenant-a")
+    partition_service = FakePartitionService(config, db_partitions={"tenant-a"})
+    preset_service = _ExplodingPresetService()
+    dispatcher = FakeDispatcher()
+    service = _service(
+        disp=dispatcher,
+        config=config,
+        partition_service=partition_service,
+        preset_service=preset_service,
+    )
+
+    await service.add_file(
+        file_path=str(file_path),
+        file_id="f1",
+        partition="tenant-a",
+        metadata={},
+        sanitized_filename="doc.txt",
+        original_filename="doc.txt",
+        user=None,
+    )
+
+    assert preset_service.calls == 1
+    assert len(dispatcher.dispatched) == 1

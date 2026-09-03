@@ -85,6 +85,38 @@ def _service(repo: FakePromptRepo | None = None) -> PromptService:
     return PromptService(prompt_repo=repo or FakePromptRepo(), config=config)
 
 
+class _ReloadRecorder:
+    def __init__(self, calls: list[str], name: str) -> None:
+        self._calls = calls
+        self._name = name
+
+    async def refresh_if_stale(self) -> bool:
+        self._calls.append(self._name)
+        return True
+
+
+class _FailOncePresetReload:
+    def __init__(self, calls: list[str]) -> None:
+        self._calls = calls
+        self._failed = False
+
+    async def refresh_if_stale(self) -> bool:
+        self._calls.append("presets")
+        if not self._failed:
+            self._failed = True
+            raise RuntimeError("temporary preset reload failure")
+        return True
+
+
+class _RefreshRecorder:
+    def __init__(self, calls: list[str]) -> None:
+        self._calls = calls
+
+    async def refresh_if_stale(self) -> bool:
+        self._calls.append("presets")
+        return True
+
+
 class TestSeeding:
     async def test_seeds_all_prompt_types_from_disk(self):
         repo = FakePromptRepo()
@@ -173,6 +205,25 @@ class TestResolution:
         # Unknown / None names are skipped, falling through to the default.
         assert await svc.resolve_prompt("sys_prompt", names=["missing"]) == "DEFAULT"
         assert await svc.resolve_prompt("sys_prompt", names=[None]) == "DEFAULT"
+
+    async def test_strict_named_resolution_rejects_a_missing_selection(self):
+        repo = FakePromptRepo()
+        svc = _service(repo)
+        await repo.create(
+            Prompt(
+                prompt_type=PromptType.ASR_TRANSCRIPTION.value,
+                name="default-asr",
+                content="DEFAULT",
+                is_default=True,
+            )
+        )
+
+        with pytest.raises(NotFoundError, match="retired-asr"):
+            await svc.resolve_prompt(
+                PromptType.ASR_TRANSCRIPTION.value,
+                names=["retired-asr"],
+                strict_names=True,
+            )
 
     async def test_first_resolvable_name_wins(self):
         repo = FakePromptRepo()
@@ -271,6 +322,47 @@ class TestCrud:
         with pytest.raises(ValidationError):
             await svc.update_prompt(b.id, name="a")
 
+    async def test_renaming_asr_prompt_refreshes_presets_and_partitions(self):
+        repo = FakePromptRepo()
+        calls: list[str] = []
+        svc = PromptService(
+            prompt_repo=repo,
+            config=SimpleNamespace(paths=PathsConfig(), prompts=PromptsConfig()),
+            preset_service=_ReloadRecorder(calls, "presets"),
+            partition_service=_ReloadRecorder(calls, "partitions"),
+        )
+        prompt = await svc.create_prompt(
+            prompt_type=PromptType.ASR_TRANSCRIPTION.value,
+            name="meeting-notes",
+            content="Keep speaker labels.",
+        )
+
+        await svc.update_prompt(prompt.id, name="meeting-notes-v2")
+
+        assert calls == ["presets"]
+
+    async def test_retrying_an_asr_rename_refreshes_caches_after_a_reload_failure(self):
+        repo = FakePromptRepo()
+        calls: list[str] = []
+        svc = PromptService(
+            prompt_repo=repo,
+            config=SimpleNamespace(paths=PathsConfig(), prompts=PromptsConfig()),
+            preset_service=_FailOncePresetReload(calls),
+            partition_service=_ReloadRecorder(calls, "partitions"),
+        )
+        prompt = await svc.create_prompt(
+            prompt_type=PromptType.ASR_TRANSCRIPTION.value,
+            name="meeting-notes",
+            content="Keep speaker labels.",
+        )
+
+        with pytest.raises(RuntimeError, match="temporary preset reload failure"):
+            await svc.update_prompt(prompt.id, name="meeting-notes-v2")
+
+        await svc.update_prompt(prompt.id, name="meeting-notes-v2")
+
+        assert calls == ["presets", "presets"]
+
     async def test_create_accepts_valid_template_placeholders(self):
         svc = _service()
         # sys_prompt allows {context} and {current_date}; escaped braces are literal.
@@ -360,6 +452,25 @@ class TestCrud:
         p = await repo.create(Prompt(prompt_type="sys_prompt", content="c"))
         await svc.delete_prompt(p.id)
         assert await repo.get(p.id) is None
+
+    async def test_deleting_asr_prompt_refreshes_preset_configuration(self):
+        repo = FakePromptRepo()
+        calls: list[str] = []
+        svc = PromptService(
+            prompt_repo=repo,
+            config=SimpleNamespace(paths=PathsConfig(), prompts=PromptsConfig()),
+            preset_service=_RefreshRecorder(calls),
+            partition_service=_ReloadRecorder(calls, "partitions"),
+        )
+        prompt = await svc.create_prompt(
+            prompt_type=PromptType.ASR_TRANSCRIPTION.value,
+            name="meeting-notes",
+            content="Keep speaker labels.",
+        )
+
+        await svc.delete_prompt(prompt.id)
+
+        assert calls == ["presets"]
 
     async def test_set_default_missing_raises(self):
         with pytest.raises(NotFoundError):
