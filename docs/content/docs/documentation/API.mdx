@@ -85,10 +85,49 @@ Upload a new file to a specific partition for indexing.
 **Request Body (form-data):**
 - `file` (binary): File to upload
 - `metadata` (JSON string): File metadata (e.g., `{"owner": "user1"}`)
+- `workspace_ids` (JSON array, optional): Workspaces to add the file to
+- `callback_url` (string, optional): URL notified once indexing reaches a terminal state
+- `callback_token` (string, optional): Bearer token for that notification
 
 **Responses:**
 - `201 Created`: Returns task status URL
+- `400 Bad Request`: `callback_url` is malformed or not a public `http(s)` URL
 - `409 Conflict`: File already exists in partition
+
+##### Indexing status callback
+
+Indexing is asynchronous. Pass a `callback_url` and OpenRAG POSTs the outcome
+once the task settles, so a client can wait instead of polling:
+
+```json
+{
+  "partition": "alice.example.org",
+  "file_id": "file-123",
+  "status": "success",
+  "metadata": {"doc_rev": "<revision>", "datetime": "...", "doctype": "..."}
+}
+```
+
+`status` is `"success"` or `"error"`; a user-cancelled task sends nothing.
+`metadata` is whatever you sent at upload, echoed back unchanged — including
+a revision-tracking field under any name you like, if that's how your receiver
+orders these callbacks (the example above uses `doc_rev`). A field you didn't
+send is simply absent, not sent back as `null`. Only server-computed keys are
+held back: the on-disk path, content hash, file size, filenames, and
+`file_id` (already a top-level field).
+
+For an authenticated target, pass `callback_token` — sent as `Authorization:
+Bearer <token>`, never in the URL or the payload. Picking a safe scheme for it
+is on the caller: `callback_url` is otherwise unchecked beyond the public
+`http(s)` requirement below.
+
+Best-effort: one attempt, no retries, a 5 s deadline, and any failure is
+logged without affecting the indexing result. Delivery is not guaranteed, so
+keep a client-side timeout and fall back to polling the task-status URL. The
+`callback_url` is checked against the SSRF guard and must be a public
+`http(s)` address — see
+[`INDEXING_CALLBACK_ALLOW_PRIVATE_URLS`](/openrag/documentation/env_vars) to
+target a local instance in development.
 
 ##### Temporal Filtering
 OpenRAG supports temporal filtering to retrieve documents from specific time periods.

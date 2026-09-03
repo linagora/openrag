@@ -260,6 +260,8 @@ async def test_dispatch_indexing_relies_on_pool_worker_registration() -> None:
             replace=True,
             indexation_config={"parsing_strategy": "pymupdf"},
             embedder_name="embed-fast",
+            callback_url="https://cozy.example.com/callback",
+            callback_token="jwt-token",
             require_existing_partition=True,
         )
 
@@ -292,6 +294,8 @@ async def test_dispatch_indexing_relies_on_pool_worker_registration() -> None:
         replace=True,
         indexation_config={"parsing_strategy": "pymupdf"},
         embedder_name="embed-fast",
+        callback_url="https://cozy.example.com/callback",
+        callback_token="jwt-token",
         require_existing_partition=True,
     )
     tsm.set_object_ref.remote.assert_not_called()

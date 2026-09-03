@@ -114,7 +114,10 @@ class IndexingService:
         original_filename: str | None,
         content_sha256: str | None,
     ) -> dict:
-        """Assemble the indexing metadata exactly as the legacy router did."""
+        """Assemble the indexing metadata exactly as the legacy router did.
+
+        The keys added below must match ``UPLOAD_METADATA_SERVER_KEYS`` exactly.
+        """
         metadata = dict(metadata or {})
         metadata.update(
             {
@@ -243,11 +246,14 @@ class IndexingService:
         workspace_ids: list[str] | None = None,
         replace: bool = False,
         content_sha256: str | None = None,
+        callback_url: str | None = None,
+        callback_token: str | None = None,
     ) -> str:
         """Assemble metadata and queue an (re)indexing job; return its task id.
 
         Workspace association happens inside the worker's ``add_file``
         after a successful index — the router only pre-validates the ids.
+        *callback_url*/*callback_token* are forwarded to the worker as-is.
         """
         if self._deduplication_enabled() and content_sha256 is None:
             content_sha256 = await asyncio.to_thread(_sha256_file, file_path)
@@ -277,6 +283,8 @@ class IndexingService:
                 replace=replace,
                 indexation_config=indexation_config,
                 embedder_name=embedder_name,
+                callback_url=callback_url,
+                callback_token=callback_token,
                 require_existing_partition=require_existing_partition,
                 allow_legacy_require_existing_partition_retry=legacy_actor_preserves_partition_guard,
             )
