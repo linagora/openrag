@@ -1007,6 +1007,36 @@ async def test_update_model_endpoint_rename_reloads_presets_then_partitions():
     assert partition_service.load_partitions_calls == 0
 
 
+class _FakeUnchangedRevisionPresetService:
+    """A preset service whose revision did not move — `refresh_if_stale` reloads
+    nothing and reports so."""
+
+    def __init__(self):
+        self.refresh_calls = 0
+
+    async def refresh_if_stale(self):
+        self.refresh_calls += 1
+        return False
+
+
+@pytest.mark.asyncio
+async def test_update_model_endpoint_rename_reloads_partitions_when_revision_unchanged():
+    """An `embedder` rename cascades into `partitions` but into no preset row, so
+    the preset revision never moves and `refresh_if_stale` reloads nothing. The
+    partition reload must still run, or `partitions.embedder` keeps the old name
+    and every index/search on that partition fails until a process restart."""
+    existing = _make_row(name="jina", model_type="embedder")
+    repo = _FakeEndpointRepo(rows=[existing])
+    preset_service = _FakeUnchangedRevisionPresetService()
+    partition_service = _FakePartitionServiceForReload()
+    svc = _make_service(repo, partition_service=partition_service, preset_service=preset_service)
+
+    await svc.update_model_endpoint("jina", "embedder", new_name="jina-v3")
+
+    assert preset_service.refresh_calls == 1
+    assert partition_service.load_partitions_calls == 1
+
+
 @pytest.mark.asyncio
 async def test_update_model_endpoint_without_rename_skips_preset_and_partition_reload():
     """A plain field update (no rename) touches no cross-referenced name, so

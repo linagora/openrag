@@ -589,9 +589,18 @@ class ModelEndpointService:
             # cached state.
             self._invalidate_client_cache(model_type, name)
             self._invalidate_client_cache(model_type, new_name)
+            # `refresh_if_stale` reloads partitions itself, but only when the
+            # preset revision moved. A rename cascades into `pipeline_presets`
+            # (and so bumps the revision) only for the model types listed in
+            # model_endpoint_repo's preset-key maps — `embedder` is in neither,
+            # yet `partitions.embedder` still holds the old name. Fall back to a
+            # direct partition reload whenever the revision did not move, or that
+            # rename leaves every partition pointing at a name the registry no
+            # longer knows until the process restarts.
+            preset_refreshed = False
             if self._preset_service is not None:
-                await self._preset_service.refresh_if_stale()
-            elif self._partition_service is not None:
+                preset_refreshed = await self._preset_service.refresh_if_stale()
+            if not preset_refreshed and self._partition_service is not None:
                 await self._partition_service.load_partitions()
 
         if promote_to_default:
