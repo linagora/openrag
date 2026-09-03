@@ -14,7 +14,7 @@ from core.models.catalog import (
     TASK_CREATED_AT_METADATA_KEY,
     TASK_FINISHED_AT_METADATA_KEY,
 )
-from core.utils.conts import is_internal_metadata_key, strip_internal_metadata
+from core.utils.consts import is_internal_metadata_key, strip_internal_metadata
 from core.utils.exceptions import ConflictError, mark_indexing_worker_may_be_running
 from core.utils.logging import get_logger
 from ray.exceptions import TaskCancelledError

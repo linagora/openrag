@@ -14,7 +14,7 @@ from core.embeddings import Embedder
 from core.models.chunk import Chunk, _coerce_chunk_type
 from core.ports.document_repo import DocumentRepository
 from core.retrieval.searcher import RetrievalSearcher, file_id_restriction
-from core.utils.conts import is_internal_metadata_key
+from core.utils.consts import is_internal_metadata_key
 from core.vector_stores import VectorStore
 
 

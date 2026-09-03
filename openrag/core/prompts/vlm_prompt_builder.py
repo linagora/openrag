@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from core.utils.conts import IMG_WRAPPER_CLOSE, IMG_WRAPPER_OPEN
+from core.utils.consts import IMG_WRAPPER_CLOSE, IMG_WRAPPER_OPEN
 
 
 def build_caption_messages(template: str, image_url: str) -> list[dict[str, Any]]:
