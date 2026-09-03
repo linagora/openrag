@@ -33,7 +33,7 @@ from api.dependencies.files import (
 )
 from api.routers.admin.task_logs import collect_task_logs
 from core.models.catalog import TERMINAL_TASK_STATES
-from core.utils.exceptions import OpenRAGError
+from core.utils.exceptions import OpenRAGError, indexing_worker_may_be_running
 from core.utils.filename import sanitize_filename
 from core.utils.log_tail import app_log_file
 from core.utils.logging import get_logger
@@ -231,8 +231,12 @@ async def add_file(
             callback_url=callback_url,
             callback_token=callback_token,
         )
-    except BaseException:
-        file_path.unlink(missing_ok=True)
+    except BaseException as exc:
+        # A submission whose outcome is unknown may have left a worker running
+        # that has not read the file yet; deleting it would fail an indexing
+        # run that could still succeed. The worker cleans up its own input.
+        if not indexing_worker_may_be_running(exc):
+            file_path.unlink(missing_ok=True)
         raise
 
     return JSONResponse(
@@ -375,8 +379,12 @@ async def put_file(
             callback_url=callback_url,
             callback_token=callback_token,
         )
-    except BaseException:
-        file_path.unlink(missing_ok=True)
+    except BaseException as exc:
+        # A submission whose outcome is unknown may have left a worker running
+        # that has not read the file yet; deleting it would fail an indexing
+        # run that could still succeed. The worker cleans up its own input.
+        if not indexing_worker_may_be_running(exc):
+            file_path.unlink(missing_ok=True)
         raise
 
     return JSONResponse(

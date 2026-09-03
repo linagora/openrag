@@ -18,6 +18,7 @@ from api.schemas.admin.model_endpoint_schemas import (
     ValidateEndpointRequest,
     ValidateEndpointResponse,
     validate_llm_token_extra,
+    validate_stt_fields,
 )
 from core.config.model_endpoints import ModelEndpointRow
 from core.utils.exceptions import ValidationError
@@ -100,6 +101,25 @@ def _reject_non_llm_token_budgets(model_type: str, extra: dict | None) -> None:
         raise ValidationError(str(exc)) from exc
 
 
+async def _reject_invalid_stt_fields(model_type: str, name: str, fields: dict, service) -> None:
+    """Validate STT-only fields, including the model retained by a partial update."""
+    if model_type != "stt":
+        return
+    if "model_name" not in fields and "extra" not in fields:
+        return
+    try:
+        if "model_name" in fields:
+            model_name = fields["model_name"]
+        else:
+            # ``extra``-only writes retain the stored model name. Fetch it so
+            # an env-seeded endpoint with no model cannot be updated into a
+            # silently ignored STT configuration.
+            model_name = (await service.get_model_endpoint(name=name, model_type=model_type)).model_name
+        validate_stt_fields(model_name, fields.get("extra"))
+    except ValueError as exc:
+        raise ValidationError(str(exc)) from exc
+
+
 @router.post(
     "/",
     response_model=ModelEndpointResponse,
@@ -148,6 +168,7 @@ async def update_model_endpoint(
     """Update a registered inference endpoint."""
     fields = body.model_dump(exclude_unset=True)
     _reject_non_llm_token_budgets(model_type, fields.get("extra"))
+    await _reject_invalid_stt_fields(model_type, name, fields, service)
     if "name" in fields:
         fields["new_name"] = fields.pop("name")
     result = await service.update_model_endpoint(
@@ -208,8 +229,12 @@ async def validate_endpoint_draft(
     service=Depends(get_model_endpoint_service),
 ):
     """Probe arbitrary endpoint values (before they are saved) for reachability
-    and model availability."""
+    and supported model capabilities."""
     api_key = body.api_key
+    if api_key is None and body.model_type == "stt":
+        extra_api_key = body.extra.get("api_key")
+        if isinstance(extra_api_key, str):
+            api_key = extra_api_key
     if api_key is None and body.stored_api_key_model_type and body.stored_api_key_name:
         endpoint = await service.get_model_endpoint(
             name=body.stored_api_key_name,
@@ -223,8 +248,11 @@ async def validate_endpoint_draft(
         api_key = endpoint.extra.get("api_key")
     return await service.validate_endpoint(
         url=body.endpoint,
+        model_type=body.model_type,
         model_name=body.model_name,
         api_key=api_key,
+        timeout=body.timeout,
+        extra=body.extra if body.model_type == "stt" else None,
     )
 
 
@@ -234,10 +262,13 @@ async def validate_model_endpoint(
     name: str,
     service=Depends(get_model_endpoint_service),
 ):
-    """Probe a registered endpoint for reachability and model availability."""
+    """Probe a registered endpoint for reachability and model capabilities."""
     endpoint = await service.get_model_endpoint(name=name, model_type=model_type)
     return await service.validate_endpoint(
         url=endpoint.endpoint,
+        model_type=model_type,
         model_name=endpoint.model_name,
         api_key=endpoint.extra.get("api_key"),
+        timeout=endpoint.timeout,
+        extra=endpoint.extra if model_type == "stt" else None,
     )

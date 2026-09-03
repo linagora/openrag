@@ -124,3 +124,159 @@ class TestDeleteByPartition:
         deleted = await repo.delete_documents_by_partition(partition)
         assert deleted == 2
         assert await repo.count_documents(partition=partition) == 0
+
+
+class TestContentClaims:
+    async def test_recovers_orphaned_claim_after_registration_grace(
+        self,
+        postgres_store: PostgresStore,
+    ):
+        partition = await _seed_partition(postgres_store)
+        repo = postgres_store.document_repo
+
+        assert (
+            await repo.claim_content_sha256(
+                file_id="abandoned-file",
+                partition=partition,
+                content_sha256="a" * 64,
+                claim_token="task:abandoned-task",
+            )
+            is None
+        )
+        assert (
+            await repo.claim_content_sha256(
+                file_id="early-retry",
+                partition=partition,
+                content_sha256="a" * 64,
+                claim_token="task:early-retry-task",
+            )
+            == "abandoned-file"
+        )
+        await postgres_store.pool.execute(
+            """
+            UPDATE file_content_claims
+            SET expires_at = NOW() + interval '23 hours 58 minutes'
+            WHERE partition_name = $1 AND content_sha256 = $2
+            """,
+            partition,
+            "a" * 64,
+        )
+
+        assert (
+            await repo.claim_content_sha256(
+                file_id="retry-file",
+                partition=partition,
+                content_sha256="a" * 64,
+                claim_token="task:retry-task",
+            )
+            == "abandoned-file"
+        )
+        lease = await repo.get_recoverable_content_sha256_claim(
+            partition=partition,
+            content_sha256="a" * 64,
+        )
+        assert lease is not None
+        assert await repo.release_recoverable_content_sha256_claim(lease) is True
+        assert (
+            await repo.claim_content_sha256(
+                file_id="retry-file",
+                partition=partition,
+                content_sha256="a" * 64,
+                claim_token="task:retry-task",
+            )
+            is None
+        )
+
+    async def test_preserves_claim_owned_by_active_task(
+        self,
+        postgres_store: PostgresStore,
+    ):
+        partition = await _seed_partition(postgres_store)
+        repo = postgres_store.document_repo
+
+        assert (
+            await repo.claim_content_sha256(
+                file_id="active-file",
+                partition=partition,
+                content_sha256="b" * 64,
+                claim_token="task:active-task",
+            )
+            is None
+        )
+        await postgres_store.pool.execute(
+            """
+            UPDATE file_content_claims
+            SET expires_at = NOW() + interval '23 hours 58 minutes'
+            WHERE partition_name = $1 AND content_sha256 = $2
+            """,
+            partition,
+            "b" * 64,
+        )
+
+        lease = await repo.get_recoverable_content_sha256_claim(
+            partition=partition,
+            content_sha256="b" * 64,
+        )
+        assert lease is not None
+        assert (
+            await repo.renew_content_sha256_claim(
+                file_id="active-file",
+                partition=partition,
+                content_sha256="b" * 64,
+                claim_token="task:active-task",
+            )
+            is True
+        )
+        assert await repo.release_recoverable_content_sha256_claim(lease) is False
+        assert (
+            await repo.claim_content_sha256(
+                file_id="duplicate-file",
+                partition=partition,
+                content_sha256="b" * 64,
+                claim_token="task:duplicate-task",
+            )
+            == "active-file"
+        )
+
+    async def test_preserves_legacy_non_task_claim(
+        self,
+        postgres_store: PostgresStore,
+    ):
+        partition = await _seed_partition(postgres_store)
+        repo = postgres_store.document_repo
+
+        assert (
+            await repo.claim_content_sha256(
+                file_id="copy-file",
+                partition=partition,
+                content_sha256="c" * 64,
+                claim_token="legacy-copy-uuid",
+            )
+            is None
+        )
+        await postgres_store.pool.execute(
+            """
+            UPDATE file_content_claims
+            SET expires_at = NOW() + interval '23 hours 58 minutes'
+            WHERE partition_name = $1 AND content_sha256 = $2
+            """,
+            partition,
+            "c" * 64,
+        )
+
+        assert (
+            await repo.get_recoverable_content_sha256_claim(
+                partition=partition,
+                content_sha256="c" * 64,
+            )
+            is None
+        )
+        assert (
+            await repo.claim_content_sha256(
+                file_id="duplicate-file",
+                partition=partition,
+                content_sha256="c" * 64,
+                claim_token="task:duplicate-task",
+            )
+            == "copy-file"
+        )

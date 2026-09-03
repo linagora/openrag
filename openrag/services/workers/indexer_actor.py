@@ -21,6 +21,13 @@ from services.workers.stages.store import INDEXING_TASK_ID_METADATA_KEY
 logger = get_logger()
 
 
+class _TaskCancelledBeforeStart(Exception):
+    """Internal signal: ``set_state(SERIALIZING)`` reported the task as already
+    fenced (cancelled) — not a failure, so it must skip failure-marking and the
+    error callback entirely (distinct from the TSM *raising*, which is a real
+    outage and does need both)."""
+
+
 class IndexerWorker:
     """Pure-Python core of the thin indexer actor.
 
@@ -89,10 +96,12 @@ class IndexerWorker:
         try:
             # Inside the try so a TaskStateManager outage here still reaches
             # the except block below and sends the error callback.
-            await retry_idempotent_ray_actor_method(
+            accepted = await retry_idempotent_ray_actor_method(
                 lambda: self._tsm.set_state.remote(task_id, "SERIALIZING"),
                 task_description=f"set_state({task_id}, SERIALIZING)",
             )
+            if accepted is False:
+                raise _TaskCancelledBeforeStart
             document = await _load_document(path, metadata, partition)
             # One indexation timestamp for this file, shared by the Milvus chunks
             # (via the store stage) and the Postgres catalog row, so they agree.
@@ -147,6 +156,10 @@ class IndexerWorker:
                 lambda: self._tsm.set_state.remote(task_id, "COMPLETED"),
                 task_description=f"set_state({task_id}, COMPLETED)",
             )
+        except _TaskCancelledBeforeStart:
+            # The TSM already told us this task is fenced/cancelled — no need to
+            # ask it again, and a cancellation must not fire an error callback.
+            raise RuntimeError(f"Task {task_id} was cancelled before indexing started") from None
         except Exception:
             should_cleanup_vectors = row is not None and (
                 row.get("stored_count", 0) > 0 or row.get("stage") == "store_failed"

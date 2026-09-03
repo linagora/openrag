@@ -1,5 +1,5 @@
-import consts
 from api.dependencies.auth import SUPER_ADMIN_MODE
+from core.utils import consts
 from fastapi import HTTPException, status
 from openai import AsyncOpenAI
 

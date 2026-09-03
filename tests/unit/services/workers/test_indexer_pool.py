@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from core.config.model_endpoints import ModelEndpointConfig
@@ -39,7 +39,7 @@ def test_build_chunker_returns_native_chunker(monkeypatch: pytest.MonkeyPatch) -
     from services.workers.indexer_pool import _build_chunker
 
     native = _NativeChunker()
-    monkeypatch.setattr(factory, "create_chunker", lambda _cfg: native)
+    monkeypatch.setattr(factory, "create_chunker", lambda _cfg, _window=None: native)
 
     assert _build_chunker(object()) is native
 
@@ -48,7 +48,7 @@ def test_build_chunker_rejects_invalid_chunker(monkeypatch: pytest.MonkeyPatch) 
     import core.chunking.factory as factory
     from services.workers.indexer_pool import _build_chunker
 
-    monkeypatch.setattr(factory, "create_chunker", lambda _cfg: _BrokenChunker())
+    monkeypatch.setattr(factory, "create_chunker", lambda _cfg, _window=None: _BrokenChunker())
 
     with pytest.raises(TypeError, match="chunk"):
         _build_chunker(object())
@@ -58,7 +58,7 @@ def test_build_chunker_rejects_non_callable_chunk_attr(monkeypatch: pytest.Monke
     import core.chunking.factory as factory
     from services.workers.indexer_pool import _build_chunker
 
-    monkeypatch.setattr(factory, "create_chunker", lambda _cfg: _NonCallableChunker())
+    monkeypatch.setattr(factory, "create_chunker", lambda _cfg, _window=None: _NonCallableChunker())
 
     with pytest.raises(TypeError, match="chunk"):
         _build_chunker(object())
@@ -123,7 +123,7 @@ def test_build_indexer_pool_uses_current_protocol_dispatcher_name(
     opts = options_calls[0]
     # A protocol-specific name prevents a rolling deployment from attaching to
     # a detached actor that still runs the previous claim implementation.
-    assert opts["name"] == "IndexerPoolDispatcher-v4"
+    assert opts["name"] == "IndexerPoolDispatcher-v6"
     assert opts["namespace"] == "openrag"
     assert opts["get_if_exists"] is True
     assert opts["lifetime"] == "detached"
@@ -139,12 +139,14 @@ def test_indexer_pool_actor_spawns_pool_size_detached_workers(
     import services.workers.indexer_pool as module
 
     calls = []
+    remote_calls = []
 
     class Options:
         def __init__(self, kwargs):
             self._kwargs = kwargs
 
-        def remote(self):
+        def remote(self, namespace):
+            remote_calls.append(namespace)
             return f"actor-{self._kwargs['name']}"
 
     def fake_options(**kwargs):
@@ -154,20 +156,21 @@ def test_indexer_pool_actor_spawns_pool_size_detached_workers(
     monkeypatch.setattr(module.IndexerWorkerActor, "options", fake_options)
 
     actor_class = module.IndexerPool.__ray_metadata__.modified_class
-    pool = actor_class(pool_size=3, max_tasks_per_worker=4)
+    pool = actor_class(pool_size=3, max_tasks_per_worker=4, namespace="tenant-ray")
 
     # One detached worker actor per pool_size slot, each capped at max_tasks_per_worker.
     assert len(pool._workers) == 3
     assert {c["name"] for c in calls} == {
-        "IndexerWorker-v4-0",
-        "IndexerWorker-v4-1",
-        "IndexerWorker-v4-2",
+        "IndexerWorker-v6-0",
+        "IndexerWorker-v6-1",
+        "IndexerWorker-v6-2",
     }
     for c in calls:
         assert c["lifetime"] == "detached"
         assert c["max_concurrency"] == 4
         assert c["get_if_exists"] is True
-        assert c["namespace"] == "openrag"
+        assert c["namespace"] == "tenant-ray"
+    assert remote_calls == ["tenant-ray", "tenant-ray", "tenant-ray"]
 
 
 def test_build_topic_tagger_factory_resolves_named_llm(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -558,7 +561,7 @@ def test_required_llm_names_mirrors_pipeline_selection() -> None:
     ) == ["ctx", "tags"]
 
 
-def test_required_model_endpoint_names_include_embedder_and_vlm() -> None:
+def test_required_model_endpoint_names_include_embedder_vlm_and_stt() -> None:
     from services.workers.indexer_pool import _required_model_endpoint_names
 
     required = _required_model_endpoint_names(
@@ -577,6 +580,7 @@ def test_required_model_endpoint_names_include_embedder_and_vlm() -> None:
         "embedder": ["embed-fast"],
         "llm": ["ctx", "tags"],
         "vlm": ["vlm-fast"],
+        "stt": ["default"],
     }
 
 
@@ -1017,6 +1021,11 @@ def _bare_pool(workers: list) -> object:
     pool._release_tasks = set()
     pool._claim_store = None
     pool._claim_store_lock = asyncio.Lock()
+    pool._namespace = "openrag"
+    pool._task_state_manager = SimpleNamespace(
+        set_object_ref=SimpleNamespace(remote=AsyncMock(return_value=True)),
+        finish_rejected_submission=SimpleNamespace(remote=AsyncMock(return_value=True)),
+    )
     return pool
 
 
@@ -1077,6 +1086,7 @@ async def test_pool_dispatches_to_least_loaded_and_passes_ref_through() -> None:
     # The ObjectRef is passed through wrapped in a one-element list (the
     # dispatcher unwraps it; the wrapper stops Ray auto-dereferencing the ref).
     assert ref0 == [workers[0].futures[0]]
+    assert pool._task_state_manager.set_object_ref.remote.await_count == 3
     await _settle_pool_release_tasks(
         pool,
         workers[0].futures[0],
@@ -1086,29 +1096,73 @@ async def test_pool_dispatches_to_least_loaded_and_passes_ref_through() -> None:
 
 
 @pytest.mark.asyncio
-async def test_pool_drain_rejects_new_work_and_reports_accepted_work() -> None:
+async def test_pool_drain_rejects_new_work_and_reports_accepted_work(monkeypatch: pytest.MonkeyPatch) -> None:
+    import services.workers.indexer_pool as module
+
     worker = _FakeWorker()
     pool = _bare_pool([worker])
+    repo = SimpleNamespace(release_content_sha256_claim=AsyncMock())
+    pool._claim_store = SimpleNamespace(document_repo=repo)
 
     await pool.submit(task_id="accepted-before-drain")
 
     assert await pool.begin_drain() == {
-        "protocol_version": "v4",
+        "protocol_version": "v6",
         "accepting_tasks": False,
         "inflight_jobs": 1,
         "worker_names": ["test-worker-0"],
     }
+    recovered_task_state_manager = SimpleNamespace(
+        finish_rejected_submission=SimpleNamespace(remote=AsyncMock(return_value=True))
+    )
+    pool._task_state_manager = None
+    get_actor = MagicMock(return_value=recovered_task_state_manager)
+    monkeypatch.setattr(module.ray, "get_actor", get_actor)
     with pytest.raises(RuntimeError, match="draining"):
-        await pool.submit(task_id="rejected-after-drain")
+        await pool.submit(
+            task_id="rejected-after-drain",
+            partition="tenant-a",
+            metadata={
+                "file_id": "file-1",
+                "content_sha256": "abc123",
+                CONTENT_CLAIM_TOKEN_METADATA_KEY: "attempt-1",
+            },
+        )
     assert len(worker.calls) == 1
+    get_actor.assert_called_once_with("TaskStateManager", namespace="openrag")
+    recovered_task_state_manager.finish_rejected_submission.remote.assert_awaited_once_with("rejected-after-drain")
+    repo.release_content_sha256_claim.assert_awaited_once_with(
+        file_id="file-1",
+        partition="tenant-a",
+        content_sha256="abc123",
+        claim_token="attempt-1",
+    )
 
     await _settle_pool_release_tasks(pool, worker.futures[0])
     assert await pool.status() == {
-        "protocol_version": "v4",
+        "protocol_version": "v6",
         "accepting_tasks": False,
         "inflight_jobs": 0,
         "worker_names": ["test-worker-0"],
     }
+
+
+@pytest.mark.asyncio
+async def test_pool_finalizes_prelaunch_rejection_with_legacy_task_state_actor() -> None:
+    from services.workers.indexer_pool import _REJECTED_SUBMISSION_ERROR
+
+    pool = _bare_pool([_FakeWorker()])
+    set_failed = AsyncMock(return_value=True)
+    pool._task_state_manager = SimpleNamespace(
+        _ray_actor_method_names={"set_failed_if_not_cancelled"},
+        set_failed_if_not_cancelled=SimpleNamespace(remote=set_failed),
+    )
+
+    await pool.begin_drain()
+    with pytest.raises(RuntimeError, match="draining"):
+        await pool.submit(task_id="legacy-rejected-task")
+
+    set_failed.assert_awaited_once_with("legacy-rejected-task", _REJECTED_SUBMISSION_ERROR)
 
 
 @pytest.mark.asyncio
@@ -1121,7 +1175,7 @@ async def test_pool_abort_drain_restores_acceptance() -> None:
         await pool.submit(task_id="rejected-while-draining")
 
     assert await pool.abort_drain() == {
-        "protocol_version": "v4",
+        "protocol_version": "v6",
         "accepting_tasks": True,
         "inflight_jobs": 0,
         "worker_names": ["test-worker-0"],
@@ -1136,7 +1190,88 @@ async def test_pool_abort_drain_restores_acceptance() -> None:
 async def test_pool_reports_current_protocol_version() -> None:
     pool = _bare_pool([_FakeWorker()])
 
-    assert await pool.protocol_version() == "v4"
+    assert await pool.protocol_version() == "v6"
+
+
+@pytest.mark.asyncio
+async def test_pool_cancels_worker_when_ref_registration_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import services.workers.indexer_pool as module
+
+    worker = _FakeWorker()
+    pool = _bare_pool([worker])
+    pool._task_state_manager.set_object_ref.remote.return_value = False
+    cancellation_requested = asyncio.Event()
+    cancel = MagicMock(side_effect=lambda *_args, **_kwargs: cancellation_requested.set())
+    monkeypatch.setattr(module.ray, "cancel", cancel)
+
+    submission = asyncio.create_task(pool.submit(task_id="task-1"))
+    await asyncio.wait_for(cancellation_requested.wait(), timeout=1)
+
+    cancel.assert_called_once_with(worker.futures[0], recursive=True)
+    assert submission.done() is False
+
+    worker.futures[0].set_result(None)
+    with pytest.raises(RuntimeError, match="cancelled before worker ref registration"):
+        await submission
+    pool._task_state_manager.finish_rejected_submission.remote.assert_awaited_once_with("task-1")
+    await _settle_pool_release_tasks(pool)
+
+
+@pytest.mark.asyncio
+async def test_pool_waits_for_worker_when_ref_registration_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import services.workers.indexer_pool as module
+
+    worker = _FakeWorker()
+    pool = _bare_pool([worker])
+    pool._task_state_manager.set_object_ref.remote.side_effect = RuntimeError("task state unavailable")
+    cancellation_requested = asyncio.Event()
+    monkeypatch.setattr(
+        module.ray,
+        "cancel",
+        MagicMock(side_effect=lambda *_args, **_kwargs: cancellation_requested.set()),
+    )
+
+    submission = asyncio.create_task(pool.submit(task_id="task-1"))
+    await asyncio.wait_for(cancellation_requested.wait(), timeout=1)
+    assert submission.done() is False
+
+    worker.futures[0].set_result(None)
+    with pytest.raises(RuntimeError, match="task state unavailable"):
+        await submission
+    pool._task_state_manager.finish_rejected_submission.remote.assert_awaited_once_with("task-1")
+    await _settle_pool_release_tasks(pool)
+
+
+@pytest.mark.asyncio
+async def test_rejected_worker_settlement_survives_submit_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import services.workers.indexer_pool as module
+
+    worker = _FakeWorker()
+    pool = _bare_pool([worker])
+    pool._task_state_manager.set_object_ref.remote.return_value = False
+    cancellation_requested = asyncio.Event()
+    monkeypatch.setattr(
+        module.ray,
+        "cancel",
+        MagicMock(side_effect=lambda *_args, **_kwargs: cancellation_requested.set()),
+    )
+
+    submission = asyncio.create_task(pool.submit(task_id="task-1"))
+    await asyncio.wait_for(cancellation_requested.wait(), timeout=1)
+    submission.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await submission
+
+    assert worker.futures[0].done() is False
+    await _settle_pool_release_tasks(pool, worker.futures[0])
+    pool._task_state_manager.finish_rejected_submission.remote.assert_awaited_once_with("task-1")
+    assert pool._inflight == [0]
 
 
 @pytest.mark.asyncio
@@ -1181,8 +1316,7 @@ async def test_pool_rolls_back_inflight_when_submission_raises() -> None:
         await pool.submit(task_id="a")
 
     assert pool._inflight == [0]
-
-    assert pool._inflight == [0]
+    pool._task_state_manager.finish_rejected_submission.remote.assert_awaited_once_with("a")
 
 
 @pytest.mark.asyncio
@@ -1264,7 +1398,7 @@ async def test_pool_keeps_content_claim_until_cancelled_task_settles() -> None:
     )
 
 
-def test_indexer_pool_wires_contextualizer_factory(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_indexer_pool_wires_contextualizer_factory_and_worker_namespace(monkeypatch: pytest.MonkeyPatch) -> None:
     import core.config
     import core.embeddings
     import services.storage.milvus_store as milvus_store
@@ -1317,7 +1451,7 @@ def test_indexer_pool_wires_contextualizer_factory(monkeypatch: pytest.MonkeyPat
         return Store()
 
     monkeypatch.setattr(core.config, "load_config", lambda: cfg)
-    monkeypatch.setattr(module, "_build_chunker", lambda _cfg: object())
+    monkeypatch.setattr(module, "_build_chunker", lambda _cfg, _window=None: object())
     monkeypatch.setattr(module, "_build_embedder_factory", lambda _cfg: object())
     monkeypatch.setattr(module, "_build_vlm_factory", lambda _cfg: vlm_factory)
     monkeypatch.setattr(module, "_build_contextualizer_factory", lambda _cfg: contextualizer_factory)
@@ -1325,7 +1459,7 @@ def test_indexer_pool_wires_contextualizer_factory(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(core.embeddings.embedder_registry, "create", lambda *args, **kwargs: object())
     monkeypatch.setattr(milvus_store, "MilvusVectorStore", lambda _cfg: object())
     monkeypatch.setattr(postgres_store, "PostgresStore", fake_postgres_store)
-    monkeypatch.setattr(parser_dispatcher, "build_parser_dispatcher", lambda _cfg: object())
+    monkeypatch.setattr(parser_dispatcher, "build_parser_dispatcher", lambda _cfg, **_kwargs: object())
     monkeypatch.setattr(parser_dispatcher, "build_caption_vlm", lambda _cfg: object())
     monkeypatch.setattr(pipeline_builder, "build_indexing_pipeline", fake_build_pipeline)
     actor_calls = []
@@ -1338,11 +1472,11 @@ def test_indexer_pool_wires_contextualizer_factory(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(module, "IndexerWorker", Worker)
 
     actor_class = module.IndexerWorkerActor.__ray_metadata__.modified_class
-    actor_class()
+    actor_class(namespace="tenant-ray")
 
     assert actor_calls
     assert actor_calls[0][0][0] == "TaskStateManager"
-    assert actor_calls[0][1].get("namespace") == "openrag"
+    assert actor_calls[0][1].get("namespace") == "tenant-ray"
     assert captured["contextualizer_factory"] is contextualizer_factory
     assert captured["topic_tagger_factory"] is topic_tagger_factory
     assert captured["vlm_factory"] is vlm_factory
@@ -1400,7 +1534,7 @@ def test_indexer_pool_loads_caption_prompt_without_global_vlm_default(monkeypatc
         return object()
 
     monkeypatch.setattr(core.config, "load_config", lambda: cfg)
-    monkeypatch.setattr(module, "_build_chunker", lambda _cfg: object())
+    monkeypatch.setattr(module, "_build_chunker", lambda _cfg, _window=None: object())
     monkeypatch.setattr(module, "_build_embedder_factory", lambda _cfg: object())
     monkeypatch.setattr(module, "_build_vlm_factory", lambda _cfg: object())
     monkeypatch.setattr(module, "_build_contextualizer_factory", lambda _cfg: object())
@@ -1408,7 +1542,7 @@ def test_indexer_pool_loads_caption_prompt_without_global_vlm_default(monkeypatc
     monkeypatch.setattr(core.embeddings.embedder_registry, "create", lambda *args, **kwargs: object())
     monkeypatch.setattr(milvus_store, "MilvusVectorStore", lambda _cfg: object())
     monkeypatch.setattr(postgres_store, "PostgresStore", lambda *args, **kwargs: Store())
-    monkeypatch.setattr(parser_dispatcher, "build_parser_dispatcher", lambda _cfg: object())
+    monkeypatch.setattr(parser_dispatcher, "build_parser_dispatcher", lambda _cfg, **_kwargs: object())
     # No global default VLM endpoint configured.
     monkeypatch.setattr(parser_dispatcher, "build_caption_vlm", lambda _cfg: None)
     monkeypatch.setattr(parser_dispatcher, "load_caption_prompt", lambda _cfg: "TEMPLATE TEXT")
@@ -1470,6 +1604,10 @@ def _bare_worker_actor(*, save_uploaded_files: bool, worker: _RecordingWorker):
     actor._ensure_catalog = _noop
     actor._ensure_registry_fresh = _noop
     actor._worker = worker
+    actor._task_state_manager = SimpleNamespace(
+        get_object_ref=SimpleNamespace(remote=AsyncMock(return_value={"ref": object()})),
+        set_failed_if_not_cancelled=SimpleNamespace(remote=AsyncMock(return_value=True)),
+    )
     actor._catalog_store = SimpleNamespace(
         workspace_repo=SimpleNamespace(),
         document_repo=SimpleNamespace(release_content_sha256_claim=AsyncMock()),
@@ -1484,6 +1622,49 @@ def _bare_worker_actor(*, save_uploaded_files: bool, worker: _RecordingWorker):
         resolve_prompt=_AsyncReturn("prompt"),
     )
     return actor
+
+
+@pytest.mark.asyncio
+async def test_actor_resolves_the_current_global_asr_prompt() -> None:
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=_RecordingWorker())
+    resolve_prompt = AsyncMock(return_value="prompt")
+    actor._prompt_service = SimpleNamespace(resolve_prompt=resolve_prompt)
+
+    assert await actor._resolve_transcription_prompt() == "prompt"
+    resolve_prompt.assert_awaited_once_with("asr_transcription")
+
+
+@pytest.mark.asyncio
+async def test_actor_uses_native_asr_prompt_when_resolution_fails() -> None:
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=_RecordingWorker())
+    resolve_prompt = AsyncMock(side_effect=RuntimeError("database unavailable"))
+    actor._prompt_service = SimpleNamespace(resolve_prompt=resolve_prompt)
+
+    assert await actor._resolve_transcription_prompt() is None
+    resolve_prompt.assert_awaited_once_with("asr_transcription")
+
+
+@pytest.mark.asyncio
+async def test_actor_does_not_start_without_registered_worker_ref(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    import services.workers.indexer_pool as module
+
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"x")
+    worker = _RecordingWorker()
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=worker)
+    actor._task_state_manager.get_object_ref.remote.return_value = None
+    monkeypatch.setattr(module, "_WORKER_REF_REGISTRATION_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(module, "_WORKER_REF_REGISTRATION_POLL_SECONDS", 0.001)
+
+    with pytest.raises(RuntimeError, match="registered task reference"):
+        await actor.process_file(task_id="t", path=str(path), metadata={"file_id": "f"}, partition="p")
+
+    worker_ref_error = module._MISSING_WORKER_REF_ERROR
+    actor._task_state_manager.set_failed_if_not_cancelled.remote.assert_awaited_once_with("t", worker_ref_error)
+    assert worker.calls == 0
 
 
 @pytest.mark.asyncio
@@ -1608,6 +1789,7 @@ async def test_preflight_failure_sends_the_error_callback_and_sets_failed(tmp_pa
         raise RuntimeError("postgres down")
 
     actor._ensure_catalog = _boom
+    actor._await_worker_ref_registration = AsyncMock(return_value=None)
     callback = AsyncMock()
     monkeypatch.setattr(module, "send_indexing_callback", callback)
     mark_failed = AsyncMock(return_value=True)
@@ -1644,6 +1826,7 @@ async def test_preflight_failure_without_callback_url_still_sets_failed(tmp_path
         raise RuntimeError("postgres down")
 
     actor._ensure_catalog = _boom
+    actor._await_worker_ref_registration = AsyncMock(return_value=None)
     callback = AsyncMock()
     monkeypatch.setattr(module, "send_indexing_callback", callback)
     mark_failed = AsyncMock(return_value=True)
@@ -1671,6 +1854,7 @@ async def test_preflight_failure_still_notifies_when_the_tsm_is_unreachable(tmp_
         raise RuntimeError("postgres down")
 
     actor._ensure_catalog = _boom
+    actor._await_worker_ref_registration = AsyncMock(return_value=None)
     callback = AsyncMock()
     monkeypatch.setattr(module, "send_indexing_callback", callback)
     monkeypatch.setattr(

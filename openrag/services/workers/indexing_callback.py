@@ -20,7 +20,7 @@ from urllib.parse import ParseResult, urlparse
 
 import httpx
 from core.config import load_config
-from core.utils.conts import UPLOAD_METADATA_SERVER_KEYS
+from core.utils.consts import UPLOAD_METADATA_SERVER_KEYS
 from core.utils.logging import get_logger
 from core.utils.url_safety import is_safe_url
 

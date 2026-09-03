@@ -445,6 +445,7 @@ class ServiceContainer:
                 config=self._require_settings(),
                 partition_service=self.partition_service,
                 preset_service=self.preset_service,
+                prompt_service=self.prompt_service,
                 client_caches={
                     "embedder": self._embedder_cache,
                     "reranker": self._reranker_cache,
@@ -649,8 +650,26 @@ class ServiceContainer:
             from services.workers.parsers.file_serializer import build_file_serializer
 
             settings = self._require_settings()
+
+            async def resolve_transcription_prompt() -> str | None:
+                return await self.prompt_service.resolve_prompt("asr_transcription")
+
+            async def resolve_transcription_endpoint():
+                # Unlike indexer actors, this parser lives in each API replica.
+                # Reload before every direct extract request so an Admin UI save
+                # made through another replica is visible on the next audio
+                # extraction as well.
+                try:
+                    await self.model_endpoint_service.load_all()
+                except Exception as exc:  # noqa: BLE001 - retain the last good endpoint during a DB outage
+                    logger.bind(error=str(exc)).warning("STT endpoint refresh failed; using last loaded endpoint")
+                return settings.models.stt.get("default")
+
             self._conversion_service = ConversionService(
-                serializer=build_file_serializer(),
+                serializer=build_file_serializer(
+                    transcription_prompt_resolver=resolve_transcription_prompt,
+                    transcription_endpoint_resolver=resolve_transcription_endpoint,
+                ),
                 vector_store=self.vector_store,
                 collection=settings.vectordb.collection_name,
             )

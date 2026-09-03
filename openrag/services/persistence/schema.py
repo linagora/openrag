@@ -61,7 +61,7 @@ model_endpoints = Table(
         nullable=False,
     ),
     CheckConstraint(
-        "model_type IN ('embedder','reranker','llm','vlm')",
+        "model_type IN ('embedder','reranker','llm','vlm','stt')",
         name="ck_model_endpoint_type",
     ),
 )
@@ -92,7 +92,7 @@ pipeline_presets = Table(
 )
 
 
-# The 8 canonical prompt types — kept in sync with core.models.prompt.PromptType.
+# The canonical prompt types — kept in sync with core.models.prompt.PromptType.
 # Used by the CHECK constraint on the prompts table so a junk type can never be
 # stored. (Mirrors the ck_model_endpoint_type / ck_pipeline_preset_type pattern.)
 _PROMPT_TYPE_VALUES = (
@@ -104,6 +104,7 @@ _PROMPT_TYPE_VALUES = (
     "multi_query",
     "spoken_style_answer",
     "topic_tagger",
+    "asr_transcription",
 )
 _PROMPT_TYPE_IN = "prompt_type IN (" + ",".join(f"'{v}'" for v in _PROMPT_TYPE_VALUES) + ")"
 

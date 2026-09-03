@@ -21,12 +21,18 @@ from openrag.core.config.root import Settings
 # of indexing throughput.
 _MODEL_REGISTRY_TTL_SECONDS = 60.0
 _CONTENT_CLAIM_RENEW_INTERVAL_SECONDS = 60 * 60
+_WORKER_REF_REGISTRATION_TIMEOUT_SECONDS = 60.0
+_WORKER_REF_REGISTRATION_POLL_SECONDS = 0.05
+_REJECTED_SUBMISSION_ERROR = "Indexer worker submission was rejected before the worker started."
+_MISSING_WORKER_REF_ERROR = "Indexer worker did not receive a registered task reference before starting."
 # Named detached actors survive API rolling deployments. Keep the dispatcher
 # and workers on the same protocol generation whenever their remote contract or
 # cross-process indexing semantics change, so new replicas cannot attach to a
 # partially compatible actor fleet left by the previous release.
 # v4: process_file gained callback_url/callback_token; a v3 worker rejects them.
-_INDEXER_ACTOR_PROTOCOL_VERSION = "v4"
+# v5 (develop): worker-ref-registration wait + TSM set_state fencing semantics.
+# v6: merge of both — a v4 or v5 worker is incompatible with this generation.
+_INDEXER_ACTOR_PROTOCOL_VERSION = "v6"
 _INDEXER_POOL_DISPATCHER_ACTOR_NAME = f"IndexerPoolDispatcher-{_INDEXER_ACTOR_PROTOCOL_VERSION}"
 
 
@@ -51,7 +57,7 @@ class IndexerWorkerActor:
     of these and load-balances across them.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, namespace: str = "openrag") -> None:
         import services.inference.ollama_client  # noqa: F401
         import services.inference.vllm_client  # noqa: F401
         from core.config import load_config
@@ -66,9 +72,13 @@ class IndexerWorkerActor:
         )
         from services.workers.pipeline_builder import build_indexing_pipeline
 
+        self._namespace = namespace
         cfg = load_config()
-
-        parser = build_parser_dispatcher(cfg)
+        parser = build_parser_dispatcher(
+            cfg,
+            transcription_prompt_resolver=self._resolve_transcription_prompt,
+            transcription_endpoint_resolver=self._resolve_transcription_endpoint,
+        )
         parser_factory = _build_parser_factory(parser)
         vlm = build_caption_vlm(cfg)
         # Loaded unconditionally: a preset can caption through a *named* VLM
@@ -79,7 +89,7 @@ class IndexerWorkerActor:
         # degrades to None on any load failure, so there's no safety
         # trade-off in always calling it.
         caption_prompt = load_caption_prompt(cfg)
-        chunker = _build_chunker(cfg)
+        chunker = _build_chunker(cfg, _build_embedder_window_resolver(cfg)())
         embedder_factory = _build_embedder_factory(cfg)
         vlm_factory = _build_vlm_factory(cfg)
         contextualizer_factory = _build_contextualizer_factory(cfg)
@@ -97,7 +107,8 @@ class IndexerWorkerActor:
             embed_concurrency=embed_cfg.embed_concurrency,
         )
         self._vector_store = MilvusVectorStore(cfg.vectordb)
-        task_state_manager = ray.get_actor("TaskStateManager", namespace="openrag")
+        task_state_manager = ray.get_actor("TaskStateManager", namespace=self._namespace)
+        self._task_state_manager = task_state_manager
         pipeline = build_indexing_pipeline(
             parser=parser,
             chunker=chunker,
@@ -107,6 +118,7 @@ class IndexerWorkerActor:
             caption_prompt=caption_prompt,
             timeouts=_build_pipeline_timeouts(cfg),
             chunker_factory=_build_chunker_from_config,
+            embedder_window_resolver=_build_embedder_window_resolver(cfg),
             parser_factory=parser_factory,
             embedder_factory=embedder_factory,
             vlm_factory=vlm_factory,
@@ -132,10 +144,12 @@ class IndexerWorkerActor:
         # Whether "default" resolves via global env/config fallbacks. This keeps
         # reload-on-miss from looping forever when no is_default row exists for a
         # type but the legacy config block can still serve the default endpoint.
+        transcriber_cfg = getattr(getattr(cfg, "loader", None), "transcriber", None)
         self._has_default_fallbacks = {
             "embedder": _global_embedder_endpoint_config(cfg) is not None,
             "llm": _global_llm_endpoint_config(cfg) is not None,
             "vlm": _global_vlm_endpoint_config(cfg) is not None,
+            "stt": bool(getattr(transcriber_cfg, "base_url", "") and getattr(transcriber_cfg, "model_name", "")),
         }
         self._has_default_fallback = self._has_default_fallbacks["llm"]
         self._model_endpoint_service: Any = None
@@ -170,6 +184,41 @@ class IndexerWorkerActor:
                 return
             await self._catalog_store.initialize()
             self._catalog_initialized = True
+
+    def _get_prompt_service(self) -> Any:
+        if self._prompt_service is None:
+            from services.orchestrators.prompt_service import PromptService
+
+            self._prompt_service = PromptService(
+                prompt_repo=self._catalog_store.prompt_repo,
+                config=self._cfg,
+            )
+        return self._prompt_service
+
+    async def _resolve_transcription_prompt(self) -> str | None:
+        """Return the current global ASR prompt without caching it in the worker.
+
+        ``OpenAIAudioClient`` invokes this directly before each request. The
+        resulting database lookup makes an Admin UI save visible to the next
+        transcription even though the parser client itself is long-lived.
+        """
+        try:
+            return await self._get_prompt_service().resolve_prompt("asr_transcription")
+        except Exception as exc:  # noqa: BLE001 - a prompt lookup must not fail a file
+            self._logger.warning(f"ASR transcription prompt resolution failed: {exc}")
+            return None
+
+    def _resolve_transcription_endpoint(self) -> Any | None:
+        """Return the current default OpenAI-compatible STT endpoint.
+
+        The parser holds this resolver rather than a static client config. The
+        indexer refreshes ``cfg.models`` from the endpoint registry on its
+        existing bounded refresh cycle, so a saved Admin UI endpoint takes
+        effect without recreating the long-lived Ray actor.
+        """
+        models = getattr(self._cfg, "models", None)
+        stt = getattr(models, "stt", None)
+        return stt.get("default") if stt is not None else None
 
     async def _ensure_registry_fresh(self, required_model_names: dict[str, list[str]] | list[str]) -> None:
         """Hydrate ``cfg.models`` from the DB so named endpoints resolve here.
@@ -271,17 +320,11 @@ class IndexerWorkerActor:
         ]
         if not enabled:
             return {}
-        if self._prompt_service is None:
-            from services.orchestrators.prompt_service import PromptService
-
-            self._prompt_service = PromptService(
-                prompt_repo=self._catalog_store.prompt_repo,
-                config=self._cfg,
-            )
+        prompt_service = self._get_prompt_service()
         resolved: dict[str, str] = {}
         for prompt_type, name_field, row_key in enabled:
             try:
-                resolved[row_key] = await self._prompt_service.resolve_prompt(
+                resolved[row_key] = await prompt_service.resolve_prompt(
                     prompt_type, names=[indexation_config.get(name_field)]
                 )
             except Exception as exc:  # noqa: BLE001 - resolution must never fail a file
@@ -308,6 +351,7 @@ class IndexerWorkerActor:
         worker_metadata = {key: value for key, value in metadata.items() if key != CONTENT_CLAIM_TOKEN_METADATA_KEY}
         try:
             try:
+                await self._await_worker_ref_registration(task_id)
                 await self._ensure_catalog()
                 await self._ensure_registry_fresh(_required_model_endpoint_names(indexation_config, embedder_name))
                 # Resolve the enrichment-stage prompts once for this file (partition
@@ -384,6 +428,28 @@ class IndexerWorkerActor:
             if not self._save_uploaded_files:
                 await delete_uploaded_file(path, self._logger)
 
+    async def _await_worker_ref_registration(self, task_id: str) -> None:
+        """Do not start indexing until cancellation can target this worker."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + _WORKER_REF_REGISTRATION_TIMEOUT_SECONDS
+        while loop.time() < deadline:
+            remaining = max(0.01, deadline - loop.time())
+            object_ref = await retry_idempotent_ray_actor_method(
+                lambda: self._task_state_manager.get_object_ref.remote(task_id),
+                recovery_timeout=remaining,
+                task_description=f"get_object_ref({task_id}) before indexing",
+            )
+            ref = object_ref.get("ref") if isinstance(object_ref, dict) else object_ref
+            if ref is not None:
+                return
+            await asyncio.sleep(min(_WORKER_REF_REGISTRATION_POLL_SECONDS, remaining))
+
+        await retry_idempotent_ray_actor_method(
+            lambda: self._task_state_manager.set_failed_if_not_cancelled.remote(task_id, _MISSING_WORKER_REF_ERROR),
+            task_description=f"set_failed_if_not_cancelled({task_id}) after missing worker ref",
+        )
+        raise RuntimeError(_MISSING_WORKER_REF_ERROR)
+
 
 @ray.remote
 class IndexerPool:
@@ -423,7 +489,7 @@ class IndexerPool:
                 get_if_exists=True,
                 lifetime="detached",
                 max_concurrency=max_tasks_per_worker,
-            ).remote()
+            ).remote(namespace)
             for i in range(pool_size)
         ]
         self._worker_names = [_indexer_worker_actor_name(i) for i in range(pool_size)]
@@ -432,6 +498,8 @@ class IndexerPool:
         self._release_tasks: set[asyncio.Task[Any]] = set()
         self._claim_store: Any = None
         self._claim_store_lock = asyncio.Lock()
+        self._namespace = namespace
+        self._task_state_manager: Any = None
 
     async def size(self) -> int:
         return len(self._workers)
@@ -472,17 +540,9 @@ class IndexerPool:
         one-element list — see the class docstring); in-flight bookkeeping is
         released when the task settles (success, failure, or cancellation).
         """
-        if not self._accepting_tasks:
-            raise RuntimeError("IndexerPool is draining and cannot accept new tasks")
-        idx = min(range(len(self._workers)), key=self._inflight.__getitem__)
-        self._inflight[idx] += 1
-        try:
-            ref = self._workers[idx].process_file.remote(**kwargs)
-        except Exception:
-            # Submission failed before a ref exists (e.g. unserializable args or
-            # a dead actor); roll back so load balancing stays accurate.
-            self._inflight[idx] -= 1
-            raise
+        task_id = str(kwargs.get("task_id") or "")
+        if not task_id:
+            raise ValueError("IndexerPool submission requires a task_id")
         metadata = kwargs.get("metadata") or {}
         content_sha256 = metadata.get("content_sha256")
         file_id = metadata.get("file_id")
@@ -495,11 +555,102 @@ class IndexerPool:
                 "content_sha256": str(content_sha256),
                 "claim_token": str(claim_token),
             }
+        if not self._accepting_tasks:
+            await self._guard_prelaunch_rejection(task_id, claim)
+            raise RuntimeError("IndexerPool is draining and cannot accept new tasks")
+        idx = min(range(len(self._workers)), key=self._inflight.__getitem__)
+        self._inflight[idx] += 1
+        try:
+            ref = self._workers[idx].process_file.remote(**kwargs)
+        except Exception:
+            # Submission failed before a ref exists (e.g. unserializable args or
+            # a dead actor); roll back so load balancing stays accurate.
+            self._inflight[idx] -= 1
+            await self._guard_prelaunch_rejection(task_id, claim)
+            raise
         task = asyncio.get_running_loop().create_task(self._release(idx, ref, claim=claim))
         # Keep a strong ref so the tracker isn't GC'd mid-flight (asyncio docs).
         self._release_tasks.add(task)
         task.add_done_callback(self._release_tasks.discard)
+        try:
+            registered = await self._register_worker_ref(task_id, ref)
+        except BaseException:
+            await self._guard_rejected_worker(task_id, ref)
+            raise
+        if not registered:
+            await self._guard_rejected_worker(task_id, ref)
+            raise RuntimeError(f"Task {kwargs.get('task_id')} was cancelled before worker ref registration")
         return [ref]
+
+    async def _guard_rejected_worker(self, task_id: str, ref: Any) -> None:
+        settlement = asyncio.create_task(self._cancel_worker_and_wait(task_id, ref))
+        self._release_tasks.add(settlement)
+        settlement.add_done_callback(self._release_tasks.discard)
+        await asyncio.shield(settlement)
+
+    async def _guard_prelaunch_rejection(self, task_id: str, claim: dict[str, str] | None) -> None:
+        cleanup = asyncio.create_task(self._finish_prelaunch_rejection(task_id, claim))
+        self._release_tasks.add(cleanup)
+        cleanup.add_done_callback(self._release_tasks.discard)
+        await asyncio.shield(cleanup)
+
+    async def _finish_prelaunch_rejection(self, task_id: str, claim: dict[str, str] | None) -> None:
+        try:
+            await self._finish_rejected_submission(task_id)
+        finally:
+            await self._release_content_claim(claim)
+
+    async def _cancel_worker_and_wait(self, task_id: str, ref: Any) -> None:
+        """Keep the submission fenced until a rejected worker has settled."""
+        try:
+            ray.cancel(ref, recursive=True)
+        except Exception:
+            # Cancellation is best-effort, but settlement is mandatory before
+            # the caller can safely release the content claim.
+            pass
+        await asyncio.gather(ref, return_exceptions=True)
+        await self._finish_rejected_submission(task_id)
+
+    async def _finish_rejected_submission(self, task_id: str) -> None:
+        task_state_manager = self._task_state_actor()
+        method_names = getattr(task_state_manager, "_ray_actor_method_names", None)
+        known_methods = set(method_names) if isinstance(method_names, (frozenset, list, set, tuple)) else None
+        if known_methods is None or "finish_rejected_submission" in known_methods:
+            method = getattr(task_state_manager, "finish_rejected_submission", None)
+            remote = getattr(method, "remote", None)
+            if remote is not None:
+                await retry_idempotent_ray_actor_method(
+                    lambda: remote(task_id),
+                    task_description=f"finish_rejected_submission({task_id}) from indexer pool",
+                )
+                return
+
+        # A TaskStateManager retained during a rolling deployment may predate
+        # the submission finalizer. It still exposes the atomic failure guard,
+        # which prevents rejected work from remaining QUEUED and consuming the
+        # uploader's pending-task quota indefinitely.
+        if known_methods is not None and "set_failed_if_not_cancelled" not in known_methods:
+            return
+        set_failed = getattr(task_state_manager, "set_failed_if_not_cancelled", None)
+        remote = getattr(set_failed, "remote", None)
+        if remote is not None:
+            await retry_idempotent_ray_actor_method(
+                lambda: remote(task_id, _REJECTED_SUBMISSION_ERROR),
+                task_description=f"set_failed_if_not_cancelled({task_id}) from indexer pool",
+            )
+
+    async def _register_worker_ref(self, task_id: str, ref: Any) -> bool:
+        task_state_manager = self._task_state_actor()
+        registered = await retry_idempotent_ray_actor_method(
+            lambda: task_state_manager.set_object_ref.remote(task_id, {"ref": ref}),
+            task_description=f"set_object_ref({task_id}) from indexer pool",
+        )
+        return registered is not False
+
+    def _task_state_actor(self) -> Any:
+        if self._task_state_manager is None:
+            self._task_state_manager = ray.get_actor("TaskStateManager", namespace=self._namespace)
+        return self._task_state_manager
 
     async def _release(self, idx: int, ref: Any, *, claim: dict[str, str] | None = None) -> None:
         renewal_task = None
@@ -513,17 +664,22 @@ class IndexerPool:
                 renewal_task.cancel()
                 await asyncio.gather(renewal_task, return_exceptions=True)
             if claim is not None:
-                try:
-                    repo = await self._claim_document_repo()
-                    await repo.release_content_sha256_claim(**claim)
-                except Exception as exc:  # noqa: BLE001 - stale claims expire automatically
-                    from core.utils.logging import get_logger
-
-                    get_logger().bind(file_id=claim["file_id"], partition=claim["partition"]).warning(
-                        "Failed to release settled content deduplication claim.",
-                        error=str(exc),
-                    )
+                await self._release_content_claim(claim)
             self._inflight[idx] -= 1
+
+    async def _release_content_claim(self, claim: dict[str, str] | None) -> None:
+        if claim is None:
+            return
+        try:
+            repo = await self._claim_document_repo()
+            await repo.release_content_sha256_claim(**claim)
+        except Exception as exc:  # noqa: BLE001 - stale claims expire automatically
+            from core.utils.logging import get_logger
+
+            get_logger().bind(file_id=claim["file_id"], partition=claim["partition"]).warning(
+                "Failed to release settled content deduplication claim.",
+                error=str(exc),
+            )
 
     async def _claim_document_repo(self) -> Any:
         if self._claim_store is None:
@@ -622,6 +778,10 @@ def _required_model_endpoint_names(
         "embedder": [],
         "llm": _required_llm_names(indexation_config),
         "vlm": [],
+        # Audio parsing resolves the global STT default at request time. Keep
+        # it in the refresh set so a worker with only file parsing (no LLM/VLM
+        # enrichment) still hydrates the newly editable endpoint registry.
+        "stt": ["default"],
     }
     if embedder_name:
         names["embedder"].append(embedder_name)
@@ -680,17 +840,45 @@ def _registry_reload_decision(
     return None
 
 
-def _build_chunker(cfg: Any) -> Any:
+def _build_chunker(cfg: Any, embedder_window: int | None = None) -> Any:
     from core.chunking.factory import create_chunker
 
-    chunker = create_chunker(cfg)
+    chunker = create_chunker(cfg, embedder_window)
     if not callable(getattr(chunker, "chunk", None)):
         raise TypeError("Configured chunker does not expose a chunk(document, partition) method")
     return chunker
 
 
-def _build_chunker_from_config(chunker_config: Any) -> Any:
-    return _build_chunker(SimpleNamespace(chunker=chunker_config))
+def _build_chunker_from_config(chunker_config: Any, embedder_window: int | None = None) -> Any:
+    return _build_chunker(SimpleNamespace(chunker=chunker_config), embedder_window)
+
+
+def _build_embedder_window_resolver(cfg: Settings) -> Any:
+    """Context window of the embedder a partition indexes with, in tokens.
+
+    The chunker derives its hard safety bound from this (see
+    ``core.chunking.factory.resolve_hard_max_tokens``): content past the window
+    is silently truncated before it is ever embedded, and a partition may point
+    at an embedder whose window differs from the deployment default. Resolution
+    mirrors ``_build_embedder_factory``: the endpoint's ``extra`` wins, then the
+    global ``embedder.max_model_len``.
+    """
+    models = getattr(cfg, "models", None)
+    named_embedders = models.embedder if models is not None else {}
+    fallback_cfg = _global_embedder_endpoint_config(cfg)
+    global_default = getattr(getattr(cfg, "embedder", None), "max_model_len", None)
+
+    def resolve(name: str = "default") -> int | None:
+        model_cfg = named_embedders.get(name)
+        if model_cfg is None and name == "default":
+            model_cfg = fallback_cfg
+        if model_cfg is not None:
+            window = model_cfg.extra.get("max_model_len")
+            if window:
+                return int(window)
+        return int(global_default) if global_default else None
+
+    return resolve
 
 
 def _build_parser_factory(parser: Any) -> Any:

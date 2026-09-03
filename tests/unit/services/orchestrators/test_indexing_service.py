@@ -735,7 +735,7 @@ def test_build_metadata_only_adds_keys_in_upload_metadata_server_keys(tmp_path):
     method ever starts injecting a new server-computed key without adding it to
     that constant too, the new key leaks into every callback going forward —
     this test is the safety net for that drift."""
-    from core.utils.conts import UPLOAD_METADATA_SERVER_KEYS
+    from core.utils.consts import UPLOAD_METADATA_SERVER_KEYS
 
     file_path = tmp_path / "doc.pdf"
     file_path.write_bytes(b"content")

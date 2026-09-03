@@ -7,7 +7,8 @@ Pipeline:
 2. If the file's suffix is in ``direct_upload_suffixes``, send it to the
    transcription endpoint as-is. Otherwise, decode through
    ``pydub.AudioSegment`` and re-encode as WAV (libsndfile-friendly).
-3. Optionally run a caller-provided language detector against the
+3. Optionally resolve a caller-provided transcription prompt and run a
+   caller-provided language detector against the
    prepared file (its result is forwarded to the OpenAI ``language``
    param). The detector is a plain async callable so this client stays
    free of Ray / model-loader coupling — the wiring layer can plug in a
@@ -25,24 +26,87 @@ ref-getter (now an injected callable).
 from __future__ import annotations
 
 import asyncio
-import logging
+import inspect
 import time
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from pathlib import Path
 
+from core.config.model_endpoints import (
+    MOSS_SPEAKER_AWARE_KEY,
+    STT_LANGUAGE_KEY,
+    STT_REQUEST_CONTROL_EXTRA_KEYS,
+    ModelEndpointConfig,
+)
 from core.indexing.parsers.document_parser import BaseClientParser
 from core.models.document import Document, DocumentType, ProcessedDocument, TextBlock
+from core.utils.logging import get_logger
 from openai import AsyncOpenAI
 from pydub import AudioSegment
+from services.inference.parsers.moss_transcript import normalize_moss_speaker_aware_transcript
 
-logger = logging.getLogger(__name__)
+logger = get_logger()
 
 
 # Suffixes the transcription backend can ingest as-is, avoiding the ~10x
 # size inflation from WAV conversion (Scaleway cap: 100 MB; OpenAI: 25 MB).
 _DEFAULT_DIRECT_UPLOAD_SUFFIXES: tuple[str, ...] = (".mp3", ".m4a", ".ogg", ".webm", ".wav")
+# ``AsyncOpenAI`` accepts an empty string and omits its Authorization header,
+# which is required for endpoints that deliberately reject authentication.
+_ANONYMOUS_API_KEY = ""
 
 LanguageDetector = Callable[[Path], Awaitable[str | None]]
+TranscriptionPromptResolver = Callable[[], Awaitable[str | None]]
+TranscriptionEndpointResolver = Callable[[], ModelEndpointConfig | None | Awaitable[ModelEndpointConfig | None]]
+
+
+class _EndpointConcurrencyLimiter:
+    """An async limiter whose capacity can change without replacing active work."""
+
+    def __init__(self, limit: int) -> None:
+        self._limit = max(1, limit)
+        self._active = 0
+        self._condition = asyncio.Condition()
+
+    @property
+    def limit(self) -> int:
+        """Return the current maximum number of concurrent requests."""
+        return self._limit
+
+    async def set_limit(self, limit: int) -> None:
+        """Apply a new limit before allowing any further queued request."""
+        async with self._condition:
+            self._limit = max(1, limit)
+            self._condition.notify_all()
+
+    async def __aenter__(self) -> _EndpointConcurrencyLimiter:
+        async with self._condition:
+            await self._condition.wait_for(lambda: self._active < self._limit)
+            self._active += 1
+        return self
+
+    async def __aexit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        async with self._condition:
+            self._active -= 1
+            self._condition.notify_all()
+
+
+@dataclass
+class _EndpointLimiterEntry:
+    """Limiter plus the active-or-queued leases that keep it reusable."""
+
+    limiter: _EndpointConcurrencyLimiter
+    leases: int = 0
+
+
+@dataclass
+class _EndpointClientEntry:
+    """Reusable HTTP client plus the requests that keep it alive."""
+
+    client: AsyncOpenAI
+    leases: int = 0
+    retired: bool = False
 
 
 class OpenAIAudioClient(BaseClientParser):
@@ -57,13 +121,25 @@ class OpenAIAudioClient(BaseClientParser):
         timeout: float = 120.0,
         direct_upload_suffixes: Iterable[str] = _DEFAULT_DIRECT_UPLOAD_SUFFIXES,
         language_detector: LanguageDetector | None = None,
+        transcription_prompt_resolver: TranscriptionPromptResolver | None = None,
+        transcription_endpoint_resolver: TranscriptionEndpointResolver | None = None,
         concurrency_limit: int = 1,
     ) -> None:
+        self._base_url = base_url
+        self._api_key = api_key
+        self._timeout = timeout
         self._client = AsyncOpenAI(base_url=base_url, api_key=api_key, timeout=timeout)
         self._model = model
         self._direct_upload_suffixes = {s.lower() for s in direct_upload_suffixes}
         self._language_detector = language_detector
+        self._transcription_prompt_resolver = transcription_prompt_resolver
+        self._transcription_endpoint_resolver = transcription_endpoint_resolver
         self._semaphore = asyncio.Semaphore(max(1, concurrency_limit))
+        self._endpoint_limiters: dict[tuple[str, str], _EndpointLimiterEntry] = {}
+        self._endpoint_registry_lock = asyncio.Lock()
+        self._current_endpoint_limiter_key: tuple[str, str] | None = None
+        self._endpoint_clients: dict[tuple[str, str, float], _EndpointClientEntry] = {}
+        self._endpoint_client_lock = asyncio.Lock()
 
     def supported_types(self) -> list[str]:
         return [DocumentType.AUDIO.value, DocumentType.VIDEO.value]
@@ -78,24 +154,33 @@ class OpenAIAudioClient(BaseClientParser):
         start = time.time()
         try:
             async with document.as_temporary_file() as input_path:
-                async with self._semaphore:
+                endpoint_config = await self._resolve_transcription_endpoint()
+                async with self._transcription_slot(endpoint_config):
                     upload_path, cleanup = await self._prepare_upload(input_path)
                     try:
-                        language: str | None = None
-                        if self._language_detector is not None:
+                        language = self._language_hint(endpoint_config)
+                        if language is None and self._language_detector is not None:
                             try:
                                 language = await self._language_detector(upload_path)
                             except Exception as exc:
-                                logger.warning("Language detection failed: %s", exc)
-                        text = await self._transcribe(upload_path, language=language)
+                                logger.bind(error=str(exc)).warning("Language detection failed")
+                        prompt = await self._resolve_prompt()
+                        text = await self._transcribe(
+                            upload_path,
+                            language=language,
+                            prompt=prompt,
+                            endpoint_config=endpoint_config,
+                        )
                     finally:
                         if cleanup:
                             await asyncio.to_thread(upload_path.unlink, True)
         except Exception:
-            logger.exception("OpenAI audio transcription failed (id=%s)", document.id)
+            logger.bind(document_id=document.id).exception("OpenAI audio transcription failed")
             raise
 
-        logger.info("OpenAI audio transcribed (id=%s) in %.2fs", document.id, time.time() - start)
+        logger.bind(document_id=document.id, elapsed_seconds=round(time.time() - start, 2)).info(
+            "OpenAI audio transcribed"
+        )
 
         text = text.strip()
         text_blocks = [TextBlock(text=text, page_number=1)] if text else []
@@ -117,14 +202,268 @@ class OpenAIAudioClient(BaseClientParser):
             return input_path, False
 
         sound = await asyncio.to_thread(AudioSegment.from_file, input_path)
-        logger.info("Converting audio to WAV (duration=%.1fs)", len(sound) / 1000)
+        logger.bind(duration_seconds=round(len(sound) / 1000, 1)).info("Converting audio to WAV")
         wav_path = input_path.with_suffix(".wav")
         await asyncio.to_thread(sound.export, wav_path, format="wav")
         return wav_path, True
 
-    async def _transcribe(self, path: Path, *, language: str | None) -> str:
-        kwargs: dict[str, object] = {"model": self._model, "file": path}
-        if language:
-            kwargs["language"] = language
-        response = await self._client.audio.transcriptions.create(**kwargs)
-        return response.text or ""
+    async def _resolve_prompt(self) -> str | None:
+        """Resolve the current managed transcription prompt, if one is wired.
+
+        Prompt resolution happens for every file instead of at client creation
+        time, so an Admin UI edit is visible to the next audio request without
+        a worker restart. A lookup failure degrades to the endpoint's native
+        transcription behaviour rather than failing indexing.
+        """
+        if self._transcription_prompt_resolver is None:
+            return None
+        try:
+            prompt = await self._transcription_prompt_resolver()
+        except Exception as exc:  # noqa: BLE001 - prompt storage must not block transcription
+            logger.bind(error=str(exc)).warning("Transcription prompt resolution failed")
+            return None
+        return prompt.strip() if prompt and prompt.strip() else None
+
+    async def _resolve_transcription_endpoint(self) -> ModelEndpointConfig | None:
+        """Resolve the current STT default, falling back safely to env config.
+
+        Indexer workers resolve from their refreshed local registry, while the
+        direct extraction path may await a fresh registry reload. Keeping that
+        distinction behind the resolver lets both paths share this client.
+        """
+        if self._transcription_endpoint_resolver is None:
+            return None
+        try:
+            endpoint = self._transcription_endpoint_resolver()
+            if inspect.isawaitable(endpoint):
+                endpoint = await endpoint
+        except Exception as exc:  # noqa: BLE001 - endpoint lookup must not block indexing
+            logger.bind(error=str(exc)).warning("STT endpoint resolution failed")
+            return None
+        if endpoint is None:
+            return None
+        if not endpoint.endpoint or not endpoint.model_name:
+            logger.warning("Ignoring incomplete configured STT endpoint; using TRANSCRIBER_* fallback")
+            return None
+        return endpoint
+
+    @staticmethod
+    def _endpoint_limiter_key(endpoint: ModelEndpointConfig) -> tuple[str, str]:
+        """Return the effective serving identity used for concurrency scope."""
+        return (endpoint.endpoint.strip().rstrip("/"), (endpoint.model_name or "").strip())
+
+    def _prune_endpoint_limiters(self) -> None:
+        """Drop drained entries except the endpoint currently selected."""
+        retired = [
+            key
+            for key, entry in self._endpoint_limiters.items()
+            if key != self._current_endpoint_limiter_key and entry.leases == 0
+        ]
+        for key in retired:
+            del self._endpoint_limiters[key]
+
+    async def _release_endpoint_lease(self, key: tuple[str, str], entry: _EndpointLimiterEntry) -> None:
+        """Release one registered lease and prune a drained retired entry."""
+        async with self._endpoint_registry_lock:
+            entry.leases -= 1
+            self._prune_endpoint_limiters()
+
+    @asynccontextmanager
+    async def _transcription_slot(self, endpoint: ModelEndpointConfig | None) -> AsyncIterator[None]:
+        """Limit one request without replacing a limiter still in use.
+
+        Registry bookkeeping is serialized, but waiting for endpoint capacity
+        happens after releasing the registry lock. Each worker owns its own
+        registry, so configured limits remain per worker rather than global.
+        """
+        if endpoint is None:
+            async with self._endpoint_registry_lock:
+                self._current_endpoint_limiter_key = None
+                self._prune_endpoint_limiters()
+            async with self._semaphore:
+                yield
+            return
+
+        key = self._endpoint_limiter_key(endpoint)
+        entry: _EndpointLimiterEntry | None = None
+        lease_registered = False
+        try:
+            async with self._endpoint_registry_lock:
+                entry = self._endpoint_limiters.get(key)
+                if entry is None:
+                    entry = _EndpointLimiterEntry(_EndpointConcurrencyLimiter(endpoint.batch_size))
+                    self._endpoint_limiters[key] = entry
+                elif entry.limiter.limit != endpoint.batch_size:
+                    await entry.limiter.set_limit(endpoint.batch_size)
+                entry.leases += 1
+                lease_registered = True
+                self._current_endpoint_limiter_key = key
+                self._prune_endpoint_limiters()
+
+            async with entry.limiter:
+                yield
+        finally:
+            if lease_registered and entry is not None:
+                await self._release_endpoint_lease(key, entry)
+
+    @staticmethod
+    def _language_hint(endpoint: ModelEndpointConfig | None) -> str | None:
+        """Read the optional STT language hint from the registered endpoint."""
+        if endpoint is None:
+            return None
+        language = endpoint.extra.get(STT_LANGUAGE_KEY)
+        if isinstance(language, str) and language.strip():
+            return language.strip()
+        return None
+
+    @staticmethod
+    def _request_extra(endpoint: ModelEndpointConfig | None) -> dict[str, object]:
+        """Return provider-specific transcription request options from endpoint extra.
+
+        The Admin UI deliberately stores generic, non-secret options in
+        ``extra`` so MOSS, Whisper, and other OpenAI-compatible providers can
+        receive their own request fields without adding a provider-specific
+        OpenRAG configuration surface. Connection metadata is excluded here:
+        the API key configures the client and the language hint is sent through
+        the standard ``language`` parameter.
+        """
+        if endpoint is None:
+            return {}
+        return {key: value for key, value in endpoint.extra.items() if key not in STT_REQUEST_CONTROL_EXTRA_KEYS}
+
+    @staticmethod
+    def _response_text(response: object) -> str:
+        """Extract transcript text from JSON and plain-text OpenAI responses."""
+        if isinstance(response, str):
+            return response
+        text = getattr(response, "text", None)
+        return text if isinstance(text, str) else ""
+
+    @staticmethod
+    def _moss_speaker_aware_enabled(endpoint: ModelEndpointConfig | None) -> bool:
+        """Whether OpenRAG should normalize a MOSS diarized response."""
+        return endpoint is not None and endpoint.extra.get(MOSS_SPEAKER_AWARE_KEY) is True
+
+    def _is_fallback_endpoint(self, endpoint: ModelEndpointConfig) -> bool:
+        """Whether *endpoint* is the legacy ``TRANSCRIBER_*`` destination."""
+        return endpoint.endpoint.strip().rstrip("/") == self._base_url.strip().rstrip("/")
+
+    @staticmethod
+    def _endpoint_client_key(endpoint: ModelEndpointConfig) -> tuple[str, str, float]:
+        """Return the effective connection identity for a configured endpoint."""
+        api_key = endpoint.extra.get("api_key")
+        resolved_api_key = api_key.strip() if isinstance(api_key, str) and api_key.strip() else _ANONYMOUS_API_KEY
+        return (endpoint.endpoint.strip().rstrip("/"), resolved_api_key, float(endpoint.timeout))
+
+    def _retire_endpoint_clients(self, current_key: tuple[str, str, float] | None) -> list[AsyncOpenAI]:
+        """Mark old configurations retired and detach those with no users."""
+        closable: list[AsyncOpenAI] = []
+        for key, entry in list(self._endpoint_clients.items()):
+            entry.retired = key != current_key
+            if entry.retired and entry.leases == 0:
+                del self._endpoint_clients[key]
+                closable.append(entry.client)
+        return closable
+
+    @staticmethod
+    async def _close_endpoint_clients(clients: Iterable[AsyncOpenAI]) -> None:
+        """Close retired clients without masking the active transcription."""
+        for client in clients:
+            try:
+                await client.close()
+            except Exception as exc:  # noqa: BLE001 - cleanup must not fail a request
+                logger.bind(error=str(exc)).warning("Failed to close retired STT client")
+
+    @asynccontextmanager
+    async def _transcription_client(
+        self,
+        endpoint: ModelEndpointConfig | None,
+    ) -> AsyncIterator[tuple[AsyncOpenAI, str]]:
+        """Lease a pooled client and retire changed endpoint configurations safely."""
+        if endpoint is None:
+            async with self._endpoint_client_lock:
+                closable = self._retire_endpoint_clients(None)
+            await self._close_endpoint_clients(closable)
+            yield self._client, self._model
+            return
+
+        key = self._endpoint_client_key(endpoint)
+        resolved_base_url, resolved_api_key, resolved_timeout = key
+        # A resolved registry endpoint owns its credentials. In particular, an
+        # administrator clearing its key must not silently restore the legacy
+        # TRANSCRIBER_API_KEY merely because the endpoint URL happens to match.
+        # The environment fallback remains available only when no endpoint was
+        # resolved above.
+        if (
+            self._is_fallback_endpoint(endpoint)
+            and resolved_api_key == self._api_key
+            and endpoint.timeout == self._timeout
+        ):
+            async with self._endpoint_client_lock:
+                closable = self._retire_endpoint_clients(None)
+            await self._close_endpoint_clients(closable)
+            yield self._client, endpoint.model_name or self._model
+            return
+
+        entry: _EndpointClientEntry | None = None
+        try:
+            async with self._endpoint_client_lock:
+                entry = self._endpoint_clients.get(key)
+                if entry is None:
+                    entry = _EndpointClientEntry(
+                        AsyncOpenAI(
+                            base_url=resolved_base_url,
+                            api_key=resolved_api_key,
+                            timeout=resolved_timeout,
+                        )
+                    )
+                    self._endpoint_clients[key] = entry
+                entry.leases += 1
+                closable = self._retire_endpoint_clients(key)
+            await self._close_endpoint_clients(closable)
+            yield entry.client, endpoint.model_name or self._model
+        finally:
+            if entry is not None:
+                async with self._endpoint_client_lock:
+                    entry.leases -= 1
+                    closable = []
+                    if entry.retired and entry.leases == 0 and self._endpoint_clients.get(key) is entry:
+                        del self._endpoint_clients[key]
+                        closable.append(entry.client)
+                await self._close_endpoint_clients(closable)
+
+    async def _transcribe(
+        self,
+        path: Path,
+        *,
+        language: str | None,
+        prompt: str | None,
+        endpoint_config: ModelEndpointConfig | None = None,
+    ) -> str:
+        async with self._transcription_client(endpoint_config) as (client, model):
+            kwargs: dict[str, object] = {"model": model, "file": path}
+            if prompt:
+                kwargs["prompt"] = prompt
+            if language:
+                kwargs["language"] = language
+            request_extra = self._request_extra(endpoint_config)
+            # The OpenAI SDK returns a plain string for ``response_format=text``.
+            # Pass that standard option through its typed argument so both its
+            # request encoding and response handling stay compatible with the SDK.
+            response_format = request_extra.pop("response_format", None)
+            if isinstance(response_format, str) and response_format.strip():
+                kwargs["response_format"] = response_format
+            elif response_format is not None:
+                request_extra["response_format"] = response_format
+            if request_extra:
+                kwargs["extra_body"] = request_extra
+            logger.bind(
+                model=model,
+                language=language or "auto",
+                configured_stt_endpoint=endpoint_config is not None,
+            ).info("Sending audio transcription request")
+            response = await client.audio.transcriptions.create(**kwargs)
+            transcript = self._response_text(response)
+            if self._moss_speaker_aware_enabled(endpoint_config):
+                return normalize_moss_speaker_aware_transcript(transcript)
+            return transcript

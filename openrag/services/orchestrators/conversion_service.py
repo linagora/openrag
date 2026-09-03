@@ -28,7 +28,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from core.utils.conts import is_internal_metadata_key
+from core.utils.consts import is_internal_metadata_key
 from core.utils.logging import get_logger
 from core.utils.text import sanitize_extracted_text
 

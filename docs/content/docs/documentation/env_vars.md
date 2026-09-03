@@ -104,7 +104,9 @@ For local whisper loader, here are the options to use
 | `WHISPER_NUM_GPUS` | `float` | 0.01 | Fraction of a GPU reserved per Whisper worker in Ray's resource accounting. |
 
 ##### OpenAI-compatible audio Loader ( `OpenAIAudioLoader` )
-The `OpenAIAudioLoader` option, allows to use openai-compatible audio endpoint/service to transcribe audio endpoint by providing the following variables: **`TRANSCRIBER_BASE_URL`, `TRANSCRIBER_API_KEY` and `TRANSCRIBER_MODEL`**
+The `OpenAIAudioLoader` option can use any OpenAI-compatible transcription service. Configure its URL, credentials, and model with **`TRANSCRIBER_BASE_URL`**, **`TRANSCRIBER_API_KEY`**, and **`TRANSCRIBER_MODEL`**.
+
+On first startup, these values seed the default **STT** endpoint in the Admin UI's **Model Endpoints** page. Once an STT endpoint is saved, it is the editable source for `OpenAIAudioLoader`: use it to change the OpenAI-compatible `/v1` URL, model, API key, timeout, concurrency, optional language hint, and non-secret provider request options for MOSS, Whisper, or another compatible provider. No OpenRAG restart is required: direct extraction reloads the endpoint before each audio request, and indexer workers refresh it within one minute. The transcription endpoint must implement `/audio/transcriptions`.
 
 The audio is automatically segmented into chunks using silence detection, then transcribes these chunks in parallel for optimal speed and accuracy.
 
@@ -128,14 +130,40 @@ Here are some other variables related to openai-compatible endpoint.
 |----------|------|---------|-------------|
 | `TRANSCRIBER_BASE_URL` | `str` | `http://transcriber:8000/v1` | Base URL for the transcriber API (OpenAI-compatible endpoint). |
 | `TRANSCRIBER_API_KEY` | `str` | `EMPTY` | Authentication key for transcriber service requests. |
-| `TRANSCRIBER_MODEL` | `str` | `openai/whisper-large-v3-turbo` | Whisper model identifier served by VLLM for speech-to-text conversion. Other options: `openai/whisper-small`, `openai/whisper-large-v3-turbo`, etc.|
-| `TRANSCRIBER_MAX_CONCURRENT_CHUNKS` | `int` | `20` | Maximum number of audio chunks processed simultaneously. Increasing this value improves throughput when sufficient GPU resources are available. |
+| `TRANSCRIBER_MODEL` | `str` | `openai/whisper-large-v3-turbo` | Model identifier exposed by the transcription endpoint. |
+| `TRANSCRIBER_MAX_CONCURRENT_CHUNKS` | `int` | `20` | Per-worker concurrency for the initial STT endpoint seed and the fallback when no saved STT endpoint is available. For a saved endpoint, set **Concurrency per worker** in **Admin UI → Model Endpoints**. |
 | `TRANSCRIBER_TIMEOUT` | `int` | `3600` | Maximum duration in seconds allowed for a single transcription request. |
 | `TRANSCRIBER_DIRECT_UPLOAD_SUFFIXES` | `str` | `.wav\|.flac\|.ogg\|.mp3\|.mp4\|.m4a\|.webm\|.mpeg\|.mpga` | Pipe-delimited list of audio file suffixes uploaded to the transcriber as-is (no WAV conversion). Other formats are re-encoded to WAV before upload. Trim this list when your transcriber backend (e.g. vLLM/libsndfile) only accepts a subset. |
 | `USE_WHISPER_LANG_DETECTOR` | `bool` | `true` | When enabled, uses a local Whisper-based language detector to identify the source audio language before transcription. |
 | `TRANSCRIBER_PORT` | `int` | `8002` | Host port the **bundled** vLLM Whisper service (`TRANSCRIBER_COMPOSE=extern/transcriber.yaml`) is published on (maps to container port 8000). Only read once you uncomment the `ports:` mapping in that compose include — by default the service is reachable over the Docker network only. |
 
 </div>
+
+:::tip[MOSS-Transcribe-Diarize with vLLM]
+
+`OpenMOSS-Team/MOSS-Transcribe-Diarize` uses this same endpoint and produces timestamped, speaker-labelled text, so no new OpenRAG loader is needed. Set `AUDIOLOADER=OpenAIAudioLoader`, point the STT endpoint at the vLLM server, and use the model name advertised by `/v1/models`. For example, when vLLM is started with `--served-model-name moss-transcribe-diarize`, enter `moss-transcribe-diarize` rather than the Hugging Face repository ID. Set `USE_WHISPER_LANG_DETECTOR=false` when you do not need the local Whisper language detector.
+
+For a MOSS server bound to `127.0.0.1:8001`, use `http://127.0.0.1:8001/v1` only when OpenRAG runs on that host. A containerized OpenRAG needs a host-reachable address such as `http://host.docker.internal:8001/v1` (plus Docker's host-gateway mapping on Linux). Match each OpenRAG worker's saved **Concurrency per worker** to the vLLM capacity; with `--max-num-seqs 1`, set it to `1` when one worker serves the endpoint, or lower it so all workers together stay within capacity. `TRANSCRIBER_MAX_CONCURRENT_CHUNKS` only controls the initial seed and fallback.
+
+The bundled transcriber image is pinned for Whisper and predates MOSS support. Serve MOSS with the vLLM build specified by the model authors, then use it as the external transcription endpoint. Its advanced STT request options are sent unchanged to vLLM, so configure an appropriate output-token budget and deterministic JSON output on the endpoint. Manage its instruction in **Admin UI → Prompt Library → Transcription**. Changes apply to the next transcription without a restart. OpenRAG leaves this global prompt empty by default so Whisper, MOSS, and other providers keep their native behavior.
+
+On a deployment dedicated to MOSS, you can paste an instruction like this into the Prompt Library:
+
+```text
+Transcribe the audio exactly in the original spoken language.
+
+Output text only. Never output timestamps, timecodes, or durations.
+When multiple speakers are clearly present, prefix each speech segment with
+[S01], [S02], [S03], and keep the same ID for the same speaker.
+
+Preserve the original language and wording. Do not translate, summarize,
+paraphrase, correct, or invent missing words.
+```
+
+For a MOSS model, **Admin UI → Model Endpoints** offers an optional **Speaker-aware MOSS transcript** setting. It removes boundary timecodes when the response is unambiguously recognized as a supported MOSS transcript and keeps labels only when more than one speaker is present. Ambiguous responses are preserved unchanged to prevent content loss. This also works with served-model aliases and is never sent to the provider.
+
+Add hotwords only when they are relevant to your own deployment. They bias recognition vocabulary and should not be part of OpenRAG's global default. When adding hotwords or a format instruction, include the desired timestamp and speaker-label format in the prompt as well.
+:::
 
 :::note[About whisper with vLLM and language detection]
 As noted in [this PR](https://github.com/linagora/openrag/pull/134), vLLM's Whisper implementation could mis-detect the language and output English regardless of the source audio. For details, see [this vLLM issue](https://github.com/vllm-project/vllm/issues/14174).
@@ -410,6 +438,7 @@ The RAG pipeline ships with preconfigured prompts bundled inside the package at 
 | `query_contextualizer_tmpl.txt` | Template for adding context to user queries |
 | `chunk_contextualizer_tmpl.txt` | Template for contextualizing document chunks during indexing |
 | `image_captioning_tmpl.txt` | Template for generating image descriptions using the VLM |
+| `asr_transcription_tmpl.txt` | Empty by default so external transcription keeps the provider's native behavior. Configure it in Prompt Library when `AUDIOLOADER=OpenAIAudioLoader`. |
 | `hyde.txt` | Hypothetical Document Embeddings (HyDE) query expansion template |
 | `multi_query_pmpt_tmpl.txt` | Template for generating multiple query variations |
 

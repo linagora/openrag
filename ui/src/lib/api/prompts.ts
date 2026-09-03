@@ -13,7 +13,7 @@ import { request } from "./client";
 // no partition-assignment endpoint — selection lives in the preset/partition
 // editors (see presets.tsx / partitions).
 
-// The 8 managed prompt types (mirrors PromptTypeName on the backend).
+// The managed prompt types (mirrors PromptTypeName on the backend).
 export type PromptType =
   | "sys_prompt"
   | "query_contextualizer"
@@ -21,7 +21,8 @@ export type PromptType =
   | "image_captioning"
   | "hyde"
   | "multi_query"
-  | "topic_tagger";
+  | "topic_tagger"
+  | "asr_transcription";
 
 export interface PromptResponse {
   id: string;

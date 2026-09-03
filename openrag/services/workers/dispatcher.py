@@ -9,11 +9,13 @@ from typing import Any
 from core.indexing.dispatcher import IndexingDispatcher
 from core.models.catalog import (
     CONTENT_CLAIM_TOKEN_METADATA_KEY,
+    COPY_CONTENT_CLAIM_TOKEN_PREFIX,
+    INDEXING_CONTENT_CLAIM_TOKEN_PREFIX,
     TASK_CREATED_AT_METADATA_KEY,
     TASK_FINISHED_AT_METADATA_KEY,
 )
-from core.utils.conts import is_internal_metadata_key, strip_internal_metadata
-from core.utils.exceptions import ConflictError
+from core.utils.consts import is_internal_metadata_key, strip_internal_metadata
+from core.utils.exceptions import ConflictError, mark_indexing_worker_may_be_running
 from core.utils.logging import get_logger
 from ray.exceptions import TaskCancelledError
 from services.workers.ray_utils import call_ray_actor_with_timeout, retry_idempotent_ray_actor_method
@@ -127,6 +129,55 @@ class WorkerDispatcher(IndexingDispatcher):
         )
         return True
 
+    async def _active_content_claim_tokens(self, partition: str) -> set[str] | None:
+        """Return task tokens whose content reservations must be preserved.
+
+        ``None`` disables orphan recovery for an older TaskStateManager that
+        cannot provide the active-task lookup.  That fallback keeps rolling
+        deployments conservative.
+        """
+        remote = _remote_actor_method(self._tsm, "get_content_claim_task_ids")
+        if remote is None:
+            return None
+        task_ids = await self._call_method(
+            lambda: remote(partition=partition),
+            task_description=f"get_active_content_claim_tokens({partition})",
+        )
+        if not isinstance(task_ids, (list, set, tuple)):
+            raise RuntimeError("TaskStateManager returned invalid claim owners for content claim recovery")
+        return {f"{INDEXING_CONTENT_CLAIM_TOKEN_PREFIX}{task_id}" for task_id in task_ids}
+
+    async def _recover_inactive_content_claim(self, *, partition: str, content_sha256: str) -> bool:
+        get_lease = getattr(self._document_repo, "get_recoverable_content_sha256_claim", None)
+        release_lease = getattr(self._document_repo, "release_recoverable_content_sha256_claim", None)
+        if not callable(get_lease) or not callable(release_lease):
+            return False
+
+        lease = await get_lease(partition=partition, content_sha256=content_sha256)
+        if lease is None:
+            return False
+        active_claim_tokens = await self._active_content_claim_tokens(partition)
+        if active_claim_tokens is None or lease.claim_token in active_claim_tokens:
+            return False
+
+        # The lease contains the expiry value observed before the fresh owner
+        # lookup. A concurrent renewal changes that value, so the repository's
+        # conditional delete fails instead of reclaiming a live reservation.
+        return bool(await release_lease(lease))
+
+    async def _begin_worker_submission(self, task_id: str) -> bool:
+        remote = _remote_actor_method(self._tsm, "begin_worker_submission")
+        if remote is None:
+            # Older task-state actors do not recover claims early, so their
+            # existing conservative behavior is safe during a rolling deploy.
+            return True
+        accepted = await retry_idempotent_ray_actor_method(
+            lambda: remote(task_id),
+            recovery_timeout=self._timeout,
+            task_description=f"begin_worker_submission({task_id})",
+        )
+        return accepted is True
+
     async def _begin_file_delete_fence(self, *, file_id: str, partition: str, fence_id: str) -> None:
         remote = _remote_actor_method(self._tsm, "begin_file_delete")
         if remote is None:
@@ -196,16 +247,23 @@ class WorkerDispatcher(IndexingDispatcher):
         task_id = uuid.uuid4().hex
         file_id = str(metadata.get("file_id") or "")
         content_sha256 = metadata.get("content_sha256")
+        content_claim_token = f"{INDEXING_CONTENT_CLAIM_TOKEN_PREFIX}{task_id}"
         claimed_content = False
 
         if content_sha256:
-            conflicting_file_id = await self._document_repo.claim_content_sha256(
-                file_id=file_id,
+            claim_kwargs = {
+                "file_id": file_id,
+                "partition": partition,
+                "content_sha256": content_sha256,
+                "claim_token": content_claim_token,
+                "replace": replace,
+            }
+            conflicting_file_id = await self._document_repo.claim_content_sha256(**claim_kwargs)
+            if conflicting_file_id is not None and await self._recover_inactive_content_claim(
                 partition=partition,
                 content_sha256=content_sha256,
-                claim_token=task_id,
-                replace=replace,
-            )
+            ):
+                conflicting_file_id = await self._document_repo.claim_content_sha256(**claim_kwargs)
             if conflicting_file_id is not None:
                 raise ConflictError(
                     f"This document already exists in partition '{partition}'.",
@@ -234,7 +292,7 @@ class WorkerDispatcher(IndexingDispatcher):
                     file_id=file_id,
                     partition=partition,
                     content_sha256=content_sha256,
-                    claim_token=task_id,
+                    claim_token=content_claim_token,
                 )
             raise
         if not accepted:
@@ -243,17 +301,18 @@ class WorkerDispatcher(IndexingDispatcher):
                     file_id=file_id,
                     partition=partition,
                     content_sha256=content_sha256,
-                    claim_token=task_id,
+                    claim_token=content_claim_token,
                 )
             raise RuntimeError(
                 f"Task {task_id} was rejected because file {file_id!r} in partition {partition!r} is being deleted"
             )
 
         task: Any | None = None
+        submission_started = False
         try:
             worker_metadata = dict(metadata)
             if claimed_content:
-                worker_metadata[CONTENT_CLAIM_TOKEN_METADATA_KEY] = task_id
+                worker_metadata[CONTENT_CLAIM_TOKEN_METADATA_KEY] = content_claim_token
             submit_kwargs: dict[str, Any] = {
                 "task_id": task_id,
                 "path": path,
@@ -269,37 +328,51 @@ class WorkerDispatcher(IndexingDispatcher):
             }
             if require_existing_partition:
                 submit_kwargs[_REQUIRE_EXISTING_PARTITION_KWARG] = True
+            if claimed_content:
+                still_owned = await self._document_repo.renew_content_sha256_claim(
+                    file_id=file_id,
+                    partition=partition,
+                    content_sha256=content_sha256,
+                    claim_token=content_claim_token,
+                )
+                if not still_owned:
+                    raise ConflictError(
+                        "The content reservation expired before indexing started. Please retry the upload.",
+                        code="DOCUMENT_CONTENT_CLAIM_LOST",
+                    )
+            if not await self._begin_worker_submission(task_id):
+                raise RuntimeError(f"Task {task_id} was rejected before worker submission")
+            submission_started = True
             task = await self._submit_indexing_task(
                 task_id,
                 submit_kwargs,
                 allow_legacy_retry=allow_legacy_require_existing_partition_retry,
             )
-
-            registered = await self._call_method(
-                lambda: self._tsm.set_object_ref.remote(task_id, {"ref": task}),
-                task_description=f"set_object_ref({task_id})",
-            )
-            if registered is False:
-                raise RuntimeError(f"Task {task_id} was cancelled before worker ref registration")
             self._track_completion(task_id, task)
-        except BaseException:
-            mark_submit_failed = True
+        except BaseException as exc:
+            submission_outcome_unknown = submission_started and task is None
+            mark_submit_failed = not submission_outcome_unknown
             try:
                 if task is not None:
                     mark_submit_failed = await self._cancel_submitted_task(task_id, task)
                     if mark_submit_failed:
                         await self._cleanup_submitted_vectors(task_id, metadata=metadata, partition=partition)
-                await self._record_finished_at(task_id, task_details)
-                if mark_submit_failed:
-                    await self._mark_submit_failed(task_id, traceback.format_exc())
+                if not submission_outcome_unknown:
+                    await self._record_finished_at(task_id, task_details)
+                    if mark_submit_failed:
+                        await self._mark_submit_failed(task_id, traceback.format_exc())
             finally:
-                if claimed_content and (task is None or mark_submit_failed):
+                if claimed_content and not submission_outcome_unknown and (task is None or mark_submit_failed):
                     await self._document_repo.release_content_sha256_claim(
                         file_id=file_id,
                         partition=partition,
                         content_sha256=content_sha256,
-                        claim_token=task_id,
+                        claim_token=content_claim_token,
                     )
+            if submission_outcome_unknown:
+                # The pool may have launched a worker that has not read the
+                # uploaded file yet; tell the caller to keep it on disk.
+                mark_indexing_worker_may_be_running(exc)
             raise
         return task_id
 
@@ -514,7 +587,7 @@ class WorkerDispatcher(IndexingDispatcher):
         target_partition = metadata.get("partition", partition)
         content_sha256 = metadata.get("content_sha256")
         claimed_content = False
-        claim_token = uuid.uuid4().hex
+        claim_token = f"{COPY_CONTENT_CLAIM_TOKEN_PREFIX}{uuid.uuid4().hex}"
         if content_sha256:
             conflicting_file_id = await self._document_repo.claim_content_sha256(
                 file_id=target_file_id,
@@ -625,13 +698,6 @@ class WorkerDispatcher(IndexingDispatcher):
                 return False
 
         ray.cancel(obj_ref["ref"], recursive=True)
-        finish_cancellation = _remote_actor_method(self._tsm, "finish_cancellation")
-        if finish_cancellation is not None:
-            await retry_idempotent_ray_actor_method(
-                submit=lambda: finish_cancellation(task_id),
-                recovery_timeout=self._timeout,
-                task_description=f"finish_cancellation({task_id})",
-            )
         return True
 
 

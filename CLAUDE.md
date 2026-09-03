@@ -258,7 +258,7 @@ hand OpenRag a URL to notify once the task settles.
 - `callback_token` — sent as `Authorization: Bearer <token>` on that POST
 
 **Body:** `{"partition", "file_id", "status": "success"|"error", "metadata"}`. `metadata` is
-the upload metadata echoed back **minus** `UPLOAD_METADATA_SERVER_KEYS` (`core/utils/conts.py`:
+the upload metadata echoed back **minus** `UPLOAD_METADATA_SERVER_KEYS` (`core/utils/consts.py`:
 `source`, `filename`, `original_filename`, `file_size`, `file_id`, `content_sha256`) — an exclusion,
 not a fixed field list, so any caller-supplied field (cozy-stack's revision marker is `doc_rev`)
 travels through unrecomputed and under whatever name the caller gave it; a key the caller never sent
@@ -292,9 +292,10 @@ to an internal address.
 
 **Rolling deploys:** the worker actors are named, detached and `get_if_exists`, so changing
 `process_file`'s remote contract requires bumping `_INDEXER_ACTOR_PROTOCOL_VERSION` in
-`indexer_pool.py` (v3 → v4 for `callback_url`/`callback_token`). Without the bump, new replicas
-attach to the previous release's actors and every submit raises `TypeError`. Old generations are
-retired with `services/workers/retire_indexer_generation.py`.
+`indexer_pool.py` (v3 → v4 for `callback_url`/`callback_token`; v6 folds in v5's worker-ref-registration
+wait and TSM `set_state` fencing semantics). Without the bump, new replicas attach to the previous
+release's actors and every submit raises `TypeError`. Old generations are retired with
+`services/workers/retire_indexer_generation.py`.
 
 **Key files:**
 - `openrag/services/workers/indexing_callback.py` — `send_indexing_callback()` (was `webhook.py`; the

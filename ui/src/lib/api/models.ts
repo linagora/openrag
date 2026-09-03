@@ -12,7 +12,7 @@ import { request } from "./client";
 //   POST   /model-endpoints/{type}/{name}/reveal-api-key
 //   POST   /model-endpoints/{type}/{name}/validate → ValidateEndpointResponse (no body)
 
-export type ModelType = "embedder" | "reranker" | "llm" | "vlm";
+export type ModelType = "embedder" | "reranker" | "llm" | "vlm" | "stt";
 
 export interface ModelEndpointResponse {
   name: string;
@@ -54,6 +54,7 @@ export interface ValidateModelEndpointResponse {
   reachable: boolean;
   model_found?: boolean | null;
   models_served?: string[] | null;
+  transcription_supported?: boolean | null;
   detail?: string | null;
 }
 
@@ -175,6 +176,13 @@ export function mergeModelEndpointApiKeyExtra(
 ): Record<string, unknown> {
   const prepared = prepareModelEndpointExtraForSubmit(extra);
   const normalizedApiKey = prepareModelEndpointExtraForSubmit({ api_key: apiKey.trim() }).api_key;
+  if (
+    normalizedApiKey === REDACTED_SECRET &&
+    typeof prepared.api_key === "string" &&
+    prepared.api_key !== REDACTED_SECRET
+  ) {
+    return prepared;
+  }
   if (typeof normalizedApiKey === "string" && normalizedApiKey) {
     return { ...prepared, api_key: normalizedApiKey };
   }
@@ -189,6 +197,8 @@ export function mergeModelEndpointApiKeyExtra(
 // box, same as the API key. Backend: core/config/model_endpoints.py.
 export const LLM_CONTEXT_SIZE_KEY = "max_llm_context_size";
 export const LLM_OUTPUT_TOKENS_KEY = "max_output_tokens";
+export const STT_LANGUAGE_KEY = "language";
+export const MOSS_SPEAKER_AWARE_KEY = "moss_speaker_aware";
 
 export interface LlmContextFields {
   maxContextSize: string;
@@ -231,6 +241,53 @@ export function mergeModelEndpointLlmContext(
   return result;
 }
 
+/** Pull the optional STT language hint out of `extra` into its own form field. */
+export function splitModelEndpointSttLanguage(extra: Record<string, unknown>): {
+  languageHint: string;
+  extra: Record<string, unknown>;
+} {
+  const { [STT_LANGUAGE_KEY]: language, ...rest } = extra;
+  return {
+    languageHint: typeof language === "string" ? language : "",
+    extra: rest,
+  };
+}
+
+/** Merge a blank-or-string STT language hint back into the endpoint's `extra`. */
+export function mergeModelEndpointSttLanguage(
+  extra: Record<string, unknown>,
+  languageHint: string,
+): Record<string, unknown> {
+  const result = { ...extra };
+  const normalized = languageHint.trim();
+  if (normalized) result[STT_LANGUAGE_KEY] = normalized;
+  else delete result[STT_LANGUAGE_KEY];
+  return result;
+}
+
+/** Pull MOSS speaker normalization out of raw endpoint extra for its dedicated control. */
+export function splitModelEndpointMossSpeakerAware(extra: Record<string, unknown>): {
+  mossSpeakerAware: boolean;
+  extra: Record<string, unknown>;
+} {
+  const { [MOSS_SPEAKER_AWARE_KEY]: speakerAware, ...rest } = extra;
+  return {
+    mossSpeakerAware: speakerAware === true,
+    extra: rest,
+  };
+}
+
+/** Enable MOSS speaker normalization; absence preserves the raw provider response. */
+export function mergeModelEndpointMossSpeakerAware(
+  extra: Record<string, unknown>,
+  enabled: boolean,
+): Record<string, unknown> {
+  const result = { ...extra };
+  if (enabled) result[MOSS_SPEAKER_AWARE_KEY] = true;
+  else delete result[MOSS_SPEAKER_AWARE_KEY];
+  return result;
+}
+
 // Which client class an endpoint is built with — a control key inside `extra`
 // (see di/factories.py:make_component_factory), surfaced here as a per-type
 // "Vendor" dropdown instead of free-text JSON. Options mirror the registries
@@ -242,6 +299,9 @@ export const VENDOR_OPTIONS_BY_TYPE: Record<ModelType, string[]> = {
   reranker: ["infinity", "openai", "tei"],
   llm: ["vllm", "ollama"],
   vlm: ["vllm"],
+  // STT uses the OpenAI-compatible audio-transcription API directly; there
+  // is no model-client implementation to select.
+  stt: [],
 };
 
 export const DEFAULT_VENDOR_BY_TYPE: Record<ModelType, string> = {
@@ -249,6 +309,7 @@ export const DEFAULT_VENDOR_BY_TYPE: Record<ModelType, string> = {
   reranker: "infinity",
   llm: "vllm",
   vlm: "vllm",
+  stt: "",
 };
 
 /** Pull the vendor/`implementation` control key out of `extra` into a form field. */
@@ -328,7 +389,10 @@ export function deleteModelEndpoint(modelType: ModelType, name: string) {
 
 export interface ValidateModelEndpointRequest {
   endpoint: string;
+  model_type?: ModelType;
   model_name?: string;
+  timeout?: number;
+  extra?: Record<string, unknown>;
   api_key?: string;
   stored_api_key_model_type?: ModelType;
   stored_api_key_name?: string;

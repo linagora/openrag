@@ -66,7 +66,7 @@ vectordb:
   hybrid_search: true
   enable: true
   timeout: 120.0 # per-request timeout (s) for the Milvus sync/async clients
-  schema_version: 1 # Increment when the collection schema changes and a migration is required
+  schema_version: 2 # Increment when the collection schema changes and a migration is required
 
 # --- Relational Database (PostgreSQL) ---
 # Env: POSTGRES_HOST, POSTGRES_PORT, POSTGRES_USER, POSTGRES_PASSWORD,
@@ -151,6 +151,7 @@ prompts:
   spoken_style_answer: spoken_style_answer_tmpl.txt
   hyde: hyde.txt
   multi_query: multi_query_pmpt_tmpl.txt
+  asr_transcription: asr_transcription_tmpl.txt
 
 # --- Document loader ---
 loader:
@@ -252,6 +253,8 @@ loader:
   # Env: TRANSCRIBER_BASE_URL, TRANSCRIBER_API_KEY, TRANSCRIBER_MODEL,
   #      TRANSCRIBER_TIMEOUT, TRANSCRIBER_MAX_CONCURRENT_CHUNKS, USE_WHISPER_LANG_DETECTOR,
   #      TRANSCRIBER_DIRECT_UPLOAD_SUFFIXES (pipe-separated, e.g. ".mp3|.mp4|.wav")
+  # These values seed the default Admin UI STT endpoint on first startup and
+  # remain the fallback when no saved STT endpoint is available.
   transcriber:
     base_url: http://transcriber:8000/v1
     api_key: EMPTY
