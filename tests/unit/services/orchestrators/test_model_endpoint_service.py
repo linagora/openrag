@@ -2185,3 +2185,52 @@ async def test_validate_endpoint_rejects_url_credentials_without_request(monkeyp
         "transcription_supported": None,
         "detail": "Endpoint URL must not include credentials.",
     }
+
+
+@pytest.mark.asyncio
+async def test_delete_model_endpoint_reloads_presets_when_the_cascade_moved_them():
+    """The repo clears preset selections naming the deleted endpoint; this
+    replica must re-read them.
+
+    Regression: without the reload, indexation kept resolving the deleted name
+    out of the in-memory preset config and failed strictly — audio uploads on
+    that preset broke — even though the DB had already restored the default
+    fallback in the delete's own transaction. Clearing a selection writes to
+    ``pipeline_presets``, so the revision moves and ``refresh_if_stale`` reloads
+    presets and partitions together.
+    """
+    repo = _FakeEndpointRepo(
+        rows=[
+            _make_row(name="whisper", model_type="stt", is_default=True),
+            _make_row(name="doomed", model_type="stt", is_default=False),
+        ]
+    )
+    preset_service = _FakePresetServiceForReload()
+    partition_service = _FakePartitionServiceForReload()
+    svc = _make_service(repo, partition_service=partition_service, preset_service=preset_service)
+
+    await svc.delete_model_endpoint("doomed", "stt")
+
+    assert preset_service.refresh_calls == 1
+    # refresh_if_stale reloaded partitions itself; no second reload here.
+    assert partition_service.load_partitions_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_delete_model_endpoint_reloads_partitions_when_no_preset_moved():
+    """No preset named the endpoint, so the revision never moves — the partition
+    reload must still run, mirroring the rename path's fallback."""
+    repo = _FakeEndpointRepo(
+        rows=[
+            _make_row(name="whisper", model_type="stt", is_default=True),
+            _make_row(name="doomed", model_type="stt", is_default=False),
+        ]
+    )
+    preset_service = _FakeUnchangedRevisionPresetService()
+    partition_service = _FakePartitionServiceForReload()
+    svc = _make_service(repo, partition_service=partition_service, preset_service=preset_service)
+
+    await svc.delete_model_endpoint("doomed", "stt")
+
+    assert preset_service.refresh_calls == 1
+    assert partition_service.load_partitions_calls == 1
