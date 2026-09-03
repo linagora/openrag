@@ -110,7 +110,10 @@ If `verify-tag` failed loudly, read its error before touching the tag — it
 guards three different things:
 
 - **not an exact GA tag** (`vMAJOR.MINOR.PATCH`): a near-miss like `v1.2.3-rc1`
-  belongs to `build_rc.yml`. Retag.
+  is rejected outright — note the missing dot. If you meant a release candidate,
+  retag as `v1.2.3-rc.1`, the shape `build_rc.yml` triggers on (`v*-rc.*`); a
+  correctly-shaped rc tag never reaches this guard, it is filtered out by the
+  job-level `if`.
 - **the tag is not an ancestor of `origin/main`**: fix the tag placement, do not
   rerun.
 - **unresolved `NEW` badge entries**: `ui/src/lib/whats-new.ts` still contains an
