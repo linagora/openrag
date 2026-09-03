@@ -89,6 +89,21 @@ class TestCrud:
         assert await repo.delete(created.id) is False
         assert await repo.get(created.id) is None
 
+    async def test_deleting_asr_prompt_clears_indexation_preset_selection(self, postgres_store: PostgresStore):
+        repo = postgres_store.prompt_repo
+        prompt = await repo.create(_prompt("asr_transcription", name="meeting-notes"))
+        await postgres_store.preset_repo.upsert(
+            "audio-indexing",
+            "indexation",
+            {"asr_transcription_prompt_name": " meeting-notes "},
+        )
+
+        assert await repo.delete(prompt.id) is True
+
+        preset = await postgres_store.preset_repo.get("audio-indexing", "indexation")
+        assert preset is not None
+        assert "asr_transcription_prompt_name" not in preset["config"]
+
 
 class TestGetByName:
     async def test_get_by_name(self, postgres_store: PostgresStore):

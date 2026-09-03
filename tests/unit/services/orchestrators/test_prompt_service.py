@@ -109,6 +109,15 @@ class _FailOncePresetReload:
             raise RuntimeError("temporary preset reload failure")
 
 
+class _RefreshRecorder:
+    def __init__(self, calls: list[str]) -> None:
+        self._calls = calls
+
+    async def refresh_if_stale(self) -> bool:
+        self._calls.append("presets")
+        return True
+
+
 class TestSeeding:
     async def test_seeds_all_prompt_types_from_disk(self):
         repo = FakePromptRepo()
@@ -444,6 +453,25 @@ class TestCrud:
         p = await repo.create(Prompt(prompt_type="sys_prompt", content="c"))
         await svc.delete_prompt(p.id)
         assert await repo.get(p.id) is None
+
+    async def test_deleting_asr_prompt_refreshes_preset_configuration(self):
+        repo = FakePromptRepo()
+        calls: list[str] = []
+        svc = PromptService(
+            prompt_repo=repo,
+            config=SimpleNamespace(paths=PathsConfig(), prompts=PromptsConfig()),
+            preset_service=_RefreshRecorder(calls),
+            partition_service=_ReloadRecorder(calls, "partitions"),
+        )
+        prompt = await svc.create_prompt(
+            prompt_type=PromptType.ASR_TRANSCRIPTION.value,
+            name="meeting-notes",
+            content="Keep speaker labels.",
+        )
+
+        await svc.delete_prompt(prompt.id)
+
+        assert calls == ["presets"]
 
     async def test_set_default_missing_raises(self):
         with pytest.raises(NotFoundError):

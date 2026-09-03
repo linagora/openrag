@@ -620,6 +620,7 @@ class ServiceContainer:
                 ),
                 config=settings,
                 partition_service=self.partition_service,
+                preset_service=self.preset_service,
             )
         return self._indexing_service
 

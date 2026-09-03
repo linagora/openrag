@@ -454,7 +454,12 @@ class PromptService:
             raise ValidationError(
                 f"Cannot delete the default '{existing.prompt_type}' prompt. Set another default first.",
             )
-        await self._repo.delete(prompt_id)
+        deleted = await self._repo.delete(prompt_id)
+        if deleted and existing.prompt_type == PromptType.ASR_TRANSCRIPTION.value and self._preset_service is not None:
+            # The repository clears persisted ASR selections atomically with
+            # the delete. PresetService refreshes its preset and partition
+            # caches together so the next upload uses the default prompt.
+            await self._preset_service.refresh_if_stale()
 
     # ------------------------------------------------------------------
     # Helpers

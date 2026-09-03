@@ -214,11 +214,30 @@ class PgPromptRepository(PromptRepository):
         return self._to_model(rec) if rec else None
 
     async def delete(self, prompt_id: str) -> bool:
-        # Presets/partitions reference prompts by *name* (soft refs in JSONB), so
-        # there is no FK cascade: a deleted prompt's stale references simply
-        # resolve to the global default. The service guards against deleting a
-        # default; callers surface usage counts before offering delete.
-        result = await self.pool.execute("DELETE FROM prompts WHERE id = $1", prompt_id)
+        # Presets reference prompts by name in JSONB, rather than through a FK.
+        # ASR selection is strict at indexing time, so clearing a deleted ASR
+        # prompt's selection in this transaction is necessary to restore the
+        # normal default fallback before the prompt row becomes invisible.
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                existing = await conn.fetchrow(
+                    "SELECT prompt_type, name FROM prompts WHERE id = $1 FOR UPDATE",
+                    prompt_id,
+                )
+                if existing is None:
+                    return False
+                if existing["prompt_type"] == "asr_transcription":
+                    await conn.execute(
+                        """
+                        UPDATE pipeline_presets
+                        SET config = config - $1::text, updated_at = now()
+                        WHERE preset_type = $2 AND btrim(config->>$1::text) = $3
+                        """,
+                        _ASR_TRANSCRIPTION_PRESET_FIELD,
+                        "indexation",
+                        existing["name"],
+                    )
+                result = await conn.execute("DELETE FROM prompts WHERE id = $1", prompt_id)
         return result == "DELETE 1"
 
     # ------------------------------------------------------------------

@@ -133,6 +133,22 @@ async def test_list_all_with_type_filter():
 
 
 @pytest.mark.asyncio
+async def test_latest_updated_at_reads_the_newest_preset_revision():
+    from services.persistence.preset_repo import PgPresetRepository
+
+    pool = _FakePool()
+    pool._fetchval_result = _NOW
+    repo = PgPresetRepository(pool_getter=lambda: pool)
+
+    assert await repo.latest_updated_at() == _NOW
+
+    query, params = pool.executed[-1]
+    assert "max(updated_at)" in query
+    assert "FROM pipeline_presets" in query
+    assert params == ()
+
+
+@pytest.mark.asyncio
 async def test_upsert_uses_on_conflict():
     from services.persistence.preset_repo import PgPresetRepository
 

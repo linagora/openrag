@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -81,6 +81,10 @@ class _FakePresetRepo:
     async def usage_counts(self) -> dict[tuple[str, str], int]:
         self.calls.append(("usage_counts", ()))
         return dict(self._partition_counts)
+
+    async def latest_updated_at(self) -> datetime | None:
+        self.calls.append(("latest_updated_at", ()))
+        return max((row["updated_at"] for row in self._store.values()), default=None)
 
 
 class _FakePartitionService:
@@ -317,6 +321,41 @@ async def test_load_all_clears_stale_entries():
 
     assert "stale" not in settings.presets.indexation
     assert "old" in settings.presets.indexation
+
+
+@pytest.mark.asyncio
+async def test_refresh_if_stale_reloads_changed_presets():
+    from core.config.root import Settings
+
+    repo = _FakePresetRepo(rows=[_make_row("audio", "indexation", {"stt": "old-stt"})])
+    settings = Settings()
+    partition_service = _FakePartitionService()
+    svc = _make_service(repo, settings=settings, partition_service=partition_service)
+    await svc.load_all()
+
+    repo._store[("audio", "indexation")] = {
+        **_make_row("audio", "indexation", {"stt": "new-stt"}),
+        "updated_at": _NOW + timedelta(microseconds=1),
+    }
+
+    assert await svc.refresh_if_stale() is True
+    assert settings.presets.indexation["audio"]["stt"] == "new-stt"
+    assert partition_service.load_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_refresh_if_stale_does_not_reload_current_presets():
+    from core.config.root import Settings
+
+    repo = _FakePresetRepo(rows=[_make_row("audio", "indexation", {"stt": "current-stt"})])
+    settings = Settings()
+    partition_service = _FakePartitionService()
+    svc = _make_service(repo, settings=settings, partition_service=partition_service)
+    await svc.load_all()
+
+    assert await svc.refresh_if_stale() is False
+    assert [call[0] for call in repo.calls].count("list_all") == 1
+    assert partition_service.load_calls == 0
 
 
 # ------------------------------------------------------------------

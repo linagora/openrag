@@ -8,6 +8,7 @@ stub with real SQL.
 from __future__ import annotations
 
 from collections.abc import Callable
+from datetime import datetime
 from typing import TYPE_CHECKING
 
 from core.ports.preset_repo import PresetRepository
@@ -79,6 +80,9 @@ class PgPresetRepository(PresetRepository):
                 "SELECT * FROM pipeline_presets ORDER BY preset_type, name",
             )
         return [self._row_to_dict(r) for r in rows]
+
+    async def latest_updated_at(self) -> datetime | None:
+        return await self.pool.fetchval("SELECT max(updated_at) FROM pipeline_presets")
 
     async def upsert(self, name: str, preset_type: str, config: dict) -> dict:
         rec = await self.pool.fetchrow(

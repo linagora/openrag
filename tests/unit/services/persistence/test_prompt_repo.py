@@ -56,6 +56,26 @@ class _ReferenceCountsPool:
         return []
 
 
+class _DeletePool:
+    def __init__(self, *, prompt_type: str = "asr_transcription") -> None:
+        self.executed: list[tuple[str, tuple]] = []
+        self._prompt_type = prompt_type
+
+    def acquire(self):
+        return _AsyncCtx(self)
+
+    def transaction(self):
+        return _AsyncCtx(self)
+
+    async def fetchrow(self, query: str, *params):
+        self.executed.append((query, params))
+        return {"prompt_type": self._prompt_type, "name": "meeting-notes"}
+
+    async def execute(self, query: str, *params):
+        self.executed.append((query, params))
+        return "DELETE 1" if "DELETE FROM prompts" in query else "UPDATE 1"
+
+
 def _prompt_row(*, name: str) -> dict:
     return {
         "id": "prompt-id",
@@ -102,3 +122,33 @@ async def test_reference_counts_normalizes_asr_preset_selection_names() -> None:
 
     preset_query = next(query for query in pool.queries if "FROM partitions part" in query)
     assert "WHEN c.key = 'asr_transcription_prompt_name' THEN btrim(c.value)" in preset_query
+
+
+@pytest.mark.asyncio
+async def test_deleting_asr_prompt_clears_referencing_indexation_presets() -> None:
+    """Deletion must make strict ASR resolution fall back instead of leaving a dangling name."""
+    from services.persistence.prompt_repo import PgPromptRepository
+
+    pool = _DeletePool()
+    repo = PgPromptRepository(pool_getter=lambda: pool)
+
+    assert await repo.delete("prompt-id") is True
+
+    cascades = [(query, params) for query, params in pool.executed if "UPDATE pipeline_presets" in query]
+    assert len(cascades) == 1
+    query, params = cascades[0]
+    assert "config - $1::text" in query
+    assert "btrim(config->>$1::text) = $3" in query
+    assert params == ("asr_transcription_prompt_name", "indexation", "meeting-notes")
+
+
+@pytest.mark.asyncio
+async def test_deleting_non_asr_prompt_does_not_change_preset_configs() -> None:
+    from services.persistence.prompt_repo import PgPromptRepository
+
+    pool = _DeletePool(prompt_type="sys_prompt")
+    repo = PgPromptRepository(pool_getter=lambda: pool)
+
+    assert await repo.delete("prompt-id") is True
+
+    assert not any("UPDATE pipeline_presets" in query for query, _ in pool.executed)
