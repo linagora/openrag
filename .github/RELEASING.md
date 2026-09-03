@@ -392,6 +392,61 @@ git show "$VER:infra/charts/openrag-stack/Chart.yaml" | grep -E '^version:'
 
 **PASS**: `step 8 PASS`, and chart `version` moved.
 
+## 9. The GitHub Release itself is correctly formed
+
+Steps 1-8 verify what was *built*. Nothing so far looks at the Release object
+users actually land on. A release whose `name` is empty renders with the tagged
+commit's subject as its title — so a perfectly good release displays as
+`Merge pull request #NNN from linagora/release/vX.Y.Z`. That happened on v2.2.0.
+
+`gh release create` leaves `name` empty unless `--title` is passed, so this is a
+recurring trap rather than a one-off slip: **always pass `--title "$VER"`.**
+
+```bash
+gh release view "$VER" --json name,tagName,isDraft,isPrerelease,body \
+  --jq '{name, tag: .tagName, draft: .isDraft, prerelease: .isPrerelease, notes: (.body|length)}'
+```
+
+A hard gate:
+
+```bash
+fail=0
+rel=$(gh release view "$VER" --json name,tagName,isDraft,isPrerelease,body) || {
+  echo "FAIL  no GitHub Release for $VER" >&2; exit 1; }
+
+# The title must be the tag. Empty renders as the commit subject; anything else
+# breaks the convention every prior GA release follows.
+name=$(printf '%s' "$rel" | jq -r '.name')
+[ "$name" = "$VER" ] \
+  && echo "OK    title=$name" \
+  || { echo "FAIL  title=${name:-<empty — will render as the commit subject>} (want $VER)"; fail=1; }
+
+[ "$(printf '%s' "$rel" | jq -r '.tagName')" = "$VER" ] \
+  && echo "OK    tag=$VER" || { echo "FAIL  tag mismatch"; fail=1; }
+
+[ "$(printf '%s' "$rel" | jq -r '.isDraft')" = "false" ] \
+  && echo "OK    published (not a draft)" || { echo "FAIL  still a draft"; fail=1; }
+
+# A GA release marked prerelease is excluded from "latest" and from most tooling.
+[ "$(printf '%s' "$rel" | jq -r '.isPrerelease')" = "false" ] \
+  && echo "OK    not flagged prerelease" || { echo "FAIL  GA release flagged as prerelease"; fail=1; }
+
+n=$(printf '%s' "$rel" | jq -r '.body|length')
+[ "$n" -gt 200 ] \
+  && echo "OK    release notes present ($n chars)" \
+  || { echo "FAIL  release notes empty or near-empty ($n chars)"; fail=1; }
+
+[ "$fail" -eq 0 ] && echo "step 9 PASS" || { echo "step 9 FAIL" >&2; exit 1; }
+```
+
+**PASS**: `step 9 PASS`.
+
+Fixing a bad title needs no rebuild and no retag — it is metadata only:
+
+```bash
+gh release edit "$VER" --title "$VER"
+```
+
 ---
 
 ## What v2.0.1 actually did, and the rules that follow
