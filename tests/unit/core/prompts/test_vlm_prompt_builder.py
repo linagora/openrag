@@ -6,7 +6,7 @@ from core.prompts.vlm_prompt_builder import (
     build_caption_messages,
     wrap_caption,
 )
-from core.utils.conts import IMG_WRAPPER_CLOSE, IMG_WRAPPER_OPEN
+from core.utils.consts import IMG_WRAPPER_CLOSE, IMG_WRAPPER_OPEN
 
 
 def test_build_caption_messages_shapes_for_openai_multimodal():

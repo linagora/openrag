@@ -20,7 +20,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from core.utils.conts import strip_protected_metadata
+from core.utils.consts import strip_protected_metadata
 from core.utils.exceptions import AuthError, PartitionNotFoundError, ValidationError
 from core.utils.filename import extract_temporal_fields
 from core.utils.logging import get_logger
