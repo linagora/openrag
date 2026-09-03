@@ -231,26 +231,23 @@ function PromptCard({
 }) {
   const used = prompt.used_by;
   const isAsrTranscription = prompt.prompt_type === "asr_transcription";
+  const isInheritedAsrFallback = isAsrTranscription && prompt.is_default && used === 0;
   return (
     <Card className="relative flex flex-col">
       <div className="absolute right-3 top-3">
         <Badge
           variant="outline"
           className={
-            isAsrTranscription
-              ? "text-xs bg-sky-50 text-sky-700 border-sky-200 dark:bg-sky-950/30 dark:text-sky-100 dark:border-sky-900/60"
-              : used > 0
+            used > 0 || isInheritedAsrFallback
               ? "text-xs bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-950/30 dark:text-amber-100 dark:border-amber-900/60"
               : "text-xs bg-muted text-muted-foreground border-transparent"
           }
         >
-          {isAsrTranscription ? <Globe2 className="mr-1 h-3 w-3" /> : <Users className="mr-1 h-3 w-3" />}
-          {isAsrTranscription
-            ? prompt.is_default
-              ? "Global default"
-              : "Inactive"
-            : used > 0
-              ? `${used} partition${used === 1 ? "" : "s"}`
+          <Users className="mr-1 h-3 w-3" />
+          {used > 0
+            ? `${used} partition${used === 1 ? "" : "s"}`
+            : isInheritedAsrFallback
+              ? "Default fallback"
               : "Unused"}
         </Badge>
       </div>
@@ -368,12 +365,11 @@ function PromptEditorSheet({
   const effectiveType = editing?.prompt_type ?? promptType;
   const isAsrTranscription = effectiveType === "asr_transcription";
   const templateCheck = validatePlaceholders(content, effectiveType);
-  // Presets and partitions reference a prompt by *name*, so a rename silently
-  // orphans every selection pointing at the old one — they fall back to the
-  // global default. Warn before that happens instead of letting the drawer's
-  // "changes apply everywhere" promise quietly become false.
-  const isRename = !!editing && !isAsrTranscription && name.trim() !== editing.name;
-  const renameBreaksRefs = isRename && (editing?.used_by ?? 0) > 0;
+  // ASR prompt references are rewritten with their prompt rename. Other prompt
+  // selections still reference the old name and fall back to their defaults.
+  const isRename = !!editing && name.trim() !== editing.name;
+  const renamePreservesAsrSelections = isRename && isAsrTranscription && (editing?.used_by ?? 0) > 0;
+  const renameBreaksRefs = isRename && !isAsrTranscription && (editing?.used_by ?? 0) > 0;
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -433,6 +429,9 @@ function PromptEditorSheet({
                 onChange={(e) => setName(e.target.value)}
                 required
               />
+              {renamePreservesAsrSelections && (
+                <p className="text-xs text-muted-foreground">Renaming updates their selections.</p>
+              )}
               {renameBreaksRefs && (
                 <p className="text-xs text-amber-600 dark:text-amber-500">
                   Selected by {editing?.used_by} partition(s) — renaming drops those selections.
@@ -467,8 +466,8 @@ function PromptEditorSheet({
               {isAsrTranscription ? <Globe2 className="h-3.5 w-3.5" /> : <Users className="h-3.5 w-3.5" />}
               {isAsrTranscription
                 ? editing.is_default
-                  ? "Applied globally when AUDIOLOADER=OpenAIAudioLoader."
-                  : "Set this prompt as default for AUDIOLOADER=OpenAIAudioLoader."
+                  ? "Used by direct extraction and indexation presets without an explicit ASR prompt selection when AUDIOLOADER=OpenAIAudioLoader."
+                  : "Used only by indexation presets that explicitly select this prompt when AUDIOLOADER=OpenAIAudioLoader."
                 : editing.used_by > 0
                 ? `Selected by ${editing.used_by} partition${editing.used_by === 1 ? "" : "s"}.`
                 : "Not selected by any partition yet."}

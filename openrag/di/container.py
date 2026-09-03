@@ -477,6 +477,8 @@ class ServiceContainer:
             self._prompt_service = PromptService(
                 prompt_repo=self.prompt_repo,
                 config=self._require_settings(),
+                preset_service=self.preset_service,
+                partition_service=self.partition_service,
             )
         return self._prompt_service
 
@@ -618,6 +620,7 @@ class ServiceContainer:
                 ),
                 config=settings,
                 partition_service=self.partition_service,
+                preset_service=self.preset_service,
             )
         return self._indexing_service
 

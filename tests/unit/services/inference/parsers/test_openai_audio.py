@@ -32,6 +32,7 @@ from core.config.model_endpoints import (  # noqa: E402
     ModelEndpointConfig,
 )
 from core.models.document import Document, DocumentType  # noqa: E402
+from core.utils.exceptions import NotFoundError  # noqa: E402
 from services.inference.parsers.openai_audio import OpenAIAudioClient  # noqa: E402
 
 # ---- shared fixtures -------------------------------------------------------
@@ -61,7 +62,7 @@ def _audio_doc(raw: bytes = b"audio-bytes", filename: str = "x.mp3") -> Document
 
 async def _wait_for_endpoint_leases(
     client: OpenAIAudioClient,
-    key: tuple[str, str],
+    key: tuple[str, str, str | None],
     expected: int,
 ) -> None:
     """Wait until a request has registered as active or queued."""
@@ -114,6 +115,30 @@ class TestParse:
     async def test_empty_raw_bytes_returns_empty(self, mock_openai_client):
         result = await _client(mock_openai_client).parse(_audio_doc(raw=b""))
         assert result.text_blocks == [] and result.page_count == 0
+
+    @pytest.mark.asyncio
+    async def test_selected_stt_endpoint_resolution_error_fails_transcription(self, mock_openai_client):
+        async def resolve_endpoint():
+            raise KeyError("Unknown STT endpoint 'retired-moss'")
+
+        client = _client(mock_openai_client, transcription_endpoint_resolver=resolve_endpoint)
+
+        with pytest.raises(KeyError, match="retired-moss"):
+            await client.parse(_audio_doc())
+
+        mock_openai_client.audio.transcriptions.create.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_selected_transcription_prompt_resolution_error_fails_transcription(self, mock_openai_client):
+        async def resolve_prompt():
+            raise NotFoundError("Selected ASR prompt 'retired-asr' no longer exists")
+
+        client = _client(mock_openai_client, transcription_prompt_resolver=resolve_prompt)
+
+        with pytest.raises(NotFoundError, match="retired-asr"):
+            await client.parse(_audio_doc())
+
+        mock_openai_client.audio.transcriptions.create.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_returns_text_block_on_success(self, mock_openai_client):
@@ -321,7 +346,7 @@ class TestParse:
             pass
 
         second = asyncio.create_task(second_request())
-        await _wait_for_endpoint_leases(client, ("http://moss-a:8000/v1", "moss"), 2)
+        await _wait_for_endpoint_leases(client, ("http://moss-a:8000/v1", "moss", None), 2)
         assert not second_entered.is_set()
 
         release_first.set()
@@ -332,6 +357,7 @@ class TestParse:
     async def test_stt_endpoint_limiter_applies_a_lowered_limit_to_active_work(self, mock_openai_client):
         client = _client(mock_openai_client)
         endpoint = ModelEndpointConfig(
+            name="moss",
             endpoint="http://moss:8000/v1",
             model_name="moss",
             batch_size=2,
@@ -356,7 +382,7 @@ class TestParse:
 
         lowered_endpoint = endpoint.model_copy(update={"batch_size": 1})
         third = asyncio.create_task(hold_slot(third_entered, asyncio.Event(), lowered_endpoint))
-        await _wait_for_endpoint_leases(client, ("http://moss:8000/v1", "moss"), 3)
+        await _wait_for_endpoint_leases(client, ("http://moss:8000/v1", "moss", "moss"), 3)
         assert not third_entered.is_set()
 
         release_first.set()
@@ -396,7 +422,7 @@ class TestParse:
         first = asyncio.create_task(hold_first())
         await asyncio.wait_for(first_entered.wait(), timeout=0.5)
         queued = asyncio.create_task(queue_second())
-        await _wait_for_endpoint_leases(client, ("http://moss-a:8000/v1", "moss"), 2)
+        await _wait_for_endpoint_leases(client, ("http://moss-a:8000/v1", "moss", None), 2)
         queued.cancel()
         with pytest.raises(asyncio.CancelledError):
             await queued
@@ -406,7 +432,10 @@ class TestParse:
         release_first.set()
         await first
 
-        assert set(client._endpoint_limiters) == {("http://moss-b:8000/v1", "moss")}
+        assert set(client._endpoint_limiters) == {
+            ("http://moss-a:8000/v1", "moss", None),
+            ("http://moss-b:8000/v1", "moss", None),
+        }
 
     @pytest.mark.asyncio
     async def test_stt_endpoint_capacity_wait_does_not_hold_the_registry_lock(self, mock_openai_client):
@@ -433,7 +462,7 @@ class TestParse:
         first = asyncio.create_task(hold_first())
         await asyncio.wait_for(first_entered.wait(), timeout=0.5)
         queued = asyncio.create_task(queue_second())
-        key_a = ("http://moss-a:8000/v1", "moss")
+        key_a = ("http://moss-a:8000/v1", "moss", None)
         await _wait_for_endpoint_leases(client, key_a, 2)
 
         async def use_endpoint_b() -> None:
@@ -465,12 +494,16 @@ class TestParse:
         async with client._transcription_slot(endpoint_b):
             pass
 
-        assert set(client._endpoint_limiters) == {("http://moss-b:8000/v1", "moss")}
+        assert set(client._endpoint_limiters) == {
+            ("http://moss-a:8000/v1", "moss", None),
+            ("http://moss-b:8000/v1", "moss", None),
+        }
 
     @pytest.mark.asyncio
-    async def test_stt_endpoint_limiter_preserves_fallback_and_prunes_after_drain(self, mock_openai_client):
+    async def test_stt_endpoint_limiter_keeps_named_cache_across_fallback(self, mock_openai_client):
         client = _client(mock_openai_client, concurrency_limit=1)
         endpoint = ModelEndpointConfig(
+            name="moss",
             endpoint="http://moss:8000/v1",
             model_name="moss",
             batch_size=1,
@@ -484,7 +517,7 @@ class TestParse:
         async with client._transcription_slot(None):
             pass
 
-        assert client._endpoint_limiters == {}
+        assert set(client._endpoint_limiters) == {("http://moss:8000/v1", "moss", "moss")}
 
     @pytest.mark.asyncio
     async def test_text_response_format_accepts_plain_string_response(self, mock_openai_client):
@@ -685,6 +718,222 @@ class TestParse:
         created[0].close.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_stt_endpoint_caches_reuse_idle_entries_when_presets_alternate(self, monkeypatch):
+        """Alternating partitions must not rebuild their endpoint clients or limiters."""
+        from services.inference.parsers import openai_audio as module
+
+        created: list[MagicMock] = []
+
+        def make_openai_client(**_kwargs):
+            client = MagicMock()
+            client.close = AsyncMock()
+            created.append(client)
+            return client
+
+        endpoint_a = ModelEndpointConfig(
+            endpoint="http://moss-a:8000/v1",
+            model_name="moss-a",
+            batch_size=1,
+            timeout=900,
+            extra={"api_key": "key-a"},
+        )
+        endpoint_b = ModelEndpointConfig(
+            endpoint="http://moss-b:8000/v1",
+            model_name="moss-b",
+            batch_size=1,
+            timeout=900,
+            extra={"api_key": "key-b"},
+        )
+        client = _client(MagicMock())
+        monkeypatch.setattr(module, "AsyncOpenAI", make_openai_client)
+
+        async def use(endpoint: ModelEndpointConfig) -> None:
+            async with client._transcription_slot(endpoint):
+                async with client._transcription_client(endpoint):
+                    pass
+
+        await use(endpoint_a)
+        await use(endpoint_b)
+        await use(endpoint_a)
+
+        assert len(created) == 2
+        assert set(client._endpoint_limiters) == {
+            ("http://moss-a:8000/v1", "moss-a", None),
+            ("http://moss-b:8000/v1", "moss-b", None),
+        }
+        assert set(client._endpoint_clients) == {
+            ("http://moss-a:8000/v1", "key-a", 900.0, None),
+            ("http://moss-b:8000/v1", "key-b", 900.0, None),
+        }
+        for created_client in created:
+            created_client.close.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_stt_endpoint_caches_keep_distinct_named_presets_on_the_same_server(self, monkeypatch):
+        """Different registrations sharing a URL must not retire each other."""
+        from services.inference.parsers import openai_audio as module
+
+        created: list[MagicMock] = []
+
+        def make_openai_client(**_kwargs):
+            client = MagicMock()
+            client.close = AsyncMock()
+            created.append(client)
+            return client
+
+        endpoint_a = ModelEndpointConfig(
+            name="moss-a",
+            endpoint="http://shared-moss:8000/v1",
+            model_name="moss",
+            timeout=900,
+            extra={"api_key": "key-a"},
+        )
+        endpoint_b = ModelEndpointConfig(
+            name="moss-b",
+            endpoint="http://shared-moss:8000/v1",
+            model_name="moss",
+            timeout=901,
+            extra={"api_key": "key-b"},
+        )
+        client = _client(MagicMock())
+        monkeypatch.setattr(module, "AsyncOpenAI", make_openai_client)
+
+        async def use(endpoint: ModelEndpointConfig) -> None:
+            async with client._transcription_client(endpoint):
+                pass
+
+        await use(endpoint_a)
+        await use(endpoint_b)
+        await use(endpoint_a)
+
+        assert len(created) == 2
+        for created_client in created:
+            created_client.close.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_stt_endpoint_cache_reactivates_a_reselected_configuration(self, monkeypatch):
+        """A configuration reverting while its old request runs must keep its client."""
+        from services.inference.parsers import openai_audio as module
+
+        created: list[MagicMock] = []
+
+        def make_openai_client(**_kwargs):
+            client = MagicMock()
+            client.close = AsyncMock()
+            created.append(client)
+            return client
+
+        endpoint_a = ModelEndpointConfig(
+            name="moss",
+            endpoint="http://moss-a:8000/v1",
+            model_name="moss",
+            timeout=900,
+            extra={"api_key": "key-a"},
+        )
+        endpoint_b = endpoint_a.model_copy(update={"endpoint": "http://moss-b:8000/v1", "extra": {"api_key": "key-b"}})
+        client = _client(MagicMock())
+        monkeypatch.setattr(module, "AsyncOpenAI", make_openai_client)
+        first_entered = asyncio.Event()
+        release_first = asyncio.Event()
+
+        async def hold_first() -> None:
+            async with client._transcription_client(endpoint_a):
+                first_entered.set()
+                await release_first.wait()
+
+        async def use(endpoint: ModelEndpointConfig) -> None:
+            async with client._transcription_client(endpoint):
+                pass
+
+        first = asyncio.create_task(hold_first())
+        await first_entered.wait()
+        await use(endpoint_b)
+        await use(endpoint_a)
+        release_first.set()
+        await first
+
+        assert len(created) == 2
+        created[0].close.assert_not_awaited()
+        assert ("http://moss-a:8000/v1", "key-a", 900.0, "moss") in client._endpoint_clients
+
+    @pytest.mark.asyncio
+    async def test_stt_endpoint_limiters_isolate_distinct_named_presets_on_the_same_route(self, mock_openai_client):
+        client = _client(mock_openai_client)
+        endpoint_a = ModelEndpointConfig(
+            name="moss-a",
+            endpoint="http://shared-moss:8000/v1",
+            model_name="moss",
+            batch_size=1,
+        )
+        endpoint_b = endpoint_a.model_copy(update={"name": "moss-b"})
+        first_entered = asyncio.Event()
+        second_entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def hold(endpoint: ModelEndpointConfig, entered: asyncio.Event) -> None:
+            async with client._transcription_slot(endpoint):
+                entered.set()
+                await release.wait()
+
+        first = asyncio.create_task(hold(endpoint_a, first_entered))
+        await first_entered.wait()
+        second = asyncio.create_task(hold(endpoint_b, second_entered))
+        try:
+            for _ in range(10):
+                if second_entered.is_set():
+                    break
+                await asyncio.sleep(0)
+            assert second_entered.is_set()
+        finally:
+            release.set()
+            await first
+            await second
+
+    @pytest.mark.asyncio
+    async def test_stt_endpoint_caches_evict_the_least_recently_used_idle_entry(self, monkeypatch):
+        """A busy worker must retain active presets without accumulating every past endpoint."""
+        from services.inference.parsers import openai_audio as module
+
+        created: list[MagicMock] = []
+
+        def make_openai_client(**_kwargs):
+            client = MagicMock()
+            client.close = AsyncMock()
+            created.append(client)
+            return client
+
+        client = _client(MagicMock())
+        monkeypatch.setattr(module, "AsyncOpenAI", make_openai_client)
+        endpoints = [
+            ModelEndpointConfig(
+                endpoint=f"http://moss-{index}:8000/v1",
+                model_name=f"moss-{index}",
+                batch_size=1,
+                timeout=900,
+                extra={"api_key": f"key-{index}"},
+            )
+            for index in range(9)
+        ]
+
+        async def use(endpoint: ModelEndpointConfig) -> None:
+            async with client._transcription_slot(endpoint):
+                async with client._transcription_client(endpoint):
+                    pass
+
+        for endpoint in endpoints[:8]:
+            await use(endpoint)
+        await use(endpoints[0])
+        await use(endpoints[8])
+
+        assert len(client._endpoint_limiters) == 8
+        assert len(client._endpoint_clients) == 8
+        assert ("http://moss-0:8000/v1", "moss-0", None) in client._endpoint_limiters
+        assert ("http://moss-1:8000/v1", "moss-1", None) not in client._endpoint_limiters
+        assert ("http://moss-0:8000/v1", "key-0", 900.0, None) in client._endpoint_clients
+        assert ("http://moss-1:8000/v1", "key-1", 900.0, None) not in client._endpoint_clients
+        created[1].close.assert_awaited_once()
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize(
         "updated_fields",
         [
@@ -707,6 +956,7 @@ class TestParse:
             return client
 
         endpoint = ModelEndpointConfig(
+            name="moss",
             endpoint="http://moss:8000/v1",
             model_name="moss-transcribe-diarize",
             timeout=900,
@@ -728,7 +978,7 @@ class TestParse:
         created[1].close.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_resolved_stt_endpoint_closes_a_retired_client_after_its_last_request(self, monkeypatch):
+    async def test_resolved_stt_endpoint_keeps_an_idle_client_for_another_preset(self, monkeypatch):
         from services.inference.parsers import openai_audio as module
 
         created: dict[str, MagicMock] = {}
@@ -755,6 +1005,7 @@ class TestParse:
             return client
 
         endpoint = ModelEndpointConfig(
+            name="moss-a",
             endpoint="http://moss-a:8000/v1",
             model_name="moss",
             timeout=900,
@@ -772,6 +1023,7 @@ class TestParse:
 
         selected[0] = endpoint.model_copy(
             update={
+                "name": "moss-b",
                 "endpoint": "http://moss-b:8000/v1",
                 "extra": {"api_key": "key-b"},
             }
@@ -786,7 +1038,7 @@ class TestParse:
         first_result = await first
 
         assert first_result.text_blocks[0].text == "from a"
-        created["http://moss-a:8000/v1"].close.assert_awaited_once()
+        created["http://moss-a:8000/v1"].close.assert_not_awaited()
         created["http://moss-b:8000/v1"].close.assert_not_awaited()
 
     @pytest.mark.asyncio

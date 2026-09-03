@@ -32,6 +32,7 @@ if TYPE_CHECKING:
     from core.ports.document_repo import DocumentRepository
     from core.ports.workspace_repo import WorkspaceRepository
     from services.orchestrators.partition_service import PartitionService
+    from services.orchestrators.preset_service import PresetService
 
 logger = get_logger()
 
@@ -73,12 +74,14 @@ class IndexingService:
         dispatcher: IndexingDispatcher,
         config: Settings | None = None,
         partition_service: PartitionService | None = None,
+        preset_service: PresetService | None = None,
     ) -> None:
         self._document_repo = document_repo
         self._workspace_repo = workspace_repo
         self._dispatcher = dispatcher
         self._config = config
         self._partition_service = partition_service
+        self._preset_service = preset_service
 
     # ------------------------------------------------------------------
     # Lookups (used by the thin router for its byte-identical guards)
@@ -206,6 +209,27 @@ class IndexingService:
         else:
             logger.bind(partition=partition, user_id=user_id).info("Auto-created partition on index.")
 
+    async def _refresh_preset_config_if_stale(self) -> None:
+        """Refresh this replica's partition cache before capturing a job config.
+
+        Best-effort, like every other cache refresh on this path: the revision
+        probe is an optimization that lets a replica notice presets another
+        replica changed, never a precondition for accepting an upload. It reads
+        ``preset_configuration_revision``, and ``latest_revision()`` raises
+        outright when that row is missing (a partial restore, a hand-edited DB)
+        as well as on any transient asyncpg error. Left unguarded this runs
+        inside ``add_file``'s admission block, so such a blip turns *every*
+        upload — of every file type, in every partition — into a 500. Falling
+        through instead costs at most a stale preset for this one dispatch,
+        which is exactly the state the caller was already in.
+        """
+        if self._preset_service is None:
+            return
+        try:
+            await self._preset_service.refresh_if_stale()
+        except Exception as exc:  # noqa: BLE001 - a stale-cache probe must not fail an upload
+            logger.warning(f"Preset cache staleness check failed; using the cached config: {exc}")
+
     async def add_file(
         self,
         *,
@@ -240,6 +264,7 @@ class IndexingService:
         )
         async with self._partition_admission(partition) as partition_existed_at_admission:
             await self._ensure_partition_exists(partition, user)
+            await self._refresh_preset_config_if_stale()
             require_existing_partition = bool(self._partition_configs()) or partition_existed_at_admission
             indexation_config, embedder_name = self._resolve_indexation_dispatch_config(partition)
             legacy_actor_preserves_partition_guard = require_existing_partition and indexation_config is not None

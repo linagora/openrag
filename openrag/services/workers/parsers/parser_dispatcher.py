@@ -137,10 +137,7 @@ class ParserDispatcher(DocumentParser):
         return backend
 
     def _resolve_audio_backend(self, ext: str) -> str:
-        file_loaders = self._config.loader.file_loaders
-        configured = (
-            getattr(file_loaders, ext, None) or getattr(file_loaders, "mp3", None) or getattr(file_loaders, "wav", None)
-        )
+        configured = _configured_audio_loader(self._config, ext)
         backend = _AUDIO_BACKENDS.get(configured)
         if backend is None:
             raise ValueError(
@@ -275,6 +272,20 @@ _BUILDERS: dict[str, Any] = {
 def _suffix(filename: str) -> str:
     """Lowercased extension without the dot (``"report.PDF"`` → ``"pdf"``)."""
     return filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+
+
+def _configured_audio_loader(config: Any, ext: str) -> str | None:
+    """Return the loader class name the dispatcher will use for an audio suffix."""
+    file_loaders = config.loader.file_loaders
+    return getattr(file_loaders, ext, None) or getattr(file_loaders, "mp3", None) or getattr(file_loaders, "wav", None)
+
+
+def routes_to_openai_audio_loader(config: Any, filename: str) -> bool:
+    """Whether indexing ``filename`` can invoke the managed STT resolver."""
+    content_type = Document.detect_content_type(filename)
+    if content_type not in {DocumentType.AUDIO, DocumentType.VIDEO}:
+        return False
+    return _configured_audio_loader(config, _suffix(filename)) == "OpenAIAudioLoader"
 
 
 def _build_vlm(base_url: str, model: str, api_key: str, timeout: float, enable_thinking: bool | None = None) -> Any:

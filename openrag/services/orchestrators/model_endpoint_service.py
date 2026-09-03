@@ -459,6 +459,7 @@ class ModelEndpointService:
             if bucket is None:
                 continue
             cfg = ModelEndpointConfig(
+                name=row.name,
                 endpoint=row.endpoint,
                 model_name=row.model_name,
                 batch_size=row.batch_size,
@@ -588,9 +589,18 @@ class ModelEndpointService:
             # cached state.
             self._invalidate_client_cache(model_type, name)
             self._invalidate_client_cache(model_type, new_name)
+            # `refresh_if_stale` reloads partitions itself, but only when the
+            # preset revision moved. A rename cascades into `pipeline_presets`
+            # (and so bumps the revision) only for the model types listed in
+            # model_endpoint_repo's preset-key maps — `embedder` is in neither,
+            # yet `partitions.embedder` still holds the old name. Fall back to a
+            # direct partition reload whenever the revision did not move, or that
+            # rename leaves every partition pointing at a name the registry no
+            # longer knows until the process restarts.
+            preset_refreshed = False
             if self._preset_service is not None:
-                await self._preset_service.load_all()
-            if self._partition_service is not None:
+                preset_refreshed = await self._preset_service.refresh_if_stale()
+            if not preset_refreshed and self._partition_service is not None:
                 await self._partition_service.load_partitions()
 
         if promote_to_default:
@@ -616,6 +626,14 @@ class ModelEndpointService:
 
         Raises 404 if not found, 422 if it is the last endpoint of its type
         (would leave components with no fallback).
+
+        Deleting an endpoint a preset still names would otherwise leave a
+        dangling reference: indexation resolves an explicit selection strictly,
+        so every audio upload on a preset whose ``stt`` names the deleted
+        endpoint would fail permanently, with nothing surfaced here. The repo
+        clears those selections in the delete's own transaction (see
+        ``_clear_preset_references``), returning the preset to the default
+        fallback; the cache reloads below make that visible to this replica.
         """
         # The last-endpoint guard and the survivor/default choice are made INSIDE
         # the repo's locked transaction (not from a stale snapshot here), so
@@ -633,6 +651,16 @@ class ModelEndpointService:
         # config and re-caches it; evicting after the reload drops any such stale
         # client so the next request rebuilds from the fresh config.
         await self.load_all()
+        # The repo cleared every preset selection naming the deleted endpoint, so
+        # the in-memory preset/partition configs still carry it until they are
+        # re-read. Without this, indexation keeps resolving the dead name and
+        # fails strictly (audio uploads on that preset) even though the DB has
+        # already restored the default fallback.
+        preset_refreshed = False
+        if self._preset_service is not None:
+            preset_refreshed = await self._preset_service.refresh_if_stale()
+        if not preset_refreshed and self._partition_service is not None:
+            await self._partition_service.load_partitions()
         self._invalidate_client_cache(model_type, name)
         if promoted is not None:
             # The deleted endpoint was the default; its 'default' alias client is now stale.
@@ -830,6 +858,12 @@ class ModelEndpointService:
         if bucket is None:
             return
         cfg = ModelEndpointConfig(
+            # ``row`` predates the rename (it is the pre-rename read, or the
+            # update applied before it), so ``row.name`` is still ``old_name``.
+            # The registry identity after the rename is ``new_name`` — and it is
+            # what keys the STT limiter/client caches — so name the config for
+            # what the DB now calls it, not for the alias it is also filed under.
+            name=new_name,
             endpoint=row.endpoint,
             model_name=row.model_name,
             batch_size=row.batch_size,

@@ -861,6 +861,8 @@ async def test_load_all_populates_config_models():
     assert "default" in settings.models.llm
     assert "moss" in settings.models.stt
     assert "default" in settings.models.stt
+    assert settings.models.stt["moss"].name == "moss"
+    assert settings.models.stt["default"].name == "moss"
 
 
 @pytest.mark.asyncio
@@ -972,10 +974,11 @@ async def test_update_model_endpoint_renames_and_evicts_cache():
 
 class _FakePresetServiceForReload:
     def __init__(self):
-        self.load_all_calls = 0
+        self.refresh_calls = 0
 
-    async def load_all(self):
-        self.load_all_calls += 1
+    async def refresh_if_stale(self):
+        self.refresh_calls += 1
+        return True
 
 
 class _FakePartitionServiceForReload:
@@ -1000,7 +1003,37 @@ async def test_update_model_endpoint_rename_reloads_presets_then_partitions():
 
     await svc.update_model_endpoint("old-name", "llm", new_name="new-name")
 
-    assert preset_service.load_all_calls == 1
+    assert preset_service.refresh_calls == 1
+    assert partition_service.load_partitions_calls == 0
+
+
+class _FakeUnchangedRevisionPresetService:
+    """A preset service whose revision did not move — `refresh_if_stale` reloads
+    nothing and reports so."""
+
+    def __init__(self):
+        self.refresh_calls = 0
+
+    async def refresh_if_stale(self):
+        self.refresh_calls += 1
+        return False
+
+
+@pytest.mark.asyncio
+async def test_update_model_endpoint_rename_reloads_partitions_when_revision_unchanged():
+    """An `embedder` rename cascades into `partitions` but into no preset row, so
+    the preset revision never moves and `refresh_if_stale` reloads nothing. The
+    partition reload must still run, or `partitions.embedder` keeps the old name
+    and every index/search on that partition fails until a process restart."""
+    existing = _make_row(name="jina", model_type="embedder")
+    repo = _FakeEndpointRepo(rows=[existing])
+    preset_service = _FakeUnchangedRevisionPresetService()
+    partition_service = _FakePartitionServiceForReload()
+    svc = _make_service(repo, partition_service=partition_service, preset_service=preset_service)
+
+    await svc.update_model_endpoint("jina", "embedder", new_name="jina-v3")
+
+    assert preset_service.refresh_calls == 1
     assert partition_service.load_partitions_calls == 1
 
 
@@ -1016,7 +1049,7 @@ async def test_update_model_endpoint_without_rename_skips_preset_and_partition_r
 
     await svc.update_model_endpoint("jina", "embedder", endpoint="http://new:8000/v1")
 
-    assert preset_service.load_all_calls == 0
+    assert preset_service.refresh_calls == 0
     assert partition_service.load_partitions_calls == 0
 
 
@@ -1034,9 +1067,10 @@ async def test_update_model_endpoint_rename_aliases_new_name_before_reload_await
     seen_during_reload = {}
 
     class _SnoopingPresetService:
-        async def load_all(self):
+        async def refresh_if_stale(self):
             seen_during_reload["new-name"] = svc._config.models.llm.get("new-name")
             seen_during_reload["old-name"] = svc._config.models.llm.get("old-name")
+            return True
 
     svc._preset_service = _SnoopingPresetService()
 
@@ -1058,7 +1092,7 @@ async def test_update_model_endpoint_rename_keeps_both_names_resolvable_after_fa
     await svc.load_all()
 
     class _FailingPresetService:
-        async def load_all(self):
+        async def refresh_if_stale(self):
             raise RuntimeError("db blip")
 
     svc._preset_service = _FailingPresetService()
@@ -1083,7 +1117,7 @@ async def test_update_model_endpoint_rename_with_field_change_aliases_the_new_va
     await svc.load_all()
 
     class _FailingPresetService:
-        async def load_all(self):
+        async def refresh_if_stale(self):
             raise RuntimeError("db blip")
 
     svc._preset_service = _FailingPresetService()
@@ -1093,6 +1127,36 @@ async def test_update_model_endpoint_rename_with_field_change_aliases_the_new_va
 
     assert svc._config.models.llm.get("new-name").endpoint == "http://new:8000/v1"
     assert svc._config.models.llm.get("old-name").endpoint == "http://new:8000/v1"
+
+
+@pytest.mark.asyncio
+async def test_update_model_endpoint_rename_aliases_carry_the_new_registry_name():
+    """The aliased config must be named for what the DB now calls the row.
+
+    ``_alias_renamed_name`` is handed the pre-rename row, so naming the config
+    from it left ``name`` at ``old_name`` under both aliases until the final
+    ``load_all()``. ``ModelEndpointConfig.name`` is the stable registry identity
+    — and for STT it keys OpenAIAudioClient's limiter/client caches — so a
+    request landing in that window would key its caches under the retired name.
+    """
+    existing = _make_row(name="old-name", model_type="stt", endpoint="http://old:8000/v1")
+    repo = _FakeEndpointRepo(rows=[existing])
+    svc = _make_service(repo)
+    await svc.load_all()
+
+    class _FailingPresetService:
+        async def refresh_if_stale(self):
+            raise RuntimeError("db blip")
+
+    svc._preset_service = _FailingPresetService()
+
+    with pytest.raises(RuntimeError):
+        await svc.update_model_endpoint("old-name", "stt", new_name="new-name")
+
+    assert svc._config.models.stt.get("new-name").name == "new-name"
+    # The old name stays resolvable for in-flight references, but it is an alias
+    # to the renamed row — not a claim that the row is still called that.
+    assert svc._config.models.stt.get("old-name").name == "new-name"
 
 
 @pytest.mark.asyncio
@@ -1111,7 +1175,7 @@ async def test_update_model_endpoint_rename_evicts_stale_client_cache_before_fai
     svc._client_caches["llm"] = cache
 
     class _FailingPresetService:
-        async def load_all(self):
+        async def refresh_if_stale(self):
             raise RuntimeError("db blip")
 
     svc._preset_service = _FailingPresetService()
@@ -2121,3 +2185,52 @@ async def test_validate_endpoint_rejects_url_credentials_without_request(monkeyp
         "transcription_supported": None,
         "detail": "Endpoint URL must not include credentials.",
     }
+
+
+@pytest.mark.asyncio
+async def test_delete_model_endpoint_reloads_presets_when_the_cascade_moved_them():
+    """The repo clears preset selections naming the deleted endpoint; this
+    replica must re-read them.
+
+    Regression: without the reload, indexation kept resolving the deleted name
+    out of the in-memory preset config and failed strictly — audio uploads on
+    that preset broke — even though the DB had already restored the default
+    fallback in the delete's own transaction. Clearing a selection writes to
+    ``pipeline_presets``, so the revision moves and ``refresh_if_stale`` reloads
+    presets and partitions together.
+    """
+    repo = _FakeEndpointRepo(
+        rows=[
+            _make_row(name="whisper", model_type="stt", is_default=True),
+            _make_row(name="doomed", model_type="stt", is_default=False),
+        ]
+    )
+    preset_service = _FakePresetServiceForReload()
+    partition_service = _FakePartitionServiceForReload()
+    svc = _make_service(repo, partition_service=partition_service, preset_service=preset_service)
+
+    await svc.delete_model_endpoint("doomed", "stt")
+
+    assert preset_service.refresh_calls == 1
+    # refresh_if_stale reloaded partitions itself; no second reload here.
+    assert partition_service.load_partitions_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_delete_model_endpoint_reloads_partitions_when_no_preset_moved():
+    """No preset named the endpoint, so the revision never moves — the partition
+    reload must still run, mirroring the rename path's fallback."""
+    repo = _FakeEndpointRepo(
+        rows=[
+            _make_row(name="whisper", model_type="stt", is_default=True),
+            _make_row(name="doomed", model_type="stt", is_default=False),
+        ]
+    )
+    preset_service = _FakeUnchangedRevisionPresetService()
+    partition_service = _FakePartitionServiceForReload()
+    svc = _make_service(repo, partition_service=partition_service, preset_service=preset_service)
+
+    await svc.delete_model_endpoint("doomed", "stt")
+
+    assert preset_service.refresh_calls == 1
+    assert partition_service.load_partitions_calls == 1

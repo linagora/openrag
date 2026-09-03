@@ -52,6 +52,7 @@ import {
   configSet,
   applyParsingStrategyChange,
   PARSING_STRATEGY_INHERIT,
+  STT_ENDPOINT_DEFAULT_OPTION,
 } from "./preset-config";
 
 const PRESET_TYPES = ["indexation", "retrieval"] as const;
@@ -257,20 +258,24 @@ function IndexationPresetForm({
   chunkingStrategies,
   parsingStrategies,
   vlms,
+  stts,
   llms,
   prompts,
   defaultLlm,
   defaultVlm,
+  defaultStt,
 }: {
   config: Config;
   onChange: (c: Config) => void;
   chunkingStrategies: string[];
   parsingStrategies: string[];
   vlms: string[];
+  stts: string[];
   llms: string[];
   prompts: PromptResponse[];
   defaultLlm?: string;
   defaultVlm?: string;
+  defaultStt?: string;
 }) {
   const set = (key: string, value: unknown) => onChange(configSet(config, key, value));
 
@@ -368,24 +373,56 @@ function IndexationPresetForm({
       {/* Parsing */}
       <section className="space-y-3">
         <h4 className="text-sm font-medium">Parsing</h4>
-        <div className="space-y-1.5">
-          <Label className="text-xs">Strategy</Label>
-          <Select
-            value={configGet(config, "parsing_strategy", PARSING_STRATEGY_INHERIT)}
-            onValueChange={(v) => onChange(applyParsingStrategyChange(config, v))}
-          >
-            <SelectTrigger size="sm">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value={PARSING_STRATEGY_INHERIT}>Default (inherit global loader)</SelectItem>
-              {parsingStrategies.map((s) => (
-                <SelectItem key={s} value={s}>
-                  {s}
+        <div className="grid gap-3 sm:grid-cols-2">
+          <div className="min-w-0 space-y-1.5">
+            <Label className="text-xs">Strategy</Label>
+            <Select
+              value={configGet(config, "parsing_strategy", PARSING_STRATEGY_INHERIT)}
+              onValueChange={(v) => onChange(applyParsingStrategyChange(config, v))}
+            >
+              <SelectTrigger size="sm" className="w-full min-w-0">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value={PARSING_STRATEGY_INHERIT}>Default (inherit global loader)</SelectItem>
+                {parsingStrategies.map((s) => (
+                  <SelectItem key={s} value={s}>
+                    {s}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="min-w-0 space-y-1.5">
+            <Label className="text-xs">STT endpoint</Label>
+            <Select
+              value={configGet(config, "stt", STT_ENDPOINT_DEFAULT_OPTION)}
+              onValueChange={(v) => set("stt", v === STT_ENDPOINT_DEFAULT_OPTION ? null : v)}
+            >
+              <SelectTrigger size="sm" className="w-full min-w-0">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value={STT_ENDPOINT_DEFAULT_OPTION}>
+                  {defaultStt ? `Use default (${defaultStt})` : "Use default"}
                 </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+                {stts.map((name) => (
+                  <SelectItem key={name} value={name}>
+                    {name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="min-w-0 sm:col-span-2">
+            <PromptSelect
+              label="Transcription prompt"
+              prompts={promptsByType("asr_transcription")}
+              value={configGet(config, "asr_transcription_prompt_name", "")}
+              onChange={(v) => set("asr_transcription_prompt_name", v || null)}
+              selectTriggerClassName="w-full min-w-0"
+            />
+          </div>
         </div>
       </section>
 
@@ -628,11 +665,13 @@ function PromptSelect({
   prompts,
   value,
   onChange,
+  selectTriggerClassName,
 }: {
   label: string;
   prompts: PromptResponse[];
   value: string;
   onChange: (v: string) => void;
+  selectTriggerClassName?: string;
 }) {
   return (
     <div className="space-y-1.5">
@@ -644,7 +683,7 @@ function PromptSelect({
         value={promptSelectValue(value)}
         onValueChange={(v) => onChange(promptOptionToName(v))}
       >
-        <SelectTrigger size="sm">
+        <SelectTrigger size="sm" className={selectTriggerClassName}>
           <SelectValue />
         </SelectTrigger>
         <SelectContent>
@@ -924,6 +963,11 @@ function PresetDialog({
     queryFn: () => listModelEndpoints("vlm"),
     enabled: open && presetType === "indexation",
   });
+  const { data: sttData } = useQuery({
+    queryKey: ["model-endpoints", "stt"],
+    queryFn: () => listModelEndpoints("stt"),
+    enabled: open && presetType === "indexation",
+  });
   const { data: rerankerData } = useQuery({
     queryKey: ["model-endpoints", "reranker"],
     queryFn: () => listModelEndpoints("reranker"),
@@ -932,8 +976,10 @@ function PresetDialog({
 
   const llms = (llmData ?? []).map((e) => e.name);
   const vlms = (vlmData ?? []).map((e) => e.name);
+  const stts = (sttData ?? []).map((e) => e.name);
   const defaultLlm = pickDefaultEndpoint(llmData)?.name;
   const defaultVlm = pickDefaultEndpoint(vlmData)?.name;
+  const defaultStt = pickDefaultEndpoint(sttData)?.name;
   // The preset's `reranker` field is a reranker *endpoint name* (resolved by the
   // backend's reranker factory), not a provider type — so list the configured
   // reranker model endpoints, like the embedder/LLM pickers.
@@ -976,10 +1022,12 @@ function PresetDialog({
               chunkingStrategies={options?.chunking_strategies ?? []}
               parsingStrategies={options?.parsing_strategies ?? ["marker", "pymupdf"]}
               vlms={vlms}
+              stts={stts}
               llms={llms}
               prompts={allPrompts}
               defaultLlm={defaultLlm}
               defaultVlm={defaultVlm}
+              defaultStt={defaultStt}
             />
           ) : (
             <RetrievalPresetForm

@@ -3,13 +3,15 @@ from __future__ import annotations
 import asyncio
 import threading
 import time
+from contextvars import ContextVar
 from types import SimpleNamespace
 from typing import Any
 
 import ray
 from core.config.model_endpoints import CONTROL_EXTRA_KEYS
 from core.models.catalog import CONTENT_CLAIM_TOKEN_METADATA_KEY
-from services.workers.indexer_actor import IndexerWorker, delete_uploaded_file
+from core.utils.exceptions import NotFoundError
+from services.workers.indexer_actor import IndexerWorker, _display_filename, delete_uploaded_file
 from services.workers.ray_utils import retry_idempotent_ray_actor_method
 
 from openrag.core.config.root import Settings
@@ -27,8 +29,31 @@ _MISSING_WORKER_REF_ERROR = "Indexer worker did not receive a registered task re
 # and workers on the same protocol generation whenever their remote contract or
 # cross-process indexing semantics change, so new replicas cannot attach to a
 # partially compatible actor fleet left by the previous release.
-_INDEXER_ACTOR_PROTOCOL_VERSION = "v5"
+_INDEXER_ACTOR_PROTOCOL_VERSION = "v6"
 _INDEXER_POOL_DISPATCHER_ACTOR_NAME = f"IndexerPoolDispatcher-{_INDEXER_ACTOR_PROTOCOL_VERSION}"
+
+
+def _explicit_indexation_selection(config: dict[str, Any] | None, key: str) -> str | None:
+    """Return a nonblank named resource selected by an indexation preset."""
+    value = config.get(key) if config is not None else None
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def _is_usable_stt_endpoint(endpoint: Any) -> bool:
+    """Whether a resolved STT endpoint carries what a transcription request needs.
+
+    ``OpenAIAudioClient`` treats an endpoint missing either field as *unset* and
+    silently degrades to the ``TRANSCRIBER_*`` fallback, dropping the endpoint's
+    ``extra`` request options along with its model. For an explicit preset
+    selection that means the file succeeds while a different provider produces
+    the transcript — the exact silent substitution a named selection exists to
+    prevent, and worse than a stale name because nothing fails to surface it.
+    Rows written by ``seed_defaults`` bypass the API's ``validate_stt_fields``
+    guard, so an empty ``TRANSCRIBER_MODEL`` can persist such a row.
+    """
+    return bool(
+        (getattr(endpoint, "endpoint", "") or "").strip() and (getattr(endpoint, "model_name", "") or "").strip()
+    )
 
 
 def _indexer_worker_actor_name(index: int) -> str:
@@ -136,6 +161,14 @@ class IndexerWorkerActor:
         # unpicklable). Created here, in the actor process, it is never pickled.
         self._logger = get_logger()
         self._cfg = cfg
+        # One actor can process several files concurrently, so the preset
+        # snapshot must stay task-local. Construct the ContextVar inside the
+        # worker process: a module-level instance makes Ray's actor class
+        # unpicklable and prevents the pool from starting.
+        self._active_indexation_config: ContextVar[dict[str, Any] | None] = ContextVar(
+            "active_indexation_config",
+            default=None,
+        )
         # Whether "default" resolves via global env/config fallbacks. This keeps
         # reload-on-miss from looping forever when no is_default row exists for a
         # type but the legacy config block can still serve the default endpoint.
@@ -188,29 +221,64 @@ class IndexerWorkerActor:
         return self._prompt_service
 
     async def _resolve_transcription_prompt(self) -> str | None:
-        """Return the current global ASR prompt without caching it in the worker.
+        """Resolve the active preset's ASR prompt, else the type's global default.
 
-        ``OpenAIAudioClient`` invokes this directly before each request. The
-        resulting database lookup makes an Admin UI save visible to the next
-        transcription even though the parser client itself is long-lived.
+        The preset name is captured when the file is dispatched, matching the
+        endpoint and the other indexation-stage settings. Prompt content itself
+        stays live: ``resolve_prompt`` re-reads it, so an Admin UI edit applies to
+        the next transcription without recreating the long-lived parser client.
+        A selected prompt that no longer exists fails the file rather than
+        silently changing its transcription instructions.
         """
+        selected_name = _explicit_indexation_selection(
+            self._active_indexation_config.get(),
+            "asr_transcription_prompt_name",
+        )
         try:
-            return await self._get_prompt_service().resolve_prompt("asr_transcription")
+            if selected_name is not None:
+                return await self._get_prompt_service().resolve_prompt(
+                    "asr_transcription",
+                    names=[selected_name],
+                    strict_names=True,
+                )
+            return await self._get_prompt_service().resolve_prompt(
+                "asr_transcription",
+            )
+        except NotFoundError:
+            raise
         except Exception as exc:  # noqa: BLE001 - a prompt lookup must not fail a file
             self._logger.warning(f"ASR transcription prompt resolution failed: {exc}")
             return None
 
     def _resolve_transcription_endpoint(self) -> Any | None:
-        """Return the current default OpenAI-compatible STT endpoint.
+        """Return the active preset's OpenAI-compatible STT endpoint.
 
         The parser holds this resolver rather than a static client config. The
         indexer refreshes ``cfg.models`` from the endpoint registry on its
         existing bounded refresh cycle, so a saved Admin UI endpoint takes
-        effect without recreating the long-lived Ray actor.
+        effect without recreating the long-lived Ray actor. An unset selection
+        uses the global default; a selected endpoint that is stale *or*
+        incomplete fails the file rather than silently switching providers.
         """
         models = getattr(self._cfg, "models", None)
         stt = getattr(models, "stt", None)
-        return stt.get("default") if stt is not None else None
+        selected_name = _explicit_indexation_selection(self._active_indexation_config.get(), "stt")
+        if stt is None:
+            if selected_name:
+                raise KeyError(f"Unknown STT endpoint '{selected_name}': the endpoint registry is unavailable.")
+            return None
+        endpoint = stt.get(selected_name or "default")
+        if selected_name:
+            if endpoint is None:
+                raise KeyError(f"Unknown STT endpoint '{selected_name}'. Available: {list(stt)}")
+            if not _is_usable_stt_endpoint(endpoint):
+                raise KeyError(
+                    f"STT endpoint '{selected_name}' selected by the active indexation preset is incomplete: "
+                    "both an endpoint URL and a model name are required."
+                )
+        # An unset selection keeps the historical contract: the global default may
+        # be absent or incomplete, and the parser falls back to TRANSCRIBER_*.
+        return endpoint
 
     async def _ensure_registry_fresh(self, required_model_names: dict[str, list[str]] | list[str]) -> None:
         """Hydrate ``cfg.models`` from the DB so named endpoints resolve here.
@@ -342,25 +410,40 @@ class IndexerWorkerActor:
         try:
             await self._await_worker_ref_registration(task_id)
             await self._ensure_catalog()
-            await self._ensure_registry_fresh(_required_model_endpoint_names(indexation_config, embedder_name))
+            from services.workers.parsers.parser_dispatcher import routes_to_openai_audio_loader
+
+            await self._ensure_registry_fresh(
+                _required_model_endpoint_names(
+                    indexation_config,
+                    embedder_name,
+                    include_selected_stt=routes_to_openai_audio_loader(
+                        self._cfg,
+                        _display_filename(path, metadata),
+                    ),
+                )
+            )
             # Resolve the enrichment-stage prompts once for this file (partition
             # override → global default → disk seed). Done here, at the job
             # boundary, so per-chunk work reuses one resolved string instead of
             # hitting the DB per chunk.
             resolved_prompts = await self._resolve_ingest_prompts(partition, indexation_config or {})
-            result = await self._worker.process_file(
-                task_id=task_id,
-                path=path,
-                metadata=worker_metadata,
-                partition=partition,
-                user=user,
-                workspace_ids=workspace_ids,
-                replace=replace,
-                indexation_config=indexation_config,
-                embedder_name=embedder_name,
-                require_existing_partition=require_existing_partition,
-                resolved_prompts=resolved_prompts,
-            )
+            token = self._active_indexation_config.set(indexation_config)
+            try:
+                result = await self._worker.process_file(
+                    task_id=task_id,
+                    path=path,
+                    metadata=worker_metadata,
+                    partition=partition,
+                    user=user,
+                    workspace_ids=workspace_ids,
+                    replace=replace,
+                    indexation_config=indexation_config,
+                    embedder_name=embedder_name,
+                    require_existing_partition=require_existing_partition,
+                    resolved_prompts=resolved_prompts,
+                )
+            finally:
+                self._active_indexation_config.reset(token)
             file_id = metadata.get("file_id", "")
             if workspace_ids and not replace and file_id:
                 try:
@@ -739,15 +822,22 @@ def _required_llm_names(indexation_config: dict[str, Any] | None) -> list[str]:
 def _required_model_endpoint_names(
     indexation_config: dict[str, Any] | None,
     embedder_name: str | None,
+    *,
+    include_selected_stt: bool = True,
 ) -> dict[str, list[str]]:
+    selected_stt = _explicit_indexation_selection(indexation_config, "stt") if include_selected_stt else None
+    required_stt = (
+        ["default"] if selected_stt is None or selected_stt == "default" else sorted(["default", selected_stt])
+    )
     names: dict[str, list[str]] = {
         "embedder": [],
         "llm": _required_llm_names(indexation_config),
         "vlm": [],
-        # Audio parsing resolves the global STT default at request time. Keep
-        # it in the refresh set so a worker with only file parsing (no LLM/VLM
-        # enrichment) still hydrates the newly editable endpoint registry.
-        "stt": ["default"],
+        # Audio parsing resolves the preset's selected STT endpoint at request
+        # time and fails the file if that selection is gone. Both names are
+        # required so a worker with only file parsing still hydrates the
+        # endpoint registry before resolving the selection.
+        "stt": required_stt,
     }
     if embedder_name:
         names["embedder"].append(embedder_name)

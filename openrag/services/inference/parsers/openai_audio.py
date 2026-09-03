@@ -41,6 +41,7 @@ from core.config.model_endpoints import (
 )
 from core.indexing.parsers.document_parser import BaseClientParser
 from core.models.document import Document, DocumentType, ProcessedDocument, TextBlock
+from core.utils.exceptions import NotFoundError
 from core.utils.logging import get_logger
 from openai import AsyncOpenAI
 from pydub import AudioSegment
@@ -55,10 +56,16 @@ _DEFAULT_DIRECT_UPLOAD_SUFFIXES: tuple[str, ...] = (".mp3", ".m4a", ".ogg", ".we
 # ``AsyncOpenAI`` accepts an empty string and omits its Authorization header,
 # which is required for endpoints that deliberately reject authentication.
 _ANONYMOUS_API_KEY = ""
+# A worker may index files from several partitions with distinct STT presets.
+# Keep a small set of idle endpoint resources so interleaved files reuse their
+# connections and concurrency limits without letting the cache grow forever.
+_MAX_CACHED_STT_ENDPOINTS = 8
 
 LanguageDetector = Callable[[Path], Awaitable[str | None]]
 TranscriptionPromptResolver = Callable[[], Awaitable[str | None]]
 TranscriptionEndpointResolver = Callable[[], ModelEndpointConfig | None | Awaitable[ModelEndpointConfig | None]]
+EndpointLimiterKey = tuple[str, str, str | None]
+EndpointClientKey = tuple[str, str, float, str | None]
 
 
 class _EndpointConcurrencyLimiter:
@@ -98,6 +105,7 @@ class _EndpointLimiterEntry:
 
     limiter: _EndpointConcurrencyLimiter
     leases: int = 0
+    last_used: int = 0
 
 
 @dataclass
@@ -107,6 +115,7 @@ class _EndpointClientEntry:
     client: AsyncOpenAI
     leases: int = 0
     retired: bool = False
+    last_used: int = 0
 
 
 class OpenAIAudioClient(BaseClientParser):
@@ -135,11 +144,11 @@ class OpenAIAudioClient(BaseClientParser):
         self._transcription_prompt_resolver = transcription_prompt_resolver
         self._transcription_endpoint_resolver = transcription_endpoint_resolver
         self._semaphore = asyncio.Semaphore(max(1, concurrency_limit))
-        self._endpoint_limiters: dict[tuple[str, str], _EndpointLimiterEntry] = {}
+        self._endpoint_limiters: dict[EndpointLimiterKey, _EndpointLimiterEntry] = {}
         self._endpoint_registry_lock = asyncio.Lock()
-        self._current_endpoint_limiter_key: tuple[str, str] | None = None
-        self._endpoint_clients: dict[tuple[str, str, float], _EndpointClientEntry] = {}
+        self._endpoint_clients: dict[EndpointClientKey, _EndpointClientEntry] = {}
         self._endpoint_client_lock = asyncio.Lock()
+        self._endpoint_cache_use = 0
 
     def supported_types(self) -> list[str]:
         return [DocumentType.AUDIO.value, DocumentType.VIDEO.value]
@@ -219,13 +228,17 @@ class OpenAIAudioClient(BaseClientParser):
             return None
         try:
             prompt = await self._transcription_prompt_resolver()
+        except NotFoundError:
+            # A preset explicitly chose a prompt that no longer exists. Using
+            # the default/native prompt would silently alter persisted output.
+            raise
         except Exception as exc:  # noqa: BLE001 - prompt storage must not block transcription
             logger.bind(error=str(exc)).warning("Transcription prompt resolution failed")
             return None
         return prompt.strip() if prompt and prompt.strip() else None
 
     async def _resolve_transcription_endpoint(self) -> ModelEndpointConfig | None:
-        """Resolve the current STT default, falling back safely to env config.
+        """Resolve the current STT endpoint, using env config only when unset.
 
         Indexer workers resolve from their refreshed local registry, while the
         direct extraction path may await a fresh registry reload. Keeping that
@@ -237,6 +250,12 @@ class OpenAIAudioClient(BaseClientParser):
             endpoint = self._transcription_endpoint_resolver()
             if inspect.isawaitable(endpoint):
                 endpoint = await endpoint
+        except KeyError:
+            # A preset selected a named endpoint that no longer exists. Falling
+            # back would silently transcribe with a different provider, so fail
+            # this file and leave the preset available for the administrator to
+            # correct.
+            raise
         except Exception as exc:  # noqa: BLE001 - endpoint lookup must not block indexing
             logger.bind(error=str(exc)).warning("STT endpoint resolution failed")
             return None
@@ -248,21 +267,25 @@ class OpenAIAudioClient(BaseClientParser):
         return endpoint
 
     @staticmethod
-    def _endpoint_limiter_key(endpoint: ModelEndpointConfig) -> tuple[str, str]:
+    def _endpoint_limiter_key(endpoint: ModelEndpointConfig) -> EndpointLimiterKey:
         """Return the effective serving identity used for concurrency scope."""
-        return (endpoint.endpoint.strip().rstrip("/"), (endpoint.model_name or "").strip())
+        name = endpoint.name.strip() if endpoint.name and endpoint.name.strip() else None
+        return (endpoint.endpoint.strip().rstrip("/"), (endpoint.model_name or "").strip(), name)
+
+    def _next_endpoint_cache_use(self) -> int:
+        self._endpoint_cache_use += 1
+        return self._endpoint_cache_use
 
     def _prune_endpoint_limiters(self) -> None:
-        """Drop drained entries except the endpoint currently selected."""
-        retired = [
-            key
-            for key, entry in self._endpoint_limiters.items()
-            if key != self._current_endpoint_limiter_key and entry.leases == 0
-        ]
-        for key in retired:
+        """Bound idle limiter entries without evicting another active preset."""
+        while len(self._endpoint_limiters) > _MAX_CACHED_STT_ENDPOINTS:
+            idle = [(entry.last_used, key) for key, entry in self._endpoint_limiters.items() if entry.leases == 0]
+            if not idle:
+                return
+            _, key = min(idle)
             del self._endpoint_limiters[key]
 
-    async def _release_endpoint_lease(self, key: tuple[str, str], entry: _EndpointLimiterEntry) -> None:
+    async def _release_endpoint_lease(self, key: EndpointLimiterKey, entry: _EndpointLimiterEntry) -> None:
         """Release one registered lease and prune a drained retired entry."""
         async with self._endpoint_registry_lock:
             entry.leases -= 1
@@ -278,7 +301,6 @@ class OpenAIAudioClient(BaseClientParser):
         """
         if endpoint is None:
             async with self._endpoint_registry_lock:
-                self._current_endpoint_limiter_key = None
                 self._prune_endpoint_limiters()
             async with self._semaphore:
                 yield
@@ -296,8 +318,8 @@ class OpenAIAudioClient(BaseClientParser):
                 elif entry.limiter.limit != endpoint.batch_size:
                     await entry.limiter.set_limit(endpoint.batch_size)
                 entry.leases += 1
+                entry.last_used = self._next_endpoint_cache_use()
                 lease_registered = True
-                self._current_endpoint_limiter_key = key
                 self._prune_endpoint_limiters()
 
             async with entry.limiter:
@@ -349,20 +371,33 @@ class OpenAIAudioClient(BaseClientParser):
         return endpoint.endpoint.strip().rstrip("/") == self._base_url.strip().rstrip("/")
 
     @staticmethod
-    def _endpoint_client_key(endpoint: ModelEndpointConfig) -> tuple[str, str, float]:
+    def _endpoint_client_key(endpoint: ModelEndpointConfig) -> EndpointClientKey:
         """Return the effective connection identity for a configured endpoint."""
         api_key = endpoint.extra.get("api_key")
         resolved_api_key = api_key.strip() if isinstance(api_key, str) and api_key.strip() else _ANONYMOUS_API_KEY
-        return (endpoint.endpoint.strip().rstrip("/"), resolved_api_key, float(endpoint.timeout))
+        name = endpoint.name.strip() if endpoint.name and endpoint.name.strip() else None
+        return (endpoint.endpoint.strip().rstrip("/"), resolved_api_key, float(endpoint.timeout), name)
 
-    def _retire_endpoint_clients(self, current_key: tuple[str, str, float] | None) -> list[AsyncOpenAI]:
-        """Mark old configurations retired and detach those with no users."""
+    def _retire_replaced_endpoint_clients(self, current_key: EndpointClientKey) -> list[AsyncOpenAI]:
+        """Retire obsolete connection settings for the endpoint being used."""
         closable: list[AsyncOpenAI] = []
         for key, entry in list(self._endpoint_clients.items()):
-            entry.retired = key != current_key
+            if current_key[3] is not None and key != current_key and key[3] == current_key[3]:
+                entry.retired = True
             if entry.retired and entry.leases == 0:
                 del self._endpoint_clients[key]
                 closable.append(entry.client)
+        return closable
+
+    def _prune_endpoint_clients(self) -> list[AsyncOpenAI]:
+        """Close least-recently-used idle clients once the endpoint cache is full."""
+        closable: list[AsyncOpenAI] = []
+        while len(self._endpoint_clients) > _MAX_CACHED_STT_ENDPOINTS:
+            idle = [(entry.last_used, key) for key, entry in self._endpoint_clients.items() if entry.leases == 0]
+            if not idle:
+                break
+            _, key = min(idle)
+            closable.append(self._endpoint_clients.pop(key).client)
         return closable
 
     @staticmethod
@@ -379,16 +414,16 @@ class OpenAIAudioClient(BaseClientParser):
         self,
         endpoint: ModelEndpointConfig | None,
     ) -> AsyncIterator[tuple[AsyncOpenAI, str]]:
-        """Lease a pooled client and retire changed endpoint configurations safely."""
+        """Lease a pooled client, retaining recently used distinct endpoints."""
         if endpoint is None:
             async with self._endpoint_client_lock:
-                closable = self._retire_endpoint_clients(None)
+                closable = self._prune_endpoint_clients()
             await self._close_endpoint_clients(closable)
             yield self._client, self._model
             return
 
         key = self._endpoint_client_key(endpoint)
-        resolved_base_url, resolved_api_key, resolved_timeout = key
+        resolved_base_url, resolved_api_key, resolved_timeout, _ = key
         # A resolved registry endpoint owns its credentials. In particular, an
         # administrator clearing its key must not silently restore the legacy
         # TRANSCRIBER_API_KEY merely because the endpoint URL happens to match.
@@ -400,7 +435,7 @@ class OpenAIAudioClient(BaseClientParser):
             and endpoint.timeout == self._timeout
         ):
             async with self._endpoint_client_lock:
-                closable = self._retire_endpoint_clients(None)
+                closable = self._prune_endpoint_clients()
             await self._close_endpoint_clients(closable)
             yield self._client, endpoint.model_name or self._model
             return
@@ -418,8 +453,11 @@ class OpenAIAudioClient(BaseClientParser):
                         )
                     )
                     self._endpoint_clients[key] = entry
+                entry.retired = False
                 entry.leases += 1
-                closable = self._retire_endpoint_clients(key)
+                entry.last_used = self._next_endpoint_cache_use()
+                closable = self._retire_replaced_endpoint_clients(key)
+                closable.extend(self._prune_endpoint_clients())
             await self._close_endpoint_clients(closable)
             yield entry.client, endpoint.model_name or self._model
         finally:
@@ -430,6 +468,7 @@ class OpenAIAudioClient(BaseClientParser):
                     if entry.retired and entry.leases == 0 and self._endpoint_clients.get(key) is entry:
                         del self._endpoint_clients[key]
                         closable.append(entry.client)
+                    closable.extend(self._prune_endpoint_clients())
                 await self._close_endpoint_clients(closable)
 
     async def _transcribe(

@@ -28,6 +28,8 @@ if TYPE_CHECKING:
 
     from core.config.root import Settings
     from core.ports.prompt_repo import PromptRepository
+    from services.orchestrators.partition_service import PartitionService
+    from services.orchestrators.preset_service import PresetService
 
 logger = get_logger()
 
@@ -169,9 +171,18 @@ def _validate_and_normalize_content(prompt_type: str, content: str) -> str:
 class PromptService:
     """CRUD, resolution, and lifecycle for DB-backed prompts."""
 
-    def __init__(self, *, prompt_repo: PromptRepository, config: Settings) -> None:
+    def __init__(
+        self,
+        *,
+        prompt_repo: PromptRepository,
+        config: Settings,
+        preset_service: PresetService | None = None,
+        partition_service: PartitionService | None = None,
+    ) -> None:
         self._repo = prompt_repo
         self._config = config
+        self._preset_service = preset_service
+        self._partition_service = partition_service
 
     # ------------------------------------------------------------------
     # Startup lifecycle
@@ -241,13 +252,21 @@ class PromptService:
     # Resolution — the single seam
     # ------------------------------------------------------------------
 
-    async def resolve_prompt(self, prompt_type: str, names: Sequence[str | None] | None = None) -> str:
+    async def resolve_prompt(
+        self,
+        prompt_type: str,
+        names: Sequence[str | None] | None = None,
+        *,
+        strict_names: bool = False,
+    ) -> str:
         """Resolve the effective prompt text for ``prompt_type``.
 
         Tries each candidate ``name`` in order (a preset- or partition-named
         library prompt), then the global default, then the on-disk seed.
         ``names`` entries may be ``None``/empty (skipped) so callers can pass
-        optional config values directly.
+        optional config values directly. With ``strict_names=True``, a supplied
+        candidate must resolve; the global default is used only when no named
+        selection was requested.
 
         Resolution happens per request, which put a Postgres round-trip on the
         chat and search paths that did not exist before — prompts used to be read
@@ -270,22 +289,28 @@ class PromptService:
         disk-loaded prompt.
         """
         candidates = [n for n in (names or ()) if n]
+        missing_strict_selection = False
         try:
             for name in candidates:
                 prompt = await self._repo.get_by_name(prompt_type, name)
                 if prompt is not None:
                     self._log_resolution(prompt_type, candidates, "named", name, prompt.content)
                     return prompt.content
-            default = await self._repo.get_default(prompt_type)
-            if default is not None:
-                self._log_resolution(prompt_type, candidates, "default", default.name, default.content)
-                return default.content
+            if strict_names and candidates:
+                missing_strict_selection = True
+            else:
+                default = await self._repo.get_default(prompt_type)
+                if default is not None:
+                    self._log_resolution(prompt_type, candidates, "default", default.name, default.content)
+                    return default.content
         except Exception as exc:  # noqa: BLE001 - a DB blip must not fail the request
             if prompt_type == PromptType.ASR_TRANSCRIPTION.value:
                 logger.warning(f"Prompt lookup failed for '{prompt_type}'; using the provider's native prompt: {exc}")
                 self._log_resolution(prompt_type, candidates, "native", None, "")
                 return ""
             logger.warning(f"Prompt lookup failed for '{prompt_type}'; falling back to the bundled template: {exc}")
+        if missing_strict_selection:
+            raise NotFoundError(f"Selected prompt '{candidates[0]}' for type '{prompt_type}' no longer exists.")
         try:
             content = _validate_and_normalize_content(prompt_type, self._disk_seed(prompt_type))
         except (FileNotFoundError, ValueError, KeyError, ValidationError) as exc:
@@ -382,6 +407,9 @@ class PromptService:
             fields["content"] = _validate_and_normalize_content(existing.prompt_type, str(new_content))
 
         new_name = fields.get("name")
+        refresh_asr_dispatch_config = (
+            existing.prompt_type == PromptType.ASR_TRANSCRIPTION.value and new_name is not None
+        )
         if new_name is not None and new_name != existing.name:
             clash = await self._repo.get_by_name(existing.prompt_type, new_name)
             if clash is not None and clash.id != prompt_id:
@@ -395,6 +423,11 @@ class PromptService:
         updated = existing
         if fields:
             updated = await self._repo.update(prompt_id, **fields) or existing
+        if refresh_asr_dispatch_config and updated.name == new_name and self._preset_service is not None:
+            # The repository cascades the persisted indexation-preset references.
+            # Rebuild both live caches before returning so the next upload does
+            # not dispatch the retired prompt name from Settings.partitions.
+            await self._preset_service.refresh_if_stale()
         if promote_to_default:
             updated = await self._repo.set_default(prompt_id) or updated
         return updated
@@ -419,7 +452,12 @@ class PromptService:
             raise ValidationError(
                 f"Cannot delete the default '{existing.prompt_type}' prompt. Set another default first.",
             )
-        await self._repo.delete(prompt_id)
+        deleted = await self._repo.delete(prompt_id)
+        if deleted and existing.prompt_type == PromptType.ASR_TRANSCRIPTION.value and self._preset_service is not None:
+            # The repository clears persisted ASR selections atomically with
+            # the delete. PresetService refreshes its preset and partition
+            # caches together so the next upload uses the default prompt.
+            await self._preset_service.refresh_if_stale()
 
     # ------------------------------------------------------------------
     # Helpers
