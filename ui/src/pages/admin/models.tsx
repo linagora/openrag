@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
+import { NewBadge } from "@/components/shared/new-badge";
 import {
   Plus,
   Trash2,
@@ -194,8 +195,9 @@ export default function ModelsPage() {
       <Tabs value={activeTab} onValueChange={setActiveTab}>
         <TabsList>
           {MODEL_TYPES.map((t) => (
-            <TabsTrigger key={t} value={t} className="capitalize">
+            <TabsTrigger key={t} value={t} className="capitalize" aria-label={t}>
               {t}
+              <NewBadge feature={`models.${t}`} />
             </TabsTrigger>
           ))}
         </TabsList>
@@ -887,6 +889,7 @@ function EndpointDialog({
                   label="Speaker-aware MOSS transcript"
                   tooltip="Normalize complete MOSS diarized responses after transcription. This also works with a served-model alias and is never sent to the provider."
                 />
+                <NewBadge feature="models.stt.moss_speaker_aware" />
                 <p className="text-xs text-muted-foreground">
                   Remove timecodes and keep speaker labels only when MOSS identifies more than one speaker.
                 </p>
