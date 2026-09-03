@@ -772,3 +772,57 @@ async def test_copy_file_drops_protected_keys():
     assert md["author"] == "bob"
     assert md["file_id"] == "dst"
     assert md["partition"] == "p2"
+
+
+class _ExplodingPresetService:
+    """PresetService whose revision probe fails the way a DB blip does.
+
+    ``PgPresetRepository.latest_revision`` raises outright when the
+    ``preset_configuration_revision`` row is missing, and asyncpg surfaces any
+    transient connection fault the same way.
+    """
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def refresh_if_stale(self) -> bool:
+        self.calls += 1
+        raise RuntimeError("Preset configuration revision row is missing.")
+
+
+@pytest.mark.asyncio
+async def test_add_file_survives_a_failing_preset_staleness_probe(tmp_path):
+    """A failed revision probe must not fail the upload.
+
+    Regression: the probe runs inside ``add_file``'s admission block, so leaving
+    it unguarded turned any transient DB fault — or a missing revision row — into
+    a 500 on *every* upload, of every file type, in every partition. It is an
+    optimization for noticing another replica's preset writes, never a
+    precondition for accepting a file, so a failure falls through to the cached
+    config and the dispatch still happens.
+    """
+    file_path = tmp_path / "doc.txt"
+    file_path.write_text("x")
+    config = _config_with_partition("tenant-a")
+    partition_service = FakePartitionService(config, db_partitions={"tenant-a"})
+    preset_service = _ExplodingPresetService()
+    dispatcher = FakeDispatcher()
+    service = _service(
+        disp=dispatcher,
+        config=config,
+        partition_service=partition_service,
+        preset_service=preset_service,
+    )
+
+    await service.add_file(
+        file_path=str(file_path),
+        file_id="f1",
+        partition="tenant-a",
+        metadata={},
+        sanitized_filename="doc.txt",
+        original_filename="doc.txt",
+        user=None,
+    )
+
+    assert preset_service.calls == 1
+    assert len(dispatcher.dispatched) == 1

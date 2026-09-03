@@ -210,10 +210,25 @@ class IndexingService:
             logger.bind(partition=partition, user_id=user_id).info("Auto-created partition on index.")
 
     async def _refresh_preset_config_if_stale(self) -> None:
-        """Refresh this replica's partition cache before capturing a job config."""
+        """Refresh this replica's partition cache before capturing a job config.
+
+        Best-effort, like every other cache refresh on this path: the revision
+        probe is an optimization that lets a replica notice presets another
+        replica changed, never a precondition for accepting an upload. It reads
+        ``preset_configuration_revision``, and ``latest_revision()`` raises
+        outright when that row is missing (a partial restore, a hand-edited DB)
+        as well as on any transient asyncpg error. Left unguarded this runs
+        inside ``add_file``'s admission block, so such a blip turns *every*
+        upload — of every file type, in every partition — into a 500. Falling
+        through instead costs at most a stale preset for this one dispatch,
+        which is exactly the state the caller was already in.
+        """
         if self._preset_service is None:
             return
-        await self._preset_service.refresh_if_stale()
+        try:
+            await self._preset_service.refresh_if_stale()
+        except Exception as exc:  # noqa: BLE001 - a stale-cache probe must not fail an upload
+            logger.warning(f"Preset cache staleness check failed; using the cached config: {exc}")
 
     async def add_file(
         self,
