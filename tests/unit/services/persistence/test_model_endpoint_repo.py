@@ -433,7 +433,8 @@ async def test_rename_stt_cascades_to_indexation_preset_only():
     assert not any("UPDATE partitions SET" in q for q, _ in queries)
     preset_updates = [(q, p) for q, p in queries if "pipeline_presets" in q]
     assert len(preset_updates) == 1
-    _, params = preset_updates[0]
+    query, params = preset_updates[0]
+    assert "btrim(config->>$4) = $5" in query
     assert params == (["stt"], "new-moss", "indexation", "stt", "old-moss")
 
 

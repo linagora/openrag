@@ -208,11 +208,15 @@ class PgModelEndpointRepository(ModelEndpointRepository):
                     ("indexation", _INDEXATION_PRESET_KEYS_BY_TYPE.get(model_type, ())),
                 ):
                     for key in keys:
+                        # Indexation workers trim explicit STT selections before
+                        # lookup, so the cascade must recognize the same stored
+                        # whitespace-padded value during a rename.
+                        reference_match = "btrim(config->>$4) = $5" if key == "stt" else "config->>$4 = $5"
                         await conn.execute(
-                            """
+                            f"""
                             UPDATE pipeline_presets
                             SET config = jsonb_set(config, $1::text[], to_jsonb($2::text)), updated_at = now()
-                            WHERE preset_type = $3 AND config->>$4 = $5
+                            WHERE preset_type = $3 AND {reference_match}
                             """,
                             [key],
                             new_name,
