@@ -885,11 +885,13 @@ function EndpointDialog({
           {isStt && (
             <div className="flex items-center justify-between gap-4 rounded-md border p-3">
               <div className="space-y-1">
-                <LabelWithInfo
-                  label="Speaker-aware MOSS transcript"
-                  tooltip="Normalize complete MOSS diarized responses after transcription. This also works with a served-model alias and is never sent to the provider."
-                />
-                <NewBadge feature="models.stt.moss_speaker_aware" />
+                <div className="flex items-center gap-1.5">
+                  <LabelWithInfo
+                    label="Speaker-aware MOSS transcript"
+                    tooltip="Normalize complete MOSS diarized responses after transcription. This also works with a served-model alias and is never sent to the provider."
+                  />
+                  <NewBadge feature="models.stt.moss_speaker_aware" />
+                </div>
                 <p className="text-xs text-muted-foreground">
                   Remove timecodes and keep speaker labels only when MOSS identifies more than one speaker.
                 </p>
