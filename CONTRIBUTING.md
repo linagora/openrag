@@ -48,6 +48,55 @@ Once cut:
 - `release/X.Y.Z` takes **only** release preparation — bug fixes, version bumps, changelog, docs. **No new features.**
 - `develop` reopens immediately for the next cycle's features (they proceed in parallel).
 
+#### Bumping the version
+
+The version is typed in exactly one place, `pyproject.toml` — `/version` is served from that file's
+installed metadata, so it is also the number the running app reports.
+
+One other file has to follow it. `ui/src/lib/whats-new.ts` drives the **NEW** badges in the admin UI
+([FEATURE_TAG.md](FEATURE_TAG.md) explains the mechanism and how to tag a feature):
+each entry records the version its feature shipped in, and the badge expires on its own a couple of
+minors later, so nobody has to remember to delete it. A feature PR cannot know its release number —
+this branch is where that number is chosen — so feature PRs write `UNRELEASED` and the release
+resolves it.
+
+Do both in the `chore(release): bump version to X.Y.Z` commit, and read the second from the first
+rather than typing the number twice:
+
+```bash
+# 1. edit pyproject.toml's `version` to X.Y.Z, then read it back:
+VER=$(grep -m1 '^version' pyproject.toml | cut -d'"' -f2)
+[ -n "$VER" ] || { echo "no version found in pyproject.toml — aborting"; exit 1; }
+
+# 2. resolve every pending NEW badge to it
+registry=ui/src/lib/whats-new.ts
+sed -E "s/^( *\"[^\"]+\": *)\"UNRELEASED\"(,?) *\$/\1\"$VER\"\2/" "$registry" > "$registry.new" \
+  && mv "$registry.new" "$registry"
+```
+
+The guard is not ceremony: an empty `$VER` — a renamed field, a moved `version` line — would otherwise
+write `""` into every pending entry, which parses as nothing and silences the badges it was meant to
+switch on. The rewrite goes through a temporary file rather than `sed -i`, whose in-place flag differs
+between GNU and BSD `sed` and fails outright on macOS.
+
+The pattern is anchored to a whole registry line — indent, quoted key, colon, and an optional
+trailing comma (the last entry in the object may legally omit it, and the replacement keeps whichever
+form was there) — so it cannot touch the `UNRELEASED` constant itself or this paragraph. A looser
+match on the bare string corrupts both, silently.
+
+An entry left unresolved badges every user forever, and nobody notices, because nobody inspects a
+dropdown expecting an option *not* to say NEW. So `verify-tag` in `.github/workflows/build.yml`
+refuses to publish GA images while any entry is still unresolved.
+
+#### Writing the release notes
+
+`ui/src/lib/release-notes.ts` backs the Release Notes dialog in the admin sidebar. Unlike
+`whats-new.ts`, it can't be resolved mechanically: its `version`, `summary`, and `newFeatures`
+describe the shipped release in prose, and only a human can write that. Feature PRs leave those
+fields empty; writing them is release-preparation work, done on `release/X.Y.Z` once the feature
+set for `X.Y.Z` is actually final — so the notes describe what shipped, not what a feature PR
+predicted would ship.
+
 When the release is ready:
 
 1. Merge `release/X.Y.Z` into `main`.

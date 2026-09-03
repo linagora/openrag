@@ -60,7 +60,7 @@ async def list_ray_actors():
 3. Preserves actor configuration
 
 **Response:**
-Returns restart confirmation with new actor ID.
+Returns restart confirmation with the active actor ID.
 
 **Warning:** Restarting actors may interrupt ongoing operations.
 """,
@@ -68,9 +68,9 @@ Returns restart confirmation with new actor ID.
 async def restart_actor(
     actor_name: str,
 ):
-    """Restart a specific Ray actor by name (kill + recreate)."""
+    """Restart a specific Ray actor by name."""
     try:
-        actor_id = restart_ray_actor(actor_name)
+        actor_id = await restart_ray_actor(actor_name)
     except KeyError:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Unknown actor: {actor_name}")
 

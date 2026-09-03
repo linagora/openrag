@@ -141,6 +141,37 @@ async def test_create_default_demotes_existing_in_same_transaction():
 
 
 @pytest.mark.asyncio
+async def test_create_maps_duplicate_to_typed_conflict():
+    import asyncpg
+    from core.config.model_endpoints import ModelEndpointRow
+    from core.utils.exceptions import ValidationError
+    from services.persistence.model_endpoint_repo import PgModelEndpointRepository
+
+    pool = _FakePool()
+
+    async def raise_duplicate(*_args, **_kwargs):
+        raise asyncpg.UniqueViolationError("duplicate endpoint")
+
+    pool.conn.fetchrow = raise_duplicate
+    repo = PgModelEndpointRepository(pool_getter=lambda: pool)
+
+    row = ModelEndpointRow(
+        name="default",
+        model_type="embedder",
+        endpoint="http://vllm:8000/v1",
+        is_default=False,
+        created_at=_NOW,
+        updated_at=_NOW,
+    )
+
+    with pytest.raises(ValidationError) as exc_info:
+        await repo.create(row)
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.code == "ENDPOINT_EXISTS"
+
+
+@pytest.mark.asyncio
 async def test_get_returns_none_when_missing():
     from services.persistence.model_endpoint_repo import PgModelEndpointRepository
 
@@ -388,6 +419,25 @@ async def test_rename_vlm_cascades_to_indexation_preset_only():
     assert p == (["vlm"], "new-vlm", "indexation", "vlm", "old-vlm")
 
 
+@pytest.mark.asyncio
+async def test_rename_stt_cascades_to_indexation_preset_only():
+    from services.persistence.model_endpoint_repo import PgModelEndpointRepository
+
+    pool = _FakePool()
+    pool.conn._fetchrow_result = {"name": "new-moss"}
+    repo = PgModelEndpointRepository(pool_getter=lambda: pool)
+
+    await repo.rename("old-moss", "stt", "new-moss")
+
+    queries = pool.conn.executed
+    assert not any("UPDATE partitions SET" in q for q, _ in queries)
+    preset_updates = [(q, p) for q, p in queries if "pipeline_presets" in q]
+    assert len(preset_updates) == 1
+    query, params = preset_updates[0]
+    assert "btrim(config->>$4) = $5" in query
+    assert params == (["stt"], "new-moss", "indexation", "stt", "old-moss")
+
+
 def _row(name, is_default):
     return {"name": name, "is_default": is_default}
 
@@ -492,3 +542,71 @@ async def test_delete_and_promote_default_promotes_survivor_under_lock():
     assert any("DELETE FROM model_endpoints" in q for q in queries)
     assert any("is_default = false" in q for q in queries)
     assert any("is_default = true" in q for q in queries)
+
+
+@pytest.mark.asyncio
+async def test_delete_clears_preset_selections_naming_the_endpoint():
+    """Deleting an endpoint must drop every preset selection that names it.
+
+    Regression: presets reference endpoints by name in JSONB with no FK, and
+    indexation resolves an explicit selection strictly — so a dangling ``stt``
+    reference permanently failed every audio upload on that preset, with nothing
+    surfaced at delete time. Mirrors PgPromptRepository.delete, which already
+    clears a deleted ASR prompt's selection.
+    """
+    from services.persistence.model_endpoint_repo import PgModelEndpointRepository
+
+    pool = _FakePool()
+    pool.conn._fetch_result = [_row("whisper", True), _row("doomed", False)]
+    repo = PgModelEndpointRepository(pool_getter=lambda: pool)
+
+    status, _ = await repo.delete_and_promote_default("doomed", "stt")
+    assert status == "ok"
+
+    clears = [(q, p) for q, p in pool.conn.executed if "config - $1::text" in q]
+    assert len(clears) == 1, "the stt selection key should be cleared exactly once"
+    query, params = clears[0]
+    assert "pipeline_presets" in query
+    # Padded selections are trimmed before lookup at indexing time, so the clear
+    # must match them the same way rename() does.
+    assert "btrim(config->>$1)" in query
+    assert params == ("stt", "indexation", "doomed")
+
+    # The clear must land inside the delete's transaction, before the row goes away.
+    queries = [q for q, _ in pool.conn.executed]
+    assert queries.index(query) < next(i for i, q in enumerate(queries) if "DELETE FROM model_endpoints" in q)
+
+
+@pytest.mark.asyncio
+async def test_delete_clears_every_preset_key_for_multi_key_types():
+    """An 'llm' endpoint is referenced by several preset keys across both types."""
+    from services.persistence.model_endpoint_repo import PgModelEndpointRepository
+
+    pool = _FakePool()
+    pool.conn._fetch_result = [_row("keep", True), _row("doomed", False)]
+    repo = PgModelEndpointRepository(pool_getter=lambda: pool)
+
+    status, _ = await repo.delete_and_promote_default("doomed", "llm")
+    assert status == "ok"
+
+    cleared = {p[0] for q, p in pool.conn.executed if "config - $1::text" in q}
+    assert cleared == {
+        "llm",
+        "contextualization_llm",
+        "metadata_extraction_llm",
+        "topic_tagging_llm",
+    }
+
+
+@pytest.mark.asyncio
+async def test_delete_of_unknown_endpoint_clears_nothing():
+    """A no-op delete must not touch presets that reference a live endpoint."""
+    from services.persistence.model_endpoint_repo import PgModelEndpointRepository
+
+    pool = _FakePool()
+    pool.conn._fetch_result = [_row("whisper", True), _row("other", False)]
+    repo = PgModelEndpointRepository(pool_getter=lambda: pool)
+
+    status, _ = await repo.delete_and_promote_default("ghost", "stt")
+    assert status == "not_found"
+    assert not any("config - $1::text" in q for q, _ in pool.conn.executed)

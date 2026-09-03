@@ -29,6 +29,11 @@ export function configUnset(prev: Config, key: string): Config {
 // matches what gets persisted (WYSIWYG).
 export const PARSING_STRATEGY_INHERIT = "__inherit__";
 
+// An indexation preset may omit its STT endpoint and follow the global default
+// managed in Model Endpoints. Select values cannot be empty, so keep a private
+// sentinel that is never persisted as an endpoint name.
+export const STT_ENDPOINT_DEFAULT_OPTION = "__use_default_stt_endpoint__";
+
 // Map a parsing-strategy selection to the next config. Kept pure so the
 // persistence behavior is unit-testable without driving the Radix Select.
 //

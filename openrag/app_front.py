@@ -13,7 +13,6 @@ import chainlit as cl
 import httpx
 from chainlit.config import config as cl_config
 from chainlit.context import get_context
-from consts import PARTITION_PREFIX
 from core.auth.chainlit import (
     CHAINLIT_AUTH_COOKIE_NAME,
     CHAINLIT_LOGOUT_COOKIE_MAX_AGE_SECONDS,
@@ -21,6 +20,7 @@ from core.auth.chainlit import (
     CHAINLIT_TOKEN_COOKIE_NAME,
     CHAINLIT_TOKEN_COOKIE_PATH,
 )
+from core.utils.consts import PARTITION_PREFIX
 from core.utils.logging import get_logger, mask_email
 from core.utils.web_url import normalize_web_url
 from dotenv import load_dotenv

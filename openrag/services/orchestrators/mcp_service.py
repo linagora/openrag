@@ -32,7 +32,7 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import urljoin, urlparse
 
 import httpx
-from core.utils.conts import is_internal_metadata_key, strip_protected_metadata
+from core.utils.consts import is_internal_metadata_key, strip_protected_metadata
 from core.utils.exceptions import ValidationError
 from core.utils.log_tail import collect_task_logs
 from core.utils.logging import get_logger
@@ -60,7 +60,7 @@ _MAX_FUZZY_CANDIDATES = 5000
 def _strip_protected_metadata(metadata: dict[str, Any] | None) -> dict[str, Any]:
     """Drop server-managed keys from caller-supplied metadata (defense in depth).
 
-    Thin wrapper over the shared guard in ``core.utils.conts`` — the key set now
+    Thin wrapper over the shared guard in ``core.utils.consts`` — the key set now
     lives there so the REST and upload paths enforce the same one (#713).
     """
     md, removed = strip_protected_metadata(metadata)

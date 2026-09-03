@@ -306,3 +306,61 @@ def test_dewrap_preserves_code_fence_verbatim():
     assert "    return 1" in lines  # indentation preserved
     assert "Intro wrapped across two lines." in lines  # prose still reflowed
     assert "Outro wrapped across two." in lines
+
+
+def test_placeholder_only_image_block_is_skipped():
+    """A caption the VLM could make nothing of is still noise — keep skipping it."""
+    from core.chunking.recursive import is_placeholder_image
+
+    assert is_placeholder_image("<image_description>\n\n[Image Placeholder]\n\n</image_description>")
+    assert is_placeholder_image("[IMAGE PLACEHOLDER]")
+    assert not is_placeholder_image("<image_description>\n\nA bar chart of revenue.\n\n</image_description>")
+
+
+def test_image_block_keeps_real_caption_beside_a_placeholder():
+    """The marker means the captioner found nothing in *one* image, but a block
+    can describe several. Dropping the whole block on any occurrence deleted
+    real caption text with it — a 132-token chart caption and 225 words of a
+    tourism description went missing from the index on the test corpus."""
+    from core.chunking.recursive import is_placeholder_image
+
+    # One wrapper holding both. wrap_caption() emits one wrapper per image, so
+    # this is the shape the bug actually takes: a composite figure the VLM
+    # partly described. Two *adjacent* wrappers were never affected — IMAGE_RE
+    # is non-greedy, so they parse as separate elements.
+    mixed = (
+        "<image_description>\n\n[Image Placeholder]\n\n92 000 COLLABORATEURS\n27 000 AVTOVAZ\n\n</image_description>"
+    )
+    assert not is_placeholder_image(mixed)
+
+
+def test_mixed_image_block_survives_chunking():
+    splitter = RecursiveSplitter(chunk_size=200, chunk_overlap_rate=0.0, length_function=_word_tokens)
+    doc = ProcessedDocument(
+        document_id="d1",
+        text_blocks=[
+            TextBlock(
+                text=(
+                    "Intro paragraph.\n\n"
+                    "<image_description>\n\n[Image Placeholder]\n\n"
+                    "92 000 COLLABORATEURS 27 000 AVTOVAZ\n\n</image_description>\n\n"
+                    "Closing paragraph."
+                ),
+                page_number=1,
+            )
+        ],
+        metadata={"source": "test.md"},
+    )
+    joined = "\n".join(c.text for c in splitter.chunk(doc, partition="p"))
+    assert "92 000 COLLABORATEURS" in joined, "real caption text dropped alongside the placeholder"
+    assert "[Image Placeholder]" not in joined, "the marker reached the index as if it were caption text"
+
+
+def test_symbol_only_caption_is_not_treated_as_a_placeholder():
+    """A caption reduced to punctuation is still content. Testing for
+    alphanumerics rather than whitespace would carve out an exception to the
+    rule this guard exists to enforce."""
+    from core.chunking.recursive import is_placeholder_image
+
+    assert not is_placeholder_image("<image_description>\n\n[Image Placeholder]\n\n©\n\n</image_description>")
+    assert is_placeholder_image("<image_description>\n\n[Image Placeholder]\n\n   \n\n</image_description>")

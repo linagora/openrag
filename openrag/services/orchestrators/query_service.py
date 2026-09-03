@@ -35,12 +35,11 @@ verbatim (no langchain import in this module).
 from __future__ import annotations
 
 import asyncio
-import copy
 import json
 from collections.abc import AsyncIterator, Callable
 from datetime import datetime
 from enum import Enum
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from core.models.preset import resolve_partition_chat_llm
 from core.models.query import Query, SearchQueries
@@ -50,7 +49,7 @@ from core.prompts import (
     format_web_context,
     prepend_system_prompt,
 )
-from core.utils.exceptions import WorkspaceNotFoundError
+from core.utils.exceptions import ValidationError, WorkspaceNotFoundError
 from core.utils.logging import get_logger
 from core.utils.source_filtering import (
     extract_and_strip_sources_block,
@@ -71,6 +70,21 @@ if TYPE_CHECKING:
 logger = get_logger()
 
 PrepareSources = Callable[[list, list], list]
+
+
+class _PrepareChatResult(NamedTuple):
+    """A named tuple stays positionally unpackable, so existing
+    ``a, b, c, ... = await self._prepare_chat(...)`` call sites still work.
+    """
+
+    payload: dict
+    docs: list
+    web_results: list
+    retrieved_docs: list
+    retrieved_web_results: list
+    citation_protocol_active: bool
+    indexed_attachment_ids: list[str]
+
 
 _MAP_SYSTEM_PROMPT = """You are an AI assistant specialized in extracting and synthesizing relevant information from text.
 
@@ -346,7 +360,7 @@ class QueryService:
         if RAGMODE(self._rag_mode) is RAGMODE.SIMPLERAG:
             return SearchQueries(query_list=[Query(query=last_user)])
 
-        chat_history = "".join(f"{m['role']}: {m['content']}\n" for m in messages)
+        chat_history = "".join(f"{m['role']}: {m.get('content') or ''}\n" for m in messages)
         contextualizer = await self._prompt_service.resolve_prompt(
             "query_contextualizer",
             names=[self._retrieval_prompt_name("query_contextualizer_prompt_name", partition)],
@@ -438,6 +452,9 @@ class QueryService:
 
     async def _prepare_chat(self, partition: list[str] | None, payload: dict, llm: LLM | None = None):
         messages = payload["messages"][-self._resolve_chat_history_depth(partition) :]
+        custom_prompt, messages = _split_leading_system_prompt(payload["messages"], messages)
+        if not messages:
+            raise ValidationError("Request must contain at least one non-system message")
         queries = await self.generate_query(messages, llm=llm, partition=partition)
 
         metadata = payload.get("metadata") or {}
@@ -445,10 +462,12 @@ class QueryService:
         spoken_style = metadata.get("spoken_style_answer", False)
         use_websearch = metadata.get("websearch", False)
         workspace = metadata.get("workspace")
+        attachment_ids = _extract_attachment_ids(metadata)
 
         top_k = self._mr_max if use_map_reduce else None
 
         filter_params = None
+        indexed_attachment_ids: list[str] = []
         if workspace and partition:
             scope = await self._workspace.resolve_scope(workspace, partition)
             if scope is None:
@@ -459,8 +478,15 @@ class QueryService:
             # partition the caller also has access to (#706).
             partition = [scope.partition]
             filter_params = {"file_id": scope.file_ids}
+        elif attachment_ids and partition:
+            # No ownership check needed: file_id is ANDed with the server-fixed
+            # partition (or, for the "all" wildcard, SUPER_ADMIN_MODE-only).
+            indexed_attachment_ids = await self._existing_file_ids(attachment_ids, partition)
+            filter_params = {"file_id": indexed_attachment_ids}
 
-        force_retrieval = use_websearch or use_map_reduce
+        # An attachment must never be dropped just because the classifier
+        # judged the turn conversational.
+        force_retrieval = use_websearch or use_map_reduce or bool(indexed_attachment_ids)
         if not queries.query_list:
             if not queries.requires_retrieval and not force_retrieval:
                 # Resolved per request from the library (named -> default ->
@@ -477,7 +503,7 @@ class QueryService:
                     context="",
                     current_date=datetime.now().strftime("%A, %B %d, %Y, %H:%M:%S"),
                 )
-                return payload, [], [], [], [], True
+                return _PrepareChatResult(payload, [], [], [], [], True, indexed_attachment_ids)
             queries = SearchQueries(query_list=[Query(query=messages[-1]["content"])])
 
         web_results: list = []
@@ -493,7 +519,7 @@ class QueryService:
             chunks = []
 
         if not chunks and not web_results and partition is None:
-            return payload, [], [], [], [], False
+            return _PrepareChatResult(payload, [], [], [], [], False, indexed_attachment_ids)
 
         docs = [c.to_langchain() for c in chunks]
 
@@ -540,22 +566,36 @@ class QueryService:
             context = f"{context}{SOURCE_SEPARATOR}{web_formatted}" if context else web_formatted
             web_results = [web_results[number - web_start_index] for number in web_source_numbers]
 
-        new_messages = copy.deepcopy(messages)
         prompt_type = "spoken_style_answer" if spoken_style else "sys_prompt"
         tmpl = await self._prompt_service.resolve_prompt(
             prompt_type, names=[self._generation_prompt_name(prompt_type, partition)]
         )
-        new_messages.insert(
-            0,
-            {
-                "role": "system",
-                "content": tmpl.format(
-                    context=context, current_date=datetime.now().strftime("%A, %B %d, %Y, %H:%M:%S")
-                ),
-            },
+        new_messages = prepend_system_prompt(
+            messages,
+            tmpl,
+            context=context,
+            current_date=datetime.now().strftime("%A, %B %d, %Y, %H:%M:%S"),
+            custom_prompt=custom_prompt,
         )
         payload["messages"] = new_messages
-        return payload, docs, web_results, retrieved_docs, retrieved_web_results, True
+        return _PrepareChatResult(
+            payload, docs, web_results, retrieved_docs, retrieved_web_results, True, indexed_attachment_ids
+        )
+
+    async def _existing_file_ids(self, file_ids: list[str], partitions: list[str]) -> list[str]:
+        """Order-preserving, deduplicated subset of ``file_ids`` indexed in ``partitions``.
+
+        ``"all"`` (``SUPER_ADMIN_MODE`` wildcard) takes an unscoped lookup instead
+        of a per-partition one.
+        """
+        if "all" in partitions:
+            if len(partitions) > 1:
+                raise ValueError("`partitions` cannot mix the wildcard with explicit values.")
+            found = set(await self._workspace.get_existing_file_ids_any_partition(file_ids))
+        else:
+            results = await asyncio.gather(*(self._workspace.get_existing_file_ids(p, file_ids) for p in partitions))
+            found = {fid for r in results for fid in r}
+        return [fid for fid in dict.fromkeys(file_ids) if fid in found]
 
     async def _gather_rag_and_web(self, queries, partition, top_k, filter_params):
         # Fuse the doc branch through retrieve_multi so a partition's rrf_k drives
@@ -602,6 +642,7 @@ class QueryService:
         instructions = tmpl.format(
             context=context,
             current_date=datetime.now().strftime("%A, %B %d, %Y, %H:%M:%S"),
+            custom_prompt="",
         )
         payload["prompt"] = f"{instructions}\n\n# User request\n{prompt}"
         return payload, docs, retrieved_docs
@@ -674,15 +715,16 @@ class QueryService:
         citation_protocol_active = False
         if partitions is None and not metadata.get("websearch", False):
             docs, web_results, retrieved_docs, retrieved_web_results = [], [], [], []
+            attachments: list[str] = []
         else:
-            (
-                payload,
-                docs,
-                web_results,
-                retrieved_docs,
-                retrieved_web_results,
-                citation_protocol_active,
-            ) = await self._prepare_chat(partitions, payload, llm)
+            result = await self._prepare_chat(partitions, payload, llm)
+            payload = result.payload
+            docs = result.docs
+            web_results = result.web_results
+            retrieved_docs = result.retrieved_docs
+            retrieved_web_results = result.retrieved_web_results
+            citation_protocol_active = result.citation_protocol_active
+            attachments = result.indexed_attachment_ids
         sources = prepare_sources(docs, web_results)
         # `all_retrieved_sources` is debug/eval telemetry, not needed by most
         # callers — skip building it (and calling prepare_sources on the full,
@@ -702,9 +744,11 @@ class QueryService:
         else:
             clean, citations = content, None
         chunk["choices"][0]["message"]["content"] = clean
-        chunk["extra"] = json.dumps(
-            _build_extra_payload(sources, citations, all_sources, include_all_retrieved=include_all_retrieved)
-        )
+        extra = _build_extra_payload(sources, citations, all_sources, include_all_retrieved=include_all_retrieved)
+        if metadata.get("attachments"):
+            # Indicate which attachments were actually searched to generate the answer.
+            extra["attachments"] = attachments
+        chunk["extra"] = json.dumps(extra)
         return chunk
 
     async def chat_stream(
@@ -722,18 +766,21 @@ class QueryService:
         citation_protocol_active = False
         if partitions is None and not metadata.get("websearch", False):
             docs, web_results, retrieved_docs, retrieved_web_results = [], [], [], []
+            attachments: list[str] = []
         else:
-            (
-                payload,
-                docs,
-                web_results,
-                retrieved_docs,
-                retrieved_web_results,
-                citation_protocol_active,
-            ) = await self._prepare_chat(partitions, payload, llm)
+            result = await self._prepare_chat(partitions, payload, llm)
+            payload = result.payload
+            docs = result.docs
+            web_results = result.web_results
+            retrieved_docs = result.retrieved_docs
+            retrieved_web_results = result.retrieved_web_results
+            citation_protocol_active = result.citation_protocol_active
+            attachments = result.indexed_attachment_ids
         sources = prepare_sources(docs, web_results)
         all_sources = prepare_sources(retrieved_docs, retrieved_web_results) if include_all_retrieved else None
         structured_output = _is_structured_output(payload)
+
+        extra_fields = {"attachments": attachments} if metadata.get("attachments") else None
 
         payload["messages"] = self._sanitize_messages(payload["messages"])
         llm_stream = llm.stream_chat(payload["messages"], **_sampling(payload))
@@ -744,6 +791,7 @@ class QueryService:
             all_sources=all_sources,
             include_all_retrieved=include_all_retrieved,
             citation_protocol_active=citation_protocol_active and not structured_output,
+            extra_fields=extra_fields,
         ):
             yield sse_line
 
@@ -798,6 +846,44 @@ def _json_slice(text: str) -> str:
 def _summary_doc(chunk, summary: str):
     """A summarised copy of a LangChain Document (page_content replaced)."""
     return chunk.__class__(page_content=summary, metadata=chunk.metadata)
+
+
+def _split_leading_system_prompt(raw_messages: list[dict], truncated: list[dict]) -> tuple[str | None, list[dict]]:
+    """Pull a client-pinned leading system prompt out of ``raw_messages``.
+
+    A leading run of ``role="system"`` messages in ``raw_messages`` (the
+    untruncated payload) is a pinned instruction, not a chat turn. ``truncated``
+    is a tail slice of ``raw_messages`` (``raw_messages[-depth:]``), so only the
+    portion of that leading run still inside the tail is stripped from it — a
+    system message elsewhere in history that merely lands first after
+    chat_history_depth truncation is never mistaken for the pin and dropped.
+
+    ``content`` is read defensively: ``OpenAIMessage`` allows a null/absent
+    content (the assistant turn carrying ``tool_calls``), and the router dumps
+    with ``exclude_none=True``, so the key is genuinely optional. A content-free
+    system message still counts toward the leading run — it is stripped from the
+    history like its siblings — it just contributes nothing to the pin.
+    """
+    parts: list[str] = []
+    i = 0
+    while i < len(raw_messages) and raw_messages[i]["role"] == "system":
+        content = raw_messages[i].get("content")
+        if content:
+            parts.append(content)
+        i += 1
+
+    offset = len(raw_messages) - len(truncated)
+    strip = max(0, i - offset)
+
+    return ("\n\n".join(parts) if parts else None), truncated[strip:]
+
+
+def _extract_attachment_ids(metadata: dict) -> list[str]:
+    """file_ids from ``metadata.attachments = [{"id": ...}, ...]``; malformed payloads dropped."""
+    raw = metadata.get("attachments")
+    if not isinstance(raw, list):
+        return []
+    return [a["id"] for a in raw if isinstance(a, dict) and isinstance(a.get("id"), str) and a["id"]]
 
 
 def _dedupe_web(web_lists: list[list]) -> list:

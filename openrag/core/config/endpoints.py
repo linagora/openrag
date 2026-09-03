@@ -2,9 +2,41 @@
 
 from __future__ import annotations
 
+import os
+from collections.abc import Mapping
+
 from pydantic import Field
 
 from .base import ConfigMixin
+
+LLM_OVERRIDE_ENDPOINT_ENV = "LLM_OVERRIDE_ALLOW_CUSTOM_ENDPOINT"
+
+
+def custom_endpoint_override_enabled() -> bool:
+    """Is a client-supplied ``llm_override.base_url`` honored at all?
+
+    Off by default: enabling it lets any authenticated caller make the server POST
+    to an arbitrary host (SSRF). Only the request *shape* is constrained — see
+    ``VLLMClient._resolve_endpoint_override``.
+
+    Lives here rather than in ``services.inference`` because the API layer reads it
+    too and ``api -> services`` is a forbidden import direction. Read on demand so
+    a test or a reloaded worker sees the current environment.
+    """
+    return os.getenv(LLM_OVERRIDE_ENDPOINT_ENV, "false").strip().lower() == "true"
+
+
+def client_llm_override(metadata: object) -> Mapping[str, object]:
+    """Read ``metadata.llm_override`` as a mapping, or ``{}``.
+
+    Only the *outer* ``metadata`` is schema-validated, so ``{"llm_override":
+    "gpt-4o"}`` is a valid request whose ``.get(...)`` would raise
+    ``AttributeError`` — a 500. A non-mapping override counts as absent.
+    """
+    if not isinstance(metadata, Mapping):
+        return {}
+    override = metadata.get("llm_override")
+    return override if isinstance(override, Mapping) else {}
 
 
 class LLMParamsConfig(ConfigMixin):

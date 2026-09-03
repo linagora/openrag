@@ -85,10 +85,49 @@ Upload a new file to a specific partition for indexing.
 **Request Body (form-data):**
 - `file` (binary): File to upload
 - `metadata` (JSON string): File metadata (e.g., `{"owner": "user1"}`)
+- `workspace_ids` (JSON array, optional): Workspaces to add the file to
+- `callback_url` (string, optional): URL notified once indexing reaches a terminal state
+- `callback_token` (string, optional): Bearer token for that notification
 
 **Responses:**
 - `201 Created`: Returns task status URL
+- `400 Bad Request`: `callback_url` is malformed or not a public `http(s)` URL
 - `409 Conflict`: File already exists in partition
+
+##### Indexing status callback
+
+Indexing is asynchronous. Pass a `callback_url` and OpenRAG POSTs the outcome
+once the task settles, so a client can wait instead of polling:
+
+```json
+{
+  "partition": "alice.example.org",
+  "file_id": "file-123",
+  "status": "success",
+  "metadata": {"doc_rev": "<revision>", "datetime": "...", "doctype": "..."}
+}
+```
+
+`status` is `"success"` or `"error"`; a user-cancelled task sends nothing.
+`metadata` is whatever you sent at upload, echoed back unchanged — including
+a revision-tracking field under any name you like, if that's how your receiver
+orders these callbacks (the example above uses `doc_rev`). A field you didn't
+send is simply absent, not sent back as `null`. Only server-computed keys are
+held back: the on-disk path, content hash, file size, filenames, and
+`file_id` (already a top-level field).
+
+For an authenticated target, pass `callback_token` — sent as `Authorization:
+Bearer <token>`, never in the URL or the payload. Picking a safe scheme for it
+is on the caller: `callback_url` is otherwise unchecked beyond the public
+`http(s)` requirement below.
+
+Best-effort: one attempt, no retries, a 5 s deadline, and any failure is
+logged without affecting the indexing result. Delivery is not guaranteed, so
+keep a client-side timeout and fall back to polling the task-status URL. The
+`callback_url` is checked against the SSRF guard and must be a public
+`http(s)` address — see
+[`INDEXING_CALLBACK_ALLOW_PRIVATE_URLS`](/openrag/documentation/env_vars) to
+target a local instance in development.
 
 ##### Temporal Filtering
 OpenRAG supports temporal filtering to retrieve documents from specific time periods.
@@ -495,7 +534,7 @@ curl -X POST http://localhost:8080/presets/ \
   }'
 ```
 
-An indexation `config` instead accepts keys such as `chunking` (`{name, chunk_size, chunk_overlap_rate}`), `parsing_strategy`, `enable_image_captioning`, `enable_contextualization`, and `contextualization_mode`.
+An indexation `config` instead accepts keys such as `chunking` (`{name, chunk_size, chunk_overlap_rate}`), `parsing_strategy`, `stt` (a named STT endpoint), `asr_transcription_prompt_name`, `enable_image_captioning`, `enable_contextualization`, and `contextualization_mode`. Omitting `stt` or `asr_transcription_prompt_name` uses the corresponding global default. The STT and ASR prompt selections apply only to audio or video files routed to `OpenAIAudioLoader`; `LocalWhisperLoader` does not use them.
 
 #### List presets
 ```http
@@ -517,7 +556,7 @@ DELETE /presets/{preset_type}/{name}
 
 Every prompt the pipeline sends to a model is a stored, editable row rather than a bundled file. On first boot each type is seeded from its bundled template as that type's **default**; an admin can add named variants and select one per preset or per partition.
 
-All routes are prefixed with **`/prompts`** and require the **admin** role. `prompt_type` is one of `sys_prompt` | `spoken_style_answer` | `query_contextualizer` | `chunk_contextualizer` | `image_captioning` | `hyde` | `multi_query` | `topic_tagger`.
+All routes are prefixed with **`/prompts`** and require the **admin** role. `prompt_type` is one of `sys_prompt` | `spoken_style_answer` | `query_contextualizer` | `chunk_contextualizer` | `image_captioning` | `hyde` | `multi_query` | `topic_tagger` | `asr_transcription`.
 
 **Resolution order** for a given type: the name selected for the request → the type's global default → the bundled template. A selection naming a prompt that no longer exists falls back to the default rather than failing.
 
@@ -528,6 +567,7 @@ All routes are prefixed with **`/prompts`** and require the **admin** role. `pro
 | `sys_prompt`, `spoken_style_answer` | partition — `generation_prompt_names` |
 | `query_contextualizer`, `hyde`, `multi_query` | retrieval preset — `*_prompt_name` |
 | `chunk_contextualizer`, `image_captioning`, `topic_tagger` | indexation preset — `*_prompt_name` |
+| `asr_transcription` | indexation preset — `asr_transcription_prompt_name` for audio or video files routed to `OpenAIAudioLoader` |
 
 #### Create a prompt
 ```http
@@ -535,7 +575,7 @@ POST /prompts/
 ```
 **Body:** `prompt_type`, `name`, `content`, `is_default` (default `false`). Returns `201 Created`, or `409` if that `(prompt_type, name)` already exists.
 
-Types rendered as templates (`sys_prompt`, `spoken_style_answer`, `query_contextualizer`, `hyde`, `multi_query`) accept only their own **plain** `{placeholders}` — no conversion (`!r`), format spec (`:>10`) or attribute access — and a violation returns `422` at write time rather than failing later at render. Escape a literal brace as `{{` / `}}`. The remaining types are sent to the model verbatim, so any text is valid.
+Types rendered as templates (`sys_prompt`, `spoken_style_answer`, `query_contextualizer`, `hyde`, `multi_query`) accept only their own **plain** `{placeholders}` — no conversion (`!r`), format spec (`:>10`) or attribute access — and a violation returns `422` at write time rather than failing later at render. Escape a literal brace as `{{` / `}}`. The remaining types are sent to the model verbatim. `asr_transcription` may be empty, which keeps the transcription model's native prompt.
 
 ```bash frame="none"
 curl -X POST http://localhost:8080/prompts/ \
@@ -576,15 +616,15 @@ curl -X PATCH http://localhost:8080/partition/my-partition \
   -d '{"generation_prompt_names": {"sys_prompt": "legal-assistant"}}'
 ```
 
-Preset-scoped prompts are selected the same way, by putting the `*_prompt_name` field in the preset's `config` (see [Pipeline Presets](#-pipeline-presets)).
+Preset-scoped prompts are selected the same way, by putting the `*_prompt_name` field in the preset's `config` (see [Pipeline Presets](#-pipeline-presets)). For audio or video files routed to `OpenAIAudioLoader`, the indexation preset also selects the ASR prompt and STT endpoint. `LocalWhisperLoader` uses neither setting.
 
 ---
 
 ### 🔌 Model Endpoints
 
-A registry of named inference endpoints (embedder, reranker, LLM, VLM) that partitions and presets can point at, so operators can manage and switch inference backends at runtime instead of via `.env`. Stored API keys are **redacted** in every response and only returned through the explicit reveal action below.
+A registry of named inference endpoints (embedder, reranker, LLM, VLM, STT) that partitions and presets can point at, so operators can manage and switch inference backends at runtime instead of via `.env`. Stored API keys are **redacted** in every response and only returned through the explicit reveal action below.
 
-All routes are prefixed with **`/model-endpoints`** and require the **admin** role. `model_type` is one of `embedder` | `reranker` | `llm` | `vlm`.
+All routes are prefixed with **`/model-endpoints`** and require the **admin** role. `model_type` is one of `embedder` | `reranker` | `llm` | `vlm` | `stt`.
 
 #### Register an endpoint
 ```http
@@ -715,7 +755,8 @@ OpenAI-compatible text completion endpoint.
 | `websearch` | `bool` | `false` | Augments the RAG context with live web search results. When used with a partition (`openrag-{partition}`), document and web results are combined. When used without a partition (direct LLM mode), web results are the sole context. Requires `WEBSEARCH_API_TOKEN` to be configured. See [web search configuration](/openrag/documentation/env_vars/#web-search-configuration). |
 | `spoken_style_answer` | `bool` | `false` | Generates a succinct spoken-style conversational answer based on the retrieved documents. |
 | `use_map_reduce` | `bool` | `false` | Uses a map-reduce strategy to aggregate information from multiple documents. See [map-reduce configuration](/openrag/documentation/env_vars/#map--reduce-configuration). |
-| `llm_override` | `object` | `null` | Overrides only the downstream LLM model name while still using OpenRAG's configured LLM endpoint and credentials. Accepts: `model` (string). Endpoint URL and API key are server-side configuration and cannot be changed by a client request. |
+| `llm_override` | `object` | `null` | Overrides the downstream LLM for this request. Accepts `model` (string), always honored. Also accepts `base_url` and `api_key`, which are honored **only** when the deployment sets `LLM_OVERRIDE_ALLOW_CUSTOM_ENDPOINT` — otherwise they are ignored and the request goes to the server's configured endpoint. See [custom LLM endpoints](/openrag/documentation/env_vars/#client-supplied-llm-endpoints). |
+| `attachments` | `list[{"id": string}]` | `null` | Scopes RAG retrieval to a specific list of file IDs within the target partition, instead of searching the whole partition. Unknown or unindexed IDs are silently dropped; duplicates are deduplicated. The response's `extra.attachments` reports which IDs were actually used. |
 
 Examples:
 
@@ -798,6 +839,54 @@ curl -X 'POST' 'http://localhost:8080/v1/chat/completions' \
     "llm_override": {
       "model": "gpt-4o"
     }
+  }
+}'
+```
+
+With `LLM_OVERRIDE_ALLOW_CUSTOM_ENDPOINT=true`, the same object may also carry the
+endpoint and its credential, sending the request to a provider of the client's
+choosing instead of the configured one:
+
+```json title="metadata.llm_override with a client-supplied endpoint"
+{
+  "llm_override": {
+    "base_url": "https://api.openai.com/v1",
+    "api_key": "sk-...",
+    "model": "gpt-4o"
+  }
+}
+```
+
+`base_url` must be `https`, must carry no query string, fragment or `..` path
+segment (percent-encoded or not), and is always requested as
+`{base_url}/chat/completions` — `{base_url}/completions` when the request comes
+in on the legacy `/v1/completions` route; anything else is rejected with a
+**400**. The server's own API key is never forwarded — an override without
+`api_key` sends no `Authorization` header at all. When the flag
+is off, `base_url`/`api_key` are ignored (a warning is logged) and only `model`
+applies, which typically surfaces as an "unknown model" error from the configured
+provider.
+
+```bash title="Scoping retrieval to specific attachments"
+curl -X 'POST' 'http://localhost:8080/v1/chat/completions' \
+  -H 'accept: application/json' \
+  -H 'Authorization: Bearer YOUR_AUTH_TOKEN' \
+  -H 'Content-Type: application/json' \
+  -d '{
+  "model": "openrag-{partition_name}",
+  "messages": [
+    {
+      "role": "user",
+      "content": "summarize these files"
+    }
+  ],
+  "stream": false,
+  "metadata": {
+    "attachments": [
+      {"id": "file-001"},
+      {"id": "file-002"},
+      {"id": "file-003"}
+    ]
   }
 }'
 ```

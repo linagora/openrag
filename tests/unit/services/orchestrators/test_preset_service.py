@@ -38,6 +38,7 @@ class _FakePresetRepo:
         self._store: dict[tuple[str, str], dict] = {}
         self._partition_counts: dict[tuple[str, str], int] = {}
         self.calls: list[tuple[str, tuple]] = []
+        self._revision = 0
         for r in rows or []:
             self._store[(r["name"], r["preset_type"])] = r
 
@@ -56,6 +57,7 @@ class _FakePresetRepo:
         self.calls.append(("upsert", (name, preset_type)))
         row = _make_row(name, preset_type, config)
         self._store[(name, preset_type)] = row
+        self._revision += 1
         return row
 
     async def delete(self, name: str, preset_type: str) -> bool:
@@ -65,13 +67,17 @@ class _FakePresetRepo:
             from core.utils.exceptions import ConflictError
 
             raise ConflictError(f"Preset '{name}' is used by {count} partition(s); reassign them before deleting.")
-        return self._store.pop((name, preset_type), None) is not None
+        deleted = self._store.pop((name, preset_type), None) is not None
+        if deleted:
+            self._revision += 1
+        return deleted
 
     async def rename(self, old_name: str, new_name: str, preset_type: str, config: dict) -> dict:
         self.calls.append(("rename", (old_name, new_name, preset_type)))
         self._store.pop((old_name, preset_type), None)
         row = _make_row(new_name, preset_type, config)
         self._store[(new_name, preset_type)] = row
+        self._revision += 1
         return row
 
     async def count_partitions_using(self, name: str, preset_type: str) -> int:
@@ -81,6 +87,14 @@ class _FakePresetRepo:
     async def usage_counts(self) -> dict[tuple[str, str], int]:
         self.calls.append(("usage_counts", ()))
         return dict(self._partition_counts)
+
+    async def latest_revision(self) -> int:
+        self.calls.append(("latest_revision", ()))
+        return self._revision
+
+    async def load_all_with_revision(self) -> tuple[list[dict], int]:
+        self.calls.append(("load_all_with_revision", ()))
+        return list(self._store.values()), self._revision
 
 
 class _FakePartitionService:
@@ -317,6 +331,61 @@ async def test_load_all_clears_stale_entries():
 
     assert "stale" not in settings.presets.indexation
     assert "old" in settings.presets.indexation
+
+
+@pytest.mark.asyncio
+async def test_refresh_if_stale_reloads_changed_presets():
+    from core.config.root import Settings
+
+    repo = _FakePresetRepo(rows=[_make_row("audio", "indexation", {"stt": "old-stt"})])
+    settings = Settings()
+    partition_service = _FakePartitionService()
+    svc = _make_service(repo, settings=settings, partition_service=partition_service)
+    await svc.load_all()
+
+    repo._store[("audio", "indexation")] = _make_row("audio", "indexation", {"stt": "new-stt"})
+    repo._revision += 1
+
+    assert await svc.refresh_if_stale() is True
+    assert settings.presets.indexation["audio"]["stt"] == "new-stt"
+    assert partition_service.load_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_refresh_if_stale_does_not_reload_current_presets():
+    from core.config.root import Settings
+
+    repo = _FakePresetRepo(rows=[_make_row("audio", "indexation", {"stt": "current-stt"})])
+    settings = Settings()
+    partition_service = _FakePartitionService()
+    svc = _make_service(repo, settings=settings, partition_service=partition_service)
+    await svc.load_all()
+
+    assert await svc.refresh_if_stale() is False
+    assert [call[0] for call in repo.calls].count("load_all_with_revision") == 1
+    assert partition_service.load_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_refresh_if_stale_keeps_revision_unadvanced_when_partition_reload_fails():
+    from core.config.root import Settings
+
+    class FailingPartitionService:
+        async def load_partitions(self) -> None:
+            raise RuntimeError("partition reload failed")
+
+    repo = _FakePresetRepo(rows=[_make_row("audio", "indexation", {"stt": "old-stt"})])
+    settings = Settings()
+    svc = _make_service(repo, settings=settings, partition_service=FailingPartitionService())
+    await svc.load_all()
+
+    repo._store[("audio", "indexation")] = _make_row("audio", "indexation", {"stt": "new-stt"})
+    repo._revision += 1
+
+    with pytest.raises(RuntimeError, match="partition reload failed"):
+        await svc.refresh_if_stale()
+
+    assert svc._loaded_revision == 0
 
 
 # ------------------------------------------------------------------

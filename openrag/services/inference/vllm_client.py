@@ -16,8 +16,14 @@ import asyncio
 import base64
 import re
 from collections.abc import AsyncIterator, Mapping
+from urllib.parse import unquote, urlsplit
 
 import httpx
+from core.config.endpoints import (
+    LLM_OVERRIDE_ENDPOINT_ENV,
+    client_llm_override,
+    custom_endpoint_override_enabled,
+)
 from core.embeddings import Embedder, embedder_registry
 from core.llm import LLM, llm_registry
 from core.utils.exceptions import (
@@ -116,6 +122,41 @@ def _log_safe_error_detail(exc: BaseException) -> dict:
 # ---------------------------------------------------------------------------
 
 
+def _strip_falsy_logprobs(payload: dict) -> dict:
+    """Drop an unset/off ``logprobs`` (and its dependent ``top_logprobs``) from *payload*.
+
+    ``logprobs: false`` is already the OpenAI default, so sending it adds
+    nothing — but strict providers whose schema lacks the field reject it by
+    name whatever the value, e.g. Gemini. Without
+    this, the config default (``LLMParamsConfig.logprobs = False``) lands in
+    ``self._defaults`` and is sent on every request. A truthy value is a
+    deliberate opt-in and is forwarded as-is.
+
+    Checked with ``is`` against ``None``/``False`` rather than plain
+    truthiness (or ``in (None, False)``, which suffers the same problem since
+    ``0 == False``): the legacy ``/completions`` endpoint's ``logprobs`` is an
+    *integer* (how many alternates to return), where ``0`` is a deliberate,
+    meaningful request — "give me the sampled token's own logprob, no
+    alternates" — not an off state, and must not be conflated with it.
+    """
+    logprobs = payload.get("logprobs")
+    if logprobs is None or logprobs is False:
+        payload.pop("logprobs", None)
+        payload.pop("top_logprobs", None)
+    return payload
+
+
+def _targets_client_endpoint(client: VLLMClient, *_args, **kwargs) -> bool:
+    """Breaker predicate: is this call routed to a client-supplied endpoint?
+
+    The ``"llm"`` breaker is one process-wide instance describing the *configured*
+    endpoint, and it counts connection errors and timeouts. Without this any
+    caller could aim the override at an unresolvable host, repeat until
+    ``fail_max``, and open the breaker for every tenant.
+    """
+    return client._has_endpoint_override(kwargs)
+
+
 @llm_registry.register("vllm")
 class VLLMClient(LLM):
     """OpenAI-compatible LLM client backed by vLLM.
@@ -149,10 +190,12 @@ class VLLMClient(LLM):
         self._api_key = api_key
         self._enable_thinking = enable_thinking
         self._defaults: dict = kwargs
-        headers: dict[str, str] = {"Content-Type": "application/json"}
-        if api_key:
-            headers["Authorization"] = f"Bearer {api_key}"
-        self._client = httpx.AsyncClient(timeout=timeout, headers=headers)
+        self._allow_custom_endpoint = custom_endpoint_override_enabled()
+        # Authorization per request, not on the client: httpx merges client-level
+        # headers into every request with no way to drop one, so the server's key
+        # would ride along to an overridden endpoint.
+        self._auth_headers: dict[str, str] = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+        self._client = httpx.AsyncClient(timeout=timeout, headers={"Content-Type": "application/json"})
         # Same construction breadcrumb as VLLMEmbedder: the component factories
         # cache instances per endpoint name, so this fires once per configured
         # endpoint and shows which base URL/model a preset name resolved to.
@@ -163,44 +206,152 @@ class VLLMClient(LLM):
             enable_thinking=self._enable_thinking,
         ).debug(f"{type(self).__name__} ready")
 
-    def _resolve_overrides(self, kwargs: dict) -> tuple[str, str, dict[str, str] | None]:
+    def _resolve_overrides(self, kwargs: dict) -> tuple[str, str, dict[str, str], bool]:
         """Read ``metadata.llm_override`` from *kwargs* without mutating caller data.
 
         Pure read: ``kwargs`` is untouched so retries see the original override on
         every attempt. The caller strips ``metadata`` from the outbound payload via
         ``_payload_kwargs`` — every ``metadata`` key is OpenRAG-internal and never
         belongs on the wire.
+
+        Returns ``(base_url, model, headers, overridden)``. ``overridden`` says the
+        endpoint is the client's; callers need it to suppress the server's sampling
+        defaults, and reporting it here keeps the override parsed once.
         """
         base_url = self._endpoint
         model = self._model
-        override_headers: dict[str, str] | None = None
+        headers = self._auth_headers
+        overridden = False
 
-        # Only `model` may be overridden by the client. `base_url` / `api_key`
-        # are deliberately NOT read from the request: honoring a client-supplied
-        # endpoint enables SSRF (the server would issue requests to an arbitrary
-        # host, e.g. cloud metadata) and would leak the server's API key to that
-        # host. The endpoint and credentials always come from server config.
-        llm_override = (kwargs.get("metadata") or {}).get("llm_override") or {}
+        # `model` is always client-overridable; `base_url` / `api_key` only when
+        # the operator sets LLM_OVERRIDE_ALLOW_CUSTOM_ENDPOINT.
+        llm_override = client_llm_override(kwargs.get("metadata"))
         if llm_override.get("model"):
             model = llm_override["model"]
 
-        return base_url, model, override_headers
+        if llm_override.get("base_url"):
+            if self._allow_custom_endpoint:
+                base_url, headers = self._resolve_endpoint_override(llm_override)
+                overridden = True
+            else:
+                # Otherwise the failure is opaque: `model` applies while
+                # `base_url` is dropped, so the request hits the *server's*
+                # endpoint with a third party's model name and comes back as
+                # "invalid model name".
+                logger.bind(
+                    requested_endpoint=llm_override.get("base_url"),
+                    used_endpoint=base_url,
+                    model=model,
+                ).warning(
+                    f"Ignoring llm_override.base_url — {LLM_OVERRIDE_ENDPOINT_ENV} is not enabled. "
+                    f"The request goes to the configured endpoint with model={model!r}."
+                )
+        elif llm_override:
+            logger.bind(keys=sorted(llm_override), model=model).warning(
+                "llm_override carries no base_url; only the model name is overridden"
+            )
 
-    def _chat_payload_kwargs(self, kwargs: dict) -> dict:
-        payload_kwargs = {**self._defaults, **kwargs}
-        enable_thinking = payload_kwargs.pop("enable_thinking", self._enable_thinking)
+        return base_url, model, headers, overridden
+
+    def _resolve_endpoint_override(self, llm_override: Mapping) -> tuple[str, dict[str, str]]:
+        """Honor a client-supplied ``llm_override`` endpoint (opt-in, host-unrestricted).
+
+        Restores the pre-refactor contract (``base_url`` + ``api_key`` + ``model``)
+        for deployments whose clients rely on it. The *host* is deliberately
+        unconstrained; the request *shape* is what keeps this from being a read
+        primitive against internal HTTP APIs:
+
+        * **https only** — the plaintext internal services worth reaching (Milvus,
+          admin panels) stay unreachable.
+        * **No client-controlled path** — always ``{base_url}/chat/completions``,
+          or ``{base_url}/completions`` from ``generate``. A ``#`` or ``?`` would
+          truncate that suffix once concatenated and a ``..`` would traverse out of
+          it, making the override a path-picker. Tested on the raw string, not
+          ``urlsplit`` parts: a trailing ``#`` parses as an empty fragment and only
+          bites after concatenation.
+        * The server's own API key is never forwarded — the override's key, or no
+          ``Authorization`` at all.
+
+        Rejections are 4xx so ``with_retry`` (429/502/503/504) does not re-attempt.
+        """
+        candidate = str(llm_override["base_url"]).strip()
+
+        if "#" in candidate or "?" in candidate:
+            raise InferenceError(
+                "llm_override.base_url must not carry a query string or fragment",
+                code="LLM_OVERRIDE_REJECTED",
+                status_code=400,
+            )
+        try:
+            parts = urlsplit(candidate)
+        except ValueError as exc:
+            # Malformed input, e.g. the unclosed IPv6 literal `https://[::1/v1`.
+            # Uncaught it escapes the httpx handlers and error_handlers.py's
+            # OpenRAGError mapping, surfacing as an unstructured 500.
+            raise InferenceError(
+                "llm_override.base_url is not a valid URL",
+                code="LLM_OVERRIDE_REJECTED",
+                status_code=400,
+            ) from exc
+        scheme = parts.scheme.lower()
+        if scheme != "https":
+            raise InferenceError(
+                f"llm_override.base_url scheme {scheme!r} is not allowed (https only)",
+                code="LLM_OVERRIDE_REJECTED",
+                status_code=400,
+            )
+        # Decoded too: `urlsplit` leaves `%XX` alone and httpx forwards it, so
+        # `%2e%2e` arrives as `..` at a target that decodes before routing.
+        if ".." in parts.path.split("/") or ".." in unquote(parts.path).split("/"):
+            raise InferenceError(
+                "llm_override.base_url must not contain a '..' path segment",
+                code="LLM_OVERRIDE_REJECTED",
+                status_code=400,
+            )
+
+        candidate = candidate.rstrip("/")
+        api_key = llm_override.get("api_key")
+        headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+        logger.bind(endpoint=candidate, configured=self._endpoint).debug(
+            "Honoring client-supplied llm_override endpoint"
+        )
+        return candidate, headers
+
+    def _has_endpoint_override(self, kwargs: dict) -> bool:
+        """Is this request routed to a client-supplied endpoint?
+
+        Reads raw ``kwargs`` because the breaker predicate runs before the method
+        body. Inside the body, use the flag from ``_resolve_overrides``.
+        """
+        if not self._allow_custom_endpoint:
+            return False
+        return bool(client_llm_override(kwargs.get("metadata")).get("base_url"))
+
+    def _chat_payload_kwargs(self, kwargs: dict, *, use_defaults: bool = True) -> dict:
+        """Merge server sampling defaults under the request's own params.
+
+        ``use_defaults=False`` for a client-supplied endpoint: the defaults describe
+        the *server's* model and another provider may reject them outright (Gemini
+        400s on an unsolicited ``logprobs``). Dropping them is what made the restored
+        override actually work.
+        """
+        payload_kwargs = {**self._defaults, **kwargs} if use_defaults else dict(kwargs)
+        fallback_thinking = self._enable_thinking if use_defaults else None
+        enable_thinking = payload_kwargs.pop("enable_thinking", fallback_thinking)
         if enable_thinking is not None and enable_thinking is True:
             chat_template_kwargs = dict(payload_kwargs.get("chat_template_kwargs") or {})
             chat_template_kwargs.setdefault("enable_thinking", enable_thinking)
             payload_kwargs["chat_template_kwargs"] = chat_template_kwargs
+        payload_kwargs = _strip_falsy_logprobs(payload_kwargs)
         return payload_kwargs
 
-    @with_circuit_breaker("llm")
+    @with_circuit_breaker("llm", skip_if=_targets_client_endpoint)
     @with_retry(max_attempts=3)
     async def generate(self, prompt: str, **kwargs) -> dict:
-        base_url, model, headers = self._resolve_overrides(kwargs)
+        base_url, model, headers, overridden = self._resolve_overrides(kwargs)
         kwargs.pop("metadata", None)
-        payload = {**self._defaults, **kwargs, "model": model, "prompt": prompt}
+        payload = {**({} if overridden else self._defaults), **kwargs, "model": model, "prompt": prompt}
+        payload = _strip_falsy_logprobs(payload)
         log_llm_call(caller="VLLMClient.generate", model=model, endpoint=base_url, prompt=prompt)
         try:
             resp = await self._client.post(f"{base_url}/completions", json=payload, headers=headers)
@@ -216,12 +367,17 @@ class VLLMClient(LLM):
             ) from exc
         return _parse_response(resp)
 
-    @with_circuit_breaker("llm")
+    @with_circuit_breaker("llm", skip_if=_targets_client_endpoint)
     @with_retry(max_attempts=3)
     async def chat(self, messages: list[dict[str, str]], **kwargs) -> dict:
-        base_url, model, headers = self._resolve_overrides(kwargs)
+        base_url, model, headers, overridden = self._resolve_overrides(kwargs)
         kwargs.pop("metadata", None)
-        payload = {**self._chat_payload_kwargs(kwargs), "model": model, "messages": messages, "stream": False}
+        payload = {
+            **self._chat_payload_kwargs(kwargs, use_defaults=not overridden),
+            "model": model,
+            "messages": messages,
+            "stream": False,
+        }
         log_llm_call(caller="VLLMClient.chat", model=model, endpoint=base_url, messages=messages)
         try:
             resp = await self._client.post(f"{base_url}/chat/completions", json=payload, headers=headers)
@@ -238,9 +394,14 @@ class VLLMClient(LLM):
         return _parse_response(resp)
 
     async def stream_chat(self, messages: list[dict[str, str]], **kwargs) -> AsyncIterator[str]:
-        base_url, model, headers = self._resolve_overrides(kwargs)
+        base_url, model, headers, overridden = self._resolve_overrides(kwargs)
         kwargs.pop("metadata", None)
-        payload = {**self._chat_payload_kwargs(kwargs), "model": model, "messages": messages, "stream": True}
+        payload = {
+            **self._chat_payload_kwargs(kwargs, use_defaults=not overridden),
+            "model": model,
+            "messages": messages,
+            "stream": True,
+        }
         log_llm_call(caller="VLLMClient.stream_chat", model=model, endpoint=base_url, messages=messages, stream=True)
         try:
             async with self._client.stream(
@@ -515,6 +676,9 @@ class VLLMVision(VLLMClient, VLM):
             resp = await self._client.post(
                 f"{self._endpoint}/chat/completions",
                 json=payload,
+                # Explicit since Authorization moved off the shared httpx client;
+                # captioning always uses the configured endpoint.
+                headers=self._auth_headers,
             )
             resp.raise_for_status()
         except httpx.ConnectError as exc:

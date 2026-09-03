@@ -25,6 +25,7 @@ Openrag loads all files into a pivot markdown file format before proceeding to c
 | `CONTENT_DEDUPLICATION_ENABLED` | `bool` | `true` | Rejects a file when identical content already exists in the same partition. Set it to `false` when a test intentionally indexes duplicates. |
 | `PDFLOADER` | `str` | `PyMuPDFLoader` | PDF parsing engine. `PyMuPDFLoader` (default) is a lightweight, fast, CPU-friendly backend for searchable PDFs. Switch to `MarkerLoader` for OCR / scanned documents, complex layouts and embedded images (heavier; GPU-friendly). Other options: `DoclingLoader`, `DotsOCRLoader`.|
 | `PARSE_TIMEOUT` | `int` | `3600` | Outer wall-clock bound (in seconds) for a single file's parse stage, whichever loader runs it. Marker and Docling self-limit via their own timeouts, but `PyMuPDFLoader` has none — this bound stops a wedged parse from stalling indexing: the file fails and is reported instead. |
+| `INDEXING_CALLBACK_ALLOW_PRIVATE_URLS` | `bool` | `false` | Development-only escape hatch for the upload `callback_url`. By default a callback targeting `localhost`, a private or link-local address is refused (SSRF guard on a caller-supplied URL). Set it to `true` only in a dev stack whose callback target is a local instance (e.g. `http://cozy.localhost:8080`). Non-`http(s)` schemes stay rejected either way. |
 
 :::caution
 `PyMuPDFLoader` (the default) is a lightweight PDF loader that cannot process non-searchable (image-based) PDFs and does not extract or handle embedded images. Set `PDFLOADER=MarkerLoader` when you need those.
@@ -103,7 +104,9 @@ For local whisper loader, here are the options to use
 | `WHISPER_NUM_GPUS` | `float` | 0.01 | Fraction of a GPU reserved per Whisper worker in Ray's resource accounting. |
 
 ##### OpenAI-compatible audio Loader ( `OpenAIAudioLoader` )
-The `OpenAIAudioLoader` option, allows to use openai-compatible audio endpoint/service to transcribe audio endpoint by providing the following variables: **`TRANSCRIBER_BASE_URL`, `TRANSCRIBER_API_KEY` and `TRANSCRIBER_MODEL`**
+The `OpenAIAudioLoader` option can use any OpenAI-compatible transcription service. Configure its URL, credentials, and model with **`TRANSCRIBER_BASE_URL`**, **`TRANSCRIBER_API_KEY`**, and **`TRANSCRIBER_MODEL`**.
+
+On first startup, these values seed the default **STT** endpoint in the Admin UI's **Model Endpoints** page. Once an STT endpoint is saved, it is the editable source for `OpenAIAudioLoader`: use it to change the OpenAI-compatible `/v1` URL, model, API key, timeout, concurrency, optional language hint, and non-secret provider request options for MOSS, Whisper, or another compatible provider. No OpenRAG restart is required: direct extraction reloads the endpoint before each audio request, and indexer workers refresh it within one minute. The transcription endpoint must implement `/audio/transcriptions`.
 
 The audio is automatically segmented into chunks using silence detection, then transcribes these chunks in parallel for optimal speed and accuracy.
 
@@ -127,14 +130,40 @@ Here are some other variables related to openai-compatible endpoint.
 |----------|------|---------|-------------|
 | `TRANSCRIBER_BASE_URL` | `str` | `http://transcriber:8000/v1` | Base URL for the transcriber API (OpenAI-compatible endpoint). |
 | `TRANSCRIBER_API_KEY` | `str` | `EMPTY` | Authentication key for transcriber service requests. |
-| `TRANSCRIBER_MODEL` | `str` | `openai/whisper-large-v3-turbo` | Whisper model identifier served by VLLM for speech-to-text conversion. Other options: `openai/whisper-small`, `openai/whisper-large-v3-turbo`, etc.|
-| `TRANSCRIBER_MAX_CONCURRENT_CHUNKS` | `int` | `20` | Maximum number of audio chunks processed simultaneously. Increasing this value improves throughput when sufficient GPU resources are available. |
+| `TRANSCRIBER_MODEL` | `str` | `openai/whisper-large-v3-turbo` | Model identifier exposed by the transcription endpoint. |
+| `TRANSCRIBER_MAX_CONCURRENT_CHUNKS` | `int` | `20` | Per-worker concurrency for the initial STT endpoint seed and the fallback when no saved STT endpoint is available. For a saved endpoint, set **Concurrency per worker** in **Admin UI → Model Endpoints**. |
 | `TRANSCRIBER_TIMEOUT` | `int` | `3600` | Maximum duration in seconds allowed for a single transcription request. |
 | `TRANSCRIBER_DIRECT_UPLOAD_SUFFIXES` | `str` | `.wav\|.flac\|.ogg\|.mp3\|.mp4\|.m4a\|.webm\|.mpeg\|.mpga` | Pipe-delimited list of audio file suffixes uploaded to the transcriber as-is (no WAV conversion). Other formats are re-encoded to WAV before upload. Trim this list when your transcriber backend (e.g. vLLM/libsndfile) only accepts a subset. |
 | `USE_WHISPER_LANG_DETECTOR` | `bool` | `true` | When enabled, uses a local Whisper-based language detector to identify the source audio language before transcription. |
 | `TRANSCRIBER_PORT` | `int` | `8002` | Host port the **bundled** vLLM Whisper service (`TRANSCRIBER_COMPOSE=extern/transcriber.yaml`) is published on (maps to container port 8000). Only read once you uncomment the `ports:` mapping in that compose include — by default the service is reachable over the Docker network only. |
 
 </div>
+
+:::tip[MOSS-Transcribe-Diarize with vLLM]
+
+`OpenMOSS-Team/MOSS-Transcribe-Diarize` uses this same endpoint and produces timestamped, speaker-labelled text, so no new OpenRAG loader is needed. Set `AUDIOLOADER=OpenAIAudioLoader`, point the STT endpoint at the vLLM server, and use the model name advertised by `/v1/models`. For example, when vLLM is started with `--served-model-name moss-transcribe-diarize`, enter `moss-transcribe-diarize` rather than the Hugging Face repository ID. Set `USE_WHISPER_LANG_DETECTOR=false` when you do not need the local Whisper language detector.
+
+For a MOSS server bound to `127.0.0.1:8001`, use `http://127.0.0.1:8001/v1` only when OpenRAG runs on that host. A containerized OpenRAG needs a host-reachable address such as `http://host.docker.internal:8001/v1` (plus Docker's host-gateway mapping on Linux). Match each OpenRAG worker's saved **Concurrency per worker** to the vLLM capacity. An endpoint configured with `--max-num-seqs 1` must be used by exactly one OpenRAG worker; increase `--max-num-seqs` before sharing that endpoint across multiple workers. `TRANSCRIBER_MAX_CONCURRENT_CHUNKS` only controls the initial seed and fallback.
+
+The bundled transcriber image is pinned for Whisper and predates MOSS support. Serve MOSS with the vLLM build specified by the model authors, then use it as the external transcription endpoint. Its advanced STT request options are sent unchanged to vLLM, so configure an appropriate output-token budget and deterministic JSON output on the endpoint. Manage instructions in **Admin UI → Prompt Library → Transcription**, then select the STT endpoint and instruction in **Admin UI → Presets → Indexation → Parsing**. Each partition uses its assigned indexation preset; leaving either selection at its default follows the global endpoint or ASR prompt. Direct extraction (`/extract`) has no partition and always uses the global endpoint and default ASR prompt. Changes apply to the next transcription without a restart. OpenRAG leaves the default ASR prompt empty so Whisper, MOSS, and other providers keep their native behavior.
+
+On a deployment dedicated to MOSS, you can paste an instruction like this into the Prompt Library:
+
+```text
+Transcribe the audio exactly in the original spoken language.
+
+Output text only. Never output timestamps, timecodes, or durations.
+When multiple speakers are clearly present, prefix each speech segment with
+[S01], [S02], [S03], and keep the same ID for the same speaker.
+
+Preserve the original language and wording. Do not translate, summarize,
+paraphrase, correct, or invent missing words.
+```
+
+For a MOSS model, **Admin UI → Model Endpoints** offers an optional **Speaker-aware MOSS transcript** setting. It removes boundary timecodes when the response is unambiguously recognized as a supported MOSS transcript and keeps labels only when more than one speaker is present. Ambiguous responses are preserved unchanged to prevent content loss. This also works with served-model aliases and is never sent to the provider.
+
+Add hotwords only when they are relevant to your own deployment. They bias recognition vocabulary and should not be part of OpenRAG's global default. When adding hotwords or a format instruction, include the desired timestamp and speaker-label format in the prompt as well.
+:::
 
 :::note[About whisper with vLLM and language detection]
 As noted in [this PR](https://github.com/linagora/openrag/pull/134), vLLM's Whisper implementation could mis-detect the language and output English regardless of the source audio. For details, see [this vLLM issue](https://github.com/vllm-project/vllm/issues/14174).
@@ -265,6 +294,7 @@ For an opt-in named-volume profile, copy the values from `infra/compose/.env.nam
 | `VLLM_CACHE` | `/root/.cache/huggingface` | Hugging Face cache used by vLLM, reranker, and transcriber services. |
 | `DB_VOLUME` | `../../db` | PostgreSQL data mounted at `/var/lib/postgresql/data`. |
 | `MILVUS_VOLUME_DIRECTORY` | `./volumes` | Parent directory for Milvus, etcd, and MinIO host-path storage. |
+| `MILVUS_MQ_TYPE` | `default` | Milvus message queue. Keep the existing value during a version upgrade; fresh installations can use the default. |
 | `MILVUS_COMPOSE` | `milvus/milvus.yaml` | Milvus compose include. Use `milvus/milvus.named-volumes.yaml` for the named-volume profile. |
 | `ETCD_VOLUME` | `etcd` | Milvus etcd named volume, used only with `MILVUS_COMPOSE=milvus/milvus.named-volumes.yaml`. |
 | `MINIO_VOLUME` | `minio` | Milvus object storage named volume, used only with `MILVUS_COMPOSE=milvus/milvus.named-volumes.yaml`. |
@@ -288,9 +318,48 @@ These are external services to provide !!!
 | `API_KEY` | str | _(unset)_ | API key for authenticating with the LLM service |
 | `LLM_ENABLE_THINKING` | bool | _(unset)_ | Optional chat-template control for models that support `enable_thinking`; leave unset for Mistral tokenizers, set `false` to suppress Qwen-style reasoning traces |
 | `LLM_SEMAPHORE` | int | 10 | Maximum number of concurrent requests to allow for the LLM service |
+| `LLM_OVERRIDE_ALLOW_CUSTOM_ENDPOINT` | bool | `false` | Honor a client-supplied `base_url`/`api_key` in `metadata.llm_override`. Off by default; read the trade-off below before enabling. |
 | `MAX_LLM_CONTEXT_SIZE` | `int` | `8192` | Fallback maximum token limit for chat/completion requests. At startup, the `/v1/models` endpoint is queried for the model's `max_model_len`; if that query fails this value is used instead. Requests whose total token count (prompt + `max_tokens`) exceeds the limit are rejected with a **413** error. |
 | `MAX_OUTPUT_TOKENS` | `int` | `1024` | Default output-token budget (`max_tokens`) applied to chat completions when the request doesn't set one explicitly. |
 
+
+#### Client-supplied LLM endpoints
+
+A client can always override the **model name** for a single request via
+`metadata.llm_override` (see the [API reference](/openrag/documentation/api/#extra-arguments)).
+`LLM_OVERRIDE_ALLOW_CUSTOM_ENDPOINT=true` additionally honors `base_url` and
+`api_key` from that object, so the request is served by a provider of the
+client's choosing rather than the configured one.
+
+It exists for deployments whose clients already send the full object and would
+otherwise break. Prefer registering a named endpoint under `/model-endpoints`
+and binding it to the partition (`chat_llm`) — same outcome, none of the
+trade-off below.
+
+**What enabling it means.** Any caller who can reach `/v1/chat/completions` can
+make the server issue https POSTs from inside your network. The request shape is
+pinned, which is what bounds the exposure:
+
+- `https` only — plaintext internal services are unreachable.
+- The path is always `{base_url}/chat/completions` (`{base_url}/completions` for
+  the legacy `/v1/completions` route); a query string, fragment or `..` segment
+  — percent-encoded or not — is rejected with a **400**, so the override cannot
+  be aimed at an arbitrary internal path.
+- Redirects are not followed, so a target cannot bounce the server elsewhere.
+- The server's own API key is never forwarded; an override without `api_key`
+  sends no `Authorization` header at all.
+
+What remains reachable is therefore essentially *other https LLM gateways* —
+including an internal one that trusts its network rather than a credential, which
+such a caller could then use without holding its key.
+
+**What it does not change.** It grants no read access a caller does not already
+have: `/search` returns the same partition content directly. What changes is the
+way data leaves — as outbound LLM traffic from the server's egress rather than as
+a user read. That matters against a DLP or approved-subprocessor constraint, not
+against a caller who was never authorized in the first place.
+
+Enable only where every API caller is already trusted with both.
 
 #### VLM Configuration
 
@@ -369,6 +438,7 @@ The RAG pipeline ships with preconfigured prompts bundled inside the package at 
 | `query_contextualizer_tmpl.txt` | Template for adding context to user queries |
 | `chunk_contextualizer_tmpl.txt` | Template for contextualizing document chunks during indexing |
 | `image_captioning_tmpl.txt` | Template for generating image descriptions using the VLM |
+| `asr_transcription_tmpl.txt` | Empty by default so external transcription keeps the provider's native behavior. Configure it in Prompt Library and select it on an indexation preset when `AUDIOLOADER=OpenAIAudioLoader`. |
 | `hyde.txt` | Hypothetical Document Embeddings (HyDE) query expansion template |
 | `multi_query_pmpt_tmpl.txt` | Template for generating multiple query variations |
 

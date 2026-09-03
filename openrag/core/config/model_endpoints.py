@@ -1,4 +1,4 @@
-"""Named model endpoint registry — multi-endpoint config for embedders, LLMs, rerankers, VLMs."""
+"""Named model endpoint registry — embedders, rerankers, LLMs, VLMs, and STT."""
 
 from __future__ import annotations
 
@@ -8,19 +8,29 @@ from typing import Any, Literal
 from core.config.base import ConfigMixin
 from pydantic import BaseModel, Field
 
-ModelEndpointType = Literal["embedder", "reranker", "llm", "vlm"]
+ModelEndpointType = Literal["embedder", "reranker", "llm", "vlm", "stt"]
 
 
 class ModelEndpointConfig(BaseModel):
     """A single registered inference endpoint.
+
+    ``name`` is the stable registry identity when this config came from the
+    model-endpoint registry. It stays absent for legacy environment-only
+    configuration, which has no independently managed registration.
 
     ``extra`` holds implementation-specific keys:
       ``{"implementation": "vllm"}``    → VLLMEmbedder
       ``{"implementation": "ollama"}``  → OllamaEmbedder
       ``{"implementation": "infinity"}``→ InfinityReranker
       ``{"api_key": "sk-..."}``         → passed to client constructor
+      ``{"max_model_len": 8192}``       → embedders: this endpoint's context
+          window, mirroring the global ``embedder.max_model_len``. A partition
+          may point at an embedder with a different window than the deployment
+          default, and the chunker derives its hard safety bound from it (see
+          ``core.chunking.factory.create_chunker``). Absent → global value.
     """
 
+    name: str | None = None
     endpoint: str
     model_name: str | None = None
     batch_size: int = Field(default=32, gt=0)
@@ -49,6 +59,17 @@ def _positive_int(value: Any) -> int | None:
 LLM_CONTEXT_SIZE_KEY = "max_llm_context_size"
 LLM_OUTPUT_TOKENS_KEY = "max_output_tokens"
 
+# Optional language hint for OpenAI-compatible speech-to-text endpoints. It is
+# stored in ``extra`` because it applies only to STT requests and needs no
+# schema column; when set it takes precedence over the optional Whisper-based
+# language detector.
+STT_LANGUAGE_KEY = "language"
+
+# Optional post-processing for MOSS diarized output. It is deliberately an
+# endpoint control rather than a provider request option: OpenRAG consumes it
+# after transcription, so it must never be forwarded to the provider.
+MOSS_SPEAKER_AWARE_KEY = "moss_speaker_aware"
+
 # Provenance marker written into an endpoint's ``extra`` when the seeder creates
 # it from env. It is what lets boot-time sync find *its own* row again after the
 # configured model — and therefore the slug the row was named after — changes.
@@ -66,6 +87,22 @@ ENV_MANAGED_VALUE = "env"
 # factory already stripped.
 CONTROL_EXTRA_KEYS = frozenset({"implementation", ENV_MANAGED_KEY, LLM_CONTEXT_SIZE_KEY, LLM_OUTPUT_TOKENS_KEY})
 
+# Connection metadata and OpenRAG-owned fields must not leak into an STT
+# provider's multipart request. Shared by runtime transcription and the Admin
+# UI validation probe so a saved endpoint is tested with the payload it will
+# actually receive.
+STT_REQUEST_CONTROL_EXTRA_KEYS = CONTROL_EXTRA_KEYS | frozenset(
+    {
+        "api_key",
+        STT_LANGUAGE_KEY,
+        MOSS_SPEAKER_AWARE_KEY,
+        "file",
+        "model",
+        "prompt",
+        "stream",
+    }
+)
+
 
 class ModelsConfig(ConfigMixin):
     """Named endpoint dictionaries — one per model type.
@@ -79,6 +116,7 @@ class ModelsConfig(ConfigMixin):
     reranker: dict[str, ModelEndpointConfig] = Field(default_factory=dict)
     llm: dict[str, ModelEndpointConfig] = Field(default_factory=dict)
     vlm: dict[str, ModelEndpointConfig] = Field(default_factory=dict)
+    stt: dict[str, ModelEndpointConfig] = Field(default_factory=dict)
 
     # When True, the endpoint the seeder created from env is refreshed from
     # Settings/env on every boot instead of only on first seed — lets operators
@@ -125,6 +163,9 @@ class ModelEndpointRow(BaseModel):
 __all__ = [
     "LLM_CONTEXT_SIZE_KEY",
     "LLM_OUTPUT_TOKENS_KEY",
+    "MOSS_SPEAKER_AWARE_KEY",
+    "STT_REQUEST_CONTROL_EXTRA_KEYS",
+    "STT_LANGUAGE_KEY",
     "ModelEndpointConfig",
     "ModelsConfig",
     "ModelEndpointRow",

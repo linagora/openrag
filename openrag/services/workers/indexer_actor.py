@@ -8,15 +8,24 @@ from typing import Any
 
 from core.models.document import Document
 from core.utils.logging import get_logger
+from services.workers.indexing_callback import send_indexing_callback
 from services.workers.pipeline_builder import (
     REPLACE_OLD_CHUNK_COLLECTION_ROW_KEY,
     REPLACE_OLD_CHUNK_IDS_ROW_KEY,
     IndexingPipeline,
 )
+from services.workers.ray_utils import retry_idempotent_ray_actor_method
 from services.workers.stages._common import run_with_optional_timeout
 from services.workers.stages.store import INDEXING_TASK_ID_METADATA_KEY
 
 logger = get_logger()
+
+
+class _TaskCancelledBeforeStart(Exception):
+    """Internal signal: ``set_state(SERIALIZING)`` reported the task as already
+    fenced (cancelled) — not a failure, so it must skip failure-marking and the
+    error callback entirely (distinct from the TSM *raising*, which is a real
+    outage and does need both)."""
 
 
 class IndexerWorker:
@@ -65,6 +74,8 @@ class IndexerWorker:
         replace: bool = False,
         indexation_config: dict[str, Any] | None = None,
         embedder_name: str | None = None,
+        callback_url: str | None = None,
+        callback_token: str | None = None,
         require_existing_partition: bool = False,
         resolved_prompts: dict[str, str] | None = None,
     ) -> dict[str, Any]:
@@ -73,11 +84,24 @@ class IndexerWorker:
         Returns a plain dict ``{"stored_count": int, "stage": "stored"}``
         on success.  On failure, state is set to FAILED and the exception
         is re-raised so the Ray task is marked as errored.
+
+        When *callback_url* is provided, a best-effort ``POST`` notification is
+        sent to it once the task reaches a terminal state; never affects the
+        indexing outcome.
         """
-        await self._tsm.set_state.remote(task_id, "SERIALIZING")
+        file_id = metadata.get("file_id", "")
+        log = logger.bind(file_id=file_id, partition=partition, task_id=task_id)
         row: dict[str, Any] | None = None
         catalog_written = False
         try:
+            # Inside the try so a TaskStateManager outage here still reaches
+            # the except block below and sends the error callback.
+            accepted = await retry_idempotent_ray_actor_method(
+                lambda: self._tsm.set_state.remote(task_id, "SERIALIZING"),
+                task_description=f"set_state({task_id}, SERIALIZING)",
+            )
+            if accepted is False:
+                raise _TaskCancelledBeforeStart
             document = await _load_document(path, metadata, partition)
             # One indexation timestamp for this file, shared by the Milvus chunks
             # (via the store stage) and the Postgres catalog row, so they agree.
@@ -128,8 +152,14 @@ class IndexerWorker:
                     partition=partition,
                     indexation_config=indexation_config,
                 )
-            await self._tsm.set_state.remote(task_id, "COMPLETED")
-            return {"stored_count": row.get("stored_count", 0), "stage": row.get("stage", "")}
+            await retry_idempotent_ray_actor_method(
+                lambda: self._tsm.set_state.remote(task_id, "COMPLETED"),
+                task_description=f"set_state({task_id}, COMPLETED)",
+            )
+        except _TaskCancelledBeforeStart:
+            # The TSM already told us this task is fenced/cancelled — no need to
+            # ask it again, and a cancellation must not fire an error callback.
+            raise RuntimeError(f"Task {task_id} was cancelled before indexing started") from None
         except Exception:
             should_cleanup_vectors = row is not None and (
                 row.get("stored_count", 0) > 0 or row.get("stage") == "store_failed"
@@ -143,8 +173,28 @@ class IndexerWorker:
                     task_id=task_id,
                 )
             tb = traceback.format_exc()
-            await self._tsm.set_failed_if_not_cancelled.remote(task_id, tb)
+            try:
+                was_failed = await retry_idempotent_ray_actor_method(
+                    lambda: self._tsm.set_failed_if_not_cancelled.remote(task_id, tb),
+                    task_description=f"set_failed_if_not_cancelled({task_id})",
+                )
+            except Exception:
+                # TSM still unreachable: treat as failed so the callback still fires.
+                was_failed = True
+            if was_failed:
+                await send_indexing_callback(
+                    callback_url, partition, file_id, "error", metadata, callback_token=callback_token
+                )
             raise
+        else:
+            # else, not end-of-try: the file is already COMPLETED here, so any
+            # error past this point must not be caught above and reported as
+            # a failed run.
+            log.info("File indexed successfully.")
+            await send_indexing_callback(
+                callback_url, partition, file_id, "success", metadata, callback_token=callback_token
+            )
+            return {"stored_count": row.get("stored_count", 0), "stage": row.get("stage", "")}
         # The raw upload is purged (when configured) by the enclosing actor, not
         # here: cleanup must also cover failures that happen *before* this method
         # runs (catalog/registry init, the SERIALIZING state update). See

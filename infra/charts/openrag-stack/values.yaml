@@ -99,7 +99,7 @@ ray:
     registry: "ghcr.io"
     repository: "linagora/openrag-ray"
     # Pin to a release tag (ideally a digest) for reproducible deploys.
-    tag: "v2.1.1"
+    tag: "v2.2.0"
   resources:
     head:
       requests:
@@ -171,8 +171,17 @@ milvus:
   # note on it above. Without this, the milvus sub-chart names its own proxy
   # Service from the real Release.Name instead, which won't match VDB_HOST.
   fullnameOverride: "openrag-milvus"
+  # Chart 5.0.25 still defaults to Milvus 2.6.21. This override can be removed
+  # when the upstream 5.0.26 chart is available from its repository index.
   image:
-    all: { tag: "v2.6.0" }
+    all: { tag: "v3.0.0" }
+  # Milvus 3 runs as UID/GID 999. Applying this group on every mount lets
+  # Kubernetes migrate supported existing volumes before the non-root process
+  # starts. Storage drivers that do not support fsGroup require an
+  # administrator-managed ownership migration before the Helm upgrade.
+  securityContext:
+    fsGroup: 999
+    fsGroupChangePolicy: Always
   cluster: { enabled: true }
   pulsarv3: { enabled: false }
   woodpecker: { enabled: true }
@@ -383,7 +392,7 @@ adminUi:
     repository: "linagoraai/openrag-admin-ui"
     # Pin to a release tag (ideally a digest) for reproducible deploys. Must be a
     # build from infra/docker/ui.Dockerfile (nginx-unprivileged, listens :8080).
-    tag: "v2.1.1"
+    tag: "v2.2.0"
     pullPolicy: IfNotPresent
   replicaCount: 1
   service:
@@ -440,7 +449,7 @@ openrag:
     registry: ""
     repository: "linagoraai/openrag"
     # Pin to a release tag (ideally a digest) for reproducible deploys.
-    tag: "v2.1.1"
+    tag: "v2.2.0"
     pullPolicy: IfNotPresent
   service:
     type: ClusterIP
