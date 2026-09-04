@@ -30,6 +30,7 @@ def _make_searcher(
     ancestor_ids=None,
 ) -> tuple[VectorStoreSearcher, MagicMock, MagicMock, MagicMock]:
     store = MagicMock()
+    store.collection_exists = AsyncMock(return_value=True)
     store.search = AsyncMock(return_value=search_results or [])
     store.query_chunks_by_filter = AsyncMock(return_value=filter_results or [])
 
@@ -85,6 +86,22 @@ def test_dict_to_chunk_metadata_excludes_reserved_keys():
 # ---------------------------------------------------------------------------
 # search()
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_search_returns_empty_when_collection_does_not_exist():
+    """Regression for #505-class bugs: on a fresh stack nothing has ever been
+    indexed, so the shared collection doesn't exist yet. search() must return
+    no matches instead of embedding the query and raising on the missing
+    collection."""
+    searcher, store, embedder, _ = _make_searcher()
+    store.collection_exists = AsyncMock(return_value=False)
+
+    result = await searcher.search(query="hello", partition=["p1"], top_k=5)
+
+    assert result == []
+    embedder.embed.assert_not_awaited()
+    store.search.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -170,6 +187,7 @@ async def test_multi_query_search_merges_filter_params():
     embedder = MagicMock()
     embedder.embed = AsyncMock(return_value=[_EMBED_VEC, _EMBED_VEC])
     store = MagicMock()
+    store.collection_exists = AsyncMock(return_value=True)
     store.search = AsyncMock(return_value=[])
     store.query_chunks_by_filter = AsyncMock(return_value=[])
     searcher = VectorStoreSearcher(vector_store=store, embedder=embedder, document_repo=MagicMock(), collection="col")
@@ -240,11 +258,24 @@ async def test_search_skips_surrounding_when_no_results():
 
 
 @pytest.mark.asyncio
+async def test_multi_query_search_returns_empty_when_collection_does_not_exist():
+    searcher, store, embedder, _ = _make_searcher()
+    store.collection_exists = AsyncMock(return_value=False)
+
+    result = await searcher.multi_query_search(queries=["q1", "q2"], partition=["p1"], top_k_per_query=5)
+
+    assert result == []
+    embedder.embed.assert_not_awaited()
+    store.search.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_multi_query_search_embeds_all_queries():
     embedder = MagicMock()
     embedder.embed = AsyncMock(return_value=[_EMBED_VEC, _EMBED_VEC])
 
     store = MagicMock()
+    store.collection_exists = AsyncMock(return_value=True)
     store.search = AsyncMock(return_value=[])
     store.query_chunks_by_filter = AsyncMock(return_value=[])
 
@@ -267,6 +298,7 @@ async def test_multi_query_search_deduplicates_across_queries():
 
     # Both queries return the same chunk "1" plus a unique one each
     store = MagicMock()
+    store.collection_exists = AsyncMock(return_value=True)
     store.search = AsyncMock(
         side_effect=[
             [_make_row("1"), _make_row("2")],
