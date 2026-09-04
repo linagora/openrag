@@ -39,7 +39,7 @@ async def retrieve_response_and_docs_openrag(query: str, partition: str, _base_u
         try:
             res = await client.chat.completions.create(**settings)
             response_llm = res.choices[0].message.content
-            list_source_chunk_ids = [item["_id"] for item in json.loads(res.extra)["sources"]]
+            list_source_chunk_ids = [item["_id"] for item in res.extra["sources"]]
 
             return response_llm, list_source_chunk_ids
         except Exception as e:

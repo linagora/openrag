@@ -234,7 +234,7 @@ async def stream_with_source_filtering(
                                 "finish_reason": None,
                             }
                         ],
-                        "extra": "{}",
+                        "extra": {},
                     }
                     yield f"data: {json.dumps(out)}\n\n"
                     emitted_len = safe_end
@@ -243,7 +243,7 @@ async def stream_with_source_filtering(
                 # keep-alive chunk): pass it through untouched. A finish-only chunk
                 # is intentionally *not* re-emitted here — the terminal flush emits
                 # the finish chunk so it can carry `extra.sources`.
-                data["extra"] = "{}"
+                data["extra"] = {}
                 yield f"data: {json.dumps(data)}\n\n"
     except Exception as exc:
         # Upstream raised mid-stream (timeout, connection drop, worker restart):
@@ -305,7 +305,6 @@ async def stream_with_source_filtering(
             chars=len(final_clean),
             sources=len(filtered),
         )
-    filtered_json = json.dumps(extra_payload)
 
     if template and len(final_clean) > emitted_len:
         tail_chunk = copy.deepcopy(template)
@@ -314,7 +313,7 @@ async def stream_with_source_filtering(
         # finish chunk); clients treat such a chunk as terminal and drop its
         # delta. The separate finish chunk below emits it with an empty delta.
         tail_chunk["choices"][0]["finish_reason"] = None
-        tail_chunk["extra"] = filtered_json
+        tail_chunk["extra"] = extra_payload
         yield f"data: {json.dumps(tail_chunk)}\n\n"
 
     if template:
@@ -322,7 +321,7 @@ async def stream_with_source_filtering(
         finish_chunk = copy.deepcopy(template)
         finish_chunk["choices"][0]["delta"] = {}
         finish_chunk["choices"][0]["finish_reason"] = last_finish_reason or "stop"
-        finish_chunk["extra"] = filtered_json
+        finish_chunk["extra"] = extra_payload
         yield f"data: {json.dumps(finish_chunk)}\n\n"
 
     yield "data: [DONE]\n\n"

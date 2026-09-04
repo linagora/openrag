@@ -550,6 +550,22 @@ async def __fetch_page_content(chunk_url, headers=None):
         return data.get("page_content", "")
 
 
+def _chunk_field(source: dict, key: str):
+    """Read one chunk field from a source entry, old shape or new.
+
+    The chunk's metadata is nested under ``chunk``; a server from before that
+    change spreads it across the entry instead. Accept both so the UI survives a
+    rolling deploy in either direction. Server-computed fields (``file_url``,
+    ``chunk_url``, ``source_type``) are read from the top level in both shapes
+    and must not come through here — they are authoritative there, and
+    deliberately scrubbed from the nested dict.
+    """
+    chunk = source.get("chunk")
+    if isinstance(chunk, dict) and key in chunk:
+        return chunk[key]
+    return source.get(key)
+
+
 async def _format_sources(metadata_sources, only_txt=False, api_key=None):
     if not isinstance(metadata_sources, list) or not metadata_sources:
         return [], []
@@ -579,9 +595,9 @@ async def _format_sources(metadata_sources, only_txt=False, api_key=None):
             d[source_name] = cl.Text(content=content, name=source_name, display="side")
             continue
 
-        filename_value = s.get("filename")
+        filename_value = _chunk_field(s, "filename")
         file_url = s.get("file_url")
-        page = s.get("page")
+        page = _chunk_field(s, "page")
         if (
             not isinstance(filename_value, str)
             or not filename_value.strip()
@@ -688,8 +704,15 @@ async def on_message(message: cl.Message):
             # Stream the response using OpenAI client directly
             stream = await client.chat.completions.create(**data)
             async for chunk in stream:
-                if chunk.extra:
-                    extra = json.loads(chunk.extra)
+                extra = getattr(chunk, "extra", None)
+                # `extra` is a JSON object, but a server from before that change
+                # sends the same payload as a JSON *string*. Accept both so the UI
+                # survives a rolling deploy in either direction. Normalising here
+                # also collapses the two "nothing to report" spellings a mid-stream
+                # chunk can carry -- `{}` (falsy) and `"{}"` (truthy) -- into one.
+                if isinstance(extra, str):
+                    extra = json.loads(extra)
+                if extra:
                     if "cited_sources" in extra:
                         # Strictly what the model cited; fall back to
                         # everything it was shown when nothing was cited
