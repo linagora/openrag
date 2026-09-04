@@ -29,7 +29,7 @@ from core.utils.logging import get_logger
 from ._call_log import log_llm_call
 from ._circuit_breaker import with_circuit_breaker
 from ._retry import with_retry
-from .vllm_client import _parse_response
+from .vllm_client import _parse_response, _strip_falsy_logprobs
 
 logger = get_logger()
 _ERROR_SNIPPET_LIMIT = 500
@@ -84,6 +84,7 @@ class OllamaClient(LLM):
     async def generate(self, prompt: str, **kwargs) -> dict:
         payload = {**self._defaults, **kwargs, "model": self._model, "prompt": prompt}
         payload.pop("metadata", None)
+        _strip_falsy_logprobs(payload)
         log_llm_call(caller="OllamaClient.generate", model=self._model, endpoint=self._endpoint, prompt=prompt)
         try:
             resp = await self._client.post(f"{self._endpoint}/completions", json=payload)
@@ -104,6 +105,7 @@ class OllamaClient(LLM):
     async def chat(self, messages: list[dict[str, str]], **kwargs) -> dict:
         payload = {**self._defaults, **kwargs, "model": self._model, "messages": messages, "stream": False}
         payload.pop("metadata", None)
+        _strip_falsy_logprobs(payload)
         log_llm_call(caller="OllamaClient.chat", model=self._model, endpoint=self._endpoint, messages=messages)
         try:
             resp = await self._client.post(f"{self._endpoint}/chat/completions", json=payload)
@@ -122,6 +124,7 @@ class OllamaClient(LLM):
     async def stream_chat(self, messages: list[dict[str, str]], **kwargs) -> AsyncIterator[str]:
         payload = {**self._defaults, **kwargs, "model": self._model, "messages": messages, "stream": True}
         payload.pop("metadata", None)
+        _strip_falsy_logprobs(payload)
         log_llm_call(
             caller="OllamaClient.stream_chat",
             model=self._model,
