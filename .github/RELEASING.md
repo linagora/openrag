@@ -397,7 +397,10 @@ git show "$VER:infra/charts/openrag-stack/Chart.yaml" | grep -E '^version:'
 Steps 1-8 verify what was *built*. Nothing so far looks at the Release object
 users actually land on. A release whose `name` is empty renders with the tagged
 commit's subject as its title — so a perfectly good release displays as
-`Merge pull request #NNN from linagora/release/vX.Y.Z`. That happened on v2.2.0.
+`Merge pull request #NNN from linagora/release/vX.Y.Z`. v2.2.0 published with
+the commit subject as its title and was corrected by hand minutes later — which
+is the point: nothing catches it, so the title is only right when someone
+happens to notice.
 
 `gh release create` leaves `name` empty unless `--title` is passed, so this is a
 recurring trap rather than a one-off slip: **always pass `--title "$VER"`.**
@@ -431,6 +434,9 @@ name=$(printf '%s' "$rel" | jq -r '.name')
 [ "$(printf '%s' "$rel" | jq -r '.isPrerelease')" = "false" ] \
   && echo "OK    not flagged prerelease" || { echo "FAIL  GA release flagged as prerelease"; fail=1; }
 
+# 200, not 0: a body of "." passes a >0 check while telling a user nothing.
+# Real releases run 2-5k chars (v2.1.1 2306, v2.1.0 4226, v2.2.0 4688), so this
+# only trips a release that genuinely shipped without notes.
 n=$(printf '%s' "$rel" | jq -r '.body|length')
 [ "$n" -gt 200 ] \
   && echo "OK    release notes present ($n chars)" \
