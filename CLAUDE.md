@@ -146,19 +146,51 @@ written against the old shape, which must stop calling `json.loads` on it:
 - `citations_reported` (bool) — `true` only when the model actually emitted a `[Sources: ...]` tag (even an empty/`none` one); `false` when the tag was missing entirely, which is the only case where `sources` falls back to keeping everything. Lets a client tell "the model cited every source" apart from "the model didn't report citations at all".
 - `all_retrieved_sources` — the complete retrieval set, captured before the context-token-budget truncation, so it also includes documents/web results that didn't fit in the prompt (and, on the map-reduce path, the original retrieved docs rather than the LLM-generated summaries). Only included when the request sets `metadata.include_all_retrieved_sources: true` — it's debug/eval telemetry, gated off by default since retrieval is uncapped up to `retriever.top_k` while the context budget only fits a handful of documents.
 
-Each document source entry is the chunk's metadata copied verbatim
-(`build_document_source_link`), plus `source_type`, `chunk_url` and `file_url`. That
-includes **`rerank_score`** — the raw score the reranker gave that chunk.
+Each document source entry (`build_document_source_link`) is shaped:
+
+```json
+{
+  "source_type": "document",
+  "chunk": { "...the chunk's metadata, copied verbatim..." },
+  "rerank_score": 0.646,
+  "chunk_url": "https://host/extract/<chunk id>",
+  "file_url":  "https://host/static/<chunk id>"
+}
+```
+
+`chunk` holds what the chunk carries; the siblings are what the server computed about
+it. Two consequences worth knowing: `source_type`, `chunk_url` and `file_url` are
+authoritative and are scrubbed from `chunk` as well as overridden at the top level, so
+metadata can't spoof them in either place (the guard is structural now, not a manual
+overwrite); and `file_url` is still omitted entirely when the chunk has no `source`.
+
+Web entries (`source_type: "web"`) are unchanged and flat — `url`, `title`, `snippet`,
+no `chunk`. Clients switch on `source_type`, as before.
+
+**`rerank_score`** — the raw score the reranker gave that chunk — sits beside `chunk`,
+not inside it: it describes how *this* query ranked the chunk, and the same chunk
+retrieved by a different query scores differently.
 
 It gets there via `ScoredChunk` (`openrag/core/models/retrieval_result.py`), a `Chunk`
 subclass holding `vector_score` / `rerank_score` / `combined_score` as typed fields.
 `_rerank_chunks` (`openrag/core/retrieval/pipeline.py`) returns `ScoredChunk.from_chunk(...)`
 instead of the bare chunk, and `ScoredChunk.to_langchain()` folds the non-null scores into
-metadata at the boundary the API response is built from. Because it subclasses `Chunk`,
-every `list[Chunk]` signature through retrieval, expansion and RRF stays valid. Only
+metadata at the boundary the API response is built from, and `build_document_source_link`
+lifts them back out to sit beside `chunk`. Because it subclasses `Chunk`, every
+`list[Chunk]` signature through retrieval, expansion and RRF stays valid. Only
 `rerank_score` is populated today — the vector score is still dropped in
 `vector_store_searcher._dict_to_chunk` (`score` is in its `skip` set), and nothing computes
-a combined score. Three caveats:
+a combined score.
+
+The three key names are shared as `RETRIEVAL_SCORE_KEYS` (`core/utils/consts.py`) because
+promoting a metadata key to an authoritative sibling is only safe if nothing else can put it
+there. Milvus collections have a dynamic field, so upload metadata is persisted verbatim —
+`{"rerank_score": 0.99}` would come back on every read. `_dict_to_chunk` therefore drops
+those keys along with `score`, and `ScoredChunk.to_langchain()` clears them from inherited
+metadata before stamping its typed fields. A score in an API response was set by *that*
+retrieval, never by whoever uploaded the file.
+
+Three caveats:
 
 - The key is **absent**, not null, when no reranker ran (reranker disabled, or a web
   source — web results are built separately and never reranked). Such chunks stay plain

@@ -470,6 +470,13 @@ object (not a JSON-encoded string) -- containing:
   `metadata.include_all_retrieved_sources` is `true` (off by default; this is
   debug/evaluation telemetry and can be large)
 
+Each entry in those arrays is shaped `{"source_type": "document", "chunk": {...},
+"rerank_score": 0.64, "chunk_url": "...", "file_url": "..."}` — `chunk` holds the
+chunk's own metadata, its siblings are what the server computed about it.
+`rerank_score` is absent when no reranker ran, and `file_url` when the chunk has
+no source file. Web entries (`source_type: "web"`) are flat: `url`, `title`,
+`snippet`, no `chunk`.
+
 **Streaming:**
 Set `stream: true` for Server-Sent Events (SSE) streaming responses.
 """,
@@ -587,6 +594,13 @@ object (not a JSON-encoded string) -- containing:
   by citation or context-budget truncation — only included when the request's
   `metadata.include_all_retrieved_sources` is `true` (off by default; this is
   debug/evaluation telemetry and can be large)
+
+Each entry in those arrays is shaped `{"source_type": "document", "chunk": {...},
+"rerank_score": 0.64, "chunk_url": "...", "file_url": "..."}` — `chunk` holds the
+chunk's own metadata, its siblings are what the server computed about it.
+`rerank_score` is absent when no reranker ran, and `file_url` when the chunk has
+no source file. Web entries (`source_type: "web"`) are flat: `url`, `title`,
+`snippet`, no `chunk`.
 
 **Note:** Streaming is not supported for this endpoint.
 """,

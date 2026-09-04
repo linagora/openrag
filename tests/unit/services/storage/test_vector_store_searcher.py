@@ -435,3 +435,23 @@ async def test_fetch_surrounding_no_restriction_when_allowed_file_ids_none():
     c = _dict_to_chunk(_make_row("1", partition="p1", prev_section_id="s0"))
     out = await searcher._fetch_surrounding([c], allowed_file_ids=None)
     assert [o.id for o in out] == ["0"]
+
+
+def test_dict_to_chunk_drops_persisted_retrieval_scores():
+    """Score keys are request-scoped. Milvus's dynamic field persists whatever a
+    caller put in upload metadata, so a stored ``rerank_score`` would otherwise
+    be read back and promoted into the API response as if this retrieval had
+    computed it."""
+    row = {
+        "id": "x",
+        "text": "t",
+        "partition": "p",
+        "file_id": "f",
+        "vector_score": 0.99,
+        "rerank_score": 0.99,
+        "combined_score": 0.99,
+        "author": "alice",
+    }
+    c = _dict_to_chunk(row)
+    assert not {"vector_score", "rerank_score", "combined_score"} & set(c.metadata)
+    assert c.metadata["author"] == "alice"

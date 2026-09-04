@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from core.utils.consts import RETRIEVAL_SCORE_KEYS
 from pydantic import BaseModel, Field
 
 from .chunk import Chunk
@@ -45,12 +46,17 @@ class ScoredChunk(Chunk):
         """Same Document as :meth:`Chunk.to_langchain`, plus the scores.
 
         The scores ride in metadata because that is what reaches clients:
-        API source entries are the chunk's metadata copied verbatim
+        API source entries are built from the chunk's metadata
         (``build_document_source_link``). A score that was never computed is
         omitted entirely rather than serialised as ``null``.
+
+        Inherited metadata is cleared of score keys first, so the ones the
+        Document carries are exactly the typed fields this retrieval set —
+        never a value that rode in on ``metadata`` from somewhere else.
         """
         doc = super().to_langchain(with_id=with_id)
-        for field in ("vector_score", "rerank_score", "combined_score"):
+        for field in RETRIEVAL_SCORE_KEYS:
+            doc.metadata.pop(field, None)
             value = getattr(self, field)
             if value is not None:
                 doc.metadata[field] = value

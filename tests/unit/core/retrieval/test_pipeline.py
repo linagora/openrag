@@ -312,3 +312,21 @@ async def test_get_relevant_docs_passes_configured_rrf_k(monkeypatch):
 
 def test_rrf_k_defaults_to_canonical_60():
     assert RetrieverPipeline(retriever=FakeRetriever()).rrf_k == 60
+
+
+def test_persisted_score_in_metadata_never_masquerades_as_this_query_s_score():
+    """A chunk can arrive carrying a ``rerank_score`` in its free-form metadata
+    -- the collection has a dynamic field, so whatever a caller sent as upload
+    metadata is persisted and read back. ``to_langchain`` must publish the typed
+    field this retrieval set, not that one, in both directions: overwritten when
+    a reranker ran, dropped when none did."""
+    stale = {"rerank_score": 0.99, "vector_score": 0.99, "author": "alice"}
+
+    scored = ScoredChunk(id="x", text="t", metadata=dict(stale), rerank_score=0.12)
+    metadata = scored.to_langchain().metadata
+    assert metadata["rerank_score"] == 0.12
+    assert "vector_score" not in metadata
+    assert metadata["author"] == "alice"
+
+    unscored = ScoredChunk(id="x", text="t", metadata=dict(stale))
+    assert "rerank_score" not in unscored.to_langchain().metadata

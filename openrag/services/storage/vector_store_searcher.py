@@ -14,7 +14,7 @@ from core.embeddings import Embedder
 from core.models.chunk import Chunk, _coerce_chunk_type
 from core.ports.document_repo import DocumentRepository
 from core.retrieval.searcher import RetrievalSearcher, file_id_restriction
-from core.utils.consts import is_internal_metadata_key
+from core.utils.consts import RETRIEVAL_SCORE_KEYS, is_internal_metadata_key
 from core.vector_stores import VectorStore
 
 
@@ -26,7 +26,20 @@ def _dict_to_chunk(row: dict[str, Any]) -> Chunk:
     """
     raw_id = row.get("id") or row.get("_id")
     chunk_id = str(raw_id) if raw_id is not None else str(uuid.uuid4())
-    skip = {"text", "vector", "_id", "id", "score", "file_id", "partition", "page", "chunk_type"}
+    # Score keys are dropped too: they are request-scoped (see
+    # ``RETRIEVAL_SCORE_KEYS``), so a persisted one is never this query's score.
+    skip = {
+        "text",
+        "vector",
+        "_id",
+        "id",
+        "score",
+        "file_id",
+        "partition",
+        "page",
+        "chunk_type",
+        *RETRIEVAL_SCORE_KEYS,
+    }
     metadata = {k: v for k, v in row.items() if k not in skip and not is_internal_metadata_key(k)}
     return Chunk(
         id=chunk_id,
