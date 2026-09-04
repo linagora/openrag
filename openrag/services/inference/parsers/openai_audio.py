@@ -364,7 +364,7 @@ class OpenAIAudioClient(BaseClientParser):
     @staticmethod
     def _moss_speaker_aware_enabled(endpoint: ModelEndpointConfig | None) -> bool:
         """Whether OpenRAG should normalize a MOSS diarized response."""
-        return endpoint is not None and endpoint.extra.get(MOSS_SPEAKER_AWARE_KEY) is True
+        return endpoint is not None and endpoint.extra.get(MOSS_SPEAKER_AWARE_KEY, True) is True
 
     def _is_fallback_endpoint(self, endpoint: ModelEndpointConfig) -> bool:
         """Whether *endpoint* is the legacy ``TRANSCRIBER_*`` destination."""

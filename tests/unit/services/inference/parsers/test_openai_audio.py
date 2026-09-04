@@ -299,7 +299,7 @@ class TestParse:
         assert result.text_blocks[0].text == "Hello everyone.\nThis week."
 
     @pytest.mark.asyncio
-    async def test_moss_output_stays_raw_without_speaker_aware_normalization(self, mock_openai_client):
+    async def test_moss_output_is_normalized_by_default(self, mock_openai_client):
         transcript = "[1.12-2.32][S01] Hello everyone."
         mock_openai_client.audio.transcriptions.create.return_value = MagicMock(text=transcript)
         endpoint = ModelEndpointConfig(
@@ -312,7 +312,7 @@ class TestParse:
 
         result = await _client(mock_openai_client, transcription_endpoint_resolver=lambda: endpoint).parse(_audio_doc())
 
-        assert result.text_blocks[0].text == transcript
+        assert result.text_blocks[0].text == "Hello everyone."
 
     @pytest.mark.asyncio
     async def test_stt_endpoint_limiter_reuses_active_entry_across_a_b_a_switch(self, mock_openai_client):

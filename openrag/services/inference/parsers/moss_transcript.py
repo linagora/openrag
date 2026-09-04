@@ -23,13 +23,13 @@ _DASH_CONTENT_MARKER = re.compile(rf"{_TIME_TOKEN}|\[\s*(?:[Ss]\d*|\d+(?:\.\d+)?
 _COMPACT_START = re.compile(
     rf"(?P<start_token>\[\s*(?P<start>{_TIME})\s*\])\s*\[\s*(?P<speaker>{_SPEAKER})\s*\]",
 )
-_SPEAKERLESS_COMPACT = re.compile(
-    rf"\s*\[\s*(?P<start>{_TIME})\s*\]\s*(?P<text>.*?)\s*\[\s*(?P<end>{_TIME})\s*\]\s*",
-    re.DOTALL,
-)
+
 _INITIAL_TIME = re.compile(rf"^\s*\[\s*(?P<start>{_TIME})\s*\]")
 _TRAILING_TIME = re.compile(rf"\[\s*(?P<end>{_TIME})\s*\]\s*$")
 _ADJACENT_TIMES = re.compile(rf"{_TIME_TOKEN}\s*{_TIME_TOKEN}")
+_COMPACT_BOUNDARY_PAIR = re.compile(
+    rf"\[\s*(?P<end>{_TIME})\s*\]\s*\[\s*(?P<start>{_TIME})\s*\]",
+)
 _TIME_TOKEN_MARKER = re.compile(_TIME_TOKEN)
 _SPEAKER_LABEL = re.compile(rf"\[\s*(?P<speaker>{_SPEAKER})\s*\]")
 _SPEAKER_MARKER = re.compile(r"\[\s*[Ss]\d*")
@@ -103,34 +103,48 @@ def _parse_compact(transcript: str) -> list[_Segment]:
 
 def _parse_speakerless_compact(transcript: str) -> list[_Segment]:
     """Recognize complete speakerless compact turns with shared boundaries."""
-    matches = list(_SPEAKERLESS_COMPACT.finditer(transcript))
-    if not matches or _DASH_MARKER.search(transcript):
+    initial = _INITIAL_TIME.match(transcript)
+    trailing = _TRAILING_TIME.search(transcript)
+    if initial is None or trailing is None or initial.end() > trailing.start() or _DASH_MARKER.search(transcript):
+        return []
+
+    start = _seconds(initial["start"])
+    if start is None:
         return []
 
     segments: list[_Segment] = []
-    cursor = 0
-    previous_end: Decimal | None = None
-    for match in matches:
-        if transcript[cursor : match.start()].strip():
-            return []
-        start = _seconds(match["start"])
-        end = _seconds(match["end"])
-        text = _normalize_text(match["text"])
+    cursor = initial.end()
+
+    for boundary in _COMPACT_BOUNDARY_PAIR.finditer(
+        transcript,
+        cursor,
+        trailing.start(),
+    ):
+        end = _seconds(boundary["end"])
+        next_start = _seconds(boundary["start"])
+        text = _normalize_text(transcript[cursor : boundary.start()])
+
         if (
-            start is None
-            or end is None
+            end is None
+            or next_start is None
             or end < start
-            or (previous_end is not None and start != previous_end)
+            or end != next_start
             or not text
-            or _TIME_TOKEN_MARKER.search(text)
             or _SPEAKER_MARKER.search(text)
         ):
             return []
-        segments.append(("S01", text))
-        previous_end = end
-        cursor = match.end()
 
-    return segments if not transcript[cursor:].strip() else []
+        segments.append(("S01", text))
+        start = next_start
+        cursor = boundary.end()
+
+    end = _seconds(trailing["end"])
+    text = _normalize_text(transcript[cursor : trailing.start()])
+    if end is None or end < start or not text or _SPEAKER_MARKER.search(text):
+        return []
+
+    segments.append(("S01", text))
+    return segments
 
 
 def _compact_region_end(transcript: str, text_start: int, next_start: re.Match[str]) -> int:
