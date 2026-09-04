@@ -7,6 +7,7 @@ from api.schemas.auth.login import CurrentUserResponse, LoginResponse
 from api.schemas.user.chat import OpenAIChatCompletionRequest, OpenAICompletionRequest, OpenAIMessage
 from api.schemas.user.search import SearchRequest
 from pydantic import ValidationError
+from services.inference.vllm_client import _strip_falsy_logprobs
 
 
 def test_user_schemas_import_from_api_package():
@@ -85,16 +86,26 @@ def test_chat_request_drops_top_logprobs_when_logprobs_not_enabled():
         assert "top_logprobs" not in dump
 
 
-def test_chat_request_omits_logprobs_when_unset():
-    """An unset logprobs must not be emitted — the server never requests it on the
-    client's behalf (sending it unsolicited can break streaming on some backends).
+def test_chat_request_defaults_logprobs_off_and_never_sends_it_unsolicited():
+    """logprobs is off by default, and an off logprobs must not reach the provider —
+    the server never requests it on the client's behalf (sending it unsolicited can
+    break streaming on some backends).
+
+    The default is an explicit ``False`` so the "off" contract is visible in the
+    OpenAPI schema, which means it survives ``model_dump(exclude_none=True)``;
+    ``_strip_falsy_logprobs`` is what keeps it off the wire. Assert at that layer,
+    otherwise the guarantee is only checked one step short of where it matters.
     """
     request = OpenAIChatCompletionRequest(messages=[OpenAIMessage(role="user", content="hi")])
     dump = request.model_dump(exclude_none=True)
 
-    assert request.logprobs is None
-    assert "logprobs" not in dump
+    assert request.logprobs is False
+    assert request.top_logprobs is None
     assert "top_logprobs" not in dump
+
+    payload = _strip_falsy_logprobs(dict(dump))
+    assert "logprobs" not in payload
+    assert "top_logprobs" not in payload
 
 
 def test_chat_request_passes_through_extra_openai_params():
