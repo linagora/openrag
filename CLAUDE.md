@@ -136,7 +136,9 @@ The RAG pipeline filters out false-positive sources by having the LLM self-repor
 4. `filter_sources_by_citations()` (`openrag/core/utils/source_filtering.py`) filters the source metadata to only include cited sources; if no `[Sources: ...]` tag is found at all, every presented source is kept instead (a missing tag means the model didn't report citations, not that it used none)
 5. For streaming, the OpenAI router buffers the last 100 chars to catch the sources tag before it reaches the client
 
-The `extra` field in API responses is a JSON string with these keys:
+The `extra` field in API responses is a JSON object with these keys. It was a
+JSON-encoded *string* up to and including v2.2.0 — a breaking change for readers
+written against the old shape, which must stop calling `json.loads` on it:
 
 - `sources` — legacy field, kept as-is for existing clients (e.g. Twake): cited sources, or every presented source as a fallback when no `[Sources: ...]` tag was found.
 - `presented_sources` — every source actually shown to the LLM (after `format_context()`/`format_web_context()` truncation), regardless of citation. Always present; a client can fall back to this ("sources consulted") when nothing was cited.

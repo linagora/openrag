@@ -455,7 +455,8 @@ Accepts OpenAI-compatible chat completion requests with:
 - Standard OpenAI parameters (temperature, max_tokens, etc.)
 
 **Response:**
-Returns OpenAI-compatible response with additional `extra` field containing:
+Returns OpenAI-compatible response with an additional `extra` field -- a JSON
+object (not a JSON-encoded string) -- containing:
 - `sources`: Legacy field, kept for backward compatibility. Cited sources, or
   every presented source as a fallback when the model didn't report citations
 - `presented_sources`: Array of every source actually shown to the model
@@ -572,7 +573,8 @@ Accepts OpenAI-compatible completion requests with:
 - Standard OpenAI parameters (temperature, max_tokens, etc.)
 
 **Response:**
-Returns OpenAI-compatible response with additional `extra` field containing:
+Returns OpenAI-compatible response with an additional `extra` field -- a JSON
+object (not a JSON-encoded string) -- containing:
 - `sources`: Legacy field, kept for backward compatibility. Cited sources, or
   every presented source as a fallback when the model didn't report citations
 - `presented_sources`: Array of every source actually shown to the model

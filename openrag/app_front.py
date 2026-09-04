@@ -688,8 +688,15 @@ async def on_message(message: cl.Message):
             # Stream the response using OpenAI client directly
             stream = await client.chat.completions.create(**data)
             async for chunk in stream:
-                if chunk.extra:
-                    extra = json.loads(chunk.extra)
+                extra = getattr(chunk, "extra", None)
+                # `extra` is a JSON object, but a server from before that change
+                # sends the same payload as a JSON *string*. Accept both so the UI
+                # survives a rolling deploy in either direction. Normalising here
+                # also collapses the two "nothing to report" spellings a mid-stream
+                # chunk can carry -- `{}` (falsy) and `"{}"` (truthy) -- into one.
+                if isinstance(extra, str):
+                    extra = json.loads(extra)
+                if extra:
                     if "cited_sources" in extra:
                         # Strictly what the model cited; fall back to
                         # everything it was shown when nothing was cited
