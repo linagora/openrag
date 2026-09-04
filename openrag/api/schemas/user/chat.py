@@ -65,7 +65,7 @@ class OpenAIChatCompletionRequest(BaseModel):
     # more. The router fills it from the resolved endpoint via
     # ``_apply_default_max_tokens`` once the partition is known.
     max_tokens: int | None = Field(None)
-    logprobs: bool | None = Field(None)
+    logprobs: bool | None = Field(False)
     top_logprobs: int | None = Field(None)
     response_format: dict[str, Any] | None = Field(
         None,
