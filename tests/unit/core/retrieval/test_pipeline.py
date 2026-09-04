@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 from core.models.chunk import Chunk
 from core.models.query import Query, SearchQueries, TemporalPredicate
+from core.models.retrieval_result import ScoredChunk
 from core.retrieval.pipeline import RetrieverPipeline
 from core.retrieval.retriever import Retriever
 
@@ -109,6 +110,85 @@ async def test_retrieve_docs_runs_reranker_when_enabled():
     out = await p.retrieve_docs(partition=["p1"], query=Query(query="hi"))
     assert [c.id for c in out] == ["c", "b", "a"]
     assert rer.calls[0]["query"] == "hi"
+
+
+class ScoringReranker:
+    """Ranks c > a > b, with scores deliberately unrelated to the ordering so a
+    mixed-up index/score pairing can't pass by coincidence."""
+
+    async def rerank(self, query, documents, top_k=None):
+        return [(2, 0.91), (0, 0.42), (1, 0.07)]
+
+
+@pytest.mark.asyncio
+async def test_reranked_chunks_come_back_as_scored_chunks():
+    """The reranker's score survives on the chunk as a typed field, and the
+    chunks stay ``Chunk`` instances so every downstream signature holds."""
+    r = FakeRetriever()
+    r.results_queue = [_chunks("a", "b", "c")]
+    p = RetrieverPipeline(retriever=r, reranker=ScoringReranker())
+    out = await p.retrieve_docs(partition=["p1"], query=Query(query="hi"))
+
+    assert [(c.id, c.rerank_score) for c in out] == [("c", 0.91), ("a", 0.42), ("b", 0.07)]
+    assert all(isinstance(c, ScoredChunk) for c in out)
+    assert all(isinstance(c, Chunk) for c in out)
+
+
+@pytest.mark.asyncio
+async def test_rerank_score_reaches_the_langchain_metadata():
+    """``to_langchain`` is the boundary the API response is built from, so the
+    score has to survive that conversion -- and the scores that never ran must
+    not appear there as nulls."""
+    r = FakeRetriever()
+    r.results_queue = [_chunks("a", "b", "c")]
+    p = RetrieverPipeline(retriever=r, reranker=ScoringReranker())
+    out = await p.retrieve_docs(partition=["p1"], query=Query(query="hi"))
+
+    metadata = out[0].to_langchain().metadata
+    assert metadata["rerank_score"] == 0.91
+    assert "vector_score" not in metadata
+    assert "combined_score" not in metadata
+
+
+@pytest.mark.asyncio
+async def test_no_score_at_all_when_reranker_disabled():
+    """No reranker means plain ``Chunk``s with no score -- not a null, and not a
+    0.0 that reads like a real score the chunk was ranked with."""
+    r = FakeRetriever()
+    r.results_queue = [_chunks("a", "b")]
+    p = RetrieverPipeline(retriever=r)
+    out = await p.retrieve_docs(partition=["p1"], query=Query(query="hi"))
+
+    assert not any(isinstance(c, ScoredChunk) for c in out)
+    assert all("rerank_score" not in c.to_langchain().metadata for c in out)
+
+
+@pytest.mark.asyncio
+async def test_reranking_does_not_mutate_the_retriever_s_chunks():
+    """The score lands on a new object. The same chunk is reranked twice on the
+    expansion path and, on the multi-query path, once per sub-query against a
+    *different* query -- mutating in place would let one sub-query's score bleed
+    into another's list."""
+    original = _chunks("a", "b")
+    r = FakeRetriever()
+    r.results_queue = [original]
+    p = RetrieverPipeline(retriever=r, reranker=FakeReranker())
+    out = await p.retrieve_docs(partition=["p1"], query=Query(query="hi"))
+
+    assert all(c.rerank_score is not None for c in out)
+    assert all(not isinstance(c, ScoredChunk) for c in original)
+
+
+@pytest.mark.asyncio
+async def test_re_reranking_replaces_the_score_without_nesting():
+    """Expansion reranks an already-scored chunk. The second score must replace
+    the first, not wrap it in another ScoredChunk layer."""
+    scored = ScoredChunk.from_chunk(_chunks("a")[0], rerank_score=0.11, vector_score=0.5)
+    again = ScoredChunk.from_chunk(scored, rerank_score=0.99)
+
+    assert again.rerank_score == 0.99
+    assert again.vector_score == 0.5  # untouched scores survive
+    assert scored.rerank_score == 0.11  # the original is left alone
 
 
 @pytest.mark.asyncio

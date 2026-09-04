@@ -146,6 +146,31 @@ written against the old shape, which must stop calling `json.loads` on it:
 - `citations_reported` (bool) — `true` only when the model actually emitted a `[Sources: ...]` tag (even an empty/`none` one); `false` when the tag was missing entirely, which is the only case where `sources` falls back to keeping everything. Lets a client tell "the model cited every source" apart from "the model didn't report citations at all".
 - `all_retrieved_sources` — the complete retrieval set, captured before the context-token-budget truncation, so it also includes documents/web results that didn't fit in the prompt (and, on the map-reduce path, the original retrieved docs rather than the LLM-generated summaries). Only included when the request sets `metadata.include_all_retrieved_sources: true` — it's debug/eval telemetry, gated off by default since retrieval is uncapped up to `retriever.top_k` while the context budget only fits a handful of documents.
 
+Each document source entry is the chunk's metadata copied verbatim
+(`build_document_source_link`), plus `source_type`, `chunk_url` and `file_url`. That
+includes **`rerank_score`** — the raw score the reranker gave that chunk.
+
+It gets there via `ScoredChunk` (`openrag/core/models/retrieval_result.py`), a `Chunk`
+subclass holding `vector_score` / `rerank_score` / `combined_score` as typed fields.
+`_rerank_chunks` (`openrag/core/retrieval/pipeline.py`) returns `ScoredChunk.from_chunk(...)`
+instead of the bare chunk, and `ScoredChunk.to_langchain()` folds the non-null scores into
+metadata at the boundary the API response is built from. Because it subclasses `Chunk`,
+every `list[Chunk]` signature through retrieval, expansion and RRF stays valid. Only
+`rerank_score` is populated today — the vector score is still dropped in
+`vector_store_searcher._dict_to_chunk` (`score` is in its `skip` set), and nothing computes
+a combined score. Three caveats:
+
+- The key is **absent**, not null, when no reranker ran (reranker disabled, or a web
+  source — web results are built separately and never reranked). Such chunks stay plain
+  `Chunk`s and carry no score field at all.
+- Its scale is provider-dependent: Infinity/vLLM return a `relevance_score`, TEI a
+  `score` with `raw_scores: false` (0–1). Compare within one response, never across
+  deployments, and don't threshold on an absolute value.
+- On the multi-query path it does **not** explain the ordering. `get_relevant_docs`
+  reranks each sub-query's list separately and then fuses them with RRF, so the final
+  order is the RRF rank; a chunk retrieved by several sub-queries keeps the score from
+  whichever list RRF saw first.
+
 ### API Routers (`openrag/api/routers/`)
 
 - `user/chat.py` - OpenAI-compatible `/v1/chat/completions` endpoint
