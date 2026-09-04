@@ -30,7 +30,7 @@ _ADJACENT_TIMES = re.compile(rf"{_TIME_TOKEN}\s*{_TIME_TOKEN}")
 _COMPACT_BOUNDARY_PAIR = re.compile(
     rf"\[\s*(?P<end>{_TIME})\s*\]\s*\[\s*(?P<start>{_TIME})\s*\]",
 )
-_TIME_TOKEN_MARKER = re.compile(_TIME_TOKEN)
+_TIME_TOKEN_MARKER = re.compile(rf"\[\s*(?P<time>{_TIME})\s*\]")
 _SPEAKER_LABEL = re.compile(rf"\[\s*(?P<speaker>{_SPEAKER})\s*\]")
 _SPEAKER_MARKER = re.compile(r"\[\s*[Ss]\d*")
 
@@ -108,6 +108,9 @@ def _parse_speakerless_compact(transcript: str) -> list[_Segment]:
     if initial is None or trailing is None or initial.end() > trailing.start() or _DASH_MARKER.search(transcript):
         return []
 
+    if _has_overlapping_boundary_candidates(transcript, initial.end(), trailing.start()):
+        return []
+
     start = _seconds(initial["start"])
     if start is None:
         return []
@@ -145,6 +148,24 @@ def _parse_speakerless_compact(transcript: str) -> list[_Segment]:
 
     segments.append(("S01", text))
     return segments
+
+
+def _has_overlapping_boundary_candidates(
+    transcript: str,
+    start: int,
+    end: int,
+) -> bool:
+    tokens = list(_TIME_TOKEN_MARKER.finditer(transcript, start, end))
+
+    for first, second, third in zip(tokens, tokens[1:], tokens[2:]):
+        if transcript[first.end() : second.start()].strip() or transcript[second.end() : third.start()].strip():
+            continue
+
+        values = [_seconds(token["time"]) for token in (first, second, third)]
+        if values[0] is not None and values[0] == values[1] == values[2]:
+            return True
+
+    return False
 
 
 def _compact_region_end(transcript: str, text_start: int, next_start: re.Match[str]) -> int:

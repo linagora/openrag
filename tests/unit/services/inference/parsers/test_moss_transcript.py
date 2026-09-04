@@ -114,6 +114,12 @@ def test_preserves_speaker_only_output_with_an_incomplete_unlabeled_compact_turn
     assert normalize_moss_speaker_aware_transcript(transcript) == transcript
 
 
+def test_preserves_speakerless_compact_turns_with_overlapping_boundaries():
+    transcript = "[1] A [2][2][2] B [3]"
+
+    assert normalize_moss_speaker_aware_transcript(transcript) == transcript
+
+
 def test_preserves_spoken_bracketed_numbers_in_a_complete_turn():
     transcript = "[00:00:01.000] [S01] The [2024] roadmap is ready. [00:00:02.000]"
 
