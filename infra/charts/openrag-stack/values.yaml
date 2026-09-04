@@ -182,6 +182,21 @@ milvus:
   securityContext:
     fsGroup: 999
     fsGroupChangePolicy: Always
+  # Server config overrides, merged over the image's milvus.yaml by the sub-chart.
+  # Must stay identical to infra/compose/milvus/user.yaml, which is the source of
+  # truth for every compose stack (a unit test asserts the two agree). Storage V3
+  # is irreversible: back the volumes up before the first upgrade that enables it.
+  extraConfigFiles:
+    user.yaml: |+
+      common:
+        storage:
+          useLoonFFI: true
+      dataCoord:
+        compaction:
+          bumpSchemaVersion:
+            enabled: true
+          storageVersion:
+            enabled: true
   cluster: { enabled: true }
   pulsarv3: { enabled: false }
   woodpecker: { enabled: true }

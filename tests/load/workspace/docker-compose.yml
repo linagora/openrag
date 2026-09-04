@@ -43,6 +43,8 @@ services:
       MINIO_ADDRESS: minio:9000
     volumes:
       - milvus_data:/var/lib/milvus
+      # Storage V3 overrides, shared with the deployment stacks (single source of truth).
+      - ../../../infra/compose/milvus/user.yaml:/milvus/configs/user.yaml:ro
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
       interval: 30s
