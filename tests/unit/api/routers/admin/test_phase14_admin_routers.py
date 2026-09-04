@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from api.dependencies.auth import require_admin
 from api.routers.admin import model_endpoints, presets
-from di.providers import get_model_endpoint_service, get_preset_service
+from core.config.compression import CompressionConfig
+from di.providers import get_config, get_model_endpoint_service, get_preset_service
 from fastapi import FastAPI
 
 
@@ -152,12 +154,18 @@ def _build_app(
     *,
     model_service: FakeModelEndpointService | None = None,
     preset_service: FakePresetService | None = None,
+    compression: CompressionConfig | None = None,
 ) -> FastAPI:
     """Build a small app with Phase 14 routers and fake dependencies."""
     app = FastAPI()
     app.include_router(model_endpoints.router, prefix="/model-endpoints")
     app.include_router(presets.router, prefix="/presets")
     app.dependency_overrides[require_admin] = lambda: {"id": "admin", "is_admin": True}
+    # ``/presets/options`` reads the deployment compression switch off the root
+    # settings. These routers are mounted without a DI container, so the real
+    # provider would 503; stand in the one section the route actually reads.
+    config = SimpleNamespace(compression=compression or CompressionConfig())
+    app.dependency_overrides[get_config] = lambda: config
     if model_service is not None:
         app.dependency_overrides[get_model_endpoint_service] = lambda: model_service
     if preset_service is not None:
@@ -697,6 +705,33 @@ async def test_preset_options_return_registered_choices(async_client_factory):
     assert body["chunking_strategies"] == ["recursive_splitter", "structured_section"]
     assert set(body["retrieval_types"]) == {"single", "multiQuery", "hyde"}
     assert body["reranker_providers"] == ["infinity", "openai", "tei"]
+
+
+@pytest.mark.parametrize(
+    ("compression", "expected_available", "expected_backend"),
+    [
+        (None, False, "noop"),
+        (CompressionConfig(enabled=True, backend="headroom"), True, "headroom"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_preset_options_report_the_deployment_compression_switch(
+    async_client_factory, compression, expected_available, expected_backend
+):
+    """Preset options should mirror the deployment-wide compression settings.
+
+    The admin UI hides the per-preset compression fields unless the deployment
+    has the feature switched on, so the switch has to reach the client here.
+    """
+    app = _build_app(compression=compression)
+
+    async with async_client_factory(app) as client:
+        response = await client.get("/presets/options")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["compression_available"] is expected_available
+    assert body["compression_backend"] == expected_backend
 
 
 @pytest.mark.asyncio

@@ -373,3 +373,18 @@ mcp:
   similarity_threshold: 0.8
   download_timeout: 30.0
   max_download_bytes: 104857600  # 100 MiB
+
+# --- Context compression ---
+# Shrinks retrieved text (and optionally chat history) before it reaches the
+# LLM. Deployment-wide kill switch; whether a request compresses is decided by
+# its partition's retrieval preset. Backends: noop, headroom.
+# headroom needs the compression extra (uv sync --extra compression) and runs
+# on CPU. See docs/content/docs/documentation/context_compression.md for the
+# measured savings and latency before enabling it.
+compression:
+  enabled: false
+  backend: noop
+  target_ratio: null    # fraction of each source to keep; null = backend decides
+  min_chars: 1000       # texts shorter than this are passed through
+  timeout_s: 15.0       # ~0.5s per 400-word chunk on CPU with the headroom backend
+  extra: {}             # backend kwargs, e.g. {model: gpt-4o}

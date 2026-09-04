@@ -29,6 +29,14 @@ class RetrievalPipelineConfig(BaseModel):
     include_ancestors: bool = True
     rrf_k: int = Field(default=60, gt=0, le=1000)  # Reciprocal Rank Fusion constant
 
+    # Context compression. Applied to retrieved chunk text (and optionally the
+    # chat history) before the prompt is assembled. Requires the deployment to
+    # have compression enabled; the backend is deployment-wide.
+    compression_enabled: bool = False
+    compression_target_ratio: float | None = Field(default=None, gt=0.0, le=1.0)
+    compress_history: bool = False
+    compress_history_keep_recent: int = Field(default=2, ge=0, le=50)
+
     # Prompt selection: name a library prompt for this preset's query-side
     # prompts (None = the type's global default, then the disk seed). hyde /
     # multi_query drive the query-expansion strategies (resolved per request in
