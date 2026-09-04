@@ -16,8 +16,17 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Skeleton } from "@/components/ui/skeleton";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog";
 
-const GRAFANA_URL = import.meta.env.VITE_GRAFANA_URL || "";
+const BUILD_TIME_GRAFANA_URL = import.meta.env.VITE_GRAFANA_URL || "";
 
 function actorStateColor(state: string): string {
   const s = state.toUpperCase();
@@ -27,21 +36,21 @@ function actorStateColor(state: string): string {
 }
 
 export default function SystemPage() {
+  const { data: config } = useQuery({
+    queryKey: ["system-config"],
+    queryFn: getConfig,
+    staleTime: Infinity,
+    refetchOnMount: "always",
+  });
+  const runtimeGrafanaUrl =
+    typeof config?.grafana_url === "string" ? config.grafana_url.trim() : "";
+  const grafanaUrl = runtimeGrafanaUrl || BUILD_TIME_GRAFANA_URL;
+
   return (
     <div>
       <PageHeader
         title="System"
         description="Status, Ray actors, metrics and configuration"
-        actions={
-          GRAFANA_URL ? (
-            <Button variant="outline" asChild>
-              <a href={GRAFANA_URL} target="_blank" rel="noopener noreferrer">
-                <ExternalLink className="mr-2 h-4 w-4" />
-                View in Grafana
-              </a>
-            </Button>
-          ) : undefined
-        }
       />
 
       <Tabs defaultValue="status">
@@ -59,7 +68,7 @@ export default function SystemPage() {
           <ActorsTab />
         </TabsContent>
         <TabsContent value="metrics">
-          <MetricsTab />
+          <MetricsTab grafanaUrl={grafanaUrl} />
         </TabsContent>
         <TabsContent value="config">
           <ConfigTab />
@@ -174,14 +183,12 @@ function ActorsTab() {
   );
 }
 
-function MetricsTab() {
+function MetricsTab({ grafanaUrl }: { grafanaUrl: string }) {
   const { data, isLoading } = useQuery({
     queryKey: ["system-metrics"],
     queryFn: getMetrics,
     refetchInterval: 10000,
   });
-
-  if (isLoading) return <Skeleton className="h-48" />;
 
   // Parse Prometheus text format into simple metric entries.
   const lines = (data || "").split("\n").filter((l) => l && !l.startsWith("#"));
@@ -196,17 +203,44 @@ function MetricsTab() {
     <Card>
       <CardHeader className="flex flex-row items-center justify-between">
         <CardTitle>Prometheus Metrics</CardTitle>
-        {GRAFANA_URL && (
+        {grafanaUrl ? (
           <Button variant="outline" size="sm" asChild>
-            <a href={GRAFANA_URL} target="_blank" rel="noopener noreferrer">
+            <a
+              href={grafanaUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              aria-label="Open metrics dashboard in Grafana (opens in a new tab)"
+            >
               <ExternalLink className="mr-2 h-3.5 w-3.5" />
-              Grafana
+              Open in Grafana
             </a>
           </Button>
+        ) : (
+          <Dialog>
+            <DialogTrigger asChild>
+              <Button variant="outline" size="sm">
+                <ExternalLink className="mr-2 h-3.5 w-3.5" />
+                Open in Grafana
+              </Button>
+            </DialogTrigger>
+            <DialogContent>
+              <DialogHeader>
+                <DialogTitle>Grafana is not configured</DialogTitle>
+                <DialogDescription>
+                  Set <code className="font-mono text-foreground">GRAFANA_URL</code> to the
+                  browser-reachable OpenRAG dashboard URL, then restart the API. This action will
+                  open that dashboard without rebuilding the Admin UI.
+                </DialogDescription>
+              </DialogHeader>
+              <DialogFooter showCloseButton />
+            </DialogContent>
+          </Dialog>
         )}
       </CardHeader>
       <CardContent>
-        {parsed.length === 0 ? (
+        {isLoading ? (
+          <Skeleton className="h-48" />
+        ) : parsed.length === 0 ? (
           <p className="text-muted-foreground text-center py-4">No metrics available</p>
         ) : (
           <div className="overflow-auto max-h-[600px]">

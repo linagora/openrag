@@ -666,6 +666,7 @@ export const handlers = [
       // not nested under auth — the permission layer reads config.super_admin_mode.
       super_admin_mode: true,
       chainlit_enabled: true,
+      grafana_url: "http://localhost:3000/d/openrag-http/openrag-http-metrics",
       auth: { auth_mode: "oidc" },
       milvus: { host: "milvus", port: 19530, database: "openrag" },
       ray: { address: "ray://ray-head:10001", pool_size: 2, max_tasks_per_worker: 2 },

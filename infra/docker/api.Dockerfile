@@ -94,7 +94,7 @@ RUN useradd --uid ${APP_UID} --gid 0 --no-log-init --no-create-home \
         /app/.venv /app/openrag.egg-info /opt/uv/cache \
         /app/openrag/.files /app/openrag/.chainlit \
     && chgrp -R 0 /app /opt/uv \
-    && chmod -R g-w /app /opt/uv \
+    && chmod -R g+rX,g-w /app /opt/uv \
     && chmod -R g=u /app/home /app/data /app/db /app/logs /app/model_weights \
         /app/.venv /app/openrag.egg-info /opt/uv/cache \
         /app/openrag/.files /app/openrag/.chainlit
