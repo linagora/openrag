@@ -7,13 +7,18 @@ MIGRATION_JOB_TEMPLATE = ROOT / "infra" / "charts" / "openrag-stack" / "template
 
 
 def test_postgres_migration_job_uses_secret_ref_instead_of_literal_secret_values() -> None:
+    """This chart names its ConfigMap/Secret via the openrag-stack.fullname /
+    secretName helpers (release-scoped, e.g. for ArgoCD) rather than the fixed
+    "rag-env"/"rag-env-secrets" names — assert it references those same
+    helpers instead of inlining literal secret values.
+    """
     template = MIGRATION_JOB_TEMPLATE.read_text(encoding="utf-8")
 
     assert "envFrom:" in template
     assert "configMapRef:" in template
-    assert "name: rag-env" in template
+    assert 'name: {{ include "openrag-stack.fullname" . }}-env' in template
     assert "secretRef:" in template
-    assert "name: rag-env-secrets" in template
+    assert 'name: {{ include "openrag-stack.secretName" . }}' in template
     assert ".Values.env.secrets" not in template
     assert 'value: "{{ $value }}"' not in template
 
@@ -22,6 +27,22 @@ def test_postgres_migration_job_sets_uv_cache_dir() -> None:
     template = MIGRATION_JOB_TEMPLATE.read_text(encoding="utf-8")
 
     assert "name: UV_CACHE_DIR" in template
+
+
+def test_postgres_migration_job_reuses_the_openrag_service_account() -> None:
+    """The Job runs the OpenRAG image under the same pinned UID as its
+    Deployment, so it needs the same ServiceAccount to reach the same SCC.
+
+    Without this the Job silently falls back to the namespace's `default` SA.
+    On OpenShift that means `restricted-v2` (MustRunAsRange), which rejects the
+    requested runAsUser as outside the namespace's assigned range — and since
+    this is a pre-install/pre-upgrade hook, the failure aborts the release.
+    """
+    template = MIGRATION_JOB_TEMPLATE.read_text(encoding="utf-8")
+
+    assert "{{- with .Values.openrag.serviceAccountName }}" in template
+    # tpl(), so a value like "{{ .Release.Name }}-openrag" resolves.
+    assert "serviceAccountName: {{ tpl . $ }}" in template
 
 
 def test_postgres_migration_job_omits_flags_the_runner_ignores() -> None:

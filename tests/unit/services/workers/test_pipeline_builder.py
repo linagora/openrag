@@ -83,7 +83,9 @@ class FakeContextualizer:
     def __init__(self) -> None:
         self.calls: list[tuple[list[Chunk], str, str]] = []
 
-    async def contextualize(self, chunks, *, filename: str = "", lang: str = "en") -> list[Chunk]:
+    async def contextualize(
+        self, chunks, *, filename: str = "", lang: str = "en", system_prompt: str | None = None
+    ) -> list[Chunk]:
         self.calls.append((list(chunks), filename, lang))
         return [chunk.model_copy(update={"text": f"ctx {chunk.text}", "context": "ctx"}) for chunk in chunks]
 
@@ -100,6 +102,7 @@ class FakeTopicTagger:
         filename: str = "",
         max_tags: int = 7,
         lang: str = "en",
+        system_prompt: str | None = None,
     ) -> list[str]:
         self.calls.append((list(chunks), filename, max_tags, lang))
         return self.tags
@@ -901,3 +904,183 @@ async def test_reindex_with_zero_new_chunks_keeps_old_chunks():
     assert row["stored_count"] == 0
     assert vs.deleted == []
     assert "delete" not in vs.events
+
+
+def test_ingest_flag_defaults_come_from_the_model_not_from_absence():
+    """A sparse indexation config that omits enable_image_captioning still
+    captions during ingest (the model default is True). Reading the flag with a
+    bare .get() treated that as disabled and skipped prompt resolution, leaving
+    captioning silently on the disk seed while the preset named another prompt.
+    """
+    from services.workers.indexer_pool import _ingest_flag_default
+
+    assert _ingest_flag_default("enable_image_captioning") is True
+    assert _ingest_flag_default("enable_contextualization") is False
+    assert _ingest_flag_default("enable_topic_tagging") is False
+
+
+def _capture_warnings():
+    """Collect loguru records — loguru does not propagate to pytest's caplog."""
+    from loguru import logger as _logger
+
+    messages: list[str] = []
+    sink_id = _logger.add(lambda m: messages.append(str(m)), level="WARNING")
+    return messages, sink_id
+
+
+def test_warns_when_a_chunk_exceeds_the_embedder_window():
+    """A chunk past truncate_prompt_tokens is silently cut by vLLM — surface it."""
+    from types import SimpleNamespace
+
+    from loguru import logger as _logger
+    from services.workers.pipeline_builder import IndexingPipeline
+
+    row = {
+        "task_id": "t1",
+        "filename": "big.pdf",
+        "partition": "p",
+        "chunks": [
+            SimpleNamespace(token_count=100, chunk_index=0, chunk_type=None),
+            SimpleNamespace(token_count=2500, chunk_index=1, chunk_type=None),
+        ],
+    }
+    messages, sink_id = _capture_warnings()
+    try:
+        IndexingPipeline._warn_on_embedder_overflow(row, 2047)
+    finally:
+        _logger.remove(sink_id)
+    assert any("truncated before embedding" in m for m in messages)
+    assert any("2046-token limit" in m for m in messages)
+
+
+def test_no_warning_when_chunks_fit_or_window_unknown():
+    from types import SimpleNamespace
+
+    from loguru import logger as _logger
+    from services.workers.pipeline_builder import IndexingPipeline
+
+    messages, sink_id = _capture_warnings()
+    try:
+        # Comfortably inside the window.
+        IndexingPipeline._warn_on_embedder_overflow(
+            {"chunks": [SimpleNamespace(token_count=500, chunk_index=0, chunk_type=None)]}, 2047
+        )
+        # Window unknown => nothing to compare against, so stay quiet.
+        IndexingPipeline._warn_on_embedder_overflow(
+            {"chunks": [SimpleNamespace(token_count=99999, chunk_index=0, chunk_type=None)]}, None
+        )
+    finally:
+        _logger.remove(sink_id)
+    assert not [m for m in messages if "truncated before embedding" in m]
+
+
+def test_overflow_warning_measures_text_not_stale_token_count():
+    """Contextualization rewrites ``text`` with the [CONTEXT] envelope via
+    model_copy and does not refresh ``token_count``, so trusting the stored
+    count misses exactly the chunks the envelope pushes over the limit."""
+    from types import SimpleNamespace
+
+    from loguru import logger as _logger
+    from services.workers.pipeline_builder import IndexingPipeline
+
+    # Realistic stale case: the chunker sized this at 2000 (just under the
+    # 2046 limit) and contextualization then prepended the [CONTEXT] envelope
+    # without refreshing the count. A stored count far below the limit is not
+    # re-tokenised on purpose — no envelope can close that gap.
+    chunk = SimpleNamespace(token_count=2000, text="x " * 3000, chunk_index=0, chunk_type=None)
+    messages, sink_id = _capture_warnings()
+    try:
+        IndexingPipeline._warn_on_embedder_overflow({"chunks": [chunk]}, 2047, lambda s: len(s.split()))
+    finally:
+        _logger.remove(sink_id)
+    assert any("truncated before embedding" in m for m in messages)
+
+
+def test_overflow_warning_falls_back_to_token_count_without_a_counter():
+    from types import SimpleNamespace
+
+    from loguru import logger as _logger
+    from services.workers.pipeline_builder import IndexingPipeline
+
+    chunk = SimpleNamespace(token_count=3000, text="short", chunk_index=0, chunk_type=None)
+    messages, sink_id = _capture_warnings()
+    try:
+        IndexingPipeline._warn_on_embedder_overflow({"chunks": [chunk]}, 2047, None)
+    finally:
+        _logger.remove(sink_id)
+    assert any("truncated before embedding" in m for m in messages)
+
+
+def _pipeline_with_chunker_factory(factory):
+    """Minimal IndexingPipeline carrying only what _select_chunker touches."""
+    from services.workers.pipeline_builder import IndexingPipeline
+
+    return IndexingPipeline(
+        parser=object(),
+        chunker=object(),
+        embedder=object(),
+        vector_store=object(),
+        chunker_factory=factory,
+    )
+
+
+def test_chunker_factory_arity_is_decided_by_signature_not_by_catching():
+    """A compatible factory that raises TypeError internally must surface that
+    error, not be silently retried with one argument (building twice and
+    reporting the arity fallback instead of the real failure)."""
+    from types import SimpleNamespace
+
+    import pytest
+    from services.workers.pipeline_builder import _accepts_embedder_window
+
+    calls = []
+
+    def modern(config, window=None):
+        calls.append(window)
+        raise TypeError("boom inside the factory")
+
+    assert _accepts_embedder_window(modern) is True
+    assert _accepts_embedder_window(lambda config: None) is False
+    assert _accepts_embedder_window(lambda *args: None) is True
+
+    pipeline = _pipeline_with_chunker_factory(modern)
+    with pytest.raises(TypeError, match="boom inside the factory"):
+        pipeline._select_chunker(SimpleNamespace(chunking=object()), "default", 2047)
+    assert len(calls) == 1, "the factory must not be invoked twice"
+
+
+def test_legacy_single_argument_chunker_factory_still_works():
+    from types import SimpleNamespace
+
+    from services.workers.pipeline_builder import IndexingPipeline
+
+    sentinel = object()
+    pipeline = _pipeline_with_chunker_factory(lambda config: sentinel)
+    assert pipeline._select_chunker(SimpleNamespace(chunking=object()), "default", 2047) is sentinel
+    assert isinstance(pipeline, IndexingPipeline)
+
+
+def test_overflow_warning_skips_chunks_far_below_the_limit():
+    """The pass runs synchronously on the event loop for every file, including
+    partitions using nothing else from this feature. Re-tokenising every chunk
+    cost ~360 ms per 3000-chunk document; the stored count settles all but the
+    band near the limit."""
+    from types import SimpleNamespace
+
+    from loguru import logger as _logger
+    from services.workers.pipeline_builder import IndexingPipeline
+
+    counted = []
+
+    def counter(text: str) -> int:
+        counted.append(text)
+        return len(text.split())
+
+    chunks = [SimpleNamespace(token_count=500, text="w " * 500, chunk_index=i, chunk_type=None) for i in range(100)]
+    messages, sink_id = _capture_warnings()
+    try:
+        IndexingPipeline._warn_on_embedder_overflow({"chunks": chunks}, 2047, counter)
+    finally:
+        _logger.remove(sink_id)
+    assert counted == [], "chunks far below the limit must not be re-tokenised"
+    assert not messages

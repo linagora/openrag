@@ -10,12 +10,14 @@ from .markdown_utils import (
 )
 from .recursive import BaseChunker, RecursiveSplitter
 from .registry import chunking_registry
+from .structured_section import StructuredSectionChunker
 
 __all__ = [
     "ChunkingStrategy",
     "chunking_registry",
     "BaseChunker",
     "RecursiveSplitter",
+    "StructuredSectionChunker",
     "MDElement",
     "chunk_table",
     "get_chunk_page_number",

@@ -4,12 +4,12 @@ dependencies:
   version: 1.4.0
 - name: postgresql
   repository: https://charts.bitnami.com/bitnami
-  version: 18.1.13
+  version: 18.7.3
 - name: milvus
   repository: https://zilliztech.github.io/milvus-helm/
-  version: 5.0.0
+  version: 5.0.25
 - name: vllm-stack
   repository: https://vllm-project.github.io/production-stack
-  version: 0.1.8
-digest: sha256:838fb1143c5471aaf919c128ece414799898727d083103ac2b669083f50b82c2
-generated: "2025-12-02T11:53:42.972907563Z"
+  version: 0.1.11
+digest: sha256:50f412b87a0f4b9fccb92b02a0ea0d21fa7d0343b86394077e4ac05cb7c16b61
+generated: "2026-08-25T13:53:27.648198879Z"

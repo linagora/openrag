@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -103,13 +105,23 @@ class _FakeEndpointRepo:
         return ("ok", promoted)
 
 
-def _make_service(repo=None, rows=None, settings=None):
+def _make_service(
+    repo=None,
+    rows=None,
+    settings=None,
+    partition_service=None,
+    preset_service=None,
+    prompt_service=None,
+):
     from core.config.root import Settings
     from services.orchestrators.model_endpoint_service import ModelEndpointService
 
     return ModelEndpointService(
         model_endpoint_repo=repo or _FakeEndpointRepo(rows),
         config=settings or Settings(),
+        partition_service=partition_service,
+        preset_service=preset_service,
+        prompt_service=prompt_service,
     )
 
 
@@ -137,6 +149,30 @@ async def test_seed_defaults_skips_type_when_rows_exist():
 
     creates = [c for c in repo.calls if c[0] == "create"]
     assert not any(name_type[1] == "embedder" for _, name_type in creates)
+
+
+@pytest.mark.asyncio
+async def test_seed_defaults_ignores_concurrent_create_conflict():
+    """A replica that loses the initial seed race must still finish booting."""
+    from core.utils.exceptions import ValidationError
+
+    attempted: list[str] = []
+
+    class RacingRepo(_FakeEndpointRepo):
+        async def create(self, row):
+            attempted.append(row.model_type)
+            if row.model_type == "stt":
+                raise ValidationError(
+                    "already exists",
+                    status_code=409,
+                    code="ENDPOINT_EXISTS",
+                )
+            return await super().create(row)
+
+    repo = RacingRepo()
+    await _make_service(repo).seed_defaults()
+
+    assert "stt" in attempted
 
 
 @pytest.mark.asyncio
@@ -183,6 +219,13 @@ async def test_seed_defaults_preserves_endpoint_api_keys(monkeypatch):
         llm={"base_url": "http://llm:8000/v1", "model": "mistral", "api_key": "llm-key"},
         vlm={"base_url": "http://vlm:8000/v1", "model": "pixtral", "api_key": "vlm-key"},
         reranker={"provider": "infinity", "api_key": "rerank-key"},
+        loader={
+            "transcriber": {
+                "base_url": "http://stt:8000/v1",
+                "model_name": "moss-transcribe-diarize",
+                "api_key": "stt-key",
+            }
+        },
     )
     repo = _FakeEndpointRepo()
     svc = _make_service(repo, settings=settings)
@@ -195,6 +238,7 @@ async def test_seed_defaults_preserves_endpoint_api_keys(monkeypatch):
         "llm": "llm-key",
         "vlm": "vlm-key",
         "reranker": "rerank-key",
+        "stt": "stt-key",
     }
 
 
@@ -215,6 +259,14 @@ async def test_seed_defaults_preserves_endpoint_timeouts_and_batch_size(monkeypa
         llm={"base_url": "http://llm:8000/v1", "model": "mistral", "timeout": 45},
         vlm={"base_url": "http://vlm:8000/v1", "model": "pixtral", "timeout": 75},
         reranker={"provider": "infinity", "timeout": 25},
+        loader={
+            "transcriber": {
+                "base_url": "http://stt:8000/v1",
+                "model_name": "moss-transcribe-diarize",
+                "timeout": 900,
+                "max_concurrent_chunks": 3,
+            }
+        },
     )
     repo = _FakeEndpointRepo()
     svc = _make_service(repo, settings=settings)
@@ -227,6 +279,8 @@ async def test_seed_defaults_preserves_endpoint_timeouts_and_batch_size(monkeypa
     assert rows["llm"].timeout == 45
     assert rows["vlm"].timeout == 75
     assert rows["reranker"].timeout == 25
+    assert rows["stt"].timeout == 900
+    assert rows["stt"].batch_size == 3
 
 
 @pytest.mark.asyncio
@@ -793,6 +847,7 @@ async def test_load_all_populates_config_models():
     rows = [
         _make_row(name="jina", model_type="embedder", is_default=True),
         _make_row(name="mistral", model_type="llm", is_default=True),
+        _make_row(name="moss", model_type="stt", model_name="moss-transcribe-diarize", is_default=True),
     ]
     repo = _FakeEndpointRepo(rows=rows)
     settings = Settings()
@@ -804,6 +859,10 @@ async def test_load_all_populates_config_models():
     assert "default" in settings.models.embedder
     assert "mistral" in settings.models.llm
     assert "default" in settings.models.llm
+    assert "moss" in settings.models.stt
+    assert "default" in settings.models.stt
+    assert settings.models.stt["moss"].name == "moss"
+    assert settings.models.stt["default"].name == "moss"
 
 
 @pytest.mark.asyncio
@@ -911,6 +970,221 @@ async def test_update_model_endpoint_renames_and_evicts_cache():
     assert "old-name" not in cache
     assert ("old-name", "embedder") not in repo._store
     assert ("new-name", "embedder") in repo._store
+
+
+class _FakePresetServiceForReload:
+    def __init__(self):
+        self.refresh_calls = 0
+
+    async def refresh_if_stale(self):
+        self.refresh_calls += 1
+        return True
+
+
+class _FakePartitionServiceForReload:
+    def __init__(self):
+        self.load_partitions_calls = 0
+
+    async def load_partitions(self):
+        self.load_partitions_calls += 1
+
+
+@pytest.mark.asyncio
+async def test_update_model_endpoint_rename_reloads_presets_then_partitions():
+    """A rename cascades DB-side references (#770) inside the repo's own rename
+    transaction (see PgModelEndpointRepository.rename), but those writes are
+    invisible until PresetService / PartitionService reload their in-memory
+    caches — pin that both get refreshed on a rename."""
+    existing = _make_row(name="old-name", model_type="llm")
+    repo = _FakeEndpointRepo(rows=[existing])
+    preset_service = _FakePresetServiceForReload()
+    partition_service = _FakePartitionServiceForReload()
+    svc = _make_service(repo, partition_service=partition_service, preset_service=preset_service)
+
+    await svc.update_model_endpoint("old-name", "llm", new_name="new-name")
+
+    assert preset_service.refresh_calls == 1
+    assert partition_service.load_partitions_calls == 0
+
+
+class _FakeUnchangedRevisionPresetService:
+    """A preset service whose revision did not move — `refresh_if_stale` reloads
+    nothing and reports so."""
+
+    def __init__(self):
+        self.refresh_calls = 0
+
+    async def refresh_if_stale(self):
+        self.refresh_calls += 1
+        return False
+
+
+@pytest.mark.asyncio
+async def test_update_model_endpoint_rename_reloads_partitions_when_revision_unchanged():
+    """An `embedder` rename cascades into `partitions` but into no preset row, so
+    the preset revision never moves and `refresh_if_stale` reloads nothing. The
+    partition reload must still run, or `partitions.embedder` keeps the old name
+    and every index/search on that partition fails until a process restart."""
+    existing = _make_row(name="jina", model_type="embedder")
+    repo = _FakeEndpointRepo(rows=[existing])
+    preset_service = _FakeUnchangedRevisionPresetService()
+    partition_service = _FakePartitionServiceForReload()
+    svc = _make_service(repo, partition_service=partition_service, preset_service=preset_service)
+
+    await svc.update_model_endpoint("jina", "embedder", new_name="jina-v3")
+
+    assert preset_service.refresh_calls == 1
+    assert partition_service.load_partitions_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_update_model_endpoint_without_rename_skips_preset_and_partition_reload():
+    """A plain field update (no rename) touches no cross-referenced name, so
+    it must not pay for a presets/partitions reload it doesn't need."""
+    existing = _make_row(name="jina")
+    repo = _FakeEndpointRepo(rows=[existing])
+    preset_service = _FakePresetServiceForReload()
+    partition_service = _FakePartitionServiceForReload()
+    svc = _make_service(repo, partition_service=partition_service, preset_service=preset_service)
+
+    await svc.update_model_endpoint("jina", "embedder", endpoint="http://new:8000/v1")
+
+    assert preset_service.refresh_calls == 0
+    assert partition_service.load_partitions_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_update_model_endpoint_rename_aliases_new_name_before_reload_awaits():
+    """A request racing the rename must resolve `new_name` even before the
+    presets/partitions reload below completes — the DB cascade (#770) has
+    already repointed partitions/presets at it by the time the rename
+    `await` returns, so the registry can't lag behind until `load_all()`."""
+    existing = _make_row(name="old-name", model_type="llm", endpoint="http://old:8000/v1")
+    repo = _FakeEndpointRepo(rows=[existing])
+    svc = _make_service(repo)
+    await svc.load_all()
+
+    seen_during_reload = {}
+
+    class _SnoopingPresetService:
+        async def refresh_if_stale(self):
+            seen_during_reload["new-name"] = svc._config.models.llm.get("new-name")
+            seen_during_reload["old-name"] = svc._config.models.llm.get("old-name")
+            return True
+
+    svc._preset_service = _SnoopingPresetService()
+
+    await svc.update_model_endpoint("old-name", "llm", new_name="new-name")
+
+    assert seen_during_reload["new-name"].endpoint == "http://old:8000/v1"
+    assert seen_during_reload["old-name"].endpoint == "http://old:8000/v1"
+
+
+@pytest.mark.asyncio
+async def test_update_model_endpoint_rename_keeps_both_names_resolvable_after_failed_reload():
+    """If PresetService.load_all() (or PartitionService.load_partitions())
+    raises mid-rename, the DB rename has already committed — the registry
+    must still resolve both the old and the new name afterward, instead of
+    being stuck answering only to the pre-rename one until process restart."""
+    existing = _make_row(name="old-name", model_type="llm", endpoint="http://old:8000/v1")
+    repo = _FakeEndpointRepo(rows=[existing])
+    svc = _make_service(repo)
+    await svc.load_all()
+
+    class _FailingPresetService:
+        async def refresh_if_stale(self):
+            raise RuntimeError("db blip")
+
+    svc._preset_service = _FailingPresetService()
+
+    with pytest.raises(RuntimeError):
+        await svc.update_model_endpoint("old-name", "llm", new_name="new-name")
+
+    assert svc._config.models.llm.get("old-name").endpoint == "http://old:8000/v1"
+    assert svc._config.models.llm.get("new-name").endpoint == "http://old:8000/v1"
+
+
+@pytest.mark.asyncio
+async def test_update_model_endpoint_rename_with_field_change_aliases_the_new_values():
+    """A rename combined with a field change (e.g. a new endpoint URL) must
+    alias `new_name`/`old_name` to the row this call just wrote, not to
+    whatever the in-memory bucket held before the update ran — otherwise a
+    reload failure right after would leave the registry silently serving the
+    stale pre-update config under the DB-authoritative new name forever."""
+    existing = _make_row(name="old-name", model_type="llm", endpoint="http://old:8000/v1")
+    repo = _FakeEndpointRepo(rows=[existing])
+    svc = _make_service(repo)
+    await svc.load_all()
+
+    class _FailingPresetService:
+        async def refresh_if_stale(self):
+            raise RuntimeError("db blip")
+
+    svc._preset_service = _FailingPresetService()
+
+    with pytest.raises(RuntimeError):
+        await svc.update_model_endpoint("old-name", "llm", new_name="new-name", endpoint="http://new:8000/v1")
+
+    assert svc._config.models.llm.get("new-name").endpoint == "http://new:8000/v1"
+    assert svc._config.models.llm.get("old-name").endpoint == "http://new:8000/v1"
+
+
+@pytest.mark.asyncio
+async def test_update_model_endpoint_rename_aliases_carry_the_new_registry_name():
+    """The aliased config must be named for what the DB now calls the row.
+
+    ``_alias_renamed_name`` is handed the pre-rename row, so naming the config
+    from it left ``name`` at ``old_name`` under both aliases until the final
+    ``load_all()``. ``ModelEndpointConfig.name`` is the stable registry identity
+    — and for STT it keys OpenAIAudioClient's limiter/client caches — so a
+    request landing in that window would key its caches under the retired name.
+    """
+    existing = _make_row(name="old-name", model_type="stt", endpoint="http://old:8000/v1")
+    repo = _FakeEndpointRepo(rows=[existing])
+    svc = _make_service(repo)
+    await svc.load_all()
+
+    class _FailingPresetService:
+        async def refresh_if_stale(self):
+            raise RuntimeError("db blip")
+
+    svc._preset_service = _FailingPresetService()
+
+    with pytest.raises(RuntimeError):
+        await svc.update_model_endpoint("old-name", "stt", new_name="new-name")
+
+    assert svc._config.models.stt.get("new-name").name == "new-name"
+    # The old name stays resolvable for in-flight references, but it is an alias
+    # to the renamed row — not a claim that the row is still called that.
+    assert svc._config.models.stt.get("old-name").name == "new-name"
+
+
+@pytest.mark.asyncio
+async def test_update_model_endpoint_rename_evicts_stale_client_cache_before_failed_reload():
+    """A cached *client instance* under old_name predates this call and can't
+    know about a field change baked into the same rename — the factory checks
+    its cache before the config registry, so it must be evicted eagerly (not
+    only in the post-reload cleanup a failing reload would skip), or a
+    request through old_name keeps getting the stale pre-update client."""
+    existing = _make_row(name="old-name", model_type="llm", endpoint="http://old:8000/v1")
+    repo = _FakeEndpointRepo(rows=[existing])
+    svc = _make_service(repo)
+    await svc.load_all()
+    stale_client = object()
+    cache: dict = {"old-name": stale_client}
+    svc._client_caches["llm"] = cache
+
+    class _FailingPresetService:
+        async def refresh_if_stale(self):
+            raise RuntimeError("db blip")
+
+    svc._preset_service = _FailingPresetService()
+
+    with pytest.raises(RuntimeError):
+        await svc.update_model_endpoint("old-name", "llm", new_name="new-name", endpoint="http://new:8000/v1")
+
+    assert "old-name" not in cache
+    assert "new-name" not in cache
 
 
 @pytest.mark.asyncio
@@ -1215,7 +1489,601 @@ async def test_validate_endpoint_probes_url_and_model_name(monkeypatch):
         "reachable": True,
         "model_found": True,
         "models_served": ["mistral-small"],
+        "transcription_supported": None,
         "detail": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_validate_stt_endpoint_probes_transcription_capability_with_redirects_enabled(monkeypatch):
+    import httpx
+
+    prompt_service = SimpleNamespace(resolve_prompt=AsyncMock(return_value="  Prefer OpenRAG terms.  "))
+    svc = _make_service(prompt_service=prompt_service)
+    calls: list[tuple[str, str]] = []
+
+    class FakeResponse:
+        def __init__(self, status_code, data=None):
+            self.status_code = status_code
+            self._data = data or {}
+
+        def json(self):
+            return self._data
+
+    class FakeClient:
+        def __init__(self, *, timeout, headers, follow_redirects):
+            assert timeout == 5.0
+            assert headers == {}
+            assert follow_redirects is False
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, url):
+            calls.append(("get", url))
+            return FakeResponse(200, {"data": [{"id": "moss-transcribe-diarize"}]})
+
+        async def post(self, url, *, data, files, follow_redirects, timeout):
+            calls.append(("post", url))
+            assert data == {
+                "model": "moss-transcribe-diarize",
+                "prompt": "Prefer OpenRAG terms.",
+                "language": "fr",
+                "response_format": "json",
+                "temperature": "0",
+                "timestamp_granularities[]": ["segment", "word"],
+                "provider[diarize]": "true",
+            }
+            assert files["file"][0] == "openrag-stt-validation.wav"
+            assert files["file"][2] == "audio/wav"
+            assert files["file"][1][:4] == b"RIFF"
+            assert len(files["file"][1]) == 32_044
+            assert follow_redirects is True
+            assert timeout.connect == 5.0
+            assert timeout.write == 5.0
+            assert timeout.pool == 5.0
+            assert timeout.read == 180.0
+            return FakeResponse(200, {"text": ""})
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+    result = await svc.validate_endpoint(
+        "http://moss:8000/v1",
+        "moss-transcribe-diarize",
+        model_type="stt",
+        timeout=180,
+        extra={
+            "language": "fr",
+            "response_format": "json",
+            "temperature": 0,
+            "timestamp_granularities": ["segment", "word"],
+            "provider": {"diarize": True},
+            "api_key": "must-not-be-forwarded",
+            "implementation": "must-not-be-forwarded",
+            "prompt": "must-not-be-forwarded",
+        },
+    )
+
+    assert calls == [
+        ("get", "http://moss:8000/v1/models"),
+        ("post", "http://moss:8000/v1/audio/transcriptions"),
+    ]
+    prompt_service.resolve_prompt.assert_awaited_once_with("asr_transcription")
+    assert result == {
+        "reachable": True,
+        "model_found": True,
+        "models_served": ["moss-transcribe-diarize"],
+        "transcription_supported": True,
+        "detail": None,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("extra", "audio_payload", "expected_supported"),
+    [
+        ({}, {}, False),
+        ({"response_format": "text"}, None, True),
+    ],
+)
+async def test_validate_stt_endpoint_checks_success_response_shape(
+    monkeypatch,
+    extra,
+    audio_payload,
+    expected_supported,
+):
+    import httpx
+
+    svc = _make_service()
+
+    class FakeResponse:
+        status_code = 200
+        text = ""
+
+        def __init__(self, payload):
+            self._payload = payload
+
+        def json(self):
+            if self._payload is None:
+                raise ValueError("not JSON")
+            return self._payload
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, _url):
+            return FakeResponse({"data": [{"id": "moss-transcribe-diarize"}]})
+
+        async def post(self, _url, **_kwargs):
+            return FakeResponse(audio_payload)
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+    result = await svc.validate_endpoint(
+        "http://moss:8000/v1",
+        "moss-transcribe-diarize",
+        model_type="stt",
+        extra=extra,
+    )
+
+    assert result["transcription_supported"] is expected_supported
+    assert result["detail"] == (
+        None if expected_supported else "Transcription endpoint returned an incompatible response."
+    )
+
+
+@pytest.mark.asyncio
+async def test_validate_stt_endpoint_uses_one_normalized_model_name(monkeypatch):
+    """Model discovery and the authenticated probe must agree on the model."""
+    import httpx
+
+    svc = _make_service()
+    probed_models: list[str] = []
+
+    class FakeResponse:
+        status_code = 200
+
+        def __init__(self, payload=None):
+            self._payload = payload
+
+        def json(self):
+            return self._payload
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, _url):
+            return FakeResponse({"data": [{"id": "moss-transcribe-diarize"}]})
+
+        async def post(self, _url, *, data, **_kwargs):
+            probed_models.append(data["model"])
+            return FakeResponse()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+    result = await svc.validate_endpoint(
+        "http://moss:8000/v1",
+        "  moss-transcribe-diarize  ",
+        model_type="stt",
+    )
+
+    assert result["model_found"] is True
+    assert probed_models == ["moss-transcribe-diarize"]
+
+
+@pytest.mark.asyncio
+async def test_validate_stt_endpoint_rejects_missing_transcription_route(monkeypatch):
+    import httpx
+
+    svc = _make_service()
+
+    class FakeResponse:
+        def __init__(self, status_code, data=None):
+            self.status_code = status_code
+            self._data = data or {}
+
+        def json(self):
+            return self._data
+
+    class FakeClient:
+        def __init__(self, *, timeout, headers, follow_redirects):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, url):
+            return FakeResponse(200, {"data": [{"id": "moss-transcribe-diarize"}]})
+
+        async def post(self, url, **_kwargs):
+            return FakeResponse(404)
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+    result = await svc.validate_endpoint(
+        "http://moss:8000/v1",
+        "moss-transcribe-diarize",
+        model_type="stt",
+    )
+
+    assert result == {
+        "reachable": True,
+        "model_found": True,
+        "models_served": ["moss-transcribe-diarize"],
+        "transcription_supported": False,
+        "detail": "Endpoint does not support OpenAI-compatible audio transcriptions.",
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status_code", [400, 422])
+async def test_validate_stt_endpoint_rejects_unsuccessful_audio_probe(monkeypatch, status_code):
+    """A malformed or rejected real probe must not validate STT credentials."""
+    import httpx
+
+    svc = _make_service()
+
+    class FakeResponse:
+        def __init__(self, response_status, data=None):
+            self.status_code = response_status
+            self._data = data or {}
+
+        def json(self):
+            return self._data
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, url):
+            return FakeResponse(200, {"data": [{"id": "moss-transcribe-diarize"}]})
+
+        async def post(self, url, **kwargs):
+            assert kwargs["data"] == {"model": "moss-transcribe-diarize"}
+            assert kwargs["files"]["file"][1][:4] == b"RIFF"
+            return FakeResponse(status_code)
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+    result = await svc.validate_endpoint(
+        "http://moss:8000/v1",
+        "moss-transcribe-diarize",
+        api_key="bad-key",
+        model_type="stt",
+    )
+
+    assert result == {
+        "reachable": True,
+        "model_found": True,
+        "models_served": ["moss-transcribe-diarize"],
+        "transcription_supported": False,
+        "detail": f"Transcription validation request returned HTTP {status_code}.",
+    }
+
+
+@pytest.mark.asyncio
+async def test_validate_stt_endpoint_skips_audio_probe_when_model_is_not_served(monkeypatch):
+    """Do not spend STT capacity once the public model list rejects the model."""
+    import httpx
+
+    svc = _make_service()
+    calls: list[str] = []
+
+    class FakeResponse:
+        def __init__(self, response_status, data=None):
+            self.status_code = response_status
+            self._data = data or {}
+
+        def json(self):
+            return self._data
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, url):
+            calls.append("get")
+            return FakeResponse(200, {"data": [{"id": "another-model"}]})
+
+        async def post(self, url, **_kwargs):
+            calls.append("post")
+            return FakeResponse(200)
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+    result = await svc.validate_endpoint(
+        "http://moss:8000/v1",
+        "moss-transcribe-diarize",
+        model_type="stt",
+    )
+
+    assert calls == ["get"]
+    assert result == {
+        "reachable": True,
+        "model_found": False,
+        "models_served": ["another-model"],
+        "transcription_supported": None,
+        "detail": None,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_payload", [ValueError("invalid JSON"), {"data": "not-a-list"}])
+async def test_validate_stt_endpoint_probes_audio_when_model_list_is_invalid(monkeypatch, model_payload):
+    import httpx
+
+    svc = _make_service()
+    calls: list[tuple[str, str]] = []
+
+    class FakeResponse:
+        def __init__(self, status_code, payload=None):
+            self.status_code = status_code
+            self._payload = payload
+
+        def json(self):
+            if isinstance(self._payload, Exception):
+                raise self._payload
+            return self._payload
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, url):
+            calls.append(("get", url))
+            return FakeResponse(200, model_payload)
+
+        async def post(self, url, **_kwargs):
+            calls.append(("post", url))
+            return FakeResponse(200, {"text": ""})
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+    result = await svc.validate_endpoint(
+        "http://moss:8000/v1",
+        "moss-transcribe-diarize",
+        model_type="stt",
+    )
+
+    assert calls == [
+        ("get", "http://moss:8000/v1/models"),
+        ("post", "http://moss:8000/v1/audio/transcriptions"),
+    ]
+    assert result == {
+        "reachable": True,
+        "model_found": None,
+        "models_served": None,
+        "transcription_supported": True,
+        "detail": "Endpoint returned an invalid model list.",
+    }
+
+
+@pytest.mark.asyncio
+async def test_validate_stt_endpoint_probes_audio_when_model_list_times_out(monkeypatch):
+    import httpx
+
+    svc = _make_service()
+    calls: list[str] = []
+
+    class FakeResponse:
+        status_code = 200
+
+        def json(self):
+            return {"text": ""}
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, request_url):
+            calls.append("get")
+            raise httpx.ReadTimeout("model list cold start")
+
+        async def post(self, request_url, **kwargs):
+            calls.append("post")
+            assert kwargs["timeout"].read == 900
+            return FakeResponse()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+    result = await svc.validate_endpoint(
+        "http://moss:8000/v1",
+        "moss-transcribe-diarize",
+        model_type="stt",
+        timeout=900,
+    )
+
+    assert calls == ["get", "post"]
+    assert result == {
+        "reachable": True,
+        "model_found": None,
+        "models_served": None,
+        "transcription_supported": True,
+        "detail": "Model list request timed out.",
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status_code", [401, 403])
+async def test_validate_stt_endpoint_rejects_auth_failure_on_audio_probe(monkeypatch, status_code):
+    import httpx
+
+    svc = _make_service()
+
+    class FakeResponse:
+        def __init__(self, status_code, payload=None):
+            self.status_code = status_code
+            self._payload = payload
+
+        def json(self):
+            return self._payload
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, url):
+            return FakeResponse(200, {"data": [{"id": "moss-transcribe-diarize"}]})
+
+        async def post(self, url, **_kwargs):
+            return FakeResponse(status_code)
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+    result = await svc.validate_endpoint(
+        "http://moss:8000/v1",
+        "moss-transcribe-diarize",
+        api_key="bad-key",
+        model_type="stt",
+    )
+
+    assert result["reachable"] is True
+    assert result["model_found"] is True
+    assert result["transcription_supported"] is False
+    assert (
+        result["detail"] == f"Transcription capability check was rejected with HTTP {status_code}. Check the API key."
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status_code", [401, 403])
+async def test_validate_stt_endpoint_stops_after_model_list_auth_failure(monkeypatch, status_code):
+    import httpx
+
+    svc = _make_service()
+    calls: list[tuple[str, str]] = []
+
+    class FakeResponse:
+        def __init__(self, response_status):
+            self.status_code = response_status
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, url):
+            calls.append(("get", url))
+            return FakeResponse(status_code)
+
+        async def post(self, url, **_kwargs):
+            calls.append(("post", url))
+            return FakeResponse(422)
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+    result = await svc.validate_endpoint(
+        "http://moss:8000/v1",
+        "moss-transcribe-diarize",
+        api_key="bad-key",
+        model_type="stt",
+    )
+
+    assert calls == [("get", "http://moss:8000/v1/models")]
+    assert result == {
+        "reachable": False,
+        "model_found": None,
+        "models_served": None,
+        "transcription_supported": False,
+        "detail": f"Model list request was rejected with HTTP {status_code}. Check the API key.",
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status_code", [401, 403])
+async def test_validate_non_stt_endpoint_keeps_auth_gated_model_list_reachable(monkeypatch, status_code):
+    """An HTTP response proves reachability even when a non-STT model list is scoped."""
+    import httpx
+
+    svc = _make_service()
+
+    class FakeResponse:
+        def __init__(self, response_status):
+            self.status_code = response_status
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, url):
+            return FakeResponse(status_code)
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+    result = await svc.validate_endpoint(
+        "http://llm:8000/v1",
+        "mistral-small",
+        api_key="scoped-key",
+        model_type="llm",
+    )
+
+    assert result == {
+        "reachable": True,
+        "model_found": None,
+        "models_served": None,
+        "transcription_supported": None,
+        "detail": f"Model list returned HTTP {status_code}.",
     }
 
 
@@ -1270,6 +2138,7 @@ async def test_validate_endpoint_rejects_non_http_urls_without_request(monkeypat
         "reachable": False,
         "model_found": None,
         "models_served": None,
+        "transcription_supported": None,
         "detail": "Endpoint URL must be an absolute HTTP(S) URL.",
     }
 
@@ -1291,6 +2160,7 @@ async def test_validate_endpoint_rejects_malformed_urls_without_request(monkeypa
         "reachable": False,
         "model_found": None,
         "models_served": None,
+        "transcription_supported": None,
         "detail": "Endpoint URL must be an absolute HTTP(S) URL.",
     }
 
@@ -1312,5 +2182,55 @@ async def test_validate_endpoint_rejects_url_credentials_without_request(monkeyp
         "reachable": False,
         "model_found": None,
         "models_served": None,
+        "transcription_supported": None,
         "detail": "Endpoint URL must not include credentials.",
     }
+
+
+@pytest.mark.asyncio
+async def test_delete_model_endpoint_reloads_presets_when_the_cascade_moved_them():
+    """The repo clears preset selections naming the deleted endpoint; this
+    replica must re-read them.
+
+    Regression: without the reload, indexation kept resolving the deleted name
+    out of the in-memory preset config and failed strictly — audio uploads on
+    that preset broke — even though the DB had already restored the default
+    fallback in the delete's own transaction. Clearing a selection writes to
+    ``pipeline_presets``, so the revision moves and ``refresh_if_stale`` reloads
+    presets and partitions together.
+    """
+    repo = _FakeEndpointRepo(
+        rows=[
+            _make_row(name="whisper", model_type="stt", is_default=True),
+            _make_row(name="doomed", model_type="stt", is_default=False),
+        ]
+    )
+    preset_service = _FakePresetServiceForReload()
+    partition_service = _FakePartitionServiceForReload()
+    svc = _make_service(repo, partition_service=partition_service, preset_service=preset_service)
+
+    await svc.delete_model_endpoint("doomed", "stt")
+
+    assert preset_service.refresh_calls == 1
+    # refresh_if_stale reloaded partitions itself; no second reload here.
+    assert partition_service.load_partitions_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_delete_model_endpoint_reloads_partitions_when_no_preset_moved():
+    """No preset named the endpoint, so the revision never moves — the partition
+    reload must still run, mirroring the rename path's fallback."""
+    repo = _FakeEndpointRepo(
+        rows=[
+            _make_row(name="whisper", model_type="stt", is_default=True),
+            _make_row(name="doomed", model_type="stt", is_default=False),
+        ]
+    )
+    preset_service = _FakeUnchangedRevisionPresetService()
+    partition_service = _FakePartitionServiceForReload()
+    svc = _make_service(repo, partition_service=partition_service, preset_service=preset_service)
+
+    await svc.delete_model_endpoint("doomed", "stt")
+
+    assert preset_service.refresh_calls == 1
+    assert partition_service.load_partitions_calls == 1

@@ -36,6 +36,7 @@ logger = get_logger()
 
 actor_creation_map: dict[str, callable] = {}
 _settings: "Settings | None" = None
+_TRACKER_PROTOCOL_TIMEOUT_SECONDS = 5
 
 
 def _require_settings() -> "Settings":
@@ -65,24 +66,104 @@ def get_or_create_actor(name, cls, namespace="openrag", remote_args=(), **option
 
 
 def get_task_state_manager():
+    from time import monotonic, sleep
+
+    import ray
     from services.workers.task_state import TaskStateManager
 
-    return get_or_create_actor("TaskStateManager", TaskStateManager, lifetime="detached")
+    def create_or_get():
+        return get_or_create_actor(
+            "TaskStateManager",
+            TaskStateManager,
+            lifetime="detached",
+            # Keep the same actor identity across process crashes so the handles
+            # cached by API services and indexer workers become usable again once
+            # Ray reconstructs the actor. State remains ephemeral until #660.
+            max_restarts=-1,
+            # Several state mutations are not safe to execute twice (notably the
+            # delete-fence counters), so calls retain at-most-once semantics.
+            max_task_retries=0,
+        )
+
+    actor = create_or_get()
+    if _supports_task_state_recovery(actor):
+        return actor
+
+    # ``get_if_exists`` keeps a detached actor created by an older deployment,
+    # but creation options cannot retrofit that actor with restart support.
+    # Replace it during bootstrap, before services or workers cache its handle.
+    logger.warning("Replacing legacy TaskStateManager without restart support")
+    ray.kill(actor, no_restart=True)
+    deadline = monotonic() + 30
+    while monotonic() < deadline:
+        try:
+            current = ray.get_actor("TaskStateManager", namespace="openrag")
+        except ValueError:
+            return create_or_get()
+        if _supports_task_state_recovery(current):
+            return current
+        sleep(0.05)
+    raise RuntimeError("Timed out replacing legacy TaskStateManager")
+
+
+def _supports_task_state_recovery(actor) -> bool:
+    return (
+        getattr(actor, "supports_in_place_restart", None) is not None
+        and getattr(actor, "renew_file_delete", None) is not None
+    )
 
 
 def get_task_completion_tracker(namespace: str = "openrag"):
+    from time import monotonic, sleep
+
+    import ray
     from services.workers.task_completion import TaskCompletionTrackerActor
 
-    tracker = get_or_create_actor(
-        "TaskCompletionTracker",
-        TaskCompletionTrackerActor,
-        namespace=namespace,
-        remote_args=(namespace,),
-        lifetime="detached",
-    )
+    def create_or_get():
+        return get_or_create_actor(
+            "TaskCompletionTracker",
+            TaskCompletionTrackerActor,
+            namespace=namespace,
+            remote_args=(namespace,),
+            lifetime="detached",
+        )
+
+    tracker = create_or_get()
+    if not _supports_task_completion_recovery(tracker):
+        logger.warning("Replacing legacy TaskCompletionTracker without cancellation recovery")
+        ray.kill(tracker, no_restart=True)
+        deadline = monotonic() + 30
+        while monotonic() < deadline:
+            try:
+                current = ray.get_actor("TaskCompletionTracker", namespace=namespace)
+            except ValueError:
+                tracker = create_or_get()
+                break
+            if _supports_task_completion_recovery(current):
+                tracker = current
+                break
+            sleep(0.05)
+        else:
+            raise RuntimeError("Timed out replacing legacy TaskCompletionTracker")
     tracker.recover.remote()
     actor_creation_map["TaskCompletionTracker"] = lambda: get_task_completion_tracker(namespace=namespace)
     return tracker
+
+
+def _supports_task_completion_recovery(actor) -> bool:
+    method_names = getattr(actor, "_ray_actor_method_names", None)
+    if isinstance(method_names, (frozenset, list, set, tuple)) and "supports_cancellation_recovery" not in method_names:
+        return False
+    method = getattr(actor, "supports_cancellation_recovery", None)
+    remote = getattr(method, "remote", None)
+    if remote is None:
+        return False
+    try:
+        import ray
+
+        return ray.get(remote(), timeout=_TRACKER_PROTOCOL_TIMEOUT_SECONDS) is True
+    except Exception:
+        return False
 
 
 def register_parser_pool_restart_factories() -> None:

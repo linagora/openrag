@@ -243,6 +243,9 @@ class TestCatalogStoreWiring:
             seed_defaults=lambda: _async_call(calls, "preset.seed"),
             load_all=lambda: _async_call(calls, "preset.load"),
         )
+        c._prompt_service = SimpleNamespace(
+            seed_defaults=lambda: _async_call(calls, "prompt.seed"),
+        )
         c._partition_service = SimpleNamespace(
             seed_default_partition=lambda: _async_call(calls, "partition.seed"),
             load_partitions=lambda: _async_call(calls, "partition.load"),
@@ -257,6 +260,7 @@ class TestCatalogStoreWiring:
             "endpoint.load",
             "preset.seed",
             "preset.load",
+            "prompt.seed",
             "partition.seed",
             "partition.load",
         ]
@@ -349,7 +353,7 @@ _ORCHESTRATORS = [
     ("mcp_service", "get_mcp_service"),
 ]
 
-_OPTIONAL_PHASE_PROVIDERS = {"get_model_endpoint_service", "get_preset_service"}
+_OPTIONAL_PHASE_PROVIDERS = {"get_model_endpoint_service", "get_preset_service", "get_prompt_service"}
 
 
 class TestPhase8OrchestratorWiring:
@@ -675,6 +679,7 @@ class TestPhase14ServiceWiring:
         assert service._client_caches["reranker"] is c._reranker_cache
         assert service._client_caches["llm"] is c._llm_cache
         assert service._client_caches["vlm"] is c._vlm_cache
+        assert service._prompt_service is c.prompt_service
 
     def test_preset_service_is_lazy_cached_with_partition_back_reference(self):
         """Expose PresetService with the config-aware PartitionService reference."""
@@ -689,6 +694,50 @@ class TestPhase14ServiceWiring:
         assert c.preset_service is service
         assert service._partition_service is c.partition_service
         assert c.partition_service._config is settings
+
+    def test_prompt_service_is_lazy_cached_on_shared_prompt_repo(self):
+        """Expose PromptService wired to the shared prompt_repo."""
+        from services.orchestrators.prompt_service import PromptService
+
+        c = ServiceContainer(_settings())
+
+        service = c.prompt_service
+
+        assert isinstance(service, PromptService)
+        assert c.prompt_service is service
+        assert service._repo is c.prompt_repo
+
+    @pytest.mark.asyncio
+    async def test_conversion_stt_resolver_refreshes_registry_for_each_audio_request(self, monkeypatch):
+        """Keep direct extraction in every API replica aligned with Admin UI changes."""
+        import services.workers.parsers.file_serializer as serializer_module
+
+        settings = _settings()
+        endpoint = ModelEndpointConfig(
+            endpoint="http://moss:8000/v1",
+            model_name="moss-transcribe-diarize",
+        )
+        refreshes = []
+        captured = {}
+
+        class FakeEndpointService:
+            async def load_all(self):
+                refreshes.append(True)
+                settings.models.stt["default"] = endpoint
+
+        def build_file_serializer(**kwargs):
+            captured.update(kwargs)
+            return object()
+
+        monkeypatch.setattr(serializer_module, "build_file_serializer", build_file_serializer)
+        c = ServiceContainer(settings)
+        c._model_endpoint_service = FakeEndpointService()
+
+        _ = c.conversion_service
+        resolved = await captured["transcription_endpoint_resolver"]()
+
+        assert refreshes == [True]
+        assert resolved is endpoint
 
     @pytest.mark.asyncio
     async def test_initialize_loads_phase14_registries_before_partitions(self, monkeypatch):
@@ -730,6 +779,13 @@ class TestPhase14ServiceWiring:
                 """Record preset loading."""
                 calls.append("preset.load")
 
+        class FakePromptService:
+            """Prompt library lifecycle recorder (seed only — no cache to load)."""
+
+            async def seed_defaults(self):
+                """Record prompt seeding."""
+                calls.append("prompt.seed")
+
         class FakePartitionService:
             """Partition cache lifecycle recorder."""
 
@@ -746,6 +802,7 @@ class TestPhase14ServiceWiring:
         c._catalog_store = FakeCatalogStore()
         c._model_endpoint_service = FakeEndpointService()
         c._preset_service = FakePresetService()
+        c._prompt_service = FakePromptService()
         c._partition_service = FakePartitionService()
 
         await c.initialize()
@@ -757,6 +814,7 @@ class TestPhase14ServiceWiring:
             "endpoint.load",
             "preset.seed",
             "preset.load",
+            "prompt.seed",
             "partition.seed",
             "partition.load",
         ]

@@ -21,6 +21,7 @@ import {
   isActiveState,
   isTerminalState,
 } from "@/lib/api/jobs";
+import { invalidateJobsQueries } from "@/lib/jobs-queries";
 import { copyToClipboard } from "@/lib/utils";
 
 const str = (v: unknown) => (v == null ? "" : String(v));
@@ -65,7 +66,7 @@ export default function JobDetailPage() {
     onSuccess: (res) => {
       toast.success(res.message ?? "Cancellation signal sent");
       queryClient.invalidateQueries({ queryKey: ["task", id] });
-      queryClient.invalidateQueries({ queryKey: ["tasks"] });
+      void invalidateJobsQueries(queryClient);
     },
     onError: (err: Error) => toast.error(`Failed to cancel: ${err.message}`),
   });

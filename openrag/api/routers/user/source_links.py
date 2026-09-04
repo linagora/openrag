@@ -33,9 +33,11 @@ def build_document_source_link(
     encoded_url = None
     if filename:
         encoded_url = quote(static_url_builder(doc_metadata["_id"]), safe=":/")
-    return {
-        "source_type": "document",
-        **({"file_url": encoded_url} if encoded_url else {}),
-        "chunk_url": chunk_url_builder(doc_metadata["_id"]),
-        **doc_metadata,
-    }
+    link = dict(doc_metadata)
+    link["source_type"] = "document"
+    link["chunk_url"] = chunk_url_builder(doc_metadata["_id"])
+    if encoded_url:
+        link["file_url"] = encoded_url
+    else:
+        link.pop("file_url", None)
+    return link

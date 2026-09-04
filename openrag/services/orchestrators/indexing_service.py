@@ -20,7 +20,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from core.utils.conts import strip_protected_metadata
+from core.utils.consts import strip_protected_metadata
 from core.utils.exceptions import AuthError, PartitionNotFoundError, ValidationError
 from core.utils.filename import extract_temporal_fields
 from core.utils.logging import get_logger
@@ -32,6 +32,7 @@ if TYPE_CHECKING:
     from core.ports.document_repo import DocumentRepository
     from core.ports.workspace_repo import WorkspaceRepository
     from services.orchestrators.partition_service import PartitionService
+    from services.orchestrators.preset_service import PresetService
 
 logger = get_logger()
 
@@ -73,12 +74,14 @@ class IndexingService:
         dispatcher: IndexingDispatcher,
         config: Settings | None = None,
         partition_service: PartitionService | None = None,
+        preset_service: PresetService | None = None,
     ) -> None:
         self._document_repo = document_repo
         self._workspace_repo = workspace_repo
         self._dispatcher = dispatcher
         self._config = config
         self._partition_service = partition_service
+        self._preset_service = preset_service
 
     # ------------------------------------------------------------------
     # Lookups (used by the thin router for its byte-identical guards)
@@ -111,7 +114,10 @@ class IndexingService:
         original_filename: str | None,
         content_sha256: str | None,
     ) -> dict:
-        """Assemble the indexing metadata exactly as the legacy router did."""
+        """Assemble the indexing metadata exactly as the legacy router did.
+
+        The keys added below must match ``UPLOAD_METADATA_SERVER_KEYS`` exactly.
+        """
         metadata = dict(metadata or {})
         metadata.update(
             {
@@ -206,6 +212,27 @@ class IndexingService:
         else:
             logger.bind(partition=partition, user_id=user_id).info("Auto-created partition on index.")
 
+    async def _refresh_preset_config_if_stale(self) -> None:
+        """Refresh this replica's partition cache before capturing a job config.
+
+        Best-effort, like every other cache refresh on this path: the revision
+        probe is an optimization that lets a replica notice presets another
+        replica changed, never a precondition for accepting an upload. It reads
+        ``preset_configuration_revision``, and ``latest_revision()`` raises
+        outright when that row is missing (a partial restore, a hand-edited DB)
+        as well as on any transient asyncpg error. Left unguarded this runs
+        inside ``add_file``'s admission block, so such a blip turns *every*
+        upload — of every file type, in every partition — into a 500. Falling
+        through instead costs at most a stale preset for this one dispatch,
+        which is exactly the state the caller was already in.
+        """
+        if self._preset_service is None:
+            return
+        try:
+            await self._preset_service.refresh_if_stale()
+        except Exception as exc:  # noqa: BLE001 - a stale-cache probe must not fail an upload
+            logger.warning(f"Preset cache staleness check failed; using the cached config: {exc}")
+
     async def add_file(
         self,
         *,
@@ -219,11 +246,14 @@ class IndexingService:
         workspace_ids: list[str] | None = None,
         replace: bool = False,
         content_sha256: str | None = None,
+        callback_url: str | None = None,
+        callback_token: str | None = None,
     ) -> str:
         """Assemble metadata and queue an (re)indexing job; return its task id.
 
         Workspace association happens inside the worker's ``add_file``
         after a successful index — the router only pre-validates the ids.
+        *callback_url*/*callback_token* are forwarded to the worker as-is.
         """
         if self._deduplication_enabled() and content_sha256 is None:
             content_sha256 = await asyncio.to_thread(_sha256_file, file_path)
@@ -240,6 +270,7 @@ class IndexingService:
         )
         async with self._partition_admission(partition) as partition_existed_at_admission:
             await self._ensure_partition_exists(partition, user)
+            await self._refresh_preset_config_if_stale()
             require_existing_partition = bool(self._partition_configs()) or partition_existed_at_admission
             indexation_config, embedder_name = self._resolve_indexation_dispatch_config(partition)
             legacy_actor_preserves_partition_guard = require_existing_partition and indexation_config is not None
@@ -252,6 +283,8 @@ class IndexingService:
                 replace=replace,
                 indexation_config=indexation_config,
                 embedder_name=embedder_name,
+                callback_url=callback_url,
+                callback_token=callback_token,
                 require_existing_partition=require_existing_partition,
                 allow_legacy_require_existing_partition_retry=legacy_actor_preserves_partition_guard,
             )

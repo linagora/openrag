@@ -24,9 +24,12 @@ async def contextualize_stage(
 
         filename = str(row.get("filename") or "")
         language = str(row.get("language") or row.get("lang") or "en")
+        # DB-resolved per-partition prompt for this file, if any; otherwise the
+        # contextualizer falls back to its own (disk-loaded) default.
+        system_prompt = row.get("contextualizer_prompt")
         effective_timeout = stage_timeout(timeout, len(chunks), per_item_timeout=per_chunk_timeout)
         row["chunks"] = await run_with_optional_timeout(
-            lambda: contextualizer.contextualize(chunks, filename=filename, lang=language),
+            lambda: contextualizer.contextualize(chunks, filename=filename, lang=language, system_prompt=system_prompt),
             effective_timeout,
         )
         row["stage"] = "contextualized"

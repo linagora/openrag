@@ -29,14 +29,42 @@ services:
       timeout: 20s
       retries: 3
 
+  milvus-init:
+    image: milvusdb/milvus:v3.0.0
+    user: "0:0"
+    environment:
+      LD_PRELOAD: ""
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        incompatible_path="$$(find /var/lib/milvus -mindepth 1 \( ! -uid 999 -o ! -gid 999 \) -print -quit)"
+        if [ -n "$$incompatible_path" ]; then
+          echo "Existing Milvus data is not owned by UID/GID 999. Back up the deployment and follow the Milvus 2.6-to-3.0 migration guide before starting Milvus 3." >&2
+          exit 1
+        fi
+        chown 999:999 /var/lib/milvus
+    volumes:
+      - ${MILVUS_VOLUME:-milvus}:/var/lib/milvus
+    read_only: true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      # Let the ownership guard inspect restrictive restored directories
+      # without granting write bypass.
+      - DAC_READ_SEARCH
+    restart: "no"
+
   milvus:
-    image: milvusdb/milvus:v2.6.11
+    image: milvusdb/milvus:v3.0.0
     command: ["milvus", "run", "standalone"]
     # Run under Docker's default seccomp profile (do not disable syscall
     # filtering). If a specific kernel needs a wider profile, supply a vetted
     # custom profile rather than seccomp:unconfined.
     environment:
       ETCD_ENDPOINTS: etcd:2379
+      ETCD_AUTH_ENABLED: "false"
+      MQ_TYPE: ${MILVUS_MQ_TYPE:-default}
       MINIO_ADDRESS: minio:9000
       MINIO_ACCESS_KEY_ID: ${MINIO_ACCESS_KEY:?Set MINIO_ACCESS_KEY in your .env}
       MINIO_SECRET_ACCESS_KEY: ${MINIO_SECRET_KEY:?Set MINIO_SECRET_KEY in your .env}
@@ -51,8 +79,12 @@ services:
     # ports:
     #   - "${VDB_PORT:-19530}:${VDB_iPORT:-19530}"
     depends_on:
-      - "etcd"
-      - "minio"
+      etcd:
+        condition: service_started
+      minio:
+        condition: service_started
+      milvus-init:
+        condition: service_completed_successfully
 
 volumes:
   etcd:

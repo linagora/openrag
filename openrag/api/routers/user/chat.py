@@ -14,9 +14,7 @@ handed to the service as a callable), and ``StreamingResponse`` /
 import asyncio
 import json
 from typing import TYPE_CHECKING
-from urllib.parse import urlparse
 
-import consts
 from api.dependencies.auth import (
     current_user,
     current_user_or_admin_partitions,
@@ -30,10 +28,13 @@ from api.dependencies.llm import (
 from api.routers.user.source_links import build_document_source_link
 from api.schemas.user.chat import OpenAIChatCompletionRequest, OpenAICompletionRequest
 from core.config import load_config
+from core.config.endpoints import client_llm_override, custom_endpoint_override_enabled
 from core.models.preset import resolve_partition_chat_llm
+from core.utils import consts
 from core.utils.exceptions import OpenRAGError
 from core.utils.logging import get_logger
 from core.utils.text import get_num_tokens, sanitize_text
+from core.utils.web_url import normalize_web_url
 from di.providers import get_config, get_partition_service, get_query_service
 from fastapi import APIRouter, Body, Depends, HTTPException, Request, status
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -225,8 +226,8 @@ def __prepare_sources(request: Request, docs: list, web_results: list | None = N
         doc_metadata = dict(doc.metadata)
         links.append(build_document_source_link(doc_metadata, static_url, chunk_url))
     for result in web_results or []:
-        url = sanitize_text(result.url or "")
-        if not url or urlparse(url).scheme not in ("http", "https"):
+        url = normalize_web_url(result.url)
+        if url is None:
             continue
         links.append(
             {
@@ -401,9 +402,18 @@ def _apply_default_max_tokens(
     consistent with the endpoint that serves the request.
 
     An explicit client-supplied value is always honoured.
+
+    Skipped for a client-supplied endpoint: this budget describes the *server's*
+    endpoint, and the client's provider may reject ``max_tokens`` outright (newer
+    OpenAI models want ``max_completion_tokens``). Left unset it drops from the
+    payload; ``validate_tokens_limit`` still falls back to the configured default.
     """
-    if request.max_tokens is None:
-        request.max_tokens = _effective_max_output_tokens(config, partitions)
+    if request.max_tokens is not None:
+        return
+    llm_override = client_llm_override(getattr(request, "metadata", None))
+    if llm_override.get("base_url") and custom_endpoint_override_enabled():
+        return
+    request.max_tokens = _effective_max_output_tokens(config, partitions)
 
 
 def check_tokens_limit(
@@ -446,7 +456,18 @@ Accepts OpenAI-compatible chat completion requests with:
 
 **Response:**
 Returns OpenAI-compatible response with additional `extra` field containing:
-- `sources`: Array of source documents with metadata and URLs
+- `sources`: Legacy field, kept for backward compatibility. Cited sources, or
+  every presented source as a fallback when the model didn't report citations
+- `presented_sources`: Array of every source actually shown to the model
+  (after context-budget truncation), regardless of what it cited
+- `cited_sources`: Array of only the sources the model explicitly cited; empty
+  whenever no citations tag was found (never falls back like `sources` does)
+- `citations_reported`: `true` only if the model emitted a citations tag
+  (even an empty one); `false` means `sources` fell back to keeping everything
+- `all_retrieved_sources`: Array of every source retrieval returned, unfiltered
+  by citation or context-budget truncation — only included when the request's
+  `metadata.include_all_retrieved_sources` is `true` (off by default; this is
+  debug/evaluation telemetry and can be large)
 
 **Streaming:**
 Set `stream: true` for Server-Sent Events (SSE) streaming responses.
@@ -552,7 +573,18 @@ Accepts OpenAI-compatible completion requests with:
 
 **Response:**
 Returns OpenAI-compatible response with additional `extra` field containing:
-- `sources`: Array of source documents with metadata and URLs
+- `sources`: Legacy field, kept for backward compatibility. Cited sources, or
+  every presented source as a fallback when the model didn't report citations
+- `presented_sources`: Array of every source actually shown to the model
+  (after context-budget truncation), regardless of what it cited
+- `cited_sources`: Array of only the sources the model explicitly cited; empty
+  whenever no citations tag was found (never falls back like `sources` does)
+- `citations_reported`: `true` only if the model emitted a citations tag
+  (even an empty one); `false` means `sources` fell back to keeping everything
+- `all_retrieved_sources`: Array of every source retrieval returned, unfiltered
+  by citation or context-budget truncation — only included when the request's
+  `metadata.include_all_retrieved_sources` is `true` (off by default; this is
+  debug/evaluation telemetry and can be large)
 
 **Note:** Streaming is not supported for this endpoint.
 """,

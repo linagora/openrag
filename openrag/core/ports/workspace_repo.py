@@ -54,6 +54,14 @@ class WorkspaceRepository(ABC):
         ...
 
     @abstractmethod
+    async def get_existing_file_ids_any_partition(self, file_ids: list[str]) -> set[str]:
+        """Return the subset of ``file_ids`` that exist in *any* partition.
+
+        Unscoped by design — only for the ``SUPER_ADMIN_MODE`` ``"all"`` wildcard.
+        """
+        ...
+
+    @abstractmethod
     async def remove_file_from_all_workspaces(self, file_id: str, partition: str) -> None:
         """Detach ``file_id`` from every workspace in ``partition``."""
         ...

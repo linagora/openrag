@@ -8,7 +8,10 @@ so the system works without any admin interaction.
 
 from __future__ import annotations
 
+import io
 import os
+import wave
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
@@ -16,6 +19,8 @@ from urllib.parse import urlsplit
 from core.config.model_endpoints import (
     ENV_MANAGED_KEY,
     ENV_MANAGED_VALUE,
+    STT_LANGUAGE_KEY,
+    STT_REQUEST_CONTROL_EXTRA_KEYS,
     ModelEndpointConfig,
     ModelEndpointRow,
 )
@@ -29,12 +34,14 @@ if TYPE_CHECKING:
 
 logger = get_logger()
 
-_VALID_TYPES = frozenset({"embedder", "reranker", "llm", "vlm"})
+_VALID_TYPES = frozenset({"embedder", "reranker", "llm", "vlm", "stt"})
 _SAMPLING_TYPES = frozenset({"llm", "vlm"})
 # `EMPTY` is the config's stand-in for "no key configured" (see endpoints.py), not
 # a credential. Treating it as one would let boot-time sync overwrite a real
 # hand-set key with a placeholder the moment sync_on_boot was switched on.
 _PLACEHOLDER_API_KEYS = frozenset({"", "EMPTY"})
+_STT_VALIDATION_TIMEOUT_SECONDS = 15.0
+_STT_TEXT_RESPONSE_FORMATS = frozenset({"text", "srt", "vtt"})
 # Which env var, if any, owns a given tunable per model type. `_build_default_seeds`
 # always fills these from Settings, so their presence in the seed says nothing about
 # whether the *environment* set them — without this table sync would write the config
@@ -45,8 +52,91 @@ _ENV_OWNED_TUNABLES: dict[str, dict[str, str]] = {
     "embedder": {"batch_size": "EMBEDDER_BATCH_SIZE", "timeout": "EMBEDDER_TIMEOUT"},
     "vlm": {"timeout": "VLM_TIMEOUT"},
     "reranker": {"timeout": "RERANKER_TIMEOUT"},
+    "stt": {
+        "batch_size": "TRANSCRIBER_MAX_CONCURRENT_CHUNKS",
+        "timeout": "TRANSCRIBER_TIMEOUT",
+    },
     "llm": {},
 }
+
+
+def _build_stt_validation_wav() -> bytes:
+    """Build a portable one-second WAV sample for STT endpoint validation."""
+    sample_rate = 16_000
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(sample_rate)
+        wav.writeframes(b"\x00\x00" * sample_rate)
+    return buffer.getvalue()
+
+
+# Created once rather than encoding/transcoding a file for each Admin UI validation.
+_STT_VALIDATION_WAV = _build_stt_validation_wav()
+
+
+def _flatten_multipart_field(key: str, value: Any) -> list[tuple[str, str]]:
+    """Serialize JSON-like values as OpenAI-style multipart form fields."""
+    if isinstance(value, Mapping):
+        return [
+            item
+            for nested_key, nested_value in value.items()
+            for item in _flatten_multipart_field(f"{key}[{nested_key}]", nested_value)
+        ]
+    if isinstance(value, (list, tuple)):
+        return [item for nested_value in value for item in _flatten_multipart_field(f"{key}[]", nested_value)]
+    if value is True:
+        serialized = "true"
+    elif value is False:
+        serialized = "false"
+    elif value is None:
+        serialized = ""
+    else:
+        serialized = str(value)
+    return [(key, serialized)] if serialized else []
+
+
+def _stt_validation_form_data(
+    model_name: str,
+    extra: dict[str, Any] | None,
+    prompt: str | None = None,
+) -> dict[str, Any]:
+    """Build the sanitized multipart fields used by an STT runtime request."""
+    request_options: dict[str, Any] = {"model": model_name}
+    if prompt and prompt.strip():
+        request_options["prompt"] = prompt.strip()
+    if extra:
+        language = extra.get(STT_LANGUAGE_KEY)
+        if isinstance(language, str) and language.strip():
+            request_options[STT_LANGUAGE_KEY] = language.strip()
+        request_options.update(
+            {key: value for key, value in extra.items() if key not in STT_REQUEST_CONTROL_EXTRA_KEYS}
+        )
+
+    serialized: dict[str, Any] = {}
+    for key, value in request_options.items():
+        for field_name, field_value in _flatten_multipart_field(key, value):
+            existing = serialized.get(field_name)
+            if existing is None:
+                serialized[field_name] = field_value
+            elif isinstance(existing, list):
+                existing.append(field_value)
+            else:
+                serialized[field_name] = [existing, field_value]
+    return serialized
+
+
+def _stt_validation_response_is_compatible(response: Any, extra: dict[str, Any] | None) -> bool:
+    """Check that the probe response has the shape consumed at runtime."""
+    response_format = extra.get("response_format") if extra else None
+    if response_format in _STT_TEXT_RESPONSE_FORMATS:
+        return isinstance(response.text, str)
+    try:
+        payload = response.json()
+    except (TypeError, ValueError):
+        return False
+    return isinstance(payload, Mapping) and isinstance(payload.get("text"), str)
 
 
 def _slug(model_name: str) -> str:
@@ -114,12 +204,27 @@ class ModelEndpointService:
         model_endpoint_repo: ModelEndpointRepository,
         config: Settings,
         partition_service: Any = None,
+        preset_service: Any = None,
+        prompt_service: Any = None,
         client_caches: dict[str, dict[str, Any]] | None = None,
     ) -> None:
         self._repo = model_endpoint_repo
         self._config = config
         self._partition_service = partition_service
+        self._preset_service = preset_service
+        self._prompt_service = prompt_service
         self._client_caches: dict[str, dict[str, Any]] = client_caches or {}
+
+    async def _resolve_stt_validation_prompt(self) -> str | None:
+        """Resolve the same managed prompt used by runtime transcription."""
+        if self._prompt_service is None:
+            return None
+        try:
+            prompt = await self._prompt_service.resolve_prompt("asr_transcription")
+        except Exception as exc:  # noqa: BLE001 - match runtime's provider-native fallback
+            logger.bind(error=str(exc)).warning("STT validation prompt resolution failed")
+            return None
+        return prompt.strip() if prompt and prompt.strip() else None
 
     # ------------------------------------------------------------------
     # Startup lifecycle
@@ -200,7 +305,16 @@ class ModelEndpointService:
                 created_at=now,
                 updated_at=now,
             )
-            await self._repo.create(row)
+            try:
+                await self._repo.create(row)
+            except ValidationError as exc:
+                if exc.status_code != 409:
+                    raise
+                # Another replica can seed the same empty endpoint type
+                # between our read above and this insert. The winner's row is
+                # the desired default, so losing that race must not fail boot.
+                logger.info(f"Default {model_type} endpoint was seeded concurrently; skipping.")
+                continue
             logger.info(f"Seeded default {model_type} endpoint '{row.name}'.")
 
     async def _sync_env_managed(self, row: ModelEndpointRow, model_type: str, data: dict[str, Any]) -> None:
@@ -291,6 +405,22 @@ class ModelEndpointService:
                 "timeout": s.reranker.timeout,
                 "extra": _with_api_key({"implementation": s.reranker.provider}, s.reranker.api_key),
             },
+            "stt": {
+                # Keep the existing TRANSCRIBER_* configuration as the source
+                # for the first seed, so upgrades preserve a working Whisper,
+                # MOSS, or other OpenAI-compatible transcription setup.
+                "endpoint": s.loader.transcriber.base_url,
+                "model_name": s.loader.transcriber.model_name,
+                # ``batch_size`` is the common registry column; for STT it is
+                # the per-worker concurrent-transcription limit used by
+                # OpenAIAudioClient.
+                "batch_size": s.loader.transcriber.max_concurrent_chunks,
+                "timeout": s.loader.transcriber.timeout,
+                "extra": _with_api_key(
+                    {},
+                    None if s.loader.transcriber.api_key in _PLACEHOLDER_API_KEYS else s.loader.transcriber.api_key,
+                ),
+            },
         }
 
     async def _backfill_sampling_params(self, rows: list[ModelEndpointRow], llm_cfg: Any) -> None:
@@ -329,6 +459,7 @@ class ModelEndpointService:
             if bucket is None:
                 continue
             cfg = ModelEndpointConfig(
+                name=row.name,
                 endpoint=row.endpoint,
                 model_name=row.model_name,
                 batch_size=row.batch_size,
@@ -343,7 +474,7 @@ class ModelEndpointService:
             buckets[model_type]["default"] = default_cfg
 
         models = self._config.models
-        for attr in ("embedder", "reranker", "llm", "vlm"):
+        for attr in ("embedder", "reranker", "llm", "vlm", "stt"):
             target: dict = getattr(models, attr)
             target.clear()
             target.update(buckets[attr])
@@ -354,6 +485,7 @@ class ModelEndpointService:
             n_llm=len(buckets["llm"]),
             n_reranker=len(buckets["reranker"]),
             n_vlm=len(buckets["vlm"]),
+            n_stt=len(buckets["stt"]),
         )
 
     # ------------------------------------------------------------------
@@ -396,6 +528,29 @@ class ModelEndpointService:
         Pass ``new_name=`` to rename. After any change the in-memory config is
         reloaded and the stale cached client instance is evicted so the next
         request builds a fresh client against the updated config.
+
+        A rename also cascades to every stored reference — ``partitions.embedder``
+        / ``partitions.chat_llm`` and endpoint-name fields embedded in
+        ``pipeline_presets.config`` — inside the repo's own rename transaction
+        (see ``PgModelEndpointRepository.rename``, #770). Those writes are
+        invisible until the referencing services reload their in-memory caches,
+        which is why a rename also refreshes presets then partitions here —
+        the same order ``PresetService.update_preset`` uses, since partition
+        resolution reads the presets dict.
+
+        Both reload calls ``await``, so a concurrent request can run between
+        them — and the DB rename has *already* committed by that point. Without
+        ``_alias_renamed_name``, a request landing in that window could resolve
+        a partition/preset that the cascade already repointed at ``new_name``
+        against a registry that (until the final ``load_all()`` below) still
+        only knows ``name`` — a bare ``KeyError``. The alias makes both ``name``
+        and ``new_name`` resolve immediately, built from the row this call just
+        wrote — not whatever the in-memory bucket held before it — so a rename
+        combined with a field change (e.g. a new ``endpoint``) aliases the
+        *updated* config, not a stale pre-update one. That also covers a reload
+        call above raising: the registry stays queryable under both names,
+        correctly, instead of the update's failure leaving it stuck on a stale
+        config until process restart.
         """
         existing = await self._repo.get(name, model_type)
         if existing is None:
@@ -423,6 +578,30 @@ class ModelEndpointService:
             await self._repo.rename(name, model_type, new_name)
             effective_name = new_name
             renamed_from = name
+            self._alias_renamed_name(model_type, name, new_name, updated or existing)
+            # A cached *client instance* under either name would otherwise survive
+            # this alias — the factory checks its cache before consulting the
+            # config registry, so a stale pre-rename/pre-update client would keep
+            # serving until the eviction at the end of this method, which a
+            # reload call below raising would skip entirely. The config alias
+            # above is already fresh, so evicting now is safe: anything rebuilt
+            # from either name resolves through the up-to-date config, not stale
+            # cached state.
+            self._invalidate_client_cache(model_type, name)
+            self._invalidate_client_cache(model_type, new_name)
+            # `refresh_if_stale` reloads partitions itself, but only when the
+            # preset revision moved. A rename cascades into `pipeline_presets`
+            # (and so bumps the revision) only for the model types listed in
+            # model_endpoint_repo's preset-key maps — `embedder` is in neither,
+            # yet `partitions.embedder` still holds the old name. Fall back to a
+            # direct partition reload whenever the revision did not move, or that
+            # rename leaves every partition pointing at a name the registry no
+            # longer knows until the process restarts.
+            preset_refreshed = False
+            if self._preset_service is not None:
+                preset_refreshed = await self._preset_service.refresh_if_stale()
+            if not preset_refreshed and self._partition_service is not None:
+                await self._partition_service.load_partitions()
 
         if promote_to_default:
             # Clears any prior default and sets this row in one transaction, then
@@ -447,6 +626,14 @@ class ModelEndpointService:
 
         Raises 404 if not found, 422 if it is the last endpoint of its type
         (would leave components with no fallback).
+
+        Deleting an endpoint a preset still names would otherwise leave a
+        dangling reference: indexation resolves an explicit selection strictly,
+        so every audio upload on a preset whose ``stt`` names the deleted
+        endpoint would fail permanently, with nothing surfaced here. The repo
+        clears those selections in the delete's own transaction (see
+        ``_clear_preset_references``), returning the preset to the default
+        fallback; the cache reloads below make that visible to this replica.
         """
         # The last-endpoint guard and the survivor/default choice are made INSIDE
         # the repo's locked transaction (not from a stale snapshot here), so
@@ -464,6 +651,16 @@ class ModelEndpointService:
         # config and re-caches it; evicting after the reload drops any such stale
         # client so the next request rebuilds from the fresh config.
         await self.load_all()
+        # The repo cleared every preset selection naming the deleted endpoint, so
+        # the in-memory preset/partition configs still carry it until they are
+        # re-read. Without this, indexation keeps resolving the dead name and
+        # fails strictly (audio uploads on that preset) even though the DB has
+        # already restored the default fallback.
+        preset_refreshed = False
+        if self._preset_service is not None:
+            preset_refreshed = await self._preset_service.refresh_if_stale()
+        if not preset_refreshed and self._partition_service is not None:
+            await self._partition_service.load_partitions()
         self._invalidate_client_cache(model_type, name)
         if promoted is not None:
             # The deleted endpoint was the default; its 'default' alias client is now stale.
@@ -489,11 +686,15 @@ class ModelEndpointService:
         model_name: str | None = None,
         *,
         api_key: str | None = None,
+        model_type: str | None = None,
+        timeout: float | None = None,
+        extra: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Probe ``{url}/models`` to verify the endpoint is reachable and serving.
+        """Probe an endpoint's model list and, for STT, transcription route.
 
         Returns a dict with ``reachable``, ``model_found``, ``models_served``,
-        and ``detail`` keys — suitable as a ``ValidateEndpointResponse`` payload.
+        ``transcription_supported``, and ``detail`` keys — suitable as a
+        ``ValidateEndpointResponse`` payload.
         """
         import httpx  # local import to avoid hard dep in tests that mock it
 
@@ -501,8 +702,14 @@ class ModelEndpointService:
             "reachable": False,
             "model_found": None,
             "models_served": None,
+            "transcription_supported": None,
             "detail": None,
         }
+        normalized_model_name = model_name.strip() if model_name is not None else None
+        if model_type == "stt" and not normalized_model_name:
+            result["transcription_supported"] = False
+            result["detail"] = "A model name is required to validate audio transcription."
+            return result
         try:
             parsed = urlsplit(url)
         except ValueError:
@@ -514,24 +721,111 @@ class ModelEndpointService:
         if parsed.username or parsed.password:
             result["detail"] = "Endpoint URL must not include credentials."
             return result
-        models_url = url.rstrip("/") + "/models"
+        base_url = url.rstrip("/")
+        models_url = base_url + "/models"
         headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
         try:
             async with httpx.AsyncClient(timeout=5.0, headers=headers, follow_redirects=False) as client:
-                resp = await client.get(models_url)
-            result["reachable"] = True
-            if resp.status_code == 200:
-                data = resp.json()
-                served = [m["id"] for m in data.get("data", []) if "id" in m]
-                result["models_served"] = served
-                if model_name is not None:
-                    result["model_found"] = model_name in served
-            else:
-                result["detail"] = f"HTTP {resp.status_code}"
+                try:
+                    resp = await client.get(models_url)
+                except httpx.TimeoutException:
+                    if model_type != "stt":
+                        raise
+                    # Model discovery is intentionally short. STT validation
+                    # can still be proven by the real audio request below.
+                    result["detail"] = "Model list request timed out."
+                else:
+                    if resp.status_code in {401, 403} and model_type == "stt":
+                        result["transcription_supported"] = False
+                        result["detail"] = (
+                            f"Model list request was rejected with HTTP {resp.status_code}. Check the API key."
+                        )
+                        return result
+                    result["reachable"] = True
+                    if resp.status_code == 200:
+                        try:
+                            data = resp.json()
+                            models = data.get("data") if isinstance(data, dict) else None
+                            if not isinstance(models, list):
+                                raise ValueError("missing list-valued data field")
+                        except (TypeError, ValueError):
+                            # A reachable endpoint may expose a non-standard or
+                            # broken /models response while still implementing the
+                            # audio route. Do not let that prevent the STT probe.
+                            result["detail"] = "Endpoint returned an invalid model list."
+                        else:
+                            served = [
+                                item["id"]
+                                for item in models
+                                if isinstance(item, dict) and isinstance(item.get("id"), str)
+                            ]
+                            result["models_served"] = served
+                            if normalized_model_name is not None:
+                                result["model_found"] = normalized_model_name in served
+                    else:
+                        result["detail"] = f"Model list returned HTTP {resp.status_code}."
+                if model_type == "stt":
+                    # The UI already rejects an unavailable model, so avoid a
+                    # needless upload and inference request in that case.
+                    if result["model_found"] is False:
+                        return result
+                    prompt = await self._resolve_stt_validation_prompt()
+                    # A well-formed request is required to validate credentials:
+                    # some providers reject a missing file/model with 400/422
+                    # before they authenticate the request.
+                    transcription_response = await client.post(
+                        base_url + "/audio/transcriptions",
+                        data=_stt_validation_form_data(normalized_model_name, extra, prompt),
+                        files={
+                            "file": (
+                                "openrag-stt-validation.wav",
+                                _STT_VALIDATION_WAV,
+                                "audio/wav",
+                            )
+                        },
+                        follow_redirects=True,
+                        timeout=httpx.Timeout(
+                            connect=5.0,
+                            read=timeout if timeout is not None else _STT_VALIDATION_TIMEOUT_SECONDS,
+                            write=5.0,
+                            pool=5.0,
+                        ),
+                    )
+                    result["reachable"] = True
+                    transcription_status = transcription_response.status_code
+                    if 200 <= transcription_status < 300:
+                        if _stt_validation_response_is_compatible(transcription_response, extra):
+                            result["transcription_supported"] = True
+                        else:
+                            result["transcription_supported"] = False
+                            result["detail"] = "Transcription endpoint returned an incompatible response."
+                    elif transcription_status in {401, 403}:
+                        result["transcription_supported"] = False
+                        result["detail"] = (
+                            f"Transcription capability check was rejected with HTTP {transcription_status}. "
+                            "Check the API key."
+                        )
+                    elif transcription_status in {404, 405}:
+                        result["transcription_supported"] = False
+                        result["detail"] = "Endpoint does not support OpenAI-compatible audio transcriptions."
+                    elif 300 <= transcription_status < 400 or transcription_status >= 500:
+                        result["transcription_supported"] = False
+                        result["detail"] = f"Transcription capability check returned HTTP {transcription_status}."
+                    else:
+                        result["transcription_supported"] = False
+                        result["detail"] = f"Transcription validation request returned HTTP {transcription_status}."
         except httpx.ConnectError as exc:
-            result["detail"] = f"Connection error: {exc}"
+            if result["reachable"] and model_type == "stt":
+                result["transcription_supported"] = False
+                result["detail"] = f"Transcription capability check failed: {exc}"
+            else:
+                result["detail"] = f"Connection error: {exc}"
         except httpx.TimeoutException:
-            result["detail"] = "Connection timed out"
+            if result["reachable"] and model_type == "stt":
+                result["transcription_supported"] = False
+                result["detail"] = "Transcription capability check timed out"
+            else:
+                result["detail"] = "Connection timed out"
         except Exception as exc:  # noqa: BLE001
             result["detail"] = str(exc)
         return result
@@ -539,6 +833,45 @@ class ModelEndpointService:
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
+
+    def _alias_renamed_name(self, model_type: str, old_name: str, new_name: str, row: ModelEndpointRow) -> None:
+        """Make both ``old_name`` and ``new_name`` resolve to *row* before any reload runs.
+
+        Runs synchronously right after the rename ``await`` returns — no
+        further ``await`` happens before this executes, so no concurrent
+        request can observe the DB already renamed while the registry still
+        only answers to ``old_name``.
+
+        Built from ``row`` — the just-written DB state — rather than copying
+        whatever the in-memory bucket currently holds under ``old_name``: a
+        rename can land in the same call as a field update (e.g. a new
+        ``endpoint`` URL), applied to the DB *before* this runs, so the stale
+        in-memory entry would alias both names to the pre-update config. If a
+        reload below then raises, that staleness would never get corrected
+        by the final ``load_all()`` this call never reaches — the registry
+        would keep serving the old endpoint under the new (DB-authoritative)
+        name until process restart. The next full ``load_all()`` (below, or
+        from any later CRUD call) rebuilds the bucket straight from DB and
+        drops the ``old_name`` entry on its own.
+        """
+        bucket: dict[str, Any] | None = getattr(self._config.models, model_type, None)
+        if bucket is None:
+            return
+        cfg = ModelEndpointConfig(
+            # ``row`` predates the rename (it is the pre-rename read, or the
+            # update applied before it), so ``row.name`` is still ``old_name``.
+            # The registry identity after the rename is ``new_name`` — and it is
+            # what keys the STT limiter/client caches — so name the config for
+            # what the DB now calls it, not for the alias it is also filed under.
+            name=new_name,
+            endpoint=row.endpoint,
+            model_name=row.model_name,
+            batch_size=row.batch_size,
+            timeout=row.timeout,
+            extra=row.extra,
+        )
+        bucket[old_name] = cfg
+        bucket[new_name] = cfg
 
     def _invalidate_client_cache(self, model_type: str, name: str) -> None:
         """Evict ``name`` from the component-factory cache for ``model_type``."""

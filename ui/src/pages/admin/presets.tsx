@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { Plus, Trash2, Pencil, Eye } from "lucide-react";
+import { NewBadge } from "@/components/shared/new-badge";
 import {
   listPresets,
   createPreset,
@@ -10,11 +11,12 @@ import {
   getPresetOptions,
 } from "@/lib/api/presets";
 import type { PresetResponse, PresetType } from "@/lib/api/presets";
-import { listPrompts } from "@/lib/api/prompts";
+import { listAllPrompts } from "@/lib/api/prompts";
 import type { PromptResponse } from "@/lib/api/prompts";
 import { listModelEndpoints, pickDefaultEndpoint } from "@/lib/api/models";
 import { PageHeader } from "@/components/shared/page-header";
 import { ConfirmDialog } from "@/components/shared/confirm-dialog";
+import { useNewOptions } from "@/components/shared/new-badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -40,11 +42,18 @@ import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { formatDate, intOr, numOr } from "@/lib/utils";
 import {
+  PROMPT_DEFAULT_OPTION,
+  promptOptionToName,
+  promptOptionValue,
+  promptSelectValue,
+} from "@/lib/prompt-meta";
+import {
   type Config,
   configGet,
   configSet,
   applyParsingStrategyChange,
   PARSING_STRATEGY_INHERIT,
+  STT_ENDPOINT_DEFAULT_OPTION,
 } from "./preset-config";
 
 const PRESET_TYPES = ["indexation", "retrieval"] as const;
@@ -250,20 +259,24 @@ function IndexationPresetForm({
   chunkingStrategies,
   parsingStrategies,
   vlms,
+  stts,
   llms,
   prompts,
   defaultLlm,
   defaultVlm,
+  defaultStt,
 }: {
   config: Config;
   onChange: (c: Config) => void;
   chunkingStrategies: string[];
   parsingStrategies: string[];
   vlms: string[];
+  stts: string[];
   llms: string[];
   prompts: PromptResponse[];
   defaultLlm?: string;
   defaultVlm?: string;
+  defaultStt?: string;
 }) {
   const set = (key: string, value: unknown) => onChange(configSet(config, key, value));
 
@@ -287,6 +300,11 @@ function IndexationPresetForm({
 
   const promptsByType = (type: string) => prompts.filter((p) => p.prompt_type === type);
 
+  // Keyed "<group>.<value>", so registering an option in whats-new.ts is the
+  // whole change. The values come from the API, so a strategy this backend
+  // does not offer renders no option and therefore no marker.
+  const chunkingNew = useNewOptions("chunking", chunkingStrategies);
+
   return (
     <div className="space-y-5">
       {/* Chunking */}
@@ -294,7 +312,13 @@ function IndexationPresetForm({
         <h4 className="text-sm font-medium">Chunking</h4>
         <div className={String(configGet(chunking as Config, "name", "")) !== "markdown_section" ? "grid grid-cols-[3fr_1fr_1fr] gap-3" : "max-w-xs"}>
           <div className="space-y-1.5">
-            <Label className="text-xs">Strategy</Label>
+            {/* The marker sits on the label as well as on the option: one
+                visible only inside an opened dropdown aids no discovery, since
+                the reader has to be looking at it already. */}
+            <Label className="flex items-center gap-1.5 text-xs">
+              Strategy
+              {chunkingNew.dot}
+            </Label>
             <Select
               value={configGet(chunking as Config, "name", "")}
               onValueChange={(v) => setChunking("name", v)}
@@ -304,8 +328,12 @@ function IndexationPresetForm({
               </SelectTrigger>
               <SelectContent>
                 {chunkingStrategies.map((s) => (
-                  <SelectItem key={s} value={s}>
-                    {s}
+                  // textValue keeps the marker out of Radix's typeahead text.
+                  <SelectItem key={s} value={s} textValue={s}>
+                    <span className="flex items-center gap-1.5">
+                      {s}
+                      {chunkingNew.badgeFor(s)}
+                    </span>
                   </SelectItem>
                 ))}
               </SelectContent>
@@ -346,24 +374,60 @@ function IndexationPresetForm({
       {/* Parsing */}
       <section className="space-y-3">
         <h4 className="text-sm font-medium">Parsing</h4>
-        <div className="space-y-1.5">
-          <Label className="text-xs">Strategy</Label>
-          <Select
-            value={configGet(config, "parsing_strategy", PARSING_STRATEGY_INHERIT)}
-            onValueChange={(v) => onChange(applyParsingStrategyChange(config, v))}
-          >
-            <SelectTrigger size="sm">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value={PARSING_STRATEGY_INHERIT}>Default (inherit global loader)</SelectItem>
-              {parsingStrategies.map((s) => (
-                <SelectItem key={s} value={s}>
-                  {s}
+        <div className="grid gap-3 sm:grid-cols-2">
+          <div className="min-w-0 space-y-1.5">
+            <Label className="text-xs">Strategy</Label>
+            <Select
+              value={configGet(config, "parsing_strategy", PARSING_STRATEGY_INHERIT)}
+              onValueChange={(v) => onChange(applyParsingStrategyChange(config, v))}
+            >
+              <SelectTrigger size="sm" className="w-full min-w-0">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value={PARSING_STRATEGY_INHERIT}>Default (inherit global loader)</SelectItem>
+                {parsingStrategies.map((s) => (
+                  <SelectItem key={s} value={s}>
+                    {s}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="min-w-0 space-y-1.5">
+            <Label className="flex items-center gap-1.5 text-xs">
+              STT endpoint
+              <NewBadge feature="models.stt" />
+            </Label>
+            <Select
+              value={configGet(config, "stt", STT_ENDPOINT_DEFAULT_OPTION)}
+              onValueChange={(v) => set("stt", v === STT_ENDPOINT_DEFAULT_OPTION ? null : v)}
+            >
+              <SelectTrigger size="sm" className="w-full min-w-0">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value={STT_ENDPOINT_DEFAULT_OPTION}>
+                  {defaultStt ? `Use default (${defaultStt})` : "Use default"}
                 </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+                {stts.map((name) => (
+                  <SelectItem key={name} value={name}>
+                    {name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="min-w-0 sm:col-span-2">
+            <PromptSelect
+              label="Transcription prompt"
+              feature="prompts.asr_transcription"
+              prompts={promptsByType("asr_transcription")}
+              value={configGet(config, "asr_transcription_prompt_name", "")}
+              onChange={(v) => set("asr_transcription_prompt_name", v || null)}
+              selectTriggerClassName="w-full min-w-0"
+            />
+          </div>
         </div>
       </section>
 
@@ -387,9 +451,9 @@ function IndexationPresetForm({
           onModelChange={(v) => set("vlm", v)}
           models={vlms}
           promptLabel="Caption prompt"
-          promptValue={configGet(config, "vlm_caption_prompt_name", "")}
-          onPromptChange={(v) => set("vlm_caption_prompt_name", v || null)}
-          prompts={promptsByType("vlm_caption")}
+          promptValue={configGet(config, "image_captioning_prompt_name", "")}
+          onPromptChange={(v) => set("image_captioning_prompt_name", v || null)}
+          prompts={promptsByType("image_captioning")}
         />
         <FeatureToggle
           label="Contextualization"
@@ -402,7 +466,7 @@ function IndexationPresetForm({
           promptLabel="Prompt"
           promptValue={configGet(config, "contextualization_prompt_name", "")}
           onPromptChange={(v) => set("contextualization_prompt_name", v || null)}
-          prompts={promptsByType("contextualization")}
+          prompts={promptsByType("chunk_contextualizer")}
         />
         <FeatureToggle
           label="Topic tagging"
@@ -416,6 +480,10 @@ function IndexationPresetForm({
           modelValue={configGet(config, "topic_tagging_llm", "")}
           onModelChange={(v) => set("topic_tagging_llm", v)}
           models={llms}
+          promptLabel="Prompt"
+          promptValue={configGet(config, "topic_tagging_prompt_name", "")}
+          onPromptChange={(v) => set("topic_tagging_prompt_name", v || null)}
+          prompts={promptsByType("topic_tagger")}
           numberLabel="Max tags"
           numberValue={configGet(config, "max_topic_tags", 7)}
           onNumberChange={(v) => set("max_topic_tags", v)}
@@ -512,23 +580,20 @@ function FeatureToggle({
 }) {
   const handleToggle = (on: boolean) => {
     onToggle(on);
-    if (on) {
-      // Auto-select when only one option available
-      if (models.length === 1 && !modelValue) onModelChange(models[0]);
-      if (prompts?.length === 1 && onPromptChange && !promptValue) onPromptChange(prompts[0].name);
-    }
+    // Auto-select the sole model, but never the sole prompt: an empty prompt
+    // value is a real choice ("use the type's global default"), and after
+    // seeding a type usually has exactly one prompt — the default itself.
+    // Auto-selecting it would pin that *name* into the preset just by opening
+    // and saving, so promoting a different global default later would silently
+    // stop affecting this preset. Models have no such fallback, so they keep it.
+    if (on && models.length === 1 && !modelValue) onModelChange(models[0]);
   };
 
-  // Auto-select if toggled on and model/prompt list resolves to single item later
+  // Same for a list that resolves to a single item after the query settles.
   useEffect(() => {
     if (!enabled) return;
     if (models.length === 1 && !modelValue) onModelChange(models[0]);
   }, [enabled, models, modelValue, onModelChange]);
-
-  useEffect(() => {
-    if (!enabled || !prompts || !onPromptChange) return;
-    if (prompts.length === 1 && !promptValue) onPromptChange(prompts[0].name);
-  }, [enabled, prompts, promptValue, onPromptChange]);
 
   return (
     <div className="space-y-2">
@@ -575,17 +640,17 @@ function FeatureToggle({
                 <PromptViewButton prompts={prompts} selectedName={promptValue || ""} />
               </div>
               <Select
-                value={promptValue || "__active__"}
-                onValueChange={(v) => onPromptChange(v === "__active__" ? "" : v)}
+                value={promptSelectValue(promptValue)}
+                onValueChange={(v) => onPromptChange(promptOptionToName(v))}
               >
                 <SelectTrigger size="sm">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="__active__">Active prompt</SelectItem>
+                  <SelectItem value={PROMPT_DEFAULT_OPTION}>Use default</SelectItem>
                   {prompts.map((p) => (
-                    <SelectItem key={p.id} value={p.name}>
-                      {p.name}{p.is_default ? " (active)" : ""}
+                    <SelectItem key={p.id} value={promptOptionValue(p.name)}>
+                      {p.name}{p.is_default ? " (default)" : ""}
                     </SelectItem>
                   ))}
                 </SelectContent>
@@ -598,6 +663,50 @@ function FeatureToggle({
   );
 }
 
+/* ---------- Standalone prompt picker (retrieval hyde / multi_query) ---------- */
+
+function PromptSelect({
+  label,
+  prompts,
+  value,
+  onChange,
+  selectTriggerClassName,
+  feature,
+}: {
+  label: string;
+  prompts: PromptResponse[];
+  value: string;
+  onChange: (v: string) => void;
+  selectTriggerClassName?: string;
+  feature?: string;
+}) {
+  return (
+    <div className="space-y-1.5">
+      <div className="flex items-center gap-1">
+        <Label className="text-xs">{label}</Label>
+        {feature && <NewBadge feature={feature} />}
+        {prompts.length > 0 && <PromptViewButton prompts={prompts} selectedName={value} />}
+      </div>
+      <Select
+        value={promptSelectValue(value)}
+        onValueChange={(v) => onChange(promptOptionToName(v))}
+      >
+        <SelectTrigger size="sm" className={selectTriggerClassName}>
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value={PROMPT_DEFAULT_OPTION}>Use default</SelectItem>
+          {prompts.map((p) => (
+            <SelectItem key={p.id} value={promptOptionValue(p.name)}>
+              {p.name}{p.is_default ? " (default)" : ""}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+    </div>
+  );
+}
+
 /* ---------- Retrieval form ---------- */
 
 function RetrievalPresetForm({
@@ -606,16 +715,19 @@ function RetrievalPresetForm({
   retrievalPipelines,
   rerankers,
   llms,
+  prompts,
 }: {
   config: Config;
   onChange: (c: Config) => void;
   retrievalPipelines: string[];
   rerankers: string[];
   llms: string[];
+  prompts: PromptResponse[];
 }) {
   const set = (key: string, value: unknown) => onChange(configSet(config, key, value));
   const pipelineType: string = configGet(config, "type", "single");
   const [advancedOpen, setAdvancedOpen] = useState(false);
+  const promptsByType = (type: string) => prompts.filter((p) => p.prompt_type === type);
 
   return (
     <div className="space-y-5">
@@ -633,6 +745,12 @@ function RetrievalPresetForm({
             </SelectContent>
           </Select>
         </div>
+        <PromptSelect
+          label="Query contextualizer prompt"
+          prompts={promptsByType("query_contextualizer")}
+          value={configGet(config, "query_contextualizer_prompt_name", "")}
+          onChange={(v) => set("query_contextualizer_prompt_name", v || null)}
+        />
         {pipelineType !== "single" && (
           <div className="space-y-1.5">
             <Label className="text-xs">Expansion LLM</Label>
@@ -653,6 +771,22 @@ function RetrievalPresetForm({
               </SelectContent>
             </Select>
           </div>
+        )}
+        {pipelineType === "hyde" && (
+          <PromptSelect
+            label="HyDE prompt"
+            prompts={promptsByType("hyde")}
+            value={configGet(config, "hyde_prompt_name", "")}
+            onChange={(v) => set("hyde_prompt_name", v || null)}
+          />
+        )}
+        {pipelineType === "multiQuery" && (
+          <PromptSelect
+            label="Multi-query prompt"
+            prompts={promptsByType("multi_query")}
+            value={configGet(config, "multi_query_prompt_name", "")}
+            onChange={(v) => set("multi_query_prompt_name", v || null)}
+          />
         )}
         <div className="space-y-1.5">
           <Label className="text-xs">top_k (vector retrieval count)</Label>
@@ -837,6 +971,11 @@ function PresetDialog({
     queryFn: () => listModelEndpoints("vlm"),
     enabled: open && presetType === "indexation",
   });
+  const { data: sttData } = useQuery({
+    queryKey: ["model-endpoints", "stt"],
+    queryFn: () => listModelEndpoints("stt"),
+    enabled: open && presetType === "indexation",
+  });
   const { data: rerankerData } = useQuery({
     queryKey: ["model-endpoints", "reranker"],
     queryFn: () => listModelEndpoints("reranker"),
@@ -845,8 +984,10 @@ function PresetDialog({
 
   const llms = (llmData ?? []).map((e) => e.name);
   const vlms = (vlmData ?? []).map((e) => e.name);
+  const stts = (sttData ?? []).map((e) => e.name);
   const defaultLlm = pickDefaultEndpoint(llmData)?.name;
   const defaultVlm = pickDefaultEndpoint(vlmData)?.name;
+  const defaultStt = pickDefaultEndpoint(sttData)?.name;
   // The preset's `reranker` field is a reranker *endpoint name* (resolved by the
   // backend's reranker factory), not a provider type — so list the configured
   // reranker model endpoints, like the embedder/LLM pickers.
@@ -854,10 +995,10 @@ function PresetDialog({
 
   const { data: promptData } = useQuery({
     queryKey: ["prompts-for-presets"],
-    queryFn: () => listPrompts({ limit: 200 }),
-    enabled: open && presetType === "indexation",
+    queryFn: () => listAllPrompts(),
+    enabled: open,
   });
-  const allPrompts = promptData?.prompts ?? [];
+  const allPrompts = promptData ?? [];
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -889,10 +1030,12 @@ function PresetDialog({
               chunkingStrategies={options?.chunking_strategies ?? []}
               parsingStrategies={options?.parsing_strategies ?? ["marker", "pymupdf"]}
               vlms={vlms}
+              stts={stts}
               llms={llms}
               prompts={allPrompts}
               defaultLlm={defaultLlm}
               defaultVlm={defaultVlm}
+              defaultStt={defaultStt}
             />
           ) : (
             <RetrievalPresetForm
@@ -901,6 +1044,7 @@ function PresetDialog({
               retrievalPipelines={options?.retrieval_types ?? []}
               rerankers={rerankers}
               llms={llms}
+              prompts={allPrompts}
             />
           )}
 

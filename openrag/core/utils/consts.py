@@ -51,3 +51,13 @@ def strip_protected_metadata(metadata: dict | None) -> tuple[dict, list[str]]:
     for key in removed:
         del md[key]
     return md, removed
+
+
+# The server-computed keys ``IndexingService._build_metadata`` merges into
+# upload metadata. The indexing-status callback excludes exactly these before
+# echoing metadata to a caller-supplied URL. Keep in sync with
+# ``_build_metadata`` — enforced by
+# ``test_build_metadata_only_adds_keys_in_upload_metadata_server_keys``.
+UPLOAD_METADATA_SERVER_KEYS: frozenset[str] = frozenset(
+    {"source", "filename", "original_filename", "file_size", "file_id", "content_sha256"}
+)

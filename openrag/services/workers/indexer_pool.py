@@ -3,13 +3,18 @@ from __future__ import annotations
 import asyncio
 import threading
 import time
+import traceback
+from contextvars import ContextVar
 from types import SimpleNamespace
 from typing import Any
 
 import ray
 from core.config.model_endpoints import CONTROL_EXTRA_KEYS
 from core.models.catalog import CONTENT_CLAIM_TOKEN_METADATA_KEY
-from services.workers.indexer_actor import IndexerWorker, delete_uploaded_file
+from core.utils.exceptions import NotFoundError
+from services.workers.indexer_actor import IndexerWorker, _display_filename, delete_uploaded_file
+from services.workers.indexing_callback import send_indexing_callback
+from services.workers.ray_utils import retry_idempotent_ray_actor_method
 
 from openrag.core.config.root import Settings
 
@@ -18,12 +23,46 @@ from openrag.core.config.root import Settings
 # of indexing throughput.
 _MODEL_REGISTRY_TTL_SECONDS = 60.0
 _CONTENT_CLAIM_RENEW_INTERVAL_SECONDS = 60 * 60
+_WORKER_REF_REGISTRATION_TIMEOUT_SECONDS = 60.0
+_WORKER_REF_REGISTRATION_POLL_SECONDS = 0.05
+_REJECTED_SUBMISSION_ERROR = "Indexer worker submission was rejected before the worker started."
+_MISSING_WORKER_REF_ERROR = "Indexer worker did not receive a registered task reference before starting."
 # Named detached actors survive API rolling deployments. Keep the dispatcher
 # and workers on the same protocol generation whenever their remote contract or
 # cross-process indexing semantics change, so new replicas cannot attach to a
 # partially compatible actor fleet left by the previous release.
-_INDEXER_ACTOR_PROTOCOL_VERSION = "v2"
+# v4: process_file gained callback_url/callback_token; a v3 worker rejects them.
+# v5 (develop): worker-ref-registration wait + TSM set_state fencing semantics.
+# v6 (this branch): merge of v4 + v5.
+# v6 (develop, independently): STT-preset-aware registry hydration + the
+# _active_indexation_config contextvar — a different contract that happened
+# to reuse the same version string on its own branch.
+# v7: merge of both v6 lineages — neither alone is compatible with this one.
+_INDEXER_ACTOR_PROTOCOL_VERSION = "v7"
 _INDEXER_POOL_DISPATCHER_ACTOR_NAME = f"IndexerPoolDispatcher-{_INDEXER_ACTOR_PROTOCOL_VERSION}"
+
+
+def _explicit_indexation_selection(config: dict[str, Any] | None, key: str) -> str | None:
+    """Return a nonblank named resource selected by an indexation preset."""
+    value = config.get(key) if config is not None else None
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def _is_usable_stt_endpoint(endpoint: Any) -> bool:
+    """Whether a resolved STT endpoint carries what a transcription request needs.
+
+    ``OpenAIAudioClient`` treats an endpoint missing either field as *unset* and
+    silently degrades to the ``TRANSCRIBER_*`` fallback, dropping the endpoint's
+    ``extra`` request options along with its model. For an explicit preset
+    selection that means the file succeeds while a different provider produces
+    the transcript — the exact silent substitution a named selection exists to
+    prevent, and worse than a stale name because nothing fails to surface it.
+    Rows written by ``seed_defaults`` bypass the API's ``validate_stt_fields``
+    guard, so an empty ``TRANSCRIBER_MODEL`` can persist such a row.
+    """
+    return bool(
+        (getattr(endpoint, "endpoint", "") or "").strip() and (getattr(endpoint, "model_name", "") or "").strip()
+    )
 
 
 def _indexer_worker_actor_name(index: int) -> str:
@@ -47,7 +86,7 @@ class IndexerWorkerActor:
     of these and load-balances across them.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, namespace: str = "openrag") -> None:
         import services.inference.ollama_client  # noqa: F401
         import services.inference.vllm_client  # noqa: F401
         from core.config import load_config
@@ -62,9 +101,13 @@ class IndexerWorkerActor:
         )
         from services.workers.pipeline_builder import build_indexing_pipeline
 
+        self._namespace = namespace
         cfg = load_config()
-
-        parser = build_parser_dispatcher(cfg)
+        parser = build_parser_dispatcher(
+            cfg,
+            transcription_prompt_resolver=self._resolve_transcription_prompt,
+            transcription_endpoint_resolver=self._resolve_transcription_endpoint,
+        )
         parser_factory = _build_parser_factory(parser)
         vlm = build_caption_vlm(cfg)
         # Loaded unconditionally: a preset can caption through a *named* VLM
@@ -75,7 +118,7 @@ class IndexerWorkerActor:
         # degrades to None on any load failure, so there's no safety
         # trade-off in always calling it.
         caption_prompt = load_caption_prompt(cfg)
-        chunker = _build_chunker(cfg)
+        chunker = _build_chunker(cfg, _build_embedder_window_resolver(cfg)())
         embedder_factory = _build_embedder_factory(cfg)
         vlm_factory = _build_vlm_factory(cfg)
         contextualizer_factory = _build_contextualizer_factory(cfg)
@@ -93,7 +136,8 @@ class IndexerWorkerActor:
             embed_concurrency=embed_cfg.embed_concurrency,
         )
         self._vector_store = MilvusVectorStore(cfg.vectordb)
-        task_state_manager = ray.get_actor("TaskStateManager", namespace="openrag")
+        task_state_manager = ray.get_actor("TaskStateManager", namespace=self._namespace)
+        self._task_state_manager = task_state_manager
         pipeline = build_indexing_pipeline(
             parser=parser,
             chunker=chunker,
@@ -103,6 +147,7 @@ class IndexerWorkerActor:
             caption_prompt=caption_prompt,
             timeouts=_build_pipeline_timeouts(cfg),
             chunker_factory=_build_chunker_from_config,
+            embedder_window_resolver=_build_embedder_window_resolver(cfg),
             parser_factory=parser_factory,
             embedder_factory=embedder_factory,
             vlm_factory=vlm_factory,
@@ -125,21 +170,35 @@ class IndexerWorkerActor:
         # unpicklable). Created here, in the actor process, it is never pickled.
         self._logger = get_logger()
         self._cfg = cfg
+        # One actor can process several files concurrently, so the preset
+        # snapshot must stay task-local. Construct the ContextVar inside the
+        # worker process: a module-level instance makes Ray's actor class
+        # unpicklable and prevents the pool from starting.
+        self._active_indexation_config: ContextVar[dict[str, Any] | None] = ContextVar(
+            "active_indexation_config",
+            default=None,
+        )
         # Whether "default" resolves via global env/config fallbacks. This keeps
         # reload-on-miss from looping forever when no is_default row exists for a
         # type but the legacy config block can still serve the default endpoint.
+        transcriber_cfg = getattr(getattr(cfg, "loader", None), "transcriber", None)
         self._has_default_fallbacks = {
             "embedder": _global_embedder_endpoint_config(cfg) is not None,
             "llm": _global_llm_endpoint_config(cfg) is not None,
             "vlm": _global_vlm_endpoint_config(cfg) is not None,
+            "stt": bool(getattr(transcriber_cfg, "base_url", "") and getattr(transcriber_cfg, "model_name", "")),
         }
         self._has_default_fallback = self._has_default_fallbacks["llm"]
         self._model_endpoint_service: Any = None
+        self._prompt_service: Any = None
         self._registry_loaded_at: float | None = None
         self._last_miss_reload_at: float | None = None
         self._last_miss_reload_key: tuple[tuple[str, tuple[str, ...]], ...] | None = None
         self._registry_lock = asyncio.Lock()
         self._registry_reload_task: asyncio.Task[None] | None = None
+        # Held here too: a pre-flight failure below runs before the worker's own
+        # except block, so it must report its own terminal state and callback.
+        self._tsm = task_state_manager
         self._worker = IndexerWorker(
             pipeline=pipeline,
             task_state_manager=task_state_manager,
@@ -162,6 +221,76 @@ class IndexerWorkerActor:
                 return
             await self._catalog_store.initialize()
             self._catalog_initialized = True
+
+    def _get_prompt_service(self) -> Any:
+        if self._prompt_service is None:
+            from services.orchestrators.prompt_service import PromptService
+
+            self._prompt_service = PromptService(
+                prompt_repo=self._catalog_store.prompt_repo,
+                config=self._cfg,
+            )
+        return self._prompt_service
+
+    async def _resolve_transcription_prompt(self) -> str | None:
+        """Resolve the active preset's ASR prompt, else the type's global default.
+
+        The preset name is captured when the file is dispatched, matching the
+        endpoint and the other indexation-stage settings. Prompt content itself
+        stays live: ``resolve_prompt`` re-reads it, so an Admin UI edit applies to
+        the next transcription without recreating the long-lived parser client.
+        A selected prompt that no longer exists fails the file rather than
+        silently changing its transcription instructions.
+        """
+        selected_name = _explicit_indexation_selection(
+            self._active_indexation_config.get(),
+            "asr_transcription_prompt_name",
+        )
+        try:
+            if selected_name is not None:
+                return await self._get_prompt_service().resolve_prompt(
+                    "asr_transcription",
+                    names=[selected_name],
+                    strict_names=True,
+                )
+            return await self._get_prompt_service().resolve_prompt(
+                "asr_transcription",
+            )
+        except NotFoundError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - a prompt lookup must not fail a file
+            self._logger.warning(f"ASR transcription prompt resolution failed: {exc}")
+            return None
+
+    def _resolve_transcription_endpoint(self) -> Any | None:
+        """Return the active preset's OpenAI-compatible STT endpoint.
+
+        The parser holds this resolver rather than a static client config. The
+        indexer refreshes ``cfg.models`` from the endpoint registry on its
+        existing bounded refresh cycle, so a saved Admin UI endpoint takes
+        effect without recreating the long-lived Ray actor. An unset selection
+        uses the global default; a selected endpoint that is stale *or*
+        incomplete fails the file rather than silently switching providers.
+        """
+        models = getattr(self._cfg, "models", None)
+        stt = getattr(models, "stt", None)
+        selected_name = _explicit_indexation_selection(self._active_indexation_config.get(), "stt")
+        if stt is None:
+            if selected_name:
+                raise KeyError(f"Unknown STT endpoint '{selected_name}': the endpoint registry is unavailable.")
+            return None
+        endpoint = stt.get(selected_name or "default")
+        if selected_name:
+            if endpoint is None:
+                raise KeyError(f"Unknown STT endpoint '{selected_name}'. Available: {list(stt)}")
+            if not _is_usable_stt_endpoint(endpoint):
+                raise KeyError(
+                    f"STT endpoint '{selected_name}' selected by the active indexation preset is incomplete: "
+                    "both an endpoint URL and a model name are required."
+                )
+        # An unset selection keeps the historical contract: the global default may
+        # be absent or incomplete, and the parser falls back to TRANSCRIBER_*.
+        return endpoint
 
     async def _ensure_registry_fresh(self, required_model_names: dict[str, list[str]] | list[str]) -> None:
         """Hydrate ``cfg.models`` from the DB so named endpoints resolve here.
@@ -231,6 +360,49 @@ class IndexerWorkerActor:
             missing=missing,
         )
 
+    # Enrichment stage → (enable flag, prompt_type, preset name-field, row key).
+    # The name-field is the indexation-preset config key naming a library prompt
+    # for that stage. Only enabled stages are resolved, so a file that neither
+    # contextualizes nor tags nor captions pays no prompt-resolution cost.
+    _INGEST_PROMPTS = (
+        ("enable_contextualization", "chunk_contextualizer", "contextualization_prompt_name", "contextualizer_prompt"),
+        ("enable_topic_tagging", "topic_tagger", "topic_tagging_prompt_name", "topic_tagger_prompt"),
+        ("enable_image_captioning", "image_captioning", "image_captioning_prompt_name", "caption_prompt"),
+    )
+
+    async def _resolve_ingest_prompts(self, partition: str, indexation_config: dict[str, Any]) -> dict[str, str]:
+        """Resolve the enabled enrichment prompts for this file's indexation preset.
+
+        Returns ``{row_key: prompt_text}`` for each enabled stage. Each is
+        resolved by the preset's ``*_prompt_name`` (a named library prompt) →
+        global default → disk seed, so it always yields a string; any failure is
+        swallowed and the stage falls back to its own disk-loaded prompt rather
+        than failing the file.
+        """
+        # Fall back to the model's own default for an absent key, not to False:
+        # enable_image_captioning defaults to True, so a sparse config (one that
+        # simply omits the flag) still captions during ingest. A bare .get() read
+        # that as disabled, skipped resolution, and left captioning silently on
+        # the disk seed — ignoring both the preset's *_prompt_name and the type's
+        # library default, with nothing surfacing the divergence.
+        enabled = [
+            (pt, name_field, key)
+            for flag, pt, name_field, key in self._INGEST_PROMPTS
+            if indexation_config.get(flag, _ingest_flag_default(flag))
+        ]
+        if not enabled:
+            return {}
+        prompt_service = self._get_prompt_service()
+        resolved: dict[str, str] = {}
+        for prompt_type, name_field, row_key in enabled:
+            try:
+                resolved[row_key] = await prompt_service.resolve_prompt(
+                    prompt_type, names=[indexation_config.get(name_field)]
+                )
+            except Exception as exc:  # noqa: BLE001 - resolution must never fail a file
+                self._logger.warning(f"Prompt resolution failed for '{prompt_type}' (partition={partition}): {exc}")
+        return resolved
+
     async def process_file(
         self,
         *,
@@ -243,25 +415,73 @@ class IndexerWorkerActor:
         replace: bool = False,
         indexation_config: dict[str, Any] | None = None,
         embedder_name: str | None = None,
+        callback_url: str | None = None,
+        callback_token: str | None = None,
         require_existing_partition: bool = False,
     ) -> dict[str, Any]:
         content_claim_token = metadata.get(CONTENT_CLAIM_TOKEN_METADATA_KEY)
         worker_metadata = {key: value for key, value in metadata.items() if key != CONTENT_CLAIM_TOKEN_METADATA_KEY}
         try:
-            await self._ensure_catalog()
-            await self._ensure_registry_fresh(_required_model_endpoint_names(indexation_config, embedder_name))
-            result = await self._worker.process_file(
-                task_id=task_id,
-                path=path,
-                metadata=worker_metadata,
-                partition=partition,
-                user=user,
-                workspace_ids=workspace_ids,
-                replace=replace,
-                indexation_config=indexation_config,
-                embedder_name=embedder_name,
-                require_existing_partition=require_existing_partition,
-            )
+            try:
+                await self._await_worker_ref_registration(task_id)
+                await self._ensure_catalog()
+                from services.workers.parsers.parser_dispatcher import routes_to_openai_audio_loader
+
+                await self._ensure_registry_fresh(
+                    _required_model_endpoint_names(
+                        indexation_config,
+                        embedder_name,
+                        include_selected_stt=routes_to_openai_audio_loader(
+                            self._cfg,
+                            _display_filename(path, metadata),
+                        ),
+                    )
+                )
+                # Resolve the enrichment-stage prompts once for this file (partition
+                # override → global default → disk seed). Done here, at the job
+                # boundary, so per-chunk work reuses one resolved string instead of
+                # hitting the DB per chunk.
+                resolved_prompts = await self._resolve_ingest_prompts(partition, indexation_config or {})
+            except Exception:
+                # Not BaseException: a cancellation here must not notify or be
+                # reported as failed (same rule as set_failed_if_not_cancelled).
+                tb = traceback.format_exc()
+                try:
+                    was_failed = await retry_idempotent_ray_actor_method(
+                        lambda: self._tsm.set_failed_if_not_cancelled.remote(task_id, tb),
+                        task_description=f"set_failed_if_not_cancelled({task_id})",
+                    )
+                except Exception:
+                    was_failed = True
+                if was_failed:
+                    await send_indexing_callback(
+                        callback_url,
+                        partition,
+                        worker_metadata.get("file_id", ""),
+                        "error",
+                        worker_metadata,
+                        callback_token=callback_token,
+                    )
+                raise
+            token = self._active_indexation_config.set(indexation_config)
+            try:
+                result = await self._worker.process_file(
+                    task_id=task_id,
+                    path=path,
+                    metadata=worker_metadata,
+                    partition=partition,
+                    user=user,
+                    workspace_ids=workspace_ids,
+                    replace=replace,
+                    indexation_config=indexation_config,
+                    embedder_name=embedder_name,
+                    callback_url=callback_url,
+                    callback_token=callback_token,
+                    require_existing_partition=require_existing_partition,
+                    resolved_prompts=resolved_prompts,
+                )
+            finally:
+                self._active_indexation_config.reset(token)
             file_id = metadata.get("file_id", "")
             if workspace_ids and not replace and file_id:
                 try:
@@ -294,6 +514,28 @@ class IndexerWorkerActor:
             # SERIALIZING state update) that never enter the worker's try block.
             if not self._save_uploaded_files:
                 await delete_uploaded_file(path, self._logger)
+
+    async def _await_worker_ref_registration(self, task_id: str) -> None:
+        """Do not start indexing until cancellation can target this worker."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + _WORKER_REF_REGISTRATION_TIMEOUT_SECONDS
+        while loop.time() < deadline:
+            remaining = max(0.01, deadline - loop.time())
+            object_ref = await retry_idempotent_ray_actor_method(
+                lambda: self._task_state_manager.get_object_ref.remote(task_id),
+                recovery_timeout=remaining,
+                task_description=f"get_object_ref({task_id}) before indexing",
+            )
+            ref = object_ref.get("ref") if isinstance(object_ref, dict) else object_ref
+            if ref is not None:
+                return
+            await asyncio.sleep(min(_WORKER_REF_REGISTRATION_POLL_SECONDS, remaining))
+
+        await retry_idempotent_ray_actor_method(
+            lambda: self._task_state_manager.set_failed_if_not_cancelled.remote(task_id, _MISSING_WORKER_REF_ERROR),
+            task_description=f"set_failed_if_not_cancelled({task_id}) after missing worker ref",
+        )
+        raise RuntimeError(_MISSING_WORKER_REF_ERROR)
 
 
 @ray.remote
@@ -334,7 +576,7 @@ class IndexerPool:
                 get_if_exists=True,
                 lifetime="detached",
                 max_concurrency=max_tasks_per_worker,
-            ).remote()
+            ).remote(namespace)
             for i in range(pool_size)
         ]
         self._worker_names = [_indexer_worker_actor_name(i) for i in range(pool_size)]
@@ -343,6 +585,8 @@ class IndexerPool:
         self._release_tasks: set[asyncio.Task[Any]] = set()
         self._claim_store: Any = None
         self._claim_store_lock = asyncio.Lock()
+        self._namespace = namespace
+        self._task_state_manager: Any = None
 
     async def size(self) -> int:
         return len(self._workers)
@@ -383,17 +627,9 @@ class IndexerPool:
         one-element list — see the class docstring); in-flight bookkeeping is
         released when the task settles (success, failure, or cancellation).
         """
-        if not self._accepting_tasks:
-            raise RuntimeError("IndexerPool is draining and cannot accept new tasks")
-        idx = min(range(len(self._workers)), key=self._inflight.__getitem__)
-        self._inflight[idx] += 1
-        try:
-            ref = self._workers[idx].process_file.remote(**kwargs)
-        except Exception:
-            # Submission failed before a ref exists (e.g. unserializable args or
-            # a dead actor); roll back so load balancing stays accurate.
-            self._inflight[idx] -= 1
-            raise
+        task_id = str(kwargs.get("task_id") or "")
+        if not task_id:
+            raise ValueError("IndexerPool submission requires a task_id")
         metadata = kwargs.get("metadata") or {}
         content_sha256 = metadata.get("content_sha256")
         file_id = metadata.get("file_id")
@@ -406,11 +642,102 @@ class IndexerPool:
                 "content_sha256": str(content_sha256),
                 "claim_token": str(claim_token),
             }
+        if not self._accepting_tasks:
+            await self._guard_prelaunch_rejection(task_id, claim)
+            raise RuntimeError("IndexerPool is draining and cannot accept new tasks")
+        idx = min(range(len(self._workers)), key=self._inflight.__getitem__)
+        self._inflight[idx] += 1
+        try:
+            ref = self._workers[idx].process_file.remote(**kwargs)
+        except Exception:
+            # Submission failed before a ref exists (e.g. unserializable args or
+            # a dead actor); roll back so load balancing stays accurate.
+            self._inflight[idx] -= 1
+            await self._guard_prelaunch_rejection(task_id, claim)
+            raise
         task = asyncio.get_running_loop().create_task(self._release(idx, ref, claim=claim))
         # Keep a strong ref so the tracker isn't GC'd mid-flight (asyncio docs).
         self._release_tasks.add(task)
         task.add_done_callback(self._release_tasks.discard)
+        try:
+            registered = await self._register_worker_ref(task_id, ref)
+        except BaseException:
+            await self._guard_rejected_worker(task_id, ref)
+            raise
+        if not registered:
+            await self._guard_rejected_worker(task_id, ref)
+            raise RuntimeError(f"Task {kwargs.get('task_id')} was cancelled before worker ref registration")
         return [ref]
+
+    async def _guard_rejected_worker(self, task_id: str, ref: Any) -> None:
+        settlement = asyncio.create_task(self._cancel_worker_and_wait(task_id, ref))
+        self._release_tasks.add(settlement)
+        settlement.add_done_callback(self._release_tasks.discard)
+        await asyncio.shield(settlement)
+
+    async def _guard_prelaunch_rejection(self, task_id: str, claim: dict[str, str] | None) -> None:
+        cleanup = asyncio.create_task(self._finish_prelaunch_rejection(task_id, claim))
+        self._release_tasks.add(cleanup)
+        cleanup.add_done_callback(self._release_tasks.discard)
+        await asyncio.shield(cleanup)
+
+    async def _finish_prelaunch_rejection(self, task_id: str, claim: dict[str, str] | None) -> None:
+        try:
+            await self._finish_rejected_submission(task_id)
+        finally:
+            await self._release_content_claim(claim)
+
+    async def _cancel_worker_and_wait(self, task_id: str, ref: Any) -> None:
+        """Keep the submission fenced until a rejected worker has settled."""
+        try:
+            ray.cancel(ref, recursive=True)
+        except Exception:
+            # Cancellation is best-effort, but settlement is mandatory before
+            # the caller can safely release the content claim.
+            pass
+        await asyncio.gather(ref, return_exceptions=True)
+        await self._finish_rejected_submission(task_id)
+
+    async def _finish_rejected_submission(self, task_id: str) -> None:
+        task_state_manager = self._task_state_actor()
+        method_names = getattr(task_state_manager, "_ray_actor_method_names", None)
+        known_methods = set(method_names) if isinstance(method_names, (frozenset, list, set, tuple)) else None
+        if known_methods is None or "finish_rejected_submission" in known_methods:
+            method = getattr(task_state_manager, "finish_rejected_submission", None)
+            remote = getattr(method, "remote", None)
+            if remote is not None:
+                await retry_idempotent_ray_actor_method(
+                    lambda: remote(task_id),
+                    task_description=f"finish_rejected_submission({task_id}) from indexer pool",
+                )
+                return
+
+        # A TaskStateManager retained during a rolling deployment may predate
+        # the submission finalizer. It still exposes the atomic failure guard,
+        # which prevents rejected work from remaining QUEUED and consuming the
+        # uploader's pending-task quota indefinitely.
+        if known_methods is not None and "set_failed_if_not_cancelled" not in known_methods:
+            return
+        set_failed = getattr(task_state_manager, "set_failed_if_not_cancelled", None)
+        remote = getattr(set_failed, "remote", None)
+        if remote is not None:
+            await retry_idempotent_ray_actor_method(
+                lambda: remote(task_id, _REJECTED_SUBMISSION_ERROR),
+                task_description=f"set_failed_if_not_cancelled({task_id}) from indexer pool",
+            )
+
+    async def _register_worker_ref(self, task_id: str, ref: Any) -> bool:
+        task_state_manager = self._task_state_actor()
+        registered = await retry_idempotent_ray_actor_method(
+            lambda: task_state_manager.set_object_ref.remote(task_id, {"ref": ref}),
+            task_description=f"set_object_ref({task_id}) from indexer pool",
+        )
+        return registered is not False
+
+    def _task_state_actor(self) -> Any:
+        if self._task_state_manager is None:
+            self._task_state_manager = ray.get_actor("TaskStateManager", namespace=self._namespace)
+        return self._task_state_manager
 
     async def _release(self, idx: int, ref: Any, *, claim: dict[str, str] | None = None) -> None:
         renewal_task = None
@@ -424,17 +751,22 @@ class IndexerPool:
                 renewal_task.cancel()
                 await asyncio.gather(renewal_task, return_exceptions=True)
             if claim is not None:
-                try:
-                    repo = await self._claim_document_repo()
-                    await repo.release_content_sha256_claim(**claim)
-                except Exception as exc:  # noqa: BLE001 - stale claims expire automatically
-                    from core.utils.logging import get_logger
-
-                    get_logger().bind(file_id=claim["file_id"], partition=claim["partition"]).warning(
-                        "Failed to release settled content deduplication claim.",
-                        error=str(exc),
-                    )
+                await self._release_content_claim(claim)
             self._inflight[idx] -= 1
+
+    async def _release_content_claim(self, claim: dict[str, str] | None) -> None:
+        if claim is None:
+            return
+        try:
+            repo = await self._claim_document_repo()
+            await repo.release_content_sha256_claim(**claim)
+        except Exception as exc:  # noqa: BLE001 - stale claims expire automatically
+            from core.utils.logging import get_logger
+
+            get_logger().bind(file_id=claim["file_id"], partition=claim["partition"]).warning(
+                "Failed to release settled content deduplication claim.",
+                error=str(exc),
+            )
 
     async def _claim_document_repo(self) -> Any:
         if self._claim_store is None:
@@ -528,11 +860,22 @@ def _required_llm_names(indexation_config: dict[str, Any] | None) -> list[str]:
 def _required_model_endpoint_names(
     indexation_config: dict[str, Any] | None,
     embedder_name: str | None,
+    *,
+    include_selected_stt: bool = True,
 ) -> dict[str, list[str]]:
+    selected_stt = _explicit_indexation_selection(indexation_config, "stt") if include_selected_stt else None
+    required_stt = (
+        ["default"] if selected_stt is None or selected_stt == "default" else sorted(["default", selected_stt])
+    )
     names: dict[str, list[str]] = {
         "embedder": [],
         "llm": _required_llm_names(indexation_config),
         "vlm": [],
+        # Audio parsing resolves the preset's selected STT endpoint at request
+        # time and fails the file if that selection is gone. Both names are
+        # required so a worker with only file parsing still hydrates the
+        # endpoint registry before resolving the selection.
+        "stt": required_stt,
     }
     if embedder_name:
         names["embedder"].append(embedder_name)
@@ -591,17 +934,45 @@ def _registry_reload_decision(
     return None
 
 
-def _build_chunker(cfg: Any) -> Any:
+def _build_chunker(cfg: Any, embedder_window: int | None = None) -> Any:
     from core.chunking.factory import create_chunker
 
-    chunker = create_chunker(cfg)
+    chunker = create_chunker(cfg, embedder_window)
     if not callable(getattr(chunker, "chunk", None)):
         raise TypeError("Configured chunker does not expose a chunk(document, partition) method")
     return chunker
 
 
-def _build_chunker_from_config(chunker_config: Any) -> Any:
-    return _build_chunker(SimpleNamespace(chunker=chunker_config))
+def _build_chunker_from_config(chunker_config: Any, embedder_window: int | None = None) -> Any:
+    return _build_chunker(SimpleNamespace(chunker=chunker_config), embedder_window)
+
+
+def _build_embedder_window_resolver(cfg: Settings) -> Any:
+    """Context window of the embedder a partition indexes with, in tokens.
+
+    The chunker derives its hard safety bound from this (see
+    ``core.chunking.factory.resolve_hard_max_tokens``): content past the window
+    is silently truncated before it is ever embedded, and a partition may point
+    at an embedder whose window differs from the deployment default. Resolution
+    mirrors ``_build_embedder_factory``: the endpoint's ``extra`` wins, then the
+    global ``embedder.max_model_len``.
+    """
+    models = getattr(cfg, "models", None)
+    named_embedders = models.embedder if models is not None else {}
+    fallback_cfg = _global_embedder_endpoint_config(cfg)
+    global_default = getattr(getattr(cfg, "embedder", None), "max_model_len", None)
+
+    def resolve(name: str = "default") -> int | None:
+        model_cfg = named_embedders.get(name)
+        if model_cfg is None and name == "default":
+            model_cfg = fallback_cfg
+        if model_cfg is not None:
+            window = model_cfg.extra.get("max_model_len")
+            if window:
+                return int(window)
+        return int(global_default) if global_default else None
+
+    return resolve
 
 
 def _build_parser_factory(parser: Any) -> Any:
@@ -966,3 +1337,15 @@ def _global_vlm_endpoint_config(cfg: Any) -> Any | None:
 
 
 __all__ = ["IndexerPool", "IndexerWorkerActor", "build_indexer_pool"]
+
+
+def _ingest_flag_default(flag: str) -> bool:
+    """The IndexationPipelineConfig default for an enrichment flag.
+
+    Read from the model so the two cannot drift: the defaults differ per stage
+    (captioning is on, contextualization and topic tagging are off).
+    """
+    from core.config.indexation_pipeline import IndexationPipelineConfig
+
+    field = IndexationPipelineConfig.model_fields.get(flag)
+    return bool(field.default) if field is not None else False

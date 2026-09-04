@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import traceback
 import uuid
 from datetime import UTC, datetime
@@ -8,20 +9,23 @@ from typing import Any
 from core.indexing.dispatcher import IndexingDispatcher
 from core.models.catalog import (
     CONTENT_CLAIM_TOKEN_METADATA_KEY,
+    COPY_CONTENT_CLAIM_TOKEN_PREFIX,
+    INDEXING_CONTENT_CLAIM_TOKEN_PREFIX,
     TASK_CREATED_AT_METADATA_KEY,
     TASK_FINISHED_AT_METADATA_KEY,
 )
-from core.utils.conts import is_internal_metadata_key, strip_internal_metadata
-from core.utils.exceptions import ConflictError
+from core.utils.consts import is_internal_metadata_key, strip_internal_metadata
+from core.utils.exceptions import ConflictError, mark_indexing_worker_may_be_running
 from core.utils.logging import get_logger
 from ray.exceptions import TaskCancelledError
-from services.workers.ray_utils import call_ray_actor_with_timeout
+from services.workers.ray_utils import call_ray_actor_with_timeout, retry_idempotent_ray_actor_method
 from services.workers.stages.store import INDEXING_TASK_ID_METADATA_KEY
 from services.workers.task_cancellation import cancel_active_indexing_tasks
 
 logger = get_logger()
 
 DEFAULT_TIMEOUT = 60.0
+_FILE_DELETE_FENCE_RENEW_INTERVAL_SECONDS = 30.0
 _REQUIRE_EXISTING_PARTITION_KWARG = "require_existing_partition"
 
 
@@ -75,6 +79,16 @@ class WorkerDispatcher(IndexingDispatcher):
             task_description=task_description,
         )
 
+    async def _call_method(self, submit: Any, task_description: str) -> Any:
+        """Submit an actor call inside the availability boundary."""
+        from services.workers.ray_utils import call_ray_actor_method_with_timeout
+
+        return await call_ray_actor_method_with_timeout(
+            submit=submit,
+            timeout=self._timeout,
+            task_description=task_description,
+        )
+
     async def _set_queued_details(
         self,
         task_id: str,
@@ -86,24 +100,25 @@ class WorkerDispatcher(IndexingDispatcher):
     ) -> bool:
         remote = _remote_actor_method(self._tsm, "set_queued_details")
         if remote is not None:
-            accepted = await self._call(
-                remote(
+            accepted = await retry_idempotent_ray_actor_method(
+                submit=lambda: remote(
                     task_id,
                     file_id=file_id,
                     partition=partition,
                     metadata=metadata,
                     user_id=user_id,
                 ),
+                recovery_timeout=self._timeout,
                 task_description=f"set_queued_details({task_id})",
             )
             return accepted is not False
 
-        await self._call(
-            self._tsm.set_state.remote(task_id, "QUEUED"),
+        await self._call_method(
+            lambda: self._tsm.set_state.remote(task_id, "QUEUED"),
             task_description=f"set_state({task_id})",
         )
-        await self._call(
-            self._tsm.set_details.remote(
+        await self._call_method(
+            lambda: self._tsm.set_details.remote(
                 task_id,
                 file_id=file_id,
                 partition=partition,
@@ -114,23 +129,104 @@ class WorkerDispatcher(IndexingDispatcher):
         )
         return True
 
-    async def _begin_file_delete_fence(self, *, file_id: str, partition: str) -> None:
+    async def _active_content_claim_tokens(self, partition: str) -> set[str] | None:
+        """Return task tokens whose content reservations must be preserved.
+
+        ``None`` disables orphan recovery for an older TaskStateManager that
+        cannot provide the active-task lookup.  That fallback keeps rolling
+        deployments conservative.
+        """
+        remote = _remote_actor_method(self._tsm, "get_content_claim_task_ids")
+        if remote is None:
+            return None
+        task_ids = await self._call_method(
+            lambda: remote(partition=partition),
+            task_description=f"get_active_content_claim_tokens({partition})",
+        )
+        if not isinstance(task_ids, (list, set, tuple)):
+            raise RuntimeError("TaskStateManager returned invalid claim owners for content claim recovery")
+        return {f"{INDEXING_CONTENT_CLAIM_TOKEN_PREFIX}{task_id}" for task_id in task_ids}
+
+    async def _recover_inactive_content_claim(self, *, partition: str, content_sha256: str) -> bool:
+        get_lease = getattr(self._document_repo, "get_recoverable_content_sha256_claim", None)
+        release_lease = getattr(self._document_repo, "release_recoverable_content_sha256_claim", None)
+        if not callable(get_lease) or not callable(release_lease):
+            return False
+
+        lease = await get_lease(partition=partition, content_sha256=content_sha256)
+        if lease is None:
+            return False
+        active_claim_tokens = await self._active_content_claim_tokens(partition)
+        if active_claim_tokens is None or lease.claim_token in active_claim_tokens:
+            return False
+
+        # The lease contains the expiry value observed before the fresh owner
+        # lookup. A concurrent renewal changes that value, so the repository's
+        # conditional delete fails instead of reclaiming a live reservation.
+        return bool(await release_lease(lease))
+
+    async def _begin_worker_submission(self, task_id: str) -> bool:
+        remote = _remote_actor_method(self._tsm, "begin_worker_submission")
+        if remote is None:
+            # Older task-state actors do not recover claims early, so their
+            # existing conservative behavior is safe during a rolling deploy.
+            return True
+        accepted = await retry_idempotent_ray_actor_method(
+            lambda: remote(task_id),
+            recovery_timeout=self._timeout,
+            task_description=f"begin_worker_submission({task_id})",
+        )
+        return accepted is True
+
+    async def _begin_file_delete_fence(self, *, file_id: str, partition: str, fence_id: str) -> None:
         remote = _remote_actor_method(self._tsm, "begin_file_delete")
         if remote is None:
             raise RuntimeError("TaskStateManager does not expose file delete fencing for delete cleanup")
-        await self._call(
-            remote(partition=partition, file_id=file_id),
+        await retry_idempotent_ray_actor_method(
+            lambda: remote(partition=partition, file_id=file_id, fence_id=fence_id),
+            recovery_timeout=self._timeout,
             task_description=f"begin_file_delete({partition}, {file_id})",
         )
 
-    async def _end_file_delete_fence(self, *, file_id: str, partition: str) -> None:
+    async def _end_file_delete_fence(self, *, file_id: str, partition: str, fence_id: str) -> None:
         remote = _remote_actor_method(self._tsm, "end_file_delete")
         if remote is None:
             raise RuntimeError("TaskStateManager does not expose file delete fencing for delete cleanup")
-        await self._call(
-            remote(partition=partition, file_id=file_id),
+        await retry_idempotent_ray_actor_method(
+            lambda: remote(partition=partition, file_id=file_id, fence_id=fence_id),
+            recovery_timeout=self._timeout,
             task_description=f"end_file_delete({partition}, {file_id})",
         )
+
+    async def _renew_file_delete_fence(self, *, file_id: str, partition: str, fence_id: str) -> None:
+        remote = _remote_actor_method(self._tsm, "renew_file_delete")
+        if remote is None:
+            raise RuntimeError("TaskStateManager does not expose renewable file delete fencing")
+        while True:
+            await asyncio.sleep(_FILE_DELETE_FENCE_RENEW_INTERVAL_SECONDS)
+            renewed = await retry_idempotent_ray_actor_method(
+                lambda: remote(partition=partition, file_id=file_id, fence_id=fence_id),
+                recovery_timeout=self._timeout,
+                task_description=f"renew_file_delete({partition}, {file_id})",
+            )
+            if renewed is not True:
+                raise RuntimeError("File delete fence lease was lost during cleanup")
+
+    async def _delete_with_renewable_fence(self, *, file_id: str, partition: str, fence_id: str) -> None:
+        delete_task = asyncio.create_task(self._delete_file_with_fence(file_id=file_id, partition=partition))
+        renewal_task = asyncio.create_task(
+            self._renew_file_delete_fence(file_id=file_id, partition=partition, fence_id=fence_id)
+        )
+        try:
+            done, _ = await asyncio.wait({delete_task, renewal_task}, return_when=asyncio.FIRST_COMPLETED)
+            if renewal_task in done:
+                await renewal_task
+            await delete_task
+        finally:
+            for task in (delete_task, renewal_task):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(delete_task, renewal_task, return_exceptions=True)
 
     async def dispatch_indexing(
         self,
@@ -143,22 +239,31 @@ class WorkerDispatcher(IndexingDispatcher):
         replace: bool,
         indexation_config: dict | None = None,
         embedder_name: str | None = None,
+        callback_url: str | None = None,
+        callback_token: str | None = None,
         require_existing_partition: bool = False,
         allow_legacy_require_existing_partition_retry: bool = False,
     ) -> str:
         task_id = uuid.uuid4().hex
         file_id = str(metadata.get("file_id") or "")
         content_sha256 = metadata.get("content_sha256")
+        content_claim_token = f"{INDEXING_CONTENT_CLAIM_TOKEN_PREFIX}{task_id}"
         claimed_content = False
 
         if content_sha256:
-            conflicting_file_id = await self._document_repo.claim_content_sha256(
-                file_id=file_id,
+            claim_kwargs = {
+                "file_id": file_id,
+                "partition": partition,
+                "content_sha256": content_sha256,
+                "claim_token": content_claim_token,
+                "replace": replace,
+            }
+            conflicting_file_id = await self._document_repo.claim_content_sha256(**claim_kwargs)
+            if conflicting_file_id is not None and await self._recover_inactive_content_claim(
                 partition=partition,
                 content_sha256=content_sha256,
-                claim_token=task_id,
-                replace=replace,
-            )
+            ):
+                conflicting_file_id = await self._document_repo.claim_content_sha256(**claim_kwargs)
             if conflicting_file_id is not None:
                 raise ConflictError(
                     f"This document already exists in partition '{partition}'.",
@@ -187,7 +292,7 @@ class WorkerDispatcher(IndexingDispatcher):
                     file_id=file_id,
                     partition=partition,
                     content_sha256=content_sha256,
-                    claim_token=task_id,
+                    claim_token=content_claim_token,
                 )
             raise
         if not accepted:
@@ -196,17 +301,18 @@ class WorkerDispatcher(IndexingDispatcher):
                     file_id=file_id,
                     partition=partition,
                     content_sha256=content_sha256,
-                    claim_token=task_id,
+                    claim_token=content_claim_token,
                 )
             raise RuntimeError(
                 f"Task {task_id} was rejected because file {file_id!r} in partition {partition!r} is being deleted"
             )
 
         task: Any | None = None
+        submission_started = False
         try:
             worker_metadata = dict(metadata)
             if claimed_content:
-                worker_metadata[CONTENT_CLAIM_TOKEN_METADATA_KEY] = task_id
+                worker_metadata[CONTENT_CLAIM_TOKEN_METADATA_KEY] = content_claim_token
             submit_kwargs: dict[str, Any] = {
                 "task_id": task_id,
                 "path": path,
@@ -217,40 +323,56 @@ class WorkerDispatcher(IndexingDispatcher):
                 "replace": replace,
                 "indexation_config": indexation_config,
                 "embedder_name": embedder_name,
+                "callback_url": callback_url,
+                "callback_token": callback_token,
             }
             if require_existing_partition:
                 submit_kwargs[_REQUIRE_EXISTING_PARTITION_KWARG] = True
+            if claimed_content:
+                still_owned = await self._document_repo.renew_content_sha256_claim(
+                    file_id=file_id,
+                    partition=partition,
+                    content_sha256=content_sha256,
+                    claim_token=content_claim_token,
+                )
+                if not still_owned:
+                    raise ConflictError(
+                        "The content reservation expired before indexing started. Please retry the upload.",
+                        code="DOCUMENT_CONTENT_CLAIM_LOST",
+                    )
+            if not await self._begin_worker_submission(task_id):
+                raise RuntimeError(f"Task {task_id} was rejected before worker submission")
+            submission_started = True
             task = await self._submit_indexing_task(
                 task_id,
                 submit_kwargs,
                 allow_legacy_retry=allow_legacy_require_existing_partition_retry,
             )
-
-            registered = await self._call(
-                self._tsm.set_object_ref.remote(task_id, {"ref": task}),
-                task_description=f"set_object_ref({task_id})",
-            )
-            if registered is False:
-                raise RuntimeError(f"Task {task_id} was cancelled before worker ref registration")
             self._track_completion(task_id, task)
-        except BaseException:
-            mark_submit_failed = True
+        except BaseException as exc:
+            submission_outcome_unknown = submission_started and task is None
+            mark_submit_failed = not submission_outcome_unknown
             try:
                 if task is not None:
                     mark_submit_failed = await self._cancel_submitted_task(task_id, task)
                     if mark_submit_failed:
                         await self._cleanup_submitted_vectors(task_id, metadata=metadata, partition=partition)
-                await self._record_finished_at(task_id, task_details)
-                if mark_submit_failed:
-                    await self._mark_submit_failed(task_id, traceback.format_exc())
+                if not submission_outcome_unknown:
+                    await self._record_finished_at(task_id, task_details)
+                    if mark_submit_failed:
+                        await self._mark_submit_failed(task_id, traceback.format_exc())
             finally:
-                if claimed_content and (task is None or mark_submit_failed):
+                if claimed_content and not submission_outcome_unknown and (task is None or mark_submit_failed):
                     await self._document_repo.release_content_sha256_claim(
                         file_id=file_id,
                         partition=partition,
                         content_sha256=content_sha256,
-                        claim_token=task_id,
+                        claim_token=content_claim_token,
                     )
+            if submission_outcome_unknown:
+                # The pool may have launched a worker that has not read the
+                # uploaded file yet; tell the caller to keep it on disk.
+                mark_indexing_worker_may_be_running(exc)
             raise
         return task_id
 
@@ -261,8 +383,8 @@ class WorkerDispatcher(IndexingDispatcher):
         metadata = dict(task_details["metadata"])
         metadata[TASK_FINISHED_AT_METADATA_KEY] = _utc_now_iso()
         try:
-            await self._call(
-                self._tsm.set_details.remote(task_id, **{**task_details, "metadata": metadata}),
+            await self._call_method(
+                lambda: self._tsm.set_details.remote(task_id, **{**task_details, "metadata": metadata}),
                 task_description=f"set_finished_at({task_id})",
             )
         except Exception as exc:
@@ -324,13 +446,13 @@ class WorkerDispatcher(IndexingDispatcher):
     async def _mark_submit_failed(self, task_id: str, tb: str) -> None:
         set_failed = getattr(self._tsm, "set_failed_if_not_cancelled", None)
         if set_failed is not None:
-            await self._call(
-                set_failed.remote(task_id, tb),
+            await self._call_method(
+                lambda: set_failed.remote(task_id, tb),
                 task_description=f"set_failed_if_not_cancelled({task_id})",
             )
             return
-        await self._call(
-            self._tsm.set_state.remote(task_id, "FAILED"),
+        await self._call_method(
+            lambda: self._tsm.set_state.remote(task_id, "FAILED"),
             task_description=f"set_state({task_id}, FAILED)",
         )
 
@@ -376,16 +498,17 @@ class WorkerDispatcher(IndexingDispatcher):
         return False
 
     async def delete_file(self, file_id: str, partition: str) -> None:
-        await self._begin_file_delete_fence(file_id=file_id, partition=partition)
+        fence_id = uuid.uuid4().hex
+        await self._begin_file_delete_fence(file_id=file_id, partition=partition, fence_id=fence_id)
         delete_failed = False
         try:
-            await self._delete_file_with_fence(file_id=file_id, partition=partition)
+            await self._delete_with_renewable_fence(file_id=file_id, partition=partition, fence_id=fence_id)
         except Exception:
             delete_failed = True
             raise
         finally:
             try:
-                await self._end_file_delete_fence(file_id=file_id, partition=partition)
+                await self._end_file_delete_fence(file_id=file_id, partition=partition, fence_id=fence_id)
             except Exception as exc:
                 logger.warning(
                     "Failed to release file delete fence",
@@ -464,7 +587,7 @@ class WorkerDispatcher(IndexingDispatcher):
         target_partition = metadata.get("partition", partition)
         content_sha256 = metadata.get("content_sha256")
         claimed_content = False
-        claim_token = uuid.uuid4().hex
+        claim_token = f"{COPY_CONTENT_CLAIM_TOKEN_PREFIX}{uuid.uuid4().hex}"
         if content_sha256:
             conflicting_file_id = await self._document_repo.claim_content_sha256(
                 file_id=target_file_id,
@@ -539,22 +662,22 @@ class WorkerDispatcher(IndexingDispatcher):
         }
 
     async def get_task_state(self, task_id: str) -> str | None:
-        return await self._call(
-            self._tsm.get_state.remote(task_id),
+        return await self._call_method(
+            lambda: self._tsm.get_state.remote(task_id),
             task_description=f"get_state({task_id})",
         )
 
     async def get_task_error(self, task_id: str) -> str | None:
-        return await self._call(
-            self._tsm.get_error.remote(task_id),
+        return await self._call_method(
+            lambda: self._tsm.get_error.remote(task_id),
             task_description=f"get_error({task_id})",
         )
 
     async def cancel_task(self, task_id: str) -> bool:
         import ray
 
-        obj_ref = await self._call(
-            self._tsm.get_object_ref.remote(task_id),
+        obj_ref = await self._call_method(
+            lambda: self._tsm.get_object_ref.remote(task_id),
             task_description=f"get_object_ref({task_id})",
         )
         if obj_ref is None:
@@ -565,12 +688,14 @@ class WorkerDispatcher(IndexingDispatcher):
         # back and the task would be stuck active forever (a zombie).
         # TaskStateManager keeps CANCELLED sticky, so a worker that starts in
         # this small window cannot report active/success after the cancel claim.
-        cancelled = await self._call(
-            self._tsm.set_cancelled_if_active.remote(task_id),
+        cancelled = await self._call_method(
+            lambda: self._tsm.set_cancelled_if_active.remote(task_id),
             task_description=f"set_cancelled_if_active({task_id})",
         )
         if not cancelled:
-            return False
+            state = await self.get_task_state(task_id)
+            if state != "CANCELLED":
+                return False
 
         ray.cancel(obj_ref["ref"], recursive=True)
         return True

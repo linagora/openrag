@@ -66,6 +66,9 @@ export interface PartitionConfig {
   document_count: number;
   chat_history_depth: number;
   chat_llm: string | null;
+  // Final-answer prompt selections for this partition. Parsing, enrichment,
+  // and retrieval prompts are selected by their respective presets.
+  generation_prompt_names: Record<string, string>;
 }
 
 export interface UpdatePartitionRequest {
@@ -75,6 +78,7 @@ export interface UpdatePartitionRequest {
   retrieval_preset?: string;
   chat_history_depth?: number;
   chat_llm?: string | null;
+  generation_prompt_names?: Record<string, string>;
   /** Accepted for compat but never sent (server has no such column). */
   collection_name?: string;
 }
@@ -90,6 +94,7 @@ const _PATCH_FIELDS = [
   "retrieval_preset",
   "chat_history_depth",
   "chat_llm",
+  "generation_prompt_names",
 ] as const;
 
 function _toRow(r: Record<string, unknown>): PartitionResponse {
@@ -200,8 +205,40 @@ export interface PartitionMember {
   added_at: string | null;
 }
 
+export interface PartitionMemberCandidate {
+  user_id: number;
+  display_name: string | null;
+  email: string | null;
+}
+
+export interface PartitionMemberCandidatePage {
+  candidates: PartitionMemberCandidate[];
+  limit: number;
+  has_more: boolean;
+  next_cursor: number | null;
+}
+
+interface ListPartitionMemberCandidatesOptions {
+  search: string;
+  cursor?: number;
+  limit?: number;
+}
+
 export function listPartitionMembers(name: string): Promise<{ members: PartitionMember[] }> {
   return request<{ members: PartitionMember[] }>(`${P}/${enc(name)}/users`);
+}
+
+export function listPartitionMemberCandidates(
+  name: string,
+  options: ListPartitionMemberCandidatesOptions,
+): Promise<PartitionMemberCandidatePage> {
+  const query = new URLSearchParams();
+  query.set("search", options.search.trim());
+  if (options.cursor !== undefined) query.set("cursor", String(options.cursor));
+  if (options.limit !== undefined) query.set("limit", String(options.limit));
+  return request<PartitionMemberCandidatePage>(
+    `${P}/${enc(name)}/users/candidates?${query.toString()}`,
+  );
 }
 
 export function addPartitionMember(name: string, userId: number, role: PartitionRole): Promise<void> {

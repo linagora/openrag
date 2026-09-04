@@ -8,14 +8,11 @@ replaces the earlier stub with real SQL.
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import TYPE_CHECKING
 
+import asyncpg
 from core.config.model_endpoints import ModelEndpointRow
 from core.ports.model_endpoint_repo import ModelEndpointRepository
-from core.utils.exceptions import NotFoundError
-
-if TYPE_CHECKING:
-    import asyncpg
+from core.utils.exceptions import NotFoundError, ValidationError
 
 # 'is_default' is deliberately excluded: a bare ``UPDATE ... SET is_default = true``
 # cannot clear the previous default in the same statement, so it would leave two
@@ -26,6 +23,21 @@ if TYPE_CHECKING:
 # through set_default / delete_and_promote_default, which clear-then-set inside one
 # transaction; ModelEndpointService.update_model_endpoint routes is_default there.
 _ALLOWED_UPDATE_FIELDS = frozenset({"endpoint", "model_name", "batch_size", "timeout", "extra"})
+
+# Endpoint names are referenced by value elsewhere, and nothing updates those
+# references when an endpoint is renamed (#770) — so ``rename()`` cascades to
+# every known reference in the same transaction as the name change. Direct
+# endpoint-name columns on ``partitions``, keyed by the model_type they hold:
+_PARTITION_COLUMN_BY_TYPE = {"embedder": "embedder", "llm": "chat_llm"}
+# Endpoint-name keys embedded in ``pipeline_presets.config`` (JSONB), by the
+# preset_type that carries them — see core/config/retrieval_pipeline.py and
+# core/config/indexation_pipeline.py for the field definitions.
+_RETRIEVAL_PRESET_KEYS_BY_TYPE = {"llm": ("llm",), "reranker": ("reranker",)}
+_INDEXATION_PRESET_KEYS_BY_TYPE = {
+    "llm": ("contextualization_llm", "metadata_extraction_llm", "topic_tagging_llm"),
+    "vlm": ("vlm",),
+    "stt": ("stt",),
+}
 
 
 class PgModelEndpointRepository(ModelEndpointRepository):
@@ -59,29 +71,39 @@ class PgModelEndpointRepository(ModelEndpointRepository):
         # rows for one model_type (same hazard the update path avoids by routing
         # through set_default). Demote any existing default in the SAME transaction
         # as the insert so the new endpoint becomes the sole default atomically.
-        async with self.pool.acquire() as conn:
-            async with conn.transaction():
-                if row.is_default:
-                    await conn.execute(
-                        "UPDATE model_endpoints SET is_default = false, updated_at = now() WHERE model_type = $1",
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.transaction():
+                    if row.is_default:
+                        await conn.execute(
+                            "UPDATE model_endpoints SET is_default = false, updated_at = now() WHERE model_type = $1",
+                            row.model_type,
+                        )
+                    rec = await conn.fetchrow(
+                        """
+                        INSERT INTO model_endpoints
+                            (name, model_type, endpoint, model_name, batch_size, timeout, extra, is_default)
+                        VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8)
+                        RETURNING *
+                        """,
+                        row.name,
                         row.model_type,
+                        row.endpoint,
+                        row.model_name,
+                        row.batch_size,
+                        row.timeout,
+                        row.extra,
+                        row.is_default,
                     )
-                rec = await conn.fetchrow(
-                    """
-                    INSERT INTO model_endpoints
-                        (name, model_type, endpoint, model_name, batch_size, timeout, extra, is_default)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8)
-                    RETURNING *
-                    """,
-                    row.name,
-                    row.model_type,
-                    row.endpoint,
-                    row.model_name,
-                    row.batch_size,
-                    row.timeout,
-                    row.extra,
-                    row.is_default,
-                )
+        except asyncpg.UniqueViolationError as exc:
+            # The service's preflight check cannot make a concurrent create
+            # atomic. Surface the same typed 409 to both an admin race and a
+            # startup-seeding race instead of leaking a database exception.
+            raise ValidationError(
+                f"Endpoint '{row.name}' of type '{row.model_type}' already exists.",
+                status_code=409,
+                code="ENDPOINT_EXISTS",
+            ) from exc
         return self._to_model(rec)
 
     async def get(self, name: str, model_type: str) -> ModelEndpointRow | None:
@@ -124,12 +146,84 @@ class PgModelEndpointRepository(ModelEndpointRepository):
         return self._to_model(rec) if rec else None
 
     async def rename(self, name: str, model_type: str, new_name: str) -> None:
-        await self.pool.execute(
-            "UPDATE model_endpoints SET name = $3, updated_at = now() WHERE name = $1 AND model_type = $2",
-            name,
-            model_type,
-            new_name,
-        )
+        """Rename an endpoint and cascade the new name to every stored reference.
+
+        Left alone, a rename silently strands every partition or preset that
+        pointed at the old name — ``partitions.embedder`` / ``partitions.chat_llm``,
+        and the endpoint-name fields embedded in ``pipeline_presets.config``
+        (JSONB) — since nothing else in the schema updates those when the
+        referenced row's name changes (#770). All writes run in this one
+        transaction so a partial cascade can never leave the registry and its
+        referents disagreeing.
+
+        The caller (``ModelEndpointService.update_model_endpoint``) still owns
+        refreshing the in-memory partition/preset caches afterwards — this
+        method only makes the DB-side references consistent.
+
+        Raises :class:`NotFoundError` if ``name`` vanished between the
+        service's existence check and this transaction (a concurrent delete)
+        — mirroring ``PgPipelinePresetRepository.rename``. Without the
+        ``RETURNING`` check, a lost race would still run the cascade below,
+        repointing partitions/presets at a ``new_name`` that was never
+        actually created.
+
+        Also ``LOCK``s ``partitions`` ``IN SHARE MODE`` before touching
+        anything — the same lock :meth:`PgPresetRepository.delete` takes, and
+        the same table :meth:`PgPartitionRepository.update_partition` writes
+        to *before* its own DB-authoritative ``chat_llm`` re-check. Without
+        this, a partition PATCH could validate ``name`` against the in-memory
+        catalog, then block behind this transaction's cascade on the exact
+        row it's about to write, and resume writing the now-renamed-away
+        ``name`` straight back once this commits — permanently stranding that
+        partition the moment the service's temporary alias (see
+        ``ModelEndpointService._alias_renamed_name``) drops. Locking first, in
+        the same order both call sites use, makes the two block on each other
+        instead of interleaving: whichever transaction's ``partitions`` write
+        commits first is the one the other observes.
+        """
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                await conn.execute("LOCK TABLE partitions IN SHARE MODE")
+
+                renamed = await conn.fetchrow(
+                    "UPDATE model_endpoints SET name = $3, updated_at = now() "
+                    "WHERE name = $1 AND model_type = $2 RETURNING name",
+                    name,
+                    model_type,
+                    new_name,
+                )
+                if renamed is None:
+                    raise NotFoundError(f"Endpoint '{name}' of type '{model_type}' not found.")
+
+                partition_col = _PARTITION_COLUMN_BY_TYPE.get(model_type)
+                if partition_col:
+                    await conn.execute(
+                        f"UPDATE partitions SET {partition_col} = $2 WHERE {partition_col} = $1",
+                        name,
+                        new_name,
+                    )
+
+                for preset_type, keys in (
+                    ("retrieval", _RETRIEVAL_PRESET_KEYS_BY_TYPE.get(model_type, ())),
+                    ("indexation", _INDEXATION_PRESET_KEYS_BY_TYPE.get(model_type, ())),
+                ):
+                    for key in keys:
+                        # Indexation workers trim explicit STT selections before
+                        # lookup, so the cascade must recognize the same stored
+                        # whitespace-padded value during a rename.
+                        reference_match = "btrim(config->>$4) = $5" if key == "stt" else "config->>$4 = $5"
+                        await conn.execute(
+                            f"""
+                            UPDATE pipeline_presets
+                            SET config = jsonb_set(config, $1::text[], to_jsonb($2::text)), updated_at = now()
+                            WHERE preset_type = $3 AND {reference_match}
+                            """,
+                            [key],
+                            new_name,
+                            preset_type,
+                            key,
+                            name,
+                        )
 
     async def delete(self, name: str, model_type: str) -> bool:
         result = await self.pool.execute(
@@ -170,6 +264,45 @@ class PgModelEndpointRepository(ModelEndpointRepository):
                     model_type,
                 )
 
+    @staticmethod
+    async def _clear_preset_references(conn: asyncpg.Connection, name: str, model_type: str) -> None:
+        """Drop every preset selection naming *name*, restoring the default fallback.
+
+        Presets reference endpoints by name in JSONB rather than through a FK, so
+        nothing in the schema clears those when the row goes away. Indexation
+        resolves an explicit selection *strictly* — a named endpoint that no
+        longer exists fails the file instead of silently switching provider — so
+        a dangling reference is not a soft fallback but a permanent break: every
+        audio upload on a preset whose ``stt`` names the deleted endpoint fails
+        until an admin edits the preset, with nothing surfaced at delete time.
+
+        Clearing the key here (rather than repointing it at the survivor) is the
+        same resolution ``PgPromptRepository.delete`` already uses for a deleted
+        ASR prompt: an absent selection is the documented "use the default"
+        state, so the preset lands back on the normal fallback path. Runs in the
+        caller's transaction, before the DELETE, so no window exists where a
+        preset names a row that is already gone.
+        """
+        for preset_type, keys in (
+            ("retrieval", _RETRIEVAL_PRESET_KEYS_BY_TYPE.get(model_type, ())),
+            ("indexation", _INDEXATION_PRESET_KEYS_BY_TYPE.get(model_type, ())),
+        ):
+            for key in keys:
+                # Indexation workers trim explicit STT selections before lookup, so
+                # the stored value may be whitespace-padded — match it the same way
+                # ``rename`` does, or a padded reference survives the delete.
+                reference_match = "btrim(config->>$1) = $3" if key == "stt" else "config->>$1 = $3"
+                await conn.execute(
+                    f"""
+                    UPDATE pipeline_presets
+                    SET config = config - $1::text, updated_at = now()
+                    WHERE preset_type = $2 AND {reference_match}
+                    """,
+                    key,
+                    preset_type,
+                    name,
+                )
+
     async def delete_and_promote_default(self, name: str, model_type: str) -> tuple[str, str | None]:
         """Delete an endpoint and, if it was the default, promote a survivor to
         default — all atomically and decided under a row lock.
@@ -201,6 +334,7 @@ class PgModelEndpointRepository(ModelEndpointRepository):
                 if len(names) <= 1:
                     return ("last", None)
                 was_default = next(r["is_default"] for r in rows if r["name"] == name)
+                await self._clear_preset_references(conn, name, model_type)
                 await conn.execute(
                     "DELETE FROM model_endpoints WHERE name = $1 AND model_type = $2",
                     name,

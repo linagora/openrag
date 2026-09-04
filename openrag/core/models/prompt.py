@@ -18,6 +18,7 @@ class PromptType(str, Enum):
     MULTI_QUERY = "multi_query"
     SPOKEN_STYLE_ANSWER = "spoken_style_answer"
     TOPIC_TAGGER = "topic_tagger"
+    ASR_TRANSCRIPTION = "asr_transcription"
 
 
 class Prompt(BaseModel):

@@ -2,25 +2,62 @@
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from typing import Any, Literal
 
-from core.config.model_endpoints import LLM_CONTEXT_SIZE_KEY, LLM_OUTPUT_TOKENS_KEY
+from core.config.model_endpoints import (
+    LLM_CONTEXT_SIZE_KEY,
+    LLM_OUTPUT_TOKENS_KEY,
+    MOSS_SPEAKER_AWARE_KEY,
+    STT_LANGUAGE_KEY,
+)
 from core.utils.redaction import redact_secret_mapping
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
-ModelEndpointType = Literal["embedder", "reranker", "llm", "vlm"]
+ModelEndpointType = Literal["embedder", "reranker", "llm", "vlm", "stt"]
 
 # LLM token budgets that the admin UI edits as first-class fields but stores in
 # ``extra`` — validated here so a typo can't persist a nonsensical value.
 _LLM_TOKEN_EXTRA_KEYS = (LLM_CONTEXT_SIZE_KEY, LLM_OUTPUT_TOKENS_KEY)
 
+# Allowlist, not a denylist: `name` is a single path segment in every
+# single-endpoint route (see `_normalize_name`), and enumerating unsafe values
+# one at a time as they're discovered — first `/` (#768), then the RFC 3986
+# dot-segments `.`/`..` — never closes the class. Anchoring both ends on
+# alphanumeric rules out `/`, `.`, `..`, and any leading/trailing separator by
+# construction, while `.`/`_`/`-` stay available in the middle for realistic
+# names like `gpt-4.1` or `jina_v3`.
+_NAME_PATTERN = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?")
+_NAME_MAX_LENGTH = 128
+
 
 def _normalize_name(value: str) -> str:
-    """Trim a user-facing registry name and reject blank values."""
+    """Trim a user-facing registry name and reject any value unsafe as a URL path segment.
+
+    ``name`` is embedded as a single path segment in every single-endpoint route
+    (``GET/PUT/DELETE /model-endpoints/{model_type}/{name}``, ``.../set-default``,
+    ``.../reveal-api-key``, ``.../validate``). A value outside ``_NAME_PATTERN``
+    — a ``/`` (splits across path segments), the exact values ``.``/``..``
+    (RFC 3986 dot-segments: browsers and HTTP clients normalize these out of
+    the URL before the request is even sent, resolving to the collection route
+    or dropping the ``model_type`` segment entirely), or anything else that
+    doesn't start/end alphanumeric — would leave the row visible in the list
+    endpoint but permanently unreachable by get/update/delete/set-default,
+    surfacing as a spurious "not found". Percent-encoding never helps: ASGI
+    servers decode ``%2F``/dot-segment escapes before Starlette's router sees
+    the path.
+    """
     value = value.strip()
     if not value:
         raise ValueError("name must be non-empty")
+    if len(value) > _NAME_MAX_LENGTH:
+        raise ValueError(f"name must be at most {_NAME_MAX_LENGTH} characters")
+    if not _NAME_PATTERN.fullmatch(value):
+        raise ValueError(
+            "name must start and end with a letter or digit, and contain only "
+            "letters, digits, '.', '_', or '-' (it is used as a URL path segment)"
+        )
     return value
 
 
@@ -30,6 +67,11 @@ def _normalize_endpoint(value: str) -> str:
     if not normalized:
         raise ValueError("endpoint must be non-empty")
     return normalized
+
+
+def _normalize_model_name(value: str | None) -> str | None:
+    """Trim an optional provider model name without inventing a value."""
+    return value.strip() if value is not None else None
 
 
 def validate_llm_token_extra(extra: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -59,6 +101,28 @@ def validate_llm_token_extra(extra: dict[str, Any] | None) -> dict[str, Any] | N
     return extra
 
 
+def validate_stt_fields(model_name: str | None, extra: dict[str, Any] | None) -> None:
+    """Validate fields that are meaningful for an OpenAI-compatible STT endpoint.
+
+    ``model`` is required by ``/audio/transcriptions``. A language hint is
+    intentionally permissive: providers accept either ISO 639-1 values such as
+    ``fr`` or broader BCP-47 tags, so the API only requires a non-empty string.
+    Speaker-aware MOSS normalization is an explicit boolean so it cannot be
+    confused with a provider request option.
+    """
+    if not model_name or not model_name.strip():
+        raise ValueError("model_name is required for an STT endpoint")
+    if extra is not None and STT_LANGUAGE_KEY in extra:
+        language = extra[STT_LANGUAGE_KEY]
+        if not isinstance(language, str) or not language.strip():
+            raise ValueError(f"extra.{STT_LANGUAGE_KEY} must be a non-empty language code")
+
+    if extra is None or MOSS_SPEAKER_AWARE_KEY not in extra:
+        return
+    if not isinstance(extra[MOSS_SPEAKER_AWARE_KEY], bool):
+        raise ValueError(f"extra.{MOSS_SPEAKER_AWARE_KEY} must be a boolean")
+
+
 class CreateModelEndpointRequest(BaseModel):
     """Request body for registering a model endpoint."""
 
@@ -85,6 +149,12 @@ class CreateModelEndpointRequest(BaseModel):
         """Normalize the endpoint URL."""
         return _normalize_endpoint(value)
 
+    @field_validator("model_name")
+    @classmethod
+    def validate_model_name(cls, value: str | None) -> str | None:
+        """Persist the same model name used by validation and inference."""
+        return _normalize_model_name(value)
+
     @field_validator("extra")
     @classmethod
     def validate_extra_token_budgets(cls, value: dict[str, Any], info: ValidationInfo) -> dict[str, Any]:
@@ -97,6 +167,12 @@ class CreateModelEndpointRequest(BaseModel):
         if info.data.get("model_type") != "llm":
             return value
         return validate_llm_token_extra(value)
+
+    @model_validator(mode="after")
+    def validate_stt_endpoint(self) -> CreateModelEndpointRequest:
+        if self.model_type == "stt":
+            validate_stt_fields(self.model_name, self.extra)
+        return self
 
 
 class UpdateModelEndpointRequest(BaseModel):
@@ -125,6 +201,12 @@ class UpdateModelEndpointRequest(BaseModel):
         if value is None:
             return None
         return _normalize_endpoint(value)
+
+    @field_validator("model_name")
+    @classmethod
+    def validate_model_name(cls, value: str | None) -> str | None:
+        """Normalize an optional replacement model name."""
+        return _normalize_model_name(value)
 
     # NOTE: no ``extra`` token-budget validator here on purpose. This schema
     # carries no ``model_type`` (it is a path parameter), so it cannot tell an
@@ -175,7 +257,10 @@ class ValidateEndpointRequest(BaseModel):
     """Request body to validate endpoint values before they are saved (draft)."""
 
     endpoint: str
+    model_type: ModelEndpointType | None = None
     model_name: str | None = None
+    timeout: float | None = Field(default=None, gt=0)
+    extra: dict[str, Any] = Field(default_factory=dict)
     api_key: str | None = None
     stored_api_key_model_type: ModelEndpointType | None = None
     stored_api_key_name: str | None = None
@@ -185,6 +270,12 @@ class ValidateEndpointRequest(BaseModel):
     def validate_endpoint(cls, value: str) -> str:
         """Normalize the draft endpoint URL before probing it."""
         return _normalize_endpoint(value)
+
+    @field_validator("model_name")
+    @classmethod
+    def validate_model_name(cls, value: str | None) -> str | None:
+        """Probe the normalized model name that would be persisted."""
+        return _normalize_model_name(value)
 
     @field_validator("stored_api_key_name")
     @classmethod
@@ -208,6 +299,7 @@ class ValidateEndpointResponse(BaseModel):
     reachable: bool
     model_found: bool | None = None
     models_served: list[str] | None = None
+    transcription_supported: bool | None = None
     detail: str | None = None
 
 
@@ -225,4 +317,5 @@ __all__ = [
     "UpdateModelEndpointRequest",
     "ValidateEndpointRequest",
     "ValidateEndpointResponse",
+    "validate_stt_fields",
 ]

@@ -15,6 +15,7 @@ from core.utils.exceptions import (
     InferenceTimeoutError,
 )
 from services.inference._circuit_breaker import _breakers
+from services.inference._retry import _is_retryable
 from services.inference.vllm_client import (
     _SUSPECT_UNICODE_ESCAPE,
     VLLMClient,
@@ -234,6 +235,94 @@ class TestVLLMClient:
         assert "max_retries" not in captured
 
     @pytest.mark.asyncio
+    async def test_falsy_config_logprobs_not_forwarded_on_chat(self):
+        """The DI container forwards LLMParamsConfig.logprobs (default False)
+        into self._defaults. `logprobs: false` is the OpenAI default, so it adds
+        nothing — but strict providers whose schema lacks the field reject it by
+        name whatever the value, e.g. Gemini"""
+        captured: dict = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured.update(json.loads(req.content))
+            return _chat_response()
+
+        await self._make_client(capture, logprobs=False).chat([{"role": "user", "content": "hi"}])
+
+        assert "logprobs" not in captured
+
+    @pytest.mark.asyncio
+    async def test_falsy_config_logprobs_not_forwarded_on_generate(self):
+        captured: dict = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured.update(json.loads(req.content))
+            return _completions_response()
+
+        await self._make_client(capture, logprobs=False).generate("hi")
+
+        assert "logprobs" not in captured
+
+    @pytest.mark.asyncio
+    async def test_falsy_request_logprobs_dropped_with_top_logprobs(self):
+        """A client sending `logprobs: false` alongside `top_logprobs` must not
+        leak either: top_logprobs is only meaningful when logprobs is on."""
+        captured: dict = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured.update(json.loads(req.content))
+            return _chat_response()
+
+        await self._make_client(capture).chat([{"role": "user", "content": "hi"}], logprobs=False, top_logprobs=3)
+
+        assert "logprobs" not in captured
+        assert "top_logprobs" not in captured
+
+    @pytest.mark.asyncio
+    async def test_truthy_logprobs_forwarded_on_chat(self):
+        """An explicit opt-in must keep flowing through unchanged."""
+        captured: dict = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured.update(json.loads(req.content))
+            return _chat_response()
+
+        await self._make_client(capture).chat([{"role": "user", "content": "hi"}], logprobs=True, top_logprobs=5)
+
+        assert captured["logprobs"] is True
+        assert captured["top_logprobs"] == 5
+
+    @pytest.mark.asyncio
+    async def test_truthy_logprobs_forwarded_on_generate(self):
+        """Same opt-in guarantee on the completions path. `/completions` takes
+        an integer `logprobs` (not the chat API's bool + `top_logprobs`), so a
+        truthy int must survive untouched — the strip is falsy-only, not a
+        blanket removal of the field."""
+        captured: dict = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured.update(json.loads(req.content))
+            return _completions_response()
+
+        await self._make_client(capture).generate("hi", logprobs=5)
+
+        assert captured["logprobs"] == 5
+
+    @pytest.mark.asyncio
+    async def test_zero_logprobs_forwarded_on_generate(self):
+        """`/completions`' integer `logprobs` treats 0 as a deliberate request
+        (the sampled token's own logprob, no alternates) — distinct from
+        unset/False. A truthiness check would wrongly conflate 0 with off."""
+        captured: dict = {}
+
+        def capture(req: httpx.Request) -> httpx.Response:
+            captured.update(json.loads(req.content))
+            return _completions_response()
+
+        await self._make_client(capture).generate("hi", logprobs=0)
+
+        assert captured["logprobs"] == 0
+
+    @pytest.mark.asyncio
     async def test_trailing_slash_stripped(self):
         c = VLLMClient(endpoint="http://vllm:8000/v1/", model_name="m")
         assert c._endpoint == "http://vllm:8000/v1"
@@ -265,10 +354,10 @@ class TestVLLMClientOverrides:
     def test_no_override_uses_defaults(self):
         client = self._make_client()
         kwargs: dict = {}
-        base_url, model, headers = client._resolve_overrides(kwargs)
+        base_url, model, headers, _ = client._resolve_overrides(kwargs)
         assert base_url == "http://default:8000/v1"
         assert model == "default-model"
-        assert headers is None
+        assert headers == {"Authorization": "Bearer default-key"}
 
     def test_llm_override_model_applied_endpoint_and_key_ignored(self):
         client = self._make_client()
@@ -280,11 +369,11 @@ class TestVLLMClientOverrides:
             },
         }
         kwargs: dict = {"metadata": original_metadata}
-        base_url, model, headers = client._resolve_overrides(kwargs)
+        base_url, model, headers, _ = client._resolve_overrides(kwargs)
         # Only `model` is honored; endpoint and credentials stay server-side.
         assert model == "custom-model"
         assert base_url == "http://default:8000/v1"
-        assert headers is None
+        assert headers == {"Authorization": "Bearer default-key"}
         # kwargs must not be mutated — retries depend on llm_override surviving.
         assert kwargs["metadata"] is original_metadata
         assert "llm_override" in kwargs["metadata"]
@@ -296,10 +385,10 @@ class TestVLLMClientOverrides:
             "use_map_reduce": True,
         }
         kwargs: dict = {"metadata": original_metadata}
-        base_url, model, headers = client._resolve_overrides(kwargs)
+        base_url, model, headers, _ = client._resolve_overrides(kwargs)
         assert base_url == "http://default:8000/v1"
         assert model == "override-model"
-        assert headers is None
+        assert headers == {"Authorization": "Bearer default-key"}
         assert kwargs["metadata"] is original_metadata
         assert kwargs["metadata"] == {
             "llm_override": {"model": "override-model"},
@@ -319,10 +408,277 @@ class TestVLLMClientOverrides:
                 }
             }
         }
-        base_url, model, headers = client._resolve_overrides(kwargs)
+        base_url, model, headers, _ = client._resolve_overrides(kwargs)
         assert model == "custom-model"
         assert base_url == "http://default:8000/v1"
-        assert headers is None
+        assert headers == {"Authorization": "Bearer default-key"}
+
+
+class TestCustomEndpointOverride:
+    """LLM_OVERRIDE_ALLOW_CUSTOM_ENDPOINT restores the full llm_override contract.
+
+    The *host* is unrestricted; the request shape is not (https, fixed path), and
+    the server's own credential must never leak.
+    """
+
+    def _make_client(self, monkeypatch, enabled: bool, **kwargs):
+        if enabled:
+            monkeypatch.setenv("LLM_OVERRIDE_ALLOW_CUSTOM_ENDPOINT", "true")
+        else:
+            monkeypatch.delenv("LLM_OVERRIDE_ALLOW_CUSTOM_ENDPOINT", raising=False)
+        return VLLMClient(
+            endpoint="http://default:8000/v1",
+            model_name="default-model",
+            api_key="default-key",
+            **kwargs,
+        )
+
+    def _kwargs(self, **override):
+        return {"metadata": {"llm_override": override}}
+
+    @staticmethod
+    def _refusing_transport() -> httpx.AsyncClient:
+        def refuse(request: httpx.Request) -> httpx.Response:
+            raise httpx.ConnectError("connection refused")
+
+        return httpx.AsyncClient(transport=_make_transport(refuse))
+
+    @pytest.mark.asyncio
+    async def test_client_endpoint_failure_does_not_touch_the_shared_breaker(self, monkeypatch):
+        """A failing client endpoint must not count against the shared "llm" breaker.
+
+        It is one global instance guarding the *server's* endpoint, so otherwise any
+        caller could aim the override at an unresolvable host and open it for every
+        tenant.
+        """
+        client = self._make_client(monkeypatch, enabled=True)
+        client._client = self._refusing_transport()
+
+        with pytest.raises(InferenceConnectionError):
+            await client.chat(
+                [{"role": "user", "content": "hi"}],
+                **self._kwargs(base_url="https://third-party.tld/v1", api_key="k"),
+            )
+
+        assert "llm" not in _breakers
+
+    @pytest.mark.asyncio
+    async def test_configured_endpoint_failure_still_counts_against_the_shared_breaker(self, monkeypatch):
+        """Skipping the breaker must be scoped to overridden endpoints, not a
+        blanket disable of the server's own."""
+        client = self._make_client(monkeypatch, enabled=True)
+        client._client = self._refusing_transport()
+
+        with pytest.raises(InferenceConnectionError):
+            await client.chat([{"role": "user", "content": "hi"}])
+
+        assert _breakers["llm"].fail_counter == 1
+
+    def test_arbitrary_endpoint_is_honored_with_client_key(self, monkeypatch):
+        client = self._make_client(monkeypatch, enabled=True)
+        base_url, model, headers, overridden = client._resolve_overrides(
+            self._kwargs(base_url="https://api.openai.com/v1/", api_key="sk-client", model="gpt-5.1")
+        )
+
+        assert base_url == "https://api.openai.com/v1"
+        assert model == "gpt-5.1"
+        assert headers == {"Authorization": "Bearer sk-client"}
+        assert overridden is True
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://169.254.169.254/latest/meta-data",
+            "https://internal-service.corp/v1",
+            "https://api.openai.com@evil.tld/v1",
+        ],
+    )
+    def test_no_host_allowlist_when_enabled(self, monkeypatch, url):
+        """Explicit: with the flag on there is no host allowlist. That residual SSRF
+        (host, not path) is what the flag trades away — asserted so it cannot
+        regress into a false sense of safety.
+        """
+        client = self._make_client(monkeypatch, enabled=True)
+        base_url, _, _, _ = client._resolve_overrides(self._kwargs(base_url=url, api_key="k", model="m"))
+
+        assert base_url == url.rstrip("/")
+
+    def test_server_api_key_never_reaches_an_overridden_endpoint(self, monkeypatch):
+        """An override with no api_key sends no Authorization at all rather than
+        falling back to the server's credential."""
+        client = self._make_client(monkeypatch, enabled=True)
+        _, _, headers, _ = client._resolve_overrides(self._kwargs(base_url="https://evil.tld/v1", model="m"))
+
+        assert headers == {}
+
+    @pytest.mark.parametrize("base_url", ["http://milvus:19530/v2", "file:///etc/passwd"])
+    def test_non_https_scheme_is_rejected_without_retry(self, monkeypatch, base_url):
+        """https only: plaintext http is where the internal-infra SSRF payoff lives.
+        Failing here turns it into a 4xx `with_retry` will not re-attempt."""
+        client = self._make_client(monkeypatch, enabled=True)
+
+        with pytest.raises(InferenceError) as exc_info:
+            client._resolve_overrides(self._kwargs(base_url=base_url, api_key="k"))
+
+        assert exc_info.value.status_code == 400
+        assert not _is_retryable(exc_info.value)
+
+    @pytest.mark.parametrize(
+        "base_url",
+        [
+            "https://milvus:19530/v2/vectordb/collections/list#",
+            "https://milvus:19530/v2/vectordb/collections/list?x=1",
+            "https://milvus:19530/v2/vectordb/../collections",
+            # Percent-encoded: httpx sends the octets verbatim, so a target that
+            # decodes before routing resolves these to the `..` form above.
+            "https://milvus:19530/v2/vectordb/%2e%2e/collections",
+            "https://milvus:19530/v2/vectordb/%2E%2E/collections",
+        ],
+    )
+    def test_client_controlled_path_is_rejected_without_retry(self, monkeypatch, base_url):
+        """The request is always issued as ``{base_url}/chat/completions``, so a
+        fragment or query truncates that suffix and a ``..`` traverses out of it —
+        either aims the override at an arbitrary internal path (here Milvus' REST
+        API, reading cross-partition vectors).
+        """
+        client = self._make_client(monkeypatch, enabled=True)
+
+        with pytest.raises(InferenceError) as exc_info:
+            client._resolve_overrides(self._kwargs(base_url=base_url, api_key="k"))
+
+        assert exc_info.value.status_code == 400
+        assert not _is_retryable(exc_info.value)
+
+    def test_unparseable_base_url_is_rejected_without_retry(self, monkeypatch):
+        """``urlsplit`` raises on an unclosed IPv6 literal; uncaught, that
+        ``ValueError`` surfaces as an unstructured 500."""
+        client = self._make_client(monkeypatch, enabled=True)
+
+        with pytest.raises(InferenceError) as exc_info:
+            client._resolve_overrides(self._kwargs(base_url="https://[::1/v1", api_key="k"))
+
+        assert exc_info.value.status_code == 400
+        assert not _is_retryable(exc_info.value)
+
+    @pytest.mark.parametrize("llm_override", ["gpt-5.1", ["gpt-5.1"], 7])
+    def test_non_mapping_llm_override_is_ignored(self, monkeypatch, llm_override):
+        """Only the outer ``metadata`` is schema-validated, so this is a well-formed
+        request whose ``.get`` would raise ``AttributeError`` — a 500. The breaker
+        predicate reads it first, before the method body runs.
+        """
+        client = self._make_client(monkeypatch, enabled=True)
+        kwargs = {"metadata": {"llm_override": llm_override}}
+
+        assert client._has_endpoint_override(kwargs) is False
+        base_url, model, headers, overridden = client._resolve_overrides(kwargs)
+
+        assert (base_url, model, overridden) == ("http://default:8000/v1", "default-model", False)
+        assert headers == {"Authorization": "Bearer default-key"}
+
+    def test_disabled_by_default_still_ignores_base_url(self, monkeypatch):
+        """Unset env keeps the hardened post-refactor behaviour, so an upgrade never
+        turns an untouched deployment into an SSRF surface."""
+        client = self._make_client(monkeypatch, enabled=False)
+        base_url, model, headers, overridden = client._resolve_overrides(
+            self._kwargs(base_url="https://api.openai.com/v1", api_key="sk-client", model="gpt-5.1")
+        )
+
+        assert base_url == "http://default:8000/v1"
+        assert model == "gpt-5.1"
+        assert headers == {"Authorization": "Bearer default-key"}
+        assert overridden is False
+
+    def test_override_does_not_mutate_caller_metadata(self, monkeypatch):
+        """Retries re-read the same kwargs, so the override must survive intact."""
+        client = self._make_client(monkeypatch, enabled=True)
+        kwargs = self._kwargs(base_url="https://api.openai.com/v1", api_key="sk-client", model="gpt-5.1")
+        original = kwargs["metadata"]["llm_override"].copy()
+
+        client._resolve_overrides(kwargs)
+
+        assert kwargs["metadata"]["llm_override"] == original
+
+    @pytest.mark.asyncio
+    async def test_override_reaches_the_wire_on_chat(self, monkeypatch):
+        """End-to-end: the request is issued to the overridden host with the
+        client's key, not the server's."""
+        client = self._make_client(monkeypatch, enabled=True)
+        seen: dict = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen["url"] = str(request.url)
+            seen["auth"] = request.headers.get("Authorization")
+            return _chat_response("ok")
+
+        client._client = httpx.AsyncClient(transport=_make_transport(handler))
+        await client.chat(
+            [{"role": "user", "content": "hi"}],
+            metadata={
+                "llm_override": {
+                    "base_url": "https://api.openai.com/v1",
+                    "api_key": "sk-client",
+                    "model": "gpt-5.1",
+                }
+            },
+        )
+
+        assert seen["url"] == "https://api.openai.com/v1/chat/completions"
+        assert seen["auth"] == "Bearer sk-client"
+
+    @pytest.mark.asyncio
+    async def test_server_sampling_defaults_are_not_sent_to_a_client_endpoint(self, monkeypatch):
+        """The server's sampling defaults must not ride along to another provider,
+        which may reject them outright — this is what made an otherwise-restored
+        override still fail in production."""
+        client = self._make_client(monkeypatch, enabled=True, temperature=0.3)
+        captured: dict = {}
+
+        def capture(request: httpx.Request) -> httpx.Response:
+            captured.update(json.loads(request.content))
+            return _chat_response("ok")
+
+        client._client = httpx.AsyncClient(transport=_make_transport(capture))
+        await client.chat(
+            [{"role": "user", "content": "hi"}],
+            metadata={"llm_override": {"base_url": "https://third-party.tld/v1", "api_key": "k", "model": "m"}},
+        )
+
+        assert "temperature" not in captured
+        assert captured["model"] == "m"
+
+    @pytest.mark.asyncio
+    async def test_keyless_override_sends_no_authorization_on_the_wire(self, monkeypatch):
+        """httpx merges client-level headers into every request, so this only holds
+        because Authorization is set per request."""
+        client = self._make_client(monkeypatch, enabled=True)
+        seen: dict = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen["auth"] = request.headers.get("Authorization")
+            return _chat_response("ok")
+
+        client._client = httpx.AsyncClient(transport=_make_transport(handler))
+        await client.chat(
+            [{"role": "user", "content": "hi"}],
+            metadata={"llm_override": {"base_url": "https://no-auth.internal/v1", "model": "m"}},
+        )
+
+        assert seen["auth"] is None
+
+    @pytest.mark.asyncio
+    async def test_server_key_is_sent_when_there_is_no_override(self, monkeypatch):
+        """Moving Authorization off the client must not silently drop it."""
+        client = self._make_client(monkeypatch, enabled=True)
+        seen: dict = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen["auth"] = request.headers.get("Authorization")
+            return _chat_response("ok")
+
+        client._client = httpx.AsyncClient(transport=_make_transport(handler))
+        await client.chat([{"role": "user", "content": "hi"}])
+
+        assert seen["auth"] == "Bearer default-key"
 
 
 # ---------------------------------------------------------------------------
@@ -532,6 +888,23 @@ class TestVLLMVision:
             return _chat_response("An image")
 
         await self._make_vision(handler).caption_image(b"\x89PNG\r\n\x1a\n")
+
+    @pytest.mark.asyncio
+    async def test_caption_image_sends_the_configured_api_key(self):
+        """VLLMClient sets Authorization per request, not on the shared httpx
+        client, so an overridden llm endpoint never receives the server's key.
+        Captioning inherits that client but always calls the configured endpoint,
+        so it must pass the header explicitly or authenticate as nobody.
+        """
+        seen: dict = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen["auth"] = request.headers.get("Authorization")
+            return _chat_response("ok")
+
+        await self._make_vision(handler).caption_image(b"img")
+
+        assert seen["auth"] == "Bearer test-key"
 
     @pytest.mark.asyncio
     async def test_caption_images_batch(self):

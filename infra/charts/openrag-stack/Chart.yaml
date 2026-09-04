@@ -1,39 +1,39 @@
 apiVersion: v2
 name: openrag-stack
 description: A Helm chart for Kubernetes
-
-# A chart can be either an 'application' or a 'library' chart.
-#
-# Application charts are a collection of templates that can be packaged into versioned archives
-# to be deployed.
-#
-# Library charts provide useful utilities or functions for the chart developer. They're included as
-# a dependency of application charts to inject those utilities and functions into the rendering
-# pipeline. Library charts do not define any templates and therefore cannot be deployed.
 type: application
 
-# This is the chart version. This version number should be incremented each time you make changes
-# to the chart and its templates, including the app version.
-# Versions are expected to follow Semantic Versioning (https://semver.org/)
-version: 0.5.2
+version: 0.6.3
+appVersion: "2.2.0"
 
-# This is the version number of the application being deployed. This version number should be
-# incremented each time you make changes to the application. Versions are not expected to
-# follow Semantic Versioning. They should reflect the version the application is using.
-# It is recommended to use it with quotes.
-appVersion: "2.0.1"
+maintainers:
+  - name: linagora
+    email: openrag@linagora.com
+    url: https://github.com/linagora/openrag
+
+home: https://github.com/linagora/openrag
+sources:
+  - https://github.com/linagora/openrag
 
 dependencies:
   - name: kuberay-operator
     version: "1.4.0"
     repository: "https://ray-project.github.io/kuberay-helm/"
+    alias: kuberay
+    condition: kuberay.enabled
   - name: postgresql
-    version: ">=17.6.0"
+    version: ">=17.6.0 <19.0.0"
     repository: "https://charts.bitnami.com/bitnami"
+    condition: postgresql.enabled
   - name: milvus
-    version: "5.0.0"
+    # The Milvus 3 chart is 5.0.26, but that release is not yet present in the
+    # published repository index. Keep 5.0.25 and override its image tag in
+    # values.yaml until 5.0.26 can be resolved through helm dependency update.
+    version: "5.0.25"
     repository: "https://zilliztech.github.io/milvus-helm/"
+    condition: milvus.enabled
   - name: vllm-stack
     alias: vllm
-    version: ">=0.1.7"
+    version: ">=0.1.7 <1.0.0"
     repository: "https://vllm-project.github.io/production-stack"
+    condition: vllm.enabled

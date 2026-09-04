@@ -1,6 +1,7 @@
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
+import { NewBadge } from "@/components/shared/new-badge";
 import {
   Plus,
   Trash2,
@@ -23,6 +24,8 @@ import {
   mergeModelEndpointApiKeyExtra,
   mergeModelEndpointImplementation,
   mergeModelEndpointLlmContext,
+  mergeModelEndpointMossSpeakerAware,
+  mergeModelEndpointSttLanguage,
   prepareModelEndpointExtraForSubmit,
   revealModelEndpointApiKey,
   REDACTED_SECRET,
@@ -30,6 +33,8 @@ import {
   splitModelEndpointApiKeyExtra,
   splitModelEndpointImplementation,
   splitModelEndpointLlmContext,
+  splitModelEndpointMossSpeakerAware,
+  splitModelEndpointSttLanguage,
   validateModelEndpoint,
   VENDOR_OPTIONS_BY_TYPE,
 } from "@/lib/api/models";
@@ -55,6 +60,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { VendorIcon } from "@/components/ui/vendor-icon";
 import { Badge } from "@/components/ui/badge";
@@ -62,7 +68,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { formatDate, intOr, numOr } from "@/lib/utils";
 
-const MODEL_TYPES = ["embedder", "reranker", "llm", "vlm"] as const;
+const MODEL_TYPES = ["embedder", "reranker", "llm", "vlm", "stt"] as const;
 
 type RevealedApiKey = {
   modelType: ModelType;
@@ -71,6 +77,14 @@ type RevealedApiKey = {
 };
 
 const normalizeEndpointUrl = (value: string) => value.trim().replace(/\/+$/, "");
+
+// Mirrors the backend's `_NAME_PATTERN` allowlist (api/schemas/admin/model_endpoint_schemas.py):
+// `name` is a single path segment in every single-endpoint route. An allowlist, not a
+// denylist — `/` splits across path segments, and `.`/`..` are RFC 3986 dot-segments that
+// browsers normalize out of the URL before the request is even sent — so anchoring both
+// ends on alphanumeric rules out all of that (and any leading/trailing separator) at once.
+const NAME_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/;
+const NAME_MAX_LENGTH = 128;
 
 // Placeholder shown when a per-endpoint budget is left blank. The real
 // fallback (the MAX_LLM_CONTEXT_SIZE / MAX_OUTPUT_TOKENS env vars — see
@@ -170,7 +184,7 @@ export default function ModelsPage() {
     <div>
       <PageHeader
         title="Model Endpoints"
-        description="Manage embedder, reranker, LLM, and VLM endpoints"
+        description="Manage embedder, reranker, LLM, VLM, and speech-to-text endpoints"
         actions={
           <Button onClick={handleOpenCreate}>
             <Plus className="mr-2 h-4 w-4" /> Add Endpoint
@@ -181,8 +195,9 @@ export default function ModelsPage() {
       <Tabs value={activeTab} onValueChange={setActiveTab}>
         <TabsList>
           {MODEL_TYPES.map((t) => (
-            <TabsTrigger key={t} value={t} className="capitalize">
+            <TabsTrigger key={t} value={t} className="capitalize" aria-label={t}>
               {t}
+              <NewBadge feature={`models.${t}`} />
             </TabsTrigger>
           ))}
         </TabsList>
@@ -210,7 +225,7 @@ export default function ModelsPage() {
                             </CardTitle>
                             <div className="flex items-center gap-1.5 shrink-0">
                               {isDefault && (
-                                <Badge variant="secondary" className="text-xs">Default</Badge>
+                                <Badge className="shrink-0 bg-green-600 text-xs hover:bg-green-700">Default</Badge>
                               )}
                             </div>
                           </div>
@@ -226,7 +241,9 @@ export default function ModelsPage() {
                             <span className="truncate ml-2 max-w-[200px] text-right" title={ep.endpoint}>{ep.endpoint}</span>
                           </div>
                           <div className="flex justify-between">
-                            <span className="text-muted-foreground">Batch Size</span>
+                            <span className="text-muted-foreground">
+                              {ep.model_type === "stt" ? "Concurrency per worker" : "Batch Size"}
+                            </span>
                             <span>{ep.batch_size}</span>
                           </div>
                           <div className="flex justify-between">
@@ -313,12 +330,48 @@ function EndpointDialog({
   const [apiKey, setApiKey] = useState("");
   const [maxContextSize, setMaxContextSize] = useState("");
   const [maxOutputTokens, setMaxOutputTokens] = useState("");
+  const [languageHint, setLanguageHint] = useState("");
+  const [mossSpeakerAware, setMossSpeakerAware] = useState(false);
   const [vendor, setVendor] = useState("");
   const [extraJson, setExtraJson] = useState("{}");
+
+  // The backend trims `name` before validating it (and before persisting it),
+  // so validate — and submit — the same trimmed value here, not the raw
+  // input; otherwise e.g. " gpt-4.1 " would be accepted by the backend but
+  // blocked by this form. Checked client-side too because the resulting 422
+  // has no readable message — FastAPI's validation `detail` is a list, and
+  // ApiError only unwraps string detail.
+  const trimmedName = name.trim();
+  const nameError =
+    trimmedName !== "" && trimmedName.length > NAME_MAX_LENGTH
+      ? `Name must be at most ${NAME_MAX_LENGTH} characters.`
+      : trimmedName !== "" && !NAME_PATTERN.test(trimmedName)
+        ? "Name must start/end with a letter or digit, and contain only letters, digits, '.', '_', or '-' — it's used in the endpoint's URL path."
+        : null;
 
   const modelType = (editing ? editing.model_type : activeTab) as ModelType;
   // LLM token-budget fields (max context / max output) apply to LLM endpoints only.
   const isLlm = modelType === "llm";
+  const isStt = modelType === "stt";
+  const sttValidationTimeout = isStt ? timeout : null;
+  const sttValidationLanguageHint = isStt ? languageHint.trim() : null;
+  const sttValidationMossSpeakerAware = isStt ? mossSpeakerAware : null;
+  const validationDraft = JSON.stringify([
+    endpoint,
+    modelType,
+    modelName,
+    apiKey,
+    extraJson,
+    sttValidationTimeout,
+    sttValidationLanguageHint,
+    sttValidationMossSpeakerAware,
+  ]);
+  const currentValidationDraft = useRef(validationDraft);
+  const validationGeneration = useRef(0);
+  useLayoutEffect(() => {
+    currentValidationDraft.current = validationDraft;
+    validationGeneration.current += 1;
+  }, [validationDraft, open, editing?.name]);
   const vendorOptions = VENDOR_OPTIONS_BY_TYPE[modelType];
   const [validated, setValidated] = useState<boolean | null>(null);
   const [validating, setValidating] = useState(false);
@@ -342,7 +395,21 @@ function EndpointDialog({
       setRevealingApiKey(false);
       if (editing) {
         const { apiKey: displayApiKey, extra: apiExtra } = splitModelEndpointApiKeyExtra(editing.extra);
-        const { implementation, extra: implExtra } = splitModelEndpointImplementation(apiExtra);
+        // STT uses OpenAI's audio API directly, so unlike inference endpoints
+        // it has no implementation/vendor selector. Preserve any advanced
+        // `implementation` value in Extra rather than silently dropping it.
+        const { languageHint: storedLanguageHint, extra: sttExtra } =
+          editing.model_type === "stt"
+            ? splitModelEndpointSttLanguage(apiExtra)
+            : { languageHint: "", extra: apiExtra };
+        const { mossSpeakerAware: storedMossSpeakerAware, extra: mossExtra } =
+          editing.model_type === "stt"
+            ? splitModelEndpointMossSpeakerAware(sttExtra)
+            : { mossSpeakerAware: false, extra: sttExtra };
+        const { implementation, extra: implExtra } =
+          editing.model_type === "stt"
+            ? { implementation: "", extra: mossExtra }
+            : splitModelEndpointImplementation(mossExtra);
         // Only carve the LLM token-budget keys out of the editable extra for LLM
         // endpoints — the budget fields are LLM-only, and splitting for non-LLM
         // types would drop any same-named keys from their extra on save (they are
@@ -359,6 +426,8 @@ function EndpointDialog({
         setApiKey(displayApiKey);
         setMaxContextSize(llmContext.maxContextSize);
         setMaxOutputTokens(llmContext.maxOutputTokens);
+        setLanguageHint(storedLanguageHint);
+        setMossSpeakerAware(storedMossSpeakerAware);
         setVendor(implementation || DEFAULT_VENDOR_BY_TYPE[editing.model_type]);
         setExtraJson(JSON.stringify(displayExtra, null, 2));
         setValidated(true);
@@ -371,25 +440,44 @@ function EndpointDialog({
         setName("");
         setEndpoint("");
         setModelName("");
-        setBatchSize("32");
-        setTimeout("30");
+        setBatchSize(activeTab === "stt" ? "1" : "32");
+        setTimeout(activeTab === "stt" ? "3600" : "30");
         setApiKey("");
         setMaxContextSize("");
         setMaxOutputTokens("");
+        setLanguageHint("");
+        setMossSpeakerAware(false);
         setVendor(DEFAULT_VENDOR_BY_TYPE[activeTab as ModelType]);
         setExtraJson("{}");
         setValidated(null);
         setValidationMsg(null);
       }
     }
-  }, [open, editing]);
+  }, [open, editing, activeTab]);
 
   // Reset validation when relevant fields change. The LLM token-budget fields
   // don't affect endpoint reachability, so they're deliberately excluded — the
   // raw extra is compared with them stripped out (as the textarea shows them).
   useEffect(() => {
+    setValidating(false);
     const editingExtra = editing ? splitModelEndpointApiKeyExtra(editing.extra) : null;
-    const editingImplExtra = editingExtra ? splitModelEndpointImplementation(editingExtra.extra).extra : null;
+    const editingSttFields = editingExtra
+      ? editing?.model_type === "stt"
+        ? splitModelEndpointSttLanguage(editingExtra.extra)
+        : { languageHint: "", extra: editingExtra.extra }
+      : null;
+    const editingSttExtra = editingSttFields?.extra ?? null;
+    const editingMossFields = editingSttExtra
+      ? editing?.model_type === "stt"
+        ? splitModelEndpointMossSpeakerAware(editingSttExtra)
+        : { mossSpeakerAware: false, extra: editingSttExtra }
+      : null;
+    const editingMossExtra = editingMossFields?.extra ?? null;
+    const editingImplExtra = editingMossExtra
+      ? editing?.model_type === "stt"
+        ? editingMossExtra
+        : splitModelEndpointImplementation(editingMossExtra).extra
+      : null;
     // Match the display path above: only strip the budget keys for LLM endpoints,
     // otherwise the "unchanged" comparison would treat a non-LLM endpoint's
     // same-named extra keys as already removed.
@@ -402,6 +490,12 @@ function EndpointDialog({
       editing &&
       endpoint === editing.endpoint &&
       (modelName || "") === (editing.model_name || "") &&
+      sttValidationTimeout ===
+        (editing.model_type === "stt" ? String(editing.timeout) : null) &&
+      sttValidationLanguageHint ===
+        (editing.model_type === "stt" ? editingSttFields?.languageHint.trim() || "" : null) &&
+      sttValidationMossSpeakerAware ===
+        (editing.model_type === "stt" ? editingMossFields?.mossSpeakerAware || false : null) &&
       apiKey === editingExtra?.apiKey &&
       extraJson === JSON.stringify(editingRawExtra, null, 2)
     ) {
@@ -415,7 +509,16 @@ function EndpointDialog({
     }
     setValidated(null);
     setValidationMsg(null);
-  }, [endpoint, modelName, apiKey, extraJson, editing]);
+  }, [
+    endpoint,
+    modelName,
+    sttValidationTimeout,
+    sttValidationLanguageHint,
+    sttValidationMossSpeakerAware,
+    apiKey,
+    extraJson,
+    editing,
+  ]);
 
   const apiKeySubmitValue = () =>
     prepareModelEndpointExtraForSubmit({ api_key: apiKey.trim() }).api_key;
@@ -491,6 +594,25 @@ function EndpointDialog({
       toast.error("Enter an endpoint URL first");
       return;
     }
+    let validationExtra: Record<string, unknown> | undefined;
+    if (isStt) {
+      try {
+        const parsedExtra: unknown = JSON.parse(extraJson);
+        if (typeof parsedExtra !== "object" || parsedExtra === null || Array.isArray(parsedExtra)) {
+          throw new Error("Extra must be a JSON object");
+        }
+        validationExtra = mergeModelEndpointMossSpeakerAware(
+          mergeModelEndpointSttLanguage(parsedExtra as Record<string, unknown>, languageHint),
+          mossSpeakerAware,
+        );
+      } catch {
+        const msg = "Invalid JSON in extra field";
+        setValidated(false);
+        setValidationMsg(msg);
+        toast.error(msg);
+        return;
+      }
+    }
     let apiKey: string | undefined;
     let submittedApiKey: string | undefined;
     try {
@@ -506,6 +628,11 @@ function EndpointDialog({
     }
     setValidating(true);
     setValidationMsg(null);
+    const submittedDraft = currentValidationDraft.current;
+    const submittedGeneration = ++validationGeneration.current;
+    const validationIsCurrent = () =>
+      submittedGeneration === validationGeneration.current &&
+      submittedDraft === currentValidationDraft.current;
     try {
       const isClearingStoredApiKey = editing?.has_api_key === true && submittedApiKey === "";
       if (
@@ -526,18 +653,26 @@ function EndpointDialog({
         !isClearingStoredApiKey &&
         !apiKey &&
         (!submittedApiKey || submittedApiKey === REDACTED_SECRET);
+      const validationTimeout = numOr(timeout, isStt ? 3600 : 30);
       const res = canUseStoredSecret
         ? await validateModelEndpoint({
             endpoint,
+            model_type: modelType,
             model_name: modelName || undefined,
+            timeout: validationTimeout,
+            extra: validationExtra,
             stored_api_key_model_type: editing.model_type,
             stored_api_key_name: editing.name,
           })
         : await validateModelEndpoint({
             endpoint,
+            model_type: modelType,
             model_name: modelName || undefined,
+            timeout: validationTimeout,
+            extra: validationExtra,
             api_key: apiKey,
           });
+      if (!validationIsCurrent()) return;
       if (!res.reachable) {
         setValidated(false);
         const msg = res.detail || "Endpoint is unreachable.";
@@ -552,26 +687,42 @@ function EndpointDialog({
         const msg = `Reachable, but "${modelName}" isn't served. Available: ${served}`;
         setValidationMsg(msg);
         toast.warning(msg);
+      } else if (isStt && res.transcription_supported !== true) {
+        setValidated(false);
+        const msg = res.detail || "Could not verify OpenAI-compatible audio transcription support.";
+        setValidationMsg(msg);
+        toast.warning(msg);
       } else {
         setValidated(true);
         const msg = res.model_found
-          ? `Reachable — "${modelName}" is served.`
-          : res.detail || "Reachable (couldn't confirm the model list).";
+          ? isStt
+            ? `Reachable — "${modelName}" is served and audio transcription is supported.`
+            : `Reachable — "${modelName}" is served.`
+          : isStt
+            ? "Reachable — audio transcription is supported (couldn't confirm the model list)."
+            : res.detail || "Reachable (couldn't confirm the model list).";
         setValidationMsg(msg);
         toast.success(msg);
       }
     } catch (e) {
+      if (!validationIsCurrent()) return;
       setValidated(false);
       const msg = e instanceof Error ? e.message : "Validation failed";
       setValidationMsg(msg);
       toast.error(msg);
     } finally {
-      setValidating(false);
+      if (validationIsCurrent()) {
+        setValidating(false);
+      }
     }
   };
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    if (nameError) {
+      toast.error(nameError);
+      return;
+    }
     let extra: Record<string, unknown> = {};
     try {
       extra = mergeModelEndpointApiKeyExtra(JSON.parse(extraJson), apiKey, {
@@ -584,28 +735,35 @@ function EndpointDialog({
     if (isLlm) {
       extra = mergeModelEndpointLlmContext(extra, { maxContextSize, maxOutputTokens });
     }
-    extra = mergeModelEndpointImplementation(extra, vendor);
+    if (isStt) {
+      extra = mergeModelEndpointSttLanguage(extra, languageHint);
+      // MOSS deployments can expose arbitrary served-model aliases, so this
+      // behavior is an explicit endpoint setting rather than a model-name check.
+      extra = mergeModelEndpointMossSpeakerAware(extra, mossSpeakerAware);
+    } else {
+      extra = mergeModelEndpointImplementation(extra, vendor);
+    }
 
     if (editing) {
       const updateData: UpdateModelEndpointRequest = {
         endpoint,
         model_name: modelName || undefined,
-        batch_size: intOr(batchSize, 32),
-        timeout: numOr(timeout, 30),
+        batch_size: intOr(batchSize, isStt ? 1 : 32),
+        timeout: numOr(timeout, isStt ? 3600 : 30),
         extra,
       };
-      if (name !== editing.name) {
-        updateData.name = name;
+      if (trimmedName !== editing.name) {
+        updateData.name = trimmedName;
       }
       onUpdate(editing.model_type, editing.name, updateData);
     } else {
       onCreate({
-        name,
+        name: trimmedName,
         model_type: activeTab as ModelType,
         endpoint,
         model_name: modelName || undefined,
-        batch_size: intOr(batchSize, 32),
-        timeout: numOr(timeout, 30),
+        batch_size: intOr(batchSize, isStt ? 1 : 32),
+        timeout: numOr(timeout, isStt ? 3600 : 30),
         extra,
       });
     }
@@ -633,19 +791,41 @@ function EndpointDialog({
               onChange={(e) => setName(e.target.value)}
               required
             />
+            {nameError && <p className="text-xs text-destructive">{nameError}</p>}
           </div>
           <div className="space-y-2">
-            <Label>Endpoint URL</Label>
+            {isStt ? (
+              <LabelWithInfo
+                label="Endpoint URL"
+                tooltip="OpenAI-compatible base URL including /v1. OpenRAG sends transcription requests to /audio/transcriptions under this URL."
+              />
+            ) : (
+              <Label>Endpoint URL</Label>
+            )}
             <Input value={endpoint} onChange={(e) => setEndpoint(e.target.value)} required />
           </div>
           <div className="space-y-2">
-            <Label>Model Name</Label>
-            <Input value={modelName} onChange={(e) => setModelName(e.target.value)} />
+            {isStt ? (
+              <LabelWithInfo
+                label="Model Name"
+                tooltip="Required by OpenAI-compatible transcription APIs. It must match the model advertised by the endpoint, for example moss-transcribe-diarize."
+              />
+            ) : (
+              <Label>Model Name</Label>
+            )}
+            <Input value={modelName} onChange={(e) => setModelName(e.target.value)} required={isStt} />
           </div>
           <div className="grid grid-cols-2 gap-4">
             <div className="space-y-2">
-              <Label>Batch Size</Label>
-              <Input type="number" value={batchSize} onChange={(e) => setBatchSize(e.target.value)} />
+              {isStt ? (
+                <LabelWithInfo
+                  label="Concurrent requests per worker"
+                  tooltip="Maximum parallel transcription requests from each OpenRAG worker. Multiple workers or replicas each have their own limit, so size it for the transcription server's total capacity."
+                />
+              ) : (
+                <Label>Batch Size</Label>
+              )}
+              <Input type="number" min="1" value={batchSize} onChange={(e) => setBatchSize(e.target.value)} />
             </div>
             <div className="space-y-2">
               <Label>Timeout (s)</Label>
@@ -686,6 +866,41 @@ function EndpointDialog({
                 Token budgets for this endpoint. Leave blank to use the system default. Applied whenever this
                 endpoint answers a request — as the default LLM, or as a partition&apos;s chat LLM preset.
               </p>
+            </div>
+          )}
+          {isStt && (
+            <div className="space-y-2">
+              <LabelWithInfo
+                label="Language hint (optional)"
+                tooltip="A language code such as fr, en, or ar. When set, it is sent as the transcription language and takes precedence over the optional Whisper language detector. Leave blank for automatic detection."
+              />
+              <Input
+                value={languageHint}
+                onChange={(e) => setLanguageHint(e.target.value)}
+                placeholder="fr"
+                autoComplete="off"
+              />
+            </div>
+          )}
+          {isStt && (
+            <div className="flex items-center justify-between gap-4 rounded-md border p-3">
+              <div className="space-y-1">
+                <div className="flex items-center gap-1.5">
+                  <LabelWithInfo
+                    label="Speaker-aware MOSS transcript"
+                    tooltip="Normalize complete MOSS diarized responses after transcription. This also works with a served-model alias and is never sent to the provider."
+                  />
+                  <NewBadge feature="models.stt.moss_speaker_aware" />
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  Remove timecodes and keep speaker labels only when MOSS identifies more than one speaker.
+                </p>
+              </div>
+              <Switch
+                checked={mossSpeakerAware}
+                onCheckedChange={setMossSpeakerAware}
+                aria-label="Enable speaker-aware MOSS transcript normalization"
+              />
             </div>
           )}
           <div className="space-y-2">
@@ -739,6 +954,7 @@ function EndpointDialog({
                 : "Stored in the endpoint extra payload when provided."}
             </p>
           </div>
+          {!isStt && (
           <div className="space-y-2">
             <Label>Vendor</Label>
             <Select value={vendor} onValueChange={setVendor}>
@@ -760,6 +976,7 @@ function EndpointDialog({
               Client implementation used to talk to this endpoint.
             </p>
           </div>
+          )}
           <div className="space-y-2">
             <Label>Extra (JSON)</Label>
             <Textarea
@@ -769,7 +986,9 @@ function EndpointDialog({
               rows={4}
             />
             <p className="text-xs text-muted-foreground">
-              Non-secret endpoint options only. The API key is handled separately above.
+              {isStt
+                ? "Advanced non-secret request-body options sent to the transcription provider. The language hint, MOSS speaker setting, and API key are handled separately above."
+                : "Non-secret endpoint options only. The API key is handled separately above."}
             </p>
           </div>
           {validationMsg && (
@@ -800,7 +1019,7 @@ function EndpointDialog({
             </Button>
             <Button
               type="submit"
-              disabled={loading || validated !== true}
+              disabled={loading || validated !== true || Boolean(nameError)}
             >
               {loading ? "Saving..." : editing ? "Update" : "Create"}
             </Button>
