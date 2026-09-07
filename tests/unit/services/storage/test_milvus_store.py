@@ -13,15 +13,23 @@ from __future__ import annotations
 
 import re
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, call
 
 import pytest
 from pymilvus import MilvusException
 
 from openrag.core.config.infrastructure import VectorDBConfig
 from openrag.core.models.chunk import Chunk, ChunkType
-from openrag.core.utils.exceptions import VDBSchemaMigrationRequiredError, VDBSearchError
-from openrag.services.storage.milvus_store import MilvusVectorStore, analyzer_params
+from openrag.core.utils.exceptions import (
+    VDBCreateOrLoadCollectionError,
+    VDBSchemaMigrationRequiredError,
+    VDBSearchError,
+)
+from openrag.services.storage.milvus_store import (
+    SCHEMA_VERSION_PROPERTY_KEY,
+    MilvusVectorStore,
+    analyzer_params,
+)
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -888,3 +896,86 @@ class TestCheckSchemaVersion:
         store._check_schema_version()
 
         assert logs.warnings == []
+
+
+class TestEnsureLoadedConcurrentCreation:
+    def test_existing_collection_waits_for_vector_indexes_before_loading(
+        self,
+        store: MilvusVectorStore,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        store._client.has_collection.return_value = True
+        store._client.describe_collection.return_value = {"properties": {SCHEMA_VERSION_PROPERTY_KEY: "1"}}
+        store._client.list_indexes.side_effect = [[], ["vector_idx"], ["sparse_idx"]]
+        monkeypatch.setattr("openrag.services.storage.milvus_store.time.sleep", lambda _: None)
+
+        store._ensure_loaded()
+
+        assert store._client.list_indexes.call_args_list == [
+            call(store._collection_name, field_name="vector"),
+            call(store._collection_name, field_name="vector"),
+            call(store._collection_name, field_name="sparse"),
+        ]
+        store._client.load_collection.assert_called_once_with(store._collection_name)
+
+    def test_missing_vector_indexes_time_out_instead_of_loading(
+        self,
+        store: MilvusVectorStore,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        store._client.has_collection.return_value = True
+        store._client.describe_collection.return_value = {"properties": {SCHEMA_VERSION_PROPERTY_KEY: "1"}}
+        store._client.list_indexes.return_value = []
+        monotonic_values = iter([0.0, store._timeout + 1.0])
+        monkeypatch.setattr(
+            "openrag.services.storage.milvus_store.time.monotonic",
+            lambda: next(monotonic_values),
+        )
+
+        with pytest.raises(VDBCreateOrLoadCollectionError, match="waiting for vector indexes"):
+            store._ensure_loaded()
+
+        store._client.load_collection.assert_not_called()
+
+    def test_new_collection_is_versioned_during_creation(
+        self,
+        store: MilvusVectorStore,
+    ) -> None:
+        store._embedding_dimension = 8
+        store._client.has_collection.return_value = False
+
+        store._ensure_loaded()
+
+        properties = store._client.create_collection.call_args.kwargs["properties"]
+        assert properties == {SCHEMA_VERSION_PROPERTY_KEY: "1"}
+        store._client.alter_collection_properties.assert_not_called()  # type: ignore[attr-defined]
+
+    def test_losing_creation_race_uses_winner_collection(self, store: MilvusVectorStore) -> None:
+        store._embedding_dimension = 8
+        store._client.has_collection.side_effect = [False, True]  # first call says "no", second call says "yes"
+        store._client.create_collection.side_effect = MilvusException(message="collection already exists")
+        store._client.describe_collection.return_value = {"properties": {SCHEMA_VERSION_PROPERTY_KEY: "1"}}
+
+        store._ensure_loaded()
+
+        store._client.load_collection.assert_called_once_with(store._collection_name)
+
+    def test_real_creation_failure_still_raises(self, store: MilvusVectorStore) -> None:
+        store._embedding_dimension = 8
+        store._client.has_collection.side_effect = [False, False]  # first call says "no", second call says "no" too
+        store._client.create_collection.side_effect = MilvusException(
+            message="some other failure, disk full or whatever"
+        )
+
+        with pytest.raises(VDBCreateOrLoadCollectionError):
+            store._ensure_loaded()
+
+    def test_existing_old_collection_still_requires_migration(
+        self,
+        store: MilvusVectorStore,
+    ) -> None:
+        store._client.has_collection.return_value = True
+        store._client.describe_collection.return_value = {"properties": {}}
+
+        with pytest.raises(VDBSchemaMigrationRequiredError):
+            store._ensure_loaded()

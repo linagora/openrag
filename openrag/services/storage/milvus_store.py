@@ -17,7 +17,7 @@ Client split (Milvus 3.0):
     ``AsyncMilvusClient`` covers the data plane (``insert``, ``search``,
     ``hybrid_search``, ``query``, ``delete``, ``upsert``). The admin/lifecycle
     plane (``has_collection``, ``create_collection``, ``load_collection``,
-    ``alter_collection_properties``, ``describe_collection``,
+    ``describe_collection``,
     ``query_iterator``, ``prepare_index_params``) is sync-only, so the sync
     :class:`MilvusClient` is kept alongside.
 
@@ -226,7 +226,7 @@ class MilvusVectorStore(VectorStore):
 
         Synchronous because the Milvus 3.0 admin/lifecycle endpoints
         (``has_collection``, ``create_collection``, ``load_collection``,
-        ``alter_collection_properties``, ``describe_collection``) have no
+        ``describe_collection``) have no
         async equivalents.
         """
         try:
@@ -242,15 +242,19 @@ class MilvusVectorStore(VectorStore):
                         consistency_level="Strong",
                         index_params=index_params,
                         enable_dynamic_field=True,
+                        properties={SCHEMA_VERSION_PROPERTY_KEY: str(self._config.schema_version)},
                     )
                 except MilvusException as e:
-                    raise VDBCreateOrLoadCollectionError(
-                        f"Failed to create collection `{self._collection_name}`: {e!s}",
-                        collection_name=self._collection_name,
-                        operation="create_collection",
-                    ) from e
-                self._store_schema_version()
+                    if not self._client.has_collection(self._collection_name):
+                        raise VDBCreateOrLoadCollectionError(
+                            f"Failed to create collection `{self._collection_name}`: {e!s}",
+                            collection_name=self._collection_name,
+                            operation="create_collection",
+                        ) from e
 
+                    self._check_schema_version()
+
+            self._wait_for_vector_indexes()
             try:
                 self._client.load_collection(self._collection_name)
             except MilvusException as e:
@@ -269,6 +273,47 @@ class MilvusVectorStore(VectorStore):
                 f"Unexpected error preparing collection `{self._collection_name}`: {e!s}",
                 collection_name=self._collection_name,
             ) from e
+
+    def _wait_for_vector_indexes(self) -> None:
+        """Wait until Milvus exposes every required vector index."""
+        required_fields = ["vector"]
+        if self._hybrid:
+            required_fields.append("sparse")
+
+        deadline = time.monotonic() + self._timeout
+
+        while True:
+            try:
+                missing_field = next(
+                    (
+                        field
+                        for field in required_fields
+                        if not self._client.list_indexes(
+                            self._collection_name,
+                            field_name=field,
+                        )
+                    ),
+                    None,
+                )
+            except MilvusException as e:
+                raise VDBCreateOrLoadCollectionError(
+                    f"Failed to inspect indexes for collection `{self._collection_name}`: {e!s}",
+                    collection_name=self._collection_name,
+                    operation="list_indexes",
+                ) from e
+
+            if missing_field is None:
+                return
+
+            if time.monotonic() >= deadline:
+                raise VDBCreateOrLoadCollectionError(
+                    f"Timed out waiting for vector indexes on collection "
+                    f"`{self._collection_name}`: missing `{missing_field}`.",
+                    collection_name=self._collection_name,
+                    operation="wait_for_indexes",
+                )
+
+            time.sleep(0.1)
 
     # ------------------------------------------------------------------
     # Schema / index
@@ -386,13 +431,6 @@ class MilvusVectorStore(VectorStore):
     # ------------------------------------------------------------------
     # Schema versioning
     # ------------------------------------------------------------------
-
-    def _store_schema_version(self) -> None:
-        """Persist the configured schema version as a Milvus collection property."""
-        self._client.alter_collection_properties(
-            collection_name=self._collection_name,
-            properties={SCHEMA_VERSION_PROPERTY_KEY: str(self._config.schema_version)},
-        )
 
     def _read_schema_version(self, *, timeout: float | None = None) -> int:
         """The schema version stamped on the live collection.
