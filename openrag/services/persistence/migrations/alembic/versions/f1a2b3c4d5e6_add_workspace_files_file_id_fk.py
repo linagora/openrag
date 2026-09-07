@@ -6,6 +6,7 @@ Create Date: 2026-03-12 10:00:00.000000
 
 """
 
+import logging
 from collections.abc import Sequence
 
 import sqlalchemy as sa
@@ -15,6 +16,7 @@ from schema_helpers import (
     column_type_is,
     fk_exists,
     index_exists,
+    table_exists,
     unique_constraint_exists,
 )
 
@@ -23,6 +25,31 @@ revision: str = "f1a2b3c4d5e6"
 down_revision: str | Sequence[str] | None = "e7f8a9b0c1d2"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
+
+logger = logging.getLogger("alembic.runtime.migration")
+
+#: Rows this migration removes are copied here instead of being dropped outright.
+#: A follow-up migration can drop the table once operators have reviewed it.
+ORPHAN_TABLE = "workspace_files_orphans_f1a2b3c4d5e6"
+
+
+def _quarantine_delete(condition: str, reason: str) -> None:
+    """Delete the workspace_files rows matching `condition`, keeping a copy.
+
+    The delete and the copy are a single statement, so they share the
+    migration's transaction: either both happen or neither does.
+    """
+    result = op.get_bind().execute(
+        sa.text(
+            f"WITH removed AS ("
+            f"  DELETE FROM workspace_files wf WHERE {condition}"
+            f"  RETURNING wf.workspace_id, wf.file_id"
+            f") INSERT INTO {ORPHAN_TABLE} (workspace_id, file_id, reason) "
+            f"SELECT workspace_id, file_id, :reason FROM removed"
+        ),
+        {"reason": reason},
+    )
+    logger.info("workspace_files: quarantined %s row(s) in %s (%s)", result.rowcount, ORPHAN_TABLE, reason)
 
 
 def upgrade() -> None:
@@ -34,8 +61,15 @@ def upgrade() -> None:
     if column_type_is("workspace_files", "file_id", sa.Integer):
         return
 
+    op.execute(
+        f"CREATE TABLE IF NOT EXISTS {ORPHAN_TABLE} ("
+        "workspace_id VARCHAR NOT NULL, file_id VARCHAR NOT NULL, reason VARCHAR NOT NULL)"
+    )
+
     # 1. Purge rows that have no matching file (no valid files.file_id to JOIN against).
-    op.execute("DELETE FROM workspace_files WHERE file_id NOT IN (SELECT file_id FROM files)")
+    #    NOT EXISTS rather than NOT IN: a NULL in the subquery would make NOT IN
+    #    match nothing and turn the purge into a silent no-op.
+    _quarantine_delete("NOT EXISTS (SELECT 1 FROM files f WHERE f.file_id = wf.file_id)", "no_matching_file")
 
     # 2. Add a temporary integer column to hold the resolved files.id value.
     if not column_exists("workspace_files", "file_fk"):
@@ -55,7 +89,7 @@ def upgrade() -> None:
     )
 
     # 3b. Drop any rows that couldn't be resolved (file_fk still NULL).
-    op.execute("DELETE FROM workspace_files WHERE file_fk IS NULL")
+    _quarantine_delete("wf.file_fk IS NULL", "unresolved_partition")
 
     # 4. Drop the old string column and its index.
     if index_exists("workspace_files", "ix_workspace_files_file_id"):
@@ -100,3 +134,14 @@ def downgrade() -> None:
         op.create_index("ix_workspace_files_file_id", "workspace_files", ["file_id"])
     if not unique_constraint_exists("workspace_files", "uix_workspace_file"):
         op.create_unique_constraint("uix_workspace_file", "workspace_files", ["workspace_id", "file_id"])
+
+    # Put back the rows upgrade() quarantined, now that file_id is a string again.
+    # Workspaces deleted since the upgrade are skipped: their FK no longer resolves.
+    if table_exists(ORPHAN_TABLE):
+        op.execute(
+            f"INSERT INTO workspace_files (workspace_id, file_id) "
+            f"SELECT o.workspace_id, o.file_id FROM {ORPHAN_TABLE} o "
+            f"WHERE EXISTS (SELECT 1 FROM workspaces w WHERE w.workspace_id = o.workspace_id) "
+            f"ON CONFLICT ON CONSTRAINT uix_workspace_file DO NOTHING"
+        )
+        op.execute(f"DROP TABLE {ORPHAN_TABLE}")
