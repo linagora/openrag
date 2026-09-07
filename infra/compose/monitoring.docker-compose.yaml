@@ -22,11 +22,13 @@ services:
     image: grafana/grafana:11.2.2
     container_name: openrag-grafana
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     environment:
       - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER:-admin}
       - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:?Set GRAFANA_ADMIN_PASSWORD in .env}
       - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_SERVER_ROOT_URL=${GF_SERVER_ROOT_URL:-http://localhost:3000}
+      - GF_SERVER_SERVE_FROM_SUB_PATH=${GF_SERVER_SERVE_FROM_SUB_PATH:-false}
     volumes:
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
       - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
@@ -55,15 +57,13 @@ services:
     restart: unless-stopped
 
   nvidia-gpu-exporter:
-    image: utkuozdemir/nvidia_gpu_exporter:1.2.0
+    image: utkuozdemir/nvidia_gpu_exporter:1.13.1
     container_name: openrag-nvidia-gpu-exporter
     ports:
       # Localhost only: scraped over the compose network by name.
       - "127.0.0.1:9835:9835"
-    volumes:
-      - /usr/lib/x86_64-linux-gnu/libnvidia-ml.so:/usr/lib/x86_64-linux-gnu/libnvidia-ml.so:ro
-      - /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1:/usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1:ro
-      - /usr/bin/nvidia-smi:/usr/bin/nvidia-smi:ro
+    environment:
+      - NVIDIA_DRIVER_CAPABILITIES=utility
     deploy:
       resources:
         reservations:
