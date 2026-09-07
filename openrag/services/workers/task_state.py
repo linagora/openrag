@@ -4,6 +4,7 @@ import base64
 import json
 import threading
 import time
+from collections import OrderedDict
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -37,6 +38,13 @@ _RECOVERABLE_TASK_KV_PREFIX = b"recoverable-task-v1:"
 _CANCELLATION_TOMBSTONE_TTL_SECONDS = 24 * 60 * 60
 _FILE_DELETE_FENCE_TTL_SECONDS = 2 * 60
 _CONTENT_CLAIM_REGISTRATION_GRACE_SECONDS = 60
+# Terminal task records are progress receipts, not the system of record: the
+# durable per-file state lives in the Postgres catalog. Retention is aligned
+# with the cancellation tombstone TTL so the in-memory row and its durable
+# tombstone disappear together, with a hard cap so a burst cannot outrun it.
+_TERMINAL_TASK_RETENTION_SECONDS = _CANCELLATION_TOMBSTONE_TTL_SECONDS
+_MAX_TERMINAL_TASKS = 10_000
+_MAX_TASK_ERROR_CHARS = 8_000
 STALE_REFLESS_TASK_ERROR = (
     "Indexing task never exposed a worker reference within the registration grace period; marking it failed as stale."
 )
@@ -196,6 +204,23 @@ def _save_recoverable_task(task_id: str, info: TaskInfo) -> None:
         _internal_kv_del(key, namespace=_task_state_kv_namespace())
 
 
+def _delete_recoverable_task(task_id: str) -> None:
+    from ray.experimental.internal_kv import _internal_kv_del
+
+    if not _task_state_storage_available():
+        return
+    _internal_kv_del(_recoverable_task_key(task_id), namespace=_task_state_kv_namespace())
+
+
+def _truncate_error(tb_str: str | None) -> str | None:
+    """Keep the tail of a traceback: the raising frame and message live there."""
+    if tb_str is None or len(tb_str) <= _MAX_TASK_ERROR_CHARS:
+        return tb_str
+    marker = "...[truncated]...\n"
+    keep = max(_MAX_TASK_ERROR_CHARS - len(marker), 0)
+    return marker + tb_str[len(tb_str) - keep :]
+
+
 try:
     from core.config import load_config as _load_config
 
@@ -254,17 +279,64 @@ class TaskStateManager:
     def __init__(self) -> None:
         self.tasks = _load_recoverable_tasks()
         self.user_index: dict[int | None, set[str]] = {}
+        # Terminal task ids in eviction order, mapped to the time they settled.
+        self.terminal_tasks: OrderedDict[str, float] = OrderedDict()
+        now = time.time()
         for task_id, info in self.tasks.items():
             self.user_index.setdefault(info.details.get("user_id"), set()).add(task_id)
+            if info.state in TERMINAL_TASK_STATES:
+                self.terminal_tasks[task_id] = now
         self.file_delete_fences = _load_file_delete_fences()
         # Ray runs each concurrency group on a separate event loop. A single
         # asyncio lock cannot safely coordinate methods across those loops.
         self.lock = threading.Lock()
 
     def _ensure_task(self, task_id: str) -> TaskInfo:
+        # Every path that can add a task goes through here, and none of them
+        # iterate ``self.tasks``, which makes this the one safe place to evict.
+        self._evict_terminal_tasks_locked()
         if task_id not in self.tasks:
             self.tasks[task_id] = TaskInfo()
         return self.tasks[task_id]
+
+    def _persist_task_locked(self, task_id: str, info: TaskInfo) -> None:
+        """Persist a task mutation and keep the terminal-retention ledger in sync."""
+        _save_recoverable_task(task_id, info)
+        if info.state in TERMINAL_TASK_STATES:
+            self.terminal_tasks.pop(task_id, None)
+            self.terminal_tasks[task_id] = time.time()
+        else:
+            self.terminal_tasks.pop(task_id, None)
+
+    def _forget_task_locked(self, task_id: str) -> None:
+        info = self.tasks.pop(task_id, None)
+        if info is None:
+            return
+        user_id = (info.details or {}).get("user_id")
+        owned = self.user_index.get(user_id)
+        if owned is not None:
+            owned.discard(task_id)
+            if not owned:
+                self.user_index.pop(user_id, None)
+        _delete_recoverable_task(task_id)
+
+    def _evict_terminal_tasks_locked(self, *, now: float | None = None) -> None:
+        """Drop settled tasks once they age out or the retention cap is exceeded."""
+        deadline = (time.time() if now is None else now) - _TERMINAL_TASK_RETENTION_SECONDS
+        examined = 0
+        while self.terminal_tasks and examined < len(self.terminal_tasks):
+            task_id, settled_at = next(iter(self.terminal_tasks.items()))
+            if len(self.terminal_tasks) <= _MAX_TERMINAL_TASKS and settled_at > deadline:
+                break
+            info = self.tasks.get(task_id)
+            if info is not None and _cancelled_task_has_worker_fence(info):
+                # An unsettled cancellation still fences a live worker. Losing it
+                # would let that worker write after the file was cancelled.
+                self.terminal_tasks.move_to_end(task_id)
+                examined += 1
+                continue
+            self.terminal_tasks.pop(task_id)
+            self._forget_task_locked(task_id)
 
     def _record_details(
         self,
@@ -298,7 +370,7 @@ class TaskStateManager:
 
     def _set_cancelled_locked(self, task_id: str, info: TaskInfo) -> None:
         info.state = "CANCELLED"
-        _save_recoverable_task(task_id, info)
+        self._persist_task_locked(task_id, info)
 
     def _expire_refless_task_if_stale_locked(self, task_id: str, info: TaskInfo) -> bool:
         ref = info.object_ref.get("ref") if isinstance(info.object_ref, dict) else info.object_ref
@@ -316,7 +388,7 @@ class TaskStateManager:
             return False
         info.state = "FAILED"
         info.error = STALE_REFLESS_TASK_ERROR
-        _save_recoverable_task(task_id, info)
+        self._persist_task_locked(task_id, info)
         return True
 
     def _expire_refless_tasks_if_stale_locked(self, task_ids: Iterable[str] | None = None) -> None:
@@ -396,15 +468,15 @@ class TaskStateManager:
             if state == "SERIALIZING":
                 info.worker_submitted = True
                 info.submission_started_at = None
-            _save_recoverable_task(task_id, info)
+            self._persist_task_locked(task_id, info)
             return True
 
     @ray.method(concurrency_group="set")
     async def set_error(self, task_id: str, tb_str: str) -> None:
         with self.lock:
             info = self._ensure_task(task_id)
-            info.error = tb_str
-            _save_recoverable_task(task_id, info)
+            info.error = _truncate_error(tb_str)
+            self._persist_task_locked(task_id, info)
 
     @ray.method(concurrency_group="set")
     async def set_failed_if_not_cancelled(self, task_id: str, tb_str: str) -> bool:
@@ -420,8 +492,8 @@ class TaskStateManager:
                 return False
             if info is not None:
                 info.state = "FAILED"
-                info.error = tb_str
-                _save_recoverable_task(task_id, info)
+                info.error = _truncate_error(tb_str)
+                self._persist_task_locked(task_id, info)
             return True
 
     @ray.method(concurrency_group="set")
@@ -446,7 +518,7 @@ class TaskStateManager:
             info.object_ref = None
             info.worker_submitted = False
             info.submission_started_at = None
-            _save_recoverable_task(task_id, info)
+            self._persist_task_locked(task_id, info)
             return True
 
     @ray.method(concurrency_group="set")
@@ -462,7 +534,7 @@ class TaskStateManager:
             if info.state in CANCELLABLE_INDEXING_STATES:
                 info.state = "FAILED"
                 info.error = "Indexer worker submission was rejected after the worker settled."
-            _save_recoverable_task(task_id, info)
+            self._persist_task_locked(task_id, info)
             return True
 
     @ray.method(concurrency_group="set")
@@ -491,7 +563,7 @@ class TaskStateManager:
                 metadata=metadata,
                 user_id=user_id,
             )
-            _save_recoverable_task(task_id, info)
+            self._persist_task_locked(task_id, info)
 
     @ray.method(concurrency_group="set")
     async def set_queued_details(
@@ -519,7 +591,7 @@ class TaskStateManager:
                 self._set_cancelled_locked(task_id, info)
                 return False
             info.state = "QUEUED"
-            _save_recoverable_task(task_id, info)
+            self._persist_task_locked(task_id, info)
             return True
 
     @ray.method(concurrency_group="set")
@@ -531,7 +603,7 @@ class TaskStateManager:
             if self._expire_refless_task_if_stale_locked(task_id, info):
                 return False
             info.submission_started_at = time.time()
-            _save_recoverable_task(task_id, info)
+            self._persist_task_locked(task_id, info)
             return True
 
     @ray.method(concurrency_group="set")
@@ -553,7 +625,7 @@ class TaskStateManager:
             info.object_ref = object_ref
             info.worker_submitted = True
             info.submission_started_at = None
-            _save_recoverable_task(task_id, info)
+            self._persist_task_locked(task_id, info)
             return True
 
     @ray.method(concurrency_group="get")

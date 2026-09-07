@@ -941,3 +941,93 @@ async def test_rejected_submission_is_only_unfenced_after_worker_settlement(monk
     assert info.worker_submitted is False
     assert info.object_ref is None
     assert saved[-1] is info
+
+
+@pytest.mark.asyncio
+async def test_terminal_tasks_are_evicted_once_retention_expires(monkeypatch) -> None:
+    # Regression for #660: terminal task records were insert-only, so a
+    # detached TaskStateManager grew without bound until the actor OOMed.
+    monkeypatch.setattr(task_state_module, "_TERMINAL_TASK_RETENTION_SECONDS", 60.0)
+    monkeypatch.setattr(task_state_module.time, "time", lambda: 1_000.0)
+    manager = _task_state_manager()
+
+    for task_id in ("done-task", "failed-task"):
+        await manager.set_queued_details(task_id, file_id=task_id, partition="tenant-a", metadata={}, user_id=7)
+    await manager.set_state("done-task", "COMPLETED")
+    await manager.set_failed_if_not_cancelled("failed-task", "boom")
+
+    monkeypatch.setattr(task_state_module.time, "time", lambda: 1_061.0)
+    await manager.set_queued_details("new-task", file_id="file-2", partition="tenant-a", metadata={}, user_id=7)
+
+    assert set(manager.tasks) == {"new-task"}
+    assert manager.user_index == {7: {"new-task"}}
+    assert await manager.get_state("done-task") is None
+
+
+@pytest.mark.asyncio
+async def test_terminal_task_retention_is_capped(monkeypatch) -> None:
+    monkeypatch.setattr(task_state_module, "_MAX_TERMINAL_TASKS", 2)
+    manager = _task_state_manager()
+
+    for index in range(5):
+        task_id = f"task-{index}"
+        await manager.set_queued_details(task_id, file_id=task_id, partition="tenant-a", metadata={}, user_id=None)
+        await manager.set_state(task_id, "COMPLETED")
+
+    # The cap is enforced on admission, so at most one settled task sits above it.
+    assert set(manager.tasks) == {"task-2", "task-3", "task-4"}
+
+
+@pytest.mark.asyncio
+async def test_eviction_keeps_active_tasks_and_unsettled_cancellations(monkeypatch) -> None:
+    monkeypatch.setattr(task_state_module, "_TERMINAL_TASK_RETENTION_SECONDS", 60.0)
+    monkeypatch.setattr(task_state_module.time, "time", lambda: 1_000.0)
+    manager = _task_state_manager()
+
+    for task_id in ("active-task", "cancelled-task", "completed-task"):
+        await manager.set_queued_details(task_id, file_id=task_id, partition="tenant-a", metadata={}, user_id=None)
+    await manager.set_object_ref("cancelled-task", {"ref": object()})
+    await manager.set_cancelled_if_active("cancelled-task")
+    await manager.set_state("completed-task", "COMPLETED")
+
+    monkeypatch.setattr(task_state_module.time, "time", lambda: 1_061.0)
+    await manager.set_queued_details("new-task", file_id="file-2", partition="tenant-a", metadata={}, user_id=None)
+
+    assert set(manager.tasks) == {"active-task", "cancelled-task", "new-task"}
+
+
+@pytest.mark.asyncio
+async def test_stored_task_error_is_bounded(monkeypatch) -> None:
+    monkeypatch.setattr(task_state_module, "_MAX_TASK_ERROR_CHARS", 64)
+    manager = _task_state_manager()
+
+    await manager.set_queued_details("task-1", file_id="file-1", partition="tenant-a", metadata={}, user_id=None)
+    await manager.set_failed_if_not_cancelled("task-1", "x" * 100 + "RuntimeError: boom")
+
+    error = await manager.get_error("task-1")
+    assert len(error) <= 64
+    assert error.endswith("RuntimeError: boom")
+
+
+@pytest.mark.asyncio
+async def test_recovered_terminal_tasks_are_subject_to_retention(monkeypatch) -> None:
+    # A settled cancellation recovered from the KV store must age out too,
+    # otherwise a restarted actor starts life with unevictable records.
+    monkeypatch.setattr(task_state_module, "_TERMINAL_TASK_RETENTION_SECONDS", 60.0)
+    monkeypatch.setattr(task_state_module.time, "time", lambda: 1_000.0)
+    monkeypatch.setattr(
+        task_state_module,
+        "_load_recoverable_tasks",
+        lambda: {
+            "settled-cancelled-task": TaskInfo(state="CANCELLED", details={"user_id": 3}),
+            "queued-task": TaskInfo(state="QUEUED", details={"user_id": 3}),
+        },
+    )
+    manager = _task_state_manager()
+
+    assert set(manager.terminal_tasks) == {"settled-cancelled-task"}
+
+    monkeypatch.setattr(task_state_module.time, "time", lambda: 1_061.0)
+    await manager.set_queued_details("new-task", file_id="file-1", partition="tenant-a", metadata={}, user_id=3)
+
+    assert set(manager.tasks) == {"queued-task", "new-task"}
