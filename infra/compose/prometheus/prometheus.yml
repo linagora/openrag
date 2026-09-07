@@ -15,10 +15,13 @@ scrape_configs:
     static_configs:
       - targets: ["nvidia-gpu-exporter:9835"]
 
+  # GET /metrics on the API port. Open by default; if METRICS_TOKEN is set in
+  # the OpenRAG .env, mount the same value as a file and uncomment the
+  # authorization block (never inline the token in this file).
   - job_name: "openrag"
     metrics_path: "/metrics"
-    authorization:
-      type: Bearer
-      credentials_file: /etc/prometheus/openrag_token
+    # authorization:
+    #   type: Bearer
+    #   credentials_file: /etc/prometheus/openrag_token
     static_configs:
       - targets: ["openrag:8080"]

@@ -203,6 +203,10 @@ Three caveats:
   order is the RRF rank; a chunk retrieved by several sub-queries keeps the score from
   whichever list RRF saw first.
 
+### Prometheus Metrics
+
+`GET /metrics` (`openrag/api/routers/admin/monitoring.py`) serves the default `prometheus_client` registry: HTTP counters/histogram recorded by `api/middleware/instrumentation.py` plus the inference circuit-breaker gauge. The path is in `DEFAULT_BYPASS_PATHS` (no user token needed) and the route enforces its own optional `METRICS_TOKEN` (`server.metrics_token`, blank = unset = open endpoint) via `require_metrics_token`; admin tokens are deliberately not accepted there — one mechanism, no fallback. The token is read through `load_config()` rather than the request container so a scrape keeps working while the container is degraded. Helm exposes it as `openrag.metrics.*` (pod annotations + optional ServiceMonitor with `bearerTokenFromSecret`), compose via `METRICS_TOKEN` in `.env`. Docs: `docs/content/docs/documentation/prometheus_metrics.md`.
+
 ### API Routers (`openrag/api/routers/`)
 
 - `user/chat.py` - OpenAI-compatible `/v1/chat/completions` endpoint

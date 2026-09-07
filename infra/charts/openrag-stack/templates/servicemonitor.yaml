@@ -1,0 +1,33 @@
+{{- if .Values.openrag.metrics.serviceMonitor.enabled }}
+# Prometheus Operator discovery of the API's GET /metrics (same port as the
+# API — there is no dedicated metrics port). Requires the monitoring.coreos.com
+# CRDs (kube-prometheus-stack or a standalone operator) to be installed first.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "openrag-stack.fullname" . }}-openrag
+  labels:
+    {{- include "openrag-stack.componentLabels" (dict "component" "openrag" "context" $) | nindent 4 }}
+    {{- with .Values.openrag.metrics.serviceMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "openrag-stack.componentSelectorLabels" (dict "component" "openrag" "context" $) | nindent 6 }}
+  namespaceSelector:
+    matchNames:
+      - {{ .Release.Namespace }}
+  endpoints:
+    - port: openrag
+      path: /metrics
+      interval: {{ .Values.openrag.metrics.serviceMonitor.interval }}
+      scrapeTimeout: {{ .Values.openrag.metrics.serviceMonitor.scrapeTimeout }}
+      {{- if .Values.openrag.metrics.serviceMonitor.bearerTokenFromSecret }}
+      authorization:
+        type: Bearer
+        credentials:
+          name: {{ include "openrag-stack.secretName" . }}
+          key: METRICS_TOKEN
+      {{- end }}
+{{- end }}
