@@ -178,7 +178,7 @@ class LoaderConfig(ConfigMixin):
     marker_max_processes: int = 2
     marker_num_gpus: float = 0.01
     marker_timeout: int = 3600
-    # Headroom keeping the child bound under the three bounds that wrap it, so a
+    # Headroom keeping the child bound under the bounds that wrap it, so a
     # wedged child times out first and recycles the pool (#659, #894).
     marker_child_timeout_ratio: float = Field(default=0.9, gt=0, lt=1)
     marker_pdftext_workers: int = 2
@@ -207,8 +207,12 @@ class LoaderConfig(ConfigMixin):
 
     @property
     def marker_child_timeout(self) -> float:
-        """Bound for one Marker child, strictly inside ``marker_timeout``."""
-        return self.marker_timeout * self.marker_child_timeout_ratio
+        """Bound for one Marker child, strictly inside every bound wrapping it.
+
+        The wrapping bounds are ``marker_timeout`` (worker actor and pool) and
+        ``parse_timeout`` (parse stage), so the shortest one sets the ceiling.
+        """
+        return min(self.marker_timeout, self.parse_timeout) * self.marker_child_timeout_ratio
 
 
 class IndexingCallbackConfig(ConfigMixin):

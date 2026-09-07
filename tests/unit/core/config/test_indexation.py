@@ -79,3 +79,11 @@ def test_marker_child_timeout_ratio_reads_its_env_var(monkeypatch, tmp_path):
     settings = load_config(config_path=tmp_path)
 
     assert settings.loader.marker_child_timeout_ratio == 0.5
+
+
+def test_marker_child_timeout_follows_a_shortened_parse_timeout():
+    """parse_timeout also wraps the child, so it caps the child bound too."""
+    cfg = LoaderConfig(marker_timeout=3600, parse_timeout=60)
+
+    assert cfg.marker_child_timeout < cfg.parse_timeout
+    assert cfg.marker_child_timeout == 54
