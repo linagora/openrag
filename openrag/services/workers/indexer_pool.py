@@ -41,6 +41,12 @@ _MISSING_WORKER_REF_ERROR = "Indexer worker did not receive a registered task re
 _INDEXER_ACTOR_PROTOCOL_VERSION = "v7"
 _INDEXER_POOL_DISPATCHER_ACTOR_NAME = f"IndexerPoolDispatcher-{_INDEXER_ACTOR_PROTOCOL_VERSION}"
 
+# Detached actors default to max_restarts=0, so one that dies — an OOM on a
+# large document, a node fault — stays dead and its pool slot is lost until the
+# next deploy. Marker and Docling already set 5 on both their pool and their
+# workers; the indexer tier had nothing (#846).
+_ACTOR_MAX_RESTARTS = 5
+
 
 def _explicit_indexation_selection(config: dict[str, Any] | None, key: str) -> str | None:
     """Return a nonblank named resource selected by an indexation preset."""
@@ -576,6 +582,7 @@ class IndexerPool:
                 get_if_exists=True,
                 lifetime="detached",
                 max_concurrency=max_tasks_per_worker,
+                max_restarts=_ACTOR_MAX_RESTARTS,
             ).remote(namespace)
             for i in range(pool_size)
         ]
@@ -834,6 +841,7 @@ def build_indexer_pool(namespace: str = "openrag") -> Any:
         get_if_exists=True,
         lifetime="detached",
         max_concurrency=max(1, pool_size * max_tasks_per_worker),
+        max_restarts=_ACTOR_MAX_RESTARTS,
     ).remote(
         pool_size=pool_size,
         max_tasks_per_worker=max_tasks_per_worker,

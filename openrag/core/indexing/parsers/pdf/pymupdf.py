@@ -67,6 +67,8 @@ def _extract_markdown(raw: bytes, filename: str) -> tuple[list[str], list[ImageB
     with pymupdf.open(stream=raw, filetype="pdf") as doc:
         try:
             chunks = _to_markdown(doc)
+            pages = [(chunk.get("text") or "").strip() for chunk in chunks]
+            return pages, []
         except RuntimeError as exc:
             # MuPDF hard-errors on some legal-but-unusual object graphs — e.g.
             # Type3 fonts with no embedded font file trip "code=4: no font file
@@ -79,8 +81,12 @@ def _extract_markdown(raw: bytes, filename: str) -> tuple[list[str], list[ImageB
                 "pymupdf4llm.to_markdown failed; retrying against a garbage-collected/cleaned copy"
             )
             cleaned = doc.tobytes(garbage=4, clean=True)
-            with pymupdf.open(stream=cleaned, filetype="pdf") as clean_doc:
-                chunks = _to_markdown(clean_doc)
+    # Outside the `with`: the failed document is closed before the cleaned copy
+    # is opened, so MuPDF's parsed structures for the first are released rather
+    # than held alongside the second. ``raw`` itself belongs to the caller's
+    # Document and stays live either way (#846).
+    with pymupdf.open(stream=cleaned, filetype="pdf") as clean_doc:
+        chunks = _to_markdown(clean_doc)
     pages = [(chunk.get("text") or "").strip() for chunk in chunks]
     return pages, []
 

@@ -163,6 +163,9 @@ def test_build_indexer_pool_uses_current_protocol_dispatcher_name(
     assert opts["lifetime"] == "detached"
     # max_concurrency bounds concurrent submit() calls → whole-fleet capacity.
     assert opts["max_concurrency"] == 12
+    # Detached actors default to max_restarts=0: without this the dispatcher
+    # stays dead after a crash until the next deploy (#846).
+    assert opts["max_restarts"] == 5
     # pool_size / max_tasks_per_worker are passed to the actor constructor.
     assert remote_calls == [{"pool_size": 3, "max_tasks_per_worker": 4, "namespace": "openrag"}]
 
@@ -202,6 +205,7 @@ def test_indexer_pool_actor_spawns_pool_size_detached_workers(
     for c in calls:
         assert c["lifetime"] == "detached"
         assert c["max_concurrency"] == 4
+        assert c["max_restarts"] == 5  # a worker that OOMs must come back (#846)
         assert c["get_if_exists"] is True
         assert c["namespace"] == "tenant-ray"
     assert remote_calls == ["tenant-ray", "tenant-ray", "tenant-ray"]
