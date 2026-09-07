@@ -264,6 +264,24 @@ file_content_claims = Table(
 )
 
 
+jobs = Table(
+    "jobs",
+    metadata,
+    Column("id", String, primary_key=True),
+    Column("partition", String, nullable=False),
+    Column("file_id", String, nullable=True),
+    Column("user_id", BigInteger, nullable=True),
+    Column("status", String, nullable=False),
+    Column("error", String, nullable=True),
+    Column("created_at", DateTime(timezone=True), server_default=text("now()"), nullable=False),
+    Column("updated_at", DateTime(timezone=True), server_default=text("now()"), nullable=False),
+    Column("finished_at", DateTime(timezone=True), nullable=True),
+    Index("ix_jobs_status", "status"),
+    Index("ix_jobs_user_id", "user_id"),
+    Index("ix_jobs_partition_file_id", "partition", "file_id"),
+)
+
+
 topic_tags = Table(
     "topic_tags",
     metadata,

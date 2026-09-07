@@ -23,6 +23,7 @@ def _task_state_manager(
     tsm.get_all_info = _remote_mock(all_info or {})
     tsm.get_object_ref = _remote_mock(object_ref)
     tsm.get_state = _remote_mock(state)
+    tsm.get_error = _remote_mock()
     tsm.get_details = _remote_mock()
     tsm.set_details = _remote_mock()
     tsm.finish_cancellation = _remote_mock()
@@ -409,3 +410,98 @@ async def test_tracker_does_not_replace_existing_completion_time() -> None:
 
     tsm.get_details.remote.assert_not_called()
     tsm.set_details.remote.assert_not_called()
+
+
+class _FakeJobRepo:
+    def __init__(self) -> None:
+        self.saved: list[Any] = []
+        self.failed_calls: list[dict] = []
+        self.purged_before: list[Any] = []
+
+    async def upsert_job(self, job):
+        self.saved.append(job)
+        return job
+
+    async def fail_orphaned_jobs(self, *, active_ids, error, before):
+        self.failed_calls.append({"active_ids": list(active_ids), "error": error, "before": before})
+        return len(self.failed_calls)
+
+    async def purge_terminal_jobs(self, *, older_than):
+        self.purged_before.append(older_than)
+        return 0
+
+
+def _tracker_with_repo(repo):
+    from services.workers.task_completion import TaskCompletionTracker
+
+    tracker = TaskCompletionTracker()
+    tracker._job_repo = AsyncMock(return_value=repo)
+    return tracker
+
+
+@pytest.mark.asyncio
+async def test_settled_task_is_written_to_the_job_history() -> None:
+    from core.models.catalog import DocumentStatus
+
+    repo = _FakeJobRepo()
+    tsm = _task_state_manager(state="COMPLETED")
+    tsm.get_details.remote.return_value = {
+        "file_id": "file-1",
+        "partition": "tenant-a",
+        "metadata": {},
+        "user_id": 42,
+    }
+
+    with patch("services.workers.task_completion.ray.get_actor", return_value=tsm):
+        tracker = _tracker_with_repo(repo)
+        await tracker._record_finished_at("task-1")
+
+    assert len(repo.saved) == 1
+    job = repo.saved[0]
+    assert (job.id, job.status, job.partition, job.file_id, job.user_id) == (
+        "task-1",
+        DocumentStatus.COMPLETED,
+        "tenant-a",
+        "file-1",
+        42,
+    )
+    assert job.finished_at is not None
+
+
+@pytest.mark.asyncio
+async def test_active_task_is_not_written_as_settled() -> None:
+    repo = _FakeJobRepo()
+    tsm = _task_state_manager(state="SERIALIZING")
+
+    with patch("services.workers.task_completion.ray.get_actor", return_value=tsm):
+        tracker = _tracker_with_repo(repo)
+        await tracker._record_settled_job("task-1", {"partition": "tenant-a"})
+
+    assert repo.saved == []
+
+
+@pytest.mark.asyncio
+async def test_job_history_failure_never_breaks_completion_tracking() -> None:
+    repo = _FakeJobRepo()
+    repo.upsert_job = AsyncMock(side_effect=RuntimeError("jobs table is missing"))
+    tsm = _task_state_manager(state="FAILED")
+
+    with patch("services.workers.task_completion.ray.get_actor", return_value=tsm):
+        tracker = _tracker_with_repo(repo)
+        await tracker._record_settled_job("task-1", {"partition": "tenant-a"})
+
+
+@pytest.mark.asyncio
+async def test_recover_settles_jobs_a_restart_orphaned() -> None:
+    repo = _FakeJobRepo()
+    tsm = _task_state_manager(all_info={"task-live": {"state": "QUEUED", "details": {}}})
+    tsm.get_object_ref.remote.return_value = {"ref": object()}
+
+    with patch("services.workers.task_completion.ray.get_actor", return_value=tsm):
+        tracker = _tracker_with_repo(repo)
+        await tracker.recover()
+
+    assert repo.failed_calls[0]["active_ids"] == ["task-live"]
+    assert "restart" in repo.failed_calls[0]["error"]
+    assert repo.failed_calls[0]["before"] is not None  # recent rows are spared
+    assert repo.purged_before  # retention runs in the same pass

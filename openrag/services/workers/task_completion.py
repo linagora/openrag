@@ -1,16 +1,24 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import ray
-from core.models.catalog import TASK_FINISHED_AT_METADATA_KEY, TERMINAL_TASK_STATES
+from core.models.catalog import (
+    TASK_FINISHED_AT_METADATA_KEY,
+    TERMINAL_TASK_STATES,
+    DocumentStatus,
+    IndexationJob,
+)
 from services.workers.ray_utils import call_ray_actor_method_with_timeout
 
 _TERMINAL_STATES = frozenset(state.value for state in TERMINAL_TASK_STATES)
 _REFLESS_RECOVERY_POLL_SECONDS = 5.0
 _TASK_STATE_CALL_TIMEOUT_SECONDS = 30.0
+_JOB_RETENTION_DAYS = 30
+_ORPHAN_GRACE_SECONDS = 300
+_ORPHANED_JOB_ERROR = "Indexing task was interrupted by a restart and no longer has a live worker."
 
 
 class TaskCompletionTracker:
@@ -23,6 +31,8 @@ class TaskCompletionTracker:
         self._logger = get_logger()
         self._tracked_task_ids: set[str] = set()
         self._recovery_lock = asyncio.Lock()
+        self._catalog_store: Any = None
+        self._catalog_lock = asyncio.Lock()
 
     def supports_cancellation_recovery(self) -> bool:
         """Identify trackers that preserve unsettled cancellation fences."""
@@ -58,6 +68,7 @@ class TaskCompletionTracker:
                     task_state_manager.get_all_info.remote,
                     "get_all_info_for_completion_recovery",
                 )
+                await self.reconcile_jobs(list(all_info))
                 for task_id, info in all_info.items():
                     state = info.get("state")
                     if state == "CANCELLED":
@@ -170,6 +181,9 @@ class TaskCompletionTracker:
 
         metadata = details.get("metadata")
         metadata = dict(metadata) if isinstance(metadata, dict) else {}
+        # Persist before stamping the actor: the stamp is what stops this method
+        # running again, so a failed write would otherwise never be retried.
+        await self._record_settled_job(task_id, details)
         metadata[TASK_FINISHED_AT_METADATA_KEY] = _utc_now_iso()
         await self._call_task_state(
             lambda: task_state_manager.set_details.remote(
@@ -209,6 +223,66 @@ class TaskCompletionTracker:
                 f"has_unsettled_cancelled_worker({task_id})",
             )
         )
+
+    async def _job_repo(self) -> Any:
+        """Build the catalog store lazily: this actor outlives any API process."""
+        if self._catalog_store is None:
+            async with self._catalog_lock:
+                if self._catalog_store is None:
+                    from core.config import load_config
+                    from services.storage.postgres_store import PostgresStore, catalog_rdb_config
+
+                    store = PostgresStore(catalog_rdb_config(load_config()), run_migrations=False)
+                    await store.initialize()
+                    self._catalog_store = store
+        return self._catalog_store.job_repo
+
+    async def _record_settled_job(self, task_id: str, details: dict[str, Any]) -> None:
+        """Persist the final state of a settled task. History must never fail indexing."""
+        try:
+            task_state_manager = self._task_state_manager()
+            state = await self._call_task_state(
+                lambda: task_state_manager.get_state.remote(task_id),
+                f"get_state({task_id}) for job history",
+            )
+            if state not in _TERMINAL_STATES:
+                return
+            error = await self._call_task_state(
+                lambda: task_state_manager.get_error.remote(task_id),
+                f"get_error({task_id}) for job history",
+            )
+            repo = await self._job_repo()
+            await repo.upsert_job(
+                IndexationJob(
+                    id=task_id,
+                    status=DocumentStatus(state),
+                    partition=details.get("partition") or "default",
+                    file_id=details.get("file_id"),
+                    user_id=details.get("user_id"),
+                    error=error,
+                    finished_at=datetime.now(UTC),
+                )
+            )
+        except Exception as exc:
+            self._logger.warning("Failed to record settled indexing job", task_id=task_id, error=str(exc))
+
+    async def reconcile_jobs(self, active_ids: list[str]) -> None:
+        """Settle records a restart orphaned and drop history past retention."""
+        try:
+            repo = await self._job_repo()
+            now = datetime.now(UTC)
+            orphaned = await repo.fail_orphaned_jobs(
+                active_ids=active_ids,
+                error=_ORPHANED_JOB_ERROR,
+                # A row written moments ago may belong to a dispatch that has
+                # not reached the actor yet, so leave the recent ones alone.
+                before=now - timedelta(seconds=_ORPHAN_GRACE_SECONDS),
+            )
+            purged = await repo.purge_terminal_jobs(older_than=now - timedelta(days=_JOB_RETENTION_DAYS))
+            if orphaned or purged:
+                self._logger.info("Reconciled indexing job history", orphaned=orphaned, purged=purged)
+        except Exception as exc:
+            self._logger.warning("Failed to reconcile indexing job history", error=str(exc))
 
     def _task_state_manager(self) -> Any:
         return ray.get_actor("TaskStateManager", namespace=self._namespace)

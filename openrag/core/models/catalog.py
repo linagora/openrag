@@ -37,14 +37,6 @@ INDEXING_CONTENT_CLAIM_TOKEN_PREFIX = "task:"
 COPY_CONTENT_CLAIM_TOKEN_PREFIX = "copy:"
 
 
-class JobStatus(str, Enum):
-    QUEUED = "QUEUED"
-    RUNNING = "RUNNING"
-    SUCCESS = "SUCCESS"
-    FAILED = "FAILED"
-    PARTIAL = "PARTIAL"
-
-
 class DocumentRecord(BaseModel):
     """A document entry in the catalog (PostgreSQL)."""
 
@@ -64,12 +56,19 @@ class DocumentRecord(BaseModel):
 
 
 class IndexationJob(BaseModel):
-    """An indexation job tracking batch document processing."""
+    """The durable record of one indexing task.
+
+    Mirrors a ``TaskStateManager`` entry into Postgres so job state survives a
+    restart and stays visible to operators. ``status`` reuses
+    :class:`DocumentStatus`, the state machine the indexing path already writes.
+    """
 
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    status: JobStatus = JobStatus.QUEUED
-    total_documents: int = 0
+    status: DocumentStatus = DocumentStatus.QUEUED
     partition: str = "default"
+    file_id: str | None = None
+    user_id: int | None = None
+    error: str | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
-    started_at: datetime | None = None
-    completed_at: datetime | None = None
+    updated_at: datetime | None = None
+    finished_at: datetime | None = None

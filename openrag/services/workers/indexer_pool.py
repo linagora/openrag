@@ -70,11 +70,9 @@ def _indexer_worker_actor_name(index: int) -> str:
 
 
 def _catalog_rdb_config(settings: Settings) -> Any:
-    if settings.rdb.database is not None:
-        return settings.rdb
-    return settings.rdb.model_copy(
-        update={"database": f"partitions_for_collection_{settings.vectordb.collection_name}"}
-    )
+    from services.storage.postgres_store import catalog_rdb_config
+
+    return catalog_rdb_config(settings)
 
 
 @ray.remote
