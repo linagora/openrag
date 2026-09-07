@@ -40,7 +40,19 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any
 
+from core.config.infrastructure import VectorDBConfig
+from core.models.chunk import Chunk
+from core.utils.exceptions import (
+    UnexpectedVDBError,
+    VDBConnectionError,
+    VDBCreateOrLoadCollectionError,
+    VDBDeleteError,
+    VDBInsertError,
+    VDBSchemaMigrationRequiredError,
+    VDBSearchError,
+)
 from core.utils.logging import get_logger
+from core.vector_stores import VectorStore
 from pymilvus import (
     AnnSearchRequest,
     AsyncMilvusClient,
@@ -51,19 +63,6 @@ from pymilvus import (
     MilvusException,
     RRFRanker,
 )
-
-from openrag.core.config.infrastructure import VectorDBConfig
-from openrag.core.models.chunk import Chunk
-from openrag.core.utils.exceptions import (
-    UnexpectedVDBError,
-    VDBConnectionError,
-    VDBCreateOrLoadCollectionError,
-    VDBDeleteError,
-    VDBInsertError,
-    VDBSchemaMigrationRequiredError,
-    VDBSearchError,
-)
-from openrag.core.vector_stores import VectorStore
 
 logger = get_logger()
 

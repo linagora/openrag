@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from openrag.core.models.catalog import DocumentRecord
+from core.models.catalog import DocumentRecord
 
 
 @dataclass(frozen=True, slots=True)

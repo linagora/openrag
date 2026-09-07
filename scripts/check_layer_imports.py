@@ -12,6 +12,9 @@ Only files inside openrag/{core,services,api,di}/ are checked. Legacy
 paths (openrag/components/, openrag/routers/, openrag/models/, ...) are
 ignored until they are migrated.
 
+Absolute application imports must use the bare layer root, not ``openrag.``:
+mixing the two loads distinct copies of classes such as exception types.
+
 Usage:
     python scripts/check_layer_imports.py
 
@@ -103,6 +106,10 @@ def check_file(path: Path) -> list[str]:
             dotted = resolve_relative(path, level, module)
         else:
             dotted = entry
+            if dotted == "openrag" or dotted.startswith("openrag."):
+                rel = path.relative_to(REPO_ROOT)
+                violations.append(f"{rel}:{lineno}  use the bare import root, not {dotted} (#885)")
+                continue
         tgt_layer = layer_of(dotted)
         if tgt_layer is None or tgt_layer == src_layer:
             continue

@@ -10,13 +10,12 @@ from typing import Any
 
 import ray
 from core.config.model_endpoints import CONTROL_EXTRA_KEYS
+from core.config.root import Settings
 from core.models.catalog import CONTENT_CLAIM_TOKEN_METADATA_KEY
 from core.utils.exceptions import NotFoundError
 from services.workers.indexer_actor import IndexerWorker, _display_filename, delete_uploaded_file
 from services.workers.indexing_callback import send_indexing_callback
 from services.workers.ray_utils import retry_idempotent_ray_actor_method
-
-from openrag.core.config.root import Settings
 
 # The indexer reloads the DB-backed model-endpoint registry at most once per
 # this window (and on a miss), bounding both staleness and DB load regardless
