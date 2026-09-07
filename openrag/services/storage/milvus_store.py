@@ -283,37 +283,46 @@ class MilvusVectorStore(VectorStore):
         deadline = time.monotonic() + self._timeout
 
         while True:
-            try:
-                missing_field = next(
-                    (
-                        field
-                        for field in required_fields
-                        if not self._client.list_indexes(
-                            self._collection_name,
-                            field_name=field,
-                        )
-                    ),
-                    None,
-                )
-            except MilvusException as e:
-                raise VDBCreateOrLoadCollectionError(
-                    f"Failed to inspect indexes for collection `{self._collection_name}`: {e!s}",
-                    collection_name=self._collection_name,
-                    operation="list_indexes",
-                ) from e
+            missing_field = None
+
+            for field in required_fields:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise VDBCreateOrLoadCollectionError(
+                        f"Timed out waiting for vector indexes on collection `{self._collection_name}`.",
+                        collection_name=self._collection_name,
+                        operation="wait_for_indexes",
+                    )
+
+                try:
+                    indexes = self._client.list_indexes(
+                        self._collection_name,
+                        field_name=field,
+                        timeout=remaining,
+                    )
+                except MilvusException as e:
+                    raise VDBCreateOrLoadCollectionError(
+                        f"Failed to inspect indexes for collection `{self._collection_name}`: {e!s}",
+                        collection_name=self._collection_name,
+                        operation="list_indexes",
+                    ) from e
+
+                if not indexes:
+                    missing_field = field
+                    break
 
             if missing_field is None:
                 return
 
-            if time.monotonic() >= deadline:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
                 raise VDBCreateOrLoadCollectionError(
-                    f"Timed out waiting for vector indexes on collection "
-                    f"`{self._collection_name}`: missing `{missing_field}`.",
+                    f"Timed out waiting for vector indexes on collection `{self._collection_name}`.",
                     collection_name=self._collection_name,
                     operation="wait_for_indexes",
                 )
 
-            time.sleep(0.1)
+            time.sleep(min(0.1, remaining))
 
     # ------------------------------------------------------------------
     # Schema / index

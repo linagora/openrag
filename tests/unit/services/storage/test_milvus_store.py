@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import re
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, call
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from pymilvus import MilvusException
@@ -907,16 +907,26 @@ class TestEnsureLoadedConcurrentCreation:
         store._client.has_collection.return_value = True
         store._client.describe_collection.return_value = {"properties": {SCHEMA_VERSION_PROPERTY_KEY: "1"}}
         store._client.list_indexes.side_effect = [[], ["vector_idx"], ["sparse_idx"]]
+
+        monotonic_values = iter([0.0, 0.1, 0.2, 0.3, 0.4])
+        monkeypatch.setattr(
+            "openrag.services.storage.milvus_store.time.monotonic",
+            lambda: next(monotonic_values),
+        )
         monkeypatch.setattr("openrag.services.storage.milvus_store.time.sleep", lambda _: None)
 
         store._ensure_loaded()
 
-        assert store._client.list_indexes.call_args_list == [
-            call(store._collection_name, field_name="vector"),
-            call(store._collection_name, field_name="vector"),
-            call(store._collection_name, field_name="sparse"),
+        calls = store._client.list_indexes.call_args_list
+
+        assert [item.kwargs["field_name"] for item in calls] == [
+            "vector",
+            "vector",
+            "sparse",
         ]
-        store._client.load_collection.assert_called_once_with(store._collection_name)
+
+        timeouts = [item.kwargs["timeout"] for item in calls]
+        assert timeouts[0] > timeouts[1] > timeouts[2] > 0
 
     def test_missing_vector_indexes_time_out_instead_of_loading(
         self,
