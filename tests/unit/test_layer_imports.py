@@ -1,8 +1,15 @@
 """Keep application modules from loading under two import roots."""
 
+import importlib.util
+from pathlib import Path
+
 import pytest
 
-from scripts import check_layer_imports as guard
+spec = importlib.util.spec_from_file_location(
+    "check_layer_imports", Path(__file__).resolve().parents[2] / "scripts/check_layer_imports.py"
+)
+guard = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(guard)
 
 
 @pytest.mark.parametrize(
