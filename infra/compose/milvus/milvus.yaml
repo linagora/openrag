@@ -72,6 +72,9 @@ services:
       MINIO_SECRET_ACCESS_KEY: ${MINIO_SECRET_KEY:?Set MINIO_SECRET_KEY in your .env}
     volumes:
       - ${MILVUS_VOLUME_DIRECTORY:-./volumes}/milvus:/var/lib/milvus
+      # Server config overrides (Storage V3). Read-only: Milvus only reads it
+      # at startup, and the init container must not have to chown it.
+      - ./user.yaml:/milvus/configs/user.yaml:ro
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
       interval: 30s

@@ -34,6 +34,9 @@ services:
       ETCD_ENDPOINTS: etcd:2379
       ETCD_AUTH_ENABLED: "false"
       MINIO_ADDRESS: minio:9000
+    # Storage V3 overrides, shared with the deployment stacks (single source of truth).
+    volumes:
+      - ../../../infra/compose/milvus/user.yaml:/milvus/configs/user.yaml:ro
     ports:
       - "19530:19530"
       - "9091:9091"

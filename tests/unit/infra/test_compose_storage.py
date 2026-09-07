@@ -33,7 +33,10 @@ def _assert_milvus_initializer(services: dict) -> None:
     assert initializer["user"] == "0:0"
     assert initializer["environment"]["LD_PRELOAD"] == ""
     assert initializer["entrypoint"] == ["/bin/sh", "-ec"]
-    assert initializer["volumes"] == milvus["volumes"]
+    # The initializer exists to chown the data volume, so that mount must match.
+    # It deliberately does not carry the milvus service's server-config mount.
+    data_mounts = [v for v in milvus["volumes"] if v.endswith(":/var/lib/milvus")]
+    assert initializer["volumes"] == data_mounts
     assert initializer["read_only"] is True
     assert initializer["cap_drop"] == ["ALL"]
     assert initializer["cap_add"] == ["CHOWN", "DAC_READ_SEARCH"]
@@ -74,7 +77,7 @@ def test_milvus_compose_defaults_preserve_existing_host_paths() -> None:
 
     assert services["etcd"]["volumes"] == ["${MILVUS_VOLUME_DIRECTORY:-./volumes}/etcd:/etcd"]
     assert services["minio"]["volumes"] == ["${MILVUS_VOLUME_DIRECTORY:-./volumes}/minio:/minio_data"]
-    assert services["milvus"]["volumes"] == ["${MILVUS_VOLUME_DIRECTORY:-./volumes}/milvus:/var/lib/milvus"]
+    assert "${MILVUS_VOLUME_DIRECTORY:-./volumes}/milvus:/var/lib/milvus" in services["milvus"]["volumes"]
 
     _assert_milvus_initializer(services)
     assert services["milvus"]["environment"]["ETCD_AUTH_ENABLED"] == "false"
@@ -99,7 +102,7 @@ def test_named_volume_profile_is_opt_in() -> None:
 
     assert named_milvus["services"]["etcd"]["volumes"] == ["${ETCD_VOLUME:-etcd}:/etcd"]
     assert named_milvus["services"]["minio"]["volumes"] == ["${MINIO_VOLUME:-minio}:/minio_data"]
-    assert named_milvus["services"]["milvus"]["volumes"] == ["${MILVUS_VOLUME:-milvus}:/var/lib/milvus"]
+    assert "${MILVUS_VOLUME:-milvus}:/var/lib/milvus" in named_milvus["services"]["milvus"]["volumes"]
     assert named_milvus["services"]["milvus"]["image"] == "milvusdb/milvus:v3.0.0"
     assert named_milvus["services"]["milvus"]["environment"]["ETCD_AUTH_ENABLED"] == "false"
     assert named_milvus["services"]["milvus"]["environment"]["MQ_TYPE"] == "${MILVUS_MQ_TYPE:-default}"
@@ -144,3 +147,44 @@ def test_helm_storage_is_pvc_based_without_host_paths() -> None:
     assert values["postgresql"]["primary"]["persistence"]["enabled"] is True
     assert values["milvus"]["minio"]["persistence"]["enabled"] is True
     assert values["milvus"]["etcd"]["persistence"]["enabled"] is True
+
+
+def test_storage_v3_is_enabled_for_every_milvus_stack() -> None:
+    """Storage V3 gates `add_function_field`, which the Milvus migrations rely on.
+
+    It has to be on wherever Milvus runs — including CI, so migrations are
+    exercised on the same storage engine production uses.
+    """
+    config = _load_yaml(COMPOSE_DIR / "milvus" / "user.yaml")
+
+    assert config["common"]["storage"]["useLoonFFI"] is True
+    # Both compaction settings are required for the function-field backfill.
+    assert config["dataCoord"]["compaction"]["bumpSchemaVersion"]["enabled"] is True
+    assert config["dataCoord"]["compaction"]["storageVersion"]["enabled"] is True
+
+    stacks = {
+        COMPOSE_DIR / "milvus" / "milvus.yaml": "./user.yaml",
+        COMPOSE_DIR / "milvus" / "milvus.named-volumes.yaml": "./user.yaml",
+        ROOT / "tests" / "integration" / "repos" / "docker-compose.yaml": "../../../infra/compose/milvus/user.yaml",
+        ROOT
+        / "tests"
+        / "integration"
+        / "api"
+        / "api_run"
+        / "docker-compose.yaml": "../../../../infra/compose/milvus/user.yaml",
+        ROOT / "tests" / "load" / "workspace" / "docker-compose.yml": "../../../infra/compose/milvus/user.yaml",
+    }
+    for path, source in stacks.items():
+        volumes = _load_yaml(path)["services"]["milvus"]["volumes"]
+        assert f"{source}:/milvus/configs/user.yaml:ro" in volumes, path
+
+
+def test_helm_milvus_config_matches_the_compose_one() -> None:
+    """Helm cannot read a file outside the chart, so the content is duplicated.
+
+    Compare the parsed documents rather than the text: the two must not drift.
+    """
+    compose_config = _load_yaml(COMPOSE_DIR / "milvus" / "user.yaml")
+    values = _load_yaml(CHART_DIR / "values.yaml")
+
+    assert yaml.safe_load(values["milvus"]["extraConfigFiles"]["user.yaml"]) == compose_config
