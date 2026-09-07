@@ -132,12 +132,14 @@ def _decode_recoverable_task(payload: bytes) -> tuple[str, TaskInfo, float | Non
     return task_id, info, expires_at
 
 
-def _load_recoverable_tasks() -> dict[str, TaskInfo]:
+def _load_recoverable_tasks() -> tuple[dict[str, TaskInfo], dict[str, float]]:
+    """Return the recovered tasks and, for those that carry one, their deadline."""
     from ray.experimental.internal_kv import _internal_kv_del, _internal_kv_get, _internal_kv_list
 
     if not _task_state_storage_available():
-        return {}
+        return {}, {}
     tasks: dict[str, TaskInfo] = {}
+    expiries: dict[str, float] = {}
     namespace = _task_state_kv_namespace()
     now = time.time()
     for key in _internal_kv_list(_RECOVERABLE_TASK_KV_PREFIX, namespace=namespace):
@@ -149,7 +151,9 @@ def _load_recoverable_tasks() -> dict[str, TaskInfo]:
             _internal_kv_del(key, namespace=namespace)
             continue
         tasks[task_id] = info
-    return tasks
+        if expires_at is not None:
+            expiries[task_id] = expires_at
+    return tasks, expiries
 
 
 def _recovery_snapshot(info: TaskInfo, *, now: float | None = None) -> tuple[TaskInfo, float | None]:
@@ -277,15 +281,21 @@ def _content_claim_registration_expired(details: dict[str, Any]) -> bool:
 @ray.remote(concurrency_groups={"set": 1000, "get": 1000, "queue_info": 1000})
 class TaskStateManager:
     def __init__(self) -> None:
-        self.tasks = _load_recoverable_tasks()
+        self.tasks, expiries = _load_recoverable_tasks()
         self.user_index: dict[int | None, set[str]] = {}
         # Terminal task ids in eviction order, mapped to the time they settled.
         self.terminal_tasks: OrderedDict[str, float] = OrderedDict()
         now = time.time()
         for task_id, info in self.tasks.items():
             self.user_index.setdefault(info.details.get("user_id"), set()).add(task_id)
-            if info.state in TERMINAL_TASK_STATES:
-                self.terminal_tasks[task_id] = now
+            if info.state not in TERMINAL_TASK_STATES:
+                continue
+            # A restart must not restart the clock, so recover the settle time
+            # from the persisted deadline where the record carries one.
+            expires_at = expiries.get(task_id)
+            self.terminal_tasks[task_id] = (
+                expires_at - _TERMINAL_TASK_RETENTION_SECONDS if expires_at is not None else now
+            )
         self.file_delete_fences = _load_file_delete_fences()
         # Ray runs each concurrency group on a separate event loop. A single
         # asyncio lock cannot safely coordinate methods across those loops.
@@ -631,6 +641,9 @@ class TaskStateManager:
     @ray.method(concurrency_group="get")
     async def get_state(self, task_id: str) -> str | None:
         with self.lock:
+            # Status polling is the one read that cannot iterate the task map,
+            # so it can evict. Without this, retention would need new work.
+            self._evict_terminal_tasks_locked()
             info = self.tasks.get(task_id)
             if info is not None:
                 self._expire_refless_task_if_stale_locked(task_id, info)

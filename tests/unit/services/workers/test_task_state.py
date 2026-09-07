@@ -655,7 +655,7 @@ def test_pre_lease_file_delete_fence_gets_migration_grace_period() -> None:
 @pytest.mark.asyncio
 async def test_active_task_registry_survives_actor_reconstruction(monkeypatch) -> None:
     stored: dict[str, TaskInfo] = {}
-    monkeypatch.setattr(task_state_module, "_load_recoverable_tasks", lambda: dict(stored))
+    monkeypatch.setattr(task_state_module, "_load_recoverable_tasks", lambda: (dict(stored), {}))
 
     def save(task_id: str, info: TaskInfo) -> None:
         if info.state in task_state_module.RECOVERABLE_TASK_STATES:
@@ -695,7 +695,7 @@ async def test_active_task_registry_survives_actor_reconstruction(monkeypatch) -
 @pytest.mark.asyncio
 async def test_cancellation_tombstone_survives_actor_reconstruction(monkeypatch) -> None:
     stored: dict[str, TaskInfo] = {}
-    monkeypatch.setattr(task_state_module, "_load_recoverable_tasks", lambda: dict(stored))
+    monkeypatch.setattr(task_state_module, "_load_recoverable_tasks", lambda: (dict(stored), {}))
 
     def save(task_id: str, info: TaskInfo) -> None:
         if info.state in task_state_module.RECOVERABLE_TASK_STATES:
@@ -781,7 +781,7 @@ def test_expired_unsettled_cancellation_is_preserved_during_recovery(monkeypatch
         lambda candidate, **_kwargs: deleted.append(candidate),
     )
 
-    recovered = task_state_module._load_recoverable_tasks()
+    recovered, _expiries = task_state_module._load_recoverable_tasks()
 
     assert recovered["task-1"].state == "CANCELLED"
     assert recovered["task-1"].worker_submitted is True
@@ -807,7 +807,7 @@ def test_expired_settled_cancellation_is_removed_during_recovery(monkeypatch) ->
         lambda candidate, **_kwargs: deleted.append(candidate),
     )
 
-    assert task_state_module._load_recoverable_tasks() == {}
+    assert task_state_module._load_recoverable_tasks() == ({}, {})
     assert deleted == [key]
 
 
@@ -835,7 +835,7 @@ def test_legacy_unsettled_cancellation_remains_unexpired(monkeypatch) -> None:
     monkeypatch.setattr(internal_kv, "_internal_kv_get", lambda candidate, **_kwargs: storage.get(candidate))
     monkeypatch.setattr(internal_kv, "_internal_kv_del", lambda candidate, **_kwargs: storage.pop(candidate, None))
 
-    recovered = task_state_module._load_recoverable_tasks()["task-1"]
+    recovered = task_state_module._load_recoverable_tasks()[0]["task-1"]
 
     assert getattr(recovered, "cancellation_settlement_expires_at", None) is None
 
@@ -843,7 +843,7 @@ def test_legacy_unsettled_cancellation_remains_unexpired(monkeypatch) -> None:
 @pytest.mark.asyncio
 async def test_submitted_cancellation_keeps_claim_after_reconstruction(monkeypatch) -> None:
     stored: dict[str, TaskInfo] = {}
-    monkeypatch.setattr(task_state_module, "_load_recoverable_tasks", lambda: dict(stored))
+    monkeypatch.setattr(task_state_module, "_load_recoverable_tasks", lambda: (dict(stored), {}))
 
     def save(task_id: str, info: TaskInfo) -> None:
         if info.state in task_state_module.RECOVERABLE_TASK_STATES:
@@ -1018,10 +1018,13 @@ async def test_recovered_terminal_tasks_are_subject_to_retention(monkeypatch) ->
     monkeypatch.setattr(
         task_state_module,
         "_load_recoverable_tasks",
-        lambda: {
-            "settled-cancelled-task": TaskInfo(state="CANCELLED", details={"user_id": 3}),
-            "queued-task": TaskInfo(state="QUEUED", details={"user_id": 3}),
-        },
+        lambda: (
+            {
+                "settled-cancelled-task": TaskInfo(state="CANCELLED", details={"user_id": 3}),
+                "queued-task": TaskInfo(state="QUEUED", details={"user_id": 3}),
+            },
+            {},
+        ),
     )
     manager = _task_state_manager()
 
@@ -1031,3 +1034,42 @@ async def test_recovered_terminal_tasks_are_subject_to_retention(monkeypatch) ->
     await manager.set_queued_details("new-task", file_id="file-1", partition="tenant-a", metadata={}, user_id=3)
 
     assert set(manager.tasks) == {"queued-task", "new-task"}
+
+
+@pytest.mark.asyncio
+async def test_expired_task_is_evicted_when_its_status_is_polled(monkeypatch) -> None:
+    # Eviction must not depend on new work arriving: a queue that goes quiet
+    # after its last file still has to forget that file's record.
+    monkeypatch.setattr(task_state_module, "_TERMINAL_TASK_RETENTION_SECONDS", 60.0)
+    monkeypatch.setattr(task_state_module.time, "time", lambda: 1_000.0)
+    manager = _task_state_manager()
+    await manager.set_queued_details("done-task", file_id="file-1", partition="tenant-a", metadata={}, user_id=1)
+    await manager.set_state("done-task", "COMPLETED")
+
+    monkeypatch.setattr(task_state_module.time, "time", lambda: 1_061.0)
+
+    assert await manager.get_state("done-task") is None
+    assert manager.tasks == {}
+    assert manager.user_index == {}
+
+
+@pytest.mark.asyncio
+async def test_recovery_preserves_the_original_retention_deadline(monkeypatch) -> None:
+    # Restarting the actor must not restart the clock, or a settled record
+    # recovered just before its deadline would live for a second full window.
+    monkeypatch.setattr(task_state_module, "_TERMINAL_TASK_RETENTION_SECONDS", 60.0)
+    monkeypatch.setattr(
+        task_state_module,
+        "_load_recoverable_tasks",
+        lambda: (
+            {"old-task": TaskInfo(state="CANCELLED", details={"user_id": 3})},
+            {"old-task": 1_060.0},
+        ),
+    )
+    monkeypatch.setattr(task_state_module.time, "time", lambda: 1_050.0)
+    manager = _task_state_manager()
+
+    assert manager.terminal_tasks["old-task"] == 1_000.0
+
+    monkeypatch.setattr(task_state_module.time, "time", lambda: 1_061.0)
+    assert await manager.get_state("old-task") is None
