@@ -5,6 +5,19 @@ from api.runtime_ui import get_grafana_url
 
 
 @pytest.mark.parametrize(
+    "control_character",
+    ["\t", "\n", "\r"],
+)
+def test_rejects_control_characters(monkeypatch, control_character):
+    monkeypatch.setenv(
+        "GRAFANA_URL",
+        f"/{control_character}/evil.example/x",
+    )
+
+    assert get_grafana_url() is None
+
+
+@pytest.mark.parametrize(
     ("value", "expected"),
     [
         (None, None),

@@ -6,6 +6,7 @@ import SystemPage from "./system";
 
 const systemConfig = vi.hoisted(() => ({
   grafanaUrl: null as string | null,
+  runtimeConfigPresent: true,
   metricsLoading: false,
   refetchOnMount: undefined as unknown,
 }));
@@ -22,7 +23,9 @@ vi.mock("@tanstack/react-query", () => ({
     if (key === "system-config") {
       systemConfig.refetchOnMount = refetchOnMount;
       return {
-        data: { grafana_url: systemConfig.grafanaUrl },
+        data: systemConfig.runtimeConfigPresent
+          ? { grafana_url: systemConfig.grafanaUrl }
+          : {},
         error: null,
         isLoading: false,
       };
@@ -71,12 +74,26 @@ describe("SystemPage Grafana action", () => {
     systemConfig.grafanaUrl = null;
     systemConfig.metricsLoading = false;
     systemConfig.refetchOnMount = undefined;
+    systemConfig.runtimeConfigPresent = true;
   });
 
   it("refetches runtime configuration whenever the page mounts", () => {
     render(<SystemPage />);
 
     expect(systemConfig.refetchOnMount).toBe("always");
+  });
+  
+  it("does not fall back to the build-time URL when runtime Grafana is invalid", async () => {
+    systemConfig.grafanaUrl = null;
+
+    render(<SystemPage />);
+
+    await userEvent.click(screen.getByRole("tab", { name: "Metrics" }));
+    await userEvent.click(screen.getByRole("button", { name: "Open in Grafana" }));
+
+    expect(
+      screen.getByRole("heading", { name: "Grafana is not configured" }),
+    ).not.toBeNull();
   });
 
   it("opens the runtime-configured dashboard from the Metrics tab", async () => {

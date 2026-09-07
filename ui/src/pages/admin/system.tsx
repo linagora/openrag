@@ -42,10 +42,16 @@ export default function SystemPage() {
     staleTime: Infinity,
     refetchOnMount: "always",
   });
+  const hasRuntimeGrafanaConfig =
+    config !== undefined &&
+    Object.prototype.hasOwnProperty.call(config, "grafana_url");
+
   const runtimeGrafanaUrl =
     typeof config?.grafana_url === "string" ? config.grafana_url.trim() : "";
-  const grafanaUrl = runtimeGrafanaUrl || BUILD_TIME_GRAFANA_URL;
 
+  const grafanaUrl = hasRuntimeGrafanaConfig
+    ? runtimeGrafanaUrl
+    : BUILD_TIME_GRAFANA_URL;
   return (
     <div>
       <PageHeader
