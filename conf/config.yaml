@@ -220,12 +220,16 @@ loader:
     md: MarkdownLoader
 
   # Env: MARKER_MAX_TASKS_PER_CHILD, MARKER_POOL_SIZE, MARKER_MAX_PROCESSES,
-  #      MARKER_NUM_GPUS, MARKER_TIMEOUT, MARKER_PDFTEXT_WORKERS, MARKER_CHUNK_SIZE
+  #      MARKER_NUM_GPUS, MARKER_TIMEOUT, MARKER_CHILD_TIMEOUT_RATIO,
+  #      MARKER_PDFTEXT_WORKERS, MARKER_CHUNK_SIZE
   marker_max_tasks_per_child: 20
   marker_pool_size: 1
   marker_max_processes: 2
   marker_num_gpus: 0.01
   marker_timeout: 3600
+  # Share of marker_timeout for the child process. Keep below 1.0 so a wedged
+  # child times out first and recycles the pool.
+  marker_child_timeout_ratio: 0.9
   marker_pdftext_workers: 2
   # Split large PDFs into chunks of this many pages for parallel processing across workers.
   # 0 = no chunking (process entire PDF in one worker).
