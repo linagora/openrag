@@ -285,7 +285,20 @@ class MilvusVectorStore(VectorStore):
 
     def _wait_for_vector_indexes(self) -> None:
         """Wait until Milvus exposes every required vector index."""
-        description = self._client.describe_collection(self._collection_name)
+        deadline = time.monotonic() + self._timeout
+        remaining = deadline - time.monotonic()
+
+        if remaining <= 0:
+            raise VDBCreateOrLoadCollectionError(
+                f"Timed out waiting for vector indexes on collection `{self._collection_name}`.",
+                collection_name=self._collection_name,
+                operation="wait_for_indexes",
+            )
+
+        description = self._client.describe_collection(
+            self._collection_name,
+            timeout=remaining,
+        )
         fields = {field.get("name") for field in description.get("fields", [])}
 
         if self._hybrid and "sparse" not in fields:
@@ -298,8 +311,6 @@ class MilvusVectorStore(VectorStore):
         required_fields = ["vector"]
         if self._hybrid:
             required_fields.append("sparse")
-
-        deadline = time.monotonic() + self._timeout
 
         while True:
             missing_field = None

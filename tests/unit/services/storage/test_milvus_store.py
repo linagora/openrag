@@ -915,6 +915,33 @@ class TestEnsureLoadedConcurrentCreation:
         store._client.list_indexes.assert_not_called()
         store._client.load_collection.assert_not_called()
 
+    def test_describe_collection_uses_shared_timeout_budget(
+        self,
+        store: MilvusVectorStore,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        store._client.has_collection.return_value = True
+        store._client.describe_collection.return_value = {
+            "properties": {SCHEMA_VERSION_PROPERTY_KEY: "1"},
+            "fields": [{"name": "vector"}, {"name": "sparse"}],
+        }
+        store._client.list_indexes.side_effect = [["vector_idx"], ["sparse_idx"]]
+
+        monotonic_values = iter([0.0, 0.25, 0.5, 0.75])
+        monkeypatch.setattr(
+            "openrag.services.storage.milvus_store.time.monotonic",
+            lambda: next(monotonic_values),
+        )
+
+        store._ensure_loaded()
+
+        describe_call = store._client.describe_collection.call_args_list[-1]
+        describe_timeout = describe_call.kwargs.get("timeout")
+        index_timeouts = [call.kwargs["timeout"] for call in store._client.list_indexes.call_args_list]
+
+        assert describe_timeout == pytest.approx(store._timeout - 0.25)
+        assert describe_timeout > index_timeouts[0] > index_timeouts[1] > 0
+
     def test_existing_collection_waits_for_vector_indexes_before_loading(
         self,
         store: MilvusVectorStore,
@@ -927,7 +954,7 @@ class TestEnsureLoadedConcurrentCreation:
         }
         store._client.list_indexes.side_effect = [[], ["vector_idx"], ["sparse_idx"]]
 
-        monotonic_values = iter([0.0, 0.1, 0.2, 0.3, 0.4])
+        monotonic_values = iter([0.0, 0.1, 0.2, 0.3, 0.4, 0.5])
         monkeypatch.setattr(
             "openrag.services.storage.milvus_store.time.monotonic",
             lambda: next(monotonic_values),
