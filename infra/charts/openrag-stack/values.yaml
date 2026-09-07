@@ -483,6 +483,25 @@ openrag:
       tls: []
       path: /
       pathType: Prefix
+  # Prometheus scrapes GET /metrics on the API port (no extra port). The route
+  # is open unless env.secrets.METRICS_TOKEN is set, in which case the scraper
+  # must send it as a bearer. Set the token whenever the API is reachable
+  # through a public Ingress. See docs/documentation/prometheus_metrics.md.
+  metrics:
+    # prometheus.io/* pod annotations for annotation-based discovery (plain
+    # Prometheus with a kubernetes_sd relabel config).
+    prometheusAnnotations: true
+    # Prometheus Operator / kube-prometheus-stack discovery.
+    serviceMonitor:
+      enabled: false
+      # Labels the operator's serviceMonitorSelector expects, e.g.
+      # release: kube-prometheus-stack
+      labels: {}
+      interval: 30s
+      scrapeTimeout: 10s
+      # Read METRICS_TOKEN from the chart env Secret (or env.existingSecret)
+      # and send it as the scrape bearer. Enable together with the token.
+      bearerTokenFromSecret: false
   resources:
     requests:
       cpu: "4"
@@ -705,6 +724,7 @@ env:
     # --set/-f) so the secret always matches the actual DB credential.
     POSTGRES_PASSWORD: "{{ .Values.postgresql.auth.password }}"
     AUTH_TOKEN: "" # API KEY for OpenRAG
+    METRICS_TOKEN: "" # Optional bearer for Prometheus on GET /metrics; empty = open endpoint
     HF_TOKEN: "" # HuggingFace token
     RERANKER_API_KEY: "EMPTY"  # Set when using an external reranker that requires authentication
 

@@ -237,8 +237,10 @@ class OIDCConfig(BaseModel):
 
 
 # Paths the auth middleware exits early on. Includes the OpenAPI docs,
-# health probes, and the OIDC callback endpoints (which can't require
-# auth because they ARE the way users get authenticated).
+# health probes, the OIDC callback endpoints (which can't require auth
+# because they ARE the way users get authenticated) and the Prometheus
+# ``/metrics`` exposition, which enforces its own optional METRICS_TOKEN at
+# the route (api.routers.admin.monitoring) instead of a user bearer.
 DEFAULT_BYPASS_PATHS: tuple[str, ...] = (
     "/docs",
     "/openapi.json",
@@ -250,6 +252,7 @@ DEFAULT_BYPASS_PATHS: tuple[str, ...] = (
     "/auth/backchannel-logout",
     "/auth/logout",
     "/auth/chainlit-logout-signal",
+    "/metrics",
 )
 
 # REST API prefixes. Unauthenticated requests here get JSON 401/403,

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from pydantic import Field
+from pydantic import Field, field_validator
 
 from .base import ConfigMixin
 
@@ -98,6 +98,20 @@ class PathsConfig(ConfigMixin):
 
 class ServerConfig(ConfigMixin):
     preferred_url_scheme: str | None = None
+    # Bearer a Prometheus scraper must present on ``GET /metrics``. ``None``
+    # (the default) leaves the endpoint open to anyone who can reach the API
+    # port — fine on an internal network, set it whenever the API is exposed
+    # through a public ingress. Env: METRICS_TOKEN.
+    metrics_token: str | None = None
+
+    @field_validator("metrics_token", mode="before")
+    @classmethod
+    def _blank_metrics_token_is_unset(cls, value: object) -> object:
+        # ``METRICS_TOKEN=`` in a .env (or whitespace) must disable the check,
+        # not install a token equal to "" that would 403 every scrape.
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value.strip() if isinstance(value, str) else value
 
 
 # ---------------------------------------------------------------------------
