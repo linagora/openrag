@@ -899,13 +899,32 @@ class TestCheckSchemaVersion:
 
 
 class TestEnsureLoadedConcurrentCreation:
+    def test_hybrid_collection_without_sparse_field_fails_immediately(
+        self,
+        store: MilvusVectorStore,
+    ) -> None:
+        store._client.has_collection.return_value = True
+        store._client.describe_collection.return_value = {
+            "properties": {SCHEMA_VERSION_PROPERTY_KEY: "1"},
+            "fields": [{"name": "vector"}],
+        }
+
+        with pytest.raises(VDBCreateOrLoadCollectionError, match="sparse"):
+            store._ensure_loaded()
+
+        store._client.list_indexes.assert_not_called()
+        store._client.load_collection.assert_not_called()
+
     def test_existing_collection_waits_for_vector_indexes_before_loading(
         self,
         store: MilvusVectorStore,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         store._client.has_collection.return_value = True
-        store._client.describe_collection.return_value = {"properties": {SCHEMA_VERSION_PROPERTY_KEY: "1"}}
+        store._client.describe_collection.return_value = {
+            "properties": {SCHEMA_VERSION_PROPERTY_KEY: "1"},
+            "fields": [{"name": "vector"}, {"name": "sparse"}],
+        }
         store._client.list_indexes.side_effect = [[], ["vector_idx"], ["sparse_idx"]]
 
         monotonic_values = iter([0.0, 0.1, 0.2, 0.3, 0.4])
@@ -934,7 +953,10 @@ class TestEnsureLoadedConcurrentCreation:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         store._client.has_collection.return_value = True
-        store._client.describe_collection.return_value = {"properties": {SCHEMA_VERSION_PROPERTY_KEY: "1"}}
+        store._client.describe_collection.return_value = {
+            "properties": {SCHEMA_VERSION_PROPERTY_KEY: "1"},
+            "fields": [{"name": "vector"}, {"name": "sparse"}],
+        }
         store._client.list_indexes.return_value = []
         monotonic_values = iter([0.0, store._timeout + 1.0])
         monkeypatch.setattr(
@@ -953,6 +975,10 @@ class TestEnsureLoadedConcurrentCreation:
     ) -> None:
         store._embedding_dimension = 8
         store._client.has_collection.return_value = False
+        store._client.describe_collection.return_value = {
+            "properties": {SCHEMA_VERSION_PROPERTY_KEY: "1"},
+            "fields": [{"name": "vector"}, {"name": "sparse"}],
+        }
 
         store._ensure_loaded()
 
@@ -964,7 +990,10 @@ class TestEnsureLoadedConcurrentCreation:
         store._embedding_dimension = 8
         store._client.has_collection.side_effect = [False, True]  # first call says "no", second call says "yes"
         store._client.create_collection.side_effect = MilvusException(message="collection already exists")
-        store._client.describe_collection.return_value = {"properties": {SCHEMA_VERSION_PROPERTY_KEY: "1"}}
+        store._client.describe_collection.return_value = {
+            "properties": {SCHEMA_VERSION_PROPERTY_KEY: "1"},
+            "fields": [{"name": "vector"}, {"name": "sparse"}],
+        }
 
         store._ensure_loaded()
 
@@ -979,6 +1008,27 @@ class TestEnsureLoadedConcurrentCreation:
 
         with pytest.raises(VDBCreateOrLoadCollectionError):
             store._ensure_loaded()
+
+    def test_partial_creation_failure_preserves_original_error(
+        self,
+        store: MilvusVectorStore,
+    ) -> None:
+        store._embedding_dimension = 8
+        store._timeout = 0
+
+        creation_error = MilvusException(message="index creation failed")
+        store._client.has_collection.side_effect = [False, True]
+        store._client.create_collection.side_effect = creation_error
+        store._client.describe_collection.return_value = {
+            "properties": {SCHEMA_VERSION_PROPERTY_KEY: "1"},
+            "fields": [{"name": "vector"}, {"name": "sparse"}],
+        }
+
+        with pytest.raises(VDBCreateOrLoadCollectionError) as error:
+            store._ensure_loaded()
+
+        assert "index creation failed" in str(error.value)
+        assert error.value.__cause__ is creation_error
 
     def test_existing_old_collection_still_requires_migration(
         self,

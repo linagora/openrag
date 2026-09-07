@@ -245,6 +245,15 @@ class MilvusVectorStore(VectorStore):
                         properties={SCHEMA_VERSION_PROPERTY_KEY: str(self._config.schema_version)},
                     )
                 except MilvusException as e:
+                    error_message = e.message.lower()
+
+                    if "already exist" not in error_message:
+                        raise VDBCreateOrLoadCollectionError(
+                            f"Failed to create collection `{self._collection_name}`: {e!s}",
+                            collection_name=self._collection_name,
+                            operation="create_collection",
+                        ) from e
+
                     if not self._client.has_collection(self._collection_name):
                         raise VDBCreateOrLoadCollectionError(
                             f"Failed to create collection `{self._collection_name}`: {e!s}",
@@ -276,6 +285,16 @@ class MilvusVectorStore(VectorStore):
 
     def _wait_for_vector_indexes(self) -> None:
         """Wait until Milvus exposes every required vector index."""
+        description = self._client.describe_collection(self._collection_name)
+        fields = {field.get("name") for field in description.get("fields", [])}
+
+        if self._hybrid and "sparse" not in fields:
+            raise VDBCreateOrLoadCollectionError(
+                f"Collection `{self._collection_name}` has no `sparse` field, but hybrid search is enabled.",
+                collection_name=self._collection_name,
+                operation="validate_collection_schema",
+            )
+
         required_fields = ["vector"]
         if self._hybrid:
             required_fields.append("sparse")
