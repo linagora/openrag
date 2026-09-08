@@ -28,8 +28,12 @@ class WorkspaceRepository(ABC):
     async def list_workspaces(self, partition: str) -> list[Workspace]: ...
 
     @abstractmethod
-    async def delete_workspace(self, workspace_id: str) -> list[str]:
-        """Delete a workspace, return file_ids that no longer belong to any workspace."""
+    async def delete_workspace(self, workspace_id: str, *, keep_files: bool = False) -> list[str]:
+        """Delete a workspace and return exclusively workspace-owned orphan IDs.
+
+        With keep_files, retain its files as independently indexed instead.
+        The returned candidates still describe what would have been deleted.
+        """
         ...
 
     # ── Workspace ↔ file membership ───────────────────────────────────

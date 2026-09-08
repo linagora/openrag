@@ -129,7 +129,7 @@ curl -X DELETE "$BASE_URL/partition/my-partition/workspaces/project-alpha" \
 {"status": "deleted", "orphaned_files_deleted": 1, "orphaned_files_failed": [], "kept_files": 0}
 ```
 
-Files that belonged **only** to the deleted workspace are automatically removed from the partition. Files shared with other workspaces are preserved.
+Only files uploaded with workspace assignment are automatically removed, and only after their last workspace is deleted. Independently indexed files remain in the partition even when attached to the deleted workspace. Files indexed before ownership tracking was introduced are also preserved because their origin is unknown.
 
 #### Keeping Orphaned Files (`keep_files=true`)
 
@@ -146,7 +146,8 @@ curl -X DELETE "$BASE_URL/partition/my-partition/workspaces/project-alpha?keep_f
 
 - `kept_files` reports how many files would have been orphaned and were left indexed in the partition instead of being deleted.
 - The workspace and its `workspace_files` rows are still removed as usual — only the file-deletion step is skipped.
-- Default behavior (parameter absent or `keep_files=false`) is unchanged: orphaned files are purged as before.
+- With `keep_files=false` (the default), only exclusively workspace-owned orphans are deleted.
+- Retained files become independent partition files, so attaching them to another workspace does not make them eligible for automatic deletion again.
 - Useful when files may be shared outside of the workspace model (e.g. referenced by an external system) and must never be deleted as a side effect of removing a workspace.
 
 ---
@@ -217,7 +218,9 @@ flowchart LR
     A[Delete workspace] --> B[Find workspace files]
     B --> C{File in other workspaces?}
     C -->|Yes| D[Keep file]
-    C -->|No| G{keep_files=true?}
+    C -->|No| H{Independently indexed?}
+    H -->|Yes| D
+    H -->|No| G{keep_files=true?}
     G -->|Yes| D
     G -->|No| E[Delete orphaned file from partition]
     D --> F[Done]

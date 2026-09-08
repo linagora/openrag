@@ -140,14 +140,13 @@ class TestExistingFileIds:
 
 
 class TestDeleteWorkspace:
-    async def test_returns_orphan_file_ids(self, postgres_store: PostgresStore):
+    async def test_independently_indexed_files_are_preserved(self, postgres_store: PostgresStore):
         await _seed_partition_and_files(postgres_store)
         repo = postgres_store.workspace_repo
         await repo.create_workspace(_workspace("ws1"))
         await repo.add_files_to_workspace("ws1", ["f1", "f2"])
         orphans = await repo.delete_workspace("ws1")
-        # Both files were only in ws1 — both come back as orphans.
-        assert set(orphans) == {"f1", "f2"}
+        assert orphans == []
         assert await repo.get_workspace("ws1") is None
 
     async def test_files_shared_with_other_workspaces_are_not_orphaned(
@@ -161,8 +160,7 @@ class TestDeleteWorkspace:
         await repo.add_files_to_workspace("ws1", ["f1", "f2"])
         await repo.add_files_to_workspace("ws2", ["f1"])  # f1 shared
         orphans = await repo.delete_workspace("ws1")
-        # f1 is still in ws2 so it's not orphaned. f2 only lived in ws1.
-        assert set(orphans) == {"f2"}
+        assert orphans == []
 
     async def test_remove_file_from_all_workspaces(
         self,

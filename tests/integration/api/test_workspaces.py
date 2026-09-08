@@ -148,8 +148,10 @@ class TestWorkspaceFiles:
         assert "shared-file" in files1
         assert "shared-file" in files2
 
-    def test_delete_workspace_default_purges_orphaned_files(self, api_client, workspace_partition, workspace_id):
-        """Unchanged default: an orphaned file is purged, kept_files is 0."""
+    def test_delete_workspace_preserves_independently_indexed_files(
+        self, api_client, workspace_partition, workspace_id
+    ):
+        """Attaching a partition file must not transfer ownership to the workspace."""
         file_id = f"file-{uuid.uuid4().hex[:8]}"
         self._upload_file(api_client, workspace_partition, file_id)
         api_client.post(
@@ -165,8 +167,15 @@ class TestWorkspaceFiles:
         assert response.status_code == 200
         body = response.json()
         assert body["status"] == "deleted"
-        assert body["orphaned_files_deleted"] == 1
+        assert body["orphaned_files_deleted"] == 0
         assert body["kept_files"] == 0
+
+        file_response = api_client.get(
+            f"/partition/{workspace_partition}/file/{file_id}",
+            params={"text": f"Test content for {file_id}", "similarity_threshold": 0},
+        )
+        assert file_response.status_code == 200
+        assert file_response.json()["documents"]
 
     def test_delete_workspace_keep_files(self, api_client, workspace_partition, workspace_id):
         """keep_files=true removes the workspace/membership but leaves the file indexed."""
@@ -190,7 +199,7 @@ class TestWorkspaceFiles:
         body = response.json()
         assert body["status"] == "deleted"
         assert body["orphaned_files_deleted"] == 0
-        assert body["kept_files"] == 1
+        assert body["kept_files"] == 0
 
         # The workspace is gone.
         ws_response = api_client.get(f"/partition/{workspace_partition}/workspaces/{workspace_id}")
