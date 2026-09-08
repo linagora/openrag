@@ -40,7 +40,19 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any
 
+from core.config.infrastructure import VectorDBConfig
+from core.models.chunk import Chunk
+from core.utils.exceptions import (
+    UnexpectedVDBError,
+    VDBConnectionError,
+    VDBCreateOrLoadCollectionError,
+    VDBDeleteError,
+    VDBInsertError,
+    VDBSchemaMigrationRequiredError,
+    VDBSearchError,
+)
 from core.utils.logging import get_logger
+from core.vector_stores import VectorStore
 from pymilvus import (
     AnnSearchRequest,
     AsyncMilvusClient,
@@ -51,19 +63,6 @@ from pymilvus import (
     MilvusException,
     RRFRanker,
 )
-
-from openrag.core.config.infrastructure import VectorDBConfig
-from openrag.core.models.chunk import Chunk
-from openrag.core.utils.exceptions import (
-    UnexpectedVDBError,
-    VDBConnectionError,
-    VDBCreateOrLoadCollectionError,
-    VDBDeleteError,
-    VDBInsertError,
-    VDBSchemaMigrationRequiredError,
-    VDBSearchError,
-)
-from openrag.core.vector_stores import VectorStore
 
 logger = get_logger()
 
@@ -283,10 +282,17 @@ class MilvusVectorStore(VectorStore):
                 operation="wait_for_indexes",
             )
 
-        description = self._client.describe_collection(
-            self._collection_name,
-            timeout=remaining,
-        )
+        try:
+            description = self._client.describe_collection(
+                self._collection_name,
+                timeout=remaining,
+            )
+        except MilvusException as e:
+            raise VDBCreateOrLoadCollectionError(
+                f"Failed to inspect collection `{self._collection_name}`: {e!s}",
+                collection_name=self._collection_name,
+                operation="describe_collection",
+            ) from e
         fields = {field.get("name") for field in description.get("fields", [])}
 
         if self._hybrid and "sparse" not in fields:
@@ -467,7 +473,14 @@ class MilvusVectorStore(VectorStore):
         ``timeout`` overrides the client default for callers that must not
         block, such as the construction-time probe.
         """
-        desc = self._client.describe_collection(self._collection_name, timeout=timeout)
+        try:
+            desc = self._client.describe_collection(self._collection_name, timeout=timeout)
+        except MilvusException as e:
+            raise VDBCreateOrLoadCollectionError(
+                f"Failed to inspect collection `{self._collection_name}`: {e!s}",
+                collection_name=self._collection_name,
+                operation="describe_collection",
+            ) from e
         raw = desc.get("properties", {}).get(SCHEMA_VERSION_PROPERTY_KEY)
         try:
             return int(raw) if raw is not None else 0

@@ -16,16 +16,14 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from api.error_handlers import register_error_handlers
+from core.config.infrastructure import VectorDBConfig
+from core.models.chunk import Chunk, ChunkType
+from core.utils.exceptions import VDBCreateOrLoadCollectionError, VDBSchemaMigrationRequiredError, VDBSearchError
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 from pymilvus import MilvusException
-
-from openrag.core.config.infrastructure import VectorDBConfig
-from openrag.core.models.chunk import Chunk, ChunkType
-from openrag.core.utils.exceptions import (
-    VDBCreateOrLoadCollectionError,
-    VDBSchemaMigrationRequiredError,
-    VDBSearchError,
-)
-from openrag.services.storage.milvus_store import (
+from services.storage.milvus_store import (
     SCHEMA_VERSION_PROPERTY_KEY,
     MilvusVectorStore,
     analyzer_params,
@@ -34,6 +32,25 @@ from openrag.services.storage.milvus_store import (
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
+
+def test_milvus_search_error_keeps_its_http_status_and_details(store: MilvusVectorStore) -> None:
+    """Mixed import roots must not turn a storage error into UNEXPECTED_ERROR (#885)."""
+    store._async_client.hybrid_search = AsyncMock(side_effect=MilvusException(1, "search unavailable"))
+    app = FastAPI()
+    register_error_handlers(app)
+
+    @app.get("/search")
+    async def search():
+        return await store.search([0.1, 0.2], query_text="test")
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.get("/search")
+
+    assert response.status_code == 422
+    assert response.json()["detail"].startswith("[VDB_SEARCH_ERROR]: Milvus hybrid search failed:")
+    assert "search unavailable" in response.json()["detail"]
+    assert response.json()["extra"] == {"collection_name": "test_collection"}
 
 
 @pytest.fixture
@@ -58,14 +75,9 @@ def store(vdb_config: VectorDBConfig, monkeypatch: pytest.MonkeyPatch) -> Milvus
     Use this for pure-logic tests. Methods that drive the client (``upsert``,
     ``search``, ...) will hit the mocks; assert on mock calls if you must.
 
-    We monkeypatch the symbols directly inside the loaded module rather than
-    using ``unittest.mock.patch`` because the project's pythonpath setup
-    (``pythonpath = ./openrag`` plus the ``openrag`` package itself on
-    sys.path) lets the same source file get registered under two different
-    module names depending on the import form, which makes string-based
-    patch paths fragile.
+    Patch the clients in the same module used by production callers.
     """
-    import openrag.services.storage.milvus_store as _store_mod
+    import services.storage.milvus_store as _store_mod
 
     monkeypatch.setattr(_store_mod, "MilvusClient", MagicMock())
     monkeypatch.setattr(_store_mod, "AsyncMilvusClient", MagicMock())
@@ -551,7 +563,7 @@ class TestHybridDispatch:
         the dense path — the collection has no ``sparse`` field, so the BM25
         leg must never be reached.
         """
-        import openrag.services.storage.milvus_store as _store_mod
+        import services.storage.milvus_store as _store_mod
 
         monkeypatch.setattr(_store_mod, "MilvusClient", MagicMock())
         monkeypatch.setattr(_store_mod, "AsyncMilvusClient", MagicMock())
@@ -580,7 +592,7 @@ class TestHybridDispatch:
         self, store: MilvusVectorStore, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         logger = MagicMock()
-        monkeypatch.setattr("openrag.services.storage.milvus_store.logger", logger)
+        monkeypatch.setattr("services.storage.milvus_store.logger", logger)
         store._async_client.hybrid_search = AsyncMock(  # type: ignore[attr-defined]
             side_effect=MilvusException(5, "service internal error: unsupported ID type")
         )
@@ -607,7 +619,7 @@ class TestHybridDispatch:
         self, store: MilvusVectorStore, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         logger = MagicMock()
-        monkeypatch.setattr("openrag.services.storage.milvus_store.logger", logger)
+        monkeypatch.setattr("services.storage.milvus_store.logger", logger)
         store._async_client.hybrid_search = AsyncMock(  # type: ignore[attr-defined]
             side_effect=MilvusException(100, "collection not found[database=default][collection=test_collection]")
         )
@@ -802,7 +814,7 @@ class _LogRecorder:
 
 @pytest.fixture
 def logs(monkeypatch: pytest.MonkeyPatch) -> _LogRecorder:
-    import openrag.services.storage.milvus_store as _store_mod
+    import services.storage.milvus_store as _store_mod
 
     recorder = _LogRecorder()
     monkeypatch.setattr(_store_mod, "logger", recorder)
@@ -854,7 +866,7 @@ class TestWarnIfMigrationPending:
     def test_the_probe_cannot_block_construction(self, store: MilvusVectorStore, logs: _LogRecorder) -> None:
         # A slow metadata RPC must not hold up building the store, so the probe
         # carries its own short timeout rather than the client's (120s default).
-        import openrag.services.storage.milvus_store as _store_mod
+        import services.storage.milvus_store as _store_mod
 
         _describes(store, "1")
 
@@ -881,6 +893,17 @@ class TestWarnIfMigrationPending:
 
 
 class TestCheckSchemaVersion:
+    def test_describe_failure_preserves_lifecycle_error(self, store: MilvusVectorStore) -> None:
+        inspection_error = MilvusException(message="schema inspection unavailable")
+        store._client.describe_collection.side_effect = inspection_error
+
+        with pytest.raises(VDBCreateOrLoadCollectionError, match="schema inspection unavailable") as error:
+            store._check_schema_version()
+
+        assert error.value.__cause__ is inspection_error
+        assert error.value.extra["operation"] == "describe_collection"
+        assert error.value.extra["collection_name"] == store._collection_name
+
     def test_logs_the_mismatch_before_raising(self, store: MilvusVectorStore, logs: _LogRecorder) -> None:
         # The exception reaches the API caller; the log line carries the fix.
         _describes(store, None)
@@ -899,6 +922,25 @@ class TestCheckSchemaVersion:
 
 
 class TestEnsureLoadedConcurrentCreation:
+    @pytest.mark.parametrize("collection_exists", [False, True])
+    def test_schema_inspection_failure_preserves_lifecycle_error(
+        self, store: MilvusVectorStore, collection_exists: bool
+    ) -> None:
+        store._embedding_dimension = 8
+        store._client.has_collection.return_value = collection_exists
+        inspection_error = MilvusException(message="schema inspection unavailable")
+        responses = [{"properties": {SCHEMA_VERSION_PROPERTY_KEY: "1"}}] if collection_exists else []
+        store._client.describe_collection.side_effect = [*responses, inspection_error]
+
+        with pytest.raises(VDBCreateOrLoadCollectionError, match="schema inspection unavailable") as error:
+            store._ensure_loaded()
+
+        assert error.value.__cause__ is inspection_error
+        assert error.value.extra["operation"] == "describe_collection"
+        assert error.value.extra["collection_name"] == store._collection_name
+        store._client.list_indexes.assert_not_called()
+        store._client.load_collection.assert_not_called()
+
     def test_hybrid_collection_without_sparse_field_fails_immediately(
         self,
         store: MilvusVectorStore,
@@ -929,7 +971,7 @@ class TestEnsureLoadedConcurrentCreation:
 
         monotonic_values = iter([0.0, 0.25, 0.5, 0.75])
         monkeypatch.setattr(
-            "openrag.services.storage.milvus_store.time.monotonic",
+            "services.storage.milvus_store.time.monotonic",
             lambda: next(monotonic_values),
         )
 
@@ -956,10 +998,10 @@ class TestEnsureLoadedConcurrentCreation:
 
         monotonic_values = iter([0.0, 0.1, 0.2, 0.3, 0.4, 0.5])
         monkeypatch.setattr(
-            "openrag.services.storage.milvus_store.time.monotonic",
+            "services.storage.milvus_store.time.monotonic",
             lambda: next(monotonic_values),
         )
-        monkeypatch.setattr("openrag.services.storage.milvus_store.time.sleep", lambda _: None)
+        monkeypatch.setattr("services.storage.milvus_store.time.sleep", lambda _: None)
 
         store._ensure_loaded()
 
@@ -987,7 +1029,7 @@ class TestEnsureLoadedConcurrentCreation:
         store._client.list_indexes.return_value = []
         monotonic_values = iter([0.0, store._timeout + 1.0])
         monkeypatch.setattr(
-            "openrag.services.storage.milvus_store.time.monotonic",
+            "services.storage.milvus_store.time.monotonic",
             lambda: next(monotonic_values),
         )
 
