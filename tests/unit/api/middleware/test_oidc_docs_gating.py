@@ -93,7 +93,7 @@ async def test_oidc_authenticated_session_reaches_docs() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("path", ["/health_check", "/version", "/auth/login"])
+@pytest.mark.parametrize("path", ["/health_check", "/ready", "/version", "/auth/login"])
 async def test_oidc_non_docs_bypass_paths_stay_public(path) -> None:
     """Only the docs are gated — health/version/auth callbacks still bypass."""
     mw = _middleware(_anon_service())

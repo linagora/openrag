@@ -73,6 +73,14 @@ one before upgrading:
 
 ## Notes
 
+Startup and readiness probes use `/ready`; liveness uses `/health_check`.
+Readiness returns 503 when startup is incomplete or PostgreSQL, Milvus, Ray,
+the default chat or embedding model, or the enabled default reranker is unavailable.
+Checks use short timeouts and results are cached for two seconds. Optional VLM/STT
+and partition-specific model endpoints do not gate the whole API. Model probes
+check availability without running inference; they do not guarantee every request
+will succeed. Use an application image that includes `/ready` with these probes.
+
 - If using a public IP instead of a hostname, you can leave `ingress.host` empty in your `values.yaml`.  
   The ingress will then match all hosts.
 

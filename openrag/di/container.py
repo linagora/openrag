@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Awaitable, Callable
+from functools import cached_property
 from typing import TYPE_CHECKING, Any
 
 from core.embeddings import embedder_registry
@@ -82,6 +83,12 @@ _NO_SETTINGS_MESSAGE = (
 
 class ServiceContainer:
     """Populates registries and provides typed factory access."""
+
+    @cached_property
+    def readiness_service(self):
+        from di.readiness import create_readiness_service
+
+        return create_readiness_service(self)
 
     def __init__(self, settings: Settings | None = None) -> None:
         register_embedders()

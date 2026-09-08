@@ -73,6 +73,15 @@ def store(vdb_config: VectorDBConfig, monkeypatch: pytest.MonkeyPatch) -> Milvus
 # ---------------------------------------------------------------------------
 
 
+async def test_health_accepts_a_fresh_collection_and_bounds_the_rpc(store):
+    store._client.has_collection.return_value = False
+    await store.check_health()
+    store._client.has_collection.assert_called_once_with("test_collection", timeout=2.0)
+    store._client.has_collection.side_effect = MilvusException(1, "unavailable")
+    with pytest.raises(MilvusException):
+        await store.check_health()
+
+
 class TestFormatValue:
     def test_int_renders_unquoted(self) -> None:
         assert MilvusVectorStore._format_value(42) == "42"
