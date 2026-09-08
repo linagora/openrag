@@ -1,3 +1,4 @@
+import asyncio
 from contextlib import asynccontextmanager
 
 import pytest
@@ -1084,3 +1085,94 @@ def test_overflow_warning_skips_chunks_far_below_the_limit():
         _logger.remove(sink_id)
     assert counted == [], "chunks far below the limit must not be re-tokenised"
     assert not messages
+
+
+class FailingVLM:
+    async def caption_image(self, image_bytes: bytes, prompt: str | None = None) -> str:
+        raise RuntimeError("vlm unreachable")
+
+
+class FailingContextualizer:
+    async def contextualize(self, chunks, *, filename="", lang="en", system_prompt=None):
+        raise RuntimeError("llm unreachable")
+
+
+class FailingTopicTagger:
+    async def tag(self, chunks, *, filename="", max_tags=7, lang="en", system_prompt=None):
+        raise RuntimeError("llm unreachable")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("stage", "components", "config"),
+    [
+        ("caption", {"vlm": FailingVLM()}, {"enable_image_captioning": True}),
+        (
+            "contextualize",
+            {"contextualizer": FailingContextualizer()},
+            {"enable_contextualization": True},
+        ),
+        ("topic_tag", {"topic_tagger": FailingTopicTagger()}, {"enable_topic_tagging": True}),
+    ],
+)
+async def test_enrichment_stage_failure_does_not_lose_the_file(stage, components, config):
+    # #702: an enrichment failure (VLM/LLM timeout, unreachable endpoint, bad
+    # response) must not abort parse->chunk->embed->store. The file is still
+    # indexed from its base content, minus that enrichment.
+    document = Document(filename="note.txt", text="hello", partition="tenant-a")
+    processed = ProcessedDocument(
+        document_id=document.id,
+        text_blocks=[TextBlock(text="hello")],
+        images=[ImageBlock(image_bytes=b"png")],
+    )
+    vector_store = FakeVectorStore()
+    pipeline = build_indexing_pipeline(
+        parser=FakeParser(processed),
+        chunker=FakeChunker([Chunk(id="c1", text="hello", partition="tenant-a")]),
+        embedder=FakeEmbedder([[1.0]]),
+        vector_store=vector_store,
+        **components,
+    )
+    row = {
+        "document": document,
+        "partition": "tenant-a",
+        "filename": "note.txt",
+        "indexation_config": config,
+    }
+
+    result = await pipeline.run(row)
+
+    assert result["stage"] == "stored"
+    assert result["stored_count"] == 1
+    assert vector_store.calls, "chunks were never stored"
+    assert stage in result["degraded_stages"]
+
+
+@pytest.mark.asyncio
+async def test_enrichment_cancellation_still_aborts_the_pipeline():
+    # Degrading on failure must not swallow cancellation: a cancelled task has
+    # to stop, not quietly index a half-enriched file.
+    class CancelledVLM:
+        async def caption_image(self, image_bytes: bytes, prompt: str | None = None) -> str:
+            raise asyncio.CancelledError
+
+    document = Document(filename="note.txt", text="hello", partition="tenant-a")
+    processed = ProcessedDocument(
+        document_id=document.id,
+        text_blocks=[TextBlock(text="hello")],
+        images=[ImageBlock(image_bytes=b"png")],
+    )
+    vector_store = FakeVectorStore()
+    pipeline = build_indexing_pipeline(
+        parser=FakeParser(processed),
+        chunker=FakeChunker([Chunk(id="c1", text="hello", partition="tenant-a")]),
+        embedder=FakeEmbedder([[1.0]]),
+        vector_store=vector_store,
+        vlm=CancelledVLM(),
+    )
+    row = {"document": document, "partition": "tenant-a", "filename": "note.txt"}
+
+    with pytest.raises(asyncio.CancelledError):
+        await pipeline.run(row)
+
+    assert vector_store.calls == []
