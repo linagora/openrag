@@ -33,7 +33,7 @@ services:
 
   milvus:
     container_name: bench-milvus
-    image: milvusdb/milvus:v3.0.0
+    image: milvusdb/milvus:v3.0.1
     command: ["milvus", "run", "standalone"]
     security_opt:
       - seccomp:unconfined
