@@ -6,7 +6,7 @@ Revises: b9c0d1e2f3a4
 
 import sqlalchemy as sa
 from alembic import op
-from schema_helpers import column_exists, table_exists
+from services.persistence.migrations.alembic.schema_helpers import column_exists, table_exists
 
 revision = "c0d1e2f3a4b5"
 down_revision = "b9c0d1e2f3a4"

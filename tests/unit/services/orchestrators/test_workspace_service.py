@@ -15,6 +15,8 @@ class FakeWorkspaceRepo:
         self.added: list[tuple[str, list[str]]] = []
         self.removed: list[tuple[str, str]] = []
         self.removed_from_all: list[tuple[str, str]] = []
+        self.finalized: list[tuple[str, str]] = []
+        self.released: list[tuple[str, str]] = []
         self.deleted: list[str] = []
 
     async def get_workspace_dict(self, workspace_id: str):
@@ -50,6 +52,13 @@ class FakeWorkspaceRepo:
     async def remove_file_from_all_workspaces(self, file_id: str, partition: str) -> None:
         self.removed_from_all.append((file_id, partition))
 
+    async def finalize_claimed_file_cleanup(self, file_id: str, partition: str) -> bool:
+        self.finalized.append((file_id, partition))
+        return True
+
+    async def release_claimed_file_cleanup(self, file_id: str, partition: str) -> None:
+        self.released.append((file_id, partition))
+
 
 class FakeDocumentRepo:
     def __init__(self, *, fail_on: set[str] | None = None):
@@ -64,14 +73,17 @@ class FakeDocumentRepo:
 
 
 class FakeVectorStore:
-    def __init__(self, ids_by_file=None):
+    def __init__(self, ids_by_file=None, *, fail_on: set[str] | None = None):
         self._ids_by_file = ids_by_file or {}
+        self._fail_on = fail_on or set()
         self.deleted: list[list[str]] = []
 
     async def query_ids_by_filter(self, collection, filters):
         return list(self._ids_by_file.get(filters.get("file_id"), []))
 
     async def delete(self, ids, collection="default") -> int:
+        if any(failed_file_id in chunk_id for failed_file_id in self._fail_on for chunk_id in ids):
+            raise RuntimeError("vector cleanup failed")
         self.deleted.append(list(ids))
         return len(ids)
 
@@ -139,20 +151,21 @@ async def test_delete_workspace_cleans_orphans_vectors_and_rows():
     assert out == {"orphaned_files_deleted": 2, "orphaned_files_failed": [], "kept_files": 0}
     # fA had chunks -> a delete call; fB had none -> no delete call.
     assert vstore.deleted == [["c1", "c2"]]
-    assert set(drepo.removed) == {("fA", "p"), ("fB", "p")}
-    assert set(wrepo.removed_from_all) == {("fA", "p"), ("fB", "p")}
+    assert drepo.removed == []
+    assert set(wrepo.finalized) == {("fA", "p"), ("fB", "p")}
 
 
 @pytest.mark.asyncio
 async def test_delete_workspace_collects_per_file_failures():
     wrepo = FakeWorkspaceRepo(orphaned=["good", "bad"])
-    drepo = FakeDocumentRepo(fail_on={"bad"})
-    vstore = FakeVectorStore(ids_by_file={"good": ["c1"], "bad": ["c2"]})
+    drepo = FakeDocumentRepo()
+    vstore = FakeVectorStore(ids_by_file={"good": ["good-c1"], "bad": ["bad-c2"]}, fail_on={"bad"})
     out = await _svc(wrepo=wrepo, drepo=drepo, vstore=vstore).delete_workspace("p", "w1")
 
     assert out["orphaned_files_deleted"] == 1
     assert out["orphaned_files_failed"] == ["bad"]
     assert out["kept_files"] == 0
+    assert wrepo.released == [("bad", "p")]
 
 
 # --------------------------------------------------------------------------- #

@@ -182,17 +182,22 @@ class WorkspaceService:
         """Port of the legacy ``vectordb.delete_file``.
 
         Drops the file's chunks from the vector store (via the clean
-        port: query ids by filter + delete), then detaches it from every
-        workspace and removes the relational file row.
+        port: query ids by filter + delete), then finalizes its catalog
+        deletion. The catalog row was claimed before vector cleanup started,
+        so a concurrent workspace attachment cannot be lost.
         """
-        ids = await self._vector_store.query_ids_by_filter(
-            self._collection,
-            {"partition": partition, "file_id": file_id},
-        )
-        if ids:
-            await self._vector_store.delete(ids, self._collection)
-        await self._workspace_repo.remove_file_from_all_workspaces(file_id, partition)
-        await self._document_repo.remove_file_from_partition(file_id=file_id, partition=partition)
+        try:
+            ids = await self._vector_store.query_ids_by_filter(
+                self._collection,
+                {"partition": partition, "file_id": file_id},
+            )
+            if ids:
+                await self._vector_store.delete(ids, self._collection)
+            if not await self._workspace_repo.finalize_claimed_file_cleanup(file_id, partition):
+                raise RuntimeError(f"Workspace cleanup claim disappeared for {file_id}")
+        except Exception:
+            await self._workspace_repo.release_claimed_file_cleanup(file_id, partition)
+            raise
         logger.info("Deleted orphaned file", file_id=file_id, partition=partition)
 
 
