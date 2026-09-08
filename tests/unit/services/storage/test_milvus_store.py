@@ -1013,18 +1013,17 @@ class TestEnsureLoadedConcurrentCreation:
         assert properties == {SCHEMA_VERSION_PROPERTY_KEY: "1"}
         store._client.alter_collection_properties.assert_not_called()  # type: ignore[attr-defined]
 
-    def test_losing_creation_race_uses_winner_collection(self, store: MilvusVectorStore) -> None:
+    def test_duplicate_collection_with_different_parameters_preserves_error(self, store: MilvusVectorStore) -> None:
         store._embedding_dimension = 8
-        store._client.has_collection.side_effect = [False, True]  # first call says "no", second call says "yes"
-        store._client.create_collection.side_effect = MilvusException(message="collection already exists")
-        store._client.describe_collection.return_value = {
-            "properties": {SCHEMA_VERSION_PROPERTY_KEY: "1"},
-            "fields": [{"name": "vector"}, {"name": "sparse"}],
-        }
+        store._client.has_collection.return_value = False
+        creation_error = MilvusException(message="create duplicate collection with different parameters")
+        store._client.create_collection.side_effect = creation_error
 
-        store._ensure_loaded()
+        with pytest.raises(VDBCreateOrLoadCollectionError, match="different parameters") as error:
+            store._ensure_loaded()
 
-        store._client.load_collection.assert_called_once_with(store._collection_name)
+        assert error.value.__cause__ is creation_error
+        store._client.load_collection.assert_not_called()
 
     def test_real_creation_failure_still_raises(self, store: MilvusVectorStore) -> None:
         store._embedding_dimension = 8

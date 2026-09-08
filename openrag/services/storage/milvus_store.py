@@ -245,23 +245,11 @@ class MilvusVectorStore(VectorStore):
                         properties={SCHEMA_VERSION_PROPERTY_KEY: str(self._config.schema_version)},
                     )
                 except MilvusException as e:
-                    error_message = e.message.lower()
-
-                    if "already exist" not in error_message:
-                        raise VDBCreateOrLoadCollectionError(
-                            f"Failed to create collection `{self._collection_name}`: {e!s}",
-                            collection_name=self._collection_name,
-                            operation="create_collection",
-                        ) from e
-
-                    if not self._client.has_collection(self._collection_name):
-                        raise VDBCreateOrLoadCollectionError(
-                            f"Failed to create collection `{self._collection_name}`: {e!s}",
-                            collection_name=self._collection_name,
-                            operation="create_collection",
-                        ) from e
-
-                    self._check_schema_version()
+                    raise VDBCreateOrLoadCollectionError(
+                        f"Failed to create collection `{self._collection_name}`: {e!s}",
+                        collection_name=self._collection_name,
+                        operation="create_collection",
+                    ) from e
 
             self._wait_for_vector_indexes()
             try:
