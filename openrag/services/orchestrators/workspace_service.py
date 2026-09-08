@@ -136,7 +136,8 @@ class WorkspaceService:
 
         ``workspace_repo.delete_workspace`` removes the workspace and its
         associations and returns the file_ids that are no longer
-        referenced by *any* workspace. Each of those is deleted from the
+        referenced by *any* workspace and were not independently indexed.
+        Each of those is deleted from the
         vector store and the relational catalog — concurrently, with
         per-file failures collected rather than raised, matching the
         legacy router's ``asyncio.gather(..., return_exceptions=True)``.
@@ -146,7 +147,7 @@ class WorkspaceService:
         files stay indexed in the partition and are reported under
         ``kept_files``.
         """
-        orphaned = await self._workspace_repo.delete_workspace(workspace_id)
+        orphaned = await self._workspace_repo.delete_workspace(workspace_id, keep_files=keep_files)
 
         deleted_count = 0
         failed_file_ids: list[str] = []

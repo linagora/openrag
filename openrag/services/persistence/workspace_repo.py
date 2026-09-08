@@ -76,14 +76,12 @@ class PgWorkspaceRepository(WorkspaceRepository):
         )
         return [self._row_to_workspace(r) for r in rows]
 
-    async def delete_workspace(self, workspace_id: str) -> list[str]:
+    async def delete_workspace(self, workspace_id: str, *, keep_files: bool = False) -> list[str]:
         """Delete the workspace and return the orphaned ``file_id`` list.
 
-        An orphan = a file currently in this workspace and in no other.
-        Because ``workspace_files.file_id`` is an integer FK to
-        ``files.id``, every workspace_files row already has a backing
-        files row; the orphan check therefore reduces to
-        "file_id NOT IN (other workspaces' file_ids)".
+        Only files uploaded for workspaces, with no independent ownership
+        and no remaining workspace reference, are eligible for cleanup.
+        Existing files with unknown origin are preserved by default.
 
         Returning the orphans (rather than auto-deleting them) keeps the
         deletion of the underlying file optional — the legacy router
@@ -98,6 +96,7 @@ class PgWorkspaceRepository(WorkspaceRepository):
                     FROM workspace_files wf
                     JOIN files f ON f.id = wf.file_id
                     WHERE wf.workspace_id = $1
+                      AND NOT f.independently_indexed
                       AND wf.file_id NOT IN (
                           SELECT file_id FROM workspace_files
                           WHERE workspace_id <> $1
@@ -105,6 +104,16 @@ class PgWorkspaceRepository(WorkspaceRepository):
                     """,
                     workspace_id,
                 )
+                if keep_files:
+                    await conn.execute(
+                        """
+                        UPDATE files SET independently_indexed = TRUE
+                        WHERE id IN (
+                            SELECT file_id FROM workspace_files WHERE workspace_id = $1
+                        )
+                        """,
+                        workspace_id,
+                    )
                 await conn.execute(
                     "DELETE FROM workspaces WHERE workspace_id = $1",
                     workspace_id,

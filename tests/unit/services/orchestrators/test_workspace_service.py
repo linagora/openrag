@@ -43,7 +43,7 @@ class FakeWorkspaceRepo:
     async def get_file_workspaces(self, file_id: str, partition: str) -> list[str]:
         return ["w1", "w2"]
 
-    async def delete_workspace(self, workspace_id: str) -> list[str]:
+    async def delete_workspace(self, workspace_id: str, *, keep_files: bool = False) -> list[str]:
         self.deleted.append(workspace_id)
         return list(self._orphaned)
 

@@ -381,7 +381,10 @@ async def test_process_file_passes_partition_and_filename_to_row(tmp_path: Path)
 
 
 @pytest.mark.asyncio
-async def test_process_file_creates_catalog_record_after_successful_pipeline(tmp_path: Path) -> None:
+@pytest.mark.parametrize("workspace_ids, independently_indexed", [(None, True), ([], True), (["ws1"], False)])
+async def test_process_file_creates_catalog_record_after_successful_pipeline(
+    tmp_path: Path, workspace_ids, independently_indexed
+) -> None:
     path = tmp_path / "doc.txt"
     path.write_bytes(b"content")
     processed = ProcessedDocument(document_id="d1", text_blocks=[TextBlock(text="content")])
@@ -395,6 +398,7 @@ async def test_process_file_creates_catalog_record_after_successful_pipeline(tmp
 
     await worker.process_file(
         task_id="t-new",
+        workspace_ids=workspace_ids,
         path=str(path),
         metadata={"file_id": "f1", "relationship_id": "rel", "parent_id": "parent"},
         partition="p",
@@ -412,6 +416,7 @@ async def test_process_file_creates_catalog_record_after_successful_pipeline(tmp
         "relationship_id": "rel",
         "parent_id": "parent",
         "require_existing_partition": False,
+        "independently_indexed": independently_indexed,
         "content_sha256": None,
     }
     assert repo.update_calls == []

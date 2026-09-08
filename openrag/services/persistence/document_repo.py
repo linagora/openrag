@@ -450,6 +450,7 @@ class PgDocumentRepository(DocumentRepository):
         indexed_at: datetime | None = None,
         require_existing_partition: bool = False,
         content_sha256: str | None = None,
+        independently_indexed: bool = True,
     ) -> bool:
         """TODO(phase-9): remove. Mirror of legacy ``add_file_to_partition``.
 
@@ -511,6 +512,7 @@ class PgDocumentRepository(DocumentRepository):
                     "relationship_id",
                     "parent_id",
                     "content_sha256",
+                    "independently_indexed",
                 ]
                 values: list[Any] = [
                     file_id,
@@ -521,6 +523,7 @@ class PgDocumentRepository(DocumentRepository):
                     relationship_id,
                     parent_id,
                     content_sha256,
+                    independently_indexed,
                 ]
                 # Omit indexed_at to let the server default fire (legacy path).
                 if indexed_at is not None:
