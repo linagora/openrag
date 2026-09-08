@@ -282,10 +282,17 @@ class MilvusVectorStore(VectorStore):
                 operation="wait_for_indexes",
             )
 
-        description = self._client.describe_collection(
-            self._collection_name,
-            timeout=remaining,
-        )
+        try:
+            description = self._client.describe_collection(
+                self._collection_name,
+                timeout=remaining,
+            )
+        except MilvusException as e:
+            raise VDBCreateOrLoadCollectionError(
+                f"Failed to inspect collection `{self._collection_name}`: {e!s}",
+                collection_name=self._collection_name,
+                operation="describe_collection",
+            ) from e
         fields = {field.get("name") for field in description.get("fields", [])}
 
         if self._hybrid and "sparse" not in fields:

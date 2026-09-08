@@ -911,6 +911,25 @@ class TestCheckSchemaVersion:
 
 
 class TestEnsureLoadedConcurrentCreation:
+    @pytest.mark.parametrize("collection_exists", [False, True])
+    def test_schema_inspection_failure_preserves_lifecycle_error(
+        self, store: MilvusVectorStore, collection_exists: bool
+    ) -> None:
+        store._embedding_dimension = 8
+        store._client.has_collection.return_value = collection_exists
+        inspection_error = MilvusException(message="schema inspection unavailable")
+        responses = [{"properties": {SCHEMA_VERSION_PROPERTY_KEY: "1"}}] if collection_exists else []
+        store._client.describe_collection.side_effect = [*responses, inspection_error]
+
+        with pytest.raises(VDBCreateOrLoadCollectionError, match="schema inspection unavailable") as error:
+            store._ensure_loaded()
+
+        assert error.value.__cause__ is inspection_error
+        assert error.value.extra["operation"] == "describe_collection"
+        assert error.value.extra["collection_name"] == store._collection_name
+        store._client.list_indexes.assert_not_called()
+        store._client.load_collection.assert_not_called()
+
     def test_hybrid_collection_without_sparse_field_fails_immediately(
         self,
         store: MilvusVectorStore,
