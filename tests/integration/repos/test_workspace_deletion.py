@@ -115,6 +115,40 @@ async def test_empty_and_missing_workspaces_return_no_candidates(postgres_store)
     assert await postgres_store.workspace_repo.delete_workspace("ws1") == []
 
 
+async def test_workspace_attachment_cannot_race_orphan_cleanup(postgres_store):
+    import asyncio
+
+    store = postgres_store
+    await setup_workspace(store)
+    await store.workspace_repo.create_workspace(Workspace(workspace_id="ws2", partition="p"))
+    await upload(store, "exclusive", workspace_ids=["ws1"])
+    cleanup_started = asyncio.Event()
+    allow_cleanup = asyncio.Event()
+    vectors = AsyncMock()
+
+    async def query_ids(collection, filters):
+        cleanup_started.set()
+        await allow_cleanup.wait()
+        return ["exclusive-chunk"]
+
+    vectors.query_ids_by_filter.side_effect = query_ids
+    svc = WorkspaceService(
+        workspace_repo=store.workspace_repo,
+        document_repo=store.document_repo,
+        vector_store=vectors,
+        collection="test",
+    )
+
+    deletion = asyncio.create_task(svc.delete_workspace("p", "ws1"))
+    await cleanup_started.wait()
+
+    assert await store.workspace_repo.add_files_to_workspace("ws2", ["exclusive"]) == ["exclusive"]
+
+    allow_cleanup.set()
+    assert (await deletion)["orphaned_files_deleted"] == 1
+    assert not await store.document_repo.file_exists_in_partition("exclusive", "p")
+
+
 async def test_migration_preserves_preexisting_workspace_files(postgres_store, test_rdb_config):
     import asyncio
     import importlib

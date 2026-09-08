@@ -7,6 +7,9 @@ on:
       - develop
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   workspace-integration:
     runs-on: ubuntu-latest
@@ -26,6 +29,8 @@ jobs:
           --health-retries 10
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -49,6 +54,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Set up Docker Compose
         uses: docker/setup-compose-action@v1

@@ -200,6 +200,7 @@ files = Table(
     Column("id", Integer, primary_key=True),
     Column("file_id", String, nullable=False, index=True),
     Column("independently_indexed", Boolean, server_default="true", nullable=False),
+    Column("workspace_cleanup_claimed", Boolean, server_default="false", nullable=False),
     Column(
         "partition_name",
         String,

@@ -29,11 +29,21 @@ class WorkspaceRepository(ABC):
 
     @abstractmethod
     async def delete_workspace(self, workspace_id: str, *, keep_files: bool = False) -> list[str]:
-        """Delete a workspace and return exclusively workspace-owned orphan IDs.
+        """Delete a workspace and return claimed workspace-owned orphan IDs.
 
         With keep_files, retain its files as independently indexed instead.
         The returned candidates still describe what would have been deleted.
         """
+        ...
+
+    @abstractmethod
+    async def finalize_claimed_file_cleanup(self, file_id: str, partition: str) -> bool:
+        """Delete a file that was claimed during workspace cleanup."""
+        ...
+
+    @abstractmethod
+    async def release_claimed_file_cleanup(self, file_id: str, partition: str) -> None:
+        """Make a claimed file attachable after cleanup fails."""
         ...
 
     # ── Workspace ↔ file membership ───────────────────────────────────

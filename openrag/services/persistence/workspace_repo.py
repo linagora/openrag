@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING
 
 from core.models.workspace import Workspace
 from core.ports.workspace_repo import WorkspaceRepository
+from services.persistence.file_count import decrement_file_counts
 
 if TYPE_CHECKING:
     import asyncpg
@@ -80,8 +81,9 @@ class PgWorkspaceRepository(WorkspaceRepository):
         """Delete the workspace and return the orphaned ``file_id`` list.
 
         Only files uploaded for workspaces, with no independent ownership
-        and no remaining workspace reference, are eligible for cleanup.
-        Existing files with unknown origin are preserved by default.
+        and no remaining workspace reference, are eligible for cleanup. The
+        transaction claims every eligible file before removing the workspace;
+        attachment refuses claimed files until cleanup succeeds or fails.
 
         Returning the orphans (rather than auto-deleting them) keeps the
         deletion of the underlying file optional — the legacy router
@@ -90,27 +92,51 @@ class PgWorkspaceRepository(WorkspaceRepository):
         """
         async with self.pool.acquire() as conn:
             async with conn.transaction():
-                orphan_rows = await conn.fetch(
-                    """
-                    SELECT f.file_id
-                    FROM workspace_files wf
-                    JOIN files f ON f.id = wf.file_id
-                    WHERE wf.workspace_id = $1
-                      AND NOT f.independently_indexed
-                      AND wf.file_id NOT IN (
-                          SELECT file_id FROM workspace_files
-                          WHERE workspace_id <> $1
-                      )
-                    """,
-                    workspace_id,
-                )
                 if keep_files:
+                    orphan_rows = await conn.fetch(
+                        """
+                        SELECT f.file_id
+                        FROM workspace_files wf
+                        JOIN files f ON f.id = wf.file_id
+                        WHERE wf.workspace_id = $1
+                          AND NOT f.independently_indexed
+                          AND wf.file_id NOT IN (
+                              SELECT file_id FROM workspace_files
+                              WHERE workspace_id <> $1
+                          )
+                        """,
+                        workspace_id,
+                    )
                     await conn.execute(
                         """
                         UPDATE files SET independently_indexed = TRUE
                         WHERE id IN (
                             SELECT file_id FROM workspace_files WHERE workspace_id = $1
                         )
+                        """,
+                        workspace_id,
+                    )
+                else:
+                    orphan_rows = await conn.fetch(
+                        """
+                        WITH candidates AS (
+                            SELECT f.id, f.file_id
+                            FROM workspace_files wf
+                            JOIN files f ON f.id = wf.file_id
+                            WHERE wf.workspace_id = $1
+                              AND NOT f.independently_indexed
+                              AND NOT f.workspace_cleanup_claimed
+                              AND wf.file_id NOT IN (
+                                  SELECT file_id FROM workspace_files
+                                  WHERE workspace_id <> $1
+                              )
+                            FOR UPDATE OF f
+                        )
+                        UPDATE files f
+                        SET workspace_cleanup_claimed = TRUE
+                        FROM candidates
+                        WHERE f.id = candidates.id
+                        RETURNING candidates.file_id
                         """,
                         workspace_id,
                     )
@@ -145,7 +171,9 @@ class PgWorkspaceRepository(WorkspaceRepository):
                 resolved = await conn.fetch(
                     """
                     SELECT file_id, id FROM files
-                    WHERE file_id = ANY($1::text[]) AND partition_name = $2
+                    WHERE file_id = ANY($1::text[])
+                      AND partition_name = $2
+                      AND NOT workspace_cleanup_claimed
                     """,
                     file_ids,
                     partition,
@@ -167,6 +195,38 @@ class PgWorkspaceRepository(WorkspaceRepository):
                             file_pk,
                         )
         return missing
+
+    async def finalize_claimed_file_cleanup(self, file_id: str, partition: str) -> bool:
+        """Delete one claimed orphan and account for its uploader quota."""
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                row = await conn.fetchrow(
+                    """
+                    DELETE FROM files
+                    WHERE file_id = $1
+                      AND partition_name = $2
+                      AND workspace_cleanup_claimed
+                    RETURNING created_by
+                    """,
+                    file_id,
+                    partition,
+                )
+                await decrement_file_counts(conn, [row] if row is not None else [])
+                return row is not None
+
+    async def release_claimed_file_cleanup(self, file_id: str, partition: str) -> None:
+        """Release a failed cleanup claim so the file can be attached again."""
+        await self.pool.execute(
+            """
+            UPDATE files
+            SET workspace_cleanup_claimed = FALSE
+            WHERE file_id = $1
+              AND partition_name = $2
+              AND workspace_cleanup_claimed
+            """,
+            file_id,
+            partition,
+        )
 
     async def remove_file_from_workspace(
         self,
