@@ -30,7 +30,7 @@ services:
       retries: 3
 
   milvus-init:
-    image: milvusdb/milvus:v3.0.0
+    image: milvusdb/milvus:v3.0.1
     user: "0:0"
     environment:
       LD_PRELOAD: ""
@@ -56,7 +56,7 @@ services:
     restart: "no"
 
   milvus:
-    image: milvusdb/milvus:v3.0.0
+    image: milvusdb/milvus:v3.0.1
     command: ["milvus", "run", "standalone"]
     # Run under Docker's default seccomp profile (do not disable syscall
     # filtering). If a specific kernel needs a wider profile, supply a vetted
