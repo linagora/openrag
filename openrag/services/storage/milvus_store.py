@@ -473,7 +473,14 @@ class MilvusVectorStore(VectorStore):
         ``timeout`` overrides the client default for callers that must not
         block, such as the construction-time probe.
         """
-        desc = self._client.describe_collection(self._collection_name, timeout=timeout)
+        try:
+            desc = self._client.describe_collection(self._collection_name, timeout=timeout)
+        except MilvusException as e:
+            raise VDBCreateOrLoadCollectionError(
+                f"Failed to inspect collection `{self._collection_name}`: {e!s}",
+                collection_name=self._collection_name,
+                operation="describe_collection",
+            ) from e
         raw = desc.get("properties", {}).get(SCHEMA_VERSION_PROPERTY_KEY)
         try:
             return int(raw) if raw is not None else 0

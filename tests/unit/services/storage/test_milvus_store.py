@@ -893,6 +893,17 @@ class TestWarnIfMigrationPending:
 
 
 class TestCheckSchemaVersion:
+    def test_describe_failure_preserves_lifecycle_error(self, store: MilvusVectorStore) -> None:
+        inspection_error = MilvusException(message="schema inspection unavailable")
+        store._client.describe_collection.side_effect = inspection_error
+
+        with pytest.raises(VDBCreateOrLoadCollectionError, match="schema inspection unavailable") as error:
+            store._check_schema_version()
+
+        assert error.value.__cause__ is inspection_error
+        assert error.value.extra["operation"] == "describe_collection"
+        assert error.value.extra["collection_name"] == store._collection_name
+
     def test_logs_the_mismatch_before_raising(self, store: MilvusVectorStore, logs: _LogRecorder) -> None:
         # The exception reaches the API caller; the log line carries the fix.
         _describes(store, None)
