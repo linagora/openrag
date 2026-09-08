@@ -29,7 +29,7 @@ def _assert_milvus_initializer(services: dict) -> None:
     initializer = services["milvus-init"]
     milvus = services["milvus"]
 
-    assert initializer["image"] == milvus["image"] == "milvusdb/milvus:v3.0.0"
+    assert initializer["image"] == milvus["image"] == "milvusdb/milvus:v3.0.1"
     assert initializer["user"] == "0:0"
     assert initializer["environment"]["LD_PRELOAD"] == ""
     assert initializer["entrypoint"] == ["/bin/sh", "-ec"]
@@ -100,7 +100,7 @@ def test_named_volume_profile_is_opt_in() -> None:
     assert named_milvus["services"]["etcd"]["volumes"] == ["${ETCD_VOLUME:-etcd}:/etcd"]
     assert named_milvus["services"]["minio"]["volumes"] == ["${MINIO_VOLUME:-minio}:/minio_data"]
     assert named_milvus["services"]["milvus"]["volumes"] == ["${MILVUS_VOLUME:-milvus}:/var/lib/milvus"]
-    assert named_milvus["services"]["milvus"]["image"] == "milvusdb/milvus:v3.0.0"
+    assert named_milvus["services"]["milvus"]["image"] == "milvusdb/milvus:v3.0.1"
     assert named_milvus["services"]["milvus"]["environment"]["ETCD_AUTH_ENABLED"] == "false"
     assert named_milvus["services"]["milvus"]["environment"]["MQ_TYPE"] == "${MILVUS_MQ_TYPE:-default}"
     assert {"etcd", "minio", "milvus"} <= set(named_milvus["volumes"])
