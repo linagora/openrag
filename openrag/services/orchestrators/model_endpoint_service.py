@@ -721,6 +721,46 @@ class ModelEndpointService:
         if parsed.username or parsed.password:
             result["detail"] = "Endpoint URL must not include credentials."
             return result
+        if model_type != "stt":
+            from services.orchestrators.readiness_service import (
+                ModelEndpointProbeError,
+                ModelNotFoundError,
+                check_model_endpoint,
+            )
+
+            config = ModelEndpointConfig(
+                endpoint=url,
+                model_name=normalized_model_name,
+                timeout=timeout or 5.0,
+                extra={
+                    **(extra or {}),
+                    **({"api_key": api_key} if api_key else {}),
+                },
+            )
+            try:
+                model_ids = await check_model_endpoint(config, model_type=model_type, timeout=timeout or 5.0)
+            except httpx.TimeoutException:
+                result["detail"] = "Model list request timed out."
+            except ModelEndpointProbeError as exc:
+                result["reachable"] = True
+                result["detail"] = f"Model list returned HTTP {exc.status_code}."
+            except ModelNotFoundError as exc:
+                result["reachable"] = True
+                result["models_served"] = exc.model_ids
+                result["model_found"] = False
+            except Exception as exc:
+                result["detail"] = str(exc)
+            else:
+                result["reachable"] = True
+                result["models_served"] = model_ids
+                result["model_found"] = (
+                    None
+                    if model_ids is None
+                    else True
+                    if normalized_model_name is None
+                    else normalized_model_name in model_ids
+                )
+            return result
         base_url = url.rstrip("/")
         models_url = base_url + "/models"
         headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}

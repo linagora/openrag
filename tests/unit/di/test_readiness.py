@@ -40,6 +40,7 @@ async def test_wiring_checks_core_dependencies_and_current_default_models(monkey
 
 
 async def test_ray_probe_requires_a_successful_actor_call(monkeypatch):
+    monkeypatch.setattr("di.readiness._ray_actor", None)
     monkeypatch.setattr("di.readiness.ray.is_initialized", lambda: True)
     method = AsyncMock(return_value={"pool_size": 1})
     actor = SimpleNamespace(get_pool_info=SimpleNamespace(remote=method))
@@ -51,6 +52,20 @@ async def test_ray_probe_requires_a_successful_actor_call(monkeypatch):
 
 
 async def test_ray_probe_rejects_uninitialized_ray(monkeypatch):
+    monkeypatch.setattr("di.readiness._ray_actor", None)
     monkeypatch.setattr("di.readiness.ray.is_initialized", lambda: False)
     with pytest.raises(RuntimeError, match="not initialized"):
         await _check_ray()
+
+
+async def test_ray_probe_reuses_actor_handle_until_it_fails(monkeypatch):
+    monkeypatch.setattr("di.readiness._ray_actor", None)
+    monkeypatch.setattr("di.readiness.ray.is_initialized", lambda: True)
+    method = AsyncMock(return_value={"pool_size": 1})
+    actor = SimpleNamespace(get_pool_info=SimpleNamespace(remote=method))
+    lookup = MagicMock(return_value=actor)
+    monkeypatch.setattr("di.readiness.ray.get_actor", lookup)
+    await _check_ray()
+    await _check_ray()
+    lookup.assert_called_once_with("TaskStateManager", namespace="openrag")
+    assert method.await_count == 2

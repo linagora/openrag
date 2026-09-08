@@ -529,7 +529,7 @@ openrag:
   probes:
     startup:
       httpGet:
-        path: /ready
+        path: /health_check
         port: openrag
       timeoutSeconds: 5
       failureThreshold: 30

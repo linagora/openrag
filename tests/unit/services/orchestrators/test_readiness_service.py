@@ -1,6 +1,7 @@
 import asyncio
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 from core.config.model_endpoints import ModelEndpointConfig
 from services.orchestrators.readiness_service import ReadinessService, check_model_endpoint
@@ -65,9 +66,24 @@ async def test_model_probe_uses_provider_path_and_credentials(respx_mock, implem
     assert probe.calls[0].request.headers["Authorization"] == "Bearer test-key"
 
 
+async def test_reranker_defaults_to_infinity_health_probe(respx_mock):
+    probe = respx_mock.get("https://model.test/health").respond(200)
+    config = ModelEndpointConfig(endpoint="https://model.test", model_name="reranker")
+    await check_model_endpoint(config, model_type="reranker")
+    assert probe.called
+
+
 @pytest.mark.parametrize("status,payload", [(401, {}), (503, {}), (200, {"data": []}), (200, {})])
 async def test_model_probe_rejects_unavailable_or_missing_model(respx_mock, status, payload):
     respx_mock.get("https://model.test/v1/models").respond(status, json=payload)
     config = ModelEndpointConfig(endpoint="https://model.test/v1", model_name="model")
     service = ReadinessService({"llm": lambda: check_model_endpoint(config)})
     assert await service.check() == {"llm": "unavailable"}
+
+
+async def test_httpx_timeout_is_reported_as_timeout(monkeypatch):
+    async def timed_out():
+        raise httpx.ReadTimeout("model timed out")
+
+    service = ReadinessService({"llm": timed_out})
+    assert await service.check() == {"llm": "timeout"}

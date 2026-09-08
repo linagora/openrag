@@ -39,3 +39,16 @@ async def test_readiness_reports_dependency_status(async_client_factory, depende
         response = await client.get("/ready")
     assert response.status_code == expected_status
     assert response.json() == {"status": "ready" if expected_status == 200 else "not_ready", "checks": checks}
+
+
+async def test_model_failure_is_reported_without_gating_core_readiness(async_client_factory):
+    checks = {"postgres": "ok", "milvus": "ok", "ray": "ok", "llm": "unavailable"}
+    app = FastAPI()
+    app.include_router(router)
+    app.state.container = SimpleNamespace(
+        is_initialized=True, readiness_service=SimpleNamespace(check=AsyncMock(return_value=checks))
+    )
+    async with async_client_factory(app) as client:
+        response = await client.get("/ready")
+    assert response.status_code == 200
+    assert response.json() == {"status": "ready", "checks": checks}

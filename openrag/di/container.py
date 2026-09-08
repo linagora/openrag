@@ -25,6 +25,7 @@ from collections.abc import Awaitable, Callable
 from functools import cached_property
 from typing import TYPE_CHECKING, Any
 
+from core.config.model_endpoints import DEFAULT_MODEL_IMPLEMENTATIONS
 from core.embeddings import embedder_registry
 from core.llm import llm_registry
 from core.rerankers import reranker_registry
@@ -180,26 +181,26 @@ class ServiceContainer:
         self.embedder_factory, self._embedder_cache = make_component_factory(
             registry=embedder_registry,
             config_section=models.embedder,
-            default_impl="vllm",
+            default_impl=DEFAULT_MODEL_IMPLEMENTATIONS["embedder"],
             client_caches=self._client_caches,
             extra_kwargs_fn=_embedder_extra_kwargs,
         )
         self.reranker_factory, self._reranker_cache = make_component_factory(
             registry=reranker_registry,
             config_section=models.reranker,
-            default_impl="infinity",
+            default_impl=DEFAULT_MODEL_IMPLEMENTATIONS["reranker"],
             client_caches=self._client_caches,
         )
         self.llm_factory, self._llm_cache = make_component_factory(
             registry=llm_registry,
             config_section=models.llm,
-            default_impl="vllm",
+            default_impl=DEFAULT_MODEL_IMPLEMENTATIONS["llm"],
             client_caches=self._client_caches,
         )
         self.vlm_factory, self._vlm_cache = make_component_factory(
             registry=vlm_registry,
             config_section=models.vlm,
-            default_impl="vllm",
+            default_impl=DEFAULT_MODEL_IMPLEMENTATIONS["vlm"],
             client_caches=self._client_caches,
         )
 

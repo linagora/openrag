@@ -73,16 +73,18 @@ one before upgrading:
 
 ## Notes
 
-For the default direct-API deployment, startup and readiness probes use `/ready`;
-liveness uses `/health_check`. When `ENABLE_RAY_SERVE=true`, override the HTTP
+For the default direct-API deployment, startup and liveness probes use
+`/health_check`, while the readiness probe uses `/ready`. When
+`ENABLE_RAY_SERVE=true`, override the HTTP
 probes with exec probes as noted in the chart values: the Ray Serve HTTP proxy
 runs on the Ray head, not on the API pod.
-Readiness returns 503 when startup is incomplete or PostgreSQL, Milvus, Ray,
-the default chat or embedding model, or the enabled default reranker is unavailable.
-Checks use short timeouts and results are cached for two seconds. Optional VLM/STT
-and partition-specific model endpoints do not gate the whole API. Model probes
-check availability without running inference; they do not guarantee every request
-will succeed. Use an application image that includes `/ready` with these probes.
+Readiness returns 503 when startup is incomplete or PostgreSQL, Milvus, or Ray is
+unavailable. Model checks are reported in the response but do not gate the whole
+API, so optional VLM/STT and partition-specific model endpoints do not remove
+healthy replicas from service. Checks use short timeouts and results are cached
+for two seconds. Model probes check availability without running inference; they
+do not guarantee every request will succeed. Use an application image that
+includes `/ready` with these probes.
 
 Readiness uses the configured model endpoints and API keys, just like inference.
 HTTP endpoints do not encrypt those credentials; configure HTTPS when transport

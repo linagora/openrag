@@ -12,15 +12,26 @@ from services.storage.milvus_store import MilvusVectorStore
 from services.storage.postgres_store import PostgresStore
 from services.workers.ray_utils import call_ray_actor_method_with_timeout
 
+_ray_actor = None
+
 if TYPE_CHECKING:
     from di.container import ServiceContainer
 
 
 async def _check_ray() -> None:
+    global _ray_actor
     if not ray.is_initialized():
+        _ray_actor = None
         raise RuntimeError("Ray is not initialized")
-    actor = await asyncio.to_thread(ray.get_actor, "TaskStateManager", namespace="openrag")
-    await call_ray_actor_method_with_timeout(actor.get_pool_info.remote, timeout=1.0, task_description="readiness")
+    try:
+        if _ray_actor is None:
+            _ray_actor = await asyncio.to_thread(ray.get_actor, "TaskStateManager", namespace="openrag")
+        await call_ray_actor_method_with_timeout(
+            _ray_actor.get_pool_info.remote, timeout=1.0, task_description="readiness"
+        )
+    except BaseException:
+        _ray_actor = None
+        raise
 
 
 def create_readiness_service(container: ServiceContainer) -> ReadinessService:
@@ -31,7 +42,7 @@ def create_readiness_service(container: ServiceContainer) -> ReadinessService:
         config = getattr(settings.models, kind).get("default")
         if config is None:
             raise RuntimeError("Default model endpoint is not configured")
-        await check_model_endpoint(config)
+        await check_model_endpoint(config, model_type=kind)
 
     checks = {
         "postgres": cast(PostgresStore, container.catalog_store).check_health,
