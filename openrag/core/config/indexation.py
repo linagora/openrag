@@ -177,7 +177,9 @@ class LoaderConfig(ConfigMixin):
     marker_pool_size: int = 1
     marker_max_processes: int = 2
     marker_num_gpus: float = 0.01
-    marker_timeout: int = 3600
+    # Must be > 0: it bounds the Ray actor calls below and sets the ceiling for
+    # marker_child_timeout, so 0/negative would fail every parse immediately.
+    marker_timeout: int = Field(default=3600, gt=0)
     # Headroom keeping the child bound under the bounds that wrap it, so a
     # wedged child times out first and recycles the pool (#659, #894).
     marker_child_timeout_ratio: float = Field(default=0.9, gt=0, lt=1)

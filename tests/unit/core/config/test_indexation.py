@@ -87,3 +87,10 @@ def test_marker_child_timeout_follows_a_shortened_parse_timeout():
 
     assert cfg.marker_child_timeout < cfg.parse_timeout
     assert cfg.marker_child_timeout == 54
+
+
+def test_marker_timeout_rejects_zero_and_negative_values():
+    """A non-positive marker_timeout would drive marker_child_timeout to <= 0."""
+    for bad in (0, -1):
+        with pytest.raises(ValidationError):
+            LoaderConfig(marker_timeout=bad)
