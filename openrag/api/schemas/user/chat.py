@@ -1,6 +1,12 @@
 from typing import Any, Literal
 
+from core.utils import consts
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+# Built from the constant rather than spelled out, so renaming the prefix (as
+# ``ragondin-`` -> ``openrag-`` already once did) cannot leave the docs pointing
+# at a model name the router no longer resolves.
+_EXAMPLE_MODEL = f"{consts.PARTITION_PREFIX}<partition>"
 
 
 class OpenAIMessage(BaseModel):
@@ -37,7 +43,7 @@ class OpenAIChatCompletionRequest(BaseModel):
         json_schema_extra={
             "examples": [
                 {
-                    "model": "openrag-<partition>",
+                    "model": _EXAMPLE_MODEL,
                     "messages": [{"role": "user", "content": "What is OpenRag?"}],
                     "temperature": 0.3,
                     "top_p": 1.0,
@@ -114,7 +120,7 @@ class OpenAICompletionRequest(BaseModel):
         json_schema_extra={
             "examples": [
                 {
-                    "model": "openrag-<partition>",
+                    "model": _EXAMPLE_MODEL,
                     "prompt": "What is OpenRag?",
                     "temperature": 0.3,
                     "top_p": 1.0,
