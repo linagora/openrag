@@ -62,11 +62,11 @@ export const NEW_SINCE: Readonly<Record<string, string>> = {
   // A commented example is invisible to both the release one-liner and the CI
   // gate: each anchors on a whole registry line, which starts with the quoted
   // key and nothing else — see FEATURE_TAG.md.
-  //   "models.reranker": "2.4.0",
-  "chunking.structured_section": "UNRELEASED",
-  "models.stt": "UNRELEASED",
-  "models.stt.moss_speaker_aware": "UNRELEASED",
-  "prompts.asr_transcription": "UNRELEASED",
+  //   "models.reranker": "UNRELEASED",
+  "chunking.structured_section": "v2.2.0",
+  "models.stt": "v2.2.0",
+  "models.stt.moss_speaker_aware": "v2.2.0",
+  "prompts.asr_transcription": "v2.2.0",
 };
 
 type Version = { major: number; minor: number };
