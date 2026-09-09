@@ -144,6 +144,10 @@ The `extra` field in API responses is a JSON string with these keys:
 - `citations_reported` (bool) — `true` only when the model actually emitted a `[Sources: ...]` tag (even an empty/`none` one); `false` when the tag was missing entirely, which is the only case where `sources` falls back to keeping everything. Lets a client tell "the model cited every source" apart from "the model didn't report citations at all".
 - `all_retrieved_sources` — the complete retrieval set, captured before the context-token-budget truncation, so it also includes documents/web results that didn't fit in the prompt (and, on the map-reduce path, the original retrieved docs rather than the LLM-generated summaries). Only included when the request sets `metadata.include_all_retrieved_sources: true` — it's debug/eval telemetry, gated off by default since retrieval is uncapped up to `retriever.top_k` while the context budget only fits a handful of documents.
 
+### Prometheus Metrics
+
+`GET /metrics` (`openrag/api/routers/admin/monitoring.py`) serves the default `prometheus_client` registry: HTTP counters/histogram recorded by `api/middleware/instrumentation.py` plus the inference circuit-breaker gauge. The path is in `DEFAULT_BYPASS_PATHS` (no user token needed) and the route enforces its own optional `METRICS_TOKEN` (`server.metrics_token`, blank = unset = open endpoint) via `require_metrics_token`; admin tokens are deliberately not accepted there — one mechanism, no fallback. The token is read through `load_config()` rather than the request container so a scrape keeps working while the container is degraded. Helm exposes it as `openrag.metrics.*` (pod annotations + optional ServiceMonitor with `bearerTokenFromSecret`), compose via `METRICS_TOKEN` in `.env`. Docs: `docs/content/docs/documentation/prometheus_metrics.md`.
+
 ### API Routers (`openrag/api/routers/`)
 
 - `user/chat.py` - OpenAI-compatible `/v1/chat/completions` endpoint
