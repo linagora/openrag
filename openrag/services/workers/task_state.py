@@ -302,8 +302,8 @@ class TaskStateManager:
         self.lock = threading.Lock()
 
     def _ensure_task(self, task_id: str) -> TaskInfo:
-        # Every path that can add a task goes through here, and none of them
-        # iterate ``self.tasks``, which makes this the one safe place to evict.
+        # Every path that can add a task goes through here, so admission always
+        # sheds history first.
         self._evict_terminal_tasks_locked()
         if task_id not in self.tasks:
             self.tasks[task_id] = TaskInfo()
@@ -331,7 +331,11 @@ class TaskStateManager:
         _delete_recoverable_task(task_id)
 
     def _evict_terminal_tasks_locked(self, *, now: float | None = None) -> None:
-        """Drop settled tasks once they age out or the retention cap is exceeded."""
+        """Drop settled tasks once they age out or the retention cap is exceeded.
+
+        This removes entries from ``self.tasks`` and ``self.user_index``, so call
+        it before reading either, never while iterating one.
+        """
         deadline = (time.time() if now is None else now) - _TERMINAL_TASK_RETENTION_SECONDS
         examined = 0
         while self.terminal_tasks and examined < len(self.terminal_tasks):
@@ -641,8 +645,6 @@ class TaskStateManager:
     @ray.method(concurrency_group="get")
     async def get_state(self, task_id: str) -> str | None:
         with self.lock:
-            # Status polling is the one read that cannot iterate the task map,
-            # so it can evict. Without this, retention would need new work.
             self._evict_terminal_tasks_locked()
             info = self.tasks.get(task_id)
             if info is not None:
@@ -747,12 +749,16 @@ class TaskStateManager:
     @ray.method(concurrency_group="queue_info")
     async def get_all_states(self) -> dict[str, str | None]:
         with self.lock:
+            # A queue that only gets polled admits no task, so the listing reads
+            # have to shed history or retention never runs.
+            self._evict_terminal_tasks_locked()
             self._expire_refless_tasks_if_stale_locked()
             return {tid: info.state for tid, info in self.tasks.items()}
 
     @ray.method(concurrency_group="queue_info")
     async def get_all_info(self) -> dict[str, dict]:
         with self.lock:
+            self._evict_terminal_tasks_locked()
             self._expire_refless_tasks_if_stale_locked()
             return {
                 task_id: {
@@ -768,6 +774,8 @@ class TaskStateManager:
     @ray.method(concurrency_group="queue_info")
     async def get_all_user_info(self, user_id: int) -> dict[str, dict]:
         with self.lock:
+            # Before the index lookup: eviction can drop the user's whole entry.
+            self._evict_terminal_tasks_locked()
             task_ids = self.user_index.get(user_id, set())
             self._expire_refless_tasks_if_stale_locked(task_ids)
             return {

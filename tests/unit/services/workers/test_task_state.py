@@ -1073,3 +1073,29 @@ async def test_recovery_preserves_the_original_retention_deadline(monkeypatch) -
 
     monkeypatch.setattr(task_state_module.time, "time", lambda: 1_061.0)
     assert await manager.get_state("old-task") is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "read",
+    [
+        lambda manager: manager.get_all_states(),
+        lambda manager: manager.get_all_info(),
+        lambda manager: manager.get_all_user_info(1),
+    ],
+    ids=["get_all_states", "get_all_info", "get_all_user_info"],
+)
+async def test_expired_task_is_evicted_when_the_queue_is_listed(monkeypatch, read) -> None:
+    # A read-only workload polls the listing and admits nothing, so these reads
+    # have to enforce retention too.
+    monkeypatch.setattr(task_state_module, "_TERMINAL_TASK_RETENTION_SECONDS", 60.0)
+    monkeypatch.setattr(task_state_module.time, "time", lambda: 1_000.0)
+    manager = _task_state_manager()
+    await manager.set_queued_details("done-task", file_id="file-1", partition="tenant-a", metadata={}, user_id=1)
+    await manager.set_state("done-task", "COMPLETED")
+
+    monkeypatch.setattr(task_state_module.time, "time", lambda: 1_061.0)
+
+    assert await read(manager) == {}
+    assert manager.tasks == {}
+    assert manager.user_index == {}
