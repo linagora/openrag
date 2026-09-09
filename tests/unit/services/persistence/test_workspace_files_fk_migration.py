@@ -65,15 +65,21 @@ def _run(monkeypatch, migration, func, **helpers):
 
 
 def test_upgrade_quarantines_instead_of_deleting(monkeypatch, migration) -> None:
-    statements = _run(monkeypatch, migration, migration.upgrade)
+    statements = _run(monkeypatch, migration, migration.upgrade, table_exists=lambda *_: False)
 
-    assert f"CREATE TABLE IF NOT EXISTS {migration.ORPHAN_TABLE}" in statements
+    assert f"create_table('{migration.ORPHAN_TABLE}'" in statements
     # Both purges copy the rows out before dropping them, in one statement.
     assert statements.count(f"INSERT INTO {migration.ORPHAN_TABLE}") == 2
     assert "NOT EXISTS (SELECT 1 FROM files f WHERE f.file_id = wf.file_id)" in statements
     assert "wf.file_fk IS NULL" in statements
     # No bare delete survives.
     assert "DELETE FROM workspace_files WHERE" not in statements
+
+
+def test_upgrade_skips_the_quarantine_table_when_it_already_exists(monkeypatch, migration) -> None:
+    statements = _run(monkeypatch, migration, migration.upgrade, table_exists=lambda *_: True)
+
+    assert "create_table(" not in statements
 
 
 def test_upgrade_logs_the_removed_row_count(monkeypatch, migration, caplog) -> None:
