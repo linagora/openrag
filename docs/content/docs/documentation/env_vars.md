@@ -179,7 +179,7 @@ The default OpenRAG transcriber stack now ships with **vLLM v0.19.1**, which inc
 
 | Variable               | Type | Default              | Description |
 |------------------------|------|----------------------|-------------|
-| `CHUNKER`              | `str`  | recursive_splitter   | Defines the chunking strategy: `recursive_splitter`. |
+| `CHUNKER`              | `str`  | structured_section   | Defines the chunking strategy: `structured_section` or `recursive_splitter`. |
 | `CONTEXTUAL_RETRIEVAL` | `bool` | true                 | Enables contextual retrieval to chunk context, a technique introduced by Anthropic to improve retrieval performance ([Contextual Retrieval](https://www.anthropic.com/news/contextual-retrieval)) |
 | `CHUNK_SIZE`           | `int`  | 512                  | Maximum size (in characters) of each chunk. |
 | `CHUNK_OVERLAP_RATE`   | `float`| 0.2                  | Percentage of overlap between consecutive chunks. |
@@ -191,7 +191,8 @@ After files are converted to Markdown, only the **text content** is chunked.
 
 **Chunker strategies:**
 
-* **`recursive_splitter`**: Uses hierarchical text structure (sections, paragraphs, sentences). Based on [RecursiveCharacterTextSplitter](https://docs.langchain.com/oss/python/integrations/splitters/index#text-structure-based), it preserves natural boundaries whenever possible while ensuring chunks never exceeding the `CHUNK_SIZE`.
+* **`structured_section`** *(default)*: Cuts on the document's own structure instead of on character separators. It detects headings (Markdown `#`, plus keyword headings such as `Titre` / `Chapitre` / `Section`) and leaf units (e.g. `Article L110-1`) by matching line content, keeps each leaf atomic, greedily packs consecutive short leaves up to `CHUNK_SIZE` tokens, and prepends the heading path so every chunk is self-describing at retrieval time. Overlap is always 0 — leaves are atomic, so replaying a tail would only duplicate whole sections, and `CHUNK_OVERLAP_RATE` is therefore ignored by this strategy. Best for structured documents (legal codes, standards, reports, technical manuals).
+* **`recursive_splitter`**: Uses hierarchical text structure (sections, paragraphs, sentences). Based on [RecursiveCharacterTextSplitter](https://docs.langchain.com/oss/python/integrations/splitters/index#text-structure-based), it preserves natural boundaries whenever possible while ensuring chunks never exceeding the `CHUNK_SIZE`. Set `CHUNKER=recursive_splitter` for unstructured prose, or to reproduce the chunking of earlier OpenRAG releases.
 
 ### Embedding
 Our embedder is **OpenAI-compatible** and runs on a **VLLM** instance configured with the following variables:
