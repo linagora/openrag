@@ -372,7 +372,21 @@ class WorkerDispatcher(IndexingDispatcher):
                 if not submission_outcome_unknown:
                     await self._record_finished_at(task_id, task_details)
                     if mark_submit_failed:
-                        await self._mark_submit_failed(task_id, traceback.format_exc())
+                        tb = traceback.format_exc()
+                        await self._mark_submit_failed(task_id, tb)
+                        # The completion tracker never saw this task, so nothing
+                        # else settles its row: it would stay QUEUED until a
+                        # restart reconciled it, long after the actor forgot the
+                        # failure.
+                        await self._record_job(
+                            task_id,
+                            status=DocumentStatus.FAILED,
+                            partition=partition,
+                            file_id=file_id,
+                            user_id=task_details["user_id"],
+                            error=tb,
+                            finished_at=datetime.now(UTC),
+                        )
             finally:
                 if claimed_content and not submission_outcome_unknown and (task is None or mark_submit_failed):
                     await self._document_repo.release_content_sha256_claim(
@@ -681,6 +695,8 @@ class WorkerDispatcher(IndexingDispatcher):
         partition: str,
         file_id: str | None = None,
         user_id: int | None = None,
+        error: str | None = None,
+        finished_at: datetime | None = None,
     ) -> None:
         """Mirror a task transition to Postgres. History must never fail indexing."""
         if self._job_repo is None:
@@ -693,6 +709,8 @@ class WorkerDispatcher(IndexingDispatcher):
                     partition=partition,
                     file_id=file_id,
                     user_id=user_id,
+                    error=error,
+                    finished_at=finished_at,
                 )
             )
         except Exception as exc:

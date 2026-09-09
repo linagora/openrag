@@ -2228,3 +2228,52 @@ async def test_dispatch_records_the_job_before_the_worker_runs() -> None:
         "file-1",
         42,
     )
+
+
+@pytest.mark.asyncio
+async def test_dispatch_failure_settles_the_durable_job() -> None:
+    """Nothing else settles this row: the completion tracker never saw the task."""
+    from core.models.catalog import DocumentStatus
+
+    repo = _JobRepoSpy()
+    tsm = _task_state_manager()
+    tsm.begin_worker_submission.remote = AsyncMock(return_value=False)
+    dispatcher = _dispatcher_with_job_repo(tsm, repo)
+
+    with pytest.raises(RuntimeError, match="rejected before worker submission"):
+        await dispatcher.dispatch_indexing(
+            path="/data/report.txt",
+            metadata={"file_id": "file-1"},
+            partition="tenant-a",
+            user={"id": 42},
+            workspace_ids=None,
+            replace=False,
+        )
+
+    assert [job.status for job in repo.saved] == [DocumentStatus.QUEUED, DocumentStatus.FAILED]
+    settled = repo.saved[-1]
+    assert (settled.partition, settled.file_id, settled.user_id) == ("tenant-a", "file-1", 42)
+    assert settled.finished_at is not None
+    assert "rejected before worker submission" in settled.error
+
+
+@pytest.mark.asyncio
+async def test_uncertain_submission_leaves_the_durable_job_queued() -> None:
+    """The worker may be running, so the row must not be settled as failed."""
+    from core.models.catalog import DocumentStatus
+
+    repo = _JobRepoSpy()
+    dispatcher = _dispatcher_with_job_repo(_task_state_manager(), repo)
+    dispatcher._pool.submit.remote = AsyncMock(side_effect=RuntimeError("pool is gone"))
+
+    with pytest.raises(RuntimeError, match="pool is gone"):
+        await dispatcher.dispatch_indexing(
+            path="/data/report.txt",
+            metadata={"file_id": "file-1"},
+            partition="tenant-a",
+            user={"id": 42},
+            workspace_ids=None,
+            replace=False,
+        )
+
+    assert [job.status for job in repo.saved] == [DocumentStatus.QUEUED]
