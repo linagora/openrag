@@ -61,10 +61,13 @@ def upgrade() -> None:
     if column_type_is("workspace_files", "file_id", sa.Integer):
         return
 
-    op.execute(
-        f"CREATE TABLE IF NOT EXISTS {ORPHAN_TABLE} ("
-        "workspace_id VARCHAR NOT NULL, file_id VARCHAR NOT NULL, reason VARCHAR NOT NULL)"
-    )
+    if not table_exists(ORPHAN_TABLE):
+        op.create_table(
+            ORPHAN_TABLE,
+            sa.Column("workspace_id", sa.String, nullable=False),
+            sa.Column("file_id", sa.String, nullable=False),
+            sa.Column("reason", sa.String, nullable=False),
+        )
 
     # 1. Purge rows that have no matching file (no valid files.file_id to JOIN against).
     #    NOT EXISTS rather than NOT IN: a NULL in the subquery would make NOT IN
