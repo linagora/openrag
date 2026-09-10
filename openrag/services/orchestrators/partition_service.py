@@ -303,9 +303,10 @@ class PartitionService:
         this raises only if the race is lost between that check and here.
 
         When ``config`` was supplied to the service, the referenced presets
-        are validated *before* the row is written (so a bad preset name fails
-        fast and atomically), the non-default config columns are persisted,
-        and the in-memory partition cache is re-resolved.
+        and model endpoints are validated *before* the row is written (so a bad
+        preset or embedder name fails fast and atomically), the non-default
+        config columns are persisted, and the in-memory partition cache is
+        re-resolved.
         """
         # Reserved-name check first so a name that normalises to a reserved
         # sentinel (e.g. "  all  ") returns the specific RESERVED_PARTITION_NAME
@@ -339,6 +340,7 @@ class PartitionService:
             self._validate_preset_refs({"partition": partition, **config_fields})
             if chat_llm:
                 self._validate_chat_llm_ref(chat_llm)
+            self._validate_embedder_ref(embedder)
 
         await self._create_partition_for_operation(
             partition,
@@ -422,10 +424,11 @@ class PartitionService:
         explicit ``None`` clears the column back to its default. When a
         preset reference changes, the merged row is validated against the
         in-memory cache *before* the write so an unknown preset name fails
-        fast, and an assigned ``chat_llm`` must name a catalogued LLM
-        endpoint; the repository additionally re-checks preset existence
-        atomically under the write's transaction, closing the race with a
-        concurrent preset delete (see
+        fast, and an assigned ``chat_llm`` / ``embedder`` must name a
+        catalogued endpoint of the matching type; the repository additionally
+        re-checks preset and endpoint existence atomically under the write's
+        transaction, closing the race with a concurrent preset delete or
+        endpoint rename (see
         :meth:`PgPartitionRepository.update_partition`).
         """
         await self._ensure_partition(partition)
@@ -441,6 +444,8 @@ class PartitionService:
             # QueryService falls back to the default LLM for those at runtime.
             if updates.get("chat_llm"):
                 self._validate_chat_llm_ref(updates["chat_llm"])
+            if updates.get("embedder"):
+                self._validate_embedder_ref(updates["embedder"])
             if updates.get("generation_prompt_names"):
                 await self._validate_generation_prompt_names(updates["generation_prompt_names"])
 
@@ -494,6 +499,29 @@ class PartitionService:
         if chat_llm not in self._require_config().models.llm:
             raise ValidationError(
                 f"LLM endpoint '{chat_llm}' referenced by chat_llm not found.",
+                code="MODEL_ENDPOINT_NOT_FOUND",
+            )
+
+    def _validate_embedder_ref(self, embedder: str) -> None:
+        """Assignment-time check: ``embedder`` must name a catalogued embedder endpoint.
+
+        Unlike :meth:`_validate_chat_llm_ref`, this is not merely a nicety.
+        ``chat_llm`` has a runtime fallback — an unknown name resolves to the
+        default LLM — so it can only be validated at assignment. The embedder
+        has no fallback: ``_build_embedder_factory`` raises a bare ``KeyError``
+        for an unknown name, taking down every upload *and* every query on the
+        partition. That is why the write is additionally re-checked against the
+        DB inside its own transaction (see
+        :meth:`PgPartitionRepository.update_partition`) rather than trusting
+        this in-memory catalog alone.
+
+        ``"default"`` is checked like any other name: it is the alias
+        ``ModelEndpointService.load_all`` files the default endpoint under, so
+        its absence means there is no embedder to index with at all.
+        """
+        if embedder not in self._require_config().models.embedder:
+            raise ValidationError(
+                f"Embedder endpoint '{embedder}' not found.",
                 code="MODEL_ENDPOINT_NOT_FOUND",
             )
 

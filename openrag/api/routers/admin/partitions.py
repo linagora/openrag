@@ -321,7 +321,7 @@ async def create_partition(
 **Body:**
 Accepts partition config fields such as:
 - `description`
-- `embedder`
+- `embedder` (must name a registered embedder endpoint — 422 otherwise; `default` resolves to the endpoint marked default)
 - `indexation_preset`
 - `retrieval_preset`
 - `chat_history_depth`
