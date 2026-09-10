@@ -84,6 +84,7 @@ _ENV_OVERRIDES: list[tuple[str, str, type]] = [
     ("MAP_REDUCE_DEBUG", "map_reduce.debug", bool),
     # Verbose
     ("LOG_LEVEL", "verbose.level", str),
+    ("LOG_FORMAT", "verbose.format", str),
     # Server
     ("PREFERRED_URL_SCHEME", "server.preferred_url_scheme", str),
     # LLM Context

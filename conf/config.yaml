@@ -114,12 +114,14 @@ map_reduce:
   debug: false
 
 # --- Logging ---
-# Env: LOG_LEVEL
-# INFO by default: DEBUG logs (and the long-lived JSON sink) persist user
-# queries and other potentially sensitive request data. Raise to DEBUG only
-# for short-lived troubleshooting.
+# Env: LOG_LEVEL, LOG_FORMAT
+# INFO by default: DEBUG logs persist user queries and other potentially
+# sensitive request data in whatever collects stderr. Raise to DEBUG only for
+# short-lived troubleshooting. format: text (colorized, dev) | json (one flat
+# object per line for Loki; the compose logging overlay and the Helm chart set it).
 verbose:
   level: INFO
+  format: text
 
 # --- Server ---
 # Env: PREFERRED_URL_SCHEME
