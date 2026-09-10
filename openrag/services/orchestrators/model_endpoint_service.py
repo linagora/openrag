@@ -510,6 +510,7 @@ class ModelEndpointService:
             # the same transaction), so the cached 'default' alias client — built
             # against the old default — is stale and must be evicted.
             self._invalidate_client_cache(row.model_type, "default")
+            await self._reload_partitions_after_default_change(row.model_type)
         return result
 
     async def get_model_endpoint(self, name: str, model_type: str) -> ModelEndpointRow:
@@ -519,8 +520,17 @@ class ModelEndpointService:
             raise NotFoundError(f"Endpoint '{name}' of type '{model_type}' not found.")
         return row
 
-    async def list_model_endpoints(self, model_type: str | None = None) -> list[ModelEndpointRow]:
-        return await self._repo.list_all(model_type=model_type)
+    async def list_model_endpoints(self, model_type: str | None = None) -> list[dict[str, Any]]:
+        """List endpoints, each annotated with ``used_by_partitions``.
+
+        One aggregate query for the counts rather than one per endpoint. The
+        count is what makes the delete dialog honest: an embedder with a
+        nonzero count cannot be deleted (the repo refuses it), so the UI can
+        say so up front instead of offering a button that 409s.
+        """
+        rows = await self._repo.list_all(model_type=model_type)
+        counts = await self._repo.usage_counts()
+        return [{**row.model_dump(), "used_by_partitions": counts.get((row.name, row.model_type), 0)} for row in rows]
 
     async def update_model_endpoint(self, name: str, model_type: str, **fields: object) -> ModelEndpointRow:
         """Update endpoint fields and/or rename it.
@@ -607,6 +617,7 @@ class ModelEndpointService:
             # Clears any prior default and sets this row in one transaction, then
             # re-points the 'default' alias to it — never leaves two defaults.
             await self._repo.set_default(model_type, effective_name)
+            await self._reload_partitions_after_default_change(model_type)
         # The 'default' alias client is stale when this endpoint becomes the default
         # OR was already the default (its config just changed).
         evict_default = bool(promote_to_default or existing.is_default)
@@ -621,6 +632,17 @@ class ModelEndpointService:
             self._invalidate_client_cache(model_type, "default")
         return await self._repo.get(effective_name, model_type) or (updated or existing)
 
+    async def _reload_partitions_after_default_change(self, model_type: str) -> None:
+        """Show this replica the partitions a new default embedder pinned (#762).
+
+        Changing the default embedder writes the old default's name onto
+        indexed partitions still riding the alias (see
+        ``PgModelEndpointRepository.set_default``); the in-memory partition
+        configs would otherwise keep resolving them through the moved alias.
+        """
+        if model_type == "embedder" and self._partition_service is not None:
+            await self._partition_service.load_partitions()
+
     async def delete_model_endpoint(self, name: str, model_type: str) -> None:
         """Delete an endpoint.
 
@@ -634,6 +656,16 @@ class ModelEndpointService:
         clears those selections in the delete's own transaction (see
         ``_clear_preset_references``), returning the preset to the default
         fallback; the cache reloads below make that visible to this replica.
+
+        Partition references are settled in that same transaction, and not the
+        same way for both columns (#762). An ``embedder`` a partition still
+        names — or, for the default, that an alias partition with indexed files
+        resolves to — refuses the delete outright — ConflictError, 409 — because
+        clearing it would repoint indexed vectors at a different embedding
+        model without saying so. Empty partitions on the alias just follow the
+        promoted default. A ``chat_llm`` reference is cleared to NULL,
+        which is precisely the request-time default it would have fallen back
+        to anyway. See ``PgModelEndpointRepository._settle_partition_references``.
         """
         # The last-endpoint guard and the survivor/default choice are made INSIDE
         # the repo's locked transaction (not from a stale snapshot here), so
@@ -675,6 +707,7 @@ class ModelEndpointService:
         # Reload before evicting so a client rebuilt during the window can't survive.
         await self.load_all()
         self._invalidate_client_cache(model_type, "default")
+        await self._reload_partitions_after_default_change(model_type)
 
     # ------------------------------------------------------------------
     # Endpoint validation

@@ -187,7 +187,15 @@ async def delete_model_endpoint(
     background_tasks: BackgroundTasks,
     service=Depends(get_model_endpoint_service),
 ):
-    """Delete a registered inference endpoint."""
+    """Delete a registered inference endpoint.
+
+    Returns 409 if a partition still names this embedder, or — when it is the
+    default — a partition following the `default` alias already holds indexed
+    files; reassign those partitions first. Empty partitions on the alias just
+    follow the promoted default.
+    An LLM endpoint deletes regardless; partitions naming it as `chat_llm` are
+    reset to the default LLM they would have fallen back to anyway.
+    """
     await service.delete_model_endpoint(name=name, model_type=model_type)
     _refresh_llm_token_cache(background_tasks, model_type)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
@@ -200,7 +208,13 @@ async def set_default_model_endpoint(
     background_tasks: BackgroundTasks,
     service=Depends(get_model_endpoint_service),
 ):
-    """Promote a registered endpoint to the default for its type."""
+    """Promote a registered endpoint to the default for its type.
+
+    For embedders, partitions following the ``default`` alias that already hold
+    indexed files stay on the outgoing default (their embedder is written down
+    by name); only partitions that have never received data move to the new
+    one.
+    """
     await service.set_default(model_type=model_type, name=name)
     _refresh_llm_token_cache(background_tasks, model_type)
     return await service.get_model_endpoint(name=name, model_type=model_type)

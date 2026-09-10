@@ -24,6 +24,10 @@ export interface ModelEndpointResponse {
   extra: Record<string, unknown>;
   has_api_key?: boolean;
   is_default: boolean;
+  /** Partitions whose resolved reference is this endpoint — those naming it,
+   *  plus (for the default endpoint) those riding the `default` alias. Only
+   *  the list response carries it; 0 for types referenced through presets. */
+  used_by_partitions?: number;
   created_at: string;
   updated_at: string;
 }

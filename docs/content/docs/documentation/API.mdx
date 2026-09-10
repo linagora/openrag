@@ -649,11 +649,15 @@ DELETE /model-endpoints/{model_type}/{name}    # 204 No Content
 ```
 `PUT` takes a partial body (any of the create fields, plus `name` to rename) and returns the updated endpoint.
 
+`DELETE` of an embedder returns `409` while a partition names it or, for the default embedder, while a partition following the `default` alias already holds indexed files. Reassign those partitions first.
+
 #### Set as default for its type
 ```http
 POST /model-endpoints/{model_type}/{name}/set-default
 ```
 Promotes the endpoint to the default used for its `model_type`, and returns it.
+
+For embedders, a new default only reaches partitions that have no data yet. A partition stays on the `default` alias until it first receives a file (upload or copy), at which point the alias is replaced by the embedder it resolved to; a partition indexed before that is pinned the same way when the default changes. Partitions with files therefore keep the embedder that built their vectors, and an admin moves one deliberately by setting its `embedder`. An emptied partition stays pinned — set its `embedder` back to `default` to follow the default again.
 
 #### Reveal the stored API key
 ```http

@@ -10,9 +10,12 @@ from __future__ import annotations
 from collections.abc import Callable
 
 import asyncpg
-from core.config.model_endpoints import ModelEndpointRow
+from core.config.model_endpoints import DEFAULT_ENDPOINT_ALIAS, ModelEndpointRow
 from core.ports.model_endpoint_repo import ModelEndpointRepository
-from core.utils.exceptions import NotFoundError, ValidationError
+from core.utils.exceptions import ConflictError, NotFoundError, ValidationError
+from core.utils.logging import get_logger
+
+logger = get_logger()
 
 # 'is_default' is deliberately excluded: a bare ``UPDATE ... SET is_default = true``
 # cannot clear the previous default in the same statement, so it would leave two
@@ -38,6 +41,68 @@ _INDEXATION_PRESET_KEYS_BY_TYPE = {
     "vlm": ("vlm",),
     "stt": ("stt",),
 }
+
+# A delete has to do something about the partition columns above, and the right
+# something differs by column — the asymmetry is the whole point (#762).
+#
+# BLOCK: `embedder` names the model a partition's vectors were built with.
+# Clearing it (the ``_clear_preset_references`` shape) would silently repoint an
+# indexed partition at a different embedding model, which is exactly the
+# corruption this guards against — there is no safe fallback, so the delete is
+# refused and the operator reassigns first.
+_BLOCKING_PARTITION_COLUMN_BY_TYPE = {"embedder": "embedder"}
+# CLEAR: `chat_llm` is resolved per request and falls back to the default LLM
+# when unset, so clearing it restores exactly the behaviour a dangling name
+# would have limped along with anyway — minus the dead name in the UI.
+_CLEARABLE_PARTITION_COLUMN_BY_TYPE = {"llm": "chat_llm"}
+
+# Partitions a delete would break: the ones naming the endpoint outright, plus
+# — when it is the default being deleted — the ones riding the `default` alias
+# that already hold files, which promotion would move to another model. An
+# alias partition with no files just follows the promoted survivor, the same as
+# on any change of default: a partition is pinned off the alias when it first
+# receives data (PartitionService.pin_embedder_for_write), so an empty one has
+# nothing to strand. Split so the error can say which is which.
+_EMBEDDER_USAGE_SQL = """
+    SELECT
+        COUNT(*) FILTER (WHERE embedder = $1)::int AS direct,
+        COUNT(*) FILTER (
+            WHERE $2::boolean AND embedder = $3
+              AND EXISTS (SELECT 1 FROM files f WHERE f.partition_name = partitions.partition)
+        )::int AS via_default
+    FROM partitions
+    """
+# Run inside a change of default embedder: the partitions still riding the
+# `default` alias that already hold files keep the outgoing default by name. The
+# first write pins a partition itself; this catches the ones indexed before that
+# existed, so a default change never moves indexed vectors to another model.
+_PIN_INDEXED_ALIAS_PARTITIONS_SQL = """
+    UPDATE partitions p
+    SET embedder = $1, updated_at = now()
+    WHERE p.embedder = $2
+      AND EXISTS (SELECT 1 FROM files f WHERE f.partition_name = p.partition)
+    RETURNING p.partition
+    """
+# Same resolution, for every endpoint at once (powers ``used_by_partitions`` on
+# the list view). Types with no partition column — reranker, vlm, stt — are
+# referenced through presets rather than partitions and correctly count 0.
+#
+# ``chat_llm IS NULL`` counts for the default LLM: the column is optional and
+# QueryService._resolve_llm falls through to the catalog default for a partition
+# that sets none, so those partitions really are served by that endpoint. The
+# embedder column has no such case — it is NOT NULL, defaulting to the alias.
+_PARTITION_USAGE_COUNTS_SQL = """
+    SELECT e.name, e.model_type, COUNT(p.partition)::int AS cnt
+    FROM model_endpoints e
+    LEFT JOIN partitions p ON (
+        (e.model_type = 'embedder' AND (p.embedder = e.name OR (e.is_default AND p.embedder = $1)))
+        OR (
+            e.model_type = 'llm'
+            AND (p.chat_llm = e.name OR (e.is_default AND (p.chat_llm = $1 OR p.chat_llm IS NULL)))
+        )
+    )
+    GROUP BY e.name, e.model_type
+    """
 
 
 class PgModelEndpointRepository(ModelEndpointRepository):
@@ -71,10 +136,22 @@ class PgModelEndpointRepository(ModelEndpointRepository):
         # rows for one model_type (same hazard the update path avoids by routing
         # through set_default). Demote any existing default in the SAME transaction
         # as the insert so the new endpoint becomes the sole default atomically.
+        #
+        # A new default embedder also keeps indexed partitions on the old one —
+        # see ``_keep_indexed_partitions_on_outgoing_default``.
         try:
             async with self.pool.acquire() as conn:
                 async with conn.transaction():
                     if row.is_default:
+                        if row.model_type == "embedder":
+                            await conn.execute("LOCK TABLE partitions IN SHARE ROW EXCLUSIVE MODE")
+                            outgoing = await conn.fetchval(
+                                "SELECT name FROM model_endpoints WHERE model_type = $1 AND is_default FOR UPDATE",
+                                row.model_type,
+                            )
+                            await self._keep_indexed_partitions_on_outgoing_default(
+                                conn, row.model_type, outgoing, row.name
+                            )
                         await conn.execute(
                             "UPDATE model_endpoints SET is_default = false, updated_at = now() WHERE model_type = $1",
                             row.model_type,
@@ -244,15 +321,25 @@ class PgModelEndpointRepository(ModelEndpointRepository):
         — leaving the type with no default at all. Same invariant
         ``delete_and_promote_default`` protects. Raises ``NotFoundError`` if the
         target endpoint is gone.
+
+        For an embedder, the partitions riding the ``default`` alias that already
+        hold files are pinned to the outgoing default first, in the same
+        transaction — see ``_keep_indexed_partitions_on_outgoing_default``.
+        ``partitions`` is locked before the endpoint rows, the order every other
+        writer of both tables takes (see ``delete_and_promote_default``).
         """
         async with self.pool.acquire() as conn:
             async with conn.transaction():
+                if model_type == "embedder":
+                    await conn.execute("LOCK TABLE partitions IN SHARE ROW EXCLUSIVE MODE")
                 rows = await conn.fetch(
-                    "SELECT name FROM model_endpoints WHERE model_type = $1 FOR UPDATE",
+                    "SELECT name, is_default FROM model_endpoints WHERE model_type = $1 FOR UPDATE",
                     model_type,
                 )
                 if name not in {r["name"] for r in rows}:
                     raise NotFoundError(f"Endpoint '{name}' of type '{model_type}' not found.")
+                outgoing = next((r["name"] for r in rows if r["is_default"]), None)
+                await self._keep_indexed_partitions_on_outgoing_default(conn, model_type, outgoing, name)
                 await conn.execute(
                     "UPDATE model_endpoints SET is_default = false, updated_at = now() WHERE model_type = $1",
                     model_type,
@@ -263,6 +350,33 @@ class PgModelEndpointRepository(ModelEndpointRepository):
                     name,
                     model_type,
                 )
+
+    @staticmethod
+    async def _keep_indexed_partitions_on_outgoing_default(
+        conn: asyncpg.Connection,
+        model_type: str,
+        outgoing: str | None,
+        incoming: str,
+    ) -> None:
+        """Pin partitions with indexed files to the embedder that built them (#762).
+
+        A change of default embedder moves every partition on the ``default``
+        alias with it. For an empty partition that is the point of the alias;
+        for one with files it points queries at a model those files were never
+        embedded with. So the indexed ones are written down under the outgoing
+        default's name before the flag moves, and only the empty ones follow.
+
+        Partitions are normally pinned when they first receive data
+        (``PartitionService.pin_embedder_for_write``), so this only finds files
+        indexed before that existed. Must run after ``partitions`` is locked.
+        """
+        if model_type != "embedder" or outgoing is None or outgoing == incoming:
+            return
+        rows = await conn.fetch(_PIN_INDEXED_ALIAS_PARTITIONS_SQL, outgoing, DEFAULT_ENDPOINT_ALIAS)
+        if rows:
+            logger.bind(embedder=outgoing, partitions=[r["partition"] for r in rows]).info(
+                "Kept indexed partitions on the outgoing default embedder."
+            )
 
     @staticmethod
     async def _clear_preset_references(conn: asyncpg.Connection, name: str, model_type: str) -> None:
@@ -303,6 +417,47 @@ class PgModelEndpointRepository(ModelEndpointRepository):
                     name,
                 )
 
+    async def _settle_partition_references(
+        self,
+        conn: asyncpg.Connection,
+        name: str,
+        model_type: str,
+        *,
+        was_default: bool,
+    ) -> None:
+        """Refuse or clear the ``partitions`` references to a doomed endpoint.
+
+        Runs inside ``delete_and_promote_default``'s transaction, after it has
+        locked ``partitions``, so the count it refuses on cannot be raced by a
+        concurrent assign (which needs a conflicting lock on the same table).
+        """
+        if model_type in _BLOCKING_PARTITION_COLUMN_BY_TYPE:
+            row = await conn.fetchrow(_EMBEDDER_USAGE_SQL, name, was_default, DEFAULT_ENDPOINT_ALIAS)
+            direct, via_default = row["direct"], row["via_default"]
+            if direct or via_default:
+                raise ConflictError(_embedder_in_use_message(name, direct, via_default))
+            return
+
+        column = _CLEARABLE_PARTITION_COLUMN_BY_TYPE.get(model_type)
+        if column is not None:
+            # Only the literal name: a partition on the `default` alias is
+            # asking for whatever is default, which promotion keeps true.
+            await conn.execute(
+                f"UPDATE partitions SET {column} = NULL, updated_at = now() WHERE {column} = $1",
+                name,
+            )
+
+    async def usage_counts(self) -> dict[tuple[str, str], int]:
+        """Return ``{(name, model_type): partition_count}`` in one aggregate query.
+
+        Lets the list view annotate every endpoint with a real ``used_by_partitions``
+        instead of the static "partitions referencing it will break" the delete
+        dialog used to guess with. Counts resolved references, so the default
+        endpoint also carries the partitions riding the ``default`` alias.
+        """
+        rows = await self.pool.fetch(_PARTITION_USAGE_COUNTS_SQL, DEFAULT_ENDPOINT_ALIAS)
+        return {(r["name"], r["model_type"]): r["cnt"] for r in rows}
+
     async def delete_and_promote_default(self, name: str, model_type: str) -> tuple[str, str | None]:
         """Delete an endpoint and, if it was the default, promote a survivor to
         default — all atomically and decided under a row lock.
@@ -313,6 +468,25 @@ class PgModelEndpointRepository(ModelEndpointRepository):
         default. Returns ``(status, promoted_name)`` where ``status`` is
         ``"not_found" | "last" | "ok"`` and ``promoted_name`` is set only when a
         deleted default was replaced.
+
+        Partition references are settled here too, differently per column (#762):
+        an ``embedder`` still referenced refuses the delete with
+        :class:`ConflictError` (409), while a ``chat_llm`` reference is cleared
+        back to its request-time default. See
+        ``_BLOCKING_PARTITION_COLUMN_BY_TYPE`` for why the two differ.
+
+        ``partitions`` is locked first — before the ``model_endpoints`` rows —
+        because ``rename()`` and :meth:`PgPresetRepository.delete` both take it
+        in that order, and ``PgPartitionRepository.update_partition`` writes
+        ``partitions`` before reading ``model_endpoints``. Taking the row lock
+        first would invert that against every one of them and deadlock.
+
+        The mode is ``SHARE ROW EXCLUSIVE``, not the ``SHARE`` those two take,
+        because this transaction goes on to write ``partitions`` itself when it
+        clears ``chat_llm``. ``SHARE`` does not conflict with itself: two
+        concurrent deletes would both hold it, then each wait on the other's to
+        write — a deadlock. ``SHARE ROW EXCLUSIVE`` conflicts with itself and
+        with ``SHARE``, so a delete queues behind another delete or a rename.
         """
         # Lock every row of this model_type (FOR UPDATE) so concurrent deletes of
         # the same type serialize, then make the last-endpoint guard and survivor
@@ -324,6 +498,7 @@ class PgModelEndpointRepository(ModelEndpointRepository):
         # deleted row was the default and a survivor was promoted.
         async with self.pool.acquire() as conn:
             async with conn.transaction():
+                await conn.execute("LOCK TABLE partitions IN SHARE ROW EXCLUSIVE MODE")
                 rows = await conn.fetch(
                     "SELECT name, is_default FROM model_endpoints WHERE model_type = $1 ORDER BY name FOR UPDATE",
                     model_type,
@@ -334,6 +509,7 @@ class PgModelEndpointRepository(ModelEndpointRepository):
                 if len(names) <= 1:
                     return ("last", None)
                 was_default = next(r["is_default"] for r in rows if r["name"] == name)
+                await self._settle_partition_references(conn, name, model_type, was_default=was_default)
                 await self._clear_preset_references(conn, name, model_type)
                 await conn.execute(
                     "DELETE FROM model_endpoints WHERE name = $1 AND model_type = $2",
@@ -354,6 +530,19 @@ class PgModelEndpointRepository(ModelEndpointRepository):
                         model_type,
                     )
                 return ("ok", promoted)
+
+
+def _embedder_in_use_message(name: str, direct: int, via_default: int) -> str:
+    """Explain *which* partitions block the delete, so the fix is actionable."""
+    parts = []
+    if direct:
+        parts.append(f"{direct} partition(s) name it")
+    if via_default:
+        parts.append(
+            f"{via_default} follow the '{DEFAULT_ENDPOINT_ALIAS}' alias with indexed files that would silently "
+            "move to another model"
+        )
+    return f"Embedder '{name}' is still in use: {', and '.join(parts)}. Reassign them before deleting."
 
 
 __all__ = ["PgModelEndpointRepository"]
