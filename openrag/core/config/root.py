@@ -7,6 +7,7 @@ from pydantic import Field
 
 from .base import ConfigMixin
 from .chunking import ChunkerConfig
+from .compression import CompressionConfig
 from .endpoints import (
     EmbedderConfig,
     LLMConfig,
@@ -63,6 +64,7 @@ class Settings(ConfigMixin):
     indexing_callback: IndexingCallbackConfig = Field(default_factory=IndexingCallbackConfig)
     ray: RayConfig = Field(default_factory=RayConfig)
     chunker: ChunkerConfig = Field(default_factory=ChunkerConfig)
+    compression: CompressionConfig = Field(default_factory=CompressionConfig)
     retriever: RetrieverConfig = Field(default_factory=SingleRetrieverConfig)
     rag: RAGConfig = Field(default_factory=RAGConfig)
     websearch: WebSearchConfig = Field(default_factory=StaanWebSearchConfig)

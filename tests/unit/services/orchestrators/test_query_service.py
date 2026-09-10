@@ -15,6 +15,7 @@ from types import SimpleNamespace
 
 import pytest
 import services.orchestrators.query_service as qs
+from core.compression import Compressor
 from core.config import load_config
 from core.models.chunk import Chunk
 from core.models.workspace import WorkspaceScope
@@ -145,11 +146,15 @@ def _config(mode="SimpleRag"):
         prompts=_PROMPT_CFG.prompts,
         partitions={},
         models=SimpleNamespace(llm={}),
+        compression=SimpleNamespace(enabled=False, target_ratio=None, min_chars=1000, timeout_s=5.0),
     )
 
 
-def _svc(*, llm=None, retrieval=None, web=None, mode="SimpleRag", llm_factory=None, workspace=None) -> QueryService:
+def _svc(
+    *, llm=None, retrieval=None, web=None, mode="SimpleRag", llm_factory=None, workspace=None, compressor=None
+) -> QueryService:
     return QueryService(
+        compressor=compressor,
         retrieval_service=retrieval or FakeRetrieval(),
         llm=llm or FakeLLM(),
         config=_config(mode),
@@ -1734,3 +1739,113 @@ def test_split_leading_system_prompt_returns_none_when_every_system_turn_is_empt
 
     assert pinned is None
     assert rest == [{"role": "user", "content": "hi"}]
+
+
+# --------------------------------------------------------------------------- #
+# context compression
+# --------------------------------------------------------------------------- #
+
+
+class RecordingCompressor(Compressor):
+    """Replaces every text with a marker, recording what it was given."""
+
+    name = "recording"
+
+    def __init__(self):
+        self.batches: list[list[str]] = []
+
+    async def _compress(self, texts, *, options):
+        self.batches.append(list(texts))
+        return [f"<{i}>" for i in range(len(texts))]
+
+
+def _compression_config(*, enabled=True, **preset):
+    defaults = {
+        "compression_enabled": True,
+        "compression_target_ratio": None,
+        "compress_history": False,
+        "compress_history_keep_recent": 2,
+    }
+    return (
+        SimpleNamespace(enabled=enabled, target_ratio=None, min_chars=0, timeout_s=5.0),
+        SimpleNamespace(retrieval=SimpleNamespace(**{**defaults, **preset}), chat_history_depth=10),
+    )
+
+
+def _compressing_svc(*, enabled=True, chunks=None, **preset):
+    compressor = RecordingCompressor()
+    global_cfg, partition_cfg = _compression_config(enabled=enabled, **preset)
+    svc = _svc(
+        llm=FakeLLM(chat_responses=["answer"]),
+        retrieval=FakeRetrieval(chunks),
+        compressor=compressor,
+    )
+    svc._config.compression = global_cfg
+    svc._config.partitions = {"p": partition_cfg}
+    return svc, compressor
+
+
+async def test_compression_is_skipped_when_globally_disabled():
+    svc, compressor = _compressing_svc(enabled=False)
+    await svc._prepare_chat(["p"], {"messages": [{"role": "user", "content": "q"}], "metadata": {}})
+    assert compressor.batches == []
+
+
+async def test_compression_is_skipped_when_the_preset_disables_it():
+    svc, compressor = _compressing_svc(compression_enabled=False)
+    await svc._prepare_chat(["p"], {"messages": [{"role": "user", "content": "q"}], "metadata": {}})
+    assert compressor.batches == []
+
+
+async def test_compression_is_skipped_for_multi_partition_requests():
+    svc, compressor = _compressing_svc()
+    await svc._prepare_chat(["p", "other"], {"messages": [{"role": "user", "content": "q"}], "metadata": {}})
+    assert compressor.batches == []
+
+
+async def test_compression_is_skipped_for_the_all_sentinel():
+    svc, compressor = _compressing_svc()
+    await svc._prepare_chat(["all"], {"messages": [{"role": "user", "content": "q"}], "metadata": {}})
+    assert compressor.batches == []
+
+
+async def test_retrieved_text_is_compressed_into_the_prompt():
+    chunks = [Chunk(id="c1", text="a long original chunk", metadata={"_id": "c1"})]
+    svc, compressor = _compressing_svc(chunks=chunks)
+    result = await svc._prepare_chat(["p"], {"messages": [{"role": "user", "content": "q"}], "metadata": {}})
+    payload = result.payload
+    assert compressor.batches == [["a long original chunk"]]
+    system = payload["messages"][0]["content"]
+    assert "<0>" in system
+    assert "a long original chunk" not in system
+
+
+async def test_sources_keep_their_original_text():
+    """The model reads the compressed text; the user is shown the real source."""
+    chunks = [Chunk(id="c1", text="a long original chunk", metadata={"_id": "c1"})]
+    svc, _ = _compressing_svc(chunks=chunks)
+    result = await svc._prepare_chat(["p"], {"messages": [{"role": "user", "content": "q"}], "metadata": {}})
+    assert [d.page_content for d in result.docs] == ["a long original chunk"]
+
+
+async def test_history_is_untouched_unless_enabled():
+    svc, compressor = _compressing_svc()
+    messages = [{"role": "user", "content": f"turn {i}"} for i in range(4)]
+    await svc._prepare_chat(["p"], {"messages": messages, "metadata": {}})
+    assert all("turn" not in "".join(batch) for batch in compressor.batches)
+
+
+async def test_history_older_than_the_window_is_compressed():
+    svc, compressor = _compressing_svc(compress_history=True, compress_history_keep_recent=2)
+    messages = [{"role": "user", "content": f"turn {i}"} for i in range(4)]
+    payload = (await svc._prepare_chat(["p"], {"messages": messages, "metadata": {}})).payload
+    assert ["turn 0", "turn 1"] in compressor.batches
+    # messages[0] is the prepended system prompt; the user turns follow.
+    assert [m["content"] for m in payload["messages"][1:]] == ["<0>", "<1>", "turn 2", "turn 3"]
+
+
+async def test_history_shorter_than_the_window_is_untouched():
+    svc, compressor = _compressing_svc(compress_history=True, compress_history_keep_recent=5)
+    messages = [{"role": "user", "content": f"turn {i}"} for i in range(3)]
+    payload = (await svc._prepare_chat(["p"], {"messages": messages, "metadata": {}})).payload
+    assert [m["content"] for m in payload["messages"][1:]] == ["turn 0", "turn 1", "turn 2"]

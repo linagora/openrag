@@ -133,6 +133,17 @@ ignore = [
 [tool.ruff.lint.isort]
 known-first-party = ["openrag"]
 
+[project.optional-dependencies]
+compression = ["headroom-ai>=0.37"]
+
+[tool.uv]
+# headroom-ai declares litellm, which requires httpx>=0.28 and so collides with
+# infinity-client's httpx<0.28 pin. Headroom only uses litellm for its model
+# registry and non-core providers, all lazily imported and ImportError-guarded;
+# the compression path we call never touches it (upstream ships without it on
+# Python 3.14 for the same reason). The always-false marker drops it.
+override-dependencies = ["litellm ; python_full_version < '0'"]
+
 [tool.uv.workspace]
 exclude = ["tests/load/prompt_eval"]
 

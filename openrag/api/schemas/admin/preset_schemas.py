@@ -90,6 +90,8 @@ class PresetOptionsResponse(BaseModel):
     parsing_strategies: list[str]
     retrieval_types: list[str]
     reranker_providers: list[str]
+    compression_available: bool = False
+    compression_backend: str = "noop"
 
 
 __all__ = [

@@ -39,6 +39,9 @@ export interface PresetOptionsResponse {
   parsing_strategies?: string[];
   retrieval_types: string[];
   reranker_providers: string[];
+  // Optional: older backends predate context compression.
+  compression_available?: boolean;
+  compression_backend?: string;
 }
 
 const BASE = "/presets";

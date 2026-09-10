@@ -41,6 +41,8 @@ from datetime import datetime
 from enum import Enum
 from typing import TYPE_CHECKING, Any, NamedTuple
 
+from core.compression import Compressor, NoopCompressor
+from core.models.compression import CompressionOptions
 from core.models.preset import resolve_partition_chat_llm
 from core.models.query import Query, SearchQueries
 from core.prompts import (
@@ -61,6 +63,7 @@ from core.utils.web_url import normalize_web_url
 from services.inference.runtime import detect_language, get_llm_semaphore
 
 if TYPE_CHECKING:
+    from core.config.retrieval_pipeline import RetrievalPipelineConfig
     from core.config.root import Settings
     from core.llm.llm import LLM
     from services.orchestrators.prompt_service import PromptService
@@ -133,8 +136,10 @@ class QueryService:
         workspace_service: WorkspaceService,
         prompt_service: PromptService,
         llm_factory: Callable[[str], LLM] | None = None,
+        compressor: Compressor | None = None,
     ) -> None:
         self._retrieval = retrieval_service
+        self._compressor = compressor or NoopCompressor()
         self._llm = llm
         self._llm_factory = llm_factory
         self._web = web_search_service
@@ -200,6 +205,45 @@ class QueryService:
             if explicit:
                 return max(explicit)
         return self._default_chat_history_depth
+
+    def _compression_settings(self, partition: list[str] | None) -> RetrievalPipelineConfig | None:
+        """Retrieval preset driving compression, or ``None`` when it is off.
+
+        Compression needs a single owning partition: the ``"all"`` sentinel and
+        multi-partition requests have no one preset to obey, so they skip it.
+        """
+        if not self._config.compression.enabled or not partition or len(partition) != 1 or "all" in partition:
+            return None
+        cfg = self._config.partitions.get(partition[0])
+        if cfg is None or not cfg.retrieval.compression_enabled:
+            return None
+        return cfg.retrieval
+
+    def _compression_options(self, preset: RetrievalPipelineConfig) -> CompressionOptions:
+        globals_ = self._config.compression
+        return CompressionOptions(
+            target_ratio=preset.compression_target_ratio or globals_.target_ratio,
+            min_chars=globals_.min_chars,
+            timeout_s=globals_.timeout_s,
+        )
+
+    async def _compress_texts(self, texts: list[str], preset: RetrievalPipelineConfig) -> list[str]:
+        result = await self._compressor.compress(texts, options=self._compression_options(preset))
+        if result.ratio:
+            logger.debug(f"Compressed context by {result.ratio:.0%} via '{result.backend}'")
+        return result.texts
+
+    async def _compress_history(self, messages: list[dict], preset: RetrievalPipelineConfig) -> list[dict]:
+        """Compress the content of turns older than the keep-recent window."""
+        older = len(messages) - preset.compress_history_keep_recent
+        indices = [i for i in range(max(0, older)) if isinstance(messages[i].get("content"), str)]
+        if not indices:
+            return messages
+        compressed = await self._compress_texts([messages[i]["content"] for i in indices], preset)
+        out = list(messages)
+        for i, content in zip(indices, compressed, strict=True):
+            out[i] = {**out[i], "content": content}
+        return out
 
     def _resolve_llm(self, partition: list[str] | None) -> LLM:
         """Effective LLM for this request — query generation and answering.
@@ -455,6 +499,7 @@ class QueryService:
         custom_prompt, messages = _split_leading_system_prompt(payload["messages"], messages)
         if not messages:
             raise ValidationError("Request must contain at least one non-system message")
+        compression = self._compression_settings(partition)
         queries = await self.generate_query(messages, llm=llm, partition=partition)
 
         metadata = payload.get("metadata") or {}
@@ -545,8 +590,11 @@ class QueryService:
                 start_index=web_start_index,
                 max_tokens=self._web.max_tokens,
             )
+        texts = [doc.page_content for doc in docs]
+        if compression is not None and texts:
+            texts = await self._compress_texts(texts, compression)
         context, included = format_context(
-            [doc.page_content for doc in docs],
+            texts,
             max_context_tokens=self._max_context_tokens - web_tokens,
             length_function=get_num_tokens(),
         )
@@ -570,6 +618,8 @@ class QueryService:
         tmpl = await self._prompt_service.resolve_prompt(
             prompt_type, names=[self._generation_prompt_name(prompt_type, partition)]
         )
+        if compression is not None and compression.compress_history:
+            messages = await self._compress_history(messages, compression)
         new_messages = prepend_system_prompt(
             messages,
             tmpl,
@@ -627,8 +677,12 @@ class QueryService:
             # Full retrieval set before the token-budget selection below, kept
             # separately for `all_retrieved_sources` (#847).
             retrieved_docs = docs
+            texts = [doc.page_content for doc in docs]
+            compression = self._compression_settings(partition)
+            if compression is not None and texts:
+                texts = await self._compress_texts(texts, compression)
             context, included = format_context(
-                [doc.page_content for doc in docs],
+                texts,
                 max_context_tokens=self._max_context_tokens,
                 length_function=get_num_tokens(),
             )
