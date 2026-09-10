@@ -186,17 +186,20 @@ class WorkspaceService:
         deletion. The catalog row was claimed before vector cleanup started,
         so a concurrent workspace attachment cannot be lost.
         """
+        vector_cleanup_started = False
         try:
             ids = await self._vector_store.query_ids_by_filter(
                 self._collection,
                 {"partition": partition, "file_id": file_id},
             )
             if ids:
+                vector_cleanup_started = True
                 await self._vector_store.delete(ids, self._collection)
             if not await self._workspace_repo.finalize_claimed_file_cleanup(file_id, partition):
                 raise RuntimeError(f"Workspace cleanup claim disappeared for {file_id}")
         except Exception:
-            await self._workspace_repo.release_claimed_file_cleanup(file_id, partition)
+            if not vector_cleanup_started:
+                await self._workspace_repo.release_claimed_file_cleanup(file_id, partition)
             raise
         logger.info("Deleted orphaned file", file_id=file_id, partition=partition)
 

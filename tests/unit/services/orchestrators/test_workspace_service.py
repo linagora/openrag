@@ -165,7 +165,9 @@ async def test_delete_workspace_collects_per_file_failures():
     assert out["orphaned_files_deleted"] == 1
     assert out["orphaned_files_failed"] == ["bad"]
     assert out["kept_files"] == 0
-    assert wrepo.released == [("bad", "p")]
+    # The vector deletion started, so releasing the claim could make the
+    # catalog row attachable even though its vectors may already be gone.
+    assert wrepo.released == []
 
 
 # --------------------------------------------------------------------------- #

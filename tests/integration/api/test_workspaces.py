@@ -1,6 +1,7 @@
 """API integration tests for workspace endpoints."""
 
 import io
+import json
 import uuid
 
 import pytest
@@ -76,16 +77,26 @@ class TestWorkspaceCRUD:
 
 class TestWorkspaceFiles:
     @staticmethod
-    def _upload_file(api_client, partition: str, file_id: str, content: str | None = None):
+    def _upload_file(
+        api_client,
+        partition: str,
+        file_id: str,
+        content: str | None = None,
+        workspace_ids: list[str] | None = None,
+    ):
         file_content = content if content is not None else f"Test content for {file_id}"
         file_obj = io.BytesIO(file_content.encode())
         response = api_client.post(
             f"/indexer/partition/{partition}/file/{file_id}",
             files={"file": (f"{file_id}.txt", file_obj, "text/plain")},
-            data={"metadata": "{}"},
+            data={
+                "metadata": "{}",
+                **({"workspace_ids": json.dumps(workspace_ids)} if workspace_ids is not None else {}),
+            },
         )
         assert response.status_code in [200, 201, 202]
         wait_for_indexing(api_client, response.json())
+        return response
 
     def test_add_files_to_workspace(self, api_client, workspace_partition, workspace_id):
         self._upload_file(api_client, workspace_partition, "file-a")
@@ -181,15 +192,18 @@ class TestWorkspaceFiles:
         """keep_files=true removes the workspace/membership but leaves the file indexed."""
         file_id = f"file-{uuid.uuid4().hex[:8]}"
         probe_content = "Unique keep files probe content"
-        self._upload_file(api_client, workspace_partition, file_id, content=probe_content)
         api_client.post(
             f"/partition/{workspace_partition}/workspaces",
             json={"workspace_id": workspace_id},
         )
-        api_client.post(
-            f"/partition/{workspace_partition}/workspaces/{workspace_id}/files",
-            json={"file_ids": [file_id]},
+        upload_response = self._upload_file(
+            api_client,
+            workspace_partition,
+            file_id,
+            content=probe_content,
+            workspace_ids=[workspace_id],
         )
+        assert upload_response.status_code in [200, 201, 202]
 
         response = api_client.delete(
             f"/partition/{workspace_partition}/workspaces/{workspace_id}",
@@ -199,7 +213,7 @@ class TestWorkspaceFiles:
         body = response.json()
         assert body["status"] == "deleted"
         assert body["orphaned_files_deleted"] == 0
-        assert body["kept_files"] == 0
+        assert body["kept_files"] == 1
 
         # The workspace is gone.
         ws_response = api_client.get(f"/partition/{workspace_partition}/workspaces/{workspace_id}")
