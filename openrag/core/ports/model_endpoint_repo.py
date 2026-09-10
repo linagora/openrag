@@ -35,5 +35,13 @@ class ModelEndpointRepository(ABC):
     async def delete_and_promote_default(self, name: str, model_type: str) -> tuple[str, str | None]:
         """Atomically delete an endpoint and, if it was the default, promote a
         survivor. Decides under a row lock. Returns ``(status, promoted_name)``
-        where status is ``"not_found" | "last" | "ok"``."""
+        where status is ``"not_found" | "last" | "ok"``.
+
+        Raises :class:`ConflictError` if a partition still references an
+        ``embedder`` endpoint; a ``chat_llm`` reference is cleared instead."""
+        ...
+
+    @abstractmethod
+    async def usage_counts(self) -> dict[tuple[str, str], int]:
+        """Return ``{(name, model_type): partition_count}`` for every endpoint."""
         ...

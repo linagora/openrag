@@ -37,6 +37,30 @@ REPLACE_OLD_CHUNK_COLLECTION_ROW_KEY = "_replace_old_chunk_collection"
 REPLACE_OLD_CHUNK_IDS_ROW_KEY = "_replace_old_chunk_ids"
 
 
+def _embedder_provenance(embedder: Embedder, reference: Any) -> dict[str, Any]:
+    """What actually produced this file's vectors.
+
+    ``embedder`` is the endpoint reference the partition carried, kept as given
+    (the ``"default"`` alias included); the model/endpoint pair is what that
+    reference resolved to, and is the only thing that catches an endpoint
+    repointed at a different model without being renamed.
+
+    Every field degrades to ``None`` rather than raising: describing a run that
+    already succeeded must not be able to fail it.
+    """
+    try:
+        dimension = embedder.dimension
+    except Exception:
+        # Raises until the first embed returns, so: no chunks, no dimension.
+        dimension = None
+    return {
+        "embedder": str(reference) if reference else "default",
+        "embedder_model_name": getattr(embedder, "model_name", None),
+        "embedder_endpoint": getattr(embedder, "endpoint", None),
+        "embedder_dimension": dimension,
+    }
+
+
 @dataclass(slots=True, frozen=True)
 class PipelineTimeouts:
     """Per-stage timeout configuration for an indexing pipeline row."""
@@ -212,6 +236,8 @@ class IndexingPipeline:
                     per_chunk_timeout=self.timeouts.embed_per_chunk,
                 ),
             )
+            # After the embed: the dimension is measured, not configured.
+            row["embedder_provenance"] = _embedder_provenance(embedder, row.get("embedder_name"))
             # Re-index (``replace=True``) is insert-before-delete: snapshot the
             # file's existing chunk ids *before* the store stage inserts the new
             # set, then delete exactly that old set after a successful insert.

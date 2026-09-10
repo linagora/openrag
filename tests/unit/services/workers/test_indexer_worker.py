@@ -50,6 +50,31 @@ class FakeEmbedder:
         self.calls.append(texts)
         return [[1.0] for _ in texts]
 
+    # Provenance surface (#762 E) — what gets recorded on the catalog row as
+    # having produced this file's vectors.
+    @property
+    def dimension(self) -> int:
+        return 1
+
+    @property
+    def model_name(self) -> str:
+        return "fake-embed-v1"
+
+    @property
+    def endpoint(self) -> str:
+        return "http://fake:8000/v1"
+
+
+#: What FakeEmbedder above is expected to leave on the stored snapshot. The
+#: reference is the dispatched ``embedder_name`` (absent in these tests, so the
+#: ``default`` alias); the model/endpoint/dimension are what it resolved to.
+_PROVENANCE = {
+    "embedder": "default",
+    "embedder_model_name": "fake-embed-v1",
+    "embedder_endpoint": "http://fake:8000/v1",
+    "embedder_dimension": 1,
+}
+
 
 class FakeVectorStore:
     def __init__(self) -> None:
@@ -404,6 +429,10 @@ async def test_process_file_creates_catalog_record_after_successful_pipeline(tmp
     assert len(repo.add_calls) == 1
     add_call = repo.add_calls[0]
     assert isinstance(add_call.pop("indexed_at"), datetime)
+    # No preset snapshot was dispatched here, but which embedder produced the
+    # vectors is recorded regardless (#762 E). Popped so the comparison below
+    # stays a test about the catalog row's own fields.
+    assert add_call.pop("indexation_config") == _PROVENANCE
     assert add_call == {
         "file_id": "f1",
         "partition": "p",
@@ -466,7 +495,12 @@ async def test_process_file_stores_indexation_config_snapshot_on_new_file(tmp_pa
         require_existing_partition=True,
     )
 
-    assert repo.add_calls[0]["indexation_config"] == indexation_config
+    stored = repo.add_calls[0]["indexation_config"]
+    assert stored.items() >= indexation_config.items()
+    # Merged, not mutated: the dispatched config is read again after the
+    # catalog write and must stay what was dispatched.
+    assert "embedder" not in indexation_config
+    assert stored["embedder"] == "default"
     assert repo.add_calls[0]["require_existing_partition"] is True
 
 
@@ -493,7 +527,9 @@ async def test_process_file_does_not_use_indexation_config_as_partition_policy(t
         indexation_config=indexation_config,
     )
 
-    assert repo.add_calls[0]["indexation_config"] == indexation_config
+    stored = repo.add_calls[0]["indexation_config"]
+    assert stored.items() >= indexation_config.items()
+    assert "embedder" not in indexation_config
     assert repo.add_calls[0]["require_existing_partition"] is False
 
 
@@ -521,6 +557,8 @@ async def test_process_file_updates_catalog_record_on_replace(tmp_path: Path) ->
     assert len(repo.update_calls) == 1
     update_call = repo.update_calls[0]
     assert isinstance(update_call.pop("indexed_at"), datetime)
+    # A re-index re-records provenance: new vectors, new embedder, new record.
+    assert update_call.pop("indexation_config") == _PROVENANCE
     assert update_call == {
         "file_id": "f1",
         "partition": "p",
@@ -630,7 +668,7 @@ async def test_process_file_stores_indexation_config_snapshot_on_replace(tmp_pat
         indexation_config=indexation_config,
     )
 
-    assert repo.update_calls[0]["indexation_config"] == indexation_config
+    assert repo.update_calls[0]["indexation_config"] == {**indexation_config, **_PROVENANCE}
 
 
 @pytest.mark.asyncio

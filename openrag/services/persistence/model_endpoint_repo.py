@@ -10,9 +10,9 @@ from __future__ import annotations
 from collections.abc import Callable
 
 import asyncpg
-from core.config.model_endpoints import ModelEndpointRow
+from core.config.model_endpoints import DEFAULT_ENDPOINT_ALIAS, ModelEndpointRow
 from core.ports.model_endpoint_repo import ModelEndpointRepository
-from core.utils.exceptions import NotFoundError, ValidationError
+from core.utils.exceptions import ConflictError, NotFoundError, ValidationError
 
 # 'is_default' is deliberately excluded: a bare ``UPDATE ... SET is_default = true``
 # cannot clear the previous default in the same statement, so it would leave two
@@ -38,6 +38,43 @@ _INDEXATION_PRESET_KEYS_BY_TYPE = {
     "vlm": ("vlm",),
     "stt": ("stt",),
 }
+
+# A delete has to do something about the partition columns above, and the right
+# something differs by column — the asymmetry is the whole point (#762).
+#
+# BLOCK: `embedder` names the model a partition's vectors were built with.
+# Clearing it (the ``_clear_preset_references`` shape) would silently repoint an
+# indexed partition at a different embedding model, which is exactly the
+# corruption this guards against — there is no safe fallback, so the delete is
+# refused and the operator reassigns first.
+_BLOCKING_PARTITION_COLUMN_BY_TYPE = {"embedder": "embedder"}
+# CLEAR: `chat_llm` is resolved per request and falls back to the default LLM
+# when unset, so clearing it restores exactly the behaviour a dangling name
+# would have limped along with anyway — minus the dead name in the UI.
+_CLEARABLE_PARTITION_COLUMN_BY_TYPE = {"llm": "chat_llm"}
+
+# Partitions whose *resolved* embedder is this endpoint: the ones naming it
+# outright, plus — when it is the row being deleted and that row is the default
+# — the ones riding the `default` alias, which promotion would silently move to
+# another model. Split so the error can say which is which.
+_EMBEDDER_USAGE_SQL = """
+    SELECT
+        COUNT(*) FILTER (WHERE embedder = $1)::int AS direct,
+        COUNT(*) FILTER (WHERE $2::boolean AND embedder = $3)::int AS via_default
+    FROM partitions
+    """
+# Same resolution, for every endpoint at once (powers ``used_by_partitions`` on
+# the list view). Types with no partition column — reranker, vlm, stt — are
+# referenced through presets rather than partitions and correctly count 0.
+_PARTITION_USAGE_COUNTS_SQL = """
+    SELECT e.name, e.model_type, COUNT(p.partition)::int AS cnt
+    FROM model_endpoints e
+    LEFT JOIN partitions p ON (
+        (e.model_type = 'embedder' AND (p.embedder = e.name OR (e.is_default AND p.embedder = $1)))
+        OR (e.model_type = 'llm' AND (p.chat_llm = e.name OR (e.is_default AND p.chat_llm = $1)))
+    )
+    GROUP BY e.name, e.model_type
+    """
 
 
 class PgModelEndpointRepository(ModelEndpointRepository):
@@ -303,6 +340,47 @@ class PgModelEndpointRepository(ModelEndpointRepository):
                     name,
                 )
 
+    async def _settle_partition_references(
+        self,
+        conn: asyncpg.Connection,
+        name: str,
+        model_type: str,
+        *,
+        was_default: bool,
+    ) -> None:
+        """Refuse or clear the ``partitions`` references to a doomed endpoint.
+
+        Runs inside ``delete_and_promote_default``'s transaction, after it has
+        locked ``partitions``, so the count it refuses on cannot be raced by a
+        concurrent assign (which needs a conflicting lock on the same table).
+        """
+        if model_type in _BLOCKING_PARTITION_COLUMN_BY_TYPE:
+            row = await conn.fetchrow(_EMBEDDER_USAGE_SQL, name, was_default, DEFAULT_ENDPOINT_ALIAS)
+            direct, via_default = row["direct"], row["via_default"]
+            if direct or via_default:
+                raise ConflictError(_embedder_in_use_message(name, direct, via_default))
+            return
+
+        column = _CLEARABLE_PARTITION_COLUMN_BY_TYPE.get(model_type)
+        if column is not None:
+            # Only the literal name: a partition on the `default` alias is
+            # asking for whatever is default, which promotion keeps true.
+            await conn.execute(
+                f"UPDATE partitions SET {column} = NULL, updated_at = now() WHERE {column} = $1",
+                name,
+            )
+
+    async def usage_counts(self) -> dict[tuple[str, str], int]:
+        """Return ``{(name, model_type): partition_count}`` in one aggregate query.
+
+        Lets the list view annotate every endpoint with a real ``used_by_partitions``
+        instead of the static "partitions referencing it will break" the delete
+        dialog used to guess with. Counts resolved references, so the default
+        endpoint also carries the partitions riding the ``default`` alias.
+        """
+        rows = await self.pool.fetch(_PARTITION_USAGE_COUNTS_SQL, DEFAULT_ENDPOINT_ALIAS)
+        return {(r["name"], r["model_type"]): r["cnt"] for r in rows}
+
     async def delete_and_promote_default(self, name: str, model_type: str) -> tuple[str, str | None]:
         """Delete an endpoint and, if it was the default, promote a survivor to
         default — all atomically and decided under a row lock.
@@ -313,6 +391,18 @@ class PgModelEndpointRepository(ModelEndpointRepository):
         default. Returns ``(status, promoted_name)`` where ``status`` is
         ``"not_found" | "last" | "ok"`` and ``promoted_name`` is set only when a
         deleted default was replaced.
+
+        Partition references are settled here too, differently per column (#762):
+        an ``embedder`` still referenced refuses the delete with
+        :class:`ConflictError` (409), while a ``chat_llm`` reference is cleared
+        back to its request-time default. See
+        ``_BLOCKING_PARTITION_COLUMN_BY_TYPE`` for why the two differ.
+
+        ``partitions`` is locked first — before the ``model_endpoints`` rows —
+        because ``rename()`` and :meth:`PgPresetRepository.delete` both take it
+        in that order, and ``PgPartitionRepository.update_partition`` writes
+        ``partitions`` before reading ``model_endpoints``. Taking the row lock
+        first would invert that against every one of them and deadlock.
         """
         # Lock every row of this model_type (FOR UPDATE) so concurrent deletes of
         # the same type serialize, then make the last-endpoint guard and survivor
@@ -324,6 +414,7 @@ class PgModelEndpointRepository(ModelEndpointRepository):
         # deleted row was the default and a survivor was promoted.
         async with self.pool.acquire() as conn:
             async with conn.transaction():
+                await conn.execute("LOCK TABLE partitions IN SHARE MODE")
                 rows = await conn.fetch(
                     "SELECT name, is_default FROM model_endpoints WHERE model_type = $1 ORDER BY name FOR UPDATE",
                     model_type,
@@ -334,6 +425,7 @@ class PgModelEndpointRepository(ModelEndpointRepository):
                 if len(names) <= 1:
                     return ("last", None)
                 was_default = next(r["is_default"] for r in rows if r["name"] == name)
+                await self._settle_partition_references(conn, name, model_type, was_default=was_default)
                 await self._clear_preset_references(conn, name, model_type)
                 await conn.execute(
                     "DELETE FROM model_endpoints WHERE name = $1 AND model_type = $2",
@@ -354,6 +446,18 @@ class PgModelEndpointRepository(ModelEndpointRepository):
                         model_type,
                     )
                 return ("ok", promoted)
+
+
+def _embedder_in_use_message(name: str, direct: int, via_default: int) -> str:
+    """Explain *which* partitions block the delete, so the fix is actionable."""
+    parts = []
+    if direct:
+        parts.append(f"{direct} partition(s) name it")
+    if via_default:
+        parts.append(
+            f"{via_default} follow the '{DEFAULT_ENDPOINT_ALIAS}' alias and would silently move to another model"
+        )
+    return f"Embedder '{name}' is still in use: {', and '.join(parts)}. Reassign them before deleting."
 
 
 __all__ = ["PgModelEndpointRepository"]

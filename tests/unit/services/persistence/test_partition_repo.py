@@ -333,16 +333,52 @@ async def test_update_partition_clearing_chat_llm_skips_the_guard():
 
 
 @pytest.mark.asyncio
-async def test_update_partition_embedder_change_skips_the_guard():
-    """embedder carries no assignment-time validation today, so assigning it
-    alone must not pay for a transaction or a model_endpoints lookup."""
+async def test_update_partition_rolls_back_when_embedder_endpoint_vanished():
+    """An embedder assignment takes the same transactional guard as chat_llm —
+    and needs it more, since a partition pointing at a nonexistent embedder
+    fails every upload and every query rather than falling back."""
     from services.persistence.partition_repo import PgPartitionRepository
 
     conn = _UpdateFakeConn(model_endpoint_exists=False)
     repo = PgPartitionRepository(pool_getter=lambda: conn)
 
+    with pytest.raises(ValidationError) as exc:
+        await repo.update_partition("p1", embedder="some-embedder")
+
+    assert exc.value.code == "MODEL_ENDPOINT_NOT_FOUND"
+    assert conn.transactions == 1
+    queries = [q for q, _ in conn.operations]
+    update_i = next(i for i, q in enumerate(queries) if "UPDATE partitions" in q)
+    check_i = next(i for i, q in enumerate(queries) if "FROM model_endpoints" in q)
+    assert update_i < check_i
+
+
+@pytest.mark.asyncio
+async def test_update_partition_commits_when_embedder_endpoint_exists():
+    from services.persistence.partition_repo import PgPartitionRepository
+
+    conn = _UpdateFakeConn(model_endpoint_exists=True)
+    repo = PgPartitionRepository(pool_getter=lambda: conn)
+
     result = await repo.update_partition("p1", embedder="some-embedder")
 
     assert result["embedder"] == "some-embedder"
-    assert conn.transactions == 0
-    assert not any("FROM model_endpoints" in q for q, _ in conn.operations)
+    assert conn.transactions == 1
+    checks = [(q, params) for q, params in conn.operations if "FROM model_endpoints" in q]
+    assert checks and checks[0][1] == ("some-embedder", "embedder")
+
+
+@pytest.mark.asyncio
+async def test_update_partition_embedder_check_resolves_the_default_alias():
+    """`default` is a virtual name — load_all files the is_default row under it,
+    so no model_endpoints row is called that. The guard has to match on the flag
+    or every partition create (which assigns embedder='default') would 422."""
+    from services.persistence.partition_repo import PgPartitionRepository
+
+    conn = _UpdateFakeConn(model_endpoint_exists=True)
+    repo = PgPartitionRepository(pool_getter=lambda: conn)
+
+    await repo.update_partition("p1", embedder="default")
+
+    check = next(q for q, _ in conn.operations if "FROM model_endpoints" in q)
+    assert "is_default" in check

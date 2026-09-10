@@ -47,11 +47,17 @@ import {
   removePartitionMember,
   updatePartitionMemberRole,
 } from "@/lib/api/partitions";
-import type { PartitionConfig, PartitionMemberCandidate, PartitionRole } from "@/lib/api/partitions";
+import type {
+  IndexedEmbedderCount,
+  PartitionConfig,
+  PartitionMemberCandidate,
+  PartitionRole,
+} from "@/lib/api/partitions";
 import { listPresets } from "@/lib/api/presets";
 import { listModelEndpoints, validateStoredModelEndpoint, resolveEmbedderName } from "@/lib/api/models";
 import { listAllPrompts } from "@/lib/api/prompts";
 import type { PromptResponse } from "@/lib/api/prompts";
+import type { ModelEndpointResponse } from "@/lib/api/models";
 import {
   PROMPT_DEFAULT_OPTION,
   PROMPT_GROUPS,
@@ -76,6 +82,79 @@ import { describePartitionMember } from "./partition-member";
 const GENERATION_PROMPT_TYPES = PROMPT_GROUPS.find((g) => g.name === "Final Answer")!.types;
 
 // --- General Tab ---
+
+/** What a partition's files were *actually* indexed with, and whether that
+ *  still matches the embedder queries use.
+ */
+function EmbedderProvenance({
+  configured,
+  indexed,
+  endpoints,
+}: {
+  configured: string;
+  indexed: IndexedEmbedderCount[] | undefined;
+  endpoints: ModelEndpointResponse[] | undefined;
+}) {
+  const rows = indexed ?? [];
+  if (rows.length === 0) return null;
+
+  // The stored reference may be the "default" alias; compare on what it
+  // resolves to, or a partition on the alias would look drifted from itself.
+  const current = resolveEmbedderName(configured, endpoints);
+  const label = (r: IndexedEmbedderCount) =>
+    r.embedder === null ? "unrecorded" : resolveEmbedderName(r.embedder, endpoints);
+  // Rows with no record predate provenance: unknown, not known-bad. Alerting
+  // on those alone would shout at every pre-upgrade partition.
+  const drifted = rows.filter((r) => r.embedder !== null && label(r) !== current);
+
+  const files = (n: number) => `${n} file${n === 1 ? "" : "s"}`;
+  const total = drifted.reduce((sum, r) => sum + r.file_count, 0);
+  const hasDrift = drifted.length > 0;
+
+  // Shown either way: a panel that only appears during an incident is one
+  // nobody knows to look for. Drift escalates it rather than adding a new one.
+  return (
+    <Alert
+      className={
+        hasDrift
+          ? "mt-6 bg-amber-50 border-amber-200 dark:bg-amber-950/30 dark:border-amber-900/60"
+          : "mt-6"
+      }
+    >
+      <Info className="h-4 w-4" />
+      <AlertTitle>
+        {hasDrift ? `${files(total)} were indexed with a different embedder` : "Indexed with"}
+      </AlertTitle>
+      <AlertDescription>
+        {hasDrift && (
+          <p className="mb-2">
+            Queries embed with <span className="font-medium">{current}</span>, so these files are
+            searched in a vector space they were not built in. Re-index them to bring them back.
+          </p>
+        )}
+        <ul className="space-y-1">
+          {rows.map((r) => (
+            <li key={`${r.embedder ?? "unrecorded"}-${r.model_name ?? ""}`} className="text-sm">
+              <span className="font-mono">{label(r)}</span>
+              {r.model_name && r.model_name !== label(r) && (
+                <span className="text-muted-foreground"> ({r.model_name})</span>
+              )}
+              {r.dimension != null && <span className="text-muted-foreground"> · {r.dimension}-d</span>}
+              <span className="text-muted-foreground"> — {files(r.file_count)}</span>
+              {label(r) === current && <span className="text-muted-foreground"> · current</span>}
+            </li>
+          ))}
+        </ul>
+        {rows.some((r) => r.embedder === null) && (
+          <p className="mt-2 text-xs text-muted-foreground">
+            &ldquo;unrecorded&rdquo; means indexed before OpenRag tracked which embedder ran &mdash; not
+            necessarily drifted.
+          </p>
+        )}
+      </AlertDescription>
+    </Alert>
+  );
+}
 
 function GeneralTab({ partition }: { partition: PartitionConfig }) {
   const queryClient = useQueryClient();
@@ -261,7 +340,11 @@ function GeneralTab({ partition }: { partition: PartitionConfig }) {
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-6">
             <div className="space-y-2">
               <Label className="text-muted-foreground">Dimension</Label>
-              <p className="text-sm font-medium pt-1">{partition.dimension}</p>
+              <p className="text-sm font-medium pt-1">
+                {partition.dimension ?? (
+                  <span className="text-muted-foreground font-normal">Not indexed yet</span>
+                )}
+              </p>
             </div>
             <div className="space-y-2">
               <Label className="text-muted-foreground">Embedder</Label>
@@ -274,6 +357,11 @@ function GeneralTab({ partition }: { partition: PartitionConfig }) {
               <p className="text-sm font-medium pt-1">{partition.document_count}</p>
             </div>
           </div>
+          <EmbedderProvenance
+            configured={partition.embedder}
+            indexed={partition.indexed_embedders}
+            endpoints={embedderEndpoints}
+          />
           <div className="pt-2 grid grid-cols-2 lg:grid-cols-4 gap-6">
             <div className="space-y-2">
               <Label>Indexation Preset</Label>

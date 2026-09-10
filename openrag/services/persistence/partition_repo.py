@@ -36,15 +36,25 @@ _PRESET_COLUMN_TYPES = {
     "retrieval_preset": "retrieval",
 }
 # Partition columns that reference a model_endpoints row, mapped to the
-# model_type they point at. Only `chat_llm` is assignment-validated today
-# (PartitionService._validate_chat_llm_ref checks the in-memory catalog);
-# `embedder` carries no such check, so it is deliberately not listed here.
-# Assigning chat_llm must be guarded against a concurrent rename the same way
-# a preset assignment is guarded against a concurrent preset delete — see
-# update_partition and PgModelEndpointRepository.rename.
+# model_type they point at. Both are assignment-validated in
+# PartitionService (_validate_chat_llm_ref / _validate_embedder_ref check the
+# in-memory catalog) and re-checked here against the DB inside the write's
+# transaction. Assigning either must be guarded against a concurrent rename the
+# same way a preset assignment is guarded against a concurrent preset delete —
+# see update_partition and PgModelEndpointRepository.rename.
 _MODEL_ENDPOINT_COLUMN_TYPES = {
     "chat_llm": "llm",
+    "embedder": "embedder",
 }
+# `default` is a virtual name: ModelEndpointService.load_all files the
+# is_default=True row under it so a partition can reference "the default
+# embedder" without naming it. No model_endpoints row is called that, so the
+# existence check has to resolve the alias rather than match on name alone.
+_DEFAULT_ENDPOINT_ALIAS = "default"
+_ENDPOINT_EXISTS_SQL = (
+    "SELECT 1 FROM model_endpoints "
+    "WHERE model_type = $2 AND (name = $1 OR ($1 = '" + _DEFAULT_ENDPOINT_ALIAS + "' AND is_default))"
+)
 _PARTITION_UPDATE_COLUMNS = frozenset(
     {
         "description",
@@ -326,9 +336,10 @@ class PgPartitionRepository(PartitionRepository):
           from, which is what a validate-in-memory-then-blind-UPDATE sequence
           could otherwise do.
 
-        ``embedder`` carries no such check — it has no assignment-time
-        validation at all today (see ``_MODEL_ENDPOINT_COLUMN_TYPES``), so
-        there is nothing here for a concurrent rename to race against.
+        ``embedder`` takes the same guard as ``chat_llm``, and needs it more:
+        a ``chat_llm`` that goes stale falls back to the default LLM at request
+        time, whereas an ``embedder`` that names nothing is a hard failure on
+        every upload and every query in that partition.
         """
         updates = _partition_updates(fields)
         if updates:
@@ -383,7 +394,7 @@ class PgPartitionRepository(PartitionRepository):
                     )
             for col, model_type in endpoint_refs.items():
                 exists = await conn.fetchval(
-                    "SELECT 1 FROM model_endpoints WHERE name = $1 AND model_type = $2",
+                    _ENDPOINT_EXISTS_SQL,
                     updates[col],
                     model_type,
                 )
@@ -434,6 +445,11 @@ class PgPartitionRepository(PartitionRepository):
             "embedder": row["embedder"],
             "indexation_preset": row["indexation_preset"],
             "retrieval_preset": row["retrieval_preset"],
+            # Never written by any code path — it sits at its server_default of
+            # 1024 for the life of the row. Kept as the hook a per-partition
+            # collection topology would need, but the API reports the live
+            # collection's dimension instead (see
+            # PartitionService._live_vector_dimension, #762 G).
             "dimension": row["dimension"],
             "collection_name": row["collection_name"],
             "chat_history_depth": row["chat_history_depth"],

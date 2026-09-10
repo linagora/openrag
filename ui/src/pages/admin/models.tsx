@@ -78,6 +78,23 @@ type RevealedApiKey = {
 
 const normalizeEndpointUrl = (value: string) => value.trim().replace(/\/+$/, "");
 
+// What deleting this endpoint actually does to the partitions pointing at it.
+// The two answers differ (#762): an embedder names the model a partition's
+// vectors were built with, so the server refuses; a chat LLM is resolved per
+// request and falls back to the default, so the delete just resets them.
+function describeDelete(ep: ModelEndpointResponse): string {
+  const n = ep.used_by_partitions ?? 0;
+  if (n === 0) return `This will permanently delete "${ep.name}".`;
+  const partitions = `${n} partition${n === 1 ? "" : "s"}`;
+  if (ep.model_type === "embedder") {
+    return `"${ep.name}" is the embedder for ${partitions}. Deleting it would break every query and upload on them, so the server will refuse — reassign those partitions to another embedder first.`;
+  }
+  if (ep.model_type === "llm") {
+    return `"${ep.name}" is the chat LLM for ${partitions}. Deleting it resets them to the default LLM.`;
+  }
+  return `This will permanently delete "${ep.name}". ${partitions} reference it.`;
+}
+
 // Mirrors the backend's `_NAME_PATTERN` allowlist (api/schemas/admin/model_endpoint_schemas.py):
 // `name` is a single path segment in every single-endpoint route. An allowlist, not a
 // denylist — `/` splits across path segments, and `.`/`..` are RFC 3986 dot-segments that
@@ -216,6 +233,7 @@ export default function ModelsPage() {
                   .filter((ep) => ep.model_type === type)
                   .map((ep) => {
                     const isDefault = ep.is_default;
+                    const usedBy = ep.used_by_partitions ?? 0;
                     return (
                       <Card key={`${ep.model_type}-${ep.name}`}>
                         <CardHeader className="pb-3">
@@ -224,6 +242,14 @@ export default function ModelsPage() {
                               {ep.name}
                             </CardTitle>
                             <div className="flex items-center gap-1.5 shrink-0">
+                              {usedBy > 0 && (
+                                <Badge
+                                  variant="outline"
+                                  className="shrink-0 text-xs bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-950/30 dark:text-amber-100 dark:border-amber-900/60"
+                                >
+                                  {`used by ${usedBy} partition${usedBy === 1 ? "" : "s"}`}
+                                </Badge>
+                              )}
                               {isDefault && (
                                 <Badge className="shrink-0 bg-green-600 text-xs hover:bg-green-700">Default</Badge>
                               )}
@@ -269,7 +295,7 @@ export default function ModelsPage() {
                             </Button>
                             <ConfirmDialog
                               title="Delete endpoint?"
-                              description={`This will delete "${ep.name}". Partitions referencing it will break.`}
+                              description={describeDelete(ep)}
                               onConfirm={() => deleteMut.mutate({ type: ep.model_type, name: ep.name })}
                             >
                               <Button size="sm" variant="outline" className="text-destructive">

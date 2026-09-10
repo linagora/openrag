@@ -665,6 +665,39 @@ class PgDocumentRepository(DocumentRepository):
             return {}
         return {"files": [self._row_to_dict(r) for r in rows]}
 
+    async def count_files_by_embedder(self, partition: str) -> list[dict]:
+        """How many files in *partition* were indexed with each embedder.
+
+        One aggregate over ``files.indexation_config``, the per-file snapshot
+        the indexing run already writes. Files indexed before provenance
+        existed have no keys there and come back as ``None`` — unknown, not
+        assumed to match the partition's current setting.
+
+        Ordered most-files-first, so a drifted remainder reads as the exception.
+        """
+        rows = await self.pool.fetch(
+            """
+            SELECT indexation_config->>'embedder'            AS embedder,
+                   indexation_config->>'embedder_model_name' AS model_name,
+                   (indexation_config->>'embedder_dimension')::int AS dimension,
+                   COUNT(*)::int                             AS file_count
+            FROM files
+            WHERE partition_name = $1
+            GROUP BY 1, 2, 3
+            ORDER BY file_count DESC, embedder NULLS LAST
+            """,
+            partition,
+        )
+        return [
+            {
+                "embedder": r["embedder"],
+                "model_name": r["model_name"],
+                "dimension": r["dimension"],
+                "file_count": r["file_count"],
+            }
+            for r in rows
+        ]
+
     async def get_files_by_relationship(
         self,
         partition: str,
@@ -773,12 +806,17 @@ class PgDocumentRepository(DocumentRepository):
         """
         metadata = row["file_metadata"] or {}
         indexed_at = row["indexed_at"]
+        indexation_config = row.get("indexation_config") if hasattr(row, "get") else None
         return {
             "partition": row["partition_name"],
             "file_id": row["file_id"],
             "relationship_id": row["relationship_id"],
             "parent_id": row["parent_id"],
             **metadata,
+            # Just the recorded embedder, not the whole config snapshot: a file
+            # list flags rows that disagree with the current setting, it does
+            # not need every chunking knob per row.
+            "embedder": (indexation_config or {}).get("embedder") if isinstance(indexation_config, dict) else None,
             "content_sha256": row.get("content_sha256"),
             # Authoritative system insert time, materialized on the row. Placed
             # after the spread so the column wins over any ``indexed_at`` the

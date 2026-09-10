@@ -124,6 +124,7 @@ class IndexerWorker:
                 row.update(resolved_prompts)
             row = await self._pipeline.run(row)
             indexed_at = row.get("indexed_at")
+            catalog_config = _with_embedder_provenance(indexation_config, row.get("embedder_provenance"))
 
             if self._document_repo is not None:
                 wrote_catalog = await _write_catalog_record(
@@ -132,7 +133,7 @@ class IndexerWorker:
                     partition=partition,
                     user=user,
                     replace=replace,
-                    indexation_config=indexation_config,
+                    indexation_config=catalog_config,
                     indexed_at=indexed_at,
                     require_existing_partition=require_existing_partition,
                 )
@@ -199,6 +200,21 @@ class IndexerWorker:
         # here: cleanup must also cover failures that happen *before* this method
         # runs (catalog/registry init, the SERIALIZING state update). See
         # ``delete_uploaded_file`` and ``IndexerWorkerActor.process_file``.
+
+
+def _with_embedder_provenance(
+    indexation_config: dict[str, Any] | None,
+    provenance: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Fold the run's embedder provenance into the stored config snapshot.
+
+    Copies rather than mutates: the dispatched ``indexation_config`` is still
+    read after this point (topic tags, the active-config contextvar) and must
+    stay the config that was dispatched. A ``None`` config still gets a record.
+    """
+    if not provenance:
+        return indexation_config
+    return {**(indexation_config or {}), **provenance}
 
 
 async def _write_catalog_record(

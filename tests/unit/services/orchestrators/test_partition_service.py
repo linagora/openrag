@@ -498,6 +498,7 @@ async def test_create_partition_with_config_inside_indexing_admission_keeps_db_w
     config = SimpleNamespace(partitions={})
     svc = _svc(prepo=prepo, config=config)
     svc._validate_preset_refs = lambda row: None
+    svc._validate_embedder_ref = lambda name: None
     svc.resolve_partition_row = lambda row: f"resolved-{row['partition']}"
 
     async with svc.indexing_admission("p1") as existed:
