@@ -77,10 +77,14 @@ async def test_keep_files_preserves_upload_after_later_workspace_deletion(postgr
     result = await svc.delete_workspace("p", "ws1", keep_files=True)
     assert result["kept_files"] == (0 if shared else 1)
     await store.workspace_repo.add_files_to_workspace("ws2", ["kept"])
-    await svc.delete_workspace("p", "ws2")
+    final_result = await svc.delete_workspace("p", "ws2")
 
-    assert await store.document_repo.file_exists_in_partition("kept", "p")
-    vectors.delete.assert_not_awaited()
+    assert final_result["orphaned_files_deleted"] == (1 if shared else 0)
+    assert await store.document_repo.file_exists_in_partition("kept", "p") is not shared
+    if shared:
+        vectors.delete.assert_awaited_once_with(["kept-chunk"], "test")
+    else:
+        vectors.delete.assert_not_awaited()
 
 
 @pytest.mark.parametrize("workspace_owned", [False, True])
@@ -122,31 +126,58 @@ async def test_workspace_attachment_cannot_race_orphan_cleanup(postgres_store):
     await setup_workspace(store)
     await store.workspace_repo.create_workspace(Workspace(workspace_id="ws2", partition="p"))
     await upload(store, "exclusive", workspace_ids=["ws1"])
-    cleanup_started = asyncio.Event()
-    allow_cleanup = asyncio.Event()
-    vectors = AsyncMock()
+    attachment = None
+    async with store.pool.acquire() as conn:
+        tx = conn.transaction()
+        await tx.start()
+        await conn.fetch(
+            """
+            SELECT f.id
+            FROM workspace_files wf
+            JOIN files f ON f.id = wf.file_id
+            WHERE wf.workspace_id = 'ws1' AND f.file_id = 'exclusive'
+            FOR UPDATE OF f
+            """,
+        )
+        await conn.execute(
+            """
+            UPDATE files
+            SET workspace_cleanup_claimed = TRUE,
+                workspace_cleanup_claimed_at = NOW()
+            WHERE file_id = 'exclusive'
+            """,
+        )
 
-    async def query_ids(collection, filters):
-        cleanup_started.set()
-        await allow_cleanup.wait()
-        return ["exclusive-chunk"]
+        attachment = asyncio.create_task(
+            store.workspace_repo.add_files_to_workspace("ws2", ["exclusive"]),
+        )
+        await asyncio.sleep(0.05)
+        assert not attachment.done()
 
-    vectors.query_ids_by_filter.side_effect = query_ids
-    svc = WorkspaceService(
-        workspace_repo=store.workspace_repo,
-        document_repo=store.document_repo,
-        vector_store=vectors,
-        collection="test",
+        await conn.execute("DELETE FROM workspaces WHERE workspace_id = 'ws1'")
+        await tx.commit()
+
+    assert await attachment == ["exclusive"]
+    assert await store.document_repo.file_exists_in_partition("exclusive", "p")
+
+
+async def test_stale_cleanup_claim_can_be_attached_again(postgres_store):
+    store = postgres_store
+    await setup_workspace(store)
+    await upload(store, "stale", workspace_ids=["ws1"])
+    await store.pool.execute(
+        """
+        UPDATE files
+        SET workspace_cleanup_claimed = TRUE,
+            workspace_cleanup_claimed_at = NOW() - INTERVAL '2 hours'
+        WHERE file_id = 'stale'
+        """,
     )
 
-    deletion = asyncio.create_task(svc.delete_workspace("p", "ws1"))
-    await cleanup_started.wait()
-
-    assert await store.workspace_repo.add_files_to_workspace("ws2", ["exclusive"]) == ["exclusive"]
-
-    allow_cleanup.set()
-    assert (await deletion)["orphaned_files_deleted"] == 1
-    assert not await store.document_repo.file_exists_in_partition("exclusive", "p")
+    assert await store.workspace_repo.add_files_to_workspace("ws1", ["stale"]) == []
+    assert await store.pool.fetchval(
+        "SELECT workspace_cleanup_claimed FROM files WHERE file_id = 'stale'",
+    ) is False
 
 
 async def test_migration_preserves_preexisting_workspace_files(postgres_store, test_rdb_config):

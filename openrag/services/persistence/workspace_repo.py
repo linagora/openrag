@@ -109,9 +109,18 @@ class PgWorkspaceRepository(WorkspaceRepository):
                     )
                     await conn.execute(
                         """
-                        UPDATE files SET independently_indexed = TRUE
-                        WHERE id IN (
-                            SELECT file_id FROM workspace_files WHERE workspace_id = $1
+                        UPDATE files f
+                        SET independently_indexed = TRUE
+                        WHERE f.id IN (
+                            SELECT wf.file_id
+                            FROM workspace_files wf
+                            WHERE wf.workspace_id = $1
+                              AND NOT EXISTS (
+                                  SELECT 1
+                                  FROM workspace_files other_wf
+                                  WHERE other_wf.file_id = wf.file_id
+                                    AND other_wf.workspace_id <> $1
+                              )
                         )
                         """,
                         workspace_id,
@@ -125,7 +134,11 @@ class PgWorkspaceRepository(WorkspaceRepository):
                             JOIN files f ON f.id = wf.file_id
                             WHERE wf.workspace_id = $1
                               AND NOT f.independently_indexed
-                              AND NOT f.workspace_cleanup_claimed
+                              AND (
+                                  NOT f.workspace_cleanup_claimed
+                                  OR f.workspace_cleanup_claimed_at IS NULL
+                                  OR f.workspace_cleanup_claimed_at < NOW() - INTERVAL '1 hour'
+                              )
                               AND wf.file_id NOT IN (
                                   SELECT file_id FROM workspace_files
                                   WHERE workspace_id <> $1
@@ -133,7 +146,8 @@ class PgWorkspaceRepository(WorkspaceRepository):
                             FOR UPDATE OF f
                         )
                         UPDATE files f
-                        SET workspace_cleanup_claimed = TRUE
+                        SET workspace_cleanup_claimed = TRUE,
+                            workspace_cleanup_claimed_at = NOW()
                         FROM candidates
                         WHERE f.id = candidates.id
                         RETURNING candidates.file_id
@@ -173,7 +187,12 @@ class PgWorkspaceRepository(WorkspaceRepository):
                     SELECT file_id, id FROM files
                     WHERE file_id = ANY($1::text[])
                       AND partition_name = $2
-                      AND NOT workspace_cleanup_claimed
+                      AND (
+                          NOT workspace_cleanup_claimed
+                          OR workspace_cleanup_claimed_at IS NULL
+                          OR workspace_cleanup_claimed_at < NOW() - INTERVAL '1 hour'
+                      )
+                    FOR UPDATE
                     """,
                     file_ids,
                     partition,
@@ -181,6 +200,23 @@ class PgWorkspaceRepository(WorkspaceRepository):
                 id_map = {r["file_id"]: r["id"] for r in resolved}
                 missing = [fid for fid in file_ids if fid not in id_map]
                 if id_map:
+                    # A claim without a recent timestamp is recoverable. The
+                    # row lock held by the SELECT above makes clearing it
+                    # serialize with the cleanup worker before attachment.
+                    await conn.execute(
+                        """
+                        UPDATE files
+                        SET workspace_cleanup_claimed = FALSE,
+                            workspace_cleanup_claimed_at = NULL
+                        WHERE id = ANY($1::int[])
+                          AND workspace_cleanup_claimed
+                          AND (
+                              workspace_cleanup_claimed_at IS NULL
+                              OR workspace_cleanup_claimed_at < NOW() - INTERVAL '1 hour'
+                          )
+                        """,
+                        list(id_map.values()),
+                    )
                     # Insert each row separately with ON CONFLICT DO NOTHING.
                     # asyncpg has no native bulk-with-conflict; the row count
                     # is bounded by file_ids so the loop is fine here.
@@ -219,7 +255,8 @@ class PgWorkspaceRepository(WorkspaceRepository):
         await self.pool.execute(
             """
             UPDATE files
-            SET workspace_cleanup_claimed = FALSE
+            SET workspace_cleanup_claimed = FALSE,
+                workspace_cleanup_claimed_at = NULL
             WHERE file_id = $1
               AND partition_name = $2
               AND workspace_cleanup_claimed
