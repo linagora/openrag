@@ -10,6 +10,14 @@ from pydantic import BaseModel, Field
 
 ModelEndpointType = Literal["embedder", "reranker", "llm", "vlm", "stt"]
 
+# Virtual endpoint name. No ``model_endpoints`` row carries it: it is the key
+# ``ModelEndpointService.load_all`` files the ``is_default=True`` row under, so
+# a partition or preset can reference "whichever endpoint is default" without
+# naming it. Anything that resolves a stored reference against the DB has to
+# account for it — see ``PgPartitionRepository`` (assignment checks) and
+# ``PgModelEndpointRepository`` (usage counts, delete guard).
+DEFAULT_ENDPOINT_ALIAS = "default"
+
 
 class ModelEndpointConfig(BaseModel):
     """A single registered inference endpoint.

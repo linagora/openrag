@@ -415,3 +415,66 @@ describe("ModelsPage STT validation", () => {
     expect(within(dialog).getByText("Endpoint B rejected its stored credential.")).toBeTruthy();
   });
 });
+
+describe("ModelsPage delete warning (#762)", () => {
+  const embedder = (used_by_partitions: number) => ({
+    name: "jina",
+    model_type: "embedder" as const,
+    endpoint: "http://vllm:8000/v1",
+    model_name: "jina-embeddings-v3",
+    batch_size: 32,
+    timeout: 60,
+    extra: {},
+    has_api_key: false,
+    is_default: true,
+    used_by_partitions,
+    created_at: "2026-01-01T00:00:00+00:00",
+    updated_at: "2026-01-01T00:00:00+00:00",
+  });
+
+  beforeEach(() => {
+    listModelEndpointsMock.mockReset().mockResolvedValue([]);
+  });
+
+  it("shows the real partition count instead of a static warning", async () => {
+    listModelEndpointsMock.mockResolvedValue([embedder(3)]);
+    const user = userEvent.setup();
+    renderPage();
+
+    await screen.findByText("used by 3 partitions");
+    await user.click(screen.getByRole("button", { name: /Delete/ }));
+
+    const dialog = await screen.findByRole("alertdialog");
+    expect(within(dialog).getByText(/is the embedder for 3 partitions/)).toBeTruthy();
+    expect(within(dialog).getByText(/the server will refuse/)).toBeTruthy();
+  });
+
+  it("says an unused endpoint deletes cleanly, with no count badge", async () => {
+    listModelEndpointsMock.mockResolvedValue([embedder(0)]);
+    const user = userEvent.setup();
+    renderPage();
+
+    await screen.findByText("jina-embeddings-v3");
+    expect(screen.queryByText(/used by/)).toBeNull();
+    await user.click(screen.getByRole("button", { name: /Delete/ }));
+
+    const dialog = await screen.findByRole("alertdialog");
+    expect(within(dialog).getByText(/This will permanently delete "jina"/)).toBeTruthy();
+  });
+
+  it("tells the truth about an LLM: reset to default, not refused", async () => {
+    listModelEndpointsMock.mockResolvedValue([
+      { ...embedder(2), name: "mistral", model_type: "llm" as const, model_name: "mistral-small" },
+    ]);
+    const user = userEvent.setup();
+    renderPage();
+
+    await screen.findByText("No embedder endpoints configured.");
+    await user.click(screen.getByRole("tab", { name: "llm" }));
+    await screen.findByText("mistral-small");
+    await user.click(screen.getByRole("button", { name: /Delete/ }));
+
+    const dialog = await screen.findByRole("alertdialog");
+    expect(within(dialog).getByText(/resets them to the default LLM/)).toBeTruthy();
+  });
+});

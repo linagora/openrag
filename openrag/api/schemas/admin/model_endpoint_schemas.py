@@ -235,6 +235,11 @@ class ModelEndpointResponse(BaseModel):
     extra: dict[str, Any]
     has_api_key: bool = False
     is_default: bool
+    # Partitions whose resolved reference is this endpoint — those naming it
+    # plus, for the default endpoint, those riding the `default` alias. Zero
+    # for types with no partition column (reranker/vlm/stt), which are
+    # referenced through presets instead. Only the list view populates it.
+    used_by_partitions: int = 0
     created_at: datetime
     updated_at: datetime
 

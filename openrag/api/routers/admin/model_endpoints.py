@@ -187,7 +187,13 @@ async def delete_model_endpoint(
     background_tasks: BackgroundTasks,
     service=Depends(get_model_endpoint_service),
 ):
-    """Delete a registered inference endpoint."""
+    """Delete a registered inference endpoint.
+
+    Returns 409 if a partition still resolves to this embedder — reassign those
+    partitions first (`used_by_partitions` on the list response counts them).
+    An LLM endpoint deletes regardless; partitions naming it as `chat_llm` are
+    reset to the default LLM they would have fallen back to anyway.
+    """
     await service.delete_model_endpoint(name=name, model_type=model_type)
     _refresh_llm_token_cache(background_tasks, model_type)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
