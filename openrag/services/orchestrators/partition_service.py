@@ -472,12 +472,33 @@ class PartitionService:
         detail = self._partition_detail(row, self.resolve_partition_row(row))
         detail["dimension"] = await self._live_vector_dimension()
         detail["document_count"] = await self._partition_repo.get_partition_file_count(partition)
+        detail["indexed_embedders"] = await self._indexed_embedders(partition)
         return detail
 
     async def update_partition_config(self, partition: str, **fields: object) -> dict:
         """Update a partition's preset references and return the resolved detail."""
         await self.update_partition(partition, **fields)
         return await self.get_partition_config(partition)
+
+    async def _indexed_embedders(self, partition: str) -> list[dict]:
+        """Which embedders actually produced this partition's files.
+
+        The partition row says what is configured *now*; this says what the
+        files were built with, so the difference is the set a swap left behind.
+
+        Empty when the catalog cannot answer. Files indexed before provenance
+        existed report ``embedder: null`` rather than being backfilled with the
+        current setting — a guess dressed as a record, and wrong for exactly
+        the files worth finding.
+        """
+        counter = getattr(self._document_repo, "count_files_by_embedder", None)
+        if counter is None:
+            return []
+        try:
+            return await counter(partition)
+        except Exception as exc:
+            logger.debug("Could not read per-file embedder provenance", partition=partition, error=str(exc))
+            return []
 
     async def _live_vector_dimension(self) -> int | None:
         """Dimension of the vectors that actually exist, or ``None``.

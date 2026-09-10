@@ -6,7 +6,9 @@ import { MemoryRouter, useLocation } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { toast } from "sonner";
 import type { Action } from "sonner";
+import { listPartitionFiles } from "@/lib/api/documents";
 import { deleteFile, uploadFile } from "@/lib/api/indexing";
+import { listPartitions } from "@/lib/api/partitions";
 import { getQueueInfo, type QueueInfo } from "@/lib/api/jobs";
 import { downloadCsv } from "@/lib/csv";
 import { useActiveJobsCount } from "@/lib/jobs-queries";
@@ -82,6 +84,20 @@ vi.mock("@/lib/csv", () => ({
   downloadCsv: vi.fn(),
 }));
 
+vi.mock("@/lib/api/models", async () => {
+  const actual = await vi.importActual<typeof import("@/lib/api/models")>("@/lib/api/models");
+  return {
+    ...actual,
+    // resolveEmbedderName stays real: resolving the `default` alias is the
+    // behaviour under test, not a dependency to stub out.
+    listModelEndpoints: vi.fn().mockResolvedValue([
+      { name: "Qwen3-Embedding-0.6B", model_type: "embedder", is_default: true },
+    ]),
+  };
+});
+
+const listPartitionsMock = vi.mocked(listPartitions);
+const listPartitionFilesMock = vi.mocked(listPartitionFiles);
 const deleteFileMock = vi.mocked(deleteFile);
 const uploadFileMock = vi.mocked(uploadFile);
 const getQueueInfoMock = vi.mocked(getQueueInfo);
@@ -317,5 +333,108 @@ describe("DocumentListPage", () => {
     await userEvent.click(screen.getByRole("button", { name: "Upload" }));
 
     await waitFor(() => expect(screen.getByTestId("active-jobs").textContent).toBe("3"));
+  });
+});
+
+describe("DocumentsPage embedder drift (#762 E)", () => {
+  const file = (extra: Record<string, unknown>) => ({
+    file_id: "file-a",
+    partition: "docs",
+    filename: "a.pdf",
+    mimetype: "application/pdf",
+    indexed_at: "2026-01-01T00:00:00Z",
+    ...extra,
+  });
+
+  const withPartitionEmbedder = (embedder: string) =>
+    listPartitionsMock.mockResolvedValue({
+      partitions: [
+        { partition: "docs", name: "docs", role: "owner", created_at: null, document_count: 1, embedder },
+      ],
+    } as never);
+
+  // The Embedder column shows a value on every row; only a *drifted* cell
+  // carries the explanatory title, so that is what marks drift.
+  const driftMarkers = () => screen.queryAllByTitle(/^Indexed with /);
+
+  it("summarises the embedder in the toolbar even with nothing drifted", async () => {
+    // The value is identical on every row until something drifts, so it is one
+    // line rather than a column — but it must still be somewhere, or the only
+    // way to learn what produced these vectors is to have an incident.
+    withPartitionEmbedder("default");
+    listPartitionFilesMock.mockResolvedValue({
+      files: [file({ embedder: "Qwen3-Embedding-0.6B" })],
+    } as never);
+
+    renderDocuments();
+
+    const summary = await screen.findByTitle("Embedder these files were indexed with");
+    expect(summary.textContent).toContain("Qwen3-Embedding-0.6B");
+    expect(driftMarkers()).toHaveLength(0);
+  });
+
+  it("shows the embedder for every file, drifted or not", async () => {
+    // A column is where a per-file fact belongs — the same reason `Type` is a
+    // column even when every row reads application/pdf.
+    withPartitionEmbedder("default");
+    listPartitionFilesMock.mockResolvedValue({
+      files: [file({ embedder: "Qwen3-Embedding-0.6B" })],
+    } as never);
+
+    renderDocuments();
+
+    await screen.findByText("a.pdf");
+    const cells = await screen.findAllByText("Qwen3-Embedding-0.6B");
+    expect(cells.length).toBeGreaterThan(0);
+    expect(driftMarkers()).toHaveLength(0);
+  });
+
+  it("shows an em dash for files indexed before provenance existed", async () => {
+    withPartitionEmbedder("default");
+    listPartitionFilesMock.mockResolvedValue({ files: [file({ embedder: null })] } as never);
+
+    renderDocuments();
+
+    await screen.findByText("a.pdf");
+    expect(screen.getByText("\u2014")).toBeTruthy();
+    expect(driftMarkers()).toHaveLength(0);
+  });
+
+  it("flags a file recorded against a different embedder", async () => {
+    withPartitionEmbedder("default");
+    listPartitionFilesMock.mockResolvedValue({ files: [file({ embedder: "bge-m3" })] } as never);
+
+    renderDocuments();
+
+    await screen.findByText("a.pdf");
+    await waitFor(() => expect(driftMarkers()).toHaveLength(1));
+    expect(driftMarkers()[0].textContent).toBe("bge-m3");
+    // Sortable header proves it is a real column, not decoration.
+    expect(screen.getByRole("button", { name: /Embedder/ })).toBeTruthy();
+  });
+
+  it("stays silent when the file matches through the `default` alias", async () => {
+    // The partition stores "default"; the file recorded the endpoint that
+    // resolved to. Comparing the raw strings would flag every file.
+    withPartitionEmbedder("default");
+    listPartitionFilesMock.mockResolvedValue({
+      files: [file({ embedder: "Qwen3-Embedding-0.6B" })],
+    } as never);
+
+    renderDocuments();
+
+    await screen.findByText("a.pdf");
+    expect(driftMarkers()).toHaveLength(0);
+  });
+
+  it("does not flag files indexed before provenance existed", async () => {
+    // Unknown is not known-bad — a badge on every legacy row says nothing.
+    withPartitionEmbedder("default");
+    listPartitionFilesMock.mockResolvedValue({ files: [file({ embedder: null })] } as never);
+
+    renderDocuments();
+
+    await screen.findByText("a.pdf");
+    expect(driftMarkers()).toHaveLength(0);
   });
 });

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import type { ColumnDef, OnChangeFn, RowSelectionState } from "@tanstack/react-table";
-import { Download, Plus, Eye, Trash2, RefreshCw, Search } from "lucide-react";
+import { Download, Plus, Eye, Trash2, RefreshCw, Search, Cpu } from "lucide-react";
 import { toast } from "sonner";
 
 import { PageHeader } from "@/components/shared/page-header";
@@ -32,6 +32,7 @@ import { listPartitionFiles, type PartitionFile } from "@/lib/api/documents";
 import { uploadFile, deleteFile, newFileId } from "@/lib/api/indexing";
 import { invalidateJobsQueries } from "@/lib/jobs-queries";
 import { listPartitions } from "@/lib/api/partitions";
+import { listModelEndpoints, resolveEmbedderName } from "@/lib/api/models";
 import { usePermissions } from "@/lib/permissions";
 import { downloadCsv } from "@/lib/csv";
 import { resolveDocumentsPartition } from "./partition-selection";
@@ -67,6 +68,13 @@ export default function DocumentListPage() {
   const fileRef = useRef<HTMLInputElement>(null);
 
   const partitionsQuery = useQuery({ queryKey: ["partitions"], queryFn: listPartitions });
+  // Needed to compare like with like: a partition stores the `default` alias,
+  // while a file records the endpoint that alias resolved to at index time.
+  const { data: embedderEndpoints } = useQuery({
+    queryKey: ["model-endpoints", "embedder"],
+    queryFn: () => listModelEndpoints("embedder"),
+    staleTime: 60_000,
+  });
   const partitions = partitionsQuery.data?.partitions ?? [];
   // Prefer the sticky choice (URL ?partition= or the remembered one), but fall
   // back to the first available partition once loaded if it no longer exists —
@@ -191,6 +199,7 @@ export default function DocumentListPage() {
           { header: "file_id", value: (file) => file.file_id },
           { header: "filename", value: (file) => fileLabel(file) },
           { header: "mimetype", value: (file) => file.mimetype },
+          { header: "embedder", value: (file) => embedderLabel(file) ?? "" },
           { header: "indexed_at", value: (file) => file.indexed_at },
           { header: "created_at", value: (file) => file.created_at },
         ],
@@ -280,6 +289,42 @@ export default function DocumentListPage() {
     onSettled: () => setUploading(false),
   });
 
+  // The embedder queries will use, resolved through the `default` alias.
+  const currentEmbedder = resolveEmbedderName(
+    partitions.find((p) => p.partition === selected)?.embedder || "default",
+    embedderEndpoints,
+  );
+  // Distinct embedders across the listed files, for the toolbar summary. Built
+  // from the rows themselves, so it always describes what is on screen.
+  const indexedEmbedders = (() => {
+    const counts = new Map<string, { label: string; file_count: number; drifted: boolean }>();
+    for (const f of fileRows) {
+      const raw = typeof f.embedder === "string" && f.embedder ? f.embedder : null;
+      const label = raw === null ? "unrecorded" : resolveEmbedderName(raw, embedderEndpoints);
+      const entry = counts.get(label) ?? { label, file_count: 0, drifted: raw !== null && label !== currentEmbedder };
+      entry.file_count += 1;
+      counts.set(label, entry);
+    }
+    return [...counts.values()].sort((a, b) => b.file_count - a.file_count);
+  })();
+
+  // null = indexed before provenance existed.
+  const embedderLabel = (file: PartitionFile): string | null => {
+    const recorded = file.embedder;
+    if (typeof recorded !== "string" || !recorded) return null;
+    return resolveEmbedderName(recorded, embedderEndpoints);
+  };
+
+  // Drifted only if the file *recorded* an embedder and it is not the current
+  // one. No record is unknown, not known-bad: flagging it would put a marker on
+  // every legacy row and say nothing.
+  const driftedFrom = (file: PartitionFile): string | null => {
+    const recorded = file.embedder;
+    if (typeof recorded !== "string" || !recorded) return null;
+    const resolved = resolveEmbedderName(recorded, embedderEndpoints);
+    return resolved === currentEmbedder ? null : resolved;
+  };
+
   const columns: ColumnDef<PartitionFile, unknown>[] = [
     {
       id: "filename",
@@ -299,6 +344,29 @@ export default function DocumentListPage() {
       accessorKey: "mimetype",
       header: "Type",
       cell: ({ row }) => (row.original.mimetype as string) || "—",
+    },
+    {
+      id: "embedder",
+      // Sortable like any other column, so a mixed partition groups by embedder.
+      accessorFn: (f) => embedderLabel(f),
+      header: ({ column }) => <SortableHeader column={column} title="Embedder" />,
+      cell: ({ row }) => {
+        const drifted = driftedFrom(row.original);
+        const label = embedderLabel(row.original);
+        if (label === null) return <span className="text-muted-foreground">—</span>;
+        return (
+          <span
+            className={drifted ? "text-amber-700 dark:text-amber-100" : undefined}
+            title={
+              drifted
+                ? `Indexed with ${drifted}; queries now embed with ${currentEmbedder}. Re-index this file to bring it back in line.`
+                : undefined
+            }
+          >
+            {label}
+          </span>
+        );
+      },
     },
     {
       id: "indexed_at",
@@ -463,6 +531,28 @@ export default function DocumentListPage() {
               {filteredFileRows.length}
               {(fileSearch || indexedSince) && ` of ${fileRows.length}`} file(s)
             </p>
+          )}
+          {/* Partition-wide summary. The Embedder column says which rows
+              drifted; this says whether any did without paging through them. */}
+          {filesQuery.data && indexedEmbedders.length > 0 && (
+            <span
+              className="inline-flex items-center gap-1.5 rounded-md border bg-muted/40 px-2 py-1 text-xs"
+              title="Embedder these files were indexed with"
+            >
+              <Cpu className="h-3.5 w-3.5 text-muted-foreground" />
+              <span className="text-muted-foreground">Indexed with</span>
+              {indexedEmbedders.map((e, i) => (
+                <span key={e.label}>
+                  {i > 0 && <span className="text-muted-foreground">, </span>}
+                  <span className={e.drifted ? "font-medium text-amber-700 dark:text-amber-100" : "font-medium"}>
+                    {e.label}
+                  </span>
+                  {indexedEmbedders.length > 1 && (
+                    <span className="text-muted-foreground"> ({e.file_count})</span>
+                  )}
+                </span>
+              ))}
+            </span>
           )}
           <Button
             variant="outline"
