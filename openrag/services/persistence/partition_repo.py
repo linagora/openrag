@@ -445,6 +445,11 @@ class PgPartitionRepository(PartitionRepository):
             "embedder": row["embedder"],
             "indexation_preset": row["indexation_preset"],
             "retrieval_preset": row["retrieval_preset"],
+            # Never written by any code path — it sits at its server_default of
+            # 1024 for the life of the row. Kept as the hook a per-partition
+            # collection topology would need, but the API reports the live
+            # collection's dimension instead (see
+            # PartitionService._live_vector_dimension, #762 G).
             "dimension": row["dimension"],
             "collection_name": row["collection_name"],
             "chat_history_depth": row["chat_history_depth"],
