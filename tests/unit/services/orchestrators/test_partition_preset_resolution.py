@@ -76,7 +76,8 @@ class _FakeVectorStore:
         return False
 
 
-def _settings(idx=None, ret=None):
+def _settings(idx=None, ret=None, embedders=("default",)):
+    from core.config.model_endpoints import ModelEndpointConfig
     from core.config.root import Settings
 
     s = Settings()
@@ -84,6 +85,10 @@ def _settings(idx=None, ret=None):
     s.presets.indexation.update(idx if idx is not None else {"default": _IDX_CONFIG})
     s.presets.retrieval.clear()
     s.presets.retrieval.update(ret if ret is not None else {"default": _RET_CONFIG})
+    # A partition create always assigns embedder="default" (the alias
+    # ModelEndpointService files the is_default row under), and that assignment
+    # is validated — so the catalog has to hold it for the create to succeed.
+    s.models.embedder.update({n: ModelEndpointConfig(endpoint="http://emb:8000/v1") for n in embedders})
     return s
 
 
@@ -429,6 +434,91 @@ async def test_create_partition_accepts_catalogued_chat_llm():
 
     assert repo._store["p1"]["chat_llm"] == "mistral"
     assert settings.partitions["p1"].chat_llm == "mistral"
+
+
+# ------------------------------------------------------------------
+# embedder assignment (model-endpoint reference)
+# ------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_update_partition_rejects_unknown_embedder():
+    from core.utils.exceptions import ValidationError
+
+    repo = _FakePartitionRepo(rows=[_full_row("p1")])
+    svc = _make_service(repo, settings=_settings(embedders=("default", "bge-m3")))
+
+    with pytest.raises(ValidationError, match="Embedder endpoint 'bge-m4'") as exc:
+        await svc.update_partition("p1", embedder="bge-m4")
+    assert exc.value.status_code == 422
+    assert exc.value.code == "MODEL_ENDPOINT_NOT_FOUND"
+    assert repo._store["p1"]["embedder"] == "default"  # nothing was written
+
+
+@pytest.mark.asyncio
+async def test_update_partition_accepts_catalogued_embedder():
+    settings = _settings(embedders=("default", "bge-m3"))
+    repo = _FakePartitionRepo(rows=[_full_row("p1")])
+    svc = _make_service(repo, settings=settings)
+
+    await svc.update_partition("p1", embedder="bge-m3")
+
+    assert repo._store["p1"]["embedder"] == "bge-m3"
+    assert settings.partitions["p1"].embedder == "bge-m3"
+
+
+@pytest.mark.asyncio
+async def test_update_partition_stale_stored_embedder_does_not_block_other_updates():
+    # Unlike chat_llm a stale embedder has no runtime fallback, but a PATCH
+    # that doesn't touch it still must not be held hostage by it — otherwise
+    # the partition becomes uneditable, including the rename that would fix it.
+    repo = _FakePartitionRepo(rows=[_full_row("p1", embedder="deleted-endpoint")])
+    svc = _make_service(repo, settings=_settings())
+
+    await svc.update_partition("p1", description="new")
+
+    assert repo._store["p1"]["description"] == "new"
+    assert repo._store["p1"]["embedder"] == "deleted-endpoint"
+
+
+@pytest.mark.asyncio
+async def test_create_partition_rejects_unknown_embedder():
+    from core.utils.exceptions import ValidationError
+
+    repo = _FakePartitionRepo()
+    svc = _make_service(repo, settings=_settings())
+
+    with pytest.raises(ValidationError, match="Embedder endpoint 'ghost'") as exc:
+        await svc.create_partition("p1", user_id=1, embedder="ghost")
+    assert exc.value.code == "MODEL_ENDPOINT_NOT_FOUND"
+    assert not await repo.partition_exists("p1")
+
+
+@pytest.mark.asyncio
+async def test_create_partition_accepts_catalogued_embedder():
+    settings = _settings(embedders=("default", "bge-m3"))
+    repo = _FakePartitionRepo()
+    svc = _make_service(repo, settings=settings)
+
+    await svc.create_partition("p1", user_id=1, embedder="bge-m3")
+
+    assert repo._store["p1"]["embedder"] == "bge-m3"
+    assert settings.partitions["p1"].embedder == "bge-m3"
+
+
+@pytest.mark.asyncio
+async def test_create_partition_rejects_default_embedder_when_none_is_catalogued():
+    """ "default" is the alias for the is_default row, not a free pass: with no
+    embedder endpoint registered there is nothing to index with, so the create
+    fails here instead of at the first upload."""
+    from core.utils.exceptions import ValidationError
+
+    repo = _FakePartitionRepo()
+    svc = _make_service(repo, settings=_settings(embedders=()))
+
+    with pytest.raises(ValidationError, match="Embedder endpoint 'default'"):
+        await svc.create_partition("p1", user_id=1)
+    assert not await repo.partition_exists("p1")
 
 
 # ------------------------------------------------------------------
