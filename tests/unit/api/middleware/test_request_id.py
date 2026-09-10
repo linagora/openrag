@@ -13,6 +13,7 @@ import pytest
 from api.middleware.request_id import REQUEST_ID_HEADER, RequestIdMiddleware
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
+from loguru import logger
 
 
 @pytest.fixture()
@@ -135,3 +136,68 @@ def test_request_id_is_visible_to_route_handlers() -> None:
     client = TestClient(app)
     client.get("/capture", headers={REQUEST_ID_HEADER: "from-handler"})
     assert captured["value"] == "from-handler"
+
+
+def test_logs_emitted_during_request_carry_request_id() -> None:
+    captured: list[dict] = []
+    handler_id = logger.add(lambda m: captured.append(dict(m.record["extra"])), level="DEBUG")
+
+    app = FastAPI()
+    app.add_middleware(RequestIdMiddleware)
+
+    @app.get("/log")
+    async def log_route() -> dict[str, str]:
+        logger.info("inside the request")
+        return {"ok": "yes"}
+
+    try:
+        resp = TestClient(app).get("/log", headers={REQUEST_ID_HEADER: "req_fixed"})
+        logger.info("outside any request")
+    finally:
+        logger.remove(handler_id)
+
+    assert resp.status_code == 200
+    inside = [e for e in captured if e.get("request_id") == "req_fixed"]
+    assert len(inside) == 1
+    outside = captured[-1]
+    assert "request_id" not in outside
+
+
+# ---------------------------------------------------------------------------
+# Inbound header validation
+# ---------------------------------------------------------------------------
+
+
+def test_oversized_inbound_request_id_is_replaced(client: TestClient) -> None:
+    """A 1000-char header is not propagated: the id is bound onto every log
+    line of the request, so an unbounded caller-supplied value would bloat
+    each line (and, as structured metadata, every Loki entry)."""
+    response = client.get("/echo", headers={REQUEST_ID_HEADER: "a" * 1000})
+    request_id = response.json()["request_id"]
+    assert re.fullmatch(r"req_[0-9a-f]{32}", request_id)
+    assert response.headers[REQUEST_ID_HEADER] == request_id
+
+
+def test_inbound_request_id_with_spaces_is_replaced(client: TestClient) -> None:
+    """Whitespace (and anything else outside the charset) is rejected — a log
+    line is whitespace-delimited in text mode, so an injected value could
+    forge a second field."""
+    response = client.get("/echo", headers={REQUEST_ID_HEADER: "abc def"})
+    request_id = response.json()["request_id"]
+    assert re.fullmatch(r"req_[0-9a-f]{32}", request_id)
+
+
+def test_well_formed_inbound_request_id_is_kept(client: TestClient) -> None:
+    """The accepted charset covers the shapes gateways actually send:
+    alphanumerics plus ``_ . : -``."""
+    response = client.get("/echo", headers={REQUEST_ID_HEADER: "req_abc-1.2:3"})
+    assert response.json()["request_id"] == "req_abc-1.2:3"
+    assert response.headers[REQUEST_ID_HEADER] == "req_abc-1.2:3"
+
+
+def test_inbound_request_id_with_trailing_newline_is_replaced(client: TestClient) -> None:
+    """A trailing newline is rejected too. ``re.match`` alone would accept it
+    (``$`` matches before a final newline) — and a newline is precisely what
+    splits one log line into two, so the check must be a ``fullmatch``."""
+    response = client.get("/echo", headers={REQUEST_ID_HEADER: "abc\n"})
+    assert re.fullmatch(r"req_[0-9a-f]{32}", response.json()["request_id"])
