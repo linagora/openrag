@@ -249,7 +249,7 @@ def _job(**kwargs):
         "file_id": "file-1",
         "user_id": 7,
         "created_at": datetime(2026, 9, 1, 10, 0, tzinfo=UTC),
-        "finished_at": datetime(2026, 9, 1, 10, 0, 30, tzinfo=UTC),
+        "completed_at": datetime(2026, 9, 1, 10, 0, 30, tzinfo=UTC),
     }
     base.update(kwargs)
     return IndexationJob(**base)

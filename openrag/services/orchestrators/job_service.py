@@ -197,7 +197,7 @@ class JobService:
 def _job_to_info(job: Any) -> dict[str, Any]:
     """Render a durable row in the same shape the actor returns."""
     created_at = job.created_at.isoformat() if job.created_at else None
-    finished_at = job.finished_at.isoformat() if job.finished_at else None
+    completed_at = job.completed_at.isoformat() if job.completed_at else None
     state = job.status.value
     return {
         "state": state,
@@ -209,7 +209,7 @@ def _job_to_info(job: Any) -> dict[str, Any]:
             "user_id": job.user_id,
         },
         "created_at": created_at,
-        "duration_ms": _duration_ms(created_at, finished_at, state=state, now=datetime.now(UTC)),
+        "duration_ms": _duration_ms(created_at, completed_at, state=state, now=datetime.now(UTC)),
     }
 
 

@@ -2253,7 +2253,7 @@ async def test_dispatch_failure_settles_the_durable_job() -> None:
     assert [job.status for job in repo.saved] == [DocumentStatus.QUEUED, DocumentStatus.FAILED]
     settled = repo.saved[-1]
     assert (settled.partition, settled.file_id, settled.user_id) == ("tenant-a", "file-1", 42)
-    assert settled.finished_at is not None
+    assert settled.completed_at is not None
     assert "rejected before worker submission" in settled.error
 
 

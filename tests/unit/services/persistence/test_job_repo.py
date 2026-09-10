@@ -21,7 +21,8 @@ def _row(**kwargs):
         "error": None,
         "created_at": _NOW,
         "updated_at": _NOW,
-        "finished_at": None,
+        "started_at": None,
+        "completed_at": None,
     }
     base.update(kwargs)
     return base
@@ -83,9 +84,57 @@ async def test_upsert_job_keeps_settled_states_and_bounds_the_error():
 
     query, params = pool.calls[0]
     # A settled row never reopens, mirroring the TaskStateManager guard.
-    assert "WHEN jobs.status = ANY($8::text[]) THEN jobs.status" in query
-    assert sorted(params[7]) == ["CANCELLED", "COMPLETED", "FAILED"]
+    assert "WHEN jobs.status = ANY($9::text[]) THEN jobs.status" in query
+    assert sorted(params[8]) == ["CANCELLED", "COMPLETED", "FAILED"]
     assert len(params[5]) == 8_000
+
+
+@pytest.mark.asyncio
+async def test_upsert_job_freezes_the_outcome_fields_together_on_a_settled_row():
+    """A FAILED write that lost the cancel race must not mark a CANCELLED row.
+
+    Freezing ``status`` alone leaves ``error`` and ``completed_at`` writable, so
+    the row reads CANCELLED while carrying the loser's traceback.
+    """
+    pool = _FakePool(fetchrow=_row(status="CANCELLED"))
+    repo = _repo(pool)
+
+    await repo.upsert_job(
+        IndexationJob(
+            id="task-1",
+            status=DocumentStatus.FAILED,
+            partition="tenant-a",
+            error="late traceback",
+            completed_at=_NOW,
+        )
+    )
+
+    query, _params = pool.calls[0]
+    compact = " ".join(query.split())
+    settled = "jobs.status = ANY($9::text[])"
+    for field, frozen in (("status", "jobs.status"), ("error", "jobs.error"), ("completed_at", "jobs.completed_at")):
+        assert f"{field} = CASE WHEN {settled} THEN {frozen}" in compact, field
+
+
+@pytest.mark.asyncio
+async def test_upsert_job_keeps_the_first_started_at():
+    """Queue wait is measured against the first stamp, so a retry cannot move it."""
+    pool = _FakePool(fetchrow=_row(status="SERIALIZING", started_at=_NOW))
+    repo = _repo(pool)
+
+    job = await repo.upsert_job(
+        IndexationJob(
+            id="task-1",
+            status=DocumentStatus.SERIALIZING,
+            partition="tenant-a",
+            started_at=_NOW,
+        )
+    )
+
+    query, params = pool.calls[0]
+    assert "started_at = COALESCE(jobs.started_at, EXCLUDED.started_at)" in query
+    assert params[6] == _NOW
+    assert job.started_at == _NOW
 
 
 @pytest.mark.asyncio
@@ -118,6 +167,7 @@ async def test_fail_orphaned_jobs_skips_settled_rows_and_live_tasks():
     assert "id <> ALL($3::text[])" in query
     # A row written moments ago belongs to a dispatch still in flight.
     assert "updated_at < $4" in query
+    assert "completed_at = now()" in query
     assert params[2] == ["task-9"]
     assert params[3] == cutoff
 
@@ -132,4 +182,6 @@ async def test_purge_terminal_jobs_only_removes_settled_rows():
 
     query, params = pool.calls[0]
     assert "status = ANY($1::text[])" in query
+    # Must match ix_jobs_settled_at, or the sweep cannot use it.
+    assert "COALESCE(completed_at, created_at) < $2" in query
     assert params[1] == cutoff

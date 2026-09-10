@@ -1,8 +1,12 @@
 """asyncpg-backed :class:`JobRepository`.
 
-Durable mirror of the in-memory ``TaskStateManager``. The actor stays the hot
-path while it is alive; these rows are what remains after a restart, so job
-history stays observable and orphaned work is recoverable.
+The durable record of indexing job state. The actor bounds its own retention,
+so it stops being able to answer for a task once it evicts it; these rows are
+what job history is read from, with the actor as the fallback for the window
+where a write has not landed yet.
+
+Writes stay best-effort by design: a Postgres blip degrades history, it does
+not fail indexing.
 """
 
 from __future__ import annotations
@@ -17,7 +21,7 @@ from core.ports.job_repo import JobRepository
 if TYPE_CHECKING:
     import asyncpg
 
-_COLUMNS = "id, partition, file_id, user_id, status, error, created_at, updated_at, finished_at"
+_COLUMNS = "id, partition, file_id, user_id, status, error, created_at, updated_at, started_at, completed_at"
 _TERMINAL_STATUSES = sorted(state.value for state in TERMINAL_TASK_STATES)
 _MAX_ERROR_CHARS = 8_000
 
@@ -39,18 +43,31 @@ class PgJobRepository(JobRepository):
     async def upsert_job(self, job: IndexationJob) -> IndexationJob:
         row = await self.pool.fetchrow(
             f"""
-            INSERT INTO jobs (id, partition, file_id, user_id, status, error, finished_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            INSERT INTO jobs (id, partition, file_id, user_id, status, error, started_at, completed_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             ON CONFLICT (id) DO UPDATE SET
                 -- A settled job never reopens, mirroring TaskStateManager.
                 status = CASE
-                    WHEN jobs.status = ANY($8::text[]) THEN jobs.status
+                    WHEN jobs.status = ANY($9::text[]) THEN jobs.status
                     ELSE EXCLUDED.status
                 END,
+                -- The outcome is decided by whichever write settled the row, and
+                -- the three fields that describe it move together. Freezing the
+                -- status alone lets a FAILED write that lost the cancel race
+                -- staple its traceback onto a row reading CANCELLED.
+                error = CASE
+                    WHEN jobs.status = ANY($9::text[]) THEN jobs.error
+                    ELSE COALESCE(EXCLUDED.error, jobs.error)
+                END,
+                completed_at = CASE
+                    WHEN jobs.status = ANY($9::text[]) THEN jobs.completed_at
+                    ELSE COALESCE(jobs.completed_at, EXCLUDED.completed_at)
+                END,
+                -- First stamp wins: a retried transition must not restart the
+                -- clock queue wait is measured against.
+                started_at = COALESCE(jobs.started_at, EXCLUDED.started_at),
                 file_id = COALESCE(EXCLUDED.file_id, jobs.file_id),
                 user_id = COALESCE(EXCLUDED.user_id, jobs.user_id),
-                error = COALESCE(EXCLUDED.error, jobs.error),
-                finished_at = COALESCE(jobs.finished_at, EXCLUDED.finished_at),
                 updated_at = now()
             RETURNING {_COLUMNS}
             """,
@@ -60,7 +77,8 @@ class PgJobRepository(JobRepository):
             job.user_id,
             job.status.value,
             job.error[:_MAX_ERROR_CHARS] if job.error else None,
-            job.finished_at,
+            job.started_at,
+            job.completed_at,
             _TERMINAL_STATUSES,
         )
         return self._row_to_job(row)
@@ -81,7 +99,7 @@ class PgJobRepository(JobRepository):
             f"""
             SELECT {_COLUMNS} FROM jobs
             WHERE ($1::text IS NULL OR status = $1)
-              AND ($2::bigint IS NULL OR user_id = $2)
+              AND ($2::int IS NULL OR user_id = $2)
             ORDER BY created_at DESC
             OFFSET $3 LIMIT $4
             """,
@@ -97,7 +115,7 @@ class PgJobRepository(JobRepository):
             """
             WITH failed AS (
                 UPDATE jobs
-                SET status = 'FAILED', error = $1, finished_at = now(), updated_at = now()
+                SET status = 'FAILED', error = $1, completed_at = now(), updated_at = now()
                 WHERE status <> ALL($2::text[])
                   AND id <> ALL($3::text[])
                   AND updated_at < $4
@@ -116,7 +134,9 @@ class PgJobRepository(JobRepository):
             """
             WITH purged AS (
                 DELETE FROM jobs
-                WHERE status = ANY($1::text[]) AND COALESCE(finished_at, updated_at) < $2
+                -- Matches ix_jobs_settled_at. A row whose terminal write
+                -- raced a failure has no completed_at and ages out on created_at.
+                WHERE status = ANY($1::text[]) AND COALESCE(completed_at, created_at) < $2
                 RETURNING 1
             )
             SELECT COUNT(*)::int FROM purged

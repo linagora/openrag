@@ -202,6 +202,7 @@ class IndexerWorkerActor:
             task_state_manager=task_state_manager,
             document_repo=self._catalog_store.document_repo,
             topic_tag_repo=self._catalog_store.topic_tag_repo,
+            job_repo=self._catalog_store.job_repo,
             vector_store=self._vector_store,
             collection=cfg.vectordb.collection_name,
         )

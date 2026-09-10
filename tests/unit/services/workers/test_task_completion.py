@@ -465,7 +465,7 @@ async def test_settled_task_is_written_to_the_job_history() -> None:
         "file-1",
         42,
     )
-    assert job.finished_at is not None
+    assert job.completed_at is not None
 
 
 @pytest.mark.asyncio

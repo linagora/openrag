@@ -260,7 +260,7 @@ class TaskCompletionTracker:
                     file_id=details.get("file_id"),
                     user_id=details.get("user_id"),
                     error=error,
-                    finished_at=datetime.now(UTC),
+                    completed_at=datetime.now(UTC),
                 )
             )
         except Exception as exc:

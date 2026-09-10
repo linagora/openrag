@@ -1123,3 +1123,99 @@ async def test_serializing_state_failure_still_sends_the_error_callback(
     callback_mock.assert_awaited_once_with(
         "https://cozy.example.com/ai/index/status", "p", "f1", "error", metadata, callback_token="jwt"
     )
+
+
+# ---------------------------------------------------------------------------
+# Durable job start (issue #660)
+# ---------------------------------------------------------------------------
+
+
+class _RecordingJobRepo:
+    """Captures ``upsert_job`` calls; optionally raises to prove writes are best-effort."""
+
+    def __init__(self, *, raises: bool = False) -> None:
+        self.saved: list[Any] = []
+        self._raises = raises
+
+    async def upsert_job(self, job: Any) -> Any:
+        if self._raises:
+            raise RuntimeError("postgres is down")
+        self.saved.append(job)
+        return job
+
+
+@pytest.mark.asyncio
+async def test_process_file_stamps_started_at_when_the_task_leaves_the_queue(tmp_path: Path) -> None:
+    """``started_at`` is what makes queue wait separable from service time."""
+    from core.models.catalog import DocumentStatus
+
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"content")
+    processed = ProcessedDocument(document_id="d1", text_blocks=[TextBlock(text="content")])
+    chunks = [Chunk(id="c1", text="content", partition="p")]
+    repo = _RecordingJobRepo()
+
+    worker = IndexerWorker(
+        pipeline=_make_pipeline(processed, chunks),
+        task_state_manager=_fake_tsm(),
+        job_repo=repo,
+    )
+    await worker.process_file(
+        task_id="t1",
+        path=str(path),
+        metadata={"file_id": "f1"},
+        partition="p",
+        user={"id": 42},
+    )
+
+    assert len(repo.saved) == 1
+    job = repo.saved[0]
+    assert (job.id, job.status, job.partition, job.file_id, job.user_id) == (
+        "t1",
+        DocumentStatus.SERIALIZING,
+        "p",
+        "f1",
+        42,
+    )
+    assert job.started_at is not None
+    assert job.completed_at is None
+
+
+@pytest.mark.asyncio
+async def test_process_file_does_not_stamp_a_task_cancelled_before_start(tmp_path: Path) -> None:
+    """A task fenced before it ran never left the queue, so it has no start."""
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"content")
+    tsm = _fake_tsm()
+    tsm.set_state.remote.return_value = False
+    repo = _RecordingJobRepo()
+
+    worker = IndexerWorker(pipeline=AsyncMock(), task_state_manager=tsm, job_repo=repo)
+
+    with pytest.raises(RuntimeError, match="cancelled before indexing started"):
+        await worker.process_file(task_id="t1", path=str(path), metadata={"file_id": "f1"}, partition="p")
+
+    assert repo.saved == []
+
+
+@pytest.mark.asyncio
+async def test_a_failed_job_write_does_not_fail_indexing(tmp_path: Path) -> None:
+    """History is best-effort: a Postgres outage must not lose the document."""
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"content")
+    processed = ProcessedDocument(document_id="d1", text_blocks=[TextBlock(text="content")])
+    chunks = [Chunk(id="c1", text="content", partition="p")]
+
+    worker = IndexerWorker(
+        pipeline=_make_pipeline(processed, chunks),
+        task_state_manager=_fake_tsm(),
+        job_repo=_RecordingJobRepo(raises=True),
+    )
+    result = await worker.process_file(
+        task_id="t1",
+        path=str(path),
+        metadata={"file_id": "f1"},
+        partition="p",
+    )
+
+    assert result["stored_count"] == 1

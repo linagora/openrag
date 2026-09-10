@@ -385,7 +385,7 @@ class WorkerDispatcher(IndexingDispatcher):
                             file_id=file_id,
                             user_id=task_details["user_id"],
                             error=tb,
-                            finished_at=datetime.now(UTC),
+                            completed_at=datetime.now(UTC),
                         )
             finally:
                 if claimed_content and not submission_outcome_unknown and (task is None or mark_submit_failed):
@@ -696,7 +696,8 @@ class WorkerDispatcher(IndexingDispatcher):
         file_id: str | None = None,
         user_id: int | None = None,
         error: str | None = None,
-        finished_at: datetime | None = None,
+        started_at: datetime | None = None,
+        completed_at: datetime | None = None,
     ) -> None:
         """Mirror a task transition to Postgres. History must never fail indexing."""
         if self._job_repo is None:
@@ -710,7 +711,8 @@ class WorkerDispatcher(IndexingDispatcher):
                     file_id=file_id,
                     user_id=user_id,
                     error=error,
-                    finished_at=finished_at,
+                    started_at=started_at,
+                    completed_at=completed_at,
                 )
             )
         except Exception as exc:

@@ -51,8 +51,9 @@ def test_upgrade_creates_the_table_and_its_indexes(monkeypatch, migration):
 
     assert op.created_tables == ["jobs"]
     assert op.created_indexes == [
-        "ix_jobs_status",
-        "ix_jobs_user_id",
+        "ix_jobs_status_created_at",
+        "ix_jobs_user_status",
+        "ix_jobs_settled_at",
         "ix_jobs_partition_file_id",
     ]
 
