@@ -30,6 +30,7 @@ _ADJACENT_TIMES = re.compile(rf"{_TIME_TOKEN}\s*{_TIME_TOKEN}")
 _COMPACT_BOUNDARY_PAIR = re.compile(
     rf"\[\s*(?P<end>{_TIME})\s*\]\s*\[\s*(?P<start>{_TIME})\s*\]",
 )
+_EDGE_TIME_TOKEN = re.compile(rf"^{_TIME_TOKEN}|{_TIME_TOKEN}$")
 _TIME_TOKEN_MARKER = re.compile(_TIME_TOKEN)
 _SPEAKER_LABEL = re.compile(rf"\[\s*(?P<speaker>{_SPEAKER})\s*\]")
 _SPEAKER_MARKER = re.compile(r"\[\s*[Ss]\d*")
@@ -108,9 +109,6 @@ def _parse_speakerless_compact(transcript: str) -> list[_Segment]:
     if initial is None or trailing is None or initial.end() > trailing.start() or _DASH_MARKER.search(transcript):
         return []
 
-    if _has_overlapping_boundary_candidates(transcript, initial.end(), trailing.start()):
-        return []
-
     start = _seconds(initial["start"])
     if start is None:
         return []
@@ -134,6 +132,7 @@ def _parse_speakerless_compact(transcript: str) -> list[_Segment]:
             or end != next_start
             or not text
             or _SPEAKER_MARKER.search(text)
+            or _has_unresolved_boundary(text)
         ):
             return []
 
@@ -143,31 +142,22 @@ def _parse_speakerless_compact(transcript: str) -> list[_Segment]:
 
     end = _seconds(trailing["end"])
     text = _normalize_text(transcript[cursor : trailing.start()])
-    if end is None or end < start or not text or _SPEAKER_MARKER.search(text):
+    if end is None or end < start or not text or _SPEAKER_MARKER.search(text) or _has_unresolved_boundary(text):
         return []
 
     segments.append(("S01", text))
     return segments
 
 
-def _has_overlapping_boundary_candidates(
-    transcript: str,
-    start: int,
-    end: int,
-) -> bool:
-    """Whether three mutually adjacent time tokens leave a boundary unresolvable.
+def _has_unresolved_boundary(text: str) -> bool:
+    """Whether a time token inside *text* reads as metadata rather than speech.
 
-    The middle token can pair with either neighbour, so the turn split is
-    ambiguous regardless of the values involved.
+    A spoken token such as ``[2024]`` is surrounded by words. A token flush
+    against a segment edge sits against a boundary token, and a pair of
+    adjacent tokens is a boundary the parser failed to consume; both leave the
+    turn split ambiguous, so the transcript is kept verbatim instead.
     """
-    tokens = list(_TIME_TOKEN_MARKER.finditer(transcript, start, end))
-
-    for first, second, third in zip(tokens, tokens[1:], tokens[2:]):
-        if transcript[first.end() : second.start()].strip() or transcript[second.end() : third.start()].strip():
-            continue
-        return True
-
-    return False
+    return bool(_EDGE_TIME_TOKEN.search(text) or _ADJACENT_TIMES.search(text))
 
 
 def _compact_region_end(transcript: str, text_start: int, next_start: re.Match[str]) -> int:

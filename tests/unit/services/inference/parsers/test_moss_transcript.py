@@ -122,6 +122,12 @@ def test_preserves_speaker_only_output_with_an_incomplete_unlabeled_compact_turn
         # even when the three values are not identical.
         "[1] A [2][2][3] B [3]",
         "[1] A [2][3][3] B [3]",
+        # A token flush against the initial or trailing boundary is equally
+        # unresolvable, and must not be emitted as spoken text.
+        "[1][1] A [2]",
+        "[1] A [2][2]",
+        "[2][2] [2]",
+        "[1] A [2] [3] B [4]",
     ],
 )
 def test_preserves_speakerless_compact_turns_with_overlapping_boundaries(transcript):
