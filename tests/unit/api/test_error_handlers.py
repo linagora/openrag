@@ -67,6 +67,11 @@ def app() -> FastAPI:
     async def _raise_unknown() -> None:
         raise RuntimeError("kaboom")
 
+    @app.get("/raise/unknown-with-request-id")
+    async def _raise_unknown_with_request_id(request: Request) -> None:
+        request.state.request_id = "req_unhandled_1"
+        raise RuntimeError("kaboom")
+
     @app.get("/raise/with-request-id")
     async def _raise_with_request_id(request: Request) -> None:
         # Simulates Phase 10C's RequestIdMiddleware having populated the
@@ -151,6 +156,24 @@ def test_unknown_exception_returns_500_with_legacy_body(client: TestClient) -> N
         "detail": "[UNEXPECTED_ERROR]: An unexpected error occurred",
         "extra": {},
     }
+
+
+def test_unhandled_exception_log_line_carries_request_id(client: TestClient) -> None:
+    """The catch-all runs in Starlette's outermost layer, *after*
+    ``RequestIdMiddleware``'s ``contextualize`` scope has unwound, so the id
+    must be bound explicitly on the "Unhandled exception" line."""
+    from loguru import logger
+
+    captured: list[dict] = []
+    handler_id = logger.add(lambda m: captured.append(dict(m.record["extra"])), level="ERROR")
+    try:
+        response = client.get("/raise/unknown-with-request-id")
+    finally:
+        logger.remove(handler_id)
+    assert response.status_code == 500
+    unhandled = [e for e in captured if e.get("error_type") == "RuntimeError"]
+    assert len(unhandled) == 1
+    assert unhandled[0]["request_id"] == "req_unhandled_1"
 
 
 def test_request_id_is_injected_into_extra_when_set(client: TestClient) -> None:
