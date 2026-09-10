@@ -312,7 +312,10 @@ ray:
 # Env: CHUNKER, CONTEXTUAL_RETRIEVAL, CONTEXTUALIZATION_TIMEOUT,
 #      MAX_CONCURRENT_CONTEXTUALIZATION, CHUNK_SIZE, CHUNK_OVERLAP_RATE
 chunker:
-  name: recursive_splitter
+  # structured_section cuts on the document's own structure (headings, leaf
+  # markers) and prepends the heading path to each chunk. Set
+  # CHUNKER=recursive_splitter for plain character-window splitting.
+  name: structured_section
   contextual_retrieval: true
   contextualization_timeout: 120
   max_concurrent_contextualization: 10

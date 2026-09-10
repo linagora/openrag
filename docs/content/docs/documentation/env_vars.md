@@ -179,10 +179,10 @@ The default OpenRAG transcriber stack now ships with **vLLM v0.19.1**, which inc
 
 | Variable               | Type | Default              | Description |
 |------------------------|------|----------------------|-------------|
-| `CHUNKER`              | `str`  | recursive_splitter   | Defines the chunking strategy: `recursive_splitter`. |
+| `CHUNKER`              | `str`  | structured_section   | Defines the chunking strategy: `structured_section` or `recursive_splitter`. |
 | `CONTEXTUAL_RETRIEVAL` | `bool` | true                 | Enables contextual retrieval to chunk context, a technique introduced by Anthropic to improve retrieval performance ([Contextual Retrieval](https://www.anthropic.com/news/contextual-retrieval)) |
-| `CHUNK_SIZE`           | `int`  | 512                  | Maximum size (in characters) of each chunk. |
-| `CHUNK_OVERLAP_RATE`   | `float`| 0.2                  | Percentage of overlap between consecutive chunks. |
+| `CHUNK_SIZE`           | `int`  | 512                  | Target size of each chunk, in **tokens** — counted with the LLM tokenizer (`tiktoken` `cl100k_base` when the LLM is unreachable), not in characters. |
+| `CHUNK_OVERLAP_RATE`   | `float`| 0.2                  | Fraction of `CHUNK_SIZE` replayed between consecutive chunks. Applies to `recursive_splitter` only — `structured_section` forces overlap to 0. |
 | `CONTEXTUALIZATION_TIMEOUT` | `int` | 120 | Timeout in seconds for individual chunk contextualization LLM calls. Prevents long-running contextualization tasks from blocking the system. |
 | `MAX_CONCURRENT_CONTEXTUALIZATION` | `int` | 10 | Maximum number of concurrent chunk contextualization tasks. Limits parallel LLM requests to prevent CPU exhaustion during batch indexing. |
 
@@ -191,7 +191,8 @@ After files are converted to Markdown, only the **text content** is chunked.
 
 **Chunker strategies:**
 
-* **`recursive_splitter`**: Uses hierarchical text structure (sections, paragraphs, sentences). Based on [RecursiveCharacterTextSplitter](https://docs.langchain.com/oss/python/integrations/splitters/index#text-structure-based), it preserves natural boundaries whenever possible while ensuring chunks never exceeding the `CHUNK_SIZE`.
+* **`structured_section`** *(default)*: Cuts on the document's own structure instead of on character separators. It detects headings (Markdown `#`, plus keyword headings such as `Titre` / `Chapitre` / `Section`) and leaf units (e.g. `Article L110-1`) by matching line content, keeps each leaf atomic, greedily packs consecutive short leaves up to `CHUNK_SIZE`, and prepends the heading path so every chunk is self-describing at retrieval time. Overlap is always 0 — leaves are atomic, so replaying a tail would only duplicate whole sections, and `CHUNK_OVERLAP_RATE` is therefore ignored by this strategy. Best for structured documents (legal codes, standards, reports, technical manuals).
+* **`recursive_splitter`**: Uses hierarchical text structure (sections, paragraphs, sentences). Based on [RecursiveCharacterTextSplitter](https://docs.langchain.com/oss/python/integrations/splitters/index#text-structure-based), it preserves natural boundaries whenever possible while ensuring chunks never exceed `CHUNK_SIZE`, and replays `CHUNK_OVERLAP_RATE` of each chunk into the next. Set `CHUNKER=recursive_splitter` for unstructured prose, or to reproduce the chunking of earlier OpenRAG releases.
 
 ### Embedding
 Our embedder is **OpenAI-compatible** and runs on a **VLLM** instance configured with the following variables:
@@ -711,9 +712,10 @@ flowchart TD
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
 | `ADMIN_UI_PORT` | `number` | `8081` | Host port the admin UI (nginx) is published on. Serves `/app/` and reverse-proxies `/auth`, `/v1`, `/chainlit`, … to the backend, so it is the OIDC front door (`OIDC_REDIRECT_URI` targets this port). Deploy-time (not a `VITE_*` build arg). |
+| `GRAFANA_URL` | `string` | `""` | Runtime, browser-reachable URL for the Grafana dashboard opened from **System → Metrics**. Restart the API after changing it. When this is empty or invalid, the action explains how to configure the dashboard instead of opening it. |
 | `VITE_API_BASE_URL` | `string` | `""` (same-origin) | API base baked into the SPA. **Empty (default) = same-origin**: nginx reverse-proxies the API over the Docker network, so the UI works on any host/IP with no CORS. Set to an absolute URL only for a browser-direct build — then list the UI's origin in `CORS_EXTRA_ORIGINS`. |
 | `VITE_BASE_PATH` | `string` | `/app/` | Sub-path the SPA is served under; must match the nginx `location`. |
-| `VITE_GRAFANA_URL` | `string` | `""` | Optional Grafana dashboard link shown on the admin **System** page. |
+| `VITE_GRAFANA_URL` | `string` | `""` | Build-time fallback for deployments whose API does not expose `GRAFANA_URL`. New deployments should use the runtime setting instead. |
 | `VITE_APP_NAME` | `string` | `OpenRAG` | Application display name used in the UI branding. |
 | `VITE_MOCK_API` | `boolean` | `false` | Development only — serves in-browser MSW API mocks when `true`. Ignored in production builds. |
 
@@ -782,3 +784,5 @@ Read only by the opt-in monitoring compose file (`infra/compose/monitoring.docke
 |----------|------|---------|-------------|
 | `GRAFANA_ADMIN_USER` | `str` | `admin` | Grafana admin username. |
 | `GRAFANA_ADMIN_PASSWORD` | `str` | _(required)_ | Grafana admin password — compose refuses to start the monitoring profile if unset. |
+| `GF_SERVER_ROOT_URL` | `str` | `http://localhost:3000` | Browser-facing Grafana root URL. Set this to the admin UI's `/grafana/` URL when using its proxy. |
+| `GF_SERVER_SERVE_FROM_SUB_PATH` | `bool` | `false` | Set to `true` when `GF_SERVER_ROOT_URL` includes the `/grafana/` subpath. |
