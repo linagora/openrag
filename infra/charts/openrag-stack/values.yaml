@@ -624,6 +624,27 @@ env:
     RAY_SERVE_PORT: "80"
     GRAFANA_URL: ""
 
+    # One flat JSON object per log line on stderr, for the platform's log
+    # collector. PREREQUISITE: this chart ships no collector and no longer
+    # mounts a logs volume — a DaemonSet (Alloy, Fluent Bit, …)
+    # must already ship pod stdout to Loki. Without one, logs exist only in
+    # the container runtime (`kubectl logs`) and are lost with the pod. See
+    # docs/documentation/loki_logs.md for the pipeline to add on the
+    # collector side. Set to "text" for the colorized human format.
+    LOG_FORMAT: "json"
+    # Ray relays worker output onto the API process. Its log deduplication
+    # merges same-shape lines from several workers and rewrites the survivor
+    # as "{...} [repeated 2x across cluster]" — no longer JSON — and the
+    # "(Actor pid=N)" relay prefix is ANSI-colorized even on a pipe. Both off.
+    RAY_DEDUP_LOGS: "0"
+    RAY_COLOR_PREFIX: "0"
+    # With ray.enabled=true the chart also sets RAY_LOG_TO_STDERR=1 (see
+    # configmap-env.yaml): worker lines are then written to the Ray pods' own
+    # stderr for the DaemonSet, instead of being relayed to the API driver —
+    # a relay that only carries lines from actors created by the *current*
+    # driver job and so goes silent for the detached workers after an API
+    # restart.
+
     WITH_CHAINLIT_UI: "false"
     SAVE_UPLOADED_FILES: "true"
 

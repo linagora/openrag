@@ -71,3 +71,14 @@ GF_SERVER_SERVE_FROM_SUB_PATH=true
 Grafana has its own login. Its admin password is initialized when the persistent
 Grafana volume is created; changing the environment variable later does not
 reset an existing password.
+
+## Log shipping to Loki
+
+An opt-in overlay ships the API and worker logs to an external Loki:
+
+```bash
+docker compose -f docker-compose.yaml -f logging.docker-compose.yaml up -d
+```
+
+Set `LOKI_URL` (and the optional `LOKI_USERNAME`, `LOKI_PASSWORD`,
+`LOKI_TENANT_ID`) in `.env`. See [Loki logs](/openrag/documentation/loki_logs/).
