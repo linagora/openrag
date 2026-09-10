@@ -323,6 +323,17 @@ def _current_openrag_auth_provider() -> str | None:
     return _openrag_auth_provider_from_user(user)
 
 
+def _chainlit_url_prefix() -> str:
+    """Browser-facing prefix Chainlit is served under, or "" when it owns the origin.
+
+    ``mount_chainlit`` exports the submount path as ``CHAINLIT_ROOT_PATH`` (plus
+    ``CHAINLIT_PARENT_ROOT_PATH`` when the parent app itself has a root_path)
+    before it loads this module, and Chainlit's own HTML template builds its
+    asset URLs from exactly this pair.
+    """
+    return os.getenv("CHAINLIT_PARENT_ROOT_PATH", "") + os.getenv("CHAINLIT_ROOT_PATH", "")
+
+
 def _chat_profile_from_model_id(model_id: str) -> cl.ChatProfile | None:
     if not model_id.startswith(PARTITION_PREFIX):
         return None
@@ -332,7 +343,16 @@ def _chat_profile_from_model_id(model_id: str) -> cl.ChatProfile | None:
     return cl.ChatProfile(
         name=model_id,
         markdown_description=description_template.format(name=model_id, partition=partition),
-        icon="/public/favicon.svg",
+        # Chainlit's frontend treats an icon containing "/public" as relative to
+        # its own API base and rewrites it (buildEndpoint), but renders the
+        # assistant avatar from the same field *verbatim*. So "/public/favicon.svg"
+        # resolves correctly in the profile picker and root-absolute in the avatar
+        # — a 403 against the OpenRAG origin on every message, outside the
+        # /chainlit auth bypass. Prefixing it by hand only moves the breakage to
+        # the picker, which then doubles the prefix. Chainlit's own /favicon route
+        # serves the same file from a path with no "/public" in it, so both
+        # consumers use it unmodified.
+        icon=f"{_chainlit_url_prefix()}/favicon",
         default=model_id == f"{PARTITION_PREFIX}all",
     )
 

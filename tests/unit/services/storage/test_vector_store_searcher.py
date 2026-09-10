@@ -9,8 +9,7 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-
-from openrag.services.storage.vector_store_searcher import VectorStoreSearcher, _dict_to_chunk
+from services.storage.vector_store_searcher import VectorStoreSearcher, _dict_to_chunk
 
 # ---------------------------------------------------------------------------
 # Helpers
