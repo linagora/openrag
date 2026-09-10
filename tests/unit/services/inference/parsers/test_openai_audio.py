@@ -299,7 +299,17 @@ class TestParse:
         assert result.text_blocks[0].text == "Hello everyone.\nThis week."
 
     @pytest.mark.asyncio
-    async def test_moss_output_is_normalized_by_default(self, mock_openai_client):
+    @pytest.mark.parametrize(
+        "extra",
+        [
+            # The Admin UI deletes the key instead of storing ``false``, so an
+            # absent key is how the toggle records "off".
+            {"api_key": "k"},
+            {"api_key": "k", MOSS_SPEAKER_AWARE_KEY: False},
+        ],
+        ids=["key_absent", "explicitly_disabled"],
+    )
+    async def test_moss_output_stays_raw_without_speaker_aware_normalization(self, mock_openai_client, extra):
         transcript = "[1.12-2.32][S01] Hello everyone."
         mock_openai_client.audio.transcriptions.create.return_value = MagicMock(text=transcript)
         endpoint = ModelEndpointConfig(
@@ -307,12 +317,12 @@ class TestParse:
             model_name="moss-transcribe-diarize",
             batch_size=1,
             timeout=120,
-            extra={"api_key": "k"},
+            extra=extra,
         )
 
         result = await _client(mock_openai_client, transcription_endpoint_resolver=lambda: endpoint).parse(_audio_doc())
 
-        assert result.text_blocks[0].text == "Hello everyone."
+        assert result.text_blocks[0].text == transcript
 
     @pytest.mark.asyncio
     async def test_stt_endpoint_limiter_reuses_active_entry_across_a_b_a_switch(self, mock_openai_client):

@@ -30,7 +30,7 @@ _ADJACENT_TIMES = re.compile(rf"{_TIME_TOKEN}\s*{_TIME_TOKEN}")
 _COMPACT_BOUNDARY_PAIR = re.compile(
     rf"\[\s*(?P<end>{_TIME})\s*\]\s*\[\s*(?P<start>{_TIME})\s*\]",
 )
-_TIME_TOKEN_MARKER = re.compile(rf"\[\s*(?P<time>{_TIME})\s*\]")
+_TIME_TOKEN_MARKER = re.compile(_TIME_TOKEN)
 _SPEAKER_LABEL = re.compile(rf"\[\s*(?P<speaker>{_SPEAKER})\s*\]")
 _SPEAKER_MARKER = re.compile(r"\[\s*[Ss]\d*")
 
@@ -155,15 +155,17 @@ def _has_overlapping_boundary_candidates(
     start: int,
     end: int,
 ) -> bool:
+    """Whether three mutually adjacent time tokens leave a boundary unresolvable.
+
+    The middle token can pair with either neighbour, so the turn split is
+    ambiguous regardless of the values involved.
+    """
     tokens = list(_TIME_TOKEN_MARKER.finditer(transcript, start, end))
 
     for first, second, third in zip(tokens, tokens[1:], tokens[2:]):
         if transcript[first.end() : second.start()].strip() or transcript[second.end() : third.start()].strip():
             continue
-
-        values = [_seconds(token["time"]) for token in (first, second, third)]
-        if values[0] is not None and values[0] == values[1] == values[2]:
-            return True
+        return True
 
     return False
 
