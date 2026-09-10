@@ -74,6 +74,17 @@ class VectorStore(ABC):
         ...
 
     @abstractmethod
+    async def vector_dimension(self) -> int | None:
+        """Dense-vector dimension the live collection actually stores.
+
+        ``None`` when it cannot be established — no collection yet, or the
+        backend can't be reached. Callers that need a number to size buffers
+        should pick their own fallback; callers that *report* the dimension
+        must pass the ``None`` through rather than substitute a guess.
+        """
+        ...
+
+    @abstractmethod
     async def collection_exists(self, name: str) -> bool:
         """Check if collection exists."""
         ...
