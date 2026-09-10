@@ -476,6 +476,8 @@ logger = get_logger()
 logger.bind(file_id=file_id, partition=partition).info("Message")
 ```
 
+stderr is the **only** sink (`core/utils/logging.py`); there is no log file. `LOG_FORMAT=text` (default) is the colorized terminal format, `LOG_FORMAT=json` writes one flat JSON object per line (`json_record`/`json_sink`: `ts`, `level`, `logger`, `function`, `line`, `msg`, `exception`, then every bound `extra` at the top level, collisions prefixed `extra_`) and routes stdlib logging (uvicorn, Ray) through loguru via `InterceptHandler` (idempotent `intercept_stdlib_logging(level)`: one interceptor on the root, foreign handlers detached not closed, root at loguru's numeric level so libraries' `isEnabledFor(DEBUG)` guards hold, chatty loggers capped at WARNING only while still at NOTSET). `RequestIdMiddleware` binds `request_id` into the loguru context for the whole request; the unhandled-500 handler binds it explicitly because it runs after that scope unwinds. Ray relays worker output onto the API stream with a `(Actor pid=N) ` prefix that the collector strips; `RAY_DEDUP_LOGS=0` and `RAY_COLOR_PREFIX=0` are required for that relay to carry valid JSON (overlay and chart set them), and with `ray.enabled=true` the chart sets `RAY_LOG_TO_STDERR=1` so workers write to their own pod's stderr (the relay only carries the current driver job's actors). Shipping: compose `infra/compose/logging.docker-compose.yaml` (Alloy, `infra/compose/alloy/config.alloy`), Helm sets `LOG_FORMAT=json` and relies on the platform DaemonSet. Docs: `docs/content/docs/documentation/loki_logs.md`.
+
 ### Import Conventions
 
 Use absolute imports from the `openrag/` directory (which is the Python path root):
