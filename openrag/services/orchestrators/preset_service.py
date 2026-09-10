@@ -45,7 +45,11 @@ _DEFAULT_SEEDS: dict[str, dict[str, dict[str, Any]]] = {
     # Named presets (legal/finance) keep their explicit choice.
     "indexation": {
         "default": {
-            "chunking": {"name": "recursive_splitter", "chunk_size": 512, "chunk_overlap_rate": 0.2},
+            # Kept in sync with ChunkerConfig's defaults, but note that
+            # _finalize_seed overwrites all three from the deployment's global
+            # chunker knobs (CHUNKER / CHUNK_SIZE / CHUNK_OVERLAP_RATE) before
+            # this seed is persisted — see #709.
+            "chunking": {"name": "structured_section", "chunk_size": 512, "chunk_overlap_rate": 0.2},
             # ``parsing_strategy`` is intentionally omitted so the default preset
             # inherits the deployment's global PDFLOADER (``file_loaders.pdf``)
             # rather than forcing one PDF backend on every partition. A hardcoded
