@@ -1,9 +1,10 @@
 """asyncpg-backed :class:`JobRepository`.
 
 The durable record of indexing job state. The actor bounds its own retention,
-so it stops being able to answer for a task once it evicts it; these rows are
-what job history is read from, with the actor as the fallback for the window
-where a write has not landed yet.
+so it stops being able to answer for a task once it evicts it, and a restart
+takes the rest with it. These rows are what survives both, and the queue views
+union them with whatever the actor still holds: history comes from here, live
+sub-state from the actor that is writing it.
 
 Writes stay best-effort by design: a Postgres blip degrades history, it does
 not fail indexing.
