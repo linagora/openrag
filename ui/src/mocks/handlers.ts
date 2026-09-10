@@ -403,19 +403,6 @@ export const handlers = [
     });
   }),
 
-  http.get(`${API}/indexer/task/:taskId/logs`, ({ params }) => {
-    const id = String(params.taskId);
-    return HttpResponse.json({
-      task_id: id,
-      logs: [
-        `2024-01-15 10:32:01 | INFO | task ${id} QUEUED`,
-        `2024-01-15 10:32:03 | INFO | task ${id} SERIALIZING`,
-        `2024-01-15 10:32:09 | INFO | task ${id} serializing: 47 chunks embedded`,
-        `2024-01-15 10:32:14 | INFO | task ${id} COMPLETED`,
-      ],
-    });
-  }),
-
   http.delete(`${API}/indexer/task/:taskId`, ({ params }) =>
     HttpResponse.json({ message: `Cancellation signal sent for task ${params.taskId}` }),
   ),

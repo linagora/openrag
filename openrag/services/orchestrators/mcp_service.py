@@ -34,7 +34,6 @@ from urllib.parse import urljoin, urlparse
 import httpx
 from core.utils.consts import is_internal_metadata_key, strip_protected_metadata
 from core.utils.exceptions import ValidationError
-from core.utils.log_tail import collect_task_logs
 from core.utils.logging import get_logger
 from core.utils.partition_limits import max_partitions_for_user
 from core.utils.url_safety import is_blocked_address, is_safe_url
@@ -425,27 +424,6 @@ class MCPService:
                 else:
                     task["error"] = "Task failed. Contact an administrator for details."
         return {"count": len(tasks), "tasks": tasks}
-
-    async def get_task_logs(
-        self,
-        *,
-        task_id: str,
-        user_id: int | None,
-        is_admin: bool,
-        log_file: str | Path,
-        max_lines: int = 100,
-    ) -> dict[str, Any]:
-        details = await self._jobs.get_task_details(task_id)
-        if details is None:
-            raise KeyError(f"Task '{task_id}' not found")
-        if not is_admin and user_id is not None and details.get("user_id") != user_id:
-            raise PermissionError("You do not have permission to access this task")
-
-        log_path = Path(log_file)
-        if not log_path.exists():
-            raise FileNotFoundError(f"Log file not found: {log_path}")
-        logs = collect_task_logs(log_path, task_id, max_lines)
-        return {"task_id": task_id, "count": len(logs), "logs": logs}
 
     # ------------------------------------------------------------------
     # Chunk lookup

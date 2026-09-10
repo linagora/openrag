@@ -90,12 +90,12 @@ ENV APP_iPORT=${APP_iPORT:-8080}
 ARG APP_UID=10001
 RUN useradd --uid ${APP_UID} --gid 0 --no-log-init --no-create-home \
         --home-dir /app/home --shell /sbin/nologin openrag \
-    && mkdir -p /app/home /app/data /app/db /app/logs /app/model_weights/hub \
+    && mkdir -p /app/home /app/data /app/db /app/model_weights/hub \
         /app/.venv /app/openrag.egg-info /opt/uv/cache \
         /app/openrag/.files /app/openrag/.chainlit \
     && chgrp -R 0 /app /opt/uv \
     && chmod -R g+rX,g-w /app /opt/uv \
-    && chmod -R g=u /app/home /app/data /app/db /app/logs /app/model_weights \
+    && chmod -R g=u /app/home /app/data /app/db /app/model_weights \
         /app/.venv /app/openrag.egg-info /opt/uv/cache \
         /app/openrag/.files /app/openrag/.chainlit
 # Expose APP_UID at runtime so entrypoint.sh can drop back to this user after

@@ -13,7 +13,6 @@ For local Docker Compose, OpenRAG keeps the historical host-path defaults to avo
 OpenRAG stores several kinds of state:
 
 - uploaded files and application data
-- logs
 - model weights and Hugging Face caches
 - PostgreSQL data
 - Milvus, etcd, and MinIO data
@@ -60,7 +59,6 @@ REPO=/path/to/openrag     # repository root
 PROJECT=openrag           # your `docker compose -p <project>` name
 
 copy $REPO/data                                 ${PROJECT}_appdata
-copy $REPO/logs                                 ${PROJECT}_logs
 copy $HOME/.cache/huggingface                   ${PROJECT}_modelweights   # optional: cache, can be re-downloaded
 copy $REPO/db                                   ${PROJECT}_pgdata
 copy $REPO/infra/compose/milvus/volumes/etcd    ${PROJECT}_etcd

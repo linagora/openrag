@@ -2,13 +2,12 @@ import { request } from "./client";
 
 // OpenRag jobs/queue API (poll-based — OpenRag has NO task SSE).
 // Verified vs routers/admin/jobs.py + routers/admin/indexing.py. The jobs
-// pages poll getTaskStatus (+ getTaskLogs) on a refetchInterval, stopping
+// pages poll getTaskStatus on a refetchInterval, stopping
 // once isTerminalState(state).
 //   GET    /queue/info                          queue + worker pool summary
 //   GET    /queue/tasks[?task_status=]          list tasks → { tasks: [...] }
 //   GET    /indexer/task/{id}                   status → { task_id, task_state, details, error_url? }
 //   GET    /indexer/task/{id}/error             { task_id, traceback: string[] }
-//   GET    /indexer/task/{id}/logs[?max_lines]  { task_id, logs: string[] }
 //   DELETE /indexer/task/{id}                   cancel → { message }
 
 const QUEUE = "/queue";
@@ -81,10 +80,6 @@ export function getTaskStatus(taskId: string): Promise<TaskStatus> {
 
 export function getTaskError(taskId: string): Promise<{ task_id: string; traceback: string[] }> {
   return request<{ task_id: string; traceback: string[] }>(`${TASK}/${encodeURIComponent(taskId)}/error`);
-}
-
-export function getTaskLogs(taskId: string, maxLines = 100): Promise<{ task_id: string; logs: string[] }> {
-  return request<{ task_id: string; logs: string[] }>(`${TASK}/${encodeURIComponent(taskId)}/logs?max_lines=${maxLines}`);
 }
 
 export function cancelTask(taskId: string): Promise<{ message: string }> {

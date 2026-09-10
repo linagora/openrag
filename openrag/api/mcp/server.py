@@ -36,7 +36,6 @@ from api.mcp.auth_context import (
     set_auth_context,
 )
 from core.config import load_config
-from core.utils.log_tail import app_log_file
 from core.utils.logging import get_logger
 from di.container import ServiceContainer
 from di.workers import ensure_worker_bootstrap
@@ -51,8 +50,6 @@ config = load_config()
 mcp_config = config.mcp
 
 server = FastMCP(mcp_config.server_name, stateless_http=True, json_response=True)
-
-LOG_FILE = app_log_file(config.paths.log_dir)
 
 
 # ---------------------------------------------------------------------------
@@ -346,23 +343,6 @@ async def list_my_tasks(task_status: str | None = None) -> dict:
         user_id=get_user_id(),
         is_admin=is_admin(),
         task_status=task_status,
-    )
-
-
-@server.tool(
-    description=(
-        "Fetch chronological log lines for a specific indexation task. "
-        "Useful for diagnosing slow or stuck indexations. "
-        "Use `max_lines` to cap output (default 100)."
-    )
-)
-async def get_task_logs(task_id: str, max_lines: int = 100) -> dict:
-    return await _service().get_task_logs(
-        task_id=task_id,
-        user_id=get_user_id(),
-        is_admin=is_admin(),
-        log_file=LOG_FILE,
-        max_lines=max_lines,
     )
 
 
