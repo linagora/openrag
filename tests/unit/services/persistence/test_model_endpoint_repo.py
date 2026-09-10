@@ -42,6 +42,13 @@ class _FakeConn:
         self.executed: list[tuple[str, tuple]] = []
         self._fetchrow_result = None
         self._fetch_result: list = []
+        # How many partitions the embedder-usage guard should find: `direct`
+        # name the endpoint, `via_default` ride the `default` alias. Zero-zero
+        # is "nothing references it", the case every pre-#762 test assumes.
+        self.embedder_usage = {"direct": 0, "via_default": 0}
+        # Partitions a change of default embedder finds on the alias with files.
+        self.pinned_partitions: list[dict] = []
+        self._fetchval_result = None
 
     def transaction(self):
         return _AsyncCtx(self)
@@ -52,10 +59,18 @@ class _FakeConn:
 
     async def fetch(self, query: str, *params):
         self.executed.append((query, params))
+        if query.lstrip().startswith("UPDATE partitions"):
+            return self.pinned_partitions
         return self._fetch_result
+
+    async def fetchval(self, query: str, *params):
+        self.executed.append((query, params))
+        return self._fetchval_result
 
     async def fetchrow(self, query: str, *params):
         self.executed.append((query, params))
+        if "FROM partitions" in query:
+            return self.embedder_usage
         return self._fetchrow_result
 
 
@@ -138,6 +153,63 @@ async def test_create_default_demotes_existing_in_same_transaction():
     clear_idx = next(i for i, q in enumerate(queries) if "is_default = false" in q)
     insert_idx = next(i for i, q in enumerate(queries) if "INSERT INTO model_endpoints" in q)
     assert clear_idx < insert_idx
+
+
+@pytest.mark.asyncio
+async def test_create_default_embedder_keeps_indexed_alias_partitions_on_the_outgoing_default():
+    """A new default embedder moves every partition on the alias; the ones with
+    files are written down under the outgoing default first, in the same
+    transaction, with partitions locked before the endpoint rows."""
+    from core.config.model_endpoints import ModelEndpointRow
+    from services.persistence.model_endpoint_repo import PgModelEndpointRepository
+
+    pool = _FakePool()
+    pool.conn._fetchrow_result = _make_row(name="e5", is_default=True)
+    pool.conn._fetchval_result = "jina"
+    repo = PgModelEndpointRepository(pool_getter=lambda: pool)
+
+    row = ModelEndpointRow(
+        name="e5",
+        model_type="embedder",
+        endpoint="http://e5:8000/v1",
+        is_default=True,
+        created_at=_NOW,
+        updated_at=_NOW,
+    )
+    await repo.create(row)
+
+    queries = [q for q, _ in pool.conn.executed]
+    lock_i = next(i for i, q in enumerate(queries) if q.startswith("LOCK TABLE partitions"))
+    outgoing_i = next(i for i, q in enumerate(queries) if "is_default FOR UPDATE" in q)
+    pin_i, (pin_q, pin_params) = next(
+        (i, e) for i, e in enumerate(pool.conn.executed) if e[0].lstrip().startswith("UPDATE partitions")
+    )
+    clear_i = next(i for i, q in enumerate(queries) if "is_default = false" in q)
+    assert lock_i < outgoing_i < pin_i < clear_i
+    assert "EXISTS (SELECT 1 FROM files" in pin_q
+    assert pin_params == ("jina", "default")
+
+
+@pytest.mark.asyncio
+async def test_create_default_llm_touches_no_partition():
+    from core.config.model_endpoints import ModelEndpointRow
+    from services.persistence.model_endpoint_repo import PgModelEndpointRepository
+
+    pool = _FakePool()
+    pool.conn._fetchrow_result = _make_row(name="qwen", model_type="llm", is_default=True)
+    repo = PgModelEndpointRepository(pool_getter=lambda: pool)
+
+    row = ModelEndpointRow(
+        name="qwen",
+        model_type="llm",
+        endpoint="http://qwen:8000/v1",
+        is_default=True,
+        created_at=_NOW,
+        updated_at=_NOW,
+    )
+    await repo.create(row)
+
+    assert not any("partitions" in q for q, _ in pool.conn.executed)
 
 
 @pytest.mark.asyncio
@@ -460,6 +532,58 @@ async def test_set_default_locks_rows_then_runs_two_updates():
 
 
 @pytest.mark.asyncio
+async def test_set_default_embedder_keeps_indexed_alias_partitions_on_the_outgoing_default():
+    """Empty partitions on the alias follow the new default; indexed ones keep
+    the embedder that built their vectors, pinned by name before the flag moves."""
+    from services.persistence.model_endpoint_repo import PgModelEndpointRepository
+
+    pool = _FakePool()
+    pool.conn._fetch_result = [_row("jina", True), _row("e5", False)]
+    pool.conn.pinned_partitions = [{"partition": "docs"}]
+    repo = PgModelEndpointRepository(pool_getter=lambda: pool)
+
+    await repo.set_default("embedder", "e5")
+
+    executed = pool.conn.executed
+    queries = [q for q, _ in executed]
+    lock_i = next(i for i, q in enumerate(queries) if q.startswith("LOCK TABLE partitions"))
+    rows_i = next(i for i, q in enumerate(queries) if "FOR UPDATE" in q)
+    pin_i = next(i for i, q in enumerate(queries) if q.lstrip().startswith("UPDATE partitions"))
+    clear_i = next(i for i, q in enumerate(queries) if "is_default = false" in q)
+    assert lock_i < rows_i < pin_i < clear_i
+    assert queries[lock_i] == "LOCK TABLE partitions IN SHARE ROW EXCLUSIVE MODE"
+    assert "EXISTS (SELECT 1 FROM files" in queries[pin_i]
+    assert executed[pin_i][1] == ("jina", "default")
+
+
+@pytest.mark.asyncio
+async def test_set_default_to_the_current_default_pins_nothing():
+    from services.persistence.model_endpoint_repo import PgModelEndpointRepository
+
+    pool = _FakePool()
+    pool.conn._fetch_result = [_row("jina", True), _row("e5", False)]
+    repo = PgModelEndpointRepository(pool_getter=lambda: pool)
+
+    await repo.set_default("embedder", "jina")
+
+    assert not any(q.lstrip().startswith("UPDATE partitions") for q, _ in pool.conn.executed)
+
+
+@pytest.mark.asyncio
+async def test_set_default_llm_neither_locks_nor_pins_partitions():
+    """Only an embedder's partitions hold vectors built with it."""
+    from services.persistence.model_endpoint_repo import PgModelEndpointRepository
+
+    pool = _FakePool()
+    pool.conn._fetch_result = [_row("mistral", True), _row("qwen", False)]
+    repo = PgModelEndpointRepository(pool_getter=lambda: pool)
+
+    await repo.set_default("llm", "qwen")
+
+    assert not any("partitions" in q for q, _ in pool.conn.executed)
+
+
+@pytest.mark.asyncio
 async def test_set_default_raises_not_found_without_clearing_when_target_missing():
     from core.utils.exceptions import NotFoundError
     from services.persistence.model_endpoint_repo import PgModelEndpointRepository
@@ -542,6 +666,172 @@ async def test_delete_and_promote_default_promotes_survivor_under_lock():
     assert any("DELETE FROM model_endpoints" in q for q in queries)
     assert any("is_default = false" in q for q in queries)
     assert any("is_default = true" in q for q in queries)
+
+
+# ── delete vs. partition references (#762 B) ─────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_delete_refuses_when_a_partition_names_the_embedder():
+    """Clearing the reference the way preset selections are cleared would
+    repoint an indexed partition at a different embedding model. There is no
+    safe fallback, so the delete is refused and nothing is written."""
+    from core.utils.exceptions import ConflictError
+    from services.persistence.model_endpoint_repo import PgModelEndpointRepository
+
+    pool = _FakePool()
+    pool.conn._fetch_result = [_row("e5", False), _row("jina", True)]
+    pool.conn.embedder_usage = {"direct": 3, "via_default": 0}
+    repo = PgModelEndpointRepository(pool_getter=lambda: pool)
+
+    with pytest.raises(ConflictError) as exc:
+        await repo.delete_and_promote_default("e5", "embedder")
+
+    assert "3 partition(s) name it" in exc.value.message
+    assert exc.value.status_code == 409
+    queries = [q for q, _ in pool.conn.executed]
+    assert not any("DELETE FROM model_endpoints" in q for q in queries)
+    assert not any("UPDATE pipeline_presets" in q for q in queries)
+
+
+@pytest.mark.asyncio
+async def test_delete_refuses_when_partitions_ride_the_default_alias():
+    """Deleting the default embedder promotes a survivor, which silently moves
+    every partition on the `default` alias to a different model — the same
+    corruption by another route, so it blocks too when those partitions hold
+    files."""
+    from core.utils.exceptions import ConflictError
+    from services.persistence.model_endpoint_repo import PgModelEndpointRepository
+
+    pool = _FakePool()
+    pool.conn._fetch_result = [_row("e5", False), _row("jina", True)]
+    pool.conn.embedder_usage = {"direct": 0, "via_default": 2}
+    repo = PgModelEndpointRepository(pool_getter=lambda: pool)
+
+    with pytest.raises(ConflictError) as exc:
+        await repo.delete_and_promote_default("jina", "embedder")
+
+    assert "'default' alias" in exc.value.message
+    assert not any("DELETE FROM model_endpoints" in q for q, _ in pool.conn.executed)
+
+
+def test_delete_counts_only_alias_partitions_that_hold_files():
+    """An empty partition on the alias has nothing to strand: it follows the
+    promoted default like it follows any other change of default."""
+    from services.persistence.model_endpoint_repo import _EMBEDDER_USAGE_SQL
+
+    direct, via_default = _EMBEDDER_USAGE_SQL.split("AS direct", 1)
+    assert "files" not in direct
+    assert "EXISTS (SELECT 1 FROM files f WHERE f.partition_name = partitions.partition)" in via_default
+
+
+@pytest.mark.asyncio
+async def test_delete_unreferenced_embedder_still_proceeds():
+    from services.persistence.model_endpoint_repo import PgModelEndpointRepository
+
+    pool = _FakePool()
+    pool.conn._fetch_result = [_row("e5", False), _row("jina", True)]
+    pool.conn.embedder_usage = {"direct": 0, "via_default": 0}
+    repo = PgModelEndpointRepository(pool_getter=lambda: pool)
+
+    status, _ = await repo.delete_and_promote_default("e5", "embedder")
+
+    assert status == "ok"
+    assert any("DELETE FROM model_endpoints" in q for q, _ in pool.conn.executed)
+
+
+@pytest.mark.asyncio
+async def test_delete_clears_chat_llm_references_instead_of_blocking():
+    """chat_llm resolves per request and falls back to the default LLM when
+    unset, so clearing it lands exactly where a dangling name would have —
+    minus the dead name. Blocking here would be pure friction."""
+    from services.persistence.model_endpoint_repo import PgModelEndpointRepository
+
+    pool = _FakePool()
+    pool.conn._fetch_result = [_row("mistral", True), _row("doomed", False)]
+    repo = PgModelEndpointRepository(pool_getter=lambda: pool)
+
+    status, _ = await repo.delete_and_promote_default("doomed", "llm")
+
+    assert status == "ok"
+    cleared = [(q, params) for q, params in pool.conn.executed if "SET chat_llm = NULL" in q]
+    assert cleared and cleared[0][1] == ("doomed",)
+    assert any("DELETE FROM model_endpoints" in q for q, _ in pool.conn.executed)
+
+
+@pytest.mark.asyncio
+async def test_delete_locks_partitions_before_the_endpoint_rows():
+    """rename() and PgPresetRepository.delete() both take partitions first, and
+    update_partition writes partitions before reading model_endpoints. Taking
+    the FOR UPDATE row lock first would invert that order and deadlock."""
+    from services.persistence.model_endpoint_repo import PgModelEndpointRepository
+
+    pool = _FakePool()
+    pool.conn._fetch_result = [_row("e5", False), _row("jina", True)]
+    repo = PgModelEndpointRepository(pool_getter=lambda: pool)
+
+    await repo.delete_and_promote_default("e5", "embedder")
+
+    queries = [q for q, _ in pool.conn.executed]
+    lock_i = next(i for i, q in enumerate(queries) if q.startswith("LOCK TABLE partitions"))
+    rows_i = next(i for i, q in enumerate(queries) if "FOR UPDATE" in q)
+    assert lock_i < rows_i
+
+
+@pytest.mark.asyncio
+async def test_concurrent_deletes_queue_on_the_partition_lock_instead_of_deadlocking():
+    """Deleting an LLM clears `chat_llm`, a write to partitions. Under SHARE,
+    which does not conflict with itself, two deletes both take the lock and then
+    each wait on the other's to write — Postgres reports a deadlock and fails
+    one. SHARE ROW EXCLUSIVE conflicts with itself, so the second one waits."""
+    from services.persistence.model_endpoint_repo import PgModelEndpointRepository
+
+    pool = _FakePool()
+    pool.conn._fetch_result = [_row("gpt", False), _row("mistral", True)]
+    repo = PgModelEndpointRepository(pool_getter=lambda: pool)
+
+    await repo.delete_and_promote_default("gpt", "llm")
+
+    locks = [q for q, _ in pool.conn.executed if q.startswith("LOCK TABLE partitions")]
+    assert locks == ["LOCK TABLE partitions IN SHARE ROW EXCLUSIVE MODE"]
+
+
+@pytest.mark.asyncio
+async def test_usage_counts_maps_name_and_type_to_partition_count():
+    from services.persistence.model_endpoint_repo import PgModelEndpointRepository
+
+    pool = _FakePool()
+    pool._fetch_result = [
+        {"name": "jina", "model_type": "embedder", "cnt": 4},
+        {"name": "mistral", "model_type": "llm", "cnt": 1},
+        {"name": "bge", "model_type": "reranker", "cnt": 0},
+    ]
+    repo = PgModelEndpointRepository(pool_getter=lambda: pool)
+
+    counts = await repo.usage_counts()
+
+    assert counts == {("jina", "embedder"): 4, ("mistral", "llm"): 1, ("bge", "reranker"): 0}
+    # One aggregate query, not one per endpoint.
+    assert len(pool.executed) == 1
+
+
+@pytest.mark.asyncio
+async def test_usage_counts_include_partitions_riding_the_default_llm():
+    """`chat_llm` is optional and unset means "the default LLM", so those
+    partitions are served by that endpoint and the delete dialog must say so."""
+    from services.persistence.model_endpoint_repo import PgModelEndpointRepository
+
+    pool = _FakePool()
+    pool._fetch_result = []
+    repo = PgModelEndpointRepository(pool_getter=lambda: pool)
+
+    await repo.usage_counts()
+
+    sql = pool.executed[0][0]
+    llm_branch = sql[sql.index("e.model_type = 'llm'") :]
+    assert "p.chat_llm IS NULL" in llm_branch
+    # Only for the default one: an unset column names no other endpoint.
+    assert "e.is_default AND (p.chat_llm = $1 OR p.chat_llm IS NULL)" in llm_branch
 
 
 @pytest.mark.asyncio

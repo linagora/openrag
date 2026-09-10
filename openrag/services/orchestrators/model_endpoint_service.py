@@ -195,6 +195,12 @@ def _is_unmodified_seed(row: ModelEndpointRow, data: dict[str, Any]) -> bool:
     return row.endpoint == data["endpoint"] and (row.model_name or "") == (data["model_name"] or "")
 
 
+def _with_usage(row: ModelEndpointRow, counts: Mapping[tuple[str, str], int]) -> dict[str, Any]:
+    # Types with no partition column (reranker/vlm/stt) count 0: partitions
+    # reference them through presets, not by name.
+    return {**row.model_dump(), "used_by_partitions": counts.get((row.name, row.model_type), 0)}
+
+
 class ModelEndpointService:
     """CRUD and lifecycle management for named model endpoints."""
 
@@ -504,6 +510,8 @@ class ModelEndpointService:
                 code="ENDPOINT_EXISTS",
             )
         result = await self._repo.create(row)
+        if row.is_default:
+            await self._reload_partitions_after_default_change(row.model_type)
         await self.load_all()
         if row.is_default:
             # The new endpoint became the default (repo demoted the previous one in
@@ -519,8 +527,27 @@ class ModelEndpointService:
             raise NotFoundError(f"Endpoint '{name}' of type '{model_type}' not found.")
         return row
 
-    async def list_model_endpoints(self, model_type: str | None = None) -> list[ModelEndpointRow]:
-        return await self._repo.list_all(model_type=model_type)
+    async def list_model_endpoints(self, model_type: str | None = None) -> list[dict[str, Any]]:
+        """List endpoints, each annotated with ``used_by_partitions``.
+
+        One aggregate query for the counts rather than one per endpoint. The
+        count is what makes the delete dialog honest: an embedder with a
+        nonzero count cannot be deleted (the repo refuses it), so the UI can
+        say so up front instead of offering a button that 409s.
+        """
+        rows = await self._repo.list_all(model_type=model_type)
+        counts = await self._repo.usage_counts()
+        return [_with_usage(row, counts) for row in rows]
+
+    async def with_partition_usage(self, row: ModelEndpointRow) -> dict[str, Any]:
+        """One endpoint annotated with ``used_by_partitions``, as the list has it.
+
+        For every other route answering with an endpoint (get, create, update,
+        set-default), so an endpoint never reads as unused on one route and in
+        use on another. Same aggregate query as the list, so the two counts
+        cannot disagree.
+        """
+        return _with_usage(row, await self._repo.usage_counts())
 
     async def update_model_endpoint(self, name: str, model_type: str, **fields: object) -> ModelEndpointRow:
         """Update endpoint fields and/or rename it.
@@ -607,6 +634,7 @@ class ModelEndpointService:
             # Clears any prior default and sets this row in one transaction, then
             # re-points the 'default' alias to it — never leaves two defaults.
             await self._repo.set_default(model_type, effective_name)
+            await self._reload_partitions_after_default_change(model_type)
         # The 'default' alias client is stale when this endpoint becomes the default
         # OR was already the default (its config just changed).
         evict_default = bool(promote_to_default or existing.is_default)
@@ -621,6 +649,23 @@ class ModelEndpointService:
             self._invalidate_client_cache(model_type, "default")
         return await self._repo.get(effective_name, model_type) or (updated or existing)
 
+    async def _reload_partitions_after_default_change(self, model_type: str) -> None:
+        """Show this replica the partitions a new default embedder pinned (#762).
+
+        Changing the default embedder writes the old default's name onto
+        indexed partitions still riding the alias (see
+        ``PgModelEndpointRepository.set_default``); the in-memory partition
+        configs would otherwise keep resolving them through the moved alias.
+
+        Call it before ``load_all()`` moves the alias. The other way round, a
+        query landing while this reload awaits its read still finds an indexed
+        partition on ``default`` and embeds with the new model; this way round,
+        an empty partition briefly keeps the old default, which holds no vectors
+        to mismatch.
+        """
+        if model_type == "embedder" and self._partition_service is not None:
+            await self._partition_service.load_partitions()
+
     async def delete_model_endpoint(self, name: str, model_type: str) -> None:
         """Delete an endpoint.
 
@@ -634,6 +679,16 @@ class ModelEndpointService:
         clears those selections in the delete's own transaction (see
         ``_clear_preset_references``), returning the preset to the default
         fallback; the cache reloads below make that visible to this replica.
+
+        Partition references are settled in that same transaction, and not the
+        same way for both columns (#762). An ``embedder`` a partition still
+        names — or, for the default, that an alias partition with indexed files
+        resolves to — refuses the delete outright — ConflictError, 409 — because
+        clearing it would repoint indexed vectors at a different embedding
+        model without saying so. Empty partitions on the alias just follow the
+        promoted default. A ``chat_llm`` reference is cleared to NULL,
+        which is precisely the request-time default it would have fallen back
+        to anyway. See ``PgModelEndpointRepository._settle_partition_references``.
         """
         # The last-endpoint guard and the survivor/default choice are made INSIDE
         # the repo's locked transaction (not from a stale snapshot here), so
@@ -672,6 +727,7 @@ class ModelEndpointService:
         if existing is None:
             raise NotFoundError(f"Endpoint '{name}' of type '{model_type}' not found.")
         await self._repo.set_default(model_type, name)
+        await self._reload_partitions_after_default_change(model_type)
         # Reload before evicting so a client rebuilt during the window can't survive.
         await self.load_all()
         self._invalidate_client_cache(model_type, "default")

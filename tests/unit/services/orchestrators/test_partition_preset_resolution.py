@@ -38,6 +38,8 @@ class _FakePartitionRepo:
         self._store: dict[str, dict] = {r["partition"]: r for r in (rows or [])}
         self._counts: dict[str, int] = {}
         self.calls: list[tuple[str, tuple]] = []
+        # What `pin_default_embedder` resolves the alias to; None = no default endpoint.
+        self.default_embedder: str | None = "jina"
 
     async def partition_exists(self, name: str) -> bool:
         return name in self._store
@@ -69,6 +71,16 @@ class _FakePartitionRepo:
 
     async def count_files_by_partition(self) -> dict[str, int]:
         return dict(self._counts)
+
+    async def pin_default_embedder(self, name: str) -> str | None:
+        """The SQL's effect: a partition on the alias takes `default_embedder`."""
+        self.calls.append(("pin_default_embedder", (name,)))
+        row = self._store.get(name)
+        if row is None:
+            return None
+        if row["embedder"] == "default" and self.default_embedder is not None:
+            row["embedder"] = self.default_embedder
+        return row["embedder"]
 
 
 class _FakeVectorStore:
@@ -600,3 +612,80 @@ async def test_update_partition_config_applies_and_returns_detail():
 
     assert detail["description"] == "new"
     assert repo._store["p1"]["description"] == "new"
+
+
+# ------------------------------------------------------------------
+# pin_embedder_for_write (#762)
+# ------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_pin_embedder_for_write_resolves_the_alias_and_reloads_the_cache():
+    """The job captures the embedder from the cache right after this, so the
+    cache must already name the endpoint the partition was pinned to."""
+    repo = _FakePartitionRepo([_full_row("docs")])
+    svc = _make_service(repo=repo)
+    await svc.load_partitions()
+
+    await svc.pin_embedder_for_write("docs")
+
+    assert repo._store["docs"]["embedder"] == "jina"
+    assert svc._config.partitions["docs"].embedder == "jina"
+
+
+@pytest.mark.asyncio
+async def test_pin_embedder_for_write_skips_the_db_for_an_explicit_embedder():
+    repo = _FakePartitionRepo([_full_row("docs", embedder="bge")])
+    svc = _make_service(repo=repo)
+    await svc.load_partitions()
+
+    await svc.pin_embedder_for_write("docs")
+
+    assert not any(c[0] == "pin_default_embedder" for c in repo.calls)
+    assert svc._config.partitions["docs"].embedder == "bge"
+
+
+@pytest.mark.asyncio
+async def test_pin_embedder_for_write_picks_up_a_pin_another_replica_made():
+    """This replica's cache still says `default`; the row already names an
+    endpoint. The pin is a no-op in SQL, and the cache catches up."""
+    repo = _FakePartitionRepo([_full_row("docs")])
+    svc = _make_service(repo=repo)
+    await svc.load_partitions()
+    repo._store["docs"]["embedder"] = "bge"
+
+    await svc.pin_embedder_for_write("docs")
+
+    assert svc._config.partitions["docs"].embedder == "bge"
+
+
+@pytest.mark.asyncio
+async def test_pin_embedder_for_write_leaves_the_alias_without_a_default_to_resolve_to():
+    repo = _FakePartitionRepo([_full_row("docs")])
+    repo.default_embedder = None
+    svc = _make_service(repo=repo)
+    await svc.load_partitions()
+
+    await svc.pin_embedder_for_write("docs")
+
+    assert svc._config.partitions["docs"].embedder == "default"
+
+
+@pytest.mark.asyncio
+async def test_pin_embedder_for_write_is_a_no_op_without_config():
+    from services.orchestrators.partition_service import PartitionService
+
+    repo = _FakePartitionRepo([_full_row("docs")])
+    svc = PartitionService(
+        partition_repo=repo,
+        membership_repo=object(),
+        document_repo=object(),
+        vector_store=_FakeVectorStore(),
+        user_repo=object(),
+        collection="vdb",
+        config=None,
+    )
+
+    await svc.pin_embedder_for_write("docs")
+
+    assert repo.calls == []

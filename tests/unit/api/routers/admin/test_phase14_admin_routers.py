@@ -49,6 +49,8 @@ class FakeModelEndpointService:
         self.endpoint_extra: dict[str, Any] = {}
         self.endpoint_model_name: str | None = "mistral"
         self.endpoint_timeout = 30.0
+        # `used_by_partitions` per (name, model_type), as usage_counts reports it.
+        self.usage: dict[tuple[str, str], int] = {}
 
     async def create_model_endpoint(self, row: Any) -> dict[str, Any]:
         """Record endpoint creation (from a ModelEndpointRow) and echo a row."""
@@ -88,6 +90,11 @@ class FakeModelEndpointService:
     async def set_default(self, model_type: str, name: str) -> None:
         """Record default promotion."""
         self.calls.append(("set_default", {"name": name, "model_type": model_type}))
+
+    async def with_partition_usage(self, row: Any) -> dict[str, Any]:
+        """Annotate a row with its partition count, as the real service does."""
+        data = row.model_dump() if hasattr(row, "model_dump") else dict(row)
+        return {**data, "used_by_partitions": self.usage.get((data["name"], data["model_type"]), 0)}
 
     async def validate_endpoint(
         self,
@@ -600,6 +607,34 @@ async def test_set_default_model_endpoint_returns_promoted_endpoint(async_client
         ("set_default", {"name": "default", "model_type": "llm"}),
         ("get", {"name": "default", "model_type": "llm"}),
     ]
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "body"),
+    [
+        ("GET", "/model-endpoints/embedder/jina", None),
+        (
+            "POST",
+            "/model-endpoints/",
+            {"name": "jina", "model_type": "embedder", "endpoint": "http://jina:8000/v1", "model_name": "jina-v3"},
+        ),
+        ("PUT", "/model-endpoints/embedder/jina", {"batch_size": 16}),
+        ("POST", "/model-endpoints/embedder/jina/set-default", None),
+    ],
+)
+@pytest.mark.asyncio
+async def test_every_route_returning_an_endpoint_reports_its_partition_count(async_client_factory, method, path, body):
+    """The list is not the only view of an endpoint: one read or written alone
+    must not read as unused because only the list filled in the count."""
+    model_service = FakeModelEndpointService()
+    model_service.usage = {("jina", "embedder"): 3}
+    app = _build_app(model_service=model_service)
+
+    async with async_client_factory(app) as client:
+        response = await client.request(method, path, json=body)
+
+    assert response.status_code in (200, 201)
+    assert response.json()["used_by_partitions"] == 3
 
 
 # --------------------------------------------------------------------------- #

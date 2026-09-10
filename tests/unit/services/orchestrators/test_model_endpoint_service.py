@@ -42,13 +42,21 @@ def _make_unvalidated_row(**kwargs):
 
 
 class _FakeEndpointRepo:
-    def __init__(self, rows: list | None = None):
+    def __init__(self, rows: list | None = None, usage: dict | None = None):
         from core.config.model_endpoints import ModelEndpointRow
 
         self._store: dict[tuple[str, str], ModelEndpointRow] = {}
         self.calls: list[tuple[str, tuple]] = []
+        self._usage = usage or {}
+        # Set to a message to make the delete refuse, the way the real repo
+        # does when a partition still resolves to the embedder.
+        self.conflict_on_delete: str | None = None
         for r in rows or []:
             self._store[(r.name, r.model_type)] = r
+
+    async def usage_counts(self) -> dict[tuple[str, str], int]:
+        self.calls.append(("usage_counts", ()))
+        return dict(self._usage)
 
     async def create(self, row):
         self._store[(row.name, row.model_type)] = row
@@ -90,6 +98,10 @@ class _FakeEndpointRepo:
     async def delete_and_promote_default(self, name: str, model_type: str) -> tuple[str, str | None]:
         names = sorted(k[0] for k in self._store if k[1] == model_type)
         self.calls.append(("delete_and_promote_default", (name, model_type)))
+        if self.conflict_on_delete is not None:
+            from core.utils.exceptions import ConflictError
+
+            raise ConflictError(self.conflict_on_delete)
         if name not in names:
             return ("not_found", None)
         if len(names) <= 1:
@@ -1446,6 +1458,92 @@ async def test_set_default_calls_repo_and_reloads():
     assert any(c[0] == "list_all" for c in repo.calls)
 
 
+# ── a new default embedder keeps indexed partitions where they are (#762) ──
+
+
+@pytest.mark.asyncio
+async def test_set_default_embedder_reloads_partitions():
+    """The repo pins indexed partitions riding the alias to the outgoing default
+    by name; this replica's partition configs must see that before the alias
+    resolves to the new one."""
+    rows = [_make_row(name="jina", is_default=True), _make_row(name="e5", is_default=False)]
+    partition_service = _FakePartitionServiceForReload()
+    svc = _make_service(_FakeEndpointRepo(rows=rows), partition_service=partition_service)
+
+    await svc.set_default("embedder", "e5")
+
+    assert partition_service.load_partitions_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_set_default_llm_does_not_reload_partitions():
+    rows = [
+        _make_row(name="mistral", model_type="llm", is_default=True),
+        _make_row(name="qwen", model_type="llm", is_default=False),
+    ]
+    partition_service = _FakePartitionServiceForReload()
+    svc = _make_service(_FakeEndpointRepo(rows=rows), partition_service=partition_service)
+
+    await svc.set_default("llm", "qwen")
+
+    assert partition_service.load_partitions_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_update_is_default_embedder_reloads_partitions():
+    rows = [_make_row(name="jina", is_default=True), _make_row(name="e5", is_default=False)]
+    partition_service = _FakePartitionServiceForReload()
+    svc = _make_service(_FakeEndpointRepo(rows=rows), partition_service=partition_service)
+
+    await svc.update_model_endpoint("e5", "embedder", is_default=True)
+
+    assert partition_service.load_partitions_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_create_default_embedder_reloads_partitions():
+    partition_service = _FakePartitionServiceForReload()
+    svc = _make_service(_FakeEndpointRepo(rows=[_make_row(name="jina")]), partition_service=partition_service)
+
+    await svc.create_model_endpoint(_make_row(name="e5", is_default=True))
+
+    assert partition_service.load_partitions_calls == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("promote", "creates"),
+    [
+        pytest.param(lambda svc: svc.set_default("embedder", "e5"), False, id="set_default"),
+        pytest.param(lambda svc: svc.update_model_endpoint("e5", "embedder", is_default=True), False, id="update"),
+        pytest.param(lambda svc: svc.create_model_endpoint(_make_row(name="e5", is_default=True)), True, id="create"),
+    ],
+)
+async def test_default_embedder_change_reloads_partitions_before_moving_the_alias(promote, creates):
+    """An indexed partition the repo just pinned still reads `default` in memory
+    until the partition reload lands. If the alias has already moved by then, a
+    query in between embeds with a model its vectors were not built with."""
+    from core.config.root import Settings
+
+    settings = Settings()
+    alias_during_reload: list[str] = []
+
+    class _RecordingPartitionService:
+        async def load_partitions(self):
+            alias_during_reload.append(settings.models.embedder["default"].name)
+
+    rows = [_make_row(name="jina", is_default=True)]
+    if not creates:
+        rows.append(_make_row(name="e5", is_default=False))
+    svc = _make_service(_FakeEndpointRepo(rows=rows), settings=settings, partition_service=_RecordingPartitionService())
+    await svc.load_all()
+
+    await promote(svc)
+
+    assert alias_during_reload == ["jina"]
+    assert settings.models.embedder["default"].name == "e5"
+
+
 # ------------------------------------------------------------------
 # validate_endpoint
 # ------------------------------------------------------------------
@@ -2353,3 +2451,67 @@ async def test_delete_model_endpoint_reloads_partitions_when_no_preset_moved():
 
     assert preset_service.refresh_calls == 1
     assert partition_service.load_partitions_calls == 1
+
+
+# ── used_by_partitions / delete conflict (#762 B) ────────────────────
+
+
+@pytest.mark.asyncio
+async def test_list_model_endpoints_annotates_used_by_partitions():
+    repo = _FakeEndpointRepo(
+        rows=[
+            _make_row(name="jina", model_type="embedder", is_default=True),
+            _make_row(name="e5", model_type="embedder", is_default=False),
+        ],
+        usage={("jina", "embedder"): 4},
+    )
+    svc = _make_service(repo)
+
+    rows = await svc.list_model_endpoints(model_type="embedder")
+
+    by_name = {r["name"]: r["used_by_partitions"] for r in rows}
+    assert by_name == {"jina": 4, "e5": 0}
+    # One aggregate lookup for the whole list, not one per endpoint.
+    assert sum(1 for c, _ in repo.calls if c == "usage_counts") == 1
+
+
+@pytest.mark.asyncio
+async def test_one_endpoint_carries_the_same_usage_count_as_the_list():
+    """The single-endpoint routes used to keep the schema's 0 while the list
+    reported the real count, so an embedder in use read as unused there."""
+    rows = [
+        _make_row(name="jina", model_type="embedder", is_default=True),
+        _make_row(name="bge", model_type="reranker", is_default=True),
+    ]
+    repo = _FakeEndpointRepo(rows=rows, usage={("jina", "embedder"): 4, ("bge", "reranker"): 0})
+    svc = _make_service(repo)
+
+    listed = {r["name"]: r["used_by_partitions"] for r in await svc.list_model_endpoints()}
+    single = {row.name: (await svc.with_partition_usage(row))["used_by_partitions"] for row in rows}
+
+    # A reranker is referenced through presets, never by a partition: still 0.
+    assert single == listed == {"jina": 4, "bge": 0}
+
+
+@pytest.mark.asyncio
+async def test_delete_model_endpoint_propagates_conflict_without_touching_caches():
+    """A refused delete changed nothing in the DB, so reloading the registry or
+    evicting clients here would be churn — and would briefly advertise a state
+    that never happened."""
+    from core.utils.exceptions import ConflictError
+
+    repo = _FakeEndpointRepo(
+        rows=[
+            _make_row(name="jina", model_type="embedder", is_default=True),
+            _make_row(name="e5", model_type="embedder", is_default=False),
+        ]
+    )
+    repo.conflict_on_delete = "Embedder 'e5' is still in use: 3 partition(s) name it."
+    partition_service = _FakePartitionServiceForReload()
+    svc = _make_service(repo, partition_service=partition_service)
+
+    with pytest.raises(ConflictError) as exc:
+        await svc.delete_model_endpoint("e5", "embedder")
+
+    assert exc.value.status_code == 409
+    assert partition_service.load_partitions_calls == 0

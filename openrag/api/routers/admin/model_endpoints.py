@@ -135,7 +135,7 @@ async def create_model_endpoint(
     row = ModelEndpointRow(**body.model_dump(), created_at=now, updated_at=now)
     result = await service.create_model_endpoint(row)
     _refresh_llm_token_cache(background_tasks, body.model_type)
-    return result
+    return await service.with_partition_usage(result)
 
 
 @router.get("/", response_model=list[ModelEndpointResponse])
@@ -154,7 +154,7 @@ async def get_model_endpoint(
     service=Depends(get_model_endpoint_service),
 ):
     """Return one registered inference endpoint."""
-    return await service.get_model_endpoint(name=name, model_type=model_type)
+    return await service.with_partition_usage(await service.get_model_endpoint(name=name, model_type=model_type))
 
 
 @router.put("/{model_type}/{name}", response_model=ModelEndpointResponse)
@@ -177,7 +177,7 @@ async def update_model_endpoint(
         **fields,
     )
     _refresh_llm_token_cache(background_tasks, model_type)
-    return result
+    return await service.with_partition_usage(result)
 
 
 @router.delete("/{model_type}/{name}", status_code=status.HTTP_204_NO_CONTENT)
@@ -187,7 +187,15 @@ async def delete_model_endpoint(
     background_tasks: BackgroundTasks,
     service=Depends(get_model_endpoint_service),
 ):
-    """Delete a registered inference endpoint."""
+    """Delete a registered inference endpoint.
+
+    Returns 409 if a partition still names this embedder, or — when it is the
+    default — a partition following the `default` alias already holds indexed
+    files; reassign those partitions first. Empty partitions on the alias just
+    follow the promoted default.
+    An LLM endpoint deletes regardless; partitions naming it as `chat_llm` are
+    reset to the default LLM they would have fallen back to anyway.
+    """
     await service.delete_model_endpoint(name=name, model_type=model_type)
     _refresh_llm_token_cache(background_tasks, model_type)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
@@ -200,10 +208,16 @@ async def set_default_model_endpoint(
     background_tasks: BackgroundTasks,
     service=Depends(get_model_endpoint_service),
 ):
-    """Promote a registered endpoint to the default for its type."""
+    """Promote a registered endpoint to the default for its type.
+
+    For embedders, partitions following the ``default`` alias that already hold
+    indexed files stay on the outgoing default (their embedder is written down
+    by name); only partitions that have never received data move to the new
+    one.
+    """
     await service.set_default(model_type=model_type, name=name)
     _refresh_llm_token_cache(background_tasks, model_type)
-    return await service.get_model_endpoint(name=name, model_type=model_type)
+    return await service.with_partition_usage(await service.get_model_endpoint(name=name, model_type=model_type))
 
 
 @router.post("/{model_type}/{name}/reveal-api-key", response_model=RevealApiKeyResponse)

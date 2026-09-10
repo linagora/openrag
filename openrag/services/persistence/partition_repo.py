@@ -55,6 +55,21 @@ _ENDPOINT_EXISTS_SQL = (
     "SELECT 1 FROM model_endpoints "
     "WHERE model_type = $2 AND (name = $1 OR ($1 = '" + _DEFAULT_ENDPOINT_ALIAS + "' AND is_default))"
 )
+# Replaces the `default` alias with the embedder it resolves to, on a partition
+# about to receive data (#762). Conditional on the alias, so an explicit
+# embedder — or a PATCH that got there first — is left alone and a second
+# upload changes nothing. The name is read from the database, not from a
+# replica's in-memory catalog: whichever default this sees, the upload is
+# dispatched with the same name, so the partition and its vectors agree.
+_PIN_DEFAULT_EMBEDDER_SQL = """
+    UPDATE partitions
+    SET embedder = e.name, updated_at = now()
+    FROM model_endpoints e
+    WHERE partitions.partition = $1
+      AND partitions.embedder = $2
+      AND e.model_type = 'embedder' AND e.is_default
+    RETURNING partitions.embedder
+    """
 _PARTITION_UPDATE_COLUMNS = frozenset(
     {
         "description",
@@ -114,6 +129,9 @@ class _PartitionOperationGuard:
 
     async def list_partition_rows(self) -> list[dict]:
         return await self._repo._list_partition_rows_on_conn(self._conn)
+
+    async def pin_default_embedder(self, name: str) -> str | None:
+        return await self._repo._pin_default_embedder_on_conn(self._conn, name)
 
 
 class PgPartitionRepository(PartitionRepository):
@@ -404,6 +422,22 @@ class PgPartitionRepository(PartitionRepository):
                         code="MODEL_ENDPOINT_NOT_FOUND",
                     )
             return self._row_to_full_dict(row)
+
+    async def pin_default_embedder(self, name: str) -> str | None:
+        """Resolve a partition's ``default`` embedder alias to the endpoint it names.
+
+        Returns the partition's embedder afterwards: the endpoint it is now
+        pinned to, the explicit name it already had, ``"default"`` when no
+        default embedder exists to resolve to, or ``None`` when the partition
+        does not exist.
+        """
+        return await self._pin_default_embedder_on_conn(self.pool, name)
+
+    async def _pin_default_embedder_on_conn(self, conn: asyncpg.Connection | asyncpg.Pool, name: str) -> str | None:
+        pinned = await conn.fetchval(_PIN_DEFAULT_EMBEDDER_SQL, name, _DEFAULT_ENDPOINT_ALIAS)
+        if pinned is not None:
+            return pinned
+        return await conn.fetchval("SELECT embedder FROM partitions WHERE partition = $1", name)
 
     # ── Legacy method names used by the Phase 7C shim ────────────────
 

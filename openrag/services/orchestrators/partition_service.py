@@ -32,6 +32,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from core.config.indexation_pipeline import IndexationPipelineConfig
+from core.config.model_endpoints import DEFAULT_ENDPOINT_ALIAS
 from core.config.retrieval_pipeline import RetrievalPipelineConfig
 from core.indexing.validators import validate_partition_name
 from core.models.preset import PartitionConfig
@@ -181,6 +182,41 @@ class PartitionService:
             finally:
                 _ACTIVE_PARTITION_OPERATIONS.reset(token)
 
+    async def pin_embedder_for_write(self, partition: str) -> None:
+        """Take *partition* off the ``default`` embedder alias before it gets data (#762).
+
+        A partition on the alias follows every change of default embedder. That
+        is only harmless while it holds nothing: once it has vectors, following
+        the alias sends its queries to a model its files were never embedded
+        with. So the first upload or copy replaces the alias with the endpoint
+        it resolves to, and a later default change passes the partition by —
+        empty partitions keep following the default, indexed ones keep their
+        embedder.
+
+        Runs at admission, before the job captures the partition's embedder, so
+        the worker is handed that concrete name. Handed ``default``, it would
+        resolve the alias itself, later, against its own copy of the catalog —
+        possibly after the default moved, writing the file into another
+        embedder than the one the partition was just pinned to.
+
+        A partition emptied afterwards stays pinned: a concrete name cannot be
+        told apart from one an admin chose, and PATCHing ``embedder`` back to
+        ``default`` is how an admin opts back in.
+        """
+        if self._config is None:
+            return
+        cached = self._config.partitions.get(partition)
+        if cached is not None and cached.embedder != DEFAULT_ENDPOINT_ALIAS:
+            return
+        operation = self._active_partition_operation(partition)
+        embedder = await self._pin_default_embedder_for_operation(partition, operation=operation)
+        if embedder is None or embedder == DEFAULT_ENDPOINT_ALIAS:
+            # No such partition, or no default embedder to resolve to: nothing
+            # to pin, and the upload fails on its own further down.
+            return
+        logger.bind(partition=partition, embedder=embedder).info("Pinned partition to its embedder on first write.")
+        await self.load_partitions()
+
     @asynccontextmanager
     async def _partition_operation_lock(self, partition: str) -> AsyncIterator[Any]:
         lock_factory = getattr(self._partition_repo, "partition_operation_lock", None)
@@ -235,6 +271,12 @@ class PartitionService:
         if list_partition_rows is not None:
             return await list_partition_rows()
         return await self._partition_repo.list_partition_rows()
+
+    async def _pin_default_embedder_for_operation(self, partition: str, *, operation: Any = None) -> str | None:
+        pin = getattr(operation, "pin_default_embedder", None)
+        if pin is not None:
+            return await pin(partition)
+        return await self._partition_repo.pin_default_embedder(partition)
 
     def _active_partition_operation(self, partition: str | None = None) -> Any:
         active_operations = _ACTIVE_PARTITION_OPERATIONS.get() or {}
