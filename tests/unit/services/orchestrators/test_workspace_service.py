@@ -18,7 +18,7 @@ class FakeWorkspaceRepo:
         self.finalized: list[tuple[str, str]] = []
         self.cleanup_started: list[tuple[str, str]] = []
         self.released: list[tuple[str, str]] = []
-        self.deleted: list[str] = []
+        self.deleted: list[tuple[str, bool]] = []
 
     async def get_workspace_dict(self, workspace_id: str):
         return self._workspace
@@ -47,7 +47,7 @@ class FakeWorkspaceRepo:
         return ["w1", "w2"]
 
     async def delete_workspace(self, workspace_id: str, *, keep_files: bool = False) -> list[str]:
-        self.deleted.append(workspace_id)
+        self.deleted.append((workspace_id, keep_files))
         return list(self._orphaned)
 
     async def remove_file_from_all_workspaces(self, file_id: str, partition: str) -> None:
@@ -141,7 +141,7 @@ async def test_delete_workspace_no_orphans():
     vstore = FakeVectorStore()
     out = await _svc(wrepo=wrepo, drepo=drepo, vstore=vstore).delete_workspace("p", "w1")
     assert out == {"orphaned_files_deleted": 0, "orphaned_files_failed": [], "kept_files": 0}
-    assert wrepo.deleted == ["w1"]
+    assert wrepo.deleted == [("w1", False)]
     assert vstore.deleted == []
     assert drepo.removed == []
 
@@ -192,7 +192,7 @@ async def test_delete_workspace_keep_files_skips_file_deletion():
     out = await svc.delete_workspace("p", "w1", keep_files=True)
 
     assert out == {"orphaned_files_deleted": 0, "orphaned_files_failed": [], "kept_files": 2}
-    assert wrepo.deleted == ["w1"]
+    assert wrepo.deleted == [("w1", True)]
     # No file touched: no vector delete, no catalog row removal, no detach.
     assert vstore.deleted == []
     assert drepo.removed == []
