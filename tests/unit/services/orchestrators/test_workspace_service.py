@@ -16,6 +16,7 @@ class FakeWorkspaceRepo:
         self.removed: list[tuple[str, str]] = []
         self.removed_from_all: list[tuple[str, str]] = []
         self.finalized: list[tuple[str, str]] = []
+        self.cleanup_started: list[tuple[str, str]] = []
         self.released: list[tuple[str, str]] = []
         self.deleted: list[str] = []
 
@@ -54,6 +55,10 @@ class FakeWorkspaceRepo:
 
     async def finalize_claimed_file_cleanup(self, file_id: str, partition: str) -> bool:
         self.finalized.append((file_id, partition))
+        return True
+
+    async def start_claimed_file_cleanup(self, file_id: str, partition: str) -> bool:
+        self.cleanup_started.append((file_id, partition))
         return True
 
     async def release_claimed_file_cleanup(self, file_id: str, partition: str) -> None:
@@ -153,6 +158,7 @@ async def test_delete_workspace_cleans_orphans_vectors_and_rows():
     assert vstore.deleted == [["c1", "c2"]]
     assert drepo.removed == []
     assert set(wrepo.finalized) == {("fA", "p"), ("fB", "p")}
+    assert wrepo.cleanup_started == [("fA", "p")]
 
 
 @pytest.mark.asyncio

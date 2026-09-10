@@ -194,6 +194,8 @@ class WorkspaceService:
             )
             if ids:
                 vector_cleanup_started = True
+                if not await self._workspace_repo.start_claimed_file_cleanup(file_id, partition):
+                    raise RuntimeError(f"Workspace cleanup claim disappeared for {file_id}")
                 await self._vector_store.delete(ids, self._collection)
             if not await self._workspace_repo.finalize_claimed_file_cleanup(file_id, partition):
                 raise RuntimeError(f"Workspace cleanup claim disappeared for {file_id}")
