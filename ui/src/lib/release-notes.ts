@@ -18,10 +18,10 @@ export interface Release {
  * dialog content are derived from it.
  */
 export const releaseNotes: Release = {
-  version: "2.2.0",
-  date: "2026-09-03",
+  version: "2.2.1",
+  date: "2026-09-08",
   summary:
-    "OpenRAG 2.2.0 expands retrieval, indexing, chunking, and speech-to-text capabilities, while improving administration and release visibility.",
+    "OpenRAG 2.2.1 expands retrieval, indexing, chunking, and speech-to-text capabilities, while improving administration and release visibility.",
 
   newFeatures: [
     "Scope chat retrieval to specific indexed files by providing attachment file IDs, so answers can focus only on the selected documents.",
@@ -42,9 +42,9 @@ export const releaseNotes: Release = {
   breakingChange: {
     title: "Milvus 3.0 migration required",
     description:
-      "OpenRAG 2.2.0 requires Milvus 3.0. Existing Milvus 2.x deployments must be migrated before upgrading. The BM25 analyzer has also changed to support case-insensitive lexical search and requires the corresponding vector database schema migration.",
+      "OpenRAG 2.2.1 requires Milvus 3.0. Existing Milvus 2.x deployments must be migrated before upgrading. The BM25 analyzer has also changed to support case-insensitive lexical search and requires the corresponding vector database schema migration.",
     action:
-      "Back up your Milvus data and follow the Milvus migration guide, including the required schema migrations, before starting OpenRAG 2.2.0.",
+      "Back up your Milvus data and follow the Milvus migration guide, including the required schema migrations, before starting OpenRAG 2.2.1.",
   },
 };
 
