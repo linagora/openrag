@@ -53,7 +53,7 @@ Once cut:
 The version is typed in exactly one place, `pyproject.toml` — `/version` is served from that file's
 installed metadata, so it is also the number the running app reports.
 
-One other file has to follow it. `ui/src/lib/whats-new.ts` drives the **NEW** badges in the admin UI
+Other files have to follow it. `ui/src/lib/whats-new.ts` drives the **NEW** badges in the admin UI
 ([FEATURE_TAG.md](FEATURE_TAG.md) explains the mechanism and how to tag a feature):
 each entry records the version its feature shipped in, and the badge expires on its own a couple of
 minors later, so nobody has to remember to delete it. A feature PR cannot know its release number —
@@ -88,6 +88,24 @@ An entry left unresolved badges every user forever, and nobody notices, because 
 dropdown expecting an option *not* to say NEW. So `verify-tag` in `.github/workflows/build.yml`
 refuses to publish GA images while any entry is still unresolved.
 
+Three deployment files name the released image tag and are bumped by hand in the same commit — they
+are what an operator actually pulls, so a missed one ships the previous release under the new
+number:
+
+| File | What carries the version |
+|------|--------------------------|
+| `infra/charts/openrag-stack/Chart.yaml` | `appVersion` (and see [Helm chart](#helm-chart) — its own `version` is separate) |
+| `infra/charts/openrag-stack/values.yaml` | the `tag: "vX.Y.Z"` of each OpenRag image |
+| `infra/compose/docker-compose.yaml` | the `linagoraai/openrag*:vX.Y.Z` images |
+
+Sweep for stragglers before opening the release PR — nothing under `infra/` should still name the
+version you are replacing:
+
+```bash
+PREV=2.2.0   # the version you are replacing
+git grep -nF "$PREV" -- infra/ || echo "clean"
+```
+
 #### Writing the release notes
 
 `ui/src/lib/release-notes.ts` backs the Release Notes dialog in the admin sidebar. Unlike
@@ -115,6 +133,83 @@ For an urgent fix to something already in production that can't wait for the nex
 - Building something? → `feature/*` off `develop`.
 - Decided to ship a version? → cut `release/X.Y.Z` off `develop`.
 - Production is broken and it can't wait? → `hotfix/*` off `main`.
+
+## Helm chart
+
+`infra/charts/openrag-stack/` carries a version of its own, and it is not the application's:
+
+- **`version`** (`0.6.x`) — the chart's version. Bump it in *any* PR that changes the chart.
+- **`appVersion`** — the OpenRag release the chart deploys. Only a release bump moves it.
+
+`.github/workflows/helm.yaml` packages and pushes to `oci://ghcr.io/linagora/openrag-stack` on every
+push to `main` or `develop` that touches `infra/charts/**` — `X.Y.Z` from `main`, `X.Y.Z-dev` from
+`develop`. OCI tags are mutable, so a chart change that forgets to bump `version` silently
+republishes a tag someone has already pinned, with different content underneath. That is the failure
+the bump prevents; it is not bookkeeping.
+
+### Sub-chart dependencies
+
+Prefer moving the dependency to overriding its values. Pinning a sub-chart's image tag — as we did
+for `milvus.image.all.tag` while no Milvus 3 chart was resolvable — runs that chart's templates
+against a different binary, so the manifests and the image no longer come from the same place.
+Override only when upstream has no release that covers what you need, and leave a comment naming the
+condition that retires the override.
+
+To move one:
+
+```bash
+# 1. edit the dependency's `version` in Chart.yaml, then
+helm dependency update infra/charts/openrag-stack
+# 2. commit the regenerated Chart.lock alongside Chart.yaml
+```
+
+`Chart.lock` is generated output, never edited by hand. Its `digest` covers both the constraints in
+`Chart.yaml` and the versions that were resolved from them, so changing either side without re-running
+the command leaves the two out of sync — and `helm dependency build` stops rather than installing
+something nobody pinned:
+
+```console
+$ helm dependency build infra/charts/openrag-stack
+Error: the lock file (Chart.lock) is out of sync with the dependencies file (Chart.yaml). Please update the dependencies
+```
+
+That is the same refusal whether you bumped `Chart.yaml` and forgot the lock or edited a resolved
+version in the lock directly, which is why there is no such thing as a hand-narrowed lock diff:
+if you want fewer things to move, pin the constraint in `Chart.yaml` — the lock only ever records
+what the resolver did.
+
+`helm dependency update` re-resolves **every** dependency, not the one you edited: `postgresql` and
+`vllm-stack` are pinned by range, so unrelated versions will move in `Chart.lock`. That is drift being
+written down rather than drift being introduced — the workflow runs `helm dependency update` itself
+before packaging, so the published chart already floats to the newest in-range versions. Read those
+lines, and say what they are in the PR so a reviewer doesn't have to guess.
+
+### Verifying a chart change
+
+Render the chart before and after and diff the manifests. The chart refuses to template without its
+required secrets, so hold the three of them in one place and reuse them for both renders:
+
+```bash
+SECRETS=(--set env.secrets.AUTH_TOKEN=dummy
+         --set env.secrets.POSTGRES_PASSWORD=dummy
+         --set postgresql.auth.password=dummy)
+
+helm template openrag infra/charts/openrag-stack "${SECRETS[@]}" > /tmp/after.yaml
+```
+
+For the "before" side, materialize the base branch's chart somewhere else and fetch its *locked*
+dependencies — `build`, not `update`, so you compare against what the lockfile pinned rather than
+against whatever is newest today:
+
+```bash
+mkdir -p /tmp/base
+git archive origin/develop infra/charts/openrag-stack | tar -x -C /tmp/base
+helm dependency build /tmp/base/infra/charts/openrag-stack
+helm template openrag /tmp/base/infra/charts/openrag-stack "${SECRETS[@]}" > /tmp/before.yaml
+diff /tmp/before.yaml /tmp/after.yaml
+```
+
+The generated `postgres-password` differs on every render — ignore that line, it is not your change.
 
 ## Pull requests
 
