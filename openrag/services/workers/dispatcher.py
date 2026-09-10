@@ -718,15 +718,31 @@ class WorkerDispatcher(IndexingDispatcher):
         except Exception as exc:
             logger.warning("Failed to record indexing job", task_id=task_id, error=str(exc))
 
+    async def _durable_job(self, task_id: str) -> IndexationJob | None:
+        """Read the durable row, or ``None`` if it cannot be read.
+
+        Reads are best-effort for the same reason writes are: this is a
+        fallback for tasks the actor has already forgotten, and a status route
+        that 500s during a Postgres outage is worse than one that reports what
+        the actor still knows.
+        """
+        if self._job_repo is None:
+            return None
+        try:
+            return await self._job_repo.get_job(task_id)
+        except Exception as exc:
+            logger.warning("Failed to read durable job", task_id=task_id, error=str(exc))
+            return None
+
     async def get_task_state(self, task_id: str) -> str | None:
         state = await self._call_method(
             lambda: self._tsm.get_state.remote(task_id),
             task_description=f"get_state({task_id})",
         )
-        if state is not None or self._job_repo is None:
+        if state is not None:
             return state
         # The actor forgets settled tasks; the durable record outlives it.
-        job = await self._job_repo.get_job(task_id)
+        job = await self._durable_job(task_id)
         return job.status.value if job is not None else None
 
     async def get_task_error(self, task_id: str) -> str | None:
@@ -734,9 +750,9 @@ class WorkerDispatcher(IndexingDispatcher):
             lambda: self._tsm.get_error.remote(task_id),
             task_description=f"get_error({task_id})",
         )
-        if error is not None or self._job_repo is None:
+        if error is not None:
             return error
-        job = await self._job_repo.get_job(task_id)
+        job = await self._durable_job(task_id)
         return job.error if job is not None else None
 
     async def cancel_task(self, task_id: str) -> bool:

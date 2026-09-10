@@ -182,8 +182,12 @@ class TaskCompletionTracker:
         metadata = details.get("metadata")
         metadata = dict(metadata) if isinstance(metadata, dict) else {}
         # Persist before stamping the actor: the stamp is what stops this method
-        # running again, so a failed write would otherwise never be retried.
-        await self._record_settled_job(task_id, details)
+        # running again, so a failed write must leave the task unstamped for
+        # ``recover`` to pick up. Stamping regardless would strand the row at
+        # whatever non-terminal status it last held, until orphan reconciliation
+        # marked a completed job FAILED after a restart.
+        if not await self._record_settled_job(task_id, details):
+            return
         metadata[TASK_FINISHED_AT_METADATA_KEY] = _utc_now_iso()
         await self._call_task_state(
             lambda: task_state_manager.set_details.remote(
@@ -237,8 +241,14 @@ class TaskCompletionTracker:
                     self._catalog_store = store
         return self._catalog_store.job_repo
 
-    async def _record_settled_job(self, task_id: str, details: dict[str, Any]) -> None:
-        """Persist the final state of a settled task. History must never fail indexing."""
+    async def _record_settled_job(self, task_id: str, details: dict[str, Any]) -> bool:
+        """Persist the final state of a settled task. History must never fail indexing.
+
+        Returns whether the caller may stamp the actor. ``True`` covers both a
+        successful write and a task with nothing to persist yet; only a genuine
+        failure returns ``False``, because the stamp is what stops recovery
+        retrying this task.
+        """
         try:
             task_state_manager = self._task_state_manager()
             state = await self._call_task_state(
@@ -246,7 +256,7 @@ class TaskCompletionTracker:
                 f"get_state({task_id}) for job history",
             )
             if state not in _TERMINAL_STATES:
-                return
+                return True
             error = await self._call_task_state(
                 lambda: task_state_manager.get_error.remote(task_id),
                 f"get_error({task_id}) for job history",
@@ -265,6 +275,8 @@ class TaskCompletionTracker:
             )
         except Exception as exc:
             self._logger.warning("Failed to record settled indexing job", task_id=task_id, error=str(exc))
+            return False
+        return True
 
     async def reconcile_jobs(self, active_ids: list[str]) -> None:
         """Settle records a restart orphaned and drop history past retention."""

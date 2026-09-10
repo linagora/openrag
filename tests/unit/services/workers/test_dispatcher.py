@@ -2192,6 +2192,23 @@ async def test_unknown_task_stays_unknown_without_a_durable_job() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_durable_read_failure_does_not_break_the_status_routes() -> None:
+    """A history-store outage must degrade the answer, not turn it into a 500.
+
+    The status routes are exactly what gets looked at while Postgres is down.
+    """
+    tsm = _task_state_manager()
+    tsm.get_state = _remote_mock(None)
+    tsm.get_error = _remote_mock(None)
+    repo = _JobRepoSpy()
+    repo.get_job = AsyncMock(side_effect=RuntimeError("postgres is unreachable"))
+    dispatcher = _dispatcher_with_job_repo(tsm, repo)
+
+    assert await dispatcher.get_task_state("task-1") is None
+    assert await dispatcher.get_task_error("task-1") is None
+
+
+@pytest.mark.asyncio
 async def test_recording_a_job_never_breaks_dispatch() -> None:
     from core.models.catalog import DocumentStatus
 

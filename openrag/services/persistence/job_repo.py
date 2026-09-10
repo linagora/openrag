@@ -68,7 +68,13 @@ class PgJobRepository(JobRepository):
                 -- clock queue wait is measured against.
                 started_at = COALESCE(jobs.started_at, EXCLUDED.started_at),
                 file_id = COALESCE(EXCLUDED.file_id, jobs.file_id),
-                user_id = COALESCE(EXCLUDED.user_id, jobs.user_id),
+                -- user_id is set once, at insert, and the foreign key owns it
+                -- from then on. Deleting a user nulls it via ON DELETE SET NULL,
+                -- and a later worker write still carries the old id, so taking
+                -- EXCLUDED.user_id here would re-point the row at a user that no
+                -- longer exists. Postgres rejects the whole upsert for that, the
+                -- caller swallows it as a best-effort history write, and the
+                -- terminal status is silently lost.
                 updated_at = now()
             RETURNING {_COLUMNS}
             """,

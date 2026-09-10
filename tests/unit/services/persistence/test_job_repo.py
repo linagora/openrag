@@ -138,6 +138,26 @@ async def test_upsert_job_keeps_the_first_started_at():
 
 
 @pytest.mark.asyncio
+async def test_upsert_job_never_rewrites_user_id_on_conflict():
+    """ON DELETE SET NULL owns the column once the row exists.
+
+    A terminal worker write still carries the id of a user who has since been
+    deleted. Taking it here re-points the row at a missing user, Postgres
+    rejects the whole upsert, the caller swallows it as best-effort history,
+    and the terminal status is lost.
+    """
+    pool = _FakePool(fetchrow=_row(user_id=None))
+    repo = _repo(pool)
+
+    await repo.upsert_job(IndexationJob(id="task-1", status=DocumentStatus.COMPLETED, partition="tenant-a", user_id=7))
+
+    query, _params = pool.calls[0]
+    update_clause = query.split("DO UPDATE SET", 1)[1].split("RETURNING", 1)[0]
+    statements = [line for line in update_clause.splitlines() if not line.strip().startswith("--")]
+    assert "user_id" not in "\n".join(statements)
+
+
+@pytest.mark.asyncio
 async def test_get_job_returns_none_when_absent():
     assert await _repo(_FakePool(fetchrow=None)).get_job("nope") is None
 
