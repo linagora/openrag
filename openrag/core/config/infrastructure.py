@@ -86,7 +86,6 @@ class PathsConfig(ConfigMixin):
     prompts_dir: Path = _DEFAULT_PROMPTS_DIR
     data_dir: Path = Path("../data")
     db_dir: Path = Path("/app/db")
-    log_dir: Path = Path("/app/logs")
 
     model_config = {**ConfigMixin.model_config, "arbitrary_types_allowed": True}
 

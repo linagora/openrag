@@ -290,7 +290,6 @@ For an opt-in named-volume profile, copy the values from `infra/compose/.env.nam
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `DATA_VOLUME` | `../../data` | OpenRAG uploaded files and app data mounted at `/app/data`. |
-| `LOG_VOLUME` | `../../logs` | OpenRAG logs mounted at `/app/logs`. |
 | `MODEL_WEIGHTS_VOLUME` | `~/.cache/huggingface` | Model cache mounted at `/app/model_weights`. |
 | `VLLM_CACHE` | `/root/.cache/huggingface` | Hugging Face cache used by vLLM, reranker, and transcriber services. |
 | `DB_VOLUME` | `../../db` | PostgreSQL data mounted at `/var/lib/postgresql/data`. |
@@ -459,52 +458,34 @@ To customize prompt:
 | `PROMPTS_DIR` | str | (bundled `openrag/prompts/templates`) | Path to a directory of prompt templates. Unset uses the templates bundled in the package; set it only to override with a custom directory. |
 
 ### Logging
-Our application uses Loguru with custom formatting. Log messages appear in two places:
-- **Terminal (stderr)**: Human-readable formatted output
-- **Log file** (`logs/app.json`): JSON format for monitoring tools like Grafana. This file resides at the mounted folder `./logs` 
+OpenRAG logs with Loguru on the process **stderr**, and nowhere else. Docker
+and Kubernetes capture that stream; a collector ships it to Loki (see
+[Loki logs](/openrag/documentation/loki_logs/)). "stderr" is the
+conventional diagnostic channel, not an error level: an `INFO` line goes
+there too.
 
-#### Log Message Format
-Terminal output follows this format:
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `LOG_LEVEL` | `str` | `INFO` | Minimum level emitted. `DEBUG` logs user queries and other request data; keep it for short-lived troubleshooting. |
+| `LOG_FORMAT` | `text` \| `json` | `text` | `text` is the colorized human format below. `json` writes one flat JSON object per line, no colour, for log collectors; it also routes uvicorn/Ray stdlib logs through the same sink. |
+
+#### Text format
 ```bash title="Logging message in the terminal..."
 LEVEL    | module:function:line - message [context_key=value]
 ```
-#### Logging Levels & What They Mean
-There are several logging levels available (TRACE, DEBUG, INFO, SUCCESS, WARNING, ERROR, CRITICAL). Only the levels intended for use in this project are documented here.
 
+#### JSON format
+```json
+{"ts":"2026-09-07T14:03:12.481000+00:00","level":"INFO","logger":"api.routers.user.chat","function":"chat_completions","line":212,"msg":"Retrieved 8 documents","request_id":"req_7f3c…","partition":"docs"}
+```
+Reserved keys: `ts`, `level`, `logger`, `function`, `line`, `msg`, `exception` (only when a traceback is attached). Every field bound with `logger.bind()` is emitted at the top level; a bound field named like a reserved key is prefixed `extra_`.
+
+#### Logging levels
 | Level | What You'll See in Logs |
 |-------|-------------------------|
 | **WARNING** | Potential issues that don't stop execution: approaching rate limits, deprecated features used, retryable failures, configuration concerns. Review these periodically. |
 | **DEBUG** | Detailed diagnostic information including variable states, intermediate processing steps, and function entry/exit points. Useful during development and troubleshooting. |
 | **INFO** | Standard operational messages showing normal application behavior: server startup, request handling, major workflow stages. This is the typical production level. |
-
-#### Configuration
-Set the logging level via environment variable:
-
-```bash
-// .env
-# Show only warnings and errors
-LOG_LEVEL=WARNING
-
-# Show detailed debug information (use in dev and pre-prod)
-LOG_LEVEL=DEBUG
-
-# Production default (informational messages)
-LOG_LEVEL=INFO
-```
-
-#### Log File Features
-
-- **Rotation**: Files rotate automatically at 10 MB
-- **Retention**: Logs kept for 10 days
-- **Format**: JSON for easy parsing and ingestion into monitoring systems
-- **Async**: Queued writing (`enqueue=True`) prevents blocking operations
-
-:::tip[Reading Logs]
-- **In development**: Watch terminal output with DEBUG level
-- **In production**: Use INFO level and monitor the JSON log file
-- **For troubleshooting**: Temporarily switch to DEBUG or TRACE
-- **For monitoring**: Parse `logs/app.json` with your observability stack
-:::
 
 ### RAY
 Ray is used for distributed task processing and parallel execution in the RAG pipeline. This configuration controls **`resource allocation`**, **`concurrency limits`**, and **`serving options`**.
@@ -771,7 +752,6 @@ Deployment-level knobs; most deployments never need to touch these — the compo
 | `OPENRAG_CONF_DIR` | `str` | bundled `conf/` | Directory containing `config.yaml`. Override to run against a custom configuration tree. |
 | `DATA_DIR` | `str` | `/app/data` (container) | Where uploaded files and app data are stored. In compose, relocate it via `DATA_VOLUME` rather than this variable. |
 | `DB_DIR` | `str` | `/app/db` | Local database directory. |
-| `LOG_DIR` | `str` | `/app/logs` | Log directory. In compose, relocate it via `LOG_VOLUME` rather than this variable. |
 | `OPENRAG_CONTAINER_STARTUP_TIMEOUT` | `float` | `max(60, 4 × POSTGRES_COMMAND_TIMEOUT)` (= 120 with defaults) | Seconds the API's service container (DB pools, Ray actors, …) is allowed to initialize at startup before the app fails fast. |
 | `OPENRAG_BANNER` | `bool` | `true` | Set to `false` to suppress the ASCII startup banner. Its colors also auto-disable under the standard `NO_COLOR` / `TERM=dumb` conventions. |
 | `UVICORN_RELOAD` | `bool` | `false` | Development only — starts uvicorn with `--reload` (auto-restart on code changes). Also forces a single worker. Never enable in production. |

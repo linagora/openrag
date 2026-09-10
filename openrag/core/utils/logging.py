@@ -1,8 +1,6 @@
-import os
 import sys
 
 from core.config import load_config
-from core.utils.log_tail import app_log_file
 from loguru import logger
 
 
@@ -58,24 +56,8 @@ def get_logger(config=None):
     # Pretty, colorized logs to the terminal (stderr): the level label is
     # colored by severity via loguru's <level> tag and the call site is cyan.
     # colorize=True forces ANSI on even when stderr isn't a TTY (e.g. under
-    # ``docker compose up``); the JSON file sink below stays uncolored for
-    # machine ingestion.
+    # ``docker compose up``). stderr is the only sink: Docker / the kubelet
+    # capture it and a collector ships it to Loki (docs: loki_logs.md).
     logger.add(sys.stderr, format=terminal_formatter, level=config.verbose.level, colorize=True)
-
-    # JSON logs to file for later use (e.g. Grafana ingestion)
-    log_path = app_log_file(getattr(config.paths, "log_dir", None))
-    try:
-        os.makedirs(log_path.parent, exist_ok=True)
-        logger.add(
-            str(log_path),
-            serialize=True,
-            level=config.verbose.level,
-            rotation="10 MB",
-            retention="10 days",
-            enqueue=True,
-        )
-    except PermissionError:
-        # Skip file logging if we don't have permission (e.g., during tests)
-        pass
 
     return logger

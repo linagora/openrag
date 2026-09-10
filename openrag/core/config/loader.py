@@ -93,7 +93,6 @@ _ENV_OVERRIDES: list[tuple[str, str, type]] = [
     ("PROMPTS_DIR", "paths.prompts_dir", str),
     ("DATA_DIR", "paths.data_dir", str),
     ("DB_DIR", "paths.db_dir", str),
-    ("LOG_DIR", "paths.log_dir", str),
     # Loader
     ("IMAGE_CAPTIONING", "loader.image_captioning", bool),
     ("IMAGE_CAPTIONING_URL", "loader.image_captioning_url", bool),
@@ -298,7 +297,7 @@ def load_config(
         data = _deep_merge(data, overrides)
 
     paths = data.get("paths", {})
-    for key in ("prompts_dir", "data_dir", "db_dir", "log_dir"):
+    for key in ("prompts_dir", "data_dir", "db_dir"):
         if key in paths and paths[key]:
             paths[key] = str(Path(paths[key]).resolve())
 

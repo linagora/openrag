@@ -133,14 +133,13 @@ llm_context:
   max_output_tokens: 1024
 
 # --- Paths ---
-# Env: PROMPTS_DIR, DATA_DIR, DB_DIR, LOG_DIR
+# Env: PROMPTS_DIR, DATA_DIR, DB_DIR
 paths:
   # prompts_dir defaults to the templates bundled in the package
   # (openrag/prompts/templates). Override via PROMPTS_DIR to load templates
   # from a custom directory.
   data_dir: ../data
   db_dir: /app/db
-  log_dir: /app/logs
 
 # --- Prompt template filenames ---
 prompts:

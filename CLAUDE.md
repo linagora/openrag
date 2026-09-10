@@ -418,7 +418,7 @@ All tests live in a separate `tests/` tree (zero test files inside the `openrag/
 - Robot Framework tests: `tests/integration/robot/api/*.robot`
 - Load/benchmark tests: `tests/load/`
 - Shared fixtures: `tests/unit/conftest.py` (mock ports), `tests/unit/api/conftest.py` (ASGI client), plus per-suite conftests
-- Test config lives in `pyproject.toml` (`[tool.pytest.ini_options]`): `testpaths = ["tests"]`, `pythonpath = ["./openrag"]`, and the `env` block sets `PROMPTS_DIR=./openrag/prompts/templates` and `LOG_DIR`
+- Test config lives in `pyproject.toml` (`[tool.pytest.ini_options]`): `testpaths = ["tests"]`, `pythonpath = ["./openrag"]`, and the `env` block sets `PROMPTS_DIR=./openrag/prompts/templates`
 
 **Running integration tests locally with act:**
 ```bash

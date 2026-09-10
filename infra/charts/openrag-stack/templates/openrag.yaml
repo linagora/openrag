@@ -83,8 +83,6 @@ spec:
               mountPath: /app/model_weights
             - name: data
               mountPath: /app/data
-            - name: logs
-              mountPath: /app/logs
             - name: venv
               mountPath: /app/.venv
             {{- if .Values.openrag.shmSize }}
@@ -101,9 +99,6 @@ spec:
         - name: data
           persistentVolumeClaim:
             claimName: {{ include "openrag-stack.fullname" . }}-data
-        - name: logs
-          persistentVolumeClaim:
-            claimName: {{ include "openrag-stack.fullname" . }}-logs
         - name: venv
           persistentVolumeClaim:
             claimName: {{ include "openrag-stack.fullname" . }}-venv

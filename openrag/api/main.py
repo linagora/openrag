@@ -393,10 +393,8 @@ if __name__ == "__main__":
         from ray import serve
 
         # @serve.ingress cloudpickles `app` to ship it to replica processes.
-        # loguru's file sink isn't picklable (an open file handle, and with
-        # enqueue=True a multiprocessing.SimpleQueue that errors with "SimpleQueue
-        # objects should only be shared between processes through inheritance"),
-        # and the app graph (lifespan, exception handlers) captures the
+        # loguru handlers aren't picklable (they hold an open stream and a
+        # lock), and the app graph (lifespan, exception handlers) captures the
         # module-global logger by value. Strip the sinks before binding so the
         # captured logger is handler-less (picklable), then restore them for this
         # driver process below. Replica processes re-add their own sinks via the
