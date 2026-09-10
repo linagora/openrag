@@ -68,6 +68,9 @@ export interface PartitionConfig {
   dimension: number | null;
   created_at: string;
   document_count: number;
+  /** Which embedders this partition's files were actually built with, most
+   *  files first. Disagreement with `embedder` is the drift signal. */
+  indexed_embedders?: IndexedEmbedderCount[];
   chat_history_depth: number;
   chat_llm: string | null;
   // Final-answer prompt selections for this partition. Parsing, enrichment,
@@ -186,11 +189,22 @@ export function deletePartition(name: string): Promise<void> {
 
 // ── Files (read side; adopted by the documents slice) ─────────────────────────
 
+/** One row of a partition's per-file embedder breakdown. */
+export interface IndexedEmbedderCount {
+  /** null = indexed before provenance was recorded. */
+  embedder: string | null;
+  model_name: string | null;
+  dimension: number | null;
+  file_count: number;
+}
+
 export interface PartitionFile {
   file_id: string;
   partition: string;
   link: string;
   filename?: string;
+  /** Embedder this file was actually indexed with; null when unrecorded. */
+  embedder?: string | null;
   [key: string]: unknown;
 }
 

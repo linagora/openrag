@@ -23,3 +23,17 @@ class Embedder(ABC):
     def dimension(self) -> int:
         """Return the embedding dimension."""
         ...
+
+    # Concrete rather than abstract: the shipped clients already store these
+    # under these names, and one that doesn't reports ``None`` instead of
+    # failing to instantiate. Override if yours keeps them elsewhere.
+
+    @property
+    def model_name(self) -> str | None:
+        """Model this client asks the endpoint to run, if known."""
+        return getattr(self, "_model", None)
+
+    @property
+    def endpoint(self) -> str | None:
+        """Base URL this client embeds against, if known."""
+        return getattr(self, "_endpoint", None)

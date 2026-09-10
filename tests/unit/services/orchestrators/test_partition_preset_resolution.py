@@ -648,3 +648,68 @@ async def test_list_summaries_report_the_live_dimension_once():
 
     assert {s["dimension"] for s in summaries.values()} == {768}
     assert calls["n"] == 1
+
+
+# ------------------------------------------------------------------
+# per-file embedder provenance (#762 E)
+# ------------------------------------------------------------------
+
+
+class _FakeDocRepoWithProvenance:
+    def __init__(self, rows=None, raises=False):
+        self._rows = rows or []
+        self._raises = raises
+        self.calls: list[str] = []
+
+    async def count_files_by_embedder(self, partition: str):
+        self.calls.append(partition)
+        if self._raises:
+            raise RuntimeError("catalog unreachable")
+        return self._rows
+
+
+@pytest.mark.asyncio
+async def test_detail_reports_which_embedders_actually_indexed_the_files():
+    """The partition row says what is configured now; this says what the files
+    were built with. The gap between them is the drift."""
+    rows = [
+        {"embedder": "Qwen3-Embedding-0.6B", "model_name": "Qwen3-Embedding-0.6B", "dimension": 1024, "file_count": 8},
+        {"embedder": "bge-m3", "model_name": "bge-m3", "dimension": 1024, "file_count": 3},
+    ]
+    repo = _FakePartitionRepo(rows=[_full_row("p1", embedder="bge-m3")])
+    svc = _make_service(repo, settings=_settings(embedders=("default", "bge-m3")))
+    svc._document_repo = _FakeDocRepoWithProvenance(rows)
+
+    detail = await svc.get_partition_config("p1")
+
+    assert detail["embedder"] == "bge-m3"  # configured now
+    assert [r["file_count"] for r in detail["indexed_embedders"]] == [8, 3]
+    # 8 files predate the swap and are the ones a repair would scope to.
+    assert detail["indexed_embedders"][0]["embedder"] == "Qwen3-Embedding-0.6B"
+
+
+@pytest.mark.asyncio
+async def test_detail_keeps_pre_provenance_files_as_unknown():
+    """Not backfilled with the current setting — that would be a guess dressed
+    as a record, and wrong for exactly the files worth finding."""
+    repo = _FakePartitionRepo(rows=[_full_row("p1")])
+    svc = _make_service(repo)
+    svc._document_repo = _FakeDocRepoWithProvenance(
+        [{"embedder": None, "model_name": None, "dimension": None, "file_count": 5}]
+    )
+
+    detail = await svc.get_partition_config("p1")
+
+    assert detail["indexed_embedders"] == [{"embedder": None, "model_name": None, "dimension": None, "file_count": 5}]
+
+
+@pytest.mark.asyncio
+async def test_detail_survives_a_catalog_failure():
+    repo = _FakePartitionRepo(rows=[_full_row("p1")])
+    svc = _make_service(repo)
+    svc._document_repo = _FakeDocRepoWithProvenance(raises=True)
+
+    detail = await svc.get_partition_config("p1")
+
+    assert detail["indexed_embedders"] == []
+    assert detail["name"] == "p1"
