@@ -39,11 +39,13 @@ _CANCELLATION_TOMBSTONE_TTL_SECONDS = 24 * 60 * 60
 _FILE_DELETE_FENCE_TTL_SECONDS = 2 * 60
 _CONTENT_CLAIM_REGISTRATION_GRACE_SECONDS = 60
 # Terminal task records are progress receipts, not the system of record: the
-# durable per-file state lives in the Postgres catalog. Retention is aligned
-# with the cancellation tombstone TTL so the in-memory row and its durable
-# tombstone disappear together, with a hard cap so a burst cannot outrun it.
-_TERMINAL_TASK_RETENTION_SECONDS = _CANCELLATION_TOMBSTONE_TTL_SECONDS
-_MAX_TERMINAL_TASKS = 10_000
+# durable per-file state lives in the Postgres catalog. They are kept only long
+# enough to answer the reads that follow a job settling, then dropped, with a
+# hard cap so a burst cannot outrun the time bound. The cancellation tombstone
+# keeps its own, longer TTL: it fences late workers rather than answering reads,
+# so the two lifetimes are deliberately not tied together.
+_TERMINAL_TASK_RETENTION_SECONDS = 60 * 60
+_MAX_TERMINAL_TASKS = 2_000
 _MAX_TASK_ERROR_CHARS = 8_000
 STALE_REFLESS_TASK_ERROR = (
     "Indexing task never exposed a worker reference within the registration grace period; marking it failed as stale."
