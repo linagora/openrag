@@ -148,9 +148,12 @@ class TestDeleteWorkspace:
         await postgres_store.pool.execute("UPDATE files SET independently_indexed = FALSE WHERE file_id = 'f2'")
         orphans = await repo.delete_workspace("ws1")
         assert orphans == ["f2"]
-        assert await postgres_store.pool.fetchval(
-            "SELECT independently_indexed FROM files WHERE file_id = 'f1'",
-        ) is True
+        assert (
+            await postgres_store.pool.fetchval(
+                "SELECT independently_indexed FROM files WHERE file_id = 'f1'",
+            )
+            is True
+        )
         assert await repo.get_workspace("ws1") is None
 
     async def test_files_shared_with_other_workspaces_are_not_orphaned(

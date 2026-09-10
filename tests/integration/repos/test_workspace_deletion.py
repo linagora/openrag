@@ -175,9 +175,12 @@ async def test_stale_cleanup_claim_can_be_attached_again(postgres_store):
     )
 
     assert await store.workspace_repo.add_files_to_workspace("ws1", ["stale"]) == []
-    assert await store.pool.fetchval(
-        "SELECT workspace_cleanup_claimed FROM files WHERE file_id = 'stale'",
-    ) is False
+    assert (
+        await store.pool.fetchval(
+            "SELECT workspace_cleanup_claimed FROM files WHERE file_id = 'stale'",
+        )
+        is False
+    )
 
 
 async def test_migration_preserves_preexisting_workspace_files(postgres_store, test_rdb_config):
