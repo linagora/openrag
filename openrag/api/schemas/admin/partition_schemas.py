@@ -126,7 +126,11 @@ class PartitionDetailResponse(BaseModel):
     retrieval_preset: str
     indexation_pipeline: dict[str, Any]
     retrieval_pipeline: dict[str, Any]
-    dimension: int
+    # Dense-vector dimension of the live collection. Null when nothing has been
+    # indexed yet (no collection to read) or the vector store is unreachable —
+    # this used to echo `partitions.dimension`, a column nothing writes, so it
+    # reported 1024 regardless of the embedder actually in use (#762 G).
+    dimension: int | None = None
     created_at: datetime
     document_count: int = 0
     chat_history_depth: int = 4
