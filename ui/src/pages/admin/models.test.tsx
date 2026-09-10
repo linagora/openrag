@@ -49,7 +49,7 @@ function renderPage() {
   );
 }
 
-describe("ModelsPage STT validation", () => {
+describe("ModelsPage validation", () => {
   beforeEach(() => {
     listModelEndpointsMock.mockReset().mockResolvedValue([]);
     updateModelEndpointMock.mockReset();
@@ -58,6 +58,30 @@ describe("ModelsPage STT validation", () => {
       model_found: true,
       transcription_supported: true,
     });
+  });
+
+  it("sends the selected reranker implementation during draft validation", async () => {
+    const user = userEvent.setup();
+    renderPage();
+
+    await screen.findByText("No embedder endpoints configured.");
+    await user.click(screen.getByRole("tab", { name: "reranker" }));
+    await user.click(screen.getByRole("button", { name: /add endpoint/i }));
+
+    const dialog = screen.getByRole("dialog");
+    const textboxes = within(dialog).getAllByRole("textbox");
+    await user.type(textboxes[1], "http://reranker:8000");
+    await user.type(textboxes[2], "jina-reranker-v2");
+    await user.click(within(dialog).getByRole("button", { name: "Validate" }));
+
+    await waitFor(() =>
+      expect(validateModelEndpointMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          model_type: "reranker",
+          extra: { implementation: "infinity" },
+        }),
+      ),
+    );
   });
 
   it("persists the STT API key used by draft validation", async () => {

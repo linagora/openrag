@@ -26,6 +26,13 @@ class ModelNotFoundError(ValueError):
         self.model_ids = model_ids
 
 
+class ModelListUnavailableError(ValueError):
+    """A reachable endpoint did not return a usable model list."""
+
+    def __init__(self) -> None:
+        super().__init__("Endpoint returned an invalid model list.")
+
+
 class ReadinessService:
     def __init__(
         self, checks: dict[str, Callable[[], Awaitable[None]]], *, timeout: float = 2.0, cache_ttl: float = 2.0
@@ -89,7 +96,10 @@ async def check_model_endpoint(
         elif response.status_code >= 400:
             raise ModelEndpointProbeError(response.status_code)
     if not health_only:
-        payload = response.json()
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise ModelListUnavailableError from exc
         models = payload.get("data") if isinstance(payload, dict) else None
         model_ids = (
             [item["id"] for item in models if isinstance(item, dict) and isinstance(item.get("id"), str)]
@@ -98,7 +108,7 @@ async def check_model_endpoint(
         )
         if not isinstance(models, list) or (config.model_name and config.model_name not in model_ids):
             if not isinstance(models, list):
-                raise ValueError("Configured model is unavailable")
+                raise ModelListUnavailableError
             raise ModelNotFoundError(model_ids)
         return model_ids
     return None

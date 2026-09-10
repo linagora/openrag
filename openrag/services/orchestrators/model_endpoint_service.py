@@ -724,6 +724,7 @@ class ModelEndpointService:
         if model_type != "stt":
             from services.orchestrators.readiness_service import (
                 ModelEndpointProbeError,
+                ModelListUnavailableError,
                 ModelNotFoundError,
                 check_model_endpoint,
             )
@@ -744,6 +745,9 @@ class ModelEndpointService:
             except ModelEndpointProbeError as exc:
                 result["reachable"] = True
                 result["detail"] = f"Model list returned HTTP {exc.status_code}."
+            except ModelListUnavailableError as exc:
+                result["reachable"] = True
+                result["detail"] = str(exc)
             except ModelNotFoundError as exc:
                 result["reachable"] = True
                 result["models_served"] = exc.model_ids

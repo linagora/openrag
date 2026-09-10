@@ -1533,6 +1533,47 @@ async def test_validate_endpoint_reports_missing_model_on_reachable_endpoint(mon
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("payload", [{"models": [{"id": "other-model"}]}, None])
+async def test_validate_endpoint_keeps_reachable_when_model_list_is_invalid(monkeypatch, payload):
+    import httpx
+
+    svc = _make_service()
+
+    class FakeResponse:
+        status_code = 200
+
+        def json(self):
+            if payload is None:
+                raise ValueError("not JSON")
+            return payload
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, _url):
+            return FakeResponse()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+    result = await svc.validate_endpoint("http://llm:8000/v1", "mistral-small")
+
+    assert result == {
+        "reachable": True,
+        "model_found": None,
+        "models_served": None,
+        "transcription_supported": None,
+        "detail": "Endpoint returned an invalid model list.",
+    }
+
+
+@pytest.mark.asyncio
 async def test_validate_health_only_endpoint_keeps_model_presence_unknown(monkeypatch):
     import httpx
 
