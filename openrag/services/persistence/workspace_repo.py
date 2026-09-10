@@ -92,6 +92,17 @@ class PgWorkspaceRepository(WorkspaceRepository):
         """
         async with self.pool.acquire() as conn:
             async with conn.transaction():
+                await conn.fetch(
+                    """
+                    SELECT f.id
+                    FROM workspace_files wf
+                    JOIN files f ON f.id = wf.file_id
+                    WHERE wf.workspace_id = $1
+                    ORDER BY f.id
+                    FOR UPDATE OF f
+                    """,
+                    workspace_id,
+                )
                 if keep_files:
                     orphan_rows = await conn.fetch(
                         """
@@ -136,8 +147,13 @@ class PgWorkspaceRepository(WorkspaceRepository):
                               AND NOT f.independently_indexed
                               AND (
                                   NOT f.workspace_cleanup_claimed
-                                  OR f.workspace_cleanup_claimed_at IS NULL
-                                  OR f.workspace_cleanup_claimed_at < NOW() - INTERVAL '1 hour'
+                                  OR (
+                                      NOT f.workspace_cleanup_started
+                                      AND (
+                                          f.workspace_cleanup_claimed_at IS NULL
+                                          OR f.workspace_cleanup_claimed_at < NOW() - INTERVAL '1 hour'
+                                      )
+                                  )
                               )
                               AND wf.file_id NOT IN (
                                   SELECT file_id FROM workspace_files
@@ -147,7 +163,8 @@ class PgWorkspaceRepository(WorkspaceRepository):
                         )
                         UPDATE files f
                         SET workspace_cleanup_claimed = TRUE,
-                            workspace_cleanup_claimed_at = NOW()
+                            workspace_cleanup_claimed_at = NOW(),
+                            workspace_cleanup_started = FALSE
                         FROM candidates
                         WHERE f.id = candidates.id
                         RETURNING candidates.file_id
@@ -189,9 +206,15 @@ class PgWorkspaceRepository(WorkspaceRepository):
                       AND partition_name = $2
                       AND (
                           NOT workspace_cleanup_claimed
-                          OR workspace_cleanup_claimed_at IS NULL
-                          OR workspace_cleanup_claimed_at < NOW() - INTERVAL '1 hour'
+                          OR (
+                              NOT workspace_cleanup_started
+                              AND (
+                                  workspace_cleanup_claimed_at IS NULL
+                                  OR workspace_cleanup_claimed_at < NOW() - INTERVAL '1 hour'
+                              )
+                          )
                       )
+                    ORDER BY id
                     FOR UPDATE
                     """,
                     file_ids,
@@ -207,9 +230,11 @@ class PgWorkspaceRepository(WorkspaceRepository):
                         """
                         UPDATE files
                         SET workspace_cleanup_claimed = FALSE,
-                            workspace_cleanup_claimed_at = NULL
+                            workspace_cleanup_claimed_at = NULL,
+                            workspace_cleanup_started = FALSE
                         WHERE id = ANY($1::int[])
                           AND workspace_cleanup_claimed
+                          AND NOT workspace_cleanup_started
                           AND (
                               workspace_cleanup_claimed_at IS NULL
                               OR workspace_cleanup_claimed_at < NOW() - INTERVAL '1 hour'
@@ -250,16 +275,36 @@ class PgWorkspaceRepository(WorkspaceRepository):
                 await decrement_file_counts(conn, [row] if row is not None else [])
                 return row is not None
 
+    async def start_claimed_file_cleanup(self, file_id: str, partition: str) -> bool:
+        """Prevent a claim from being recovered before vector deletion."""
+        row = await self.pool.fetchrow(
+            """
+            UPDATE files
+            SET workspace_cleanup_started = TRUE,
+                workspace_cleanup_claimed_at = NOW()
+            WHERE file_id = $1
+              AND partition_name = $2
+              AND workspace_cleanup_claimed
+              AND NOT workspace_cleanup_started
+            RETURNING id
+            """,
+            file_id,
+            partition,
+        )
+        return row is not None
+
     async def release_claimed_file_cleanup(self, file_id: str, partition: str) -> None:
         """Release a failed cleanup claim so the file can be attached again."""
         await self.pool.execute(
             """
             UPDATE files
             SET workspace_cleanup_claimed = FALSE,
-                workspace_cleanup_claimed_at = NULL
+                workspace_cleanup_claimed_at = NULL,
+                workspace_cleanup_started = FALSE
             WHERE file_id = $1
               AND partition_name = $2
               AND workspace_cleanup_claimed
+              AND NOT workspace_cleanup_started
             """,
             file_id,
             partition,

@@ -1,5 +1,6 @@
 """Workspace deletion through the production service, catalog writer, and SQL."""
 
+import asyncio
 from unittest.mock import AsyncMock
 
 import pytest
@@ -120,33 +121,34 @@ async def test_empty_and_missing_workspaces_return_no_candidates(postgres_store)
 
 
 async def test_workspace_attachment_cannot_race_orphan_cleanup(postgres_store):
-    import asyncio
-
     store = postgres_store
     await setup_workspace(store)
     await store.workspace_repo.create_workspace(Workspace(workspace_id="ws2", partition="p"))
     await upload(store, "exclusive", workspace_ids=["ws1"])
-    attachment = None
+
     async with store.pool.acquire() as conn:
         tx = conn.transaction()
         await tx.start()
-        await conn.fetch(
-            """
-            SELECT f.id
-            FROM workspace_files wf
-            JOIN files f ON f.id = wf.file_id
-            WHERE wf.workspace_id = 'ws1' AND f.file_id = 'exclusive'
-            FOR UPDATE OF f
-            """,
-        )
-        await conn.execute(
-            """
-            UPDATE files
-            SET workspace_cleanup_claimed = TRUE,
-                workspace_cleanup_claimed_at = NOW()
-            WHERE file_id = 'exclusive'
-            """,
-        )
+        await conn.execute("LOCK TABLE workspaces IN SHARE MODE")
+
+        deletion = asyncio.create_task(store.workspace_repo.delete_workspace("ws1"))
+        for _ in range(100):
+            blocked = await store.pool.fetchval(
+                """
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM pg_stat_activity
+                    WHERE datname = current_database()
+                      AND wait_event_type = 'Lock'
+                      AND query LIKE '%DELETE FROM workspaces%'
+                )
+                """,
+            )
+            if blocked:
+                break
+            await asyncio.sleep(0.01)
+        else:
+            raise AssertionError("workspace deletion did not reach the blocked DELETE")
 
         attachment = asyncio.create_task(
             store.workspace_repo.add_files_to_workspace("ws2", ["exclusive"]),
@@ -154,11 +156,82 @@ async def test_workspace_attachment_cannot_race_orphan_cleanup(postgres_store):
         await asyncio.sleep(0.05)
         assert not attachment.done()
 
-        await conn.execute("DELETE FROM workspaces WHERE workspace_id = 'ws1'")
         await tx.commit()
 
+    assert await deletion == ["exclusive"]
     assert await attachment == ["exclusive"]
     assert await store.document_repo.file_exists_in_partition("exclusive", "p")
+
+
+async def test_workspace_cleanup_rechecks_membership_after_waiting_for_attachment(postgres_store):
+    store = postgres_store
+    await setup_workspace(store)
+    await store.workspace_repo.create_workspace(Workspace(workspace_id="ws2", partition="p"))
+    await upload(store, "exclusive", workspace_ids=["ws1"])
+
+    async with store.pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute("LOCK TABLE workspace_files IN SHARE MODE")
+
+            attachment = asyncio.create_task(
+                store.workspace_repo.add_files_to_workspace("ws2", ["exclusive"]),
+            )
+            for _ in range(100):
+                blocked = await store.pool.fetchval(
+                    """
+                    SELECT EXISTS (
+                        SELECT 1
+                        FROM pg_stat_activity
+                        WHERE datname = current_database()
+                          AND wait_event_type = 'Lock'
+                          AND query LIKE '%INSERT INTO workspace_files%'
+                    )
+                    """,
+                )
+                if blocked:
+                    break
+                await asyncio.sleep(0.01)
+            else:
+                raise AssertionError("workspace attachment did not reach the blocked INSERT")
+
+            deletion = asyncio.create_task(store.workspace_repo.delete_workspace("ws1"))
+            await asyncio.sleep(0.05)
+            assert not deletion.done()
+
+    assert await attachment == []
+    assert await deletion == []
+    assert await store.workspace_repo.list_workspace_files("ws2") == ["exclusive"]
+    assert await store.document_repo.file_exists_in_partition("exclusive", "p")
+
+
+async def test_concurrent_last_workspace_deletions_claim_the_shared_file(postgres_store):
+    store = postgres_store
+    await setup_workspace(store)
+    await store.workspace_repo.create_workspace(Workspace(workspace_id="ws2", partition="p"))
+    await upload(store, "shared", workspace_ids=["ws1", "ws2"])
+
+    async with store.pool.acquire() as conn:
+        tx = conn.transaction()
+        await tx.start()
+        await conn.fetch(
+            """
+            SELECT id
+            FROM files
+            WHERE file_id = 'shared'
+            FOR UPDATE
+            """,
+        )
+
+        delete_ws1 = asyncio.create_task(store.workspace_repo.delete_workspace("ws1"))
+        delete_ws2 = asyncio.create_task(store.workspace_repo.delete_workspace("ws2"))
+        await asyncio.sleep(0.05)
+        assert not delete_ws1.done()
+        assert not delete_ws2.done()
+
+        await tx.commit()
+
+    orphan_lists = await asyncio.gather(delete_ws1, delete_ws2)
+    assert [file_id for orphans in orphan_lists for file_id in orphans] == ["shared"]
 
 
 async def test_stale_cleanup_claim_can_be_attached_again(postgres_store):
@@ -180,6 +253,29 @@ async def test_stale_cleanup_claim_can_be_attached_again(postgres_store):
             "SELECT workspace_cleanup_claimed FROM files WHERE file_id = 'stale'",
         )
         is False
+    )
+
+
+async def test_stale_destructive_cleanup_claim_cannot_be_attached(postgres_store):
+    store = postgres_store
+    await setup_workspace(store)
+    await upload(store, "stale", workspace_ids=["ws1"])
+    await store.pool.execute(
+        """
+        UPDATE files
+        SET workspace_cleanup_claimed = TRUE,
+            workspace_cleanup_claimed_at = NOW() - INTERVAL '2 hours',
+            workspace_cleanup_started = TRUE
+        WHERE file_id = 'stale'
+        """,
+    )
+
+    assert await store.workspace_repo.add_files_to_workspace("ws1", ["stale"]) == ["stale"]
+    assert (
+        await store.pool.fetchval(
+            "SELECT workspace_cleanup_claimed FROM files WHERE file_id = 'stale'",
+        )
+        is True
     )
 
 

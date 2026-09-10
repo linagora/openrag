@@ -42,6 +42,11 @@ class WorkspaceRepository(ABC):
         ...
 
     @abstractmethod
+    async def start_claimed_file_cleanup(self, file_id: str, partition: str) -> bool:
+        """Mark a cleanup claim as destructive and no longer recoverable."""
+        ...
+
+    @abstractmethod
     async def release_claimed_file_cleanup(self, file_id: str, partition: str) -> None:
         """Make a claimed file attachable after cleanup fails."""
         ...
