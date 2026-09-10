@@ -13,6 +13,7 @@ divergence as a pending schema change.
 
 from datetime import datetime
 
+from core.models.catalog import DocumentStatus
 from sqlalchemy import (
     JSON,
     BigInteger,
@@ -264,6 +265,9 @@ file_content_claims = Table(
 )
 
 
+_JOB_STATUS_CHECK = "status IN ({})".format(",".join(f"'{status.value}'" for status in DocumentStatus))
+
+
 # One row per dispatched indexing task, keyed by the dispatcher's ``task_id``.
 #
 # ``partition`` deliberately carries no FK to ``partitions.partition``: a job row
@@ -292,12 +296,13 @@ jobs = Table(
     # a starved pool.
     Column("started_at", DateTime(timezone=True), nullable=True),
     Column("completed_at", DateTime(timezone=True), nullable=True),
-    # The state machine is DocumentStatus. Pinning it in the database keeps a
-    # typo or a future rename from silently writing a status nothing queries.
-    CheckConstraint(
-        "status IN ('QUEUED','SERIALIZING','CHUNKING','INSERTING','COMPLETED','FAILED','CANCELLED')",
-        name="ck_jobs_status",
-    ),
+    # The state machine is DocumentStatus, and the constraint is generated from
+    # it so the two cannot drift. It is what makes hydration total: a status the
+    # enum does not know would raise in ``PgJobRepository._row_to_job``, so the
+    # database has to refuse it on the way in. Note that this deliberately
+    # excludes the legacy CHUNKING/INSERTING states, which #721 removed from the
+    # public state machine and which no write path can produce.
+    CheckConstraint(_JOB_STATUS_CHECK, name="ck_jobs_status"),
     # Queue views filter by status and order by recency.
     Index("ix_jobs_status_created_at", "status", "created_at"),
     # Per-user task listing, which filters on user_id and often on status too.

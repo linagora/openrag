@@ -6,6 +6,8 @@ import importlib
 from pathlib import Path
 
 import pytest
+import sqlalchemy as sa
+from core.models.catalog import DocumentStatus
 
 
 @pytest.fixture
@@ -23,9 +25,11 @@ class _FakeOp:
     def __init__(self) -> None:
         self.created_tables: list[str] = []
         self.created_indexes: list[str] = []
+        self.constraints: list = []
 
-    def create_table(self, name, *_columns) -> None:
+    def create_table(self, name, *columns) -> None:
         self.created_tables.append(name)
+        self.constraints.extend(c for c in columns if isinstance(c, sa.CheckConstraint | sa.ForeignKeyConstraint))
 
     def create_index(self, name, table, columns) -> None:
         self.created_indexes.append(name)
@@ -65,3 +69,29 @@ def test_upgrade_is_a_no_op_when_the_table_is_already_there(monkeypatch, migrati
 
     assert op.created_tables == []
     assert op.created_indexes == []
+
+
+def test_the_status_check_still_matches_the_state_machine(monkeypatch, migration):
+    """The constraint is a frozen copy, so a new state needs its own migration.
+
+    A row carrying a status DocumentStatus does not know raises in
+    ``PgJobRepository._row_to_job``, so widening the enum without widening the
+    database turns a write into an unreadable row.
+    """
+    op = _install(monkeypatch, migration, exists=False)
+
+    migration.upgrade()
+
+    (check,) = [c for c in op.constraints if isinstance(c, sa.CheckConstraint)]
+    pinned = {value.strip().strip("'") for value in str(check.sqltext).split("(", 1)[1].rstrip(")").split(",")}
+    assert pinned == {status.value for status in DocumentStatus}
+
+
+def test_user_id_is_nulled_rather_than_cascaded(monkeypatch, migration):
+    """A job row is a historical record: deleting a user must not delete history."""
+    op = _install(monkeypatch, migration, exists=False)
+
+    migration.upgrade()
+
+    (fk,) = [c for c in op.constraints if isinstance(c, sa.ForeignKeyConstraint)]
+    assert fk.ondelete == "SET NULL"

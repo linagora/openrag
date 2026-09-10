@@ -59,8 +59,11 @@ def upgrade() -> None:
             ),
             sa.Column("started_at", sa.DateTime(timezone=True), nullable=True),
             sa.Column("completed_at", sa.DateTime(timezone=True), nullable=True),
+            # Frozen copy of DocumentStatus as of this revision. A new state has
+            # to arrive with its own migration, which is what the parity test in
+            # tests/unit/services/persistence/test_jobs_migration.py enforces.
             sa.CheckConstraint(
-                "status IN ('QUEUED','SERIALIZING','CHUNKING','INSERTING','COMPLETED','FAILED','CANCELLED')",
+                "status IN ('QUEUED','SERIALIZING','COMPLETED','FAILED','CANCELLED')",
                 name="ck_jobs_status",
             ),
             # Left unnamed so this CREATE TABLE and the startup
