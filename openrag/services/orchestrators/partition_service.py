@@ -258,13 +258,14 @@ class PartitionService:
         """Per-partition stored config columns + ``document_count``, keyed by name.
 
         Lightweight list view: returns the stored columns (description, embedder,
-        preset references, dimension, chat config) WITHOUT resolving the
-        indexation/retrieval pipelines — so this stays two queries regardless of
+        preset references, chat config) plus the live vector dimension, WITHOUT
+        resolving the indexation/retrieval pipelines — so this stays two queries regardless of
         partition count. Pipeline resolution is reserved for the single-partition
         detail (``get_partition_config``). Values are JSON-ready.
         """
         rows = await self._partition_repo.list_partition_rows()
         counts = await self.file_counts_by_partition()
+        dimension = await self._live_vector_dimension()
         summaries: dict[str, dict] = {}
         for r in rows:
             name = r["partition"]
@@ -275,7 +276,7 @@ class PartitionService:
                 "embedder": r.get("embedder") or "default",
                 "indexation_preset": r.get("indexation_preset") or "default",
                 "retrieval_preset": r.get("retrieval_preset") or "default",
-                "dimension": r.get("dimension"),
+                "dimension": dimension,
                 "chat_history_depth": r.get("chat_history_depth") or self._legacy_chat_history_depth_fallback(),
                 "chat_llm": r.get("chat_llm"),
                 "created_at": created.isoformat() if hasattr(created, "isoformat") else created,
@@ -469,6 +470,7 @@ class PartitionService:
         if row is None:
             raise PartitionNotFoundError(f"Partition '{partition}' does not exist.")
         detail = self._partition_detail(row, self.resolve_partition_row(row))
+        detail["dimension"] = await self._live_vector_dimension()
         detail["document_count"] = await self._partition_repo.get_partition_file_count(partition)
         return detail
 
@@ -476,6 +478,33 @@ class PartitionService:
         """Update a partition's preset references and return the resolved detail."""
         await self.update_partition(partition, **fields)
         return await self.get_partition_config(partition)
+
+    async def _live_vector_dimension(self) -> int | None:
+        """Dimension of the vectors that actually exist, or ``None``.
+
+        Replaces ``partitions.dimension``, which no code path has ever written:
+        it sits at its ``server_default`` of 1024 forever, so a client reading
+        it got a *wrong* number rather than a missing one whenever the embedder
+        was anything but 1024-d (#762 G). The column stays — it is the hook a
+        per-partition-collection topology would need — but it is no longer
+        reported as fact.
+
+        One collection serves every partition today, so this is the same value
+        for all of them. That is the honest answer to "what dimension are this
+        partition's vectors", not a limitation of the lookup.
+
+        A vector-store failure yields ``None`` rather than propagating: the
+        dimension is informational, and a briefly unreachable Milvus should not
+        turn a partition-config read into a 500.
+        """
+        getter = getattr(self._vector_store, "vector_dimension", None)
+        if getter is None:
+            return None
+        try:
+            return await getter()
+        except Exception as exc:
+            logger.debug("Could not read the live vector dimension", error=str(exc))
+            return None
 
     def _validate_preset_refs(self, row: dict) -> None:
         """Validate a row's preset references for create/update.
@@ -551,7 +580,10 @@ class PartitionService:
             "retrieval_preset": row.get("retrieval_preset") or "default",
             "indexation_pipeline": cfg.indexation.model_dump(mode="json"),
             "retrieval_pipeline": cfg.retrieval.model_dump(mode="json"),
-            "dimension": row.get("dimension"),
+            # Placeholder: the column is not the dimension of anything (see
+            # _live_vector_dimension). get_partition_config overwrites it with
+            # the live value; nothing else should read it.
+            "dimension": None,
             "created_at": row.get("created_at"),
             "chat_history_depth": row.get("chat_history_depth") or self._legacy_chat_history_depth_fallback(),
             "chat_llm": row.get("chat_llm"),

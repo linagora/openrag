@@ -261,7 +261,11 @@ function GeneralTab({ partition }: { partition: PartitionConfig }) {
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-6">
             <div className="space-y-2">
               <Label className="text-muted-foreground">Dimension</Label>
-              <p className="text-sm font-medium pt-1">{partition.dimension}</p>
+              <p className="text-sm font-medium pt-1">
+                {partition.dimension ?? (
+                  <span className="text-muted-foreground font-normal">Not indexed yet</span>
+                )}
+              </p>
             </div>
             <div className="space-y-2">
               <Label className="text-muted-foreground">Embedder</Label>

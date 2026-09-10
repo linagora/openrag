@@ -1391,6 +1391,26 @@ class MilvusVectorStore(VectorStore):
 
         return int(result.get("delete_count", 0)) if isinstance(result, dict) else 0
 
+    async def vector_dimension(self) -> int | None:
+        """Dense-vector dimension read from the live collection schema.
+
+        Deliberately *not* :meth:`_vector_dim`, which falls back to the
+        configured value and then to a fixed guess so page sizing always has a
+        number to work with. A reported dimension has no business guessing:
+        ``None`` is a fact, a plausible-looking 1024 is a fabrication (#762 G).
+
+        Shares ``_schema_vector_dim`` with the page-sizing path, so this costs
+        one ``describe_collection`` per process — and the failure case (no
+        collection yet) stays uncached, since it stops being true the moment
+        anything is indexed.
+        """
+        if self._schema_vector_dim is not None:
+            return self._schema_vector_dim
+        dim = await asyncio.to_thread(self._describe_vector_dim)
+        if dim is not None:
+            self._schema_vector_dim = dim
+        return dim
+
     async def collection_exists(self, name: str) -> bool:
         """Report whether the Milvus collection exists on the server.
 

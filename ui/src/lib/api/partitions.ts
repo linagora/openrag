@@ -36,7 +36,9 @@ export interface PartitionResponse {
   exists: boolean;
   description: string;
   embedder: string;
-  dimension: number;
+  /** Dense-vector dimension of the live collection; null when nothing is
+   *  indexed yet or the vector store is unreachable. */
+  dimension: number | null;
   collection_name: string | null;
   chat_history_depth: number;
   chat_llm: string | null;
@@ -61,7 +63,9 @@ export interface PartitionConfig {
   retrieval_preset: string;
   indexation_pipeline: Record<string, unknown>;
   retrieval_pipeline: Record<string, unknown>;
-  dimension: number;
+  /** Dense-vector dimension of the live collection; null when nothing is
+   *  indexed yet or the vector store is unreachable. */
+  dimension: number | null;
   created_at: string;
   document_count: number;
   chat_history_depth: number;
@@ -105,7 +109,7 @@ function _toRow(r: Record<string, unknown>): PartitionResponse {
     exists: true,
     description: "",
     embedder: "",
-    dimension: 0,
+    dimension: null,
     collection_name: null,
     chat_history_depth: 0,
     chat_llm: null,
