@@ -72,8 +72,14 @@ class _FakePartitionRepo:
 
 
 class _FakeVectorStore:
+    def __init__(self, dimension: int | None = 768) -> None:
+        self._dimension = dimension
+
     async def collection_exists(self, name: str) -> bool:
         return False
+
+    async def vector_dimension(self) -> int | None:
+        return self._dimension
 
 
 def _settings(idx=None, ret=None, embedders=("default",)):
@@ -540,7 +546,9 @@ async def test_get_partition_config_returns_resolved_detail():
     assert detail["embedder"] == "default"
     assert detail["indexation_preset"] == "default"
     assert detail["retrieval_preset"] == "default"
-    assert detail["dimension"] == 1024
+    # The row says 1024 (the column's server default, which nothing writes);
+    # the live collection says 768. The API must report the collection.
+    assert detail["dimension"] == 768
     assert detail["retrieval_pipeline"]["top_k"] == 50
     assert "chunking" in detail["indexation_pipeline"]
     assert "chat_history_depth" in detail
@@ -582,3 +590,61 @@ async def test_update_partition_config_applies_and_returns_detail():
 
     assert detail["description"] == "new"
     assert repo._store["p1"]["description"] == "new"
+
+
+# ------------------------------------------------------------------
+# reported dimension (#762 G)
+# ------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_detail_dimension_is_null_when_the_store_cannot_tell():
+    """No collection yet, or an unreachable Milvus. "Unknown" is a fact; the
+    1024 this used to echo was a fabrication."""
+    repo = _FakePartitionRepo(rows=[_full_row("p1")])
+    svc = _make_service(repo)
+    svc._vector_store = _FakeVectorStore(dimension=None)
+
+    detail = await svc.get_partition_config("p1")
+
+    assert detail["dimension"] is None
+
+
+@pytest.mark.asyncio
+async def test_detail_dimension_survives_a_vector_store_failure():
+    """The dimension is informational — a briefly unreachable store must not
+    turn a partition-config read into a 500."""
+
+    class _BrokenStore(_FakeVectorStore):
+        async def vector_dimension(self) -> int | None:
+            raise RuntimeError("milvus unreachable")
+
+    repo = _FakePartitionRepo(rows=[_full_row("p1")])
+    svc = _make_service(repo)
+    svc._vector_store = _BrokenStore()
+
+    detail = await svc.get_partition_config("p1")
+
+    assert detail["dimension"] is None
+    assert detail["name"] == "p1"
+
+
+@pytest.mark.asyncio
+async def test_list_summaries_report_the_live_dimension_once():
+    """One collection serves every partition, so they share the answer — and
+    the lookup is made once for the whole list, not per row."""
+    calls = {"n": 0}
+
+    class _CountingStore(_FakeVectorStore):
+        async def vector_dimension(self) -> int | None:
+            calls["n"] += 1
+            return 768
+
+    repo = _FakePartitionRepo(rows=[_full_row("a"), _full_row("b"), _full_row("c")])
+    svc = _make_service(repo)
+    svc._vector_store = _CountingStore()
+
+    summaries = await svc.list_partition_summaries()
+
+    assert {s["dimension"] for s in summaries.values()} == {768}
+    assert calls["n"] == 1

@@ -50,6 +50,10 @@ class MockVectorStore(VectorStore):
     def __init__(self) -> None:
         self.collections: dict[str, dict[str, Any]] = {}
         self.search_results: list[dict[str, Any]] = []
+        # What the "live collection" reports as its dense-vector dimension.
+        # None models "nothing indexed yet", which the API renders as null
+        # rather than inventing a number (#762 G).
+        self.dimension: int | None = 1024
 
     async def upsert(self, chunks: list[Any], collection: str = "default", *, indexed_at=None) -> int:
         store = self.collections.setdefault(collection, {})
@@ -93,6 +97,9 @@ class MockVectorStore(VectorStore):
 
     async def collection_exists(self, name: str) -> bool:
         return name in self.collections
+
+    async def vector_dimension(self) -> int | None:
+        return self.dimension if self.collections else None
 
     async def query_ids_by_filter(self, collection: str, filters: dict[str, Any]) -> list[str]:
         return list(self.collections.get(collection, {}).keys())
