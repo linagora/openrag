@@ -42,6 +42,10 @@ class _FakeConn:
         self.executed: list[tuple[str, tuple]] = []
         self._fetchrow_result = None
         self._fetch_result: list = []
+        # How many partitions the embedder-usage guard should find: `direct`
+        # name the endpoint, `via_default` ride the `default` alias. Zero-zero
+        # is "nothing references it", the case every pre-#762 test assumes.
+        self.embedder_usage = {"direct": 0, "via_default": 0}
 
     def transaction(self):
         return _AsyncCtx(self)
@@ -56,6 +60,8 @@ class _FakeConn:
 
     async def fetchrow(self, query: str, *params):
         self.executed.append((query, params))
+        if "FROM partitions" in query:
+            return self.embedder_usage
         return self._fetchrow_result
 
 
@@ -542,6 +548,124 @@ async def test_delete_and_promote_default_promotes_survivor_under_lock():
     assert any("DELETE FROM model_endpoints" in q for q in queries)
     assert any("is_default = false" in q for q in queries)
     assert any("is_default = true" in q for q in queries)
+
+
+# ── delete vs. partition references (#762 B) ─────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_delete_refuses_when_a_partition_names_the_embedder():
+    """Clearing the reference the way preset selections are cleared would
+    repoint an indexed partition at a different embedding model. There is no
+    safe fallback, so the delete is refused and nothing is written."""
+    from core.utils.exceptions import ConflictError
+    from services.persistence.model_endpoint_repo import PgModelEndpointRepository
+
+    pool = _FakePool()
+    pool.conn._fetch_result = [_row("e5", False), _row("jina", True)]
+    pool.conn.embedder_usage = {"direct": 3, "via_default": 0}
+    repo = PgModelEndpointRepository(pool_getter=lambda: pool)
+
+    with pytest.raises(ConflictError) as exc:
+        await repo.delete_and_promote_default("e5", "embedder")
+
+    assert "3 partition(s) name it" in exc.value.message
+    assert exc.value.status_code == 409
+    queries = [q for q, _ in pool.conn.executed]
+    assert not any("DELETE FROM model_endpoints" in q for q in queries)
+    assert not any("UPDATE pipeline_presets" in q for q in queries)
+
+
+@pytest.mark.asyncio
+async def test_delete_refuses_when_partitions_ride_the_default_alias():
+    """Deleting the default embedder promotes a survivor, which silently moves
+    every partition on the `default` alias to a different model — the same
+    corruption by another route, so it blocks too."""
+    from core.utils.exceptions import ConflictError
+    from services.persistence.model_endpoint_repo import PgModelEndpointRepository
+
+    pool = _FakePool()
+    pool.conn._fetch_result = [_row("e5", False), _row("jina", True)]
+    pool.conn.embedder_usage = {"direct": 0, "via_default": 2}
+    repo = PgModelEndpointRepository(pool_getter=lambda: pool)
+
+    with pytest.raises(ConflictError) as exc:
+        await repo.delete_and_promote_default("jina", "embedder")
+
+    assert "'default' alias" in exc.value.message
+    assert not any("DELETE FROM model_endpoints" in q for q, _ in pool.conn.executed)
+
+
+@pytest.mark.asyncio
+async def test_delete_unreferenced_embedder_still_proceeds():
+    from services.persistence.model_endpoint_repo import PgModelEndpointRepository
+
+    pool = _FakePool()
+    pool.conn._fetch_result = [_row("e5", False), _row("jina", True)]
+    pool.conn.embedder_usage = {"direct": 0, "via_default": 0}
+    repo = PgModelEndpointRepository(pool_getter=lambda: pool)
+
+    status, _ = await repo.delete_and_promote_default("e5", "embedder")
+
+    assert status == "ok"
+    assert any("DELETE FROM model_endpoints" in q for q, _ in pool.conn.executed)
+
+
+@pytest.mark.asyncio
+async def test_delete_clears_chat_llm_references_instead_of_blocking():
+    """chat_llm resolves per request and falls back to the default LLM when
+    unset, so clearing it lands exactly where a dangling name would have —
+    minus the dead name. Blocking here would be pure friction."""
+    from services.persistence.model_endpoint_repo import PgModelEndpointRepository
+
+    pool = _FakePool()
+    pool.conn._fetch_result = [_row("mistral", True), _row("doomed", False)]
+    repo = PgModelEndpointRepository(pool_getter=lambda: pool)
+
+    status, _ = await repo.delete_and_promote_default("doomed", "llm")
+
+    assert status == "ok"
+    cleared = [(q, params) for q, params in pool.conn.executed if "SET chat_llm = NULL" in q]
+    assert cleared and cleared[0][1] == ("doomed",)
+    assert any("DELETE FROM model_endpoints" in q for q, _ in pool.conn.executed)
+
+
+@pytest.mark.asyncio
+async def test_delete_locks_partitions_before_the_endpoint_rows():
+    """rename() and PgPresetRepository.delete() both take partitions first, and
+    update_partition writes partitions before reading model_endpoints. Taking
+    the FOR UPDATE row lock first would invert that order and deadlock."""
+    from services.persistence.model_endpoint_repo import PgModelEndpointRepository
+
+    pool = _FakePool()
+    pool.conn._fetch_result = [_row("e5", False), _row("jina", True)]
+    repo = PgModelEndpointRepository(pool_getter=lambda: pool)
+
+    await repo.delete_and_promote_default("e5", "embedder")
+
+    queries = [q for q, _ in pool.conn.executed]
+    lock_i = next(i for i, q in enumerate(queries) if "LOCK TABLE partitions IN SHARE MODE" in q)
+    rows_i = next(i for i, q in enumerate(queries) if "FOR UPDATE" in q)
+    assert lock_i < rows_i
+
+
+@pytest.mark.asyncio
+async def test_usage_counts_maps_name_and_type_to_partition_count():
+    from services.persistence.model_endpoint_repo import PgModelEndpointRepository
+
+    pool = _FakePool()
+    pool._fetch_result = [
+        {"name": "jina", "model_type": "embedder", "cnt": 4},
+        {"name": "mistral", "model_type": "llm", "cnt": 1},
+        {"name": "bge", "model_type": "reranker", "cnt": 0},
+    ]
+    repo = PgModelEndpointRepository(pool_getter=lambda: pool)
+
+    counts = await repo.usage_counts()
+
+    assert counts == {("jina", "embedder"): 4, ("mistral", "llm"): 1, ("bge", "reranker"): 0}
+    # One aggregate query, not one per endpoint.
+    assert len(pool.executed) == 1
 
 
 @pytest.mark.asyncio
