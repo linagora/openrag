@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -23,6 +24,14 @@ class ContentClaimLease:
 
 class DocumentRepository(ABC):
     """CRUD operations for documents."""
+
+    @abstractmethod
+    async def get_indexed_documents(self, keys: Collection[tuple[str, str]]) -> dict[tuple[str, str], datetime]:
+        """Return existing (partition, file_id) keys and their indexing times.
+
+        Implementations must perform a fresh, batched lookup and propagate errors.
+        """
+        raise NotImplementedError
 
     @abstractmethod
     async def create_document(self, doc: DocumentRecord) -> DocumentRecord: ...

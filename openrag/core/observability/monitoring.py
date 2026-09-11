@@ -17,6 +17,11 @@ from prometheus_client import (
 
 # -- Request metrics --------------------------------------------------------
 
+ORPHAN_CHUNKS_DROPPED = Counter(
+    "openrag_retrieval_orphan_chunks_dropped_total",
+    "Chunk-drop occurrences for files absent from the catalog; repeated retrievals can count the same chunk again",
+)
+
 REQUEST_COUNT = Counter(
     "openrag_http_requests_total",
     "Total number of HTTP requests",
