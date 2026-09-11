@@ -36,6 +36,12 @@ beforeAll(() => {
       disconnect() {}
     },
   );
+  Object.defineProperties(HTMLElement.prototype, {
+    hasPointerCapture: { configurable: true, value: () => false },
+    setPointerCapture: { configurable: true, value: () => undefined },
+    releasePointerCapture: { configurable: true, value: () => undefined },
+    scrollIntoView: { configurable: true, value: () => undefined },
+  });
 });
 
 function renderPage() {
@@ -82,6 +88,62 @@ describe("ModelsPage validation", () => {
         }),
       ),
     );
+  });
+
+  it("requires revalidation after changing the provider", async () => {
+    const user = userEvent.setup();
+    renderPage();
+
+    await screen.findByText("No embedder endpoints configured.");
+    await user.click(screen.getByRole("tab", { name: "reranker" }));
+    await user.click(screen.getByRole("button", { name: /add endpoint/i }));
+
+    const dialog = screen.getByRole("dialog");
+    const textboxes = within(dialog).getAllByRole("textbox");
+    await user.type(textboxes[0], "reranker");
+    await user.type(textboxes[1], "http://reranker:8000");
+    await user.type(textboxes[2], "jina-reranker-v2");
+    await user.click(within(dialog).getByRole("button", { name: "Validate" }));
+
+    const createButton = within(dialog).getByRole("button", { name: "Create" }) as HTMLButtonElement;
+    await waitFor(() => expect(createButton.disabled).toBe(false));
+    await user.click(within(dialog).getByRole("combobox"));
+    await user.click(screen.getByRole("option", { name: /openai/i }));
+
+    await waitFor(() => expect(createButton.disabled).toBe(true));
+  });
+
+  it("does not restore validation for an edited endpoint after its provider changes", async () => {
+    listModelEndpointsMock.mockResolvedValue([
+      {
+        name: "reranker",
+        model_type: "reranker",
+        endpoint: "http://reranker:8000",
+        model_name: "jina-reranker-v2",
+        batch_size: 32,
+        timeout: 30,
+        extra: { implementation: "infinity" },
+        has_api_key: false,
+        is_default: true,
+        created_at: "2026-01-01T00:00:00+00:00",
+        updated_at: "2026-01-01T00:00:00+00:00",
+      },
+    ]);
+    const user = userEvent.setup();
+    renderPage();
+
+    await screen.findByText("No embedder endpoints configured.");
+    await user.click(screen.getByRole("tab", { name: "reranker" }));
+    await screen.findByText("jina-reranker-v2");
+    await user.click(screen.getByRole("button", { name: "Edit" }));
+
+    const dialog = screen.getByRole("dialog");
+    const updateButton = within(dialog).getByRole("button", { name: "Update" }) as HTMLButtonElement;
+    await waitFor(() => expect(updateButton.disabled).toBe(false));
+    await user.click(within(dialog).getByRole("combobox"));
+    await user.click(screen.getByRole("option", { name: /openai/i }));
+
+    await waitFor(() => expect(updateButton.disabled).toBe(true));
   });
 
   it("persists the STT API key used by draft validation", async () => {

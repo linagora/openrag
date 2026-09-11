@@ -474,6 +474,11 @@ function EndpointDialog({
         : { mossSpeakerAware: false, extra: editingSttExtra }
       : null;
     const editingMossExtra = editingMossFields?.extra ?? null;
+    const editingImplementation =
+      editingMossExtra && editing && editing.model_type !== "stt"
+        ? splitModelEndpointImplementation(editingMossExtra).implementation ||
+          DEFAULT_VENDOR_BY_TYPE[editing.model_type]
+        : "";
     const editingImplExtra = editingMossExtra
       ? editing?.model_type === "stt"
         ? editingMossExtra
@@ -498,6 +503,7 @@ function EndpointDialog({
       sttValidationMossSpeakerAware ===
         (editing.model_type === "stt" ? editingMossFields?.mossSpeakerAware || false : null) &&
       apiKey === editingExtra?.apiKey &&
+      (editing.model_type === "stt" || vendor === editingImplementation) &&
       extraJson === JSON.stringify(editingRawExtra, null, 2)
     ) {
       setValidated(true);
@@ -518,6 +524,7 @@ function EndpointDialog({
     sttValidationMossSpeakerAware,
     apiKey,
     extraJson,
+    vendor,
     editing,
   ]);
 

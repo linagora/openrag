@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import threading
+from concurrent.futures import Future, ThreadPoolExecutor
 from functools import partial
 from typing import TYPE_CHECKING, cast
 
@@ -13,19 +15,46 @@ from services.storage.postgres_store import PostgresStore
 from services.workers.ray_utils import call_ray_actor_method_with_timeout
 
 _ray_actor = None
+_ray_actor_lookup: Future | None = None
+_ray_actor_lookup_lock = threading.Lock()
+_ray_actor_lookup_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="readiness-ray-lookup")
 
 if TYPE_CHECKING:
     from di.container import ServiceContainer
 
 
+async def _lookup_ray_actor():
+    global _ray_actor_lookup
+    with _ray_actor_lookup_lock:
+        lookup = _ray_actor_lookup
+        if lookup is None:
+            lookup = _ray_actor_lookup_executor.submit(ray.get_actor, "TaskStateManager", namespace="openrag")
+            _ray_actor_lookup = lookup
+    try:
+        actor = await asyncio.shield(asyncio.wrap_future(lookup))
+    except asyncio.CancelledError:
+        raise
+    except BaseException:
+        with _ray_actor_lookup_lock:
+            if _ray_actor_lookup is lookup:
+                _ray_actor_lookup = None
+        raise
+    with _ray_actor_lookup_lock:
+        if _ray_actor_lookup is lookup:
+            _ray_actor_lookup = None
+    return actor
+
+
 async def _check_ray() -> None:
-    global _ray_actor
+    global _ray_actor, _ray_actor_lookup
     if not ray.is_initialized():
         _ray_actor = None
+        with _ray_actor_lookup_lock:
+            _ray_actor_lookup = None
         raise RuntimeError("Ray is not initialized")
+    if _ray_actor is None:
+        _ray_actor = await _lookup_ray_actor()
     try:
-        if _ray_actor is None:
-            _ray_actor = await asyncio.to_thread(ray.get_actor, "TaskStateManager", namespace="openrag")
         await call_ray_actor_method_with_timeout(
             _ray_actor.get_pool_info.remote, timeout=1.0, task_description="readiness"
         )
