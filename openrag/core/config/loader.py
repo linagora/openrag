@@ -109,6 +109,7 @@ _ENV_OVERRIDES: list[tuple[str, str, type]] = [
     ("MARKER_MAX_PROCESSES", "loader.marker_max_processes", int),
     ("MARKER_NUM_GPUS", "loader.marker_num_gpus", float),
     ("MARKER_TIMEOUT", "loader.marker_timeout", int),
+    ("MARKER_CHILD_TIMEOUT_RATIO", "loader.marker_child_timeout_ratio", float),
     ("MARKER_PDFTEXT_WORKERS", "loader.marker_pdftext_workers", int),
     ("MARKER_CHUNK_SIZE", "loader.marker_chunk_size", int),
     ("DOCLING_NUM_GPUS", "loader.docling_num_gpus", float),
