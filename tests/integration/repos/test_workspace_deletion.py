@@ -307,6 +307,8 @@ async def test_failed_vector_cleanup_is_durable_and_retryable(postgres_store):
     assert await store.workspace_repo.add_files_to_workspace("ws2", ["retryable"]) == ["retryable"]
 
     vectors.delete.side_effect = None
+    # Retry reacquires CLAIMED first; the service then performs the normal
+    # CLAIMED -> CLEANUP_STARTED transition before deleting remaining vectors.
     assert await svc.retry_failed_file_cleanup("retryable", "p") is True
     assert not await store.document_repo.file_exists_in_partition("retryable", "p")
 

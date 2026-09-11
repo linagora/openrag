@@ -355,12 +355,14 @@ class PgWorkspaceRepository(WorkspaceRepository):
         return row is not None
 
     async def claim_failed_file_cleanup(self, file_id: str, partition: str) -> bool:
-        """Lease failed or abandoned destructive cleanup for an idempotent retry."""
+        """Reclaim failed or abandoned cleanup before restarting deletion."""
         row = await self.pool.fetchrow(
             """
             UPDATE files
-            SET workspace_cleanup_failed = FALSE,
+            SET workspace_cleanup_claimed = TRUE,
                 workspace_cleanup_claimed_at = NOW(),
+                workspace_cleanup_started = FALSE,
+                workspace_cleanup_failed = FALSE,
                 workspace_cleanup_state = $3
             WHERE file_id = $1
               AND partition_name = $2

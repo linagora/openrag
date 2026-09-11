@@ -53,7 +53,7 @@ class WorkspaceRepository(ABC):
 
     @abstractmethod
     async def claim_failed_file_cleanup(self, file_id: str, partition: str) -> bool:
-        """Atomically lease a failed cleanup for retry."""
+        """Atomically reclaim failed or abandoned cleanup before retry."""
         ...
 
     @abstractmethod
