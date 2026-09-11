@@ -23,17 +23,22 @@ from core.models.catalog import (
     TASK_FINISHED_AT_METADATA_KEY,
     TERMINAL_TASK_STATES,
 )
+from core.utils.logging import get_logger
+
+logger = get_logger()
 
 _ACTIVE_STATES = ("QUEUED", "SERIALIZING")
+_DURABLE_TASK_LIMIT = 500
 _TERMINAL_STATES = frozenset(state.value for state in TERMINAL_TASK_STATES)
 
 
 class JobService:
     """Queue/worker introspection over the TaskStateManager actor."""
 
-    def __init__(self, task_state_manager: Any, timeout: float = 60.0) -> None:
+    def __init__(self, task_state_manager: Any, timeout: float = 60.0, *, job_repo: Any = None) -> None:
         self._tsm = task_state_manager
         self._timeout = timeout
+        self._job_repo = job_repo
 
     async def _call(self, submit: Any, task_description: str) -> Any:
         """Route TaskStateManager calls through the centralized Ray helper.
@@ -100,6 +105,13 @@ class JobService:
                 f"get_all_user_info({user_id})",
             )
 
+        # The actor only remembers live and recent tasks. Durable rows fill in
+        # history it has evicted, and everything dispatched before a restart.
+        all_info = {
+            **await self._durable_task_info(is_admin=is_admin, user_id=user_id, task_status=task_status),
+            **all_info,
+        }
+
         if task_status is None:
             filtered = list(all_info.items())
         elif task_status.lower() == "active":
@@ -155,9 +167,73 @@ class JobService:
             f"get_details({task_id})",
         )
         if details is None:
+            job = await self._durable_job(task_id)
+            details = _job_to_info(job)["details"] if job is not None else None
+        if details is None:
             return None
         public_details, _, _ = _task_details(details)
         return public_details
+
+    async def _durable_job(self, task_id: str) -> Any:
+        if self._job_repo is None:
+            return None
+        try:
+            return await self._job_repo.get_job(task_id)
+        except Exception as exc:
+            logger.warning("Failed to read durable job", task_id=task_id, error=str(exc))
+            return None
+
+    async def _durable_task_info(
+        self,
+        *,
+        is_admin: bool,
+        user_id: int | None,
+        task_status: str | None,
+    ) -> dict[str, dict]:
+        if self._job_repo is None:
+            return {}
+        try:
+            jobs = await self._job_repo.list_jobs(
+                statuses=_durable_statuses(task_status),
+                user_id=None if is_admin else user_id,
+                limit=_DURABLE_TASK_LIMIT,
+            )
+        except Exception as exc:
+            logger.warning("Failed to list durable jobs", error=str(exc))
+            return {}
+        return {job.id: _job_to_info(job) for job in jobs}
+
+
+def _durable_statuses(task_status: str | None) -> list[str] | None:
+    """The statuses the durable query should return, or ``None`` for all.
+
+    The row limit applies to what the query returns, so an unfiltered read
+    would hide older matches behind newer rows of every other status.
+    """
+    if task_status is None:
+        return None
+    if task_status.lower() == "active":
+        return list(_ACTIVE_STATES)
+    return [task_status.upper()]
+
+
+def _job_to_info(job: Any) -> dict[str, Any]:
+    """Render a durable row in the same shape the actor returns."""
+    created_at = job.created_at.isoformat() if job.created_at else None
+    completed_at = job.completed_at.isoformat() if job.completed_at else None
+    state = job.status.value
+    return {
+        "state": state,
+        "error": job.error,
+        "details": {
+            "file_id": job.file_id,
+            "partition": job.partition,
+            "metadata": {},
+            "user_id": job.user_id,
+        },
+        "created_at": created_at,
+        "duration_ms": _duration_ms(created_at, completed_at, state=state, now=datetime.now(UTC)),
+    }
 
 
 def _duration_ms(

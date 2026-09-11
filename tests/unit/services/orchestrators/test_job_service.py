@@ -219,3 +219,105 @@ async def test_get_user_pending_task_count_uses_task_state_manager():
     pending = await JobService(FakeTSM(info=info)).get_user_pending_task_count(7)
 
     assert pending == 2
+
+
+class FakeJobRepo:
+    """Durable job rows, as the actor would never return them."""
+
+    def __init__(self, jobs=None, *, broken: bool = False):
+        self._jobs = {job.id: job for job in (jobs or [])}
+        self._broken = broken
+        self.listed_statuses = []
+
+    async def list_jobs(self, *, statuses=None, user_id=None, offset=0, limit=50):
+        if self._broken:
+            raise RuntimeError("jobs table is missing")
+        self.listed_statuses.append(statuses)
+        return [
+            job
+            for job in self._jobs.values()
+            if (user_id is None or job.user_id == user_id) and (statuses is None or job.status.value in statuses)
+        ]
+
+    async def get_job(self, job_id):
+        if self._broken:
+            raise RuntimeError("jobs table is missing")
+        return self._jobs.get(job_id)
+
+
+def _job(**kwargs):
+    from core.models.catalog import DocumentStatus, IndexationJob
+
+    base = {
+        "id": "t-old",
+        "status": DocumentStatus.COMPLETED,
+        "partition": "tenant-a",
+        "file_id": "file-1",
+        "user_id": 7,
+        "created_at": datetime(2026, 9, 1, 10, 0, tzinfo=UTC),
+        "completed_at": datetime(2026, 9, 1, 10, 0, 30, tzinfo=UTC),
+    }
+    base.update(kwargs)
+    return IndexationJob(**base)
+
+
+@pytest.mark.asyncio
+async def test_list_tasks_includes_jobs_the_actor_has_forgotten():
+    info = {"t-live": {"state": "QUEUED", "details": {}, "user": 7}}
+    service = JobService(FakeTSM(info=info), job_repo=FakeJobRepo([_job()]))
+
+    rows = await service.list_tasks(is_admin=True, user_id=7)
+
+    by_id = {row["task_id"]: row for row in rows}
+    assert set(by_id) == {"t-live", "t-old"}
+    assert by_id["t-old"]["state"] == "COMPLETED"
+    assert by_id["t-old"]["duration_ms"] == 30_000
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("task_status", "expected"),
+    [("failed", ["FAILED"]), ("active", ["QUEUED", "SERIALIZING"]), (None, None)],
+    ids=["exact", "active", "unfiltered"],
+)
+async def test_a_status_query_is_filtered_before_the_row_limit(task_status, expected):
+    # The durable read is capped, so filtering it afterwards would drop matches
+    # that sit behind newer rows of another status.
+    from core.models.catalog import DocumentStatus
+
+    repo = FakeJobRepo([_job(id="t-failed", status=DocumentStatus.FAILED)])
+    service = JobService(FakeTSM(info={}), job_repo=repo)
+
+    await service.list_tasks(is_admin=True, user_id=7, task_status=task_status)
+
+    assert repo.listed_statuses == [expected]
+
+
+@pytest.mark.asyncio
+async def test_live_actor_state_wins_over_the_durable_row():
+    info = {"t1": {"state": "SERIALIZING", "details": {}, "user": 7}}
+    service = JobService(FakeTSM(info=info), job_repo=FakeJobRepo([_job(id="t1")]))
+
+    rows = await service.list_tasks(is_admin=True, user_id=7)
+
+    assert [row["state"] for row in rows] == ["SERIALIZING"]
+
+
+@pytest.mark.asyncio
+async def test_get_task_details_falls_back_to_the_durable_row():
+    service = JobService(FakeTSM(info={}), job_repo=FakeJobRepo([_job()]))
+
+    details = await service.get_task_details("t-old")
+
+    assert details == {"file_id": "file-1", "partition": "tenant-a", "metadata": {}, "user_id": 7}
+
+
+@pytest.mark.asyncio
+async def test_queue_views_survive_an_unavailable_jobs_table():
+    info = {"t-live": {"state": "QUEUED", "details": {}, "user": 7}}
+    service = JobService(FakeTSM(info=info), job_repo=FakeJobRepo(broken=True))
+
+    rows = await service.list_tasks(is_admin=True, user_id=7)
+
+    assert [row["task_id"] for row in rows] == ["t-live"]
+    assert await service.get_task_details("t-live") == {}

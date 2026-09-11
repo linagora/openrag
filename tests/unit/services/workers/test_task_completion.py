@@ -23,6 +23,7 @@ def _task_state_manager(
     tsm.get_all_info = _remote_mock(all_info or {})
     tsm.get_object_ref = _remote_mock(object_ref)
     tsm.get_state = _remote_mock(state)
+    tsm.get_error = _remote_mock()
     tsm.get_details = _remote_mock()
     tsm.set_details = _remote_mock()
     tsm.finish_cancellation = _remote_mock()
@@ -190,8 +191,6 @@ async def test_tracker_retries_active_task_without_stored_ref_after_restart() ->
 
 @pytest.mark.asyncio
 async def test_tracker_records_recovered_refless_task_when_it_reaches_terminal_state() -> None:
-    from services.workers.task_completion import TaskCompletionTracker
-
     details = {
         "file_id": "file-1",
         "partition": "tenant-a",
@@ -200,14 +199,18 @@ async def test_tracker_records_recovered_refless_task_when_it_reaches_terminal_s
     }
     tsm = _task_state_manager(object_ref=None)
     tsm.get_details.remote.return_value = details
-    tsm.get_state.remote.side_effect = ["SERIALIZING", "COMPLETED"]
+    # Three reads: two by the poll loop, one by the history write that now has to
+    # succeed before the actor is stamped.
+    tsm.get_state.remote.side_effect = ["SERIALIZING", "COMPLETED", "COMPLETED"]
 
     with (
         patch("services.workers.task_completion.ray.get_actor", return_value=tsm),
         patch("services.workers.task_completion._utc_now_iso", return_value="2026-07-20T08:01:05+00:00"),
         patch("services.workers.task_completion.asyncio.sleep", AsyncMock()),
     ):
-        tracker = TaskCompletionTracker()
+        # A settled task now only stamps the actor once its history row is
+        # written, so the tracker needs a repository that answers.
+        tracker = _tracker_with_repo(_FakeJobRepo())
         await tracker.recover_refless("task-1", poll_interval=0)
 
     tsm.set_details.remote.assert_awaited_once_with(
@@ -224,8 +227,6 @@ async def test_tracker_records_recovered_refless_task_when_it_reaches_terminal_s
 
 @pytest.mark.asyncio
 async def test_tracker_waits_for_submitted_cancelled_worker_ref() -> None:
-    from services.workers.task_completion import TaskCompletionTracker
-
     ref = asyncio.get_running_loop().create_future()
     ref.set_result(None)
     details = {
@@ -244,7 +245,9 @@ async def test_tracker_waits_for_submitted_cancelled_worker_ref() -> None:
         patch("services.workers.task_completion._utc_now_iso", return_value="2026-07-20T08:01:05+00:00"),
         patch("services.workers.task_completion.asyncio.sleep", AsyncMock()),
     ):
-        tracker = TaskCompletionTracker()
+        # A settled task now only stamps the actor once its history row is
+        # written, so the tracker needs a repository that answers.
+        tracker = _tracker_with_repo(_FakeJobRepo())
         await tracker.recover_refless(
             "task-1",
             poll_interval=0,
@@ -258,8 +261,6 @@ async def test_tracker_waits_for_submitted_cancelled_worker_ref() -> None:
 
 @pytest.mark.asyncio
 async def test_tracker_finishes_cancelled_submission_after_pool_clears_fence() -> None:
-    from services.workers.task_completion import TaskCompletionTracker
-
     details = {
         "file_id": "file-1",
         "partition": "tenant-a",
@@ -275,7 +276,9 @@ async def test_tracker_finishes_cancelled_submission_after_pool_clears_fence() -
         patch("services.workers.task_completion._utc_now_iso", return_value="2026-07-20T08:01:05+00:00"),
         patch("services.workers.task_completion.asyncio.sleep", AsyncMock()),
     ):
-        tracker = TaskCompletionTracker()
+        # A settled task now only stamps the actor once its history row is
+        # written, so the tracker needs a repository that answers.
+        tracker = _tracker_with_repo(_FakeJobRepo())
         await tracker.recover_refless(
             "task-1",
             poll_interval=0,
@@ -409,3 +412,171 @@ async def test_tracker_does_not_replace_existing_completion_time() -> None:
 
     tsm.get_details.remote.assert_not_called()
     tsm.set_details.remote.assert_not_called()
+
+
+class _FakeJobRepo:
+    def __init__(self) -> None:
+        self.saved: list[Any] = []
+        self.failed_calls: list[dict] = []
+        self.purged_before: list[Any] = []
+
+    async def upsert_job(self, job):
+        self.saved.append(job)
+        return job
+
+    async def fail_orphaned_jobs(self, *, active_ids, error, before):
+        self.failed_calls.append({"active_ids": list(active_ids), "error": error, "before": before})
+        return len(self.failed_calls)
+
+    async def purge_terminal_jobs(self, *, older_than):
+        self.purged_before.append(older_than)
+        return 0
+
+
+def _tracker_with_repo(repo):
+    from services.workers.task_completion import TaskCompletionTracker
+
+    tracker = TaskCompletionTracker()
+    tracker._job_repo = AsyncMock(return_value=repo)
+    return tracker
+
+
+@pytest.mark.asyncio
+async def test_settled_task_is_written_to_the_job_history() -> None:
+    from core.models.catalog import DocumentStatus
+
+    repo = _FakeJobRepo()
+    tsm = _task_state_manager(state="COMPLETED")
+    tsm.get_details.remote.return_value = {
+        "file_id": "file-1",
+        "partition": "tenant-a",
+        "metadata": {},
+        "user_id": 42,
+    }
+
+    with patch("services.workers.task_completion.ray.get_actor", return_value=tsm):
+        tracker = _tracker_with_repo(repo)
+        await tracker._record_finished_at("task-1")
+
+    assert len(repo.saved) == 1
+    job = repo.saved[0]
+    assert (job.id, job.status, job.partition, job.file_id, job.user_id) == (
+        "task-1",
+        DocumentStatus.COMPLETED,
+        "tenant-a",
+        "file-1",
+        42,
+    )
+    assert job.completed_at is not None
+
+
+@pytest.mark.asyncio
+async def test_a_failed_history_write_leaves_the_task_unstamped() -> None:
+    """The stamp is what stops recovery retrying, so it must follow the write.
+
+    Stamping regardless strands the row at its last non-terminal status until
+    orphan reconciliation marks a completed job FAILED after a restart.
+    """
+    repo = _FakeJobRepo()
+    repo.upsert_job = AsyncMock(side_effect=RuntimeError("postgres is unreachable"))
+    tsm = _task_state_manager(state="COMPLETED")
+    tsm.get_details.remote.return_value = {
+        "file_id": "file-1",
+        "partition": "tenant-a",
+        "metadata": {},
+        "user_id": 42,
+    }
+
+    with patch("services.workers.task_completion.ray.get_actor", return_value=tsm):
+        tracker = _tracker_with_repo(repo)
+        await tracker._record_finished_at("task-1")
+
+    tsm.set_details.remote.assert_not_awaited()
+    assert list(tracker._pending_settlements) == ["task-1"]
+    tracker._settlement_retry.cancel()
+
+
+@pytest.mark.asyncio
+async def test_active_task_is_not_written_as_settled() -> None:
+    repo = _FakeJobRepo()
+    tsm = _task_state_manager(state="SERIALIZING")
+
+    with patch("services.workers.task_completion.ray.get_actor", return_value=tsm):
+        tracker = _tracker_with_repo(repo)
+        await tracker._record_settled_job("task-1", {"partition": "tenant-a"})
+
+    assert repo.saved == []
+
+
+@pytest.mark.asyncio
+async def test_job_history_failure_never_breaks_completion_tracking() -> None:
+    repo = _FakeJobRepo()
+    repo.upsert_job = AsyncMock(side_effect=RuntimeError("jobs table is missing"))
+    tsm = _task_state_manager(state="FAILED")
+
+    with patch("services.workers.task_completion.ray.get_actor", return_value=tsm):
+        tracker = _tracker_with_repo(repo)
+        await tracker._record_settled_job("task-1", {"partition": "tenant-a"})
+
+    tracker._settlement_retry.cancel()
+
+
+@pytest.mark.asyncio
+async def test_a_held_settlement_is_retried_until_postgres_takes_it() -> None:
+    # Nothing re-reads a settled task later: track() forgets it and the actor
+    # evicts its record, so a dropped write leaves the row non-terminal and
+    # orphan reconciliation reports a finished job as failed.
+    repo = _FakeJobRepo()
+    repo.upsert_job = AsyncMock(side_effect=[RuntimeError("postgres is unreachable"), None])
+    tsm = _task_state_manager(state="COMPLETED")
+    tsm.get_details.remote.return_value = {
+        "file_id": "file-1",
+        "partition": "tenant-a",
+        "metadata": {},
+        "user_id": 42,
+    }
+
+    with patch("services.workers.task_completion.ray.get_actor", return_value=tsm):
+        tracker = _tracker_with_repo(repo)
+        await tracker._record_finished_at("task-1")
+
+        assert list(tracker._pending_settlements) == ["task-1"]
+
+        tracker._settlement_retry.cancel()
+        await tracker._retry_pending_settlements(delay=0)
+
+    assert tracker._pending_settlements == {}
+    assert repo.upsert_job.await_count == 2
+    assert repo.upsert_job.await_args_list[1].args[0].status.value == "COMPLETED"
+    tsm.set_details.remote.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_a_held_settlement_is_not_reconciled_as_an_orphan() -> None:
+    from core.models.catalog import DocumentStatus, IndexationJob
+
+    repo = _FakeJobRepo()
+    tracker = _tracker_with_repo(repo)
+    tracker._pending_settlements["task-1"] = IndexationJob(
+        id="task-1", status=DocumentStatus.COMPLETED, partition="tenant-a"
+    )
+
+    await tracker.reconcile_jobs([])
+
+    assert repo.failed_calls[0]["active_ids"] == ["task-1"]
+
+
+@pytest.mark.asyncio
+async def test_recover_settles_jobs_a_restart_orphaned() -> None:
+    repo = _FakeJobRepo()
+    tsm = _task_state_manager(all_info={"task-live": {"state": "QUEUED", "details": {}}})
+    tsm.get_object_ref.remote.return_value = {"ref": object()}
+
+    with patch("services.workers.task_completion.ray.get_actor", return_value=tsm):
+        tracker = _tracker_with_repo(repo)
+        await tracker.recover()
+
+    assert repo.failed_calls[0]["active_ids"] == ["task-live"]
+    assert "restart" in repo.failed_calls[0]["error"]
+    assert repo.failed_calls[0]["before"] is not None  # recent rows are spared
+    assert repo.purged_before  # retention runs in the same pass

@@ -13,6 +13,7 @@ divergence as a pending schema change.
 
 from datetime import datetime
 
+from core.models.catalog import DocumentStatus
 from sqlalchemy import (
     JSON,
     BigInteger,
@@ -267,6 +268,59 @@ file_content_claims = Table(
         server_default=text("now() + interval '24 hours'"),
         nullable=False,
     ),
+)
+
+
+_JOB_STATUS_CHECK = "status IN ({})".format(",".join(f"'{status.value}'" for status in DocumentStatus))
+
+
+# One row per dispatched indexing task, keyed by the dispatcher's ``task_id``.
+#
+# ``partition`` deliberately carries no FK to ``partitions.partition``: a job row
+# is a historical record and must outlive the partition it targeted, and a
+# terminal job must not block a partition delete. ``user_id`` does carry one, so
+# deleting a user cannot leave a row pointing at an id that no longer resolves;
+# it is nulled rather than cascaded for the same must-outlive reason.
+#
+# Rows are bounded by retention, not by the table: see
+# ``PgJobRepository.purge_terminal_jobs``.
+jobs = Table(
+    "jobs",
+    metadata,
+    Column("id", String, primary_key=True),
+    Column("partition", String, nullable=False),
+    Column("file_id", String, nullable=True),
+    # ``users.id`` is Integer, so the FK target fixes this type.
+    Column("user_id", Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True),
+    Column("status", String, nullable=False),
+    Column("error", String, nullable=True),
+    Column("created_at", DateTime(timezone=True), server_default=text("now()"), nullable=False),
+    Column("updated_at", DateTime(timezone=True), server_default=text("now()"), nullable=False),
+    # Queue wait is ``started_at - created_at`` and service time is
+    # ``completed_at - started_at``; a single settle timestamp cannot separate
+    # the two, and the queue-wait series is what tells a slow parser apart from
+    # a starved pool.
+    Column("started_at", DateTime(timezone=True), nullable=True),
+    Column("completed_at", DateTime(timezone=True), nullable=True),
+    # The state machine is DocumentStatus, and the constraint is generated from
+    # it so the two cannot drift. It is what makes hydration total: a status the
+    # enum does not know would raise in ``PgJobRepository._row_to_job``, so the
+    # database has to refuse it on the way in. Note that this deliberately
+    # excludes the legacy CHUNKING/INSERTING states, which #721 removed from the
+    # public state machine and which no write path can produce.
+    CheckConstraint(_JOB_STATUS_CHECK, name="ck_jobs_status"),
+    # Queue views filter by status and order by recency.
+    Index("ix_jobs_status_created_at", "status", "created_at"),
+    # Per-user task listing, which filters on user_id and often on status too.
+    Index("ix_jobs_user_status", "user_id", "status"),
+    # Retention sweeps terminal rows by settle time, which is
+    # ``COALESCE(completed_at, created_at)``: a row whose terminal write raced a
+    # failure has no completed_at and ages out on created_at instead. The index
+    # has to match that expression, because a plain b-tree on bare completed_at
+    # serves neither the filter nor the ordering the sweep uses.
+    Index("ix_jobs_settled_at", text("COALESCE(completed_at, created_at)")),
+    # Incident lookups start from a file, not a task id.
+    Index("ix_jobs_partition_file_id", "partition", "file_id"),
 )
 
 

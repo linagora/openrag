@@ -1521,6 +1521,7 @@ def test_indexer_pool_wires_contextualizer_factory_and_worker_namespace(monkeypa
     class Store:
         document_repo = object()
         topic_tag_repo = object()
+        job_repo = object()
 
     class Worker:
         def __init__(self, **kwargs):
@@ -1609,6 +1610,7 @@ def test_indexer_pool_loads_caption_prompt_without_global_vlm_default(monkeypatc
     class Store:
         document_repo = object()
         topic_tag_repo = object()
+        job_repo = object()
 
     class Worker:
         def __init__(self, **kwargs):

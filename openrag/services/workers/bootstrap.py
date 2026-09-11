@@ -152,7 +152,12 @@ def get_task_completion_tracker(namespace: str = "openrag"):
 
 def _supports_task_completion_recovery(actor) -> bool:
     method_names = getattr(actor, "_ray_actor_method_names", None)
-    if isinstance(method_names, (frozenset, list, set, tuple)) and "supports_cancellation_recovery" not in method_names:
+    # ``reconcile_jobs`` came with durable history: a tracker that predates it
+    # would never write a settled row or recover one a restart orphaned.
+    required = ("supports_cancellation_recovery", "reconcile_jobs")
+    if isinstance(method_names, (frozenset, list, set, tuple)) and not set(required) <= set(method_names):
+        return False
+    if getattr(actor, "reconcile_jobs", None) is None:
         return False
     method = getattr(actor, "supports_cancellation_recovery", None)
     remote = getattr(method, "remote", None)

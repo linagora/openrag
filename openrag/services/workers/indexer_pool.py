@@ -69,11 +69,9 @@ def _indexer_worker_actor_name(index: int) -> str:
 
 
 def _catalog_rdb_config(settings: Settings) -> Any:
-    if settings.rdb.database is not None:
-        return settings.rdb
-    return settings.rdb.model_copy(
-        update={"database": f"partitions_for_collection_{settings.vectordb.collection_name}"}
-    )
+    from services.storage.postgres_store import catalog_rdb_config
+
+    return catalog_rdb_config(settings)
 
 
 @ray.remote
@@ -203,6 +201,7 @@ class IndexerWorkerActor:
             task_state_manager=task_state_manager,
             document_repo=self._catalog_store.document_repo,
             topic_tag_repo=self._catalog_store.topic_tag_repo,
+            job_repo=self._catalog_store.job_repo,
             vector_store=self._vector_store,
             collection=cfg.vectordb.collection_name,
         )
