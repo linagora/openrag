@@ -15,6 +15,7 @@ if TYPE_CHECKING:
 class VectorStore(ABC):
     """Base class for vector database backends."""
 
+    @abstractmethod
     def iter_chunk_metadata(
         self, collection: str, *, partition: str, file_ids: list[str] | None = None, batch_size: int = 500
     ) -> AsyncIterator[list[dict[str, Any]]]:

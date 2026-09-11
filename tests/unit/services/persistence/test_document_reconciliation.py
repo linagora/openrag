@@ -39,15 +39,12 @@ async def test_catalog_lookup_does_not_hide_outages():
         await PgDocumentRepository(lambda: pool).get_indexed_documents({("a", "f")})
 
 
-def test_repository_without_catalog_lookup_cannot_be_constructed():
+@pytest.mark.parametrize("method", ["get_indexed_documents", "list_indexed_documents"])
+def test_repository_without_catalog_lookup_cannot_be_constructed(method):
     incomplete = type(
         "IncompleteRepository",
         (DocumentRepository,),
-        {
-            name: lambda *args, **kwargs: None
-            for name in DocumentRepository.__abstractmethods__
-            if name != "get_indexed_documents"
-        },
+        {name: lambda *args, **kwargs: None for name in DocumentRepository.__abstractmethods__ if name != method},
     )
-    with pytest.raises(TypeError, match="get_indexed_documents"):
+    with pytest.raises(TypeError, match=method):
         incomplete()

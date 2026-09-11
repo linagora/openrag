@@ -9,6 +9,22 @@ from core.ports.document_repo import DocumentRepository
 from core.vector_stores import VectorStore
 
 
+def validate_scan_options(
+    partition: str, page_size: int, grace_seconds: float, *, now: datetime | None = None
+) -> datetime:
+    """Validate before opening storage and return a representable cutoff."""
+    if not partition or partition == "all":
+        raise ValueError("A concrete partition is required; the 'all' wildcard is not supported")
+    if not 1 <= page_size <= 1000:
+        raise ValueError("Page size must be between 1 and 1000")
+    if not 0 <= grace_seconds < float("inf"):
+        raise ValueError("Grace seconds must be finite and nonnegative")
+    try:
+        return (now or datetime.now(UTC)) - timedelta(seconds=grace_seconds)
+    except OverflowError as exc:
+        raise ValueError("Grace seconds exceeds the supported datetime range") from exc
+
+
 def _timestamp(value: Any) -> datetime | None:
     try:
         parsed = datetime.fromisoformat(value) if isinstance(value, str) else value
@@ -35,11 +51,9 @@ async def reconcile_partition(
     Repair is for maintenance windows with writers paused. A fresh catalog
     lookup reduces races but cannot substitute for a shared admission fence.
     Only explicit, aged orphan IDs can be deleted. Timestamp mismatches are
-    diagnostic: legacy imports and copies need not share an indexing timestamp.
+    diagnostic: legacy imports and older copies need not share an indexing timestamp.
     """
-    if not partition or not 1 <= page_size <= 1000 or not 0 <= grace_seconds < float("inf"):
-        raise ValueError("Provide a partition, page_size 1..1000 and a finite nonnegative grace_seconds")
-    cutoff = (now or datetime.now(UTC)) - timedelta(seconds=grace_seconds)
+    cutoff = validate_scan_options(partition, page_size, grace_seconds, now=now)
     summary = {
         "type": "summary",
         "partition": partition,
@@ -121,4 +135,6 @@ async def reconcile_partition(
                 summary["missing_documents"] += len(missing)
                 yield {"type": "missing_chunks", "partition": partition, "file_ids": missing}
         after = file_ids[-1]
+        if len(file_ids) < page_size:
+            break
     yield summary

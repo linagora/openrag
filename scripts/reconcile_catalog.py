@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-import math
 from contextlib import aclosing
 
 from _bootstrap import ensure_openrag_source_path
@@ -76,6 +75,8 @@ async def _run(args) -> int:
 
 
 def main(argv=None) -> int:
+    from services.storage.reconciliation import validate_scan_options
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--partition", required=True, help="One logical partition to inspect")
     parser.add_argument("--page-size", type=int, default=500, help="Rows per page (1..1000)")
@@ -86,10 +87,10 @@ def main(argv=None) -> int:
         help="Delete aged orphan chunk IDs. Pause and drain all writers before using this flag.",
     )
     args = parser.parse_args(argv)
-    if not args.partition or not 1 <= args.page_size <= 1000:
-        parser.error("A nonempty partition and page size between 1 and 1000 are required")
-    if not math.isfinite(args.grace_seconds) or args.grace_seconds < 0:
-        parser.error("Grace seconds must be finite and nonnegative")
+    try:
+        validate_scan_options(args.partition, args.page_size, args.grace_seconds)
+    except ValueError as exc:
+        parser.error(str(exc))
     return asyncio.run(_run(args))
 
 

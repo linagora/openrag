@@ -11,7 +11,9 @@ pytest marker.
 
 from __future__ import annotations
 
+import asyncio
 import re
+import threading
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -20,6 +22,7 @@ from api.error_handlers import register_error_handlers
 from core.config.infrastructure import VectorDBConfig
 from core.models.chunk import Chunk, ChunkType
 from core.utils.exceptions import VDBCreateOrLoadCollectionError, VDBSchemaMigrationRequiredError, VDBSearchError
+from core.vector_stores import VectorStore
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pymilvus import MilvusException
@@ -32,6 +35,90 @@ from services.storage.milvus_store import (
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
+
+async def test_metadata_scan_rejects_wildcard_without_querying(store):
+    with pytest.raises(ValueError):
+        await anext(store.iter_chunk_metadata("default", partition="all"))
+    store._client.query_iterator.assert_not_called()
+
+
+def test_vector_store_requires_metadata_iterator():
+    incomplete = type(
+        "IncompleteStore",
+        (VectorStore,),
+        {
+            name: lambda *args, **kwargs: None
+            for name in VectorStore.__abstractmethods__
+            if name != "iter_chunk_metadata"
+        },
+    )
+    with pytest.raises(TypeError, match="iter_chunk_metadata"):
+        incomplete()
+
+
+@pytest.mark.parametrize("phase", ["creation", "next"])
+async def test_metadata_scan_closes_iterator_created_after_cancellation(store, phase):
+    started = threading.Event()
+    release = threading.Event()
+    iterator = MagicMock()
+
+    def create(**kwargs):
+        if phase == "creation":
+            block()
+        return iterator
+
+    def block():
+        started.set()
+        assert release.wait(5)
+        return []
+
+    if phase == "next":
+        iterator.next.side_effect = block
+    iterator.close.side_effect = lambda: release.is_set() or pytest.fail("Closed during an active thread call")
+
+    store._client.query_iterator.side_effect = create
+    pages = store.iter_chunk_metadata("default", partition="a")
+    task = asyncio.create_task(anext(pages))
+    try:
+        assert await asyncio.to_thread(started.wait, 5)
+        task.cancel()
+        await asyncio.sleep(0)
+        task.cancel()
+        await asyncio.sleep(0)
+    finally:
+        release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await asyncio.to_thread(lambda: None)
+    iterator.close.assert_called_once()
+
+
+async def test_wildcard_repair_cannot_delete_healthy_tenants(store):
+    from datetime import UTC, datetime
+
+    from services.storage.reconciliation import reconcile_partition
+
+    catalog = AsyncMock()
+    catalog.get_indexed_documents.return_value = {
+        ("a", "f"): datetime(2000, 1, 1, tzinfo=UTC),
+        ("b", "g"): datetime(2000, 1, 1, tzinfo=UTC),
+    }
+    iterator = MagicMock()
+    iterator.next.side_effect = [
+        [
+            {"_id": 1, "partition": "a", "file_id": "f", "indexed_at": "2000-01-01T00:00:00+00:00"},
+            {"_id": 2, "partition": "b", "file_id": "g", "indexed_at": "2000-01-01T00:00:00+00:00"},
+        ],
+        [],
+    ]
+    store._client.query_iterator.return_value = iterator
+    store.delete = AsyncMock()
+    with pytest.raises(ValueError):
+        _ = [event async for event in reconcile_partition(catalog, store, "default", "all", repair=True)]
+    store.delete.assert_not_awaited()
+    store._client.query_iterator.assert_not_called()
+    catalog.get_indexed_documents.assert_not_awaited()
 
 
 async def test_metadata_scan_yields_pages_without_draining_and_closes(store):

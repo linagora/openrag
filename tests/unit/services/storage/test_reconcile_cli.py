@@ -43,12 +43,23 @@ def test_cli_failure_emits_error_without_success_summary(cli, monkeypatch, capsy
 
 @pytest.mark.parametrize(
     "args",
-    [[], ["--partition", ""], ["--partition", "a", "--page-size", "0"], ["--partition", "a", "--grace-seconds", "nan"]],
+    [
+        [],
+        ["--partition", ""],
+        ["--partition", "all", "--repair"],
+        ["--partition", "a", "--page-size", "0"],
+        ["--partition", "a", "--grace-seconds", "nan"],
+        ["--partition", "a", "--grace-seconds", "1e18"],
+        ["--partition", "a", "--grace-seconds", "1e12"],
+    ],
 )
-def test_cli_rejects_invalid_arguments_before_connecting(cli, args):
+def test_cli_rejects_invalid_arguments_before_connecting(cli, args, monkeypatch):
+    scan = MagicMock(side_effect=AssertionError("Invalid arguments must not open storage"))
+    monkeypatch.setattr(cli, "scan", scan)
     with pytest.raises(SystemExit) as error:
         cli.main(args)
     assert error.value.code == 2
+    scan.assert_not_called()
 
 
 async def test_scan_opens_existing_stores_without_migrations_and_closes_on_failure(cli, monkeypatch):

@@ -125,8 +125,28 @@ async def test_repair_recheck_failure_aborts_without_deletion():
     assert vectors.closed == 1
 
 
-@pytest.mark.parametrize("options", [{"page_size": 0}, {"page_size": 1001}, {"grace_seconds": -1}, {"partition": ""}])
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"page_size": 0},
+        {"page_size": 1001},
+        {"grace_seconds": -1},
+        {"partition": ""},
+        {"partition": "all"},
+        {"grace_seconds": 1e18},
+        {"grace_seconds": 1e12},
+    ],
+)
 async def test_rejects_invalid_scan_options(options):
     args = {"partition": "a", "page_size": 2, **options}
     with pytest.raises(ValueError):
         _ = [e async for e in reconcile_partition(Catalog(), Vectors([]), "collection", now=NOW, **args)]
+
+
+async def test_short_catalog_page_does_not_fetch_an_empty_followup():
+    from unittest.mock import AsyncMock
+
+    catalog = Catalog({("a", "f"): OLD})
+    catalog.list_indexed_documents = AsyncMock(wraps=catalog.list_indexed_documents)
+    await run(catalog, Vectors([row(1, "f")]))
+    catalog.list_indexed_documents.assert_awaited_once()

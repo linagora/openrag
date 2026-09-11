@@ -87,8 +87,6 @@ async def test_catalog_guard_and_reconciliation_with_real_stores(dense_only_stor
     assert {r["file_id"] for r in rows} == {"live", "legacy"}
     assert await catalog.file_exists_in_partition("missing", "reconcile_a")
     assert await vectors.query_ids_by_filter("default", {"partition": "reconcile_b"})
-    await vectors.drop_collection("default")
-    await vectors.aclose()
 
 
 # ---------------------------------------------------------------------------

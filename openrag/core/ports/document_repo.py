@@ -33,6 +33,7 @@ class DocumentRepository(ABC):
         """
         raise NotImplementedError
 
+    @abstractmethod
     async def list_indexed_documents(
         self, partition: str, *, before: datetime, after: str | None = None, limit: int = 500
     ) -> list[str]:

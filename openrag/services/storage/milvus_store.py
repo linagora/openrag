@@ -1459,27 +1459,55 @@ class MilvusVectorStore(VectorStore):
         self, collection: str, *, partition: str, file_ids: list[str] | None = None, batch_size: int = 500
     ) -> AsyncIterator[list[dict[str, Any]]]:
         self._resolve_collection(collection)
-        if not partition or not 1 <= batch_size <= 1000:
-            raise ValueError("A partition and a batch size between 1 and 1000 are required")
+        if not partition or partition in self._PARTITION_WILDCARDS or not 1 <= batch_size <= 1000:
+            raise ValueError("A concrete partition (not 'all') and a batch size between 1 and 1000 are required")
         if file_ids == []:
             return
         filters: dict[str, Any] = {"partition": partition}
         if file_ids is not None:
             filters["file_id"] = file_ids
-        iterator = await asyncio.to_thread(
-            self._client.query_iterator,
-            collection_name=self._collection_name,
-            filter=self._build_filter_expr(filters),
-            output_fields=["_id", "partition", "file_id", "indexed_at"],
-            batch_size=batch_size,
-            consistency_level="Strong",
-            timeout=self._timeout,
+        creation = asyncio.create_task(
+            asyncio.to_thread(
+                self._client.query_iterator,
+                collection_name=self._collection_name,
+                filter=self._build_filter_expr(filters),
+                output_fields=["_id", "partition", "file_id", "indexed_at"],
+                batch_size=batch_size,
+                consistency_level="Strong",
+                timeout=self._timeout,
+            )
         )
+        pending = None
+
+        async def cleanup():
+            # Thread calls cannot be cancelled. Retain ownership until creation
+            # and any in-flight next() finish, then close exactly once.
+            await asyncio.gather(creation, return_exceptions=True)
+            if creation.cancelled() or creation.exception() is not None:
+                return
+            if pending is not None:
+                await asyncio.gather(pending, return_exceptions=True)
+            await asyncio.to_thread(creation.result().close)
+
         try:
-            while page := await asyncio.to_thread(iterator.next):
+            iterator = await asyncio.shield(creation)
+            while True:
+                pending = asyncio.create_task(asyncio.to_thread(iterator.next))
+                page = await asyncio.shield(pending)
+                if not page:
+                    break
                 yield page
         finally:
-            await asyncio.to_thread(iterator.close)
+            closing = asyncio.create_task(cleanup())
+            cancelled = False
+            while True:
+                try:
+                    await asyncio.shield(closing)
+                    break
+                except asyncio.CancelledError:
+                    cancelled = True
+            if cancelled:
+                raise asyncio.CancelledError
 
     async def query_chunks_by_filter(
         self,
