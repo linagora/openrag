@@ -483,15 +483,28 @@ class IndexerWorkerActor:
                 self._active_indexation_config.reset(token)
             file_id = metadata.get("file_id", "")
             if workspace_ids and not replace and file_id:
-                try:
-                    await asyncio.gather(
-                        *(
-                            self._catalog_store.workspace_repo.add_files_to_workspace(workspace_id, [file_id])
-                            for workspace_id in workspace_ids
+                results = await asyncio.gather(
+                    *(
+                        self._catalog_store.workspace_repo.add_files_to_workspace(workspace_id, [file_id])
+                        for workspace_id in workspace_ids
+                    ),
+                    return_exceptions=True,
+                )
+                cancelled = next((result for result in results if isinstance(result, asyncio.CancelledError)), None)
+                if cancelled is not None:
+                    raise cancelled
+                failures = [
+                    (workspace_id, result)
+                    for workspace_id, result in zip(workspace_ids, results, strict=True)
+                    if isinstance(result, Exception)
+                ]
+                if failures:
+                    await self._catalog_store.document_repo.mark_file_independently_indexed(file_id, partition)
+                    for workspace_id, error in failures:
+                        self._logger.warning(
+                            f"Failed to attach indexed file to workspace '{workspace_id}'; "
+                            f"file retained independently: {error}"
                         )
-                    )
-                except Exception:
-                    pass
             return result
         finally:
             content_sha256 = metadata.get("content_sha256")

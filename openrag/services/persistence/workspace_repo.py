@@ -27,6 +27,12 @@ from core.models.workspace import Workspace
 from core.ports.workspace_repo import WorkspaceRepository
 from services.persistence.file_count import decrement_file_counts
 
+CLEANUP_NONE = "NONE"
+CLEANUP_CLAIMED = "CLAIMED"
+CLEANUP_STARTED = "CLEANUP_STARTED"
+CLEANUP_FAILED = "CLEANUP_FAILED"
+CLEANUP_FINALIZED = "CLEANUP_FINALIZED"
+
 if TYPE_CHECKING:
     import asyncpg
 
@@ -121,7 +127,12 @@ class PgWorkspaceRepository(WorkspaceRepository):
                     await conn.execute(
                         """
                         UPDATE files f
-                        SET independently_indexed = TRUE
+                        SET independently_indexed = TRUE,
+                            workspace_cleanup_claimed = FALSE,
+                            workspace_cleanup_claimed_at = NULL,
+                            workspace_cleanup_started = FALSE,
+                            workspace_cleanup_failed = FALSE,
+                            workspace_cleanup_state = $2
                         WHERE f.id IN (
                             SELECT wf.file_id
                             FROM workspace_files wf
@@ -135,6 +146,7 @@ class PgWorkspaceRepository(WorkspaceRepository):
                         )
                         """,
                         workspace_id,
+                        CLEANUP_NONE,
                     )
                 else:
                     orphan_rows = await conn.fetch(
@@ -146,9 +158,9 @@ class PgWorkspaceRepository(WorkspaceRepository):
                             WHERE wf.workspace_id = $1
                               AND NOT f.independently_indexed
                               AND (
-                                  NOT f.workspace_cleanup_claimed
+                                  f.workspace_cleanup_state = $2
                                   OR (
-                                      NOT f.workspace_cleanup_started
+                                      f.workspace_cleanup_state = $3
                                       AND (
                                           f.workspace_cleanup_claimed_at IS NULL
                                           OR f.workspace_cleanup_claimed_at < NOW() - INTERVAL '1 hour'
@@ -164,12 +176,17 @@ class PgWorkspaceRepository(WorkspaceRepository):
                         UPDATE files f
                         SET workspace_cleanup_claimed = TRUE,
                             workspace_cleanup_claimed_at = NOW(),
-                            workspace_cleanup_started = FALSE
+                            workspace_cleanup_started = FALSE,
+                            workspace_cleanup_failed = FALSE,
+                            workspace_cleanup_state = $4
                         FROM candidates
                         WHERE f.id = candidates.id
                         RETURNING candidates.file_id
                         """,
                         workspace_id,
+                        CLEANUP_NONE,
+                        CLEANUP_CLAIMED,
+                        CLEANUP_CLAIMED,
                     )
                 await conn.execute(
                     "DELETE FROM workspaces WHERE workspace_id = $1",
@@ -205,9 +222,9 @@ class PgWorkspaceRepository(WorkspaceRepository):
                     WHERE file_id = ANY($1::text[])
                       AND partition_name = $2
                       AND (
-                          NOT workspace_cleanup_claimed
+                          workspace_cleanup_state = $3
                           OR (
-                              NOT workspace_cleanup_started
+                              workspace_cleanup_state = $4
                               AND (
                                   workspace_cleanup_claimed_at IS NULL
                                   OR workspace_cleanup_claimed_at < NOW() - INTERVAL '1 hour'
@@ -216,9 +233,11 @@ class PgWorkspaceRepository(WorkspaceRepository):
                       )
                     ORDER BY id
                     FOR UPDATE
-                    """,
+                        """,
                     file_ids,
                     partition,
+                    CLEANUP_NONE,
+                    CLEANUP_CLAIMED,
                 )
                 id_map = {r["file_id"]: r["id"] for r in resolved}
                 missing = [fid for fid in file_ids if fid not in id_map]
@@ -231,16 +250,19 @@ class PgWorkspaceRepository(WorkspaceRepository):
                         UPDATE files
                         SET workspace_cleanup_claimed = FALSE,
                             workspace_cleanup_claimed_at = NULL,
-                            workspace_cleanup_started = FALSE
+                            workspace_cleanup_started = FALSE,
+                            workspace_cleanup_failed = FALSE,
+                            workspace_cleanup_state = $2
                         WHERE id = ANY($1::int[])
-                          AND workspace_cleanup_claimed
-                          AND NOT workspace_cleanup_started
+                          AND workspace_cleanup_state = $3
                           AND (
                               workspace_cleanup_claimed_at IS NULL
                               OR workspace_cleanup_claimed_at < NOW() - INTERVAL '1 hour'
                           )
                         """,
                         list(id_map.values()),
+                        CLEANUP_NONE,
+                        CLEANUP_CLAIMED,
                     )
                     # Insert each row separately with ON CONFLICT DO NOTHING.
                     # asyncpg has no native bulk-with-conflict; the row count
@@ -263,15 +285,29 @@ class PgWorkspaceRepository(WorkspaceRepository):
             async with conn.transaction():
                 row = await conn.fetchrow(
                     """
-                    DELETE FROM files
+                    UPDATE files
+                    SET workspace_cleanup_state = $3,
+                        workspace_cleanup_claimed = FALSE,
+                        workspace_cleanup_claimed_at = NULL,
+                        workspace_cleanup_started = FALSE,
+                        workspace_cleanup_failed = FALSE
                     WHERE file_id = $1
                       AND partition_name = $2
-                      AND workspace_cleanup_claimed
-                    RETURNING created_by
+                      AND workspace_cleanup_state IN ($4, $5)
+                    RETURNING id, created_by
                     """,
                     file_id,
                     partition,
+                    CLEANUP_FINALIZED,
+                    CLEANUP_STARTED,
+                    CLEANUP_FAILED,
                 )
+                if row is not None:
+                    await conn.execute(
+                        "DELETE FROM files WHERE id = $1 AND workspace_cleanup_state = $2",
+                        row["id"],
+                        CLEANUP_FINALIZED,
+                    )
                 await decrement_file_counts(conn, [row] if row is not None else [])
                 return row is not None
 
@@ -281,15 +317,71 @@ class PgWorkspaceRepository(WorkspaceRepository):
             """
             UPDATE files
             SET workspace_cleanup_started = TRUE,
-                workspace_cleanup_claimed_at = NOW()
+                workspace_cleanup_claimed_at = NOW(),
+                workspace_cleanup_failed = FALSE,
+                workspace_cleanup_state = $3
             WHERE file_id = $1
               AND partition_name = $2
-              AND workspace_cleanup_claimed
-              AND NOT workspace_cleanup_started
+              AND workspace_cleanup_state = $4
             RETURNING id
             """,
             file_id,
             partition,
+            CLEANUP_STARTED,
+            CLEANUP_CLAIMED,
+        )
+        return row is not None
+
+    async def mark_cleanup_failed(self, file_id: str, partition: str) -> bool:
+        """Persist a destructive cleanup failure without allowing attachment."""
+        row = await self.pool.fetchrow(
+            """
+            UPDATE files
+            SET workspace_cleanup_failed = TRUE,
+                workspace_cleanup_claimed = TRUE,
+                workspace_cleanup_started = TRUE,
+                workspace_cleanup_claimed_at = NOW(),
+                workspace_cleanup_state = $3
+            WHERE file_id = $1
+              AND partition_name = $2
+              AND workspace_cleanup_state = $4
+            RETURNING id
+            """,
+            file_id,
+            partition,
+            CLEANUP_FAILED,
+            CLEANUP_STARTED,
+        )
+        return row is not None
+
+    async def claim_failed_file_cleanup(self, file_id: str, partition: str) -> bool:
+        """Lease failed or abandoned destructive cleanup for an idempotent retry."""
+        row = await self.pool.fetchrow(
+            """
+            UPDATE files
+            SET workspace_cleanup_failed = FALSE,
+                workspace_cleanup_claimed_at = NOW(),
+                workspace_cleanup_state = $3
+            WHERE file_id = $1
+              AND partition_name = $2
+              AND workspace_cleanup_state IN ($4, $5)
+              AND (
+                  workspace_cleanup_state = $4
+                  OR (
+                      workspace_cleanup_state = $5
+                      AND (
+                          workspace_cleanup_claimed_at IS NULL
+                          OR workspace_cleanup_claimed_at < NOW() - INTERVAL '1 hour'
+                      )
+                  )
+              )
+            RETURNING id
+            """,
+            file_id,
+            partition,
+            CLEANUP_STARTED,
+            CLEANUP_FAILED,
+            CLEANUP_STARTED,
         )
         return row is not None
 
@@ -300,14 +392,17 @@ class PgWorkspaceRepository(WorkspaceRepository):
             UPDATE files
             SET workspace_cleanup_claimed = FALSE,
                 workspace_cleanup_claimed_at = NULL,
-                workspace_cleanup_started = FALSE
+                workspace_cleanup_started = FALSE,
+                workspace_cleanup_failed = FALSE,
+                workspace_cleanup_state = $3
             WHERE file_id = $1
               AND partition_name = $2
-              AND workspace_cleanup_claimed
-              AND NOT workspace_cleanup_started
+              AND workspace_cleanup_state = $4
             """,
             file_id,
             partition,
+            CLEANUP_NONE,
+            CLEANUP_CLAIMED,
         )
 
     async def remove_file_from_workspace(

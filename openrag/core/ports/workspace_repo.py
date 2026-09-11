@@ -47,6 +47,16 @@ class WorkspaceRepository(ABC):
         ...
 
     @abstractmethod
+    async def mark_cleanup_failed(self, file_id: str, partition: str) -> bool:
+        """Persist that destructive cleanup failed and must be retried."""
+        ...
+
+    @abstractmethod
+    async def claim_failed_file_cleanup(self, file_id: str, partition: str) -> bool:
+        """Atomically lease a failed cleanup for retry."""
+        ...
+
+    @abstractmethod
     async def release_claimed_file_cleanup(self, file_id: str, partition: str) -> None:
         """Make a claimed file attachable after cleanup fails."""
         ...

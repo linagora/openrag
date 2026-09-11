@@ -192,18 +192,43 @@ class WorkspaceService:
                 self._collection,
                 {"partition": partition, "file_id": file_id},
             )
+            if not await self._workspace_repo.start_claimed_file_cleanup(file_id, partition):
+                raise RuntimeError(f"Workspace cleanup claim disappeared for {file_id}")
+            vector_cleanup_started = True
             if ids:
-                vector_cleanup_started = True
-                if not await self._workspace_repo.start_claimed_file_cleanup(file_id, partition):
-                    raise RuntimeError(f"Workspace cleanup claim disappeared for {file_id}")
                 await self._vector_store.delete(ids, self._collection)
             if not await self._workspace_repo.finalize_claimed_file_cleanup(file_id, partition):
                 raise RuntimeError(f"Workspace cleanup claim disappeared for {file_id}")
         except Exception:
-            if not vector_cleanup_started:
-                await self._workspace_repo.release_claimed_file_cleanup(file_id, partition)
+            if vector_cleanup_started:
+                try:
+                    await self._workspace_repo.mark_cleanup_failed(file_id, partition)
+                except Exception as mark_error:  # noqa: BLE001 - preserve original cleanup failure
+                    logger.error(
+                        "Failed to persist workspace cleanup failure state",
+                        file_id=file_id,
+                        partition=partition,
+                        error=str(mark_error),
+                    )
+            else:
+                try:
+                    await self._workspace_repo.release_claimed_file_cleanup(file_id, partition)
+                except Exception as release_error:  # noqa: BLE001 - preserve original cleanup failure
+                    logger.error(
+                        "Failed to release workspace cleanup claim",
+                        file_id=file_id,
+                        partition=partition,
+                        error=str(release_error),
+                    )
             raise
         logger.info("Deleted orphaned file", file_id=file_id, partition=partition)
+
+    async def retry_failed_file_cleanup(self, file_id: str, partition: str) -> bool:
+        """Retry a failed or abandoned cleanup while keeping attachment fenced."""
+        if not await self._workspace_repo.claim_failed_file_cleanup(file_id, partition):
+            return False
+        await self._delete_file(file_id, partition)
+        return True
 
 
 __all__ = ["WorkspaceService"]

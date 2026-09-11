@@ -18,6 +18,8 @@ class FakeWorkspaceRepo:
         self.finalized: list[tuple[str, str]] = []
         self.cleanup_started: list[tuple[str, str]] = []
         self.released: list[tuple[str, str]] = []
+        self.failed: list[tuple[str, str]] = []
+        self.retry_claimed: list[tuple[str, str]] = []
         self.deleted: list[tuple[str, bool]] = []
 
     async def get_workspace_dict(self, workspace_id: str):
@@ -63,6 +65,14 @@ class FakeWorkspaceRepo:
 
     async def release_claimed_file_cleanup(self, file_id: str, partition: str) -> None:
         self.released.append((file_id, partition))
+
+    async def mark_cleanup_failed(self, file_id: str, partition: str) -> bool:
+        self.failed.append((file_id, partition))
+        return True
+
+    async def claim_failed_file_cleanup(self, file_id: str, partition: str) -> bool:
+        self.retry_claimed.append((file_id, partition))
+        return True
 
 
 class FakeDocumentRepo:
@@ -158,7 +168,7 @@ async def test_delete_workspace_cleans_orphans_vectors_and_rows():
     assert vstore.deleted == [["c1", "c2"]]
     assert drepo.removed == []
     assert set(wrepo.finalized) == {("fA", "p"), ("fB", "p")}
-    assert wrepo.cleanup_started == [("fA", "p")]
+    assert set(wrepo.cleanup_started) == {("fA", "p"), ("fB", "p")}
 
 
 @pytest.mark.asyncio
@@ -174,6 +184,81 @@ async def test_delete_workspace_collects_per_file_failures():
     # The vector deletion started, so releasing the claim could make the
     # catalog row attachable even though its vectors may already be gone.
     assert wrepo.released == []
+    assert wrepo.failed == [("bad", "p")]
+
+
+@pytest.mark.asyncio
+async def test_delete_workspace_releases_claim_when_start_fails():
+    class StartFailureRepo(FakeWorkspaceRepo):
+        async def start_claimed_file_cleanup(self, file_id: str, partition: str) -> bool:
+            return False
+
+    wrepo = StartFailureRepo(orphaned=["bad"])
+    vstore = FakeVectorStore(ids_by_file={"bad": ["bad-c1"]})
+    result = await _svc(wrepo=wrepo, vstore=vstore).delete_workspace("p", "w1")
+    assert result["orphaned_files_failed"] == ["bad"]
+    assert wrepo.released == [("bad", "p")]
+    assert wrepo.failed == []
+
+
+@pytest.mark.asyncio
+async def test_retry_failed_file_cleanup_reclaims_and_finalizes():
+    wrepo = FakeWorkspaceRepo()
+    vstore = FakeVectorStore(ids_by_file={"bad": ["bad-c1"]})
+    svc = _svc(wrepo=wrepo, vstore=vstore)
+    assert await svc.retry_failed_file_cleanup("bad", "p") is True
+    assert wrepo.retry_claimed == [("bad", "p")]
+    assert wrepo.cleanup_started == [("bad", "p")]
+    assert wrepo.finalized == [("bad", "p")]
+
+
+@pytest.mark.asyncio
+async def test_retry_failed_file_cleanup_returns_false_when_not_claimed():
+    class NoRetryRepo(FakeWorkspaceRepo):
+        async def claim_failed_file_cleanup(self, file_id: str, partition: str) -> bool:
+            return False
+
+    assert await _svc(wrepo=NoRetryRepo()).retry_failed_file_cleanup("bad", "p") is False
+
+
+@pytest.mark.asyncio
+async def test_delete_workspace_marks_claim_failed_when_finalization_fails():
+    class FinalizeFailureRepo(FakeWorkspaceRepo):
+        async def finalize_claimed_file_cleanup(self, file_id: str, partition: str) -> bool:
+            raise RuntimeError("database unavailable")
+
+    wrepo = FinalizeFailureRepo(orphaned=["bad"])
+    vstore = FakeVectorStore(ids_by_file={"bad": ["bad-c1"]})
+    result = await _svc(wrepo=wrepo, vstore=vstore).delete_workspace("p", "w1")
+    assert result["orphaned_files_failed"] == ["bad"]
+    assert wrepo.failed == [("bad", "p")]
+
+
+@pytest.mark.asyncio
+async def test_retry_cleanup_is_safe_after_partial_vector_deletion():
+    class PartialVectorStore(FakeVectorStore):
+        def __init__(self):
+            super().__init__(ids_by_file={"bad": ["chunk-a", "chunk-b"]})
+            self.remaining = ["chunk-a", "chunk-b"]
+            self.attempts = 0
+
+        async def query_ids_by_filter(self, collection, filters):
+            return list(self.remaining)
+
+        async def delete(self, ids, collection="default"):
+            self.attempts += 1
+            self.remaining = [chunk_id for chunk_id in self.remaining if chunk_id not in ids[:1]]
+            if self.attempts == 1:
+                raise RuntimeError("vector store timed out after deleting one chunk")
+            return len(ids)
+
+    wrepo = FakeWorkspaceRepo(orphaned=["bad"])
+    vstore = PartialVectorStore()
+    svc = _svc(wrepo=wrepo, vstore=vstore)
+    first = await svc.delete_workspace("p", "w1")
+    assert first["orphaned_files_failed"] == ["bad"]
+    assert await svc.retry_failed_file_cleanup("bad", "p") is True
+    assert vstore.remaining == []
 
 
 # --------------------------------------------------------------------------- #
