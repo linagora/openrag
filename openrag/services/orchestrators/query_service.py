@@ -484,9 +484,11 @@ class QueryService:
             indexed_attachment_ids = await self._existing_file_ids(attachment_ids, partition)
             filter_params = {"file_id": indexed_attachment_ids}
 
-        # An attachment must never be dropped just because the classifier
-        # judged the turn conversational.
-        force_retrieval = use_websearch or use_map_reduce or bool(indexed_attachment_ids)
+        # Explicit evidence requests and indexed attachments must not be
+        # dropped just because the classifier judged the turn conversational.
+        force_retrieval = (
+            metadata.get("require_retrieval") is True or use_websearch or use_map_reduce or bool(indexed_attachment_ids)
+        )
         if not queries.query_list:
             if not queries.requires_retrieval and not force_retrieval:
                 # Resolved per request from the library (named -> default ->
@@ -612,12 +614,13 @@ class QueryService:
 
     async def _prepare_completions(self, partition: list[str], payload: dict, llm: LLM | None = None):
         prompt = payload["prompt"]
+        metadata = payload.get("metadata") or {}
         # partition= is ours: the retrieval preset's query_contextualizer is
         # resolved per partition. The skip below is from #807.
         queries = await self.generate_query([{"role": "user", "content": prompt}], llm=llm, partition=partition)
         retrieved_docs: list = []
         if not queries.query_list:
-            if not queries.requires_retrieval:
+            if not queries.requires_retrieval and metadata.get("require_retrieval") is not True:
                 docs, context = [], ""
             else:
                 queries = SearchQueries(query_list=[Query(query=prompt)])
@@ -634,7 +637,6 @@ class QueryService:
             )
             docs = [docs[i] for i in included]
 
-        metadata = payload.get("metadata") or {}
         prompt_type = "spoken_style_answer" if metadata.get("spoken_style_answer", False) else "sys_prompt"
         tmpl = await self._prompt_service.resolve_prompt(
             prompt_type, names=[self._generation_prompt_name(prompt_type, partition)]
