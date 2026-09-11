@@ -45,3 +45,14 @@ class ModelEndpointRepository(ABC):
     async def usage_counts(self) -> dict[tuple[str, str], int]:
         """Return ``{(name, model_type): partition_count}`` for every endpoint."""
         ...
+
+    @abstractmethod
+    async def indexed_file_usage(self, name: str, model_type: str) -> list[dict]:
+        """Partitions resolving to this endpoint that already hold indexed files.
+
+        What an in-place edit of an embedder's URL or model would strand (#762
+        C). Unlike a delete or a rename, that edit never touches the partitions
+        table, so nothing else in the schema can tell you it happened — this is
+        the only way to size it before it does.
+        """
+        ...

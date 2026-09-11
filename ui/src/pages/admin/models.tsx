@@ -20,6 +20,7 @@ import {
   createModelEndpoint,
   updateModelEndpoint,
   deleteModelEndpoint,
+  getModelEndpointIndexedUsage,
   DEFAULT_VENDOR_BY_TYPE,
   mergeModelEndpointApiKeyExtra,
   mergeModelEndpointImplementation,
@@ -46,6 +47,22 @@ import type {
 } from "@/lib/api/models";
 import { PageHeader } from "@/components/shared/page-header";
 import { ConfirmDialog } from "@/components/shared/confirm-dialog";
+import {
+  AlertDialog,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import { Checkbox } from "@/components/ui/checkbox";
+import {
+  diffEndpointUpdate,
+  hasMaterialChange,
+  suggestCopyName,
+  type EndpointFieldChange,
+} from "./embedder-edit-guard";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -137,6 +154,12 @@ export default function ModelsPage() {
   const [activeTab, setActiveTab] = useState("embedder");
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editing, setEditing] = useState<ModelEndpointResponse | null>(null);
+  // The embedder whose edit is waiting on the explanation below, and the one a
+  // prefilled create is copying from. Never both.
+  const [pendingEdit, setPendingEdit] = useState<ModelEndpointResponse | null>(null);
+  // Carries its suggested name: computing it needs the full endpoint list, which
+  // is a fresh array every render and would thrash the dialog's seeding effect.
+  const [seed, setSeed] = useState<{ from: ModelEndpointResponse; name: string } | null>(null);
 
   const { data, isLoading } = useQuery({
     queryKey: ["model-endpoints"],
@@ -193,7 +216,28 @@ export default function ModelsPage() {
   };
 
   const handleOpenEdit = (ep: ModelEndpointResponse) => {
+    // An embedder edit is the one that can silently invalidate stored data, and
+    // the safe alternative (a second endpoint) is only obvious if it is offered
+    // before the form is open and the change already typed (#762 C).
+    if (ep.model_type === "embedder") {
+      setPendingEdit(ep);
+      return;
+    }
     setEditing(ep);
+    setDialogOpen(true);
+  };
+
+  const handleModifyExisting = (ep: ModelEndpointResponse) => {
+    setPendingEdit(null);
+    setSeed(null);
+    setEditing(ep);
+    setDialogOpen(true);
+  };
+
+  const handleCreateCopy = (ep: ModelEndpointResponse) => {
+    setPendingEdit(null);
+    setEditing(null);
+    setSeed({ from: ep, name: suggestCopyName(ep.name, endpoints.map((e) => e.name)) });
     setDialogOpen(true);
   };
 
@@ -318,10 +362,21 @@ export default function ModelsPage() {
         ))}
       </Tabs>
 
+      <EmbedderEditIntroDialog
+        endpoint={pendingEdit}
+        onCancel={() => setPendingEdit(null)}
+        onCreateNew={handleCreateCopy}
+        onModify={handleModifyExisting}
+      />
+
       <EndpointDialog
         open={dialogOpen}
-        onOpenChange={setDialogOpen}
+        onOpenChange={(v) => {
+          setDialogOpen(v);
+          if (!v) setSeed(null);
+        }}
         editing={editing}
+        seed={seed}
         activeTab={activeTab}
         onCreate={(data) => createMut.mutate(data)}
         onUpdate={(type, name, data) => updateMut.mutate({ type, name, data })}
@@ -331,10 +386,68 @@ export default function ModelsPage() {
   );
 }
 
+/** Offered before an embedder's edit form opens, not after (#762 C).
+ *
+ *  An embedder is not a setting — it is the function that built every vector
+ *  already stored for the partitions using it. Editing it in place keeps the
+ *  name, keeps the partition references, and silently changes what queries are
+ *  compared against. A second endpoint has none of those consequences, so it is
+ *  offered first, while it is still a choice rather than a correction.
+ */
+function EmbedderEditIntroDialog({
+  endpoint,
+  onCancel,
+  onCreateNew,
+  onModify,
+}: {
+  endpoint: ModelEndpointResponse | null;
+  onCancel: () => void;
+  onCreateNew: (ep: ModelEndpointResponse) => void;
+  onModify: (ep: ModelEndpointResponse) => void;
+}) {
+  if (!endpoint) return null;
+  return (
+    <AlertDialog open onOpenChange={(next) => (next ? undefined : onCancel())}>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>An embedder owns its vector space</AlertDialogTitle>
+          <AlertDialogDescription asChild>
+            <div className="space-y-3">
+              <p>
+                Every vector indexed through <span className="font-medium">{endpoint.name}</span> lives
+                in the space that model defines. Queries are only comparable to those vectors while
+                the same model answers them.
+              </p>
+              <p>
+                Changing the URL or the model here repoints existing partitions in place. If the new
+                model is not the same one, already-indexed files stay in the old space and retrieval
+                degrades silently &mdash; nothing errors, results just stop being meaningful.
+              </p>
+              <p>
+                If you are switching to a different model, add a second endpoint and move partitions
+                to it deliberately. Editing is for correcting a URL or a typo that points at the same
+                model.
+              </p>
+            </div>
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter className="gap-2">
+          <AlertDialogCancel>Cancel</AlertDialogCancel>
+          <Button variant="outline" onClick={() => onModify(endpoint)}>
+            Modify this one
+          </Button>
+          <Button onClick={() => onCreateNew(endpoint)}>Create a new one</Button>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+  );
+}
+
 function EndpointDialog({
   open,
   onOpenChange,
   editing,
+  seed,
   activeTab,
   onCreate,
   onUpdate,
@@ -343,6 +456,9 @@ function EndpointDialog({
   open: boolean;
   onOpenChange: (v: boolean) => void;
   editing: ModelEndpointResponse | null;
+  /** Endpoint a prefilled create is copying from, with the free name suggested
+   *  for the copy; null for a blank create. */
+  seed: { from: ModelEndpointResponse; name: string } | null;
   activeTab: string;
   onCreate: (data: CreateModelEndpointRequest) => void;
   onUpdate: (type: string, name: string, data: UpdateModelEndpointRequest) => void;
@@ -375,7 +491,7 @@ function EndpointDialog({
         ? "Name must start/end with a letter or digit, and contain only letters, digits, '.', '_', or '-' — it's used in the endpoint's URL path."
         : null;
 
-  const modelType = (editing ? editing.model_type : activeTab) as ModelType;
+  const modelType = (editing?.model_type ?? seed?.from.model_type ?? activeTab) as ModelType;
   // LLM token-budget fields (max context / max output) apply to LLM endpoints only.
   const isLlm = modelType === "llm";
   const isStt = modelType === "stt";
@@ -405,6 +521,10 @@ function EndpointDialog({
   const [revealedApiKey, setRevealedApiKey] = useState<RevealedApiKey | null>(null);
   const [apiKeyVisible, setApiKeyVisible] = useState(false);
   const [revealingApiKey, setRevealingApiKey] = useState(false);
+  const [pendingUpdate, setPendingUpdate] = useState<{
+    data: UpdateModelEndpointRequest;
+    changes: EndpointFieldChange[];
+  } | null>(null);
 
   useEffect(() => {
     if (!open) {
@@ -419,21 +539,25 @@ function EndpointDialog({
       setRevealedApiKey(null);
       setApiKeyVisible(false);
       setRevealingApiKey(false);
-      if (editing) {
-        const { apiKey: displayApiKey, extra: apiExtra } = splitModelEndpointApiKeyExtra(editing.extra);
+      // A prefilled create seeds from an endpoint the same way an edit does —
+      // the point of offering "create a new one" is that the new one starts
+      // where the old one did, so only the model has to be retyped.
+      const source = editing ?? seed?.from ?? null;
+      if (source) {
+        const { apiKey: displayApiKey, extra: apiExtra } = splitModelEndpointApiKeyExtra(source.extra);
         // STT uses OpenAI's audio API directly, so unlike inference endpoints
         // it has no implementation/vendor selector. Preserve any advanced
         // `implementation` value in Extra rather than silently dropping it.
         const { languageHint: storedLanguageHint, extra: sttExtra } =
-          editing.model_type === "stt"
+          source.model_type === "stt"
             ? splitModelEndpointSttLanguage(apiExtra)
             : { languageHint: "", extra: apiExtra };
         const { mossSpeakerAware: storedMossSpeakerAware, extra: mossExtra } =
-          editing.model_type === "stt"
+          source.model_type === "stt"
             ? splitModelEndpointMossSpeakerAware(sttExtra)
             : { mossSpeakerAware: false, extra: sttExtra };
         const { implementation, extra: implExtra } =
-          editing.model_type === "stt"
+          source.model_type === "stt"
             ? { implementation: "", extra: mossExtra }
             : splitModelEndpointImplementation(mossExtra);
         // Only carve the LLM token-budget keys out of the editable extra for LLM
@@ -441,26 +565,29 @@ function EndpointDialog({
         // types would drop any same-named keys from their extra on save (they are
         // re-merged only when isLlm below), silently deleting them.
         const { llmContext, extra: displayExtra } =
-          editing.model_type === "llm"
+          source.model_type === "llm"
             ? splitModelEndpointLlmContext(implExtra)
             : { llmContext: { maxContextSize: "", maxOutputTokens: "" }, extra: implExtra };
-        setName(editing.name);
-        setEndpoint(editing.endpoint);
-        setModelName(editing.model_name || "");
-        setBatchSize(String(editing.batch_size));
-        setTimeout(String(editing.timeout));
-        setApiKey(displayApiKey);
+        setName(editing ? source.name : (seed?.name ?? source.name));
+        setEndpoint(source.endpoint);
+        setModelName(source.model_name || "");
+        setBatchSize(String(source.batch_size));
+        setTimeout(String(source.timeout));
+        // A stored key comes back redacted, so a copy cannot inherit it.
+        setApiKey(editing ? displayApiKey : "");
         setMaxContextSize(llmContext.maxContextSize);
         setMaxOutputTokens(llmContext.maxOutputTokens);
         setLanguageHint(storedLanguageHint);
         setMossSpeakerAware(storedMossSpeakerAware);
-        setVendor(implementation || DEFAULT_VENDOR_BY_TYPE[editing.model_type]);
+        setVendor(implementation || DEFAULT_VENDOR_BY_TYPE[source.model_type]);
         setExtraJson(JSON.stringify(displayExtra, null, 2));
-        setValidated(true);
+        setValidated(editing ? true : null);
         setValidationMsg(
-          editing.has_api_key
+          editing?.has_api_key
             ? "API key is stored server-side. Leave it unchanged to keep it, or type a new key to rotate it."
-            : null,
+            : seed?.from.has_api_key
+              ? "Copied from " + seed.from.name + ". Its API key is stored server-side and cannot be copied — enter one for the new endpoint."
+              : null,
         );
       } else {
         setName("");
@@ -479,7 +606,7 @@ function EndpointDialog({
         setValidationMsg(null);
       }
     }
-  }, [open, editing, activeTab]);
+  }, [open, editing, seed, activeTab]);
 
   // Reset validation when relevant fields change. The LLM token-budget fields
   // don't affect endpoint reachability, so they're deliberately excluded — the
@@ -781,6 +908,13 @@ function EndpointDialog({
       if (trimmedName !== editing.name) {
         updateData.name = trimmedName;
       }
+      // Confirm before writing, showing what actually changed. Nothing changed
+      // means nothing to confirm — a dialog there would only be noise.
+      const changes = diffEndpointUpdate(editing, updateData);
+      if (changes.length > 0) {
+        setPendingUpdate({ data: updateData, changes });
+        return;
+      }
       onUpdate(editing.model_type, editing.name, updateData);
     } else {
       onCreate({
@@ -1052,6 +1186,152 @@ function EndpointDialog({
           </DialogFooter>
         </form>
       </DialogContent>
+
+      {editing && pendingUpdate && (
+        <EndpointUpdateConfirmDialog
+          editing={editing}
+          changes={pendingUpdate.changes}
+          loading={loading}
+          onCancel={() => setPendingUpdate(null)}
+          onConfirm={() => {
+            const { data } = pendingUpdate;
+            setPendingUpdate(null);
+            onUpdate(editing.model_type, editing.name, data);
+          }}
+        />
+      )}
     </Dialog>
+  );
+}
+
+/** Last stop before an endpoint edit is written (#762 C).
+ *
+ *  Shows what changes from what, and — when the change can move the vector
+ *  space — how much already-indexed data rides on this endpoint, then holds the
+ *  confirm behind an explicit acknowledgement. The checkbox appears only for
+ *  material changes: demanding one to alter a timeout would teach people to
+ *  tick it unread, which is precisely the habit that makes it worthless on the
+ *  edit that actually matters.
+ */
+function EndpointUpdateConfirmDialog({
+  editing,
+  changes,
+  loading,
+  onCancel,
+  onConfirm,
+}: {
+  editing: ModelEndpointResponse;
+  changes: EndpointFieldChange[];
+  loading: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  const material = hasMaterialChange(changes);
+  const [acknowledged, setAcknowledged] = useState(false);
+
+  // Only worth asking for when it changes what the dialog says. The count is
+  // read at confirm time so it reflects the partition state right now.
+  const usageQuery = useQuery({
+    queryKey: ["model-endpoint-indexed-usage", editing.model_type, editing.name],
+    queryFn: () => getModelEndpointIndexedUsage(editing.model_type as ModelType, editing.name),
+    enabled: material,
+  });
+  const usage = usageQuery.data;
+
+  return (
+    <AlertDialog open onOpenChange={(next) => (next ? undefined : onCancel())}>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>
+            {material ? "This changes the vector space" : "Confirm changes"}
+          </AlertDialogTitle>
+          <AlertDialogDescription asChild>
+            <div className="space-y-4">
+              <ul className="space-y-1.5">
+                {changes.map((c) => (
+                  <li key={c.field} className="text-sm">
+                    <span className="text-muted-foreground">{c.label}</span>{" "}
+                    <span className="font-mono">{c.from}</span>
+                    <span className="text-muted-foreground"> &rarr; </span>
+                    <span className={c.material ? "font-mono font-medium text-amber-700 dark:text-amber-100" : "font-mono"}>
+                      {c.to}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+
+              {material && (
+                <>
+                  {usageQuery.isLoading && (
+                    <p className="text-sm text-muted-foreground">Checking what is indexed&hellip;</p>
+                  )}
+                  {usage && usage.total_files > 0 && (
+                    <div className="rounded-md border border-amber-200 bg-amber-50 p-3 dark:border-amber-900/60 dark:bg-amber-950/30">
+                      <p className="mb-1.5 text-sm font-medium">
+                        {usage.total_files} indexed file{usage.total_files === 1 ? "" : "s"} were built
+                        with this endpoint
+                      </p>
+                      <ul className="space-y-0.5 text-sm">
+                        {usage.partitions.map((p) => (
+                          <li key={p.partition}>
+                            <span className="font-mono">{p.partition}</span>
+                            <span className="text-muted-foreground">
+                              {" "}
+                              &mdash; {p.file_count} file{p.file_count === 1 ? "" : "s"}
+                            </span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                  {usage && usage.total_files === 0 && (
+                    <p className="text-sm text-muted-foreground">
+                      Nothing is indexed against this endpoint yet, so no stored vectors are at stake.
+                    </p>
+                  )}
+
+                  <ul className="list-disc space-y-1.5 pl-5 text-sm">
+                    <li>
+                      If the new model is not the same one &mdash; a different model, a different
+                      dimensionality, even a different quantization &mdash; it produces different
+                      vectors, and queries stop being comparable to what is already stored.
+                    </li>
+                    <li>
+                      Nothing errors. Search keeps returning results, ranked in a space the files were
+                      never built in, so the damage is invisible until someone notices the answers are
+                      wrong.
+                    </li>
+                    <li>
+                      This takes effect on the next query &mdash; no restart, no re-embed. Existing
+                      vectors are not rebuilt.
+                    </li>
+                    <li>
+                      If it really is a different model, add a second endpoint and migrate partitions
+                      to it instead, so the old vectors keep working until their files are re-embedded.
+                    </li>
+                  </ul>
+
+                  <label className="flex items-start gap-2 text-sm font-medium">
+                    <Checkbox
+                      checked={acknowledged}
+                      onCheckedChange={(v) => setAcknowledged(v === true)}
+                      aria-label="I understand the consequences"
+                      className="mt-0.5"
+                    />
+                    <span>I understand the consequences for already-indexed data.</span>
+                  </label>
+                </>
+              )}
+            </div>
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter className="gap-2">
+          <AlertDialogCancel>Cancel</AlertDialogCancel>
+          <Button onClick={onConfirm} disabled={loading || (material && !acknowledged)}>
+            {loading ? "Saving..." : "Update"}
+          </Button>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
   );
 }

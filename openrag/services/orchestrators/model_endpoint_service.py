@@ -531,6 +531,16 @@ class ModelEndpointService:
         counts = await self._repo.usage_counts()
         return [{**row.model_dump(), "used_by_partitions": counts.get((row.name, row.model_type), 0)} for row in rows]
 
+    async def indexed_file_usage(self, name: str, model_type: str) -> list[dict[str, Any]]:
+        """Per-partition indexed-file counts for one endpoint, most files first.
+
+        Sizes what an in-place edit would strand, so the confirmation can name a
+        real number instead of warning in the abstract (#762 C). Empty when the
+        endpoint holds no indexed data — nothing is at stake and the UI can say
+        so rather than warning anyway.
+        """
+        return await self._repo.indexed_file_usage(name, model_type)
+
     async def update_model_endpoint(self, name: str, model_type: str, **fields: object) -> ModelEndpointRow:
         """Update endpoint fields and/or rename it.
 
