@@ -145,12 +145,30 @@ def downgrade() -> None:
         op.create_unique_constraint("uix_workspace_file", "workspace_files", ["workspace_id", "file_id"])
 
     # Put back the rows upgrade() quarantined, now that file_id is a string again.
-    # Workspaces deleted since the upgrade are skipped: their FK no longer resolves.
+    # Rows whose workspace was deleted since the upgrade no longer resolve, and rows
+    # that collide with a live pair are skipped by ON CONFLICT. Either way the copy
+    # in ORPHAN_TABLE is all that is left of them, so only drop the table once every
+    # row made it back.
     if table_exists(ORPHAN_TABLE):
-        op.execute(
-            f"INSERT INTO workspace_files (workspace_id, file_id) "
-            f"SELECT o.workspace_id, o.file_id FROM {ORPHAN_TABLE} o "
-            f"WHERE EXISTS (SELECT 1 FROM workspaces w WHERE w.workspace_id = o.workspace_id) "
-            f"ON CONFLICT ON CONSTRAINT uix_workspace_file DO NOTHING"
-        )
-        op.execute(f"DROP TABLE {ORPHAN_TABLE}")
+        bind = op.get_bind()
+        quarantined = bind.execute(sa.text(f"SELECT COUNT(*) FROM {ORPHAN_TABLE}")).scalar_one()
+        restored = bind.execute(
+            sa.text(
+                f"INSERT INTO workspace_files (workspace_id, file_id) "
+                f"SELECT o.workspace_id, o.file_id FROM {ORPHAN_TABLE} o "
+                f"WHERE EXISTS (SELECT 1 FROM workspaces w WHERE w.workspace_id = o.workspace_id) "
+                f"ON CONFLICT ON CONSTRAINT uix_workspace_file DO NOTHING"
+            )
+        ).rowcount
+        if restored == quarantined:
+            op.execute(f"DROP TABLE {ORPHAN_TABLE}")
+            logger.info("workspace_files: restored %s quarantined row(s), dropped %s", restored, ORPHAN_TABLE)
+        else:
+            logger.warning(
+                "workspace_files: restored %s of %s quarantined row(s); keeping %s so the "
+                "remaining %s row(s) are not lost",
+                restored,
+                quarantined,
+                ORPHAN_TABLE,
+                quarantined - restored,
+            )

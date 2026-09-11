@@ -25,10 +25,8 @@ def migration(monkeypatch):
 
 
 class _FakeResult:
-    rowcount = 7
-
-    def scalar_one(self):
-        return 0
+    def __init__(self, rowcount) -> None:
+        self.rowcount = rowcount
 
 
 class _FakeScalarResult:
@@ -40,28 +38,42 @@ class _FakeScalarResult:
 
 
 class _FakeBind:
-    def __init__(self, calls: list[str]) -> None:
+    """Pretends every quarantine statement touched `rowcount` rows.
+
+    `quarantined` is what ``SELECT COUNT(*) FROM <orphan table>`` reports in
+    downgrade(); equal to `rowcount` means every row made it back.
+    """
+
+    def __init__(self, calls: list[str], rowcount: int = 7, quarantined: int | None = None) -> None:
         self.calls = calls
+        self.rowcount = rowcount
+        self.quarantined = rowcount if quarantined is None else quarantined
 
     def execute(self, statement, params=None):
-        self.calls.append(str(statement))
-        return _FakeResult()
+        statement = str(statement)
+        self.calls.append(statement)
+        if "file_id IS NULL" in statement:
+            return _FakeScalarResult(self.null_file_id_count)
+        if statement.startswith("SELECT COUNT(*)"):
+            return _FakeScalarResult(self.quarantined)
+        return _FakeResult(self.rowcount)
+
+    null_file_id_count = 0
 
 
 class _NullFileIdBind(_FakeBind):
-    def execute(self, statement, params=None):
-        self.calls.append(str(statement))
-        if "file_id IS NULL" in str(statement):
-            return _FakeScalarResult(1)
-        return _FakeResult()
+    null_file_id_count = 1
 
 
 class _FakeOp:
-    def __init__(self) -> None:
+    bind_class = _FakeBind
+
+    def __init__(self, quarantined: int | None = None) -> None:
         self.calls: list[str] = []
+        self.quarantined = quarantined
 
     def get_bind(self):
-        return _FakeBind(self.calls)
+        return self.bind_class(self.calls, quarantined=self.quarantined)
 
     def execute(self, statement) -> None:
         self.calls.append(str(statement))
@@ -74,12 +86,11 @@ class _FakeOp:
 
 
 class _NullFileIdOp(_FakeOp):
-    def get_bind(self):
-        return _NullFileIdBind(self.calls)
+    bind_class = _NullFileIdBind
 
 
-def _run(monkeypatch, migration, func, **helpers):
-    fake_op = _FakeOp()
+def _run(monkeypatch, migration, func, quarantined=None, **helpers):
+    fake_op = _FakeOp(quarantined=quarantined)
     monkeypatch.setattr(migration, "op", fake_op)
     monkeypatch.setattr(migration, "column_type_is", lambda *_: False)
     for helper in ("column_exists", "index_exists", "fk_exists", "unique_constraint_exists", "table_exists"):
@@ -148,6 +159,20 @@ def test_downgrade_restores_the_quarantined_rows(monkeypatch, migration) -> None
     assert f"SELECT o.workspace_id, o.file_id FROM {migration.ORPHAN_TABLE} o" in statements
     assert "ON CONFLICT ON CONSTRAINT uix_workspace_file DO NOTHING" in statements
     assert f"DROP TABLE {migration.ORPHAN_TABLE}" in statements
+
+
+def test_downgrade_keeps_the_table_when_a_row_cannot_be_restored(monkeypatch, migration, caplog) -> None:
+    # 9 rows quarantined, 7 restored: the other 2 belong to workspaces deleted
+    # since the upgrade, or collided on the unique constraint. Dropping the table
+    # now would destroy the only copy left of them.
+    with caplog.at_level("WARNING", logger="alembic.runtime.migration"):
+        statements = _run(monkeypatch, migration, migration.downgrade, quarantined=9)
+
+    assert f"DROP TABLE {migration.ORPHAN_TABLE}" not in statements
+    assert [r.getMessage() for r in caplog.records] == [
+        f"workspace_files: restored 7 of 9 quarantined row(s); keeping {migration.ORPHAN_TABLE} "
+        f"so the remaining 2 row(s) are not lost"
+    ]
 
 
 def test_downgrade_skips_the_restore_when_nothing_was_quarantined(monkeypatch, migration) -> None:
