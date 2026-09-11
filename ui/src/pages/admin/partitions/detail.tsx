@@ -38,6 +38,16 @@ import {
 } from "@/components/ui/table";
 import { PageHeader } from "@/components/shared/page-header";
 import { ConfirmDialog } from "@/components/shared/confirm-dialog";
+import { computeEmbedderDrift } from "./embedder-drift";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import {
   getPartitionConfig,
   updatePartition,
@@ -48,16 +58,18 @@ import {
   updatePartitionMemberRole,
 } from "@/lib/api/partitions";
 import type {
-  IndexedEmbedderCount,
   PartitionConfig,
   PartitionMemberCandidate,
   PartitionRole,
 } from "@/lib/api/partitions";
 import { listPresets } from "@/lib/api/presets";
-import { listModelEndpoints, validateStoredModelEndpoint, resolveEmbedderName } from "@/lib/api/models";
+import {
+  listModelEndpoints,
+  validateStoredModelEndpoint,
+  resolveEmbedderName,
+} from "@/lib/api/models";
 import { listAllPrompts } from "@/lib/api/prompts";
 import type { PromptResponse } from "@/lib/api/prompts";
-import type { ModelEndpointResponse } from "@/lib/api/models";
 import {
   PROMPT_DEFAULT_OPTION,
   PROMPT_GROUPS,
@@ -83,33 +95,105 @@ const GENERATION_PROMPT_TYPES = PROMPT_GROUPS.find((g) => g.name === "Final Answ
 
 // --- General Tab ---
 
+const files = (n: number) => `${n} file${n === 1 ? "" : "s"}`;
+
+/** Interrupts once when a partition's files no longer match its embedder.
+ *
+ *  The panel below states the same fact permanently, but it only speaks to
+ *  someone already looking at it. A swap is silent everywhere else — queries
+ *  keep returning results, just ranked in a vector space the files were not
+ *  built in — so the one case worth an interruption is the one where results
+ *  are already wrong and nobody has been told.
+ *
+ *  Once per browser session per drift state: re-opening the page does not
+ *  nag, but a *new* embedder appearing later does, because the acknowledgement
+ *  is keyed on which embedders drifted rather than on the partition alone.
+ */
+function EmbedderDriftDialog({
+  partition,
+  drift,
+}: {
+  partition: string;
+  drift: ReturnType<typeof computeEmbedderDrift>;
+}) {
+  const signature = drift.hasDrift
+    ? `${drift.current}<-${drift.drifted.map((g) => `${g.key}:${g.file_count}`).join(",")}`
+    : "";
+  const storageKey = `openrag:embedder-drift:${partition}:${signature}`;
+  const [open, setOpen] = useState(false);
+
+  useEffect(() => {
+    if (!drift.hasDrift) return;
+    let acknowledged = false;
+    try {
+      acknowledged = sessionStorage.getItem(storageKey) === "1";
+    } catch {
+      // Private windows and blocked site data throw on access. Showing the
+      // dialog is the safe fallback: a repeated warning beats a silent one.
+    }
+    // Opening is a reaction to sessionStorage, which React cannot read during render.
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- see above
+    if (!acknowledged) setOpen(true);
+  }, [drift.hasDrift, storageKey]);
+
+  const acknowledge = () => {
+    try {
+      sessionStorage.setItem(storageKey, "1");
+    } catch {
+      // Nothing to do — the dialog simply shows again next visit.
+    }
+    setOpen(false);
+  };
+
+  if (!drift.hasDrift) return null;
+
+  return (
+    <AlertDialog open={open} onOpenChange={(next) => (next ? setOpen(true) : acknowledge())}>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>Search results in this partition may be wrong</AlertDialogTitle>
+          <AlertDialogDescription asChild>
+            <div className="space-y-3">
+              <p>
+                {files(drift.driftedFiles)} in <span className="font-medium">{partition}</span> were
+                indexed with a different embedder than the one queries now use. Their vectors were
+                produced by another model, so they are searched in a vector space they were not built
+                in &mdash; nothing errors, the ranking is just no longer meaningful.
+              </p>
+              <ul className="space-y-1 text-sm">
+                {drift.drifted.map((g) => (
+                  <li key={g.key}>
+                    <span className="font-mono">{g.key}</span>
+                    <span className="text-muted-foreground"> &mdash; {files(g.file_count)}</span>
+                  </li>
+                ))}
+                <li>
+                  <span className="font-mono">{drift.current}</span>
+                  <span className="text-muted-foreground"> &mdash; used by queries now</span>
+                </li>
+              </ul>
+              <p>Re-embed those files to bring them back in line.</p>
+            </div>
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogAction onClick={acknowledge}>Got it</AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+  );
+}
+
 /** What a partition's files were *actually* indexed with, and whether that
  *  still matches the embedder queries use.
  */
 function EmbedderProvenance({
-  configured,
-  indexed,
-  endpoints,
+  drift,
 }: {
-  configured: string;
-  indexed: IndexedEmbedderCount[] | undefined;
-  endpoints: ModelEndpointResponse[] | undefined;
+  drift: ReturnType<typeof computeEmbedderDrift>;
 }) {
-  const rows = indexed ?? [];
-  if (rows.length === 0) return null;
-
-  // The stored reference may be the "default" alias; compare on what it
-  // resolves to, or a partition on the alias would look drifted from itself.
-  const current = resolveEmbedderName(configured, endpoints);
-  const label = (r: IndexedEmbedderCount) =>
-    r.embedder === null ? "unrecorded" : resolveEmbedderName(r.embedder, endpoints);
-  // Rows with no record predate provenance: unknown, not known-bad. Alerting
-  // on those alone would shout at every pre-upgrade partition.
-  const drifted = rows.filter((r) => r.embedder !== null && label(r) !== current);
-
-  const files = (n: number) => `${n} file${n === 1 ? "" : "s"}`;
-  const total = drifted.reduce((sum, r) => sum + r.file_count, 0);
-  const hasDrift = drifted.length > 0;
+  const { groups, current, hasDrift, driftedFiles: total } = drift;
+  if (groups.length === 0) return null;
 
   // Shown either way: a panel that only appears during an incident is one
   // nobody knows to look for. Drift escalates it rather than adding a new one.
@@ -129,23 +213,20 @@ function EmbedderProvenance({
         {hasDrift && (
           <p className="mb-2">
             Queries embed with <span className="font-medium">{current}</span>, so these files are
-            searched in a vector space they were not built in. Re-index them to bring them back.
+            searched in a vector space they were not built in. Re-embed them to bring them back.
           </p>
         )}
         <ul className="space-y-1">
-          {rows.map((r) => (
-            <li key={`${r.embedder ?? "unrecorded"}-${r.model_name ?? ""}`} className="text-sm">
-              <span className="font-mono">{label(r)}</span>
-              {r.model_name && r.model_name !== label(r) && (
-                <span className="text-muted-foreground"> ({r.model_name})</span>
-              )}
-              {r.dimension != null && <span className="text-muted-foreground"> · {r.dimension}-d</span>}
-              <span className="text-muted-foreground"> — {files(r.file_count)}</span>
-              {label(r) === current && <span className="text-muted-foreground"> · current</span>}
+          {groups.map((g) => (
+            <li key={g.key} className="text-sm">
+              <span className="font-mono">{g.key}</span>
+              {g.dimension != null && <span className="text-muted-foreground"> · {g.dimension}-d</span>}
+              <span className="text-muted-foreground"> — {files(g.file_count)}</span>
+              {g.recorded && !g.drifted && <span className="text-muted-foreground"> · current</span>}
             </li>
           ))}
         </ul>
-        {rows.some((r) => r.embedder === null) && (
+        {groups.some((g) => !g.recorded) && (
           <p className="mt-2 text-xs text-muted-foreground">
             &ldquo;unrecorded&rdquo; means indexed before OpenRag tracked which embedder ran &mdash; not
             necessarily drifted.
@@ -207,6 +288,13 @@ function GeneralTab({ partition }: { partition: PartitionConfig }) {
     queryFn: () => listModelEndpoints("embedder"),
     enabled: isAdmin,
   });
+
+  // Computed once and handed to both the panel and the dialog, so a partition
+  // can never be flagged in one and clean in the other.
+  const embedderDrift = useMemo(
+    () => computeEmbedderDrift(partition.embedder, partition.indexed_embedders, embedderEndpoints),
+    [partition.embedder, partition.indexed_embedders, embedderEndpoints],
+  );
 
   const { data: promptsData } = useQuery({
     queryKey: ["prompts-library"],
@@ -357,11 +445,8 @@ function GeneralTab({ partition }: { partition: PartitionConfig }) {
               <p className="text-sm font-medium pt-1">{partition.document_count}</p>
             </div>
           </div>
-          <EmbedderProvenance
-            configured={partition.embedder}
-            indexed={partition.indexed_embedders}
-            endpoints={embedderEndpoints}
-          />
+          <EmbedderProvenance drift={embedderDrift} />
+          <EmbedderDriftDialog partition={partition.name} drift={embedderDrift} />
           <div className="pt-2 grid grid-cols-2 lg:grid-cols-4 gap-6">
             <div className="space-y-2">
               <Label>Indexation Preset</Label>

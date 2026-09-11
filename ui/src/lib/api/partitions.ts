@@ -203,8 +203,12 @@ export interface PartitionFile {
   partition: string;
   link: string;
   filename?: string;
-  /** Embedder this file was actually indexed with; null when unrecorded. */
+  /** Endpoint reference this file was indexed through; null when unrecorded.
+   *  A renameable label — prefer `embedder_model_name` for display. */
   embedder?: string | null;
+  /** Model that actually produced this file's vectors; null when unrecorded.
+   *  Survives renames, repoints and deletions of the endpoint. */
+  embedder_model_name?: string | null;
   [key: string]: unknown;
 }
 

@@ -815,8 +815,14 @@ class PgDocumentRepository(DocumentRepository):
             **metadata,
             # Just the recorded embedder, not the whole config snapshot: a file
             # list flags rows that disagree with the current setting, it does
-            # not need every chunking knob per row.
+            # not need every chunking knob per row. Both the endpoint reference
+            # and the model it ran: the reference is a renameable label and the
+            # endpoint may since have been repointed or deleted, so the model is
+            # the only durable record of which vector space the file is in.
             "embedder": (indexation_config or {}).get("embedder") if isinstance(indexation_config, dict) else None,
+            "embedder_model_name": (
+                (indexation_config or {}).get("embedder_model_name") if isinstance(indexation_config, dict) else None
+            ),
             "content_sha256": row.get("content_sha256"),
             # Authoritative system insert time, materialized on the row. Placed
             # after the spread so the column wins over any ``indexed_at`` the
