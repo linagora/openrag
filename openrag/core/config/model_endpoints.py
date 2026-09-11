@@ -9,6 +9,13 @@ from core.config.base import ConfigMixin
 from pydantic import BaseModel, Field
 
 ModelEndpointType = Literal["embedder", "reranker", "llm", "vlm", "stt"]
+DEFAULT_MODEL_IMPLEMENTATIONS = {
+    "embedder": "vllm",
+    "llm": "vllm",
+    "vlm": "vllm",
+    "reranker": "infinity",
+    "stt": "vllm",
+}
 
 
 class ModelEndpointConfig(BaseModel):

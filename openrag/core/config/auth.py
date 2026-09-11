@@ -244,6 +244,7 @@ DEFAULT_BYPASS_PATHS: tuple[str, ...] = (
     "/openapi.json",
     "/redoc",
     "/health_check",
+    "/ready",
     "/version",
     "/auth/login",
     "/auth/callback",

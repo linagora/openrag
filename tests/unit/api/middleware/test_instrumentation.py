@@ -70,6 +70,7 @@ def test_skips_excluded_paths(monkeypatch) -> None:
     client = TestClient(app)
     client.get("/metrics")
     client.get("/health_check")
+    client.get("/ready")
     client.get("/docs")
     client.get("/openapi.json")
 

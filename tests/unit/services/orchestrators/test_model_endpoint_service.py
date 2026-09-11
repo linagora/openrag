@@ -1495,6 +1495,125 @@ async def test_validate_endpoint_probes_url_and_model_name(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_validate_endpoint_reports_missing_model_on_reachable_endpoint(monkeypatch):
+    import httpx
+
+    svc = _make_service()
+
+    class FakeResponse:
+        status_code = 200
+
+        def json(self):
+            return {"data": [{"id": "other-model"}]}
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, _url):
+            return FakeResponse()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+    result = await svc.validate_endpoint("http://llm:8000/v1", "missing-model")
+
+    assert result == {
+        "reachable": True,
+        "model_found": False,
+        "models_served": ["other-model"],
+        "transcription_supported": None,
+        "detail": None,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("payload", [{"models": [{"id": "other-model"}]}, None])
+async def test_validate_endpoint_keeps_reachable_when_model_list_is_invalid(monkeypatch, payload):
+    import httpx
+
+    svc = _make_service()
+
+    class FakeResponse:
+        status_code = 200
+
+        def json(self):
+            if payload is None:
+                raise ValueError("not JSON")
+            return payload
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, _url):
+            return FakeResponse()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+    result = await svc.validate_endpoint("http://llm:8000/v1", "mistral-small")
+
+    assert result == {
+        "reachable": True,
+        "model_found": None,
+        "models_served": None,
+        "transcription_supported": None,
+        "detail": "Endpoint returned an invalid model list.",
+    }
+
+
+@pytest.mark.asyncio
+async def test_validate_health_only_endpoint_keeps_model_presence_unknown(monkeypatch):
+    import httpx
+
+    svc = _make_service()
+
+    class FakeResponse:
+        status_code = 200
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, _url):
+            return FakeResponse()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+    result = await svc.validate_endpoint(
+        "http://reranker:8000",
+        "reranker-model",
+        model_type="reranker",
+        extra={"implementation": "infinity"},
+    )
+
+    assert result == {
+        "reachable": True,
+        "model_found": None,
+        "models_served": None,
+        "transcription_supported": None,
+        "detail": None,
+    }
+
+
+@pytest.mark.asyncio
 async def test_validate_stt_endpoint_probes_transcription_capability_with_redirects_enabled(monkeypatch):
     import httpx
 
