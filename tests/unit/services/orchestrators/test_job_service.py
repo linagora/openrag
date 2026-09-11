@@ -227,11 +227,17 @@ class FakeJobRepo:
     def __init__(self, jobs=None, *, broken: bool = False):
         self._jobs = {job.id: job for job in (jobs or [])}
         self._broken = broken
+        self.listed_statuses = []
 
-    async def list_jobs(self, *, status=None, user_id=None, offset=0, limit=50):
+    async def list_jobs(self, *, statuses=None, user_id=None, offset=0, limit=50):
         if self._broken:
             raise RuntimeError("jobs table is missing")
-        return [job for job in self._jobs.values() if user_id is None or job.user_id == user_id]
+        self.listed_statuses.append(statuses)
+        return [
+            job
+            for job in self._jobs.values()
+            if (user_id is None or job.user_id == user_id) and (statuses is None or job.status.value in statuses)
+        ]
 
     async def get_job(self, job_id):
         if self._broken:
@@ -266,6 +272,25 @@ async def test_list_tasks_includes_jobs_the_actor_has_forgotten():
     assert set(by_id) == {"t-live", "t-old"}
     assert by_id["t-old"]["state"] == "COMPLETED"
     assert by_id["t-old"]["duration_ms"] == 30_000
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("task_status", "expected"),
+    [("failed", ["FAILED"]), ("active", ["QUEUED", "SERIALIZING"]), (None, None)],
+    ids=["exact", "active", "unfiltered"],
+)
+async def test_a_status_query_is_filtered_before_the_row_limit(task_status, expected):
+    # The durable read is capped, so filtering it afterwards would drop matches
+    # that sit behind newer rows of another status.
+    from core.models.catalog import DocumentStatus
+
+    repo = FakeJobRepo([_job(id="t-failed", status=DocumentStatus.FAILED)])
+    service = JobService(FakeTSM(info={}), job_repo=repo)
+
+    await service.list_tasks(is_admin=True, user_id=7, task_status=task_status)
+
+    assert repo.listed_statuses == [expected]
 
 
 @pytest.mark.asyncio

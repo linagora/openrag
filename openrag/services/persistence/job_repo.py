@@ -97,20 +97,22 @@ class PgJobRepository(JobRepository):
     async def list_jobs(
         self,
         *,
-        status: str | None = None,
+        statuses: list[str] | None = None,
         user_id: int | None = None,
         offset: int = 0,
         limit: int = 50,
     ) -> list[IndexationJob]:
+        """List the newest matching rows. Filtering happens here, before the
+        limit, so a status query cannot be crowded out by newer rows."""
         rows = await self.pool.fetch(
             f"""
             SELECT {_COLUMNS} FROM jobs
-            WHERE ($1::text IS NULL OR status = $1)
+            WHERE ($1::text[] IS NULL OR status = ANY($1::text[]))
               AND ($2::int IS NULL OR user_id = $2)
             ORDER BY created_at DESC
             OFFSET $3 LIMIT $4
             """,
-            status,
+            statuses,
             user_id,
             max(0, offset),
             max(1, limit),

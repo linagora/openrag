@@ -22,7 +22,7 @@ class JobRepository(ABC):
     async def list_jobs(
         self,
         *,
-        status: str | None = None,
+        statuses: list[str] | None = None,
         user_id: int | None = None,
         offset: int = 0,
         limit: int = 50,

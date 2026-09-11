@@ -107,7 +107,10 @@ class JobService:
 
         # The actor only remembers live and recent tasks. Durable rows fill in
         # history it has evicted, and everything dispatched before a restart.
-        all_info = {**await self._durable_task_info(is_admin=is_admin, user_id=user_id), **all_info}
+        all_info = {
+            **await self._durable_task_info(is_admin=is_admin, user_id=user_id, task_status=task_status),
+            **all_info,
+        }
 
         if task_status is None:
             filtered = list(all_info.items())
@@ -180,11 +183,18 @@ class JobService:
             logger.warning("Failed to read durable job", task_id=task_id, error=str(exc))
             return None
 
-    async def _durable_task_info(self, *, is_admin: bool, user_id: int | None) -> dict[str, dict]:
+    async def _durable_task_info(
+        self,
+        *,
+        is_admin: bool,
+        user_id: int | None,
+        task_status: str | None,
+    ) -> dict[str, dict]:
         if self._job_repo is None:
             return {}
         try:
             jobs = await self._job_repo.list_jobs(
+                statuses=_durable_statuses(task_status),
                 user_id=None if is_admin else user_id,
                 limit=_DURABLE_TASK_LIMIT,
             )
@@ -192,6 +202,19 @@ class JobService:
             logger.warning("Failed to list durable jobs", error=str(exc))
             return {}
         return {job.id: _job_to_info(job) for job in jobs}
+
+
+def _durable_statuses(task_status: str | None) -> list[str] | None:
+    """The statuses the durable query should return, or ``None`` for all.
+
+    The row limit applies to what the query returns, so an unfiltered read
+    would hide older matches behind newer rows of every other status.
+    """
+    if task_status is None:
+        return None
+    if task_status.lower() == "active":
+        return list(_ACTIVE_STATES)
+    return [task_status.upper()]
 
 
 def _job_to_info(job: Any) -> dict[str, Any]:

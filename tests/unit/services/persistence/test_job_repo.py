@@ -167,10 +167,13 @@ async def test_list_jobs_filters_by_status_and_user():
     pool = _FakePool(fetch=[_row(), _row(id="task-2")])
     repo = _repo(pool)
 
-    jobs = await repo.list_jobs(status="FAILED", user_id=7, offset=-5, limit=0)
+    jobs = await repo.list_jobs(statuses=["QUEUED", "SERIALIZING"], user_id=7, offset=-5, limit=0)
 
-    _query, params = pool.calls[0]
-    assert params == ("FAILED", 7, 0, 1)
+    query, params = pool.calls[0]
+    # The filter belongs in the query: applying it after LIMIT would hide older
+    # matches behind newer rows of another status.
+    assert "status = ANY($1::text[])" in query
+    assert params == (["QUEUED", "SERIALIZING"], 7, 0, 1)
     assert [job.id for job in jobs] == ["task-1", "task-2"]
 
 

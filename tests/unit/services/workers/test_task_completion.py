@@ -488,9 +488,12 @@ async def test_a_failed_history_write_leaves_the_task_unstamped() -> None:
     }
 
     with patch("services.workers.task_completion.ray.get_actor", return_value=tsm):
-        await _tracker_with_repo(repo)._record_finished_at("task-1")
+        tracker = _tracker_with_repo(repo)
+        await tracker._record_finished_at("task-1")
 
     tsm.set_details.remote.assert_not_awaited()
+    assert list(tracker._pending_settlements) == ["task-1"]
+    tracker._settlement_retry.cancel()
 
 
 @pytest.mark.asyncio
@@ -514,6 +517,53 @@ async def test_job_history_failure_never_breaks_completion_tracking() -> None:
     with patch("services.workers.task_completion.ray.get_actor", return_value=tsm):
         tracker = _tracker_with_repo(repo)
         await tracker._record_settled_job("task-1", {"partition": "tenant-a"})
+
+    tracker._settlement_retry.cancel()
+
+
+@pytest.mark.asyncio
+async def test_a_held_settlement_is_retried_until_postgres_takes_it() -> None:
+    # Nothing re-reads a settled task later: track() forgets it and the actor
+    # evicts its record, so a dropped write leaves the row non-terminal and
+    # orphan reconciliation reports a finished job as failed.
+    repo = _FakeJobRepo()
+    repo.upsert_job = AsyncMock(side_effect=[RuntimeError("postgres is unreachable"), None])
+    tsm = _task_state_manager(state="COMPLETED")
+    tsm.get_details.remote.return_value = {
+        "file_id": "file-1",
+        "partition": "tenant-a",
+        "metadata": {},
+        "user_id": 42,
+    }
+
+    with patch("services.workers.task_completion.ray.get_actor", return_value=tsm):
+        tracker = _tracker_with_repo(repo)
+        await tracker._record_finished_at("task-1")
+
+        assert list(tracker._pending_settlements) == ["task-1"]
+
+        tracker._settlement_retry.cancel()
+        await tracker._retry_pending_settlements(delay=0)
+
+    assert tracker._pending_settlements == {}
+    assert repo.upsert_job.await_count == 2
+    assert repo.upsert_job.await_args_list[1].args[0].status.value == "COMPLETED"
+    tsm.set_details.remote.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_a_held_settlement_is_not_reconciled_as_an_orphan() -> None:
+    from core.models.catalog import DocumentStatus, IndexationJob
+
+    repo = _FakeJobRepo()
+    tracker = _tracker_with_repo(repo)
+    tracker._pending_settlements["task-1"] = IndexationJob(
+        id="task-1", status=DocumentStatus.COMPLETED, partition="tenant-a"
+    )
+
+    await tracker.reconcile_jobs([])
+
+    assert repo.failed_calls[0]["active_ids"] == ["task-1"]
 
 
 @pytest.mark.asyncio
