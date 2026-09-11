@@ -19,7 +19,7 @@ from prometheus_client import (
 
 ORPHAN_CHUNKS_DROPPED = Counter(
     "openrag_retrieval_orphan_chunks_dropped_total",
-    "Retrieved chunks dropped because their partition and file are absent from the catalog",
+    "Chunk-drop occurrences for files absent from the catalog; repeated retrievals can count the same chunk again",
 )
 
 REQUEST_COUNT = Counter(
