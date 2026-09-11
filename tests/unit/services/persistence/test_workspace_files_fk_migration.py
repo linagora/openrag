@@ -27,6 +27,17 @@ def migration(monkeypatch):
 class _FakeResult:
     rowcount = 7
 
+    def scalar_one(self):
+        return 0
+
+
+class _FakeScalarResult:
+    def __init__(self, value) -> None:
+        self.value = value
+
+    def scalar_one(self):
+        return self.value
+
 
 class _FakeBind:
     def __init__(self, calls: list[str]) -> None:
@@ -34,6 +45,14 @@ class _FakeBind:
 
     def execute(self, statement, params=None):
         self.calls.append(str(statement))
+        return _FakeResult()
+
+
+class _NullFileIdBind(_FakeBind):
+    def execute(self, statement, params=None):
+        self.calls.append(str(statement))
+        if "file_id IS NULL" in str(statement):
+            return _FakeScalarResult(1)
         return _FakeResult()
 
 
@@ -52,6 +71,11 @@ class _FakeOp:
             self.calls.append(f"{name}{args}")
 
         return _record
+
+
+class _NullFileIdOp(_FakeOp):
+    def get_bind(self):
+        return _NullFileIdBind(self.calls)
 
 
 def _run(monkeypatch, migration, func, **helpers):
@@ -100,6 +124,22 @@ def test_upgrade_is_a_no_op_when_already_migrated(monkeypatch, migration) -> Non
     migration.upgrade()
 
     assert fake_op.calls == []
+
+
+def test_upgrade_rejects_null_file_ids_before_mutating_schema(monkeypatch, migration) -> None:
+    fake_op = _NullFileIdOp()
+    monkeypatch.setattr(migration, "op", fake_op)
+    monkeypatch.setattr(migration, "column_type_is", lambda *_: False)
+    monkeypatch.setattr(migration, "table_exists", lambda *_: False)
+    monkeypatch.setattr(migration, "column_exists", lambda *_: False)
+    monkeypatch.setattr(migration, "index_exists", lambda *_: False)
+    monkeypatch.setattr(migration, "fk_exists", lambda *_: False)
+    monkeypatch.setattr(migration, "unique_constraint_exists", lambda *_: False)
+
+    with pytest.raises(RuntimeError, match=r"1 row\(s\) have NULL file_id"):
+        migration.upgrade()
+
+    assert all("CREATE TABLE" not in call for call in fake_op.calls)
 
 
 def test_downgrade_restores_the_quarantined_rows(monkeypatch, migration) -> None:

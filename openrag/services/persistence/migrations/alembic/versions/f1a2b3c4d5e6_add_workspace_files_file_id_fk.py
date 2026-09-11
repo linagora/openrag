@@ -61,6 +61,14 @@ def upgrade() -> None:
     if column_type_is("workspace_files", "file_id", sa.Integer):
         return
 
+    null_file_id_count = op.get_bind().execute(
+        sa.text("SELECT COUNT(*) FROM workspace_files WHERE file_id IS NULL")
+    ).scalar_one()
+    if null_file_id_count:
+        raise RuntimeError(
+            f"Cannot migrate workspace_files: {null_file_id_count} row(s) have NULL file_id"
+        )
+
     if not table_exists(ORPHAN_TABLE):
         op.create_table(
             ORPHAN_TABLE,
