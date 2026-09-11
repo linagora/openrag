@@ -371,6 +371,26 @@ export function updateModelEndpoint(
   });
 }
 
+/** One partition's already-indexed file count for an endpoint. */
+export interface IndexedPartitionUsage {
+  partition: string;
+  file_count: number;
+}
+
+/** What an in-place edit of an embedder endpoint would strand (#762 C).
+ *
+ *  Empty means nothing is indexed against it yet, so the edit carries no
+ *  retrieval risk and the confirmation can say so instead of warning anyway.
+ */
+export interface IndexedFileUsage {
+  partitions: IndexedPartitionUsage[];
+  total_files: number;
+}
+
+export function getModelEndpointIndexedUsage(modelType: ModelType, name: string) {
+  return request<IndexedFileUsage>(`${BASE}/${enc(modelType)}/${enc(name)}/indexed-usage`);
+}
+
 export function setDefaultModelEndpoint(modelType: ModelType, name: string) {
   return request<ModelEndpointResponse>(
     `${BASE}/${enc(modelType)}/${enc(name)}/set-default`,

@@ -669,6 +669,37 @@ async def test_usage_counts_maps_name_and_type_to_partition_count():
 
 
 @pytest.mark.asyncio
+async def test_indexed_file_usage_counts_files_per_partition():
+    """An in-place repoint strands indexed files; this is what sizes it.
+
+    A delete or rename touches the partitions table, so the schema records it.
+    Editing the URL or model touches neither — the only way to know how much
+    data rides on the endpoint is to count it first (#762 C).
+    """
+    from services.persistence.model_endpoint_repo import PgModelEndpointRepository
+
+    pool = _FakePool()
+    pool._fetch_result = [
+        {"partition": "docs", "file_count": 31},
+        {"partition": "test_ah", "file_count": 11},
+    ]
+    repo = PgModelEndpointRepository(pool_getter=lambda: pool)
+
+    usage = await repo.indexed_file_usage("qwen", "embedder")
+
+    assert usage == [
+        {"partition": "docs", "file_count": 31},
+        {"partition": "test_ah", "file_count": 11},
+    ]
+    assert len(pool.executed) == 1
+    sql, params = pool.executed[0]
+    # Resolved, not literal: partitions riding the `default` alias count too, or
+    # editing the default embedder would report zero files at stake.
+    assert "e.is_default" in sql
+    assert params[:2] == ("qwen", "embedder")
+
+
+@pytest.mark.asyncio
 async def test_delete_clears_preset_selections_naming_the_endpoint():
     """Deleting an endpoint must drop every preset selection that names it.
 

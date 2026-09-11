@@ -76,6 +76,19 @@ _PARTITION_USAGE_COUNTS_SQL = """
     GROUP BY e.name, e.model_type
     """
 
+# Per-partition indexed-file counts for one endpoint. `usage_counts` above
+# answers "how many partitions point here"; this answers "how much already-built
+# data rides on it", which is what sizes an in-place repoint.
+_EMBEDDER_INDEXED_USAGE_SQL = """
+    SELECT p.partition AS partition, COUNT(f.file_id)::int AS file_count
+    FROM model_endpoints e
+    JOIN partitions p ON (p.embedder = e.name OR (e.is_default AND p.embedder = $3))
+    JOIN files f ON f.partition_name = p.partition
+    WHERE e.name = $1 AND e.model_type = $2
+    GROUP BY p.partition
+    ORDER BY file_count DESC, p.partition
+    """
+
 
 class PgModelEndpointRepository(ModelEndpointRepository):
     """asyncpg-backed implementation of :class:`ModelEndpointRepository`."""
@@ -380,6 +393,17 @@ class PgModelEndpointRepository(ModelEndpointRepository):
         """
         rows = await self.pool.fetch(_PARTITION_USAGE_COUNTS_SQL, DEFAULT_ENDPOINT_ALIAS)
         return {(r["name"], r["model_type"]): r["cnt"] for r in rows}
+
+    async def indexed_file_usage(self, name: str, model_type: str) -> list[dict]:
+        """Partitions resolving to this endpoint that already hold indexed files.
+
+        What an in-place edit of an embedder's URL or model would strand (#762
+        C). Unlike a delete or a rename, that edit never touches the partitions
+        table, so nothing else in the schema records that it happened — this is
+        the only way to size it before it does.
+        """
+        rows = await self.pool.fetch(_EMBEDDER_INDEXED_USAGE_SQL, name, model_type, DEFAULT_ENDPOINT_ALIAS)
+        return [{"partition": r["partition"], "file_count": r["file_count"]} for r in rows]
 
     async def delete_and_promote_default(self, name: str, model_type: str) -> tuple[str, str | None]:
         """Delete an endpoint and, if it was the default, promote a survivor to

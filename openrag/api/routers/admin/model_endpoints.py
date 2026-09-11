@@ -11,6 +11,8 @@ from api.dependencies.auth import require_admin
 from api.routers.user.chat import invalidate_max_model_tokens, prime_max_model_tokens
 from api.schemas.admin.model_endpoint_schemas import (
     CreateModelEndpointRequest,
+    IndexedFileUsageResponse,
+    IndexedPartitionUsage,
     ModelEndpointResponse,
     ModelEndpointType,
     RevealApiKeyResponse,
@@ -155,6 +157,28 @@ async def get_model_endpoint(
 ):
     """Return one registered inference endpoint."""
     return await service.get_model_endpoint(name=name, model_type=model_type)
+
+
+@router.get("/{model_type}/{name}/indexed-usage", response_model=IndexedFileUsageResponse)
+async def get_model_endpoint_indexed_usage(
+    model_type: ModelEndpointType,
+    name: str,
+    service=Depends(get_model_endpoint_service),
+):
+    """How many already-indexed files ride on this endpoint, per partition.
+
+    Read-only: it sizes what an in-place edit of the endpoint's URL or model
+    would strand, so a confirmation can state a real number rather than warn in
+    the abstract (#762 C). Meaningful for embedders — a repointed reranker or
+    LLM changes no stored vector — so other types answer empty.
+    """
+    if model_type != "embedder":
+        return IndexedFileUsageResponse()
+    rows = await service.indexed_file_usage(name=name, model_type=model_type)
+    return IndexedFileUsageResponse(
+        partitions=[IndexedPartitionUsage(**row) for row in rows],
+        total_files=sum(row["file_count"] for row in rows),
+    )
 
 
 @router.put("/{model_type}/{name}", response_model=ModelEndpointResponse)
