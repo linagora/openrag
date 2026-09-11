@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
 from core.config.model_endpoints import (
+    DEFAULT_MODEL_IMPLEMENTATIONS,
     ENV_MANAGED_KEY,
     ENV_MANAGED_VALUE,
     STT_LANGUAGE_KEY,
@@ -24,7 +25,7 @@ from core.config.model_endpoints import (
     ModelEndpointConfig,
     ModelEndpointRow,
 )
-from core.utils.exceptions import NotFoundError, ValidationError
+from core.utils.exceptions import ConflictError, NotFoundError, ValidationError
 from core.utils.logging import get_logger
 from core.utils.redaction import preserve_existing_secrets
 
@@ -178,6 +179,41 @@ def _with_sampling_params(extra: dict[str, Any], llm_cfg: Any) -> dict[str, Any]
     ``indexer_pool._global_llm_endpoint_config``.
     """
     return {**extra, **_sampling_params(llm_cfg)}
+
+
+# What decides the vectors an embedder produces, and so what an in-place edit
+# can move out from under already-indexed files (#762). Mirrored by
+# MATERIAL_FIELDS / MATERIAL_EXTRA_KEYS in ui/src/pages/admin/embedder-edit-guard.ts,
+# which decides when the UI asks for the acknowledgement this service requires.
+# `max_model_len` becomes the embedder's truncation limit: the same model at
+# another limit embeds long chunks differently.
+_MATERIAL_EMBEDDER_EXTRA_KEYS = ("implementation", "max_model_len")
+
+
+def _shown(value: object) -> str | None:
+    """Compare stored and submitted values the way the edit form renders them."""
+    return None if value is None or value == "" else str(value)
+
+
+def _material_embedder_changes(existing: ModelEndpointRow, fields: Mapping[str, object]) -> list[str]:
+    """Fields of an embedder update that would change the vectors it produces."""
+    changed: list[str] = []
+    endpoint = fields.get("endpoint")
+    if isinstance(endpoint, str) and endpoint.strip().rstrip("/") != (existing.endpoint or "").strip().rstrip("/"):
+        changed.append("endpoint")
+    if "model_name" in fields and _shown(fields["model_name"]) != _shown(existing.model_name):
+        changed.append("model_name")
+    extra = fields.get("extra")
+    if isinstance(extra, dict):
+        before = existing.extra or {}
+        # An endpoint saved without `implementation` runs the default client, so
+        # stamping that default on a later save changes nothing.
+        default_impl = DEFAULT_MODEL_IMPLEMENTATIONS["embedder"]
+        for key in _MATERIAL_EMBEDDER_EXTRA_KEYS:
+            fallback = default_impl if key == "implementation" else None
+            if _shown(extra.get(key, fallback)) != _shown(before.get(key, fallback)):
+                changed.append(f"extra.{key}")
+    return changed
 
 
 def _is_unmodified_seed(row: ModelEndpointRow, data: dict[str, Any]) -> bool:
@@ -549,7 +585,24 @@ class ModelEndpointService:
         """
         return _with_usage(row, await self._repo.usage_counts())
 
-    async def update_model_endpoint(self, name: str, model_type: str, **fields: object) -> ModelEndpointRow:
+    async def indexed_file_usage(self, name: str, model_type: str) -> list[dict[str, Any]]:
+        """Per-partition indexed-file counts for one endpoint, most files first.
+
+        Sizes what an in-place edit would strand, so the confirmation can name a
+        real number instead of warning in the abstract (#762 C). Empty when the
+        endpoint holds no indexed data — nothing is at stake and the UI can say
+        so rather than warning anyway.
+        """
+        return await self._repo.indexed_file_usage(name, model_type)
+
+    async def update_model_endpoint(
+        self,
+        name: str,
+        model_type: str,
+        *,
+        acknowledge_indexed_data: bool = False,
+        **fields: object,
+    ) -> ModelEndpointRow:
         """Update endpoint fields and/or rename it.
 
         Pass ``new_name=`` to rename. After any change the in-memory config is
@@ -578,6 +631,14 @@ class ModelEndpointService:
         call above raising: the registry stays queryable under both names,
         correctly, instead of the update's failure leaving it stuck on a stale
         config until process restart.
+
+        An embedder edit that changes what its vectors are — URL, model,
+        ``implementation`` or ``max_model_len`` — while partitions resolving to
+        it hold indexed files is refused with ``EMBEDDER_EDIT_AFFECTS_INDEXED_DATA``
+        (409) unless ``acknowledge_indexed_data`` is set (#762). Nothing errors
+        after such an edit: queries are just embedded with another model than
+        the stored vectors, so the caller has to have seen that first. The
+        admin UI's confirmation dialog is one such caller, not the guard.
         """
         existing = await self._repo.get(name, model_type)
         if existing is None:
@@ -593,6 +654,9 @@ class ModelEndpointService:
 
         if isinstance(fields.get("extra"), dict):
             fields["extra"] = preserve_existing_secrets(existing.extra, fields["extra"])  # type: ignore[arg-type]
+
+        if model_type == "embedder" and not acknowledge_indexed_data:
+            await self._refuse_unacknowledged_repoint(existing, fields)
 
         if fields:
             updated = await self._repo.update(name, model_type, **fields)
@@ -648,6 +712,26 @@ class ModelEndpointService:
         if evict_default:
             self._invalidate_client_cache(model_type, "default")
         return await self._repo.get(effective_name, model_type) or (updated or existing)
+
+    async def _refuse_unacknowledged_repoint(self, existing: ModelEndpointRow, fields: Mapping[str, object]) -> None:
+        """Raise unless this embedder edit leaves every indexed file's vectors valid."""
+        changed = _material_embedder_changes(existing, fields)
+        if not changed:
+            return
+        usage = await self._repo.indexed_file_usage(existing.name, existing.model_type)
+        total = sum(row["file_count"] for row in usage)
+        if not total:
+            return
+        shown = ", ".join(row["partition"] for row in usage[:5])
+        if len(usage) > 5:
+            shown += f" and {len(usage) - 5} more"
+        raise ConflictError(
+            f"Changing {', '.join(changed)} on embedder '{existing.name}' leaves {total} indexed file(s) in "
+            f"{len(usage)} partition(s) ({shown}) with vectors a different configuration no longer matches. "
+            "Resend with acknowledge_indexed_data=true to apply it anyway, or create a new endpoint and move "
+            "partitions to it.",
+            code="EMBEDDER_EDIT_AFFECTS_INDEXED_DATA",
+        )
 
     async def _reload_partitions_after_default_change(self, model_type: str) -> None:
         """Show this replica the partitions a new default embedder pinned (#762).
