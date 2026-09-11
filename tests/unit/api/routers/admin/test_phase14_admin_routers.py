@@ -56,6 +56,11 @@ class FakeModelEndpointService:
         self.calls.append(("create", payload))
         return _model_endpoint_row(**payload)
 
+    async def indexed_file_usage(self, name: str, model_type: str) -> list[dict[str, Any]]:
+        """Record the usage lookup and echo two partitions' worth of files."""
+        self.calls.append(("indexed_file_usage", {"name": name, "model_type": model_type}))
+        return [{"partition": "docs", "file_count": 31}, {"partition": "test_ah", "file_count": 11}]
+
     async def list_model_endpoints(self, model_type: str | None = None) -> list[dict[str, Any]]:
         """Record endpoint listing with the optional type filter."""
         self.calls.append(("list", {"model_type": model_type}))
@@ -198,6 +203,39 @@ async def test_create_model_endpoint_normalizes_payload(async_client_factory):
             },
         )
     ]
+
+
+@pytest.mark.asyncio
+async def test_indexed_usage_totals_files_across_partitions(async_client_factory):
+    """The confirmation needs a real number, so the route sums what it returns."""
+    model_service = FakeModelEndpointService()
+    app = _build_app(model_service=model_service)
+
+    async with async_client_factory(app) as client:
+        response = await client.get("/model-endpoints/embedder/qwen/indexed-usage")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "partitions": [
+            {"partition": "docs", "file_count": 31},
+            {"partition": "test_ah", "file_count": 11},
+        ],
+        "total_files": 42,
+    }
+
+
+@pytest.mark.asyncio
+async def test_indexed_usage_is_empty_for_types_that_store_no_vectors(async_client_factory):
+    """Repointing a reranker or an LLM strands nothing — don't query for it."""
+    model_service = FakeModelEndpointService()
+    app = _build_app(model_service=model_service)
+
+    async with async_client_factory(app) as client:
+        response = await client.get("/model-endpoints/llm/default/indexed-usage")
+
+    assert response.status_code == 200
+    assert response.json() == {"partitions": [], "total_files": 0}
+    assert [c for c, _ in model_service.calls] == []
 
 
 @pytest.mark.asyncio
