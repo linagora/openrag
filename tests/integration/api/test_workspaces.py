@@ -189,6 +189,8 @@ class TestWorkspaceFiles:
         assert file_response.json()["documents"]
 
     def test_delete_workspace_default_purges_workspace_owned_file(self, api_client, workspace_partition, workspace_id):
+        created = api_client.post(f"/partition/{workspace_partition}/workspaces", json={"workspace_id": workspace_id})
+        assert created.status_code == 201
         file_id = f"owned-{uuid.uuid4().hex[:8]}"
         self._upload_file(
             api_client,

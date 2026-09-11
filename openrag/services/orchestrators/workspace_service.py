@@ -162,6 +162,8 @@ class WorkspaceService:
                 return_exceptions=True,
             )
             for file_id, result in zip(orphaned, results, strict=True):
+                if isinstance(result, asyncio.CancelledError):
+                    raise result
                 if isinstance(result, Exception):
                     logger.warning(
                         "Failed to delete orphaned file from vector store",
@@ -178,7 +180,15 @@ class WorkspaceService:
             "kept_files": kept_files,
         }
 
-    async def _delete_file(self, file_id: str, partition: str, *, cleanup_started: bool = False) -> None:
+    async def _delete_file(self, file_id: str, partition: str) -> None:
+        async with self._workspace_repo.cleanup_session(file_id, partition) as owned:
+            if owned is None:
+                raise RuntimeError(f"Workspace cleanup already running for {file_id}")
+            await self._delete_owned_file(file_id, partition, owned)
+
+    async def _delete_owned_file(
+        self, file_id: str, partition: str, owned: WorkspaceRepository, *, cleanup_started: bool = False
+    ) -> None:
         """Port of the legacy ``vectordb.delete_file``.
 
         Drops the file's chunks from the vector store (via the clean
@@ -193,17 +203,17 @@ class WorkspaceService:
                 {"partition": partition, "file_id": file_id},
             )
             if not vector_cleanup_started:
-                if not await self._workspace_repo.start_claimed_file_cleanup(file_id, partition):
+                if not await owned.start_claimed_file_cleanup(file_id, partition):
                     raise RuntimeError(f"Workspace cleanup claim disappeared for {file_id}")
                 vector_cleanup_started = True
             if ids:
                 await self._vector_store.delete(ids, self._collection)
-            if not await self._workspace_repo.finalize_claimed_file_cleanup(file_id, partition):
+            if not await owned.finalize_claimed_file_cleanup(file_id, partition):
                 raise RuntimeError(f"Workspace cleanup claim disappeared for {file_id}")
-        except Exception:
+        except (Exception, asyncio.CancelledError):
             if vector_cleanup_started:
                 try:
-                    await self._workspace_repo.mark_cleanup_failed(file_id, partition)
+                    await owned.mark_cleanup_failed(file_id, partition)
                 except Exception as mark_error:  # noqa: BLE001 - preserve original cleanup failure
                     logger.error(
                         "Failed to persist workspace cleanup failure state",
@@ -213,7 +223,7 @@ class WorkspaceService:
                     )
             else:
                 try:
-                    await self._workspace_repo.release_claimed_file_cleanup(file_id, partition)
+                    await owned.release_claimed_file_cleanup(file_id, partition)
                 except Exception as release_error:  # noqa: BLE001 - preserve original cleanup failure
                     logger.error(
                         "Failed to release workspace cleanup claim",
@@ -226,10 +236,11 @@ class WorkspaceService:
 
     async def retry_failed_file_cleanup(self, file_id: str, partition: str) -> bool:
         """Retry a failed or abandoned cleanup while keeping attachment fenced."""
-        if not await self._workspace_repo.claim_failed_file_cleanup(file_id, partition):
-            return False
-        await self._delete_file(file_id, partition, cleanup_started=True)
-        return True
+        async with self._workspace_repo.cleanup_session(file_id, partition) as owned:
+            if owned is None or not await owned.claim_failed_file_cleanup(file_id, partition):
+                return False
+            await self._delete_owned_file(file_id, partition, owned, cleanup_started=True)
+            return True
 
 
 __all__ = ["WorkspaceService"]

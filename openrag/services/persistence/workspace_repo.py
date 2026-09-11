@@ -20,7 +20,9 @@ the boundary.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
+from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 
 from core.models.workspace import Workspace
@@ -42,6 +44,36 @@ class PgWorkspaceRepository(WorkspaceRepository):
 
     def __init__(self, pool_getter: Callable[[], asyncpg.Pool]) -> None:
         self._pool_getter = pool_getter
+        self._cleanup_conn = None
+        self._cleanup_target = None
+
+    @asynccontextmanager
+    async def cleanup_session(self, file_id: str, partition: str):
+        # Session locks survive commits, keeping durable state visible while
+        # excluding other workers for the entire external deletion operation.
+        key = json.dumps([partition, file_id])
+        async with self.pool.acquire() as conn:
+            acquired = await conn.fetchval("SELECT pg_try_advisory_lock(hashtextextended($1, 0))", key)
+            if not acquired:
+                yield None
+                return
+            owned = PgWorkspaceRepository(self._pool_getter)
+            owned._cleanup_conn = conn
+            owned._cleanup_target = (file_id, partition)
+            try:
+                yield owned
+            finally:
+                owned._cleanup_conn = None
+                owned._cleanup_target = None
+                # A disconnected owner cannot mutate state through a new
+                # connection. PostgreSQL releases its lock on disconnect.
+                if not conn.is_closed():
+                    await conn.execute("SELECT pg_advisory_unlock(hashtextextended($1, 0))", key)
+
+    def _owned_connection(self, file_id: str, partition: str):
+        if self._cleanup_conn is None or self._cleanup_target != (file_id, partition):
+            raise RuntimeError("Cleanup requires an active owning session")
+        return self._cleanup_conn
 
     @property
     def pool(self) -> asyncpg.Pool:
@@ -281,10 +313,10 @@ class PgWorkspaceRepository(WorkspaceRepository):
 
     async def finalize_claimed_file_cleanup(self, file_id: str, partition: str) -> bool:
         """Delete one claimed orphan and account for its uploader quota."""
-        async with self.pool.acquire() as conn:
-            async with conn.transaction():
-                row = await conn.fetchrow(
-                    """
+        conn = self._owned_connection(file_id, partition)
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                """
                     UPDATE files
                     SET workspace_cleanup_state = $3,
                         workspace_cleanup_claimed = FALSE,
@@ -296,24 +328,24 @@ class PgWorkspaceRepository(WorkspaceRepository):
                       AND workspace_cleanup_state IN ($4, $5)
                     RETURNING id, created_by
                     """,
-                    file_id,
-                    partition,
+                file_id,
+                partition,
+                CLEANUP_FINALIZED,
+                CLEANUP_STARTED,
+                CLEANUP_FAILED,
+            )
+            if row is not None:
+                await conn.execute(
+                    "DELETE FROM files WHERE id = $1 AND workspace_cleanup_state = $2",
+                    row["id"],
                     CLEANUP_FINALIZED,
-                    CLEANUP_STARTED,
-                    CLEANUP_FAILED,
                 )
-                if row is not None:
-                    await conn.execute(
-                        "DELETE FROM files WHERE id = $1 AND workspace_cleanup_state = $2",
-                        row["id"],
-                        CLEANUP_FINALIZED,
-                    )
-                await decrement_file_counts(conn, [row] if row is not None else [])
-                return row is not None
+            await decrement_file_counts(conn, [row] if row is not None else [])
+            return row is not None
 
     async def start_claimed_file_cleanup(self, file_id: str, partition: str) -> bool:
         """Prevent a claim from being recovered before vector deletion."""
-        row = await self.pool.fetchrow(
+        row = await self._owned_connection(file_id, partition).fetchrow(
             """
             UPDATE files
             SET workspace_cleanup_started = TRUE,
@@ -334,7 +366,7 @@ class PgWorkspaceRepository(WorkspaceRepository):
 
     async def mark_cleanup_failed(self, file_id: str, partition: str) -> bool:
         """Persist a destructive cleanup failure without allowing attachment."""
-        row = await self.pool.fetchrow(
+        row = await self._owned_connection(file_id, partition).fetchrow(
             """
             UPDATE files
             SET workspace_cleanup_failed = TRUE,
@@ -356,7 +388,7 @@ class PgWorkspaceRepository(WorkspaceRepository):
 
     async def claim_failed_file_cleanup(self, file_id: str, partition: str) -> bool:
         """Reclaim failed or abandoned cleanup before restarting deletion."""
-        row = await self.pool.fetchrow(
+        row = await self._owned_connection(file_id, partition).fetchrow(
             """
             UPDATE files
             SET workspace_cleanup_claimed = TRUE,
@@ -389,7 +421,7 @@ class PgWorkspaceRepository(WorkspaceRepository):
 
     async def release_claimed_file_cleanup(self, file_id: str, partition: str) -> None:
         """Release a failed cleanup claim so the file can be attached again."""
-        await self.pool.execute(
+        await self._owned_connection(file_id, partition).execute(
             """
             UPDATE files
             SET workspace_cleanup_claimed = FALSE,

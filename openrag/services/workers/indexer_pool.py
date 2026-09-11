@@ -499,12 +499,22 @@ class IndexerWorkerActor:
                     if isinstance(result, Exception) or result
                 ]
                 if failures:
-                    await self._catalog_store.document_repo.mark_file_independently_indexed(file_id, partition)
+                    protected = await self._catalog_store.document_repo.mark_file_independently_indexed(
+                        file_id, partition
+                    )
+                    if not protected:
+                        raise RuntimeError(
+                            f"Cannot protect indexed file '{file_id}': cleanup already started or file missing"
+                        )
                     for workspace_id, error in failures:
                         self._logger.warning(
                             f"Failed to attach indexed file to workspace '{workspace_id}'; "
                             f"file retained independently: {error}"
                         )
+                else:
+                    await self._catalog_store.document_repo.finalize_file_workspace_ownership(
+                        file_id, partition, workspace_ids
+                    )
             return result
         finally:
             content_sha256 = metadata.get("content_sha256")

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from contextlib import AbstractAsyncContextManager
 
 from core.models.workspace import Workspace
 
@@ -17,6 +18,15 @@ class WorkspaceRepository(ABC):
     """
 
     # ── Workspace lifecycle ───────────────────────────────────────────
+
+    @abstractmethod
+    def cleanup_session(self, file_id: str, partition: str) -> AbstractAsyncContextManager[WorkspaceRepository | None]:
+        """Yield an exclusively owned cleanup repository, or None if busy.
+
+        Cleanup transitions must use this session. Ownership lasts through
+        vector deletion and database finalization, independently of claim age.
+        """
+        ...
 
     @abstractmethod
     async def create_workspace(self, workspace: Workspace) -> Workspace: ...

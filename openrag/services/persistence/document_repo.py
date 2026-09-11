@@ -548,13 +548,49 @@ class PgDocumentRepository(DocumentRepository):
         result = await self.pool.execute(
             """
             UPDATE files
-            SET independently_indexed = TRUE
+            SET independently_indexed = TRUE,
+                workspace_cleanup_state = 'NONE',
+                workspace_cleanup_claimed = FALSE,
+                workspace_cleanup_claimed_at = NULL
             WHERE file_id = $1 AND partition_name = $2
+              AND workspace_cleanup_state IN ('NONE', 'CLAIMED')
             """,
             file_id,
             partition,
         )
         return int(result.split()[-1]) > 0
+
+    async def finalize_file_workspace_ownership(self, file_id: str, partition: str, workspace_ids: list[str]) -> bool:
+        if not workspace_ids:
+            return False
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                # Serialize with workspace deletion, then use a fresh snapshot
+                # to recheck membership after waiting for the file row lock.
+                await conn.fetchrow(
+                    "SELECT id FROM files WHERE file_id = $1 AND partition_name = $2 FOR UPDATE",
+                    file_id,
+                    partition,
+                )
+                row = await conn.fetchrow(
+                    """
+                    UPDATE files f SET independently_indexed = FALSE
+                    WHERE f.file_id = $1 AND f.partition_name = $2
+                      AND f.workspace_cleanup_state = 'NONE'
+                      AND NOT EXISTS (
+                          SELECT 1 FROM unnest($3::text[]) AS requested(workspace_id)
+                          WHERE NOT EXISTS (
+                              SELECT 1 FROM workspace_files wf
+                              WHERE wf.file_id = f.id AND wf.workspace_id = requested.workspace_id
+                          )
+                      )
+                    RETURNING f.id
+                    """,
+                    file_id,
+                    partition,
+                    workspace_ids,
+                )
+                return row is not None
 
     async def remove_file_from_partition(self, file_id: str, partition: str) -> bool:
         """TODO(phase-9): remove. Mirror of legacy ``remove_file_from_partition``."""

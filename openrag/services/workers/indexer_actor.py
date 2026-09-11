@@ -238,7 +238,8 @@ async def _write_catalog_record(
         parent_id=metadata.get("parent_id"),
         indexed_at=indexed_at,
         require_existing_partition=require_existing_partition,
-        independently_indexed=not bool(workspace_ids),
+        # Stay protected until the outer worker has completed every attachment.
+        independently_indexed=True,
         content_sha256=metadata.get("content_sha256"),
         **config_kwargs,
     )

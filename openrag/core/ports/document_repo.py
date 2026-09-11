@@ -60,6 +60,11 @@ class DocumentRepository(ABC):
         ...
 
     @abstractmethod
+    async def finalize_file_workspace_ownership(self, file_id: str, partition: str, workspace_ids: list[str]) -> bool:
+        """Transfer a new upload to its workspaces only if all attachments remain."""
+        ...
+
+    @abstractmethod
     async def get_content_sha256(self, file_id: str, partition: str) -> str | None: ...
 
     @abstractmethod

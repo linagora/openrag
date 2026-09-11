@@ -37,6 +37,12 @@ def unique_constraint_exists(table: str, constraint_name: str) -> bool:
     return any(uc["name"] == constraint_name for uc in inspect(op.get_bind()).get_unique_constraints(table))
 
 
+def check_constraint_exists(table: str, constraint_name: str) -> bool:
+    if not table_exists(table):
+        return False
+    return any(c["name"] == constraint_name for c in inspect(op.get_bind()).get_check_constraints(table))
+
+
 def column_type_is(table: str, column: str, sa_type: type) -> bool:
     """Return True if `table.column` exists and its type is an instance of `sa_type`."""
     if not table_exists(table):

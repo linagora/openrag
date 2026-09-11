@@ -381,7 +381,7 @@ async def test_process_file_passes_partition_and_filename_to_row(tmp_path: Path)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("workspace_ids, independently_indexed", [(None, True), ([], True), (["ws1"], False)])
+@pytest.mark.parametrize("workspace_ids, independently_indexed", [(None, True), ([], True), (["ws1"], True)])
 async def test_process_file_creates_catalog_record_after_successful_pipeline(
     tmp_path: Path, workspace_ids, independently_indexed
 ) -> None:

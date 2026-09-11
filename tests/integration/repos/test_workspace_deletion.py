@@ -24,6 +24,8 @@ async def upload(store, file_id, *, partition="p", workspace_ids=None, replace=F
     if not replace:
         for workspace_id in workspace_ids or []:
             assert await store.workspace_repo.add_files_to_workspace(workspace_id, [file_id]) == []
+        if workspace_ids:
+            assert await store.document_repo.finalize_file_workspace_ownership(file_id, partition, workspace_ids)
 
 
 async def setup_workspace(store, workspace_id="ws1", partition="p"):
@@ -336,10 +338,12 @@ async def test_concurrent_cleanup_retries_only_one_worker_claims_file(postgres_s
         WHERE file_id = 'retryable'
         """,
     )
-    assert await asyncio.gather(
-        store.workspace_repo.claim_failed_file_cleanup("retryable", "p"),
-        store.workspace_repo.claim_failed_file_cleanup("retryable", "p"),
-    ) in ([True, False], [False, True])
+
+    async def claim():
+        async with store.workspace_repo.cleanup_session("retryable", "p") as owned:
+            return owned is not None and await owned.claim_failed_file_cleanup("retryable", "p")
+
+    assert await asyncio.gather(claim(), claim()) in ([True, False], [False, True])
 
 
 async def test_migration_preserves_preexisting_workspace_files(postgres_store, test_rdb_config):
@@ -383,3 +387,123 @@ async def test_migration_preserves_preexisting_workspace_files(postgres_store, t
     await asyncio.to_thread(migrate_legacy_data)
     assert await postgres_store.workspace_repo.delete_workspace("ws1") == []
     assert await postgres_store.document_repo.file_exists_in_partition("legacy", "p")
+
+
+async def test_active_cleanup_cannot_be_reclaimed_even_when_timestamp_expires(postgres_store):
+    store = postgres_store
+    await setup_workspace(store)
+    await upload(store, "slow", workspace_ids=["ws1"])
+    svc, vectors = service(store)
+    deleting = asyncio.Event()
+    finish = asyncio.Event()
+
+    async def slow_delete(*args):
+        deleting.set()
+        await finish.wait()
+
+    vectors.delete.side_effect = slow_delete
+    task = asyncio.create_task(svc.delete_workspace("p", "ws1"))
+    try:
+        await asyncio.wait_for(deleting.wait(), timeout=5)
+        await store.pool.execute(
+            "UPDATE files SET workspace_cleanup_claimed_at = NOW() - INTERVAL '2 hours' WHERE file_id = 'slow'"
+        )
+        assert await svc.retry_failed_file_cleanup("slow", "p") is False
+        async with store.workspace_repo.cleanup_session("slow", "p") as competing:
+            assert competing is None
+        assert vectors.delete.await_count == 1
+    finally:
+        finish.set()
+        result = await task
+    assert result["orphaned_files_deleted"] == 1
+
+
+async def test_expired_session_cannot_mutate_new_cleanup_owner(postgres_store):
+    repo = postgres_store.workspace_repo
+    async with repo.cleanup_session("f", "p") as old:
+        assert old is not None
+    async with repo.cleanup_session("f", "p") as current:
+        assert current is not None
+        for transition in (old.mark_cleanup_failed, old.finalize_claimed_file_cleanup, old.start_claimed_file_cleanup):
+            with pytest.raises(RuntimeError, match="active owning session"):
+                await transition("f", "p")
+
+
+async def test_pending_attachments_protect_upload_during_workspace_deletion(postgres_store):
+    store = postgres_store
+    await setup_workspace(store)
+    # Catalog creation precedes the gather of attachment operations.
+    assert await _write_catalog_record(
+        doc_repo=store.document_repo,
+        metadata={"file_id": "pending"},
+        partition="p",
+        user=None,
+        replace=False,
+        indexation_config=None,
+        workspace_ids=["ws1", "missing"],
+    )
+    assert await store.workspace_repo.add_files_to_workspace("ws1", ["pending"]) == []
+    svc, vectors = service(store)
+    assert (await svc.delete_workspace("p", "ws1"))["orphaned_files_deleted"] == 0
+    assert await store.workspace_repo.add_files_to_workspace("missing", ["pending"]) == ["pending"]
+    assert await store.document_repo.mark_file_independently_indexed("pending", "p")
+    assert not await store.document_repo.finalize_file_workspace_ownership("pending", "p", ["ws1", "missing"])
+    assert await store.document_repo.file_exists_in_partition("pending", "p")
+    vectors.delete.assert_not_awaited()
+
+
+async def test_protection_cannot_claim_success_after_destructive_cleanup_starts(postgres_store):
+    store = postgres_store
+    await setup_workspace(store)
+    await upload(store, "f", workspace_ids=["ws1"])
+    assert await store.workspace_repo.delete_workspace("ws1") == ["f"]
+    async with store.workspace_repo.cleanup_session("f", "p") as owned:
+        assert await owned.start_claimed_file_cleanup("f", "p")
+        assert not await store.document_repo.mark_file_independently_indexed("f", "p")
+        assert (
+            await store.pool.fetchval("SELECT workspace_cleanup_state FROM files WHERE file_id = 'f'")
+            == "CLEANUP_STARTED"
+        )
+
+
+async def test_cleanup_state_migration_repairs_missing_constraint_and_downgrades(postgres_store, test_rdb_config):
+    import importlib
+
+    from alembic.migration import MigrationContext
+    from alembic.operations import Operations
+    from sqlalchemy import URL, create_engine, inspect, text
+
+    config = test_rdb_config
+    await setup_workspace(postgres_store)
+    await upload(postgres_store, "f", workspace_ids=["ws1"])
+
+    def migrate():
+        migration = importlib.import_module(
+            "services.persistence.migrations.alembic.versions.f5a6b7c8d9e0_add_workspace_cleanup_state"
+        )
+        engine = create_engine(
+            URL.create(
+                "postgresql",
+                username=config.user,
+                password=config.password,
+                host=config.host,
+                port=config.port,
+                database=config.database,
+            )
+        )
+        try:
+            with engine.begin() as conn, Operations.context(MigrationContext.configure(conn)):
+                constraint = "ck_files_workspace_cleanup_state"
+                conn.execute(text(f"ALTER TABLE files DROP CONSTRAINT {constraint}"))
+                migration.upgrade()
+                migration.upgrade()
+                assert constraint in {c["name"] for c in inspect(conn).get_check_constraints("files")}
+                conn.execute(text(f"ALTER TABLE files DROP CONSTRAINT {constraint}"))
+                migration.downgrade()
+                migration.downgrade()
+                migration.upgrade()
+                assert constraint in {c["name"] for c in inspect(conn).get_check_constraints("files")}
+        finally:
+            engine.dispose()
+
+    await asyncio.to_thread(migrate)

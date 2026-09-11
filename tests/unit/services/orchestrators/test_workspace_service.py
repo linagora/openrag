@@ -2,11 +2,18 @@
 
 from __future__ import annotations
 
+import asyncio
+from contextlib import asynccontextmanager
+
 import pytest
 from services.orchestrators.workspace_service import WorkspaceService
 
 
 class FakeWorkspaceRepo:
+    @asynccontextmanager
+    async def cleanup_session(self, file_id, partition):
+        yield self
+
     def __init__(self, *, workspace=None, orphaned=None, files=None):
         self._workspace = workspace
         self._orphaned = orphaned if orphaned is not None else []
@@ -264,6 +271,26 @@ async def test_retry_cleanup_is_safe_after_partial_vector_deletion():
 # --------------------------------------------------------------------------- #
 # keep_files — opt out of the orphan cleanup
 # --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("during_delete", [False, True])
+async def test_cancelled_cleanup_propagates_and_preserves_recovery_state(during_delete):
+    class CancelledStore(FakeVectorStore):
+        async def query_ids_by_filter(self, collection, filters):
+            if not during_delete:
+                raise asyncio.CancelledError()
+            return ["chunk"]
+
+        async def delete(self, ids, collection="default"):
+            raise asyncio.CancelledError()
+
+    repo = FakeWorkspaceRepo(orphaned=["f"])
+    with pytest.raises(asyncio.CancelledError):
+        await _svc(wrepo=repo, vstore=CancelledStore()).delete_workspace("p", "ws")
+    assert repo.finalized == []
+    assert repo.failed == ([("f", "p")] if during_delete else [])
+    assert repo.released == ([] if during_delete else [("f", "p")])
 
 
 @pytest.mark.asyncio
