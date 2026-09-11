@@ -42,12 +42,16 @@ def _make_unvalidated_row(**kwargs):
 
 
 class _FakeEndpointRepo:
-    def __init__(self, rows: list | None = None, usage: dict | None = None):
+    def __init__(self, rows: list | None = None, usage: dict | None = None, indexed_usage: list | None = None):
         from core.config.model_endpoints import ModelEndpointRow
 
         self._store: dict[tuple[str, str], ModelEndpointRow] = {}
         self.calls: list[tuple[str, tuple]] = []
         self._usage = usage or {}
+        # Per-partition indexed-file counts `indexed_file_usage` reports, the
+        # same for every endpoint. Empty is "nothing indexed", which is what
+        # every test written before the edit guard assumes.
+        self._indexed_usage = indexed_usage or []
         # Set to a message to make the delete refuse, the way the real repo
         # does when a partition still resolves to the embedder.
         self.conflict_on_delete: str | None = None
@@ -57,6 +61,10 @@ class _FakeEndpointRepo:
     async def usage_counts(self) -> dict[tuple[str, str], int]:
         self.calls.append(("usage_counts", ()))
         return dict(self._usage)
+
+    async def indexed_file_usage(self, name: str, model_type: str) -> list[dict]:
+        self.calls.append(("indexed_file_usage", (name, model_type)))
+        return list(self._indexed_usage)
 
     async def create(self, row):
         self._store[(row.name, row.model_type)] = row
@@ -1229,6 +1237,97 @@ async def test_update_non_default_endpoint_keeps_default_alias_cache():
 
     assert "e5" not in cache
     assert cache.get("default") is sentinel
+
+
+# ── edit guard: an embedder edit that strands indexed vectors (#762) ──
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"endpoint": "http://other:8000/v1"},
+        {"model_name": "bge-m3"},
+        {"extra": {"implementation": "ollama"}},
+        {"extra": {"max_model_len": 512}},
+    ],
+)
+async def test_update_refuses_a_material_embedder_edit_over_indexed_files(fields):
+    """The browser confirmation is not the guard: a direct API call changing
+    what the embedder produces must be refused while files depend on it."""
+    from core.utils.exceptions import ConflictError
+
+    repo = _FakeEndpointRepo(
+        rows=[_make_row(name="jina")],
+        indexed_usage=[{"partition": "docs", "file_count": 31}, {"partition": "hr", "file_count": 4}],
+    )
+    svc = _make_service(repo)
+
+    with pytest.raises(ConflictError) as exc:
+        await svc.update_model_endpoint("jina", "embedder", **fields)
+
+    assert exc.value.code == "EMBEDDER_EDIT_AFFECTS_INDEXED_DATA"
+    assert "35 indexed file(s) in 2 partition(s) (docs, hr)" in exc.value.message
+    assert not any(c[0] == "update" for c in repo.calls)
+
+
+@pytest.mark.asyncio
+async def test_update_applies_a_material_embedder_edit_once_acknowledged():
+    repo = _FakeEndpointRepo(rows=[_make_row(name="jina")], indexed_usage=[{"partition": "docs", "file_count": 31}])
+    svc = _make_service(repo)
+
+    result = await svc.update_model_endpoint("jina", "embedder", acknowledge_indexed_data=True, model_name="bge-m3")
+
+    assert result.model_name == "bge-m3"
+
+
+@pytest.mark.asyncio
+async def test_update_applies_a_material_embedder_edit_when_nothing_is_indexed():
+    repo = _FakeEndpointRepo(rows=[_make_row(name="jina")], indexed_usage=[])
+    svc = _make_service(repo)
+
+    result = await svc.update_model_endpoint("jina", "embedder", model_name="bge-m3")
+
+    assert result.model_name == "bge-m3"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"timeout": 90.0},
+        {"batch_size": 8},
+        {"new_name": "jina-v3"},
+        # A trailing slash is the same URL once normalized.
+        {"endpoint": "http://vllm:8000/v1/"},
+        # An endpoint saved without `implementation` already runs the default
+        # client; the form stamping that default on save changes nothing.
+        {"extra": {"implementation": "vllm"}},
+        {"extra": {"embed_concurrency": 4}},
+    ],
+)
+async def test_update_does_not_ask_for_acknowledgement_on_a_harmless_edit(fields):
+    repo = _FakeEndpointRepo(rows=[_make_row(name="jina")], indexed_usage=[{"partition": "docs", "file_count": 31}])
+    svc = _make_service(repo)
+
+    await svc.update_model_endpoint("jina", "embedder", **fields)
+
+    assert not any(c[0] == "indexed_file_usage" for c in repo.calls)
+
+
+@pytest.mark.asyncio
+async def test_update_never_guards_a_non_embedder():
+    """Repointing an LLM changes future answers, never a stored vector."""
+    repo = _FakeEndpointRepo(
+        rows=[_make_row(name="mistral", model_type="llm")],
+        indexed_usage=[{"partition": "docs", "file_count": 31}],
+    )
+    svc = _make_service(repo)
+
+    result = await svc.update_model_endpoint("mistral", "llm", model_name="mistral-large")
+
+    assert result.model_name == "mistral-large"
+    assert not any(c[0] == "indexed_file_usage" for c in repo.calls)
 
 
 @pytest.mark.asyncio

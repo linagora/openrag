@@ -56,6 +56,11 @@ class FakeModelEndpointService:
         self.calls.append(("create", payload))
         return _model_endpoint_row(**payload)
 
+    async def indexed_file_usage(self, name: str, model_type: str) -> list[dict[str, Any]]:
+        """Record the usage lookup and echo two partitions' worth of files."""
+        self.calls.append(("indexed_file_usage", {"name": name, "model_type": model_type}))
+        return [{"partition": "docs", "file_count": 31}, {"partition": "test_ah", "file_count": 11}]
+
     async def list_model_endpoints(self, model_type: str | None = None) -> list[dict[str, Any]]:
         """Record endpoint listing with the optional type filter."""
         self.calls.append(("list", {"model_type": model_type}))
@@ -76,9 +81,19 @@ class FakeModelEndpointService:
             )
         )
 
-    async def update_model_endpoint(self, name: str, model_type: str, **fields: Any) -> dict[str, Any]:
+    async def update_model_endpoint(
+        self,
+        name: str,
+        model_type: str,
+        *,
+        acknowledge_indexed_data: bool = False,
+        **fields: Any,
+    ) -> dict[str, Any]:
         """Record endpoint updates and echo the merged response row."""
-        self.calls.append(("update", {"name": name, "model_type": model_type, **fields}))
+        recorded = {"name": name, "model_type": model_type, **fields}
+        if acknowledge_indexed_data:
+            recorded["acknowledge_indexed_data"] = True
+        self.calls.append(("update", recorded))
         return _model_endpoint_row(**{"name": name, "model_type": model_type, **fields})
 
     async def delete_model_endpoint(self, name: str, model_type: str) -> None:
@@ -201,6 +216,39 @@ async def test_create_model_endpoint_normalizes_payload(async_client_factory):
 
 
 @pytest.mark.asyncio
+async def test_indexed_usage_totals_files_across_partitions(async_client_factory):
+    """The confirmation needs a real number, so the route sums what it returns."""
+    model_service = FakeModelEndpointService()
+    app = _build_app(model_service=model_service)
+
+    async with async_client_factory(app) as client:
+        response = await client.get("/model-endpoints/embedder/qwen/indexed-usage")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "partitions": [
+            {"partition": "docs", "file_count": 31},
+            {"partition": "test_ah", "file_count": 11},
+        ],
+        "total_files": 42,
+    }
+
+
+@pytest.mark.asyncio
+async def test_indexed_usage_is_empty_for_types_that_store_no_vectors(async_client_factory):
+    """Repointing a reranker or an LLM strands nothing — don't query for it."""
+    model_service = FakeModelEndpointService()
+    app = _build_app(model_service=model_service)
+
+    async with async_client_factory(app) as client:
+        response = await client.get("/model-endpoints/llm/default/indexed-usage")
+
+    assert response.status_code == 200
+    assert response.json() == {"partitions": [], "total_files": 0}
+    assert [c for c, _ in model_service.calls] == []
+
+
+@pytest.mark.asyncio
 async def test_update_model_endpoint_forwards_only_provided_fields(async_client_factory):
     """Model endpoint updates should exclude omitted fields."""
     model_service = FakeModelEndpointService()
@@ -224,6 +272,39 @@ async def test_update_model_endpoint_forwards_only_provided_fields(async_client_
             },
         )
     ]
+
+
+@pytest.mark.asyncio
+async def test_update_model_endpoint_forwards_the_indexed_data_acknowledgement(async_client_factory):
+    """The acknowledgement is a service argument, never a column to write."""
+    model_service = FakeModelEndpointService()
+    app = _build_app(model_service=model_service)
+
+    async with async_client_factory(app) as client:
+        response = await client.put(
+            "/model-endpoints/embedder/default",
+            json={"model_name": "bge-m3", "acknowledge_indexed_data": True},
+        )
+
+    assert response.status_code == 200
+    assert model_service.calls == [
+        (
+            "update",
+            {"name": "default", "model_type": "embedder", "model_name": "bge-m3", "acknowledge_indexed_data": True},
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_update_model_endpoint_rejects_an_acknowledgement_with_nothing_to_update(async_client_factory):
+    model_service = FakeModelEndpointService()
+    app = _build_app(model_service=model_service)
+
+    async with async_client_factory(app) as client:
+        response = await client.put("/model-endpoints/embedder/default", json={"acknowledge_indexed_data": True})
+
+    assert response.status_code == 422
+    assert model_service.calls == []
 
 
 @pytest.mark.asyncio

@@ -187,6 +187,17 @@ class UpdateModelEndpointRequest(BaseModel):
     timeout: float | None = Field(default=None, gt=0)
     extra: dict[str, Any] | None = None
     is_default: bool | None = None
+    # Not stored. An embedder edit that changes its URL, model, `implementation`
+    # or `max_model_len` while partitions hold files built with it is refused
+    # (409 EMBEDDER_EDIT_AFFECTS_INDEXED_DATA) unless this says the caller knows.
+    acknowledge_indexed_data: bool = Field(
+        default=False,
+        description=(
+            "Apply an embedder change that would leave already-indexed files with vectors from the "
+            "previous model or configuration. Without it such an edit returns 409 "
+            "EMBEDDER_EDIT_AFFECTS_INDEXED_DATA."
+        ),
+    )
 
     @field_validator("name")
     @classmethod
@@ -218,9 +229,28 @@ class UpdateModelEndpointRequest(BaseModel):
     @model_validator(mode="after")
     def require_at_least_one_update(self) -> UpdateModelEndpointRequest:
         """Reject empty update payloads."""
-        if not self.model_fields_set:
+        if not self.model_fields_set - {"acknowledge_indexed_data"}:
             raise ValueError("at least one field must be provided")
         return self
+
+
+class IndexedPartitionUsage(BaseModel):
+    """One partition's already-indexed file count for an endpoint."""
+
+    partition: str
+    file_count: int
+
+
+class IndexedFileUsageResponse(BaseModel):
+    """What an in-place edit of an embedder endpoint would strand (#762 C).
+
+    Sized per partition so a confirmation can name real numbers. An empty
+    ``partitions`` means nothing is indexed against this endpoint yet, and the
+    edit carries no retrieval risk at all.
+    """
+
+    partitions: list[IndexedPartitionUsage] = []
+    total_files: int = 0
 
 
 class ModelEndpointResponse(BaseModel):

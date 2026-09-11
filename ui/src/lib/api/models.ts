@@ -52,6 +52,10 @@ export interface UpdateModelEndpointRequest {
   timeout?: number;
   extra?: Record<string, unknown>;
   is_default?: boolean;
+  /** Required by the server for an embedder edit that changes what its vectors
+   *  are while partitions hold files indexed with it (409 otherwise). Set only
+   *  after the user has seen and acknowledged what is indexed. */
+  acknowledge_indexed_data?: boolean;
 }
 
 export interface ValidateModelEndpointResponse {
@@ -111,7 +115,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function isSecretField(key: string | undefined): boolean {
+/** Whether a key holds a secret, and so comes back redacted rather than as its
+ *  stored value — which is why a diff has to leave it alone. */
+export function isSecretField(key: string | undefined): boolean {
   if (!key) return false;
   const normalized = key.toLowerCase();
   return SECRET_FIELD_NAMES.has(normalized) || SECRET_FIELD_SUFFIXES.some((suffix) => normalized.endsWith(suffix));
@@ -369,6 +375,26 @@ export function updateModelEndpoint(
     method: "PUT",
     body: JSON.stringify(data),
   });
+}
+
+/** One partition's already-indexed file count for an endpoint. */
+export interface IndexedPartitionUsage {
+  partition: string;
+  file_count: number;
+}
+
+/** What an in-place edit of an embedder endpoint would strand (#762 C).
+ *
+ *  Empty means nothing is indexed against it yet, so the edit carries no
+ *  retrieval risk and the confirmation can say so instead of warning anyway.
+ */
+export interface IndexedFileUsage {
+  partitions: IndexedPartitionUsage[];
+  total_files: number;
+}
+
+export function getModelEndpointIndexedUsage(modelType: ModelType, name: string) {
+  return request<IndexedFileUsage>(`${BASE}/${enc(modelType)}/${enc(name)}/indexed-usage`);
 }
 
 export function setDefaultModelEndpoint(modelType: ModelType, name: string) {
