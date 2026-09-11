@@ -220,7 +220,7 @@ def test_update_model_endpoint_defers_budget_validation_to_the_route(key, bad):
     It carries no ``model_type`` — that is a path parameter — so it cannot tell
     an LLM update from a non-LLM one, and validating here would reserve the key
     names for every type. The route applies the check once it knows the type;
-    ``test_phase14_admin_routers`` pins both sides of that.
+    ``test_model_endpoint_and_preset_routes`` pins both sides of that.
     """
     assert UpdateModelEndpointRequest(extra={key: bad}).extra == {key: bad}
 
