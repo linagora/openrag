@@ -37,8 +37,18 @@ _MISSING_WORKER_REF_ERROR = "Indexer worker did not receive a registered task re
 # _active_indexation_config contextvar — a different contract that happened
 # to reuse the same version string on its own branch.
 # v7: merge of both v6 lineages — neither alone is compatible with this one.
-_INDEXER_ACTOR_PROTOCOL_VERSION = "v7"
+# v8: max_restarts on the dispatcher and the workers. Ray applies actor options
+# only when it creates the actor, and get_if_exists=True reuses a detached actor
+# left by the previous release — so without a new name the restart policy would
+# silently not apply to exactly the long-running deployments that need it (#846).
+_INDEXER_ACTOR_PROTOCOL_VERSION = "v8"
 _INDEXER_POOL_DISPATCHER_ACTOR_NAME = f"IndexerPoolDispatcher-{_INDEXER_ACTOR_PROTOCOL_VERSION}"
+
+# Detached actors default to max_restarts=0, so one that dies — an OOM on a
+# large document, a node fault — stays dead and its pool slot is lost until the
+# next deploy. Marker and Docling already set 5 on both their pool and their
+# workers; the indexer tier had nothing (#846).
+_ACTOR_MAX_RESTARTS = 5
 
 
 def _explicit_indexation_selection(config: dict[str, Any] | None, key: str) -> str | None:
@@ -575,6 +585,7 @@ class IndexerPool:
                 get_if_exists=True,
                 lifetime="detached",
                 max_concurrency=max_tasks_per_worker,
+                max_restarts=_ACTOR_MAX_RESTARTS,
             ).remote(namespace)
             for i in range(pool_size)
         ]
@@ -833,6 +844,7 @@ def build_indexer_pool(namespace: str = "openrag") -> Any:
         get_if_exists=True,
         lifetime="detached",
         max_concurrency=max(1, pool_size * max_tasks_per_worker),
+        max_restarts=_ACTOR_MAX_RESTARTS,
     ).remote(
         pool_size=pool_size,
         max_tasks_per_worker=max_tasks_per_worker,
