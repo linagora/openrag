@@ -164,7 +164,7 @@ curl -X POST "$BASE_URL/indexer/partition/my-partition/file/my-file-id" \
   -F 'workspace_ids=["project-alpha", "project-beta"]'
 ```
 
-The `workspace_ids` field accepts a JSON array of workspace IDs. Each workspace must exist in the target partition, otherwise the request is rejected with a 404.
+The `workspace_ids` field accepts a JSON array of workspace IDs. Each workspace must exist in the target partition, otherwise the request is rejected with a 404. A file uploaded without `workspace_ids` and attached later through the workspace-files endpoint remains an independently indexed partition file; deleting that workspace does not remove it. Use upload-time assignment when the file should be owned and purged with its last workspace.
 
 ---
 

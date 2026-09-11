@@ -543,6 +543,19 @@ class PgDocumentRepository(DocumentRepository):
                     )
                 return True
 
+    async def mark_file_independently_indexed(self, file_id: str, partition: str) -> bool:
+        """Protect an indexed file when requested workspace attachment fails."""
+        result = await self.pool.execute(
+            """
+            UPDATE files
+            SET independently_indexed = TRUE
+            WHERE file_id = $1 AND partition_name = $2
+            """,
+            file_id,
+            partition,
+        )
+        return int(result.split()[-1]) > 0
+
     async def remove_file_from_partition(self, file_id: str, partition: str) -> bool:
         """TODO(phase-9): remove. Mirror of legacy ``remove_file_from_partition``."""
         async with self.pool.acquire() as conn:

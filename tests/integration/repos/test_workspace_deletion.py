@@ -242,7 +242,8 @@ async def test_stale_cleanup_claim_can_be_attached_again(postgres_store):
         """
         UPDATE files
         SET workspace_cleanup_claimed = TRUE,
-            workspace_cleanup_claimed_at = NOW() - INTERVAL '2 hours'
+            workspace_cleanup_claimed_at = NOW() - INTERVAL '2 hours',
+            workspace_cleanup_state = 'CLAIMED'
         WHERE file_id = 'stale'
         """,
     )
@@ -265,7 +266,8 @@ async def test_stale_destructive_cleanup_claim_cannot_be_attached(postgres_store
         UPDATE files
         SET workspace_cleanup_claimed = TRUE,
             workspace_cleanup_claimed_at = NOW() - INTERVAL '2 hours',
-            workspace_cleanup_started = TRUE
+            workspace_cleanup_started = TRUE,
+            workspace_cleanup_state = 'CLEANUP_STARTED'
         WHERE file_id = 'stale'
         """,
     )
@@ -277,6 +279,57 @@ async def test_stale_destructive_cleanup_claim_cannot_be_attached(postgres_store
         )
         is True
     )
+
+
+async def test_failed_vector_cleanup_is_durable_and_retryable(postgres_store):
+    store = postgres_store
+    await setup_workspace(store)
+    await upload(store, "retryable", workspace_ids=["ws1"])
+    svc, vectors = service(store)
+    vectors.delete.side_effect = RuntimeError("temporary vector-store failure")
+
+    result = await svc.delete_workspace("p", "ws1")
+    assert result["orphaned_files_failed"] == ["retryable"]
+    state = await store.pool.fetchrow(
+        """
+        SELECT workspace_cleanup_claimed, workspace_cleanup_started, workspace_cleanup_failed,
+               workspace_cleanup_state
+        FROM files WHERE file_id = 'retryable'
+        """,
+    )
+    assert dict(state) == {
+        "workspace_cleanup_claimed": True,
+        "workspace_cleanup_started": True,
+        "workspace_cleanup_failed": True,
+        "workspace_cleanup_state": "CLEANUP_FAILED",
+    }
+    await store.workspace_repo.create_workspace(Workspace(workspace_id="ws2", partition="p"))
+    assert await store.workspace_repo.add_files_to_workspace("ws2", ["retryable"]) == ["retryable"]
+
+    vectors.delete.side_effect = None
+    assert await svc.retry_failed_file_cleanup("retryable", "p") is True
+    assert not await store.document_repo.file_exists_in_partition("retryable", "p")
+
+
+async def test_concurrent_cleanup_retries_only_one_worker_claims_file(postgres_store):
+    store = postgres_store
+    await setup_workspace(store)
+    await upload(store, "retryable", workspace_ids=["ws1"])
+    await store.pool.execute(
+        """
+        UPDATE files
+        SET workspace_cleanup_claimed = TRUE,
+            workspace_cleanup_started = TRUE,
+            workspace_cleanup_failed = TRUE,
+            workspace_cleanup_claimed_at = NOW(),
+            workspace_cleanup_state = 'CLEANUP_FAILED'
+        WHERE file_id = 'retryable'
+        """,
+    )
+    assert await asyncio.gather(
+        store.workspace_repo.claim_failed_file_cleanup("retryable", "p"),
+        store.workspace_repo.claim_failed_file_cleanup("retryable", "p"),
+    ) in ([True, False], [False, True])
 
 
 async def test_migration_preserves_preexisting_workspace_files(postgres_store, test_rdb_config):

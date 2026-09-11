@@ -1699,8 +1699,11 @@ def _bare_worker_actor(*, save_uploaded_files: bool, worker: _RecordingWorker):
         set_failed_if_not_cancelled=SimpleNamespace(remote=AsyncMock(return_value=True)),
     )
     actor._catalog_store = SimpleNamespace(
-        workspace_repo=SimpleNamespace(),
-        document_repo=SimpleNamespace(release_content_sha256_claim=AsyncMock()),
+        workspace_repo=SimpleNamespace(add_files_to_workspace=AsyncMock(return_value=[])),
+        document_repo=SimpleNamespace(
+            release_content_sha256_claim=AsyncMock(),
+            mark_file_independently_indexed=AsyncMock(return_value=True),
+        ),
     )
     actor._save_uploaded_files = save_uploaded_files
     actor._logger = SimpleNamespace(debug=lambda *a, **k: None, warning=lambda *a, **k: None)
@@ -1713,6 +1716,46 @@ def _bare_worker_actor(*, save_uploaded_files: bool, worker: _RecordingWorker):
         resolve_prompt=_AsyncReturn("prompt"),
     )
     return actor
+
+
+@pytest.mark.asyncio
+async def test_actor_protects_file_when_some_workspace_attachments_fail(tmp_path) -> None:
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"x")
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=_RecordingWorker())
+    actor._catalog_store.workspace_repo.add_files_to_workspace = AsyncMock(
+        side_effect=[RuntimeError("ws1 unavailable"), []]
+    )
+
+    result = await actor.process_file(
+        task_id="t",
+        path=str(path),
+        metadata={"file_id": "f"},
+        partition="p",
+        workspace_ids=["ws1", "ws2"],
+    )
+
+    assert result == {"stored_count": 1, "stage": "stored"}
+    actor._catalog_store.document_repo.mark_file_independently_indexed.assert_awaited_once_with("f", "p")
+
+
+@pytest.mark.asyncio
+async def test_actor_propagates_workspace_attachment_cancellation(tmp_path) -> None:
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"x")
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=_RecordingWorker())
+    actor._catalog_store.workspace_repo.add_files_to_workspace = AsyncMock(side_effect=asyncio.CancelledError())
+
+    with pytest.raises(asyncio.CancelledError):
+        await actor.process_file(
+            task_id="t",
+            path=str(path),
+            metadata={"file_id": "f"},
+            partition="p",
+            workspace_ids=["ws1"],
+        )
+
+    actor._catalog_store.document_repo.mark_file_independently_indexed.assert_not_awaited()
 
 
 @contextmanager

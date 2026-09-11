@@ -188,6 +188,27 @@ class TestWorkspaceFiles:
         assert file_response.status_code == 200
         assert file_response.json()["documents"]
 
+    def test_delete_workspace_default_purges_workspace_owned_file(self, api_client, workspace_partition, workspace_id):
+        file_id = f"owned-{uuid.uuid4().hex[:8]}"
+        self._upload_file(
+            api_client,
+            workspace_partition,
+            file_id,
+            workspace_ids=[workspace_id],
+        )
+
+        response = api_client.delete(f"/partition/{workspace_partition}/workspaces/{workspace_id}")
+        assert response.status_code == 200
+        assert response.json()["orphaned_files_deleted"] == 1
+        assert api_client.get(f"/partition/{workspace_partition}/file/{file_id}").status_code == 404
+        search = api_client.get(
+            f"/search/partition/{workspace_partition}/file/{file_id}",
+            params={"text": f"Test content for {file_id}", "similarity_threshold": 0},
+        )
+        assert search.status_code in (200, 404)
+        if search.status_code == 200:
+            assert search.json()["documents"] == []
+
     def test_delete_workspace_keep_files(self, api_client, workspace_partition, workspace_id):
         """keep_files=true removes the workspace/membership but leaves the file indexed."""
         file_id = f"file-{uuid.uuid4().hex[:8]}"

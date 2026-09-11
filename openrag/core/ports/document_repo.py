@@ -55,6 +55,11 @@ class DocumentRepository(ABC):
     async def file_exists_in_partition(self, file_id: str, partition: str) -> bool: ...
 
     @abstractmethod
+    async def mark_file_independently_indexed(self, file_id: str, partition: str) -> bool:
+        """Protect a file from workspace-owned cleanup."""
+        ...
+
+    @abstractmethod
     async def get_content_sha256(self, file_id: str, partition: str) -> str | None: ...
 
     @abstractmethod
