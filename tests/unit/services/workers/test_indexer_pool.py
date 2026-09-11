@@ -1719,13 +1719,12 @@ def _bare_worker_actor(*, save_uploaded_files: bool, worker: _RecordingWorker):
 
 
 @pytest.mark.asyncio
-async def test_actor_protects_file_when_some_workspace_attachments_fail(tmp_path) -> None:
+@pytest.mark.parametrize("failure", [RuntimeError("ws1 unavailable"), ["f"]])
+async def test_actor_protects_file_when_some_workspace_attachments_fail(tmp_path, failure) -> None:
     path = tmp_path / "doc.txt"
     path.write_bytes(b"x")
     actor = _bare_worker_actor(save_uploaded_files=True, worker=_RecordingWorker())
-    actor._catalog_store.workspace_repo.add_files_to_workspace = AsyncMock(
-        side_effect=[RuntimeError("ws1 unavailable"), []]
-    )
+    actor._catalog_store.workspace_repo.add_files_to_workspace = AsyncMock(side_effect=[failure, []])
 
     result = await actor.process_file(
         task_id="t",

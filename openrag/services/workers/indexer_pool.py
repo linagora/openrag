@@ -496,7 +496,7 @@ class IndexerWorkerActor:
                 failures = [
                     (workspace_id, result)
                     for workspace_id, result in zip(workspace_ids, results, strict=True)
-                    if isinstance(result, Exception)
+                    if isinstance(result, Exception) or result
                 ]
                 if failures:
                     await self._catalog_store.document_repo.mark_file_independently_indexed(file_id, partition)

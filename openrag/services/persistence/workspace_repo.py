@@ -361,7 +361,7 @@ class PgWorkspaceRepository(WorkspaceRepository):
             UPDATE files
             SET workspace_cleanup_claimed = TRUE,
                 workspace_cleanup_claimed_at = NOW(),
-                workspace_cleanup_started = FALSE,
+                workspace_cleanup_started = TRUE,
                 workspace_cleanup_failed = FALSE,
                 workspace_cleanup_state = $3
             WHERE file_id = $1

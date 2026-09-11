@@ -208,7 +208,7 @@ async def test_retry_failed_file_cleanup_reclaims_and_finalizes():
     svc = _svc(wrepo=wrepo, vstore=vstore)
     assert await svc.retry_failed_file_cleanup("bad", "p") is True
     assert wrepo.retry_claimed == [("bad", "p")]
-    assert wrepo.cleanup_started == [("bad", "p")]
+    assert wrepo.cleanup_started == []
     assert wrepo.finalized == [("bad", "p")]
 
 

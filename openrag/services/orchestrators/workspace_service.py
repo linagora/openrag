@@ -178,7 +178,7 @@ class WorkspaceService:
             "kept_files": kept_files,
         }
 
-    async def _delete_file(self, file_id: str, partition: str) -> None:
+    async def _delete_file(self, file_id: str, partition: str, *, cleanup_started: bool = False) -> None:
         """Port of the legacy ``vectordb.delete_file``.
 
         Drops the file's chunks from the vector store (via the clean
@@ -186,15 +186,16 @@ class WorkspaceService:
         deletion. The catalog row was claimed before vector cleanup started,
         so a concurrent workspace attachment cannot be lost.
         """
-        vector_cleanup_started = False
+        vector_cleanup_started = cleanup_started
         try:
             ids = await self._vector_store.query_ids_by_filter(
                 self._collection,
                 {"partition": partition, "file_id": file_id},
             )
-            if not await self._workspace_repo.start_claimed_file_cleanup(file_id, partition):
-                raise RuntimeError(f"Workspace cleanup claim disappeared for {file_id}")
-            vector_cleanup_started = True
+            if not vector_cleanup_started:
+                if not await self._workspace_repo.start_claimed_file_cleanup(file_id, partition):
+                    raise RuntimeError(f"Workspace cleanup claim disappeared for {file_id}")
+                vector_cleanup_started = True
             if ids:
                 await self._vector_store.delete(ids, self._collection)
             if not await self._workspace_repo.finalize_claimed_file_cleanup(file_id, partition):
@@ -227,7 +228,7 @@ class WorkspaceService:
         """Retry a failed or abandoned cleanup while keeping attachment fenced."""
         if not await self._workspace_repo.claim_failed_file_cleanup(file_id, partition):
             return False
-        await self._delete_file(file_id, partition)
+        await self._delete_file(file_id, partition, cleanup_started=True)
         return True
 
 

@@ -197,17 +197,19 @@ class TestWorkspaceFiles:
             workspace_ids=[workspace_id],
         )
 
+        chunks_url = f"/partition/{workspace_partition}/chunks"
+        chunk_params = {"file_id": file_id, "include_embedding": False}
+        before = api_client.get(chunks_url, params=chunk_params)
+        assert before.status_code == 200
+        assert before.json()["chunks"]
+
         response = api_client.delete(f"/partition/{workspace_partition}/workspaces/{workspace_id}")
         assert response.status_code == 200
         assert response.json()["orphaned_files_deleted"] == 1
         assert api_client.get(f"/partition/{workspace_partition}/file/{file_id}").status_code == 404
-        search = api_client.get(
-            f"/search/partition/{workspace_partition}/file/{file_id}",
-            params={"text": f"Test content for {file_id}", "similarity_threshold": 0},
-        )
-        assert search.status_code in (200, 404)
-        if search.status_code == 200:
-            assert search.json()["documents"] == []
+        after = api_client.get(chunks_url, params=chunk_params)
+        assert after.status_code == 200
+        assert after.json()["chunks"] == []
 
     def test_delete_workspace_keep_files(self, api_client, workspace_partition, workspace_id):
         """keep_files=true removes the workspace/membership but leaves the file indexed."""
