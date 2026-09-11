@@ -747,6 +747,7 @@ OpenAI-compatible text completion endpoint.
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
+| `require_retrieval` | `bool` | `false` | Set to JSON `true` for evidence verification or retrieval evaluation. Partition-backed chat (including streaming) and text completions attempt retrieval even when the query router would skip it, using the original input as a fallback. Existing scope and filters still apply; matching sources and answer correctness are not guaranteed. Has no effect in direct LLM mode. |
 | `websearch` | `bool` | `false` | Augments the RAG context with live web search results. When used with a partition (`openrag-{partition}`), document and web results are combined. When used without a partition (direct LLM mode), web results are the sole context. Requires `WEBSEARCH_API_TOKEN` to be configured. See [web search configuration](/openrag/documentation/env_vars/#web-search-configuration). |
 | `spoken_style_answer` | `bool` | `false` | Generates a succinct spoken-style conversational answer based on the retrieved documents. |
 | `use_map_reduce` | `bool` | `false` | Uses a map-reduce strategy to aggregate information from multiple documents. See [map-reduce configuration](/openrag/documentation/env_vars/#map--reduce-configuration). |

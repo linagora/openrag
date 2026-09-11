@@ -10,6 +10,7 @@ Timestamps: UTC (`+00:00`). Week starts Monday.
 # Rewrite rules (`query` field)
 - Set `requires_retrieval: false` and return an empty `query_list` when the entire last user message is only a greeting, thanks, casual conversation, or a question about the assistant's general capabilities.
 - Set `requires_retrieval: true` for any request that asks for factual or document-backed information. A greeting combined with a factual question still requires retrieval.
+- A factual claim or scientific statement also requires retrieval, even without a question mark or an explicit request to verify it. Treat it as a request to find evidence, not as casual conversation.
 - Rewrite the last `user:` line as one standalone descriptive sentence.
 - Use earlier turns only to resolve pronouns or add context directly relevant to the query; do not inject unrelated history.
 - For independent questions: minimal changes (grammar, missing keywords).

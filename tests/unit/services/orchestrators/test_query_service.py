@@ -1768,3 +1768,127 @@ def test_split_leading_system_prompt_returns_none_when_every_system_turn_is_empt
 
     assert pinned is None
     assert rest == [{"role": "user", "content": "hi"}]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["chat", "chat_stream", "complete"])
+@pytest.mark.parametrize("require_retrieval", [True, False, None, "true", 1])
+async def test_require_retrieval_overrides_skip_only_when_explicitly_true(operation, require_retrieval):
+    claim = "A deficiency of vitamin B12 increases blood levels of homocysteine."
+    llm = FakeLLM(chat_responses=[json.dumps({"requires_retrieval": False, "query_list": []})])
+    retrieval = FakeRetrieval()
+    svc = _svc(mode="ChatBotRag", llm=llm, retrieval=retrieval)
+    metadata = {"include_all_retrieved_sources": True}
+    if require_retrieval is not None:
+        metadata["require_retrieval"] = require_retrieval
+    payload = {"metadata": metadata}
+    if operation == "complete":
+        payload["prompt"] = claim
+    else:
+        payload["messages"] = [{"role": "user", "content": claim}]
+    kwargs = {
+        "partitions": ["p"],
+        "payload": payload,
+        "prepare_sources": lambda docs, web: [{"id": d.metadata["_id"]} for d in docs],
+    }
+    if operation != "complete":
+        kwargs["model_name"] = "m"
+    if operation == "chat_stream":
+        events = [
+            json.loads(line[6:])
+            async for line in svc.chat_stream(**kwargs)
+            if line.startswith("data: ") and line.strip() != "data: [DONE]"
+        ]
+        extra = next(event["extra"] for event in reversed(events) if event.get("extra"))
+    else:
+        extra = (await getattr(svc, operation)(**kwargs))["extra"]
+    if require_retrieval is True:
+        assert len(retrieval.retrieve_multi_calls) == 1
+        call = retrieval.retrieve_multi_calls[0]
+        assert call["partitions"] == ["p"]
+        assert call["search_queries"].query_list[0].query == claim
+        assert extra["all_retrieved_sources"] == [{"id": "c1"}]
+    else:
+        assert retrieval.retrieve_multi_calls == []
+        assert extra["all_retrieved_sources"] == []
+
+
+@pytest.mark.asyncio
+async def test_require_retrieval_preserves_workspace_scope():
+    retrieval = FakeRetrieval()
+    svc = _svc(
+        mode="ChatBotRag",
+        retrieval=retrieval,
+        llm=FakeLLM(chat_responses=[json.dumps({"requires_retrieval": False, "query_list": []})]),
+        workspace=FakeWorkspace(scope=WorkspaceScope(workspace_id="w1", partition="p1", file_ids=["allowed-file"])),
+    )
+    await svc._prepare_chat(
+        ["p1", "p2"],
+        {
+            "messages": [{"role": "user", "content": "Verify this claim."}],
+            "metadata": {"require_retrieval": True, "workspace": "w1"},
+        },
+    )
+    call = retrieval.retrieve_multi_calls[0]
+    assert call["partitions"] == ["p1"]
+    assert call["filter_params"] == {"file_id": ["allowed-file"]}
+
+
+@pytest.mark.asyncio
+async def test_require_retrieval_does_not_bypass_missing_workspace():
+    retrieval = FakeRetrieval()
+    svc = _svc(
+        mode="ChatBotRag",
+        retrieval=retrieval,
+        workspace=FakeWorkspace(scope=None),
+        llm=FakeLLM(chat_responses=[json.dumps({"requires_retrieval": False, "query_list": []})]),
+    )
+    with pytest.raises(WorkspaceNotFoundError):
+        await svc._prepare_chat(
+            ["p"],
+            {
+                "messages": [{"role": "user", "content": "Verify this claim."}],
+                "metadata": {"require_retrieval": True, "workspace": "missing"},
+            },
+        )
+    assert retrieval.retrieve_multi_calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("has_query", [False, True])
+async def test_require_retrieval_keeps_generated_filters_and_allows_no_matches(has_query):
+    query = {
+        "query": "papers published in 2020",
+        "temporal_filters": [
+            {"field": "created_at", "operator": ">=", "value": "2020-01-01T00:00:00+00:00"},
+        ],
+    }
+    retrieval = FakeRetrieval(chunks=[])
+    svc = _svc(
+        mode="ChatBotRag",
+        retrieval=retrieval,
+        llm=FakeLLM(
+            chat_responses=[
+                json.dumps(
+                    {
+                        "requires_retrieval": has_query,
+                        "query_list": [query] if has_query else [],
+                    }
+                )
+            ]
+        ),
+    )
+    result = await svc._prepare_chat(
+        ["p"],
+        {
+            "messages": [{"role": "user", "content": "Find papers from 2020."}],
+            "metadata": {"require_retrieval": True},
+        },
+    )
+    assert len(retrieval.retrieve_multi_calls) == 1
+    if has_query:
+        generated = retrieval.retrieve_multi_calls[0]["search_queries"].query_list[0]
+        assert generated.query == query["query"]
+        assert generated.to_milvus_filter()
+    assert result.docs == []
+    assert result.retrieved_docs == []
