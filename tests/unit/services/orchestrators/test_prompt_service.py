@@ -371,6 +371,18 @@ class TestCrud:
         )
         assert p.id
 
+    async def test_query_contextualizer_accepts_calendar_anchors_placeholder(self):
+        """``{calendar_anchors}`` is rendered by QueryService.generate_query; a
+        contextualizer prompt using it must pass write-time validation, and the
+        bundled template does."""
+        svc = _service()
+        p = await svc.create_prompt(
+            prompt_type="query_contextualizer",
+            name="anchored",
+            content="Date: {current_date}\n{calendar_anchors}\nLang: {query_language}",
+        )
+        assert p.id
+
     async def test_create_rejects_unknown_placeholder(self):
         svc = _service()
         with pytest.raises(ValidationError) as exc:

@@ -4,6 +4,7 @@ Output shape (return this JSON object, nothing else):
 {{"requires_retrieval": <true|false>, "query_list": [ {{"query": "<rewritten search string>", "temporal_filters": <list of predicates | null>}} ]}}
 
 Current date: {current_date}
+{calendar_anchors}
 Language for `query` field: {query_language}
 Timestamps: UTC (`+00:00`). Week starts Monday.
 
@@ -29,14 +30,10 @@ Emit `temporal_filters` when the user refers to WHEN a document was created / pu
 Each predicate: `field="created_at"`, `operator` ∈ {{`>=`, `>`, `<=`, `<`}}, `value` = ISO 8601 UTC.
 Predicates are AND-combined. Always use half-open intervals: `>= start` AND `< next_start`.
 
-Date resolution (vs Current date):
-- today / now → `[today, tomorrow)`
-- yesterday → `[yesterday, today)`
-- this / last week → Monday-to-Monday
-- this / last month → 1st-to-1st
-- this / last year → Jan 1-to-Jan 1
-- past N days/weeks/months/years → `[Current − N, tomorrow)`
-- recent / latest → past 90 days (~3 months, NOT a year): `[Current − 90 days, tomorrow)`
+Date resolution:
+- Relative periods (today, yesterday, this / last week, month, year, past N, recent) → copy the matching anchor under Current date verbatim; never recompute it.
+- Explicit dates (e.g. January 2024, 2023, Q3 2025) → `[start, next start)` computed from the stated date.
+- recent / latest → past 90 days (~3 months, NOT a year)
 - since X → ONE predicate only: `>= X`. Do NOT add an upper bound.
 - before X → one predicate `< X`
 - bare MONTH (no year) → nearest past occurrence

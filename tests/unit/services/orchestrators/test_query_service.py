@@ -1768,3 +1768,24 @@ def test_split_leading_system_prompt_returns_none_when_every_system_turn_is_empt
 
     assert pinned is None
     assert rest == [{"role": "user", "content": "hi"}]
+
+
+@pytest.mark.asyncio
+async def test_generate_query_hands_the_contextualizer_precomputed_calendar_anchors():
+    """ "Last week" must reach Milvus as Monday-to-Monday. Mistral Small resolved
+    it to the past seven days when left to do the arithmetic, so the system
+    prompt now carries the boundaries pre-computed through the template's
+    ``{calendar_anchors}`` placeholder.
+    """
+    payload = json.dumps({"requires_retrieval": True, "query_list": [{"query": "q", "temporal_filters": None}]})
+    llm = FakeLLM(chat_responses=[payload])
+    svc = _svc(llm=llm, mode="ChatBotRag")
+
+    await svc.generate_query([{"role": "user", "content": "résume mes échanges de la semaine dernière"}])
+
+    system = llm.chat_calls[0][0][0]
+    assert system["role"] == "system"
+    assert "Calendar anchors (use verbatim, do not recompute)" in system["content"]
+    assert "- last week [" in system["content"]
+    # The bundled template points its resolution rules at those anchors.
+    assert "copy the matching anchor under Current date verbatim" in system["content"]
