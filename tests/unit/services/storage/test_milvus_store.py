@@ -121,6 +121,61 @@ async def test_wildcard_repair_cannot_delete_healthy_tenants(store):
     catalog.get_indexed_documents.assert_not_awaited()
 
 
+@pytest.mark.parametrize("phase", ["creation", "next"])
+async def test_metadata_scan_does_not_spin_when_shutdown_cancels_all_tasks(store, monkeypatch, phase):
+    started = threading.Event()
+    release = threading.Event()
+    iterator = MagicMock()
+    children = []
+    create_task = asyncio.create_task
+    shield = asyncio.shield
+    cancelled_awaits = 0
+
+    def track(coro):
+        child = create_task(coro)
+        children.append(child)
+        return child
+
+    def bounded_shield(task):
+        # Fail deterministically instead of hanging the suite if a cancelled
+        # cleanup task is retried forever during event-loop shutdown.
+        nonlocal cancelled_awaits
+        if task.cancelled():
+            cancelled_awaits += 1
+            assert cancelled_awaits <= 1, "Retrying an already cancelled cleanup task"
+        return shield(task)
+
+    def block():
+        started.set()
+        assert release.wait(5)
+        return []
+
+    def create(**kwargs):
+        if phase == "creation":
+            block()
+        return iterator
+
+    monkeypatch.setattr(asyncio, "create_task", track)
+    monkeypatch.setattr(asyncio, "shield", bounded_shield)
+    store._client.query_iterator.side_effect = create
+    if phase == "next":
+        iterator.next.side_effect = block
+    pages = store.iter_chunk_metadata("default", partition="a")
+    consumer = create_task(anext(pages))
+    try:
+        assert await asyncio.to_thread(started.wait, 5)
+        consumer.cancel()
+        await asyncio.sleep(0)
+        assert len(children) >= 2
+        for child in children:
+            child.cancel()
+        consumer.cancel()
+    finally:
+        release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await consumer
+
+
 async def test_metadata_scan_yields_pages_without_draining_and_closes(store):
     iterator = MagicMock()
     iterator.next.side_effect = [[{"_id": 1, "file_id": "f"}], [{"_id": 2, "file_id": "g"}], []]

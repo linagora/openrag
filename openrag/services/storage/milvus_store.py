@@ -1505,6 +1505,10 @@ class MilvusVectorStore(VectorStore):
                     await asyncio.shield(closing)
                     break
                 except asyncio.CancelledError:
+                    # Event-loop shutdown may cancel the cleanup task itself;
+                    # retrying an already cancelled task would spin forever.
+                    if closing.cancelled():
+                        raise
                     cancelled = True
             if cancelled:
                 raise asyncio.CancelledError
