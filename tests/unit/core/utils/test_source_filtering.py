@@ -260,8 +260,8 @@ def _parse_finish_sources(sse_lines: list[str]) -> list:
         if line.startswith("data: ") and line.strip() != "data: [DONE]":
             data = json.loads(line[len("data: ") :])
             extra = data.get("extra")
-            if extra and extra != "{}":
-                return json.loads(extra).get("sources", [])
+            if extra:
+                return extra.get("sources", [])
     return []
 
 
@@ -609,8 +609,8 @@ class TestStreamClosedWithoutDone:
             if line.startswith("data: ") and line.strip() != "data: [DONE]":
                 data = json.loads(line[len("data: ") :])
                 extra = data.get("extra")
-                if extra and extra != "{}":
-                    finish_extra = json.loads(extra)
+                if extra:
+                    finish_extra = extra
                     break
         assert finish_extra is not None
         assert finish_extra.get("truncated") is True
@@ -709,9 +709,46 @@ def _parse_finish_extra(sse_lines: list[str]) -> dict:
         if line.startswith("data: ") and line.strip() != "data: [DONE]":
             data = json.loads(line[len("data: ") :])
             extra = data.get("extra")
-            if extra and extra != "{}":
-                return json.loads(extra)
+            if extra:
+                return extra
     return {}
+
+
+class TestStreamExtraShape:
+    """`extra` is a nested JSON object on every streamed chunk, never a string.
+
+    Worth pinning separately from the source-content tests: the empty sentinel a
+    mid-stream chunk carries changed from `"{}"` (a truthy string) to `{}` (a
+    falsy object), so any client guarding on `if chunk.extra:` now takes the
+    other branch. That flip is invisible to a test that only reads sources.
+    """
+
+    SOURCES = [{"source_type": "document", "n": 1}]
+
+    @pytest.mark.asyncio
+    async def test_every_chunk_carries_extra_as_an_object(self):
+        # Long enough to push past the 100-char citation-tag buffer, so at least
+        # one mid-stream content chunk is actually emitted to the client.
+        lines = [
+            _make_chunk("Answer body. " * 40),
+            _make_chunk("\n[Sources: 1]"),
+            _make_finish(),
+            DONE_LINE,
+        ]
+        result = await _collect(stream_with_source_filtering(_fake_stream(lines), self.SOURCES, "test-model"))
+
+        payloads = [
+            json.loads(line[len("data: ") :])
+            for line in result
+            if line.startswith("data: ") and line.strip() != "data: [DONE]"
+        ]
+        assert payloads, "stream produced no data frames"
+        assert all(isinstance(p["extra"], dict) for p in payloads), [type(p["extra"]) for p in payloads]
+
+        # Mid-stream chunks carry the empty sentinel; only the tail/finish chunks
+        # carry sources. `{}` is falsy, so `if chunk.extra:` now skips the former.
+        assert [p for p in payloads if not p["extra"]], "no mid-stream chunk carried the empty sentinel"
+        assert payloads[-1]["extra"]["sources"] == self.SOURCES
 
 
 class TestStreamWithManySources:

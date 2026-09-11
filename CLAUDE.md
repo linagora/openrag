@@ -136,13 +136,72 @@ The RAG pipeline filters out false-positive sources by having the LLM self-repor
 4. `filter_sources_by_citations()` (`openrag/core/utils/source_filtering.py`) filters the source metadata to only include cited sources; if no `[Sources: ...]` tag is found at all, every presented source is kept instead (a missing tag means the model didn't report citations, not that it used none)
 5. For streaming, the OpenAI router buffers the last 100 chars to catch the sources tag before it reaches the client
 
-The `extra` field in API responses is a JSON string with these keys:
+The `extra` field in API responses is a JSON object with these keys. It was a
+JSON-encoded *string* up to and including v2.2.0 — a breaking change for readers
+written against the old shape, which must stop calling `json.loads` on it:
 
 - `sources` — legacy field, kept as-is for existing clients (e.g. Twake): cited sources, or every presented source as a fallback when no `[Sources: ...]` tag was found.
 - `presented_sources` — every source actually shown to the LLM (after `format_context()`/`format_web_context()` truncation), regardless of citation. Always present; a client can fall back to this ("sources consulted") when nothing was cited.
 - `cited_sources` — strictly what the model cited via the tag; unlike `sources`, this never falls back to "everything" — it's `[]` whenever no tag was found. Chainlit is expected to move to this field, falling back to `presented_sources` in its UI when `cited_sources` is empty.
 - `citations_reported` (bool) — `true` only when the model actually emitted a `[Sources: ...]` tag (even an empty/`none` one); `false` when the tag was missing entirely, which is the only case where `sources` falls back to keeping everything. Lets a client tell "the model cited every source" apart from "the model didn't report citations at all".
 - `all_retrieved_sources` — the complete retrieval set, captured before the context-token-budget truncation, so it also includes documents/web results that didn't fit in the prompt (and, on the map-reduce path, the original retrieved docs rather than the LLM-generated summaries). Only included when the request sets `metadata.include_all_retrieved_sources: true` — it's debug/eval telemetry, gated off by default since retrieval is uncapped up to `retriever.top_k` while the context budget only fits a handful of documents.
+
+Each document source entry (`build_document_source_link`) is shaped:
+
+```json
+{
+  "source_type": "document",
+  "chunk": { "...the chunk's metadata, copied verbatim..." },
+  "rerank_score": 0.646,
+  "chunk_url": "https://host/extract/<chunk id>",
+  "file_url":  "https://host/static/<chunk id>"
+}
+```
+
+`chunk` holds what the chunk carries; the siblings are what the server computed about
+it. Two consequences worth knowing: `source_type`, `chunk_url` and `file_url` are
+authoritative and are scrubbed from `chunk` as well as overridden at the top level, so
+metadata can't spoof them in either place (the guard is structural now, not a manual
+overwrite); and `file_url` is still omitted entirely when the chunk has no `source`.
+
+Web entries (`source_type: "web"`) are unchanged and flat — `url`, `title`, `snippet`,
+no `chunk`. Clients switch on `source_type`, as before.
+
+**`rerank_score`** — the raw score the reranker gave that chunk — sits beside `chunk`,
+not inside it: it describes how *this* query ranked the chunk, and the same chunk
+retrieved by a different query scores differently.
+
+It gets there via `ScoredChunk` (`openrag/core/models/retrieval_result.py`), a `Chunk`
+subclass holding `vector_score` / `rerank_score` / `combined_score` as typed fields.
+`_rerank_chunks` (`openrag/core/retrieval/pipeline.py`) returns `ScoredChunk.from_chunk(...)`
+instead of the bare chunk, and `ScoredChunk.to_langchain()` folds the non-null scores into
+metadata at the boundary the API response is built from, and `build_document_source_link`
+lifts them back out to sit beside `chunk`. Because it subclasses `Chunk`, every
+`list[Chunk]` signature through retrieval, expansion and RRF stays valid. Only
+`rerank_score` is populated today — the vector score is still dropped in
+`vector_store_searcher._dict_to_chunk` (`score` is in its `skip` set), and nothing computes
+a combined score.
+
+The three key names are shared as `RETRIEVAL_SCORE_KEYS` (`core/utils/consts.py`) because
+promoting a metadata key to an authoritative sibling is only safe if nothing else can put it
+there. Milvus collections have a dynamic field, so upload metadata is persisted verbatim —
+`{"rerank_score": 0.99}` would come back on every read. `_dict_to_chunk` therefore drops
+those keys along with `score`, and `ScoredChunk.to_langchain()` clears them from inherited
+metadata before stamping its typed fields. A score in an API response was set by *that*
+retrieval, never by whoever uploaded the file.
+
+Three caveats:
+
+- The key is **absent**, not null, when no reranker ran (reranker disabled, or a web
+  source — web results are built separately and never reranked). Such chunks stay plain
+  `Chunk`s and carry no score field at all.
+- Its scale is provider-dependent: Infinity/vLLM return a `relevance_score`, TEI a
+  `score` with `raw_scores: false` (0–1). Compare within one response, never across
+  deployments, and don't threshold on an absolute value.
+- On the multi-query path it does **not** explain the ordering. `get_relevant_docs`
+  reranks each sub-query's list separately and then fuses them with RRF, so the final
+  order is the RRF rank; a chunk retrieved by several sub-queries keeps the score from
+  whichever list RRF saw first.
 
 ### API Routers (`openrag/api/routers/`)
 

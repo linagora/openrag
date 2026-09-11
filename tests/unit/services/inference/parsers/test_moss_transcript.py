@@ -36,6 +36,18 @@ def test_normalizes_a_complete_speakerless_compact_turn():
     assert normalize_moss_speaker_aware_transcript(transcript) == "Hello"
 
 
+def test_speakerless_compact_uses_trailing_boundary_after_spoken_numeric_token():
+    transcript = "[1] The [2024] roadmap is ready [2]"
+
+    assert normalize_moss_speaker_aware_transcript(transcript) == "The [2024] roadmap is ready"
+
+
+def test_normalizes_three_speakerless_compact_turns_with_shared_boundaries():
+    transcript = "[1] A [2][2] B [3][3] C [4]"
+
+    assert normalize_moss_speaker_aware_transcript(transcript) == "A\nB\nC"
+
+
 def test_normalizes_repeated_speakerless_compact_turns_with_shared_boundaries():
     transcript = "[1] A [2][2] B [3]"
 
@@ -102,10 +114,45 @@ def test_preserves_speaker_only_output_with_an_incomplete_unlabeled_compact_turn
     assert normalize_moss_speaker_aware_transcript(transcript) == transcript
 
 
+@pytest.mark.parametrize(
+    "transcript",
+    [
+        "[1] A [2][2][2] B [3]",
+        # The middle token can pair either way, so the split stays ambiguous
+        # even when the three values are not identical.
+        "[1] A [2][2][3] B [3]",
+        "[1] A [2][3][3] B [3]",
+        # A token flush against the initial or trailing boundary is equally
+        # unresolvable, and must not be emitted as spoken text.
+        "[1][1] A [2]",
+        "[1] A [2][2]",
+        "[2][2] [2]",
+        "[1] A [2] [3] B [4]",
+    ],
+)
+def test_preserves_speakerless_compact_turns_with_overlapping_boundaries(transcript):
+    assert normalize_moss_speaker_aware_transcript(transcript) == transcript
+
+
 def test_preserves_spoken_bracketed_numbers_in_a_complete_turn():
     transcript = "[00:00:01.000] [S01] The [2024] roadmap is ready. [00:00:02.000]"
 
     assert normalize_moss_speaker_aware_transcript(transcript) == "The [2024] roadmap is ready."
+
+
+@pytest.mark.parametrize(
+    ("transcript", "expected"),
+    [
+        ("[1] Keep [12] items [2]", "Keep [12] items"),
+        ("[1] Keep [note] here [2]", "Keep [note] here"),
+        (
+            "[1] repeat repeat [2024] unchanged [2]",
+            "repeat repeat [2024] unchanged",
+        ),
+    ],
+)
+def test_preserves_all_spoken_content_during_normalization(transcript, expected):
+    assert normalize_moss_speaker_aware_transcript(transcript) == expected
 
 
 @pytest.mark.parametrize(
