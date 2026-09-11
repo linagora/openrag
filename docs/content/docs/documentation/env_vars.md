@@ -467,7 +467,7 @@ there too.
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
 | `LOG_LEVEL` | `str` | `INFO` | Minimum level emitted. `DEBUG` logs user queries and other request data; keep it for short-lived troubleshooting. |
-| `LOG_FORMAT` | `text` \| `json` | `text` | `text` is the colorized human format below. `json` writes one flat JSON object per line, no colour, for log collectors; it also routes every library's stdlib logs through the same sink (the four named ones — `asyncio`, `httpcore`, `httpx`, `urllib3` — capped at WARNING), so with a collector attached `LOG_LEVEL=DEBUG` is a troubleshooting setting, not a production one. |
+| `LOG_FORMAT` | `text` \| `json` | `text` | `text` is the colorized human format below. `json` writes one flat JSON object per line, no colour, for log collectors; it also routes every library's stdlib logs through the same sink (the five named ones — `asyncio`, `httpcore`, `httpx`, `urllib3` and `openai` — capped at WARNING), so with a collector attached `LOG_LEVEL=DEBUG` is a troubleshooting setting, not a production one. |
 
 #### Text format
 ```bash title="Logging message in the terminal..."
@@ -511,6 +511,7 @@ The following environment variables control Ray's logging behavior, task retry s
 | Variable | Type | value | Description |
 |----------|------|---------|-------------|
 | `RAY_DEDUP_LOGS` | `number` | `0` | Turns off Ray log deduplication that appears across multiple processes. Set to `0` to see all logs from each process. Required (`0`) with `LOG_FORMAT=json`: the deduplicated survivor is rewritten as `{…} [repeated 2x across cluster]`, which is no longer JSON. The logging overlay and the Helm chart set it. |
+| `RAY_COLOR_PREFIX` | `number` | `0` | Turns off the ANSI colorization of Ray's `(Actor pid=N)` relay prefix, which is applied even when the output is a pipe. Required (`0`) with `LOG_FORMAT=json`, or every relayed worker line reaches the collector prefixed with escape sequences and fails to parse as JSON. |
 | `RAY_ENABLE_RECORD_ACTOR_TASK_LOGGING` | `number` | `1` | Enables logs at task level in the Ray dashboard for better debugging and monitoring. |
 | `RAY_task_retry_delay_ms` | `number` | `3000` | Delay (in milliseconds) before retrying a failed task. Controls the wait time between retry attempts. |
 | `RAY_ENABLE_UV_RUN_RUNTIME_ENV` | `number` | `0` | Controls UV runtime environment integration. **Critical**: Must be set to `0` when using the newest version of UV to avoid compatibility issues. |

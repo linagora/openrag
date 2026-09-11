@@ -169,6 +169,31 @@ def test_json_record_omits_exception_key_without_one(json_lines):
     assert "exception" not in payload
 
 
+def test_json_record_omits_exception_key_for_an_empty_exc_info(json_lines):
+    """``exc_info=True`` outside an ``except`` block must not fake a traceback.
+
+    stdlib hands such a record ``(None, None, None)``, from which loguru still
+    builds a RecordException; formatting it yields ``"NoneType: None\n"``,
+    which Grafana would render as a traceback. Every intercepted library can
+    produce this shape, so the JSON sink has to reject it.
+    """
+    logger.opt(exception=(None, None, None)).error("no exception attached")
+    (payload,) = json_lines
+    assert "exception" not in payload
+
+
+def test_json_mode_omits_exception_key_for_stdlib_empty_exc_info(capsys):
+    config = SimpleNamespace(verbose=SimpleNamespace(level="INFO", format="json"))
+    try:
+        get_logger(config)
+        logging.getLogger("somelib").error("nothing raised", exc_info=True)
+        payload = json.loads(capsys.readouterr().err)
+        assert payload["msg"] == "nothing raised"
+        assert "exception" not in payload
+    finally:
+        _restore_default_logger()
+
+
 def test_json_sink_writes_one_parsable_line_without_ansi(capsys):
     handler_id = logger.add(json_sink, level="DEBUG")
     try:
@@ -295,7 +320,7 @@ def test_json_mode_quiets_chatty_library_loggers(capsys):
 
 
 def test_json_mode_ships_unlisted_library_loggers_at_log_level(capsys):
-    """Only the four named loggers are capped; anything else follows
+    """Only the five named loggers are capped; anything else follows
     ``LOG_LEVEL`` (that is what makes ``DEBUG`` a troubleshooting setting)."""
     config = SimpleNamespace(verbose=SimpleNamespace(level="DEBUG", format="json"))
     try:

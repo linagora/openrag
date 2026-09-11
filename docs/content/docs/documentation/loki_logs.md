@@ -55,8 +55,9 @@ no `level` label.
 | `RAY_LOG_TO_STDERR` | unset | Set to `1` by the chart when `ray.enabled=true`: workers write to their own pod's stderr instead of the API driver's relay. See the Kubernetes section. |
 
 JSON mode also routes every library's stdlib logs to the collector (the
-four named ones — `asyncio`, `httpcore`, `httpx`, `urllib3` — capped at
-WARNING), so with a collector attached `LOG_LEVEL=DEBUG` is a
+five named ones — `asyncio`, `httpcore`, `httpx`, `urllib3` and
+`openai` — capped at WARNING, so the OpenAI client's per-request dump of
+the outbound prompt stays out of the collector), so with a collector attached `LOG_LEVEL=DEBUG` is a
 troubleshooting setting, not a production one: everything else logs at the
 level you set, and the ingest volume follows.
 
@@ -191,9 +192,10 @@ them with a `stage.drop` on lines that are not JSON if the volume matters.
 | One indexing task | `{app="openrag"} \| task_id="<task_id>"` |
 | Worker lines only | `{app="openrag"} \| ray_actor!=""` |
 
-`ray_actor` can be present as an empty value on non-worker lines (the
-structured-metadata stage always sets the key), so `| ray_actor!=""` is the
-right filter to isolate worker lines, as used above.
+`ray_actor` is set only on worker lines: the `stage.regex` that extracts it
+sits inside `stage.match`, so on an API line the key is absent rather than
+empty. `| ray_actor!=""` matches both shapes and is the right filter either
+way, as used above.
 
 ## Upgrading from a release with file logs
 
