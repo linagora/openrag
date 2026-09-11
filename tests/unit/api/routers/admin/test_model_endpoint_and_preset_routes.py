@@ -158,7 +158,7 @@ def _build_app(
     model_service: FakeModelEndpointService | None = None,
     preset_service: FakePresetService | None = None,
 ) -> FastAPI:
-    """Build a small app with Phase 14 routers and fake dependencies."""
+    """Build a small app with the model endpoint and preset routers and fake dependencies."""
     app = FastAPI()
     app.include_router(model_endpoints.router, prefix="/model-endpoints")
     app.include_router(presets.router, prefix="/presets")
