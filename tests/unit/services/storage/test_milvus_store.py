@@ -34,6 +34,40 @@ from services.storage.milvus_store import (
 # ---------------------------------------------------------------------------
 
 
+async def test_metadata_scan_yields_pages_without_draining_and_closes(store):
+    iterator = MagicMock()
+    iterator.next.side_effect = [[{"_id": 1, "file_id": "f"}], [{"_id": 2, "file_id": "g"}], []]
+    store._client.query_iterator.return_value = iterator
+    pages = store.iter_chunk_metadata("test_collection", partition='tenant"a', batch_size=2)
+    assert await anext(pages) == [{"_id": 1, "file_id": "f"}]
+    assert iterator.next.call_count == 1
+    await pages.aclose()
+    iterator.close.assert_called_once()
+    kwargs = store._client.query_iterator.call_args.kwargs
+    assert kwargs["filter"] == 'partition == "tenant\\"a"'
+    assert kwargs["batch_size"] == 2
+    assert kwargs["output_fields"] == ["_id", "partition", "file_id", "indexed_at"]
+    assert kwargs["consistency_level"] == "Strong"
+
+
+async def test_metadata_scan_closes_on_error_and_empty_filter_reads_nothing(store):
+    assert [p async for p in store.iter_chunk_metadata("default", partition="a", file_ids=[])] == []
+    store._client.query_iterator.assert_not_called()
+    iterator = MagicMock()
+    iterator.next.side_effect = RuntimeError("scan failed")
+    store._client.query_iterator.return_value = iterator
+    with pytest.raises(RuntimeError, match="scan failed"):
+        _ = [p async for p in store.iter_chunk_metadata("default", partition="a")]
+    iterator.close.assert_called_once()
+
+
+async def test_close_releases_sync_client_even_if_async_client_fails(store):
+    store._async_client.close = AsyncMock(side_effect=RuntimeError("close failed"))
+    with pytest.raises(RuntimeError, match="close failed"):
+        await store.aclose()
+    store._client.close.assert_called_once()
+
+
 def test_milvus_search_error_keeps_its_http_status_and_details(store: MilvusVectorStore) -> None:
     """Mixed import roots must not turn a storage error into UNEXPECTED_ERROR (#885)."""
     store._async_client.hybrid_search = AsyncMock(side_effect=MilvusException(1, "search unavailable"))

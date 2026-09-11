@@ -22,7 +22,7 @@ columns is a post-refactoring feature.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from typing import TYPE_CHECKING, Any
 
 from core.models.catalog import INDEXING_CONTENT_CLAIM_TOKEN_PREFIX, DocumentRecord, DocumentStatus
@@ -54,6 +54,41 @@ class PgDocumentRepository(DocumentRepository):
         return self._pool_getter()
 
     # ── DocumentRepository port methods ──────────────────────────────
+
+    async def get_indexed_documents(self, keys: Collection[tuple[str, str]]) -> dict[tuple[str, str], datetime]:
+        if not keys:
+            return {}
+        partitions, file_ids = zip(*keys)
+        rows = await self.pool.fetch(
+            """
+            SELECT f.partition_name, f.file_id, f.indexed_at
+            FROM files f
+            JOIN unnest($1::text[], $2::text[]) AS requested(partition_name, file_id)
+              ON f.partition_name = requested.partition_name AND f.file_id = requested.file_id
+            """,
+            list(partitions),
+            list(file_ids),
+        )
+        return {(r["partition_name"], r["file_id"]): r["indexed_at"] for r in rows}
+
+    async def list_indexed_documents(
+        self, partition: str, *, before: datetime, after: str | None = None, limit: int = 500
+    ) -> list[str]:
+        if not partition or not 1 <= limit <= 1000:
+            raise ValueError("A partition and a page size between 1 and 1000 are required")
+        rows = await self.pool.fetch(
+            """
+            SELECT file_id FROM files
+            WHERE partition_name = $1 AND indexed_at < $2
+              AND ($3::text IS NULL OR file_id > $3)
+            ORDER BY file_id LIMIT $4
+            """,
+            partition,
+            before,
+            after,
+            limit,
+        )
+        return [r["file_id"] for r in rows]
 
     async def create_document(self, doc: DocumentRecord) -> DocumentRecord:
         """Insert a document row keyed by (file_id, partition).

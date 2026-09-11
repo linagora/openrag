@@ -36,7 +36,7 @@ from __future__ import annotations
 import asyncio
 import secrets
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any
 
@@ -199,6 +199,13 @@ class MilvusVectorStore(VectorStore):
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
+
+    async def aclose(self) -> None:
+        """Release both clients when a standalone operator command finishes."""
+        try:
+            await self._async_client.close()
+        finally:
+            await asyncio.to_thread(self._client.close)
 
     async def initialize(self, embedding_dimension: int) -> None:
         """Materialise the backing Milvus collection.
@@ -1442,6 +1449,32 @@ class MilvusVectorStore(VectorStore):
         expr = self._build_filter_expr(filters)
         rows = await asyncio.to_thread(self._iter_query, expr, ["_id"])
         return [self._milvus_id_to_str(r["_id"]) for r in rows if "_id" in r]
+
+    async def iter_chunk_metadata(
+        self, collection: str, *, partition: str, file_ids: list[str] | None = None, batch_size: int = 500
+    ) -> AsyncIterator[list[dict[str, Any]]]:
+        self._resolve_collection(collection)
+        if not partition or not 1 <= batch_size <= 1000:
+            raise ValueError("A partition and a batch size between 1 and 1000 are required")
+        if file_ids == []:
+            return
+        filters: dict[str, Any] = {"partition": partition}
+        if file_ids is not None:
+            filters["file_id"] = file_ids
+        iterator = await asyncio.to_thread(
+            self._client.query_iterator,
+            collection_name=self._collection_name,
+            filter=self._build_filter_expr(filters),
+            output_fields=["_id", "partition", "file_id", "indexed_at"],
+            batch_size=batch_size,
+            consistency_level="Strong",
+            timeout=self._timeout,
+        )
+        try:
+            while page := await asyncio.to_thread(iterator.next):
+                yield page
+        finally:
+            await asyncio.to_thread(iterator.close)
 
     async def query_chunks_by_filter(
         self,

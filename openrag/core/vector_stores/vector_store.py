@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING, Any
 
 from core.models.chunk import Chunk
@@ -13,6 +14,12 @@ if TYPE_CHECKING:
 
 class VectorStore(ABC):
     """Base class for vector database backends."""
+
+    def iter_chunk_metadata(
+        self, collection: str, *, partition: str, file_ids: list[str] | None = None, batch_size: int = 500
+    ) -> AsyncIterator[list[dict[str, Any]]]:
+        """Stream scalar-only pages for reconciliation; never load a corpus into memory."""
+        raise NotImplementedError
 
     @abstractmethod
     async def upsert(

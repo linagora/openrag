@@ -17,6 +17,11 @@ from prometheus_client import (
 
 # -- Request metrics --------------------------------------------------------
 
+ORPHAN_CHUNKS_DROPPED = Counter(
+    "openrag_retrieval_orphan_chunks_dropped_total",
+    "Retrieved chunks dropped because their partition and file are absent from the catalog",
+)
+
 REQUEST_COUNT = Counter(
     "openrag_http_requests_total",
     "Total number of HTTP requests",
