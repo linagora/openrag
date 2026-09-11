@@ -36,7 +36,7 @@ from __future__ import annotations
 import asyncio
 import secrets
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any
 
@@ -199,6 +199,13 @@ class MilvusVectorStore(VectorStore):
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
+
+    async def aclose(self) -> None:
+        """Release both clients when a standalone operator command finishes."""
+        try:
+            await self._async_client.close()
+        finally:
+            await asyncio.to_thread(self._client.close)
 
     async def initialize(self, embedding_dimension: int) -> None:
         """Materialise the backing Milvus collection.
@@ -1447,6 +1454,64 @@ class MilvusVectorStore(VectorStore):
         expr = self._build_filter_expr(filters)
         rows = await asyncio.to_thread(self._iter_query, expr, ["_id"])
         return [self._milvus_id_to_str(r["_id"]) for r in rows if "_id" in r]
+
+    async def iter_chunk_metadata(
+        self, collection: str, *, partition: str, file_ids: list[str] | None = None, batch_size: int = 500
+    ) -> AsyncIterator[list[dict[str, Any]]]:
+        self._resolve_collection(collection)
+        if not partition or partition in self._PARTITION_WILDCARDS or not 1 <= batch_size <= 1000:
+            raise ValueError("A concrete partition (not 'all') and a batch size between 1 and 1000 are required")
+        if file_ids == []:
+            return
+        filters: dict[str, Any] = {"partition": partition}
+        if file_ids is not None:
+            filters["file_id"] = file_ids
+        creation = asyncio.create_task(
+            asyncio.to_thread(
+                self._client.query_iterator,
+                collection_name=self._collection_name,
+                filter=self._build_filter_expr(filters),
+                output_fields=["_id", "partition", "file_id", "indexed_at"],
+                batch_size=batch_size,
+                consistency_level="Strong",
+                timeout=self._timeout,
+            )
+        )
+        pending = None
+
+        async def cleanup():
+            # Thread calls cannot be cancelled. Retain ownership until creation
+            # and any in-flight next() finish, then close exactly once.
+            await asyncio.gather(creation, return_exceptions=True)
+            if creation.cancelled() or creation.exception() is not None:
+                return
+            if pending is not None:
+                await asyncio.gather(pending, return_exceptions=True)
+            await asyncio.to_thread(creation.result().close)
+
+        try:
+            iterator = await asyncio.shield(creation)
+            while True:
+                pending = asyncio.create_task(asyncio.to_thread(iterator.next))
+                page = await asyncio.shield(pending)
+                if not page:
+                    break
+                yield page
+        finally:
+            closing = asyncio.create_task(cleanup())
+            cancelled = False
+            while True:
+                try:
+                    await asyncio.shield(closing)
+                    break
+                except asyncio.CancelledError:
+                    # Event-loop shutdown may cancel the cleanup task itself;
+                    # retrying an already cancelled task would spin forever.
+                    if closing.cancelled():
+                        raise
+                    cancelled = True
+            if cancelled:
+                raise asyncio.CancelledError
 
     async def query_chunks_by_filter(
         self,

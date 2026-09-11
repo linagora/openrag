@@ -24,6 +24,8 @@ import os
 import socket
 import uuid
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
+from unittest.mock import AsyncMock
 
 import pytest
 from core.config.infrastructure import VectorDBConfig
@@ -31,6 +33,60 @@ from core.models.chunk import Chunk, ChunkType
 from services.storage.milvus_store import MilvusVectorStore, analyzer_params
 
 pytestmark = pytest.mark.integration
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_catalog_guard_and_reconciliation_with_real_stores(dense_only_store, postgres_store):
+    from core.models.catalog import DocumentRecord
+    from services.storage.catalog_searcher import CatalogSearcher
+    from services.storage.reconciliation import reconcile_partition
+    from services.storage.vector_store_searcher import VectorStoreSearcher
+
+    vectors = dense_only_store
+    await vectors.initialize(_EMBEDDING_DIM)
+    catalog = postgres_store.document_repo
+    await postgres_store.partition_repo.create_partition("reconcile_a")
+    for file_id in ("live", "missing"):
+        await catalog.create_document(DocumentRecord(file_id=file_id, partition="reconcile_a"))
+    old = datetime.now(UTC) - timedelta(days=1)
+    await catalog.pool.execute("UPDATE files SET indexed_at = $1", old)
+    await vectors.upsert(
+        [
+            _chunk("live document", "reconcile_a", 0.1, document_id="live"),
+            _chunk("orphan document", "reconcile_a", 0.2, document_id="orphan"),
+            _chunk("other tenant", "reconcile_b", 0.3, document_id="orphan"),
+        ],
+        indexed_at=old,
+    )
+    # Dynamic fields may be absent on legacy rows. They must remain report-only.
+    await vectors.insert_entities(
+        [
+            {
+                "file_id": "legacy",
+                "partition": "reconcile_a",
+                "text": "undated legacy",
+                "vector": _embedding(0.4),
+            }
+        ]
+    )
+    embedder = AsyncMock()
+    embedder.embed.return_value = [_embedding(0.1)]
+    searcher = CatalogSearcher(VectorStoreSearcher(vectors, embedder, catalog, "default"), catalog)
+    chunks = await searcher.search("document", ["reconcile_a"], 10, with_surrounding_chunks=False)
+    assert [c.document_id for c in chunks] == ["live"]
+
+    report = [e async for e in reconcile_partition(catalog, vectors, "default", "reconcile_a", page_size=1)]
+    assert report[-1]["orphan_chunks"] == 1
+    assert report[-1]["missing_documents"] == 1
+    assert report[-1]["unaged_chunks"] == 1
+    repaired = [
+        e async for e in reconcile_partition(catalog, vectors, "default", "reconcile_a", page_size=1, repair=True)
+    ]
+    assert repaired[-1]["deleted_chunks"] == 1
+    rows = [row async for page in vectors.iter_chunk_metadata("default", partition="reconcile_a") for row in page]
+    assert {r["file_id"] for r in rows} == {"live", "legacy"}
+    assert await catalog.file_exists_in_partition("missing", "reconcile_a")
+    assert await vectors.query_ids_by_filter("default", {"partition": "reconcile_b"})
 
 
 # ---------------------------------------------------------------------------

@@ -613,17 +613,20 @@ class WorkerDispatcher(IndexingDispatcher):
                 return
 
             public_metadata = strip_internal_metadata(metadata)
+            indexed_at = datetime.now(UTC)
             entities = []
             for row in rows:
                 entity = strip_internal_metadata(row)
                 entity.pop("_id", None)
                 entity.update(public_metadata)
+                entity["indexed_at"] = indexed_at.isoformat()
                 entities.append(entity)
 
             await self._insert_entities(entities)
 
             file_metadata = self._file_metadata_from_chunk(rows[0])
             file_metadata.update(public_metadata)
+            file_metadata["indexed_at"] = indexed_at.isoformat()
             await self._document_repo.add_file_to_partition(
                 file_id=target_file_id,
                 partition=target_partition,
@@ -632,6 +635,7 @@ class WorkerDispatcher(IndexingDispatcher):
                 relationship_id=file_metadata.get("relationship_id"),
                 parent_id=file_metadata.get("parent_id"),
                 content_sha256=content_sha256,
+                indexed_at=indexed_at,
             )
         finally:
             if claimed_content:
