@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from core.utils.exceptions import ValidationError
 from services.storage.postgres_store import PostgresStore
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio(loop_scope="session")]
@@ -23,12 +24,28 @@ class TestCreateList:
         names = {row["partition"] for row in await repo.list_partitions()}
         assert {"p1", "p2"} <= names
 
-    async def test_create_is_idempotent_per_name(self, postgres_store: PostgresStore):
+    async def test_create_rejects_a_duplicate_name(self, postgres_store: PostgresStore):
+        """A second create is a 409, not a silent success.
+
+        The repo deliberately does not treat an existing partition as a
+        successful create: the service layer needs the distinction so it does
+        not overwrite preset/config fields for a partition it did not create.
+        Callers that want ensure-exists opt in explicitly — seed_default_partition
+        guards with partition_exists first, and IndexingService catches
+        PARTITION_EXISTS to treat the create race as success.
+
+        This test used to assert the opposite ("the legacy method swallows the
+        conflict") and had been failing on develop ever since that behaviour was
+        deliberately changed.
+        """
         repo = postgres_store.partition_repo
         await repo.create_partition("dup")
-        # The legacy method swallows the conflict and returns the existing row
-        # rather than raising. Orchestrators rely on this for "ensure exists".
-        await repo.create_partition("dup")
+
+        with pytest.raises(ValidationError) as excinfo:
+            await repo.create_partition("dup")
+        assert excinfo.value.code == "PARTITION_EXISTS"
+
+        # The rejected create must not have left a second row behind.
         assert await repo.partition_exists("dup") is True
         assert len([r for r in await repo.list_partitions() if r["partition"] == "dup"]) == 1
 
