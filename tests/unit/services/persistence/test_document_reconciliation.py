@@ -2,6 +2,7 @@ from datetime import UTC, datetime
 from unittest.mock import AsyncMock
 
 import pytest
+from core.ports.document_repo import DocumentRepository
 from services.persistence.document_repo import PgDocumentRepository
 
 
@@ -36,3 +37,17 @@ async def test_catalog_lookup_does_not_hide_outages():
     pool.fetch.side_effect = RuntimeError("offline")
     with pytest.raises(RuntimeError, match="offline"):
         await PgDocumentRepository(lambda: pool).get_indexed_documents({("a", "f")})
+
+
+def test_repository_without_catalog_lookup_cannot_be_constructed():
+    incomplete = type(
+        "IncompleteRepository",
+        (DocumentRepository,),
+        {
+            name: lambda *args, **kwargs: None
+            for name in DocumentRepository.__abstractmethods__
+            if name != "get_indexed_documents"
+        },
+    )
+    with pytest.raises(TypeError, match="get_indexed_documents"):
+        incomplete()

@@ -25,6 +25,7 @@ class ContentClaimLease:
 class DocumentRepository(ABC):
     """CRUD operations for documents."""
 
+    @abstractmethod
     async def get_indexed_documents(self, keys: Collection[tuple[str, str]]) -> dict[tuple[str, str], datetime]:
         """Return existing (partition, file_id) keys and their indexing times.
 
