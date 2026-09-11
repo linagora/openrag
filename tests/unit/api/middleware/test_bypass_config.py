@@ -41,6 +41,7 @@ def test_default_bypass_paths_match_legacy_set() -> None:
         "/openapi.json",
         "/redoc",
         "/health_check",
+        "/ready",
         "/version",
         "/auth/login",
         "/auth/callback",

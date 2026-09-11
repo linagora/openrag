@@ -362,6 +362,7 @@ function EndpointDialog({
     modelName,
     apiKey,
     extraJson,
+    vendor,
     sttValidationTimeout,
     sttValidationLanguageHint,
     sttValidationMossSpeakerAware,
@@ -473,6 +474,11 @@ function EndpointDialog({
         : { mossSpeakerAware: false, extra: editingSttExtra }
       : null;
     const editingMossExtra = editingMossFields?.extra ?? null;
+    const editingImplementation =
+      editingMossExtra && editing && editing.model_type !== "stt"
+        ? splitModelEndpointImplementation(editingMossExtra).implementation ||
+          DEFAULT_VENDOR_BY_TYPE[editing.model_type]
+        : "";
     const editingImplExtra = editingMossExtra
       ? editing?.model_type === "stt"
         ? editingMossExtra
@@ -497,6 +503,7 @@ function EndpointDialog({
       sttValidationMossSpeakerAware ===
         (editing.model_type === "stt" ? editingMossFields?.mossSpeakerAware || false : null) &&
       apiKey === editingExtra?.apiKey &&
+      (editing.model_type === "stt" || vendor === editingImplementation) &&
       extraJson === JSON.stringify(editingRawExtra, null, 2)
     ) {
       setValidated(true);
@@ -517,6 +524,7 @@ function EndpointDialog({
     sttValidationMossSpeakerAware,
     apiKey,
     extraJson,
+    vendor,
     editing,
   ]);
 
@@ -594,24 +602,26 @@ function EndpointDialog({
       toast.error("Enter an endpoint URL first");
       return;
     }
-    let validationExtra: Record<string, unknown> | undefined;
-    if (isStt) {
-      try {
-        const parsedExtra: unknown = JSON.parse(extraJson);
-        if (typeof parsedExtra !== "object" || parsedExtra === null || Array.isArray(parsedExtra)) {
-          throw new Error("Extra must be a JSON object");
-        }
+    let validationExtra: Record<string, unknown>;
+    try {
+      const parsedExtra: unknown = JSON.parse(extraJson);
+      if (typeof parsedExtra !== "object" || parsedExtra === null || Array.isArray(parsedExtra)) {
+        throw new Error("Extra must be a JSON object");
+      }
+      if (isStt) {
         validationExtra = mergeModelEndpointMossSpeakerAware(
           mergeModelEndpointSttLanguage(parsedExtra as Record<string, unknown>, languageHint),
           mossSpeakerAware,
         );
-      } catch {
-        const msg = "Invalid JSON in extra field";
-        setValidated(false);
-        setValidationMsg(msg);
-        toast.error(msg);
-        return;
+      } else {
+        validationExtra = mergeModelEndpointImplementation(parsedExtra as Record<string, unknown>, vendor);
       }
+    } catch {
+      const msg = "Invalid JSON in extra field";
+      setValidated(false);
+      setValidationMsg(msg);
+      toast.error(msg);
+      return;
     }
     let apiKey: string | undefined;
     let submittedApiKey: string | undefined;
