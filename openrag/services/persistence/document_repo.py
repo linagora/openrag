@@ -22,7 +22,7 @@ columns is a post-refactoring feature.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from typing import TYPE_CHECKING, Any
 
 from core.models.catalog import INDEXING_CONTENT_CLAIM_TOKEN_PREFIX, DocumentRecord, DocumentStatus
@@ -54,6 +54,22 @@ class PgDocumentRepository(DocumentRepository):
         return self._pool_getter()
 
     # ── DocumentRepository port methods ──────────────────────────────
+
+    async def get_indexed_documents(self, keys: Collection[tuple[str, str]]) -> dict[tuple[str, str], datetime]:
+        if not keys:
+            return {}
+        partitions, file_ids = zip(*keys)
+        rows = await self.pool.fetch(
+            """
+            SELECT f.partition_name, f.file_id, f.indexed_at
+            FROM files f
+            JOIN unnest($1::text[], $2::text[]) AS requested(partition_name, file_id)
+              ON f.partition_name = requested.partition_name AND f.file_id = requested.file_id
+            """,
+            list(partitions),
+            list(file_ids),
+        )
+        return {(r["partition_name"], r["file_id"]): r["indexed_at"] for r in rows}
 
     async def create_document(self, doc: DocumentRecord) -> DocumentRecord:
         """Insert a document row keyed by (file_id, partition).

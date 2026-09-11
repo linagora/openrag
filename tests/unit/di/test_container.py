@@ -359,6 +359,26 @@ _OPTIONAL_PHASE_PROVIDERS = {"get_model_endpoint_service", "get_preset_service",
 class TestPhase8OrchestratorWiring:
     """8F: all orchestrators wired consistently (container + providers)."""
 
+    async def test_default_and_named_searchers_filter_deleted_documents(self, monkeypatch):
+        from unittest.mock import AsyncMock, MagicMock
+
+        container = ServiceContainer(_settings())
+        embedder = AsyncMock()
+        embedder.embed.return_value = [[0.1]]
+        monkeypatch.setattr(container, "create_embedder", lambda *a, **kw: embedder)
+        monkeypatch.setattr(container, "create_llm", lambda *a, **kw: MagicMock())
+        monkeypatch.setattr(container, "embedder_factory", lambda name: embedder)
+        monkeypatch.setattr(
+            container.vector_store,
+            "search",
+            AsyncMock(return_value=[{"id": "1", "file_id": "deleted", "partition": "a"}]),
+        )
+        monkeypatch.setattr(container.document_repo, "get_indexed_documents", AsyncMock(return_value={}))
+
+        service = container.retrieval_service
+        for searcher in (service._searcher, service._searcher_factory("named")):
+            assert await searcher.search("q", ["a"], 5, with_surrounding_chunks=False) == []
+
     @pytest.mark.parametrize("prop,_provider", _ORCHESTRATORS)
     def test_property_is_lazy_and_cache_slot_starts_none(self, prop, _provider):
         """Keep orchestrator properties lazy until the first access."""

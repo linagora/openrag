@@ -502,6 +502,7 @@ class ServiceContainer:
         """RetrievalService — lazily built, cached for the container's lifetime."""
         if self._retrieval_service is None:
             from services.orchestrators.retrieval_service import RetrievalService
+            from services.storage.catalog_searcher import CatalogSearcher
             from services.storage.vector_store_searcher import VectorStoreSearcher
 
             settings = self._require_settings()
@@ -522,13 +523,17 @@ class ServiceContainer:
                 document_repo=self.document_repo,
                 collection=settings.vectordb.collection_name,
             )
+            searcher = CatalogSearcher(searcher, self.document_repo)
 
             def searcher_factory(embedder_name: str):
-                return VectorStoreSearcher(
-                    vector_store=self.vector_store,
-                    embedder=self.embedder_factory(embedder_name),
-                    document_repo=self.document_repo,
-                    collection=settings.vectordb.collection_name,
+                return CatalogSearcher(
+                    VectorStoreSearcher(
+                        vector_store=self.vector_store,
+                        embedder=self.embedder_factory(embedder_name),
+                        document_repo=self.document_repo,
+                        collection=settings.vectordb.collection_name,
+                    ),
+                    self.document_repo,
                 )
 
             llm_cfg = settings.llm.model_dump()
