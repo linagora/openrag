@@ -45,6 +45,13 @@ async def test_reports_support_for_in_place_restart() -> None:
 
 
 @pytest.mark.asyncio
+async def test_reports_support_for_bounded_task_retention() -> None:
+    manager = _task_state_manager()
+
+    assert await manager.supports_bounded_task_retention() is True
+
+
+@pytest.mark.asyncio
 async def test_cancelled_state_is_not_overwritten_by_worker_transitions() -> None:
     manager = _task_state_manager()
 
@@ -974,8 +981,8 @@ async def test_terminal_task_retention_is_capped(monkeypatch) -> None:
         await manager.set_queued_details(task_id, file_id=task_id, partition="tenant-a", metadata={}, user_id=None)
         await manager.set_state(task_id, "COMPLETED")
 
-    # The cap is enforced on admission, so at most one settled task sits above it.
-    assert set(manager.tasks) == {"task-2", "task-3", "task-4"}
+    # Settling sheds history itself, so the cap holds without another caller.
+    assert set(manager.tasks) == {"task-3", "task-4"}
 
 
 @pytest.mark.asyncio
@@ -994,6 +1001,74 @@ async def test_eviction_keeps_active_tasks_and_unsettled_cancellations(monkeypat
     await manager.set_queued_details("new-task", file_id="file-2", partition="tenant-a", metadata={}, user_id=None)
 
     assert set(manager.tasks) == {"active-task", "cancelled-task", "new-task"}
+
+
+@pytest.mark.asyncio
+async def test_a_settling_burst_sheds_history_with_nothing_else_running(monkeypatch) -> None:
+    # Admission-time eviction always runs one settle behind, so a batch that
+    # ends the queue has to shed its own history instead of waiting for a
+    # caller that may never come.
+    monkeypatch.setattr(task_state_module, "_MAX_TERMINAL_TASKS", 2)
+    monkeypatch.setattr(task_state_module, "_TERMINAL_TASK_RETENTION_SECONDS", 60.0)
+    monkeypatch.setattr(task_state_module.time, "time", lambda: 1_000.0)
+    manager = _task_state_manager()
+    for index in range(4):
+        task_id = f"task-{index}"
+        await manager.set_queued_details(task_id, file_id=task_id, partition="tenant-a", metadata={}, user_id=None)
+    for index in range(4):
+        await manager.set_state(f"task-{index}", "COMPLETED")
+
+    assert set(manager.tasks) == {"task-2", "task-3"}
+
+    monkeypatch.setattr(task_state_module.time, "time", lambda: 1_061.0)
+    await manager.set_queued_details("late-task", file_id="late", partition="tenant-a", metadata={}, user_id=None)
+    await manager.set_failed_if_not_cancelled("late-task", "boom")
+
+    assert set(manager.tasks) == {"late-task"}
+
+
+@pytest.mark.asyncio
+async def test_cancellation_fence_outlives_the_receipt_window(monkeypatch) -> None:
+    # The receipt answers the reads that follow a settle; the tombstone fences
+    # late writers for far longer. Evicting the record on the receipt window
+    # took the fence with it, and the durable tombstone with that.
+    deleted: list[str] = []
+    monkeypatch.setattr(task_state_module, "_TERMINAL_TASK_RETENTION_SECONDS", 60.0)
+    monkeypatch.setattr(task_state_module, "_CANCELLATION_TOMBSTONE_TTL_SECONDS", 240.0)
+    monkeypatch.setattr(task_state_module, "_delete_recoverable_task", deleted.append)
+    monkeypatch.setattr(task_state_module.time, "time", lambda: 1_000.0)
+    manager = _task_state_manager()
+    await manager.set_queued_details("cancelled-task", file_id="file-1", partition="tenant-a", metadata={}, user_id=1)
+    await manager.set_cancelled_if_active("cancelled-task")
+
+    monkeypatch.setattr(task_state_module.time, "time", lambda: 1_061.0)
+
+    assert await manager.get_state("cancelled-task") == "CANCELLED"
+    assert await manager.set_state("cancelled-task", "COMPLETED") is False
+    assert deleted == []
+
+    monkeypatch.setattr(task_state_module.time, "time", lambda: 1_241.0)
+
+    assert await manager.get_state("cancelled-task") is None
+    assert deleted == ["cancelled-task"]
+
+
+@pytest.mark.asyncio
+async def test_an_expired_receipt_behind_a_fence_is_still_evicted(monkeypatch) -> None:
+    # A held fence sits at the head of the ledger for far longer than the
+    # receipts queued behind it. It must not stall the sweep for them.
+    monkeypatch.setattr(task_state_module, "_TERMINAL_TASK_RETENTION_SECONDS", 60.0)
+    monkeypatch.setattr(task_state_module, "_CANCELLATION_TOMBSTONE_TTL_SECONDS", 240.0)
+    monkeypatch.setattr(task_state_module.time, "time", lambda: 1_000.0)
+    manager = _task_state_manager()
+    for task_id in ("cancelled-task", "done-task"):
+        await manager.set_queued_details(task_id, file_id=task_id, partition="tenant-a", metadata={}, user_id=1)
+    await manager.set_cancelled_if_active("cancelled-task")
+    await manager.set_state("done-task", "COMPLETED")
+
+    monkeypatch.setattr(task_state_module.time, "time", lambda: 1_061.0)
+
+    assert await manager.get_all_states() == {"cancelled-task": "CANCELLED"}
 
 
 @pytest.mark.asyncio
@@ -1057,6 +1132,7 @@ async def test_expired_task_is_evicted_when_its_status_is_polled(monkeypatch) ->
 async def test_recovery_preserves_the_original_retention_deadline(monkeypatch) -> None:
     # Restarting the actor must not restart the clock, or a settled record
     # recovered just before its deadline would live for a second full window.
+    # The persisted deadline is kept as-is rather than rebuilt from a window.
     monkeypatch.setattr(task_state_module, "_TERMINAL_TASK_RETENTION_SECONDS", 60.0)
     monkeypatch.setattr(
         task_state_module,
@@ -1069,7 +1145,7 @@ async def test_recovery_preserves_the_original_retention_deadline(monkeypatch) -
     monkeypatch.setattr(task_state_module.time, "time", lambda: 1_050.0)
     manager = _task_state_manager()
 
-    assert manager.terminal_tasks["old-task"] == 1_000.0
+    assert manager.terminal_tasks["old-task"] == 1_060.0
 
     monkeypatch.setattr(task_state_module.time, "time", lambda: 1_061.0)
     assert await manager.get_state("old-task") is None

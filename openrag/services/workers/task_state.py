@@ -42,8 +42,9 @@ _CONTENT_CLAIM_REGISTRATION_GRACE_SECONDS = 60
 # durable per-file state lives in the Postgres catalog. They are kept only long
 # enough to answer the reads that follow a job settling, then dropped, with a
 # hard cap so a burst cannot outrun the time bound. The cancellation tombstone
-# keeps its own, longer TTL: it fences late workers rather than answering reads,
-# so the two lifetimes are deliberately not tied together.
+# keeps its own, longer TTL: it fences late workers rather than answering reads.
+# A record that is both lives to the later of the two deadlines, so the receipt
+# window never cuts a fence short and a fence never extends a receipt.
 _TERMINAL_TASK_RETENTION_SECONDS = 60 * 60
 _MAX_TERMINAL_TASKS = 2_000
 _MAX_TASK_ERROR_CHARS = 8_000
@@ -158,10 +159,25 @@ def _load_recoverable_tasks() -> tuple[dict[str, TaskInfo], dict[str, float]]:
     return tasks, expiries
 
 
-def _recovery_snapshot(info: TaskInfo, *, now: float | None = None) -> tuple[TaskInfo, float | None]:
+def _tombstone_deadline(info: TaskInfo, *, now: float | None = None) -> float | None:
+    """When a record stops fencing late writers, or ``None`` if it fences none.
+
+    Ray actor-task cancellation is best effort. An elapsed deadline cannot prove
+    that an unreachable worker stopped, so a cancellation whose worker has not
+    settled gets no deadline and is held until its reference resolves.
+    """
+    timestamp = time.time() if now is None else now
     if info.state == "FAILED" and info.error == STALE_REFLESS_TASK_ERROR:
-        timestamp = time.time() if now is None else now
-        return info, timestamp + _CANCELLATION_TOMBSTONE_TTL_SECONDS
+        return timestamp + _CANCELLATION_TOMBSTONE_TTL_SECONDS
+    if info.state != "CANCELLED" or _cancelled_task_has_worker_fence(info):
+        return None
+    return timestamp + _CANCELLATION_TOMBSTONE_TTL_SECONDS
+
+
+def _recovery_snapshot(info: TaskInfo, *, now: float | None = None) -> tuple[TaskInfo, float | None]:
+    timestamp = time.time() if now is None else now
+    if info.state == "FAILED" and info.error == STALE_REFLESS_TASK_ERROR:
+        return info, _tombstone_deadline(info, now=timestamp)
     if info.state != "CANCELLED":
         return info, None
     # Keep the worker reference until cancellation is confirmed. If the actor
@@ -174,13 +190,7 @@ def _recovery_snapshot(info: TaskInfo, *, now: float | None = None) -> tuple[Tas
         worker_submitted=getattr(info, "worker_submitted", False),
         submission_started_at=getattr(info, "submission_started_at", None),
     )
-    timestamp = time.time() if now is None else now
-    if _cancelled_task_has_worker_fence(snapshot):
-        # Ray actor-task cancellation is best effort. An elapsed deadline cannot
-        # prove that an unreachable worker stopped, so unresolved workers remain
-        # durable until their reference settles or the pool confirms settlement.
-        return snapshot, None
-    return snapshot, timestamp + _CANCELLATION_TOMBSTONE_TTL_SECONDS
+    return snapshot, _tombstone_deadline(snapshot, now=timestamp)
 
 
 def _cancelled_task_has_worker_fence(info: TaskInfo) -> bool:
@@ -285,19 +295,17 @@ class TaskStateManager:
     def __init__(self) -> None:
         self.tasks, expiries = _load_recoverable_tasks()
         self.user_index: dict[int | None, set[str]] = {}
-        # Terminal task ids in eviction order, mapped to the time they settled.
+        # Terminal task ids in eviction order, mapped to the time they may go.
         self.terminal_tasks: OrderedDict[str, float] = OrderedDict()
         now = time.time()
         for task_id, info in self.tasks.items():
             self.user_index.setdefault(info.details.get("user_id"), set()).add(task_id)
             if info.state not in TERMINAL_TASK_STATES:
                 continue
-            # A restart must not restart the clock, so recover the settle time
-            # from the persisted deadline where the record carries one.
-            expires_at = expiries.get(task_id)
-            self.terminal_tasks[task_id] = (
-                expires_at - _TERMINAL_TASK_RETENTION_SECONDS if expires_at is not None else now
-            )
+            # A restart must not restart the clock: a record that was persisted
+            # with a fence deadline is held to that deadline, not to a fresh
+            # window. Only a fence has one, so the rest get the receipt window.
+            self.terminal_tasks[task_id] = expiries.get(task_id, now + _TERMINAL_TASK_RETENTION_SECONDS)
         self.file_delete_fences = _load_file_delete_fences()
         # Ray runs each concurrency group on a separate event loop. A single
         # asyncio lock cannot safely coordinate methods across those loops.
@@ -314,11 +322,24 @@ class TaskStateManager:
     def _persist_task_locked(self, task_id: str, info: TaskInfo) -> None:
         """Persist a task mutation and keep the terminal-retention ledger in sync."""
         _save_recoverable_task(task_id, info)
-        if info.state in TERMINAL_TASK_STATES:
-            self.terminal_tasks.pop(task_id, None)
-            self.terminal_tasks[task_id] = time.time()
-        else:
-            self.terminal_tasks.pop(task_id, None)
+        self.terminal_tasks.pop(task_id, None)
+        if info.state not in TERMINAL_TASK_STATES:
+            return
+        now = time.time()
+        receipt_deadline = now + _TERMINAL_TASK_RETENTION_SECONDS
+        fence_deadline = _tombstone_deadline(info, now=now)
+        self.terminal_tasks[task_id] = max(receipt_deadline, fence_deadline or receipt_deadline)
+
+    def _settle_task_locked(self, task_id: str, info: TaskInfo) -> None:
+        """Persist a settled task and shed history straight away.
+
+        Admission-time eviction always runs one settle behind, so a burst that
+        ends the queue would leave its last records in memory until something
+        else touched the actor. Only call this from a public entry point:
+        eviction mutates ``self.tasks`` and would break a caller iterating it.
+        """
+        self._persist_task_locked(task_id, info)
+        self._evict_terminal_tasks_locked()
 
     def _forget_task_locked(self, task_id: str) -> None:
         info = self.tasks.pop(task_id, None)
@@ -338,12 +359,20 @@ class TaskStateManager:
         This removes entries from ``self.tasks`` and ``self.user_index``, so call
         it before reading either, never while iterating one.
         """
-        deadline = (time.time() if now is None else now) - _TERMINAL_TASK_RETENTION_SECONDS
+        timestamp = time.time() if now is None else now
         examined = 0
         while self.terminal_tasks and examined < len(self.terminal_tasks):
-            task_id, settled_at = next(iter(self.terminal_tasks.items()))
-            if len(self.terminal_tasks) <= _MAX_TERMINAL_TASKS and settled_at > deadline:
-                break
+            task_id, deadline = next(iter(self.terminal_tasks.items()))
+            if len(self.terminal_tasks) <= _MAX_TERMINAL_TASKS and deadline > timestamp:
+                if deadline - timestamp <= _TERMINAL_TASK_RETENTION_SECONDS:
+                    # Receipts share one window, so everything queued behind this
+                    # one is younger and cannot have expired either.
+                    break
+                # A fence outlives the receipts behind it. Step over it rather
+                # than let it stall the sweep for as long as it is held.
+                self.terminal_tasks.move_to_end(task_id)
+                examined += 1
+                continue
             info = self.tasks.get(task_id)
             if info is not None and _cancelled_task_has_worker_fence(info):
                 # An unsettled cancellation still fences a live worker. Losing it
@@ -386,7 +415,7 @@ class TaskStateManager:
 
     def _set_cancelled_locked(self, task_id: str, info: TaskInfo) -> None:
         info.state = "CANCELLED"
-        self._persist_task_locked(task_id, info)
+        self._settle_task_locked(task_id, info)
 
     def _expire_refless_task_if_stale_locked(self, task_id: str, info: TaskInfo) -> bool:
         ref = info.object_ref.get("ref") if isinstance(info.object_ref, dict) else info.object_ref
@@ -484,7 +513,10 @@ class TaskStateManager:
             if state == "SERIALIZING":
                 info.worker_submitted = True
                 info.submission_started_at = None
-            self._persist_task_locked(task_id, info)
+            if state in TERMINAL_TASK_STATES:
+                self._settle_task_locked(task_id, info)
+            else:
+                self._persist_task_locked(task_id, info)
             return True
 
     @ray.method(concurrency_group="set")
@@ -509,7 +541,7 @@ class TaskStateManager:
             if info is not None:
                 info.state = "FAILED"
                 info.error = _truncate_error(tb_str)
-                self._persist_task_locked(task_id, info)
+                self._settle_task_locked(task_id, info)
             return True
 
     @ray.method(concurrency_group="set")
@@ -752,16 +784,17 @@ class TaskStateManager:
     async def get_all_states(self) -> dict[str, str | None]:
         with self.lock:
             # A queue that only gets polled admits no task, so the listing reads
-            # have to shed history or retention never runs.
-            self._evict_terminal_tasks_locked()
+            # have to shed history or retention never runs. Sweep after the stale
+            # pass: it settles tasks itself, and it cannot evict while iterating.
             self._expire_refless_tasks_if_stale_locked()
+            self._evict_terminal_tasks_locked()
             return {tid: info.state for tid, info in self.tasks.items()}
 
     @ray.method(concurrency_group="queue_info")
     async def get_all_info(self) -> dict[str, dict]:
         with self.lock:
-            self._evict_terminal_tasks_locked()
             self._expire_refless_tasks_if_stale_locked()
+            self._evict_terminal_tasks_locked()
             return {
                 task_id: {
                     "state": info.state,
@@ -776,10 +809,10 @@ class TaskStateManager:
     @ray.method(concurrency_group="queue_info")
     async def get_all_user_info(self, user_id: int) -> dict[str, dict]:
         with self.lock:
+            self._expire_refless_tasks_if_stale_locked(list(self.user_index.get(user_id, set())))
             # Before the index lookup: eviction can drop the user's whole entry.
             self._evict_terminal_tasks_locked()
             task_ids = self.user_index.get(user_id, set())
-            self._expire_refless_tasks_if_stale_locked(task_ids)
             return {
                 tid: {
                     "state": self.tasks[tid].state,
@@ -801,6 +834,11 @@ class TaskStateManager:
     @ray.method(concurrency_group="queue_info")
     async def supports_in_place_restart(self) -> bool:
         """Identify actors created with the restart policy introduced by #841."""
+        return True
+
+    @ray.method(concurrency_group="queue_info")
+    async def supports_bounded_task_retention(self) -> bool:
+        """Identify actors that bound terminal task retention (#660)."""
         return True
 
     @ray.method(concurrency_group="queue_info")
