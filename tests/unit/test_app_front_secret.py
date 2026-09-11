@@ -495,6 +495,52 @@ async def test_chainlit_keeps_page_less_pdf_sources(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_chainlit_reads_chunk_fields_from_the_nested_shape(monkeypatch):
+    """Source entries nest the chunk's metadata under `chunk`; `file_url` and
+    `chunk_url` stay authoritative at the top level."""
+    module = _load_app_front(monkeypatch, auth_mode="token", module_name="app_front_nested_chunk_test")
+    monkeypatch.setattr(module, "get_external_url", lambda: "https://openrag.example")
+    _stub_chainlit_elements(module)
+
+    elements, source_names = await module._format_sources(
+        [
+            {
+                "source_type": "document",
+                "chunk": {"filename": "report.pdf", "page": 4},
+                "rerank_score": 0.64,
+                "file_url": "https://openrag.example/static/pdf-id",
+            }
+        ]
+    )
+
+    assert source_names == ["report.pdf (page: 4)"]
+    assert elements[0].page == 4
+
+
+@pytest.mark.asyncio
+async def test_chainlit_still_reads_the_flat_pre_nesting_shape(monkeypatch):
+    """A server from before the nesting spreads those fields across the entry.
+    The UI has to render both so a rolling deploy in either direction works."""
+    module = _load_app_front(monkeypatch, auth_mode="token", module_name="app_front_flat_chunk_test")
+    monkeypatch.setattr(module, "get_external_url", lambda: "https://openrag.example")
+    _stub_chainlit_elements(module)
+
+    elements, source_names = await module._format_sources(
+        [
+            {
+                "source_type": "document",
+                "filename": "report.pdf",
+                "page": 4,
+                "file_url": "https://openrag.example/static/pdf-id",
+            }
+        ]
+    )
+
+    assert source_names == ["report.pdf (page: 4)"]
+    assert elements[0].page == 4
+
+
+@pytest.mark.asyncio
 async def test_chainlit_keeps_valid_web_sources(monkeypatch):
     module = _load_app_front(monkeypatch, auth_mode="token", module_name="app_front_web_source_test")
     monkeypatch.setattr(module, "get_external_url", lambda: "https://openrag.example")
