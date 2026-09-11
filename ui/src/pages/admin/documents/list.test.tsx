@@ -8,6 +8,7 @@ import { toast } from "sonner";
 import type { Action } from "sonner";
 import { listPartitionFiles } from "@/lib/api/documents";
 import { deleteFile, uploadFile } from "@/lib/api/indexing";
+import { listModelEndpoints } from "@/lib/api/models";
 import { listPartitions } from "@/lib/api/partitions";
 import { getQueueInfo, type QueueInfo } from "@/lib/api/jobs";
 import { downloadCsv } from "@/lib/csv";
@@ -88,10 +89,16 @@ vi.mock("@/lib/api/models", async () => {
   const actual = await vi.importActual<typeof import("@/lib/api/models")>("@/lib/api/models");
   return {
     ...actual,
-    // resolveEmbedderName stays real: resolving the `default` alias is the
-    // behaviour under test, not a dependency to stub out.
+    // resolveEmbedderName/resolveEmbedderModel stay real: resolving the
+    // `default` alias and the endpoint's model is the behaviour under test,
+    // not a dependency to stub out.
     listModelEndpoints: vi.fn().mockResolvedValue([
-      { name: "Qwen3-Embedding-0.6B", model_type: "embedder", is_default: true },
+      {
+        name: "Qwen3-Embedding-0.6B",
+        model_type: "embedder",
+        model_name: "Qwen3-Embedding-0.6B",
+        is_default: true,
+      },
     ]),
   };
 });
@@ -436,5 +443,46 @@ describe("DocumentsPage embedder drift (#762 E)", () => {
 
     await screen.findByText("a.pdf");
     expect(driftMarkers()).toHaveLength(0);
+  });
+
+  it("names the model that ran, not the endpoint it ran through", async () => {
+    // The endpoint is a renameable label and may since have been repointed or
+    // deleted; the recorded model is what fixes the vector space, so that is
+    // what the column says.
+    withPartitionEmbedder("default");
+    listPartitionFilesMock.mockResolvedValue({
+      files: [file({ embedder: "Qwen3-Embedding-0.6B", embedder_model_name: "Qwen3-Embedding-0.6B" })],
+    } as never);
+
+    renderDocuments();
+
+    await screen.findByText("a.pdf");
+    expect(await screen.findAllByText("Qwen3-Embedding-0.6B")).not.toHaveLength(0);
+    expect(driftMarkers()).toHaveLength(0);
+  });
+
+  it("does not flag files indexed before the endpoint was renamed", async () => {
+    // The real-world false positive: the endpoint was renamed, so the file's
+    // recorded label no longer matches the partition's. Same model on both
+    // sides, so nothing drifted and nothing may be flagged.
+    vi.mocked(listModelEndpoints).mockResolvedValue([
+      {
+        name: "Qwen3-Embedding",
+        model_type: "embedder",
+        model_name: "Qwen3-Embedding-0.6B",
+        is_default: true,
+      },
+    ] as never);
+    withPartitionEmbedder("Qwen3-Embedding");
+    listPartitionFilesMock.mockResolvedValue({
+      files: [file({ embedder: "Qwen3-Embedding-0.6B", embedder_model_name: "Qwen3-Embedding-0.6B" })],
+    } as never);
+
+    renderDocuments();
+
+    await screen.findByText("a.pdf");
+    await waitFor(() => expect(driftMarkers()).toHaveLength(0));
+    // And the column names the model, which both sides agree on.
+    expect(await screen.findAllByText("Qwen3-Embedding-0.6B")).not.toHaveLength(0);
   });
 });

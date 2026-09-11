@@ -32,7 +32,7 @@ import { listPartitionFiles, type PartitionFile } from "@/lib/api/documents";
 import { uploadFile, deleteFile, newFileId } from "@/lib/api/indexing";
 import { invalidateJobsQueries } from "@/lib/jobs-queries";
 import { listPartitions } from "@/lib/api/partitions";
-import { listModelEndpoints, resolveEmbedderName } from "@/lib/api/models";
+import { listModelEndpoints, resolveEmbedderName, resolveEmbedderModel } from "@/lib/api/models";
 import { usePermissions } from "@/lib/permissions";
 import { downloadCsv } from "@/lib/csv";
 import { resolveDocumentsPartition } from "./partition-selection";
@@ -199,7 +199,7 @@ export default function DocumentListPage() {
           { header: "file_id", value: (file) => file.file_id },
           { header: "filename", value: (file) => fileLabel(file) },
           { header: "mimetype", value: (file) => file.mimetype },
-          { header: "embedder", value: (file) => embedderLabel(file) ?? "" },
+          { header: "embedder", value: (file) => fileModel(file) ?? "" },
           { header: "indexed_at", value: (file) => file.indexed_at },
           { header: "created_at", value: (file) => file.created_at },
         ],
@@ -290,40 +290,57 @@ export default function DocumentListPage() {
   });
 
   // The embedder queries will use, resolved through the `default` alias.
-  const currentEmbedder = resolveEmbedderName(
-    partitions.find((p) => p.partition === selected)?.embedder || "default",
-    embedderEndpoints,
-  );
+  const configuredEmbedder = partitions.find((p) => p.partition === selected)?.embedder || "default";
+  const currentEmbedder = resolveEmbedderName(configuredEmbedder, embedderEndpoints);
+  const currentModel = resolveEmbedderModel(configuredEmbedder, embedderEndpoints);
+  // Named by the model, since that is what the column shows and what drift is
+  // judged on; the endpoint label is only a fallback for an unresolvable ref.
+  const currentLabel = currentModel ?? currentEmbedder;
+
+  // The model that produced a file's vectors — what the column names, because
+  // it is the model and not the endpoint that fixes the vector space. Prefer
+  // the model recorded at index time: the endpoint is a renameable label and
+  // may since have been repointed or deleted, so resolving the reference is a
+  // guess about today and the snapshot is a fact about then.
+  // null = indexed before provenance existed.
+  const fileModel = (file: PartitionFile): string | null => {
+    const recorded = file.embedder;
+    if (typeof recorded !== "string" || !recorded) return null;
+    return (
+      file.embedder_model_name ?? resolveEmbedderModel(recorded, embedderEndpoints) ?? resolveEmbedderName(recorded, embedderEndpoints)
+    );
+  };
+
+  // Drifted only if the file *recorded* an embedder and it ran a different
+  // model. No record is unknown, not known-bad: flagging it would put a marker
+  // on every legacy row and say nothing. Judged on the model rather than the
+  // endpoint label, or every file indexed before an endpoint rename reads as
+  // drifted when the same model produced it.
+  const driftedFrom = (file: PartitionFile): string | null => {
+    const recorded = file.embedder;
+    if (typeof recorded !== "string" || !recorded) return null;
+    const model = file.embedder_model_name ?? resolveEmbedderModel(recorded, embedderEndpoints);
+    if (model !== null && currentModel !== null) {
+      return model === currentModel ? null : model;
+    }
+    // No model on one side or the other: the labels are all that is left.
+    const resolved = resolveEmbedderName(recorded, embedderEndpoints);
+    return resolved === currentEmbedder ? null : resolved;
+  };
+
   // Distinct embedders across the listed files, for the toolbar summary. Built
-  // from the rows themselves, so it always describes what is on screen.
+  // from the rows themselves, so it always describes what is on screen, and
+  // grouped by model so two endpoints running one model read as one entry.
   const indexedEmbedders = (() => {
     const counts = new Map<string, { label: string; file_count: number; drifted: boolean }>();
     for (const f of fileRows) {
-      const raw = typeof f.embedder === "string" && f.embedder ? f.embedder : null;
-      const label = raw === null ? "unrecorded" : resolveEmbedderName(raw, embedderEndpoints);
-      const entry = counts.get(label) ?? { label, file_count: 0, drifted: raw !== null && label !== currentEmbedder };
+      const label = fileModel(f) ?? "unrecorded";
+      const entry = counts.get(label) ?? { label, file_count: 0, drifted: driftedFrom(f) !== null };
       entry.file_count += 1;
       counts.set(label, entry);
     }
     return [...counts.values()].sort((a, b) => b.file_count - a.file_count);
   })();
-
-  // null = indexed before provenance existed.
-  const embedderLabel = (file: PartitionFile): string | null => {
-    const recorded = file.embedder;
-    if (typeof recorded !== "string" || !recorded) return null;
-    return resolveEmbedderName(recorded, embedderEndpoints);
-  };
-
-  // Drifted only if the file *recorded* an embedder and it is not the current
-  // one. No record is unknown, not known-bad: flagging it would put a marker on
-  // every legacy row and say nothing.
-  const driftedFrom = (file: PartitionFile): string | null => {
-    const recorded = file.embedder;
-    if (typeof recorded !== "string" || !recorded) return null;
-    const resolved = resolveEmbedderName(recorded, embedderEndpoints);
-    return resolved === currentEmbedder ? null : resolved;
-  };
 
   const columns: ColumnDef<PartitionFile, unknown>[] = [
     {
@@ -348,18 +365,18 @@ export default function DocumentListPage() {
     {
       id: "embedder",
       // Sortable like any other column, so a mixed partition groups by embedder.
-      accessorFn: (f) => embedderLabel(f),
+      accessorFn: (f) => fileModel(f),
       header: ({ column }) => <SortableHeader column={column} title="Embedder" />,
       cell: ({ row }) => {
         const drifted = driftedFrom(row.original);
-        const label = embedderLabel(row.original);
+        const label = fileModel(row.original);
         if (label === null) return <span className="text-muted-foreground">—</span>;
         return (
           <span
             className={drifted ? "text-amber-700 dark:text-amber-100" : undefined}
             title={
               drifted
-                ? `Indexed with ${drifted}; queries now embed with ${currentEmbedder}. Re-index this file to bring it back in line.`
+                ? `Indexed with ${drifted}; queries now embed with ${currentLabel}. Re-embed this file to bring it back in line.`
                 : undefined
             }
           >
@@ -541,9 +558,10 @@ export default function DocumentListPage() {
             >
               <Cpu className="h-3.5 w-3.5 text-muted-foreground" />
               <span className="text-muted-foreground">Indexed with</span>
-              {indexedEmbedders.map((e, i) => (
+              {indexedEmbedders.map((e) => (
                 <span key={e.label}>
-                  {i > 0 && <span className="text-muted-foreground">, </span>}
+                  {/* No separator: the flex gap already spaces these, and a
+                      comma inside the next item renders after that gap. */}
                   <span className={e.drifted ? "font-medium text-amber-700 dark:text-amber-100" : "font-medium"}>
                     {e.label}
                   </span>
