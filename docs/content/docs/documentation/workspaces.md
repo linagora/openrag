@@ -59,7 +59,7 @@ All workspace endpoints live under `/partition/{partition}/workspaces`.
 | POST | `/partition/{partition}/workspaces` | Editor | Create a workspace |
 | GET | `/partition/{partition}/workspaces` | Viewer | List all workspaces in partition |
 | GET | `/partition/{partition}/workspaces/{workspace_id}` | Viewer | Get workspace details |
-| DELETE | `/partition/{partition}/workspaces/{workspace_id}` | Owner | Delete workspace and orphaned files |
+| DELETE | `/partition/{partition}/workspaces/{workspace_id}` | Owner | Delete workspace (and orphaned files, unless `keep_files=true`) |
 
 ### Workspace File Management
 
@@ -126,10 +126,28 @@ curl -X DELETE "$BASE_URL/partition/my-partition/workspaces/project-alpha" \
 ```
 
 ```json
-{"status": "deleted", "orphaned_files_deleted": 1}
+{"status": "deleted", "orphaned_files_deleted": 1, "orphaned_files_failed": [], "kept_files": 0}
 ```
 
 Files that belonged **only** to the deleted workspace are automatically removed from the partition. Files shared with other workspaces are preserved.
+
+#### Keeping Orphaned Files (`keep_files=true`)
+
+Pass `?keep_files=true` to delete the workspace and its membership rows **without** touching any files, even ones that would otherwise be orphaned:
+
+```bash
+curl -X DELETE "$BASE_URL/partition/my-partition/workspaces/project-alpha?keep_files=true" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+```json
+{"status": "deleted", "orphaned_files_deleted": 0, "orphaned_files_failed": [], "kept_files": 1}
+```
+
+- `kept_files` reports how many files would have been orphaned and were left indexed in the partition instead of being deleted.
+- The workspace and its `workspace_files` rows are still removed as usual — only the file-deletion step is skipped.
+- Default behavior (parameter absent or `keep_files=false`) is unchanged: orphaned files are purged as before.
+- Useful when files may be shared outside of the workspace model (e.g. referenced by an external system) and must never be deleted as a side effect of removing a workspace.
 
 ---
 
@@ -199,7 +217,9 @@ flowchart LR
     A[Delete workspace] --> B[Find workspace files]
     B --> C{File in other workspaces?}
     C -->|Yes| D[Keep file]
-    C -->|No| E[Delete orphaned file from partition]
+    C -->|No| G{keep_files=true?}
+    G -->|Yes| D
+    G -->|No| E[Delete orphaned file from partition]
     D --> F[Done]
     E --> F
 ```

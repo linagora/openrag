@@ -131,7 +131,7 @@ class WorkspaceService:
     # Cross-cutting: delete workspace + clean up orphaned files
     # ------------------------------------------------------------------
 
-    async def delete_workspace(self, partition: str, workspace_id: str) -> dict:
+    async def delete_workspace(self, partition: str, workspace_id: str, keep_files: bool = False) -> dict:
         """Delete the workspace, then fully delete any files it orphaned.
 
         ``workspace_repo.delete_workspace`` removes the workspace and its
@@ -140,12 +140,22 @@ class WorkspaceService:
         vector store and the relational catalog — concurrently, with
         per-file failures collected rather than raised, matching the
         legacy router's ``asyncio.gather(..., return_exceptions=True)``.
+
+        With ``keep_files=True`` the orphan cleanup is skipped entirely:
+        the workspace and its membership rows are still removed, but the
+        files stay indexed in the partition and are reported under
+        ``kept_files``.
         """
         orphaned = await self._workspace_repo.delete_workspace(workspace_id)
 
         deleted_count = 0
         failed_file_ids: list[str] = []
-        if orphaned:
+        kept_files = 0
+        if orphaned and keep_files:
+            # Orphaned files stay indexed in the partition; only the workspace
+            # and its membership rows are removed.
+            kept_files = len(orphaned)
+        elif orphaned:
             results = await asyncio.gather(
                 *[self._delete_file(file_id, partition) for file_id in orphaned],
                 return_exceptions=True,
@@ -164,6 +174,7 @@ class WorkspaceService:
         return {
             "orphaned_files_deleted": deleted_count,
             "orphaned_files_failed": failed_file_ids,
+            "kept_files": kept_files,
         }
 
     async def _delete_file(self, file_id: str, partition: str) -> None:

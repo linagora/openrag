@@ -5,7 +5,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any
 
-from openrag.core.models.chunk import Chunk
+from core.models.chunk import Chunk
 
 if TYPE_CHECKING:
     from datetime import datetime

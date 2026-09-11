@@ -455,7 +455,41 @@ async def test_chat_direct_mode_skips_retrieval():
     assert called["n"] == 0  # no retrieval in direct mode
     assert out["model"] == "m1"
     assert out["choices"][0]["message"]["content"] == "hello [Sources: none]"
-    assert json.loads(out["extra"])["sources"] == []
+    assert out["extra"]["sources"] == []
+
+
+@pytest.mark.asyncio
+async def test_chat_extra_is_a_json_object_not_an_encoded_string():
+    """`extra` is a nested JSON object on the wire, not a JSON-encoded string.
+
+    Asserted explicitly because every other test reads `out["extra"][...]`, which
+    happens to raise on a string too -- but as a `TypeError` about subscripting,
+    which reads like a broken test rather than a reverted response contract. This
+    one names the contract, so a regression says what it broke.
+    """
+    svc = _svc(llm=FakeLLM(chat_responses=["hello [Sources: none]"]))
+    out = await svc.chat(
+        partitions=None,
+        payload={"messages": [{"role": "user", "content": "hi"}], "metadata": {}},
+        prepare_sources=lambda d, w: [],
+        model_name="m1",
+    )
+    assert isinstance(out["extra"], dict)
+    # Survives serialization: the router hands this straight to the JSON encoder.
+    assert json.loads(json.dumps(out["extra"]))["sources"] == []
+
+
+@pytest.mark.asyncio
+async def test_complete_extra_is_a_json_object_not_an_encoded_string():
+    """Same contract on the legacy /completions path -- see the chat counterpart."""
+    svc = _svc(llm=FakeLLM(gen_text="text body\n[Sources: none]"))
+    out = await svc.complete(
+        partitions=None,
+        payload={"prompt": "do x"},
+        prepare_sources=lambda d, w: [],
+    )
+    assert isinstance(out["extra"], dict)
+    assert json.loads(json.dumps(out["extra"]))["sources"] == []
 
 
 @pytest.mark.asyncio
@@ -471,7 +505,7 @@ async def test_chat_direct_mode_preserves_literal_source_marker():
     )
 
     assert out["choices"][0]["message"]["content"] == answer
-    assert json.loads(out["extra"])["sources"] == []
+    assert out["extra"]["sources"] == []
 
 
 @pytest.mark.asyncio
@@ -487,7 +521,7 @@ async def test_chat_direct_mode_preserves_literal_terminal_sources_marker():
     )
 
     assert out["choices"][0]["message"]["content"] == answer
-    assert json.loads(out["extra"])["sources"] == []
+    assert out["extra"]["sources"] == []
 
 
 @pytest.mark.asyncio
@@ -503,7 +537,7 @@ async def test_chat_with_partition_retrieves_and_filters_sources():
         prepare_sources=lambda d, w: sources,
         model_name="m",
     )
-    extra = json.loads(out["extra"])
+    extra = out["extra"]
     assert extra["sources"] == [{"source_type": "document", "n": 1}]  # only cited source 1
     assert extra["presented_sources"] == sources  # everything shown to the model
     assert extra["cited_sources"] == [{"source_type": "document", "n": 1}]  # strictly what was cited
@@ -524,7 +558,7 @@ async def test_chat_all_retrieved_sources_omitted_by_default():
         model_name="m",
     )
 
-    extra = json.loads(out["extra"])
+    extra = out["extra"]
     assert "all_retrieved_sources" not in extra
     assert extra["sources"] == sources
     assert extra["presented_sources"] == sources
@@ -553,7 +587,7 @@ async def test_chat_all_retrieved_sources_survives_context_budget_truncation():
         model_name="m",
     )
 
-    extra = json.loads(out["extra"])
+    extra = out["extra"]
     assert extra["sources"] == [{"id": "c1"}]  # only the doc that fit the prompt and was cited
     assert extra["all_retrieved_sources"] == [{"id": "c1"}, {"id": "c2"}]  # both, unfiltered
 
@@ -589,7 +623,7 @@ async def test_chat_stream_all_retrieved_sources_survives_context_budget_truncat
         for line in lines
         if line.startswith("data: ") and line.strip() != "data: [DONE]"
     ]
-    extra = next(json.loads(c["extra"]) for c in reversed(chunks_out) if c.get("extra") not in (None, "{}"))
+    extra = next(c["extra"] for c in reversed(chunks_out) if c.get("extra") not in (None, {}))
 
     assert extra["sources"] == [{"id": "c1"}]
     assert extra["all_retrieved_sources"] == [{"id": "c1"}, {"id": "c2"}]
@@ -610,7 +644,7 @@ async def test_complete_all_retrieved_sources_survives_context_budget_truncation
         prepare_sources=lambda d, w: [{"id": doc.metadata.get("_id")} for doc in d],
     )
 
-    extra = json.loads(out["extra"])
+    extra = out["extra"]
     assert extra["sources"] == [{"id": "c1"}]
     assert extra["all_retrieved_sources"] == [{"id": "c1"}, {"id": "c2"}]
 
@@ -627,7 +661,7 @@ async def test_chat_recovers_context_markers_as_citations():
     )
 
     assert out["choices"][0]["message"]["content"] == "First claim. Second claim."
-    assert json.loads(out["extra"])["sources"] == sources
+    assert out["extra"]["sources"] == sources
 
 
 @pytest.mark.asyncio
@@ -646,7 +680,7 @@ async def test_chat_conversational_request_skips_partition_retrieval():
 
     assert retrieval.retrieve_multi_calls == []
     assert out["choices"][0]["message"]["content"] == "I can help you search and summarize documents."
-    assert json.loads(out["extra"])["sources"] == []
+    assert out["extra"]["sources"] == []
     answer_messages = llm.chat_calls[1][0]
     assert answer_messages[0]["role"] == "system"
     assert "OpenRAG" in answer_messages[0]["content"]
@@ -696,7 +730,7 @@ async def test_chat_mixed_request_still_retrieves_documents():
     )
 
     assert len(retrieval.retrieve_multi_calls) == 1
-    assert json.loads(out["extra"])["sources"] == [{"source_type": "document", "filename": "report.pdf"}]
+    assert out["extra"]["sources"] == [{"source_type": "document", "filename": "report.pdf"}]
 
 
 @pytest.mark.asyncio
@@ -734,7 +768,7 @@ async def test_chat_without_citation_keeps_retrieved_sources():
         model_name="m",
     )
 
-    extra = json.loads(out["extra"])
+    extra = out["extra"]
     assert extra["sources"] == sources
     # No tag at all → not reported, even though `sources` ends up covering
     # everything, same as if the model had explicitly cited all of them (#847 review).
@@ -758,7 +792,7 @@ async def test_chat_invalid_citation_does_not_fallback_to_unrelated_sources():
         model_name="m",
     )
 
-    extra = json.loads(out["extra"])
+    extra = out["extra"]
     assert extra["sources"] == []
     assert extra["citations_reported"] is True  # a tag was present, just out of range
 
@@ -781,7 +815,7 @@ async def test_chat_structured_output_keeps_retrieved_sources_without_citation_m
     )
 
     assert out["choices"][0]["message"]["content"] == structured_answer
-    assert json.loads(out["extra"])["sources"] == sources
+    assert out["extra"]["sources"] == sources
 
 
 @pytest.mark.asyncio
@@ -827,7 +861,7 @@ async def test_chat_stream_structured_output_preserves_source_like_json_values()
     content = "".join(
         choice.get("delta", {}).get("content", "") for chunk in chunks for choice in chunk.get("choices", [])
     )
-    extra = next(json.loads(chunk["extra"]) for chunk in reversed(chunks) if chunk.get("extra") not in (None, "{}"))
+    extra = next(chunk["extra"] for chunk in reversed(chunks) if chunk.get("extra") not in (None, {}))
 
     assert content == structured_answer
     assert extra["sources"] == sources
@@ -866,7 +900,7 @@ async def test_structured_websearch_returns_only_sources_included_in_context():
         model_name="m",
     )
 
-    extra = json.loads(out["extra"])
+    extra = out["extra"]
     assert extra["sources"] == [{"url": "https://example.test/included"}]
     # #847 review: excluded (didn't fit the web token budget) still shows up
     # in all_retrieved_sources.
@@ -1284,7 +1318,7 @@ async def test_chat_attachments_drops_unindexed_and_reports_in_extra():
     # Only the indexed id drives the filter...
     assert retrieval.retrieve_multi_calls[0]["filter_params"] == {"file_id": ["fa"]}
     # ...and the same validated list is reported back to the client in extra.
-    assert json.loads(chunk["extra"])["attachments"] == ["fa"]
+    assert chunk["extra"]["attachments"] == ["fa"]
 
 
 @pytest.mark.asyncio
@@ -1305,7 +1339,7 @@ async def test_chat_attachments_duplicate_ids_deduped():
         model_name="m",
     )
     assert retrieval.retrieve_multi_calls[0]["filter_params"] == {"file_id": ["fa"]}
-    assert json.loads(chunk["extra"])["attachments"] == ["fa"]
+    assert chunk["extra"]["attachments"] == ["fa"]
 
 
 @pytest.mark.asyncio
@@ -1347,7 +1381,7 @@ async def test_chat_attachments_all_partition_looks_up_any_partition():
         model_name="m",
     )
     assert retrieval.retrieve_multi_calls[0]["filter_params"] == {"file_id": ["fa"]}
-    assert json.loads(chunk["extra"])["attachments"] == ["fa"]
+    assert chunk["extra"]["attachments"] == ["fa"]
 
 
 @pytest.mark.asyncio
@@ -1375,7 +1409,7 @@ async def test_complete_direct_mode_preserves_literal_source_marker():
         prepare_sources=lambda d, w: [{"x": 1}] if d or w else [],
     )
     assert out["choices"][0]["text"] == answer
-    assert json.loads(out["extra"])["sources"] == []
+    assert out["extra"]["sources"] == []
 
 
 @pytest.mark.asyncio
@@ -1412,7 +1446,7 @@ async def test_complete_partition_request_keeps_context_and_filters_citations():
         prepare_sources=lambda d, w: sources,
     )
 
-    extra = json.loads(out["extra"])
+    extra = out["extra"]
     assert out["choices"][0]["text"] == "The answer is grounded."
     assert extra["sources"] == sources
     assert extra["citations_reported"] is True
@@ -1435,7 +1469,7 @@ async def test_complete_without_citation_keeps_retrieved_sources():
         prepare_sources=lambda d, w: sources,
     )
 
-    extra = json.loads(out["extra"])
+    extra = out["extra"]
     assert out["choices"][0]["text"] == "A general answer with no citation marker."
     assert extra["sources"] == sources
     assert extra["citations_reported"] is False
@@ -1500,7 +1534,7 @@ async def test_chat_all_retrieved_sources_survives_map_reduce_replacement():
         model_name="m",
     )
 
-    extra = json.loads(out["extra"])
+    extra = out["extra"]
     # What the LLM actually saw and cited: the map-reduce summaries.
     assert extra["sources"] == [
         {"id": "c1", "text": "summary one"},
