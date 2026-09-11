@@ -83,7 +83,14 @@ def json_record(record: dict) -> dict:
         "msg": record["message"],
     }
     exc = record["exception"]
-    if exc is not None:
+    # ``exc.type is None`` as well as ``exc is None``: loguru builds a
+    # RecordException for any non-empty exc_info tuple, and stdlib hands it
+    # ``(None, None, None)`` for ``logger.error(..., exc_info=True)`` called
+    # outside an ``except`` block — a shape every intercepted library can
+    # produce. ``format_exception(None, None, None)`` returns
+    # ``"NoneType: None\n"``, which would render in Grafana as a traceback on
+    # a record that has none.
+    if exc is not None and exc.type is not None:
         payload["exception"] = "".join(traceback.format_exception(exc.type, exc.value, exc.traceback))
     for key, value in extra.items():
         payload[f"extra_{key}" if key in RESERVED_JSON_KEYS else key] = value
