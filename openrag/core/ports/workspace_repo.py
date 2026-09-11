@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from contextlib import AbstractAsyncContextManager
 
 from core.models.workspace import Workspace
 
@@ -19,6 +20,15 @@ class WorkspaceRepository(ABC):
     # ── Workspace lifecycle ───────────────────────────────────────────
 
     @abstractmethod
+    def cleanup_session(self, file_id: str, partition: str) -> AbstractAsyncContextManager[WorkspaceRepository | None]:
+        """Yield an exclusively owned cleanup repository, or None if busy.
+
+        Cleanup transitions must use this session. Ownership lasts through
+        vector deletion and database finalization, independently of claim age.
+        """
+        ...
+
+    @abstractmethod
     async def create_workspace(self, workspace: Workspace) -> Workspace: ...
 
     @abstractmethod
@@ -28,8 +38,37 @@ class WorkspaceRepository(ABC):
     async def list_workspaces(self, partition: str) -> list[Workspace]: ...
 
     @abstractmethod
-    async def delete_workspace(self, workspace_id: str) -> list[str]:
-        """Delete a workspace, return file_ids that no longer belong to any workspace."""
+    async def delete_workspace(self, workspace_id: str, *, keep_files: bool = False) -> list[str]:
+        """Delete a workspace and return claimed workspace-owned orphan IDs.
+
+        With keep_files, retain its files as independently indexed instead.
+        The returned candidates still describe what would have been deleted.
+        """
+        ...
+
+    @abstractmethod
+    async def finalize_claimed_file_cleanup(self, file_id: str, partition: str) -> bool:
+        """Delete a file that was claimed during workspace cleanup."""
+        ...
+
+    @abstractmethod
+    async def start_claimed_file_cleanup(self, file_id: str, partition: str) -> bool:
+        """Mark a cleanup claim as destructive and no longer recoverable."""
+        ...
+
+    @abstractmethod
+    async def mark_cleanup_failed(self, file_id: str, partition: str) -> bool:
+        """Persist that destructive cleanup failed and must be retried."""
+        ...
+
+    @abstractmethod
+    async def claim_failed_file_cleanup(self, file_id: str, partition: str) -> bool:
+        """Atomically reclaim failed or abandoned cleanup before retry."""
+        ...
+
+    @abstractmethod
+    async def release_claimed_file_cleanup(self, file_id: str, partition: str) -> None:
+        """Make a claimed file attachable after cleanup fails."""
         ...
 
     # ── Workspace ↔ file membership ───────────────────────────────────

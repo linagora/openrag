@@ -176,6 +176,8 @@ async def add_file(
             parsed_workspace_ids = json.loads(workspace_ids)
             if not isinstance(parsed_workspace_ids, list):
                 raise ValueError
+            if not all(isinstance(workspace_id, str) for workspace_id in parsed_workspace_ids):
+                raise ValueError
         except (json.JSONDecodeError, ValueError):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,

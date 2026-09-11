@@ -135,6 +135,7 @@ class IndexerWorker:
                     indexation_config=indexation_config,
                     indexed_at=indexed_at,
                     require_existing_partition=require_existing_partition,
+                    workspace_ids=workspace_ids,
                 )
                 if not wrote_catalog:
                     raise RuntimeError("Catalog row was not written after vector indexing")
@@ -211,6 +212,7 @@ async def _write_catalog_record(
     indexation_config: dict[str, Any] | None,
     indexed_at: datetime | None = None,
     require_existing_partition: bool = False,
+    workspace_ids: list[str] | None = None,
 ) -> bool:
     file_id = metadata.get("file_id", "")
     file_metadata = {key: value for key, value in metadata.items() if key != "page"}
@@ -236,6 +238,8 @@ async def _write_catalog_record(
         parent_id=metadata.get("parent_id"),
         indexed_at=indexed_at,
         require_existing_partition=require_existing_partition,
+        # Stay protected until the outer worker has completed every attachment.
+        independently_indexed=True,
         content_sha256=metadata.get("content_sha256"),
         **config_kwargs,
     )

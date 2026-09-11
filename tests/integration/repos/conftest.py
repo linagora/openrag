@@ -84,6 +84,8 @@ async def _ensured_test_database() -> str:
     """Create the test database from scratch; drop it at session teardown."""
     admin = await _connect_admin()
     if admin is None:
+        if os.environ.get("POSTGRES_TEST_ADMIN_DSN"):
+            pytest.fail("Configured PostgreSQL test server is unreachable; refusing to skip database regression tests.")
         pytest.skip(
             f"Postgres unreachable at {_admin_dsn()}; set POSTGRES_TEST_ADMIN_DSN or start the rdb container.",
         )

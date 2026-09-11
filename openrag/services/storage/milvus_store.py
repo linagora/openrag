@@ -1415,6 +1415,11 @@ class MilvusVectorStore(VectorStore):
 
         return int(result.get("delete_count", 0)) if isinstance(result, dict) else 0
 
+    async def check_health(self) -> None:
+        # A missing collection is normal before the first upload. A failed RPC
+        # is not. Use the async data-plane client so cancellation stops the RPC.
+        await self._async_client.has_collection(self._collection_name, timeout=2.0)
+
     async def collection_exists(self, name: str) -> bool:
         """Report whether the Milvus collection exists on the server.
 

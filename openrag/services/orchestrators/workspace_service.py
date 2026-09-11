@@ -136,7 +136,8 @@ class WorkspaceService:
 
         ``workspace_repo.delete_workspace`` removes the workspace and its
         associations and returns the file_ids that are no longer
-        referenced by *any* workspace. Each of those is deleted from the
+        referenced by *any* workspace and were not independently indexed.
+        Each of those is deleted from the
         vector store and the relational catalog — concurrently, with
         per-file failures collected rather than raised, matching the
         legacy router's ``asyncio.gather(..., return_exceptions=True)``.
@@ -146,7 +147,7 @@ class WorkspaceService:
         files stay indexed in the partition and are reported under
         ``kept_files``.
         """
-        orphaned = await self._workspace_repo.delete_workspace(workspace_id)
+        orphaned = await self._workspace_repo.delete_workspace(workspace_id, keep_files=keep_files)
 
         deleted_count = 0
         failed_file_ids: list[str] = []
@@ -161,6 +162,8 @@ class WorkspaceService:
                 return_exceptions=True,
             )
             for file_id, result in zip(orphaned, results, strict=True):
+                if isinstance(result, asyncio.CancelledError):
+                    raise result
                 if isinstance(result, Exception):
                     logger.warning(
                         "Failed to delete orphaned file from vector store",
@@ -178,21 +181,66 @@ class WorkspaceService:
         }
 
     async def _delete_file(self, file_id: str, partition: str) -> None:
+        async with self._workspace_repo.cleanup_session(file_id, partition) as owned:
+            if owned is None:
+                raise RuntimeError(f"Workspace cleanup already running for {file_id}")
+            await self._delete_owned_file(file_id, partition, owned)
+
+    async def _delete_owned_file(
+        self, file_id: str, partition: str, owned: WorkspaceRepository, *, cleanup_started: bool = False
+    ) -> None:
         """Port of the legacy ``vectordb.delete_file``.
 
         Drops the file's chunks from the vector store (via the clean
-        port: query ids by filter + delete), then detaches it from every
-        workspace and removes the relational file row.
+        port: query ids by filter + delete), then finalizes its catalog
+        deletion. The catalog row was claimed before vector cleanup started,
+        so a concurrent workspace attachment cannot be lost.
         """
-        ids = await self._vector_store.query_ids_by_filter(
-            self._collection,
-            {"partition": partition, "file_id": file_id},
-        )
-        if ids:
-            await self._vector_store.delete(ids, self._collection)
-        await self._workspace_repo.remove_file_from_all_workspaces(file_id, partition)
-        await self._document_repo.remove_file_from_partition(file_id=file_id, partition=partition)
+        vector_cleanup_started = cleanup_started
+        try:
+            ids = await self._vector_store.query_ids_by_filter(
+                self._collection,
+                {"partition": partition, "file_id": file_id},
+            )
+            if not vector_cleanup_started:
+                if not await owned.start_claimed_file_cleanup(file_id, partition):
+                    raise RuntimeError(f"Workspace cleanup claim disappeared for {file_id}")
+                vector_cleanup_started = True
+            if ids:
+                await self._vector_store.delete(ids, self._collection)
+            if not await owned.finalize_claimed_file_cleanup(file_id, partition):
+                raise RuntimeError(f"Workspace cleanup claim disappeared for {file_id}")
+        except (Exception, asyncio.CancelledError):
+            if vector_cleanup_started:
+                try:
+                    await owned.mark_cleanup_failed(file_id, partition)
+                except Exception as mark_error:  # noqa: BLE001 - preserve original cleanup failure
+                    logger.error(
+                        "Failed to persist workspace cleanup failure state",
+                        file_id=file_id,
+                        partition=partition,
+                        error=str(mark_error),
+                    )
+            else:
+                try:
+                    await owned.release_claimed_file_cleanup(file_id, partition)
+                except Exception as release_error:  # noqa: BLE001 - preserve original cleanup failure
+                    logger.error(
+                        "Failed to release workspace cleanup claim",
+                        file_id=file_id,
+                        partition=partition,
+                        error=str(release_error),
+                    )
+            raise
         logger.info("Deleted orphaned file", file_id=file_id, partition=partition)
+
+    async def retry_failed_file_cleanup(self, file_id: str, partition: str) -> bool:
+        """Retry a failed or abandoned cleanup while keeping attachment fenced."""
+        async with self._workspace_repo.cleanup_session(file_id, partition) as owned:
+            if owned is None or not await owned.claim_failed_file_cleanup(file_id, partition):
+                return False
+            await self._delete_owned_file(file_id, partition, owned, cleanup_started=True)
+            return True
 
 
 __all__ = ["WorkspaceService"]

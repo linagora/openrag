@@ -527,12 +527,14 @@ openrag:
       httpGet:
         path: /health_check
         port: openrag
+      timeoutSeconds: 5
       failureThreshold: 30
       periodSeconds: 10
     readiness:
       httpGet:
-        path: /health_check
+        path: /ready
         port: openrag
+      timeoutSeconds: 5
       initialDelaySeconds: 10
       periodSeconds: 10
       failureThreshold: 3
