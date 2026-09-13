@@ -13,6 +13,7 @@ import asyncpg
 from core.config.model_endpoints import DEFAULT_ENDPOINT_ALIAS, ModelEndpointRow
 from core.ports.model_endpoint_repo import ModelEndpointRepository
 from core.utils.exceptions import ConflictError, NotFoundError, ValidationError
+from core.vector_stores.vector_field import allocate_vector_field_name
 
 # 'is_default' is deliberately excluded: a bare ``UPDATE ... SET is_default = true``
 # cannot clear the previous default in the same statement, so it would leave two
@@ -22,7 +23,14 @@ from core.utils.exceptions import ConflictError, NotFoundError, ValidationError
 # on a non-default endpoint yielded two defaults for the type.) Promotion must go
 # through set_default / delete_and_promote_default, which clear-then-set inside one
 # transaction; ModelEndpointService.update_model_endpoint routes is_default there.
+# ``vector_field`` is deliberately absent: an endpoint's dense field is
+# allocated once and pinned for life, so that renaming or re-pointing an
+# endpoint can never move its vectors to a different field (#762 F).
 _ALLOWED_UPDATE_FIELDS = frozenset({"endpoint", "model_name", "batch_size", "timeout", "extra"})
+
+# Name of the partial unique index in schema.py, used to tell a vector-field
+# collision apart from a duplicate (name, model_type) on insert.
+_VECTOR_FIELD_UNIQUE_INDEX = "uq_model_endpoint_vector_field"
 
 # Endpoint names are referenced by value elsewhere, and nothing updates those
 # references when an endpoint is renamed (#770) — so ``rename()`` cascades to
@@ -119,6 +127,7 @@ class PgModelEndpointRepository(ModelEndpointRepository):
             timeout=row["timeout"],
             extra=row["extra"] or {},
             is_default=row["is_default"],
+            vector_field=row["vector_field"],
             created_at=row["created_at"],
             updated_at=row["updated_at"],
         )
@@ -137,11 +146,13 @@ class PgModelEndpointRepository(ModelEndpointRepository):
                             "UPDATE model_endpoints SET is_default = false, updated_at = now() WHERE model_type = $1",
                             row.model_type,
                         )
+                    vector_field = await self._allocate_vector_field(conn, row)
                     rec = await conn.fetchrow(
                         """
                         INSERT INTO model_endpoints
-                            (name, model_type, endpoint, model_name, batch_size, timeout, extra, is_default)
-                        VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8)
+                            (name, model_type, endpoint, model_name, batch_size, timeout, extra,
+                             is_default, vector_field)
+                        VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9)
                         RETURNING *
                         """,
                         row.name,
@@ -152,8 +163,19 @@ class PgModelEndpointRepository(ModelEndpointRepository):
                         row.timeout,
                         row.extra,
                         row.is_default,
+                        vector_field,
                     )
         except asyncpg.UniqueViolationError as exc:
+            if exc.constraint_name == _VECTOR_FIELD_UNIQUE_INDEX:
+                # Two concurrent creates read the same set of taken names and
+                # allocated the same field. Rare, retryable, and emphatically
+                # not "this endpoint already exists" — say which it is.
+                raise ValidationError(
+                    f"Could not allocate a dense vector field for '{row.name}': "
+                    "another endpoint claimed the same name concurrently. Retry.",
+                    status_code=409,
+                    code="VECTOR_FIELD_CONFLICT",
+                ) from exc
             # The service's preflight check cannot make a concurrent create
             # atomic. Surface the same typed 409 to both an admin race and a
             # startup-seeding race instead of leaking a database exception.
@@ -163,6 +185,26 @@ class PgModelEndpointRepository(ModelEndpointRepository):
                 code="ENDPOINT_EXISTS",
             ) from exc
         return self._to_model(rec)
+
+    @staticmethod
+    async def _allocate_vector_field(conn: asyncpg.Connection, row: ModelEndpointRow) -> str | None:
+        """Pick the dense vector field a new endpoint will own (#762 F).
+
+        Only embedders get one — nothing else writes vectors. The name is
+        allocated here, inside the insert's own transaction, rather than in the
+        service, so the set of already-taken names is read under the same
+        snapshot that the insert commits in; a create that races past it still
+        hits ``uq_model_endpoint_vector_field`` and is reported as the conflict
+        it is rather than as a duplicate endpoint.
+
+        Any ``vector_field`` on the incoming row is ignored: the column is
+        server-owned, so a client cannot steer an endpoint onto another
+        embedder's vectors by posting a name of its own.
+        """
+        if row.model_type != "embedder":
+            return None
+        taken = await conn.fetch("SELECT vector_field FROM model_endpoints WHERE vector_field IS NOT NULL")
+        return allocate_vector_field_name(row.name, {rec["vector_field"] for rec in taken})
 
     async def get(self, name: str, model_type: str) -> ModelEndpointRow | None:
         rec = await self.pool.fetchrow(

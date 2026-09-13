@@ -19,6 +19,9 @@ def _make_row(**kwargs):
         "timeout": 30.0,
         "extra": {},
         "is_default": True,
+        # NULL is the common real-world value: every row predating #762 F
+        # shares the legacy `vector` field rather than owning one.
+        "vector_field": None,
         "created_at": _NOW,
         "updated_at": _NOW,
     }
@@ -784,3 +787,158 @@ async def test_delete_of_unknown_endpoint_clears_nothing():
     status, _ = await repo.delete_and_promote_default("ghost", "stt")
     assert status == "not_found"
     assert not any("config - $1::text" in q for q, _ in pool.conn.executed)
+
+
+# ----------------------------------------------------------------------
+# Per-embedder dense vector fields (#762 F)
+# ----------------------------------------------------------------------
+
+
+def _insert_params(pool) -> tuple:
+    """Bind parameters of the INSERT the repo issued."""
+    return next(p for q, p in pool.conn.executed if "INSERT INTO model_endpoints" in q)
+
+
+@pytest.mark.asyncio
+async def test_create_allocates_a_dense_field_for_an_embedder():
+    from core.config.model_endpoints import ModelEndpointRow
+    from services.persistence.model_endpoint_repo import PgModelEndpointRepository
+
+    pool = _FakePool()
+    pool.conn._fetchrow_result = _make_row(name="bge-m3", vector_field="vector_bge_m3")
+    repo = PgModelEndpointRepository(pool_getter=lambda: pool)
+
+    result = await repo.create(
+        ModelEndpointRow(
+            name="bge-m3",
+            model_type="embedder",
+            endpoint="http://vllm:8000/v1",
+            created_at=_NOW,
+            updated_at=_NOW,
+        )
+    )
+
+    assert _insert_params(pool)[-1] == "vector_bge_m3"
+    assert result.vector_field == "vector_bge_m3"
+
+
+@pytest.mark.asyncio
+async def test_create_allocates_nothing_for_a_non_embedder():
+    # Only embedders write vectors, so only embedders own a dense field.
+    from core.config.model_endpoints import ModelEndpointRow
+    from services.persistence.model_endpoint_repo import PgModelEndpointRepository
+
+    pool = _FakePool()
+    pool.conn._fetchrow_result = _make_row(model_type="llm", vector_field=None)
+    repo = PgModelEndpointRepository(pool_getter=lambda: pool)
+
+    await repo.create(
+        ModelEndpointRow(
+            name="mistral",
+            model_type="llm",
+            endpoint="http://vllm:8000/v1",
+            created_at=_NOW,
+            updated_at=_NOW,
+        )
+    )
+
+    assert _insert_params(pool)[-1] is None
+
+
+@pytest.mark.asyncio
+async def test_create_avoids_a_field_another_endpoint_already_owns():
+    # "a-b" and "a.b" both prefer vector_a_b. Handing the second the first's
+    # field would put two embedders' vectors in one index — #762's core defect.
+    from core.config.model_endpoints import ModelEndpointRow
+    from services.persistence.model_endpoint_repo import PgModelEndpointRepository
+
+    pool = _FakePool()
+    pool.conn._fetch_result = [{"vector_field": "vector_a_b"}]
+    pool.conn._fetchrow_result = _make_row(name="a.b", vector_field="vector_a_b_2")
+    repo = PgModelEndpointRepository(pool_getter=lambda: pool)
+
+    await repo.create(
+        ModelEndpointRow(
+            name="a.b",
+            model_type="embedder",
+            endpoint="http://vllm:8000/v1",
+            created_at=_NOW,
+            updated_at=_NOW,
+        )
+    )
+
+    assert _insert_params(pool)[-1] == "vector_a_b_2"
+
+
+@pytest.mark.asyncio
+async def test_create_ignores_a_client_supplied_vector_field():
+    # The column is server-owned. Honouring an incoming value would let a
+    # caller point a new endpoint at an existing embedder's vectors.
+    from core.config.model_endpoints import ModelEndpointRow
+    from services.persistence.model_endpoint_repo import PgModelEndpointRepository
+
+    pool = _FakePool()
+    pool.conn._fetch_result = [{"vector_field": "vector_victim"}]
+    pool.conn._fetchrow_result = _make_row(name="attacker", vector_field="vector_attacker")
+    repo = PgModelEndpointRepository(pool_getter=lambda: pool)
+
+    await repo.create(
+        ModelEndpointRow(
+            name="attacker",
+            model_type="embedder",
+            endpoint="http://vllm:8000/v1",
+            vector_field="vector_victim",
+            created_at=_NOW,
+            updated_at=_NOW,
+        )
+    )
+
+    assert _insert_params(pool)[-1] == "vector_attacker"
+
+
+@pytest.mark.asyncio
+async def test_update_cannot_change_the_dense_field():
+    # Pinned for life: a rename or re-point must never move an endpoint's
+    # vectors to a different field.
+    from services.persistence.model_endpoint_repo import PgModelEndpointRepository
+
+    pool = _FakePool()
+    pool._fetchrow_result = _make_row()
+    repo = PgModelEndpointRepository(pool_getter=lambda: pool)
+
+    await repo.update("default", "embedder", vector_field="vector_somewhere_else")
+
+    assert not any("vector_field" in q for q, _ in pool.executed)
+
+
+@pytest.mark.asyncio
+async def test_create_reports_a_field_collision_as_itself_not_a_duplicate_endpoint():
+    import asyncpg
+    from core.config.model_endpoints import ModelEndpointRow
+    from core.utils.exceptions import ValidationError
+    from services.persistence.model_endpoint_repo import PgModelEndpointRepository
+
+    class _CollidingConn(_FakeConn):
+        async def fetchrow(self, query: str, *params):
+            if "INSERT INTO model_endpoints" in query:
+                exc = asyncpg.UniqueViolationError("duplicate key")
+                exc.constraint_name = "uq_model_endpoint_vector_field"
+                raise exc
+            return await super().fetchrow(query, *params)
+
+    pool = _FakePool()
+    pool.conn = _CollidingConn()
+    repo = PgModelEndpointRepository(pool_getter=lambda: pool)
+
+    with pytest.raises(ValidationError) as excinfo:
+        await repo.create(
+            ModelEndpointRow(
+                name="bge-m3",
+                model_type="embedder",
+                endpoint="http://vllm:8000/v1",
+                created_at=_NOW,
+                updated_at=_NOW,
+            )
+        )
+
+    assert excinfo.value.code == "VECTOR_FIELD_CONFLICT"
