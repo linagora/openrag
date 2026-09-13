@@ -74,6 +74,37 @@ class VectorStore(ABC):
         ...
 
     @abstractmethod
+    async def ensure_vector_field(self, field: str, dimension: int) -> bool:
+        """Make ``field`` exist, be indexed, and be searchable. Idempotent.
+
+        Per-embedder dense fields (#762 F) are added to a collection that is
+        already live and serving, so this must not disturb the fields already
+        in it: existing searches keep working throughout, and no data is
+        rewritten. Returns whether this call created the field.
+
+        Three properties are required of an implementation, because the
+        scheme is unsafe without them:
+
+        - The field is **nullable**, so rows written before it existed stay
+          valid rather than being back-filled with a fake zero vector.
+        - A search on the field **skips** rows where it is null instead of
+          reading them as zero. This is what makes a partition pointed at a
+          not-yet-backfilled embedder return *fewer* results rather than
+          wrong ones.
+        - The field is indexed **identically** to the collection's original
+          dense field. An embedder whose field is indexed differently would
+          retrieve differently for reasons that have nothing to do with the
+          model, which is the confusion this whole feature exists to remove.
+
+        ``dimension`` sizes a newly created field and is ignored when the
+        field already exists — re-sizing would invalidate the index.
+
+        Raises:
+            ValueError: the backend cannot hold another dense field.
+        """
+        ...
+
+    @abstractmethod
     async def vector_dimension(self) -> int | None:
         """Dense-vector dimension the live collection actually stores.
 
