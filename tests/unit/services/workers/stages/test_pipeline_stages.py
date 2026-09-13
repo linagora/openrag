@@ -102,6 +102,7 @@ class FakeVectorStore(VectorStore):
         self.error = error
         self.calls: list[tuple[list[Chunk], str]] = []
         self.ensure_calls: list[tuple[str, int]] = []
+        self.vector_field_calls: list[tuple[str, int]] = []
 
     async def upsert(self, chunks: list[Chunk], collection: str = "default", *, indexed_at=None) -> int:
         self.calls.append((chunks, collection))
@@ -123,6 +124,10 @@ class FakeVectorStore(VectorStore):
     async def ensure_collection(self, name: str, dimension: int, **kwargs) -> None:
         self.ensure_calls.append((name, dimension))
         return None
+
+    async def ensure_vector_field(self, field: str, dimension: int) -> bool:
+        self.vector_field_calls.append((field, dimension))
+        return True
 
     async def drop_collection(self, name: str) -> None:
         return None

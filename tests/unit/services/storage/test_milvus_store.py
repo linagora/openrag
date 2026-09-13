@@ -1130,3 +1130,148 @@ class TestEnsureLoadedConcurrentCreation:
 
         with pytest.raises(VDBSchemaMigrationRequiredError):
             store._ensure_loaded()
+
+
+# ---------------------------------------------------------------------------
+# ensure_vector_field (#762 F)
+# ---------------------------------------------------------------------------
+
+
+def _descriptor(*names: str, vector_fields: tuple[str, ...] = ("vector", "sparse")) -> dict[str, Any]:
+    """A ``describe_collection`` payload naming ``names``.
+
+    Anything listed in ``vector_fields`` is typed as a vector so it counts
+    against the per-collection ceiling; everything else is a scalar.
+    """
+    from pymilvus import DataType
+
+    return {
+        "fields": [
+            {
+                "name": name,
+                "type": (DataType.FLOAT_VECTOR if name in vector_fields else DataType.VARCHAR),
+            }
+            for name in names
+        ]
+    }
+
+
+class TestEnsureVectorField:
+    async def test_the_legacy_field_is_a_no_op(self, store: MilvusVectorStore) -> None:
+        # ``vector`` is built into the collection, so there is nothing to add
+        # and add_collection_field would reject it.
+        assert await store.ensure_vector_field("vector", 1024) is False
+        store._client.add_collection_field.assert_not_called()
+
+    async def test_a_new_field_is_added_indexed_and_reloaded_in_that_order(self, store: MilvusVectorStore) -> None:
+        store._client.describe_collection.return_value = _descriptor("text", "vector", "sparse")
+        store._client.query.return_value = [{"count(*)": 3}]
+
+        assert await store.ensure_vector_field("vector_bge_m3", 768) is True
+
+        kwargs = store._client.add_collection_field.call_args.kwargs
+        assert kwargs["field_name"] == "vector_bge_m3"
+        assert kwargs["dim"] == 768
+        # Null-means-absent is the safety property: rows written before the
+        # field existed must stay valid and drop out of its searches.
+        assert kwargs["nullable"] is True
+
+        ordered = [call[0] for call in store._client.method_calls]
+        assert ordered.index("add_collection_field") < ordered.index("create_index")
+        # Without the refresh the field accepts writes but fails searches.
+        assert ordered.index("create_index") < ordered.index("refresh_load")
+
+    async def test_the_new_field_is_indexed_like_the_original_dense_field(self, store: MilvusVectorStore) -> None:
+        # Two embedders indexed under different recipes would retrieve
+        # differently for reasons unrelated to the models.
+        store._client.describe_collection.return_value = _descriptor("vector")
+        recorded: list[dict[str, Any]] = []
+        store._client.prepare_index_params.return_value = MagicMock(add_index=lambda **kw: recorded.append(kw))
+
+        await store.ensure_vector_field("vector_jina_v3", 1024)
+
+        baseline: list[dict[str, Any]] = []
+        MilvusVectorStore._add_dense_index(MagicMock(add_index=lambda **kw: baseline.append(kw)), "vector")
+        assert [{**kw, "field_name": "vector"} for kw in recorded] == baseline
+
+    async def test_an_existing_field_is_left_alone(self, store: MilvusVectorStore) -> None:
+        store._client.describe_collection.return_value = _descriptor("vector", "vector_bge_m3")
+
+        assert await store.ensure_vector_field("vector_bge_m3", 768) is False
+        store._client.add_collection_field.assert_not_called()
+
+    async def test_the_second_call_never_reaches_the_backend(self, store: MilvusVectorStore) -> None:
+        # Called on every write, so the memo is what keeps it off the hot path.
+        store._client.describe_collection.return_value = _descriptor("vector")
+        await store.ensure_vector_field("vector_bge_m3", 768)
+        store._client.reset_mock()
+
+        assert await store.ensure_vector_field("vector_bge_m3", 768) is False
+        store._client.describe_collection.assert_not_called()
+
+    async def test_a_failure_is_not_memoized(self, store: MilvusVectorStore) -> None:
+        # Remembering a failure as done would leave the field missing for the
+        # life of the process while writes kept being aimed at it.
+        store._client.describe_collection.return_value = _descriptor("vector")
+        store._client.add_collection_field.side_effect = MilvusException(1, "transient")
+        with pytest.raises(VDBCreateOrLoadCollectionError):
+            await store.ensure_vector_field("vector_bge_m3", 768)
+
+        store._client.add_collection_field.side_effect = None
+        assert await store.ensure_vector_field("vector_bge_m3", 768) is True
+
+    async def test_losing_the_create_race_is_not_an_error(self, store: MilvusVectorStore) -> None:
+        store._client.describe_collection.return_value = _descriptor("vector")
+        store._client.add_collection_field.side_effect = MilvusException(1, "field already exist")
+
+        assert await store.ensure_vector_field("vector_bge_m3", 768) is False
+        store._client.create_index.assert_not_called()
+
+    async def test_a_full_collection_names_the_real_remedy(self, store: MilvusVectorStore) -> None:
+        packed = tuple(f"vector_{n}" for n in range(10))
+        store._client.describe_collection.return_value = _descriptor(*packed, vector_fields=packed)
+
+        with pytest.raises(ValueError, match="embedder"):
+            await store.ensure_vector_field("vector_one_too_many", 768)
+        store._client.add_collection_field.assert_not_called()
+
+    async def test_sparse_counts_against_the_ceiling(self, store: MilvusVectorStore) -> None:
+        # Hybrid search spends one of the ten on ``sparse``, leaving nine.
+        packed = ("sparse", *(f"vector_{n}" for n in range(9)))
+        store._client.describe_collection.return_value = _descriptor(*packed, vector_fields=packed)
+
+        with pytest.raises(ValueError, match="maximum"):
+            await store.ensure_vector_field("vector_one_too_many", 768)
+
+    async def test_an_unloadable_field_says_it_was_already_added(self, store: MilvusVectorStore) -> None:
+        # The field now exists but cannot be searched; the message has to say
+        # so, or an operator retries a create that will report "already exist".
+        store._client.describe_collection.return_value = _descriptor("vector")
+        store._client.query.return_value = [{"count(*)": 3}]
+        store._client.refresh_load.side_effect = MilvusException(1, "load failed")
+
+        with pytest.raises(VDBCreateOrLoadCollectionError, match="could not"):
+            await store.ensure_vector_field("vector_bge_m3", 768)
+
+    async def test_a_collection_with_data_is_refreshed_not_released(self, store: MilvusVectorStore) -> None:
+        # Releasing a collection that holds data would stop every search on it
+        # for the length of the reload.
+        store._client.describe_collection.return_value = _descriptor("vector")
+        store._client.query.return_value = [{"count(*)": 3}]
+
+        await store.ensure_vector_field("vector_bge_m3", 768)
+
+        store._client.refresh_load.assert_called_once()
+        store._client.release_collection.assert_not_called()
+
+    async def test_an_empty_collection_is_fully_reloaded(self, store: MilvusVectorStore) -> None:
+        # refresh_load leaves the new field unloaded on an empty collection
+        # (Milvus 3.0.1), and that is the first write of every new deployment.
+        store._client.describe_collection.return_value = _descriptor("vector")
+        store._client.query.return_value = [{"count(*)": 0}]
+
+        await store.ensure_vector_field("vector_bge_m3", 768)
+
+        ordered = [call[0] for call in store._client.method_calls]
+        assert ordered.index("create_index") < ordered.index("release_collection") < ordered.index("load_collection")
+        store._client.refresh_load.assert_not_called()
