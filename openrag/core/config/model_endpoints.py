@@ -178,6 +178,10 @@ class ModelEndpointRow(BaseModel):
     timeout: float = Field(default=30.0, gt=0)
     extra: dict[str, Any] = Field(default_factory=dict)
     is_default: bool = False
+    # Dense vector field this embedder owns. None means the legacy shared
+    # ``vector`` field — see core/vector_stores/vector_field.py. Server-owned:
+    # allocated once at creation, never accepted from a client, never updated.
+    vector_field: str | None = None
     created_at: datetime
     updated_at: datetime
 
