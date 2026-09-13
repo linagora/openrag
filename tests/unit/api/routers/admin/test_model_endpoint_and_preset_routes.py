@@ -210,6 +210,9 @@ async def test_create_model_endpoint_normalizes_payload(async_client_factory):
                 "timeout": 30.0,
                 "extra": {},
                 "is_default": False,
+                # Server-owned and unset on the way in — the repository
+                # allocates it, and only for embedders (#762 F).
+                "vector_field": None,
             },
         )
     ]
