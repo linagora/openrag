@@ -80,6 +80,26 @@ SCHEMA_VERSION_PROPERTY_KEY = "openrag.schema_version"
 #: Scalar time fields that get an ``STL_SORT`` index.
 INDEXED_TIME_FIELDS = ["created_at"]
 
+#: Every vector-typed field counts against the per-collection ceiling below,
+#: dense and sparse alike — so ``sparse`` occupies one of the ten whenever
+#: hybrid search is on, leaving nine for per-embedder dense fields (#762 F).
+_VECTOR_DATA_TYPES = frozenset(
+    {
+        DataType.BINARY_VECTOR,
+        DataType.FLOAT_VECTOR,
+        DataType.FLOAT16_VECTOR,
+        DataType.BFLOAT16_VECTOR,
+        DataType.SPARSE_FLOAT_VECTOR,
+        DataType.INT8_VECTOR,
+    }
+)
+
+#: Milvus caps a collection at ten vector fields ("maximum vector field's
+#: number should be limited to 10"). Checked before adding rather than after
+#: failing, so the caller gets a sentence about embedders instead of a
+#: server-side error about fields.
+MAX_VECTOR_FIELDS = 10
+
 #: Dense ANN search params for the HNSW/COSINE index on ``vector``. ``ef``
 #: governs the search-time candidate pool size and trades recall for latency.
 DEFAULT_DENSE_SEARCH_PARAMS: dict[str, Any] = {
@@ -189,6 +209,10 @@ class MilvusVectorStore(VectorStore):
         self._schema_vector_dim: int | None = None
         self._loaded = False
         self._load_lock = asyncio.Lock()
+        # Per-embedder dense fields already ensured in this process (#762 F).
+        # Bounded by the collection's vector-field ceiling, so it cannot grow.
+        self._ensured_vector_fields: set[str] = set()
+        self._vector_field_lock = asyncio.Lock()
         # Connection healing: PyMilvus 3.0 exposes no documented client-level
         # reconnect knob (no retry/keepalive params on MilvusClient or
         # AsyncMilvusClient). Trust the gRPC
@@ -441,6 +465,22 @@ class MilvusVectorStore(VectorStore):
 
         return schema
 
+    @staticmethod
+    def _add_dense_index(index_params, field_name: str) -> None:
+        """Attach the one dense-vector index recipe to ``field_name``.
+
+        Shared by :meth:`_create_index` and :meth:`ensure_vector_field` so a
+        per-embedder field (#762 F) cannot drift from the original ``vector``
+        field. Two embedders indexed under different recipes would retrieve
+        differently for reasons unrelated to the models themselves.
+        """
+        index_params.add_index(
+            field_name=field_name,
+            index_type="HNSW",
+            metric_type="COSINE",
+            index_params={"M": 128, "efConstruction": 256, "metric_type": "COSINE"},
+        )
+
     def _create_index(self):
         """Build index params: HNSW/COSINE on ``vector``, inverted on scalars,
         STL_SORT on every :data:`INDEXED_TIME_FIELDS` entry, and — only when
@@ -459,12 +499,7 @@ class MilvusVectorStore(VectorStore):
             index_type="INVERTED",
             index_name="partition_idx",
         )
-        index_params.add_index(
-            field_name="vector",
-            index_type="HNSW",
-            metric_type="COSINE",
-            index_params={"M": 128, "efConstruction": 256, "metric_type": "COSINE"},
-        )
+        self._add_dense_index(index_params, "vector")
         if self._hybrid:
             index_params.add_index(
                 field_name="sparse",
@@ -1355,6 +1390,117 @@ class MilvusVectorStore(VectorStore):
                 "Drop the collection before re-sizing."
             )
         await self.initialize(dimension)
+
+    async def ensure_vector_field(self, field: str, dimension: int) -> bool:
+        """Add a per-embedder dense field to the live collection (#762 F).
+
+        Non-disruptive by construction: the fields already in the collection
+        keep serving searches before, during and after, and nothing is
+        rewritten. Safe to call on every write — the first call per field does
+        the work and the rest return from the memo, mirroring how
+        :meth:`initialize` guards collection creation.
+
+        Returns whether this call created the field. ``vector`` always returns
+        ``False``: it is built into the collection, so there is nothing to add.
+        """
+        if field == "vector":
+            return False
+        if field in self._ensured_vector_fields:
+            return False
+        async with self._vector_field_lock:
+            if field in self._ensured_vector_fields:
+                return False
+            # Memoized only after the call returns, never before: a failure
+            # must be retried by the next write rather than remembered as
+            # done, or the field would stay missing for the life of the
+            # process while writes kept being aimed at it.
+            created = await asyncio.to_thread(self._ensure_vector_field_sync, field, dimension)
+            self._ensured_vector_fields.add(field)
+            return created
+
+    def _ensure_vector_field_sync(self, field: str, dimension: int) -> bool:
+        """Add, index and reload ``field``. Synchronous — see :meth:`_ensure_loaded`.
+
+        The reload at the end is not optional. Milvus accepts writes to a
+        freshly indexed field but fails searches on it with "field index of the
+        field: X is not loaded" until the collection is reloaded — see
+        :meth:`_reload_for_new_field` for which reload.
+        """
+        descriptor = self._client.describe_collection(self._collection_name)
+        fields = descriptor.get("fields", [])
+        if any(existing["name"] == field for existing in fields):
+            return False
+
+        vector_fields = [existing for existing in fields if existing.get("type") in _VECTOR_DATA_TYPES]
+        if len(vector_fields) >= MAX_VECTOR_FIELDS:
+            raise ValueError(
+                f"Collection `{self._collection_name}` already holds "
+                f"{len(vector_fields)} vector fields, the maximum Milvus allows. "
+                f"Cannot give '{field}' its own dense field; delete an unused "
+                "embedder first."
+            )
+
+        try:
+            self._client.add_collection_field(
+                collection_name=self._collection_name,
+                field_name=field,
+                data_type=DataType.FLOAT_VECTOR,
+                dim=dimension,
+                # Rows written before this field existed keep a null here. That
+                # null is load-bearing: Milvus excludes such rows from searches
+                # on this field, so a partition whose embedder has not been
+                # backfilled yet returns fewer results rather than wrong ones.
+                nullable=True,
+            )
+        except MilvusException as e:
+            # Another worker may have won the race after the describe above.
+            if "already exist" not in str(e).lower():
+                raise VDBCreateOrLoadCollectionError(
+                    f"Failed to add vector field `{field}` to `{self._collection_name}`: {e!s}",
+                    collection_name=self._collection_name,
+                    operation="add_collection_field",
+                ) from e
+            return False
+
+        try:
+            index_params = self._client.prepare_index_params()
+            self._add_dense_index(index_params, field)
+            # sync=False: the default blocks until the build finishes, which on
+            # a collection with data takes ~60 s (Milvus 3.0.1) — long enough
+            # to stall the write that triggered it. The reload below makes the
+            # field searchable without waiting for the build.
+            self._client.create_index(self._collection_name, index_params, sync=False)
+            self._reload_for_new_field()
+        except MilvusException as e:
+            raise VDBCreateOrLoadCollectionError(
+                f"Added vector field `{field}` to `{self._collection_name}` but could not index and load it: {e!s}",
+                collection_name=self._collection_name,
+                operation="create_index",
+            ) from e
+        logger.bind(field=field, dimension=dimension).info("Added per-embedder dense vector field")
+        return True
+
+    def _reload_for_new_field(self) -> None:
+        """Make a freshly indexed field searchable without interrupting search.
+
+        ``refresh_load`` does that while every other field keeps serving — but
+        only once the collection holds a row. On an empty collection it returns
+        without loading the new field, and every later search on it fails with
+        "field index ... is not loaded" (verified on Milvus 3.0.1). That empty
+        case is the common one: the first write to a new deployment creates the
+        collection and provisions the field in the same call. An empty
+        collection has no searches to interrupt, so it takes a full release and
+        load instead.
+        """
+        # count(*), not get_collection_stats: the stats lag and reported 0 for
+        # a collection holding a flushed row, which would release a live
+        # collection. count(*) sees growing rows too.
+        rows = self._client.query(self._collection_name, filter="", output_fields=["count(*)"])
+        if rows and int(rows[0].get("count(*)", 0)) > 0:
+            self._client.refresh_load(self._collection_name)
+            return
+        self._client.release_collection(self._collection_name)
+        self._client.load_collection(self._collection_name)
 
     async def drop_collection(self, name: str) -> None:
         """Destructive: drop the entire backing Milvus collection.
