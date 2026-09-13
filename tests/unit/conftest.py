@@ -54,6 +54,8 @@ class MockVectorStore(VectorStore):
         # None models "nothing indexed yet", which the API renders as null
         # rather than inventing a number (#762 G).
         self.dimension: int | None = 1024
+        # Per-embedder dense fields ensured on this store (#762 F).
+        self.vector_fields: dict[str, int] = {}
 
     async def upsert(self, chunks: list[Any], collection: str = "default", *, indexed_at=None) -> int:
         store = self.collections.setdefault(collection, {})
@@ -91,6 +93,11 @@ class MockVectorStore(VectorStore):
 
     async def ensure_collection(self, name: str, dimension: int, **kwargs: Any) -> None:
         self.collections.setdefault(name, {})
+
+    async def ensure_vector_field(self, field: str, dimension: int) -> bool:
+        created = field not in self.vector_fields
+        self.vector_fields[field] = dimension
+        return created
 
     async def drop_collection(self, name: str) -> None:
         self.collections.pop(name, None)
