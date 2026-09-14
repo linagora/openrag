@@ -41,8 +41,8 @@ async def store_stage(
                 raise ValueError("store_stage received chunks without embeddings")
             await vector_store.ensure_collection("default", len(embedding), vector_field=vector_field)
             if vector_field is not None:
-                # Cheap after the first call per field: the store memoizes
-                # what it has already provisioned.
+                # Re-checked on every batch, not memoized: the field may have
+                # been dropped since by another process (see the store).
                 await vector_store.ensure_vector_field(vector_field, len(embedding))
             task_id = row.get("task_id")
             if task_id:
