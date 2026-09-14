@@ -41,6 +41,7 @@ USER root
 
 COPY --chown=10001:0 --from=build /app/dist /usr/share/nginx/html
 COPY --chown=10001:0 infra/compose/nginx/openrag-admin.conf /etc/nginx/conf.d/default.conf
+COPY --chown=10001:0 infra/compose/nginx/security-headers.conf /etc/nginx/security-headers.conf
 
 # /var/cache/nginx and /var/run come from the base image (not copied above) —
 # own them as 10001:0 and make them group-writable, the same arbitrary-UID
