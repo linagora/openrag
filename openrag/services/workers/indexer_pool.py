@@ -38,7 +38,11 @@ _MISSING_WORKER_REF_ERROR = "Indexer worker did not receive a registered task re
 # _active_indexation_config contextvar — a different contract that happened
 # to reuse the same version string on its own branch.
 # v7: merge of both v6 lineages — neither alone is compatible with this one.
-_INDEXER_ACTOR_PROTOCOL_VERSION = "v7"
+# v8: TaskStateManager now bounds its in-memory retention and replaces any actor
+# without that support during bootstrap. That replacement kills the old actor
+# id, which strands the dispatcher's and workers' cached handles to it, so the
+# indexer generation has to roll too.
+_INDEXER_ACTOR_PROTOCOL_VERSION = "v8"
 _INDEXER_POOL_DISPATCHER_ACTOR_NAME = f"IndexerPoolDispatcher-{_INDEXER_ACTOR_PROTOCOL_VERSION}"
 
 
