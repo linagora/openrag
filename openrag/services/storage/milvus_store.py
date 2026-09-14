@@ -169,6 +169,12 @@ class MilvusVectorStore(VectorStore):
             self._client = MilvusClient(uri=self._uri, timeout=self._timeout)
             self._async_client = AsyncMilvusClient(uri=self._uri, timeout=self._timeout)
         except MilvusException as e:
+            client = getattr(self, "_client", None)
+            if client is not None:
+                try:
+                    client.close()
+                except Exception as close_error:
+                    logger.warning("Failed to close partially constructed Milvus client", error=str(close_error))
             raise VDBConnectionError(
                 f"Failed to connect to Milvus: {e!s}",
                 db_url=self._uri,

@@ -21,7 +21,12 @@ import pytest
 from api.error_handlers import register_error_handlers
 from core.config.infrastructure import VectorDBConfig
 from core.models.chunk import Chunk, ChunkType
-from core.utils.exceptions import VDBCreateOrLoadCollectionError, VDBSchemaMigrationRequiredError, VDBSearchError
+from core.utils.exceptions import (
+    VDBConnectionError,
+    VDBCreateOrLoadCollectionError,
+    VDBSchemaMigrationRequiredError,
+    VDBSearchError,
+)
 from core.vector_stores import VectorStore
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -262,6 +267,23 @@ def store(vdb_config: VectorDBConfig, monkeypatch: pytest.MonkeyPatch) -> Milvus
     # setup noise, not something a test asserting on client calls should see.
     built._client.reset_mock()
     return built
+
+
+def test_constructor_closes_sync_client_when_async_client_fails(vdb_config, monkeypatch):
+    import services.storage.milvus_store as _store_mod
+
+    sync_client = MagicMock()
+    monkeypatch.setattr(_store_mod, "MilvusClient", MagicMock(return_value=sync_client))
+    monkeypatch.setattr(
+        _store_mod,
+        "AsyncMilvusClient",
+        MagicMock(side_effect=MilvusException(message="async client failed")),
+    )
+
+    with pytest.raises(VDBConnectionError, match="async client failed"):
+        MilvusVectorStore(vdb_config)
+
+    sync_client.close.assert_called_once_with()
 
 
 # ---------------------------------------------------------------------------

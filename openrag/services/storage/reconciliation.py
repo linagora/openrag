@@ -19,8 +19,11 @@ def validate_scan_options(
         raise ValueError("Page size must be between 1 and 1000")
     if not 0 <= grace_seconds < float("inf"):
         raise ValueError("Grace seconds must be finite and nonnegative")
+    current = now or datetime.now(UTC)
+    if current.tzinfo is None or current.utcoffset() is None:
+        raise ValueError("now must include timezone information")
     try:
-        return (now or datetime.now(UTC)) - timedelta(seconds=grace_seconds)
+        return current.astimezone(UTC) - timedelta(seconds=grace_seconds)
     except OverflowError as exc:
         raise ValueError("Grace seconds exceeds the supported datetime range") from exc
 

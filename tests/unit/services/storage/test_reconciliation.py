@@ -1,7 +1,7 @@
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
-from services.storage.reconciliation import reconcile_partition
+from services.storage.reconciliation import reconcile_partition, validate_scan_options
 
 NOW = datetime(2026, 9, 11, 12, tzinfo=UTC)
 OLD = NOW - timedelta(days=1)
@@ -141,6 +141,18 @@ async def test_rejects_invalid_scan_options(options):
     args = {"partition": "a", "page_size": 2, **options}
     with pytest.raises(ValueError):
         _ = [e async for e in reconcile_partition(Catalog(), Vectors([]), "collection", now=NOW, **args)]
+
+
+def test_scan_options_reject_timezone_naive_now():
+    with pytest.raises(ValueError, match="timezone"):
+        validate_scan_options("a", 500, 3600, now=datetime(2026, 9, 11, 12))
+
+
+def test_scan_options_normalize_cutoff_to_utc():
+    paris = timezone(timedelta(hours=2))
+    cutoff = validate_scan_options("a", 500, 3600, now=datetime(2026, 9, 11, 14, tzinfo=paris))
+    assert cutoff == datetime(2026, 9, 11, 11, tzinfo=UTC)
+    assert cutoff.tzinfo is UTC
 
 
 async def test_short_catalog_page_does_not_fetch_an_empty_followup():
