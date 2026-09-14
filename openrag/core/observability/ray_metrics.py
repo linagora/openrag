@@ -32,21 +32,24 @@ Prometheus rejects wholesale.
 **Recording is best-effort, always.** Every function here swallows its own
 errors. An indexing task must never fail because a metric could not be written —
 and ``observe_stage_duration`` is called from a ``finally`` block, where a raise
-would mask the pipeline's real exception. Failures are warned once per process
-rather than per document, so a broken metric is visible without flooding the log.
+would mask the pipeline's real exception. Failures are warned once per metric,
+so a broken one is visible without flooding a log that these run against on
+every document.
 
 **A caveat on silence.** ``ray.util.metrics`` records happily when Ray is not
 initialised — it is a no-op, not an error. That keeps imports safe in unit tests
 and in the API process, but it also means "no series in Prometheus" and "this
-code never ran under Ray" look identical from the outside. The integration test
-in ``tests/unit/core/observability/`` asserts the export path itself rather than
-the call, precisely because the call cannot fail loudly.
+code never ran under Ray" look identical from the outside. The unit tests
+therefore assert that each call site is reached, which is the only failure mode
+that can be caught without a live Ray cluster.
 """
 
 from __future__ import annotations
 
+import time
 from datetime import UTC, datetime
 
+from core.observability._reporting import report_once
 from core.observability.metric_specs import (
     INGEST_CLOCK_SKEW_TOTAL,
     INGEST_DOCUMENTS_TOTAL,
@@ -55,22 +58,7 @@ from core.observability.metric_specs import (
     INGEST_STAGE_DURATION_SECONDS,
     MetricSpec,
 )
-from core.utils.logging import get_logger
 from ray.util.metrics import Counter, Gauge, Histogram
-
-logger = get_logger()
-
-# Warned at most once per process: a metrics backend that is broken for one
-# document is broken for all of them, and this runs per stage per file.
-_warned = False
-
-
-def _warn_once(exc: Exception, what: str) -> None:
-    global _warned
-    if _warned:
-        return
-    _warned = True
-    logger.warning(f"metric recording failed ({what}); further metric errors in this process are not logged: {exc}")
 
 
 def _counter(spec: MetricSpec) -> Counter:
@@ -78,7 +66,7 @@ def _counter(spec: MetricSpec) -> Counter:
 
 
 def _histogram(spec: MetricSpec) -> Histogram:
-    return Histogram(spec.name, description=spec.description, boundaries=list(spec.buckets or ()), tag_keys=spec.labels)
+    return Histogram(spec.name, description=spec.description, boundaries=list(spec.buckets), tag_keys=spec.labels)
 
 
 def _gauge(spec: MetricSpec) -> Gauge:
@@ -108,7 +96,7 @@ def record_document_terminal(status: str) -> None:
     try:
         _DOCUMENTS_TOTAL.inc(1, tags={"status": str(status).lower()})
     except Exception as exc:  # noqa: BLE001 - metrics must never break indexing
-        _warn_once(exc, "ingest_documents_total")
+        report_once(INGEST_DOCUMENTS_TOTAL.name, exc)
 
 
 def observe_stage_duration(stage: str, seconds: float) -> None:
@@ -120,7 +108,7 @@ def observe_stage_duration(stage: str, seconds: float) -> None:
     try:
         _STAGE_DURATION.observe(float(seconds), tags={"stage": stage})
     except Exception as exc:  # noqa: BLE001
-        _warn_once(exc, "ingest_stage_duration_seconds")
+        report_once(INGEST_STAGE_DURATION_SECONDS.name, exc)
 
 
 def observe_queue_wait_from(created_at: str | None, *, now: datetime | None = None) -> None:
@@ -161,7 +149,7 @@ def observe_queue_wait_from(created_at: str | None, *, now: datetime | None = No
             waited = 0.0
         _QUEUE_WAIT.observe(waited)
     except Exception as exc:  # noqa: BLE001
-        _warn_once(exc, "ingest_queue_wait_seconds")
+        report_once(INGEST_QUEUE_WAIT_SECONDS.name, exc)
 
 
 def record_parse_completion(pool: str, *, at: float | None = None) -> None:
@@ -180,12 +168,10 @@ def record_parse_completion(pool: str, *, at: float | None = None) -> None:
             ray_openrag_ingest_last_parse_completion_timestamp_seconds
         ) > 300
     """
-    import time
-
     try:
         _LAST_PARSE_TIMESTAMP.set(float(at if at is not None else time.time()), tags={"pool": pool})
     except Exception as exc:  # noqa: BLE001
-        _warn_once(exc, "ingest_last_parse_completion_timestamp_seconds")
+        report_once(INGEST_LAST_PARSE_TIMESTAMP.name, exc)
 
 
 __all__ = [

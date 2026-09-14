@@ -50,16 +50,25 @@ from ._retry import with_retry
 logger = get_logger()
 
 
+#: Sentinel line terminating an SSE completion. A stream that ends without it
+#: is a truncated answer, not a finished one — ``core/utils/source_filtering``
+#: reports exactly that to the caller.
+_STREAM_DONE = "data: [DONE]"
+
+
 def _record_stream_usage(line: str) -> None:
     """Count tokens from the usage-only chunk of a streamed completion.
 
-    Emitted last, after ``stream_options.include_usage`` is requested, with
-    ``"choices": []`` and a top-level ``"usage"``. Every other line is
-    ignored cheaply; a provider that sends no such chunk simply contributes
-    no token metric rather than erroring on each of the hundreds of deltas
-    that make up one answer.
+    Called for every SSE line — hundreds per answer — so the substring test
+    comes first. Content deltas also begin with ``data: ``, and parsing each of
+    them would duplicate, on the primary user-facing path, work that
+    ``stream_with_source_filtering`` already does downstream.
+
+    A delta whose *content* happens to contain the word "usage" is parsed and
+    then discarded by ``record_usage_from_response``, which requires ``usage``
+    to be a top-level object.
     """
-    if not line.startswith("data: ") or line.strip() == "data: [DONE]":
+    if '"usage"' not in line or not line.startswith("data: "):
         return
     try:
         payload = json.loads(line[len("data: ") :])
@@ -427,19 +436,21 @@ class VLLMClient(LLM):
             "model": model,
             "messages": messages,
             "stream": True,
-            # Without this the streamed response carries no ``usage`` block at
-            # all, so the *primary* user-facing path — every chat answer — would
-            # contribute nothing to openrag_llm_tokens_total and the cost metric
-            # would silently measure only indexing and the non-streaming paths.
-            # The extra trailing chunk it produces has ``"choices": []`` and a
-            # top-level ``"usage"``; ``core/utils/source_filtering`` already
-            # handles that shape explicitly, so no consumer change is needed.
+            # Without this a streamed response carries no usage block at all,
+            # so every chat answer would contribute nothing to the token metric.
+            # The extra trailing chunk it produces is already handled by
+            # ``core/utils/source_filtering``.
             "stream_options": {"include_usage": True},
         }
         log_llm_call(caller="VLLMClient.stream_chat", model=model, endpoint=base_url, messages=messages, stream=True)
         provider = resolve_provider(self, {"metadata": metadata})
         started = time.perf_counter()
-        outcome = "success"
+        # Pessimistic until `[DONE]` proves the answer complete. The consumer
+        # breaks on `[DONE]` and closes this generator, which raises
+        # GeneratorExit at the yield below — indistinguishable from a client
+        # that gave up mid-answer unless completion is recorded explicitly.
+        # Assuming success instead would report every finished chat as an error.
+        outcome = "error"
         try:
             async with self._client.stream(
                 "POST", f"{base_url}/chat/completions", json=payload, headers=headers
@@ -452,26 +463,17 @@ class VLLMClient(LLM):
                     )
                 async for line in resp.aiter_lines():
                     _record_stream_usage(line)
+                    if line.strip() == _STREAM_DONE:
+                        outcome = "success"
                     yield line
         except httpx.ConnectError as exc:
-            outcome = "error"
             raise InferenceConnectionError(f"Cannot reach LLM at {base_url}") from exc
         except httpx.TimeoutException as exc:
             outcome = "timeout"
             raise InferenceTimeoutError(f"LLM streaming request timed out at {base_url}") from exc
-        except BaseException:
-            # Includes CancelledError: a client that disconnects mid-answer has
-            # not received a successful completion, and recording it as one would
-            # understate the error rate exactly when users are giving up.
-            outcome = "error"
-            raise
         finally:
-            # Instrumented by hand rather than with @with_inference_metrics: this
-            # is an async generator, so the decorator's ``await func(...)`` would
-            # time only the creation of the generator object, not the stream. The
-            # duration here covers the full transfer, matching what the caller
-            # actually waited — the same reasoning InstrumentationMiddleware
-            # applies to streaming HTTP responses.
+            # Hand-instrumented: @with_inference_metrics would time only the
+            # creation of this async generator, not the transfer.
             record_inference(
                 provider=provider,
                 operation="chat",
