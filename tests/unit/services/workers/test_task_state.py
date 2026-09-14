@@ -1175,3 +1175,48 @@ async def test_expired_task_is_evicted_when_the_queue_is_listed(monkeypatch, rea
     assert await read(manager) == {}
     assert manager.tasks == {}
     assert manager.user_index == {}
+
+
+@pytest.mark.asyncio
+async def test_refused_write_on_an_unknown_id_does_not_leak_a_blank_record(monkeypatch) -> None:
+    # A late set_state(..., "SERIALIZING") for an id this actor no longer knows
+    # (evicted, or never admitted here) used to leave a blank TaskInfo() behind:
+    # _ensure_task creates it, the ref check then refuses the write before
+    # anything persists, and a record with state=None never reaches
+    # terminal_tasks, so nothing would ever evict it.
+    monkeypatch.setattr(task_state_module, "_TERMINAL_TASK_RETENTION_SECONDS", 60.0)
+    monkeypatch.setattr(task_state_module.time, "time", lambda: 1_000.0)
+    manager = _task_state_manager()
+
+    assert await manager.set_state("ghost-task", "SERIALIZING") is False
+    assert manager.tasks["ghost-task"].state is None
+    assert "ghost-task" in manager.terminal_tasks
+
+    monkeypatch.setattr(task_state_module.time, "time", lambda: 1_061.0)
+    assert await manager.get_state("ghost-task") is None
+    assert manager.tasks == {}
+
+
+@pytest.mark.asyncio
+async def test_details_written_on_an_evicted_id_does_not_leak_a_stateless_record(monkeypatch) -> None:
+    # TaskCompletionTracker._record_finished_at reads details, then writes them
+    # back with a finished-at stamp. If the record expires in between the two
+    # calls, set_details recreates it through _ensure_task with details but no
+    # state, and that state=None record used to be invisible to the retention
+    # ledger forever, surfacing as a task with state=None in every listing.
+    monkeypatch.setattr(task_state_module, "_TERMINAL_TASK_RETENTION_SECONDS", 60.0)
+    monkeypatch.setattr(task_state_module.time, "time", lambda: 1_000.0)
+    manager = _task_state_manager()
+    await manager.set_queued_details("done", file_id="f", partition="p", metadata={}, user_id=7)
+    await manager.set_state("done", "COMPLETED")
+    details = await manager.get_details("done")
+
+    monkeypatch.setattr(task_state_module.time, "time", lambda: 1_061.0)
+    await manager.set_details("done", file_id="f", partition="p", metadata=details["metadata"], user_id=7)
+
+    assert manager.tasks["done"].state is None
+    assert "done" in manager.terminal_tasks
+
+    monkeypatch.setattr(task_state_module.time, "time", lambda: 1_122.0)
+    assert await manager.get_all_user_info(7) == {}
+    assert manager.tasks == {}

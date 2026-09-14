@@ -317,13 +317,24 @@ class TaskStateManager:
         self._evict_terminal_tasks_locked()
         if task_id not in self.tasks:
             self.tasks[task_id] = TaskInfo()
+            # A stateless record here has no other owner: the caller may still
+            # refuse the write outright (state stays None) or only ever set
+            # details/error without setting state. Either way nothing else
+            # evicts it, so give it a receipt deadline immediately. A persist
+            # right after replaces this with the real one.
+            self.terminal_tasks[task_id] = time.time() + _TERMINAL_TASK_RETENTION_SECONDS
         return self.tasks[task_id]
 
     def _persist_task_locked(self, task_id: str, info: TaskInfo) -> None:
         """Persist a task mutation and keep the terminal-retention ledger in sync."""
         _save_recoverable_task(task_id, info)
         self.terminal_tasks.pop(task_id, None)
-        if info.state not in TERMINAL_TASK_STATES:
+        # A record that settled into a state we track normally follows the
+        # terminal/fence rule below. A record that never got a state at all
+        # (details or an error set on a fresh id, e.g. by a write racing an
+        # eviction) is just as unreachable otherwise, so it gets the same
+        # receipt window with no fence.
+        if info.state not in TERMINAL_TASK_STATES and info.state is not None:
             return
         now = time.time()
         receipt_deadline = now + _TERMINAL_TASK_RETENTION_SECONDS
