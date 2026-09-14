@@ -12,6 +12,8 @@ import re
 from collections.abc import Iterable
 from typing import Any
 
+import filetype
+
 from ..utils.exceptions import ValidationError
 
 DEFAULT_FORBIDDEN_CHARS_IN_FILE_ID: frozenset[str] = frozenset("/")
@@ -105,3 +107,67 @@ def validate_file_format(
         )
         raise ValidationError(details, status_code=415)
     return file_extension
+
+
+#: Bytes read from the head of an upload for signature detection. The matchers
+#: that need the most are the OOXML ones, which read the archive's first local
+#: file header; 8 KiB is well clear of that and is read once per upload.
+CONTENT_SNIFF_BYTES = 8192
+
+#: Extensions whose content carries a signature we can check, mapped to what
+#: ``filetype`` reports for that signature.
+#:
+#: An extension absent from this map is not verified, and that is deliberate
+#: rather than an oversight:
+#:
+#: * ``txt``/``md``/``html``/``htm``/``eml``/``svg`` are text formats with no
+#:   signature to check.
+#: * ``doc`` (OLE2) and ``wma`` were verified empirically against the bundled
+#:   matchers and are not reliably detected, so enforcing them would reject
+#:   legitimate uploads.
+#: * Audio and video containers other than those above are left out until the
+#:   accepted brand variants can be checked against real samples; guessing at
+#:   them risks refusing valid media.
+_VERIFIABLE_SIGNATURES: dict[str, frozenset[str]] = {
+    "pdf": frozenset({"pdf"}),
+    "png": frozenset({"png"}),
+    "jpg": frozenset({"jpg"}),
+    "jpeg": frozenset({"jpg"}),
+    "gif": frozenset({"gif"}),
+    "bmp": frozenset({"bmp"}),
+    "webp": frozenset({"webp"}),
+    "docx": frozenset({"docx"}),
+    "pptx": frozenset({"pptx"}),
+}
+
+
+def validate_content_matches_extension(extension: str, head: bytes) -> None:
+    """Reject an upload whose bytes contradict the extension it was named with.
+
+    The extension alone decides which parser a document reaches, so a file
+    renamed to ``.pdf`` is handed to the PDF backend whatever it actually
+    contains. For the formats in :data:`_VERIFIABLE_SIGNATURES` the signature
+    must match; an unrecognised signature is a failure too, because arbitrary
+    content is exactly what this rejects.
+
+    Extensions outside that map pass through untouched — there is nothing to
+    check, and refusing them would be a guess.
+
+    Raises:
+        ValidationError: HTTP 415, when the content contradicts the extension.
+    """
+    expected = _VERIFIABLE_SIGNATURES.get(extension)
+    if expected is None:
+        return
+
+    kind = filetype.guess(head)
+    detected = kind.extension if kind is not None else None
+    if detected in expected:
+        return
+
+    found = f"looks like a {detected} file" if detected else f"is not a recognised {extension} file"
+    raise ValidationError(
+        f"Uploaded file does not match its .{extension} extension: it {found}. "
+        f"Upload it with the extension matching its actual format.",
+        status_code=415,
+    )
