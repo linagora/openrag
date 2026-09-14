@@ -571,7 +571,9 @@ class WorkerDispatcher(IndexingDispatcher):
         rows = await self._vector_store.query_chunks_by_filter(
             self._collection,
             {"partition": partition, "file_id": file_id},
-            output_fields=["*", "vector"],
+            # "*" carries every dense field — one per embedder (#762 F) — and
+            # the whole row is written back, so none of them may be missing.
+            output_fields=["*"],
         )
         if not rows:
             return
@@ -623,7 +625,7 @@ class WorkerDispatcher(IndexingDispatcher):
             rows = await self._vector_store.query_chunks_by_filter(
                 self._collection,
                 {"partition": partition, "file_id": file_id},
-                output_fields=["*", "vector"],
+                output_fields=["*"],
             )
             if not rows:
                 return

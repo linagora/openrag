@@ -16,6 +16,7 @@ from core.ports.document_repo import DocumentRepository
 from core.retrieval.searcher import RetrievalSearcher, file_id_restriction
 from core.utils.consts import RETRIEVAL_SCORE_KEYS, is_internal_metadata_key
 from core.vector_stores import VectorStore
+from core.vector_stores.vector_field import is_vector_field_key
 
 
 def _dict_to_chunk(row: dict[str, Any]) -> Chunk:
@@ -30,7 +31,6 @@ def _dict_to_chunk(row: dict[str, Any]) -> Chunk:
     # ``RETRIEVAL_SCORE_KEYS``), so a persisted one is never this query's score.
     skip = {
         "text",
-        "vector",
         "_id",
         "id",
         "score",
@@ -40,7 +40,9 @@ def _dict_to_chunk(row: dict[str, Any]) -> Chunk:
         "chunk_type",
         *RETRIEVAL_SCORE_KEYS,
     }
-    metadata = {k: v for k, v in row.items() if k not in skip and not is_internal_metadata_key(k)}
+    metadata = {
+        k: v for k, v in row.items() if k not in skip and not is_vector_field_key(k) and not is_internal_metadata_key(k)
+    }
     return Chunk(
         id=chunk_id,
         document_id=row.get("file_id", ""),

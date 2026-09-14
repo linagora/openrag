@@ -60,8 +60,15 @@ def strip_protected_metadata(metadata: dict | None) -> tuple[dict, list[str]]:
     Returns the cleaned dict and the sorted list of dropped keys so the caller
     can log the rejection with its own context. Never mutates the input.
     """
+    # Imported here: core.vector_stores pulls in core.models, which imports
+    # this module.
+    from core.vector_stores.vector_field import is_vector_field_key
+
     md = dict(metadata or {})
-    removed = sorted(k for k in md if k in PROTECTED_METADATA_KEYS)
+    # A dense field is as server-managed as ``vector`` was: a caller-set
+    # ``vector_<embedder>`` would overwrite that embedder's vectors on the
+    # metadata-update path, which re-upserts whole rows (#762 F).
+    removed = sorted(k for k in md if k in PROTECTED_METADATA_KEYS or is_vector_field_key(k))
     for key in removed:
         del md[key]
     return md, removed
