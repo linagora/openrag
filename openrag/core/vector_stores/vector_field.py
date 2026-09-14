@@ -26,13 +26,13 @@ update allowlist. The corollary is a policy, enforced by the edit guard
 (#762 C): editing an endpoint never changes which model it points at. An
 operator who wants a different model creates a different endpoint.
 
-**A null ``vector_field`` means the legacy shared field.** Every deployment
-predating this feature has real vectors in ``vector``, under every embedder
-that ever indexed into it. Rather than re-embed the world on upgrade, existing
-rows keep ``vector_field`` null and :func:`resolve_vector_field` maps that to
-``vector`` — today's exact behaviour, including its flaws. Only newly created
-embedders get a dedicated field, and an existing one moves off the shared
-field through a partition re-embed, never through an upgrade.
+**Every embedder owns a field; nothing shares ``vector``.** Collections before
+schema version 3 kept every embedder's output in one ``vector`` field. The
+upgrade allocates a name for each existing embedder (SQL revision
+``c4e8f2a6b913``) and the Milvus v3 migration copies each partition's vectors
+into its embedder's field before dropping ``vector``. So a missing field is
+never "the legacy one": it is a deployment whose migrations have not run, and
+:func:`resolve_vector_field` says so instead of guessing.
 """
 
 from __future__ import annotations
@@ -51,7 +51,7 @@ VECTOR_FIELD_PREFIX = "vector_"
 """Marks a field as a per-embedder dense vector, and keeps names letter-led."""
 
 LEGACY_VECTOR_FIELD = "vector"
-"""The single dense field every pre-#762 collection was built with."""
+"""The shared dense field of pre-v3 collections — reserved, never allocated."""
 
 MAX_FIELD_NAME_LENGTH = 255
 """Field-name ceiling, set to the shortest limit among the stores we target."""
@@ -63,12 +63,16 @@ _FALLBACK_STEM = "embedder"
 def resolve_vector_field(vector_field: str | None) -> str:
     """The dense field an endpoint reads and writes.
 
-    ``None`` is not a missing value: it means the endpoint predates per-embedder
-    fields and shares the legacy ``vector`` field with every other such
-    endpoint. Callers must route through here rather than reading the column,
-    so the legacy case can never be mistaken for "no field configured".
+    Raises instead of falling back: an embedder without a field is one whose
+    migrations have not run, and routing it anywhere would read or write the
+    wrong vectors.
     """
-    return vector_field or LEGACY_VECTOR_FIELD
+    if not vector_field:
+        raise ValueError(
+            "This embedder has no dense vector field. Apply the pending migrations "
+            "(start OpenRAG once for the SQL ones, then the Milvus migration runner)."
+        )
+    return vector_field
 
 
 def is_vector_field_key(key: object) -> bool:
@@ -116,8 +120,8 @@ def allocate_vector_field_name(endpoint_name: str, taken: Collection[str]) -> st
     appended, trimming the stem when needed so the result stays inside
     :data:`MAX_FIELD_NAME_LENGTH`.
 
-    ``vector`` itself is always treated as taken: it is the legacy shared field
-    (see :func:`resolve_vector_field`), so no endpoint may claim it as its own.
+    ``vector`` itself is always treated as taken: it is the shared field of
+    pre-v3 collections, so no endpoint may claim it as its own.
     """
     reserved = {LEGACY_VECTOR_FIELD, *taken}
     candidate = sanitize_vector_field_name(endpoint_name)

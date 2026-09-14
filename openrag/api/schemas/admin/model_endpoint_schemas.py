@@ -254,9 +254,10 @@ class ModelEndpointResponse(BaseModel):
     extra: dict[str, Any]
     has_api_key: bool = False
     is_default: bool
-    # Dense vector field this embedder owns (#762 F); null for non-embedders
-    # and for embedders still on the shared legacy ``vector`` field. Read-only:
-    # allocated server-side at creation and pinned for the endpoint's life.
+    # Dense vector field this embedder owns (#762 F); null for non-embedders,
+    # which own none. ck_embedder_has_vector_field makes it mandatory for every
+    # embedder. Read-only: allocated server-side at creation and pinned for the
+    # endpoint's life.
     vector_field: str | None = None
     # Partitions whose resolved reference is this endpoint — those naming it
     # plus, for the default endpoint, those riding the `default` alias. Zero
