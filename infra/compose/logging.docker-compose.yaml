@@ -1,0 +1,59 @@
+# Opt-in log shipping to an external Loki (VM / single-host deployments).
+#
+#   docker compose -f docker-compose.yaml -f logging.docker-compose.yaml up -d
+#
+# Adds a Grafana Alloy container that discovers the OpenRAG containers through
+# the Docker socket, parses their JSON log lines and pushes them to LOKI_URL.
+# It also switches the API to LOG_FORMAT=json so enabling this overlay is the
+# only step. In Kubernetes use the platform's collector instead (see
+# docs/documentation/loki_logs.md for the pipeline to add there).
+# Ray relays the workers' output onto the API process. Two of its defaults
+# break a JSON stream: log deduplication merges same-shape lines from several
+# workers and rewrites the survivor as "{...} [repeated 2x across cluster]",
+# which is no longer JSON; and the "(Actor pid=N)" prefix is ANSI-colorized
+# even on a pipe. Both are switched off here (Alloy still strips escapes as
+# a belt-and-braces).
+x-json-logs: &json_logs
+  LOG_FORMAT: json
+  RAY_DEDUP_LOGS: "0"
+  RAY_COLOR_PREFIX: "0"
+
+services:
+  openrag:
+    environment:
+      <<: *json_logs
+  openrag-cpu:
+    environment:
+      <<: *json_logs
+
+  alloy:
+    image: grafana/alloy:v1.19.2
+    container_name: openrag-alloy
+    restart: unless-stopped
+    # Alloy's own UI/API is bound to loopback *inside* the container and no port
+    # is published, so it is not reachable from the host or the network.
+    command:
+      - run
+      - --server.http.listen-addr=127.0.0.1:12345
+      - --storage.path=/var/lib/alloy/data
+      - /etc/alloy/config.alloy
+    environment:
+      # Push endpoint, e.g. https://loki.example.com/loki/api/v1/push
+      LOKI_URL: ${LOKI_URL:?Set LOKI_URL in .env}
+      # Optional basic auth and tenant (X-Scope-OrgID); leave empty if unused.
+      LOKI_USERNAME: ${LOKI_USERNAME:-}
+      LOKI_PASSWORD: ${LOKI_PASSWORD:-}
+      LOKI_TENANT_ID: ${LOKI_TENANT_ID:-}
+    volumes:
+      - ./alloy/config.alloy:/etc/alloy/config.alloy:ro
+      # The Docker socket grants the full Docker API — create, exec into and
+      # delete any container, i.e. root-equivalent on the host. `:ro` only
+      # makes the socket *file* unmodifiable; it does not restrict the API.
+      # Alloy is therefore a trusted component here, as trusted as the daemon
+      # itself. Use it only with images you trust, and drop this overlay if
+      # that is not acceptable (a rootless log driver is the alternative).
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - alloy_data:/var/lib/alloy/data
+
+volumes:
+  alloy_data:

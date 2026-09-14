@@ -10,6 +10,8 @@ Covered:
 - ``Path(source)`` must not crash when ``source`` is missing/None (the #370 bug).
 - ``file_url`` must be omitted when there is no filename, and present and
   URL-encoded when there is.
+- The chunk's metadata is nested under ``chunk``; server-computed fields and
+  retrieval scores stay at the top level and cannot be spoofed from metadata.
 """
 
 from api.routers.user.source_links import build_document_source_link
@@ -57,10 +59,26 @@ def test_file_url_independent_of_source_basename():
     assert link["file_url"] == "https://host/static/7"
 
 
-def test_metadata_is_passed_through():
+def test_metadata_is_nested_under_chunk_and_passed_through_whole():
     link = _build({"_id": "x", "source": "doc.pdf", "author": "alice"})
-    assert link["author"] == "alice"
+    assert link["chunk"] == {"_id": "x", "source": "doc.pdf", "author": "alice"}
     assert link["chunk_url"] == "https://host/extract/x"
+    # Nothing from the chunk leaks back out to the top level.
+    assert set(link) == {"source_type", "chunk", "chunk_url", "file_url"}
+
+
+def test_retrieval_scores_sit_beside_the_chunk_not_inside_it():
+    """Scores describe how *this* query ranked the chunk, not the chunk itself --
+    the same chunk retrieved by another query scores differently."""
+    link = _build({"_id": "x", "source": "doc.pdf", "rerank_score": 0.64})
+
+    assert link["rerank_score"] == 0.64
+    assert "rerank_score" not in link["chunk"]
+
+
+def test_score_absent_when_no_reranker_ran():
+    link = _build({"_id": "x", "source": "doc.pdf"})
+    assert "rerank_score" not in link
 
 
 def test_metadata_cannot_override_authoritative_source_fields():
@@ -77,6 +95,9 @@ def test_metadata_cannot_override_authoritative_source_fields():
     assert link["source_type"] == "document"
     assert link["file_url"] == "https://host/static/42"
     assert link["chunk_url"] == "https://host/extract/42"
+    # Also scrubbed from the nested dict: a client reading `chunk["file_url"]`
+    # must not get the attacker value the top level already rejected.
+    assert not {"source_type", "chunk_url", "file_url"} & set(link["chunk"])
 
 
 def test_metadata_file_url_is_removed_when_source_is_missing():

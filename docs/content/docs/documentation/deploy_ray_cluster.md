@@ -99,7 +99,6 @@ docker:
     - -v /ray_mount/model_weights:/app/model_weights
     - -v /ray_mount/data:/app/data
     - -v /ray_mount/.hydra_config:/app/.hydra_config
-    - -v /ray_mount/logs:/app/logs
     - --env-file /ray_mount/.env
 
 auth:

@@ -1,8 +1,8 @@
 {
   "uid": "system-overview",
-  "title": "System Overview",
-  "description": "Host system metrics from node_exporter",
-  "tags": ["openrag", "system", "node-exporter"],
+  "title": "Infrastructure Overview",
+  "description": "Host CPU, memory, storage, network, and aggregate NVIDIA GPU metrics",
+  "tags": ["openrag", "system", "node-exporter", "gpu", "nvidia"],
   "timezone": "browser",
   "editable": true,
   "fiscalYearStartMonth": 0,
@@ -122,7 +122,7 @@
       "id": 3,
       "title": "Memory Usage (%)",
       "type": "gauge",
-      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 8 },
+      "gridPos": { "h": 8, "w": 6, "x": 0, "y": 8 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "fieldConfig": {
         "defaults": {
@@ -160,7 +160,7 @@
       "id": 4,
       "title": "CPU Usage (%)",
       "type": "gauge",
-      "gridPos": { "h": 6, "w": 6, "x": 6, "y": 8 },
+      "gridPos": { "h": 8, "w": 6, "x": 6, "y": 8 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "fieldConfig": {
         "defaults": {
@@ -256,7 +256,7 @@
       "id": 6,
       "title": "Network I/O",
       "type": "timeseries",
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 14 },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
       "datasource": { "type": "prometheus", "uid": "prometheus" },
       "fieldConfig": {
         "defaults": {
@@ -366,6 +366,165 @@
       "options": {
         "legend": { "calcs": ["mean", "lastNotNull"], "displayMode": "table", "placement": "bottom" },
         "tooltip": { "mode": "multi", "sort": "desc" }
+      }
+    },
+    {
+      "id": 8,
+      "title": "GPU Utilization (%)",
+      "description": "Highest compute utilization across all NVIDIA GPUs",
+      "type": "gauge",
+      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 24 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "mappings": [],
+          "max": 100,
+          "min": 0,
+          "noValue": "N/A",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 60 },
+              { "color": "orange", "value": 80 },
+              { "color": "red", "value": 90 }
+            ]
+          },
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "max(nvidia_smi_utilization_gpu_ratio) * 100",
+          "legendFormat": "GPU",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "showThresholdLabels": false,
+        "showThresholdMarkers": true
+      }
+    },
+    {
+      "id": 9,
+      "title": "GPU Memory Usage (%)",
+      "description": "Used VRAM as a percentage of total VRAM across all NVIDIA GPUs",
+      "type": "gauge",
+      "gridPos": { "h": 6, "w": 6, "x": 6, "y": 24 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "mappings": [],
+          "max": 100,
+          "min": 0,
+          "noValue": "N/A",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 60 },
+              { "color": "orange", "value": 80 },
+              { "color": "red", "value": 90 }
+            ]
+          },
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "(sum(nvidia_smi_memory_used_bytes) / sum(nvidia_smi_memory_total_bytes)) * 100",
+          "legendFormat": "GPU Memory",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "showThresholdLabels": false,
+        "showThresholdMarkers": true
+      }
+    },
+    {
+      "id": 10,
+      "title": "Highest GPU Temperature",
+      "description": "Highest temperature reported by any NVIDIA GPU",
+      "type": "gauge",
+      "gridPos": { "h": 6, "w": 6, "x": 12, "y": 24 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "mappings": [],
+          "max": 110,
+          "min": 0,
+          "noValue": "N/A",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 70 },
+              { "color": "orange", "value": 80 },
+              { "color": "red", "value": 90 }
+            ]
+          },
+          "unit": "celsius"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "max(nvidia_smi_temperature_gpu)",
+          "legendFormat": "Temperature",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "showThresholdLabels": false,
+        "showThresholdMarkers": true
+      }
+    },
+    {
+      "id": 11,
+      "title": "Total GPU Power Draw",
+      "description": "Combined power draw reported by all NVIDIA GPUs",
+      "type": "stat",
+      "gridPos": { "h": 6, "w": 6, "x": 18, "y": 24 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "mappings": [],
+          "noValue": "N/A",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null }
+            ]
+          },
+          "unit": "watt"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "sum(nvidia_smi_power_draw_watts)",
+          "legendFormat": "Power",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "textMode": "auto",
+        "wideLayout": true
       }
     }
   ],

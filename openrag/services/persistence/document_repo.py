@@ -22,7 +22,7 @@ columns is a post-refactoring feature.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from typing import TYPE_CHECKING, Any
 
 from core.models.catalog import INDEXING_CONTENT_CLAIM_TOKEN_PREFIX, DocumentRecord, DocumentStatus
@@ -54,6 +54,22 @@ class PgDocumentRepository(DocumentRepository):
         return self._pool_getter()
 
     # ── DocumentRepository port methods ──────────────────────────────
+
+    async def get_indexed_documents(self, keys: Collection[tuple[str, str]]) -> dict[tuple[str, str], datetime]:
+        if not keys:
+            return {}
+        partitions, file_ids = zip(*keys)
+        rows = await self.pool.fetch(
+            """
+            SELECT f.partition_name, f.file_id, f.indexed_at
+            FROM files f
+            JOIN unnest($1::text[], $2::text[]) AS requested(partition_name, file_id)
+              ON f.partition_name = requested.partition_name AND f.file_id = requested.file_id
+            """,
+            list(partitions),
+            list(file_ids),
+        )
+        return {(r["partition_name"], r["file_id"]): r["indexed_at"] for r in rows}
 
     async def create_document(self, doc: DocumentRecord) -> DocumentRecord:
         """Insert a document row keyed by (file_id, partition).
@@ -450,6 +466,7 @@ class PgDocumentRepository(DocumentRepository):
         indexed_at: datetime | None = None,
         require_existing_partition: bool = False,
         content_sha256: str | None = None,
+        independently_indexed: bool = True,
     ) -> bool:
         """TODO(phase-9): remove. Mirror of legacy ``add_file_to_partition``.
 
@@ -511,6 +528,7 @@ class PgDocumentRepository(DocumentRepository):
                     "relationship_id",
                     "parent_id",
                     "content_sha256",
+                    "independently_indexed",
                 ]
                 values: list[Any] = [
                     file_id,
@@ -521,6 +539,7 @@ class PgDocumentRepository(DocumentRepository):
                     relationship_id,
                     parent_id,
                     content_sha256,
+                    independently_indexed,
                 ]
                 # Omit indexed_at to let the server default fire (legacy path).
                 if indexed_at is not None:
@@ -539,6 +558,55 @@ class PgDocumentRepository(DocumentRepository):
                         user_id,
                     )
                 return True
+
+    async def mark_file_independently_indexed(self, file_id: str, partition: str) -> bool:
+        """Protect an indexed file when requested workspace attachment fails."""
+        result = await self.pool.execute(
+            """
+            UPDATE files
+            SET independently_indexed = TRUE,
+                workspace_cleanup_state = 'NONE',
+                workspace_cleanup_claimed = FALSE,
+                workspace_cleanup_claimed_at = NULL
+            WHERE file_id = $1 AND partition_name = $2
+              AND workspace_cleanup_state IN ('NONE', 'CLAIMED')
+            """,
+            file_id,
+            partition,
+        )
+        return int(result.split()[-1]) > 0
+
+    async def finalize_file_workspace_ownership(self, file_id: str, partition: str, workspace_ids: list[str]) -> bool:
+        if not workspace_ids:
+            return False
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                # Serialize with workspace deletion, then use a fresh snapshot
+                # to recheck membership after waiting for the file row lock.
+                await conn.fetchrow(
+                    "SELECT id FROM files WHERE file_id = $1 AND partition_name = $2 FOR UPDATE",
+                    file_id,
+                    partition,
+                )
+                row = await conn.fetchrow(
+                    """
+                    UPDATE files f SET independently_indexed = FALSE
+                    WHERE f.file_id = $1 AND f.partition_name = $2
+                      AND f.workspace_cleanup_state = 'NONE'
+                      AND NOT EXISTS (
+                          SELECT 1 FROM unnest($3::text[]) AS requested(workspace_id)
+                          WHERE NOT EXISTS (
+                              SELECT 1 FROM workspace_files wf
+                              WHERE wf.file_id = f.id AND wf.workspace_id = requested.workspace_id
+                          )
+                      )
+                    RETURNING f.id
+                    """,
+                    file_id,
+                    partition,
+                    workspace_ids,
+                )
+                return row is not None
 
     async def remove_file_from_partition(self, file_id: str, partition: str) -> bool:
         """TODO(phase-9): remove. Mirror of legacy ``remove_file_from_partition``."""

@@ -128,7 +128,13 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
     Robot Framework suite and the existing unit assertions still match
     after the move.
     """
-    logger.exception(
+    # This handler runs in Starlette's outermost layer, after the
+    # ``RequestIdMiddleware`` ``contextualize`` scope has unwound with the
+    # exception, so the id is bound explicitly here — the one line an operator
+    # will search for by request_id must not be the one missing it.
+    request_id = _get_request_id(request)
+    log = logger.bind(request_id=request_id) if request_id is not None else logger
+    log.exception(
         "Unhandled exception",
         error_type=type(exc).__name__,
         message=str(exc),
@@ -136,7 +142,6 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
         path=request.url.path,
     )
     extra: dict[str, object] = {}
-    request_id = _get_request_id(request)
     if request_id is not None:
         extra["request_id"] = request_id
     response = JSONResponse(
