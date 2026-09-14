@@ -49,9 +49,9 @@ model_endpoints = Table(
     Column("timeout", Float, server_default="30.0", nullable=False),
     Column("extra", JSONB, server_default=text("'{}'::jsonb"), nullable=False),
     Column("is_default", Boolean, server_default="false", nullable=False),
-    # Dense vector field owned by this embedder (#762 F). NULL means the row
-    # predates per-embedder fields and shares the legacy ``vector`` field, so
-    # it is nullable by design rather than for backfill convenience.
+    # Dense vector field owned by this embedder (#762 F). Nullable only because
+    # non-embedder rows never own one; ck_embedder_has_vector_field below
+    # makes it mandatory for embedders.
     Column("vector_field", String, nullable=True),
     Column(
         "created_at",
@@ -69,9 +69,13 @@ model_endpoints = Table(
         "model_type IN ('embedder','reranker','llm','vlm','stt')",
         name="ck_model_endpoint_type",
     ),
+    CheckConstraint(
+        "model_type <> 'embedder' OR vector_field IS NOT NULL",
+        name="ck_embedder_has_vector_field",
+    ),
     # Two endpoints sharing a dense field would make their vectors
     # indistinguishable — the exact failure #762 exists to stop. Partial
-    # because NULL is the legacy shared field and is expected on many rows.
+    # because every non-embedder row is NULL.
     Index(
         "uq_model_endpoint_vector_field",
         "vector_field",
