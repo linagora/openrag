@@ -45,6 +45,7 @@ from core.utils.exceptions import (
     ValidationError,
 )
 from core.utils.logging import get_logger
+from core.vector_stores.vector_field import is_vector_field_key
 from services.workers.task_cancellation import cancel_active_indexing_tasks
 
 if TYPE_CHECKING:
@@ -773,15 +774,14 @@ class PartitionService:
         """
         _validate_limit(limit)
         await self._ensure_partition(partition)
-        excluded = {"text"} if include_embedding else {"text", "vector"}
-        output_fields = ["*", "vector"] if include_embedding else ["*"]
+        excluded = {"text"}
         filters: dict[str, Any] = {"partition": partition}
         if file_id is not None:
             filters["file_id"] = file_id
         rows = await self._vector_store.query_chunks_by_filter(
             self._collection,
             filters,
-            output_fields=output_fields,
+            output_fields=["*"],
         )
         if limit is not None and len(rows) > limit:
             rows = rows[:limit]
@@ -793,9 +793,13 @@ class PartitionService:
                     continue
                 if is_internal_metadata_key(k):
                     continue
-                if k == "vector":
-                    # Legacy surfaced the embedding as a flat string.
-                    v = str(np.array(v).flatten().tolist())
+                if is_vector_field_key(k):
+                    # "*" returns one dense field per embedder (#762 F), null
+                    # for all but the one that embedded this chunk. Legacy
+                    # surfaced that embedding as a flat string under "vector".
+                    if include_embedding and v is not None:
+                        meta["vector"] = str(np.array(v).flatten().tolist())
+                    continue
                 meta[k] = v
             return meta
 
