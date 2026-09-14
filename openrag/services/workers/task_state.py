@@ -16,6 +16,10 @@ from core.models.catalog import (
     TERMINAL_TASK_STATES,
     DocumentStatus,
 )
+from core.observability.ray_metrics import (
+    observe_queue_wait_from,
+    record_document_terminal,
+)
 
 ACTIVE_INDEXING_STATES = frozenset({"QUEUED", "SERIALIZING"})
 # Legacy indexing states removed from the public state machine in #721. Current
@@ -28,6 +32,10 @@ LEGACY_ACTIVE_INDEXING_STATES = frozenset({"CHUNKING", "INSERTING"})
 CANCELLABLE_INDEXING_STATES = ACTIVE_INDEXING_STATES | LEGACY_ACTIVE_INDEXING_STATES
 RECOVERABLE_TASK_STATES = CANCELLABLE_INDEXING_STATES | {"CANCELLED"}
 TERMINAL_INDEXING_STATES = frozenset({"COMPLETED", "FAILED"})
+#: ``TERMINAL_TASK_STATES`` as plain strings. ``TaskInfo.state`` is a bare
+#: ``str`` (it round-trips through the recoverable-task JSON), so comparing it
+#: against the enum members directly would silently never match.
+_TERMINAL_STATE_NAMES = frozenset(state.value for state in TERMINAL_TASK_STATES)
 PENDING_TASK_DETAILS = "__openrag_pending_task_details__"
 SUBMITTED_TASK_WITHOUT_REF = "__openrag_submitted_task_without_ref__"
 _FENCE_KV_KEY = b"file-delete-fences-v1"
@@ -235,6 +243,19 @@ def _object_ref_is_ready(object_ref: Any) -> bool:
     return bool(ready)
 
 
+def _task_created_at(details: dict[str, Any] | None) -> str | None:
+    """The dispatcher's admission timestamp for a task, if it recorded one.
+
+    Read defensively: ``details`` is free-form and survives a rolling deploy
+    from a TaskStateManager running the previous schema, so the key can be
+    absent or the wrong type. Returning ``None`` records no observation,
+    which is honest — a zero would be a lie that drags the p50 down.
+    """
+    metadata = (details or {}).get("metadata")
+    created_at = metadata.get(TASK_CREATED_AT_METADATA_KEY) if isinstance(metadata, dict) else None
+    return created_at if isinstance(created_at, str) else None
+
+
 def _content_claim_registration_expired(details: dict[str, Any]) -> bool:
     metadata = details.get("metadata")
     created_at = metadata.get(TASK_CREATED_AT_METADATA_KEY) if isinstance(metadata, dict) else None
@@ -296,9 +317,31 @@ class TaskStateManager:
         self._prune_expired_file_delete_fences()
         return bool(self.file_delete_fences.get((partition, file_id)))
 
+    @staticmethod
+    def _count_terminal(previous: str | None, new: str) -> None:
+        """Count a document reaching a terminal state, once per transition.
+
+        Every setter here is re-entrant by design: a retried actor call can
+        set FAILED on an already-failed task, and ``finish_rejected_submission``
+        can run after ``set_failed_if_not_cancelled`` for the same task.
+        Counting the *write* rather than the transition would inflate the
+        failure ratio that ``OpenRagIngestFailureRate`` (S3-4) alerts on, so
+        the guard is on the previous state, not on the new one.
+
+        Counted in the TaskStateManager rather than in the indexer worker
+        because the worker only sees documents that reached it. Tasks that
+        fail before dispatch — a rejected submission, a stale ref-less task,
+        a cancellation while queued — are exactly the systemic failures the
+        alert needs to see, and the worker never observes them.
+        """
+        if new in _TERMINAL_STATE_NAMES and previous not in _TERMINAL_STATE_NAMES:
+            record_document_terminal(new)
+
     def _set_cancelled_locked(self, task_id: str, info: TaskInfo) -> None:
+        previous = info.state
         info.state = "CANCELLED"
         _save_recoverable_task(task_id, info)
+        self._count_terminal(previous, "CANCELLED")
 
     def _expire_refless_task_if_stale_locked(self, task_id: str, info: TaskInfo) -> bool:
         ref = info.object_ref.get("ref") if isinstance(info.object_ref, dict) else info.object_ref
@@ -314,9 +357,11 @@ class TaskStateManager:
             or not registration_expired
         ):
             return False
+        previous = info.state
         info.state = "FAILED"
         info.error = STALE_REFLESS_TASK_ERROR
         _save_recoverable_task(task_id, info)
+        self._count_terminal(previous, "FAILED")
         return True
 
     def _expire_refless_tasks_if_stale_locked(self, task_ids: Iterable[str] | None = None) -> None:
@@ -392,11 +437,25 @@ class TaskStateManager:
                 ref = object_ref.get("ref") if isinstance(object_ref, dict) else object_ref
                 if ref is None:
                     return False
+            previous = info.state
             info.state = state
             if state == "SERIALIZING":
                 info.worker_submitted = True
                 info.submission_started_at = None
+                # Queue wait is observed here, and only on the QUEUED ->
+                # SERIALIZING edge, because this is the one place that holds
+                # both halves of the measurement. ``created_at`` is stamped by
+                # the dispatcher into the task details; the worker never
+                # receives it — ``worker_metadata`` is built from the caller's
+                # metadata, and adding the key there would echo it back in the
+                # customer-facing indexing callback body (it is not in
+                # UPLOAD_METADATA_SERVER_KEYS) and persist it into chunk
+                # metadata. Guarding on ``previous`` keeps a retried set_state
+                # from observing the same wait twice.
+                if previous != "SERIALIZING":
+                    observe_queue_wait_from(_task_created_at(info.details))
             _save_recoverable_task(task_id, info)
+            self._count_terminal(previous, state)
             return True
 
     @ray.method(concurrency_group="set")
@@ -419,9 +478,11 @@ class TaskStateManager:
             if info is not None and info.state == "CANCELLED":
                 return False
             if info is not None:
+                previous = info.state
                 info.state = "FAILED"
                 info.error = tb_str
                 _save_recoverable_task(task_id, info)
+                self._count_terminal(previous, "FAILED")
             return True
 
     @ray.method(concurrency_group="set")
@@ -460,8 +521,10 @@ class TaskStateManager:
             info.worker_submitted = False
             info.submission_started_at = None
             if info.state in CANCELLABLE_INDEXING_STATES:
+                previous = info.state
                 info.state = "FAILED"
                 info.error = "Indexer worker submission was rejected after the worker settled."
+                self._count_terminal(previous, "FAILED")
             _save_recoverable_task(task_id, info)
             return True
 
