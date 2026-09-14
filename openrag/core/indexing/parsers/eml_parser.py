@@ -228,14 +228,21 @@ class EmlParser(DocumentParser):
 
     async def _render_one(self, attachment: dict, ext: str) -> tuple[str, list[ImageBlock]]:
         """Dispatch one attachment. Returns ``(text_to_inline, image_blocks)``."""
+        # An attachment's name decides how it is handled — which parser it
+        # reaches, or whether it is emitted as an image for captioning — but
+        # these bytes never crossed the upload check. Validate before that
+        # decision, not inside one branch of it: an attachment with no
+        # registered parser still falls through to the image path below.
+        # A mismatch skips this attachment; the rest of the message parses.
+        try:
+            validate_content_matches_extension(ext, attachment["raw"][:CONTENT_SNIFF_BYTES])
+        except Exception as exc:
+            logger.warning("Skipping attachment %s: %s", attachment["filename"], exc)
+            return "", []
+
         parser = self._attachment_parsers.get(ext)
         if parser is not None:
             try:
-                # An attachment's name picks its parser exactly as an upload's
-                # does, but these bytes never crossed the upload check. A
-                # mismatch raises and is caught below: the attachment is
-                # skipped and logged, the rest of the message still parses.
-                validate_content_matches_extension(ext, attachment["raw"][:CONTENT_SNIFF_BYTES])
                 doc = Document(
                     filename=attachment["filename"],
                     raw_bytes=attachment["raw"],

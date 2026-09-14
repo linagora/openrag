@@ -153,3 +153,33 @@ async def test_eml_attachment_with_matching_content_still_parses():
         "pdf",
     )
     assert "hello" in inline
+
+
+@pytest.mark.asyncio
+async def test_eml_attachment_with_no_registered_parser_is_still_checked():
+    """An attachment with no parser falls through to the image path and is
+    emitted for captioning. Validating inside the parser branch would leave
+    that route unchecked, so the check runs before the branch."""
+    from core.indexing.parsers.eml_parser import EmlParser
+
+    parser = EmlParser(attachment_parsers={})  # nothing registered for png
+    inline, images = await parser._render_one(
+        {"filename": "photo.png", "raw": PDF, "content_type": "image/png", "size": len(PDF)},
+        "png",
+    )
+
+    assert inline == ""
+    assert images == []
+
+
+@pytest.mark.asyncio
+async def test_genuine_image_attachment_without_a_parser_still_becomes_an_image():
+    from core.indexing.parsers.eml_parser import EmlParser
+
+    parser = EmlParser(attachment_parsers={})
+    _, images = await parser._render_one(
+        {"filename": "photo.png", "raw": _PNG_BYTES, "content_type": "image/png", "size": len(_PNG_BYTES)},
+        "png",
+    )
+
+    assert len(images) == 1

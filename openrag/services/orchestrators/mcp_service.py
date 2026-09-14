@@ -589,10 +589,9 @@ class MCPService:
         # parser — the same trust the upload routes refuse to extend to a
         # caller-supplied filename. Check the downloaded bytes agree with it.
         try:
-            validate_content_matches_extension(
-                suffix.lstrip(".").lower(),
-                tmp_path.read_bytes()[:CONTENT_SNIFF_BYTES],
-            )
+            with tmp_path.open("rb") as downloaded:
+                head = downloaded.read(CONTENT_SNIFF_BYTES)
+            validate_content_matches_extension(suffix.lstrip(".").lower(), head)
         except Exception:
             tmp_path.unlink(missing_ok=True)
             raise
