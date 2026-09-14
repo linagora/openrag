@@ -525,11 +525,23 @@ class ServiceContainer:
                 batch_size=embed_cfg.batch_size,
                 embed_concurrency=embed_cfg.embed_concurrency,
             )
+
+            def _vector_field_for(embedder_name: str) -> str | None:
+                """The dense field an embedder endpoint reads (#762 F).
+
+                ``None`` for an unknown name; the store refuses to search it.
+                """
+                endpoint_cfg = settings.models.embedder.get(embedder_name)
+                return endpoint_cfg.vector_field if endpoint_cfg is not None else None
+
             searcher = VectorStoreSearcher(
                 vector_store=self.vector_store,
                 embedder=embedder,
                 document_repo=self.document_repo,
                 collection=settings.vectordb.collection_name,
+                # The global searcher embeds with the default embedder, so it
+                # reads the default embedder's field.
+                vector_field=lambda: _vector_field_for("default"),
             )
             searcher = CatalogSearcher(searcher, self.document_repo)
 
@@ -540,6 +552,7 @@ class ServiceContainer:
                         embedder=self.embedder_factory(embedder_name),
                         document_repo=self.document_repo,
                         collection=settings.vectordb.collection_name,
+                        vector_field=lambda: _vector_field_for(embedder_name),
                     ),
                     self.document_repo,
                 )

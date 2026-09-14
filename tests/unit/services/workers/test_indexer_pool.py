@@ -2429,3 +2429,49 @@ async def test_cancelled_preflight_sends_no_callback(tmp_path, monkeypatch) -> N
         )
 
     callback.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# _build_vector_field_resolver (#762 F)
+# ---------------------------------------------------------------------------
+
+
+def _settings_with_embedders(**embedders: ModelEndpointConfig) -> SimpleNamespace:
+    return SimpleNamespace(models=SimpleNamespace(embedder=dict(embedders)), embedder=None)
+
+
+class TestVectorFieldResolver:
+    def test_a_registered_embedder_resolves_to_its_own_field(self) -> None:
+        from services.workers.indexer_pool import _build_vector_field_resolver
+
+        cfg = _settings_with_embedders(
+            bge=ModelEndpointConfig(name="bge", endpoint="http://x/v1", vector_field="vector_bge_m3")
+        )
+        assert _build_vector_field_resolver(cfg)("bge") == "vector_bge_m3"
+
+    def test_the_field_is_read_not_derived_from_the_name(self) -> None:
+        # The field is pinned at creation and survives a rename. Deriving it
+        # from the current name would send a renamed endpoint's vectors
+        # somewhere its own searches never look.
+        from services.workers.indexer_pool import _build_vector_field_resolver
+
+        cfg = _settings_with_embedders(
+            renamed=ModelEndpointConfig(name="renamed", endpoint="http://x/v1", vector_field="vector_original_name")
+        )
+        assert _build_vector_field_resolver(cfg)("renamed") == "vector_original_name"
+
+    def test_an_embedder_awaiting_its_migration_resolves_to_nothing(self) -> None:
+        from services.workers.indexer_pool import _build_vector_field_resolver
+
+        cfg = _settings_with_embedders(old=ModelEndpointConfig(name="old", endpoint="http://x/v1"))
+        assert _build_vector_field_resolver(cfg)("old") is None
+
+    def test_an_unknown_embedder_resolves_to_nothing(self) -> None:
+        # Falling back to some other embedder's field would silently merge two
+        # models' vectors into one index.
+        from services.workers.indexer_pool import _build_vector_field_resolver
+
+        cfg = _settings_with_embedders(
+            bge=ModelEndpointConfig(name="bge", endpoint="http://x/v1", vector_field="vector_bge_m3")
+        )
+        assert _build_vector_field_resolver(cfg)("never-registered") is None

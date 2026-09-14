@@ -90,8 +90,8 @@ class _FakeVectorStore:
     async def collection_exists(self, name: str) -> bool:
         return False
 
-    async def vector_dimension(self) -> int | None:
-        return self._dimension
+    async def vector_dimension(self, vector_field: str | None = None) -> int | None:
+        return self._dimension if vector_field else None
 
 
 def _settings(idx=None, ret=None, embedders=("default",)):
@@ -106,7 +106,9 @@ def _settings(idx=None, ret=None, embedders=("default",)):
     # A partition create always assigns embedder="default" (the alias
     # ModelEndpointService files the is_default row under), and that assignment
     # is validated — so the catalog has to hold it for the create to succeed.
-    s.models.embedder.update({n: ModelEndpointConfig(endpoint="http://emb:8000/v1") for n in embedders})
+    s.models.embedder.update(
+        {n: ModelEndpointConfig(endpoint="http://emb:8000/v1", vector_field=f"vector_{n}") for n in embedders}
+    )
     return s
 
 
@@ -646,7 +648,7 @@ async def test_detail_dimension_survives_a_vector_store_failure():
     turn a partition-config read into a 500."""
 
     class _BrokenStore(_FakeVectorStore):
-        async def vector_dimension(self) -> int | None:
+        async def vector_dimension(self, vector_field: str | None = None) -> int | None:
             raise RuntimeError("milvus unreachable")
 
     repo = _FakePartitionRepo(rows=[_full_row("p1")])
@@ -660,24 +662,27 @@ async def test_detail_dimension_survives_a_vector_store_failure():
 
 
 @pytest.mark.asyncio
-async def test_list_summaries_report_the_live_dimension_once():
-    """One collection serves every partition, so they share the answer — and
-    the lookup is made once for the whole list, not per row."""
-    calls = {"n": 0}
+async def test_list_summaries_report_the_live_dimension_once_per_embedder():
+    """Each embedder owns a field of its own width (#762 F), so partitions on
+    different embedders report different dimensions — and the lookup is made
+    once per embedder, not per row."""
+    calls: list[str | None] = []
 
     class _CountingStore(_FakeVectorStore):
-        async def vector_dimension(self) -> int | None:
-            calls["n"] += 1
-            return 768
+        async def vector_dimension(self, vector_field: str | None = None) -> int | None:
+            calls.append(vector_field)
+            return {"vector_default": 768, "vector_bge": 1024}[vector_field]
 
-    repo = _FakePartitionRepo(rows=[_full_row("a"), _full_row("b"), _full_row("c")])
-    svc = _make_service(repo)
+    repo = _FakePartitionRepo(
+        rows=[_full_row("a"), _full_row("b"), {**_full_row("c"), "embedder": "bge"}],
+    )
+    svc = _make_service(repo, settings=_settings(embedders=("default", "bge")))
     svc._vector_store = _CountingStore()
 
     summaries = await svc.list_partition_summaries()
 
-    assert {s["dimension"] for s in summaries.values()} == {768}
-    assert calls["n"] == 1
+    assert [summaries[p]["dimension"] for p in ("a", "b", "c")] == [768, 768, 1024]
+    assert sorted(calls) == ["vector_bge", "vector_default"]
 
 
 # ------------------------------------------------------------------

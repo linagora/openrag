@@ -19,10 +19,12 @@ LEGAL_FIELD_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
 class TestResolveVectorField:
-    def test_none_means_the_legacy_shared_field(self):
-        # Not "unset": rows predating the feature genuinely read and write
-        # ``vector``, so None must resolve rather than raise or stay falsy.
-        assert resolve_vector_field(None) == LEGACY_VECTOR_FIELD
+    @pytest.mark.parametrize("missing", [None, ""])
+    def test_a_missing_field_is_refused_not_mapped_to_vector(self, missing):
+        # Every embedder owns a field once migrated; falling back to the old
+        # shared one would read or write another embedder's vectors.
+        with pytest.raises(ValueError, match="migrations"):
+            resolve_vector_field(missing)
 
     def test_an_allocated_name_is_returned_unchanged(self):
         assert resolve_vector_field("vector_bge_m3") == "vector_bge_m3"

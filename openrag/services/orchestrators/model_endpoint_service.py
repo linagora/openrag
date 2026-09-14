@@ -503,6 +503,7 @@ class ModelEndpointService:
                 batch_size=row.batch_size,
                 timeout=row.timeout,
                 extra=row.extra,
+                vector_field=row.vector_field,
             )
             bucket[row.name] = cfg
             if row.is_default:
@@ -1036,6 +1037,9 @@ class ModelEndpointService:
             batch_size=row.batch_size,
             timeout=row.timeout,
             extra=row.extra,
+            # Survives the rename by construction: the field is pinned to the
+            # row, never recomputed from the name (#762 F).
+            vector_field=row.vector_field,
         )
         bucket[old_name] = cfg
         bucket[new_name] = cfg

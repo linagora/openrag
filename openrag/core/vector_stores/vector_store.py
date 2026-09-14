@@ -29,11 +29,18 @@ class VectorStore(ABC):
         collection: str = "default",
         *,
         indexed_at: datetime | None = None,
+        vector_field: str | None = None,
     ) -> int:
         """Insert or update chunks. Returns count of upserted items.
 
         ``indexed_at`` optionally pins the indexation timestamp stamped on the
         chunks so it can match the catalog row; ``None`` means "use now".
+
+        ``vector_field`` names the dense field of the embedder that produced
+        the embeddings (#762 F) — every embedder owns one, so it is required in
+        practice and a missing one is an error. Writing to a field the backend
+        does not have yet fails, so callers pair this with
+        :meth:`ensure_vector_field`.
         """
         ...
 
@@ -46,8 +53,16 @@ class VectorStore(ABC):
         collection: str = "default",
         filters: dict[str, Any] | None = None,
         similarity_threshold: float | None = None,
+        vector_field: str | None = None,
     ) -> list[dict[str, Any]]:
         """Similarity search returning raw result dicts.
+
+        ``vector_field`` names the dense field of the query's embedder
+        (#762 F); a missing one is an error. Rows that carry no value in that
+        field are absent from the results rather than scored as zero, so
+        searching a field an embedder has not backfilled yet returns fewer
+        results, never wrong ones — and a field that does not exist yet returns
+        none.
 
         Hybrid (dense + lexical) retrieval is a backend configuration
         concern, not a separate entry point: when a backend has it enabled
@@ -73,7 +88,12 @@ class VectorStore(ABC):
 
     @abstractmethod
     async def ensure_collection(self, name: str, dimension: int, **kwargs: Any) -> None:
-        """Create collection if it doesn't exist."""
+        """Create collection if it doesn't exist.
+
+        A fresh collection is created with the dense field named by the
+        ``vector_field`` keyword, sized to ``dimension``; both are ignored when
+        the collection exists.
+        """
         ...
 
     @abstractmethod
@@ -99,9 +119,9 @@ class VectorStore(ABC):
           reading them as zero. This is what makes a partition pointed at a
           not-yet-backfilled embedder return *fewer* results rather than
           wrong ones.
-        - The field is indexed **identically** to the collection's original
-          dense field. An embedder whose field is indexed differently would
-          retrieve differently for reasons that have nothing to do with the
+        - The field is indexed **identically** to every other dense field.
+          An embedder whose field is indexed differently would retrieve
+          differently for reasons that have nothing to do with the
           model, which is the confusion this whole feature exists to remove.
 
         ``dimension`` sizes a newly created field and is ignored when the
@@ -113,11 +133,14 @@ class VectorStore(ABC):
         ...
 
     @abstractmethod
-    async def vector_dimension(self) -> int | None:
+    async def vector_dimension(self, vector_field: str | None = None) -> int | None:
         """Dense-vector dimension the live collection actually stores.
 
-        ``None`` when it cannot be established — no collection yet, or the
-        backend can't be reached. Callers that need a number to size buffers
+        ``vector_field`` selects which embedder's field to measure (#762 F);
+        fields differ in width, so without one there is no answer.
+
+        ``None`` when it cannot be established — no field given, nothing
+        indexed with it yet, or the backend can't be reached. Callers that need a number to size buffers
         should pick their own fallback; callers that *report* the dimension
         must pass the ``None`` through rather than substitute a guess.
         """

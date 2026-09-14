@@ -53,6 +53,7 @@ from core.utils.exceptions import (
 )
 from core.utils.logging import get_logger
 from core.vector_stores import VectorStore
+from core.vector_stores.vector_field import is_vector_field_key, resolve_vector_field
 from pymilvus import (
     AnnSearchRequest,
     AsyncMilvusClient,
@@ -123,10 +124,6 @@ DEFAULT_BM25_SEARCH_PARAMS: dict[str, Any] = {
 #: Native Milvus 3.0 RRF fusion constant — k=100 matches the legacy MilvusDB
 #: tuning and the rank-fusion literature default.
 RRF_K = 100
-
-#: Entity-level keys to strip from search-result records — ``vector`` is
-#: noisy and large; ``text`` stays in the payload (callers need it).
-_SEARCH_RESULT_DROPPED_KEYS = frozenset({"vector"})
 
 #: Per-call timeout for the construction-time schema-version probe. Deliberately
 #: short and independent of ``VectorDBConfig.timeout``: the probe only produces a
@@ -202,17 +199,24 @@ class MilvusVectorStore(VectorStore):
             ) from e
 
         self._embedding_dimension: int | None = None
-        # Real dense-vector dimension read from the live collection schema,
+        # The dense field a fresh collection is created with — the first
+        # writer's. Ignored, like the dimension, when the collection exists.
+        self._initial_vector_field: str | None = None
+        # Real dense-vector bytes per row read from the live collection schema,
         # cached for page sizing. Distinct from ``_embedding_dimension`` (the
         # configured value passed to ``initialize``), which is ignored when the
         # collection already exists and so may not match what Milvus stores.
         self._schema_vector_dim: int | None = None
         self._loaded = False
         self._load_lock = asyncio.Lock()
+        self._search_schema_checked = False
         # Per-embedder dense fields already ensured in this process (#762 F).
         # Bounded by the collection's vector-field ceiling, so it cannot grow.
         self._ensured_vector_fields: set[str] = set()
         self._vector_field_lock = asyncio.Lock()
+        # Dense field names read from the live schema; invalidated whenever a
+        # field is added. ``None`` means "not read yet".
+        self._dense_fields_cache: frozenset[str] | None = None
         # Connection healing: PyMilvus 3.0 exposes no documented client-level
         # reconnect knob (no retry/keepalive params on MilvusClient or
         # AsyncMilvusClient). Trust the gRPC
@@ -237,7 +241,7 @@ class MilvusVectorStore(VectorStore):
         finally:
             await asyncio.to_thread(self._client.close)
 
-    async def initialize(self, embedding_dimension: int) -> None:
+    async def initialize(self, embedding_dimension: int, vector_field: str | None = None) -> None:
         """Materialise the backing Milvus collection.
 
         Safe to call multiple times. The first caller wins; concurrent callers
@@ -245,8 +249,10 @@ class MilvusVectorStore(VectorStore):
 
         Args:
             embedding_dimension: Dimensionality of the dense vectors that will
-                be upserted. Used to size the ``vector`` field in a fresh
+                be upserted. Used to size ``vector_field`` in a fresh
                 collection. Ignored if the collection already exists.
+            vector_field: The calling embedder's dense field, which a fresh
+                collection is created with. Required only to create one.
         """
         if self._loaded:
             return
@@ -254,6 +260,7 @@ class MilvusVectorStore(VectorStore):
             if self._loaded:
                 return
             self._embedding_dimension = embedding_dimension
+            self._initial_vector_field = vector_field
             await asyncio.to_thread(self._ensure_loaded)
             self._loaded = True
 
@@ -341,7 +348,8 @@ class MilvusVectorStore(VectorStore):
                 collection_name=self._collection_name,
                 operation="describe_collection",
             ) from e
-        fields = {field.get("name") for field in description.get("fields", [])}
+        described = description.get("fields", [])
+        fields = {field.get("name") for field in described}
 
         if self._hybrid and "sparse" not in fields:
             raise VDBCreateOrLoadCollectionError(
@@ -350,7 +358,13 @@ class MilvusVectorStore(VectorStore):
                 operation="validate_collection_schema",
             )
 
-        required_fields = ["vector"]
+        # Every dense field present — one per embedder that has written here.
+        # Loading fails on a vector field without an index, whichever it is.
+        required_fields = [
+            field["name"]
+            for field in described
+            if field.get("type") in _VECTOR_DATA_TYPES and field.get("name") != "sparse"
+        ]
         if self._hybrid:
             required_fields.append("sparse")
 
@@ -404,17 +418,24 @@ class MilvusVectorStore(VectorStore):
         """Build the OpenRAG hybrid schema.
 
         Fields: auto-id ``_id`` (INT64 PK), ``text`` (VARCHAR + analyzer),
-        ``partition`` (VARCHAR, partition_key), ``file_id`` (VARCHAR),
-        ``vector`` (FLOAT_VECTOR, dim from :meth:`initialize`), one
-        TIMESTAMPTZ per field in :data:`INDEXED_TIME_FIELDS`, and — when
-        ``hybrid_search`` is on — ``sparse`` (SPARSE_FLOAT_VECTOR) wired to a
-        native :class:`Function` of type :data:`FunctionType.BM25` over
-        ``text``.
+        ``partition`` (VARCHAR, partition_key), ``file_id`` (VARCHAR), the
+        creating embedder's dense field (FLOAT_VECTOR, name and dim from
+        :meth:`initialize`), one TIMESTAMPTZ per field in
+        :data:`INDEXED_TIME_FIELDS`, and — when ``hybrid_search`` is on —
+        ``sparse`` (SPARSE_FLOAT_VECTOR) wired to a native :class:`Function`
+        of type :data:`FunctionType.BM25` over ``text``.
+
+        There is no shared ``vector`` field (schema v3, #762 F): every other
+        embedder's field is added on its first write by
+        :meth:`ensure_vector_field`. The creating one is declared here rather
+        than added the same way because Milvus refuses a collection with no
+        vector field at all, which is what a collection without ``sparse``
+        would otherwise be.
         """
-        if self._embedding_dimension is None:
+        if self._embedding_dimension is None or self._initial_vector_field is None:
             raise VDBCreateOrLoadCollectionError(
-                "embedding_dimension must be set before building the schema; "
-                "call MilvusVectorStore.initialize(dim) first.",
+                "embedding_dimension and vector_field must be set before building the schema; "
+                "call MilvusVectorStore.initialize(dim, vector_field) first.",
                 collection_name=self._collection_name,
                 operation="create_schema",
             )
@@ -440,9 +461,16 @@ class MilvusVectorStore(VectorStore):
             max_length=MAX_LENGTH,
         )
         schema.add_field(
-            field_name="vector",
+            field_name=self._initial_vector_field,
             datatype=DataType.FLOAT_VECTOR,
             dim=self._embedding_dimension,
+            # Rows of every other embedder leave this null. Measured against a
+            # collection without the column: all-null costs ~4 bytes a row and
+            # no index at all, while a zero placeholder costs a full vector plus
+            # a second HNSW index over degenerate points. Nullable here too so
+            # it matches the fields added later — Milvus fixes nullability at
+            # creation.
+            nullable=True,
         )
 
         for time_field in INDEXED_TIME_FIELDS:
@@ -482,7 +510,7 @@ class MilvusVectorStore(VectorStore):
         )
 
     def _create_index(self):
-        """Build index params: HNSW/COSINE on ``vector``, inverted on scalars,
+        """Build index params: HNSW/COSINE on the creating embedder's field, inverted on scalars,
         STL_SORT on every :data:`INDEXED_TIME_FIELDS` entry, and — only when
         ``hybrid_search`` is enabled — SPARSE_INVERTED_INDEX/BM25 on
         ``sparse`` (k1=1.2, b=0.75) to mirror the schema gating in
@@ -499,7 +527,7 @@ class MilvusVectorStore(VectorStore):
             index_type="INVERTED",
             index_name="partition_idx",
         )
-        self._add_dense_index(index_params, "vector")
+        self._add_dense_index(index_params, self._initial_vector_field)
         if self._hybrid:
             index_params.add_index(
                 field_name="sparse",
@@ -551,7 +579,7 @@ class MilvusVectorStore(VectorStore):
         if stored_version < expected_version:
             return (
                 f"Collection `{self._collection_name}` is at schema version {stored_version}, but this build "
-                f"expects {expected_version}. Indexing fails until the pending migration(s) are applied. "
+                f"expects {expected_version}. Search and indexing fail until the pending migration(s) are applied. "
                 "Run, with OpenRAG stopped: uv run python "
                 "services/persistence/migrations/milvus/migrate.py --dry-run (then without --dry-run)."
             )
@@ -756,39 +784,66 @@ class MilvusVectorStore(VectorStore):
     # ------------------------------------------------------------------
 
     def _vector_dim(self) -> int:
-        """Best-effort dense-vector dimension for page sizing.
+        """Best-effort dense-vector width of one row, for page sizing.
 
-        Prefers the *real* dimension from the live collection schema, because
-        the value recorded at :meth:`initialize` is only the dimension this
-        process was configured with — it is ignored when the collection already
-        exists, so it can disagree with what Milvus actually stores. Page sizing
-        cares about on-the-wire bytes, so the schema wins. The schema read is
-        cached (the dimension can't change without a drop + recreate). Falls
-        back to the :meth:`initialize` value when the schema can't be read, then
-        to :data:`_UNKNOWN_VECTOR_DIM`. Reading too small a dimension here would
-        re-introduce the oversized-page failure this guard exists to prevent.
+        The *sum* of every dense field's dimension on the live schema: ``"*"``
+        returns them all, and while a row normally carries one non-null vector,
+        a partition being re-embedded carries two. Over-counting shrinks a page;
+        under-counting re-introduces the oversized-page failure this guard
+        exists to prevent.
+
+        Prefers the schema over the value recorded at :meth:`initialize`, which
+        is only what this process was configured with. Cached until a field is
+        added. Falls back to the :meth:`initialize` value when the schema can't
+        be read, then to :data:`_UNKNOWN_VECTOR_DIM`.
         """
         if self._schema_vector_dim is not None:
             return self._schema_vector_dim
-        dim = self._describe_vector_dim()
-        if dim is not None:
-            self._schema_vector_dim = dim
-            return dim
+        dims = [dim for dim in map(self._describe_vector_dim, self._dense_field_names()) if dim]
+        if dims:
+            self._schema_vector_dim = sum(dims)
+            return self._schema_vector_dim
         if self._embedding_dimension is not None:
             return self._embedding_dimension
         return _UNKNOWN_VECTOR_DIM
 
-    def _describe_vector_dim(self) -> int | None:
-        """Read the ``vector`` field's ``dim`` from the live collection schema.
+    def _dense_field_names(self) -> frozenset[str]:
+        """Every dense vector field on the live collection, cached.
+
+        One field per embedder (#762 F), so the names cannot be hardcoded. They
+        change only when a field is added, so the schema is read once and the
+        cache is invalidated by :meth:`ensure_vector_field` — in this process.
+        A field added by another process is not seen until restart, which is
+        why result stripping keys off :func:`is_vector_field_key` instead.
+
+        Empty when the collection cannot be described (it may not exist yet).
+        """
+        if self._dense_fields_cache is not None:
+            return self._dense_fields_cache
+        try:
+            descriptor = self._client.describe_collection(self._collection_name)
+        except Exception:
+            return frozenset()
+        self._dense_fields_cache = frozenset(
+            field["name"]
+            for field in descriptor.get("fields", [])
+            if field.get("type") in _VECTOR_DATA_TYPES and field.get("name") != "sparse"
+        )
+        return self._dense_fields_cache
+
+    def _describe_vector_dim(self, field: str) -> int | None:
+        """Read ``field``'s ``dim`` from the live collection schema.
 
         Returns ``None`` if the collection or field can't be inspected (e.g. the
         collection does not exist yet), leaving the caller to pick a fallback.
+        Per-embedder fields (#762 F) may differ in width, so the caller says
+        which one it means.
         """
         try:
             desc = self._client.describe_collection(self._collection_name)
-            for field in desc.get("fields", []):
-                if field.get("name") == "vector":
-                    dim = field.get("params", {}).get("dim")
+            for entry in desc.get("fields", []):
+                if entry.get("name") == field:
+                    dim = entry.get("params", {}).get("dim")
                     return int(dim) if dim else None
         except Exception:
             return None
@@ -797,16 +852,17 @@ class MilvusVectorStore(VectorStore):
     def _safe_batch_size(self, output_fields: list[str]) -> int:
         """Cap the batch so one page stays under Milvus's ~64MB result limit.
 
-        Only matters when the dense ``vector`` rides along (~dim*4 bytes/row);
+        Only matters when a dense field rides along (~dim*4 bytes/row);
         explicit scalar projections are small, so they keep the large default.
         Milvus 3.0 returns the vector for the ``"*"`` wildcard too — the search
-        path strips it post-hoc via ``_SEARCH_RESULT_DROPPED_KEYS`` and
+        path strips it post-hoc (see :meth:`_dense_field_names`) and
         ``query_chunks_by_filter(["*"])`` leaks it — so ``"*"`` counts as
-        vector-inclusive here. The dimension comes from :meth:`_vector_dim`, not
+        vector-inclusive here, and so does any per-embedder field (#762 F)
+        named explicitly. The dimension comes from :meth:`_vector_dim`, not
         a fixed guess, so a read-only process still sizes pages to the real
         collection.
         """
-        if "vector" not in output_fields and "*" not in output_fields:
+        if "*" not in output_fields and not any(is_vector_field_key(f) for f in output_fields):
             return 16_000
         dim = self._vector_dim()
         budget = 32 * 1024 * 1024  # ~half of Milvus's ~64MB cap
@@ -902,6 +958,7 @@ class MilvusVectorStore(VectorStore):
         *,
         indexed_at: str,
         order: dict[str, int | None],
+        vector_field: str,
     ) -> dict[str, Any]:
         """Build the Milvus insert payload for one chunk.
 
@@ -914,7 +971,7 @@ class MilvusVectorStore(VectorStore):
         entity.update(
             {
                 "text": chunk.text,
-                "vector": chunk.embedding,
+                vector_field: chunk.embedding,
                 "partition": chunk.partition,
                 "file_id": chunk.document_id,
                 "chunk_type": chunk.chunk_type.value,
@@ -946,6 +1003,7 @@ class MilvusVectorStore(VectorStore):
         collection: str = "default",
         *,
         indexed_at: datetime | None = None,
+        vector_field: str | None = None,
     ) -> int:
         """Insert pre-embedded chunks into the backing Milvus collection.
 
@@ -971,8 +1029,9 @@ class MilvusVectorStore(VectorStore):
 
         indexed_at = (indexed_at or datetime.now(UTC)).isoformat()
         order_metadata = self._gen_chunk_order_metadata(len(chunks))
+        field = resolve_vector_field(vector_field)
         entities = [
-            self._chunk_to_entity(c, indexed_at=indexed_at, order=o)
+            self._chunk_to_entity(c, indexed_at=indexed_at, order=o, vector_field=field)
             for c, o in zip(chunks, order_metadata, strict=True)
         ]
 
@@ -1001,14 +1060,15 @@ class MilvusVectorStore(VectorStore):
 
         Each record has ``id`` (stringified for :class:`Chunk` round-trip),
         ``score`` (distance for dense, fused RRF score for hybrid), and the
-        entity's output fields except ``vector``.
+        entity's output fields except the dense vectors — ``"*"`` returns one
+        per embedder, each a large float array.
         """
         if not response:
             return []
         out: list[dict[str, Any]] = []
         for hit in response[0]:
             entity = hit.get("entity", {}) if isinstance(hit, dict) else {}
-            record = {k: v for k, v in entity.items() if k not in _SEARCH_RESULT_DROPPED_KEYS}
+            record = {k: v for k, v in entity.items() if not is_vector_field_key(k)}
             # The primary key field is named ``_id`` (auto_id INT64), so Milvus
             # exposes it on the hit as ``_id`` and also inside ``entity`` — NOT
             # under the generic ``id`` key. Reading ``id`` yielded a literal
@@ -1114,6 +1174,7 @@ class MilvusVectorStore(VectorStore):
         collection: str = "default",
         filters: dict[str, Any] | None = None,
         similarity_threshold: float | None = None,
+        vector_field: str | None = None,
     ) -> list[dict[str, Any]]:
         """Similarity search — single entry point for dense and hybrid.
 
@@ -1124,13 +1185,55 @@ class MilvusVectorStore(VectorStore):
         the hybrid path — Milvus's server-side BM25 ``Function`` generates the
         sparse vector from it; the dense path ignores it.
 
-        Returns raw dicts (``id``, ``score``, plus entity fields except
-        ``vector``). ``similarity_threshold`` (when set) is the range-search
+        Returns raw dicts (``id``, ``score``, plus entity fields except the
+        dense vectors). ``similarity_threshold`` (when set) is the range-search
         ``radius`` floor on the dense leg; see :meth:`_dense_search_params`.
+
+        Refuses a collection below the configured schema version: before v3 the
+        embedder fields do not exist yet, and Milvus would answer a search on a
+        missing field with an error the search path reports as "no results".
         """
+        field = resolve_vector_field(vector_field)
+        await self._check_search_schema_version()
+        if not await self._has_dense_field(field):
+            # Nothing has been indexed with this embedder yet, so its field was
+            # never added: an empty result, not a failed search.
+            return []
         if self._hybrid:
-            return await self._hybrid_search(embedding, query_text, top_k, collection, filters, similarity_threshold)
-        return await self._dense_search(embedding, top_k, collection, filters, similarity_threshold)
+            return await self._hybrid_search(
+                embedding, query_text, top_k, collection, filters, similarity_threshold, field
+            )
+        return await self._dense_search(embedding, top_k, collection, filters, similarity_threshold, field)
+
+    async def _has_dense_field(self, field: str) -> bool:
+        """Whether ``field`` exists, re-reading the schema before saying no.
+
+        The cached names only follow fields added by this process; another
+        process (an indexer) may have added this one since.
+        """
+        if field in self._dense_field_names():
+            return True
+        self._dense_fields_cache = None
+        self._schema_vector_dim = None
+        return field in await asyncio.to_thread(self._dense_field_names)
+
+    async def _check_search_schema_version(self) -> None:
+        """Run :meth:`_check_schema_version` once per process on the search path.
+
+        Indexing checks on :meth:`initialize`; the API process never calls it,
+        so without this an un-migrated collection keeps answering searches —
+        with nothing, once the fields it reads no longer match the schema. A
+        collection that does not exist yet is not a mismatch.
+        """
+        if self._search_schema_checked:
+            return
+
+        def _check() -> None:
+            if self._client.has_collection(self._collection_name):
+                self._check_schema_version()
+
+        await asyncio.to_thread(_check)
+        self._search_schema_checked = True
 
     async def _hybrid_search_legs_are_empty(
         self,
@@ -1139,13 +1242,14 @@ class MilvusVectorStore(VectorStore):
         top_k: int,
         expr: str,
         similarity_threshold: float | None,
+        vector_field: str,
     ) -> bool:
         """Verify that dense and BM25 searches both produced no candidates."""
         dense_response, sparse_response = await asyncio.gather(
             self._async_client.search(
                 collection_name=self._collection_name,
                 data=[embedding],
-                anns_field="vector",
+                anns_field=vector_field,
                 search_params=self._dense_search_params(similarity_threshold),
                 limit=top_k,
                 filter=expr,
@@ -1170,8 +1274,9 @@ class MilvusVectorStore(VectorStore):
         collection: str,
         filters: dict[str, Any] | None,
         similarity_threshold: float | None,
+        vector_field: str,
     ) -> list[dict[str, Any]]:
-        """Dense ANN search on the ``vector`` field.
+        """Dense ANN search on ``vector_field``.
 
         Uses HNSW with COSINE distance and ``ef=64`` — same tuning as the
         legacy MilvusDB.
@@ -1183,7 +1288,7 @@ class MilvusVectorStore(VectorStore):
             response = await self._async_client.search(
                 collection_name=self._collection_name,
                 data=[embedding],
-                anns_field="vector",
+                anns_field=vector_field,
                 search_params=self._dense_search_params(similarity_threshold),
                 limit=top_k,
                 filter=expr,
@@ -1207,6 +1312,7 @@ class MilvusVectorStore(VectorStore):
         collection: str,
         filters: dict[str, Any] | None,
         similarity_threshold: float | None,
+        vector_field: str,
     ) -> list[dict[str, Any]]:
         """Dense + Milvus-native BM25 sparse, fused via ``RRFRanker``.
 
@@ -1235,7 +1341,7 @@ class MilvusVectorStore(VectorStore):
 
         dense_req = AnnSearchRequest(
             data=[embedding],
-            anns_field="vector",
+            anns_field=vector_field,
             param=self._dense_search_params(similarity_threshold),
             limit=top_k,
             expr=expr,
@@ -1267,6 +1373,7 @@ class MilvusVectorStore(VectorStore):
                     top_k,
                     expr,
                     similarity_threshold,
+                    vector_field,
                 ),
             )
         except Exception as e:
@@ -1372,24 +1479,19 @@ class MilvusVectorStore(VectorStore):
         Thin wrapper over :meth:`initialize`: validates ``name`` against the
         bound collection (so a future per-tenant store factory cannot
         accidentally cross-wire one tenant's collection name into another's
-        store) and forwards ``dimension``. Idempotent.
+        store) and forwards ``dimension`` and the ``vector_field`` keyword, which
+        a fresh collection is created with. Idempotent.
+
+        Dimensions belong to fields, not the collection (#762 F): a second
+        embedder of another width is not a conflict, it gets its own field
+        through :meth:`ensure_vector_field`.
 
         Raises:
             ValueError: ``name`` is neither ``self._collection_name`` nor
                 the ABC sentinel ``"default"``.
-            ValueError: the store is already initialized with a different
-                embedding dimension — re-initialising would invalidate the
-                index, so callers must drop and re-create explicitly.
         """
         self._resolve_collection(name)
-        if self._loaded and self._embedding_dimension != dimension:
-            raise ValueError(
-                f"MilvusVectorStore already initialised at "
-                f"dimension={self._embedding_dimension}; "
-                f"got ensure_collection(dimension={dimension}). "
-                "Drop the collection before re-sizing."
-            )
-        await self.initialize(dimension)
+        await self.initialize(dimension, kwargs.get("vector_field"))
 
     async def ensure_vector_field(self, field: str, dimension: int) -> bool:
         """Add a per-embedder dense field to the live collection (#762 F).
@@ -1400,11 +1502,8 @@ class MilvusVectorStore(VectorStore):
         the work and the rest return from the memo, mirroring how
         :meth:`initialize` guards collection creation.
 
-        Returns whether this call created the field. ``vector`` always returns
-        ``False``: it is built into the collection, so there is nothing to add.
+        Returns whether this call created the field.
         """
-        if field == "vector":
-            return False
         if field in self._ensured_vector_fields:
             return False
         async with self._vector_field_lock:
@@ -1477,6 +1576,9 @@ class MilvusVectorStore(VectorStore):
                 collection_name=self._collection_name,
                 operation="create_index",
             ) from e
+        # The schema changed, so anything derived from it is now stale.
+        self._dense_fields_cache = None
+        self._schema_vector_dim = None
         logger.bind(field=field, dimension=dimension).info("Added per-embedder dense vector field")
         return True
 
@@ -1579,25 +1681,21 @@ class MilvusVectorStore(VectorStore):
         # is not. Use the async data-plane client so cancellation stops the RPC.
         await self._async_client.has_collection(self._collection_name, timeout=2.0)
 
-    async def vector_dimension(self) -> int | None:
-        """Dense-vector dimension read from the live collection schema.
+    async def vector_dimension(self, vector_field: str | None = None) -> int | None:
+        """Dense-vector dimension of ``vector_field``, read from the live schema.
 
         Deliberately *not* :meth:`_vector_dim`, which falls back to the
         configured value and then to a fixed guess so page sizing always has a
         number to work with. A reported dimension has no business guessing:
-        ``None`` is a fact, a plausible-looking 1024 is a fabrication (#762 G).
+        ``None`` is a fact, a plausible-looking 1024 is a fabrication (#762 E).
 
-        Shares ``_schema_vector_dim`` with the page-sizing path, so this costs
-        one ``describe_collection`` per process — and the failure case (no
-        collection yet) stays uncached, since it stops being true the moment
-        anything is indexed.
+        Per-embedder fields (#762 F) can differ in width, so there is no
+        collection-wide answer: without a field, or before anything was indexed
+        with it, the dimension is unknown and this returns ``None``.
         """
-        if self._schema_vector_dim is not None:
-            return self._schema_vector_dim
-        dim = await asyncio.to_thread(self._describe_vector_dim)
-        if dim is not None:
-            self._schema_vector_dim = dim
-        return dim
+        if not vector_field:
+            return None
+        return await asyncio.to_thread(self._describe_vector_dim, vector_field)
 
     async def collection_exists(self, name: str) -> bool:
         """Report whether the Milvus collection exists on the server.
