@@ -336,14 +336,24 @@ class MarkerPool:
         isn't cancellable, so the child may still be parsing when we get here.
         Recycling first (kills the child, rebuilds the pool) stops the next
         dispatched chunk from landing on a worker still busy with this one (#723).
+
+        If recycling itself keeps failing, the worker is never returned to
+        ``_queue`` — a slot silently lost is safer than one that might still
+        be busy.
         """
         try:
-            await self._reset_worker_pool(worker)
+            await retry_with_backoff(
+                lambda _i: self._reset_worker_pool(worker),
+                max_retries=self.config.loader.marker_max_task_retry,
+                base_delay=self.config.loader.marker_retry_base_delay,
+                task_description=f"MarkerWorker recycle after {label}",
+            )
         except Exception:
-            self.logger.exception(f"Failed to recycle MarkerWorker after {label}; returning it anyway")
-        finally:
-            await self._queue.put(worker)
-            self.logger.debug(f"MarkerWorker returned to pool for {label}")
+            self.logger.exception(f"MarkerWorker recycle after {label} failed; dropping its slot")
+            return
+
+        await self._queue.put(worker)
+        self.logger.debug(f"MarkerWorker returned to pool for {label}")
 
     async def _process_chunk(self, file_path: str, page_range: list[int] | None, label: str):
         """Acquire a worker slot, process a PDF chunk, and release the slot.

@@ -227,6 +227,32 @@ async def test_process_chunk_recycles_before_releasing_on_cancellation(monkeypat
     assert pool._queue.get_nowait() == "worker-1"
 
 
+async def test_process_chunk_never_returns_worker_when_recycle_keeps_failing(monkeypatch):
+    """If recycling can't be confirmed, the slot must stay dropped rather than
+    hand back a worker that might still be running the previous parse."""
+    pool = _bare_marker_pool()
+
+    async def fake_run_chunk(worker, file_path, page_range, label):
+        raise TimeoutError("parse timed out")
+
+    async def failing_reset(worker):
+        raise RuntimeError("actor unavailable")
+
+    monkeypatch.setattr(pool, "ensure_worker_pool_healthy", lambda worker: _noop())
+    monkeypatch.setattr(pool, "_run_chunk", fake_run_chunk)
+    monkeypatch.setattr(pool, "_reset_worker_pool", failing_reset)
+
+    try:
+        await pool._process_chunk("f.pdf", None, "(all pages)")
+    except Exception:
+        pass
+
+    for _ in range(5):
+        await asyncio.sleep(0)
+
+    assert pool._queue.qsize() == 0
+
+
 async def _noop():
     return None
 
