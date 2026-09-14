@@ -27,7 +27,7 @@ git checkout main # or a given release
 The Docker Compose stack lives under **`infra/compose/`**, next to its **`.env.example`** template. Generate a `.env` from it — this fills in every credential with a fresh random value, which the stack requires to start:
 
 ```bash title="Create your .env from the template"
-uv run python scripts/gen_env.py
+python3 scripts/gen_env.py
 ```
 
 Then fill in the blanks the generator cannot guess: your LLM/VLM endpoints and the embedder.

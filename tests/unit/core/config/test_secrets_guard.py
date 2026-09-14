@@ -244,15 +244,19 @@ _EXAMPLE_ENV_FILES = (
 _CREDENTIAL_KEYS = frozenset(spec.env_var for spec in SECRET_SPECS)
 
 
-def _assignments(text: str) -> dict[str, str]:
-    """``KEY=value`` pairs, including ones behind a single comment marker —
-    a commented example is still a value someone will uncomment and use."""
-    pairs: dict[str, str] = {}
+def _assignments(text: str) -> list[tuple[str, str]]:
+    """Every ``KEY=value`` pair, including ones behind a single comment marker.
+
+    A commented example is still a value someone will uncomment and use, and
+    every occurrence counts: keeping only the first would let a later usable
+    credential slip past this gate.
+    """
+    pairs: list[tuple[str, str]] = []
     for line in text.splitlines():
         stripped = line.lstrip("# ").strip()
         match = re.match(r"^([A-Z0-9_]+)=(.*)$", stripped)
         if match:
-            pairs.setdefault(match.group(1), match.group(2).strip())
+            pairs.append((match.group(1), match.group(2).strip()))
     return pairs
 
 
@@ -266,7 +270,7 @@ def test_example_env_files_ship_no_usable_credential(relative_path):
 
     offenders = [
         key
-        for key, value in _assignments(path.read_text()).items()
+        for key, value in _assignments(path.read_text())
         # "EMPTY" is the documented no-credential sentinel, not a usable one.
         if key in _CREDENTIAL_KEYS and value and value != "EMPTY" and not is_known_default(value)
     ]

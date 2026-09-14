@@ -21,8 +21,8 @@ weak choice but no choice at all: a template copied verbatim. So the example fil
 `__GENERATE_ME__` where a credential belongs, and one command fills them in:
 
 ```bash
-uv run python scripts/gen_env.py           # writes infra/compose/.env
-uv run python scripts/gen_env.py --check   # verify nothing is left unset
+python3 scripts/gen_env.py           # writes infra/compose/.env
+python3 scripts/gen_env.py --check   # verify nothing is left unset
 ```
 
 ## What must be supplied

@@ -144,7 +144,7 @@ git checkout main # or a given release
 Generate a `.env` under `infra/compose/` from `infra/compose/.env.example`. The generator fills every credential with a fresh random value; you then supply the endpoint variables it cannot guess.
 
 ```bash
-uv run python scripts/gen_env.py
+python3 scripts/gen_env.py
 ```
 
 The template marks each credential `__GENERATE_ME__` instead of shipping a working default, and OpenRag refuses to start on any value published in this repository — so copying the template by hand fails at startup with a message naming what is still unset.
