@@ -565,3 +565,192 @@ async def test_single_strategy_resolves_no_prompt():
     svc = RetrievalService(searcher=FakeSearcher(), reranker=None, llm=None, config=cfg, prompt_service=rec)
     await svc._pipeline_for_partition("tenant-a")
     assert rec.calls == []
+
+
+# --------------------------------------------------------------------------- #
+# Partition fan-out resilience (#736)
+# --------------------------------------------------------------------------- #
+
+
+class ExplodingSearcher(FakeSearcher):
+    """A searcher whose partition is unreachable — e.g. its embedder endpoint is
+    down, which is the realistic per-leg failure now that every partition shares
+    one Milvus collection."""
+
+    async def search(self, **kwargs):
+        raise RuntimeError("embedder endpoint unreachable")
+
+
+def _mixed_factory(failing: set[str]):
+    """Searcher factory where the named embedders raise and the rest answer."""
+    made: dict[str, FakeSearcher] = {}
+
+    def factory(name: str) -> FakeSearcher:
+        if name not in made:
+            s = ExplodingSearcher() if name in failing else FakeSearcher()
+            s.search_result = [_chunk(f"{name}-hit")]
+            made[name] = s
+        return made[name]
+
+    return factory
+
+
+@pytest.mark.asyncio
+async def test_retrieve_survives_one_failing_partition():
+    """One unhealthy partition must not wipe out the healthy ones (#736).
+
+    The fan-out gathers one leg per partition group. Without
+    ``return_exceptions`` a single raising leg aborts the whole gather, so a
+    user with several memberships — or a super-admin on ``all`` — gets nothing
+    back instead of the partitions that answered fine.
+    """
+    cfg = _config()
+    cfg.partitions = {
+        "good": _partition(name="good", embedder="embed-good"),
+        "bad": _partition(name="bad", embedder="embed-bad"),
+    }
+    svc = RetrievalService(
+        searcher=FakeSearcher(),
+        reranker=None,
+        llm=None,
+        config=cfg,
+        searcher_factory=_mixed_factory({"embed-bad"}),
+    )
+
+    out = await svc.retrieve(partitions=["all"], query=Query(query="hello"))
+
+    assert [c.id for c in out] == ["embed-good-hit"]
+
+
+@pytest.mark.asyncio
+async def test_retrieve_multi_survives_one_failing_partition():
+    """The multi-query fan-out shares the same choke point, so it degrades too."""
+    cfg = _config()
+    cfg.partitions = {
+        "good": _partition(name="good", embedder="embed-good"),
+        "bad": _partition(name="bad", embedder="embed-bad"),
+    }
+    svc = RetrievalService(
+        searcher=FakeSearcher(),
+        reranker=None,
+        llm=None,
+        config=cfg,
+        searcher_factory=_mixed_factory({"embed-bad"}),
+    )
+
+    out = await svc.retrieve_multi(partitions=["all"], search_queries=SearchQueries(query_list=[Query(query="hello")]))
+
+    assert [c.id for c in out] == ["embed-good-hit"]
+
+
+@pytest.mark.asyncio
+async def test_retrieve_raises_when_every_partition_fails():
+    """Fail-open stops at total failure.
+
+    With no leg left there is nothing to degrade to, and an empty list reads as
+    "the corpus has no match" — the caller would answer from no context instead
+    of surfacing the outage. The original error type is preserved so the API
+    keeps mapping it as before.
+    """
+    cfg = _config()
+    cfg.partitions = {
+        "a": _partition(name="a", embedder="embed-a"),
+        "b": _partition(name="b", embedder="embed-b"),
+    }
+    svc = RetrievalService(
+        searcher=FakeSearcher(),
+        reranker=None,
+        llm=None,
+        config=cfg,
+        searcher_factory=_mixed_factory({"embed-a", "embed-b"}),
+    )
+
+    with pytest.raises(RuntimeError, match="embedder endpoint unreachable"):
+        await svc.retrieve(partitions=["all"], query=Query(query="hello"))
+
+
+@pytest.mark.asyncio
+async def test_retrieve_propagates_cancellation_rather_than_degrading():
+    """A cancelled request is not a degraded partition.
+
+    ``return_exceptions=True`` captures ``CancelledError`` like any other
+    exception, which would silently turn a client disconnect or a timeout into
+    a partial result. It must unwind instead.
+    """
+
+    class CancellingSearcher(FakeSearcher):
+        async def search(self, **kwargs):
+            raise asyncio.CancelledError()
+
+    def factory(name: str) -> FakeSearcher:
+        if name == "embed-cancel":
+            return CancellingSearcher()
+        s = FakeSearcher()
+        s.search_result = [_chunk(f"{name}-hit")]
+        return s
+
+    cfg = _config()
+    cfg.partitions = {
+        "good": _partition(name="good", embedder="embed-good"),
+        "gone": _partition(name="gone", embedder="embed-cancel"),
+    }
+    svc = RetrievalService(searcher=FakeSearcher(), reranker=None, llm=None, config=cfg, searcher_factory=factory)
+
+    with pytest.raises(asyncio.CancelledError):
+        await svc.retrieve(partitions=["all"], query=Query(query="hello"))
+
+
+@pytest.mark.asyncio
+async def test_bounded_fanout_also_degrades_per_partition():
+    """Resilience must hold on the throttled path too, not just the fast one.
+
+    Above ``max_partition_concurrency`` the legs run through a semaphore
+    wrapper, which is a separate gather call — the earlier fix would have been
+    easy to apply to only one of them.
+    """
+    cfg = _config()
+    cfg.retriever.max_partition_concurrency = 2
+    cfg.partitions = {f"p{i}": _partition(name=f"p{i}", embedder=f"e{i}") for i in range(5)}
+    svc = RetrievalService(
+        searcher=FakeSearcher(),
+        reranker=None,
+        llm=None,
+        config=cfg,
+        searcher_factory=_mixed_factory({"e1", "e3"}),
+    )
+
+    out = await svc.retrieve(partitions=["all"], query=Query(query="hi"))
+
+    assert sorted(c.id for c in out) == ["e0-hit", "e2-hit", "e4-hit"]
+
+
+@pytest.mark.asyncio
+async def test_dropped_partition_is_named_in_the_log():
+    """Degrading silently would hide a broken partition indefinitely: results
+    still come back, so nobody notices until someone asks why a tenant's
+    documents stopped being cited. The warning names the partitions (#736)."""
+    from loguru import logger as _logger
+
+    messages: list[str] = []
+    sink_id = _logger.add(lambda m: messages.append(str(m)), level="WARNING")
+    try:
+        cfg = _config()
+        cfg.partitions = {
+            "healthy": _partition(name="healthy", embedder="embed-good"),
+            "broken": _partition(name="broken", embedder="embed-bad"),
+        }
+        svc = RetrievalService(
+            searcher=FakeSearcher(),
+            reranker=None,
+            llm=None,
+            config=cfg,
+            searcher_factory=_mixed_factory({"embed-bad"}),
+        )
+        await svc.retrieve(partitions=["all"], query=Query(query="hello"))
+    finally:
+        _logger.remove(sink_id)
+
+    dropped = [m for m in messages if "broken" in m]
+    assert dropped, f"the dropped partition was not logged: {messages}"
+    assert "RuntimeError" in dropped[0]
+    assert "healthy" not in dropped[0], "only the failed partition should be named"

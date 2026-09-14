@@ -126,6 +126,10 @@ class PostgresStore(CatalogStore):
         await self._conn.shutdown()
         self._initialized = False
 
+    async def check_health(self) -> None:
+        async with self.pool.acquire(timeout=2.0) as conn:
+            await conn.fetchval("SELECT 1", timeout=2.0)
+
     # ------------------------------------------------------------------
     # Connection access (escape hatch for Phase 8 orchestrators)
     # ------------------------------------------------------------------

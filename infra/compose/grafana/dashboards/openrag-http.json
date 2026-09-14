@@ -1,479 +1,105 @@
 {
-  "uid": "openrag-http",
-  "title": "OpenRAG HTTP Metrics",
-  "description": "HTTP request metrics from the OpenRAG application",
-  "tags": ["openrag", "http", "api"],
-  "timezone": "browser",
+  "annotations": {"list": [{"builtIn": 1, "datasource": {"type": "grafana", "uid": "-- Grafana --"}, "enable": true, "hide": true, "iconColor": "rgba(0, 211, 255, 1)", "name": "Annotations & Alerts", "type": "dashboard"}]},
+  "description": "Operator health overview and endpoint-level HTTP diagnostics for OpenRAG",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
   "links": [],
-  "templating": { "list": [] },
   "panels": [
+    {"collapsed": false, "gridPos": {"h": 1, "w": 24, "x": 0, "y": 0}, "id": 1, "panels": [], "title": "OpenRAG Health", "type": "row"},
     {
-      "id": 1,
-      "title": "Request Rate (req/s)",
-      "type": "timeseries",
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "fieldConfig": {
-        "defaults": {
-          "color": { "mode": "palette-classic" },
-          "custom": {
-            "axisBorderShow": false,
-            "axisCenteredZero": false,
-            "axisLabel": "req/s",
-            "drawStyle": "line",
-            "fillOpacity": 15,
-            "gradientMode": "none",
-            "lineInterpolation": "smooth",
-            "lineWidth": 2,
-            "pointSize": 5,
-            "showPoints": "never",
-            "spanNulls": false,
-            "stacking": { "group": "A", "mode": "normal" },
-            "thresholdsStyle": { "mode": "off" }
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              { "color": "green", "value": null }
-            ]
-          },
-          "unit": "reqps"
-        },
-        "overrides": []
-      },
-      "targets": [
-        {
-          "expr": "sum(rate(openrag_http_requests_total[5m])) by (endpoint)",
-          "legendFormat": "{{ endpoint }}",
-          "refId": "A"
-        }
-      ],
-      "options": {
-        "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom" },
-        "tooltip": { "mode": "multi", "sort": "desc" }
-      }
+      "datasource": {"type": "prometheus", "uid": "prometheus"}, "description": "Current OpenRAG HTTP request throughput.",
+      "fieldConfig": {"defaults": {"color": {"mode": "thresholds"}, "decimals": 2, "mappings": [], "noValue": "No traffic", "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}]}, "unit": "reqps"}, "overrides": []},
+      "gridPos": {"h": 5, "w": 6, "x": 0, "y": 1}, "id": 2,
+      "options": {"colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto", "wideLayout": true},
+      "targets": [{"editorMode": "code", "expr": "sum(rate(openrag_http_requests_total[$__rate_interval]))", "legendFormat": "Requests/sec", "range": true, "refId": "A"}], "title": "Requests/sec", "type": "stat"
     },
     {
-      "id": 2,
-      "title": "Error Rate (errors/s)",
-      "type": "timeseries",
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "fieldConfig": {
-        "defaults": {
-          "color": { "mode": "palette-classic" },
-          "custom": {
-            "axisBorderShow": false,
-            "axisCenteredZero": false,
-            "axisLabel": "errors/s",
-            "drawStyle": "line",
-            "fillOpacity": 15,
-            "gradientMode": "none",
-            "lineInterpolation": "smooth",
-            "lineWidth": 2,
-            "pointSize": 5,
-            "showPoints": "never",
-            "spanNulls": false,
-            "stacking": { "group": "A", "mode": "normal" },
-            "thresholdsStyle": { "mode": "off" }
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              { "color": "green", "value": null },
-              { "color": "red", "value": 1 }
-            ]
-          },
-          "unit": "reqps"
-        },
-        "overrides": []
-      },
-      "targets": [
-        {
-          "expr": "sum(rate(openrag_http_request_failures_total[5m])) by (endpoint)",
-          "legendFormat": "{{ endpoint }}",
-          "refId": "A"
-        }
-      ],
-      "options": {
-        "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom" },
-        "tooltip": { "mode": "multi", "sort": "desc" }
-      }
+      "datasource": {"type": "prometheus", "uid": "prometheus"}, "description": "Percentage of requests returning an HTTP 4xx or 5xx response.",
+      "fieldConfig": {"defaults": {"color": {"mode": "thresholds"}, "decimals": 1, "mappings": [], "noValue": "0%", "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 1}, {"color": "red", "value": 5}]}, "unit": "percent"}, "overrides": []},
+      "gridPos": {"h": 5, "w": 6, "x": 6, "y": 1}, "id": 3,
+      "options": {"colorMode": "background", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto", "wideLayout": true},
+      "targets": [{"editorMode": "code", "expr": "100 * (sum(rate(openrag_http_request_failures_total[$__rate_interval])) or vector(0)) / clamp_min((sum(rate(openrag_http_requests_total[$__rate_interval])) or vector(0)), 1e-9)", "legendFormat": "Errors", "range": true, "refId": "A"}], "title": "Error rate", "type": "stat"
     },
     {
-      "id": 3,
-      "title": "Total Request Rate",
-      "type": "stat",
-      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 8 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "fieldConfig": {
-        "defaults": {
-          "color": { "mode": "thresholds" },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              { "color": "green", "value": null }
-            ]
-          },
-          "unit": "reqps"
-        },
-        "overrides": []
-      },
-      "targets": [
-        {
-          "expr": "sum(rate(openrag_http_requests_total[5m]))",
-          "legendFormat": "Total",
-          "refId": "A"
-        }
-      ],
-      "options": {
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
-        "colorMode": "background",
-        "graphMode": "area",
-        "justifyMode": "auto",
-        "textMode": "auto",
-        "wideLayout": true
-      }
+      "datasource": {"type": "prometheus", "uid": "prometheus"}, "description": "95% of requests complete within this duration.",
+      "fieldConfig": {"defaults": {"color": {"mode": "thresholds"}, "decimals": 2, "mappings": [], "noValue": "No traffic", "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 1}, {"color": "red", "value": 5}]}, "unit": "s"}, "overrides": []},
+      "gridPos": {"h": 5, "w": 6, "x": 12, "y": 1}, "id": 4,
+      "options": {"colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto", "wideLayout": true},
+      "targets": [{"editorMode": "code", "expr": "histogram_quantile(0.95, sum(rate(openrag_http_request_duration_seconds_bucket[$__rate_interval])) by (le))", "legendFormat": "p95", "range": true, "refId": "A"}], "title": "P95 latency", "type": "stat"
     },
     {
-      "id": 4,
-      "title": "Total Error Rate",
-      "type": "stat",
-      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 8 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "fieldConfig": {
-        "defaults": {
-          "color": { "mode": "thresholds" },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              { "color": "green", "value": null },
-              { "color": "red", "value": 0.1 }
-            ]
-          },
-          "unit": "reqps"
-        },
-        "overrides": []
-      },
-      "targets": [
-        {
-          "expr": "sum(rate(openrag_http_request_failures_total[5m]))",
-          "legendFormat": "Errors",
-          "refId": "A"
-        }
-      ],
-      "options": {
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
-        "colorMode": "background",
-        "graphMode": "area",
-        "justifyMode": "auto",
-        "textMode": "auto",
-        "wideLayout": true
-      }
+      "datasource": {"type": "prometheus", "uid": "prometheus"}, "description": "Whether Prometheus can successfully scrape OpenRAG.",
+      "fieldConfig": {"defaults": {"color": {"mode": "thresholds"}, "mappings": [{"options": {"0": {"color": "red", "index": 1, "text": "Down"}, "1": {"color": "green", "index": 0, "text": "Healthy"}}, "type": "value"}], "noValue": "Unknown", "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "green", "value": 1}]}}, "overrides": []},
+      "gridPos": {"h": 5, "w": 6, "x": 18, "y": 1}, "id": 5,
+      "options": {"colorMode": "background", "graphMode": "none", "justifyMode": "auto", "orientation": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "value_and_name", "wideLayout": true},
+      "targets": [{"editorMode": "code", "expr": "min(up{job=\"openrag\"})", "legendFormat": "OpenRAG", "range": true, "refId": "A"}], "title": "Service status", "type": "stat"
+    },
+    {"collapsed": false, "gridPos": {"h": 1, "w": 24, "x": 0, "y": 6}, "id": 6, "panels": [], "title": "HTTP Trends", "type": "row"},
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"}, "description": "Request throughput grouped by HTTP method.",
+      "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}, "custom": {"drawStyle": "line", "fillOpacity": 15, "lineInterpolation": "smooth", "lineWidth": 2, "showPoints": "never"}, "unit": "reqps"}, "overrides": []},
+      "gridPos": {"h": 9, "w": 8, "x": 0, "y": 7}, "id": 7, "options": {"legend": {"calcs": ["lastNotNull", "max"], "displayMode": "table", "placement": "right", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [{"editorMode": "code", "expr": "sum(rate(openrag_http_requests_total[$__rate_interval])) by (method)", "legendFormat": "{{method}}", "range": true, "refId": "A"}], "title": "Traffic over time", "type": "timeseries"
     },
     {
-      "id": 5,
-      "title": "Error Percentage (%)",
-      "type": "timeseries",
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "fieldConfig": {
-        "defaults": {
-          "color": { "mode": "palette-classic" },
-          "custom": {
-            "axisBorderShow": false,
-            "axisCenteredZero": false,
-            "axisLabel": "%",
-            "drawStyle": "line",
-            "fillOpacity": 15,
-            "gradientMode": "none",
-            "lineInterpolation": "smooth",
-            "lineWidth": 2,
-            "pointSize": 5,
-            "showPoints": "never",
-            "spanNulls": false,
-            "stacking": { "group": "A", "mode": "none" },
-            "thresholdsStyle": { "mode": "line+area" }
-          },
-          "mappings": [],
-          "max": 100,
-          "min": 0,
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              { "color": "transparent", "value": null },
-              { "color": "red", "value": 5 }
-            ]
-          },
-          "unit": "percent"
-        },
-        "overrides": []
-      },
-      "targets": [
-        {
-          "expr": "(sum(rate(openrag_http_request_failures_total[5m])) by (endpoint) / sum(rate(openrag_http_requests_total[5m])) by (endpoint)) * 100",
-          "legendFormat": "{{ endpoint }}",
-          "refId": "A"
-        }
-      ],
-      "options": {
-        "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom" },
-        "tooltip": { "mode": "multi", "sort": "desc" }
-      }
+      "datasource": {"type": "prometheus", "uid": "prometheus"}, "description": "Client errors and server errors over time.",
+      "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}, "custom": {"drawStyle": "line", "fillOpacity": 15, "lineInterpolation": "smooth", "lineWidth": 2, "showPoints": "never"}, "unit": "reqps"}, "overrides": [{"matcher": {"id": "byName", "options": "4xx client errors"}, "properties": [{"id": "color", "value": {"fixedColor": "orange", "mode": "fixed"}}]}, {"matcher": {"id": "byName", "options": "5xx server errors"}, "properties": [{"id": "color", "value": {"fixedColor": "red", "mode": "fixed"}}]}]},
+      "gridPos": {"h": 9, "w": 8, "x": 8, "y": 7}, "id": 8, "options": {"legend": {"calcs": ["lastNotNull", "max"], "displayMode": "table", "placement": "right", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [{"editorMode": "code", "expr": "sum(rate(openrag_http_requests_total{status_code=~\"4..\"}[$__rate_interval])) or vector(0)", "legendFormat": "4xx client errors", "range": true, "refId": "A"}, {"editorMode": "code", "expr": "sum(rate(openrag_http_requests_total{status_code=~\"5..\"}[$__rate_interval])) or vector(0)", "legendFormat": "5xx server errors", "range": true, "refId": "B"}], "title": "4xx / 5xx over time", "type": "timeseries"
     },
     {
-      "id": 6,
-      "title": "Request Duration — p50",
-      "type": "timeseries",
-      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 16 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "fieldConfig": {
-        "defaults": {
-          "color": { "mode": "palette-classic" },
-          "custom": {
-            "axisBorderShow": false,
-            "axisCenteredZero": false,
-            "axisLabel": "",
-            "drawStyle": "line",
-            "fillOpacity": 10,
-            "gradientMode": "none",
-            "lineInterpolation": "smooth",
-            "lineWidth": 2,
-            "pointSize": 5,
-            "showPoints": "never",
-            "spanNulls": false,
-            "stacking": { "group": "A", "mode": "none" },
-            "thresholdsStyle": { "mode": "off" }
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              { "color": "green", "value": null }
-            ]
-          },
-          "unit": "s"
-        },
-        "overrides": []
-      },
-      "targets": [
-        {
-          "expr": "histogram_quantile(0.50, sum(rate(openrag_http_request_duration_seconds_bucket[5m])) by (le, endpoint))",
-          "legendFormat": "p50 — {{ endpoint }}",
-          "refId": "A"
-        }
-      ],
-      "options": {
-        "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom" },
-        "tooltip": { "mode": "multi", "sort": "desc" }
-      }
+      "datasource": {"type": "prometheus", "uid": "prometheus"}, "description": "Typical and worst-case OpenRAG response times.",
+      "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}, "custom": {"drawStyle": "line", "fillOpacity": 10, "lineInterpolation": "smooth", "lineWidth": 2, "showPoints": "never"}, "unit": "s"}, "overrides": []},
+      "gridPos": {"h": 9, "w": 8, "x": 16, "y": 7}, "id": 9, "options": {"legend": {"calcs": ["lastNotNull", "max"], "displayMode": "table", "placement": "right", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [{"editorMode": "code", "expr": "histogram_quantile(0.50, sum(rate(openrag_http_request_duration_seconds_bucket[$__rate_interval])) by (le))", "legendFormat": "p50 — typical", "range": true, "refId": "A"}, {"editorMode": "code", "expr": "histogram_quantile(0.95, sum(rate(openrag_http_request_duration_seconds_bucket[$__rate_interval])) by (le))", "legendFormat": "p95 — slow", "range": true, "refId": "B"}, {"editorMode": "code", "expr": "histogram_quantile(0.99, sum(rate(openrag_http_request_duration_seconds_bucket[$__rate_interval])) by (le))", "legendFormat": "p99 — slowest 1%", "range": true, "refId": "C"}], "title": "Latency percentiles", "type": "timeseries"
+    },
+    {"collapsed": false, "gridPos": {"h": 1, "w": 24, "x": 0, "y": 16}, "id": 10, "panels": [], "title": "Problem Endpoints", "type": "row"},
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"}, "description": "Routes with the highest percentage of failed requests.",
+      "fieldConfig": {"defaults": {"color": {"mode": "thresholds"}, "decimals": 1, "noValue": "No failures", "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 1}, {"color": "red", "value": 5}]}, "unit": "percent"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 17}, "id": 11, "options": {"displayMode": "gradient", "orientation": "horizontal", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "showUnfilled": true},
+      "targets": [{"editorMode": "code", "expr": "topk(5, 100 * sum(rate(openrag_http_request_failures_total[$__rate_interval])) by (method, endpoint) / clamp_min(sum(rate(openrag_http_requests_total[$__rate_interval])) by (method, endpoint), 1e-9))", "instant": true, "legendFormat": "{{method}} {{endpoint}}", "range": false, "refId": "A"}], "title": "Top 5 failing routes", "type": "bargauge"
     },
     {
-      "id": 7,
-      "title": "Request Duration — p95",
-      "type": "timeseries",
-      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 16 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "fieldConfig": {
-        "defaults": {
-          "color": { "mode": "palette-classic" },
-          "custom": {
-            "axisBorderShow": false,
-            "axisCenteredZero": false,
-            "axisLabel": "",
-            "drawStyle": "line",
-            "fillOpacity": 10,
-            "gradientMode": "none",
-            "lineInterpolation": "smooth",
-            "lineWidth": 2,
-            "pointSize": 5,
-            "showPoints": "never",
-            "spanNulls": false,
-            "stacking": { "group": "A", "mode": "none" },
-            "thresholdsStyle": { "mode": "off" }
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              { "color": "green", "value": null }
-            ]
-          },
-          "unit": "s"
-        },
-        "overrides": []
-      },
-      "targets": [
-        {
-          "expr": "histogram_quantile(0.95, sum(rate(openrag_http_request_duration_seconds_bucket[5m])) by (le, endpoint))",
-          "legendFormat": "p95 — {{ endpoint }}",
-          "refId": "A"
-        }
-      ],
-      "options": {
-        "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom" },
-        "tooltip": { "mode": "multi", "sort": "desc" }
-      }
+      "datasource": {"type": "prometheus", "uid": "prometheus"}, "description": "Routes with the highest p95 response time.",
+      "fieldConfig": {"defaults": {"color": {"mode": "thresholds"}, "decimals": 2, "noValue": "No traffic", "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 1}, {"color": "red", "value": 5}]}, "unit": "s"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 17}, "id": 12, "options": {"displayMode": "gradient", "orientation": "horizontal", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "showUnfilled": true},
+      "targets": [{"editorMode": "code", "expr": "topk(5, histogram_quantile(0.95, sum(rate(openrag_http_request_duration_seconds_bucket[$__rate_interval])) by (le, method, endpoint)))", "instant": true, "legendFormat": "{{method}} {{endpoint}}", "range": false, "refId": "A"}], "title": "Top 5 slowest routes", "type": "bargauge"
+    },
+    {"collapsed": false, "gridPos": {"h": 1, "w": 24, "x": 0, "y": 25}, "id": 13, "panels": [], "title": "Endpoint Diagnostics", "type": "row"},
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"}, "description": "Traffic for the selected endpoints and HTTP methods.",
+      "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}, "custom": {"drawStyle": "line", "fillOpacity": 15, "lineInterpolation": "smooth", "lineWidth": 2, "showPoints": "never"}, "unit": "reqps"}, "overrides": []},
+      "gridPos": {"h": 9, "w": 12, "x": 0, "y": 26}, "id": 14, "options": {"legend": {"calcs": ["lastNotNull", "max"], "displayMode": "table", "placement": "right", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [{"editorMode": "code", "expr": "sum(rate(openrag_http_requests_total{endpoint=~\"$endpoint\", method=~\"$method\"}[$__rate_interval])) by (method, endpoint)", "legendFormat": "{{method}} {{endpoint}}", "range": true, "refId": "A"}], "title": "Request rate", "type": "timeseries"
     },
     {
-      "id": 8,
-      "title": "Request Duration — p99",
-      "type": "timeseries",
-      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 16 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "fieldConfig": {
-        "defaults": {
-          "color": { "mode": "palette-classic" },
-          "custom": {
-            "axisBorderShow": false,
-            "axisCenteredZero": false,
-            "axisLabel": "",
-            "drawStyle": "line",
-            "fillOpacity": 10,
-            "gradientMode": "none",
-            "lineInterpolation": "smooth",
-            "lineWidth": 2,
-            "pointSize": 5,
-            "showPoints": "never",
-            "spanNulls": false,
-            "stacking": { "group": "A", "mode": "none" },
-            "thresholdsStyle": { "mode": "off" }
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              { "color": "green", "value": null }
-            ]
-          },
-          "unit": "s"
-        },
-        "overrides": []
-      },
-      "targets": [
-        {
-          "expr": "histogram_quantile(0.99, sum(rate(openrag_http_request_duration_seconds_bucket[5m])) by (le, endpoint))",
-          "legendFormat": "p99 — {{ endpoint }}",
-          "refId": "A"
-        }
-      ],
-      "options": {
-        "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom" },
-        "tooltip": { "mode": "multi", "sort": "desc" }
-      }
+      "datasource": {"type": "prometheus", "uid": "prometheus"}, "description": "Response status codes for the selected traffic.",
+      "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}, "custom": {"drawStyle": "line", "fillOpacity": 15, "lineInterpolation": "smooth", "lineWidth": 2, "showPoints": "never"}, "unit": "reqps"}, "overrides": []},
+      "gridPos": {"h": 9, "w": 12, "x": 12, "y": 26}, "id": 15, "options": {"legend": {"calcs": ["lastNotNull", "max"], "displayMode": "table", "placement": "right", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [{"editorMode": "code", "expr": "sum(rate(openrag_http_requests_total{endpoint=~\"$endpoint\", method=~\"$method\"}[$__rate_interval])) by (status_code)", "legendFormat": "HTTP {{status_code}}", "range": true, "refId": "A"}], "title": "Status codes", "type": "timeseries"
     },
     {
-      "id": 9,
-      "title": "Top Endpoints by Request Count",
-      "type": "table",
-      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 24 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "fieldConfig": {
-        "defaults": {
-          "color": { "mode": "thresholds" },
-          "custom": {
-            "align": "auto",
-            "cellOptions": { "type": "auto" },
-            "inspect": false
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              { "color": "green", "value": null }
-            ]
-          }
-        },
-        "overrides": [
-          {
-            "matcher": { "id": "byName", "options": "Value #A" },
-            "properties": [
-              { "id": "displayName", "value": "Total Requests" },
-              { "id": "unit", "value": "short" }
-            ]
-          },
-          {
-            "matcher": { "id": "byName", "options": "Value #B" },
-            "properties": [
-              { "id": "displayName", "value": "Error Rate (req/s)" },
-              { "id": "unit", "value": "reqps" },
-              { "id": "custom.cellOptions", "value": { "type": "color-text" } },
-              { "id": "thresholds", "value": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 0.01 }] } },
-              { "id": "color", "value": { "mode": "thresholds" } }
-            ]
-          },
-          {
-            "matcher": { "id": "byName", "options": "Value #C" },
-            "properties": [
-              { "id": "displayName", "value": "Avg Duration" },
-              { "id": "unit", "value": "s" }
-            ]
-          },
-          {
-            "matcher": { "id": "byName", "options": "endpoint" },
-            "properties": [
-              { "id": "displayName", "value": "Endpoint" }
-            ]
-          }
-        ]
-      },
-      "targets": [
-        {
-          "expr": "sum(openrag_http_requests_total) by (endpoint)",
-          "format": "table",
-          "instant": true,
-          "legendFormat": "",
-          "refId": "A"
-        },
-        {
-          "expr": "sum(rate(openrag_http_request_failures_total[5m])) by (endpoint)",
-          "format": "table",
-          "instant": true,
-          "legendFormat": "",
-          "refId": "B"
-        },
-        {
-          "expr": "sum(rate(openrag_http_request_duration_seconds_sum[5m])) by (endpoint) / sum(rate(openrag_http_request_duration_seconds_count[5m])) by (endpoint)",
-          "format": "table",
-          "instant": true,
-          "legendFormat": "",
-          "refId": "C"
-        }
-      ],
-      "options": {
-        "showHeader": true,
-        "sortBy": [
-          { "desc": true, "displayName": "Total Requests" }
-        ],
-        "cellHeight": "sm",
-        "footer": { "show": false, "reducer": ["sum"], "countRows": false }
-      },
-      "transformations": [
-        {
-          "id": "merge",
-          "options": {}
-        },
-        {
-          "id": "organize",
-          "options": {
-            "excludeByName": { "Time": true },
-            "indexByName": {},
-            "renameByName": {}
-          }
-        }
-      ]
+      "datasource": {"type": "prometheus", "uid": "prometheus"}, "description": "Distribution of request durations for the selected traffic.",
+      "fieldConfig": {"defaults": {"color": {"mode": "continuous-GrYlRd"}, "custom": {"scaleDistribution": {"type": "log"}}, "unit": "s"}, "overrides": []},
+      "gridPos": {"h": 9, "w": 24, "x": 0, "y": 35}, "id": 16,
+      "options": {"calculate": false, "cellGap": 1, "color": {"exponent": 0.5, "mode": "scheme", "reverse": false, "scale": "exponential", "scheme": "Oranges", "steps": 64}, "filterValues": {"le": 1e-9}, "legend": {"show": true}, "rowsFrame": {"layout": "auto"}, "tooltip": {"mode": "single", "showColorScale": false, "yHistogram": false}, "yAxis": {"axisPlacement": "left", "reverse": false, "unit": "s"}},
+      "targets": [{"editorMode": "code", "expr": "sum(rate(openrag_http_request_duration_seconds_bucket{endpoint=~\"$endpoint\", method=~\"$method\"}[$__rate_interval])) by (le)", "format": "heatmap", "legendFormat": "{{le}}", "range": true, "refId": "A"}], "title": "Latency distribution", "type": "heatmap"
     }
   ],
   "refresh": "30s",
   "schemaVersion": 39,
-  "time": { "from": "now-1h", "to": "now" },
+  "tags": ["openrag", "http", "operator", "diagnostics"],
+  "templating": {"list": [
+    {"allValue": ".*", "current": {"selected": true, "text": ["All"], "value": ["$__all"]}, "datasource": {"type": "prometheus", "uid": "prometheus"}, "definition": "label_values(openrag_http_requests_total, endpoint)", "hide": 0, "includeAll": true, "label": "Endpoint", "multi": true, "name": "endpoint", "options": [], "query": {"query": "label_values(openrag_http_requests_total, endpoint)", "refId": "PrometheusVariableQueryEditor-VariableQuery"}, "refresh": 1, "regex": "", "skipUrlSync": false, "sort": 1, "type": "query"},
+    {"allValue": ".*", "current": {"selected": true, "text": ["All"], "value": ["$__all"]}, "datasource": {"type": "prometheus", "uid": "prometheus"}, "definition": "label_values(openrag_http_requests_total, method)", "hide": 0, "includeAll": true, "label": "Method", "multi": true, "name": "method", "options": [], "query": {"query": "label_values(openrag_http_requests_total, method)", "refId": "PrometheusVariableQueryEditor-VariableQuery"}, "refresh": 1, "regex": "", "skipUrlSync": false, "sort": 1, "type": "query"}
+  ]},
+  "time": {"from": "now-1h", "to": "now"},
   "timepicker": {},
-  "version": 1
+  "timezone": "browser",
+  "title": "OpenRAG HTTP Metrics",
+  "uid": "openrag-http",
+  "version": 2,
+  "weekStart": ""
 }

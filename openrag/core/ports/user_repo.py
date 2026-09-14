@@ -10,7 +10,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Any
 
-from openrag.core.models.user import ApiKey, User
+from core.models.user import ApiKey, User
 
 
 class UserRepository(ABC):

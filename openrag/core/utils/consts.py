@@ -61,3 +61,20 @@ def strip_protected_metadata(metadata: dict | None) -> tuple[dict, list[str]]:
 UPLOAD_METADATA_SERVER_KEYS: frozenset[str] = frozenset(
     {"source", "filename", "original_filename", "file_size", "file_id", "content_sha256"}
 )
+
+
+# Retrieval scores are *request-scoped*: they say how one query ranked a chunk,
+# not what the chunk is. They live as typed fields on ``ScoredChunk`` and are
+# stamped into metadata only at ``to_langchain()``, the boundary the API
+# response is built from.
+#
+# Listed here so the two ends agree on the spelling: the read boundary
+# (``vector_store_searcher._dict_to_chunk``) drops them, and the response
+# builder (``api/routers/user/source_links``) promotes them. Without the read
+# guard, a caller who wrote ``metadata: {"rerank_score": 0.99}`` on upload would
+# have it persisted in Milvus (the collection has a dynamic field), read back
+# into ``Chunk.metadata``, and promoted to a top-level sibling of ``chunk`` —
+# indistinguishable from the score this retrieval actually computed.
+#
+# A tuple, not a frozenset: the promotion order is the response's key order.
+RETRIEVAL_SCORE_KEYS: tuple[str, ...] = ("vector_score", "rerank_score", "combined_score")

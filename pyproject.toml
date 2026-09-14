@@ -1,6 +1,6 @@
 [project]
 name = "openrag"
-version = "2.2.0"
+version = "2.2.1"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -144,7 +144,6 @@ addopts = "--strict-markers --tb=short"
 asyncio_mode = "auto"
 env = [
     "PROMPTS_DIR=./openrag/prompts/templates",
-    "LOG_DIR=./logs",
 ]
 markers = [
     "integration: Integration tests requiring running OpenRAG server",

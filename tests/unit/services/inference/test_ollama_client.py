@@ -208,6 +208,78 @@ class TestOllamaClient:
         lines = [line async for line in client.stream_chat([{"role": "user", "content": "hi"}])]
         assert lines == ["data: [DONE]"]
 
+    @pytest.mark.asyncio
+    async def test_falsy_logprobs_default_stripped_from_chat_payload(self):
+        """``llm.logprobs`` defaults to False in config and lands in ``_defaults``,
+        so without stripping it is sent on every request -- and Ollama's
+        OpenAI-compatible API does not support the field."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            body = json.loads(request.content)
+            assert "logprobs" not in body
+            assert "top_logprobs" not in body
+            return _chat_response()
+
+        await self._make_client(handler, logprobs=False).chat([{"role": "user", "content": "hi"}])
+
+    @pytest.mark.asyncio
+    async def test_falsy_logprobs_default_stripped_from_stream_payload(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            body = json.loads(request.content)
+            assert "logprobs" not in body
+            return httpx.Response(200, text="data: [DONE]\n")
+
+        client = self._make_client(handler, logprobs=False)
+        lines = [line async for line in client.stream_chat([{"role": "user", "content": "hi"}])]
+        assert lines == ["data: [DONE]"]
+
+    @pytest.mark.asyncio
+    async def test_falsy_logprobs_default_stripped_from_generate_payload(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            body = json.loads(request.content)
+            assert "logprobs" not in body
+            return _completions_response()
+
+        await self._make_client(handler, logprobs=False).generate("hi")
+
+    @pytest.mark.asyncio
+    async def test_request_supplied_falsy_logprobs_stripped(self):
+        """A client sending an explicit ``logprobs: false`` is asking for nothing,
+        so it must not reach the provider either."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            body = json.loads(request.content)
+            assert "logprobs" not in body
+            return _chat_response()
+
+        await self._make_client(handler).chat([{"role": "user", "content": "hi"}], logprobs=False)
+
+    @pytest.mark.asyncio
+    async def test_truthy_logprobs_forwarded(self):
+        """A truthy logprobs is a deliberate opt-in and is passed through with its
+        dependent top_logprobs."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            body = json.loads(request.content)
+            assert body["logprobs"] is True
+            assert body["top_logprobs"] == 3
+            return _chat_response()
+
+        await self._make_client(handler).chat([{"role": "user", "content": "hi"}], logprobs=True, top_logprobs=3)
+
+    @pytest.mark.asyncio
+    async def test_zero_logprobs_forwarded_on_generate(self):
+        """On /v1/completions logprobs is an *integer* count, where 0 is a
+        meaningful request ("the sampled token's own logprob, no alternates")
+        rather than an off state -- so it must survive the strip."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            body = json.loads(request.content)
+            assert body["logprobs"] == 0
+            return _completions_response()
+
+        await self._make_client(handler).generate("hi", logprobs=0)
+
     def test_endpoint_v1_appended_when_missing(self):
         client = OllamaClient(endpoint="http://ollama:11434", model_name="llama3")
         assert client._endpoint == "http://ollama:11434/v1"

@@ -157,12 +157,15 @@ def test_build_indexer_pool_uses_current_protocol_dispatcher_name(
     opts = options_calls[0]
     # A protocol-specific name prevents a rolling deployment from attaching to
     # a detached actor that still runs the previous claim implementation.
-    assert opts["name"] == "IndexerPoolDispatcher-v8"
+    assert opts["name"] == "IndexerPoolDispatcher-v9"
     assert opts["namespace"] == "openrag"
     assert opts["get_if_exists"] is True
     assert opts["lifetime"] == "detached"
     # max_concurrency bounds concurrent submit() calls → whole-fleet capacity.
     assert opts["max_concurrency"] == 12
+    # Detached actors default to max_restarts=0: without this the dispatcher
+    # stays dead after a crash until the next deploy (#846).
+    assert opts["max_restarts"] == 5
     # pool_size / max_tasks_per_worker are passed to the actor constructor.
     assert remote_calls == [{"pool_size": 3, "max_tasks_per_worker": 4, "namespace": "openrag"}]
 
@@ -195,13 +198,14 @@ def test_indexer_pool_actor_spawns_pool_size_detached_workers(
     # One detached worker actor per pool_size slot, each capped at max_tasks_per_worker.
     assert len(pool._workers) == 3
     assert {c["name"] for c in calls} == {
-        "IndexerWorker-v8-0",
-        "IndexerWorker-v8-1",
-        "IndexerWorker-v8-2",
+        "IndexerWorker-v9-0",
+        "IndexerWorker-v9-1",
+        "IndexerWorker-v9-2",
     }
     for c in calls:
         assert c["lifetime"] == "detached"
         assert c["max_concurrency"] == 4
+        assert c["max_restarts"] == 5  # a worker that OOMs must come back (#846)
         assert c["get_if_exists"] is True
         assert c["namespace"] == "tenant-ray"
     assert remote_calls == ["tenant-ray", "tenant-ray", "tenant-ray"]
@@ -1192,7 +1196,7 @@ async def test_pool_drain_rejects_new_work_and_reports_accepted_work(monkeypatch
     await pool.submit(task_id="accepted-before-drain")
 
     assert await pool.begin_drain() == {
-        "protocol_version": "v8",
+        "protocol_version": "v9",
         "accepting_tasks": False,
         "inflight_jobs": 1,
         "worker_names": ["test-worker-0"],
@@ -1225,7 +1229,7 @@ async def test_pool_drain_rejects_new_work_and_reports_accepted_work(monkeypatch
 
     await _settle_pool_release_tasks(pool, worker.futures[0])
     assert await pool.status() == {
-        "protocol_version": "v8",
+        "protocol_version": "v9",
         "accepting_tasks": False,
         "inflight_jobs": 0,
         "worker_names": ["test-worker-0"],
@@ -1260,7 +1264,7 @@ async def test_pool_abort_drain_restores_acceptance() -> None:
         await pool.submit(task_id="rejected-while-draining")
 
     assert await pool.abort_drain() == {
-        "protocol_version": "v8",
+        "protocol_version": "v9",
         "accepting_tasks": True,
         "inflight_jobs": 0,
         "worker_names": ["test-worker-0"],
@@ -1275,7 +1279,7 @@ async def test_pool_abort_drain_restores_acceptance() -> None:
 async def test_pool_reports_current_protocol_version() -> None:
     pool = _bare_pool([_FakeWorker()])
 
-    assert await pool.protocol_version() == "v8"
+    assert await pool.protocol_version() == "v9"
 
 
 @pytest.mark.asyncio
@@ -1699,8 +1703,12 @@ def _bare_worker_actor(*, save_uploaded_files: bool, worker: _RecordingWorker):
         set_failed_if_not_cancelled=SimpleNamespace(remote=AsyncMock(return_value=True)),
     )
     actor._catalog_store = SimpleNamespace(
-        workspace_repo=SimpleNamespace(),
-        document_repo=SimpleNamespace(release_content_sha256_claim=AsyncMock()),
+        workspace_repo=SimpleNamespace(add_files_to_workspace=AsyncMock(return_value=[])),
+        document_repo=SimpleNamespace(
+            release_content_sha256_claim=AsyncMock(),
+            mark_file_independently_indexed=AsyncMock(return_value=True),
+            finalize_file_workspace_ownership=AsyncMock(return_value=True),
+        ),
     )
     actor._save_uploaded_files = save_uploaded_files
     actor._logger = SimpleNamespace(debug=lambda *a, **k: None, warning=lambda *a, **k: None)
@@ -1713,6 +1721,66 @@ def _bare_worker_actor(*, save_uploaded_files: bool, worker: _RecordingWorker):
         resolve_prompt=_AsyncReturn("prompt"),
     )
     return actor
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [RuntimeError("ws1 unavailable"), ["f"]])
+async def test_actor_protects_file_when_some_workspace_attachments_fail(tmp_path, failure) -> None:
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"x")
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=_RecordingWorker())
+    actor._catalog_store.workspace_repo.add_files_to_workspace = AsyncMock(side_effect=[failure, []])
+
+    result = await actor.process_file(
+        task_id="t",
+        path=str(path),
+        metadata={"file_id": "f"},
+        partition="p",
+        workspace_ids=["ws1", "ws2"],
+    )
+
+    assert result == {"stored_count": 1, "stage": "stored"}
+    actor._catalog_store.document_repo.mark_file_independently_indexed.assert_awaited_once_with("f", "p")
+    actor._catalog_store.document_repo.finalize_file_workspace_ownership.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_actor_transfers_ownership_only_after_all_attachments_succeed(tmp_path) -> None:
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"x")
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=_RecordingWorker())
+    attach = actor._catalog_store.workspace_repo.add_files_to_workspace
+
+    async def transfer(*args):
+        assert attach.await_count == 2
+        return True
+
+    finalize = actor._catalog_store.document_repo.finalize_file_workspace_ownership
+    finalize.side_effect = transfer
+    await actor.process_file(
+        task_id="t", path=str(path), metadata={"file_id": "f"}, partition="p", workspace_ids=["ws1", "ws2"]
+    )
+    finalize.assert_awaited_once_with("f", "p", ["ws1", "ws2"])
+    actor._catalog_store.document_repo.mark_file_independently_indexed.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_actor_propagates_workspace_attachment_cancellation(tmp_path) -> None:
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"x")
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=_RecordingWorker())
+    actor._catalog_store.workspace_repo.add_files_to_workspace = AsyncMock(side_effect=asyncio.CancelledError())
+
+    with pytest.raises(asyncio.CancelledError):
+        await actor.process_file(
+            task_id="t",
+            path=str(path),
+            metadata={"file_id": "f"},
+            partition="p",
+            workspace_ids=["ws1"],
+        )
+
+    actor._catalog_store.document_repo.mark_file_independently_indexed.assert_not_awaited()
 
 
 @contextmanager

@@ -252,7 +252,7 @@ async def validate_endpoint_draft(
         model_name=body.model_name,
         api_key=api_key,
         timeout=body.timeout,
-        extra=body.extra if body.model_type == "stt" else None,
+        extra=body.extra or None,
     )
 
 
@@ -264,11 +264,16 @@ async def validate_model_endpoint(
 ):
     """Probe a registered endpoint for reachability and model capabilities."""
     endpoint = await service.get_model_endpoint(name=name, model_type=model_type)
+    validation_extra = (
+        endpoint.extra
+        if model_type == "stt"
+        else {key: value for key, value in endpoint.extra.items() if key != "api_key"}
+    )
     return await service.validate_endpoint(
         url=endpoint.endpoint,
         model_type=model_type,
         model_name=endpoint.model_name,
         api_key=endpoint.extra.get("api_key"),
         timeout=endpoint.timeout,
-        extra=endpoint.extra if model_type == "stt" else None,
+        extra=validation_extra or None,
     )

@@ -748,7 +748,7 @@ class QueryService:
         if metadata.get("attachments"):
             # Indicate which attachments were actually searched to generate the answer.
             extra["attachments"] = attachments
-        chunk["extra"] = json.dumps(extra)
+        chunk["extra"] = extra
         return chunk
 
     async def chat_stream(
@@ -825,8 +825,8 @@ class QueryService:
         else:
             clean, citations = text, None
         resp["choices"][0]["text"] = clean
-        resp["extra"] = json.dumps(
-            _build_extra_payload(sources, citations, all_sources, include_all_retrieved=include_all_retrieved)
+        resp["extra"] = _build_extra_payload(
+            sources, citations, all_sources, include_all_retrieved=include_all_retrieved
         )
         return resp
 
