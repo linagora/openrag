@@ -132,6 +132,12 @@ class TaskCompletionTracker:
                     lambda: task_state_manager.get_details.remote(task_id),
                     f"get_details({task_id}) for ref-less recovery",
                 )
+                if details is None:
+                    # The actor no longer knows this task: evicted, or never
+                    # admitted on this generation. None of the exit conditions
+                    # below can fire on a None read, so without this the loop
+                    # would poll forever. There is nothing left to watch.
+                    return
                 if _has_finished_at(details):
                     return
 

@@ -692,3 +692,32 @@ async def test_settled_job_read_gives_up_after_bounded_polling(monkeypatch) -> N
 
     assert result is True
     assert repo.saved == []
+
+
+@pytest.mark.asyncio
+async def test_recover_refless_stops_once_the_actor_forgets_the_task() -> None:
+    from services.workers.task_completion import TaskCompletionTracker
+
+    # get_details, get_state and get_object_ref all return None for a task the
+    # actor no longer knows about (evicted, or never admitted on this
+    # generation), and expire_refless_task_if_stale returns False. None of
+    # recover_refless's exit conditions can fire on those reads, so without an
+    # explicit check it polled forever. asyncio.sleep raising here proves the
+    # method returned on the first read instead of ever reaching the poll.
+    tsm = _task_state_manager()
+    tsm.get_details.remote.return_value = None
+
+    async def _fail_if_it_polls(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("recover_refless polled instead of returning on a forgotten task")
+
+    with (
+        patch("services.workers.task_completion.ray.get_actor", return_value=tsm),
+        patch("services.workers.task_completion.asyncio.sleep", _fail_if_it_polls),
+    ):
+        tracker = TaskCompletionTracker()
+        await asyncio.wait_for(tracker.recover_refless("ghost-task", poll_interval=0), timeout=1)
+
+    tsm.get_details.remote.assert_awaited_once_with("ghost-task")
+    tsm.get_state.remote.assert_not_awaited()
+    tsm.get_object_ref.remote.assert_not_awaited()
+    tsm.expire_refless_task_if_stale.remote.assert_not_awaited()
