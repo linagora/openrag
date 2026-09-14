@@ -133,6 +133,22 @@ class VectorStore(ABC):
         ...
 
     @abstractmethod
+    async def drop_vector_field(self, field: str) -> bool:
+        """Remove a deleted embedder's dense field, and every vector in it.
+
+        Frees the slot the field held against the backend's vector-field
+        ceiling. The caller guarantees no partition still uses the field — an
+        embedder delete is refused while one does. Idempotent: returns whether
+        this call dropped the field, ``False`` when it was already gone.
+
+        Raises:
+            ValueError: ``field`` is not a per-embedder dense field, or it is
+                the collection's only vector field, which the backend cannot
+                drop.
+        """
+        ...
+
+    @abstractmethod
     async def vector_dimension(self, vector_field: str | None = None) -> int | None:
         """Dense-vector dimension the live collection actually stores.
 

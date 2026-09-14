@@ -149,6 +149,9 @@ class FakeVectorStore(VectorStore):
         self.vector_field_calls.append((field, dimension))
         return True
 
+    async def drop_vector_field(self, field: str) -> bool:
+        return False
+
     async def drop_collection(self, name: str) -> None:
         return None
 

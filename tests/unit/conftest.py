@@ -108,6 +108,9 @@ class MockVectorStore(VectorStore):
         self.vector_fields[field] = dimension
         return created
 
+    async def drop_vector_field(self, field: str) -> bool:
+        return self.vector_fields.pop(field, None) is not None
+
     async def drop_collection(self, name: str) -> None:
         self.collections.pop(name, None)
 
