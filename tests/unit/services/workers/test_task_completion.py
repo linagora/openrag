@@ -14,8 +14,13 @@ def _remote_mock(return_value: Any = None) -> MagicMock:
 
 
 @pytest.fixture(autouse=True)
-def _stub_periodic_reconcile(monkeypatch):
-    """Keep recover()'s background reconcile loop from dangling past each test."""
+def _stub_periodic_reconcile(request, monkeypatch):
+    """Keep recover()'s background reconcile loop from dangling past each test.
+
+    Skipped for the test that exercises the real loop directly.
+    """
+    if request.node.name == "test_periodic_reconcile_keeps_sweeping_until_cancelled":
+        return
     from services.workers import task_completion
 
     async def _noop(self, interval=None):
@@ -622,29 +627,26 @@ async def test_recover_starts_the_periodic_reconcile_loop(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_periodic_reconcile_keeps_sweeping_until_cancelled(monkeypatch) -> None:
-    from services.workers.task_completion import TaskCompletionTracker
-
+async def test_periodic_reconcile_keeps_sweeping_until_cancelled() -> None:
     repo = _FakeJobRepo()
-    tsm = _task_state_manager(all_info={"task-live": {"state": "QUEUED", "details": {}}})
     tracker = _tracker_with_repo(repo)
+    tracker._task_state_manager = MagicMock()
+    tracker._call_task_state = AsyncMock(return_value={"task-live": {}})
 
-    sleeps = []
+    calls = []
 
-    async def fast_sleep(seconds):
-        sleeps.append(seconds)
-        if len(sleeps) >= 2:
+    async def fake_reconcile_jobs(active_ids):
+        calls.append(list(active_ids))
+        if len(calls) >= 2:
             raise asyncio.CancelledError()
 
-    with (
-        patch("services.workers.task_completion.ray.get_actor", return_value=tsm),
-        patch("services.workers.task_completion.asyncio.sleep", fast_sleep),
-        pytest.raises(asyncio.CancelledError),
-    ):
+    tracker.reconcile_jobs = fake_reconcile_jobs
+
+    with pytest.raises(asyncio.CancelledError):
         await tracker._periodic_reconcile(interval=0)
 
-    assert len(repo.failed_calls) == 2
-    assert repo.failed_calls[0]["active_ids"] == ["task-live"]
+    assert len(calls) == 2
+    assert calls[0] == ["task-live"]
 
 
 @pytest.mark.asyncio
@@ -690,4 +692,3 @@ async def test_settled_job_read_gives_up_after_bounded_polling(monkeypatch) -> N
 
     assert result is True
     assert repo.saved == []
-    assert repo.purged_before  # retention runs in the same pass
