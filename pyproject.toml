@@ -144,6 +144,10 @@ addopts = "--strict-markers --tb=short"
 asyncio_mode = "auto"
 env = [
     "PROMPTS_DIR=./openrag/prompts/templates",
+    # The loader calls load_dotenv(), so a developer's own .env would otherwise
+    # decide whether the boot-time secret policy trips during a unit run. The
+    # policy has its own tests, which pass their environment explicitly.
+    "ALLOW_INSECURE_SECRETS=true",
 ]
 markers = [
     "integration: Integration tests requiring running OpenRAG server",
