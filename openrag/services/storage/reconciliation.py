@@ -38,6 +38,24 @@ def _timestamp(value: Any) -> datetime | None:
     return None
 
 
+async def _files_with_current_generation(
+    vectors: VectorStore,
+    collection: str,
+    partition: str,
+    expected: dict[str, datetime],
+    page_size: int,
+) -> set[str]:
+    """Return the file IDs having at least one chunk stamped with the catalog timestamp."""
+    found: set[str] = set()
+    pages = vectors.iter_chunk_metadata(collection, partition=partition, file_ids=list(expected), batch_size=page_size)
+    async with aclosing(pages):
+        async for page in pages:
+            found.update(r["file_id"] for r in page if _timestamp(r.get("indexed_at")) == expected[r["file_id"]])
+            if len(found) == len(expected):
+                break
+    return found
+
+
 async def reconcile_partition(
     catalog: DocumentRepository,
     vectors: VectorStore,
@@ -53,8 +71,12 @@ async def reconcile_partition(
 
     Repair is for maintenance windows with writers paused. A fresh catalog
     lookup reduces races but cannot substitute for a shared admission fence.
-    Only explicit, aged orphan IDs can be deleted. Timestamp mismatches are
-    diagnostic: legacy imports and older copies need not share an indexing timestamp.
+    Only explicit, aged orphan IDs can be deleted. Timestamp findings are
+    diagnostic. A file with chunks both matching and not matching its catalog
+    timestamp kept a stale chunk set (failed replacement cleanup). A file with no
+    matching chunk has an unverified catalog timestamp instead: the
+    ``files.indexed_at`` migration backfilled existing rows with its run time, and
+    copies made before ``copy_file`` stamped a shared timestamp kept the source's.
     """
     cutoff = validate_scan_options(partition, page_size, grace_seconds, now=now)
     summary = {
@@ -67,6 +89,7 @@ async def reconcile_partition(
         "orphan_chunks": 0,
         "missing_documents": 0,
         "timestamp_mismatches": 0,
+        "unverified_catalog_timestamps": 0,
         "unaged_chunks": 0,
         "recent_chunks_skipped": 0,
         "deleted_chunks": 0,
@@ -74,12 +97,15 @@ async def reconcile_partition(
         "duplicate_sets_checked": False,
     }
     pages = vectors.iter_chunk_metadata(collection, partition=partition, batch_size=page_size)
+    # Verdicts from the previous page: a file's chunks are written in one batch,
+    # so a file spanning a page boundary is looked up and reported only once.
+    previous: dict[str, bool] = {}
     async with aclosing(pages):
         async for page in pages:
             summary["scanned_chunks"] += len(page)
             existing = await catalog.get_indexed_documents({(partition, r["file_id"]) for r in page})
             orphans = []
-            mismatches = []
+            suspects: dict[str, list[str]] = {}
             unaged = []
             for row in page:
                 timestamp = _timestamp(row.get("indexed_at"))
@@ -93,13 +119,26 @@ async def reconcile_partition(
                 if key not in existing:
                     orphans.append(row)
                 elif existing[key] < cutoff and timestamp != existing[key]:
-                    mismatches.append(str(row["_id"]))
+                    suspects.setdefault(row["file_id"], []).append(str(row["_id"]))
+            unresolved = {f: existing[partition, f] for f in suspects if f not in previous}
+            current = (
+                await _files_with_current_generation(vectors, collection, partition, unresolved, page_size)
+                if unresolved
+                else set()
+            )
+            verdicts = {f: previous[f] if f in previous else f in current for f in suspects}
+            mismatches = [chunk_id for f, ids in suspects.items() if verdicts[f] for chunk_id in ids]
+            unverified = [f for f in unresolved if not verdicts[f]]
+            previous = verdicts
             if unaged:
                 summary["unaged_chunks"] += len(unaged)
                 yield {"type": "unknown_chunk_age", "partition": partition, "chunk_ids": unaged}
             if mismatches:
                 summary["timestamp_mismatches"] += len(mismatches)
                 yield {"type": "indexing_timestamp_mismatch", "partition": partition, "chunk_ids": mismatches}
+            if unverified:
+                summary["unverified_catalog_timestamps"] += len(unverified)
+                yield {"type": "unverified_catalog_timestamp", "partition": partition, "file_ids": unverified}
             if orphans:
                 summary["orphan_chunks"] += len(orphans)
                 deleted = 0

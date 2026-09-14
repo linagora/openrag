@@ -29,6 +29,14 @@ def test_cli_streams_json_and_returns_drift_status(cli, monkeypatch, capsys, fin
     assert json.loads(capsys.readouterr().out) == {"type": "summary", "orphan_chunks": findings}
 
 
+def test_cli_unverified_catalog_timestamps_do_not_signal_drift(cli, monkeypatch):
+    async def scan(args):
+        yield {"type": "summary", "unverified_catalog_timestamps": 3}
+
+    monkeypatch.setattr(cli, "scan", scan)
+    assert cli.main(["--partition", "a"]) == 0
+
+
 def test_cli_failure_emits_error_without_success_summary(cli, monkeypatch, capsys):
     async def scan(args):
         yield {"type": "orphan_chunks", "chunks": []}

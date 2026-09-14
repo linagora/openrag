@@ -99,6 +99,35 @@ async def test_timestamp_mismatch_is_report_only_and_bad_timestamps_are_visible(
     assert vectors.deleted == []
 
 
+async def test_stale_chunks_on_an_earlier_page_than_the_current_set_are_mismatches():
+    catalog = Catalog({("a", "replaced"): OLD})
+    stale = OLD - timedelta(days=1)
+    vectors = Vectors([row(1, "replaced", stale), row(2, "replaced", stale), row(3, "replaced")])
+    events = await run(catalog, vectors, repair=True)
+    assert [e["chunk_ids"] for e in events if e["type"] == "indexing_timestamp_mismatch"] == [["1", "2"]]
+    assert events[-1]["timestamp_mismatches"] == 2
+    assert events[-1]["unverified_catalog_timestamps"] == 0
+    assert vectors.deleted == []
+
+
+async def test_files_without_a_chunk_matching_the_catalog_are_unverified_not_mismatched():
+    # The files.indexed_at migration stamped existing rows with its run time,
+    # after their chunks were indexed; older copies look the same.
+    migrated = OLD
+    original = OLD - timedelta(days=90)
+    catalog = Catalog({("a", "legacy"): migrated, ("a", "copy"): migrated})
+    vectors = Vectors(
+        [row(1, "legacy", original), row(2, "legacy", original), row(3, "legacy", original), row(4, "copy", original)]
+    )
+    events = await run(catalog, vectors, repair=True)
+    summary = events[-1]
+    assert [e["file_ids"] for e in events if e["type"] == "unverified_catalog_timestamp"] == [["legacy"], ["copy"]]
+    assert summary["unverified_catalog_timestamps"] == 2
+    assert summary["timestamp_mismatches"] == 0
+    assert not any(e["type"] == "indexing_timestamp_mismatch" for e in events)
+    assert vectors.deleted == []
+
+
 async def test_catalog_failure_aborts_without_deleting_or_reporting_success():
     class FailedCatalog(Catalog):
         async def get_indexed_documents(self, keys):
