@@ -56,8 +56,12 @@ class MockVectorStore(VectorStore):
         self.dimension: int | None = 1024
         # Per-embedder dense fields ensured on this store (#762 F).
         self.vector_fields: dict[str, int] = {}
+        # Which dense field each search was aimed at, in call order.
+        self.searched_vector_fields: list[str | None] = []
 
-    async def upsert(self, chunks: list[Any], collection: str = "default", *, indexed_at=None) -> int:
+    async def upsert(
+        self, chunks: list[Any], collection: str = "default", *, indexed_at=None, vector_field=None
+    ) -> int:
         store = self.collections.setdefault(collection, {})
         for chunk in chunks:
             store[getattr(chunk, "id", id(chunk))] = chunk
@@ -71,7 +75,9 @@ class MockVectorStore(VectorStore):
         collection: str = "default",
         filters: dict[str, Any] | None = None,
         similarity_threshold: float | None = None,
+        vector_field: str | None = None,
     ) -> list[dict[str, Any]]:
+        self.searched_vector_fields.append(vector_field)
         return self.search_results[:top_k]
 
     async def delete(self, ids: list[str], collection: str = "default") -> int:

@@ -123,6 +123,11 @@ class IndexingPipeline:
     # can derive a hard safety bound from the embedder this partition actually
     # uses rather than from the deployment default.
     embedder_window_resolver: Callable[[str], int | None] | None = None
+    # Resolves an embedder endpoint name to the dense field it owns (#762 F),
+    # so a partition's vectors are written where that partition's searches
+    # will look for them. None (or an unset resolver) reaches the store, which
+    # refuses the write rather than guess a field.
+    vector_field_resolver: Callable[[str], str | None] | None = None
     vlm_factory: Callable[[str], VLM] | None = None
     contextualizer_factory: Callable[[str], ChunkContextualizer] | None = None
     topic_tagger_factory: Callable[[str], TopicTagger] | None = None
@@ -299,6 +304,7 @@ class IndexingPipeline:
                     self.vector_store,
                     timeout=self.timeouts.store,
                     per_chunk_timeout=self.timeouts.store_per_chunk,
+                    vector_field=(self.vector_field_resolver(embedder_name) if self.vector_field_resolver else None),
                 ),
             )
             # BUG (#657 follow-up): ``store_stage`` completes successfully even
@@ -572,6 +578,7 @@ def build_indexing_pipeline(
     parser_factory: Callable[[str], DocumentParser] | None = None,
     chunker_factory: Callable[..., ChunkingStrategy] | None = None,
     embedder_window_resolver: Callable[[str], int | None] | None = None,
+    vector_field_resolver: Callable[[str], str | None] | None = None,
     embedder_factory: Callable[[str], Embedder] | None = None,
     vlm_factory: Callable[[str], VLM] | None = None,
     contextualizer_factory: Callable[[str], ChunkContextualizer] | None = None,
@@ -594,6 +601,7 @@ def build_indexing_pipeline(
         parser_factory=parser_factory,
         chunker_factory=chunker_factory,
         embedder_window_resolver=embedder_window_resolver,
+        vector_field_resolver=vector_field_resolver,
         embedder_factory=embedder_factory,
         vlm_factory=vlm_factory,
         contextualizer_factory=contextualizer_factory,

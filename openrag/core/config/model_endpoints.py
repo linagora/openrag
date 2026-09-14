@@ -51,6 +51,11 @@ class ModelEndpointConfig(BaseModel):
     batch_size: int = Field(default=32, gt=0)
     timeout: float = Field(default=30.0, gt=0)
     extra: dict[str, Any] = Field(default_factory=dict)
+    # The dense field this embedder reads and writes (#762 F). Every embedder
+    # row has one; None only before the row is loaded from the database, so
+    # resolve through ``core.vector_stores.vector_field.resolve_vector_field``,
+    # which refuses it.
+    vector_field: str | None = None
 
 
 def _positive_int(value: Any) -> int | None:
