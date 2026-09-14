@@ -21,8 +21,4 @@ scrape_configs:
       type: Bearer
       credentials_file: /etc/prometheus/openrag_token
     static_configs:
-      - targets: ["host.docker.internal:8000"]
-
-  - job_name: "ray"
-    static_configs:
-      - targets: ["host.docker.internal:8080"]
+      - targets: ["openrag:8080"]

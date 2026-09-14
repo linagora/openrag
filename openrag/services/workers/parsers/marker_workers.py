@@ -207,7 +207,9 @@ class MarkerWorker:
             converter_config["page_range"] = page_range
 
         loop = asyncio.get_event_loop()
-        timeout = self.config.loader.marker_timeout
+        # Expires before the bounds wrapping this call, so the recycle below
+        # actually runs instead of being cancelled from outside (#894).
+        timeout = self.config.loader.marker_child_timeout
 
         def run_with_timeout():
             with self._executor_lock:

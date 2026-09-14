@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from openrag.core.models.catalog import DocumentRecord
+from core.models.catalog import DocumentRecord
 
 
 @dataclass(frozen=True, slots=True)
@@ -23,6 +24,14 @@ class ContentClaimLease:
 
 class DocumentRepository(ABC):
     """CRUD operations for documents."""
+
+    @abstractmethod
+    async def get_indexed_documents(self, keys: Collection[tuple[str, str]]) -> dict[tuple[str, str], datetime]:
+        """Return existing (partition, file_id) keys and their indexing times.
+
+        Implementations must perform a fresh, batched lookup and propagate errors.
+        """
+        raise NotImplementedError
 
     @abstractmethod
     async def create_document(self, doc: DocumentRecord) -> DocumentRecord: ...
@@ -53,6 +62,16 @@ class DocumentRepository(ABC):
 
     @abstractmethod
     async def file_exists_in_partition(self, file_id: str, partition: str) -> bool: ...
+
+    @abstractmethod
+    async def mark_file_independently_indexed(self, file_id: str, partition: str) -> bool:
+        """Protect a file from workspace-owned cleanup."""
+        ...
+
+    @abstractmethod
+    async def finalize_file_workspace_ownership(self, file_id: str, partition: str, workspace_ids: list[str]) -> bool:
+        """Transfer a new upload to its workspaces only if all attachments remain."""
+        ...
 
     @abstractmethod
     async def get_content_sha256(self, file_id: str, partition: str) -> str | None: ...

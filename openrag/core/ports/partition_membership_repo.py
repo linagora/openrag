@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
-from openrag.core.models.user import PartitionRole, UserPartition
+from core.models.user import PartitionRole, UserPartition
 
 
 class PartitionMembershipRepository(ABC):

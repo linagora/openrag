@@ -134,6 +134,9 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 
         path = request.url.path
 
+        if path in {"/health_check", "/ready"}:
+            return await call_next(request)
+
         # Exempt prefixes are checked before the admin bypass on purpose: these
         # paths never run through AuthMiddleware, so request.state.user is unset
         # and _is_admin() is False even for an admin's browser session.

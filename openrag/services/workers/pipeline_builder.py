@@ -141,6 +141,36 @@ class IndexingPipeline:
             finally:
                 timings[name] = (time.perf_counter() - start) * 1000.0
 
+        async def _timed_enrichment(name: str, coro: Any) -> None:
+            """Run an enrichment stage best-effort (#702).
+
+            Captioning, contextualization and topic tagging improve a file's
+            index; they are not what makes it indexable. A failure here — a VLM
+            timeout, an unreachable LLM, a malformed response — used to abort
+            ``run()`` before chunk/embed/store, losing the whole file over an
+            enrichment step even though the base content was ready to store.
+            Skip the stage instead: warn, note it on the row, and index what we
+            have. This extends to *invocation* the reasoning ``_select_vlm`` /
+            ``_select_contextualizer`` / ``_select_topic_tagger`` already apply
+            to endpoint *resolution*.
+
+            Cancellation still propagates: ``CancelledError`` is a
+            ``BaseException``, so a cancelled task is never mistaken for a
+            degraded one. Each stage leaves the row's input intact on failure
+            (only successful stages overwrite ``processed_document``/``chunks``),
+            so the next stage runs on the un-enriched value.
+            """
+            try:
+                await _timed(name, coro)
+            except Exception as exc:  # noqa: BLE001 - enrichment must not fail the file
+                row.setdefault("degraded_stages", {})[name] = str(exc)
+                logger.bind(
+                    task_id=row.get("task_id"),
+                    filename=row.get("filename", ""),
+                    partition=row.get("partition"),
+                    stage=name,
+                ).warning(f"{name} stage failed; indexing the file without it: {exc}")
+
         try:
             await _timed("parse", parse_stage(row, parser, timeout=self.timeouts.parse))
             # The caption decision needs the parsed document (standalone images
@@ -168,7 +198,7 @@ class IndexingPipeline:
                 # per-row value win, so that migration is a one-line change.
                 if self.caption_prompt is not None:
                     row.setdefault("caption_prompt", self.caption_prompt)
-                await _timed(
+                await _timed_enrichment(
                     "caption",
                     caption_stage(
                         row,
@@ -179,7 +209,7 @@ class IndexingPipeline:
                 )
             await _timed("chunk", chunk_stage(row, chunker, timeout=self.timeouts.chunk))
             if contextualizer is not None:
-                await _timed(
+                await _timed_enrichment(
                     "contextualize",
                     contextualize_stage(
                         row,
@@ -194,7 +224,7 @@ class IndexingPipeline:
             self._warn_on_embedder_overflow(row, embedder_window, getattr(chunker, "length_function", None))
             if topic_tagger is not None:
                 max_tags = config.max_topic_tags if config is not None else 7
-                await _timed(
+                await _timed_enrichment(
                     "topic_tag",
                     topic_tag_stage(
                         row,

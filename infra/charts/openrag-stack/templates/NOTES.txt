@@ -48,3 +48,15 @@ Secrets provider: {{ .Values.env.secretsProvider.type | default "values" }}
 {{- if .Values.env.existingSecret }}
 Using existing secret: {{ .Values.env.existingSecret }}
 {{- end }}
+
+Logs
+----
+Application logs go to the pods' stderr only (LOG_FORMAT={{ .Values.env.config.LOG_FORMAT | default "text" }}).
+This chart ships no log collector and mounts no logs volume: a DaemonSet
+(Alloy, Fluent Bit, ...) must already ship pod stdout to your Loki,
+otherwise logs are only reachable with `kubectl logs` and vanish with the pod.
+Collector-side parsing stages: docs/documentation/loki_logs.md
+{{- if .Values.persistence.enabled }}
+Upgrading from a release that mounted /app/logs: the old "{{ include "openrag-stack.fullname" . }}-logs"
+PVC is kept by helm.sh/resource-policy and is no longer used — delete it by hand.
+{{- end }}

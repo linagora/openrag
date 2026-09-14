@@ -135,6 +135,35 @@ async def test_add_file_invalid_workspace_is_rejected_before_upload_is_saved(tmp
     assert not (tmp_path / "data").exists()
 
 
+@pytest.mark.parametrize("workspace_ids", ["null", "123", "[123]", "[null]", '["ok", 123]'])
+@pytest.mark.asyncio
+async def test_add_file_rejects_invalid_workspace_id_form_values(tmp_path, monkeypatch, workspace_ids):
+    app = _build_app(tmp_path, monkeypatch, content=b"same")
+    transport = httpx.ASGITransport(app=app)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        resp = await client.post(
+            "/indexer/partition/p1/file/f1",
+            data={"workspace_ids": workspace_ids},
+        )
+
+    assert resp.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_add_file_accepts_empty_workspace_id_array(tmp_path, monkeypatch):
+    app = _build_app(tmp_path, monkeypatch, content=b"same")
+    transport = httpx.ASGITransport(app=app)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        resp = await client.post(
+            "/indexer/partition/p1/file/f1",
+            data={"workspace_ids": "[]"},
+        )
+
+    assert resp.status_code == 409
+
+
 @pytest.mark.asyncio
 async def test_add_file_dispatch_failure_removes_upload(tmp_path, monkeypatch):
     app = _build_app(

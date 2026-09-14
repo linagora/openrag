@@ -26,10 +26,9 @@ import uuid
 from collections.abc import Iterator
 
 import pytest
-
-from openrag.core.config.infrastructure import VectorDBConfig
-from openrag.core.models.chunk import Chunk, ChunkType
-from openrag.services.storage.milvus_store import MilvusVectorStore, analyzer_params
+from core.config.infrastructure import VectorDBConfig
+from core.models.chunk import Chunk, ChunkType
+from services.storage.milvus_store import MilvusVectorStore, analyzer_params
 
 pytestmark = pytest.mark.integration
 
@@ -236,7 +235,7 @@ class TestEndToEnd:
     async def test_upsert_without_embedding_raises(self, hybrid_store: MilvusVectorStore) -> None:
         await hybrid_store.initialize(_EMBEDDING_DIM)
         bad = Chunk(text="missing", partition="p1", embedding=None)
-        from openrag.core.utils.exceptions import VDBInsertError
+        from core.utils.exceptions import VDBInsertError
 
         with pytest.raises(VDBInsertError, match="no embedding"):
             await hybrid_store.upsert([bad])

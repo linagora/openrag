@@ -58,6 +58,7 @@ from api.routers.user.extract import router as extract_router
 from api.routers.user.health import router as health_router
 from api.routers.user.search import router as search_router
 from api.runtime_flags import WITH_CHAINLIT_UI, WITH_OPENAI_API
+from api.runtime_ui import get_grafana_url
 from core.config import load_config
 from core.utils.banner import print_startup_banner
 from core.utils.logging import get_logger
@@ -342,6 +343,7 @@ def get_config():
         **redact_secrets(jsonable_encoder(settings)),
         "super_admin_mode": SUPER_ADMIN_MODE,
         "chainlit_enabled": WITH_CHAINLIT_UI,
+        "grafana_url": get_grafana_url(),
     }
 
 
@@ -391,10 +393,8 @@ if __name__ == "__main__":
         from ray import serve
 
         # @serve.ingress cloudpickles `app` to ship it to replica processes.
-        # loguru's file sink isn't picklable (an open file handle, and with
-        # enqueue=True a multiprocessing.SimpleQueue that errors with "SimpleQueue
-        # objects should only be shared between processes through inheritance"),
-        # and the app graph (lifespan, exception handlers) captures the
+        # loguru handlers aren't picklable (they hold an open stream and a
+        # lock), and the app graph (lifespan, exception handlers) captures the
         # module-global logger by value. Strip the sinks before binding so the
         # captured logger is handler-less (picklable), then restore them for this
         # driver process below. Replica processes re-add their own sinks via the

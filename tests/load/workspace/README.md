@@ -27,10 +27,10 @@ docker compose down -v       # Remove everything (next run re-inserts data)
 
 | Service    | Image                       | Port  |
 |------------|-----------------------------|-------|
-| Milvus     | milvusdb/milvus:v3.0.0      | 19530 |
+| Milvus     | milvusdb/milvus:v3.0.1      | 19530 |
 | PostgreSQL | postgres:16                 | 5433  |
 | etcd       | quay.io/coreos/etcd:v3.5.25 | -     |
-| MinIO      | minio/minio                 | -     |
+| MinIO      | quay.io/minio/minio         | -     |
 
 PostgreSQL uses port **5433** to avoid conflicts with any existing instance on 5432.
 

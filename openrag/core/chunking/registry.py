@@ -1,6 +1,6 @@
 """Chunking strategy registry."""
 
-from openrag.core.utils.registry import Registry
+from core.utils.registry import Registry
 
 from .chunking_strategy import ChunkingStrategy
 

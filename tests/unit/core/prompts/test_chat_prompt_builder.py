@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from openrag.core.prompts.chat_prompt_builder import (
+from core.prompts.chat_prompt_builder import (
     EMPTY_CONTEXT_MESSAGE,
     SOURCE_SEPARATOR,
     format_context,

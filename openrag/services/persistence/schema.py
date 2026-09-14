@@ -199,6 +199,12 @@ files = Table(
     metadata,
     Column("id", Integer, primary_key=True),
     Column("file_id", String, nullable=False, index=True),
+    Column("independently_indexed", Boolean, server_default="true", nullable=False),
+    Column("workspace_cleanup_claimed", Boolean, server_default="false", nullable=False),
+    Column("workspace_cleanup_claimed_at", DateTime(timezone=True), nullable=True),
+    Column("workspace_cleanup_started", Boolean, server_default="false", nullable=False),
+    Column("workspace_cleanup_failed", Boolean, server_default="false", nullable=False),
+    Column("workspace_cleanup_state", String, server_default="NONE", nullable=False),
     Column(
         "partition_name",
         String,
