@@ -10,13 +10,12 @@ from typing import Any
 
 import ray
 from core.config.model_endpoints import CONTROL_EXTRA_KEYS
+from core.config.root import Settings
 from core.models.catalog import CONTENT_CLAIM_TOKEN_METADATA_KEY
 from core.utils.exceptions import NotFoundError
 from services.workers.indexer_actor import IndexerWorker, _display_filename, delete_uploaded_file
 from services.workers.indexing_callback import send_indexing_callback
 from services.workers.ray_utils import retry_idempotent_ray_actor_method
-
-from openrag.core.config.root import Settings
 
 # The indexer reloads the DB-backed model-endpoint registry at most once per
 # this window (and on a miss), bounding both staleness and DB load regardless
@@ -484,15 +483,38 @@ class IndexerWorkerActor:
                 self._active_indexation_config.reset(token)
             file_id = metadata.get("file_id", "")
             if workspace_ids and not replace and file_id:
-                try:
-                    await asyncio.gather(
-                        *(
-                            self._catalog_store.workspace_repo.add_files_to_workspace(workspace_id, [file_id])
-                            for workspace_id in workspace_ids
-                        )
+                results = await asyncio.gather(
+                    *(
+                        self._catalog_store.workspace_repo.add_files_to_workspace(workspace_id, [file_id])
+                        for workspace_id in workspace_ids
+                    ),
+                    return_exceptions=True,
+                )
+                cancelled = next((result for result in results if isinstance(result, asyncio.CancelledError)), None)
+                if cancelled is not None:
+                    raise cancelled
+                failures = [
+                    (workspace_id, result)
+                    for workspace_id, result in zip(workspace_ids, results, strict=True)
+                    if isinstance(result, Exception) or result
+                ]
+                if failures:
+                    protected = await self._catalog_store.document_repo.mark_file_independently_indexed(
+                        file_id, partition
                     )
-                except Exception:
-                    pass
+                    if not protected:
+                        raise RuntimeError(
+                            f"Cannot protect indexed file '{file_id}': cleanup already started or file missing"
+                        )
+                    for workspace_id, error in failures:
+                        self._logger.warning(
+                            f"Failed to attach indexed file to workspace '{workspace_id}'; "
+                            f"file retained independently: {error}"
+                        )
+                else:
+                    await self._catalog_store.document_repo.finalize_file_workspace_ownership(
+                        file_id, partition, workspace_ids
+                    )
             return result
         finally:
             content_sha256 = metadata.get("content_sha256")

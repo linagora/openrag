@@ -45,6 +45,8 @@ def _build_app(monkeypatch, **env):
             Route("/v1/chat", ok),
             Route("/auth/login", ok),
             Route("/other", ok),
+            Route("/health_check", ok),
+            Route("/ready", ok),
             Route("/chainlit/ws/socket.io/", ok),
             Route("/chainlithack", ok),
             Route("/assets/pdf.worker.mjs", ok),
@@ -59,6 +61,14 @@ def test_allows_under_limit(monkeypatch):
     client = TestClient(app)
     for _ in range(5):
         assert client.get("/v1/chat").status_code == 200
+
+
+@pytest.mark.parametrize("path", ["/health_check", "/ready"])
+def test_probes_are_not_blocked_by_exhausted_request_budget(monkeypatch, path):
+    client = TestClient(_build_app(monkeypatch, RATE_LIMIT_DEFAULT="1/minute"))
+    assert client.get("/other").status_code == 200
+    assert client.get("/other").status_code == 429
+    assert client.get(path).status_code == 200
 
 
 def test_blocks_over_limit_with_retry_after(monkeypatch):

@@ -29,7 +29,7 @@ def _assert_milvus_initializer(services: dict) -> None:
     initializer = services["milvus-init"]
     milvus = services["milvus"]
 
-    assert initializer["image"] == milvus["image"] == "milvusdb/milvus:v3.0.0"
+    assert initializer["image"] == milvus["image"] == "milvusdb/milvus:v3.0.1"
     assert initializer["user"] == "0:0"
     assert initializer["environment"]["LD_PRELOAD"] == ""
     assert initializer["entrypoint"] == ["/bin/sh", "-ec"]
@@ -55,7 +55,7 @@ def test_compose_defaults_preserve_existing_host_paths() -> None:
 
     assert "${MILVUS_COMPOSE:-milvus/milvus.yaml}" in compose["include"]
     assert "${DATA_VOLUME:-../../data}:/app/data" in openrag_volumes
-    assert "${LOG_VOLUME:-../../logs}:/app/logs" in openrag_volumes
+    assert not any("/app/logs" in v for v in openrag_volumes)
     assert "${MODEL_WEIGHTS_VOLUME:-~/.cache/huggingface}:/app/model_weights" in openrag_volumes
     assert compose["x-openrag"]["build"]["args"]["APP_UID"] == "${APP_UID:-1000}"
     # N8: the ../../openrag source bind-mount is commented out by default
@@ -63,7 +63,8 @@ def test_compose_defaults_preserve_existing_host_paths() -> None:
     assert "../../openrag:/app/openrag" not in openrag_volumes
     assert "${DB_VOLUME:-../../db}:/var/lib/postgresql/data" in rdb_volumes
 
-    assert {"appdata", "logs", "modelweights", "pgdata"} <= top_level_volumes
+    assert {"appdata", "modelweights", "pgdata"} <= top_level_volumes
+    assert "logs" not in top_level_volumes
     assert "${DATA_VOLUME:-appdata}:/app/data" not in openrag_volumes
     assert "${DB_VOLUME:-pgdata}:/var/lib/postgresql/data" not in rdb_volumes
 
@@ -91,7 +92,7 @@ def test_named_volume_profile_is_opt_in() -> None:
     assert "MINIO_SECRET_KEY" in default_env_values
 
     assert env_values["DATA_VOLUME"] == "appdata"
-    assert env_values["LOG_VOLUME"] == "logs"
+    assert "LOG_VOLUME" not in env_values
     assert env_values["MODEL_WEIGHTS_VOLUME"] == "modelweights"
     assert env_values["VLLM_CACHE"] == "modelweights"
     assert env_values["DB_VOLUME"] == "pgdata"
@@ -100,7 +101,7 @@ def test_named_volume_profile_is_opt_in() -> None:
     assert named_milvus["services"]["etcd"]["volumes"] == ["${ETCD_VOLUME:-etcd}:/etcd"]
     assert named_milvus["services"]["minio"]["volumes"] == ["${MINIO_VOLUME:-minio}:/minio_data"]
     assert named_milvus["services"]["milvus"]["volumes"] == ["${MILVUS_VOLUME:-milvus}:/var/lib/milvus"]
-    assert named_milvus["services"]["milvus"]["image"] == "milvusdb/milvus:v3.0.0"
+    assert named_milvus["services"]["milvus"]["image"] == "milvusdb/milvus:v3.0.1"
     assert named_milvus["services"]["milvus"]["environment"]["ETCD_AUTH_ENABLED"] == "false"
     assert named_milvus["services"]["milvus"]["environment"]["MQ_TYPE"] == "${MILVUS_MQ_TYPE:-default}"
     assert {"etcd", "minio", "milvus"} <= set(named_milvus["volumes"])

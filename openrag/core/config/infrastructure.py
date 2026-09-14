@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, field_validator
 
 from .base import ConfigMixin
 
@@ -86,7 +87,6 @@ class PathsConfig(ConfigMixin):
     prompts_dir: Path = _DEFAULT_PROMPTS_DIR
     data_dir: Path = Path("../data")
     db_dir: Path = Path("/app/db")
-    log_dir: Path = Path("/app/logs")
 
     model_config = {**ConfigMixin.model_config, "arbitrary_types_allowed": True}
 
@@ -107,6 +107,15 @@ class ServerConfig(ConfigMixin):
 
 class VerboseConfig(ConfigMixin):
     level: str = "DEBUG"
+    # ``text``: colorized human format on stderr. ``json``: one flat JSON
+    # object per line, no ANSI, for log collectors (Loki). Env: LOG_FORMAT.
+    format: Literal["text", "json"] = "text"
+
+    @field_validator("format", mode="before")
+    @classmethod
+    def _lowercase_format(cls, value: object) -> object:
+        # ``LOG_FORMAT=JSON`` in a .env must not fail validation at import.
+        return value.strip().lower() if isinstance(value, str) else value
 
 
 # ---------------------------------------------------------------------------

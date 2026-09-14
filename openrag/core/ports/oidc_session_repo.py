@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
-from openrag.core.models.user import OIDCSession
+from core.models.user import OIDCSession
 
 
 class OIDCSessionRepository(ABC):

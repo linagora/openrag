@@ -356,6 +356,33 @@ async def test_validate_model_endpoint_uses_stored_api_key(async_client_factory)
 
 
 @pytest.mark.asyncio
+async def test_validate_stored_reranker_forwards_implementation(async_client_factory):
+    model_service = FakeModelEndpointService()
+    model_service.endpoint_model_name = "jina-reranker-v2"
+    model_service.endpoint_extra = {"implementation": "openai"}
+    app = _build_app(model_service=model_service)
+
+    async with async_client_factory(app) as client:
+        response = await client.post("/model-endpoints/reranker/jina/validate")
+
+    assert response.status_code == 200
+    assert model_service.calls == [
+        ("get", {"name": "jina", "model_type": "reranker"}),
+        (
+            "validate",
+            {
+                "url": "http://llm:8000/v1",
+                "model_type": "reranker",
+                "model_name": "jina-reranker-v2",
+                "api_key": None,
+                "timeout": 30.0,
+                "extra": {"implementation": "openai"},
+            },
+        ),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_validate_stored_stt_endpoint_forwards_request_options(async_client_factory):
     model_service = FakeModelEndpointService()
     model_service.endpoint_model_name = "moss-transcribe-diarize"
@@ -422,6 +449,37 @@ async def test_validate_endpoint_draft_forwards_body_without_lookup(async_client
                 "api_key": "draft-key",
                 "timeout": 900.0,
                 "extra": {"language": "fr", "response_format": "json"},
+            },
+        ),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_validate_reranker_draft_forwards_implementation(async_client_factory):
+    model_service = FakeModelEndpointService()
+    app = _build_app(model_service=model_service)
+
+    async with async_client_factory(app) as client:
+        response = await client.post(
+            "/model-endpoints/validate",
+            json={
+                "endpoint": "http://reranker:8000/v1",
+                "model_type": "reranker",
+                "model_name": "jina-reranker-v2",
+                "extra": {"implementation": "openai"},
+            },
+        )
+
+    assert response.status_code == 200
+    assert model_service.calls == [
+        (
+            "validate",
+            {
+                "url": "http://reranker:8000/v1",
+                "model_type": "reranker",
+                "model_name": "jina-reranker-v2",
+                "api_key": None,
+                "extra": {"implementation": "openai"},
             },
         ),
     ]

@@ -1699,8 +1699,12 @@ def _bare_worker_actor(*, save_uploaded_files: bool, worker: _RecordingWorker):
         set_failed_if_not_cancelled=SimpleNamespace(remote=AsyncMock(return_value=True)),
     )
     actor._catalog_store = SimpleNamespace(
-        workspace_repo=SimpleNamespace(),
-        document_repo=SimpleNamespace(release_content_sha256_claim=AsyncMock()),
+        workspace_repo=SimpleNamespace(add_files_to_workspace=AsyncMock(return_value=[])),
+        document_repo=SimpleNamespace(
+            release_content_sha256_claim=AsyncMock(),
+            mark_file_independently_indexed=AsyncMock(return_value=True),
+            finalize_file_workspace_ownership=AsyncMock(return_value=True),
+        ),
     )
     actor._save_uploaded_files = save_uploaded_files
     actor._logger = SimpleNamespace(debug=lambda *a, **k: None, warning=lambda *a, **k: None)
@@ -1713,6 +1717,66 @@ def _bare_worker_actor(*, save_uploaded_files: bool, worker: _RecordingWorker):
         resolve_prompt=_AsyncReturn("prompt"),
     )
     return actor
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [RuntimeError("ws1 unavailable"), ["f"]])
+async def test_actor_protects_file_when_some_workspace_attachments_fail(tmp_path, failure) -> None:
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"x")
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=_RecordingWorker())
+    actor._catalog_store.workspace_repo.add_files_to_workspace = AsyncMock(side_effect=[failure, []])
+
+    result = await actor.process_file(
+        task_id="t",
+        path=str(path),
+        metadata={"file_id": "f"},
+        partition="p",
+        workspace_ids=["ws1", "ws2"],
+    )
+
+    assert result == {"stored_count": 1, "stage": "stored"}
+    actor._catalog_store.document_repo.mark_file_independently_indexed.assert_awaited_once_with("f", "p")
+    actor._catalog_store.document_repo.finalize_file_workspace_ownership.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_actor_transfers_ownership_only_after_all_attachments_succeed(tmp_path) -> None:
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"x")
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=_RecordingWorker())
+    attach = actor._catalog_store.workspace_repo.add_files_to_workspace
+
+    async def transfer(*args):
+        assert attach.await_count == 2
+        return True
+
+    finalize = actor._catalog_store.document_repo.finalize_file_workspace_ownership
+    finalize.side_effect = transfer
+    await actor.process_file(
+        task_id="t", path=str(path), metadata={"file_id": "f"}, partition="p", workspace_ids=["ws1", "ws2"]
+    )
+    finalize.assert_awaited_once_with("f", "p", ["ws1", "ws2"])
+    actor._catalog_store.document_repo.mark_file_independently_indexed.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_actor_propagates_workspace_attachment_cancellation(tmp_path) -> None:
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"x")
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=_RecordingWorker())
+    actor._catalog_store.workspace_repo.add_files_to_workspace = AsyncMock(side_effect=asyncio.CancelledError())
+
+    with pytest.raises(asyncio.CancelledError):
+        await actor.process_file(
+            task_id="t",
+            path=str(path),
+            metadata={"file_id": "f"},
+            partition="p",
+            workspace_ids=["ws1"],
+        )
+
+    actor._catalog_store.document_repo.mark_file_independently_indexed.assert_not_awaited()
 
 
 @contextmanager
