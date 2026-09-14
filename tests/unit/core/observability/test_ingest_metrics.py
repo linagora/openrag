@@ -122,7 +122,7 @@ def test_recording_failure_never_propagates(monkeypatch: pytest.MonkeyPatch) -> 
         def set(self, *a: Any, **k: Any) -> None:
             raise RuntimeError("backend down")
 
-    monkeypatch.setattr(ray_metrics, "_warned", False)
+    monkeypatch.setattr("core.observability._reporting._reported", set())
     monkeypatch.setattr(ray_metrics, "_STAGE_DURATION", _Exploding())
     monkeypatch.setattr(ray_metrics, "_DOCUMENTS_TOTAL", _Exploding())
     monkeypatch.setattr(ray_metrics, "_LAST_PARSE_TIMESTAMP", _Exploding())

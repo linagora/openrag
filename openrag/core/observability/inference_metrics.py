@@ -9,128 +9,145 @@ so one PromQL query covers the whole system.
 **Exactly one backend per process, chosen once.** Recording to both would
 double-count every call: the API process initialises Ray, so ``ray.util.metrics``
 there is live rather than a no-op, and the same event would appear on ``/metrics``
-*and* on the node's Ray metrics agent. The rule is therefore "record where this
-process can actually be scraped":
+*and* on the node's Ray metrics agent. The rule is "record where this process can
+actually be scraped":
 
 * Inside a Ray actor — an indexing worker, or the API itself when
   ``ENABLE_RAY_SERVE=true`` makes it a Serve replica — use ``ray.util.metrics``.
   Serve replicas are not individually addressable over HTTP, so a
-  ``prometheus_client`` counter in one replica is invisible to a scrape that the
-  Serve proxy routes to a different one.
+  ``prometheus_client`` counter in one replica is invisible to a scrape the
+  Serve proxy routes to another.
 * Otherwise (the plain uvicorn API of the standalone compose deployment) use
   ``prometheus_client``, served by ``/metrics``.
 
 The check mirrors ``services/workers/task_state._task_state_storage_available``,
-which already uses actor identity to decide whether it is running somewhere with
-Ray's facilities available.
+which already uses actor identity for the same kind of decision.
 
 *Deployment consequence for S3-3 / S3-6 / S3-7:* under Ray Serve these series
 appear on the Ray metrics target, not on ``/metrics``. A deployment that scrapes
-only ``/metrics`` will see HTTP metrics and no inference metrics. Both targets
-have to be scraped for the set to be complete.
+only ``/metrics`` sees HTTP metrics and no inference metrics; both targets must
+be scraped for the set to be complete.
 
-**On the ``provider`` label.** It is the admin-configured endpoint *name* from
-``di/factories.make_component_factory`` — bounded by configuration. It is
-deliberately neither the model nor the base URL: both are client-controllable
-through ``metadata.llm_override``, which would make the label unbounded from the
-value side, the one way a metric can blow up cardinality that
+**On the ``provider`` label.** It is the admin-configured endpoint *name*,
+stamped onto each client by ``di/factories.make_component_factory`` — bounded by
+configuration. Deliberately neither the model nor the base URL: both are
+client-controllable through ``metadata.llm_override``, which would make the
+label unbounded from the *value* side, the one cardinality failure
 ``FORBIDDEN_LABELS`` cannot catch.
 
 A request that overrides the endpoint is attributed to the fixed bucket
-``client_override`` rather than to the operator's provider. Counting a
-third-party endpoint's failures against our own would corrupt the error rate
-``OpenRagInferenceProviderDown`` alerts on. ``_circuit_breaker`` already draws
-this line — ``skip_if=_targets_client_endpoint`` keeps a client's endpoint from
-tripping our breaker — and this follows it.
+``client_override``, so a third-party endpoint's failures cannot corrupt the
+error rate ``OpenRagInferenceProviderDown`` alerts on. ``_circuit_breaker``
+already draws that line with ``skip_if=_targets_client_endpoint``.
 """
 
 from __future__ import annotations
 
 from functools import lru_cache
+from typing import NamedTuple, Protocol
 
+from core.observability._reporting import report_once
 from core.observability.metric_specs import (
     INFERENCE_DURATION_SECONDS,
     INFERENCE_REQUESTS_TOTAL,
     LLM_TOKENS_TOTAL,
+    MetricSpec,
 )
-from core.utils.logging import get_logger
 
-logger = get_logger()
+#: Attribute ``make_component_factory`` stamps the endpoint name onto, read back
+#: by ``services/inference/_metrics.resolve_provider``. Shared so the two sides
+#: cannot drift apart on a typo.
+PROVIDER_NAME_ATTR = "openrag_provider_name"
 
-#: Fixed bucket for a call that targeted a client-supplied endpoint. A single
-#: constant, never the override's URL — that would be unbounded.
+#: Fixed bucket for a call that targeted a client-supplied endpoint — a single
+#: constant, never the override's URL.
 CLIENT_OVERRIDE_PROVIDER = "client_override"
 
-_warned = False
+
+class _Instrument(Protocol):
+    """The two backends' APIs differ; call sites should not have to know which."""
+
+    def inc(self, value: float, tags: dict[str, str]) -> None: ...
+
+    def observe(self, value: float, tags: dict[str, str]) -> None: ...
 
 
-def _warn_once(exc: Exception, what: str) -> None:
-    global _warned
-    if _warned:
-        return
-    _warned = True
-    logger.warning(f"inference metric recording failed ({what}); further errors in this process are not logged: {exc}")
+class _RayInstrument:
+    def __init__(self, metric: object) -> None:
+        self._metric = metric
+
+    def inc(self, value: float, tags: dict[str, str]) -> None:
+        self._metric.inc(value, tags=tags)
+
+    def observe(self, value: float, tags: dict[str, str]) -> None:
+        self._metric.observe(value, tags=tags)
+
+
+class _PrometheusInstrument:
+    def __init__(self, metric: object) -> None:
+        self._metric = metric
+
+    def inc(self, value: float, tags: dict[str, str]) -> None:
+        self._metric.labels(**tags).inc(value)
+
+    def observe(self, value: float, tags: dict[str, str]) -> None:
+        self._metric.labels(**tags).observe(value)
+
+
+class _Instruments(NamedTuple):
+    requests: _Instrument
+    duration: _Instrument
+    tokens: _Instrument
 
 
 @lru_cache(maxsize=1)
 def _use_ray_backend() -> bool:
-    """Whether this process should export through Ray rather than ``/metrics``.
+    """Whether this process exports through Ray rather than ``/metrics``.
 
-    Cached: a process does not migrate between the two, and this is called on
-    every inference call. Any failure resolving Ray's context means we are not
-    in an actor, so the ``prometheus_client`` path is the safe answer.
+    Cached: a process does not migrate between the two. A failure resolving
+    Ray's context means we are not in an actor, so ``prometheus_client`` is the
+    correct answer rather than an error.
     """
     try:
         import ray
 
         return ray.get_runtime_context().get_actor_id() is not None
-    except Exception:  # noqa: BLE001 - absence of Ray is a valid answer, not an error
+    except Exception:  # noqa: BLE001 - absence of Ray is an answer, not a failure
         return False
 
 
 @lru_cache(maxsize=1)
-def _instruments() -> tuple:
-    """Build the three instruments once, against the backend this process uses."""
+def _instruments() -> _Instruments:
     if _use_ray_backend():
-        from ray.util.metrics import Counter, Histogram
+        from ray.util import metrics as ray_metrics
 
-        return (
-            Counter(
-                INFERENCE_REQUESTS_TOTAL.name,
-                description=INFERENCE_REQUESTS_TOTAL.description,
-                tag_keys=INFERENCE_REQUESTS_TOTAL.labels,
-            ),
-            Histogram(
-                INFERENCE_DURATION_SECONDS.name,
-                description=INFERENCE_DURATION_SECONDS.description,
-                boundaries=list(INFERENCE_DURATION_SECONDS.buckets or ()),
-                tag_keys=INFERENCE_DURATION_SECONDS.labels,
-            ),
-            Counter(
-                LLM_TOKENS_TOTAL.name,
-                description=LLM_TOKENS_TOTAL.description,
-                tag_keys=LLM_TOKENS_TOTAL.labels,
-            ),
-            True,
-        )
+        def counter(spec: MetricSpec) -> _Instrument:
+            return _RayInstrument(ray_metrics.Counter(spec.name, description=spec.description, tag_keys=spec.labels))
 
-    from prometheus_client import Counter as PCounter
-    from prometheus_client import Histogram as PHistogram
+        def histogram(spec: MetricSpec) -> _Instrument:
+            return _RayInstrument(
+                ray_metrics.Histogram(
+                    spec.name,
+                    description=spec.description,
+                    boundaries=list(spec.buckets),
+                    tag_keys=spec.labels,
+                )
+            )
+    else:
+        import prometheus_client
 
-    return (
-        PCounter(
-            INFERENCE_REQUESTS_TOTAL.name,
-            INFERENCE_REQUESTS_TOTAL.description,
-            list(INFERENCE_REQUESTS_TOTAL.labels),
-        ),
-        PHistogram(
-            INFERENCE_DURATION_SECONDS.name,
-            INFERENCE_DURATION_SECONDS.description,
-            list(INFERENCE_DURATION_SECONDS.labels),
-            buckets=(*(INFERENCE_DURATION_SECONDS.buckets or ()), float("inf")),
-        ),
-        PCounter(LLM_TOKENS_TOTAL.name, LLM_TOKENS_TOTAL.description, list(LLM_TOKENS_TOTAL.labels)),
-        False,
+        def counter(spec: MetricSpec) -> _Instrument:
+            return _PrometheusInstrument(prometheus_client.Counter(spec.name, spec.description, list(spec.labels)))
+
+        def histogram(spec: MetricSpec) -> _Instrument:
+            return _PrometheusInstrument(
+                prometheus_client.Histogram(spec.name, spec.description, list(spec.labels), buckets=spec.buckets)
+            )
+
+    return _Instruments(
+        requests=counter(INFERENCE_REQUESTS_TOTAL),
+        duration=histogram(INFERENCE_DURATION_SECONDS),
+        tokens=counter(LLM_TOKENS_TOTAL),
     )
 
 
@@ -139,50 +156,41 @@ def record_inference(*, provider: str, operation: str, outcome: str, duration_se
 
     One observation per *logical* call, not per retry attempt: the decorator
     sits outside ``@with_retry``, so three transport retries that eventually
-    succeed are one success here. Per-attempt counts would make a flaky-but-
-    recovering endpoint look like a failing one in the error ratio.
+    succeed are one success. Per-attempt counts would make a flaky-but-
+    recovering endpoint indistinguishable from a failing one.
     """
     try:
-        requests, duration, _tokens, is_ray = _instruments()
-        tags = {"provider": provider, "operation": operation, "outcome": outcome}
-        if is_ray:
-            requests.inc(1, tags=tags)
-            duration.observe(float(duration_seconds), tags={"provider": provider, "operation": operation})
-        else:
-            requests.labels(**tags).inc()
-            duration.labels(provider=provider, operation=operation).observe(float(duration_seconds))
+        instruments = _instruments()
+        instruments.requests.inc(1, {"provider": provider, "operation": operation, "outcome": outcome})
+        instruments.duration.observe(float(duration_seconds), {"provider": provider, "operation": operation})
     except Exception as exc:  # noqa: BLE001 - metrics must never fail a request
-        _warn_once(exc, "inference_requests_total")
+        report_once(INFERENCE_REQUESTS_TOTAL.name, exc)
 
 
 def record_tokens(*, operation: str, prompt: int = 0, completion: int = 0) -> None:
     """Add to the aggregate token counters.
 
-    Aggregate on purpose. "How much has this tenant consumed?" is a billing
-    question answered from Postgres by D2; answering it here would reintroduce
-    ``partition`` through the back door.
+    Aggregate on purpose: "how much has this tenant consumed?" is a billing
+    question answered from Postgres by D2, and answering it here would
+    reintroduce ``partition`` through the back door.
     """
     try:
-        _requests, _duration, tokens, is_ray = _instruments()
+        tokens = _instruments().tokens
         for kind, value in (("prompt", prompt), ("completion", completion)):
-            if not value:
-                continue
-            if is_ray:
-                tokens.inc(int(value), tags={"operation": operation, "kind": kind})
-            else:
-                tokens.labels(operation=operation, kind=kind).inc(int(value))
+            if value:
+                tokens.inc(int(value), {"operation": operation, "kind": kind})
     except Exception as exc:  # noqa: BLE001
-        _warn_once(exc, "llm_tokens_total")
+        report_once(LLM_TOKENS_TOTAL.name, exc)
 
 
 def record_usage_from_response(response: object, *, operation: str) -> None:
-    """Extract an OpenAI-shaped ``usage`` block from a response and count it.
+    """Count an OpenAI-shaped ``usage`` block, if the response carries one.
 
-    Read defensively and silently: ``usage`` is optional in the OpenAI schema,
-    absent from some gateways entirely, and absent from *every* streaming
-    response unless the request asked for ``stream_options.include_usage``.
-    A provider that never reports usage must degrade to "no token metric", not
-    to an error on every call.
+    Read defensively and silently. ``usage`` is optional in the OpenAI schema,
+    absent from some gateways entirely, and absent from every streaming response
+    unless the request asked for ``stream_options.include_usage``. A provider
+    that never reports it must degrade to "no token metric", not to an error on
+    every call.
     """
     if not isinstance(response, dict):
         return
@@ -194,15 +202,14 @@ def record_usage_from_response(response: object, *, operation: str) -> None:
     if not isinstance(prompt, int) or not isinstance(completion, int):
         return
     if not prompt and not completion:
-        # An empty or all-zero usage block is a provider reporting nothing,
-        # not a call that consumed nothing. Returning here keeps the
-        # distinction visible to anyone reading the code path.
+        # A provider reporting nothing, not a call that consumed nothing.
         return
     record_tokens(operation=operation, prompt=prompt, completion=completion)
 
 
 __all__ = [
     "CLIENT_OVERRIDE_PROVIDER",
+    "PROVIDER_NAME_ATTR",
     "record_inference",
     "record_tokens",
     "record_usage_from_response",

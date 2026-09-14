@@ -288,3 +288,180 @@ def test_backend_choice_is_cached_and_defaults_to_prometheus(monkeypatch: pytest
     assert inference_metrics._use_ray_backend() is False
 
     inference_metrics._use_ray_backend.cache_clear()
+
+
+# ---------------------------------------------------------------------------
+# Regression: the consumer closes this generator, and that is not a failure
+# ---------------------------------------------------------------------------
+# ``stream_with_source_filtering`` breaks out of its loop on ``data: [DONE]``
+# and then closes the iterator (source_filtering.py:173 and the aclose() that
+# follows it). Closing raises GeneratorExit inside ``stream_chat`` at the yield.
+# Treating that as a failure reported *every completed chat* as an error — the
+# error-rate panel would have read ~100% while the system worked perfectly.
+
+
+class _FakeStreamResponse:
+    def __init__(self, lines: list[str], status_code: int = 200) -> None:
+        self._lines = lines
+        self.status_code = status_code
+        self.text = ""
+
+    async def aiter_lines(self):
+        for line in self._lines:
+            yield line
+
+    async def aread(self) -> bytes:
+        return b""
+
+
+class _FakeStreamContext:
+    def __init__(self, response: _FakeStreamResponse) -> None:
+        self._response = response
+
+    async def __aenter__(self) -> _FakeStreamResponse:
+        return self._response
+
+    async def __aexit__(self, *exc_info: Any) -> bool:
+        return False
+
+
+class _FakeHttpClient:
+    def __init__(self, lines: list[str], status_code: int = 200) -> None:
+        self._lines = lines
+        self._status_code = status_code
+
+    def stream(self, *_args: Any, **_kwargs: Any) -> _FakeStreamContext:
+        return _FakeStreamContext(_FakeStreamResponse(self._lines, self._status_code))
+
+
+def _streaming_client(lines: list[str], monkeypatch: pytest.MonkeyPatch, calls: list) -> Any:
+    import services.inference.vllm_client as vc
+
+    monkeypatch.setattr(vc, "record_inference", lambda **kw: calls.append(kw))
+    client = vc.VLLMClient("http://llm.invalid/v1", "test-model")
+    client._client = _FakeHttpClient(lines)
+    return client
+
+
+@pytest.mark.asyncio
+async def test_stream_closed_after_done_is_a_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Reproduces the real consumer: break on ``[DONE]``, then close."""
+    calls: list = []
+    client = _streaming_client(
+        ['data: {"choices":[{"delta":{"content":"hi"}}]}', "data: [DONE]"],
+        monkeypatch,
+        calls,
+    )
+
+    stream = client.stream_chat([{"role": "user", "content": "q"}])
+    async for line in stream:
+        if line.strip() == "data: [DONE]":
+            break
+    await stream.aclose()
+
+    assert [c["outcome"] for c in calls] == ["success"]
+
+
+@pytest.mark.asyncio
+async def test_stream_abandoned_before_done_is_not_a_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A client that gives up mid-answer did not get a completion, and the
+    error rate must show it."""
+    calls: list = []
+    client = _streaming_client(
+        [f'data: {{"choices":[{{"delta":{{"content":"{i}"}}}}]}}' for i in range(5)] + ["data: [DONE]"],
+        monkeypatch,
+        calls,
+    )
+
+    stream = client.stream_chat([{"role": "user", "content": "q"}])
+    async for _line in stream:
+        break
+    await stream.aclose()
+
+    assert [c["outcome"] for c in calls] == ["error"]
+
+
+@pytest.mark.asyncio
+async def test_stream_truncated_without_done_is_not_a_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An upstream that ends without ``[DONE]`` truncated the answer —
+    ``source_filtering`` reports exactly that to the caller, so the metric must
+    not disagree with the message the user receives."""
+    calls: list = []
+    client = _streaming_client(['data: {"choices":[{"delta":{"content":"hi"}}]}'], monkeypatch, calls)
+
+    stream = client.stream_chat([{"role": "user", "content": "q"}])
+    async for _line in stream:
+        pass
+
+    assert [c["outcome"] for c in calls] == ["error"]
+
+
+def test_content_delta_is_not_parsed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The guard must reject ordinary deltas before ``json.loads``.
+
+    This runs for every SSE line — hundreds per answer — and the consumer
+    already parses each one downstream.
+    """
+    import services.inference.vllm_client as vc
+
+    parsed: list[str] = []
+    monkeypatch.setattr(vc.json, "loads", lambda text: parsed.append(text) or {})
+
+    vc._record_stream_usage('data: {"choices":[{"delta":{"content":"hello"}}]}')
+
+    assert parsed == []
+
+
+def test_content_mentioning_usage_records_nothing(recorded) -> None:
+    """A model answering a question *about* usage trips the cheap substring
+    guard; ``record_usage_from_response`` must still reject it, because ``usage``
+    is not a top-level object there."""
+    import services.inference.vllm_client as vc
+
+    vc._record_stream_usage('data: {"choices":[{"delta":{"content":"your \\"usage\\" is high"}}]}')
+
+    assert recorded["tokens"] == []
+
+
+# ---------------------------------------------------------------------------
+# The declared label domains must be the ones the code actually emits
+# ---------------------------------------------------------------------------
+# Without these, INFERENCE_OUTCOME_VALUES and TOKEN_KIND_VALUES are comments
+# that happen to be typed as tuples: nothing would notice a new outcome string
+# appearing in _outcome_for, and S3-4's alert expressions are written against
+# the declared set.
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        InferenceTimeoutError("slow"),
+        InferenceError("bad gateway"),
+        ValueError("unexpected"),
+        KeyboardInterrupt(),
+    ],
+)
+def test_every_outcome_is_a_declared_value(exc: BaseException) -> None:
+    from core.observability.metric_specs import INFERENCE_OUTCOME_VALUES
+    from services.inference._metrics import _outcome_for
+
+    assert _outcome_for(exc) in INFERENCE_OUTCOME_VALUES
+
+
+def test_success_is_a_declared_outcome() -> None:
+    """``with_inference_metrics`` writes this one directly rather than through
+    ``_outcome_for``, so it needs its own assertion."""
+    from core.observability.metric_specs import INFERENCE_OUTCOME_VALUES
+
+    assert "success" in INFERENCE_OUTCOME_VALUES
+
+
+def test_token_kinds_are_declared_values(recorded) -> None:
+    from core.observability.metric_specs import TOKEN_KIND_VALUES
+
+    inference_metrics.record_usage_from_response(
+        {"usage": {"prompt_tokens": 5, "completion_tokens": 7}}, operation="chat"
+    )
+
+    emitted = {k for call in recorded["tokens"] for k in ("prompt", "completion") if call.get(k)}
+    assert emitted <= set(TOKEN_KIND_VALUES)

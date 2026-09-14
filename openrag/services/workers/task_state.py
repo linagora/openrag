@@ -257,9 +257,8 @@ def _task_created_at(details: dict[str, Any] | None) -> str | None:
 
 
 def _content_claim_registration_expired(details: dict[str, Any]) -> bool:
-    metadata = details.get("metadata")
-    created_at = metadata.get(TASK_CREATED_AT_METADATA_KEY) if isinstance(metadata, dict) else None
-    if not isinstance(created_at, str):
+    created_at = _task_created_at(details)
+    if created_at is None:
         return False
     try:
         created = datetime.fromisoformat(created_at)
@@ -327,6 +326,11 @@ class TaskStateManager:
         Counting the *write* rather than the transition would inflate the
         failure ratio that ``OpenRagIngestFailureRate`` (S3-4) alerts on, so
         the guard is on the previous state, not on the new one.
+
+        The first terminal state wins. A task later moved from FAILED to
+        COMPLETED counts once, as failed — the guard cannot distinguish a
+        correction from a duplicate write, and under-counting a rare correction
+        is safer than double-counting every retry.
 
         Counted in the TaskStateManager rather than in the indexer worker
         because the worker only sees documents that reached it. Tasks that
@@ -442,16 +446,9 @@ class TaskStateManager:
             if state == "SERIALIZING":
                 info.worker_submitted = True
                 info.submission_started_at = None
-                # Queue wait is observed here, and only on the QUEUED ->
-                # SERIALIZING edge, because this is the one place that holds
-                # both halves of the measurement. ``created_at`` is stamped by
-                # the dispatcher into the task details; the worker never
-                # receives it — ``worker_metadata`` is built from the caller's
-                # metadata, and adding the key there would echo it back in the
-                # customer-facing indexing callback body (it is not in
-                # UPLOAD_METADATA_SERVER_KEYS) and persist it into chunk
-                # metadata. Guarding on ``previous`` keeps a retried set_state
-                # from observing the same wait twice.
+                # Only on the entering edge: a retried set_state must not
+                # observe the same wait twice. This is the one place holding
+                # both halves — the worker never receives ``created_at``.
                 if previous != "SERIALIZING":
                     observe_queue_wait_from(_task_created_at(info.details))
             _save_recoverable_task(task_id, info)
@@ -520,12 +517,12 @@ class TaskStateManager:
             info.object_ref = None
             info.worker_submitted = False
             info.submission_started_at = None
+            previous = info.state
             if info.state in CANCELLABLE_INDEXING_STATES:
-                previous = info.state
                 info.state = "FAILED"
                 info.error = "Indexer worker submission was rejected after the worker settled."
-                self._count_terminal(previous, "FAILED")
             _save_recoverable_task(task_id, info)
+            self._count_terminal(previous, info.state)
             return True
 
     @ray.method(concurrency_group="set")

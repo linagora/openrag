@@ -33,16 +33,14 @@ from typing import Any
 from aiobreaker import CircuitBreakerError
 from core.observability.inference_metrics import (
     CLIENT_OVERRIDE_PROVIDER,
+    PROVIDER_NAME_ATTR,
     record_inference,
     record_usage_from_response,
 )
 from core.utils.exceptions import InferenceTimeoutError
 
-#: Set on each client instance by ``di/factories.make_component_factory``. The
-#: fallback matters: a client built directly (tests, scripts, a code path that
-#: bypasses the factory) still records rather than raising, and lands in a fixed
-#: bucket instead of minting a label value.
-PROVIDER_NAME_ATTR = "openrag_provider_name"
+#: Fallback for a client built outside the factory (tests, scripts): it still
+#: records, and lands in a fixed bucket instead of minting a label value.
 _UNKNOWN_PROVIDER = "unconfigured"
 
 
@@ -115,4 +113,4 @@ def with_inference_metrics(operation: str, *, capture_usage: bool = False) -> Ca
     return decorator
 
 
-__all__ = ["PROVIDER_NAME_ATTR", "resolve_provider", "with_inference_metrics"]
+__all__ = ["resolve_provider", "with_inference_metrics"]

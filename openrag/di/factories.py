@@ -27,13 +27,12 @@ double) is accepted.
 
 from __future__ import annotations
 
-import contextlib
 import threading
 from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Any, Protocol, TypeVar
 
 from core.config.model_endpoints import CONTROL_EXTRA_KEYS
-from services.inference._metrics import PROVIDER_NAME_ATTR
+from core.observability.inference_metrics import PROVIDER_NAME_ATTR
 
 if TYPE_CHECKING:
     from core.utils.registry import Registry
@@ -114,18 +113,11 @@ def make_component_factory(
             if extra_kwargs_fn is not None:
                 kwargs.update(extra_kwargs_fn(model_cfg))
             instance = registry.create(impl, **kwargs)
-            # Stamp the admin-configured endpoint name onto the instance so the
-            # inference metrics can label by it. Set here rather than passed to
-            # the constructor because every client absorbs unknown kwargs into
-            # ``self._defaults`` and splats them into the request body — the same
-            # trap batch_size fell into (#712) — and because it keeps the registry
-            # create() contract unchanged for every backend.
-            #
-            # This name is the one bounded identifier available: the model and the
-            # base URL are both client-controllable via ``metadata.llm_override``,
-            # so labelling by either would let callers mint series.
-            with contextlib.suppress(AttributeError):  # __slots__ clients, if any appear
-                setattr(instance, PROVIDER_NAME_ATTR, name)
+            # The bounded identifier the inference metrics label by. Set after
+            # construction rather than passed in: every client splats unknown
+            # kwargs into the outbound request body, the trap batch_size fell
+            # into (#712).
+            setattr(instance, PROVIDER_NAME_ATTR, name)
             cache[name] = instance
             return instance
 
