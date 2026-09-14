@@ -124,6 +124,7 @@ def _make_service(
     partition_service=None,
     preset_service=None,
     prompt_service=None,
+    vector_store=None,
 ):
     from core.config.root import Settings
     from services.orchestrators.model_endpoint_service import ModelEndpointService
@@ -134,6 +135,7 @@ def _make_service(
         partition_service=partition_service,
         preset_service=preset_service,
         prompt_service=prompt_service,
+        vector_store=vector_store,
     )
 
 
@@ -2411,3 +2413,69 @@ async def test_delete_model_endpoint_propagates_conflict_without_touching_caches
 
     assert exc.value.status_code == 409
     assert partition_service.load_partitions_calls == 0
+
+
+# ── dropping a deleted embedder's vector field (#762 F) ──────────────
+
+
+def _embedders_with_fields():
+    return [
+        _make_row(name="jina", is_default=True, vector_field="vector_jina"),
+        _make_row(name="e5", is_default=False, vector_field="vector_e5"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_deleting_an_embedder_drops_its_vector_field(mock_vector_store):
+    mock_vector_store.vector_fields = {"vector_jina": 1024, "vector_e5": 768}
+    svc = _make_service(_FakeEndpointRepo(rows=_embedders_with_fields()), vector_store=mock_vector_store)
+
+    await svc.delete_model_endpoint("e5", "embedder")
+
+    assert mock_vector_store.vector_fields == {"vector_jina": 1024}
+
+
+@pytest.mark.asyncio
+async def test_a_refused_embedder_delete_keeps_its_vector_field(mock_vector_store):
+    from core.utils.exceptions import ConflictError, NotFoundError, ValidationError
+
+    mock_vector_store.vector_fields = {"vector_jina": 1024, "vector_e5": 768}
+    repo = _FakeEndpointRepo(rows=_embedders_with_fields())
+    svc = _make_service(repo, vector_store=mock_vector_store)
+
+    with pytest.raises(NotFoundError):
+        await svc.delete_model_endpoint("ghost", "embedder")
+    repo.conflict_on_delete = "Embedder 'e5' is still in use: 3 partition(s) name it."
+    with pytest.raises(ConflictError):
+        await svc.delete_model_endpoint("e5", "embedder")
+    repo.conflict_on_delete = None
+    await svc.delete_model_endpoint("e5", "embedder")
+    with pytest.raises(ValidationError, match="last"):
+        await svc.delete_model_endpoint("jina", "embedder")
+
+    assert mock_vector_store.vector_fields == {"vector_jina": 1024}
+
+
+@pytest.mark.asyncio
+async def test_a_failed_field_drop_does_not_fail_the_committed_delete():
+    store = SimpleNamespace(drop_vector_field=AsyncMock(side_effect=RuntimeError("milvus down")))
+    repo = _FakeEndpointRepo(rows=_embedders_with_fields())
+    partition_service = _FakePartitionServiceForReload()
+    svc = _make_service(repo, partition_service=partition_service, vector_store=store)
+
+    await svc.delete_model_endpoint("e5", "embedder")
+
+    store.drop_vector_field.assert_awaited_once_with("vector_e5")
+    assert ("e5", "embedder") not in repo._store
+    assert partition_service.load_partitions_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_deleting_another_model_type_never_touches_the_vector_store():
+    store = SimpleNamespace(drop_vector_field=AsyncMock())
+    repo = _FakeEndpointRepo(rows=[_make_row(name="a", model_type="llm"), _make_row(name="b", model_type="llm")])
+    svc = _make_service(repo, vector_store=store)
+
+    await svc.delete_model_endpoint("b", "llm")
+
+    store.drop_vector_field.assert_not_awaited()

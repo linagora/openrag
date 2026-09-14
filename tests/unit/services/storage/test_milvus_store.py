@@ -21,6 +21,7 @@ from core.config.infrastructure import VectorDBConfig
 from core.models.chunk import Chunk, ChunkType
 from core.utils.exceptions import (
     VDBCreateOrLoadCollectionError,
+    VDBDeleteError,
     VDBSchemaMigrationRequiredError,
     VDBSearchError,
 )
@@ -1298,16 +1299,17 @@ class TestEnsureVectorField:
         assert await store.ensure_vector_field("vector_bge_m3", 768) is False
         store._client.add_collection_field.assert_not_called()
 
-    async def test_the_second_call_never_reaches_the_backend(self, store: MilvusVectorStore) -> None:
-        # Called on every write, so the memo is what keeps it off the hot path.
-        store._client.describe_collection.return_value = _descriptor("vector")
-        await store.ensure_vector_field("vector_bge_m3", 768)
-        store._client.reset_mock()
-
+    async def test_a_field_dropped_by_another_process_is_added_again(self, store: MilvusVectorStore) -> None:
+        # Its embedder was deleted and re-created under the same name. Milvus
+        # would store a write to the missing field in the dynamic field, where
+        # no search finds it, so ensuring it must not trust an earlier answer.
+        store._client.describe_collection.return_value = _descriptor("vector", "vector_bge_m3")
         assert await store.ensure_vector_field("vector_bge_m3", 768) is False
-        store._client.describe_collection.assert_not_called()
 
-    async def test_a_failure_is_not_memoized(self, store: MilvusVectorStore) -> None:
+        store._client.describe_collection.return_value = _descriptor("vector")
+        assert await store.ensure_vector_field("vector_bge_m3", 768) is True
+
+    async def test_a_failure_is_retried_by_the_next_call(self, store: MilvusVectorStore) -> None:
         # Remembering a failure as done would leave the field missing for the
         # life of the process while writes kept being aimed at it.
         store._client.describe_collection.return_value = _descriptor("vector")
@@ -1373,6 +1375,67 @@ class TestEnsureVectorField:
         ordered = [call[0] for call in store._client.method_calls]
         assert ordered.index("create_index") < ordered.index("release_collection") < ordered.index("load_collection")
         store._client.refresh_load.assert_not_called()
+
+
+class TestDropVectorField:
+    async def test_the_field_is_dropped_in_place(self, store: MilvusVectorStore) -> None:
+        store._client.has_collection.return_value = True
+        store._client.describe_collection.return_value = _descriptor(
+            FIELD, "vector_bge_m3", "sparse", vector_fields=(FIELD, "vector_bge_m3", "sparse")
+        )
+
+        assert await store.drop_vector_field("vector_bge_m3") is True
+
+        store._client.drop_collection_field.assert_called_once_with(store._collection_name, "vector_bge_m3")
+        # Searches on the other fields keep being served throughout.
+        store._client.release_collection.assert_not_called()
+
+    async def test_the_schema_caches_are_invalidated(self, store: MilvusVectorStore) -> None:
+        store._client.has_collection.return_value = True
+        store._client.describe_collection.return_value = _descriptor(
+            FIELD, "vector_bge_m3", vector_fields=(FIELD, "vector_bge_m3")
+        )
+        store._dense_fields_cache = frozenset({FIELD, "vector_bge_m3"})
+        store._schema_vector_dim = 1792
+
+        await store.drop_vector_field("vector_bge_m3")
+
+        assert store._dense_fields_cache is None
+        assert store._schema_vector_dim is None
+
+    @pytest.mark.parametrize("has_collection", [True, False])
+    async def test_a_field_already_gone_is_a_no_op(self, store: MilvusVectorStore, has_collection: bool) -> None:
+        store._client.has_collection.return_value = has_collection
+        store._client.describe_collection.return_value = _descriptor(FIELD, vector_fields=(FIELD,))
+
+        assert await store.drop_vector_field("vector_bge_m3") is False
+        store._client.drop_collection_field.assert_not_called()
+
+    @pytest.mark.parametrize("field", ["vector", "sparse", "text"])
+    async def test_only_a_per_embedder_field_can_be_dropped(self, store: MilvusVectorStore, field: str) -> None:
+        with pytest.raises(ValueError, match="per-embedder"):
+            await store.drop_vector_field(field)
+        store._client.drop_collection_field.assert_not_called()
+
+    async def test_the_last_vector_field_is_refused(self, store: MilvusVectorStore) -> None:
+        # Hybrid search off: no sparse field, and Milvus cannot hold a
+        # collection without any vector field.
+        store._client.has_collection.return_value = True
+        store._client.describe_collection.return_value = _descriptor("text", FIELD, vector_fields=(FIELD,))
+
+        with pytest.raises(ValueError, match="only vector field"):
+            await store.drop_vector_field(FIELD)
+        store._client.drop_collection_field.assert_not_called()
+
+    async def test_a_backend_failure_is_a_delete_error(self, store: MilvusVectorStore) -> None:
+        store._client.has_collection.return_value = True
+        store._client.describe_collection.return_value = _descriptor(
+            FIELD, "vector_bge_m3", vector_fields=(FIELD, "vector_bge_m3")
+        )
+        store._client.drop_collection_field.side_effect = MilvusException(1, "boom")
+
+        with pytest.raises(VDBDeleteError, match="vector_bge_m3"):
+            await store.drop_vector_field("vector_bge_m3")
 
 
 # ---------------------------------------------------------------------------

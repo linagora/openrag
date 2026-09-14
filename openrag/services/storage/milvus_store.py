@@ -53,7 +53,7 @@ from core.utils.exceptions import (
 )
 from core.utils.logging import get_logger
 from core.vector_stores import VectorStore
-from core.vector_stores.vector_field import is_vector_field_key, resolve_vector_field
+from core.vector_stores.vector_field import LEGACY_VECTOR_FIELD, is_vector_field_key, resolve_vector_field
 from pymilvus import (
     AnnSearchRequest,
     AsyncMilvusClient,
@@ -204,12 +204,10 @@ class MilvusVectorStore(VectorStore):
         self._loaded = False
         self._load_lock = asyncio.Lock()
         self._search_schema_checked = False
-        # Per-embedder dense fields already ensured in this process (#762 F).
-        # Bounded by the collection's vector-field ceiling, so it cannot grow.
-        self._ensured_vector_fields: set[str] = set()
+        # Serializes adding and dropping per-embedder dense fields (#762 F).
         self._vector_field_lock = asyncio.Lock()
         # Dense field names read from the live schema; invalidated whenever a
-        # field is added. ``None`` means "not read yet".
+        # field is added or dropped. ``None`` means "not read yet".
         self._dense_fields_cache: frozenset[str] | None = None
         # Connection healing: PyMilvus 3.0 exposes no documented client-level
         # reconnect knob (no retry/keepalive params on MilvusClient or
@@ -798,8 +796,9 @@ class MilvusVectorStore(VectorStore):
         """Every dense vector field on the live collection, cached.
 
         One field per embedder (#762 F), so the names cannot be hardcoded. They
-        change only when a field is added, so the schema is read once and the
-        cache is invalidated by :meth:`ensure_vector_field` — in this process.
+        change only when a field is added or dropped, so the schema is read
+        once and the cache is invalidated by :meth:`ensure_vector_field` and
+        :meth:`drop_vector_field` — in this process.
         A field added by another process is not seen until restart, which is
         why result stripping keys off :func:`is_vector_field_key` instead.
 
@@ -1485,24 +1484,19 @@ class MilvusVectorStore(VectorStore):
 
         Non-disruptive by construction: the fields already in the collection
         keep serving searches before, during and after, and nothing is
-        rewritten. Safe to call on every write — the first call per field does
-        the work and the rest return from the memo, mirroring how
-        :meth:`initialize` guards collection creation.
+        rewritten. Safe to call on every write.
+
+        The schema is re-read on every call rather than memoized. Another
+        process may have dropped the field since (its embedder was deleted,
+        then re-created under the same name), and a write aimed at a field the
+        schema no longer has is not refused: Milvus stores it in the dynamic
+        field, where no search finds it (verified on Milvus 3.0.1). One
+        describe per write batch is small next to embedding that batch.
 
         Returns whether this call created the field.
         """
-        if field in self._ensured_vector_fields:
-            return False
         async with self._vector_field_lock:
-            if field in self._ensured_vector_fields:
-                return False
-            # Memoized only after the call returns, never before: a failure
-            # must be retried by the next write rather than remembered as
-            # done, or the field would stay missing for the life of the
-            # process while writes kept being aimed at it.
-            created = await asyncio.to_thread(self._ensure_vector_field_sync, field, dimension)
-            self._ensured_vector_fields.add(field)
-            return created
+            return await asyncio.to_thread(self._ensure_vector_field_sync, field, dimension)
 
     def _ensure_vector_field_sync(self, field: str, dimension: int) -> bool:
         """Add, index and reload ``field``. Synchronous — see :meth:`_ensure_loaded`.
@@ -1590,6 +1584,41 @@ class MilvusVectorStore(VectorStore):
             return
         self._client.release_collection(self._collection_name)
         self._client.load_collection(self._collection_name)
+
+    async def drop_vector_field(self, field: str) -> bool:
+        """Drop a deleted embedder's dense field, its index and its vectors.
+
+        Milvus drops a field from a loaded collection in place: its index goes
+        with it and searches on the other fields keep working, with no reload
+        (verified on Milvus 3.0.1).
+        """
+        if field == LEGACY_VECTOR_FIELD or not is_vector_field_key(field):
+            raise ValueError(f"'{field}' is not a per-embedder dense vector field.")
+        async with self._vector_field_lock:
+            dropped = await asyncio.to_thread(self._drop_vector_field_sync, field)
+            self._dense_fields_cache = None
+            self._schema_vector_dim = None
+        return dropped
+
+    def _drop_vector_field_sync(self, field: str) -> bool:
+        if not self._client.has_collection(self._collection_name):
+            return False
+        fields = self._client.describe_collection(self._collection_name).get("fields", [])
+        if not any(existing["name"] == field for existing in fields):
+            return False
+        if sum(1 for existing in fields if existing.get("type") in _VECTOR_DATA_TYPES) <= 1:
+            raise ValueError(
+                f"'{field}' is the only vector field of `{self._collection_name}`, which Milvus cannot drop."
+            )
+        try:
+            self._client.drop_collection_field(self._collection_name, field)
+        except MilvusException as e:
+            raise VDBDeleteError(
+                f"Failed to drop vector field `{field}` from `{self._collection_name}`: {e!s}",
+                collection_name=self._collection_name,
+            ) from e
+        logger.bind(field=field).info("Dropped per-embedder dense vector field")
+        return True
 
     async def drop_collection(self, name: str) -> None:
         """Destructive: drop the entire backing Milvus collection.
