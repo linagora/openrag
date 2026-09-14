@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import threading
 from types import SimpleNamespace
 
@@ -53,6 +54,12 @@ class _NullLogger:
         pass
 
     def info(self, *args, **kwargs) -> None:
+        pass
+
+    def debug(self, *args, **kwargs) -> None:
+        pass
+
+    def exception(self, *args, **kwargs) -> None:
         pass
 
 
@@ -157,3 +164,72 @@ def test_setup_mp_always_rebuilds_when_old_executor_is_none(monkeypatch):
 
     assert current_executor.shutdown_kwargs == {"wait": False, "cancel_futures": True}
     assert worker.executor is new_executor
+
+
+# ---------------------------------------------------------------------------
+# MarkerPool._process_chunk — don't release a slot the child still owns (#723)
+# ---------------------------------------------------------------------------
+
+
+def _bare_marker_pool():
+    """A MarkerPool instance with __init__ skipped (no real Ray actors)."""
+    pool_class = marker_workers.MarkerPool.__ray_metadata__.modified_class
+    pool = pool_class.__new__(pool_class)
+    pool.logger = _NullLogger()
+    pool.config = SimpleNamespace(loader=SimpleNamespace(marker_max_task_retry=0, marker_retry_base_delay=0.01))
+    pool._queue = asyncio.Queue()
+    pool._queue.put_nowait("worker-1")
+    return pool
+
+
+async def test_process_chunk_returns_worker_to_queue_on_success(monkeypatch):
+    pool = _bare_marker_pool()
+    monkeypatch.setattr(pool, "ensure_worker_pool_healthy", lambda worker: _noop())
+    monkeypatch.setattr(pool, "_run_chunk", lambda worker, file_path, page_range, label: _return("ok"))
+
+    result = await pool._process_chunk("f.pdf", None, "(all pages)")
+
+    assert result == "ok"
+    assert pool._queue.qsize() == 1
+    assert pool._queue.get_nowait() == "worker-1"
+
+
+async def test_process_chunk_recycles_before_releasing_on_cancellation(monkeypatch):
+    """A cancelled/timed-out chunk must not free its slot until the worker's
+    pool has been recycled — otherwise a still-busy worker re-enters rotation."""
+    pool = _bare_marker_pool()
+    reset_calls = []
+
+    async def fake_reset(worker):
+        reset_calls.append(worker)
+
+    async def fake_run_chunk(worker, file_path, page_range, label):
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(pool, "ensure_worker_pool_healthy", lambda worker: _noop())
+    monkeypatch.setattr(pool, "_run_chunk", fake_run_chunk)
+    monkeypatch.setattr(pool, "_reset_worker_pool", fake_reset)
+
+    try:
+        await pool._process_chunk("f.pdf", None, "(all pages)")
+    except asyncio.CancelledError:
+        pass
+
+    # The slot is not returned inline...
+    assert pool._queue.qsize() == 0
+
+    # ...it only reappears after the background recycle has run.
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    assert reset_calls == ["worker-1"]
+    assert pool._queue.qsize() == 1
+    assert pool._queue.get_nowait() == "worker-1"
+
+
+async def _noop():
+    return None
+
+
+async def _return(value):
+    return value

@@ -329,6 +329,22 @@ class MarkerPool:
             task_description=f"MarkerPool PDF {label} ({file_path})",
         )
 
+    async def _recycle_and_release(self, worker, label: str):
+        """Rebuild a worker's pool before handing its slot back.
+
+        Runs after a timed-out or cancelled ``_run_chunk``: ``run_in_executor``
+        isn't cancellable, so the child may still be parsing when we get here.
+        Recycling first (kills the child, rebuilds the pool) stops the next
+        dispatched chunk from landing on a worker still busy with this one (#723).
+        """
+        try:
+            await self._reset_worker_pool(worker)
+        except Exception:
+            self.logger.exception(f"Failed to recycle MarkerWorker after {label}; returning it anyway")
+        finally:
+            await self._queue.put(worker)
+            self.logger.debug(f"MarkerWorker returned to pool for {label}")
+
     async def _process_chunk(self, file_path: str, page_range: list[int] | None, label: str):
         """Acquire a worker slot, process a PDF chunk, and release the slot.
 
@@ -339,13 +355,20 @@ class MarkerPool:
 
         async def attempt(_i: int):
             worker = await self._queue.get()
+            completed = False
             try:
                 self.logger.info(f"MarkerWorker allocated for {label}")
                 await self.ensure_worker_pool_healthy(worker)
-                return await self._run_chunk(worker, file_path, page_range, label)
+                result = await self._run_chunk(worker, file_path, page_range, label)
+                completed = True
+                return result
             finally:
-                await self._queue.put(worker)
-                self.logger.debug(f"MarkerWorker returned to pool for {label}")
+                if completed:
+                    await self._queue.put(worker)
+                    self.logger.debug(f"MarkerWorker returned to pool for {label}")
+                else:
+                    self.logger.warning(f"MarkerWorker for {label} did not complete cleanly; recycling before reuse")
+                    asyncio.create_task(self._recycle_and_release(worker, label))
 
         return await retry_with_backoff(
             attempt,
