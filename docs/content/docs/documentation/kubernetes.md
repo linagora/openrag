@@ -28,6 +28,7 @@ This guide explains how to deploy the **OpenRAG** stack on a Kubernetes cluster 
 
    - Edit the `env.config` and `env.secrets` sections in your `values.yaml`.
    - Secrets (API keys, tokens, Hugging Face credentials, etc.) will be mounted into the cluster as Kubernetes secrets.
+   - To keep them out of values files altogether, let External Secrets Operator write that Secret from OpenBao / Vault instead: see [Secrets from OpenBao](./openbao_secrets) and the `values-openbao.yaml` overlay shipped with the chart.
    - For managed PostgreSQL, point the `POSTGRES_*` values at the external database and disable database auto-creation.
 
 3. **Install or upgrade the release from GHCR**:

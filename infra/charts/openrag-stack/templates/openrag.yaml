@@ -4,6 +4,10 @@ metadata:
   name: {{ include "openrag-stack.fullname" . }}-openrag
   labels:
     {{- include "openrag-stack.componentLabels" (dict "component" "openrag" "context" $) | nindent 4 }}
+  {{- with .Values.openrag.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
 spec:
   replicas: {{ .Values.openrag.replicas }}
   selector:

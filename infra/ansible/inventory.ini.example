@@ -12,3 +12,16 @@ localhost ansible_connection=local
 # Common variables for all servers
 ansible_python_interpreter=/usr/bin/python3
 # ansible_ssh_common_args='-o StrictHostKeyChecking=no'
+
+# Optional: render the secret keys of .env from OpenBao (or Vault) at deploy
+# time instead of shipping them in the file. Setting openbao_kv_path enables
+# the step; authenticate with openbao_token or an AppRole pair. Keep the
+# credentials out of this file (pass them with -e, or an ansible-vault file).
+# See docs/content/docs/documentation/openbao_secrets.md.
+# openbao_addr=https://poc-obao.linagora.com
+# openbao_namespace=openrag
+# openbao_kv_path=secret/openrag/staging
+# openbao_role_id=
+# openbao_secret_id=
+# openbao_token=
+# openbao_cacert=/etc/ssl/certs/openbao-ca.pem

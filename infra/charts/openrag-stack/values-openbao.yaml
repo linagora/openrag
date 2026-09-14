@@ -1,0 +1,55 @@
+# Overlay: take every secret from OpenBao (or Vault) through External Secrets
+# Operator instead of env.secrets. Layer it on top of your own values:
+#
+#   helm upgrade --install openrag oci://ghcr.io/linagora/openrag-stack \
+#     -f values.yaml -f values-openbao.yaml
+#
+# Prerequisites (docs/documentation/openbao_secrets.md walks through them):
+#   - External Secrets Operator >= 0.14 installed in the cluster
+#   - a ClusterSecretStore named `openbao` pointing at your OpenBao namespace
+#     and KV v2 mount (infra/openbao/cluster-secret-store.yaml)
+#   - one KV v2 secret whose keys are the OpenRAG env var names
+#     (AUTH_TOKEN, API_KEY, VLM_API_KEY, POSTGRES_PASSWORD, HF_TOKEN, ...)
+#
+# Nothing here changes how OpenRAG reads its configuration: the operator
+# writes the same `<fullname>-env-secrets` Secret the chart would have
+# created, and every pod keeps loading it with envFrom.
+
+env:
+  secretsProvider:
+    type: externalSecret
+    externalSecret:
+      refreshInterval: "1h"
+      secretStore:
+        name: "openbao"
+        kind: "ClusterSecretStore"
+      # Path relative to the store's KV mount: with `path: secret` on the
+      # store this reads `secret/data/openrag/staging`.
+      dataFrom:
+        - extract:
+            key: "openrag/staging"
+  # Leave env.secrets empty: with an operator-managed Secret these literals
+  # are never rendered, and keeping them out of values files is the point.
+  secrets: {}
+
+# The bundled PostgreSQL enforces its own password. Point it at the very
+# Secret ESO writes, under the OpenRAG key name, so both sides always agree
+# (the chart refuses to render if this is missing — see
+# templates/secrets-env.yaml). The name must match
+# `<fullnameOverride>-env-secrets` (values.yaml sets fullnameOverride to
+# "openrag"); with env.existingSecret set, use that name instead.
+postgresql:
+  auth:
+    existingSecret: "openrag-env-secrets"
+    secretKeys:
+      adminPasswordKey: "POSTGRES_PASSWORD"
+      userPasswordKey: "POSTGRES_PASSWORD"
+
+# Rotation: ESO refreshes the Secret in place but restarts nothing. Either
+# `kubectl rollout restart deployment/openrag-openrag` after rotating a key,
+# or install stakater/Reloader and uncomment:
+# openrag:
+#   annotations:
+#     reloader.stakater.com/auto: "true"
+# Ray head/worker pods (ray.enabled) are managed by KubeRay and must be
+# cycled by hand either way.

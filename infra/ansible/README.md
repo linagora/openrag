@@ -187,6 +187,27 @@ RETRIEVER_TOP_K=20
 EMBEDDER_MODEL_NAME=Qwen/Qwen3-Embedding-0.6B
 ```
 
+### Secrets from OpenBao (optional)
+
+Instead of shipping the secret values inside `.env`, the `openrag.yml`
+playbook can pull them from OpenBao (or Vault) at deploy time. Define
+`openbao_kv_path` on the host or group — plus `openbao_addr` and either
+`openbao_token` or an AppRole pair — and the playbook runs
+`infra/scripts/openbao_env.py` on the target to patch the secret keys into
+`.env` (mode `0600`, `no_log`), before `docker compose up`:
+
+```bash
+ansible-playbook -i inventory.ini playbooks/openrag.yml --ask-become-pass \
+  -e openbao_addr=https://poc-obao.linagora.com \
+  -e openbao_namespace=openrag \
+  -e openbao_kv_path=secret/openrag/staging \
+  -e openbao_role_id="$BAO_ROLE_ID" -e openbao_secret_id="$BAO_SECRET_ID"
+```
+
+The remaining, non-secret variables still come from `.env` (copied from your
+local file on first deploy, or from `infra/compose/.env.example`). Full
+guide: `docs/content/docs/documentation/openbao_secrets.md`.
+
 ### Version Configuration
 
 The playbook uses these default versions (configurable via inventory variables):

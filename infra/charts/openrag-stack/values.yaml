@@ -454,6 +454,13 @@ openrag:
     type: ClusterIP
     port: 8080
     targetPort: 8080
+  # Annotations on the OpenRAG Deployment object itself (not its pods). The
+  # main use is a secret reloader when the env Secret is operator-managed
+  # (env.secretsProvider.type: externalSecret): ESO rewrites the Secret on
+  # rotation but restarts nothing, so e.g. stakater/Reloader needs
+  #   reloader.stakater.com/auto: "true"
+  # here to roll the pods. See docs/documentation/openbao_secrets.md.
+  annotations: {}
   # Off by default: enabling requires an explicit openrag.ingress.host (see
   # templates/openrag.yaml's `required` guard) so the chart never exposes an
   # unauthenticated wildcard-host Ingress by accident.
@@ -567,16 +574,26 @@ env:
 
   # Secrets provider — ignored when existingSecret is set.
   # type: values (default) | externalSecret | vaultStaticSecret
+  #
+  # With externalSecret / vaultStaticSecret (or existingSecret) the bundled
+  # PostgreSQL must read its password from that same Secret — see
+  # values-openbao.yaml for the full overlay (secrets-env.yaml fails the
+  # render otherwise) and docs/documentation/openbao_secrets.md.
   secretsProvider:
     type: values
 
-    # Option A: External Secrets Operator
+    # Option A: External Secrets Operator (works with OpenBao and Vault: the
+    # `vault` provider of a (Cluster)SecretStore — infra/openbao/ has one).
+    # Every key of the remote secret becomes an env var of every OpenRAG pod
+    # (the Secret is loaded with envFrom), so name the KV keys after the env
+    # vars: AUTH_TOKEN, API_KEY, POSTGRES_PASSWORD, HF_TOKEN, ...
     externalSecret:
       refreshInterval: "1h"
       secretStore:
         name: "vault-backend"
         kind: "ClusterSecretStore"
-      # Option 1: fetch all keys from a path (recommended)
+      # Option 1: fetch all keys from a path (recommended). The key is
+      # relative to the store's KV mount (`spec.provider.vault.path`).
       dataFrom: []
       # - extract:
       #     key: "openrag/secrets"

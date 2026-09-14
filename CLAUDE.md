@@ -410,6 +410,29 @@ Configuration is a single YAML file validated with Pydantic models:
 
 Environment variables override config values (see `infra/compose/.env.example`).
 
+### Secrets Management (OpenBao / Vault)
+
+The application has no secrets client: every credential is read from the environment, so
+secret managers are integrated at deploy time only. `docs/content/docs/documentation/openbao_secrets.md`
+is the guide; the pieces are:
+
+- **Helm** — `env.secretsProvider.type` in `infra/charts/openrag-stack/values.yaml`: `values`
+  (default, literal `env.secrets`), `externalSecret` (External Secrets Operator) or
+  `vaultStaticSecret`. `values-openbao.yaml` is the ESO overlay for OpenBao. Every OpenRAG pod
+  loads the resulting Secret with `envFrom`, so the KV keys are the env var names.
+  `templates/secrets-env.yaml` fails the render when the bundled PostgreSQL has neither
+  `auth.password` nor `auth.existingSecret`: with an operator-managed Secret it must point at
+  that Secret with `auth.secretKeys.*` = `POSTGRES_PASSWORD`, or bitnami generates a random
+  password OpenRAG can never match. `openrag.annotations` exists for a Reloader annotation
+  (ESO refreshes the Secret but restarts nothing).
+- **Compose / Ansible** — `infra/scripts/openbao_env.py` (stdlib only) reads one KV v2 secret and
+  patches its keys into `.env` in place (mode 0600, values never printed). The `openrag.yml`
+  playbook runs it when `openbao_kv_path` is defined. Tested in
+  `tests/unit/infra/test_openbao_env.py` against an in-process fake OpenBao.
+- **OpenBao side** — `infra/openbao/policy.hcl` (read-only on `secret/openrag/*`, including the
+  logical path the UI needs) and `infra/openbao/cluster-secret-store.yaml` (ESO store with
+  Kubernetes auth).
+
 ### Testing Structure
 
 All tests live in a separate `tests/` tree (zero test files inside the `openrag/` package):

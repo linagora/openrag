@@ -110,6 +110,42 @@
 
       become_user: "{{ project_user }}"
 
+    # ========== SECRETS FROM OPENBAO (optional) ==========
+    # Set openbao_kv_path (plus openbao_addr and either openbao_token or
+    # openbao_role_id/openbao_secret_id) on the host or group to render the
+    # secret keys of .env from OpenBao instead of shipping them in the file.
+    # See docs/content/docs/documentation/openbao_secrets.md.
+    - name: Render secrets from OpenBao into .env
+      block:
+        - name: Check whether .env already exists on the target
+          stat:
+            path: "{{ project_path }}/.env"
+          register: openbao_env_file
+
+        - name: Patch .env with the secrets stored in OpenBao
+          command:
+            argv:
+              - python3
+              - "{{ project_path }}/infra/scripts/openbao_env.py"
+              - --path
+              - "{{ openbao_kv_path }}"
+              - --base
+              - "{{ project_path ~ '/.env' if openbao_env_file.stat.exists else project_path ~ '/infra/compose/.env.example' }}"
+              - --out
+              - "{{ project_path }}/.env"
+          environment:
+            BAO_ADDR: "{{ openbao_addr }}"
+            BAO_NAMESPACE: "{{ openbao_namespace | default('') }}"
+            BAO_TOKEN: "{{ openbao_token | default('') }}"
+            BAO_ROLE_ID: "{{ openbao_role_id | default('') }}"
+            BAO_SECRET_ID: "{{ openbao_secret_id | default('') }}"
+            BAO_CACERT: "{{ openbao_cacert | default('') }}"
+          # The script never prints values, but the task's environment holds
+          # the AppRole secret_id — keep the whole task out of the play log.
+          no_log: true
+      when: openbao_kv_path is defined
+      become_user: "{{ project_user }}"
+
     - name: Create required directories
       file:
         path: "{{ project_path }}/{{ item }}"
