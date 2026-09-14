@@ -185,3 +185,58 @@ def test_extract_temporal_fields_invalid_datetime_raises_400():
     assert exc_info.value.status_code == 400
     assert "not-a-date" in str(exc_info.value)
     assert "created_at" in str(exc_info.value)
+
+
+# ---------------------------------------------------------------------------
+# Upload content-signature check
+# ---------------------------------------------------------------------------
+
+
+class _LoaderFormats:
+    def model_dump(self):
+        return {"pdf": "x", "png": "x", "txt": "x"}
+
+
+class _Mimetypes:
+    def to_dict(self):
+        return {}
+
+
+class _StubConfig:
+    class loader:  # noqa: N801 - mirrors the config object's attribute shape
+        file_loaders = _LoaderFormats()
+        mimetypes = _Mimetypes()
+
+
+_PDF_BYTES = b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n" + b"payload" * 4000
+_PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
+
+
+@pytest.mark.asyncio
+async def test_validate_file_format_rejects_content_that_contradicts_the_extension():
+    upload = UploadFile(file=io.BytesIO(_PNG_BYTES), filename="renamed.pdf")
+
+    with pytest.raises(ValidationError) as exc_info:
+        await files_dep.validate_file_format(file=upload, metadata={}, config=_StubConfig)
+
+    assert exc_info.value.status_code == 415
+
+
+@pytest.mark.asyncio
+async def test_validate_file_format_accepts_matching_content():
+    upload = UploadFile(file=io.BytesIO(_PDF_BYTES), filename="real.pdf")
+
+    assert await files_dep.validate_file_format(file=upload, metadata={}, config=_StubConfig) is upload
+
+
+@pytest.mark.asyncio
+async def test_reading_the_head_leaves_the_stream_intact_for_the_save(tmp_path: Path):
+    """The check reads the head and rewinds. If it did not, the file written to
+    disk afterwards would be silently truncated by however much was sniffed."""
+    upload = UploadFile(file=io.BytesIO(_PDF_BYTES), filename="real.pdf")
+
+    await files_dep.validate_file_format(file=upload, metadata={}, config=_StubConfig)
+    saved = await save_file_to_disk_with_sha256(upload, tmp_path, chunk_size=1024)
+
+    assert saved.path.read_bytes() == _PDF_BYTES
+    assert saved.size_bytes == len(_PDF_BYTES)

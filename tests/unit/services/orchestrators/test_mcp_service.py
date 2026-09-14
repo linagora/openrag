@@ -13,7 +13,12 @@ from types import SimpleNamespace
 import httpx
 import pytest
 from core.utils.exceptions import ValidationError
-from services.orchestrators.mcp_service import MCPService
+from services.orchestrators.mcp_service import (
+    MCPService,
+)  #: index_url verifies downloaded bytes against the URL extension; these
+
+#: fixtures use .pdf URLs, so their payloads must carry a PDF signature.
+_PDF_HEADER = b"%PDF-1.7\n"
 
 # ---------------------------------------------------------------------------
 # Fakes
@@ -630,7 +635,7 @@ async def test_index_url_auto_creates_partition_and_indexes(monkeypatch):
     svc = _service(partitions=parts, indexing=indexing)
 
     async def fake_download(url, dest):
-        dest.write_bytes(b"data")
+        dest.write_bytes(_PDF_HEADER + b"data")
 
     monkeypatch.setattr(svc, "_safe_download", fake_download)
 
@@ -671,7 +676,7 @@ async def test_index_url_removes_download_when_content_is_duplicate(monkeypatch)
     async def fake_download(url, dest):
         nonlocal downloaded_path
         downloaded_path = dest
-        dest.write_bytes(b"duplicate")
+        dest.write_bytes(_PDF_HEADER + b"duplicate")
 
     monkeypatch.setattr(svc, "_safe_download", fake_download)
 
@@ -698,7 +703,7 @@ async def test_index_url_removes_download_when_dispatch_is_cancelled(monkeypatch
     async def fake_download(url, dest):
         nonlocal downloaded_path
         downloaded_path = dest
-        dest.write_bytes(b"partial")
+        dest.write_bytes(_PDF_HEADER + b"partial")
 
     monkeypatch.setattr(svc, "_safe_download", fake_download)
 
@@ -722,7 +727,7 @@ async def test_index_url_admin_auto_create_bypasses_partition_cap(monkeypatch):
     svc = _service(partitions=parts, indexing=indexing)
 
     async def fake_download(url, dest):
-        dest.write_bytes(b"data")
+        dest.write_bytes(_PDF_HEADER + b"data")
 
     monkeypatch.setattr(svc, "_safe_download", fake_download)
 
@@ -746,7 +751,7 @@ async def test_index_url_treats_partition_exists_race_as_success(monkeypatch):
     svc = _service(partitions=parts, indexing=indexing)
 
     async def fake_download(url, dest):
-        dest.write_bytes(b"data")
+        dest.write_bytes(_PDF_HEADER + b"data")
 
     monkeypatch.setattr(svc, "_safe_download", fake_download)
 

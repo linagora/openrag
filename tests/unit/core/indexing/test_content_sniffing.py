@@ -106,3 +106,50 @@ def test_real_pdf_fixture_is_accepted():
 
     fixture = Path(__file__).resolve().parents[3] / "resources" / "test_file.pdf"
     validate_content_matches_extension("pdf", fixture.read_bytes()[:CONTENT_SNIFF_BYTES])
+
+
+# ---------------------------------------------------------------------------
+# Paths that reach a parser without crossing the upload routes
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_eml_attachment_with_contradicting_content_is_skipped():
+    """An attachment's filename picks its parser exactly as an upload's does,
+    but those bytes never crossed the upload check. A mismatched attachment
+    must be dropped, and the rest of the message must still parse."""
+    from core.indexing.parsers.eml_parser import EmlParser
+
+    called = False
+
+    class _ExplodingParser:
+        async def parse(self, document):  # pragma: no cover - must not run
+            nonlocal called
+            called = True
+            raise AssertionError("parser reached with unverified bytes")
+
+    parser = EmlParser(attachment_parsers={"pdf": _ExplodingParser()})
+    inline, images = await parser._render_one(
+        {"filename": "invoice.pdf", "raw": _PNG_BYTES, "content_type": "application/pdf", "size": len(_PNG_BYTES)},
+        "pdf",
+    )
+
+    assert called is False
+    assert inline == ""
+
+
+@pytest.mark.asyncio
+async def test_eml_attachment_with_matching_content_still_parses():
+    from core.indexing.parsers.eml_parser import EmlParser
+    from core.models.document import ProcessedDocument, TextBlock
+
+    class _Parser:
+        async def parse(self, document):
+            return ProcessedDocument(document_id="a", text_blocks=[TextBlock(text="hello")], images=[])
+
+    parser = EmlParser(attachment_parsers={"pdf": _Parser()})
+    inline, _ = await parser._render_one(
+        {"filename": "real.pdf", "raw": PDF, "content_type": "application/pdf", "size": len(PDF)},
+        "pdf",
+    )
+    assert "hello" in inline

@@ -35,6 +35,7 @@ from email import policy
 from email.utils import parsedate_to_datetime
 
 from ...models.document import Document, DocumentType, ImageBlock, ProcessedDocument, TextBlock
+from ..validators import CONTENT_SNIFF_BYTES, validate_content_matches_extension
 from .document_parser import DocumentParser
 from .html_parser import HtmlParser
 from .registry import parser_registry
@@ -230,6 +231,11 @@ class EmlParser(DocumentParser):
         parser = self._attachment_parsers.get(ext)
         if parser is not None:
             try:
+                # An attachment's name picks its parser exactly as an upload's
+                # does, but these bytes never crossed the upload check. A
+                # mismatch raises and is caught below: the attachment is
+                # skipped and logged, the rest of the message still parses.
+                validate_content_matches_extension(ext, attachment["raw"][:CONTENT_SNIFF_BYTES])
                 doc = Document(
                     filename=attachment["filename"],
                     raw_bytes=attachment["raw"],

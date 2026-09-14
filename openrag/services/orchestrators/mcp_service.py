@@ -32,6 +32,7 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import urljoin, urlparse
 
 import httpx
+from core.indexing.validators import CONTENT_SNIFF_BYTES, validate_content_matches_extension
 from core.utils.consts import is_internal_metadata_key, strip_protected_metadata
 from core.utils.exceptions import ValidationError
 from core.utils.logging import get_logger
@@ -583,6 +584,18 @@ class MCPService:
         finally:
             if not download_complete:
                 tmp_path.unlink(missing_ok=True)
+
+        # The extension comes from the URL path, and it alone selects the
+        # parser — the same trust the upload routes refuse to extend to a
+        # caller-supplied filename. Check the downloaded bytes agree with it.
+        try:
+            validate_content_matches_extension(
+                suffix.lstrip(".").lower(),
+                tmp_path.read_bytes()[:CONTENT_SNIFF_BYTES],
+            )
+        except Exception:
+            tmp_path.unlink(missing_ok=True)
+            raise
 
         metadata = _strip_protected_metadata(extra_metadata)
         metadata["source_url"] = url
