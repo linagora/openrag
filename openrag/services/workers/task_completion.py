@@ -19,9 +19,12 @@ _REFLESS_RECOVERY_POLL_SECONDS = 5.0
 _TASK_STATE_CALL_TIMEOUT_SECONDS = 30.0
 _JOB_RETENTION_DAYS = 30
 _ORPHAN_GRACE_SECONDS = 300
+_RECONCILE_INTERVAL_SECONDS = 120.0
 _SETTLEMENT_RETRY_SECONDS = 30.0
 _MAX_PENDING_SETTLEMENTS = 1_000
 _ORPHANED_JOB_ERROR = "Indexing task was interrupted by a restart and no longer has a live worker."
+_SETTLED_STATE_POLL_ATTEMPTS = 5
+_SETTLED_STATE_POLL_INTERVAL_SECONDS = 0.05
 
 
 class TaskCompletionTracker:
@@ -39,6 +42,7 @@ class TaskCompletionTracker:
         # Outcomes Postgres has not taken yet, oldest first.
         self._pending_settlements: OrderedDict[str, IndexationJob] = OrderedDict()
         self._settlement_retry: asyncio.Future | None = None
+        self._reconcile_loop: asyncio.Future | None = None
 
     def supports_cancellation_recovery(self) -> bool:
         """Identify trackers that preserve unsettled cancellation fences."""
@@ -75,6 +79,8 @@ class TaskCompletionTracker:
                     "get_all_info_for_completion_recovery",
                 )
                 await self.reconcile_jobs(list(all_info))
+                if self._reconcile_loop is None or self._reconcile_loop.done():
+                    self._reconcile_loop = asyncio.ensure_future(self._periodic_reconcile())
                 for task_id, info in all_info.items():
                     state = info.get("state")
                     if state == "CANCELLED":
@@ -250,6 +256,26 @@ class TaskCompletionTracker:
             )
         )
 
+    async def _poll_for_terminal_state(self, task_state_manager: Any, task_id: str) -> str | None:
+        """Ride out the race between a cancel's state write and this read.
+
+        ``cancel_active_indexing_tasks`` awaits the same worker ref as
+        ``track()``, then writes ``CANCELLED`` in a second remote call. A read
+        here can land in that gap and see the task's last non-terminal state,
+        wrongly concluding there is nothing to persist yet. A short poll
+        closes the window instead of trusting the first read.
+        """
+        for attempt in range(_SETTLED_STATE_POLL_ATTEMPTS):
+            state = await self._call_task_state(
+                lambda: task_state_manager.get_state.remote(task_id),
+                f"get_state({task_id}) for job history",
+            )
+            if state in _TERMINAL_STATES:
+                return state
+            if attempt < _SETTLED_STATE_POLL_ATTEMPTS - 1:
+                await asyncio.sleep(_SETTLED_STATE_POLL_INTERVAL_SECONDS)
+        return None
+
     async def _job_repo(self) -> Any:
         """Build the catalog store lazily: this actor outlives any API process."""
         if self._catalog_store is None:
@@ -273,11 +299,8 @@ class TaskCompletionTracker:
         """
         try:
             task_state_manager = self._task_state_manager()
-            state = await self._call_task_state(
-                lambda: task_state_manager.get_state.remote(task_id),
-                f"get_state({task_id}) for job history",
-            )
-            if state not in _TERMINAL_STATES:
+            state = await self._poll_for_terminal_state(task_state_manager, task_id)
+            if state is None:
                 return True
             error = await self._call_task_state(
                 lambda: task_state_manager.get_error.remote(task_id),
@@ -339,6 +362,26 @@ class TaskCompletionTracker:
                         task_id=task_id,
                         error=str(exc),
                     )
+
+    async def _periodic_reconcile(self, interval: float = _RECONCILE_INTERVAL_SECONDS) -> None:
+        """Keep sweeping orphaned/expired job rows between restarts.
+
+        ``recover()`` only runs once per process start, so without this a task
+        interrupted inside the grace window it skips (the most recent
+        ``_ORPHAN_GRACE_SECONDS``) would never be revisited until the next
+        restart.
+        """
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                task_state_manager = self._task_state_manager()
+                all_info = await self._call_task_state(
+                    task_state_manager.get_all_info.remote,
+                    "get_all_info_for_periodic_reconcile",
+                )
+                await self.reconcile_jobs(list(all_info))
+            except Exception as exc:
+                self._logger.warning("Periodic indexing job reconciliation failed", error=str(exc))
 
     async def reconcile_jobs(self, active_ids: list[str]) -> None:
         """Settle records a restart orphaned and drop history past retention."""

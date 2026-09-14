@@ -13,6 +13,17 @@ def _remote_mock(return_value: Any = None) -> MagicMock:
     return method
 
 
+@pytest.fixture(autouse=True)
+def _stub_periodic_reconcile(monkeypatch):
+    """Keep recover()'s background reconcile loop from dangling past each test."""
+    from services.workers import task_completion
+
+    async def _noop(self, interval=None):
+        return None
+
+    monkeypatch.setattr(task_completion.TaskCompletionTracker, "_periodic_reconcile", _noop)
+
+
 def _task_state_manager(
     *,
     all_info: dict[str, dict] | None = None,
@@ -579,4 +590,104 @@ async def test_recover_settles_jobs_a_restart_orphaned() -> None:
     assert repo.failed_calls[0]["active_ids"] == ["task-live"]
     assert "restart" in repo.failed_calls[0]["error"]
     assert repo.failed_calls[0]["before"] is not None  # recent rows are spared
+
+
+@pytest.mark.asyncio
+async def test_recover_starts_the_periodic_reconcile_loop(monkeypatch) -> None:
+    """recover() only runs once per process start, so without a periodic
+    sweep a task orphaned inside the grace window it skipped would never be
+    revisited until the next restart."""
+    from services.workers import task_completion
+
+    started = []
+    release = asyncio.Event()
+
+    async def fake_periodic_reconcile(self, interval=None):
+        started.append(1)
+        await release.wait()
+
+    monkeypatch.setattr(task_completion.TaskCompletionTracker, "_periodic_reconcile", fake_periodic_reconcile)
+    repo = _FakeJobRepo()
+    tsm = _task_state_manager()
+
+    with patch("services.workers.task_completion.ray.get_actor", return_value=tsm):
+        tracker = _tracker_with_repo(repo)
+        await tracker.recover()
+        await tracker.recover()
+
+    assert started == [1]  # second recover() found the loop still running
+
+    release.set()
+    await tracker._reconcile_loop
+
+
+@pytest.mark.asyncio
+async def test_periodic_reconcile_keeps_sweeping_until_cancelled(monkeypatch) -> None:
+    from services.workers.task_completion import TaskCompletionTracker
+
+    repo = _FakeJobRepo()
+    tsm = _task_state_manager(all_info={"task-live": {"state": "QUEUED", "details": {}}})
+    tracker = _tracker_with_repo(repo)
+
+    sleeps = []
+
+    async def fast_sleep(seconds):
+        sleeps.append(seconds)
+        if len(sleeps) >= 2:
+            raise asyncio.CancelledError()
+
+    with (
+        patch("services.workers.task_completion.ray.get_actor", return_value=tsm),
+        patch("services.workers.task_completion.asyncio.sleep", fast_sleep),
+        pytest.raises(asyncio.CancelledError),
+    ):
+        await tracker._periodic_reconcile(interval=0)
+
+    assert len(repo.failed_calls) == 2
+    assert repo.failed_calls[0]["active_ids"] == ["task-live"]
+
+
+@pytest.mark.asyncio
+async def test_settled_job_read_rides_out_the_cancel_state_write_race(monkeypatch) -> None:
+    """A cancel writes CANCELLED right after the same worker ref this method
+    is settling for also finishes. A read landing in that gap must not read
+    the pre-cancel state and conclude there is nothing to persist yet."""
+    from core.models.catalog import DocumentStatus
+    from services.workers import task_completion
+
+    monkeypatch.setattr(task_completion, "_SETTLED_STATE_POLL_INTERVAL_SECONDS", 0)
+    repo = _FakeJobRepo()
+    tsm = _task_state_manager()
+    tsm.get_state.remote.side_effect = ["SERIALIZING", "SERIALIZING", "CANCELLED"]
+    tsm.get_details.remote.return_value = {
+        "file_id": "file-1",
+        "partition": "tenant-a",
+        "metadata": {},
+        "user_id": 42,
+    }
+
+    with patch("services.workers.task_completion.ray.get_actor", return_value=tsm):
+        tracker = _tracker_with_repo(repo)
+        await tracker._record_finished_at("task-1")
+
+    assert len(repo.saved) == 1
+    assert repo.saved[0].status == DocumentStatus.CANCELLED
+
+
+@pytest.mark.asyncio
+async def test_settled_job_read_gives_up_after_bounded_polling(monkeypatch) -> None:
+    """A task that is genuinely still active (no race, no cancel in flight)
+    must still be treated as having nothing to persist yet, not hang."""
+    from services.workers import task_completion
+
+    monkeypatch.setattr(task_completion, "_SETTLED_STATE_POLL_INTERVAL_SECONDS", 0)
+    repo = _FakeJobRepo()
+    tsm = _task_state_manager(state="SERIALIZING")
+
+    with patch("services.workers.task_completion.ray.get_actor", return_value=tsm):
+        tracker = _tracker_with_repo(repo)
+        result = await tracker._record_settled_job("task-1", {"partition": "tenant-a"})
+
+    assert result is True
+    assert repo.saved == []
     assert repo.purged_before  # retention runs in the same pass
