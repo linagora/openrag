@@ -4,27 +4,17 @@ from functools import wraps
 
 import httpx
 from aiobreaker import CircuitBreaker, CircuitBreakerError, CircuitBreakerListener
+from core.observability.inference_metrics import record_circuit_breaker_state
 from core.utils.exceptions import InferenceConnectionError, LLMParsingError, OpenRAGError
 from core.utils.logging import get_logger
-from prometheus_client import Gauge
 
 logger = get_logger()
 
 _breakers: dict[str, CircuitBreaker] = {}
 _breaker_config: dict[str, tuple[int, float]] = {}
 
-try:
-    CIRCUIT_BREAKER_STATE = Gauge(
-        "openrag_circuit_breaker_state",
-        "Circuit breaker state (0=closed, 1=open, 2=half-open)",
-        ["name"],
-    )
-except ValueError:
-    from prometheus_client import REGISTRY
-
-    CIRCUIT_BREAKER_STATE = REGISTRY._names_to_collectors["openrag_circuit_breaker_state"]
-
 _STATE_VALUES = {"ClosedState": 0, "OpenState": 1, "HalfOpenState": 2}
+_UNKNOWN_STATE = -1
 
 
 def _is_client_error(exc: Exception) -> bool:
@@ -52,7 +42,7 @@ class _LoggingListener(CircuitBreakerListener):
             old=type(old).__name__,
             new=state_name,
         )
-        CIRCUIT_BREAKER_STATE.labels(name=breaker.name).set(_STATE_VALUES.get(state_name, -1))
+        record_circuit_breaker_state(breaker.name, _STATE_VALUES.get(state_name, _UNKNOWN_STATE))
 
 
 def get_breaker(name: str, fail_max: int = 50, timeout_duration: float = 60.0) -> CircuitBreaker:

@@ -48,6 +48,7 @@ from typing import NamedTuple, Protocol
 
 from core.observability._reporting import report_once
 from core.observability.metric_specs import (
+    CIRCUIT_BREAKER_STATE,
     INFERENCE_DURATION_SECONDS,
     INFERENCE_REQUESTS_TOTAL,
     LLM_TOKENS_TOTAL,
@@ -71,6 +72,8 @@ class _Instrument(Protocol):
 
     def observe(self, value: float, tags: dict[str, str]) -> None: ...
 
+    def set(self, value: float, tags: dict[str, str]) -> None: ...
+
 
 class _RayInstrument:
     def __init__(self, metric: object) -> None:
@@ -81,6 +84,9 @@ class _RayInstrument:
 
     def observe(self, value: float, tags: dict[str, str]) -> None:
         self._metric.observe(value, tags=tags)
+
+    def set(self, value: float, tags: dict[str, str]) -> None:
+        self._metric.set(value, tags=tags)
 
 
 class _PrometheusInstrument:
@@ -93,11 +99,15 @@ class _PrometheusInstrument:
     def observe(self, value: float, tags: dict[str, str]) -> None:
         self._metric.labels(**tags).observe(value)
 
+    def set(self, value: float, tags: dict[str, str]) -> None:
+        self._metric.labels(**tags).set(value)
+
 
 class _Instruments(NamedTuple):
     requests: _Instrument
     duration: _Instrument
     tokens: _Instrument
+    circuit_breaker: _Instrument
 
 
 @lru_cache(maxsize=1)
@@ -133,6 +143,9 @@ def _instruments() -> _Instruments:
                     tag_keys=spec.labels,
                 )
             )
+
+        def gauge(spec: MetricSpec) -> _Instrument:
+            return _RayInstrument(ray_metrics.Gauge(spec.name, description=spec.description, tag_keys=spec.labels))
     else:
         import prometheus_client
 
@@ -144,10 +157,14 @@ def _instruments() -> _Instruments:
                 prometheus_client.Histogram(spec.name, spec.description, list(spec.labels), buckets=spec.buckets)
             )
 
+        def gauge(spec: MetricSpec) -> _Instrument:
+            return _PrometheusInstrument(prometheus_client.Gauge(spec.name, spec.description, list(spec.labels)))
+
     return _Instruments(
         requests=counter(INFERENCE_REQUESTS_TOTAL),
         duration=histogram(INFERENCE_DURATION_SECONDS),
         tokens=counter(LLM_TOKENS_TOTAL),
+        circuit_breaker=gauge(CIRCUIT_BREAKER_STATE),
     )
 
 
@@ -183,6 +200,22 @@ def record_tokens(*, operation: str, prompt: int = 0, completion: int = 0) -> No
         report_once(LLM_TOKENS_TOTAL.name, exc)
 
 
+def record_circuit_breaker_state(name: str, state: int) -> None:
+    """Publish a breaker's state.
+
+    Routed through this module rather than a module-level ``prometheus_client``
+    Gauge because the breakers trip on both sides of Ray: the ``llm`` breaker in
+    the API process serving chat, the ``embedder`` and ``vlm`` breakers inside
+    indexing workers. The previous Gauge was only ever visible for the former,
+    so a tripped embedder — the failure most worth alerting on, because it stops
+    ingestion entirely — was invisible to every scrape.
+    """
+    try:
+        _instruments().circuit_breaker.set(state, {"name": name})
+    except Exception as exc:  # noqa: BLE001 - a breaker trip must still be logged
+        report_once(CIRCUIT_BREAKER_STATE.name, exc)
+
+
 def record_usage_from_response(response: object, *, operation: str) -> None:
     """Count an OpenAI-shaped ``usage`` block, if the response carries one.
 
@@ -210,6 +243,7 @@ def record_usage_from_response(response: object, *, operation: str) -> None:
 __all__ = [
     "CLIENT_OVERRIDE_PROVIDER",
     "PROVIDER_NAME_ATTR",
+    "record_circuit_breaker_state",
     "record_inference",
     "record_tokens",
     "record_usage_from_response",
