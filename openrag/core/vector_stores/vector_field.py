@@ -71,6 +71,15 @@ def resolve_vector_field(vector_field: str | None) -> str:
     return vector_field or LEGACY_VECTOR_FIELD
 
 
+def is_vector_field_key(key: object) -> bool:
+    """Whether a row key is a dense vector field rather than chunk metadata.
+
+    Stores return every vector field with a wildcard read, so anything that
+    shows a row's metadata has to drop these — one float array per embedder.
+    """
+    return isinstance(key, str) and (key == LEGACY_VECTOR_FIELD or key.startswith(VECTOR_FIELD_PREFIX))
+
+
 def sanitize_vector_field_name(endpoint_name: str) -> str:
     """Build the preferred field name for an endpoint, ignoring collisions.
 
@@ -131,6 +140,7 @@ __all__ = [
     "MAX_FIELD_NAME_LENGTH",
     "VECTOR_FIELD_PREFIX",
     "allocate_vector_field_name",
+    "is_vector_field_key",
     "resolve_vector_field",
     "sanitize_vector_field_name",
 ]

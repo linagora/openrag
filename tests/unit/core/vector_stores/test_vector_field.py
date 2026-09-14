@@ -7,6 +7,7 @@ from core.vector_stores.vector_field import (
     LEGACY_VECTOR_FIELD,
     MAX_FIELD_NAME_LENGTH,
     allocate_vector_field_name,
+    is_vector_field_key,
     resolve_vector_field,
     sanitize_vector_field_name,
 )
@@ -25,6 +26,16 @@ class TestResolveVectorField:
 
     def test_an_allocated_name_is_returned_unchanged(self):
         assert resolve_vector_field("vector_bge_m3") == "vector_bge_m3"
+
+
+class TestIsVectorFieldKey:
+    @pytest.mark.parametrize("key", ["vector", "vector_bge_m3", "vector_Qwen3_Embedding_0_6B"])
+    def test_dense_fields_are_recognised(self, key):
+        assert is_vector_field_key(key)
+
+    @pytest.mark.parametrize("key", ["text", "vectorize", "my_vector", 3, None])
+    def test_everything_else_is_metadata(self, key):
+        assert not is_vector_field_key(key)
 
 
 class TestSanitize:

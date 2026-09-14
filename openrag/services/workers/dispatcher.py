@@ -17,6 +17,7 @@ from core.models.catalog import (
 from core.utils.consts import is_internal_metadata_key, strip_internal_metadata
 from core.utils.exceptions import ConflictError, mark_indexing_worker_may_be_running
 from core.utils.logging import get_logger
+from core.vector_stores.vector_field import is_vector_field_key
 from ray.exceptions import TaskCancelledError
 from services.workers.ray_utils import call_ray_actor_with_timeout, retry_idempotent_ray_actor_method
 from services.workers.stages.store import INDEXING_TASK_ID_METADATA_KEY
@@ -41,7 +42,6 @@ class WorkerDispatcher(IndexingDispatcher):
             "_id",
             "id",
             "text",
-            "vector",
             "page",
             "section_id",
             "prev_section_id",
@@ -556,7 +556,9 @@ class WorkerDispatcher(IndexingDispatcher):
         rows = await self._vector_store.query_chunks_by_filter(
             self._collection,
             {"partition": partition, "file_id": file_id},
-            output_fields=["*", "vector"],
+            # "*" carries every dense field — one per embedder (#762 F) — and
+            # the whole row is written back, so none of them may be missing.
+            output_fields=["*"],
         )
         if not rows:
             return
@@ -607,7 +609,7 @@ class WorkerDispatcher(IndexingDispatcher):
             rows = await self._vector_store.query_chunks_by_filter(
                 self._collection,
                 {"partition": partition, "file_id": file_id},
-                output_fields=["*", "vector"],
+                output_fields=["*"],
             )
             if not rows:
                 return
@@ -658,7 +660,9 @@ class WorkerDispatcher(IndexingDispatcher):
         return {
             k: v
             for k, v in chunk.items()
-            if k not in self._FILE_METADATA_EXCLUDED_KEYS and not is_internal_metadata_key(k)
+            if k not in self._FILE_METADATA_EXCLUDED_KEYS
+            and not is_internal_metadata_key(k)
+            and not is_vector_field_key(k)
         }
 
     async def get_task_state(self, task_id: str) -> str | None:
