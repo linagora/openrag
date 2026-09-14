@@ -29,6 +29,7 @@ from services.inference.vllm_client import _parse_response, _strip_falsy_logprob
 
 from ._call_log import log_llm_call
 from ._circuit_breaker import with_circuit_breaker
+from ._metrics import with_inference_metrics
 from ._retry import with_retry
 
 logger = get_logger()
@@ -79,6 +80,7 @@ class OllamaClient(LLM):
         )
         logger.bind(model=self._model, endpoint=self._endpoint, timeout=timeout).debug("OllamaClient ready")
 
+    @with_inference_metrics("chat", capture_usage=True)
     @with_circuit_breaker("llm")
     @with_retry(max_attempts=3)
     async def generate(self, prompt: str, **kwargs) -> dict:
@@ -100,6 +102,7 @@ class OllamaClient(LLM):
             ) from exc
         return _parse_response(resp)
 
+    @with_inference_metrics("chat", capture_usage=True)
     @with_circuit_breaker("llm")
     @with_retry(max_attempts=3)
     async def chat(self, messages: list[dict[str, str]], **kwargs) -> dict:
