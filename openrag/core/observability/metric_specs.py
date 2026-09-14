@@ -287,6 +287,17 @@ INFERENCE_DURATION_SECONDS = MetricSpec(
     buckets=INFERENCE_DURATION_BUCKETS,
 )
 
+#: Breaker state per configured breaker. ``name`` is one of the four breaker
+#: names declared in ``services/inference`` (``llm``, ``embedder``, ``vlm``,
+#: ``reranker``) — code-defined, so bounded by the source rather than by
+#: configuration or traffic.
+CIRCUIT_BREAKER_STATE = MetricSpec(
+    name="openrag_circuit_breaker_state",
+    description="Circuit breaker state (0=closed, 1=open, 2=half-open, -1=unknown)",
+    kind="gauge",
+    labels=("name",),
+)
+
 #: Aggregate token burn. Deliberately not per-tenant: "how much has this tenant
 #: consumed?" is a billing question answered from Postgres by D2, and answering
 #: it here would reintroduce ``partition`` through the back door.
@@ -301,6 +312,7 @@ LLM_TOKENS_TOTAL = MetricSpec(
 #: Every spec declared above. The cardinality test walks this; the backends
 #: instantiate from it. A metric that is not here is not covered by either.
 ALL_SPECS: tuple[MetricSpec, ...] = (
+    CIRCUIT_BREAKER_STATE,
     INGEST_DOCUMENTS_TOTAL,
     INGEST_STAGE_DURATION_SECONDS,
     INGEST_QUEUE_WAIT_SECONDS,
@@ -315,6 +327,7 @@ ALL_SPECS: tuple[MetricSpec, ...] = (
 
 __all__ = [
     "ALL_SPECS",
+    "CIRCUIT_BREAKER_STATE",
     "FORBIDDEN_LABELS",
     "INFERENCE_DURATION_SECONDS",
     "INFERENCE_OPERATION_VALUES",
