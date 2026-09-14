@@ -391,6 +391,24 @@ class TaskStateManager:
                 self.terminal_tasks.move_to_end(task_id)
                 examined += 1
                 continue
+            if info is not None and deadline > timestamp:
+                is_tombstone = info.state == "CANCELLED" or (
+                    info.state == "FAILED" and info.error == STALE_REFLESS_TASK_ERROR
+                )
+                if is_tombstone:
+                    # A settled cancellation's or stale-refless task's worker has
+                    # already gone quiet, but the record itself still fences a
+                    # late write through set_state's state_is_fenced check.
+                    # Forgetting it here under cap pressure alone, before its own
+                    # stored deadline (the later of receipt and fence, computed
+                    # at persist/recovery time), would let that late write
+                    # recreate the task through _ensure_task with no fence at
+                    # all. The cap still bounds memory in the long run: this
+                    # entry keeps cycling to the end of the queue until its own
+                    # deadline passes, same as any other unexpired fence.
+                    self.terminal_tasks.move_to_end(task_id)
+                    examined += 1
+                    continue
             self.terminal_tasks.pop(task_id)
             self._forget_task_locked(task_id)
 

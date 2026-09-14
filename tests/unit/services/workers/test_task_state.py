@@ -1072,6 +1072,38 @@ async def test_an_expired_receipt_behind_a_fence_is_still_evicted(monkeypatch) -
 
 
 @pytest.mark.asyncio
+async def test_capacity_pressure_does_not_evict_an_unexpired_cancellation_tombstone(monkeypatch) -> None:
+    # A settled cancellation's worker fence clears once the worker goes quiet,
+    # but the record itself still has to fence a late write for the full 24h
+    # tombstone TTL. Capacity eviction used to ignore that: once the cap was
+    # exceeded it forgot the head-of-queue record regardless of type, and a
+    # later set_state could recreate the task through _ensure_task with no
+    # fence at all.
+    monkeypatch.setattr(task_state_module, "_MAX_TERMINAL_TASKS", 1)
+    monkeypatch.setattr(task_state_module, "_TERMINAL_TASK_RETENTION_SECONDS", 60.0)
+    monkeypatch.setattr(task_state_module, "_CANCELLATION_TOMBSTONE_TTL_SECONDS", 86_400.0)
+    monkeypatch.setattr(task_state_module.time, "time", lambda: 1_000.0)
+    manager = _task_state_manager()
+    await manager.set_queued_details("cancelled-task", file_id="f1", partition="tenant-a", metadata={}, user_id=1)
+    assert await manager.set_cancelled_if_active("cancelled-task") is True
+
+    # An unrelated task settles well within the cancellation's 24h fence and
+    # pushes the ledger over its 1-record cap.
+    monkeypatch.setattr(task_state_module.time, "time", lambda: 1_100.0)
+    await manager.set_queued_details("done-task", file_id="f2", partition="tenant-a", metadata={}, user_id=2)
+    await manager.set_state("done-task", "COMPLETED")
+
+    assert "cancelled-task" in manager.tasks
+    assert "done-task" not in manager.tasks
+    assert await manager.get_state("cancelled-task") == "CANCELLED"
+
+    # A late write from a worker that never saw the cancellation must still be
+    # refused, not silently accepted because the record was forgotten.
+    assert await manager.set_state("cancelled-task", "SERIALIZING") is False
+    assert await manager.get_state("cancelled-task") == "CANCELLED"
+
+
+@pytest.mark.asyncio
 async def test_stored_task_error_is_bounded(monkeypatch) -> None:
     monkeypatch.setattr(task_state_module, "_MAX_TASK_ERROR_CHARS", 64)
     manager = _task_state_manager()
