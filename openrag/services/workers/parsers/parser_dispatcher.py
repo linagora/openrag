@@ -21,6 +21,7 @@ from typing import Any
 from core.config.model_endpoints import ModelEndpointConfig
 from core.indexing.parsers.document_parser import DocumentParser
 from core.models.document import Document, DocumentType, ProcessedDocument
+from core.observability.ray_metrics import record_parse_completion
 from core.utils.logging import get_logger
 
 logger = get_logger()
@@ -99,7 +100,15 @@ class ParserDispatcher(DocumentParser):
     async def parse(self, document: Document) -> ProcessedDocument:
         backend = self._resolve_backend(document.content_type, _suffix(document.filename))
         parser = self._get(backend)
-        return await parser.parse(document)
+        processed = await parser.parse(document)
+        # The progress watchdog's only observation point: this is the one place
+        # that knows both *which* backend ran and that it completed. Stamped
+        # after a successful parse only — a pool whose workers are wedged stops
+        # updating it, which is what lets the alert's ``time() - <stamp>`` climb.
+        # A failing pool that still returns promptly is a different condition,
+        # covered by openrag_ingest_documents_total{status="failed"}.
+        record_parse_completion(backend)
+        return processed
 
     def for_pdf_strategy(self, strategy: str) -> DocumentParser:
         """Return a parser that forces ``strategy`` (a PDF backend name such as
@@ -247,7 +256,15 @@ class _PdfStrategyParser(DocumentParser):
 
     async def parse(self, document: Document) -> ProcessedDocument:
         if document.content_type is DocumentType.PDF:
-            return await self._dispatcher._get(self._pdf_backend).parse(document)
+            # Stamped here as well as in ``ParserDispatcher.parse``: this branch
+            # reaches the backend directly, so a partition whose preset pins a
+            # ``parsing_strategy`` would otherwise never update the watchdog —
+            # and the pool most likely to wedge (marker) is a PDF backend, which
+            # is precisely the case the watchdog exists for. The non-PDF branch
+            # below delegates to the dispatcher, which stamps on its own.
+            processed = await self._dispatcher._get(self._pdf_backend).parse(document)
+            record_parse_completion(self._pdf_backend)
+            return processed
         return await self._dispatcher.parse(document)
 
 
