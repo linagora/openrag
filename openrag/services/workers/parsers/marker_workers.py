@@ -19,6 +19,7 @@ from core.models.document import (
 )
 from core.utils.logging import get_logger
 from marker.converters.pdf import PdfConverter
+from ray.exceptions import TaskCancelledError
 
 from ..ray_utils import call_ray_actor_with_timeout, retry_with_backoff
 
@@ -77,6 +78,11 @@ def _marker_num_gpus(config) -> float:
 # crafted high-page-count file can't exhaust CPU/memory during ingestion.
 # 0 or negative disables the cap.
 _MAX_PDF_PAGES = 2000
+
+# How many times a pool-recycle retries after its own reset call is cancelled
+# (rather than failing) before the worker slot is dropped for good.
+_RECYCLE_CANCEL_RETRIES = 3
+_RECYCLE_CANCEL_RETRY_DELAY = 0.5
 
 
 @ray.remote
@@ -337,20 +343,31 @@ class MarkerPool:
         Recycling first (kills the child, rebuilds the pool) stops the next
         dispatched chunk from landing on a worker still busy with this one (#723).
 
-        If recycling itself keeps failing, the worker is never returned to
-        ``_queue`` — a slot silently lost is safer than one that might still
-        be busy.
+        A cancel delivered to the reset call itself (the same delete that is
+        tearing down this chunk can recursively cancel it) is not a failed
+        reset, so it is retried instead of dropping the slot. If recycling
+        genuinely keeps failing, the worker is never returned to ``_queue`` —
+        a slot silently lost is safer than one that might still be busy.
         """
-        try:
-            await retry_with_backoff(
-                lambda _i: self._reset_worker_pool(worker),
-                max_retries=self.config.loader.marker_max_task_retry,
-                base_delay=self.config.loader.marker_retry_base_delay,
-                task_description=f"MarkerWorker recycle after {label}",
-            )
-        except Exception:
-            self.logger.exception(f"MarkerWorker recycle after {label} failed; dropping its slot")
-            return
+        for cancel_attempt in range(_RECYCLE_CANCEL_RETRIES + 1):
+            try:
+                await retry_with_backoff(
+                    lambda _i: self._reset_worker_pool(worker),
+                    max_retries=self.config.loader.marker_max_task_retry,
+                    base_delay=self.config.loader.marker_retry_base_delay,
+                    task_description=f"MarkerWorker recycle after {label}",
+                )
+            except (asyncio.CancelledError, TaskCancelledError):
+                if cancel_attempt >= _RECYCLE_CANCEL_RETRIES:
+                    self.logger.exception(f"MarkerWorker recycle after {label} kept getting cancelled; dropping its slot")
+                    return
+                self.logger.warning(f"MarkerWorker recycle after {label} was cancelled; retrying")
+                await asyncio.sleep(_RECYCLE_CANCEL_RETRY_DELAY)
+                continue
+            except Exception:
+                self.logger.exception(f"MarkerWorker recycle after {label} failed; dropping its slot")
+                return
+            break
 
         await self._queue.put(worker)
         self.logger.debug(f"MarkerWorker returned to pool for {label}")
@@ -366,19 +383,29 @@ class MarkerPool:
         async def attempt(_i: int):
             worker = await self._queue.get()
             completed = False
+            child_may_still_run = False
             try:
                 self.logger.info(f"MarkerWorker allocated for {label}")
                 await self.ensure_worker_pool_healthy(worker)
                 result = await self._run_chunk(worker, file_path, page_range, label)
                 completed = True
                 return result
+            except (TimeoutError, asyncio.CancelledError, TaskCancelledError):
+                child_may_still_run = True
+                raise
             finally:
                 if completed:
                     await self._queue.put(worker)
                     self.logger.debug(f"MarkerWorker returned to pool for {label}")
-                else:
+                elif child_may_still_run:
                     self.logger.warning(f"MarkerWorker for {label} did not complete cleanly; recycling before reuse")
                     asyncio.create_task(self._recycle_and_release(worker, label))
+                else:
+                    # An ordinary exception (parse error, OOM) means the child
+                    # already stopped on its own; nothing to reclaim, and
+                    # recycling here would kill the other slots on this actor.
+                    await self._queue.put(worker)
+                    self.logger.debug(f"MarkerWorker returned to pool for {label} without recycling")
 
         return await retry_with_backoff(
             attempt,

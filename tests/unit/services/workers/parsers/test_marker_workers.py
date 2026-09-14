@@ -253,6 +253,56 @@ async def test_process_chunk_never_returns_worker_when_recycle_keeps_failing(mon
     assert pool._queue.qsize() == 0
 
 
+async def test_process_chunk_returns_worker_without_recycling_on_ordinary_exception(monkeypatch):
+    """A parse error (not a cancel/timeout) means the child already stopped on
+    its own, so the slot must go back directly instead of recycling the whole
+    actor's pool and killing sibling chunks."""
+    pool = _bare_marker_pool()
+    reset_calls = []
+
+    async def fake_reset(worker):
+        reset_calls.append(worker)
+
+    async def fake_run_chunk(worker, file_path, page_range, label):
+        raise RuntimeError("parse error")
+
+    monkeypatch.setattr(pool, "ensure_worker_pool_healthy", lambda worker: _noop())
+    monkeypatch.setattr(pool, "_run_chunk", fake_run_chunk)
+    monkeypatch.setattr(pool, "_reset_worker_pool", fake_reset)
+
+    try:
+        await pool._process_chunk("f.pdf", None, "(all pages)")
+    except RuntimeError:
+        pass
+
+    assert reset_calls == []
+    assert pool._queue.qsize() == 1
+    assert pool._queue.get_nowait() == "worker-1"
+
+
+async def test_recycle_and_release_retries_across_cancellation(monkeypatch):
+    """A cancel delivered to the reset call itself (e.g. the same delete that
+    is tearing down the chunk) must be retried, not treated as a failed
+    recycle that permanently drops the slot."""
+    pool = _bare_marker_pool()
+    pool._queue = asyncio.Queue()
+    monkeypatch.setattr(marker_workers, "_RECYCLE_CANCEL_RETRY_DELAY", 0)
+    attempts = []
+
+    async def flaky_reset(worker):
+        attempts.append(worker)
+        if len(attempts) == 1:
+            raise asyncio.CancelledError()
+
+    monkeypatch.setattr(pool, "_reset_worker_pool", flaky_reset)
+
+    await pool._recycle_and_release("worker-1", "(all pages)")
+
+    assert len(attempts) == 2
+    assert pool._queue.qsize() == 1
+    assert pool._queue.get_nowait() == "worker-1"
+
+
 async def _noop():
     return None
 
