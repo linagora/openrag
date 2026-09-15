@@ -1,6 +1,6 @@
 # OpenRagCatalogDriftDetected
 
-**Severity:** warning · **Fires after:** 15 min
+**Severity:** critical · **Fires after:** 15 min
 
 ```
 sum(rate(openrag_retrieval_orphan_chunks_dropped_total[15m])) > 0
@@ -71,6 +71,16 @@ and genuinely does not list those files.
 Re-run deletion for the orphaned file ids so the vector store matches the catalog. If the
 cause was a restore, expect drift proportional to the gap between the two backups, and
 reconcile rather than chasing individual files.
+
+## Expect it to keep firing while you work
+
+The threshold is `> 0`, and the condition persists until the two stores are reconciled —
+so unlike a rate or a saturation alert, this one does not clear on its own and cannot be
+made to stop quickly. At `critical` that means it will keep paging.
+
+That is deliberate: the alert exists because the damage is otherwise invisible, and
+silencing it is a decision someone should have to make explicitly. Silence it for a
+bounded window while reconciling, rather than downgrading it.
 
 ## Verify recovery
 

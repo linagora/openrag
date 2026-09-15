@@ -16,7 +16,7 @@ with no annotation: it promises help at three in the morning and does not delive
 | [OpenRagIngestFailureRate](OpenRagIngestFailureRate.md) | warning | Over 25% of documents failing to index |
 | [OpenRagBacklogGrowing](OpenRagBacklogGrowing.md) | warning | Queue rising faster than it drains |
 | [OpenRagInferenceProviderDown](OpenRagInferenceProviderDown.md) | critical | An inference endpoint is failing or circuit-broken |
-| [OpenRagCatalogDriftDetected](OpenRagCatalogDriftDetected.md) | warning | Vector store and catalog disagree |
+| [OpenRagCatalogDriftDetected](OpenRagCatalogDriftDetected.md) | critical | Vector store and catalog disagree |
 | [OpenRagTargetDown](OpenRagTargetDown.md) | critical | Prometheus cannot scrape — **every other alert is inert** |
 
 Start with `OpenRagTargetDown` whenever several alerts look wrong at once, and with

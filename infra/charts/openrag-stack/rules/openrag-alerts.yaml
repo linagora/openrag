@@ -115,7 +115,7 @@ groups:
         expr: sum(rate(openrag_retrieval_orphan_chunks_dropped_total[15m])) > 0
         for: 15m
         labels:
-          severity: warning
+          severity: critical
         annotations:
           summary: "Retrieval is dropping chunks whose file is missing from the catalog"
           description: >-
