@@ -29,6 +29,29 @@ networkPolicy:
     - 8080  # openrag API/UI & admin-ui
     # - 8265  # ray dashboard - Security issue, the ray dashboard is not protected by any auth, so it should not be exposed to the public internet.
 
+# === Monitoring artifacts ===
+# OpenRag-specific wiring for a Prometheus that already exists — the chart does
+# not deploy Prometheus, Grafana or Alertmanager. Rules come from
+# rules/openrag-alerts.yaml, the same file the Compose stack loads, so both
+# deployments alert on one definition.
+monitoring:
+  prometheusRule:
+    # Needs the monitoring.coreos.com CRDs (kube-prometheus-stack or a
+    # standalone Prometheus Operator). Off by default: creating the CRD object
+    # without the operator present fails the install.
+    enabled: false
+    # Labels the operator's ruleSelector matches on, e.g.
+    # release: kube-prometheus-stack. An unmatched PrometheusRule is created
+    # and never loaded, which is indistinguishable from having no alerts.
+    labels: {}
+    # Labels stamped onto every alert, to match the Alertmanager routing of the
+    # stack receiving them. A rule's own labels win on conflict.
+    # e.g. team: platform / service: openrag
+    commonLabels: {}
+    # Override the runbook_url base baked into the rules. Leave empty to keep
+    # the published GitHub location; set it for an air-gapped or mirrored copy.
+    runbookBaseUrl: ""
+
 # === Global shared persistence ===
 persistence:
   enabled: true
