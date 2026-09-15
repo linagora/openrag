@@ -76,6 +76,16 @@ class JobService:
         worker_info = await self._call(lambda: self._tsm.get_pool_info.remote(), "get_pool_info")
         return {"workers": self._format_pool_info(worker_info), "tasks": task_summary}
 
+    async def get_active_task_counts(self) -> dict[str, int]:
+        """The ``active_statuses`` counts alone, without the worker-pool round trip.
+
+        ``get_queue_info`` always fetches pool info too, which the metrics scrape
+        never uses; that second Ray call would just eat into its timeout budget.
+        """
+        all_states: dict = await self._call(lambda: self._tsm.get_all_states.remote(), "get_all_states")
+        status_counts = Counter(all_states.values())
+        return {s: status_counts.get(s, 0) for s in _ACTIVE_STATES}
+
     async def list_tasks(
         self,
         *,
