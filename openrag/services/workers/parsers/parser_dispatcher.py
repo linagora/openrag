@@ -21,6 +21,7 @@ from typing import Any
 from core.config.model_endpoints import ModelEndpointConfig
 from core.indexing.parsers.document_parser import DocumentParser
 from core.models.document import Document, DocumentType, ProcessedDocument
+from core.observability.ray_metrics import record_parse_completion
 from core.utils.logging import get_logger
 
 logger = get_logger()
@@ -98,8 +99,23 @@ class ParserDispatcher(DocumentParser):
 
     async def parse(self, document: Document) -> ProcessedDocument:
         backend = self._resolve_backend(document.content_type, _suffix(document.filename))
-        parser = self._get(backend)
-        return await parser.parse(document)
+        return await self._parse_with(backend, document)
+
+    async def _parse_with(self, backend: str, document: Document) -> ProcessedDocument:
+        """Run *document* through *backend*, stamping the progress watchdog.
+
+        The single point where a parse is known to have both a backend and a
+        completion, so every route to a parser goes through here — including
+        ``_PdfStrategyParser``, which selects the backend itself.
+
+        Stamped on success only: a pool whose workers are wedged stops updating
+        it, which is what lets the watchdog alert's ``time() - <stamp>`` climb.
+        A pool that fails promptly is a different condition, covered by
+        ``openrag_ingest_documents_total{status="failed"}``.
+        """
+        processed = await self._get(backend).parse(document)
+        record_parse_completion(backend)
+        return processed
 
     def for_pdf_strategy(self, strategy: str) -> DocumentParser:
         """Return a parser that forces ``strategy`` (a PDF backend name such as
@@ -247,7 +263,7 @@ class _PdfStrategyParser(DocumentParser):
 
     async def parse(self, document: Document) -> ProcessedDocument:
         if document.content_type is DocumentType.PDF:
-            return await self._dispatcher._get(self._pdf_backend).parse(document)
+            return await self._dispatcher._parse_with(self._pdf_backend, document)
         return await self._dispatcher.parse(document)
 
 
