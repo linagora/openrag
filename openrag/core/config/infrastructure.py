@@ -98,11 +98,14 @@ class PathsConfig(ConfigMixin):
 
 class ServerConfig(ConfigMixin):
     preferred_url_scheme: str | None = None
-    # Bearer a Prometheus scraper must present on ``GET /metrics``. ``None``
-    # (the default) leaves the endpoint open to anyone who can reach the API
-    # port — fine on an internal network, set it whenever the API is exposed
-    # through a public ingress. Env: METRICS_TOKEN.
+    # Access to ``GET /metrics``. Fails closed: with neither field set the
+    # route answers 403 to every scrape. ``metrics_token`` (METRICS_TOKEN) is
+    # the bearer a Prometheus scraper must present; ``metrics_allow_unauthenticated``
+    # (METRICS_ALLOW_UNAUTHENTICATED=true) opens the endpoint to anyone who can
+    # reach the API port — a deliberate opt-in for deployments that block the
+    # path at the edge and scrape in-cluster. When both are set, the token wins.
     metrics_token: str | None = None
+    metrics_allow_unauthenticated: bool = False
 
     @field_validator("metrics_token", mode="before")
     @classmethod

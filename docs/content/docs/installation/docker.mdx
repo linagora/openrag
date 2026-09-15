@@ -19,11 +19,13 @@ The optional monitoring stack provides ready-to-use dashboards for OpenRAG HTTP
 traffic, host resources, and NVIDIA GPUs. It is separate from the default stack
 so deployments that do not need monitoring keep the same footprint.
 
-Before starting it, set a strong `GRAFANA_ADMIN_PASSWORD` in `.env`. The
-`GRAFANA_ADMIN_USER` defaults to `admin`. The bundled Prometheus scrapes
-`GET /metrics` on the API over the Compose network without any token; see
-[Prometheus metrics](/openrag/documentation/prometheus_metrics/) to protect
-the endpoint with `METRICS_TOKEN` or to scrape it from an external Prometheus.
+Before starting it, set a strong `GRAFANA_ADMIN_PASSWORD` and a random
+`METRICS_TOKEN` (`openssl rand -hex 16`) in `.env`. The `GRAFANA_ADMIN_USER`
+defaults to `admin`. The bundled Prometheus scrapes `GET /metrics` on the API
+over the Compose network with that token, which the overlay hands to it
+directly; nothing else to mount. See
+[Prometheus metrics](/openrag/documentation/prometheus_metrics/) to scrape the
+endpoint from an external Prometheus.
 
 Start OpenRAG with the monitoring overlay:
 
