@@ -34,48 +34,71 @@ cardinality stays bounded. Probe and documentation paths (`/health_check`,
 ## Access control
 
 `/metrics` bypasses the regular authentication middleware: a scraper never
-needs a user or admin token. Access is governed by one setting:
+needs a user or admin token, and admin tokens are not accepted there. The
+route fails closed and is governed by two settings:
 
 | Variable | Default | Effect |
 | --- | --- | --- |
-| `METRICS_TOKEN` | unset | Unset: the endpoint is open to anyone who can reach the API port. Set: the scraper must send `Authorization: Bearer <METRICS_TOKEN>`; any other credential, including an admin token, gets `403`. |
+| `METRICS_TOKEN` | unset | The bearer a scraper must send as `Authorization: Bearer <METRICS_TOKEN>`. Any other credential, including an admin token, gets `403`. |
+| `METRICS_ALLOW_UNAUTHENTICATED` | `false` | `true` serves the endpoint to anyone who can reach the API port when no token is set. |
 
-Leaving it unset is the usual posture when the API port is only reachable
-from an internal network (a Compose network, a Kubernetes cluster, a private
-VLAN). Set it whenever the API is reachable through a public reverse proxy or
-Ingress, otherwise route names and traffic volumes become readable by anyone.
-The metrics contain no request payloads, user data or secrets.
+| `METRICS_TOKEN` | `METRICS_ALLOW_UNAUTHENTICATED` | `GET /metrics` |
+| --- | --- | --- |
+| unset | `false` | `403` for everyone (the default). The API logs a warning at startup. |
+| set | any | `200` with the bearer, `403` otherwise. |
+| unset | `true` | `200` for anyone reaching the port. |
+
+The token is the normal setup. The API port is the one a public reverse
+proxy or Ingress forwards, so an open endpoint is readable wherever the API
+is: route names, status-code distributions, traffic volumes and the
+circuit-breaker gauge are useful reconnaissance even though the metrics
+contain no request payloads, user data or secrets. Reserve
+`METRICS_ALLOW_UNAUTHENTICATED=true` for a deployment that blocks `/metrics`
+at the edge and scrapes the service from inside the network; see
+[Opening the endpoint](#opening-the-endpoint-without-a-token).
+
+The bearer travels in clear on plain HTTP. Scrapes over a Compose network or
+between pods carry it like every other request on that network; from outside,
+scrape through TLS (the reverse proxy or Ingress that already terminates it).
 
 Check the endpoint from the host:
 
 ```bash
-curl -fsS http://localhost:8080/metrics | head
-# with a token:
 curl -fsS -H "Authorization: Bearer $METRICS_TOKEN" http://localhost:8080/metrics | head
 ```
 
 ## Scraping from a VM deployment
 
 With Docker Compose, `/metrics` is served on `APP_PORT` (8080 by default),
-which the stack already publishes. Add a job to the external Prometheus:
+which the stack already publishes. Set `METRICS_TOKEN` in the OpenRAG `.env`
+and add a job to the external Prometheus:
 
 ```yaml
 scrape_configs:
   - job_name: "openrag"
     metrics_path: "/metrics"
-    scheme: https            # http if the API is not behind TLS
+    scheme: https            # the bearer travels in clear: keep TLS in front
     static_configs:
       - targets: ["openrag.example.com:443"]
-    # Only when METRICS_TOKEN is set on the OpenRAG side. Keep the token in a
-    # file (mode 0400, owned by the Prometheus user), never inline.
+    # Keep the token in a file (mode 0400, owned by the Prometheus user),
+    # never inline.
     authorization:
       type: Bearer
       credentials_file: /etc/prometheus/openrag_metrics_token
 ```
 
+The admin UI proxy (`ADMIN_UI_PORT`) answers `404` on `/metrics`: scrape the
+API port, not the front door.
+
 If the Prometheus server cannot reach the VM directly, run an agent next to
 OpenRAG (Prometheus in agent mode, or Grafana Alloy) that scrapes
-`localhost:8080/metrics` and forwards the samples with `remote_write`.
+`localhost:8080/metrics` with the same bearer and forwards the samples with
+`remote_write`.
+
+The bundled monitoring overlay (`monitoring.docker-compose.yaml`) needs no
+extra step: it writes `METRICS_TOKEN` into the Prometheus container as the
+`credentials_file` of its `openrag` job, and refuses to start when the
+variable is missing from `.env`.
 
 ## Scraping in Kubernetes
 
@@ -98,9 +121,12 @@ openrag:
 **Annotation-based discovery.** The API pod carries `prometheus.io/scrape`,
 `prometheus.io/path` and `prometheus.io/port` annotations by default
 (`openrag.metrics.prometheusAnnotations`), for a plain Prometheus configured
-with the usual `kubernetes_sd_configs` relabeling.
+with the usual `kubernetes_sd_configs` relabeling. The annotations only say
+"scrape me": the job behind them must send the bearer
+(`authorization.credentials_file` in that job, or a mounted Secret), or every
+scrape gets `403`.
 
-**With a token.** Put it in the chart env Secret and tell the ServiceMonitor to
+**The token.** Put it in the chart env Secret and tell the ServiceMonitor to
 read it from there:
 
 ```yaml
@@ -117,7 +143,28 @@ openrag:
 With `env.existingSecret`, add a `METRICS_TOKEN` key to that Secret instead.
 The default NetworkPolicy already admits the API port from outside the
 namespace, so a Prometheus in a `monitoring` namespace reaches it without
-extra rules.
+extra rules. The ServiceMonitor scrapes the Service on port 8080 inside the
+cluster, plain HTTP like the rest of the pod-to-pod traffic; the Ingress TLS
+is not involved.
+
+## Opening the endpoint without a token
+
+`METRICS_ALLOW_UNAUTHENTICATED=true` (compose `.env`, or
+`env.config.METRICS_ALLOW_UNAUTHENTICATED: "true"` in Helm) serves
+`/metrics` to anyone who can reach the API port. Use it only when that port
+is not exposed as-is:
+
+- **Compose.** The admin UI proxy already returns `404` on `/metrics`, so
+  the exposure is `APP_PORT` itself. Bind it to the host or a private
+  interface (`APP_PORT=127.0.0.1:8080` in `.env` keeps it off the public
+  interfaces) or firewall it, and scrape from that network. The bundled
+  overlay still needs `METRICS_TOKEN` set: it always sends the bearer.
+- **Kubernetes.** Block `/metrics` at the Ingress, with whatever your
+  controller offers for a path-level deny (a `location = /metrics { return
+  404; }` server snippet on ingress-nginx, a `Route` rule on OpenShift), and
+  scrape the Service from inside the cluster. Port 8080 is the one
+  `networkPolicy.externalPorts` opens to the Ingress controller, so without
+  that rule the open endpoint is reachable wherever the API is.
 
 ## Grafana
 
