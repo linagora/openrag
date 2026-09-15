@@ -47,6 +47,9 @@ class MockEmbedder(Embedder):
 class MockVectorStore(VectorStore):
     """In-memory vector store keyed by collection name."""
 
+    def iter_chunk_metadata(self, collection, *, partition, file_ids=None, batch_size=500):
+        raise NotImplementedError("This test double does not model reconciliation metadata")
+
     def __init__(self) -> None:
         self.collections: dict[str, dict[str, Any]] = {}
         self.search_results: list[dict[str, Any]] = []

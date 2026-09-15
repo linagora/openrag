@@ -25,7 +25,7 @@ built ``searcher`` / ``reranker`` / ``llm`` plus ``config``.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
 from core.prompts import load_template_by_key
@@ -375,8 +375,11 @@ class RetrievalService:
     # Pipeline retrieval (powers QueryService — 8C.2)
     # ------------------------------------------------------------------
 
-    async def _gather_partition_groups(self, coros: list) -> list:
+    async def _gather_partition_groups(self, legs: list[tuple[list[str], Awaitable[list]]]) -> list:
         """Await one coroutine per partition group, bounding concurrency.
+
+        Each leg is ``(partition_names, coroutine)``; the names are carried so a
+        dropped leg can be named in the log.
 
         Small fan-outs (the common case: a handful of partitions) run fully
         parallel via a plain gather — no added overhead, byte-identical to the
@@ -390,18 +393,44 @@ class RetrievalService:
         the ``retrieve_per_query`` → ``retrieve`` nesting (each inner call bounds
         its own leaves; the coroutines being awaited hold no permit while
         waiting for one, so there is no cross-level deadlock).
+
+        One unhealthy partition must not empty the whole result set (#736), so
+        legs are gathered with ``return_exceptions=True`` and a failed one is
+        dropped with a warning naming it. Two cases are deliberately not
+        degraded: ``CancelledError`` is re-raised so a client disconnect or a
+        timeout still unwinds, and if *every* leg failed the first error is
+        re-raised — an empty list is indistinguishable from "no match" and would
+        answer from no context instead of surfacing the outage.
         """
         limit = self._config.retriever.max_partition_concurrency
-        if len(coros) <= limit:
-            return await asyncio.gather(*coros)
+        coros = [coro for _, coro in legs]
+        if len(coros) > limit:
+            semaphore = asyncio.Semaphore(limit)
 
-        semaphore = asyncio.Semaphore(limit)
+            async def _bounded(coro):
+                async with semaphore:
+                    return await coro
 
-        async def _bounded(coro):
-            async with semaphore:
-                return await coro
+            coros = [_bounded(c) for c in coros]
+        results = await asyncio.gather(*coros, return_exceptions=True)
 
-        return await asyncio.gather(*(_bounded(c) for c in coros))
+        ranked_lists = []
+        first_error: BaseException | None = None
+        for (partition_names, _), result in zip(legs, results, strict=True):
+            if not isinstance(result, BaseException):
+                ranked_lists.append(result)
+                continue
+            if isinstance(result, asyncio.CancelledError):
+                raise result
+            if first_error is None:
+                first_error = result
+            logger.bind(partitions=partition_names).warning(
+                f"Retrieval degraded: dropping partition(s) {partition_names} — {type(result).__name__}: {result}"
+            )
+
+        if first_error is not None and not ranked_lists:
+            raise first_error
+        return ranked_lists
 
     async def retrieve(
         self,
@@ -415,11 +444,14 @@ class RetrievalService:
         groups = await self._pipeline_groups_for_partitions(partitions)
         ranked_lists = await self._gather_partition_groups(
             [
-                pipeline.retrieve_docs(
-                    partition=partition_group,
-                    query=query,
-                    top_k=top_k if top_k is not None else default_top_k,
-                    filter_params=filter_params,
+                (
+                    partition_group,
+                    pipeline.retrieve_docs(
+                        partition=partition_group,
+                        query=query,
+                        top_k=top_k if top_k is not None else default_top_k,
+                        filter_params=filter_params,
+                    ),
                 )
                 for partition_group, pipeline, default_top_k in groups
             ]
@@ -438,11 +470,14 @@ class RetrievalService:
         groups = await self._pipeline_groups_for_partitions(partitions)
         ranked_lists = await self._gather_partition_groups(
             [
-                pipeline.get_relevant_docs(
-                    partition=partition_group,
-                    search_queries=search_queries,
-                    top_k=top_k if top_k is not None else default_top_k,
-                    filter_params=filter_params,
+                (
+                    partition_group,
+                    pipeline.get_relevant_docs(
+                        partition=partition_group,
+                        search_queries=search_queries,
+                        top_k=top_k if top_k is not None else default_top_k,
+                        filter_params=filter_params,
+                    ),
                 )
                 for partition_group, pipeline, default_top_k in groups
             ]
