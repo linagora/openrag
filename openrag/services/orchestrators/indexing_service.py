@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from core.utils.consts import strip_protected_metadata
-from core.utils.exceptions import AuthError, PartitionNotFoundError, ValidationError
+from core.utils.exceptions import AuthError, ConfigError, PartitionNotFoundError, ValidationError
 from core.utils.filename import extract_temporal_fields
 from core.utils.logging import get_logger
 from core.utils.partition_limits import max_partitions_for_user
@@ -173,18 +173,38 @@ class IndexingService:
     def _target_embedder(self, partition: str) -> tuple[str, str] | None:
         """``(embedder name, vector field)`` a copy into *partition* must land in (#762 F).
 
-        ``None`` when that cannot be resolved — no embedder factory, preset
-        registry or allocated field — and the copy keeps its vectors as they are.
+        ``None`` only where there is no per-embedder routing to do at all — no
+        embedder factory and no endpoint registry, which is the legacy wiring
+        unit tests use. There the copy keeps its vectors as they are.
+
+        Everywhere else an unresolvable target raises. Under schema v3 a search
+        reads one field, so copying the source's vectors into a partition that
+        reads another silently hides the copy; there is no shared field left to
+        fall back to.
         """
         if self._embedder_factory is None or self._config is None:
             return None
         partition_cfg = self._partition_configs().get(partition)
         if partition_cfg is None:
-            return None
+            raise ConfigError(
+                f"Partition '{partition}' has no resolved configuration, so the embedder a copy "
+                "into it must use is unknown.",
+                code="EMBEDDER_ROUTING_UNRESOLVED",
+            )
         endpoint = getattr(getattr(self._config, "models", None), "embedder", {}).get(partition_cfg.embedder)
+        if endpoint is None:
+            raise ConfigError(
+                f"Partition '{partition}' names embedder '{partition_cfg.embedder}', which no endpoint "
+                "defines, so a copy into it cannot be routed.",
+                code="EMBEDDER_ROUTING_UNRESOLVED",
+            )
         vector_field = getattr(endpoint, "vector_field", None)
         if vector_field is None:
-            return None
+            raise ConfigError(
+                f"Embedder '{partition_cfg.embedder}' has no dense vector field, so a copy into "
+                f"'{partition}' cannot be routed. Apply the pending migrations.",
+                code="EMBEDDER_ROUTING_UNRESOLVED",
+            )
         return partition_cfg.embedder, vector_field
 
     @asynccontextmanager

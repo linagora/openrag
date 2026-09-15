@@ -700,8 +700,11 @@ class WorkerDispatcher(IndexingDispatcher):
         stored text — the input the source embedder was given, context
         included — and every other embedder's field is left empty on the copy.
 
-        Returns the embedder record for the copy when anything was re-embedded,
-        ``{}`` when every chunk already had its vector there.
+        Returns the embedder record for the copy either way: the copy's vectors
+        sit in this embedder's field whether they were re-embedded here or
+        carried over from a source partition on the same embedder, and a file
+        with no record reads as "indexed before provenance existed" — unknown
+        rather than known-good — everywhere it is surfaced.
         """
         missing = [entity for entity in entities if entity.get(vector_field) is None]
         if missing:
@@ -714,7 +717,14 @@ class WorkerDispatcher(IndexingDispatcher):
         for entity in entities:
             for key in [key for key in entity if is_vector_field_key(key) and key != vector_field]:
                 del entity[key]
-        return embedder_provenance(embedder, embedder_reference, vector_field) if missing else {}
+        provenance = embedder_provenance(embedder, embedder_reference, vector_field)
+        if provenance.get("embedder_dimension") is None:
+            # An embedder that never ran cannot report its width, but the
+            # vectors being copied are exactly that wide.
+            widths = {len(entity[vector_field]) for entity in entities if entity.get(vector_field) is not None}
+            if len(widths) == 1:
+                provenance["embedder_dimension"] = widths.pop()
+        return provenance
 
     async def _upsert_entities(self, entities: list[dict[str, Any]]) -> None:
         upsert_entities = getattr(self._vector_store, "upsert_entities", None)

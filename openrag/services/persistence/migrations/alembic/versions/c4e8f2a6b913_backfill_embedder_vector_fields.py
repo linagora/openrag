@@ -100,10 +100,24 @@ def _pin_default_alias(conn: sa.engine.Connection) -> None:
     defaults = list(
         conn.execute(sa.text(f"SELECT name FROM {_ENDPOINTS} WHERE model_type = 'embedder' AND is_default")).scalars()
     )
-    # No default means the alias resolves to nothing today; several would make
-    # the choice a guess. Either way, leave the partitions for an operator.
     if len(defaults) != 1:
-        return
+        # No default means the alias resolves to nothing; several make the
+        # choice a guess. Either way the partitions riding it cannot be routed
+        # to a dense field, so stop rather than migrate into that state — the
+        # operator sets a default and runs this again. Nobody on the alias,
+        # nothing to pin.
+        riding = conn.execute(
+            sa.text(f"SELECT COUNT(*) FROM {_PARTITIONS} WHERE embedder = :alias"), {"alias": _DEFAULT_ALIAS}
+        ).scalar_one()
+        if not riding:
+            return
+        raise RuntimeError(
+            f"{riding} partition(s) use the '{_DEFAULT_ALIAS}' embedder alias, and this deployment has "
+            f"{len(defaults)} default embedder endpoints. Each embedder now owns its own vector field "
+            "(#762), so the alias has to be pinned to one concrete embedder before those partitions can "
+            "be read or written. Mark exactly one embedder endpoint as the default, then run the "
+            "migrations again."
+        )
     conn.execute(
         sa.text(f"UPDATE {_PARTITIONS} SET embedder = :name WHERE embedder = :alias"),
         {"name": defaults[0], "alias": _DEFAULT_ALIAS},

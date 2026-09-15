@@ -251,23 +251,26 @@ class EmbedderSwapService:
                 )
             await self._vector_store.ensure_vector_field(field, len(vectors[0]))
             by_id = {str(row["_id"]): vector for row, vector in zip(rows, vectors, strict=True)}
-            try:
-                await self._vector_store.write_vectors(field, by_id)
-            except VDBError:
-                # Deleting a file stays allowed during a swap, and a write that
-                # names a chunk deleted since is refused whole. Write what is
-                # still there; if nothing was deleted, the failure is real.
-                remaining = await self._vector_store.query_chunks_by_filter(
-                    self._collection,
-                    {"partition": partition, "file_id": file_id},
-                    output_fields=["_id"],
-                )
-                still_there = {str(row["_id"]) for row in remaining}
-                if still_there >= by_id.keys():
-                    raise
-                by_id = {chunk_id: vector for chunk_id, vector in by_id.items() if chunk_id in still_there}
-                if by_id:
+            # Deleting a file stays allowed during a swap, and a write naming a
+            # chunk deleted since is refused whole. Drop what is gone and write
+            # the rest — repeatedly, because the next delete can land between
+            # this query and the retry. The loop ends: each pass writes, or
+            # strictly shrinks a finite set. A failure with nothing deleted is
+            # a real one and propagates.
+            while by_id:
+                try:
                     await self._vector_store.write_vectors(field, by_id)
+                    break
+                except VDBError:
+                    remaining = await self._vector_store.query_chunks_by_filter(
+                        self._collection,
+                        {"partition": partition, "file_id": file_id},
+                        output_fields=["_id"],
+                    )
+                    still_there = {str(row["_id"]) for row in remaining}
+                    if still_there >= by_id.keys():
+                        raise
+                    by_id = {chunk_id: vector for chunk_id, vector in by_id.items() if chunk_id in still_there}
         # Recorded even for a file with no chunks, so a resume skips it.
         await self._document_repo.record_file_embedder(file_id, partition, embedder_provenance(embedder, target, field))
 

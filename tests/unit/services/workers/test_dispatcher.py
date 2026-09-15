@@ -2302,7 +2302,41 @@ async def test_a_copy_between_partitions_on_the_same_embedder_keeps_its_vectors(
     assert embedder.calls == []
     store.ensure_vector_field.assert_not_called()
     assert store.insert_entities.await_args.args[0][0]["vector_bge_m3"] == [0.5, 0.5, 0.5]
-    assert "indexation_config" not in repo.add_file_to_partition.await_args.kwargs
+    # Recorded even though nothing was re-embedded: the copy really was made
+    # with this embedder, and a file with no record reads as unknown.
+    assert repo.add_file_to_partition.await_args.kwargs["indexation_config"] == {
+        "embedder": "bge-m3",
+        "embedder_model_name": "BAAI/bge-m3",
+        "embedder_endpoint": "http://bge:8000/v1",
+        "embedder_dimension": 3,
+        "embedder_vector_field": "vector_bge_m3",
+    }
+
+
+@pytest.mark.asyncio
+async def test_a_copy_records_the_width_of_the_vectors_it_carried() -> None:
+    """A vLLM embedder only knows its width once it has embedded something, and
+    a same-embedder copy never embeds — the copied vectors say it instead."""
+
+    class _UnrunEmbedder(_CopyEmbedder):
+        @property
+        def dimension(self) -> int:
+            raise RuntimeError("no embedding has been made yet")
+
+    rows = [{"_id": 1, "text": "hello", "vector_bge_m3": [0.5, 0.5, 0.5], "file_id": "file-1", "partition": "a"}]
+    dispatcher, _store, repo = _copy_dispatcher(rows)
+
+    await dispatcher.copy_file(
+        "file-1",
+        {"file_id": "copy-1", "partition": "b"},
+        "a",
+        user=None,
+        vector_field="vector_bge_m3",
+        embedder=_UnrunEmbedder(),
+        embedder_reference="bge-m3",
+    )
+
+    assert repo.add_file_to_partition.await_args.kwargs["indexation_config"]["embedder_dimension"] == 3
 
 
 class _JobRepoSpy:

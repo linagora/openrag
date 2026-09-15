@@ -791,13 +791,14 @@ class PgDocumentRepository(DocumentRepository):
         """
         rows = await self.pool.fetch(
             """
-            SELECT indexation_config->>'embedder'            AS embedder,
-                   indexation_config->>'embedder_model_name' AS model_name,
+            SELECT indexation_config->>'embedder'             AS embedder,
+                   indexation_config->>'embedder_model_name'  AS model_name,
                    (indexation_config->>'embedder_dimension')::int AS dimension,
-                   COUNT(*)::int                             AS file_count
+                   indexation_config->>'embedder_vector_field' AS vector_field,
+                   COUNT(*)::int                              AS file_count
             FROM files
             WHERE partition_name = $1
-            GROUP BY 1, 2, 3
+            GROUP BY 1, 2, 3, 4
             ORDER BY file_count DESC, embedder NULLS LAST
             """,
             partition,
@@ -807,6 +808,7 @@ class PgDocumentRepository(DocumentRepository):
                 "embedder": r["embedder"],
                 "model_name": r["model_name"],
                 "dimension": r["dimension"],
+                "vector_field": r["vector_field"],
                 "file_count": r["file_count"],
             }
             for r in rows

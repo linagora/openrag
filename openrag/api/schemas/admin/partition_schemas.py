@@ -129,6 +129,12 @@ class IndexedEmbedderCount(BaseModel):
     embedder: str | None = None
     model_name: str | None = None
     dimension: int | None = None
+    # The dense field these files' vectors were written to (#762 F). A search
+    # reads exactly one field, so a file recorded with the right model but in
+    # another field is as invisible as one indexed by another model — two
+    # endpoints on the same model each own a field. ``None`` for files indexed
+    # before the field was recorded.
+    vector_field: str | None = None
     file_count: int = 0
 
 

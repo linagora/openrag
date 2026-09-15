@@ -731,6 +731,25 @@ async def test_usage_counts_maps_name_and_type_to_partition_count():
 
 
 @pytest.mark.asyncio
+async def test_usage_counts_include_partitions_riding_the_default_llm():
+    """`chat_llm` is optional and unset means "the default LLM", so those
+    partitions are served by that endpoint and the delete dialog must say so."""
+    from services.persistence.model_endpoint_repo import PgModelEndpointRepository
+
+    pool = _FakePool()
+    pool._fetch_result = []
+    repo = PgModelEndpointRepository(pool_getter=lambda: pool)
+
+    await repo.usage_counts()
+
+    sql = pool.executed[0][0]
+    llm_branch = sql[sql.index("e.model_type = 'llm'") :]
+    assert "p.chat_llm IS NULL" in llm_branch
+    # Only for the default one: an unset column names no other endpoint.
+    assert "e.is_default AND (p.chat_llm = $1 OR p.chat_llm IS NULL)" in llm_branch
+
+
+@pytest.mark.asyncio
 async def test_indexed_file_usage_counts_files_per_partition():
     """An in-place repoint strands indexed files; this is what sizes it.
 

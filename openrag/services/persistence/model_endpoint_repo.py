@@ -75,12 +75,20 @@ _EMBEDDER_USAGE_SQL = """
 # Same resolution, for every endpoint at once (powers ``used_by_partitions`` on
 # the list view). Types with no partition column — reranker, vlm, stt — are
 # referenced through presets rather than partitions and correctly count 0.
+#
+# ``chat_llm IS NULL`` counts for the default LLM: the column is optional and
+# QueryService._resolve_llm falls through to the catalog default for a partition
+# that sets none, so those partitions really are served by that endpoint. The
+# embedder column has no such case — it is NOT NULL, defaulting to the alias.
 _PARTITION_USAGE_COUNTS_SQL = """
     SELECT e.name, e.model_type, COUNT(p.partition)::int AS cnt
     FROM model_endpoints e
     LEFT JOIN partitions p ON (
         (e.model_type = 'embedder' AND (p.embedder = e.name OR (e.is_default AND p.embedder = $1)))
-        OR (e.model_type = 'llm' AND (p.chat_llm = e.name OR (e.is_default AND p.chat_llm = $1)))
+        OR (
+            e.model_type = 'llm'
+            AND (p.chat_llm = e.name OR (e.is_default AND (p.chat_llm = $1 OR p.chat_llm IS NULL)))
+        )
     )
     GROUP BY e.name, e.model_type
     """

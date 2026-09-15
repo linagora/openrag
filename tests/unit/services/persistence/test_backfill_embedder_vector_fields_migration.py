@@ -27,18 +27,31 @@ class _Result:
     def scalars(self):
         return iter(self._values)
 
+    def scalar_one(self):
+        return self._values[0]
+
 
 class _FakeConn:
     """Just enough of a Connection to answer the migration's four queries."""
 
-    def __init__(self, *, taken: list[str], legacy: list[str], defaults: list[str]) -> None:
+    def __init__(
+        self,
+        *,
+        taken: list[str],
+        legacy: list[str],
+        defaults: list[str],
+        on_alias: int = 0,
+    ) -> None:
         self.taken = taken
         self.legacy = legacy
         self.defaults = defaults
+        self.on_alias = on_alias
         self.updates: list[tuple[str, dict]] = []
 
     def execute(self, statement, params: dict | None = None):
         sql = str(statement)
+        if sql.startswith("SELECT COUNT(*)"):
+            return _Result([self.on_alias])
         if sql.startswith("SELECT vector_field"):
             return _Result(self.taken)
         if sql.startswith("SELECT name") and "vector_field IS NULL" in sql:
@@ -118,11 +131,25 @@ def test_partitions_on_the_alias_are_pinned_to_the_single_default(monkeypatch, m
 
 
 @pytest.mark.parametrize("defaults", [[], ["a", "b"]])
-def test_partitions_are_left_alone_without_exactly_one_default(monkeypatch, migration, defaults) -> None:
-    conn = _FakeConn(taken=[], legacy=[], defaults=defaults)
+def test_nothing_to_pin_without_exactly_one_default(monkeypatch, migration, defaults) -> None:
+    """Nobody rides the alias, so which embedder it means never comes up."""
+    conn = _FakeConn(taken=[], legacy=[], defaults=defaults, on_alias=0)
     _install(monkeypatch, migration, conn)
 
     migration.upgrade()
+
+    assert _partition_updates(conn) == []
+
+
+@pytest.mark.parametrize("defaults", [[], ["a", "b"]])
+def test_partitions_on_the_alias_stop_the_migration_without_one_default(monkeypatch, migration, defaults) -> None:
+    """Migrating on would leave those partitions with no dense field to use:
+    the alias resolves to nothing, or to a guess between two models."""
+    conn = _FakeConn(taken=[], legacy=[], defaults=defaults, on_alias=2)
+    _install(monkeypatch, migration, conn)
+
+    with pytest.raises(RuntimeError, match="2 partition\\(s\\) use the 'default' embedder alias"):
+        migration.upgrade()
 
     assert _partition_updates(conn) == []
 

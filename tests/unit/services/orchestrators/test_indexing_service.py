@@ -9,7 +9,13 @@ import pytest
 from core.config.indexation_pipeline import IndexationPipelineConfig
 from core.config.retrieval_pipeline import RetrievalPipelineConfig
 from core.models.preset import PartitionConfig
-from core.utils.exceptions import AuthError, ConflictError, PartitionNotFoundError, ValidationError
+from core.utils.exceptions import (
+    AuthError,
+    ConfigError,
+    ConflictError,
+    PartitionNotFoundError,
+    ValidationError,
+)
 from services.orchestrators.indexing_service import IndexingService
 
 
@@ -1042,6 +1048,7 @@ async def test_a_copy_into_a_swapping_partition_is_refused():
 
 @pytest.mark.asyncio
 async def test_a_copy_with_no_resolvable_target_field_keeps_its_vectors():
+    """Legacy wiring — no embedder factory at all — has no routing to do."""
     disp = FakeDispatcher()
     svc = _service(disp=disp, config=_swap_config("p-dst"))
 
@@ -1055,3 +1062,74 @@ async def test_a_copy_with_no_resolvable_target_field_keeps_its_vectors():
     )
 
     assert disp.copy_routing == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("embedder_endpoints", "reason"),
+    [
+        ({}, "no endpoint defines the embedder"),
+        (
+            {"bge-m3": SimpleNamespace(vector_field=None)},
+            "the embedder has no field yet",
+        ),
+    ],
+)
+async def test_a_copy_that_cannot_be_routed_is_refused(embedder_endpoints, reason):
+    """Copying the source's vectors would hide the file: nothing reads them.
+
+    Under schema v3 a search reads one field, so a copy into a partition whose
+    field cannot be resolved is not a copy that merely skips re-embedding — it
+    is one no query will ever return.
+    """
+    config = _swap_config("p-dst")
+    config.models.embedder = embedder_endpoints
+    partitions = SwapAwarePartitionService(config)
+    disp = FakeDispatcher()
+    svc = IndexingService(
+        document_repo=FakeDocumentRepo(),
+        workspace_repo=FakeWorkspaceRepo(),
+        dispatcher=disp,
+        config=config,
+        partition_service=partitions,
+        embedder_factory=lambda name: object(),
+    )
+
+    with pytest.raises(ConfigError, match="cannot be routed"):
+        await svc.copy_file(
+            source_file_id="src",
+            source_partition="p-src",
+            target_file_id="dst",
+            target_partition="p-dst",
+            metadata={},
+            user=None,
+        )
+
+    assert disp.copied == [], reason
+
+
+@pytest.mark.asyncio
+async def test_a_copy_into_a_partition_with_no_resolved_config_is_refused():
+    config = _swap_config()  # no partitions resolved
+    partitions = SwapAwarePartitionService(config)
+    disp = FakeDispatcher()
+    svc = IndexingService(
+        document_repo=FakeDocumentRepo(),
+        workspace_repo=FakeWorkspaceRepo(),
+        dispatcher=disp,
+        config=config,
+        partition_service=partitions,
+        embedder_factory=lambda name: object(),
+    )
+
+    with pytest.raises(ConfigError, match="no resolved configuration"):
+        await svc.copy_file(
+            source_file_id="src",
+            source_partition="p-src",
+            target_file_id="dst",
+            target_partition="p-dst",
+            metadata={},
+            user=None,
+        )
+
+    assert disp.copied == []

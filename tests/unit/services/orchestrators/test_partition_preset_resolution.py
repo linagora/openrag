@@ -508,6 +508,50 @@ async def test_an_embedder_change_on_a_partition_with_files_requires_a_swap():
 
 
 @pytest.mark.asyncio
+async def test_a_partition_whose_config_cannot_be_written_is_not_left_behind():
+    """Otherwise the caller gets an error, and their retry gets 'already
+    exists' — for a partition holding none of what they asked for."""
+    repo = _FakePartitionRepo()
+    svc = _make_service(repo)
+
+    async def _fail(*args, **kwargs):
+        raise RuntimeError("preset deleted under us")
+
+    repo.update_partition = _fail
+
+    with pytest.raises(RuntimeError, match="preset deleted under us"):
+        await svc.create_partition("p-new", user_id=1)
+
+    assert "p-new" not in repo._store
+
+
+@pytest.mark.asyncio
+async def test_an_embedder_change_waits_for_indexing_in_flight():
+    """An admitted upload resolved the old embedder and has no `files` row yet,
+    so an empty partition is not necessarily an idle one."""
+    from core.utils.exceptions import ConflictError
+
+    repo = _FakePartitionRepo(rows=[_full_row("p1")])
+    svc = _make_service(repo, settings=_settings(embedders=("default", "bge-m3")))
+    svc._task_state_manager = object()
+    svc._count_active_indexing_tasks = _returns(2)
+
+    with pytest.raises(ConflictError) as exc:
+        await svc.update_partition("p1", embedder="bge-m3")
+
+    assert exc.value.code == "INDEXING_IN_PROGRESS"
+    assert "2 indexing task(s)" in exc.value.message
+    assert repo._store["p1"]["embedder"] == "default"
+
+
+def _returns(value):
+    async def _call(*args, **kwargs):
+        return value
+
+    return _call
+
+
+@pytest.mark.asyncio
 async def test_naming_the_endpoint_the_alias_resolves_to_is_not_a_change():
     """Same vector field, same vectors: nothing is left behind."""
     from core.config.model_endpoints import ModelEndpointConfig
@@ -690,7 +734,7 @@ async def test_detail_dimension_survives_a_vector_store_failure():
     turn a partition-config read into a 500."""
 
     class _BrokenStore(_FakeVectorStore):
-        async def vector_dimension(self) -> int | None:
+        async def vector_dimension(self, vector_field: str | None = None) -> int | None:
             raise RuntimeError("milvus unreachable")
 
     repo = _FakePartitionRepo(rows=[_full_row("p1")])
