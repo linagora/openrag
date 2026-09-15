@@ -11,6 +11,7 @@ import asyncio
 import functools
 import uuid
 import weakref
+from collections.abc import Callable
 
 import ray
 from core.utils.logging import get_logger
@@ -61,26 +62,45 @@ class DistributedSemaphoreActor:
 # the loop that created them and must not be shared across loops: Ray runs each
 # concurrency group on its own loop, and the API and worker processes have their
 # own. Weak keys so a finished loop's gates are collected along with it.
-_local_gates: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, dict[tuple[str, int], asyncio.Semaphore]] = (
-    weakref.WeakKeyDictionary()
-)
+# Keyed by ``(namespace, name)`` - the same identity ``_get_or_create_actor``
+# resolves - so one gate fronts exactly one actor. Keying by name alone would
+# let two namespaces share a gate and block each other, and folding the budget
+# into the key would give one actor several gates whose combined outstanding
+# acquires exceed any of their budgets, which is the pile-up this exists to stop.
+_local_gates: weakref.WeakKeyDictionary[
+    asyncio.AbstractEventLoop, dict[tuple[str, str], tuple[asyncio.Semaphore, int]]
+] = weakref.WeakKeyDictionary()
 
 
-def _local_gate(name: str, budget: int) -> asyncio.Semaphore:
-    """Return this loop's admission gate for ``name``, creating it on first use."""
+def _local_gate(namespace: str, name: str, budget: int) -> asyncio.Semaphore:
+    """Return this loop's admission gate for one actor, creating it on first use.
+
+    The first handle for an actor identity fixes the budget, mirroring the actor
+    itself: ``DistributedSemaphoreActor`` takes its permit count from whoever
+    creates it and every later handle just attaches. A mismatch is a
+    misconfiguration worth surfacing, not a reason to open a second gate.
+    """
     loop = asyncio.get_running_loop()
     per_loop = _local_gates.get(loop)
     if per_loop is None:
         per_loop = {}
         _local_gates[loop] = per_loop
-    key = (name, budget)
-    gate = per_loop.get(key)
-    if gate is None:
+    key = (namespace, name)
+    entry = per_loop.get(key)
+    if entry is None:
         # max(1, ...) so a misconfigured non-positive budget degrades to serial
         # access rather than an asyncio.Semaphore that never admits anyone.
-        gate = asyncio.Semaphore(max(1, budget))
-        per_loop[key] = gate
-    return gate
+        entry = (asyncio.Semaphore(max(1, budget)), budget)
+        per_loop[key] = entry
+    elif entry[1] != budget:
+        logger.bind(semaphore=name, namespace=namespace).warning(
+            "Ignoring admission budget {requested} for semaphore '{name}': it is already gated at {existing} "
+            "in this process. Configure one budget per semaphore.",
+            requested=budget,
+            existing=entry[1],
+            name=name,
+        )
+    return entry[0]
 
 
 class DistributedSemaphore:
@@ -133,10 +153,14 @@ class DistributedSemaphore:
             ).remote(self._max_concurrent_ops)
 
     async def __aenter__(self):
-        # Local admission gate before the actor is touched at all, so a burst
-        # cannot fill the actor's concurrency slots with waiters (#965).
-        gate = _local_gate(self._name, self._max_concurrent_ops)
-        await gate.acquire()
+        # One deadline for the whole admission path. Queueing for the local gate
+        # is as much "waiting for a permit" as the actor call is, so bounding
+        # only the second half would leave the first unbounded (#965).
+        gate = _local_gate(self._namespace, self._name, self._max_concurrent_ops)
+        deadline = None if self._acquire_timeout is None else asyncio.get_running_loop().time() + self._acquire_timeout
+
+        await _acquire_gate(gate, deadline, self._name)
+        release_gate = _release_once(gate)
         try:
             semaphore_actor = self._get_or_create_actor()
             # acquire.remote() is dispatched to the actor immediately and runs to
@@ -147,31 +171,45 @@ class DistributedSemaphore:
             # returns, __aexit__ never runs, and the permit would otherwise leak
             # for the lifetime of the actor.
             acquire_task = asyncio.ensure_future(semaphore_actor.acquire.remote())
-            try:
-                incarnation = await _await_permit(acquire_task, self._acquire_timeout)
-            except TimeoutError:
-                # Same hand-back as the cancellation path below: the actor may
-                # still grant this permit, and nothing local can stop it.
-                acquire_task.add_done_callback(functools.partial(_release_if_granted, self._name, semaphore_actor))
-                logger.bind(semaphore=self._name, acquire_timeout=self._acquire_timeout).warning(
-                    "Timed out waiting for a permit on semaphore '{name}' - giving up rather than "
-                    "holding an indexing slot on a saturated gate.",
-                    name=self._name,
-                )
-                raise TimeoutError(
-                    f"Timed out after {self._acquire_timeout:g}s waiting for a permit on '{self._name}'"
-                ) from None
-            except asyncio.CancelledError:
-                acquire_task.add_done_callback(functools.partial(_release_if_granted, self._name, semaphore_actor))
+        except BaseException:
+            release_gate()
+            raise
+
+        try:
+            incarnation = await _await_permit(acquire_task, _remaining(deadline))
+        except (TimeoutError, asyncio.CancelledError) as exc:
+            # The actor is still running this acquire, and still holding one of
+            # its concurrency slots for it. So the gate permit stays held until
+            # that settles: handing it back now would let a fresh caller add a
+            # *second* outstanding acquire against the same budget, and a run of
+            # timeouts would refill the actor's slots with exactly the waiters
+            # this gate exists to keep out. A genuinely wedged actor therefore
+            # drains the local budget and later callers fail fast at the gate,
+            # which is the intended answer: stop adding load.
+            acquire_task.add_done_callback(functools.partial(_release_if_granted, self._name, semaphore_actor))
+            acquire_task.add_done_callback(lambda _task: release_gate())
+            if isinstance(exc, asyncio.CancelledError) or self._acquire_timeout is None:
+                # No local bound was set, so a TimeoutError here came from the
+                # actor call itself and belongs to the caller unchanged.
                 raise
-        finally:
-            # Only the *call* is gated, never the held section: an acquire that
-            # has returned no longer occupies an actor slot, so a holder costs
-            # the actor nothing and must not consume admission. Gating the hold
-            # instead would also make a local budget that an actor restart
-            # cannot reset - the restart is what frees capacity after a holder
-            # wedges, and a gated hold would defeat that recovery.
-            gate.release()
+            logger.bind(semaphore=self._name, acquire_timeout=self._acquire_timeout).warning(
+                "Timed out waiting for a permit on semaphore '{name}' - giving up rather than "
+                "holding an indexing slot on a saturated gate.",
+                name=self._name,
+            )
+            raise TimeoutError(
+                f"Timed out after {self._acquire_timeout:g}s waiting for a permit on '{self._name}'"
+            ) from None
+        except BaseException:
+            release_gate()
+            raise
+
+        # Only the *call* is gated, never the held section: an acquire that has
+        # returned no longer occupies an actor slot, so a holder costs the actor
+        # nothing and must not consume admission. Gating the hold instead would
+        # also make a local budget that an actor restart cannot reset - the
+        # restart is what frees capacity after a holder wedges.
+        release_gate()
         self._incarnations.setdefault(asyncio.current_task(), []).append(incarnation)
         return self
 
@@ -183,6 +221,43 @@ class DistributedSemaphore:
         if stack is not None and not stack:
             del self._incarnations[task]
         await _release(semaphore_actor, incarnation)
+
+
+def _release_once(gate: asyncio.Semaphore) -> Callable[[], None]:
+    """Return a one-shot release for ``gate``.
+
+    The permit is handed back either inline or from a done-callback depending on
+    how the acquire ends, and for one caller both paths are reachable, so the
+    release has to be idempotent.
+    """
+    released = False
+
+    def release() -> None:
+        nonlocal released
+        if not released:
+            released = True
+            gate.release()
+
+    return release
+
+
+def _remaining(deadline: float | None) -> float | None:
+    """Time left before ``deadline``, or ``None`` when unbounded."""
+    if deadline is None:
+        return None
+    return max(0.0, deadline - asyncio.get_running_loop().time())
+
+
+async def _acquire_gate(gate: asyncio.Semaphore, deadline: float | None, name: str) -> None:
+    """Take a local admission permit, bounded by the shared deadline."""
+    remaining = _remaining(deadline)
+    if remaining is None:
+        await gate.acquire()
+        return
+    try:
+        await asyncio.wait_for(gate.acquire(), timeout=remaining)
+    except TimeoutError:
+        raise TimeoutError(f"Timed out waiting to enter the local admission gate for '{name}'") from None
 
 
 async def _await_permit(acquire_task: asyncio.Task, timeout: float | None):

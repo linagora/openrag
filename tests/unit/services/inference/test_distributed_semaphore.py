@@ -304,7 +304,7 @@ class TestDistributedSemaphoreLocalAdmissionGate:
     def _gate_of(self, sem: DistributedSemaphore) -> asyncio.Semaphore:
         from services.inference.distributed_semaphore import _local_gate
 
-        return _local_gate(sem._name, sem._max_concurrent_ops)
+        return _local_gate(sem._namespace, sem._name, sem._max_concurrent_ops)
 
     async def test_outstanding_acquires_never_exceed_the_budget(self):
         budget = 4
@@ -345,21 +345,28 @@ class TestDistributedSemaphoreLocalAdmissionGate:
         with contextlib.suppress(asyncio.CancelledError):
             await second
 
-    async def test_cancelled_during_remote_acquire_returns_the_gate_permit_exactly_once(self):
-        stub = _StubSemaphoreActor(permits=0)  # nothing will be granted
+    async def test_cancelled_during_remote_acquire_holds_the_gate_until_the_actor_settles(self):
+        stub = _StubSemaphoreActor(permits=0)  # nothing will be granted yet
         sem = self._sem(1, stub)
+        gate = self._gate_of(sem)
 
         blocked = asyncio.ensure_future(sem.__aenter__())
-        await asyncio.sleep(0.05)
-        assert stub.acquire_calls == 1, "this caller did reach the actor before being cancelled"
+        assert await _wait_until(lambda: stub.acquire_calls == 1), "the caller never reached the actor"
 
         blocked.cancel()
         with pytest.raises(asyncio.CancelledError):
             await blocked
 
-        # Exactly one: a missed release would starve the budget, a double
-        # release would widen it permanently.
-        assert await _free_permits(self._gate_of(sem)) == 1
+        # The actor is still running that acquire and still holding one of its
+        # concurrency slots for it, so recycling the local permit now would let a
+        # replacement caller add a second outstanding acquire for one budget.
+        assert gate.locked(), "the gate permit must outlive the abandoned acquire"
+
+        stub.grant(1)
+        # Exactly one release: a missed one would starve the budget, a double one
+        # would widen it permanently.
+        assert await _wait_until(lambda: not gate.locked()), "the gate permit was never returned"
+        assert await _free_permits(gate) == 1
 
     async def test_nested_use_on_one_task_does_not_self_deadlock(self):
         stub = _StubSemaphoreActor(permits=2)
@@ -394,7 +401,7 @@ class TestDistributedSemaphoreLocalAdmissionGate:
         seen = []
 
         async def grab():
-            seen.append(_local_gate("loop-scoped-gate", 3))
+            seen.append(_local_gate("test", "loop-scoped-gate", 3))
 
         asyncio.run(grab())
         asyncio.run(grab())
@@ -402,6 +409,42 @@ class TestDistributedSemaphoreLocalAdmissionGate:
         # An asyncio.Semaphore parks its waiters on the loop that created them,
         # so a gate must never be carried across loops.
         assert seen[0] is not seen[1]
+
+    async def test_gates_are_keyed_by_actor_identity_not_name_alone(self):
+        from services.inference.distributed_semaphore import _local_gate
+
+        name = f"shared-name-{uuid.uuid4().hex}"
+
+        # _get_or_create_actor resolves actors by (namespace, name), so two
+        # namespaces are two actors and must not contend for one gate.
+        assert _local_gate("ns-a", name, 4) is not _local_gate("ns-b", name, 4)
+
+    async def test_one_actor_identity_keeps_one_gate_across_budgets(self):
+        from services.inference.distributed_semaphore import _local_gate
+
+        name = f"one-actor-{uuid.uuid4().hex}"
+        first = _local_gate("ns", name, 4)
+
+        # A second budget for the same actor must not open a second gate: their
+        # combined outstanding acquires would exceed either budget, which is the
+        # pile-up the gate exists to prevent. First budget wins, as for the actor.
+        assert _local_gate("ns", name, 99) is first
+        assert await _free_permits(first) == 4
+
+
+async def _wait_until(predicate, timeout: float = 2.0, interval: float = 0.01) -> bool:
+    """Poll ``predicate`` until it holds or the deadline passes.
+
+    Asserting after a fixed sleep only says the transition had not happened yet
+    on a loaded machine; polling to a deadline says it never happened.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while loop.time() < deadline:
+        if predicate():
+            return True
+        await asyncio.sleep(interval)
+    return predicate()
 
 
 class TestDistributedSemaphoreAcquireTimeout:
@@ -422,6 +465,12 @@ class TestDistributedSemaphoreAcquireTimeout:
         sem._get_or_create_actor = lambda: stub
         return sem
 
+    @staticmethod
+    def _gate_of(sem: DistributedSemaphore) -> asyncio.Semaphore:
+        from services.inference.distributed_semaphore import _local_gate
+
+        return _local_gate(sem._namespace, sem._name, sem._max_concurrent_ops)
+
     async def test_a_saturated_gate_times_the_caller_out(self):
         stub = _StubSemaphoreActor(permits=0)  # no permit will ever be granted
         sem = self._sem(stub, acquire_timeout=0.05)
@@ -429,17 +478,36 @@ class TestDistributedSemaphoreAcquireTimeout:
         with pytest.raises(TimeoutError):
             await asyncio.wait_for(sem.__aenter__(), timeout=2.0)
 
-    async def test_a_timed_out_caller_returns_its_local_gate_permit(self):
-        from services.inference.distributed_semaphore import _local_gate
+    async def test_the_deadline_covers_the_local_gate_wait_too(self):
+        # Budget 4, so five concurrent callers leave one queued on the gate
+        # itself. That wait is part of the admission path and must be bounded by
+        # the same deadline, or the configured bound means nothing to it.
+        stub = _StubSemaphoreActor(permits=0)
+        sem = self._sem(stub, acquire_timeout=0.05)
 
+        results = await asyncio.gather(
+            *(sem.__aenter__() for _ in range(5)),
+            return_exceptions=True,
+        )
+
+        assert all(isinstance(r, TimeoutError) for r in results)
+
+    async def test_a_timed_out_caller_keeps_its_gate_permit_until_the_actor_settles(self):
         stub = _StubSemaphoreActor(permits=0)
         sem = self._sem(stub, acquire_timeout=0.05)
 
         with pytest.raises(TimeoutError):
             await sem.__aenter__()
 
-        gate = _local_gate(sem._name, sem._max_concurrent_ops)
-        assert await _free_permits(gate) == sem._max_concurrent_ops
+        # The actor is still running that acquire, so it still occupies one of
+        # its concurrency slots. Handing the local permit back now would let a
+        # fresh caller add a second outstanding acquire for the same budget.
+        assert await _free_permits(self._gate_of(sem)) == sem._max_concurrent_ops - 1
+
+        stub.grant(1)
+        assert await _wait_until(lambda: stub.release_calls == 1)
+        assert await _wait_until(lambda: True)  # let the release callback run
+        assert await _free_permits(self._gate_of(sem)) == sem._max_concurrent_ops
 
     async def test_a_permit_granted_after_the_timeout_is_handed_back(self):
         stub = _StubSemaphoreActor(permits=0)
@@ -451,15 +519,14 @@ class TestDistributedSemaphoreAcquireTimeout:
         # The actor keeps running the acquire regardless of the local timeout;
         # when it finally grants, the permit must not be abandoned.
         stub.grant(1)
-        await asyncio.sleep(0.1)
-        assert stub.release_calls == 1
+        assert await _wait_until(lambda: stub.release_calls == 1), "granted permit was abandoned"
 
     async def test_no_timeout_configured_still_waits(self):
         stub = _StubSemaphoreActor(permits=0)
         sem = self._sem(stub, acquire_timeout=None)
 
         pending = asyncio.ensure_future(sem.__aenter__())
-        await asyncio.sleep(0.1)
+        assert await _wait_until(lambda: stub.outstanding_acquires == 1), "acquire never reached the actor"
         assert not pending.done(), "acquire_timeout=None must preserve the previous unbounded wait"
 
         stub.grant(1)

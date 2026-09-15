@@ -1069,6 +1069,9 @@ def test_build_contextualizer_factory_uses_named_llm_endpoint(tmp_path) -> None:
         }
         assert contextualizer._semaphore._name == "llmSemaphore"
         assert contextualizer._semaphore._max_concurrent_ops == 7
+        # Scaled from *this* endpoint's 45s, not the 60s global fallback: the
+        # handle is per-endpoint even though the actor behind it is shared.
+        assert contextualizer._semaphore._acquire_timeout == 180.0
     finally:
         # FakeLLM lives only for this test — drop it so the shared llm_registry
         # doesn't leak into other tests in the same process.

@@ -1195,22 +1195,24 @@ def _build_contextualizer_factory(cfg: Settings) -> Any:
             if entry is not None and entry[0] == identity:
                 return entry[1]
             if "system_prompt" not in shared:
-                # Build both before publishing to `shared` so a failure can't
-                # leave it half-initialised (which would later raise a stray
-                # KeyError on the missing key, misread as an unresolvable LLM).
-                system_prompt = load_template_by_key(cfg.paths.prompts_dir, cfg.prompts, "chunk_contextualizer")
-                # Built directly from config to avoid importing
-                # services.inference.runtime, which eagerly constructs a LangDetector.
-                llm_semaphore = DistributedSemaphore(
-                    name="llmSemaphore",
-                    max_concurrent_ops=cfg.semaphore.llm_semaphore,
-                    # Mirrors services.inference.runtime.acquire_timeout_for,
-                    # inlined for the same reason the semaphore is built here:
-                    # importing runtime eagerly constructs a LangDetector.
-                    acquire_timeout=cfg.semaphore.acquire_timeout_factor * float(cfg.llm.timeout),
+                shared["system_prompt"] = load_template_by_key(
+                    cfg.paths.prompts_dir, cfg.prompts, "chunk_contextualizer"
                 )
-                shared["system_prompt"] = system_prompt
-                shared["llm_semaphore"] = llm_semaphore
+            # One handle per resolved endpoint rather than one shared handle:
+            # every handle coordinates through the same named actor (and the
+            # same process-local gate, keyed by namespace+name), but
+            # acquire_timeout is local to a handle and has to scale *this*
+            # endpoint's own per-call timeout. A shared handle would bound a
+            # 45s endpoint by the global fallback's timeout instead.
+            #
+            # Built directly from config to avoid importing
+            # services.inference.runtime, which eagerly constructs a LangDetector;
+            # this mirrors its acquire_timeout_for.
+            llm_semaphore = DistributedSemaphore(
+                name="llmSemaphore",
+                max_concurrent_ops=cfg.semaphore.llm_semaphore,
+                acquire_timeout=cfg.semaphore.acquire_timeout_factor * float(model_cfg.timeout),
+            )
             impl_kwargs = {key: value for key, value in model_cfg.extra.items() if key not in CONTROL_EXTRA_KEYS}
             impl = model_cfg.extra.get("implementation", "vllm")
             llm = llm_registry.create(
@@ -1225,7 +1227,7 @@ def _build_contextualizer_factory(cfg: Settings) -> Any:
                 shared["system_prompt"],
                 timeout_seconds=cfg.chunker.contextualization_timeout,
                 batch_size=cfg.chunker.max_concurrent_contextualization,
-                llm_semaphore=shared["llm_semaphore"],
+                llm_semaphore=llm_semaphore,
             )
             cache[name] = (identity, contextualizer)
             return contextualizer
