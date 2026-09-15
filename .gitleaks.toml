@@ -18,6 +18,7 @@ description = "Documentation placeholders standing in for a real credential"
 regexTarget = "secret"
 regexes = [
   '''^YOUR_[A-Z0-9_]+$''',       # YOUR_AUTH_TOKEN
+  '''^__GENERATE_ME__$''',       # .env.example value an operator must replace
   '''^or-x+(\.\.\.)?$''',        # or-xxx...  (API token format, elided)
   '''^\{[a-z_]+\}$''',           # {admin_token}  (Python format field)
   '''^\$\{?[A-Za-z_][A-Za-z0-9_]*\}?$''', # $TOKEN / ${AUTH_TOKEN}  (shell variable)

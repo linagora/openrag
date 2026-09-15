@@ -125,16 +125,19 @@ For an urgent fix to something already in production that can't wait for the nex
 ## Security checks
 
 `.github/workflows/security.yml` fails a pull request only on what the pull request itself
-introduces; findings that predate it are tracked in the repository's Security tab.
+introduces. Findings that predate it are recorded, not gated on — where depends on the check.
 
 - **Dependencies** fails when `uv.lock` or `ui/package-lock.json` gains a HIGH or CRITICAL
   advisory the base branch does not have. Upgrade to the fixed version shown in the annotation.
   If no fix exists or the vulnerable path is unreachable, accept it in `.trivyignore.yaml`
-  in the same pull request, with a `statement` saying why.
+  in the same pull request, with a `statement` saying why; the check lists every accepted
+  advisory, with its statement, in its summary. Pre-existing advisories are in the Security tab.
 - **Secrets** fails when any commit in the pull request contains a credential, even one a later
   commit removes. Revoke it at its issuer first — the history of a public repository cannot be
   recalled — then rewrite the branch so the value never merges. Placeholders in docs should use
-  `YOUR_AUTH_TOKEN` or `or-xxx...`, which `.gitleaks.toml` allows.
+  `YOUR_AUTH_TOKEN`, `__GENERATE_ME__` or `or-xxx...`, which `.gitleaks.toml` allows.
+  Findings already in history are not in the Security tab: they are fingerprinted in
+  `.gitleaksignore`, which is the record of them.
 - **CodeQL** reports to the Security tab and annotates the pull request.
 
 ## Local checks before pushing
