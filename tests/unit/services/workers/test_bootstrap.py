@@ -65,6 +65,7 @@ def test_task_state_manager_restarts_without_retrying_mutations(monkeypatch):
     actor = SimpleNamespace(
         supports_in_place_restart=SimpleNamespace(),
         renew_file_delete=SimpleNamespace(),
+        supports_bounded_task_retention=SimpleNamespace(),
     )
 
     def fake_get_or_create_actor(name, cls, **options):
@@ -90,6 +91,7 @@ def test_legacy_task_state_manager_is_replaced_before_handle_is_returned(monkeyp
     replacement = SimpleNamespace(
         supports_in_place_restart=SimpleNamespace(),
         renew_file_delete=SimpleNamespace(),
+        supports_bounded_task_retention=SimpleNamespace(),
     )
     get_or_create = Mock(side_effect=[legacy, replacement])
     kill = Mock()
@@ -109,6 +111,31 @@ def test_task_state_manager_without_renewable_fences_is_replaced(monkeypatch):
     replacement = SimpleNamespace(
         supports_in_place_restart=SimpleNamespace(),
         renew_file_delete=SimpleNamespace(),
+        supports_bounded_task_retention=SimpleNamespace(),
+    )
+    get_or_create = Mock(side_effect=[legacy, replacement])
+    kill = Mock()
+    monkeypatch.setattr(bootstrap, "actor_creation_map", {})
+    monkeypatch.setattr(bootstrap, "get_or_create_actor", get_or_create)
+    monkeypatch.setattr(ray, "kill", kill)
+    monkeypatch.setattr(ray, "get_actor", Mock(side_effect=ValueError("actor removed")))
+
+    assert bootstrap.get_task_state_manager() is replacement
+
+    kill.assert_called_once_with(legacy, no_restart=True)
+
+
+def test_task_state_manager_without_bounded_retention_is_replaced(monkeypatch):
+    # An actor left detached by an earlier deployment keeps leaking terminal
+    # records, and creation options cannot retrofit retention onto it.
+    legacy = SimpleNamespace(
+        supports_in_place_restart=SimpleNamespace(),
+        renew_file_delete=SimpleNamespace(),
+    )
+    replacement = SimpleNamespace(
+        supports_in_place_restart=SimpleNamespace(),
+        renew_file_delete=SimpleNamespace(),
+        supports_bounded_task_retention=SimpleNamespace(),
     )
     get_or_create = Mock(side_effect=[legacy, replacement])
     kill = Mock()
@@ -152,6 +179,7 @@ def test_legacy_task_completion_tracker_is_replaced_before_recovery(monkeypatch)
     legacy = SimpleNamespace(recover=SimpleNamespace(remote=Mock()))
     replacement = SimpleNamespace(
         supports_cancellation_recovery=SimpleNamespace(remote=Mock(return_value="capability-ref")),
+        reconcile_jobs=SimpleNamespace(remote=Mock()),
         recover=SimpleNamespace(remote=Mock()),
     )
     get_or_create = Mock(side_effect=[legacy, replacement])
@@ -168,6 +196,32 @@ def test_legacy_task_completion_tracker_is_replaced_before_recovery(monkeypatch)
     kill.assert_called_once_with(legacy, no_restart=True)
     replacement.recover.remote.assert_called_once_with()
     assert get_or_create.call_count == 2
+
+
+def test_task_completion_tracker_without_durable_history_is_replaced(monkeypatch):
+    # A tracker left detached by an earlier deployment answers the cancellation
+    # check but never records a settled job or reconciles an orphaned one.
+    legacy = SimpleNamespace(
+        supports_cancellation_recovery=SimpleNamespace(remote=Mock(return_value="capability-ref")),
+        recover=SimpleNamespace(remote=Mock()),
+    )
+    replacement = SimpleNamespace(
+        supports_cancellation_recovery=SimpleNamespace(remote=Mock(return_value="capability-ref")),
+        reconcile_jobs=SimpleNamespace(remote=Mock()),
+        recover=SimpleNamespace(remote=Mock()),
+    )
+    get_or_create = Mock(side_effect=[legacy, replacement])
+    kill = Mock()
+
+    monkeypatch.setattr(bootstrap, "actor_creation_map", {})
+    monkeypatch.setattr(bootstrap, "get_or_create_actor", get_or_create)
+    monkeypatch.setattr(ray, "kill", kill)
+    monkeypatch.setattr(ray, "get", Mock(return_value=True))
+    monkeypatch.setattr(ray, "get_actor", Mock(side_effect=ValueError("actor removed")))
+
+    assert bootstrap.get_task_completion_tracker() is replacement
+
+    kill.assert_called_once_with(legacy, no_restart=True)
 
 
 @pytest.mark.parametrize(
