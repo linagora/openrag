@@ -20,7 +20,7 @@ x-openrag-env: &openrag_env
 x-openrag: &openrag_template
   image: linagoraai/openrag:v2.2.1
   # Start as root so entrypoint.sh can grant GID-0 write on the bind-mounted
-  # writable dirs (data/, logs/, the HF cache) — which a non-root container
+  # writable dirs (data/, the HF cache) — which a non-root container
   # can't write when Docker auto-creates them root-owned — then it immediately
   # drops to the non-root app user (UID in GID 0) via setpriv before launching.
   # The image's USER stays non-root for non-compose/OpenShift runs.
@@ -31,7 +31,7 @@ x-openrag: &openrag_template
     context: ../..
     dockerfile: infra/docker/api.Dockerfile
     args:
-      # Local compose bind-mounts repo-owned paths (data, logs, i8n). Build the
+      # Local compose bind-mounts repo-owned paths (data, i8n). Build the
       # image with the host user's UID by default so the non-root container can
       # still write those mounts; OpenShift builds keep the Dockerfile default.
       APP_UID: ${APP_UID:-1000}
@@ -60,7 +60,6 @@ x-openrag: &openrag_template
     # development; keep it off in production.
     # - ../../openrag:/app/openrag # For dev mode
     - ${SHARED_ENV:-./.env}:/ray_mount/.env # Shared environment variables (falls back to ./.env)
-    - ${LOG_VOLUME:-../../logs}:/app/logs
   ports:
     - ${APP_PORT:-8080}:${APP_iPORT:-8080}
     # Bind the Ray dashboard to localhost only: it has no authentication and
@@ -232,7 +231,6 @@ services:
 
 volumes:
   appdata:
-  logs:
   modelweights:
   pgdata:
   openrag_venv: # Persists the container-synced /app/.venv so packages survive restarts

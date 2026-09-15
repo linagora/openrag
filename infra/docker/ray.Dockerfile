@@ -59,10 +59,10 @@ RUN ln -s /app/.venv/bin/ray /usr/local/bin/ray
 
 ENV PYTHONPATH=/app/openrag/
 
-# Run as non-root. The app writes under /app (venv, data, logs, model_weights),
+# Run as non-root. The app writes under /app (venv, data, model_weights),
 # so the user owns /app.
 RUN groupadd --gid 10001 app \
     && useradd --uid 10001 --gid 10001 --home-dir /app --no-create-home app \
-    && mkdir -p /app/data /app/logs /app/model_weights \
+    && mkdir -p /app/data /app/model_weights \
     && chown -R 10001:10001 /app
 USER 10001:10001

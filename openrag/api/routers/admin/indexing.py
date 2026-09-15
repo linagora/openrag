@@ -31,11 +31,9 @@ from api.dependencies.files import (
     validate_file_id,
     validate_metadata,
 )
-from api.routers.admin.task_logs import collect_task_logs
 from core.models.catalog import TERMINAL_TASK_STATES
 from core.utils.exceptions import OpenRAGError, indexing_worker_may_be_running
 from core.utils.filename import sanitize_filename
-from core.utils.log_tail import app_log_file
 from core.utils.logging import get_logger
 from core.utils.url_safety import is_safe_url
 from di.providers import get_auth_service, get_config, get_indexing_service, get_partition_service
@@ -586,46 +584,6 @@ async def get_task_error(
     if user and user.get("is_admin", False):
         return {"task_id": task_id, "traceback": error.splitlines()}
     return {"task_id": task_id, "traceback": ["Task failed. Contact an administrator for details."]}
-
-
-@router.get(
-    "/task/{task_id}/logs",
-    description="""Get logs for a specific task.
-
-**Parameters:**
-- `task_id`: The unique task identifier
-- `max_lines`: Maximum number of log lines to return (default: 100)
-
-**Response:**
-Returns task logs including:
-- `task_id`: The task identifier
-- `logs`: Array of log entries with timestamps and messages
-
-**Note:** Logs are returned in chronological order (oldest first).
-""",
-)
-async def get_task_logs(
-    task_id: str,
-    max_lines: int = 100,
-    task_details=Depends(require_task_owner),
-    config=Depends(get_config),
-):
-    log_file = app_log_file(config.paths.log_dir)
-    if not log_file.exists():
-        raise HTTPException(status_code=500, detail="Log file not found.")
-
-    try:
-        logs = collect_task_logs(log_file, task_id, max_lines)
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=str(exc),
-        ) from exc
-
-    if not logs:
-        raise HTTPException(status_code=404, detail=f"No logs found for task '{task_id}'")
-
-    return JSONResponse(content={"task_id": task_id, "logs": logs})
 
 
 @router.delete(

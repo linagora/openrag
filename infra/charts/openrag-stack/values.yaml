@@ -40,7 +40,6 @@ persistence:
     modelWeights: { size: 50Gi }
     data: { size: 20Gi }
     hydraConfig: { size: 10Mi }
-    logs: { size: 1Gi }
     venv: { size: 10Gi }
 
 # === Shared security defaults ===
@@ -186,6 +185,10 @@ milvus:
   minio:
     mode: distributed
     replicas: 3
+    # MinIO pulled minio/minio from Docker Hub; pull the same pinned tag from
+    # quay.io instead (mirrors the compose stacks' fix for the same issue).
+    image:
+      repository: quay.io/minio/minio
     persistence:
       enabled: true
       size: 20Gi
@@ -508,13 +511,13 @@ openrag:
   # containerSecurityContext: {}
   # infra/docker/api.Dockerfile bakes an "openrag" user as uid 10001, primary
   # gid 0 (`useradd --uid 10001 --gid 0`), and grants group-write on the paths
-  # it writes at runtime (venv, egg-info, HOME, data/db/logs, HF cache, uv
+  # it writes at runtime (venv, egg-info, HOME, data/db, HF cache, uv
   # cache) via `chgrp -R 0` + `chmod g=u` — the OpenShift arbitrary-UID
   # pattern. runAsGroup must stay 0 (not 10001) to match, or e.g. the editable
   # install's `openrag.egg-info` isn't writable and uv fails at startup
   # ("Cannot update time stamp of directory 'openrag.egg-info'"). fsGroup can
   # stay 10001: it's only applied (and added as a supplementary group) to the
-  # mounted PVCs (data/logs/model_weights/venv), not to the image's own paths.
+  # mounted PVCs (data/model_weights/venv), not to the image's own paths.
   # Merged with the shared security.podSecurityContext defaults above.
   podSecurityContext:
     runAsUser: 10001
@@ -624,6 +627,27 @@ env:
     RAY_SERVE_NUM_REPLICAS: "4"
     RAY_SERVE_PORT: "80"
     GRAFANA_URL: ""
+
+    # One flat JSON object per log line on stderr, for the platform's log
+    # collector. PREREQUISITE: this chart ships no collector and no longer
+    # mounts a logs volume — a DaemonSet (Alloy, Fluent Bit, …)
+    # must already ship pod stdout to Loki. Without one, logs exist only in
+    # the container runtime (`kubectl logs`) and are lost with the pod. See
+    # docs/documentation/loki_logs.md for the pipeline to add on the
+    # collector side. Set to "text" for the colorized human format.
+    LOG_FORMAT: "json"
+    # Ray relays worker output onto the API process. Its log deduplication
+    # merges same-shape lines from several workers and rewrites the survivor
+    # as "{...} [repeated 2x across cluster]" — no longer JSON — and the
+    # "(Actor pid=N)" relay prefix is ANSI-colorized even on a pipe. Both off.
+    RAY_DEDUP_LOGS: "0"
+    RAY_COLOR_PREFIX: "0"
+    # With ray.enabled=true the chart also sets RAY_LOG_TO_STDERR=1 (see
+    # configmap-env.yaml): worker lines are then written to the Ray pods' own
+    # stderr for the DaemonSet, instead of being relayed to the API driver —
+    # a relay that only carries lines from actors created by the *current*
+    # driver job and so goes silent for the detached workers after an API
+    # restart.
 
     WITH_CHAINLIT_UI: "false"
     SAVE_UPLOADED_FILES: "true"
