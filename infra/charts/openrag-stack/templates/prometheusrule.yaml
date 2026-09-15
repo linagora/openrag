@@ -12,6 +12,12 @@ operator). Disabled by default, like the ServiceMonitor.
 {{- with .Values.monitoring.prometheusRule.runbookBaseUrl }}
 {{- $rules = replace "https://github.com/linagora/openrag/blob/main/docs/deployment/runbooks" . $rules }}
 {{- end }}
+{{- /* The `job` label is assigned by the scrape config, not by us, so the baked
+   default is a convention rather than a guarantee. A wrong matcher is silent —
+   OpenRagTargetDown never fires, and never firing looks exactly like healthy. */}}
+{{- with .Values.monitoring.prometheusRule.jobMatcher }}
+{{- $rules = replace `job=~".*openrag.*"` (printf `job=~%q` .) $rules }}
+{{- end }}
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
 metadata:

@@ -214,6 +214,25 @@ def test_chart_template_reads_the_shipped_rules_file() -> None:
     assert RUNBOOK_BASE in template
 
 
+def test_job_matcher_override_targets_a_string_the_rules_contain() -> None:
+    """A `replace` whose needle is absent is a no-op, and this one fails silently.
+
+    An operator setting jobMatcher would get a rendered PrometheusRule that still
+    carries the baked default, OpenRagTargetDown would never fire, and never firing
+    is indistinguishable from a healthy target. Pin both halves so a reworded
+    expression breaks the build instead.
+    """
+    template = (CHART_DIR / "templates" / "prometheusrule.yaml").read_text(encoding="utf-8")
+    needle = 'job=~".*openrag.*"'
+    assert needle in template, "the template's replace target changed"
+    assert needle in RULES_FILE.read_text(encoding="utf-8"), "the rules no longer carry that selector"
+
+
+def test_job_matcher_defaults_to_the_baked_expression() -> None:
+    values = yaml.safe_load((CHART_DIR / "values.yaml").read_text(encoding="utf-8"))
+    assert values["monitoring"]["prometheusRule"]["jobMatcher"] == ""
+
+
 def test_prometheus_rule_is_disabled_by_default() -> None:
     """Rendering the CRD without the operator installed fails the install."""
     values = yaml.safe_load((CHART_DIR / "values.yaml").read_text(encoding="utf-8"))
