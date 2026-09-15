@@ -20,6 +20,10 @@ plain dicts and strings.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from core.embeddings.embedder import Embedder
 
 
 class IndexingDispatcher(ABC):
@@ -68,8 +72,19 @@ class IndexingDispatcher(ABC):
         metadata: dict,
         partition: str,
         user: dict | None,
+        *,
+        vector_field: str | None = None,
+        embedder: Embedder | None = None,
+        embedder_reference: str | None = None,
     ) -> None:
-        """Copy a file's chunks into another partition / file id."""
+        """Copy a file's chunks into another partition / file id.
+
+        ``vector_field`` and ``embedder`` name the target partition's embedder
+        (#762 F). A partition searches only its embedder's field, so chunks
+        with no vector there are re-embedded from their stored text, and the
+        copy carries no other embedder's vectors. Without them, chunks are
+        copied with the vectors they have.
+        """
         ...
 
     @abstractmethod

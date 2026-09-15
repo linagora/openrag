@@ -7,7 +7,7 @@ import type { IndexedEmbedderCount } from "@/lib/api/partitions";
  */
 type EmbedderGroup = {
   /** Unique per group, for list keys. `key` is the model shown, which one model
-   *  at two widths shares across two groups. */
+   *  at two widths, or in two fields, shares across groups. */
   id: string;
   key: string;
   drifted: boolean;
@@ -25,6 +25,11 @@ export function computeEmbedderDrift(
   indexed: IndexedEmbedderCount[] | undefined,
   endpoints: ModelEndpointResponse[] | undefined,
 ) {
+  // The dense field queries read today. Two endpoints can run the same model
+  // and still own different fields, so a file can record the right model and
+  // sit somewhere no search looks — the same invisibility a model change
+  // causes, and the swap's own skip test compares both.
+  const currentField = endpoints?.find((e) => e.name === resolveEmbedderName(configured, endpoints))?.vector_field;
   const rows = indexed ?? [];
   // The stored reference may be the "default" alias; compare on what it
   // resolves to, or a partition on the alias would look drifted from itself.
@@ -53,19 +58,25 @@ export function computeEmbedderDrift(
     const model = recorded ? rowModel(r) : null;
     const shown = label(r);
     const name = !recorded ? "unrecorded" : (model ?? shown);
-    // Width is part of the identity, not a detail of it: the same model at 768
-    // and at 1024 produced two vector spaces. Merging them would report a
-    // single healthy group and drop the rest.
-    const id = `${name}\u0000${r.dimension ?? ""}`;
+    // Width and field are part of the identity, not details of it: the same
+    // model at 768 and at 1024 produced two vector spaces, and the same model
+    // in two fields is in one index queries read and one they do not. Merging
+    // either would report a single healthy group and drop the rest.
+    const id = `${name}\u0000${r.dimension ?? ""}\u0000${r.vector_field ?? ""}`;
     let group = byKey.get(id);
     if (group === undefined) {
+      // Unrecorded on either side is unknown, not wrong: files predating the
+      // field are shown as they always were.
+      const fieldDrifted =
+        r.vector_field != null && currentField != null && r.vector_field !== currentField;
       group = {
         id,
         key: name,
         // When either side's model is unknown, the labels are all that is left.
         drifted:
           recorded &&
-          (model !== null && currentModel !== null ? model !== currentModel : shown !== currentName),
+          (fieldDrifted ||
+            (model !== null && currentModel !== null ? model !== currentModel : shown !== currentName)),
         recorded,
         dimension: r.dimension,
         file_count: 0,

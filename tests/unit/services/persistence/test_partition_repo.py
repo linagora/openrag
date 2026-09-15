@@ -382,3 +382,146 @@ async def test_update_partition_embedder_check_resolves_the_default_alias():
 
     check = next(q for q, _ in conn.operations if "FROM model_endpoints" in q)
     assert "is_default" in check
+
+
+# ---------------------------------------------------------------------------
+# Embedder swaps (#762 F4)
+# ---------------------------------------------------------------------------
+
+
+class _SwapConn(_FakeConn):
+    def __init__(self, *, endpoint_exists: bool = True, inserted: dict | None = None, lock_acquired: bool = True):
+        super().__init__()
+        self.endpoint_exists = endpoint_exists
+        self.inserted = inserted
+        self.lock_acquired = lock_acquired
+
+    async def fetchval(self, query: str, *params):
+        self.operations.append((query, params))
+        if "FROM model_endpoints" in query:
+            return 1 if self.endpoint_exists else None
+        if "pg_try_advisory_lock" in query:
+            return self.lock_acquired
+        return None
+
+    async def fetchrow(self, query: str, *params):
+        self.operations.append((query, params))
+        if "INSERT INTO partition_embedder_swaps" in query:
+            return self.inserted
+        return None
+
+
+@pytest.mark.asyncio
+async def test_a_swap_is_recorded_after_locking_out_endpoint_deletes_and_checking_its_target():
+    from services.persistence.partition_repo import PgPartitionRepository
+
+    conn = _SwapConn(inserted={"partition": "p1", "status": "running"})
+    repo = PgPartitionRepository(pool_getter=lambda: _FakePool(conn))
+
+    swap = await repo.start_embedder_swap("p1", source_embedder="e5", target_embedder="bge-m3", files_total=4)
+
+    assert swap == {"partition": "p1", "status": "running"}
+    queries = [query for query, _ in conn.operations]
+    lock = queries.index("LOCK TABLE partitions IN ROW EXCLUSIVE MODE")
+    check = next(i for i, q in enumerate(queries) if "FROM model_endpoints" in q)
+    insert = next(i for i, q in enumerate(queries) if "INSERT INTO partition_embedder_swaps" in q)
+    assert queries[0] == "BEGIN"
+    assert lock < check < insert
+    # Replaces a finished swap, never a running one.
+    assert "WHERE s.status <> $4" in queries[insert]
+    assert conn.operations[insert][1] == ("p1", "e5", "bge-m3", "running", 4)
+
+
+@pytest.mark.asyncio
+async def test_a_swap_onto_a_missing_endpoint_is_not_recorded():
+    from core.utils.exceptions import NotFoundError
+    from services.persistence.partition_repo import PgPartitionRepository
+
+    conn = _SwapConn(endpoint_exists=False)
+    repo = PgPartitionRepository(pool_getter=lambda: _FakePool(conn))
+
+    with pytest.raises(NotFoundError) as exc:
+        await repo.start_embedder_swap("p1", source_embedder="e5", target_embedder="ghost", files_total=0)
+
+    assert exc.value.code == "MODEL_ENDPOINT_NOT_FOUND"
+    assert not any("INSERT INTO partition_embedder_swaps" in q for q, _ in conn.operations)
+
+
+@pytest.mark.asyncio
+async def test_a_running_swap_makes_start_return_none():
+    from services.persistence.partition_repo import PgPartitionRepository
+
+    repo = PgPartitionRepository(pool_getter=lambda: _FakePool(_SwapConn(inserted=None)))
+
+    assert await repo.start_embedder_swap("p1", source_embedder="e5", target_embedder="bge-m3", files_total=0) is None
+
+
+@pytest.mark.asyncio
+async def test_swap_updates_only_apply_to_a_running_swap_and_only_to_known_columns():
+    from services.persistence.partition_repo import PgPartitionRepository
+
+    class _Pool(_FakePool):
+        def __init__(self):
+            super().__init__(_SwapConn())
+            self.calls: list[tuple[str, tuple]] = []
+
+        async def fetchrow(self, query, *params):
+            self.calls.append((query, params))
+            return None
+
+    pool = _Pool()
+    repo = PgPartitionRepository(pool_getter=lambda: pool)
+
+    assert await repo.update_embedder_swap("p1", files_done=3, source_embedder="x", target_embedder="x") is None
+
+    query, params = pool.calls[0]
+    assert "SET files_done = $3, updated_at = now()" in query
+    assert "WHERE partition = $1 AND status = $2" in query
+    assert params == ("p1", "running", 3)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("acquired", [True, False])
+async def test_the_runner_lock_is_tried_not_waited_on_and_released_only_when_held(acquired):
+    from services.persistence.partition_repo import PgPartitionRepository
+
+    conn = _SwapConn(lock_acquired=acquired)
+    repo = PgPartitionRepository(pool_getter=lambda: _FakePool(conn))
+
+    async with repo.embedder_swap_runner_lock("p1") as claimed:
+        assert claimed is acquired
+
+    queries = [query for query, _ in conn.operations]
+    assert any("pg_try_advisory_lock" in q for q in queries)
+    assert any("pg_advisory_unlock" in q for q in queries) is acquired
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("running", [True, False])
+async def test_completing_a_swap_switches_the_partition_in_the_same_transaction(running):
+    from services.persistence.partition_repo import PgPartitionRepository
+
+    class _CompleteConn(_SwapConn):
+        async def fetchrow(self, query: str, *params):
+            self.operations.append((query, params))
+            if "UPDATE partition_embedder_swaps" in query:
+                return {"partition": "p1", "target_embedder": "bge-m3", "status": "completed"} if running else None
+            return None
+
+    conn = _CompleteConn()
+    repo = PgPartitionRepository(pool_getter=lambda: _FakePool(conn))
+
+    result = await repo.complete_embedder_swap("p1")
+
+    queries = [query for query, _ in conn.operations]
+    assert queries[:2] == ["BEGIN", "LOCK TABLE partitions IN ROW EXCLUSIVE MODE"]
+    swap_update = next(i for i, q in enumerate(queries) if "UPDATE partition_embedder_swaps" in q)
+    assert conn.operations[swap_update][1] == ("p1", "completed", "running")
+    partition_updates = [(q, p) for q, p in conn.operations if "UPDATE partitions SET embedder" in q]
+    if running:
+        assert result["status"] == "completed"
+        assert [p for _, p in partition_updates] == [("p1", "bge-m3")]
+    else:
+        # Cancelled first: the partition keeps its embedder.
+        assert result is None
+        assert partition_updates == []

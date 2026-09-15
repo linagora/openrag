@@ -129,6 +129,12 @@ class IndexedEmbedderCount(BaseModel):
     embedder: str | None = None
     model_name: str | None = None
     dimension: int | None = None
+    # The dense field these files' vectors were written to (#762 F). A search
+    # reads exactly one field, so a file recorded with the right model but in
+    # another field is as invisible as one indexed by another model — two
+    # endpoints on the same model each own a field. ``None`` for files indexed
+    # before the field was recorded.
+    vector_field: str | None = None
     file_count: int = 0
 
 
@@ -157,9 +163,40 @@ class PartitionDetailResponse(BaseModel):
     generation_prompt_names: dict[str, str] = Field(default_factory=dict)
 
 
+class StartEmbedderSwapRequest(BaseModel):
+    """Request body for moving a partition to another embedder (#762 F4)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    embedder: str
+
+    @field_validator("embedder")
+    @classmethod
+    def validate_embedder(cls, value: str) -> str:
+        """Trim the endpoint name and reject a blank one."""
+        return _normalize_name(value)
+
+
+class EmbedderSwapResponse(BaseModel):
+    """A partition's running embedder swap, or how its last one ended."""
+
+    partition: str
+    source_embedder: str
+    target_embedder: str
+    status: str
+    files_total: int
+    files_done: int
+    error: str | None = None
+    started_at: datetime
+    updated_at: datetime
+    finished_at: datetime | None = None
+
+
 __all__ = [
     "CreatePartitionRequest",
+    "EmbedderSwapResponse",
     "IndexedEmbedderCount",
     "PartitionDetailResponse",
+    "StartEmbedderSwapRequest",
     "UpdatePartitionRequest",
 ]
