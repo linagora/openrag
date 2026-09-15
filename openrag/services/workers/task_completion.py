@@ -189,8 +189,11 @@ class TaskCompletionTracker:
             self._tracked_task_ids.discard(task_id)
 
     async def _record_finished_at(self, task_id: str) -> None:
+        # Keep the handle in a variable: Ray's ActorMethod holds it weakly, so a
+        # method called off an unstored handle raises "Lost reference to actor".
+        task_state_manager = self._task_state_manager()
         details = await self._call_task_state(
-            lambda: self._task_state_manager().get_details.remote(task_id),
+            lambda: task_state_manager.get_details.remote(task_id),
             f"get_details({task_id}) for completion timestamp",
         )
         if not isinstance(details, dict) or _has_finished_at(details):

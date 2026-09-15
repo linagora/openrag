@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import weakref
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -484,6 +485,55 @@ async def test_settled_task_is_written_to_the_job_history() -> None:
         42,
     )
     assert job.completed_at is not None
+
+
+class _RayLikeActorMethod:
+    """Hold the handle weakly, as Ray's ActorMethod does."""
+
+    def __init__(self, handle: _RayLikeActorHandle, name: str) -> None:
+        self._handle = weakref.ref(handle)
+        self._name = name
+
+    def remote(self, *args: Any, **kwargs: Any) -> Any:
+        handle = self._handle()
+        if handle is None:
+            raise RuntimeError("Lost reference to actor. Actor handles must be stored as variables")
+        return getattr(handle.backing, self._name).remote(*args, **kwargs)
+
+
+class _RayLikeActorHandle:
+    def __init__(self, backing: MagicMock) -> None:
+        self.backing = backing
+
+    def __getattr__(self, name: str) -> _RayLikeActorMethod:
+        return _RayLikeActorMethod(self, name)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("state", ["COMPLETED", "CANCELLED"])
+async def test_settled_task_is_recorded_through_ray_like_actor_handles(state: str) -> None:
+    """A method called off an unstored ``ray.get_actor`` handle raises in Ray.
+
+    The MagicMock above is one object kept alive for the whole test, so it
+    cannot catch that; here every ``get_actor`` returns a fresh handle.
+    """
+    from core.models.catalog import DocumentStatus
+
+    repo = _FakeJobRepo()
+    tsm = _task_state_manager(state=state)
+    tsm.get_details.remote.return_value = {"file_id": "file-1", "partition": "tenant-a", "metadata": {}}
+    ref = asyncio.get_running_loop().create_future()
+    ref.set_result(None)
+
+    with patch(
+        "services.workers.task_completion.ray.get_actor",
+        side_effect=lambda *args, **kwargs: _RayLikeActorHandle(tsm),
+    ):
+        tracker = _tracker_with_repo(repo)
+        await tracker.track("task-1", {"ref": ref})
+
+    assert [job.status for job in repo.saved] == [DocumentStatus(state)]
+    tsm.set_details.remote.assert_awaited_once()
 
 
 @pytest.mark.asyncio
