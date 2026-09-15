@@ -1,0 +1,54 @@
+# OpenRagTargetDown
+
+**Severity:** critical · **Fires after:** 5 min
+
+```
+up{job=~".*openrag.*"} == 0
+```
+
+## What it means
+
+Prometheus cannot scrape OpenRag.
+
+**Every other OpenRag alert is inert while this is firing.** An absent series cannot
+breach a threshold, so a dashboard of green panels and a silent alert list mean nothing
+until this is resolved. That is the whole reason this rule exists.
+
+## What it is NOT
+
+This is **not** a readiness alert. `up` reports whether `/metrics` answered — and
+`/metrics` is designed to keep answering while the service container is degraded, because
+that is exactly when the metrics are wanted. A degraded instance is `up == 1` and not
+ready at the same time.
+
+A true `OpenRagNotReady` needs a readiness gauge exported from the readiness service; it
+does not exist yet. Until it does, check `/ready` by hand:
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' "$OPENRAG/ready"   # 503 = degraded
+curl -s "$OPENRAG/ready" | jq .checks
+```
+
+## First checks
+
+```bash
+kubectl -n <ns> get pods -l app.kubernetes.io/component=openrag
+kubectl -n <ns> logs <pod> --tail=100
+```
+
+## Likely causes, most common first
+
+1. **The pod is down, crash-looping, or failing its startup probe.**
+2. **The scrape credential is wrong.** Where `METRICS_TOKEN` is set, a scraper sending the
+   wrong bearer gets 403 and the target reads as down.
+3. **`ServiceMonitor` selector mismatch.** The operator's `serviceMonitorSelector` did not
+   match the labels, so nothing is discovered. Check the operator's targets page.
+4. **NetworkPolicy.** Only the ports in `networkPolicy.externalPorts` are reachable from
+   outside the namespace; a Prometheus in another namespace scraping a different port is
+   blocked.
+5. **The whole node or namespace is gone** — in which case other alerts are firing too.
+
+## Verify recovery
+
+The target returns to `up == 1` on the operator's targets page, and the other OpenRag
+alerts become meaningful again — check that none of them fire immediately afterwards.

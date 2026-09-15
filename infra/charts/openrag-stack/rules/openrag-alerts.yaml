@@ -1,0 +1,186 @@
+# OpenRag alert rules — plain Prometheus rule groups, deployment-agnostic.
+#
+# One source of truth, two consumers:
+#   * Kubernetes — templates/prometheusrule.yaml wraps these groups in a
+#     monitoring.coreos.com/v1 PrometheusRule via .Files.Get.
+#   * Compose    — infra/compose/prometheus/prometheus.yml references this
+#     directory through rule_files.
+#
+# Helm's .Files.Get cannot read outside the chart directory, which is why the
+# file lives here and Compose mounts it from here rather than the reverse. Two
+# copies is how the Compose and Kubernetes alerting drift apart unnoticed.
+#
+# Metric names and label values follow core/observability/metric_specs.py.
+# Nothing here may reference a caller-controlled label (partition, user_id,
+# file_id, task_id, request_id, filename): those are unbounded by construction,
+# and a recording rule or alert that groups by one reintroduces the cardinality
+# the metric design excluded. tests/unit/infra/test_alert_rules.py enforces it.
+#
+# runbook_url is a literal base URL, not a template. $externalLabels would
+# read from Prometheus' own external_labels, and in the integrated
+# deployment the platform owns that config — so the one delivery path we
+# cannot configure is the one where every link would break. The chart
+# rewrites the base when monitoring.prometheusRule.runbookBaseUrl is set;
+# unset, the shipped URL works in every path including Compose.
+#
+# KNOWN LIMITATION — Ray Serve multi-replica. Every expression below reads
+# per-process counters. With ENABLE_RAY_SERVE=true and num_replicas > 1
+# (api/main.py), a scrape reaches one replica at random, so rates and gauges are
+# a random 1/N sample that appears to reset between scrapes. These rules will
+# both miss real conditions and fire on phantom ones under that topology. Run
+# num_replicas=1, or treat the alerts as advisory, until per-replica scraping
+# exists.
+
+groups:
+  # ── Ingestion ────────────────────────────────────────────────────────────
+  - name: openrag-ingestion
+    rules:
+      - alert: OpenRagIngestStalled
+        # Work is waiting and nothing has finished parsing for 15 minutes.
+        # The gauge is a completion *timestamp*, not a seconds-since counter, so
+        # the age is computed here at evaluation time — a seconds-since gauge
+        # reads 0 when nothing updates it, which is exactly the wedged-pool
+        # condition this detects.
+        #
+        # max() over pools, not per pool: one idle pool is normal (no audio
+        # uploads today), every pool idle while work is queued is not. If no
+        # pool has *ever* completed a parse the gauge is absent and this cannot
+        # fire — OpenRagBacklogGrowing covers a queue that rises from zero.
+        expr: |
+          (openrag_ingest_tasks{state="QUEUED"} > 0)
+          and on()
+          (time() - max(openrag_ingest_last_parse_completion_timestamp_seconds) > 900)
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Ingestion is stalled — documents are queued and nothing is completing"
+          description: >-
+            {{ $value }} task(s) are QUEUED and no parser pool has completed a parse
+            for over 15 minutes. Uploads are being accepted and never indexed.
+          runbook_url: "https://github.com/linagora/openrag/blob/main/docs/deployment/runbooks/OpenRagIngestStalled.md"
+
+      - alert: OpenRagIngestFailureRate
+        # Ratio over terminal outcomes only. `cancelled` is excluded from both
+        # sides: a user cancelling an upload is not a failure, and counting it
+        # would either dilute a real spike or page on ordinary behaviour.
+        #
+        # The volume floor stops 1-failed-of-2 from paging on a quiet instance.
+        # When no documents finish at all the denominator is 0, the ratio is NaN
+        # and no series is produced, so this stays silent rather than dividing by
+        # zero — "nothing is completing" is OpenRagIngestStalled's job.
+        expr: |
+          (
+            sum(rate(openrag_ingest_documents_total{status="failed"}[15m]))
+            /
+            sum(rate(openrag_ingest_documents_total{status=~"completed|failed"}[15m]))
+          ) > 0.25
+          and
+          sum(increase(openrag_ingest_documents_total{status=~"completed|failed"}[15m])) >= 5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "More than 25% of documents are failing to index"
+          description: >-
+            {{ $value | humanizePercentage }} of documents reaching a terminal state
+            over the last 15 minutes failed.
+          runbook_url: "https://github.com/linagora/openrag/blob/main/docs/deployment/runbooks/OpenRagIngestFailureRate.md"
+
+      - alert: OpenRagBacklogGrowing
+        # Two conditions, both required: the queue is trending up over half an
+        # hour (deriv, which needs a gauge and this is one), and it is large
+        # enough to matter. Either alone is noisy — a burst upload rises
+        # steeply and drains fine; a steady small queue is a healthy pipeline.
+        expr: |
+          deriv(openrag_ingest_tasks{state="QUEUED"}[30m]) > 0
+          and
+          openrag_ingest_tasks{state="QUEUED"} > 50
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Indexing backlog is growing faster than it drains"
+          description: >-
+            The QUEUED task count has trended upward for 30 minutes and now stands at
+            {{ $value }}. Ingestion capacity is below the arrival rate.
+          runbook_url: "https://github.com/linagora/openrag/blob/main/docs/deployment/runbooks/OpenRagBacklogGrowing.md"
+
+      - alert: OpenRagCatalogDriftDetected
+        # openrag_retrieval_orphan_chunks_dropped_total counts retrieval hits
+        # dropped because the file is absent from the catalog — vector store and
+        # catalog disagree. Its own definition notes repeated retrievals can
+        # count the same chunk again, so the rate is not a document count: only
+        # "non-zero" is meaningful here, never a magnitude threshold.
+        expr: sum(rate(openrag_retrieval_orphan_chunks_dropped_total[15m])) > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Retrieval is dropping chunks whose file is missing from the catalog"
+          description: >-
+            Chunks are being returned by the vector store for files the catalog does not
+            know about. Retrieval quality is silently degraded.
+          runbook_url: "https://github.com/linagora/openrag/blob/main/docs/deployment/runbooks/OpenRagCatalogDriftDetected.md"
+
+  # ── Inference ────────────────────────────────────────────────────────────
+  - name: openrag-inference
+    rules:
+      - alert: OpenRagInferenceProviderDown
+        # Two independent signals for one condition, unioned.
+        #
+        # `circuit_open` is deliberately NOT in the error numerator: it is a
+        # consequence of the breaker, which the second clause already detects.
+        # Counting it in both would make the ratio self-sustaining once the
+        # breaker trips, so the alert could never clear on its own.
+        #
+        # label_replace projects the breaker's `name` onto `provider` so both
+        # sides of the union carry the same label and the annotation resolves
+        # either way. The two label spaces are related but not identical —
+        # `name` is the breaker kind (llm, embedder, vlm, reranker), `provider`
+        # is the registry entry — which the runbook spells out.
+        expr: |
+          (
+            sum by (provider) (rate(openrag_inference_requests_total{outcome=~"error|timeout"}[10m]))
+            /
+            sum by (provider) (rate(openrag_inference_requests_total[10m]))
+          ) > 0.5
+          or
+          label_replace(
+            max by (name) (openrag_circuit_breaker_state) == 1,
+            "provider", "$1", "name", "(.*)"
+          )
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Inference provider {{ $labels.provider }} is failing or circuit-broken"
+          description: >-
+            Provider {{ $labels.provider }} is either returning errors/timeouts for more
+            than half of its calls, or its circuit breaker is open. Chat and indexing that
+            depend on it will fail.
+          runbook_url: "https://github.com/linagora/openrag/blob/main/docs/deployment/runbooks/OpenRagInferenceProviderDown.md"
+
+  # ── Meta ─────────────────────────────────────────────────────────────────
+  - name: openrag-meta
+    rules:
+      - alert: OpenRagTargetDown
+        # The meta-alert: without it, every rule above fails silent. A target
+        # that stops answering produces no series, and "no series" is
+        # indistinguishable from "healthy" to every other expression here.
+        #
+        # This is NOT OpenRagNotReady. `up` reports whether /metrics answered,
+        # and /metrics deliberately keeps answering while the container is
+        # degraded (it reads process config, not the service container) — so a
+        # degraded instance is up==1 and not ready at the same time. Readiness
+        # needs a gauge exported from readiness_service; see S3-1b.
+        expr: up{job=~".*openrag.*"} == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Prometheus cannot scrape OpenRag ({{ $labels.instance }})"
+          description: >-
+            The target has been unreachable for 5 minutes. Every other OpenRag alert is
+            inert while this is firing, because absent series cannot breach a threshold.
+          runbook_url: "https://github.com/linagora/openrag/blob/main/docs/deployment/runbooks/OpenRagTargetDown.md"
