@@ -19,11 +19,16 @@ not new; picking up an advisory the base did not have is.
 
 Accepted findings. The head is scanned with the pull request's own
 .trivyignore.yaml, which is how a reviewed change accepts an advisory it
-introduces — and also how one could hide it. So the head scan also runs with
-``--show-suppressed``, and every suppression at or above the threshold is
-listed in the step summary with its statement; the ones this change is
-accepting (absent from the base) also become warning annotations. Accepting
-stays possible, but never silent.
+introduces — and also how one could hide it. So both sides are scanned with
+their own ignore file and ``--show-suppressed``, and every suppression at or
+above the threshold is listed in the step summary with its statement. A
+suppression the base did not already have is one this change adds, whether or
+not the base reported the advisory, and also becomes a warning annotation.
+Accepting stays possible, but never silent.
+
+For the gate itself an advisory the base suppressed counts as present on the
+base, so removing an acceptance does not fail a pull request over an advisory
+that predates it.
 
 Usage:
     python scripts/new_vulnerabilities.py --base base/*.json --head head/*.json
@@ -113,12 +118,13 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     level = f"{args.min_severity}-or-above"
 
-    base, _ = load_findings(args.base, args.min_severity)
+    base, base_suppressed = load_findings(args.base, args.min_severity)
     head, suppressed = load_findings(args.head, args.min_severity)
-    new = _by_severity(head[key] for key in head.keys() - base.keys())
-    # Those this change accepts (absent from the base) first, most severe first.
+    # Suppressed or not, an advisory the base had is not new to this change.
+    new = _by_severity(head[key] for key in head.keys() - base.keys() - base_suppressed.keys())
+    # Suppressions this change adds (the base did not suppress them) first, most severe first.
     accepted = sorted(
-        ((key in base, vuln) for key, vuln in suppressed.items()),
+        ((key in base_suppressed, vuln) for key, vuln in suppressed.items()),
         key=lambda item: (
             item[0],
             -SEVERITIES.index(item[1]["Severity"]),

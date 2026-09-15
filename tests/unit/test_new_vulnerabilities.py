@@ -159,15 +159,39 @@ def test_suppression_added_by_the_change_passes_but_is_annotated_and_summarised(
     assert "Only reached by the test client \\| not in production" in text
 
 
-def test_suppression_of_an_advisory_already_on_base_is_summarised_without_annotation(tmp_path, capsys, monkeypatch):
+def test_suppression_the_base_already_had_is_summarised_without_annotation(tmp_path, capsys, monkeypatch):
     summary = tmp_path / "summary.md"
     monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
-    base = report(tmp_path, "base", vuln())
+    base = report(tmp_path, "base", suppressed=[(vuln(), "accepted in an earlier change")])
     head = report(tmp_path, "head", suppressed=[(vuln(), "accepted in an earlier change")])
 
     assert gate.main(["--base", str(base), "--head", str(head)]) == 0
     assert "::warning" not in capsys.readouterr().out
     assert "| no | HIGH | `aiohttp` |" in summary.read_text()
+
+
+def test_suppressing_an_advisory_the_base_reported_is_accepted_by_this_change(tmp_path, capsys, monkeypatch):
+    # The advisory predates the change, so it never fails the gate — but the
+    # suppression is new, and must be annotated like any other.
+    summary = tmp_path / "summary.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
+    base = report(tmp_path, "base", vuln())
+    head = report(tmp_path, "head", suppressed=[(vuln(), "not reachable from the upload path")])
+
+    assert gate.main(["--base", str(base), "--head", str(head)]) == 0
+    assert (
+        "::warning file=uv.lock,title=HIGH dependency vulnerability accepted in .trivyignore.yaml"
+        "::aiohttp 3.12.14: CVE-2025-0001 — not reachable from the upload path"
+    ) in capsys.readouterr().out
+    assert "| yes | HIGH | `aiohttp` |" in summary.read_text()
+
+
+def test_removing_an_acceptance_does_not_fail_on_an_advisory_the_base_had(tmp_path, capsys):
+    base = report(tmp_path, "base", suppressed=[(vuln(), "accepted in an earlier change")])
+    head = report(tmp_path, "head", vuln())
+
+    assert gate.main(["--base", str(base), "--head", str(head)]) == 0
+    assert "::" not in capsys.readouterr().out
 
 
 def test_suppression_without_statement_is_called_out(tmp_path, capsys):

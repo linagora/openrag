@@ -84,9 +84,12 @@ jobs:
             --ignorefile .trivyignore.yaml --show-suppressed \
             --format json --output /reports/head/report.json "$LOCKFILE"
 
-      # The lockfile alone is scanned, extracted from the base commit into an
+      # The lockfile is scanned alone, extracted from the base commit into an
       # empty directory at the same relative path. A pull request that adds the
       # lockfile has no base report, and every head finding counts as new.
+      # The base's own .trivyignore.yaml comes along, with --show-suppressed, so
+      # the gate can tell a suppression this change adds from one the base
+      # already had — including one on an advisory the base already reported.
       - name: Scan the base revision
         if: github.event_name == 'pull_request'
         env:
@@ -99,9 +102,14 @@ jobs:
           fi
           mkdir -p "$RUNNER_TEMP/base/$(dirname "$LOCKFILE")"
           git show "$BASE_SHA:$LOCKFILE" > "$RUNNER_TEMP/base/$LOCKFILE"
+          ignore=()
+          if git cat-file -e "$BASE_SHA:.trivyignore.yaml" 2>/dev/null; then
+            git show "$BASE_SHA:.trivyignore.yaml" > "$RUNNER_TEMP/base/.trivyignore.yaml"
+            ignore=(--ignorefile .trivyignore.yaml --show-suppressed)
+          fi
           docker run --rm -v "$RUNNER_TEMP/base:/src:ro" -w /src \
             -v "$RUNNER_TEMP/trivy-cache:/root/.cache/trivy" -v "$RUNNER_TEMP/reports:/reports" \
-            "$TRIVY_IMAGE" fs --quiet --skip-db-update --scanners vuln \
+            "$TRIVY_IMAGE" fs --quiet --skip-db-update --scanners vuln "${ignore[@]}" \
             --format json --output /reports/base/report.json "$LOCKFILE"
 
       - name: Fail on HIGH or CRITICAL vulnerabilities this pull request introduces
