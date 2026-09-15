@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import os
 from dataclasses import dataclass
@@ -64,6 +65,12 @@ async def validate_file_format(
     head = await file.read(core_validators.CONTENT_SNIFF_BYTES)
     await file.seek(0)
     core_validators.validate_content_matches_extension(extension, head)
+    # An OOXML package is settled by the archive's central directory, at the end
+    # of the file, so the head cannot decide it. The multipart body is already
+    # buffered by the time a dependency runs, so the whole upload is readable
+    # here. Off the loop: reading the directory of an attacker-supplied archive
+    # is unbounded work, and a spooled upload that rolled over is a file on disk.
+    await asyncio.to_thread(core_validators.validate_ooxml_package, extension, file.file)
     return file
 
 

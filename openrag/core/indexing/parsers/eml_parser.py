@@ -28,14 +28,16 @@ propagate; we log and continue.
 
 from __future__ import annotations
 
+import asyncio
 import email
+import io
 import logging
 from collections.abc import Mapping
 from email import policy
 from email.utils import parsedate_to_datetime
 
 from ...models.document import Document, DocumentType, ImageBlock, ProcessedDocument, TextBlock
-from ..validators import CONTENT_SNIFF_BYTES, validate_content_matches_extension
+from ..validators import CONTENT_SNIFF_BYTES, validate_content_matches_extension, validate_ooxml_package
 from .document_parser import DocumentParser
 from .html_parser import HtmlParser
 from .registry import parser_registry
@@ -236,6 +238,7 @@ class EmlParser(DocumentParser):
         # A mismatch skips this attachment; the rest of the message parses.
         try:
             validate_content_matches_extension(ext, attachment["raw"][:CONTENT_SNIFF_BYTES])
+            await asyncio.to_thread(validate_ooxml_package, ext, io.BytesIO(attachment["raw"]))
         except Exception as exc:
             logger.warning("Skipping attachment %s: %s", attachment["filename"], exc)
             return "", []

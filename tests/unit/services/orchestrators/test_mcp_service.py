@@ -13,10 +13,9 @@ from types import SimpleNamespace
 import httpx
 import pytest
 from core.utils.exceptions import ValidationError
-from services.orchestrators.mcp_service import (
-    MCPService,
-)  #: index_url verifies downloaded bytes against the URL extension; these
+from services.orchestrators.mcp_service import MCPService
 
+#: index_url verifies downloaded bytes against the URL extension; these
 #: fixtures use .pdf URLs, so their payloads must carry a PDF signature.
 _PDF_HEADER = b"%PDF-1.7\n"
 

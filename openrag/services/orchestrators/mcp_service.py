@@ -32,7 +32,11 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import urljoin, urlparse
 
 import httpx
-from core.indexing.validators import CONTENT_SNIFF_BYTES, validate_content_matches_extension
+from core.indexing.validators import (
+    CONTENT_SNIFF_BYTES,
+    validate_content_matches_extension,
+    validate_ooxml_package,
+)
 from core.utils.consts import is_internal_metadata_key, strip_protected_metadata
 from core.utils.exceptions import ValidationError
 from core.utils.logging import get_logger
@@ -589,9 +593,10 @@ class MCPService:
         # parser — the same trust the upload routes refuse to extend to a
         # caller-supplied filename. Check the downloaded bytes agree with it.
         try:
+            extension = suffix.lstrip(".").lower()
             with tmp_path.open("rb") as downloaded:
-                head = downloaded.read(CONTENT_SNIFF_BYTES)
-            validate_content_matches_extension(suffix.lstrip(".").lower(), head)
+                validate_content_matches_extension(extension, downloaded.read(CONTENT_SNIFF_BYTES))
+                await asyncio.to_thread(validate_ooxml_package, extension, downloaded)
         except Exception:
             tmp_path.unlink(missing_ok=True)
             raise

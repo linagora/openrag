@@ -9,8 +9,9 @@ from __future__ import annotations
 
 import json
 import re
+import zipfile
 from collections.abc import Iterable
-from typing import Any
+from typing import IO, Any
 
 import filetype
 
@@ -110,8 +111,8 @@ def validate_file_format(
 
 
 #: Bytes read from the head of an upload for signature detection. The matchers
-#: that need the most are the OOXML ones, which read the archive's first local
-#: file header; 8 KiB is well clear of that and is read once per upload.
+#: that need the most read a few hundred bytes; 8 KiB is well clear of that and
+#: is read once per upload.
 CONTENT_SNIFF_BYTES = 8192
 
 #: Extensions whose content carries a signature we can check, mapped to what
@@ -128,6 +129,9 @@ CONTENT_SNIFF_BYTES = 8192
 #: * Audio and video containers other than those above are left out until the
 #:   accepted brand variants can be checked against real samples; guessing at
 #:   them risks refusing valid media.
+#: * ``docx``/``pptx`` are **not** here: a ZIP's authoritative index is its
+#:   central directory, which sits at the end of the file, so no head buffer can
+#:   settle them. They are checked by :func:`validate_ooxml_package` instead.
 _VERIFIABLE_SIGNATURES: dict[str, frozenset[str]] = {
     "pdf": frozenset({"pdf"}),
     "png": frozenset({"png"}),
@@ -136,9 +140,19 @@ _VERIFIABLE_SIGNATURES: dict[str, frozenset[str]] = {
     "gif": frozenset({"gif"}),
     "bmp": frozenset({"bmp"}),
     "webp": frozenset({"webp"}),
-    "docx": frozenset({"docx"}),
-    "pptx": frozenset({"pptx"}),
 }
+
+#: The part whose presence makes an OPC package a document of that kind, per
+#: ECMA-376.
+_OOXML_MAIN_PARTS: dict[str, str] = {
+    "docx": "word/document.xml",
+    "pptx": "ppt/presentation.xml",
+}
+
+#: Parts every OPC package carries whatever its flavour: the content-type map
+#: and the package relationships. Both are mandatory, and an archive that only
+#: borrowed a document's entry names has neither.
+_OOXML_PACKAGE_PARTS = frozenset({"[Content_Types].xml", "_rels/.rels"})
 
 
 def validate_content_matches_extension(extension: str, head: bytes) -> None:
@@ -171,3 +185,59 @@ def validate_content_matches_extension(extension: str, head: bytes) -> None:
         f"Upload it with the extension matching its actual format.",
         status_code=415,
     )
+
+
+def validate_ooxml_package(extension: str, stream: IO[bytes]) -> None:
+    """Reject a ``.docx``/``.pptx`` upload that is not a real OOXML package.
+
+    ``filetype`` cannot settle this, and was verified failing both ways: its
+    matcher looks for an entry *named* ``word/`` or ``ppt/`` among the first few
+    ZIP local file headers, so a plain archive containing ``word/anything.txt``
+    is reported as a docx, while a genuine document whose ``customXml``/
+    ``docProps`` parts are written first is reported as a plain zip and would be
+    refused. The package is opened instead and its central directory — the
+    authoritative index, at the end of the file — is read.
+
+    Only the directory is parsed; no member is decompressed, so a compression
+    bomb is never expanded here.
+
+    Blocking by design, like the parsers in ``core/indexing/parsers/``. Callers
+    on the event loop wrap it in ``asyncio.to_thread``: reading the directory of
+    an attacker-supplied archive is unbounded work, and the API serves streaming
+    responses and ``/health_check`` from the same loop.
+
+    Args:
+        extension: Lowercased extension without the dot. Anything that is not an
+            OOXML format returns without reading the stream.
+        stream: Seekable binary stream holding the **whole** file. Its position
+            is restored before returning, on success and on rejection alike, so
+            a caller can go on to stream the same handle to disk.
+
+    Raises:
+        ValidationError: HTTP 415, when the archive is not a package of that kind.
+    """
+    main_part = _OOXML_MAIN_PARTS.get(extension)
+    if main_part is None:
+        return
+
+    position = stream.tell()
+    try:
+        with zipfile.ZipFile(stream) as package:
+            names = set(package.namelist())
+    except (zipfile.BadZipFile, OSError, ValueError) as exc:
+        raise ValidationError(
+            f"Uploaded file does not match its .{extension} extension: it is not a readable "
+            f"Office package. Upload it with the extension matching its actual format.",
+            status_code=415,
+        ) from exc
+    finally:
+        stream.seek(position)
+
+    missing = (_OOXML_PACKAGE_PARTS | {main_part}) - names
+    if missing:
+        raise ValidationError(
+            f"Uploaded file does not match its .{extension} extension: the archive is missing "
+            f"{', '.join(sorted(missing))}, so it is not a valid Office package. "
+            f"Upload it with the extension matching its actual format.",
+            status_code=415,
+        )

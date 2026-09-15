@@ -194,7 +194,7 @@ def test_extract_temporal_fields_invalid_datetime_raises_400():
 
 class _LoaderFormats:
     def model_dump(self):
-        return {"pdf": "x", "png": "x", "txt": "x"}
+        return {"pdf": "x", "png": "x", "txt": "x", "docx": "x"}
 
 
 class _Mimetypes:
@@ -240,3 +240,39 @@ async def test_reading_the_head_leaves_the_stream_intact_for_the_save(tmp_path: 
 
     assert saved.path.read_bytes() == _PDF_BYTES
     assert saved.size_bytes == len(_PDF_BYTES)
+
+
+@pytest.mark.asyncio
+async def test_validate_file_format_accepts_a_real_docx(tmp_path: Path):
+    """An OOXML upload is settled by the archive directory at the end of the
+    file, so the dependency must read past the head — and the streamed save
+    that follows must still get every byte."""
+    docx = pytest.importorskip("docx", reason="python-docx is only available transitively")
+    buf = io.BytesIO()
+    document = docx.Document()
+    document.add_paragraph("hello")
+    document.save(buf)
+    body = buf.getvalue()
+
+    upload = UploadFile(file=io.BytesIO(body), filename="real.docx")
+    await files_dep.validate_file_format(file=upload, metadata={}, config=_StubConfig)
+    saved = await save_file_to_disk_with_sha256(upload, tmp_path, chunk_size=1024)
+
+    assert saved.path.read_bytes() == body
+
+
+@pytest.mark.asyncio
+async def test_validate_file_format_rejects_a_zip_renamed_docx():
+    """The archive the signature matcher reports as a docx: first entry named
+    ``word/``, no package inside."""
+    import zipfile
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as archive:
+        archive.writestr("word/not-a-document.txt", "nope")
+    upload = UploadFile(file=io.BytesIO(buf.getvalue()), filename="renamed.docx")
+
+    with pytest.raises(ValidationError) as exc_info:
+        await files_dep.validate_file_format(file=upload, metadata={}, config=_StubConfig)
+
+    assert exc_info.value.status_code == 415
