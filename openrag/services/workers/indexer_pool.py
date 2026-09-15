@@ -168,6 +168,9 @@ class IndexerWorkerActor:
             contextualizer_factory=contextualizer_factory,
             topic_tagger_factory=topic_tagger_factory,
             defer_replace_cleanup=True,
+            # No point letting more of one document's images queue on the VLM
+            # gate than the gate will ever admit at once.
+            caption_concurrency=cfg.semaphore.vlm_semaphore,
         )
         self._catalog_store = PostgresStore(_catalog_rdb_config(cfg), run_migrations=False)
         self._catalog_initialized = False
