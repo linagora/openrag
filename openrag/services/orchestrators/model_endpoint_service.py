@@ -519,8 +519,27 @@ class ModelEndpointService:
             raise NotFoundError(f"Endpoint '{name}' of type '{model_type}' not found.")
         return row
 
-    async def list_model_endpoints(self, model_type: str | None = None) -> list[ModelEndpointRow]:
-        return await self._repo.list_all(model_type=model_type)
+    async def list_model_endpoints(self, model_type: str | None = None) -> list[dict[str, Any]]:
+        """List endpoints, each annotated with ``used_by_partitions``.
+
+        One aggregate query for the counts rather than one per endpoint. The
+        count is what makes the delete dialog honest: an embedder with a
+        nonzero count cannot be deleted (the repo refuses it), so the UI can
+        say so up front instead of offering a button that 409s.
+        """
+        rows = await self._repo.list_all(model_type=model_type)
+        counts = await self._repo.usage_counts()
+        return [{**row.model_dump(), "used_by_partitions": counts.get((row.name, row.model_type), 0)} for row in rows]
+
+    async def indexed_file_usage(self, name: str, model_type: str) -> list[dict[str, Any]]:
+        """Per-partition indexed-file counts for one endpoint, most files first.
+
+        Sizes what an in-place edit would strand, so the confirmation can name a
+        real number instead of warning in the abstract (#762 C). Empty when the
+        endpoint holds no indexed data — nothing is at stake and the UI can say
+        so rather than warning anyway.
+        """
+        return await self._repo.indexed_file_usage(name, model_type)
 
     async def update_model_endpoint(self, name: str, model_type: str, **fields: object) -> ModelEndpointRow:
         """Update endpoint fields and/or rename it.
@@ -634,6 +653,14 @@ class ModelEndpointService:
         clears those selections in the delete's own transaction (see
         ``_clear_preset_references``), returning the preset to the default
         fallback; the cache reloads below make that visible to this replica.
+
+        Partition references are settled in that same transaction, and not the
+        same way for both columns (#762). An ``embedder`` a partition still
+        resolves to refuses the delete outright — ConflictError, 409 — because
+        clearing it would repoint indexed vectors at a different embedding
+        model without saying so. A ``chat_llm`` reference is cleared to NULL,
+        which is precisely the request-time default it would have fallen back
+        to anyway. See ``PgModelEndpointRepository._settle_partition_references``.
         """
         # The last-endpoint guard and the survivor/default choice are made INSIDE
         # the repo's locked transaction (not from a stale snapshot here), so

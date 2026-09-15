@@ -38,6 +38,16 @@ import {
 } from "@/components/ui/table";
 import { PageHeader } from "@/components/shared/page-header";
 import { ConfirmDialog } from "@/components/shared/confirm-dialog";
+import { computeEmbedderDrift } from "./embedder-drift";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import {
   getPartitionConfig,
   updatePartition,
@@ -47,9 +57,17 @@ import {
   removePartitionMember,
   updatePartitionMemberRole,
 } from "@/lib/api/partitions";
-import type { PartitionConfig, PartitionMemberCandidate, PartitionRole } from "@/lib/api/partitions";
+import type {
+  PartitionConfig,
+  PartitionMemberCandidate,
+  PartitionRole,
+} from "@/lib/api/partitions";
 import { listPresets } from "@/lib/api/presets";
-import { listModelEndpoints, validateStoredModelEndpoint, resolveEmbedderName } from "@/lib/api/models";
+import {
+  listModelEndpoints,
+  validateStoredModelEndpoint,
+  resolveEmbedderName,
+} from "@/lib/api/models";
 import { listAllPrompts } from "@/lib/api/prompts";
 import type { PromptResponse } from "@/lib/api/prompts";
 import {
@@ -76,6 +94,148 @@ import { describePartitionMember } from "./partition-member";
 const GENERATION_PROMPT_TYPES = PROMPT_GROUPS.find((g) => g.name === "Final Answer")!.types;
 
 // --- General Tab ---
+
+const files = (n: number) => `${n} file${n === 1 ? "" : "s"}`;
+
+/** Interrupts once when a partition's files no longer match its embedder.
+ *
+ *  The panel below states the same fact permanently, but it only speaks to
+ *  someone already looking at it. A swap is silent everywhere else — queries
+ *  keep returning results, just ranked in a vector space the files were not
+ *  built in — so the one case worth an interruption is the one where results
+ *  are already wrong and nobody has been told.
+ *
+ *  Once per browser session per drift state: re-opening the page does not
+ *  nag, but a *new* embedder appearing later does, because the acknowledgement
+ *  is keyed on which embedders drifted rather than on the partition alone.
+ */
+function EmbedderDriftDialog({
+  partition,
+  drift,
+}: {
+  partition: string;
+  drift: ReturnType<typeof computeEmbedderDrift>;
+}) {
+  const signature = drift.hasDrift
+    ? `${drift.current}<-${drift.drifted.map((g) => `${g.key}:${g.file_count}`).join(",")}`
+    : "";
+  const storageKey = `openrag:embedder-drift:${partition}:${signature}`;
+  const [open, setOpen] = useState(false);
+
+  useEffect(() => {
+    if (!drift.hasDrift) return;
+    let acknowledged = false;
+    try {
+      acknowledged = sessionStorage.getItem(storageKey) === "1";
+    } catch {
+      // Private windows and blocked site data throw on access. Showing the
+      // dialog is the safe fallback: a repeated warning beats a silent one.
+    }
+    // Opening is a reaction to sessionStorage, which React cannot read during render.
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- see above
+    if (!acknowledged) setOpen(true);
+  }, [drift.hasDrift, storageKey]);
+
+  const acknowledge = () => {
+    try {
+      sessionStorage.setItem(storageKey, "1");
+    } catch {
+      // Nothing to do — the dialog simply shows again next visit.
+    }
+    setOpen(false);
+  };
+
+  if (!drift.hasDrift) return null;
+
+  return (
+    <AlertDialog open={open} onOpenChange={(next) => (next ? setOpen(true) : acknowledge())}>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>Search results in this partition may be wrong</AlertDialogTitle>
+          <AlertDialogDescription asChild>
+            <div className="space-y-3">
+              <p>
+                {files(drift.driftedFiles)} in <span className="font-medium">{partition}</span> were
+                indexed with a different embedder than the one queries now use. Their vectors were
+                produced by another model, so they are searched in a vector space they were not built
+                in &mdash; nothing errors, the ranking is just no longer meaningful.
+              </p>
+              <ul className="space-y-1 text-sm">
+                {drift.drifted.map((g) => (
+                  <li key={g.key}>
+                    <span className="font-mono">{g.key}</span>
+                    <span className="text-muted-foreground"> &mdash; {files(g.file_count)}</span>
+                  </li>
+                ))}
+                <li>
+                  <span className="font-mono">{drift.current}</span>
+                  <span className="text-muted-foreground"> &mdash; used by queries now</span>
+                </li>
+              </ul>
+              <p>Re-embed those files to bring them back in line.</p>
+            </div>
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogAction onClick={acknowledge}>Got it</AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+  );
+}
+
+/** What a partition's files were *actually* indexed with, and whether that
+ *  still matches the embedder queries use.
+ */
+function EmbedderProvenance({
+  drift,
+}: {
+  drift: ReturnType<typeof computeEmbedderDrift>;
+}) {
+  const { groups, current, hasDrift, driftedFiles: total } = drift;
+  if (groups.length === 0) return null;
+
+  // Shown either way: a panel that only appears during an incident is one
+  // nobody knows to look for. Drift escalates it rather than adding a new one.
+  return (
+    <Alert
+      className={
+        hasDrift
+          ? "mt-6 bg-amber-50 border-amber-200 dark:bg-amber-950/30 dark:border-amber-900/60"
+          : "mt-6"
+      }
+    >
+      <Info className="h-4 w-4" />
+      <AlertTitle>
+        {hasDrift ? `${files(total)} were indexed with a different embedder` : "Indexed with"}
+      </AlertTitle>
+      <AlertDescription>
+        {hasDrift && (
+          <p className="mb-2">
+            Queries embed with <span className="font-medium">{current}</span>, so these files are
+            searched in a vector space they were not built in. Re-embed them to bring them back.
+          </p>
+        )}
+        <ul className="space-y-1">
+          {groups.map((g) => (
+            <li key={g.key} className="text-sm">
+              <span className="font-mono">{g.key}</span>
+              {g.dimension != null && <span className="text-muted-foreground"> · {g.dimension}-d</span>}
+              <span className="text-muted-foreground"> — {files(g.file_count)}</span>
+              {g.recorded && !g.drifted && <span className="text-muted-foreground"> · current</span>}
+            </li>
+          ))}
+        </ul>
+        {groups.some((g) => !g.recorded) && (
+          <p className="mt-2 text-xs text-muted-foreground">
+            &ldquo;unrecorded&rdquo; means indexed before OpenRag tracked which embedder ran &mdash; not
+            necessarily drifted.
+          </p>
+        )}
+      </AlertDescription>
+    </Alert>
+  );
+}
 
 function GeneralTab({ partition }: { partition: PartitionConfig }) {
   const queryClient = useQueryClient();
@@ -128,6 +288,13 @@ function GeneralTab({ partition }: { partition: PartitionConfig }) {
     queryFn: () => listModelEndpoints("embedder"),
     enabled: isAdmin,
   });
+
+  // Computed once and handed to both the panel and the dialog, so a partition
+  // can never be flagged in one and clean in the other.
+  const embedderDrift = useMemo(
+    () => computeEmbedderDrift(partition.embedder, partition.indexed_embedders, embedderEndpoints),
+    [partition.embedder, partition.indexed_embedders, embedderEndpoints],
+  );
 
   const { data: promptsData } = useQuery({
     queryKey: ["prompts-library"],
@@ -261,7 +428,11 @@ function GeneralTab({ partition }: { partition: PartitionConfig }) {
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-6">
             <div className="space-y-2">
               <Label className="text-muted-foreground">Dimension</Label>
-              <p className="text-sm font-medium pt-1">{partition.dimension}</p>
+              <p className="text-sm font-medium pt-1">
+                {partition.dimension ?? (
+                  <span className="text-muted-foreground font-normal">Not indexed yet</span>
+                )}
+              </p>
             </div>
             <div className="space-y-2">
               <Label className="text-muted-foreground">Embedder</Label>
@@ -274,6 +445,8 @@ function GeneralTab({ partition }: { partition: PartitionConfig }) {
               <p className="text-sm font-medium pt-1">{partition.document_count}</p>
             </div>
           </div>
+          <EmbedderProvenance drift={embedderDrift} />
+          <EmbedderDriftDialog partition={partition.name} drift={embedderDrift} />
           <div className="pt-2 grid grid-cols-2 lg:grid-cols-4 gap-6">
             <div className="space-y-2">
               <Label>Indexation Preset</Label>

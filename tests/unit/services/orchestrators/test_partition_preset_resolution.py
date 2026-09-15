@@ -72,11 +72,18 @@ class _FakePartitionRepo:
 
 
 class _FakeVectorStore:
+    def __init__(self, dimension: int | None = 768) -> None:
+        self._dimension = dimension
+
     async def collection_exists(self, name: str) -> bool:
         return False
 
+    async def vector_dimension(self) -> int | None:
+        return self._dimension
 
-def _settings(idx=None, ret=None):
+
+def _settings(idx=None, ret=None, embedders=("default",)):
+    from core.config.model_endpoints import ModelEndpointConfig
     from core.config.root import Settings
 
     s = Settings()
@@ -84,6 +91,10 @@ def _settings(idx=None, ret=None):
     s.presets.indexation.update(idx if idx is not None else {"default": _IDX_CONFIG})
     s.presets.retrieval.clear()
     s.presets.retrieval.update(ret if ret is not None else {"default": _RET_CONFIG})
+    # A partition create always assigns embedder="default" (the alias
+    # ModelEndpointService files the is_default row under), and that assignment
+    # is validated — so the catalog has to hold it for the create to succeed.
+    s.models.embedder.update({n: ModelEndpointConfig(endpoint="http://emb:8000/v1") for n in embedders})
     return s
 
 
@@ -432,6 +443,91 @@ async def test_create_partition_accepts_catalogued_chat_llm():
 
 
 # ------------------------------------------------------------------
+# embedder assignment (model-endpoint reference)
+# ------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_update_partition_rejects_unknown_embedder():
+    from core.utils.exceptions import ValidationError
+
+    repo = _FakePartitionRepo(rows=[_full_row("p1")])
+    svc = _make_service(repo, settings=_settings(embedders=("default", "bge-m3")))
+
+    with pytest.raises(ValidationError, match="Embedder endpoint 'bge-m4'") as exc:
+        await svc.update_partition("p1", embedder="bge-m4")
+    assert exc.value.status_code == 422
+    assert exc.value.code == "MODEL_ENDPOINT_NOT_FOUND"
+    assert repo._store["p1"]["embedder"] == "default"  # nothing was written
+
+
+@pytest.mark.asyncio
+async def test_update_partition_accepts_catalogued_embedder():
+    settings = _settings(embedders=("default", "bge-m3"))
+    repo = _FakePartitionRepo(rows=[_full_row("p1")])
+    svc = _make_service(repo, settings=settings)
+
+    await svc.update_partition("p1", embedder="bge-m3")
+
+    assert repo._store["p1"]["embedder"] == "bge-m3"
+    assert settings.partitions["p1"].embedder == "bge-m3"
+
+
+@pytest.mark.asyncio
+async def test_update_partition_stale_stored_embedder_does_not_block_other_updates():
+    # Unlike chat_llm a stale embedder has no runtime fallback, but a PATCH
+    # that doesn't touch it still must not be held hostage by it — otherwise
+    # the partition becomes uneditable, including the rename that would fix it.
+    repo = _FakePartitionRepo(rows=[_full_row("p1", embedder="deleted-endpoint")])
+    svc = _make_service(repo, settings=_settings())
+
+    await svc.update_partition("p1", description="new")
+
+    assert repo._store["p1"]["description"] == "new"
+    assert repo._store["p1"]["embedder"] == "deleted-endpoint"
+
+
+@pytest.mark.asyncio
+async def test_create_partition_rejects_unknown_embedder():
+    from core.utils.exceptions import ValidationError
+
+    repo = _FakePartitionRepo()
+    svc = _make_service(repo, settings=_settings())
+
+    with pytest.raises(ValidationError, match="Embedder endpoint 'ghost'") as exc:
+        await svc.create_partition("p1", user_id=1, embedder="ghost")
+    assert exc.value.code == "MODEL_ENDPOINT_NOT_FOUND"
+    assert not await repo.partition_exists("p1")
+
+
+@pytest.mark.asyncio
+async def test_create_partition_accepts_catalogued_embedder():
+    settings = _settings(embedders=("default", "bge-m3"))
+    repo = _FakePartitionRepo()
+    svc = _make_service(repo, settings=settings)
+
+    await svc.create_partition("p1", user_id=1, embedder="bge-m3")
+
+    assert repo._store["p1"]["embedder"] == "bge-m3"
+    assert settings.partitions["p1"].embedder == "bge-m3"
+
+
+@pytest.mark.asyncio
+async def test_create_partition_rejects_default_embedder_when_none_is_catalogued():
+    """ "default" is the alias for the is_default row, not a free pass: with no
+    embedder endpoint registered there is nothing to index with, so the create
+    fails here instead of at the first upload."""
+    from core.utils.exceptions import ValidationError
+
+    repo = _FakePartitionRepo()
+    svc = _make_service(repo, settings=_settings(embedders=()))
+
+    with pytest.raises(ValidationError, match="Embedder endpoint 'default'"):
+        await svc.create_partition("p1", user_id=1)
+    assert not await repo.partition_exists("p1")
+
+
+# ------------------------------------------------------------------
 # get_partition_config / update_partition_config (PartitionDetailResponse)
 # ------------------------------------------------------------------
 
@@ -450,7 +546,9 @@ async def test_get_partition_config_returns_resolved_detail():
     assert detail["embedder"] == "default"
     assert detail["indexation_preset"] == "default"
     assert detail["retrieval_preset"] == "default"
-    assert detail["dimension"] == 1024
+    # The row says 1024 (the column's server default, which nothing writes);
+    # the live collection says 768. The API must report the collection.
+    assert detail["dimension"] == 768
     assert detail["retrieval_pipeline"]["top_k"] == 50
     assert "chunking" in detail["indexation_pipeline"]
     assert "chat_history_depth" in detail
@@ -492,3 +590,126 @@ async def test_update_partition_config_applies_and_returns_detail():
 
     assert detail["description"] == "new"
     assert repo._store["p1"]["description"] == "new"
+
+
+# ------------------------------------------------------------------
+# reported dimension (#762 G)
+# ------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_detail_dimension_is_null_when_the_store_cannot_tell():
+    """No collection yet, or an unreachable Milvus. "Unknown" is a fact; the
+    1024 this used to echo was a fabrication."""
+    repo = _FakePartitionRepo(rows=[_full_row("p1")])
+    svc = _make_service(repo)
+    svc._vector_store = _FakeVectorStore(dimension=None)
+
+    detail = await svc.get_partition_config("p1")
+
+    assert detail["dimension"] is None
+
+
+@pytest.mark.asyncio
+async def test_detail_dimension_survives_a_vector_store_failure():
+    """The dimension is informational — a briefly unreachable store must not
+    turn a partition-config read into a 500."""
+
+    class _BrokenStore(_FakeVectorStore):
+        async def vector_dimension(self) -> int | None:
+            raise RuntimeError("milvus unreachable")
+
+    repo = _FakePartitionRepo(rows=[_full_row("p1")])
+    svc = _make_service(repo)
+    svc._vector_store = _BrokenStore()
+
+    detail = await svc.get_partition_config("p1")
+
+    assert detail["dimension"] is None
+    assert detail["name"] == "p1"
+
+
+@pytest.mark.asyncio
+async def test_list_summaries_report_the_live_dimension_once():
+    """One collection serves every partition, so they share the answer — and
+    the lookup is made once for the whole list, not per row."""
+    calls = {"n": 0}
+
+    class _CountingStore(_FakeVectorStore):
+        async def vector_dimension(self) -> int | None:
+            calls["n"] += 1
+            return 768
+
+    repo = _FakePartitionRepo(rows=[_full_row("a"), _full_row("b"), _full_row("c")])
+    svc = _make_service(repo)
+    svc._vector_store = _CountingStore()
+
+    summaries = await svc.list_partition_summaries()
+
+    assert {s["dimension"] for s in summaries.values()} == {768}
+    assert calls["n"] == 1
+
+
+# ------------------------------------------------------------------
+# per-file embedder provenance (#762 E)
+# ------------------------------------------------------------------
+
+
+class _FakeDocRepoWithProvenance:
+    def __init__(self, rows=None, raises=False):
+        self._rows = rows or []
+        self._raises = raises
+        self.calls: list[str] = []
+
+    async def count_files_by_embedder(self, partition: str):
+        self.calls.append(partition)
+        if self._raises:
+            raise RuntimeError("catalog unreachable")
+        return self._rows
+
+
+@pytest.mark.asyncio
+async def test_detail_reports_which_embedders_actually_indexed_the_files():
+    """The partition row says what is configured now; this says what the files
+    were built with. The gap between them is the drift."""
+    rows = [
+        {"embedder": "Qwen3-Embedding-0.6B", "model_name": "Qwen3-Embedding-0.6B", "dimension": 1024, "file_count": 8},
+        {"embedder": "bge-m3", "model_name": "bge-m3", "dimension": 1024, "file_count": 3},
+    ]
+    repo = _FakePartitionRepo(rows=[_full_row("p1", embedder="bge-m3")])
+    svc = _make_service(repo, settings=_settings(embedders=("default", "bge-m3")))
+    svc._document_repo = _FakeDocRepoWithProvenance(rows)
+
+    detail = await svc.get_partition_config("p1")
+
+    assert detail["embedder"] == "bge-m3"  # configured now
+    assert [r["file_count"] for r in detail["indexed_embedders"]] == [8, 3]
+    # 8 files predate the swap and are the ones a repair would scope to.
+    assert detail["indexed_embedders"][0]["embedder"] == "Qwen3-Embedding-0.6B"
+
+
+@pytest.mark.asyncio
+async def test_detail_keeps_pre_provenance_files_as_unknown():
+    """Not backfilled with the current setting — that would be a guess dressed
+    as a record, and wrong for exactly the files worth finding."""
+    repo = _FakePartitionRepo(rows=[_full_row("p1")])
+    svc = _make_service(repo)
+    svc._document_repo = _FakeDocRepoWithProvenance(
+        [{"embedder": None, "model_name": None, "dimension": None, "file_count": 5}]
+    )
+
+    detail = await svc.get_partition_config("p1")
+
+    assert detail["indexed_embedders"] == [{"embedder": None, "model_name": None, "dimension": None, "file_count": 5}]
+
+
+@pytest.mark.asyncio
+async def test_detail_survives_a_catalog_failure():
+    repo = _FakePartitionRepo(rows=[_full_row("p1")])
+    svc = _make_service(repo)
+    svc._document_repo = _FakeDocRepoWithProvenance(raises=True)
+
+    detail = await svc.get_partition_config("p1")
+
+    assert detail["indexed_embedders"] == []
+    assert detail["name"] == "p1"
