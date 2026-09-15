@@ -71,12 +71,17 @@ jobs:
             fs --quiet --download-db-only
 
       # Advisories accepted in .trivyignore.yaml are left out of the head scan,
-      # which is what lets a reviewed pull request through the gate below.
+      # which is what lets a reviewed pull request through the gate below. The
+      # file comes from the pull request itself — accepting a finding belongs in
+      # the change that introduces it — so --show-suppressed keeps each
+      # suppression, with its statement, in the report: the gate lists them in
+      # the step summary and annotates the ones this change adds.
       - name: Scan the head revision
         run: |
           docker run --rm -v "$PWD:/src:ro" -w /src \
             -v "$RUNNER_TEMP/trivy-cache:/root/.cache/trivy" -v "$RUNNER_TEMP/reports:/reports" \
-            "$TRIVY_IMAGE" fs --quiet --skip-db-update --scanners vuln --ignorefile .trivyignore.yaml \
+            "$TRIVY_IMAGE" fs --quiet --skip-db-update --scanners vuln \
+            --ignorefile .trivyignore.yaml --show-suppressed \
             --format json --output /reports/head/report.json "$LOCKFILE"
 
       # The lockfile alone is scanned, extracted from the base commit into an

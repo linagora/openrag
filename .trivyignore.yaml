@@ -9,8 +9,12 @@
 #   vulnerabilities:
 #     - id: CVE-2025-43859
 #       purls: ["pkg:pypi/h11@0.14.0"]   # scope it to the version you accept
-#       statement: Why this is acceptable, and what would change that.
+#       statement: "Why this is acceptable, and what would change that (see #123)."
 #       expired_at: 2027-03-01           # optional; the entry stops matching after it
+#
+# Quote the statement: unquoted, YAML ends it at the first " #". The check
+# lists every accepted advisory with its statement in its summary, and
+# annotates the ones a pull request adds, so an acceptance is never silent.
 #
 # An entry only speaks for the pull request that introduces the advisory. Once
 # merged, the finding is on the base revision too, so later pull requests do

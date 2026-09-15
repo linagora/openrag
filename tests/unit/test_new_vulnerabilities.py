@@ -24,15 +24,26 @@ def vuln(pkg="aiohttp", version="3.12.14", advisory="CVE-2025-0001", severity="H
     }
 
 
-def report(tmp_path, name, *vulns, artifact="uv.lock", kind="uv"):
-    """Write a Trivy JSON report shaped like `trivy fs --format json <lockfile>`."""
+def report(tmp_path, name, *vulns, artifact="uv.lock", kind="uv", suppressed=()):
+    """Write a Trivy JSON report shaped like `trivy fs --format json [--show-suppressed] <lockfile>`.
+
+    ``suppressed`` holds (finding, statement) pairs an ignore file matched.
+    """
     path = tmp_path / f"{name}.json"
     target = Path(artifact).name  # Trivy names a single-file result by basename
-    path.write_text(
-        json.dumps(
-            {"ArtifactName": artifact, "Results": [{"Target": target, "Type": kind, "Vulnerabilities": list(vulns)}]}
-        )
-    )
+    result = {"Target": target, "Type": kind, "Vulnerabilities": list(vulns)}
+    if suppressed:
+        result["ExperimentalModifiedFindings"] = [
+            {
+                "Type": "vulnerability",
+                "Status": "ignored",
+                "Statement": statement,
+                "Source": ".trivyignore.yaml",
+                "Finding": finding,
+            }
+            for finding, statement in suppressed
+        ]
+    path.write_text(json.dumps({"ArtifactName": artifact, "Results": [result]}))
     return path
 
 
@@ -126,3 +137,62 @@ def test_annotation_properties_cannot_break_out_of_the_command(tmp_path, capsys)
     line = capsys.readouterr().out.splitlines()[0]
     assert line.startswith("::error file=odd%2Cname%3Alock,title=")
     assert "%0A::warning::x" in line
+
+
+def test_suppression_added_by_the_change_passes_but_is_annotated_and_summarised(tmp_path, capsys, monkeypatch):
+    summary = tmp_path / "summary.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
+    base = report(tmp_path, "base")
+    h11 = vuln(pkg="h11", version="0.14.0", advisory="CVE-2025-43859", severity="CRITICAL", fixed="0.16.0")
+    head = report(tmp_path, "head", suppressed=[(h11, "Only reached by the test client | not in production")])
+
+    assert gate.main(["--base", str(base), "--head", str(head)]) == 0
+    out = capsys.readouterr().out
+    assert (
+        "::warning file=uv.lock,title=CRITICAL dependency vulnerability accepted in .trivyignore.yaml"
+        "::h11 0.14.0: CVE-2025-43859 — Only reached by the test client | not in production"
+    ) in out
+    assert "::error" not in out
+    text = summary.read_text()
+    assert "### 1 HIGH-or-above dependency vulnerabilities accepted in `.trivyignore.yaml`" in text
+    assert "| yes | CRITICAL | `h11` | 0.14.0 |" in text
+    assert "Only reached by the test client \\| not in production" in text
+
+
+def test_suppression_of_an_advisory_already_on_base_is_summarised_without_annotation(tmp_path, capsys, monkeypatch):
+    summary = tmp_path / "summary.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
+    base = report(tmp_path, "base", vuln())
+    head = report(tmp_path, "head", suppressed=[(vuln(), "accepted in an earlier change")])
+
+    assert gate.main(["--base", str(base), "--head", str(head)]) == 0
+    assert "::warning" not in capsys.readouterr().out
+    assert "| no | HIGH | `aiohttp` |" in summary.read_text()
+
+
+def test_suppression_without_statement_is_called_out(tmp_path, capsys):
+    head = report(tmp_path, "head", suppressed=[(vuln(), "")])
+
+    assert gate.main(["--head", str(head)]) == 0
+    assert "CVE-2025-0001 — (no statement given)" in capsys.readouterr().out
+
+
+def test_suppression_below_threshold_is_not_reported(tmp_path, capsys):
+    head = report(tmp_path, "head", suppressed=[(vuln(severity="MEDIUM"), "fine")])
+
+    assert gate.main(["--head", str(head)]) == 0
+    assert "accepted" not in capsys.readouterr().out
+
+
+def test_suppression_does_not_hide_a_different_new_finding(tmp_path, capsys):
+    head = report(
+        tmp_path,
+        "head",
+        vuln(pkg="pillow", advisory="CVE-2025-0002"),
+        suppressed=[(vuln(), "accepted")],
+    )
+
+    assert gate.main(["--base", "--head", str(head)]) == 1
+    out = capsys.readouterr().out
+    assert "::error file=uv.lock,title=New HIGH dependency vulnerability::pillow" in out
+    assert "::warning file=uv.lock" in out
