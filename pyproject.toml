@@ -9,6 +9,7 @@ dependencies = [
     "chainlit>=2.2.1",
     "docling>=2.24.0",
     "einops>=0.8.1",
+    "filetype>=1.2.0",
     "pyyaml>=6.0",
     "langchain-community>=0.3.18",
     "langchain-core>=0.3.39",
