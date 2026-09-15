@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import MutableMapping
+from contextlib import nullcontext
 from typing import Any
 
 from core.models.document import ImageBlock, ProcessedDocument, TextBlock
@@ -18,6 +19,7 @@ async def caption_stage(
     *,
     timeout: float | None = None,
     per_image_timeout: float = 0.0,
+    max_concurrency: int | None = None,
 ) -> MutableMapping[str, Any]:
     """Caption images in ``row["processed_document"]`` and mutate the row."""
 
@@ -32,7 +34,7 @@ async def caption_stage(
 
         effective_timeout = stage_timeout(timeout, len(processed_document.images), per_item_timeout=per_image_timeout)
         row["processed_document"] = await run_with_optional_timeout(
-            lambda: _caption_document(processed_document, vlm, prompt),
+            lambda: _caption_document(processed_document, vlm, prompt, max_concurrency),
             effective_timeout,
         )
         row["stage"] = "captioned"
@@ -50,16 +52,28 @@ async def _caption_document(
     processed_document: ProcessedDocument,
     vlm: VLM,
     prompt: str | None,
+    max_concurrency: int | None = None,
 ) -> ProcessedDocument:
     """Return a copy of ``processed_document`` with captions materialized."""
     images = processed_document.images
     if not images:
         return processed_document
 
+    # Per-document fan-out bound. One task per image is created either way, but
+    # only this many contend for the shared VLM gate at a time. Without it a
+    # single image-heavy document queues hundreds of its own callers on that
+    # gate, and the gate's wait bound stops meaning anything for that document:
+    # its last images would time out waiting behind their own siblings on a
+    # perfectly healthy endpoint.
+    limiter = (
+        asyncio.Semaphore(max_concurrency) if max_concurrency is not None and max_concurrency > 0 else nullcontext()
+    )
+
     async def caption_one(image: ImageBlock) -> str:
-        # Bound the fan-out cluster-wide so every indexer actor shares one VLM budget.
-        async with get_vlm_semaphore():
-            return await vlm.caption_image(image.image_bytes, prompt=prompt)
+        async with limiter:
+            # Bound the fan-out cluster-wide so every indexer actor shares one VLM budget.
+            async with get_vlm_semaphore():
+                return await vlm.caption_image(image.image_bytes, prompt=prompt)
 
     # tqdm.gather is built on as_completed, so a failing child does not clean up
     # sibling tasks for us. Drain them explicitly so failed documents do not keep

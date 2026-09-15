@@ -53,6 +53,13 @@ class DistributedSemaphore:
     caller's concurrent ``__aenter__`` overwrite another's before its
     ``__aexit__`` reads it back, misattributing a release to the wrong
     incarnation after an actor restart.
+
+    ``acquire_timeout`` bounds how long a caller waits for a permit. Waiting for
+    a permit is otherwise the only unbounded wait on the enrichment path - the
+    inference calls themselves are already bounded by their client's httpx
+    timeout - so without it a saturated semaphore pins an indexer slot indefinitely.
+    ``None`` waits forever, preserving the previous behaviour for callers that
+    have not been given a bound.
     """
 
     def __init__(
@@ -60,10 +67,12 @@ class DistributedSemaphore:
         name: str = "llmSemaphore",
         namespace: str = "openrag",
         max_concurrent_ops: int = 10,
+        acquire_timeout: float | None = None,
     ):
         self._name = name
         self._namespace = namespace
         self._max_concurrent_ops = max_concurrent_ops
+        self._acquire_timeout = acquire_timeout
         self._incarnations: dict[asyncio.Task, list[str | None]] = {}
 
     def _get_or_create_actor(self):
@@ -87,10 +96,23 @@ class DistributedSemaphore:
         # for the lifetime of the actor.
         acquire_task = asyncio.ensure_future(semaphore_actor.acquire.remote())
         try:
-            incarnation = await asyncio.shield(acquire_task)
-        except asyncio.CancelledError:
+            incarnation = await _await_permit(acquire_task, self._acquire_timeout)
+        except (TimeoutError, asyncio.CancelledError) as exc:
+            # The actor may still grant this permit; hand it back the same way
+            # the cancellation path always has.
             acquire_task.add_done_callback(functools.partial(_release_if_granted, self._name, semaphore_actor))
-            raise
+            if isinstance(exc, asyncio.CancelledError) or self._acquire_timeout is None:
+                # No local bound was set, so a TimeoutError here came from the
+                # actor call itself and belongs to the caller unchanged.
+                raise
+            logger.bind(semaphore=self._name, acquire_timeout=self._acquire_timeout).warning(
+                "Timed out waiting for a permit on semaphore '{name}' - giving up rather than "
+                "holding an indexing slot on a saturated semaphore.",
+                name=self._name,
+            )
+            raise TimeoutError(
+                f"Timed out after {self._acquire_timeout:g}s waiting for a permit on '{self._name}'"
+            ) from None
         self._incarnations.setdefault(asyncio.current_task(), []).append(incarnation)
         return self
 
@@ -102,6 +124,20 @@ class DistributedSemaphore:
         if stack is not None and not stack:
             del self._incarnations[task]
         await _release(semaphore_actor, incarnation)
+
+
+async def _await_permit(acquire_task: asyncio.Task, timeout: float | None):
+    """Await a dispatched acquire, optionally bounded.
+
+    Shielded either way: ``acquire.remote()`` runs to completion on the actor
+    regardless of what happens locally, so abandoning the local await must not
+    abandon a permit the actor may still grant. ``wait_for`` cancels the shield,
+    never the task behind it, which leaves the caller free to hand the permit
+    back through the usual done-callback.
+    """
+    if timeout is None:
+        return await asyncio.shield(acquire_task)
+    return await asyncio.wait_for(asyncio.shield(acquire_task), timeout=timeout)
 
 
 async def _release(semaphore_actor, incarnation: str | None) -> None:

@@ -312,7 +312,7 @@ def test_build_contextualizer_factory_returns_factory_for_later_hydration(tmp_pa
 
     cfg = SimpleNamespace(
         models=SimpleNamespace(llm={}),
-        llm=SimpleNamespace(base_url="", model="", api_key=""),
+        llm=SimpleNamespace(base_url="", model="", api_key="", timeout=60),
         chunker=SimpleNamespace(contextualization_timeout=12, max_concurrent_contextualization=3),
         paths=SimpleNamespace(prompts_dir=str(tmp_path)),
         prompts=SimpleNamespace(chunk_contextualizer="chunk_contextualizer_tmpl.txt"),
@@ -364,9 +364,9 @@ def test_contextualizer_factory_reads_live_registry(tmp_path) -> None:
         registry: dict = {}
         cfg = SimpleNamespace(
             models=SimpleNamespace(llm=registry),
-            llm=SimpleNamespace(base_url="", model="", api_key=""),
+            llm=SimpleNamespace(base_url="", model="", api_key="", timeout=60),
             chunker=SimpleNamespace(contextualization_timeout=12, max_concurrent_contextualization=3),
-            semaphore=SimpleNamespace(llm_semaphore=4),
+            semaphore=SimpleNamespace(llm_semaphore=4, vlm_semaphore=4, acquire_timeout_factor=4.0),
             paths=SimpleNamespace(prompts_dir=str(tmp_path)),
             prompts=SimpleNamespace(chunk_contextualizer="ctx.txt"),
         )
@@ -845,9 +845,9 @@ def test_contextualizer_factory_rebuilds_on_endpoint_edit(tmp_path) -> None:
         }
         cfg = SimpleNamespace(
             models=SimpleNamespace(llm=registry),
-            llm=SimpleNamespace(base_url="", model="", api_key=""),
+            llm=SimpleNamespace(base_url="", model="", api_key="", timeout=60),
             chunker=SimpleNamespace(contextualization_timeout=12, max_concurrent_contextualization=3),
-            semaphore=SimpleNamespace(llm_semaphore=4),
+            semaphore=SimpleNamespace(llm_semaphore=4, vlm_semaphore=4, acquire_timeout_factor=4.0),
             paths=SimpleNamespace(prompts_dir=str(tmp_path)),
             prompts=SimpleNamespace(chunk_contextualizer="ctx.txt"),
         )
@@ -903,9 +903,9 @@ def test_contextualizer_factory_rebuilds_on_api_key_rotation(tmp_path) -> None:
         }
         cfg = SimpleNamespace(
             models=SimpleNamespace(llm=registry),
-            llm=SimpleNamespace(base_url="", model="", api_key=""),
+            llm=SimpleNamespace(base_url="", model="", api_key="", timeout=60),
             chunker=SimpleNamespace(contextualization_timeout=12, max_concurrent_contextualization=3),
-            semaphore=SimpleNamespace(llm_semaphore=4),
+            semaphore=SimpleNamespace(llm_semaphore=4, vlm_semaphore=4, acquire_timeout_factor=4.0),
             paths=SimpleNamespace(prompts_dir=str(tmp_path)),
             prompts=SimpleNamespace(chunk_contextualizer="ctx.txt"),
         )
@@ -996,9 +996,10 @@ def test_build_contextualizer_factory_uses_global_llm_fallback(tmp_path) -> None
             model="mistral",
             api_key="llm-key",
             enable_thinking=False,
+            timeout=60,
         ),
         chunker=SimpleNamespace(contextualization_timeout=12, max_concurrent_contextualization=3),
-        semaphore=SimpleNamespace(llm_semaphore=7),
+        semaphore=SimpleNamespace(llm_semaphore=7, vlm_semaphore=7, acquire_timeout_factor=4.0),
         paths=SimpleNamespace(prompts_dir=str(tmp_path)),
         prompts=SimpleNamespace(chunk_contextualizer="chunk_contextualizer_tmpl.txt"),
     )
@@ -1046,9 +1047,11 @@ def test_build_contextualizer_factory_uses_named_llm_endpoint(tmp_path) -> None:
                     )
                 }
             ),
-            llm=SimpleNamespace(base_url="http://fallback.example/v1", model="fallback", api_key="fallback-key"),
+            llm=SimpleNamespace(
+                base_url="http://fallback.example/v1", model="fallback", api_key="fallback-key", timeout=60
+            ),
             chunker=SimpleNamespace(contextualization_timeout=12, max_concurrent_contextualization=3),
-            semaphore=SimpleNamespace(llm_semaphore=7),
+            semaphore=SimpleNamespace(llm_semaphore=7, vlm_semaphore=7, acquire_timeout_factor=4.0),
             paths=SimpleNamespace(prompts_dir=str(tmp_path)),
             prompts=SimpleNamespace(chunk_contextualizer="chunk_contextualizer_tmpl.txt"),
         )
@@ -1066,6 +1069,9 @@ def test_build_contextualizer_factory_uses_named_llm_endpoint(tmp_path) -> None:
         }
         assert contextualizer._semaphore._name == "llmSemaphore"
         assert contextualizer._semaphore._max_concurrent_ops == 7
+        # Scaled from *this* endpoint's 45s, not the 60s global fallback: the
+        # handle is per-endpoint even though the actor behind it is shared.
+        assert contextualizer._semaphore._acquire_timeout == 180.0
     finally:
         # FakeLLM lives only for this test — drop it so the shared llm_registry
         # doesn't leak into other tests in the same process.
@@ -1518,6 +1524,7 @@ def test_indexer_pool_wires_contextualizer_factory_and_worker_namespace(monkeypa
             embed_concurrency=2,
         ),
         loader=SimpleNamespace(parse_timeout=3600, save_uploaded_files=True),
+        semaphore=SimpleNamespace(llm_semaphore=10, vlm_semaphore=10, acquire_timeout_factor=4.0),
         vectordb=SimpleNamespace(collection_name="vdb_test"),
         rdb=RDBConfig(),
     )
@@ -1607,6 +1614,7 @@ def test_indexer_pool_loads_caption_prompt_without_global_vlm_default(monkeypatc
             embed_concurrency=2,
         ),
         loader=SimpleNamespace(parse_timeout=3600, save_uploaded_files=True),
+        semaphore=SimpleNamespace(llm_semaphore=10, vlm_semaphore=10, acquire_timeout_factor=4.0),
         vectordb=SimpleNamespace(collection_name="vdb_test"),
         rdb=RDBConfig(),
     )

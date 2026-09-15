@@ -206,3 +206,116 @@ class TestDistributedSemaphoreRollingDeployCompatibility:
         # right after must succeed rather than hang.
         await asyncio.wait_for(sem.__aenter__(), timeout=2.0)
         await sem.__aexit__(None, None, None)
+
+
+class _StubActorMethod:
+    """Stands in for a Ray actor method handle (``handle.method.remote(...)``)."""
+
+    def __init__(self, fn):
+        self._fn = fn
+
+    def remote(self, *args, **kwargs):
+        return self._fn(*args, **kwargs)
+
+
+class _StubSemaphoreActor:
+    """In-process stand-in for ``DistributedSemaphoreActor``.
+
+    Records how many ``acquire`` calls are outstanding at once — the quantity
+    that occupies Ray actor concurrency slots and, past the actor's limit,
+    starves ``release`` (#965). A stub lets that invariant be asserted directly
+    instead of needing a thousand concurrent callers to observe it.
+    """
+
+    def __init__(self, permits: int):
+        self._permits = asyncio.Semaphore(permits)
+        self.incarnation = "stub-incarnation"
+        self.acquire_calls = 0
+        self.release_calls = 0
+        self.outstanding_acquires = 0
+        self.max_outstanding_acquires = 0
+        self.acquire = _StubActorMethod(self._acquire)
+        self.release = _StubActorMethod(self._release)
+
+    def grant(self, count: int = 1) -> None:
+        for _ in range(count):
+            self._permits.release()
+
+    async def _acquire(self) -> str:
+        self.acquire_calls += 1
+        self.outstanding_acquires += 1
+        self.max_outstanding_acquires = max(self.max_outstanding_acquires, self.outstanding_acquires)
+        try:
+            await self._permits.acquire()
+        finally:
+            self.outstanding_acquires -= 1
+        return self.incarnation
+
+    async def _release(self, incarnation: str | None = None) -> None:
+        self.release_calls += 1
+        self._permits.release()
+
+
+async def _wait_until(predicate, timeout: float = 2.0, interval: float = 0.01) -> bool:
+    """Poll ``predicate`` until it holds or the deadline passes.
+
+    Asserting after a fixed sleep only says the transition had not happened yet
+    on a loaded machine; polling to a deadline says it never happened.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while loop.time() < deadline:
+        if predicate():
+            return True
+        await asyncio.sleep(interval)
+    return predicate()
+
+
+class TestDistributedSemaphoreAcquireTimeout:
+    """Waiting for a permit is the only unbounded wait left on the enrichment
+    path — the inference calls themselves are bounded by their client's httpx
+    timeout. Without a bound here a caller on a saturated semaphore pins its
+    indexer slot for as long as the (detached) actor lives.
+    """
+
+    @staticmethod
+    def _sem(stub: _StubSemaphoreActor, acquire_timeout: float | None) -> DistributedSemaphore:
+        sem = DistributedSemaphore(
+            name=f"timeout-{uuid.uuid4().hex}",
+            namespace="test",
+            max_concurrent_ops=4,
+            acquire_timeout=acquire_timeout,
+        )
+        sem._get_or_create_actor = lambda: stub
+        return sem
+
+    async def test_a_saturated_semaphore_times_the_caller_out(self):
+        stub = _StubSemaphoreActor(permits=0)  # no permit will ever be granted
+        sem = self._sem(stub, acquire_timeout=0.05)
+
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(sem.__aenter__(), timeout=2.0)
+
+    async def test_a_permit_granted_after_the_timeout_is_handed_back(self):
+        stub = _StubSemaphoreActor(permits=0)
+        sem = self._sem(stub, acquire_timeout=0.05)
+
+        with pytest.raises(TimeoutError):
+            await sem.__aenter__()
+
+        # The actor keeps running the acquire regardless of the local timeout;
+        # when it finally grants, the permit must not be abandoned.
+        stub.grant(1)
+        assert await _wait_until(lambda: stub.release_calls == 1), "granted permit was abandoned"
+
+    async def test_no_timeout_configured_still_waits(self):
+        stub = _StubSemaphoreActor(permits=0)
+        sem = self._sem(stub, acquire_timeout=None)
+
+        pending = asyncio.ensure_future(sem.__aenter__())
+        assert await _wait_until(lambda: stub.outstanding_acquires == 1), "acquire never reached the actor"
+        assert not pending.done(), "acquire_timeout=None must preserve the previous unbounded wait"
+
+        stub.grant(1)
+        await asyncio.wait_for(pending, timeout=1.0)
+        await sem.__aexit__(None, None, None)

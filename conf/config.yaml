@@ -41,6 +41,10 @@ vlm:
 semaphore:
   llm_semaphore: 10
   vlm_semaphore: 10
+  # Permit wait bound, as a multiple of the backend's own per-call timeout
+  # (vlm.timeout / chunker.contextualization_timeout). Seconds are tuned
+  # there; this only says how many call-lengths a caller may queue for.
+  acquire_timeout_factor: 4.0
 
 # --- Embedder ---
 # Env: EMBEDDER_MODEL_NAME, EMBEDDER_BASE_URL, EMBEDDER_API_KEY, MAX_MODEL_LEN,

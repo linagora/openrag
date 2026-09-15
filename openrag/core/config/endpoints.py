@@ -100,6 +100,19 @@ class SemaphoreConfig(ConfigMixin):
 
     llm_semaphore: int = 10
     vlm_semaphore: int = 10
+    # How long a caller may wait for a permit, as a multiple of that backend's
+    # own per-call timeout. Dimensionless on purpose: every duration involved is
+    # already configured per backend (``vlm.timeout``,
+    # ``chunker.contextualization_timeout``), so seconds stay tuned in one place
+    # and this survives any deployment unchanged.
+    #
+    # Waiting for a permit is the only unbounded wait left in the enrichment
+    # stages - the calls themselves are bounded by their client's httpx timeout,
+    # and contextualization wraps each one in asyncio.wait_for on top. Without a
+    # bound here a saturated gate holds an indexer slot indefinitely (#965).
+    # A generous multiple, because a permit legitimately takes ~queue-depth times
+    # a call to come free; it is a liveness bound, not a latency target.
+    acquire_timeout_factor: float = Field(default=4.0, gt=0)
 
 
 class LLMContextConfig(ConfigMixin):
