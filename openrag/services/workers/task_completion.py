@@ -1,16 +1,30 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+from collections import OrderedDict
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import ray
-from core.models.catalog import TASK_FINISHED_AT_METADATA_KEY, TERMINAL_TASK_STATES
+from core.models.catalog import (
+    TASK_FINISHED_AT_METADATA_KEY,
+    TERMINAL_TASK_STATES,
+    DocumentStatus,
+    IndexationJob,
+)
 from services.workers.ray_utils import call_ray_actor_method_with_timeout
 
 _TERMINAL_STATES = frozenset(state.value for state in TERMINAL_TASK_STATES)
 _REFLESS_RECOVERY_POLL_SECONDS = 5.0
 _TASK_STATE_CALL_TIMEOUT_SECONDS = 30.0
+_JOB_RETENTION_DAYS = 30
+_ORPHAN_GRACE_SECONDS = 300
+_RECONCILE_INTERVAL_SECONDS = 120.0
+_SETTLEMENT_RETRY_SECONDS = 30.0
+_MAX_PENDING_SETTLEMENTS = 1_000
+_ORPHANED_JOB_ERROR = "Indexing task was interrupted by a restart and no longer has a live worker."
+_SETTLED_STATE_POLL_ATTEMPTS = 5
+_SETTLED_STATE_POLL_INTERVAL_SECONDS = 0.05
 
 
 class TaskCompletionTracker:
@@ -23,6 +37,12 @@ class TaskCompletionTracker:
         self._logger = get_logger()
         self._tracked_task_ids: set[str] = set()
         self._recovery_lock = asyncio.Lock()
+        self._catalog_store: Any = None
+        self._catalog_lock = asyncio.Lock()
+        # Outcomes Postgres has not taken yet, oldest first.
+        self._pending_settlements: OrderedDict[str, IndexationJob] = OrderedDict()
+        self._settlement_retry: asyncio.Future | None = None
+        self._reconcile_loop: asyncio.Future | None = None
 
     def supports_cancellation_recovery(self) -> bool:
         """Identify trackers that preserve unsettled cancellation fences."""
@@ -58,6 +78,9 @@ class TaskCompletionTracker:
                     task_state_manager.get_all_info.remote,
                     "get_all_info_for_completion_recovery",
                 )
+                await self.reconcile_jobs(list(all_info))
+                if self._reconcile_loop is None or self._reconcile_loop.done():
+                    self._reconcile_loop = asyncio.ensure_future(self._periodic_reconcile())
                 for task_id, info in all_info.items():
                     state = info.get("state")
                     if state == "CANCELLED":
@@ -109,6 +132,12 @@ class TaskCompletionTracker:
                     lambda: task_state_manager.get_details.remote(task_id),
                     f"get_details({task_id}) for ref-less recovery",
                 )
+                if details is None:
+                    # The actor no longer knows this task: evicted, or never
+                    # admitted on this generation. None of the exit conditions
+                    # below can fire on a None read, so without this the loop
+                    # would poll forever. There is nothing left to watch.
+                    return
                 if _has_finished_at(details):
                     return
 
@@ -160,6 +189,8 @@ class TaskCompletionTracker:
             self._tracked_task_ids.discard(task_id)
 
     async def _record_finished_at(self, task_id: str) -> None:
+        # Keep the handle in a variable: Ray's ActorMethod holds it weakly, so a
+        # method called off an unstored handle raises "Lost reference to actor".
         task_state_manager = self._task_state_manager()
         details = await self._call_task_state(
             lambda: task_state_manager.get_details.remote(task_id),
@@ -168,6 +199,30 @@ class TaskCompletionTracker:
         if not isinstance(details, dict) or _has_finished_at(details):
             return
 
+        # Persist before stamping the actor: the stamp is what stops this method
+        # running again, so a failed write must leave the task unstamped for
+        # ``recover`` to pick up. Stamping regardless would strand the row at
+        # whatever non-terminal status it last held, until orphan reconciliation
+        # marked a completed job FAILED after a restart.
+        if not await self._record_settled_job(task_id, details):
+            return
+        await self._stamp_finished_at(task_id, details)
+
+    async def _stamp_finished_at(self, task_id: str, details: dict[str, Any] | None = None) -> None:
+        """Mark the task settled in the actor, if it still knows the task.
+
+        The retry path arrives here long after the fact, so it re-reads rather
+        than replaying stale details: ``set_details`` on a task the actor has
+        already evicted would put the record back.
+        """
+        task_state_manager = self._task_state_manager()
+        if details is None:
+            details = await self._call_task_state(
+                lambda: task_state_manager.get_details.remote(task_id),
+                f"get_details({task_id}) for completion timestamp",
+            )
+            if not isinstance(details, dict) or _has_finished_at(details):
+                return
         metadata = details.get("metadata")
         metadata = dict(metadata) if isinstance(metadata, dict) else {}
         metadata[TASK_FINISHED_AT_METADATA_KEY] = _utc_now_iso()
@@ -209,6 +264,153 @@ class TaskCompletionTracker:
                 f"has_unsettled_cancelled_worker({task_id})",
             )
         )
+
+    async def _poll_for_terminal_state(self, task_state_manager: Any, task_id: str) -> str | None:
+        """Ride out the race between a cancel's state write and this read.
+
+        ``cancel_active_indexing_tasks`` awaits the same worker ref as
+        ``track()``, then writes ``CANCELLED`` in a second remote call. A read
+        here can land in that gap and see the task's last non-terminal state,
+        wrongly concluding there is nothing to persist yet. A short poll
+        closes the window instead of trusting the first read.
+        """
+        for attempt in range(_SETTLED_STATE_POLL_ATTEMPTS):
+            state = await self._call_task_state(
+                lambda: task_state_manager.get_state.remote(task_id),
+                f"get_state({task_id}) for job history",
+            )
+            if state in _TERMINAL_STATES:
+                return state
+            if attempt < _SETTLED_STATE_POLL_ATTEMPTS - 1:
+                await asyncio.sleep(_SETTLED_STATE_POLL_INTERVAL_SECONDS)
+        return None
+
+    async def _job_repo(self) -> Any:
+        """Build the catalog store lazily: this actor outlives any API process."""
+        if self._catalog_store is None:
+            async with self._catalog_lock:
+                if self._catalog_store is None:
+                    from core.config import load_config
+                    from services.storage.postgres_store import PostgresStore, catalog_rdb_config
+
+                    store = PostgresStore(catalog_rdb_config(load_config()), run_migrations=False)
+                    await store.initialize()
+                    self._catalog_store = store
+        return self._catalog_store.job_repo
+
+    async def _record_settled_job(self, task_id: str, details: dict[str, Any]) -> bool:
+        """Persist the final state of a settled task. History must never fail indexing.
+
+        Returns whether the caller may stamp the actor. ``True`` covers both a
+        successful write and a task with nothing to persist yet; only a genuine
+        failure returns ``False``, because the stamp is what stops recovery
+        retrying this task.
+        """
+        try:
+            task_state_manager = self._task_state_manager()
+            state = await self._poll_for_terminal_state(task_state_manager, task_id)
+            if state is None:
+                return True
+            error = await self._call_task_state(
+                lambda: task_state_manager.get_error.remote(task_id),
+                f"get_error({task_id}) for job history",
+            )
+            job = IndexationJob(
+                id=task_id,
+                status=DocumentStatus(state),
+                partition=details.get("partition") or "default",
+                file_id=details.get("file_id"),
+                user_id=details.get("user_id"),
+                error=error,
+                completed_at=datetime.now(UTC),
+            )
+        except Exception as exc:
+            self._logger.warning("Failed to read settled indexing job", task_id=task_id, error=str(exc))
+            return False
+        if await self._write_job(job):
+            return True
+        self._queue_settlement_retry(job)
+        return False
+
+    async def _write_job(self, job: IndexationJob) -> bool:
+        try:
+            repo = await self._job_repo()
+            await repo.upsert_job(job)
+        except Exception as exc:
+            self._logger.warning("Failed to record settled indexing job", task_id=job.id, error=str(exc))
+            return False
+        return True
+
+    def _queue_settlement_retry(self, job: IndexationJob) -> None:
+        """Hold a decided outcome until Postgres takes it.
+
+        Nothing re-reads it later: ``track`` is about to forget the task and the
+        actor evicts its record soon after, so a dropped outcome leaves the row
+        non-terminal for orphan reconciliation to report as a failed job.
+        """
+        if job.id not in self._pending_settlements and len(self._pending_settlements) >= _MAX_PENDING_SETTLEMENTS:
+            dropped, _ = self._pending_settlements.popitem(last=False)
+            self._logger.warning("Dropped a pending indexing job settlement", task_id=dropped)
+        self._pending_settlements[job.id] = job
+        if self._settlement_retry is None or self._settlement_retry.done():
+            self._settlement_retry = asyncio.ensure_future(self._retry_pending_settlements())
+
+    async def _retry_pending_settlements(self, delay: float = _SETTLEMENT_RETRY_SECONDS) -> None:
+        """Re-offer held outcomes until Postgres accepts them."""
+        while self._pending_settlements:
+            await asyncio.sleep(delay)
+            for task_id, job in list(self._pending_settlements.items()):
+                if not await self._write_job(job):
+                    continue
+                self._pending_settlements.pop(task_id, None)
+                try:
+                    await self._stamp_finished_at(task_id)
+                except Exception as exc:
+                    self._logger.warning(
+                        "Failed to record indexing task completion time",
+                        task_id=task_id,
+                        error=str(exc),
+                    )
+
+    async def _periodic_reconcile(self, interval: float = _RECONCILE_INTERVAL_SECONDS) -> None:
+        """Keep sweeping orphaned/expired job rows between restarts.
+
+        ``recover()`` only runs once per process start, so without this a task
+        interrupted inside the grace window it skips (the most recent
+        ``_ORPHAN_GRACE_SECONDS``) would never be revisited until the next
+        restart.
+        """
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                task_state_manager = self._task_state_manager()
+                all_info = await self._call_task_state(
+                    task_state_manager.get_all_info.remote,
+                    "get_all_info_for_periodic_reconcile",
+                )
+                await self.reconcile_jobs(list(all_info))
+            except Exception as exc:
+                self._logger.warning("Periodic indexing job reconciliation failed", error=str(exc))
+
+    async def reconcile_jobs(self, active_ids: list[str]) -> None:
+        """Settle records a restart orphaned and drop history past retention."""
+        try:
+            repo = await self._job_repo()
+            now = datetime.now(UTC)
+            orphaned = await repo.fail_orphaned_jobs(
+                # A settlement waiting on Postgres has an outcome already; it is
+                # not an orphan, and failing it here would freeze the wrong one.
+                active_ids=[*active_ids, *self._pending_settlements],
+                error=_ORPHANED_JOB_ERROR,
+                # A row written moments ago may belong to a dispatch that has
+                # not reached the actor yet, so leave the recent ones alone.
+                before=now - timedelta(seconds=_ORPHAN_GRACE_SECONDS),
+            )
+            purged = await repo.purge_terminal_jobs(older_than=now - timedelta(days=_JOB_RETENTION_DAYS))
+            if orphaned or purged:
+                self._logger.info("Reconciled indexing job history", orphaned=orphaned, purged=purged)
+        except Exception as exc:
+            self._logger.warning("Failed to reconcile indexing job history", error=str(exc))
 
     def _task_state_manager(self) -> Any:
         return ray.get_actor("TaskStateManager", namespace=self._namespace)

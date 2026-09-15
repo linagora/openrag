@@ -97,6 +97,9 @@ class FakeVLM(VLM):
 
 
 class FakeVectorStore(VectorStore):
+    def iter_chunk_metadata(self, collection, *, partition, file_ids=None, batch_size=500):
+        raise NotImplementedError("This write-only test double does not support reconciliation")
+
     def __init__(self, count: int, error: Exception | None = None) -> None:
         self.count = count
         self.error = error

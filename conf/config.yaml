@@ -230,7 +230,7 @@ loader:
   marker_timeout: 3600
   # Share of the shortest wrapping bound (marker_timeout or parse_timeout) given
   # to the child process. Keep below 1.0 so a wedged child times out first and
-  # recycles the pool.
+  # recycles its slot.
   marker_child_timeout_ratio: 0.9
   marker_pdftext_workers: 2
   # Split large PDFs into chunks of this many pages for parallel processing across workers.
