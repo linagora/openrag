@@ -31,10 +31,40 @@ a magnitude threshold on it.
    are two stores with independent backup timelines; a point-in-time mismatch shows up
    exactly like this.
 
-## First checks
+## How big is it? The metric cannot tell you — the logs can
 
-The metric is aggregate by design. The affected `partition` and `file_id` are **log**
-fields — with `LOG_FORMAT=json`, filter the collector for the drop event.
+This is the triage step, because the two shapes need different responses and the counter
+looks identical for both:
+
+- **A few stale files, queried repeatedly.** The counter climbs steadily because the same
+  orphan is re-retrieved, not because more files are affected.
+- **An entire partition orphaned** — a partition deleted in Postgres whose Milvus
+  partition was never dropped, or a restore where the two stores came from different
+  moments. Every query touching it drops everything.
+
+`_warn_orphans` (`services/storage/catalog_searcher.py`) logs the distinguishing signal:
+
+| Log field | What it tells you |
+| --- | --- |
+| `dropped_chunks` | Chunks dropped in this retrieval |
+| `dropped_files` | **Distinct files** behind them — this is the number that separates the two cases |
+| `orphaned_files_sample` | Up to 10 `{partition, file_id}` pairs, truncated to 128 chars |
+
+Two properties of that log line to plan around: it is **rate-limited to once per minute**
+process-wide, and the sample is capped at 10 files. So it tells you the shape of the
+problem and gives you a foothold, but it is not an inventory — do not try to enumerate
+the affected files from the logs. Query the two stores directly once you know which
+partition is involved.
+
+With `LOG_FORMAT=json`, filter the collector for `dropped_files`.
+
+## What this alert is not
+
+**Not a catalog outage.** The lookup runs through a plain `asyncpg` pool with no fallback
+and no cache — deliberately, so a catalog outage can never expose deleted files. A
+connection failure therefore *raises* and the retrieval query fails outright; it does not
+silently drop every chunk. If this counter is climbing, the catalog answered successfully
+and genuinely does not list those files.
 
 ## Actions
 
