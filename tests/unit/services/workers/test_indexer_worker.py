@@ -73,6 +73,8 @@ _PROVENANCE = {
     "embedder_model_name": "fake-embed-v1",
     "embedder_endpoint": "http://fake:8000/v1",
     "embedder_dimension": 1,
+    # This harness wires no vector-field resolver.
+    "embedder_vector_field": None,
 }
 
 

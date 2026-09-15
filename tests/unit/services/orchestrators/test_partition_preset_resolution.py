@@ -475,6 +475,78 @@ async def test_update_partition_accepts_catalogued_embedder():
     assert settings.partitions["p1"].embedder == "bge-m3"
 
 
+# ------------------------------------------------------------------
+# embedder change on a partition with files (#762 F4)
+# ------------------------------------------------------------------
+
+
+class _SwappingPartitionRepo(_FakePartitionRepo):
+    def __init__(self, rows: list[dict] | None = None, swap: dict | None = None) -> None:
+        super().__init__(rows)
+        self.swap = swap
+
+    async def get_embedder_swap(self, partition: str) -> dict | None:
+        return self.swap
+
+
+@pytest.mark.asyncio
+async def test_an_embedder_change_on_a_partition_with_files_requires_a_swap():
+    """In place, the files stay in the old embedder's field, which searches
+    stop reading — they would vanish from results."""
+    from core.utils.exceptions import ConflictError
+
+    repo = _FakePartitionRepo(rows=[_full_row("p1")])
+    repo._counts["p1"] = 3
+    svc = _make_service(repo, settings=_settings(embedders=("default", "bge-m3")))
+
+    with pytest.raises(ConflictError) as exc:
+        await svc.update_partition("p1", embedder="bge-m3")
+
+    assert exc.value.code == "EMBEDDER_SWAP_REQUIRED"
+    assert "/partition/p1/embedder-swap" in exc.value.message
+    assert repo._store["p1"]["embedder"] == "default"
+
+
+@pytest.mark.asyncio
+async def test_naming_the_endpoint_the_alias_resolves_to_is_not_a_change():
+    """Same vector field, same vectors: nothing is left behind."""
+    from core.config.model_endpoints import ModelEndpointConfig
+
+    settings = _settings(embedders=("bge-m3",))
+    settings.models.embedder["default"] = ModelEndpointConfig(
+        endpoint="http://emb:8000/v1", vector_field="vector_bge-m3"
+    )
+    repo = _FakePartitionRepo(rows=[_full_row("p1")])
+    repo._counts["p1"] = 3
+    svc = _make_service(repo, settings=settings)
+
+    await svc.update_partition("p1", embedder="bge-m3")
+
+    assert repo._store["p1"]["embedder"] == "bge-m3"
+
+
+@pytest.mark.asyncio
+async def test_an_embedder_change_is_refused_while_a_swap_runs_even_without_files():
+    from core.utils.exceptions import ConflictError
+
+    repo = _SwappingPartitionRepo(rows=[_full_row("p1")], swap={"status": "running", "target_embedder": "bge-m3"})
+    svc = _make_service(repo, settings=_settings(embedders=("default", "bge-m3", "e5")))
+
+    with pytest.raises(ConflictError) as exc:
+        await svc.update_partition("p1", embedder="e5")
+
+    assert exc.value.code == "EMBEDDER_SWAP_IN_PROGRESS"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["completed", "failed", "cancelled"])
+async def test_a_finished_swap_does_not_lock_the_partition(status):
+    repo = _SwappingPartitionRepo(rows=[_full_row("p1")], swap={"status": status, "target_embedder": "bge-m3"})
+    svc = _make_service(repo, settings=_settings(embedders=("default", "bge-m3")))
+
+    await svc.ensure_no_embedder_swap("p1")
+
+
 @pytest.mark.asyncio
 async def test_update_partition_stale_stored_embedder_does_not_block_other_updates():
     # Unlike chat_llm a stale embedder has no runtime fallback, but a PATCH

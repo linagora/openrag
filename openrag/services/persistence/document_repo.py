@@ -733,6 +733,33 @@ class PgDocumentRepository(DocumentRepository):
             return {}
         return {"files": [self._row_to_dict(r) for r in rows]}
 
+    async def list_file_embedders(self, partition: str) -> list[dict]:
+        rows = await self.pool.fetch(
+            """
+            SELECT file_id,
+                   indexation_config->>'embedder_model_name'   AS embedder_model_name,
+                   indexation_config->>'embedder_vector_field' AS embedder_vector_field
+            FROM files
+            WHERE partition_name = $1
+            ORDER BY file_id
+            """,
+            partition,
+        )
+        return [dict(r) for r in rows]
+
+    async def record_file_embedder(self, file_id: str, partition: str, provenance: dict) -> bool:
+        result = await self.pool.execute(
+            """
+            UPDATE files
+            SET indexation_config = COALESCE(indexation_config, '{}'::jsonb) || $3::jsonb
+            WHERE file_id = $1 AND partition_name = $2
+            """,
+            file_id,
+            partition,
+            provenance,
+        )
+        return result.split()[-1] != "0"
+
     async def count_files_by_embedder(self, partition: str) -> list[dict]:
         """How many files in *partition* were indexed with each embedder.
 

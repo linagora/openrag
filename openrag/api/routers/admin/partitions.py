@@ -19,11 +19,16 @@ from api.dependencies.auth import (
     require_partition_viewer,
 )
 from api.dependencies.files import validate_file_id
-from api.schemas.admin.partition_schemas import PartitionDetailResponse, UpdatePartitionRequest
+from api.schemas.admin.partition_schemas import (
+    EmbedderSwapResponse,
+    PartitionDetailResponse,
+    StartEmbedderSwapRequest,
+    UpdatePartitionRequest,
+)
 from core.utils.exceptions import ConfigError
 from core.utils.logging import get_logger
 from core.utils.partition_limits import max_partitions_for_user
-from di.providers import get_partition_service
+from di.providers import get_embedder_swap_service, get_partition_service
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request, Response, status
 from fastapi.responses import JSONResponse
 
@@ -321,7 +326,7 @@ async def create_partition(
 **Body:**
 Accepts partition config fields such as:
 - `description`
-- `embedder` (must name a registered embedder endpoint — 422 otherwise; `default` resolves to the endpoint marked default)
+- `embedder` (must name a registered embedder endpoint — 422 otherwise; `default` resolves to the endpoint marked default). On a partition with indexed files, a change returns 409 `EMBEDDER_SWAP_REQUIRED`: use `POST /partition/{partition}/embedder-swap`, which re-embeds the files first
 - `indexation_preset`
 - `retrieval_preset`
 - `chat_history_depth`
@@ -346,6 +351,95 @@ async def update_partition_config(
         partition=partition,
         **body.model_dump(exclude_unset=True),
     )
+
+
+@router.post(
+    "/{partition}/embedder-swap",
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=EmbedderSwapResponse,
+    description="""Move a partition to another embedder, re-embedding its files in place.
+
+Each embedder stores its vectors in its own field, and a partition searches only its embedder's field, so the
+files are re-embedded before the partition switches: each chunk's stored text is embedded again with the new
+embedder. Nothing is re-parsed or re-chunked, and searches keep using the current embedder until the swap
+completes.
+
+While the swap runs, uploads, file replacements, metadata updates and copies into the partition return 409
+`EMBEDDER_SWAP_IN_PROGRESS`. Deleting files stays allowed.
+
+Swapping to the embedder the partition already uses re-embeds only the files recorded with another model.
+
+**Body:**
+- `embedder`: name of the embedder endpoint to move to (not the `default` alias)
+
+**Errors:**
+- 409 `EMBEDDER_SWAP_IN_PROGRESS`: a swap is already running on this partition
+- 409 `INDEXING_IN_PROGRESS`: files are still being indexed into this partition
+- 422 `MODEL_ENDPOINT_NOT_FOUND` / `EMBEDDER_ALIAS_NOT_ALLOWED`
+
+**Permissions:**
+- Requires partition owner role
+
+**Response:**
+The swap. Poll `GET /partition/{partition}/embedder-swap` for progress.
+""",
+)
+async def start_embedder_swap(
+    partition: str,
+    body: StartEmbedderSwapRequest,
+    partition_owner=Depends(require_partition_owner),
+    service=Depends(get_embedder_swap_service),
+):
+    """Start re-embedding a partition with another embedder."""
+    return await service.start(partition, body.embedder)
+
+
+@router.get(
+    "/{partition}/embedder-swap",
+    response_model=EmbedderSwapResponse,
+    description="""Progress of a partition's embedder swap, or how its last one ended.
+
+`status` is `running`, `completed`, `failed` (see `error`) or `cancelled`; `files_done` of `files_total` files
+have been checked or re-embedded.
+
+**Permissions:**
+- Requires partition viewer role
+
+**Errors:**
+- 404 `EMBEDDER_SWAP_NOT_FOUND`: the partition never had one
+""",
+)
+async def get_embedder_swap(
+    partition: str,
+    partition_viewer=Depends(require_partition_viewer),
+    service=Depends(get_embedder_swap_service),
+):
+    """Return the partition's embedder swap."""
+    return await service.get(partition)
+
+
+@router.delete(
+    "/{partition}/embedder-swap",
+    response_model=EmbedderSwapResponse,
+    description="""Cancel a running embedder swap.
+
+The partition stays on its current embedder, and files can be written to it again. Files already re-embedded
+keep their new vectors, which nothing searches until a later swap to the same embedder, which skips them.
+
+**Permissions:**
+- Requires partition owner role
+
+**Errors:**
+- 409 `EMBEDDER_SWAP_NOT_RUNNING`
+""",
+)
+async def cancel_embedder_swap(
+    partition: str,
+    partition_owner=Depends(require_partition_owner),
+    service=Depends(get_embedder_swap_service),
+):
+    """Cancel the partition's running embedder swap."""
+    return await service.cancel(partition)
 
 
 @router.get(

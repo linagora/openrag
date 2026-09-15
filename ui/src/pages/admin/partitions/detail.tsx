@@ -1,7 +1,17 @@
 import { useState, useEffect, useCallback, useMemo } from "react";
 import { useParams, Link } from "react-router-dom";
 import { useInfiniteQuery, useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Save, UserPlus, Trash2, CheckCircle, XCircle, Loader2, Info } from "lucide-react";
+import {
+  ArrowLeft,
+  ArrowLeftRight,
+  Save,
+  UserPlus,
+  Trash2,
+  CheckCircle,
+  XCircle,
+  Loader2,
+  Info,
+} from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -36,12 +46,16 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { NewBadge } from "@/components/shared/new-badge";
 import { PageHeader } from "@/components/shared/page-header";
 import { ConfirmDialog } from "@/components/shared/confirm-dialog";
 import { computeEmbedderDrift } from "./embedder-drift";
+import { ChangeEmbedderDialog, EmbedderSwapBanner } from "./embedder-swap";
+import { useEmbedderSwap } from "./use-embedder-swap";
 import {
   AlertDialog,
   AlertDialogAction,
+  AlertDialogCancel,
   AlertDialogContent,
   AlertDialogDescription,
   AlertDialogFooter,
@@ -112,9 +126,12 @@ const files = (n: number) => `${n} file${n === 1 ? "" : "s"}`;
 function EmbedderDriftDialog({
   partition,
   drift,
+  onReembed,
 }: {
   partition: string;
   drift: ReturnType<typeof computeEmbedderDrift>;
+  /** Offered when the viewer may start a re-embed; omitted otherwise. */
+  onReembed?: () => void;
 }) {
   const signature = drift.hasDrift
     ? `${drift.current}<-${drift.drifted.map((g) => `${g.key}:${g.file_count}`).join(",")}`
@@ -177,7 +194,21 @@ function EmbedderDriftDialog({
           </AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>
-          <AlertDialogAction onClick={acknowledge}>Got it</AlertDialogAction>
+          {onReembed ? (
+            <>
+              <AlertDialogCancel onClick={acknowledge}>Later</AlertDialogCancel>
+              <AlertDialogAction
+                onClick={() => {
+                  acknowledge();
+                  onReembed();
+                }}
+              >
+                Re-embed drifted files
+              </AlertDialogAction>
+            </>
+          ) : (
+            <AlertDialogAction onClick={acknowledge}>Got it</AlertDialogAction>
+          )}
         </AlertDialogFooter>
       </AlertDialogContent>
     </AlertDialog>
@@ -189,8 +220,10 @@ function EmbedderDriftDialog({
  */
 function EmbedderProvenance({
   drift,
+  onReembed,
 }: {
   drift: ReturnType<typeof computeEmbedderDrift>;
+  onReembed?: () => void;
 }) {
   const { groups, current, hasDrift, driftedFiles: total } = drift;
   if (groups.length === 0) return null;
@@ -231,6 +264,11 @@ function EmbedderProvenance({
             &ldquo;unrecorded&rdquo; means indexed before OpenRag tracked which embedder ran &mdash; not
             necessarily drifted.
           </p>
+        )}
+        {hasDrift && onReembed && (
+          <Button type="button" variant="outline" size="sm" className="mt-3" onClick={onReembed}>
+            Re-embed drifted files
+          </Button>
         )}
       </AlertDescription>
     </Alert>
@@ -295,6 +333,17 @@ function GeneralTab({ partition }: { partition: PartitionConfig }) {
     () => computeEmbedderDrift(partition.embedder, partition.indexed_embedders, embedderEndpoints),
     [partition.embedder, partition.indexed_embedders, embedderEndpoints],
   );
+
+  // Moving to another embedder re-embeds the files first (#762 F4). Starting one
+  // is owner-gated like any settings change, and picking the target needs the
+  // admin-only endpoint registry. `swapTarget` non-null = the dialog is open.
+  const { swap: embedderSwap, running: swapRunning } = useEmbedderSwap(partition.name);
+  const canSwapEmbedder = canEdit && isAdmin && !swapRunning && (embedderEndpoints?.length ?? 0) > 0;
+  const [swapTarget, setSwapTarget] = useState<string | null>(null);
+  const currentEmbedderName = resolveEmbedderName(partition.embedder, embedderEndpoints);
+  // Repairing drift is a swap onto the embedder the partition already uses: only
+  // the files recorded with another model are redone.
+  const reembedDrifted = canSwapEmbedder ? () => setSwapTarget(currentEmbedderName) : undefined;
 
   const { data: promptsData } = useQuery({
     queryKey: ["prompts-library"],
@@ -436,17 +485,54 @@ function GeneralTab({ partition }: { partition: PartitionConfig }) {
             </div>
             <div className="space-y-2">
               <Label className="text-muted-foreground">Embedder</Label>
-              <p className="text-sm font-medium pt-1">
-                {resolveEmbedderName(partition.embedder, embedderEndpoints)}
-              </p>
+              <div className="flex flex-wrap items-center gap-x-2 gap-y-1 pt-1">
+                <p className="text-sm font-medium">{currentEmbedderName}</p>
+                {canSwapEmbedder && (
+                  <TooltipProvider>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          className="h-6 gap-1 px-2 text-xs font-normal text-muted-foreground hover:text-foreground"
+                          onClick={() => setSwapTarget("")}
+                        >
+                          <ArrowLeftRight className="h-3 w-3" />
+                          Change
+                        </Button>
+                      </TooltipTrigger>
+                      <TooltipContent className="max-w-xs">
+                        Move this partition to another embedder. Its files are re-embedded first;
+                        searches keep using {currentEmbedderName} until that finishes.
+                      </TooltipContent>
+                    </Tooltip>
+                  </TooltipProvider>
+                )}
+                {canSwapEmbedder && <NewBadge feature="partitions.embedder_swap" />}
+              </div>
             </div>
             <div className="space-y-2">
               <Label className="text-muted-foreground">Documents</Label>
               <p className="text-sm font-medium pt-1">{partition.document_count}</p>
             </div>
           </div>
-          <EmbedderProvenance drift={embedderDrift} />
-          <EmbedderDriftDialog partition={partition.name} drift={embedderDrift} />
+          <EmbedderSwapBanner swap={embedderSwap} canCancel={canEdit} endpoints={embedderEndpoints} />
+          <EmbedderProvenance drift={embedderDrift} onReembed={reembedDrifted} />
+          {/* A running swap is already the fix: no need to interrupt about the drift it repairs. */}
+          {!swapRunning && (
+            <EmbedderDriftDialog partition={partition.name} drift={embedderDrift} onReembed={reembedDrifted} />
+          )}
+          {swapTarget !== null && (
+            <ChangeEmbedderDialog
+              partition={partition.name}
+              currentEmbedder={partition.embedder}
+              documentCount={partition.document_count}
+              endpoints={embedderEndpoints ?? []}
+              initialTarget={swapTarget}
+              onClose={() => setSwapTarget(null)}
+            />
+          )}
           <div className="pt-2 grid grid-cols-2 lg:grid-cols-4 gap-6">
             <div className="space-y-2">
               <Label>Indexation Preset</Label>

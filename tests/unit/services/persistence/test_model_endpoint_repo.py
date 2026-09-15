@@ -49,9 +49,17 @@ class _FakeConn:
         # name the endpoint, `via_default` ride the `default` alias. Zero-zero
         # is "nothing references it", the case every pre-#762 test assumes.
         self.embedder_usage = {"direct": 0, "via_default": 0}
+        # Running embedder swaps targeting the endpoint (#762 F4).
+        self.running_swaps = 0
 
     def transaction(self):
         return _AsyncCtx(self)
+
+    async def fetchval(self, query: str, *params):
+        self.executed.append((query, params))
+        if "FROM partition_embedder_swaps" in query:
+            return self.running_swaps
+        return None
 
     async def execute(self, query: str, *params):
         self.executed.append((query, params))
@@ -577,6 +585,57 @@ async def test_delete_refuses_when_a_partition_names_the_embedder():
     queries = [q for q, _ in pool.conn.executed]
     assert not any("DELETE FROM model_endpoints" in q for q in queries)
     assert not any("UPDATE pipeline_presets" in q for q in queries)
+
+
+@pytest.mark.asyncio
+async def test_delete_refuses_while_a_swap_is_filling_the_embedders_field():
+    """No partition names the target of a running swap yet, but deleting it
+    would drop the field the swap is writing into (#762 F4)."""
+    from core.utils.exceptions import ConflictError
+    from services.persistence.model_endpoint_repo import PgModelEndpointRepository
+
+    pool = _FakePool()
+    pool.conn._fetch_result = [_row("e5", False), _row("jina", True)]
+    pool.conn.running_swaps = 2
+    repo = PgModelEndpointRepository(pool_getter=lambda: pool)
+
+    with pytest.raises(ConflictError) as exc:
+        await repo.delete_and_promote_default("e5", "embedder")
+
+    assert exc.value.code == "EMBEDDER_SWAP_IN_PROGRESS"
+    assert "2 running embedder swap(s)" in exc.value.message
+    queries = [q for q, _ in pool.conn.executed]
+    assert not any("DELETE FROM model_endpoints" in q for q in queries)
+
+
+@pytest.mark.asyncio
+async def test_rename_carries_embedder_swaps_along():
+    """A running swap completes by writing its target into the partition, so it
+    has to name the endpoint by its new name."""
+    from services.persistence.model_endpoint_repo import PgModelEndpointRepository
+
+    pool = _FakePool()
+    pool.conn._fetchrow_result = {"name": "new"}
+    repo = PgModelEndpointRepository(pool_getter=lambda: pool)
+
+    await repo.rename("old", "embedder", "new")
+
+    swap_updates = [(q, p) for q, p in pool.conn.executed if "UPDATE partition_embedder_swaps" in q]
+    assert [q.split("SET ")[1].split(" =")[0] for q, _ in swap_updates] == ["source_embedder", "target_embedder"]
+    assert all(p == ("old", "new") for _, p in swap_updates)
+
+
+@pytest.mark.asyncio
+async def test_rename_of_a_non_embedder_leaves_embedder_swaps_alone():
+    from services.persistence.model_endpoint_repo import PgModelEndpointRepository
+
+    pool = _FakePool()
+    pool.conn._fetchrow_result = {"name": "new"}
+    repo = PgModelEndpointRepository(pool_getter=lambda: pool)
+
+    await repo.rename("old", "llm", "new")
+
+    assert not any("partition_embedder_swaps" in q for q, _ in pool.conn.executed)
 
 
 @pytest.mark.asyncio

@@ -34,6 +34,7 @@ import numpy as np
 from core.config.indexation_pipeline import IndexationPipelineConfig
 from core.config.retrieval_pipeline import RetrievalPipelineConfig
 from core.indexing.validators import validate_partition_name
+from core.models.embedder_swap import EmbedderSwapStatus
 from core.models.preset import PartitionConfig
 from core.utils.consts import is_internal_metadata_key
 from core.utils.exceptions import (
@@ -181,6 +182,36 @@ class PartitionService:
                 yield await self._partition_exists_for_operation(partition, operation=operation)
             finally:
                 _ACTIVE_PARTITION_OPERATIONS.reset(token)
+
+    @asynccontextmanager
+    async def operation_lock(self, partition: str) -> AsyncIterator[None]:
+        """Hold the cross-process partition fence uploads and deletes serialize on.
+
+        For operations that must not interleave with an upload admission or a
+        partition delete — an embedder swap starting or completing (#762 F4).
+        """
+        async with self._partition_operation_lock(partition):
+            yield
+
+    async def ensure_no_embedder_swap(self, partition: str) -> None:
+        """Refuse a write to *partition* while an embedder swap is re-embedding it (#762 F4).
+
+        The swap re-embeds the chunks the partition has when it starts, and
+        completes by pointing the partition at the new embedder. A file written
+        meanwhile would land in the old embedder's field and be left behind; a
+        metadata update would rewrite chunks under the swap. Repositories
+        without swap support never report one.
+        """
+        getter = getattr(self._partition_repo, "get_embedder_swap", None)
+        if getter is None:
+            return
+        swap = await getter(partition)
+        if swap is not None and swap.get("status") == EmbedderSwapStatus.RUNNING:
+            raise ConflictError(
+                f"Partition '{partition}' is being re-embedded with '{swap.get('target_embedder')}'. "
+                "Files can be added or changed once the embedder swap completes.",
+                code="EMBEDDER_SWAP_IN_PROGRESS",
+            )
 
     @asynccontextmanager
     async def _partition_operation_lock(self, partition: str) -> AsyncIterator[Any]:
@@ -451,6 +482,7 @@ class PartitionService:
                 self._validate_chat_llm_ref(updates["chat_llm"])
             if updates.get("embedder"):
                 self._validate_embedder_ref(updates["embedder"])
+                await self._refuse_in_place_embedder_change(partition, current, updates["embedder"])
             if updates.get("generation_prompt_names"):
                 await self._validate_generation_prompt_names(updates["generation_prompt_names"])
 
@@ -461,6 +493,32 @@ class PartitionService:
 
         logger.info("Partition updated.", partition=partition, fields=sorted(updates))
         return result
+
+    async def _refuse_in_place_embedder_change(self, partition: str, current: dict, embedder: str) -> None:
+        """An embedder change on a partition with files goes through a swap (#762 F4).
+
+        Repointing the column in place leaves every indexed file in the old
+        embedder's vector field, which searches stop reading: the files vanish
+        from results. The swap re-embeds them first. A partition with no files
+        has nothing to leave behind.
+
+        A change is judged on the vector field the two names resolve to, so
+        naming the endpoint the ``default`` alias already resolves to is not
+        one.
+        """
+        embedders = self._require_config().models.embedder
+        current_name = current.get("embedder") or "default"
+        current_field = getattr(embedders.get(current_name), "vector_field", None)
+        new_field = getattr(embedders.get(embedder), "vector_field", None)
+        if current_field is not None and current_field == new_field:
+            return
+        await self.ensure_no_embedder_swap(partition)
+        if await self._partition_repo.get_partition_file_count(partition) > 0:
+            raise ConflictError(
+                f"Partition '{partition}' has indexed files, which would disappear from search if its "
+                f"embedder changed in place. Use POST /partition/{partition}/embedder-swap to re-embed them.",
+                code="EMBEDDER_SWAP_REQUIRED",
+            )
 
     async def get_partition_config(self, partition: str) -> dict:
         """Return the resolved Phase 14 detail for a partition.

@@ -19,6 +19,7 @@ from core.utils.exceptions import ConflictError, mark_indexing_worker_may_be_run
 from core.utils.logging import get_logger
 from core.vector_stores.vector_field import is_vector_field_key
 from ray.exceptions import TaskCancelledError
+from services.workers.pipeline_builder import embedder_provenance
 from services.workers.ray_utils import call_ray_actor_with_timeout, retry_idempotent_ray_actor_method
 from services.workers.stages.store import INDEXING_TASK_ID_METADATA_KEY
 from services.workers.task_cancellation import cancel_active_indexing_tasks
@@ -584,6 +585,10 @@ class WorkerDispatcher(IndexingDispatcher):
         metadata: dict,
         partition: str,
         user: dict | None,
+        *,
+        vector_field: str | None = None,
+        embedder: Any = None,
+        embedder_reference: str | None = None,
     ) -> None:
         target_file_id = metadata.get("file_id", file_id)
         target_partition = metadata.get("partition", partition)
@@ -622,6 +627,10 @@ class WorkerDispatcher(IndexingDispatcher):
                 entity.update(public_metadata)
                 entities.append(entity)
 
+            provenance: dict[str, Any] = {}
+            if vector_field is not None and embedder is not None:
+                provenance = await self._route_to_vector_field(entities, vector_field, embedder, embedder_reference)
+
             await self._insert_entities(entities)
 
             file_metadata = self._file_metadata_from_chunk(rows[0])
@@ -634,6 +643,7 @@ class WorkerDispatcher(IndexingDispatcher):
                 relationship_id=file_metadata.get("relationship_id"),
                 parent_id=file_metadata.get("parent_id"),
                 content_sha256=content_sha256,
+                **({"indexation_config": provenance} if provenance else {}),
             )
         finally:
             if claimed_content:
@@ -643,6 +653,38 @@ class WorkerDispatcher(IndexingDispatcher):
                     content_sha256=content_sha256,
                     claim_token=claim_token,
                 )
+
+    async def _route_to_vector_field(
+        self,
+        entities: list[dict[str, Any]],
+        vector_field: str,
+        embedder: Any,
+        embedder_reference: str | None,
+    ) -> dict[str, Any]:
+        """Put copied chunks' vectors in the target partition's embedder field (#762 F).
+
+        A chunk holds a vector only in the field of the embedder that produced
+        it, and a partition searches only its own embedder's field: copied as
+        is into a partition on another embedder, the file is never found.
+        Chunks with no vector in the target field are re-embedded from their
+        stored text — the input the source embedder was given, context
+        included — and every other embedder's field is left empty on the copy.
+
+        Returns the embedder record for the copy when anything was re-embedded,
+        ``{}`` when every chunk already had its vector there.
+        """
+        missing = [entity for entity in entities if entity.get(vector_field) is None]
+        if missing:
+            vectors = await embedder.embed([entity.get("text") or "" for entity in missing])
+            if len(vectors) != len(missing):
+                raise ValueError(f"Embedder returned {len(vectors)} vectors for {len(missing)} copied chunks.")
+            await self._vector_store.ensure_vector_field(vector_field, len(vectors[0]))
+            for entity, vector in zip(missing, vectors, strict=True):
+                entity[vector_field] = vector
+        for entity in entities:
+            for key in [key for key in entity if is_vector_field_key(key) and key != vector_field]:
+                del entity[key]
+        return embedder_provenance(embedder, embedder_reference, vector_field) if missing else {}
 
     async def _upsert_entities(self, entities: list[dict[str, Any]]) -> None:
         upsert_entities = getattr(self._vector_store, "upsert_entities", None)

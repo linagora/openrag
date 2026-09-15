@@ -2126,3 +2126,98 @@ async def test_dispatch_indexing_does_not_mark_failure_before_worker_submission(
             )
 
     assert indexing_worker_may_be_running(excinfo.value) is False
+
+
+# ---------------------------------------------------------------------------
+# Copy into a partition on another embedder (#762 F)
+# ---------------------------------------------------------------------------
+
+
+class _CopyEmbedder:
+    model_name = "BAAI/bge-m3"
+    endpoint = "http://bge:8000/v1"
+    dimension = 3
+
+    def __init__(self) -> None:
+        self.calls: list[list[str]] = []
+
+    async def embed(self, texts: list[str]) -> list[list[float]]:
+        self.calls.append(texts)
+        return [[1.0, 2.0, 3.0] for _ in texts]
+
+
+def _copy_dispatcher(rows: list[dict]):
+    from services.workers.dispatcher import WorkerDispatcher
+
+    store = _vector_store()
+    store.query_chunks_by_filter = AsyncMock(return_value=rows)
+    store.ensure_vector_field = AsyncMock(return_value=False)
+    store.insert_entities = AsyncMock(return_value=len(rows))
+    repo = _document_repo()
+    dispatcher = WorkerDispatcher(
+        pool=_pool_with_ref(object()),
+        task_state_manager=_task_state_manager(),
+        completion_tracker=_completion_tracker(),
+        vector_store=store,
+        document_repo=repo,
+        workspace_repo=_workspace_repo(),
+        collection="default",
+    )
+    return dispatcher, store, repo
+
+
+@pytest.mark.asyncio
+async def test_a_copy_re_embeds_chunks_into_the_target_embedders_field() -> None:
+    rows = [
+        {"_id": 1, "text": "hello", "vector_e5": [0.1, 0.2], "file_id": "file-1", "partition": "tenant-a"},
+        {"_id": 2, "text": "world", "vector_e5": [0.3, 0.4], "file_id": "file-1", "partition": "tenant-a"},
+    ]
+    dispatcher, store, repo = _copy_dispatcher(rows)
+    embedder = _CopyEmbedder()
+
+    await dispatcher.copy_file(
+        "file-1",
+        {"file_id": "copy-1", "partition": "tenant-b"},
+        "tenant-a",
+        user=None,
+        vector_field="vector_bge_m3",
+        embedder=embedder,
+        embedder_reference="bge-m3",
+    )
+
+    # From the stored text, like the source embedder was given.
+    assert embedder.calls == [["hello", "world"]]
+    store.ensure_vector_field.assert_awaited_once_with("vector_bge_m3", 3)
+    inserted = store.insert_entities.await_args.args[0]
+    assert [row["vector_bge_m3"] for row in inserted] == [[1.0, 2.0, 3.0], [1.0, 2.0, 3.0]]
+    # The copy carries no other embedder's vectors.
+    assert all("vector_e5" not in row for row in inserted)
+    assert repo.add_file_to_partition.await_args.kwargs["indexation_config"] == {
+        "embedder": "bge-m3",
+        "embedder_model_name": "BAAI/bge-m3",
+        "embedder_endpoint": "http://bge:8000/v1",
+        "embedder_dimension": 3,
+        "embedder_vector_field": "vector_bge_m3",
+    }
+
+
+@pytest.mark.asyncio
+async def test_a_copy_between_partitions_on_the_same_embedder_keeps_its_vectors() -> None:
+    rows = [{"_id": 1, "text": "hello", "vector_bge_m3": [0.5, 0.5, 0.5], "file_id": "file-1", "partition": "a"}]
+    dispatcher, store, repo = _copy_dispatcher(rows)
+    embedder = _CopyEmbedder()
+
+    await dispatcher.copy_file(
+        "file-1",
+        {"file_id": "copy-1", "partition": "b"},
+        "a",
+        user=None,
+        vector_field="vector_bge_m3",
+        embedder=embedder,
+        embedder_reference="bge-m3",
+    )
+
+    assert embedder.calls == []
+    store.ensure_vector_field.assert_not_called()
+    assert store.insert_entities.await_args.args[0][0]["vector_bge_m3"] == [0.5, 0.5, 0.5]
+    assert "indexation_config" not in repo.add_file_to_partition.await_args.kwargs
