@@ -743,15 +743,23 @@ OpenAI-compatible text completion endpoint.
 
 #### Extra arguments
 
-* When using the openai endpoint /v1/chat/completions, you can pass extra arguments **via the `metadata` field** of the request body to customize the RAG behavior:
+* When using `/v1/chat/completions` or `/v1/completions`, you can pass extra arguments **via the `metadata` field** of the request body to customize the RAG behavior. Some options apply only to chat, as shown below:
 
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `websearch` | `bool` | `false` | Augments the RAG context with live web search results. When used with a partition (`openrag-{partition}`), document and web results are combined. When used without a partition (direct LLM mode), web results are the sole context. Requires `WEBSEARCH_API_TOKEN` to be configured. See [web search configuration](/openrag/documentation/env_vars/#web-search-configuration). |
-| `spoken_style_answer` | `bool` | `false` | Generates a succinct spoken-style conversational answer based on the retrieved documents. |
-| `use_map_reduce` | `bool` | `false` | Uses a map-reduce strategy to aggregate information from multiple documents. See [map-reduce configuration](/openrag/documentation/env_vars/#map--reduce-configuration). |
-| `llm_override` | `object` | `null` | Overrides the downstream LLM for this request. Accepts `model` (string), always honored. Also accepts `base_url` and `api_key`, which are honored **only** when the deployment sets `LLM_OVERRIDE_ALLOW_CUSTOM_ENDPOINT` — otherwise they are ignored and the request goes to the server's configured endpoint. See [custom LLM endpoints](/openrag/documentation/env_vars/#client-supplied-llm-endpoints). |
-| `attachments` | `list[{"id": string}]` | `null` | Scopes RAG retrieval to a specific list of file IDs within the target partition, instead of searching the whole partition. Unknown or unindexed IDs are silently dropped; duplicates are deduplicated. The response's `extra.attachments` reports which IDs were actually used. |
+Partition-backed chat retrieves by default. It skips retrieval only for an empty or exclusively casual message;
+ambiguous, mixed, and factual messages retrieve. Text completions retain their contextualizer-controlled default.
+
+| Option | Applies to | Type | Default | Description |
+|--------|------------|------|---------|-------------|
+| `require_retrieval` | Chat and text completions | `bool` | `false` | For partition-backed chat, JSON `true` forces retrieval even for a casual or normalized-empty message. Other chat messages already retrieve by default. For text completions, JSON `true` remains the opt-in override when the contextualizer would skip. The original input is the fallback query. Existing scope and filters still apply; matching sources and answer correctness are not guaranteed. Has no effect in direct LLM mode. |
+| `websearch` | Chat only | `bool` | `false` | Augments the RAG context with live web search results. When used with a partition (`openrag-{partition}`), document and web results are combined. When used without a partition (direct LLM mode), web results are the sole context. Requires `WEBSEARCH_API_TOKEN` to be configured. See [web search configuration](/openrag/documentation/env_vars/#web-search-configuration). |
+| `spoken_style_answer` | Chat and text completions | `bool` | `false` | Generates a succinct spoken-style conversational answer based on the retrieved documents. |
+| `use_map_reduce` | Chat only | `bool` | `false` | Uses a map-reduce strategy to aggregate information from multiple documents. See [map-reduce configuration](/openrag/documentation/env_vars/#map--reduce-configuration). |
+| `llm_override` | Chat and text completions | `object` | `null` | Overrides the downstream LLM for this request. Accepts `model` (string), always honored. Also accepts `base_url` and `api_key`, which are honored **only** when the deployment sets `LLM_OVERRIDE_ALLOW_CUSTOM_ENDPOINT` — otherwise they are ignored and the request goes to the server's configured endpoint. See [custom LLM endpoints](/openrag/documentation/env_vars/#client-supplied-llm-endpoints). |
+| `attachments` | Chat only | `list[{"id": string}]` | `null` | Scopes RAG retrieval to a specific list of file IDs within the target partition, instead of searching the whole partition. Unknown or unindexed IDs are silently dropped; duplicates are deduplicated. The response's `extra.attachments` reports which IDs were actually used. |
+
+Common English and French casual messages are recognized directly; other phrasing is checked conservatively by the
+contextualizer. Casual replies use a dedicated instruction in the detected language. Only greetings introduce
+OpenRAG, and ambiguous or normalized-empty input defaults to English.
 
 Examples:
 

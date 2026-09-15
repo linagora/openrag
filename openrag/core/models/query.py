@@ -103,6 +103,10 @@ class SearchQueries(BaseModel):
     """Collection of sub-queries produced by query decomposition."""
 
     query_list: list[Query] = Field(..., description="Search sub-queries to retrieve relevant documents.")
+    intent: Literal["greeting", "gratitude", "farewell", "capability", "other"] = Field(
+        default="other",
+        description="Conservative classification of the complete latest user message.",
+    )
     requires_retrieval: bool = Field(
         default=True,
         description="Whether the user's request needs document retrieval.",
