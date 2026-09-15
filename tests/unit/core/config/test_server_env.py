@@ -39,3 +39,22 @@ def test_blank_metrics_token_means_unset(monkeypatch, tmp_path):
     settings = load_config(config_path=tmp_path)
 
     assert settings.server.metrics_token is None
+
+
+def test_metrics_allow_unauthenticated_defaults_to_false(monkeypatch, tmp_path):
+    """Fail closed: an operator must opt in to an open endpoint explicitly."""
+    _write_minimal_config(tmp_path)
+    monkeypatch.delenv("METRICS_ALLOW_UNAUTHENTICATED", raising=False)
+
+    settings = load_config(config_path=tmp_path)
+
+    assert settings.server.metrics_allow_unauthenticated is False
+
+
+def test_metrics_allow_unauthenticated_from_env(monkeypatch, tmp_path):
+    _write_minimal_config(tmp_path)
+    monkeypatch.setenv("METRICS_ALLOW_UNAUTHENTICATED", "true")
+
+    settings = load_config(config_path=tmp_path)
+
+    assert settings.server.metrics_allow_unauthenticated is True
