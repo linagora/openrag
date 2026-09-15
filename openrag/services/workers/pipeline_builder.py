@@ -37,13 +37,18 @@ REPLACE_OLD_CHUNK_COLLECTION_ROW_KEY = "_replace_old_chunk_collection"
 REPLACE_OLD_CHUNK_IDS_ROW_KEY = "_replace_old_chunk_ids"
 
 
-def _embedder_provenance(embedder: Embedder, reference: Any) -> dict[str, Any]:
-    """What actually produced this file's vectors.
+def embedder_provenance(embedder: Embedder, reference: Any, vector_field: str | None = None) -> dict[str, Any]:
+    """What actually produced this file's vectors, and where they are.
 
     ``embedder`` is the endpoint reference the partition carried, kept as given
     (the ``"default"`` alias included); the model/endpoint pair is what that
     reference resolved to, and is the only thing that catches an endpoint
     repointed at a different model without being renamed.
+
+    ``embedder_vector_field`` is the dense field the vectors were written to
+    (#762 F). The model alone does not say it: an endpoint repointed at another
+    model keeps its field, so a file can record the right model and still sit
+    in the wrong field. A re-embed skips a file only when both match.
 
     Every field degrades to ``None`` rather than raising: describing a run that
     already succeeded must not be able to fail it.
@@ -58,6 +63,7 @@ def _embedder_provenance(embedder: Embedder, reference: Any) -> dict[str, Any]:
         "embedder_model_name": getattr(embedder, "model_name", None),
         "embedder_endpoint": getattr(embedder, "endpoint", None),
         "embedder_dimension": dimension,
+        "embedder_vector_field": vector_field,
     }
 
 
@@ -275,8 +281,9 @@ class IndexingPipeline:
                     per_chunk_timeout=self.timeouts.embed_per_chunk,
                 ),
             )
+            vector_field = self.vector_field_resolver(embedder_name) if self.vector_field_resolver else None
             # After the embed: the dimension is measured, not configured.
-            row["embedder_provenance"] = _embedder_provenance(embedder, row.get("embedder_name"))
+            row["embedder_provenance"] = embedder_provenance(embedder, row.get("embedder_name"), vector_field)
             # What the catalog write checks the partition's embedder against (#958).
             row["embedder_fingerprint"] = getattr(embedder, "vector_fingerprint", None)
             # Re-index (``replace=True``) is insert-before-delete: snapshot the
@@ -310,7 +317,7 @@ class IndexingPipeline:
                     self.vector_store,
                     timeout=self.timeouts.store,
                     per_chunk_timeout=self.timeouts.store_per_chunk,
-                    vector_field=(self.vector_field_resolver(embedder_name) if self.vector_field_resolver else None),
+                    vector_field=vector_field,
                 ),
             )
             # BUG (#657 follow-up): ``store_stage`` completes successfully even

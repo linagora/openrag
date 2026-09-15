@@ -76,6 +76,26 @@ class DocumentRepository(ABC):
         ...
 
     @abstractmethod
+    async def list_file_embedders(self, partition: str) -> list[dict]:
+        """Where each file of *partition* was embedded, ordered by ``file_id``.
+
+        ``[{"file_id", "embedder_model_name", "embedder_vector_field"}]``, read
+        from the per-file ``indexation_config`` snapshot; either value is
+        ``None`` when the file predates it being recorded.
+        """
+        ...
+
+    @abstractmethod
+    async def record_file_embedder(self, file_id: str, partition: str, provenance: dict) -> bool:
+        """Merge *provenance* into the file's ``indexation_config`` snapshot.
+
+        Only the embedder keys change; the rest of the snapshot describes how
+        the file was parsed and chunked, which a re-embed does not redo.
+        Returns ``False`` when the file no longer exists.
+        """
+        ...
+
+    @abstractmethod
     async def mark_file_independently_indexed(self, file_id: str, partition: str) -> bool:
         """Protect a file from workspace-owned cleanup."""
         ...

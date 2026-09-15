@@ -839,6 +839,33 @@ class PgDocumentRepository(DocumentRepository):
             return {}
         return {"files": [self._row_to_dict(r) for r in rows]}
 
+    async def list_file_embedders(self, partition: str) -> list[dict]:
+        rows = await self.pool.fetch(
+            """
+            SELECT file_id,
+                   indexation_config->>'embedder_model_name'   AS embedder_model_name,
+                   indexation_config->>'embedder_vector_field' AS embedder_vector_field
+            FROM files
+            WHERE partition_name = $1
+            ORDER BY file_id
+            """,
+            partition,
+        )
+        return [dict(r) for r in rows]
+
+    async def record_file_embedder(self, file_id: str, partition: str, provenance: dict) -> bool:
+        result = await self.pool.execute(
+            """
+            UPDATE files
+            SET indexation_config = COALESCE(indexation_config, '{}'::jsonb) || $3::jsonb
+            WHERE file_id = $1 AND partition_name = $2
+            """,
+            file_id,
+            partition,
+            provenance,
+        )
+        return result.split()[-1] != "0"
+
     async def count_files_by_embedder(self, partition: str) -> list[dict]:
         """How many files in *partition* were indexed with each embedder.
 
@@ -851,13 +878,14 @@ class PgDocumentRepository(DocumentRepository):
         """
         rows = await self.pool.fetch(
             """
-            SELECT indexation_config->>'embedder'            AS embedder,
-                   indexation_config->>'embedder_model_name' AS model_name,
+            SELECT indexation_config->>'embedder'             AS embedder,
+                   indexation_config->>'embedder_model_name'  AS model_name,
                    (indexation_config->>'embedder_dimension')::int AS dimension,
-                   COUNT(*)::int                             AS file_count
+                   indexation_config->>'embedder_vector_field' AS vector_field,
+                   COUNT(*)::int                              AS file_count
             FROM files
             WHERE partition_name = $1
-            GROUP BY 1, 2, 3
+            GROUP BY 1, 2, 3, 4
             ORDER BY file_count DESC, embedder NULLS LAST
             """,
             partition,
@@ -867,6 +895,7 @@ class PgDocumentRepository(DocumentRepository):
                 "embedder": r["embedder"],
                 "model_name": r["model_name"],
                 "dimension": r["dimension"],
+                "vector_field": r["vector_field"],
                 "file_count": r["file_count"],
             }
             for r in rows
