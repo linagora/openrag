@@ -61,26 +61,45 @@ class DistributedSemaphoreActor:
 # the loop that created them and must not be shared across loops: Ray runs each
 # concurrency group on its own loop, and the API and worker processes have their
 # own. Weak keys so a finished loop's gates are collected along with it.
-_local_gates: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, dict[tuple[str, int], asyncio.Semaphore]] = (
-    weakref.WeakKeyDictionary()
-)
+# Keyed by ``(namespace, name)`` - the same identity ``_get_or_create_actor``
+# resolves - so one gate fronts exactly one actor. Keying by name alone would
+# let two namespaces share a gate and block each other, and folding the budget
+# into the key would give one actor several gates whose combined outstanding
+# acquires exceed any of their budgets, which is the pile-up this exists to stop.
+_local_gates: weakref.WeakKeyDictionary[
+    asyncio.AbstractEventLoop, dict[tuple[str, str], tuple[asyncio.Semaphore, int]]
+] = weakref.WeakKeyDictionary()
 
 
-def _local_gate(name: str, budget: int) -> asyncio.Semaphore:
-    """Return this loop's admission gate for ``name``, creating it on first use."""
+def _local_gate(namespace: str, name: str, budget: int) -> asyncio.Semaphore:
+    """Return this loop's admission gate for one actor, creating it on first use.
+
+    The first handle for an actor identity fixes the budget, mirroring the actor
+    itself: ``DistributedSemaphoreActor`` takes its permit count from whoever
+    creates it and every later handle just attaches. A mismatch is a
+    misconfiguration worth surfacing, not a reason to open a second gate.
+    """
     loop = asyncio.get_running_loop()
     per_loop = _local_gates.get(loop)
     if per_loop is None:
         per_loop = {}
         _local_gates[loop] = per_loop
-    key = (name, budget)
-    gate = per_loop.get(key)
-    if gate is None:
+    key = (namespace, name)
+    entry = per_loop.get(key)
+    if entry is None:
         # max(1, ...) so a misconfigured non-positive budget degrades to serial
         # access rather than an asyncio.Semaphore that never admits anyone.
-        gate = asyncio.Semaphore(max(1, budget))
-        per_loop[key] = gate
-    return gate
+        entry = (asyncio.Semaphore(max(1, budget)), budget)
+        per_loop[key] = entry
+    elif entry[1] != budget:
+        logger.bind(semaphore=name, namespace=namespace).warning(
+            "Ignoring admission budget {requested} for semaphore '{name}': it is already gated at {existing} "
+            "in this process. Configure one budget per semaphore.",
+            requested=budget,
+            existing=entry[1],
+            name=name,
+        )
+    return entry[0]
 
 
 class DistributedSemaphore:
@@ -126,7 +145,7 @@ class DistributedSemaphore:
     async def __aenter__(self):
         # Local admission gate before the actor is touched at all, so a burst
         # cannot fill the actor's concurrency slots with waiters (#965).
-        gate = _local_gate(self._name, self._max_concurrent_ops)
+        gate = _local_gate(self._namespace, self._name, self._max_concurrent_ops)
         await gate.acquire()
         try:
             semaphore_actor = self._get_or_create_actor()

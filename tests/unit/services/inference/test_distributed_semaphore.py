@@ -304,7 +304,7 @@ class TestDistributedSemaphoreLocalAdmissionGate:
     def _gate_of(self, sem: DistributedSemaphore) -> asyncio.Semaphore:
         from services.inference.distributed_semaphore import _local_gate
 
-        return _local_gate(sem._name, sem._max_concurrent_ops)
+        return _local_gate(sem._namespace, sem._name, sem._max_concurrent_ops)
 
     async def test_outstanding_acquires_never_exceed_the_budget(self):
         budget = 4
@@ -394,7 +394,7 @@ class TestDistributedSemaphoreLocalAdmissionGate:
         seen = []
 
         async def grab():
-            seen.append(_local_gate("loop-scoped-gate", 3))
+            seen.append(_local_gate("test", "loop-scoped-gate", 3))
 
         asyncio.run(grab())
         asyncio.run(grab())
@@ -402,3 +402,24 @@ class TestDistributedSemaphoreLocalAdmissionGate:
         # An asyncio.Semaphore parks its waiters on the loop that created them,
         # so a gate must never be carried across loops.
         assert seen[0] is not seen[1]
+
+    async def test_gates_are_keyed_by_actor_identity_not_name_alone(self):
+        from services.inference.distributed_semaphore import _local_gate
+
+        name = f"shared-name-{uuid.uuid4().hex}"
+
+        # _get_or_create_actor resolves actors by (namespace, name), so two
+        # namespaces are two actors and must not contend for one gate.
+        assert _local_gate("ns-a", name, 4) is not _local_gate("ns-b", name, 4)
+
+    async def test_one_actor_identity_keeps_one_gate_across_budgets(self):
+        from services.inference.distributed_semaphore import _local_gate
+
+        name = f"one-actor-{uuid.uuid4().hex}"
+        first = _local_gate("ns", name, 4)
+
+        # A second budget for the same actor must not open a second gate: their
+        # combined outstanding acquires would exceed either budget, which is the
+        # pile-up the gate exists to prevent. First budget wins, as for the actor.
+        assert _local_gate("ns", name, 99) is first
+        assert await _free_permits(first) == 4
