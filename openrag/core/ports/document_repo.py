@@ -34,6 +34,13 @@ class DocumentRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    async def list_indexed_documents(
+        self, partition: str, *, before: datetime, after: str | None = None, limit: int = 500
+    ) -> list[str]:
+        """Keyset page of file IDs indexed before a cutoff, ordered by file ID."""
+        raise NotImplementedError
+
+    @abstractmethod
     async def create_document(self, doc: DocumentRecord) -> DocumentRecord: ...
 
     @abstractmethod
