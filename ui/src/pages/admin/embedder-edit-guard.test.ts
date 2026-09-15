@@ -25,6 +25,76 @@ describe("diffEndpointUpdate", () => {
     expect(diffEndpointUpdate(embedder, update({}))).toEqual([]);
   });
 
+  it("flags a truncation change as material", () => {
+    // max_model_len becomes the embedder's truncate_prompt_tokens: same model,
+    // same URL, shorter input — and different vectors for every long chunk.
+    const withExtra = { ...embedder, extra: { max_model_len: 8192 } } as ModelEndpointResponse;
+
+    const changes = diffEndpointUpdate(withExtra, update({ extra: { max_model_len: 512 } }));
+
+    expect(changes).toHaveLength(1);
+    expect(changes[0]).toMatchObject({
+      field: "extra.max_model_len",
+      label: "max_model_len",
+      from: "8192",
+      to: "512",
+      material: true,
+    });
+    expect(hasMaterialChange(changes)).toBe(true);
+  });
+
+  it("reports a throughput option without demanding an acknowledgement", () => {
+    const withExtra = { ...embedder, extra: { embed_concurrency: 4 } } as ModelEndpointResponse;
+
+    const changes = diffEndpointUpdate(withExtra, update({ extra: { embed_concurrency: 16 } }));
+
+    expect(changes).toHaveLength(1);
+    expect(changes[0]).toMatchObject({ field: "extra.embed_concurrency", material: false });
+    expect(hasMaterialChange(changes)).toBe(false);
+  });
+
+  it("ignores a redacted secret, which comes back masked on every save", () => {
+    const withExtra = { ...embedder, extra: { api_key: "sk-real-key" } } as ModelEndpointResponse;
+
+    const changes = diffEndpointUpdate(withExtra, update({ extra: { api_key: "sk-********" } }));
+
+    expect(changes).toEqual([]);
+  });
+
+  it("says nothing about extra when the edit does not carry it", () => {
+    const withExtra = { ...embedder, extra: { max_model_len: 8192 } } as ModelEndpointResponse;
+
+    expect(diffEndpointUpdate(withExtra, update({}))).toEqual([]);
+  });
+
+  it("does not report the form's own default as a change", () => {
+    // The save stamps `implementation` whether or not anyone touched the
+    // vendor select, so a stored endpoint without one would otherwise report
+    // "not set → vllm" on every edit — and demand an acknowledgement for it.
+    const changes = diffEndpointUpdate(
+      embedder,
+      update({ batch_size: 64, extra: { implementation: "vllm" } }),
+      { implementation: "vllm" },
+    );
+
+    expect(changes.map((c) => c.field)).toEqual(["batch_size"]);
+    expect(hasMaterialChange(changes)).toBe(false);
+  });
+
+  it("still flags an actual vendor switch", () => {
+    const changes = diffEndpointUpdate(embedder, update({ extra: { implementation: "ollama" } }), {
+      implementation: "vllm",
+    });
+
+    expect(changes).toHaveLength(1);
+    expect(changes[0]).toMatchObject({
+      field: "extra.implementation",
+      from: "vllm",
+      to: "ollama",
+      material: true,
+    });
+  });
+
   it("flags a model change as material", () => {
     const changes = diffEndpointUpdate(embedder, update({ model_name: "bge-m3" }));
 

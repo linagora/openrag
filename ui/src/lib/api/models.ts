@@ -116,7 +116,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function isSecretField(key: string | undefined): boolean {
+/** Whether a key holds a secret, and so comes back redacted rather than as its
+ *  stored value — which is why a diff has to leave it alone. */
+export function isSecretField(key: string | undefined): boolean {
   if (!key) return false;
   const normalized = key.toLowerCase();
   return SECRET_FIELD_NAMES.has(normalized) || SECRET_FIELD_SUFFIXES.some((suffix) => normalized.endsWith(suffix));

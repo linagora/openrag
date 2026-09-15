@@ -1,4 +1,4 @@
-import type { ModelEndpointResponse, UpdateModelEndpointRequest } from "@/lib/api/models";
+import { isSecretField, type ModelEndpointResponse, type UpdateModelEndpointRequest } from "@/lib/api/models";
 
 /** One field an endpoint edit would change, as the confirmation renders it. */
 export type EndpointFieldChange = {
@@ -11,13 +11,23 @@ export type EndpointFieldChange = {
   material: boolean;
 };
 
-/** The two fields that decide which model actually serves an embedding request.
+/** The fields that decide which model actually serves an embedding request.
  *
  *  `name` is not one of them: it is a label, and #770 cascades a rename to every
  *  stored reference. `batch_size` and `timeout` are throughput knobs — they
  *  change how the vectors are fetched, never what they are.
  */
 const MATERIAL_FIELDS = new Set(["endpoint", "model_name"]);
+
+/** `extra` keys that change the vectors themselves.
+ *
+ *  `implementation` picks the client, and so the request an embedding is made
+ *  with. `max_model_len` becomes the embedder's `truncate_prompt_tokens`, so
+ *  lowering it silently shortens every chunk past the new limit — the same
+ *  model, the same endpoint, different vectors. The rest of `extra`
+ *  (`embed_concurrency`, `batch_size`) is throughput, like the columns above.
+ */
+const MATERIAL_EXTRA_KEYS = new Set(["implementation", "max_model_len"]);
 
 const LABELS: Record<string, string> = {
   name: "Name",
@@ -35,12 +45,17 @@ function show(value: unknown): string {
 
 /** Fields this edit would change, in a fixed order, most consequential first.
  *
- *  `extra` is deliberately not diffed: a stored API key comes back redacted, so
- *  comparing it against the form's value reports a change on every save.
+ *  Secret `extra` keys are skipped: a stored API key comes back redacted, so
+ *  comparing it against the form's value would report a change on every save.
+ *  Everything else in `extra` is diffed — some of it decides the vectors.
  */
 export function diffEndpointUpdate(
   editing: ModelEndpointResponse,
   update: UpdateModelEndpointRequest,
+  /** Values the form filled in for keys the stored endpoint left unset — its
+   *  own defaults, which it stamps into `extra` on save whether or not anyone
+   *  touched them. Without them an untouched form reports "not set → vllm". */
+  formDefaults: Record<string, unknown> = {},
 ): EndpointFieldChange[] {
   const before: Record<string, unknown> = {
     name: editing.name,
@@ -66,6 +81,34 @@ export function diffEndpointUpdate(
       from: show(from),
       to: show(to),
       material: isEmbedder && MATERIAL_FIELDS.has(field),
+    });
+  }
+  changes.push(...diffExtra({ ...formDefaults, ...(editing.extra ?? {}) }, update.extra, isEmbedder));
+  return changes;
+}
+
+/** Per-key changes in `extra`, secrets excluded.
+ *
+ *  One entry per key rather than one for the whole object: the reader has to
+ *  see *which* option moved to judge it, and only some of them are material.
+ */
+function diffExtra(
+  before: Record<string, unknown> | undefined,
+  after: Record<string, unknown> | undefined,
+  isEmbedder: boolean,
+): EndpointFieldChange[] {
+  if (after === undefined) return [];
+  const from = before ?? {};
+  const keys = [...new Set([...Object.keys(from), ...Object.keys(after)])].filter((k) => !isSecretField(k)).sort();
+  const changes: EndpointFieldChange[] = [];
+  for (const key of keys) {
+    if (show(from[key]) === show(after[key])) continue;
+    changes.push({
+      field: `extra.${key}`,
+      label: key,
+      from: show(from[key]),
+      to: show(after[key]),
+      material: isEmbedder && MATERIAL_EXTRA_KEYS.has(key),
     });
   }
   return changes;

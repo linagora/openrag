@@ -22,6 +22,11 @@ export function computeEmbedderDrift(
   indexed: IndexedEmbedderCount[] | undefined,
   endpoints: ModelEndpointResponse[] | undefined,
 ) {
+  // The dense field queries read today. Two endpoints can run the same model
+  // and still own different fields, so a file can record the right model and
+  // sit somewhere no search looks — the same invisibility a model change
+  // causes, and the swap's own skip test compares both.
+  const currentField = endpoints?.find((e) => e.name === resolveEmbedderName(configured, endpoints))?.vector_field;
   const rows = indexed ?? [];
   // The stored reference may be the "default" alias; compare on what it
   // resolves to, or a partition on the alias would look drifted from itself.
@@ -49,15 +54,25 @@ export function computeEmbedderDrift(
     const recorded = r.embedder !== null;
     const model = recorded ? rowModel(r) : null;
     const shown = label(r);
-    const key = !recorded ? "unrecorded" : (model ?? shown);
+    const name = !recorded ? "unrecorded" : (model ?? shown);
+    // Width and field are part of the identity, not details of it: the same
+    // model at 768 and at 1024 produced two vector spaces, and the same model
+    // in two fields is in one index queries read and one they do not. Merging
+    // either would report a single healthy group and drop the rest.
+    const key = `${name}\u0000${r.dimension ?? ""}\u0000${r.vector_field ?? ""}`;
     let group = byKey.get(key);
     if (group === undefined) {
+      // Unrecorded on either side is unknown, not wrong: files predating the
+      // field are shown as they always were.
+      const fieldDrifted =
+        r.vector_field != null && currentField != null && r.vector_field !== currentField;
       group = {
-        key,
+        key: name,
         // When either side's model is unknown, the labels are all that is left.
         drifted:
           recorded &&
-          (model !== null && currentModel !== null ? model !== currentModel : shown !== currentName),
+          (fieldDrifted ||
+            (model !== null && currentModel !== null ? model !== currentModel : shown !== currentName)),
         recorded,
         dimension: r.dimension,
         file_count: 0,
@@ -66,7 +81,19 @@ export function computeEmbedderDrift(
       groups.push(group);
     }
     group.file_count += r.file_count;
-    if (group.dimension === null) group.dimension = r.dimension;
+  }
+  // One model at several widths: whichever width the partition reads today,
+  // the others are not searchable with it. Nothing here knows which that is —
+  // the live dimension belongs to the current field — so they are all reported
+  // rather than one being picked as the healthy one.
+  const widthsByName = new Map<string, Set<number | null>>();
+  for (const group of groups) {
+    const widths = widthsByName.get(group.key) ?? new Set<number | null>();
+    widths.add(group.dimension);
+    widthsByName.set(group.key, widths);
+  }
+  for (const group of groups) {
+    if (group.recorded && (widthsByName.get(group.key)?.size ?? 0) > 1) group.drifted = true;
   }
   groups.sort((a, b) => b.file_count - a.file_count);
   const drifted = groups.filter((g) => g.drifted);

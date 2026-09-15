@@ -48,7 +48,7 @@ const str = (v: unknown) => (v == null ? "" : String(v));
 export default function DocumentListPage() {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
-  const { canWrite, superAdminModeResolved } = usePermissions();
+  const { canWrite, isAdmin, superAdminModeResolved } = usePermissions();
 
   // OpenRag has no flat/cross-partition file list — files live inside a
   // partition, so the view is partition-scoped (pick one, see its files). The
@@ -73,10 +73,14 @@ export default function DocumentListPage() {
   const partitionsQuery = useQuery({ queryKey: ["partitions"], queryFn: listPartitions });
   // Needed to compare like with like: a partition stores the `default` alias,
   // while a file records the endpoint that alias resolved to at index time.
+  // Admin-only registry, and this page renders for partition members too: a
+  // non-admin would collect 403s. Without it the column falls back to the model
+  // each file recorded, which is the name being resolved to anyway.
   const { data: embedderEndpoints } = useQuery({
     queryKey: ["model-endpoints", "embedder"],
     queryFn: () => listModelEndpoints("embedder"),
     staleTime: 60_000,
+    enabled: isAdmin,
   });
   const partitions = partitionsQuery.data?.partitions ?? [];
   // Prefer the sticky choice (URL ?partition= or the remembered one), but fall

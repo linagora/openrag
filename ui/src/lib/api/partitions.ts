@@ -238,6 +238,10 @@ export interface IndexedEmbedderCount {
   embedder: string | null;
   model_name: string | null;
   dimension: number | null;
+  /** Dense field these files' vectors are in (#762 F); null when unrecorded.
+   *  A search reads one field, so this is what decides whether they are found —
+   *  two endpoints on one model own different fields. */
+  vector_field?: string | null;
   file_count: number;
 }
 

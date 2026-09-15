@@ -476,6 +476,10 @@ function EndpointDialog({
   const [languageHint, setLanguageHint] = useState("");
   const [mossSpeakerAware, setMossSpeakerAware] = useState(false);
   const [vendor, setVendor] = useState("");
+  // What `vendor` was when the form opened — the baseline the save's stamped
+  // `implementation` is compared against. A ref, not state: it is read at
+  // submit time and must never re-render the form.
+  const initialVendorRef = useRef("");
   const [extraJson, setExtraJson] = useState("{}");
 
   // The backend trims `name` before validating it (and before persisting it),
@@ -582,6 +586,7 @@ function EndpointDialog({
         setLanguageHint(storedLanguageHint);
         setMossSpeakerAware(storedMossSpeakerAware);
         setVendor(implementation || DEFAULT_VENDOR_BY_TYPE[source.model_type]);
+        initialVendorRef.current = implementation || DEFAULT_VENDOR_BY_TYPE[source.model_type];
         setExtraJson(JSON.stringify(displayExtra, null, 2));
         setValidated(editing ? true : null);
         setValidationMsg(
@@ -920,8 +925,10 @@ function EndpointDialog({
         updateData.name = trimmedName;
       }
       // Confirm before writing, showing what actually changed. Nothing changed
-      // means nothing to confirm — a dialog there would only be noise.
-      const changes = diffEndpointUpdate(editing, updateData);
+      // means nothing to confirm — a dialog there would only be noise. The
+      // vendor the form opened with is the baseline for `implementation`: the
+      // save stamps it even when the stored endpoint never carried one.
+      const changes = diffEndpointUpdate(editing, updateData, { implementation: initialVendorRef.current });
       if (changes.length > 0) {
         setPendingUpdate({ data: updateData, changes });
         return;
@@ -1251,7 +1258,10 @@ function EndpointUpdateConfirmDialog({
 
   return (
     <AlertDialog open onOpenChange={(next) => (next ? undefined : onCancel())}>
-      <AlertDialogContent>
+      {/* The change list and the indexed-usage table both grow with the
+          deployment, so the dialog scrolls rather than pushing its own buttons
+          off a short viewport. */}
+      <AlertDialogContent className="max-h-[calc(100vh-4rem)] overflow-y-auto">
         <AlertDialogHeader>
           <AlertDialogTitle>
             {material ? "This changes the vector space" : "Confirm changes"}
