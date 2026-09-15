@@ -37,8 +37,25 @@ _MISSING_WORKER_REF_ERROR = "Indexer worker did not receive a registered task re
 # _active_indexation_config contextvar — a different contract that happened
 # to reuse the same version string on its own branch.
 # v7: merge of both v6 lineages — neither alone is compatible with this one.
-_INDEXER_ACTOR_PROTOCOL_VERSION = "v7"
+# v8 (develop): max_restarts on the dispatcher and the workers. Ray applies
+# actor options only when it creates the actor, and get_if_exists=True reuses a
+# detached actor left by the previous release — so without a new name the
+# restart policy would silently not apply to exactly the long-running
+# deployments that need it (#846).
+# v8 (this branch, independently): TaskStateManager now bounds its in-memory
+# retention and replaces any actor without that support during bootstrap. That
+# replacement kills the old actor id, which strands the dispatcher's and
+# workers' cached handles to it, so the indexer generation has to roll too — a
+# different contract that happened to reuse the same version string.
+# v9: merge of both v8 lineages — neither alone is compatible with this one.
+_INDEXER_ACTOR_PROTOCOL_VERSION = "v9"
 _INDEXER_POOL_DISPATCHER_ACTOR_NAME = f"IndexerPoolDispatcher-{_INDEXER_ACTOR_PROTOCOL_VERSION}"
+
+# Detached actors default to max_restarts=0, so one that dies — an OOM on a
+# large document, a node fault — stays dead and its pool slot is lost until the
+# next deploy. Marker and Docling already set 5 on both their pool and their
+# workers; the indexer tier had nothing (#846).
+_ACTOR_MAX_RESTARTS = 5
 
 
 def _explicit_indexation_selection(config: dict[str, Any] | None, key: str) -> str | None:
@@ -69,11 +86,9 @@ def _indexer_worker_actor_name(index: int) -> str:
 
 
 def _catalog_rdb_config(settings: Settings) -> Any:
-    if settings.rdb.database is not None:
-        return settings.rdb
-    return settings.rdb.model_copy(
-        update={"database": f"partitions_for_collection_{settings.vectordb.collection_name}"}
-    )
+    from services.storage.postgres_store import catalog_rdb_config
+
+    return catalog_rdb_config(settings)
 
 
 @ray.remote
@@ -203,6 +218,7 @@ class IndexerWorkerActor:
             task_state_manager=task_state_manager,
             document_repo=self._catalog_store.document_repo,
             topic_tag_repo=self._catalog_store.topic_tag_repo,
+            job_repo=self._catalog_store.job_repo,
             vector_store=self._vector_store,
             collection=cfg.vectordb.collection_name,
         )
@@ -598,6 +614,7 @@ class IndexerPool:
                 get_if_exists=True,
                 lifetime="detached",
                 max_concurrency=max_tasks_per_worker,
+                max_restarts=_ACTOR_MAX_RESTARTS,
             ).remote(namespace)
             for i in range(pool_size)
         ]
@@ -856,6 +873,7 @@ def build_indexer_pool(namespace: str = "openrag") -> Any:
         get_if_exists=True,
         lifetime="detached",
         max_concurrency=max(1, pool_size * max_tasks_per_worker),
+        max_restarts=_ACTOR_MAX_RESTARTS,
     ).remote(
         pool_size=pool_size,
         max_tasks_per_worker=max_tasks_per_worker,

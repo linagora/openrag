@@ -71,6 +71,25 @@ class PgDocumentRepository(DocumentRepository):
         )
         return {(r["partition_name"], r["file_id"]): r["indexed_at"] for r in rows}
 
+    async def list_indexed_documents(
+        self, partition: str, *, before: datetime, after: str | None = None, limit: int = 500
+    ) -> list[str]:
+        if not partition or not 1 <= limit <= 1000:
+            raise ValueError("A partition and a page size between 1 and 1000 are required")
+        rows = await self.pool.fetch(
+            """
+            SELECT file_id FROM files
+            WHERE partition_name = $1 AND indexed_at < $2
+              AND ($3::text IS NULL OR file_id > $3)
+            ORDER BY file_id LIMIT $4
+            """,
+            partition,
+            before,
+            after,
+            limit,
+        )
+        return [r["file_id"] for r in rows]
+
     async def create_document(self, doc: DocumentRecord) -> DocumentRecord:
         """Insert a document row keyed by (file_id, partition).
 
