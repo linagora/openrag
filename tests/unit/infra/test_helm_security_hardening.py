@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import yaml
@@ -20,6 +21,14 @@ def _template(name: str) -> str:
 
 def _all_templates() -> str:
     return "\n".join(path.read_text(encoding="utf-8") for path in TEMPLATES.glob("*.yaml"))
+
+
+def _template_list(name: str, variable: str) -> list[str]:
+    """Pull one ``{{- $variable := list "a" "b" }}`` out of a chart template."""
+    pattern = r"\$" + re.escape(variable) + r"\s*:=\s*list\b(.*?)\}\}"
+    match = re.search(pattern, _template(name), re.DOTALL)
+    assert match, f"${variable} not found in {name}"
+    return re.findall(r'"([^"]*)"', match.group(1))
 
 
 def test_helm_defaults_do_not_ship_known_placeholder_secrets() -> None:
@@ -50,13 +59,20 @@ def test_secret_template_fails_on_required_or_placeholder_secrets() -> None:
     assert "range $requiredKey := $requiredSecrets" in template
     assert "AUTH_TOKEN" in template
     assert "POSTGRES_PASSWORD" in template
-    assert "sk-xxxx" in template
-    assert "hf_xxxx" in template
-    assert "CHANGE_ME_STRONG_PASSWORD" in template
+
+    # The denylist itself is asserted against its Python counterpart in
+    # tests/unit/core/config/test_secrets_guard.py, which is the single source
+    # of truth for the values. Here we only check the entries this test has
+    # always pinned are still in it — matched case-insensitively, and against
+    # the parsed list rather than the file text so a mention in a comment
+    # cannot satisfy (or break) the assertion.
+    denylist = {value.casefold() for value in _template_list("secrets-env.yaml", "placeholderSecrets")}
+    assert {"sk-xxxx", "hf_xxxx", "change_me_strong_password"} <= denylist
+
     # "EMPTY" must NOT be a forbidden placeholder: it is the documented value
     # for EMBEDDER_API_KEY/TRANSCRIBER_API_KEY against local OpenAI-compatible
     # servers (see .env.example), so the chart must accept it.
-    assert "EMPTY" not in template
+    assert "empty" not in denylist
 
 
 def test_chart_workloads_apply_restricted_security_contexts() -> None:
