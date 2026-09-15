@@ -206,3 +206,199 @@ class TestDistributedSemaphoreRollingDeployCompatibility:
         # right after must succeed rather than hang.
         await asyncio.wait_for(sem.__aenter__(), timeout=2.0)
         await sem.__aexit__(None, None, None)
+
+
+class _StubActorMethod:
+    """Stands in for a Ray actor method handle (``handle.method.remote(...)``)."""
+
+    def __init__(self, fn):
+        self._fn = fn
+
+    def remote(self, *args, **kwargs):
+        return self._fn(*args, **kwargs)
+
+
+class _StubSemaphoreActor:
+    """In-process stand-in for ``DistributedSemaphoreActor``.
+
+    Records how many ``acquire`` calls are outstanding at once — the quantity
+    that occupies Ray actor concurrency slots and, past the actor's limit,
+    starves ``release`` (#965). A stub lets that invariant be asserted directly
+    instead of needing a thousand concurrent callers to observe it.
+    """
+
+    def __init__(self, permits: int):
+        self._permits = asyncio.Semaphore(permits)
+        self.incarnation = "stub-incarnation"
+        self.acquire_calls = 0
+        self.release_calls = 0
+        self.outstanding_acquires = 0
+        self.max_outstanding_acquires = 0
+        self.acquire = _StubActorMethod(self._acquire)
+        self.release = _StubActorMethod(self._release)
+
+    def grant(self, count: int = 1) -> None:
+        for _ in range(count):
+            self._permits.release()
+
+    async def _acquire(self) -> str:
+        self.acquire_calls += 1
+        self.outstanding_acquires += 1
+        self.max_outstanding_acquires = max(self.max_outstanding_acquires, self.outstanding_acquires)
+        try:
+            await self._permits.acquire()
+        finally:
+            self.outstanding_acquires -= 1
+        return self.incarnation
+
+    async def _release(self, incarnation: str | None = None) -> None:
+        self.release_calls += 1
+        self._permits.release()
+
+
+async def _free_permits(gate: asyncio.Semaphore) -> int:
+    """Count a gate's free permits without disturbing it.
+
+    Public-API only, so a double release shows up as a count *above* the
+    configured budget rather than being silently absorbed.
+    """
+    taken = 0
+    while True:
+        try:
+            await asyncio.wait_for(gate.acquire(), timeout=0.01)
+        except TimeoutError:
+            break
+        taken += 1
+    for _ in range(taken):
+        gate.release()
+    return taken
+
+
+class TestDistributedSemaphoreLocalAdmissionGate:
+    """Regression tests for issue #965: a burst of callers must not park more
+    outstanding ``acquire`` calls on the actor than the local budget allows.
+
+    ``DistributedSemaphoreActor`` is an asyncio Ray actor running at Ray's
+    default ``max_concurrency`` of 1000, and a blocked ``acquire`` holds one of
+    those slots for its whole wait. Once waiters fill every slot, a ``release``
+    submitted afterwards is never dispatched, no permit is returned, and the
+    semaphore stays wedged for the lifetime of the detached actor.
+
+    Only the acquire *call* is gated. A holder's acquire has already returned
+    and occupies no actor slot, so holders are not admission-controlled - and
+    gating them would create a local budget that an actor restart cannot reset.
+    """
+
+    @staticmethod
+    def _sem(budget: int, stub: _StubSemaphoreActor) -> DistributedSemaphore:
+        # Unique name per test so each gets its own gate even when pytest-asyncio
+        # reuses an event loop (gates are keyed by loop *and* name).
+        sem = DistributedSemaphore(
+            name=f"gate-{uuid.uuid4().hex}",
+            namespace="test",
+            max_concurrent_ops=budget,
+        )
+        sem._get_or_create_actor = lambda: stub
+        return sem
+
+    def _gate_of(self, sem: DistributedSemaphore) -> asyncio.Semaphore:
+        from services.inference.distributed_semaphore import _local_gate
+
+        return _local_gate(sem._name, sem._max_concurrent_ops)
+
+    async def test_outstanding_acquires_never_exceed_the_budget(self):
+        budget = 4
+        # Fewer permits than the budget so acquires genuinely block on the actor.
+        stub = _StubSemaphoreActor(permits=2)
+        sem = self._sem(budget, stub)
+
+        async def use():
+            async with sem:
+                await asyncio.sleep(0)
+
+        await asyncio.gather(*(use() for _ in range(40)))
+
+        assert stub.max_outstanding_acquires <= budget
+        assert stub.acquire_calls == 40
+        assert stub.release_calls == 40
+
+    async def test_waiting_on_the_gate_does_not_reach_the_actor(self):
+        stub = _StubSemaphoreActor(permits=0)  # the first acquire blocks on the actor
+        sem = self._sem(1, stub)
+
+        first = asyncio.ensure_future(sem.__aenter__())
+        await asyncio.sleep(0.05)
+        assert stub.acquire_calls == 1
+
+        second = asyncio.ensure_future(sem.__aenter__())
+        await asyncio.sleep(0.05)
+        assert stub.acquire_calls == 1, "a caller queued on the local gate must not call the actor"
+
+        # Granting a permit lets the first acquire return, which frees the gate
+        # and only then lets the second caller's call reach the actor.
+        stub.grant(1)
+        await asyncio.wait_for(first, timeout=1.0)
+        await asyncio.sleep(0.05)
+        assert stub.acquire_calls == 2
+
+        second.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await second
+
+    async def test_cancelled_during_remote_acquire_returns_the_gate_permit_exactly_once(self):
+        stub = _StubSemaphoreActor(permits=0)  # nothing will be granted
+        sem = self._sem(1, stub)
+
+        blocked = asyncio.ensure_future(sem.__aenter__())
+        await asyncio.sleep(0.05)
+        assert stub.acquire_calls == 1, "this caller did reach the actor before being cancelled"
+
+        blocked.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await blocked
+
+        # Exactly one: a missed release would starve the budget, a double
+        # release would widen it permanently.
+        assert await _free_permits(self._gate_of(sem)) == 1
+
+    async def test_nested_use_on_one_task_does_not_self_deadlock(self):
+        stub = _StubSemaphoreActor(permits=2)
+        # Budget of 1 while nesting two deep: safe precisely because the gate
+        # covers the acquire call, not the held section.
+        sem = self._sem(1, stub)
+
+        async with sem:
+            async with sem:
+                assert stub.acquire_calls == 2
+
+        assert stub.release_calls == 2
+        assert await _free_permits(self._gate_of(sem)) == 1
+
+    async def test_gate_is_released_when_the_remote_acquire_raises(self):
+        stub = _StubSemaphoreActor(permits=1)
+        sem = self._sem(1, stub)
+
+        async def boom():
+            raise RuntimeError("actor unreachable")
+
+        stub.acquire = _StubActorMethod(boom)
+        with pytest.raises(RuntimeError):
+            await sem.__aenter__()
+
+        # A failed acquire must not shrink this process's admission budget.
+        assert await _free_permits(self._gate_of(sem)) == 1
+
+    def test_gates_are_scoped_to_the_running_event_loop(self):
+        from services.inference.distributed_semaphore import _local_gate
+
+        seen = []
+
+        async def grab():
+            seen.append(_local_gate("loop-scoped-gate", 3))
+
+        asyncio.run(grab())
+        asyncio.run(grab())
+
+        # An asyncio.Semaphore parks its waiters on the loop that created them,
+        # so a gate must never be carried across loops.
+        assert seen[0] is not seen[1]
