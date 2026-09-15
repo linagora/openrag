@@ -454,3 +454,31 @@ def test_dict_to_chunk_drops_persisted_retrieval_scores():
     c = _dict_to_chunk(row)
     assert not {"vector_score", "rerank_score", "combined_score"} & set(c.metadata)
     assert c.metadata["author"] == "alice"
+
+
+# ---------------------------------------------------------------------------
+# Per-embedder dense field (#762 F)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_the_searcher_reads_its_own_embedders_field():
+    # One searcher is built per embedder, so its field is fixed for its life
+    # and every search it issues must carry it.
+    searcher, store, _, _ = _make_searcher()
+    searcher._vector_field = "vector_bge_m3"
+
+    await searcher.search("q", partition=["p1"], top_k=5)
+
+    assert store.search.await_args.kwargs["vector_field"] == "vector_bge_m3"
+
+
+@pytest.mark.asyncio
+async def test_a_searcher_without_a_field_passes_none_for_the_store_to_refuse():
+    # Choosing a field is the store's call, and it refuses None rather than
+    # fall back to another embedder's vectors.
+    searcher, store, _, _ = _make_searcher()
+
+    await searcher.search("q", partition=["p1"], top_k=5)
+
+    assert store.search.await_args.kwargs["vector_field"] is None

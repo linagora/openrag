@@ -37,6 +37,36 @@ REPLACE_OLD_CHUNK_COLLECTION_ROW_KEY = "_replace_old_chunk_collection"
 REPLACE_OLD_CHUNK_IDS_ROW_KEY = "_replace_old_chunk_ids"
 
 
+def embedder_provenance(embedder: Embedder, reference: Any, vector_field: str | None = None) -> dict[str, Any]:
+    """What actually produced this file's vectors, and where they are.
+
+    ``embedder`` is the endpoint reference the partition carried, kept as given
+    (the ``"default"`` alias included); the model/endpoint pair is what that
+    reference resolved to, and is the only thing that catches an endpoint
+    repointed at a different model without being renamed.
+
+    ``embedder_vector_field`` is the dense field the vectors were written to
+    (#762 F). The model alone does not say it: an endpoint repointed at another
+    model keeps its field, so a file can record the right model and still sit
+    in the wrong field. A re-embed skips a file only when both match.
+
+    Every field degrades to ``None`` rather than raising: describing a run that
+    already succeeded must not be able to fail it.
+    """
+    try:
+        dimension = embedder.dimension
+    except Exception:
+        # Raises until the first embed returns, so: no chunks, no dimension.
+        dimension = None
+    return {
+        "embedder": str(reference) if reference else "default",
+        "embedder_model_name": getattr(embedder, "model_name", None),
+        "embedder_endpoint": getattr(embedder, "endpoint", None),
+        "embedder_dimension": dimension,
+        "embedder_vector_field": vector_field,
+    }
+
+
 @dataclass(slots=True, frozen=True)
 class PipelineTimeouts:
     """Per-stage timeout configuration for an indexing pipeline row."""
@@ -99,6 +129,11 @@ class IndexingPipeline:
     # can derive a hard safety bound from the embedder this partition actually
     # uses rather than from the deployment default.
     embedder_window_resolver: Callable[[str], int | None] | None = None
+    # Resolves an embedder endpoint name to the dense field it owns (#762 F),
+    # so a partition's vectors are written where that partition's searches
+    # will look for them. None (or an unset resolver) reaches the store, which
+    # refuses the write rather than guess a field.
+    vector_field_resolver: Callable[[str], str | None] | None = None
     vlm_factory: Callable[[str], VLM] | None = None
     contextualizer_factory: Callable[[str], ChunkContextualizer] | None = None
     topic_tagger_factory: Callable[[str], TopicTagger] | None = None
@@ -242,6 +277,9 @@ class IndexingPipeline:
                     per_chunk_timeout=self.timeouts.embed_per_chunk,
                 ),
             )
+            vector_field = self.vector_field_resolver(embedder_name) if self.vector_field_resolver else None
+            # After the embed: the dimension is measured, not configured.
+            row["embedder_provenance"] = embedder_provenance(embedder, row.get("embedder_name"), vector_field)
             # Re-index (``replace=True``) is insert-before-delete: snapshot the
             # file's existing chunk ids *before* the store stage inserts the new
             # set, then delete exactly that old set after a successful insert.
@@ -273,6 +311,7 @@ class IndexingPipeline:
                     self.vector_store,
                     timeout=self.timeouts.store,
                     per_chunk_timeout=self.timeouts.store_per_chunk,
+                    vector_field=vector_field,
                 ),
             )
             # BUG (#657 follow-up): ``store_stage`` completes successfully even
@@ -546,6 +585,7 @@ def build_indexing_pipeline(
     parser_factory: Callable[[str], DocumentParser] | None = None,
     chunker_factory: Callable[..., ChunkingStrategy] | None = None,
     embedder_window_resolver: Callable[[str], int | None] | None = None,
+    vector_field_resolver: Callable[[str], str | None] | None = None,
     embedder_factory: Callable[[str], Embedder] | None = None,
     vlm_factory: Callable[[str], VLM] | None = None,
     contextualizer_factory: Callable[[str], ChunkContextualizer] | None = None,
@@ -568,6 +608,7 @@ def build_indexing_pipeline(
         parser_factory=parser_factory,
         chunker_factory=chunker_factory,
         embedder_window_resolver=embedder_window_resolver,
+        vector_field_resolver=vector_field_resolver,
         embedder_factory=embedder_factory,
         vlm_factory=vlm_factory,
         contextualizer_factory=contextualizer_factory,

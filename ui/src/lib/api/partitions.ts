@@ -1,4 +1,4 @@
-import { request } from "./client";
+import { ApiError, request } from "./client";
 
 // OpenRag partitions — mounted at `/partition`. Verified vs
 // api/schemas/admin/partition_schemas.py + routers/admin/partitions.py:
@@ -8,6 +8,9 @@ import { request } from "./client";
 //   POST   /partition/{p}                   create (name in path, NO body; caller becomes owner) → 201
 //   PATCH  /partition/{p}                   update config → PartitionDetailResponse
 //   DELETE /partition/{p}                   delete → 204
+//   POST   /partition/{p}/embedder-swap     start re-embedding with another embedder → 202 EmbedderSwap
+//   GET    /partition/{p}/embedder-swap     running swap, or how the last one ended (404: never swapped)
+//   DELETE /partition/{p}/embedder-swap     cancel the running swap
 //   GET    /partition/{p}/users             members → { members: [{ user_id, display_name, email, role, added_at }] }
 //   POST   /partition/{p}/users             add member   (multipart: user_id, role)
 //   PATCH  /partition/{p}/users/{user_id}   change role  (multipart: role)
@@ -36,7 +39,9 @@ export interface PartitionResponse {
   exists: boolean;
   description: string;
   embedder: string;
-  dimension: number;
+  /** Dense-vector dimension of the live collection; null when nothing is
+   *  indexed yet or the vector store is unreachable. */
+  dimension: number | null;
   collection_name: string | null;
   chat_history_depth: number;
   chat_llm: string | null;
@@ -61,9 +66,14 @@ export interface PartitionConfig {
   retrieval_preset: string;
   indexation_pipeline: Record<string, unknown>;
   retrieval_pipeline: Record<string, unknown>;
-  dimension: number;
+  /** Dense-vector dimension of the live collection; null when nothing is
+   *  indexed yet or the vector store is unreachable. */
+  dimension: number | null;
   created_at: string;
   document_count: number;
+  /** Which embedders this partition's files were actually built with, most
+   *  files first. Disagreement with `embedder` is the drift signal. */
+  indexed_embedders?: IndexedEmbedderCount[];
   chat_history_depth: number;
   chat_llm: string | null;
   // Final-answer prompt selections for this partition. Parsing, enrichment,
@@ -105,7 +115,7 @@ function _toRow(r: Record<string, unknown>): PartitionResponse {
     exists: true,
     description: "",
     embedder: "",
-    dimension: 0,
+    dimension: null,
     collection_name: null,
     chat_history_depth: 0,
     chat_llm: null,
@@ -180,13 +190,72 @@ export function deletePartition(name: string): Promise<void> {
   return request<void>(`${P}/${enc(name)}`, { method: "DELETE" });
 }
 
+// ── Embedder swap (#762 F4) ────────────────────────────────────────────────────
+
+export type EmbedderSwapStatus = "running" | "completed" | "failed" | "cancelled";
+
+/** A partition's move to another embedder: its files are re-embedded in place,
+ *  and searches switch to the new embedder only once every file is done. */
+export interface EmbedderSwap {
+  partition: string;
+  source_embedder: string;
+  target_embedder: string;
+  status: EmbedderSwapStatus;
+  files_total: number;
+  files_done: number;
+  error: string | null;
+  started_at: string;
+  updated_at: string;
+  finished_at: string | null;
+}
+
+/** The running swap, or how the last one ended; null when the partition never swapped. */
+export async function getEmbedderSwap(name: string): Promise<EmbedderSwap | null> {
+  try {
+    return await request<EmbedderSwap>(`${P}/${enc(name)}/embedder-swap`);
+  } catch (e) {
+    if (e instanceof ApiError && e.status === 404) return null;
+    throw e;
+  }
+}
+
+export function startEmbedderSwap(name: string, embedder: string): Promise<EmbedderSwap> {
+  return request<EmbedderSwap>(`${P}/${enc(name)}/embedder-swap`, {
+    method: "POST",
+    body: JSON.stringify({ embedder }),
+  });
+}
+
+export function cancelEmbedderSwap(name: string): Promise<EmbedderSwap> {
+  return request<EmbedderSwap>(`${P}/${enc(name)}/embedder-swap`, { method: "DELETE" });
+}
+
 // ── Files (read side; adopted by the documents slice) ─────────────────────────
+
+/** One row of a partition's per-file embedder breakdown. */
+export interface IndexedEmbedderCount {
+  /** null = indexed before provenance was recorded. */
+  embedder: string | null;
+  model_name: string | null;
+  dimension: number | null;
+  /** Dense field these files' vectors are in (#762 F); null when unrecorded.
+   *  A search reads one field, so this is what decides whether they are found —
+   *  two endpoints on one model own different fields. */
+  vector_field?: string | null;
+  file_count: number;
+}
 
 export interface PartitionFile {
   file_id: string;
   partition: string;
   link: string;
   filename?: string;
+  /** Endpoint reference this file was indexed through; null when unrecorded.
+   *  A renameable label — prefer `embedder_model_name` for display. */
+  embedder?: string | null;
+  /** Model that actually produced this file's vectors; null when unrecorded.
+   *  Survives renames, repoints and deletions of the endpoint. */
+  embedder_model_name?: string | null;
   [key: string]: unknown;
 }
 

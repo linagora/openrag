@@ -42,13 +42,21 @@ def _make_unvalidated_row(**kwargs):
 
 
 class _FakeEndpointRepo:
-    def __init__(self, rows: list | None = None):
+    def __init__(self, rows: list | None = None, usage: dict | None = None):
         from core.config.model_endpoints import ModelEndpointRow
 
         self._store: dict[tuple[str, str], ModelEndpointRow] = {}
         self.calls: list[tuple[str, tuple]] = []
+        self._usage = usage or {}
+        # Set to a message to make the delete refuse, the way the real repo
+        # does when a partition still resolves to the embedder.
+        self.conflict_on_delete: str | None = None
         for r in rows or []:
             self._store[(r.name, r.model_type)] = r
+
+    async def usage_counts(self) -> dict[tuple[str, str], int]:
+        self.calls.append(("usage_counts", ()))
+        return dict(self._usage)
 
     async def create(self, row):
         self._store[(row.name, row.model_type)] = row
@@ -90,6 +98,10 @@ class _FakeEndpointRepo:
     async def delete_and_promote_default(self, name: str, model_type: str) -> tuple[str, str | None]:
         names = sorted(k[0] for k in self._store if k[1] == model_type)
         self.calls.append(("delete_and_promote_default", (name, model_type)))
+        if self.conflict_on_delete is not None:
+            from core.utils.exceptions import ConflictError
+
+            raise ConflictError(self.conflict_on_delete)
         if name not in names:
             return ("not_found", None)
         if len(names) <= 1:
@@ -112,6 +124,7 @@ def _make_service(
     partition_service=None,
     preset_service=None,
     prompt_service=None,
+    vector_store=None,
 ):
     from core.config.root import Settings
     from services.orchestrators.model_endpoint_service import ModelEndpointService
@@ -122,6 +135,7 @@ def _make_service(
         partition_service=partition_service,
         preset_service=preset_service,
         prompt_service=prompt_service,
+        vector_store=vector_store,
     )
 
 
@@ -2353,3 +2367,115 @@ async def test_delete_model_endpoint_reloads_partitions_when_no_preset_moved():
 
     assert preset_service.refresh_calls == 1
     assert partition_service.load_partitions_calls == 1
+
+
+# ── used_by_partitions / delete conflict (#762 B) ────────────────────
+
+
+@pytest.mark.asyncio
+async def test_list_model_endpoints_annotates_used_by_partitions():
+    repo = _FakeEndpointRepo(
+        rows=[
+            _make_row(name="jina", model_type="embedder", is_default=True),
+            _make_row(name="e5", model_type="embedder", is_default=False),
+        ],
+        usage={("jina", "embedder"): 4},
+    )
+    svc = _make_service(repo)
+
+    rows = await svc.list_model_endpoints(model_type="embedder")
+
+    by_name = {r["name"]: r["used_by_partitions"] for r in rows}
+    assert by_name == {"jina": 4, "e5": 0}
+    # One aggregate lookup for the whole list, not one per endpoint.
+    assert sum(1 for c, _ in repo.calls if c == "usage_counts") == 1
+
+
+@pytest.mark.asyncio
+async def test_delete_model_endpoint_propagates_conflict_without_touching_caches():
+    """A refused delete changed nothing in the DB, so reloading the registry or
+    evicting clients here would be churn — and would briefly advertise a state
+    that never happened."""
+    from core.utils.exceptions import ConflictError
+
+    repo = _FakeEndpointRepo(
+        rows=[
+            _make_row(name="jina", model_type="embedder", is_default=True),
+            _make_row(name="e5", model_type="embedder", is_default=False),
+        ]
+    )
+    repo.conflict_on_delete = "Embedder 'e5' is still in use: 3 partition(s) name it."
+    partition_service = _FakePartitionServiceForReload()
+    svc = _make_service(repo, partition_service=partition_service)
+
+    with pytest.raises(ConflictError) as exc:
+        await svc.delete_model_endpoint("e5", "embedder")
+
+    assert exc.value.status_code == 409
+    assert partition_service.load_partitions_calls == 0
+
+
+# ── dropping a deleted embedder's vector field (#762 F) ──────────────
+
+
+def _embedders_with_fields():
+    return [
+        _make_row(name="jina", is_default=True, vector_field="vector_jina"),
+        _make_row(name="e5", is_default=False, vector_field="vector_e5"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_deleting_an_embedder_drops_its_vector_field(mock_vector_store):
+    mock_vector_store.vector_fields = {"vector_jina": 1024, "vector_e5": 768}
+    svc = _make_service(_FakeEndpointRepo(rows=_embedders_with_fields()), vector_store=mock_vector_store)
+
+    await svc.delete_model_endpoint("e5", "embedder")
+
+    assert mock_vector_store.vector_fields == {"vector_jina": 1024}
+
+
+@pytest.mark.asyncio
+async def test_a_refused_embedder_delete_keeps_its_vector_field(mock_vector_store):
+    from core.utils.exceptions import ConflictError, NotFoundError, ValidationError
+
+    mock_vector_store.vector_fields = {"vector_jina": 1024, "vector_e5": 768}
+    repo = _FakeEndpointRepo(rows=_embedders_with_fields())
+    svc = _make_service(repo, vector_store=mock_vector_store)
+
+    with pytest.raises(NotFoundError):
+        await svc.delete_model_endpoint("ghost", "embedder")
+    repo.conflict_on_delete = "Embedder 'e5' is still in use: 3 partition(s) name it."
+    with pytest.raises(ConflictError):
+        await svc.delete_model_endpoint("e5", "embedder")
+    repo.conflict_on_delete = None
+    await svc.delete_model_endpoint("e5", "embedder")
+    with pytest.raises(ValidationError, match="last"):
+        await svc.delete_model_endpoint("jina", "embedder")
+
+    assert mock_vector_store.vector_fields == {"vector_jina": 1024}
+
+
+@pytest.mark.asyncio
+async def test_a_failed_field_drop_does_not_fail_the_committed_delete():
+    store = SimpleNamespace(drop_vector_field=AsyncMock(side_effect=RuntimeError("milvus down")))
+    repo = _FakeEndpointRepo(rows=_embedders_with_fields())
+    partition_service = _FakePartitionServiceForReload()
+    svc = _make_service(repo, partition_service=partition_service, vector_store=store)
+
+    await svc.delete_model_endpoint("e5", "embedder")
+
+    store.drop_vector_field.assert_awaited_once_with("vector_e5")
+    assert ("e5", "embedder") not in repo._store
+    assert partition_service.load_partitions_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_deleting_another_model_type_never_touches_the_vector_store():
+    store = SimpleNamespace(drop_vector_field=AsyncMock())
+    repo = _FakeEndpointRepo(rows=[_make_row(name="a", model_type="llm"), _make_row(name="b", model_type="llm")])
+    svc = _make_service(repo, vector_store=store)
+
+    await svc.delete_model_endpoint("b", "llm")
+
+    store.drop_vector_field.assert_not_awaited()

@@ -18,8 +18,9 @@ from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 
+from core.models.embedder_swap import EmbedderSwapStatus
 from core.ports.partition_repo import PartitionRepository
-from core.utils.exceptions import ValidationError
+from core.utils.exceptions import NotFoundError, ValidationError
 from core.utils.logging import get_logger
 from services.persistence.file_count import decrement_file_counts
 
@@ -36,15 +37,25 @@ _PRESET_COLUMN_TYPES = {
     "retrieval_preset": "retrieval",
 }
 # Partition columns that reference a model_endpoints row, mapped to the
-# model_type they point at. Only `chat_llm` is assignment-validated today
-# (PartitionService._validate_chat_llm_ref checks the in-memory catalog);
-# `embedder` carries no such check, so it is deliberately not listed here.
-# Assigning chat_llm must be guarded against a concurrent rename the same way
-# a preset assignment is guarded against a concurrent preset delete — see
-# update_partition and PgModelEndpointRepository.rename.
+# model_type they point at. Both are assignment-validated in
+# PartitionService (_validate_chat_llm_ref / _validate_embedder_ref check the
+# in-memory catalog) and re-checked here against the DB inside the write's
+# transaction. Assigning either must be guarded against a concurrent rename the
+# same way a preset assignment is guarded against a concurrent preset delete —
+# see update_partition and PgModelEndpointRepository.rename.
 _MODEL_ENDPOINT_COLUMN_TYPES = {
     "chat_llm": "llm",
+    "embedder": "embedder",
 }
+# `default` is a virtual name: ModelEndpointService.load_all files the
+# is_default=True row under it so a partition can reference "the default
+# embedder" without naming it. No model_endpoints row is called that, so the
+# existence check has to resolve the alias rather than match on name alone.
+_DEFAULT_ENDPOINT_ALIAS = "default"
+_ENDPOINT_EXISTS_SQL = (
+    "SELECT 1 FROM model_endpoints "
+    "WHERE model_type = $2 AND (name = $1 OR ($1 = '" + _DEFAULT_ENDPOINT_ALIAS + "' AND is_default))"
+)
 _PARTITION_UPDATE_COLUMNS = frozenset(
     {
         "description",
@@ -59,6 +70,8 @@ _PARTITION_UPDATE_COLUMNS = frozenset(
     }
 )
 _PARTITION_OPERATION_LOCK_NAMESPACE = 20260720
+_EMBEDDER_SWAP_RUNNER_LOCK_NAMESPACE = 20260914
+_EMBEDDER_SWAP_UPDATE_COLUMNS = frozenset({"status", "files_total", "files_done", "error", "finished_at"})
 
 logger = get_logger()
 
@@ -133,6 +146,27 @@ class PgPartitionRepository(PartitionRepository):
                     _PARTITION_OPERATION_LOCK_NAMESPACE,
                     name,
                 )
+
+    @asynccontextmanager
+    async def embedder_swap_runner_lock(self, partition: str) -> AsyncIterator[bool]:
+        """Session-level advisory lock, so a runner that dies releases it with its connection."""
+        async with self.pool.acquire() as conn:
+            acquired = bool(
+                await conn.fetchval(
+                    "SELECT pg_try_advisory_lock($1::integer, hashtext($2)::integer)",
+                    _EMBEDDER_SWAP_RUNNER_LOCK_NAMESPACE,
+                    partition,
+                )
+            )
+            try:
+                yield acquired
+            finally:
+                if acquired:
+                    await conn.execute(
+                        "SELECT pg_advisory_unlock($1::integer, hashtext($2)::integer)",
+                        _EMBEDDER_SWAP_RUNNER_LOCK_NAMESPACE,
+                        partition,
+                    )
 
     # ── PartitionRepository port methods ─────────────────────────────
 
@@ -302,6 +336,109 @@ class PgPartitionRepository(PartitionRepository):
         )
         return [self._row_to_full_dict(r) for r in rows]
 
+    async def start_embedder_swap(
+        self, partition: str, *, source_embedder: str, target_embedder: str, files_total: int
+    ) -> dict | None:
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                # ROW EXCLUSIVE conflicts with the SHARE lock an endpoint delete
+                # or rename takes on ``partitions`` first (see
+                # PgModelEndpointRepository), and is taken in the same order:
+                # partitions, then model_endpoints. Whichever commits first is
+                # what the other sees.
+                await conn.execute("LOCK TABLE partitions IN ROW EXCLUSIVE MODE")
+                exists = await conn.fetchval(
+                    "SELECT 1 FROM model_endpoints WHERE name = $1 AND model_type = 'embedder'",
+                    target_embedder,
+                )
+                if not exists:
+                    raise NotFoundError(
+                        f"Embedder endpoint '{target_embedder}' not found.",
+                        code="MODEL_ENDPOINT_NOT_FOUND",
+                    )
+                row = await conn.fetchrow(
+                    """
+                    INSERT INTO partition_embedder_swaps AS s
+                        (partition, source_embedder, target_embedder, status, files_total, files_done,
+                         error, started_at, updated_at, finished_at)
+                    VALUES ($1, $2, $3, $4, $5, 0, NULL, now(), now(), NULL)
+                    ON CONFLICT (partition) DO UPDATE SET
+                        source_embedder = EXCLUDED.source_embedder,
+                        target_embedder = EXCLUDED.target_embedder,
+                        status = EXCLUDED.status,
+                        files_total = EXCLUDED.files_total,
+                        files_done = 0,
+                        error = NULL,
+                        started_at = now(),
+                        updated_at = now(),
+                        finished_at = NULL
+                    WHERE s.status <> $4
+                    RETURNING *
+                    """,
+                    partition,
+                    source_embedder,
+                    target_embedder,
+                    EmbedderSwapStatus.RUNNING.value,
+                    files_total,
+                )
+        return dict(row) if row is not None else None
+
+    async def get_embedder_swap(self, partition: str) -> dict | None:
+        row = await self.pool.fetchrow("SELECT * FROM partition_embedder_swaps WHERE partition = $1", partition)
+        return dict(row) if row is not None else None
+
+    async def list_embedder_swaps(self, status: str | None = None) -> list[dict]:
+        if status is None:
+            rows = await self.pool.fetch("SELECT * FROM partition_embedder_swaps ORDER BY started_at")
+        else:
+            rows = await self.pool.fetch(
+                "SELECT * FROM partition_embedder_swaps WHERE status = $1 ORDER BY started_at",
+                status,
+            )
+        return [dict(r) for r in rows]
+
+    async def update_embedder_swap(self, partition: str, **fields: object) -> dict | None:
+        updates = {k: v for k, v in fields.items() if k in _EMBEDDER_SWAP_UPDATE_COLUMNS}
+        sets = [f"{column} = ${i}" for i, column in enumerate(updates, start=3)]
+        row = await self.pool.fetchrow(
+            f"""
+            UPDATE partition_embedder_swaps
+            SET {", ".join([*sets, "updated_at = now()"])}
+            WHERE partition = $1 AND status = $2
+            RETURNING *
+            """,
+            partition,
+            EmbedderSwapStatus.RUNNING.value,
+            *updates.values(),
+        )
+        return dict(row) if row is not None else None
+
+    async def complete_embedder_swap(self, partition: str) -> dict | None:
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                # Same lock order as start_embedder_swap and the endpoint
+                # delete/rename guards: partitions first.
+                await conn.execute("LOCK TABLE partitions IN ROW EXCLUSIVE MODE")
+                swap = await conn.fetchrow(
+                    """
+                    UPDATE partition_embedder_swaps
+                    SET status = $2, finished_at = now(), updated_at = now()
+                    WHERE partition = $1 AND status = $3
+                    RETURNING *
+                    """,
+                    partition,
+                    EmbedderSwapStatus.COMPLETED.value,
+                    EmbedderSwapStatus.RUNNING.value,
+                )
+                if swap is None:
+                    return None
+                await conn.execute(
+                    "UPDATE partitions SET embedder = $2, updated_at = now() WHERE partition = $1",
+                    partition,
+                    swap["target_embedder"],
+                )
+        return dict(swap)
+
     async def update_partition(self, name: str, **fields: object) -> dict | None:
         """Update a partition's config columns.
 
@@ -326,9 +463,10 @@ class PgPartitionRepository(PartitionRepository):
           from, which is what a validate-in-memory-then-blind-UPDATE sequence
           could otherwise do.
 
-        ``embedder`` carries no such check — it has no assignment-time
-        validation at all today (see ``_MODEL_ENDPOINT_COLUMN_TYPES``), so
-        there is nothing here for a concurrent rename to race against.
+        ``embedder`` takes the same guard as ``chat_llm``, and needs it more:
+        a ``chat_llm`` that goes stale falls back to the default LLM at request
+        time, whereas an ``embedder`` that names nothing is a hard failure on
+        every upload and every query in that partition.
         """
         updates = _partition_updates(fields)
         if updates:
@@ -383,7 +521,7 @@ class PgPartitionRepository(PartitionRepository):
                     )
             for col, model_type in endpoint_refs.items():
                 exists = await conn.fetchval(
-                    "SELECT 1 FROM model_endpoints WHERE name = $1 AND model_type = $2",
+                    _ENDPOINT_EXISTS_SQL,
                     updates[col],
                     model_type,
                 )
@@ -434,6 +572,11 @@ class PgPartitionRepository(PartitionRepository):
             "embedder": row["embedder"],
             "indexation_preset": row["indexation_preset"],
             "retrieval_preset": row["retrieval_preset"],
+            # Never written by any code path — it sits at its server_default of
+            # 1024 for the life of the row. Kept as the hook a per-partition
+            # collection topology would need, but the API reports the live
+            # collection's dimension instead (see
+            # PartitionService._live_vector_dimension, #762 G).
             "dimension": row["dimension"],
             "collection_name": row["collection_name"],
             "chat_history_depth": row["chat_history_depth"],

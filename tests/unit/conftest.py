@@ -53,8 +53,20 @@ class MockVectorStore(VectorStore):
     def __init__(self) -> None:
         self.collections: dict[str, dict[str, Any]] = {}
         self.search_results: list[dict[str, Any]] = []
+        # What the "live collection" reports as its dense-vector dimension.
+        # None models "nothing indexed yet", which the API renders as null
+        # rather than inventing a number (#762 G).
+        self.dimension: int | None = 1024
+        # Per-embedder dense fields ensured on this store (#762 F).
+        self.vector_fields: dict[str, int] = {}
+        # Which dense field each search was aimed at, in call order.
+        self.searched_vector_fields: list[str | None] = []
+        # Partial writes per field: {field: {chunk_id: vector or None}}.
+        self.written_vectors: dict[str, dict[str, list[float] | None]] = {}
 
-    async def upsert(self, chunks: list[Any], collection: str = "default", *, indexed_at=None) -> int:
+    async def upsert(
+        self, chunks: list[Any], collection: str = "default", *, indexed_at=None, vector_field=None
+    ) -> int:
         store = self.collections.setdefault(collection, {})
         for chunk in chunks:
             store[getattr(chunk, "id", id(chunk))] = chunk
@@ -68,7 +80,9 @@ class MockVectorStore(VectorStore):
         collection: str = "default",
         filters: dict[str, Any] | None = None,
         similarity_threshold: float | None = None,
+        vector_field: str | None = None,
     ) -> list[dict[str, Any]]:
+        self.searched_vector_fields.append(vector_field)
         return self.search_results[:top_k]
 
     async def delete(self, ids: list[str], collection: str = "default") -> int:
@@ -91,11 +105,26 @@ class MockVectorStore(VectorStore):
     async def ensure_collection(self, name: str, dimension: int, **kwargs: Any) -> None:
         self.collections.setdefault(name, {})
 
+    async def ensure_vector_field(self, field: str, dimension: int) -> bool:
+        created = field not in self.vector_fields
+        self.vector_fields[field] = dimension
+        return created
+
+    async def drop_vector_field(self, field: str) -> bool:
+        return self.vector_fields.pop(field, None) is not None
+
+    async def write_vectors(self, field: str, vectors: dict[str, list[float] | None]) -> int:
+        self.written_vectors.setdefault(field, {}).update(vectors)
+        return len(vectors)
+
     async def drop_collection(self, name: str) -> None:
         self.collections.pop(name, None)
 
     async def collection_exists(self, name: str) -> bool:
         return name in self.collections
+
+    async def vector_dimension(self) -> int | None:
+        return self.dimension if self.collections else None
 
     async def query_ids_by_filter(self, collection: str, filters: dict[str, Any]) -> list[str]:
         return list(self.collections.get(collection, {}).keys())

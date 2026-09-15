@@ -223,6 +223,25 @@ class UpdateModelEndpointRequest(BaseModel):
         return self
 
 
+class IndexedPartitionUsage(BaseModel):
+    """One partition's already-indexed file count for an endpoint."""
+
+    partition: str
+    file_count: int
+
+
+class IndexedFileUsageResponse(BaseModel):
+    """What an in-place edit of an embedder endpoint would strand (#762 C).
+
+    Sized per partition so a confirmation can name real numbers. An empty
+    ``partitions`` means nothing is indexed against this endpoint yet, and the
+    edit carries no retrieval risk at all.
+    """
+
+    partitions: list[IndexedPartitionUsage] = []
+    total_files: int = 0
+
+
 class ModelEndpointResponse(BaseModel):
     """Response body for a registered model endpoint."""
 
@@ -235,6 +254,16 @@ class ModelEndpointResponse(BaseModel):
     extra: dict[str, Any]
     has_api_key: bool = False
     is_default: bool
+    # Dense vector field this embedder owns (#762 F); null for non-embedders,
+    # which own none. ck_embedder_has_vector_field makes it mandatory for every
+    # embedder. Read-only: allocated server-side at creation and pinned for the
+    # endpoint's life.
+    vector_field: str | None = None
+    # Partitions whose resolved reference is this endpoint — those naming it
+    # plus, for the default endpoint, those riding the `default` alias. Zero
+    # for types with no partition column (reranker/vlm/stt), which are
+    # referenced through presets instead. Only the list view populates it.
+    used_by_partitions: int = 0
     created_at: datetime
     updated_at: datetime
 

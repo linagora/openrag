@@ -10,9 +10,11 @@ from __future__ import annotations
 from collections.abc import Callable
 
 import asyncpg
-from core.config.model_endpoints import ModelEndpointRow
+from core.config.model_endpoints import DEFAULT_ENDPOINT_ALIAS, ModelEndpointRow
+from core.models.embedder_swap import EmbedderSwapStatus
 from core.ports.model_endpoint_repo import ModelEndpointRepository
-from core.utils.exceptions import NotFoundError, ValidationError
+from core.utils.exceptions import ConflictError, NotFoundError, ValidationError
+from core.vector_stores.vector_field import allocate_vector_field_name
 
 # 'is_default' is deliberately excluded: a bare ``UPDATE ... SET is_default = true``
 # cannot clear the previous default in the same statement, so it would leave two
@@ -22,7 +24,14 @@ from core.utils.exceptions import NotFoundError, ValidationError
 # on a non-default endpoint yielded two defaults for the type.) Promotion must go
 # through set_default / delete_and_promote_default, which clear-then-set inside one
 # transaction; ModelEndpointService.update_model_endpoint routes is_default there.
+# ``vector_field`` is deliberately absent: an endpoint's dense field is
+# allocated once and pinned for life, so that renaming or re-pointing an
+# endpoint can never move its vectors to a different field (#762 F).
 _ALLOWED_UPDATE_FIELDS = frozenset({"endpoint", "model_name", "batch_size", "timeout", "extra"})
+
+# Name of the partial unique index in schema.py, used to tell a vector-field
+# collision apart from a duplicate (name, model_type) on insert.
+_VECTOR_FIELD_UNIQUE_INDEX = "uq_model_endpoint_vector_field"
 
 # Endpoint names are referenced by value elsewhere, and nothing updates those
 # references when an endpoint is renamed (#770) — so ``rename()`` cascades to
@@ -38,6 +47,64 @@ _INDEXATION_PRESET_KEYS_BY_TYPE = {
     "vlm": ("vlm",),
     "stt": ("stt",),
 }
+
+# A delete has to do something about the partition columns above, and the right
+# something differs by column — the asymmetry is the whole point (#762).
+#
+# BLOCK: `embedder` names the model a partition's vectors were built with.
+# Clearing it (the ``_clear_preset_references`` shape) would silently repoint an
+# indexed partition at a different embedding model, which is exactly the
+# corruption this guards against — there is no safe fallback, so the delete is
+# refused and the operator reassigns first.
+_BLOCKING_PARTITION_COLUMN_BY_TYPE = {"embedder": "embedder"}
+# CLEAR: `chat_llm` is resolved per request and falls back to the default LLM
+# when unset, so clearing it restores exactly the behaviour a dangling name
+# would have limped along with anyway — minus the dead name in the UI.
+_CLEARABLE_PARTITION_COLUMN_BY_TYPE = {"llm": "chat_llm"}
+
+# Partitions whose *resolved* embedder is this endpoint: the ones naming it
+# outright, plus — when it is the row being deleted and that row is the default
+# — the ones riding the `default` alias, which promotion would silently move to
+# another model. Split so the error can say which is which.
+_EMBEDDER_USAGE_SQL = """
+    SELECT
+        COUNT(*) FILTER (WHERE embedder = $1)::int AS direct,
+        COUNT(*) FILTER (WHERE $2::boolean AND embedder = $3)::int AS via_default
+    FROM partitions
+    """
+# Same resolution, for every endpoint at once (powers ``used_by_partitions`` on
+# the list view). Types with no partition column — reranker, vlm, stt — are
+# referenced through presets rather than partitions and correctly count 0.
+#
+# ``chat_llm IS NULL`` counts for the default LLM: the column is optional and
+# QueryService._resolve_llm falls through to the catalog default for a partition
+# that sets none, so those partitions really are served by that endpoint. The
+# embedder column has no such case — it is NOT NULL, defaulting to the alias.
+_PARTITION_USAGE_COUNTS_SQL = """
+    SELECT e.name, e.model_type, COUNT(p.partition)::int AS cnt
+    FROM model_endpoints e
+    LEFT JOIN partitions p ON (
+        (e.model_type = 'embedder' AND (p.embedder = e.name OR (e.is_default AND p.embedder = $1)))
+        OR (
+            e.model_type = 'llm'
+            AND (p.chat_llm = e.name OR (e.is_default AND (p.chat_llm = $1 OR p.chat_llm IS NULL)))
+        )
+    )
+    GROUP BY e.name, e.model_type
+    """
+
+# Per-partition indexed-file counts for one endpoint. `usage_counts` above
+# answers "how many partitions point here"; this answers "how much already-built
+# data rides on it", which is what sizes an in-place repoint.
+_EMBEDDER_INDEXED_USAGE_SQL = """
+    SELECT p.partition AS partition, COUNT(f.file_id)::int AS file_count
+    FROM model_endpoints e
+    JOIN partitions p ON (p.embedder = e.name OR (e.is_default AND p.embedder = $3))
+    JOIN files f ON f.partition_name = p.partition
+    WHERE e.name = $1 AND e.model_type = $2
+    GROUP BY p.partition
+    ORDER BY file_count DESC, p.partition
+    """
 
 
 class PgModelEndpointRepository(ModelEndpointRepository):
@@ -61,6 +128,7 @@ class PgModelEndpointRepository(ModelEndpointRepository):
             timeout=row["timeout"],
             extra=row["extra"] or {},
             is_default=row["is_default"],
+            vector_field=row["vector_field"],
             created_at=row["created_at"],
             updated_at=row["updated_at"],
         )
@@ -79,11 +147,13 @@ class PgModelEndpointRepository(ModelEndpointRepository):
                             "UPDATE model_endpoints SET is_default = false, updated_at = now() WHERE model_type = $1",
                             row.model_type,
                         )
+                    vector_field = await self._allocate_vector_field(conn, row)
                     rec = await conn.fetchrow(
                         """
                         INSERT INTO model_endpoints
-                            (name, model_type, endpoint, model_name, batch_size, timeout, extra, is_default)
-                        VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8)
+                            (name, model_type, endpoint, model_name, batch_size, timeout, extra,
+                             is_default, vector_field)
+                        VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9)
                         RETURNING *
                         """,
                         row.name,
@@ -94,8 +164,19 @@ class PgModelEndpointRepository(ModelEndpointRepository):
                         row.timeout,
                         row.extra,
                         row.is_default,
+                        vector_field,
                     )
         except asyncpg.UniqueViolationError as exc:
+            if exc.constraint_name == _VECTOR_FIELD_UNIQUE_INDEX:
+                # Two concurrent creates read the same set of taken names and
+                # allocated the same field. Rare, retryable, and emphatically
+                # not "this endpoint already exists" — say which it is.
+                raise ValidationError(
+                    f"Could not allocate a dense vector field for '{row.name}': "
+                    "another endpoint claimed the same name concurrently. Retry.",
+                    status_code=409,
+                    code="VECTOR_FIELD_CONFLICT",
+                ) from exc
             # The service's preflight check cannot make a concurrent create
             # atomic. Surface the same typed 409 to both an admin race and a
             # startup-seeding race instead of leaking a database exception.
@@ -105,6 +186,26 @@ class PgModelEndpointRepository(ModelEndpointRepository):
                 code="ENDPOINT_EXISTS",
             ) from exc
         return self._to_model(rec)
+
+    @staticmethod
+    async def _allocate_vector_field(conn: asyncpg.Connection, row: ModelEndpointRow) -> str | None:
+        """Pick the dense vector field a new endpoint will own (#762 F).
+
+        Only embedders get one — nothing else writes vectors. The name is
+        allocated here, inside the insert's own transaction, rather than in the
+        service, so the set of already-taken names is read under the same
+        snapshot that the insert commits in; a create that races past it still
+        hits ``uq_model_endpoint_vector_field`` and is reported as the conflict
+        it is rather than as a duplicate endpoint.
+
+        Any ``vector_field`` on the incoming row is ignored: the column is
+        server-owned, so a client cannot steer an endpoint onto another
+        embedder's vectors by posting a name of its own.
+        """
+        if row.model_type != "embedder":
+            return None
+        taken = await conn.fetch("SELECT vector_field FROM model_endpoints WHERE vector_field IS NOT NULL")
+        return allocate_vector_field_name(row.name, {rec["vector_field"] for rec in taken})
 
     async def get(self, name: str, model_type: str) -> ModelEndpointRow | None:
         rec = await self.pool.fetchrow(
@@ -202,6 +303,17 @@ class PgModelEndpointRepository(ModelEndpointRepository):
                         name,
                         new_name,
                     )
+                if model_type == "embedder":
+                    # A running swap completes by writing its target into
+                    # partitions.embedder, so it must name the endpoint as it is
+                    # called by then (#762 F4). Finished ones are history, and
+                    # follow along so they keep resolving too.
+                    for column in ("source_embedder", "target_embedder"):
+                        await conn.execute(
+                            f"UPDATE partition_embedder_swaps SET {column} = $2 WHERE {column} = $1",
+                            name,
+                            new_name,
+                        )
 
                 for preset_type, keys in (
                     ("retrieval", _RETRIEVAL_PRESET_KEYS_BY_TYPE.get(model_type, ())),
@@ -303,6 +415,73 @@ class PgModelEndpointRepository(ModelEndpointRepository):
                     name,
                 )
 
+    async def _settle_partition_references(
+        self,
+        conn: asyncpg.Connection,
+        name: str,
+        model_type: str,
+        *,
+        was_default: bool,
+    ) -> None:
+        """Refuse or clear the ``partitions`` references to a doomed endpoint.
+
+        Runs inside ``delete_and_promote_default``'s transaction, after it has
+        locked ``partitions``, so the count it refuses on cannot be raced by a
+        concurrent assign (which needs a conflicting lock on the same table).
+        """
+        if model_type in _BLOCKING_PARTITION_COLUMN_BY_TYPE:
+            row = await conn.fetchrow(_EMBEDDER_USAGE_SQL, name, was_default, DEFAULT_ENDPOINT_ALIAS)
+            direct, via_default = row["direct"], row["via_default"]
+            if direct or via_default:
+                raise ConflictError(_embedder_in_use_message(name, direct, via_default))
+            # Not referenced by a partition yet, but a running swap is filling
+            # its field: deleting it would drop that field under the swap
+            # (#762 F4). A swap records itself while holding a lock that
+            # conflicts with the SHARE lock taken on partitions above.
+            swapping = await conn.fetchval(
+                "SELECT COUNT(*)::int FROM partition_embedder_swaps WHERE target_embedder = $1 AND status = $2",
+                name,
+                EmbedderSwapStatus.RUNNING.value,
+            )
+            if swapping:
+                raise ConflictError(
+                    f"Embedder '{name}' is the target of {swapping} running embedder swap(s). "
+                    "Wait for them to finish, or cancel them, before deleting it.",
+                    code="EMBEDDER_SWAP_IN_PROGRESS",
+                )
+            return
+
+        column = _CLEARABLE_PARTITION_COLUMN_BY_TYPE.get(model_type)
+        if column is not None:
+            # Only the literal name: a partition on the `default` alias is
+            # asking for whatever is default, which promotion keeps true.
+            await conn.execute(
+                f"UPDATE partitions SET {column} = NULL, updated_at = now() WHERE {column} = $1",
+                name,
+            )
+
+    async def usage_counts(self) -> dict[tuple[str, str], int]:
+        """Return ``{(name, model_type): partition_count}`` in one aggregate query.
+
+        Lets the list view annotate every endpoint with a real ``used_by_partitions``
+        instead of the static "partitions referencing it will break" the delete
+        dialog used to guess with. Counts resolved references, so the default
+        endpoint also carries the partitions riding the ``default`` alias.
+        """
+        rows = await self.pool.fetch(_PARTITION_USAGE_COUNTS_SQL, DEFAULT_ENDPOINT_ALIAS)
+        return {(r["name"], r["model_type"]): r["cnt"] for r in rows}
+
+    async def indexed_file_usage(self, name: str, model_type: str) -> list[dict]:
+        """Partitions resolving to this endpoint that already hold indexed files.
+
+        What an in-place edit of an embedder's URL or model would strand (#762
+        C). Unlike a delete or a rename, that edit never touches the partitions
+        table, so nothing else in the schema records that it happened — this is
+        the only way to size it before it does.
+        """
+        rows = await self.pool.fetch(_EMBEDDER_INDEXED_USAGE_SQL, name, model_type, DEFAULT_ENDPOINT_ALIAS)
+        return [{"partition": r["partition"], "file_count": r["file_count"]} for r in rows]
+
     async def delete_and_promote_default(self, name: str, model_type: str) -> tuple[str, str | None]:
         """Delete an endpoint and, if it was the default, promote a survivor to
         default — all atomically and decided under a row lock.
@@ -313,6 +492,18 @@ class PgModelEndpointRepository(ModelEndpointRepository):
         default. Returns ``(status, promoted_name)`` where ``status`` is
         ``"not_found" | "last" | "ok"`` and ``promoted_name`` is set only when a
         deleted default was replaced.
+
+        Partition references are settled here too, differently per column (#762):
+        an ``embedder`` still referenced refuses the delete with
+        :class:`ConflictError` (409), while a ``chat_llm`` reference is cleared
+        back to its request-time default. See
+        ``_BLOCKING_PARTITION_COLUMN_BY_TYPE`` for why the two differ.
+
+        ``partitions`` is locked first — before the ``model_endpoints`` rows —
+        because ``rename()`` and :meth:`PgPresetRepository.delete` both take it
+        in that order, and ``PgPartitionRepository.update_partition`` writes
+        ``partitions`` before reading ``model_endpoints``. Taking the row lock
+        first would invert that against every one of them and deadlock.
         """
         # Lock every row of this model_type (FOR UPDATE) so concurrent deletes of
         # the same type serialize, then make the last-endpoint guard and survivor
@@ -324,6 +515,7 @@ class PgModelEndpointRepository(ModelEndpointRepository):
         # deleted row was the default and a survivor was promoted.
         async with self.pool.acquire() as conn:
             async with conn.transaction():
+                await conn.execute("LOCK TABLE partitions IN SHARE MODE")
                 rows = await conn.fetch(
                     "SELECT name, is_default FROM model_endpoints WHERE model_type = $1 ORDER BY name FOR UPDATE",
                     model_type,
@@ -334,6 +526,7 @@ class PgModelEndpointRepository(ModelEndpointRepository):
                 if len(names) <= 1:
                     return ("last", None)
                 was_default = next(r["is_default"] for r in rows if r["name"] == name)
+                await self._settle_partition_references(conn, name, model_type, was_default=was_default)
                 await self._clear_preset_references(conn, name, model_type)
                 await conn.execute(
                     "DELETE FROM model_endpoints WHERE name = $1 AND model_type = $2",
@@ -354,6 +547,18 @@ class PgModelEndpointRepository(ModelEndpointRepository):
                         model_type,
                     )
                 return ("ok", promoted)
+
+
+def _embedder_in_use_message(name: str, direct: int, via_default: int) -> str:
+    """Explain *which* partitions block the delete, so the fix is actionable."""
+    parts = []
+    if direct:
+        parts.append(f"{direct} partition(s) name it")
+    if via_default:
+        parts.append(
+            f"{via_default} follow the '{DEFAULT_ENDPOINT_ALIAS}' alias and would silently move to another model"
+        )
+    return f"Embedder '{name}' is still in use: {', and '.join(parts)}. Reassign them before deleting."
 
 
 __all__ = ["PgModelEndpointRepository"]

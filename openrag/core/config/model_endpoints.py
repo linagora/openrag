@@ -17,6 +17,14 @@ DEFAULT_MODEL_IMPLEMENTATIONS = {
     "stt": "vllm",
 }
 
+# Virtual endpoint name. No ``model_endpoints`` row carries it: it is the key
+# ``ModelEndpointService.load_all`` files the ``is_default=True`` row under, so
+# a partition or preset can reference "whichever endpoint is default" without
+# naming it. Anything that resolves a stored reference against the DB has to
+# account for it — see ``PgPartitionRepository`` (assignment checks) and
+# ``PgModelEndpointRepository`` (usage counts, delete guard).
+DEFAULT_ENDPOINT_ALIAS = "default"
+
 
 class ModelEndpointConfig(BaseModel):
     """A single registered inference endpoint.
@@ -43,6 +51,11 @@ class ModelEndpointConfig(BaseModel):
     batch_size: int = Field(default=32, gt=0)
     timeout: float = Field(default=30.0, gt=0)
     extra: dict[str, Any] = Field(default_factory=dict)
+    # The dense field this embedder reads and writes (#762 F). Every embedder
+    # row has one; None only before the row is loaded from the database, so
+    # resolve through ``core.vector_stores.vector_field.resolve_vector_field``,
+    # which refuses it.
+    vector_field: str | None = None
 
 
 def _positive_int(value: Any) -> int | None:
@@ -163,6 +176,12 @@ class ModelEndpointRow(BaseModel):
     timeout: float = Field(default=30.0, gt=0)
     extra: dict[str, Any] = Field(default_factory=dict)
     is_default: bool = False
+    # Dense vector field this embedder owns — see
+    # core/vector_stores/vector_field.py. None only for a non-embedder, or for
+    # an embedder whose migrations have not run yet, which resolves to an error
+    # rather than to a shared field. Server-owned: allocated once at creation,
+    # never accepted from a client, never updated.
+    vector_field: str | None = None
     created_at: datetime
     updated_at: datetime
 
