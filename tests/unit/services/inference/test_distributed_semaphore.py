@@ -206,3 +206,46 @@ class TestDistributedSemaphoreRollingDeployCompatibility:
         # right after must succeed rather than hang.
         await asyncio.wait_for(sem.__aenter__(), timeout=2.0)
         await sem.__aexit__(None, None, None)
+
+
+class TestDistributedSemaphoreReleaseStarvation:
+    """``release()`` must never queue behind blocked ``acquire()`` calls.
+
+    Ray caps an async actor at ``max_concurrency`` (default 1000) in-flight
+    calls, counted across *all* its methods. Every ``acquire()`` that finds
+    the semaphore full suspends inside the actor and keeps its slot, so once
+    the waiters alone fill the cap every ``release()`` sits in Ray's queue
+    behind them and never runs: the permit holders cannot give their permits
+    back, the waiters never get one, and the whole cluster's captioning (or
+    contextualization) stops for good. Prod hit this on 2026-09-10 with a
+    bulk upload of image-heavy PPTX/PDF files: one ``acquire()`` per image,
+    dispatched up-front, buried the ``vlmSemaphore`` for five days until the
+    actor was restarted by hand.
+    """
+
+    async def test_release_is_not_starved_by_a_thousand_pending_acquires(self):
+        namespace = f"test-starve-{uuid.uuid4().hex}"
+        actor = DistributedSemaphoreActor.options(
+            name="sem",
+            namespace=namespace,
+            lifetime="detached",
+        ).remote(1)
+        pending: list[asyncio.Future] = []
+        try:
+            holder = await actor.acquire.remote()  # take the only permit
+
+            # Enough blocked acquires to fill the actor's default 1000-call cap.
+            pending = [asyncio.ensure_future(actor.acquire.remote()) for _ in range(1000)]
+            await asyncio.sleep(1.0)  # let them all reach the actor and suspend there
+
+            # Pre-fix this never completes: the release is queued behind the
+            # 1000 suspended acquires and no slot ever frees up for it.
+            await asyncio.wait_for(actor.release.remote(holder), timeout=10.0)
+
+            # And the returned permit must actually reach one of the waiters.
+            done, _ = await asyncio.wait(pending, timeout=5.0, return_when=asyncio.FIRST_COMPLETED)
+            assert len(done) == 1
+        finally:
+            for task in pending:
+                task.cancel()
+            ray.kill(actor, no_restart=True)

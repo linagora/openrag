@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import threading
 import uuid
 
 import ray
@@ -17,7 +18,22 @@ from core.utils.logging import get_logger
 logger = get_logger()
 
 
-@ray.remote(max_restarts=5)
+# ``release`` runs in its own concurrency group so it can never be starved by
+# ``acquire``. Ray caps an async actor at ``max_concurrency`` (default 1000)
+# in-flight calls per concurrency group, and a call counts as in-flight for as
+# long as its coroutine is suspended - which is exactly what an ``acquire`` on
+# a full semaphore does. Once the blocked acquires alone fill the default
+# group, every ``release`` queues behind them and never runs: the holders
+# can't hand their permits back, the waiters never get one, and the semaphore
+# is wedged for the life of the actor (prod, 2026-09-10: a bulk upload of
+# image-heavy files dispatched one ``acquire`` per image and buried the
+# ``vlmSemaphore`` for five days until it was restarted by hand). In a
+# separate group, ``release`` gets its own slots - and, in Ray's async actors,
+# its own event loop on its own thread, hence the thread-safe hand-off below.
+_RELEASE_CONCURRENCY_GROUP = "release"
+
+
+@ray.remote(max_restarts=5, concurrency_groups={_RELEASE_CONCURRENCY_GROUP: 100})
 class DistributedSemaphoreActor:
     def __init__(self, max_concurrent_ops: int):
         self.semaphore = asyncio.Semaphore(max_concurrent_ops)
@@ -26,19 +42,38 @@ class DistributedSemaphoreActor:
         # cancellation - can be detected and dropped instead of incrementing
         # a freshly-restarted semaphore above max_concurrent_ops.
         self.incarnation = uuid.uuid4().hex
+        # The event loop ``acquire`` runs on (the default concurrency group's).
+        # ``asyncio.Semaphore`` is not thread-safe, so ``release`` - which runs
+        # on the release group's loop - must hand the wake-up over to this one.
+        # Captured lazily from the first ``acquire``; the lock keeps that
+        # capture and the pre-capture fallback in ``release`` from interleaving.
+        self._acquire_loop: asyncio.AbstractEventLoop | None = None
+        self._loop_lock = threading.Lock()
 
     async def acquire(self) -> str:
+        with self._loop_lock:
+            if self._acquire_loop is None:
+                self._acquire_loop = asyncio.get_running_loop()
         await self.semaphore.acquire()
         return self.incarnation
 
-    def release(self, incarnation: str | None = None) -> None:
+    @ray.method(concurrency_group=_RELEASE_CONCURRENCY_GROUP)
+    async def release(self, incarnation: str | None = None) -> None:
         # `incarnation` defaults to None so a driver still running the
         # pre-incarnation-token code (rolling deploy against this same
         # detached, `get_if_exists=True` actor) can call `release()` with no
         # arguments without raising - it never checked incarnations either.
         if incarnation is not None and incarnation != self.incarnation:
             return
-        self.semaphore.release()
+        with self._loop_lock:
+            loop = self._acquire_loop
+            if loop is None:
+                # No acquire has run yet, so no waiter exists to wake: bumping
+                # the counter directly is safe from this thread, and the lock
+                # keeps a first acquire from slipping in between.
+                self.semaphore.release()
+                return
+        loop.call_soon_threadsafe(self.semaphore.release)
 
 
 class DistributedSemaphore:
