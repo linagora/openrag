@@ -2,11 +2,28 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 import pytest
 from core.models.catalog import DocumentRecord, DocumentStatus
 from services.storage.postgres_store import PostgresStore
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio(loop_scope="session")]
+
+
+async def test_reconciliation_lookup_and_pages(postgres_store):
+    for partition in ("a", "b"):
+        await _seed_partition(postgres_store, partition)
+    repo = postgres_store.document_repo
+    for partition, file_id in (("a", "a1"), ("a", "a2"), ("a", "recent"), ("b", "b1")):
+        await repo.create_document(_doc(file_id, partition))
+    before = datetime.now(UTC) - timedelta(hours=1)
+    await repo.pool.execute("UPDATE files SET indexed_at = $1 WHERE file_id != 'recent'", before - timedelta(hours=1))
+    existing = await repo.get_indexed_documents({("a", "a1"), ("b", "b1"), ("a", "b1"), ("b", "a1")})
+    assert set(existing) == {("a", "a1"), ("b", "b1")}
+    assert await repo.list_indexed_documents("a", before=before, limit=1) == ["a1"]
+    assert await repo.list_indexed_documents("a", before=before, after="a1", limit=1) == ["a2"]
+    assert await repo.list_indexed_documents("a", before=before, after="a2", limit=1) == []
 
 
 async def _seed_partition(store: PostgresStore, name: str = "p") -> str:
