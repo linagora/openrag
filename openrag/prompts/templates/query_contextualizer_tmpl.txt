@@ -76,7 +76,7 @@ User: "Thanks"
 {{"intent":"gratitude","requires_retrieval":false,"query_list":[]}}
 
 User: "Hello, how can you helpe me?"
-{{"intent":"greeting","requires_retrieval":false,"query_list":[]}}
+{{"intent":"capability","requires_retrieval":false,"query_list":[]}}
 
 User: "Hello, what was Product A revenue in Q1?"
 {{"intent":"other","requires_retrieval":true,"query_list":[{{"query":"Product A revenue in Q1","temporal_filters":null}}]}}

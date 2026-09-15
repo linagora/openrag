@@ -1914,7 +1914,7 @@ def test_casual_message_policy_classifies_every_allowlisted_expression(message, 
 @pytest.mark.asyncio
 async def test_chainlit_reported_typo_is_classified_by_the_contextualizer_without_retrieval():
     message = "hello, how can you helpe me ?"
-    llm = FakeLLM(chat_responses=[json.dumps({"intent": "greeting", "requires_retrieval": False, "query_list": []})])
+    llm = FakeLLM(chat_responses=[json.dumps({"intent": "capability", "requires_retrieval": False, "query_list": []})])
     retrieval = FakeRetrieval()
     svc = _svc(mode="ChatBotRag", llm=llm, retrieval=retrieval)
 
@@ -1927,7 +1927,10 @@ async def test_chainlit_reported_typo_is_classified_by_the_contextualizer_withou
     assert retrieval.retrieve_multi_calls == []
     assert result.docs == []
     assert result.web_results == []
-    assert "intent is greeting" in result.payload["messages"][0]["content"]
+    prompt = result.payload["messages"][0]["content"]
+    assert "intent is capability" in prompt
+    assert "indexed documents and media" in prompt
+    assert "developed by LINAGORA" not in prompt
 
 
 @pytest.mark.parametrize(
