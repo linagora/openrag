@@ -92,7 +92,7 @@ def get_task_state_manager():
     # ``get_if_exists`` keeps a detached actor created by an older deployment,
     # but creation options cannot retrofit that actor with restart support.
     # Replace it during bootstrap, before services or workers cache its handle.
-    logger.warning("Replacing legacy TaskStateManager without restart support")
+    logger.warning("Replacing legacy TaskStateManager from an earlier deployment")
     ray.kill(actor, no_restart=True)
     deadline = monotonic() + 30
     while monotonic() < deadline:
@@ -110,6 +110,9 @@ def _supports_task_state_recovery(actor) -> bool:
     return (
         getattr(actor, "supports_in_place_restart", None) is not None
         and getattr(actor, "renew_file_delete", None) is not None
+        # Retention is a lifecycle change, and creation options cannot retrofit
+        # it onto an actor a previous deployment left detached and leaking.
+        and getattr(actor, "supports_bounded_task_retention", None) is not None
     )
 
 
