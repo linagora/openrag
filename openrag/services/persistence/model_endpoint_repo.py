@@ -11,6 +11,7 @@ from collections.abc import Callable
 
 import asyncpg
 from core.config.model_endpoints import DEFAULT_ENDPOINT_ALIAS, ModelEndpointRow
+from core.models.embedder_swap import EmbedderSwapStatus
 from core.ports.model_endpoint_repo import ModelEndpointRepository
 from core.utils.exceptions import ConflictError, NotFoundError, ValidationError
 from core.utils.logging import get_logger
@@ -334,6 +335,17 @@ class PgModelEndpointRepository(ModelEndpointRepository):
                         name,
                         new_name,
                     )
+                if model_type == "embedder":
+                    # A running swap completes by writing its target into
+                    # partitions.embedder, so it must name the endpoint as it is
+                    # called by then (#762 F4). Finished ones are history, and
+                    # follow along so they keep resolving too.
+                    for column in ("source_embedder", "target_embedder"):
+                        await conn.execute(
+                            f"UPDATE partition_embedder_swaps SET {column} = $2 WHERE {column} = $1",
+                            name,
+                            new_name,
+                        )
 
                 for preset_type, keys in (
                     ("retrieval", _RETRIEVAL_PRESET_KEYS_BY_TYPE.get(model_type, ())),
@@ -491,6 +503,21 @@ class PgModelEndpointRepository(ModelEndpointRepository):
             direct, via_default = row["direct"], row["via_default"]
             if direct or via_default:
                 raise ConflictError(_embedder_in_use_message(name, direct, via_default))
+            # Not referenced by a partition yet, but a running swap is filling
+            # its field: deleting it would drop that field under the swap
+            # (#762 F4). A swap records itself while holding a lock that
+            # conflicts with the SHARE lock taken on partitions above.
+            swapping = await conn.fetchval(
+                "SELECT COUNT(*)::int FROM partition_embedder_swaps WHERE target_embedder = $1 AND status = $2",
+                name,
+                EmbedderSwapStatus.RUNNING.value,
+            )
+            if swapping:
+                raise ConflictError(
+                    f"Embedder '{name}' is the target of {swapping} running embedder swap(s). "
+                    "Wait for them to finish, or cancel them, before deleting it.",
+                    code="EMBEDDER_SWAP_IN_PROGRESS",
+                )
             return
 
         column = _CLEARABLE_PARTITION_COLUMN_BY_TYPE.get(model_type)

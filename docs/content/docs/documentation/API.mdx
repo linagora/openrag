@@ -410,6 +410,49 @@ curl -X PATCH http://localhost:8080/partition/my_partition \
   -d '{"indexation_preset": "legal", "retrieval_preset": "hyde"}'
 ```
 
+:::caution
+On a partition that holds indexed files, changing `embedder` here returns `409 EMBEDDER_SWAP_REQUIRED`. Each
+embedder stores its vectors in its own field and a partition searches only its own, so repointing the field
+without re-embedding would hide every indexed file. Use the embedder swap below, which re-embeds first. The
+edit is still accepted on a partition with no files.
+:::
+
+#### Partition Embedder Swap
+
+Move a partition to another embedder, re-embedding its files in place. Each chunk's **stored text** is embedded
+again with the new embedder — nothing is re-parsed or re-chunked — and searches keep using the current embedder
+until every file is done, so no query returns results from a half-filled index.
+
+| Endpoint | Method | Role | Description |
+|----------|--------|------|-------------|
+| `/partition/{partition}/embedder-swap` | POST | Owner | Start a swap → `202` with the swap |
+| `/partition/{partition}/embedder-swap` | GET | Viewer | Progress, or how the last one ended → `404 EMBEDDER_SWAP_NOT_FOUND` if the partition never had one |
+| `/partition/{partition}/embedder-swap` | DELETE | Owner | Cancel a running swap → `409 EMBEDDER_SWAP_NOT_RUNNING` otherwise |
+
+```bash frame="none"
+curl -X POST http://localhost:8080/partition/my_partition/embedder-swap \
+  -H "Authorization: Bearer YOUR_AUTH_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"embedder": "bge-m3"}'
+```
+
+The response carries `status` (`running` | `completed` | `failed` | `cancelled`), `files_done` of `files_total`,
+and `error` when it failed. There is no push notification: poll the `GET` route for progress. A swap onto the
+embedder the partition already uses re-embeds only the files recorded with another model, which is how drift
+from an earlier change is repaired.
+
+`embedder` must name a registered embedder endpoint, not the `default` alias (422 otherwise) — the alias can
+move to another model later, which would leave the partition pointing at a field it never filled.
+
+:::caution
+While a swap runs, uploads, file replacements, metadata updates and copies **into** that partition return
+`409 EMBEDDER_SWAP_IN_PROGRESS`; deleting files stays allowed. Starting one is refused with
+`409 INDEXING_IN_PROGRESS` while files are still being indexed.
+
+Cancelling leaves the partition on its current embedder. Files already re-embedded keep their new vectors —
+nothing searches them until a later swap to that same embedder, which skips them.
+:::
+
 #### Partition Members
 
 Manage who can access a partition and with which role — all **owner** only.

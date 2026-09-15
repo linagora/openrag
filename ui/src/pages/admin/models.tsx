@@ -541,9 +541,10 @@ function EmbedderEditIntroDialog({
                 degrades silently &mdash; nothing errors, results just stop being meaningful.
               </p>
               <p>
-                If you are switching to a different model, add a second endpoint and move partitions
-                to it deliberately. Editing is for correcting a URL or a typo that points at the same
-                model.
+                If you are switching to a different model, add a second endpoint, then move each
+                partition to it with <span className="font-medium">Change embedder</span> on the
+                partition&apos;s page: its files are re-embedded before searches switch over. Editing is
+                for correcting a URL or a typo that points at the same model.
               </p>
             </div>
           </AlertDialogDescription>
@@ -1478,8 +1479,14 @@ function EndpointUpdateConfirmDialog({
                       vectors are not rebuilt.
                     </li>
                     <li>
-                      If it really is a different model, add a second endpoint and migrate partitions
-                      to it instead, so the old vectors keep working until their files are re-embedded.
+                      If it really is a different model, add a second endpoint and move partitions to
+                      it with <span className="font-medium">Change embedder</span> on each
+                      partition&apos;s page instead: the files are re-embedded first, and searches keep
+                      working until they are.
+                    </li>
+                    <li>
+                      If you go ahead anyway, each affected partition can re-embed its drifted files
+                      afterwards from its page.
                     </li>
                   </ul>
 

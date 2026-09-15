@@ -15,19 +15,20 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from core.utils.consts import strip_protected_metadata
-from core.utils.exceptions import AuthError, PartitionNotFoundError, ValidationError
+from core.utils.exceptions import AuthError, ConfigError, PartitionNotFoundError, ValidationError
 from core.utils.filename import extract_temporal_fields
 from core.utils.logging import get_logger
 from core.utils.partition_limits import max_partitions_for_user
 
 if TYPE_CHECKING:
     from core.config.root import Settings
+    from core.embeddings.embedder import Embedder
     from core.indexing.dispatcher import IndexingDispatcher
     from core.ports.document_repo import DocumentRepository
     from core.ports.workspace_repo import WorkspaceRepository
@@ -75,6 +76,7 @@ class IndexingService:
         config: Settings | None = None,
         partition_service: PartitionService | None = None,
         preset_service: PresetService | None = None,
+        embedder_factory: Callable[[str], Embedder] | None = None,
     ) -> None:
         self._document_repo = document_repo
         self._workspace_repo = workspace_repo
@@ -82,6 +84,7 @@ class IndexingService:
         self._config = config
         self._partition_service = partition_service
         self._preset_service = preset_service
+        self._embedder_factory = embedder_factory
 
     # ------------------------------------------------------------------
     # Lookups (used by the thin router for its byte-identical guards)
@@ -143,6 +146,66 @@ class IndexingService:
             self._config is not None
             and getattr(getattr(self._config, "loader", None), "content_deduplication_enabled", False)
         )
+
+    async def _ensure_no_embedder_swap(self, partition: str) -> None:
+        ensure = getattr(self._partition_service, "ensure_no_embedder_swap", None)
+        if ensure is not None:
+            await ensure(partition)
+
+    @asynccontextmanager
+    async def _embedder_swap_fence(self, partition: str) -> AsyncIterator[None]:
+        """Refuse a chunk rewrite while *partition*'s embedder is being swapped (#762 F4).
+
+        Held for the whole write, not just the check: a metadata update reads
+        whole rows and writes them back, so one interleaving with a swap's
+        partial writes would put the old, empty field back over new vectors.
+        A swap starts under the same fence.
+        """
+        lock = getattr(self._partition_service, "operation_lock", None)
+        if lock is None:
+            await self._ensure_no_embedder_swap(partition)
+            yield
+            return
+        async with lock(partition):
+            await self._ensure_no_embedder_swap(partition)
+            yield
+
+    def _target_embedder(self, partition: str) -> tuple[str, str] | None:
+        """``(embedder name, vector field)`` a copy into *partition* must land in (#762 F).
+
+        ``None`` only where there is no per-embedder routing to do at all — no
+        embedder factory and no endpoint registry, which is the legacy wiring
+        unit tests use. There the copy keeps its vectors as they are.
+
+        Everywhere else an unresolvable target raises. Under schema v3 a search
+        reads one field, so copying the source's vectors into a partition that
+        reads another silently hides the copy; there is no shared field left to
+        fall back to.
+        """
+        if self._embedder_factory is None or self._config is None:
+            return None
+        partition_cfg = self._partition_configs().get(partition)
+        if partition_cfg is None:
+            raise ConfigError(
+                f"Partition '{partition}' has no resolved configuration, so the embedder a copy "
+                "into it must use is unknown.",
+                code="EMBEDDER_ROUTING_UNRESOLVED",
+            )
+        endpoint = getattr(getattr(self._config, "models", None), "embedder", {}).get(partition_cfg.embedder)
+        if endpoint is None:
+            raise ConfigError(
+                f"Partition '{partition}' names embedder '{partition_cfg.embedder}', which no endpoint "
+                "defines, so a copy into it cannot be routed.",
+                code="EMBEDDER_ROUTING_UNRESOLVED",
+            )
+        vector_field = getattr(endpoint, "vector_field", None)
+        if vector_field is None:
+            raise ConfigError(
+                f"Embedder '{partition_cfg.embedder}' has no dense vector field, so a copy into "
+                f"'{partition}' cannot be routed. Apply the pending migrations.",
+                code="EMBEDDER_ROUTING_UNRESOLVED",
+            )
+        return partition_cfg.embedder, vector_field
 
     @asynccontextmanager
     async def _partition_admission(self, partition: str) -> AsyncIterator[bool]:
@@ -279,6 +342,7 @@ class IndexingService:
             content_sha256=content_sha256,
         )
         async with self._partition_admission(partition) as partition_existed_at_admission:
+            await self._ensure_no_embedder_swap(partition)
             await self._ensure_partition_exists(partition, user)
             await self._refresh_preset_config_if_stale()
             await self._pin_partition_embedder(partition)
@@ -323,7 +387,8 @@ class IndexingService:
                 f"Dropped protected metadata keys from file metadata update: {dropped}"
             )
         metadata["file_id"] = file_id
-        await self._dispatcher.update_file_metadata(file_id, metadata, partition, user)
+        async with self._embedder_swap_fence(partition):
+            await self._dispatcher.update_file_metadata(file_id, metadata, partition, user)
 
     async def copy_file(
         self,
@@ -348,8 +413,22 @@ class IndexingService:
         metadata["file_id"] = target_file_id
         metadata["partition"] = target_partition
         metadata["content_sha256"] = content_sha256
-        await self._pin_partition_embedder(target_partition)
-        await self._dispatcher.copy_file(source_file_id, metadata, source_partition, user)
+        async with self._embedder_swap_fence(target_partition):
+            await self._pin_partition_embedder(target_partition)
+            target = self._target_embedder(target_partition)
+            if target is None:
+                await self._dispatcher.copy_file(source_file_id, metadata, source_partition, user)
+            else:
+                name, vector_field = target
+                await self._dispatcher.copy_file(
+                    source_file_id,
+                    metadata,
+                    source_partition,
+                    user,
+                    vector_field=vector_field,
+                    embedder=self._embedder_factory(name),
+                    embedder_reference=name,
+                )
 
     # ------------------------------------------------------------------
     # Task state

@@ -1,5 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { createPartition, listPartitionMemberCandidates } from "./partitions";
+import {
+  cancelEmbedderSwap,
+  createPartition,
+  getEmbedderSwap,
+  listPartitionMemberCandidates,
+  startEmbedderSwap,
+} from "./partitions";
 
 // Minimal Response-like object covering what `request` reads (mirrors client.test.ts).
 function fakeResponse({ status = 200, body = "" }: { status?: number; body?: string } = {}): Response {
@@ -97,5 +103,54 @@ describe("listPartitionMemberCandidates", () => {
         ["limit", "10"],
       ]),
     );
+  });
+});
+
+describe("embedder swap", () => {
+  const swap = {
+    partition: "docs",
+    source_embedder: "e5",
+    target_embedder: "bge-m3",
+    status: "running",
+    files_total: 4,
+    files_done: 1,
+    error: null,
+    started_at: "2026-09-14T00:00:00Z",
+    updated_at: "2026-09-14T00:00:00Z",
+    finished_at: null,
+  };
+
+  it("reads a partition that never swapped as no swap, not an error", async () => {
+    fetchMock.mockResolvedValue(
+      fakeResponse({ status: 404, body: JSON.stringify({ detail: "[EMBEDDER_SWAP_NOT_FOUND]: none" }) }),
+    );
+
+    await expect(getEmbedderSwap("docs")).resolves.toBeNull();
+    expect(fetchMock.mock.calls[0][0]).toBe("/partition/docs/embedder-swap");
+  });
+
+  it("surfaces other failures", async () => {
+    fetchMock.mockResolvedValue(fakeResponse({ status: 500, body: JSON.stringify({ detail: "boom" }) }));
+
+    await expect(getEmbedderSwap("docs")).rejects.toThrow("boom");
+  });
+
+  it("starts a swap with the target embedder in the body", async () => {
+    fetchMock.mockResolvedValue(fakeResponse({ status: 202, body: JSON.stringify(swap) }));
+
+    await expect(startEmbedderSwap("my docs", "bge-m3")).resolves.toEqual(swap);
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("/partition/my%20docs/embedder-swap");
+    expect(methodOf(fetchMock.mock.calls[0])).toBe("POST");
+    expect(JSON.parse(init.body as string)).toEqual({ embedder: "bge-m3" });
+  });
+
+  it("cancels with DELETE", async () => {
+    fetchMock.mockResolvedValue(fakeResponse({ body: JSON.stringify({ ...swap, status: "cancelled" }) }));
+
+    await cancelEmbedderSwap("docs");
+
+    expect(methodOf(fetchMock.mock.calls[0])).toBe("DELETE");
   });
 });
