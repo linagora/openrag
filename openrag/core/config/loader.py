@@ -37,6 +37,7 @@ _ENV_OVERRIDES: list[tuple[str, str, type]] = [
     # Semaphore
     ("LLM_SEMAPHORE", "semaphore.llm_semaphore", int),
     ("VLM_SEMAPHORE", "semaphore.vlm_semaphore", int),
+    ("SEMAPHORE_ACQUIRE_TIMEOUT_FACTOR", "semaphore.acquire_timeout_factor", float),
     # Embedder
     ("EMBEDDER_MODEL_NAME", "embedder.model_name", str),
     ("EMBEDDER_BASE_URL", "embedder.base_url", str),

@@ -402,3 +402,66 @@ class TestDistributedSemaphoreLocalAdmissionGate:
         # An asyncio.Semaphore parks its waiters on the loop that created them,
         # so a gate must never be carried across loops.
         assert seen[0] is not seen[1]
+
+
+class TestDistributedSemaphoreAcquireTimeout:
+    """Waiting for a permit is the only unbounded wait left on the enrichment
+    path — the inference calls themselves are bounded by their client's httpx
+    timeout. Without a bound here a saturated gate pins an indexer slot for as
+    long as the (detached) actor lives.
+    """
+
+    @staticmethod
+    def _sem(stub: _StubSemaphoreActor, acquire_timeout: float | None) -> DistributedSemaphore:
+        sem = DistributedSemaphore(
+            name=f"timeout-{uuid.uuid4().hex}",
+            namespace="test",
+            max_concurrent_ops=4,
+            acquire_timeout=acquire_timeout,
+        )
+        sem._get_or_create_actor = lambda: stub
+        return sem
+
+    async def test_a_saturated_gate_times_the_caller_out(self):
+        stub = _StubSemaphoreActor(permits=0)  # no permit will ever be granted
+        sem = self._sem(stub, acquire_timeout=0.05)
+
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(sem.__aenter__(), timeout=2.0)
+
+    async def test_a_timed_out_caller_returns_its_local_gate_permit(self):
+        from services.inference.distributed_semaphore import _local_gate
+
+        stub = _StubSemaphoreActor(permits=0)
+        sem = self._sem(stub, acquire_timeout=0.05)
+
+        with pytest.raises(TimeoutError):
+            await sem.__aenter__()
+
+        gate = _local_gate(sem._name, sem._max_concurrent_ops)
+        assert await _free_permits(gate) == sem._max_concurrent_ops
+
+    async def test_a_permit_granted_after_the_timeout_is_handed_back(self):
+        stub = _StubSemaphoreActor(permits=0)
+        sem = self._sem(stub, acquire_timeout=0.05)
+
+        with pytest.raises(TimeoutError):
+            await sem.__aenter__()
+
+        # The actor keeps running the acquire regardless of the local timeout;
+        # when it finally grants, the permit must not be abandoned.
+        stub.grant(1)
+        await asyncio.sleep(0.1)
+        assert stub.release_calls == 1
+
+    async def test_no_timeout_configured_still_waits(self):
+        stub = _StubSemaphoreActor(permits=0)
+        sem = self._sem(stub, acquire_timeout=None)
+
+        pending = asyncio.ensure_future(sem.__aenter__())
+        await asyncio.sleep(0.1)
+        assert not pending.done(), "acquire_timeout=None must preserve the previous unbounded wait"
+
+        stub.grant(1)
+        await asyncio.wait_for(pending, timeout=1.0)
+        await sem.__aexit__(None, None, None)

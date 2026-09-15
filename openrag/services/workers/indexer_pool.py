@@ -1199,7 +1199,12 @@ def _build_contextualizer_factory(cfg: Settings) -> Any:
                 # Built directly from config to avoid importing
                 # services.inference.runtime, which eagerly constructs a LangDetector.
                 llm_semaphore = DistributedSemaphore(
-                    name="llmSemaphore", max_concurrent_ops=cfg.semaphore.llm_semaphore
+                    name="llmSemaphore",
+                    max_concurrent_ops=cfg.semaphore.llm_semaphore,
+                    # Mirrors services.inference.runtime.acquire_timeout_for,
+                    # inlined for the same reason the semaphore is built here:
+                    # importing runtime eagerly constructs a LangDetector.
+                    acquire_timeout=cfg.semaphore.acquire_timeout_factor * float(cfg.llm.timeout),
                 )
                 shared["system_prompt"] = system_prompt
                 shared["llm_semaphore"] = llm_semaphore
