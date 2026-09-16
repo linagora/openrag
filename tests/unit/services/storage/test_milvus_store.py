@@ -863,7 +863,7 @@ class TestHybridDispatch:
         assert [candidate["id"] for candidate in stages["sparse"]["candidates"]] == ["20", "30"]
         assert [candidate["id"] for candidate in stages["hybrid_fused"]["candidates"]] == ["30", "10"]
         assert stages["dense_before_threshold"]["candidates"][1]["removal_reason"]["code"] == "workspace_filter"
-        assert set(finished["timings"]) >= {"dense_search", "sparse_search", "fusion"}
+        assert set(finished["timings"]) >= {"dense_search", "sparse_search"}
         assert store._async_client.search.await_count == 3  # type: ignore[attr-defined]
         diagnostic_calls = store._async_client.search.await_args_list  # type: ignore[attr-defined]
         assert "file_id" not in diagnostic_calls[0].kwargs["filter"]
@@ -872,6 +872,57 @@ class TestHybridDispatch:
         for call in diagnostic_calls:
             assert 'partition in ["allowed"]' in call.kwargs["filter"]
             assert "forbidden" not in call.kwargs["filter"]
+
+    @pytest.mark.asyncio
+    async def test_mixed_temporal_filter_is_not_relaxed_or_misattributed(self, store: MilvusVectorStore) -> None:
+        mixed_filter = 'created_at >= ISO "2026-01-01T00:00:00+00:00" AND page > 5'
+        store._async_client.hybrid_search = AsyncMock(return_value=[[self._hit(10, 0.08)]])  # type: ignore[attr-defined]
+        store._async_client.search = AsyncMock(  # type: ignore[attr-defined]
+            side_effect=[
+                [[self._hit(40, 0.95)]],
+                [[]],
+                [[]],
+            ]
+        )
+        trace = RetrievalTraceBuilder("req-1", "query")
+
+        await store.search(
+            [0.1, 0.2],
+            query_text="query",
+            filters={"partition": ["allowed"], "expr": mixed_filter},
+            similarity_threshold=0.7,
+            trace=trace,
+        )
+
+        before_filter = store._async_client.search.await_args_list[0].kwargs["filter"]  # type: ignore[attr-defined]
+        assert mixed_filter in before_filter
+        finished = trace.finish(configuration_fingerprint="fingerprint")
+        before_stage = next(stage for stage in finished["stages"] if stage["name"] == "dense_before_threshold")
+        assert before_stage["candidates"][0]["removal_reason"] is None
+
+    @pytest.mark.asyncio
+    async def test_hybrid_aggregate_duration_is_not_reported_as_fusion_timing(
+        self, store: MilvusVectorStore
+    ) -> None:
+        store._async_client.hybrid_search = AsyncMock(return_value=[[self._hit(10, 0.08)]])  # type: ignore[attr-defined]
+        store._async_client.search = AsyncMock(  # type: ignore[attr-defined]
+            side_effect=[[[self._hit(10, 0.95)]], [[self._hit(10, 0.95)]], [[]]]
+        )
+        trace = RetrievalTraceBuilder("req-1", "query")
+
+        await store.search(
+            [0.1, 0.2],
+            query_text="query",
+            filters={"partition": ["allowed"]},
+            similarity_threshold=0.7,
+            trace=trace,
+        )
+
+        finished = trace.finish(configuration_fingerprint="fingerprint")
+        fused_stage = next(stage for stage in finished["stages"] if stage["name"] == "hybrid_fused")
+        assert "fusion" not in finished["timings"]
+        assert fused_stage["status"] == "complete"
+        assert fused_stage["duration_seconds"] is None
 
     @pytest.mark.asyncio
     async def test_diagnostic_failure_records_partial_error_and_returns_production_results(

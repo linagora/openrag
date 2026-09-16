@@ -1040,7 +1040,11 @@ class MilvusVectorStore(VectorStore):
         relaxed = dict(filters or {})
         file_scope = relaxed.pop("file_id", None)
         raw_expr = relaxed.get("expr")
-        temporal_relaxed = isinstance(raw_expr, str) and re.search(r"\b(?:created_at|indexed_at)\b", raw_expr, re.I)
+        temporal_relaxed = isinstance(raw_expr, str) and re.fullmatch(
+            r'\s*(?:created_at|indexed_at)\s*(?:==|!=|>=|<=|>|<)\s*(?:ISO\s+)?(?:"[^"\r\n]*"|\'[^\'\r\n]*\')\s*',
+            raw_expr,
+            re.I,
+        )
         if temporal_relaxed:
             relaxed.pop("expr", None)
         return relaxed, file_scope, bool(temporal_relaxed)
@@ -1090,10 +1094,8 @@ class MilvusVectorStore(VectorStore):
                     explanation="Candidate did not pass the request's temporal filter.",
                 )
             else:
-                reason = TraceRemovalReason(
-                    code="dense_threshold",
-                    explanation="Candidate did not pass the configured dense similarity threshold.",
-                )
+                marked.append(candidate)
+                continue
             marked.append(candidate.model_copy(update={"removal_reason": reason}))
         return marked
 
@@ -1147,7 +1149,6 @@ class MilvusVectorStore(VectorStore):
         filters: dict[str, Any] | None,
         similarity_threshold: float | None,
         fused_rows: list[dict[str, Any]],
-        fusion_duration: float,
     ) -> None:
         """Run opt-in ANN legs after production ordering is already fixed."""
         relaxed_filters, file_scope, temporal_relaxed = self._relaxed_diagnostic_filters(filters)
@@ -1204,7 +1205,6 @@ class MilvusVectorStore(VectorStore):
 
         trace.timings["dense_search"] = before_duration + after_duration
         trace.timings["sparse_search"] = sparse_duration
-        trace.timings["fusion"] = fusion_duration
         self._record_diagnostic_stage(trace, "dense_before_threshold", before, before_duration, before_error)
         self._record_diagnostic_stage(trace, "dense_after_threshold", after, after_duration, after_error)
         self._record_diagnostic_stage(trace, "sparse", sparse, sparse_duration, sparse_error)
@@ -1212,7 +1212,6 @@ class MilvusVectorStore(VectorStore):
             "hybrid_fused",
             status="complete",
             candidates=fused,
-            duration_seconds=fusion_duration,
         )
 
     async def _record_dense_diagnostics(
@@ -1374,7 +1373,6 @@ class MilvusVectorStore(VectorStore):
         ``radius`` floor on the dense leg; see :meth:`_dense_search_params`.
         """
         if self._hybrid:
-            production_started = time.perf_counter() if trace is not None else None
             result = await self._hybrid_search(
                 embedding,
                 query_text,
@@ -1383,8 +1381,7 @@ class MilvusVectorStore(VectorStore):
                 filters,
                 similarity_threshold,
             )
-            if trace is not None and production_started is not None and query_text is not None:
-                fusion_duration = time.perf_counter() - production_started
+            if trace is not None and query_text is not None:
                 try:
                     await self._record_hybrid_diagnostics(
                         trace=trace,
@@ -1394,7 +1391,6 @@ class MilvusVectorStore(VectorStore):
                         filters=filters,
                         similarity_threshold=similarity_threshold,
                         fused_rows=result,
-                        fusion_duration=fusion_duration,
                     )
                 except Exception as error:
                     trace.record_error("hybrid_diagnostics", error)
