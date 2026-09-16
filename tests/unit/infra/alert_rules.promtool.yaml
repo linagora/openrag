@@ -161,11 +161,34 @@ tests:
 
   # ── OpenRagBacklogGrowing ───────────────────────────────────────────────
   - interval: 1m
-    name: a burst that drains does not alert
+    name: a bulk import that lands in 10 minutes and drains does not alert
     input_series:
+      # 200 documents arrive over 10 minutes, then drain. With a 30m derivative
+      # window this false-alarmed at 18m: the window still held the rise while
+      # the queue was emptying, so the slope stayed positive. At 5m it turns
+      # with the queue, and the 10m arrival phase is far inside `for: 25m`.
       - series: 'openrag_ingest_tasks{state="QUEUED"}'
-        values: "0+20x10 200-20x10 0+0x40"
+        values: "0+20x10 200-14x14 4+0x50"
     alert_rule_test:
+      - eval_time: 18m
+        alertname: OpenRagBacklogGrowing
+        exp_alerts: []
+      - eval_time: 55m
+        alertname: OpenRagBacklogGrowing
+        exp_alerts: []
+
+  - interval: 1m
+    name: a slower bulk import, climbing for 20 minutes, is still not an alert
+    input_series:
+      # The shape `for: 25m` exists to tolerate. It defeated every shorter `for`
+      # tested — 15m false-alarmed at 21m. An import climbing for longer than
+      # 25m will still trip this; see the runbook, it is not fixable here.
+      - series: 'openrag_ingest_tasks{state="QUEUED"}'
+        values: "0+10x20 200-10x20 0+0x40"
+    alert_rule_test:
+      - eval_time: 21m
+        alertname: OpenRagBacklogGrowing
+        exp_alerts: []
       - eval_time: 55m
         alertname: OpenRagBacklogGrowing
         exp_alerts: []
@@ -183,9 +206,31 @@ tests:
               severity: warning
               state: QUEUED
             exp_annotations:
-              description: "The QUEUED task count has trended upward for 30 minutes and now stands at 275. Ingestion capacity is below the arrival rate."
+              description: "The QUEUED task count has risen continuously for 25 minutes and now stands at 275. Ingestion capacity is below the arrival rate."
               runbook_url: "https://github.com/linagora/openrag/blob/main/docs/deployment/runbooks/OpenRagBacklogGrowing.md"
               summary: "Indexing backlog is growing faster than it drains"
+
+  - interval: 1m
+    name: a deep batch draining slowly — the case that pins the 5m derivative window
+    input_series:
+      # 300 deep in 15 minutes, then draining steadily for an hour. The queue
+      # stays above the floor the whole time, so the derivative alone decides.
+      #
+      # This is the scenario the window length actually guards: with deriv[30m]
+      # the window still holds the rise well into the drain, the slope stays
+      # positive past `for: 25m`, and it false-alarms at 28m on a batch that is
+      # clearing normally. The two burst cases above do NOT catch that — `for`
+      # alone rejects them — so without this case, restoring the 30m window
+      # would pass the whole suite.
+      - series: 'openrag_ingest_tasks{state="QUEUED"}'
+        values: "0+20x15 300-5x60"
+    alert_rule_test:
+      - eval_time: 28m
+        alertname: OpenRagBacklogGrowing
+        exp_alerts: []
+      - eval_time: 50m
+        alertname: OpenRagBacklogGrowing
+        exp_alerts: []
 
   - interval: 1m
     name: a small queue rising slowly stays below the absolute floor

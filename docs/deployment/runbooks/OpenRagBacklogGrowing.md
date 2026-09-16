@@ -1,10 +1,10 @@
 # OpenRagBacklogGrowing
 
-**Severity:** warning · **Fires after:** 15 min
+**Severity:** warning · **Fires after:** 25 min of continuous growth
 
 ```
-deriv(openrag_ingest_tasks{state="QUEUED"}[30m]) > 0
-and openrag_ingest_tasks{state="QUEUED"} > 50
+openrag_ingest_tasks{state="QUEUED"} > 50
+and deriv(openrag_ingest_tasks{state="QUEUED"}[5m]) > 0
 ```
 
 ## What it means
@@ -15,6 +15,21 @@ healthy pipeline. This is arrival rate exceeding capacity.
 
 **This is capacity, not a fault.** If nothing is completing at all, that is
 `OpenRagIngestStalled` — check whether it is also firing before treating this as scale.
+
+## It will fire on a large enough bulk import, and that is not fixable here
+
+`for: 25m` outlasts the arrival phase of a typical batch, so an import that lands and
+drains does not alert. **An import whose queue climbs for more than 25 minutes will.**
+
+No threshold on these two series can prevent that: during a 2,000-document upload the
+queue genuinely is growing and capacity genuinely is below arrival rate, so "a batch just
+landed" and "we are underwater" are literally the same shape. The signal that separates
+them is the **age of the oldest pending item** — a healthy batch consumes promptly from a
+deep queue, a collapsed one lets the oldest item age without bound — and the in-process
+queue does not expose it.
+
+If you know a bulk import is running, silence this for the duration rather than widening
+the threshold.
 
 ## First checks
 
@@ -45,5 +60,6 @@ be that the batch will take as long as it takes.
 
 ## Verify recovery
 
-`deriv(...)` goes negative — the queue is draining. The absolute depth may stay high for
+`deriv(...)` goes negative within about five minutes of the queue turning — it is a
+short window on purpose, so it tracks the turn rather than lagging behind it. The absolute depth may stay high for
 a while; that is fine as long as the trend has turned.

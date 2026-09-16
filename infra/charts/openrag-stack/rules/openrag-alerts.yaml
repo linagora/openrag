@@ -101,17 +101,39 @@ groups:
         # Depth is on the left because `and` takes its left-hand side's value,
         # which is what puts the queue depth in the annotation rather than the
         # derivative's per-second slope. Filtering is symmetric either way.
+        #
+        # The derivative window is deliberately SHORT. A 30m window lags: while
+        # the queue is actively draining it still contains the earlier rise, so
+        # the slope stays positive and the alert fires on a bulk import that is
+        # clearing normally — measured, the 30m/15m pair false-alarmed on every
+        # burst tested. At 5m the slope turns with the queue.
+        #
+        # `for` is then the only thing separating "growing" from "grew, now
+        # draining", so it is long: 25m outlasts the arrival phase of the bulk
+        # imports measured. A slower import whose queue climbs for longer than
+        # that will still trip this, and no threshold on these two series can
+        # prevent it — "2000 documents just arrived" and "we are underwater"
+        # are the same shape. The signal that separates them is the age of the
+        # oldest pending item, which this deployment cannot measure.
+        #
+        # END OF LIFE: this rule reads the in-process queue
+        # (TaskStateManager). Once ingestion sits behind a broker the backlog
+        # lives there, openrag_ingest_tasks collapses to "work already pulled"
+        # — bounded by prefetch, near-constant however deep the real queue is —
+        # and this rule stops measuring anything. Retire it then in favour of
+        # broker-native signals (queue depth, consumer lag, oldest unacked
+        # message age); do not retune it.
         expr: |
           openrag_ingest_tasks{state="QUEUED"} > 50
           and
-          deriv(openrag_ingest_tasks{state="QUEUED"}[30m]) > 0
-        for: 15m
+          deriv(openrag_ingest_tasks{state="QUEUED"}[5m]) > 0
+        for: 25m
         labels:
           severity: warning
         annotations:
           summary: "Indexing backlog is growing faster than it drains"
           description: >-
-            The QUEUED task count has trended upward for 30 minutes and now stands at
+            The QUEUED task count has risen continuously for 25 minutes and now stands at
             {{ $value }}. Ingestion capacity is below the arrival rate.
           runbook_url: "https://github.com/linagora/openrag/blob/main/docs/deployment/runbooks/OpenRagBacklogGrowing.md"
 
