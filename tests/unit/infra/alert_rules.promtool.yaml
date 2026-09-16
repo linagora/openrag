@@ -29,27 +29,30 @@ evaluation_interval: 1m
 tests:
   # ── OpenRagIngestStalled ────────────────────────────────────────────────
   - interval: 1m
-    name: work is queued and no parse completes — fires past 15m idle plus for 5m
+    name: work is queued and no parse completes — fires past 12m idle plus for 2m
     input_series:
       - series: 'openrag_ingest_tasks{state="QUEUED"}'
         values: "3+0x40"
       - series: 'openrag_ingest_last_parse_completion_timestamp_seconds{pool="marker"}'
         values: "0+0x40"
     alert_rule_test:
+      # Below the 12m threshold: the condition is not yet true.
       - eval_time: 10m
         alertname: OpenRagIngestStalled
         exp_alerts: []
-      - eval_time: 18m
+      # Condition true since 13m, but `for: 2m` is not satisfied — pending, and
+      # promtool counts only firing alerts, so this must still be empty.
+      - eval_time: 14m
         alertname: OpenRagIngestStalled
         exp_alerts: []
-      - eval_time: 22m
+      - eval_time: 16m
         alertname: OpenRagIngestStalled
         exp_alerts:
           - exp_labels:
               severity: critical
               state: QUEUED
             exp_annotations:
-              description: "3 task(s) are QUEUED and no parser pool has completed a parse for over 15 minutes. Uploads are being accepted and never indexed."
+              description: "3 task(s) are QUEUED and no parser pool has completed a parse for over 12 minutes. Uploads are being accepted and never indexed."
               runbook_url: "https://github.com/linagora/openrag/blob/main/docs/deployment/runbooks/OpenRagIngestStalled.md"
               summary: "Ingestion is stalled — documents are queued and nothing is completing"
 

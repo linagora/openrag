@@ -1,21 +1,25 @@
 # OpenRagIngestStalled
 
-**Severity:** critical · **Fires after:** ~20 min (15 min idle + `for: 5m`)
+**Severity:** critical · **Fires after:** ~14 min (12 min idle + `for: 2m`)
 
 ```
 (openrag_ingest_tasks{state="QUEUED"} > 0)
 and on()
-(time() - max(openrag_ingest_last_parse_completion_timestamp_seconds) > 900)
+(time() - max(openrag_ingest_last_parse_completion_timestamp_seconds) > 720)
 ```
 
 ## What it means
 
-Documents are queued and **no parser pool has completed a parse for 15 minutes**.
+Documents are queued and **no parser pool has completed a parse for 12 minutes**.
 Uploads are still being accepted and acknowledged; none of them are being indexed. This
 is user-visible as "I uploaded it and it never appeared in search".
 
 Distinguish from `OpenRagBacklogGrowing`, which means the pipeline *is* working but too
 slowly. This alert means it is not working at all.
+
+The precise latency depends on `evaluation_interval`: the condition can only be seen
+on the first evaluation past 12 minutes, so the shipped Compose config (15s) fires at
+~14m15s, while a 1-minute interval fires at 15m.
 
 ## First checks
 

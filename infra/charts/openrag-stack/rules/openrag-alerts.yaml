@@ -36,7 +36,7 @@ groups:
   - name: openrag-ingestion
     rules:
       - alert: OpenRagIngestStalled
-        # Work is waiting and nothing has finished parsing for 15 minutes.
+        # Work is waiting and nothing has finished parsing for 12 minutes.
         # The gauge is a completion *timestamp*, not a seconds-since counter, so
         # the age is computed here at evaluation time — a seconds-since gauge
         # reads 0 when nothing updates it, which is exactly the wedged-pool
@@ -49,15 +49,15 @@ groups:
         expr: |
           (openrag_ingest_tasks{state="QUEUED"} > 0)
           and on()
-          (time() - max(openrag_ingest_last_parse_completion_timestamp_seconds) > 900)
-        for: 5m
+          (time() - max(openrag_ingest_last_parse_completion_timestamp_seconds) > 720)
+        for: 2m
         labels:
           severity: critical
         annotations:
           summary: "Ingestion is stalled — documents are queued and nothing is completing"
           description: >-
             {{ $value }} task(s) are QUEUED and no parser pool has completed a parse
-            for over 15 minutes. Uploads are being accepted and never indexed.
+            for over 12 minutes. Uploads are being accepted and never indexed.
           runbook_url: "https://github.com/linagora/openrag/blob/main/docs/deployment/runbooks/OpenRagIngestStalled.md"
 
       - alert: OpenRagIngestFailureRate
