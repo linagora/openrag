@@ -74,6 +74,117 @@ def test_safe_public_value_redacts_secrets_and_content():
     }
 
 
+def test_safe_public_value_projects_nested_contextualization_by_container():
+    value = safe_public_value(
+        {
+            "contextualization": {
+                "subqueries": [
+                    {
+                        "query": "generated query",
+                        "temporal_filters": [
+                            {
+                                "operator": ">=",
+                                "value": "2026-01-01T00:00:00+00:00",
+                                "content": "private document text",
+                            }
+                        ],
+                        "prompt": {"query": "private prompt"},
+                        "embedding": [0.1, 0.2],
+                    }
+                ],
+                "prompt": {
+                    "name": "contextualization",
+                    "source": "named",
+                    "content_hash": "hash",
+                    "query": "private prompt",
+                    "original_query": "private user message copied into prompt",
+                    "embedding": [0.3, 0.4],
+                },
+            }
+        }
+    )
+
+    assert value == {
+        "contextualization": {
+            "subqueries": [
+                {
+                    "query": "generated query",
+                    "temporal_filters": [
+                        {"operator": ">=", "value": "2026-01-01T00:00:00+00:00"}
+                    ],
+                }
+            ],
+            "prompt": {
+                "name": "contextualization",
+                "source": "named",
+                "content_hash": "hash",
+            },
+        }
+    }
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        {"prompt": {"content_hash": "hash", "query": "private prompt"}},
+        {"subqueries": [{"query": "public query", "embedding": [0.1]}]},
+    ],
+)
+def test_contextualization_nested_models_reject_non_contract_fields(values):
+    with pytest.raises(ValidationError):
+        ContextualizationTrace(**values)
+
+
+def test_trace_error_messages_are_replaced_with_safe_metadata():
+    sensitive = (
+        "Authorization: Bearer bearer-secret api_key=key-secret "
+        "https://user:password@example.test/path?token=url-secret "
+        "PRIVATE DOCUMENT EXCERPT"
+    )
+    builder = RetrievalTraceBuilder("request", "query")
+    builder.record_stage("final", status="error", candidates=[], error=sensitive)
+    builder.record_error("final", RuntimeError(sensitive))
+    builder.contextualization = ContextualizationTrace(
+        error=TraceError(stage="contextualization", kind="parse_error", message=sensitive)
+    )
+
+    trace = builder.finish(configuration_fingerprint="fingerprint")
+
+    final_stage = next(stage for stage in trace["stages"] if stage["name"] == "final")
+    assert final_stage["error"] == "redacted"
+    assert trace["errors"] == [
+        {"stage": "final", "message": "redacted", "kind": "RuntimeError"}
+    ]
+    assert trace["contextualization"]["error"] == {
+        "stage": "contextualization",
+        "message": "redacted",
+        "kind": "parse_error",
+    }
+    serialized = json.dumps(trace)
+    for prohibited in (
+        "Authorization",
+        "Bearer",
+        "bearer-secret",
+        "api_key",
+        "key-secret",
+        "user:password",
+        "url-secret",
+        "PRIVATE DOCUMENT EXCERPT",
+    ):
+        assert prohibited not in serialized
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "expected"),
+    [
+        ("/v1?api_key=relative-secret#fragment", "/v1"),
+        ("//user:password@example.test/path?token=network-secret#fragment", "//example.test/path"),
+    ],
+)
+def test_safe_public_value_sanitizes_relative_endpoint_urls(endpoint, expected):
+    assert safe_public_value({"endpoint": endpoint}) == {"endpoint": expected}
+
+
 def test_canonical_fingerprint_is_order_independent():
     expected = hashlib.sha256(b'{"a":1,"b":2}').hexdigest()
     assert canonical_fingerprint({"b": 2, "a": 1}) == expected
@@ -129,7 +240,7 @@ def test_trace_models_forbid_unknown_fields(model, values):
         model(**values, private_content="must not be accepted")
 
 
-def test_trace_errors_are_bounded_and_unvisited_stages_are_explicit():
+def test_trace_errors_are_safe_and_unvisited_stages_are_explicit():
     builder = RetrievalTraceBuilder("request", "query")
     builder.record_error("dense_before_threshold", RuntimeError("x" * 600))
 
@@ -138,7 +249,11 @@ def test_trace_errors_are_bounded_and_unvisited_stages_are_explicit():
     assert trace["schema_version"] == TRACE_SCHEMA_VERSION == 1
     assert [stage["name"] for stage in trace["stages"]] == list(TRACE_STAGE_NAMES)
     assert {stage["status"] for stage in trace["stages"]} == {"not_run"}
-    assert len(trace["errors"][0]["message"]) == 500
+    assert trace["errors"][0] == {
+        "stage": "dense_before_threshold",
+        "message": "redacted",
+        "kind": "RuntimeError",
+    }
     assert TRACE_STATUSES == ("complete", "not_run", "unavailable", "error")
     assert REMOVAL_REASONS == (
         "dense_threshold",

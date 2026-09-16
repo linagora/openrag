@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+REDACTED_ERROR_MESSAGE = "redacted"
 
 TraceStageName = Literal[
     "original_query",
@@ -64,6 +66,11 @@ class TraceStage(_TraceModel):
     candidates: list[TraceCandidate] = Field(default_factory=list)
     error: str | None = Field(default=None, max_length=500)
 
+    @field_validator("error", mode="before")
+    @classmethod
+    def redact_error(cls, value: object) -> str | None:
+        return None if value is None else REDACTED_ERROR_MESSAGE
+
 
 class TraceError(_TraceModel):
     """A bounded error that made retrieval telemetry partial."""
@@ -72,12 +79,39 @@ class TraceError(_TraceModel):
     message: str = Field(max_length=500)
     kind: str | None = None
 
+    @field_validator("message", mode="before")
+    @classmethod
+    def redact_message(cls, value: object) -> str:
+        return REDACTED_ERROR_MESSAGE
+
+
+class TemporalFilterTrace(_TraceModel):
+    """Public temporal predicate generated during contextualization."""
+
+    operator: str
+    value: str
+
+
+class ContextualizedSubqueryTrace(_TraceModel):
+    """One generated query and its public temporal predicates."""
+
+    query: str
+    temporal_filters: list[TemporalFilterTrace] = Field(default_factory=list)
+
+
+class PromptTrace(_TraceModel):
+    """Public prompt identity without prompt content."""
+
+    content_hash: str
+    name: str | None = None
+    source: str | None = None
+
 
 class ContextualizationTrace(_TraceModel):
     """Public query-contextualization decisions attached by chat tracing."""
 
     original_query: str | None = None
-    subqueries: list[dict[str, object]] = Field(default_factory=list)
+    subqueries: list[ContextualizedSubqueryTrace] = Field(default_factory=list)
     intent: str | None = None
     requires_retrieval: bool | None = None
     fallback_used: bool = False
@@ -85,4 +119,4 @@ class ContextualizationTrace(_TraceModel):
     duration_seconds: float | None = Field(default=None, ge=0)
     endpoint: str | None = None
     model: str | None = None
-    prompt: dict[str, object] | None = None
+    prompt: PromptTrace | None = None

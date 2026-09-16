@@ -13,6 +13,7 @@ from urllib.parse import urlsplit, urlunsplit
 from core.models.chunk import Chunk
 from core.models.retrieval_result import ScoredChunk
 from core.models.retrieval_trace import (
+    REDACTED_ERROR_MESSAGE,
     ContextualizationTrace,
     TraceCandidate,
     TraceError,
@@ -45,7 +46,7 @@ REMOVAL_REASONS = (
     "temporal_filter",
 )
 
-_PUBLIC_KEYS = frozenset(
+_ROOT_PUBLIC_KEYS = frozenset(
     {
         "schema_version",
         "request_id",
@@ -91,7 +92,6 @@ _PUBLIC_KEYS = frozenset(
         "fused",
         "reranker",
         "original_query",
-        "embedding",
         "dense_search",
         "sparse_search",
         "fusion",
@@ -99,45 +99,127 @@ _PUBLIC_KEYS = frozenset(
         "total",
     }
 ).union(TRACE_STAGE_NAMES)
+_PUBLIC_KEYS_BY_CONTEXT = {
+    "root": _ROOT_PUBLIC_KEYS,
+    "contextualization": frozenset(
+        {
+            "original_query",
+            "subqueries",
+            "intent",
+            "requires_retrieval",
+            "fallback_used",
+            "error",
+            "duration_seconds",
+            "endpoint",
+            "model",
+            "prompt",
+        }
+    ),
+    "prompt": frozenset({"content_hash", "name", "source"}),
+    "subquery": frozenset({"query", "temporal_filters"}),
+    "temporal_filter": frozenset({"operator", "value"}),
+    "stage": frozenset({"name", "status", "duration_seconds", "candidate_count", "candidates", "error"}),
+    "candidate": frozenset({"id", "document_id", "rank", "scores", "duplicate_of", "removal_reason"}),
+    "scores": frozenset({"dense", "sparse", "fused", "reranker"}),
+    "removal_reason": frozenset({"code", "explanation"}),
+    "trace_error": frozenset({"stage", "message", "kind"}),
+    "timings": frozenset(
+        {
+            "contextualization",
+            "embedding",
+            "dense_search",
+            "sparse_search",
+            "fusion",
+            "reranking",
+            "total",
+        }
+    ).union(TRACE_STAGE_NAMES),
+    "comparisons": frozenset({"original_query"}),
+    "comparison": frozenset({"status", "stages", "timings", "errors", "configuration_fingerprint"}),
+    "empty": frozenset(),
+}
+_CHILD_CONTEXTS = {
+    "contextualization": "contextualization",
+    "prompt": "prompt",
+    "subqueries": "subquery",
+    "temporal_filters": "temporal_filter",
+    "stages": "stage",
+    "candidates": "candidate",
+    "scores": "scores",
+    "removal_reason": "removal_reason",
+    "errors": "trace_error",
+    "error": "trace_error",
+    "timings": "timings",
+    "comparisons": "comparisons",
+}
 _OMITTED = object()
 
 
 def _public_endpoint(value: str) -> str:
     """Remove URL credentials, query parameters, and fragments."""
-    parts = urlsplit(value)
-    if not parts.scheme or not parts.netloc:
-        return value
-    hostname = parts.hostname or ""
-    if ":" in hostname:
-        hostname = f"[{hostname}]"
     try:
-        port = f":{parts.port}" if parts.port is not None else ""
+        parts = urlsplit(value)
     except ValueError:
-        port = ""
-    return urlunsplit((parts.scheme, f"{hostname}{port}", parts.path, "", ""))
+        return value.split("?", 1)[0].split("#", 1)[0]
+    netloc = ""
+    if parts.netloc:
+        hostname = parts.hostname or ""
+        if ":" in hostname:
+            hostname = f"[{hostname}]"
+        try:
+            port = f":{parts.port}" if parts.port is not None else ""
+        except ValueError:
+            port = ""
+        netloc = f"{hostname}{port}"
+    return urlunsplit((parts.scheme, netloc, parts.path, "", ""))
 
 
-def _safe_public_value(value: object, *, key: str | None = None) -> object:
+def _child_context(context: str, key: str) -> str:
+    if context == "comparisons" and key == "original_query":
+        return "comparison"
+    return _CHILD_CONTEXTS.get(key, "empty")
+
+
+def _safe_public_value(value: object, *, context: str = "root", key: str | None = None) -> object:
+    if isinstance(value, ContextualizationTrace):
+        context = "contextualization"
+    elif isinstance(value, TraceStage):
+        context = "stage"
+    elif isinstance(value, TraceCandidate):
+        context = "candidate"
+    elif isinstance(value, TraceError):
+        context = "trace_error"
     if isinstance(value, BaseModel):
         value = value.model_dump(mode="json")
     if isinstance(value, Mapping):
         public: dict[str, object] = {}
+        allowed_keys = _PUBLIC_KEYS_BY_CONTEXT[context]
         for raw_key, raw_value in value.items():
-            if not isinstance(raw_key, str) or raw_key not in _PUBLIC_KEYS:
+            if not isinstance(raw_key, str) or raw_key not in allowed_keys:
                 continue
-            safe_value = _safe_public_value(raw_value, key=raw_key)
+            safe_value = _safe_public_value(
+                raw_value,
+                context=_child_context(context, raw_key),
+                key=raw_key,
+            )
             if safe_value is not _OMITTED:
                 public[raw_key] = safe_value
         return public
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
-        return [safe for item in value if (safe := _safe_public_value(item)) is not _OMITTED]
+        return [
+            safe
+            for item in value
+            if (safe := _safe_public_value(item, context=context)) is not _OMITTED
+        ]
     if isinstance(value, Enum):
-        return _safe_public_value(value.value, key=key)
+        return _safe_public_value(value.value, context=context, key=key)
     if isinstance(value, (datetime, date)):
         return value.isoformat()
     if value is None or isinstance(value, (bool, int, float, str)):
         if key == "endpoint" and isinstance(value, str):
             return _public_endpoint(value)
+        if key in {"error", "message"} and isinstance(value, str):
+            return REDACTED_ERROR_MESSAGE
         return value
     return _OMITTED
 
@@ -204,11 +286,12 @@ class RetrievalTraceBuilder:
             duration_seconds=duration_seconds,
             candidate_count=len(candidates),
             candidates=list(candidates),
-            error=error[:500] if error is not None else None,
+            error=REDACTED_ERROR_MESSAGE if error is not None else None,
         )
 
     def record_error(self, stage: str, error: Exception | str) -> None:
-        self.errors.append(TraceError(stage=stage, message=str(error)[:500]))
+        kind = type(error).__name__ if isinstance(error, Exception) else "Error"
+        self.errors.append(TraceError(stage=stage, message=REDACTED_ERROR_MESSAGE, kind=kind))
 
     def finish(self, *, configuration_fingerprint: str) -> dict[str, object]:
         trace: dict[str, Any] = {
