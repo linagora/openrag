@@ -186,8 +186,16 @@ your setup; see [Grafana HTTP dashboard](/openrag/documentation/grafana_http_das
 ## Limitations
 
 - Metrics are per process. With `ENABLE_RAY_SERVE=true` and several replicas,
-  each replica answers `/metrics` with its own counters. Keep the default
+  each replica answers `/metrics` with its own counters behind one
+  load-balancing proxy, so a scrape returns a random replica. Keep the default
   single uvicorn worker, or scrape each replica individually.
+- The Helm discovery (`openrag.metrics.*`) covers the uvicorn topology only.
+  With `ray.enabled=true` and `ENABLE_RAY_SERVE=true` the API is served by the
+  RayCluster head Service, not by the `openrag` Service on port 8080: the
+  chart then renders no `prometheus.io/*` annotations, and enabling the
+  ServiceMonitor fails the install with a message saying so. Scraping Ray
+  Serve replicas needs a per-replica target (a PodMonitor on the Ray pods with
+  a dedicated metrics port) and is not implemented yet.
 - Counters reset when the API restarts; use `rate()` and `increase()` rather
   than raw values.
 - Indexing, inference and vector-store metrics are not exposed yet; only the
