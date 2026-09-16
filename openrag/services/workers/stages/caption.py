@@ -70,10 +70,9 @@ async def _caption_document(
     )
 
     async def caption_one(image: ImageBlock) -> str:
-        async with limiter:
-            # Bound the fan-out cluster-wide so every indexer actor shares one VLM budget.
-            async with get_vlm_semaphore():
-                return await vlm.caption_image(image.image_bytes, prompt=prompt)
+        # Bound the fan-out cluster-wide so every indexer actor shares one VLM budget.
+        async with limiter, get_vlm_semaphore():
+            return await vlm.caption_image(image.image_bytes, prompt=prompt)
 
     # tqdm.gather is built on as_completed, so a failing child does not clean up
     # sibling tasks for us. Drain them explicitly so failed documents do not keep
