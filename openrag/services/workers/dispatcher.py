@@ -13,6 +13,8 @@ from core.models.catalog import (
     INDEXING_CONTENT_CLAIM_TOKEN_PREFIX,
     TASK_CREATED_AT_METADATA_KEY,
     TASK_FINISHED_AT_METADATA_KEY,
+    DocumentStatus,
+    IndexationJob,
 )
 from core.utils.consts import is_internal_metadata_key, strip_internal_metadata
 from core.utils.exceptions import ConflictError, mark_indexing_worker_may_be_running
@@ -60,6 +62,7 @@ class WorkerDispatcher(IndexingDispatcher):
         document_repo: Any,
         workspace_repo: Any,
         collection: str,
+        job_repo: Any = None,
         timeout: float = DEFAULT_TIMEOUT,
     ) -> None:
         self._pool = pool
@@ -68,6 +71,7 @@ class WorkerDispatcher(IndexingDispatcher):
         self._vector_store = vector_store
         self._document_repo = document_repo
         self._workspace_repo = workspace_repo
+        self._job_repo = job_repo
         self._collection = collection
         self._timeout = timeout
 
@@ -308,6 +312,14 @@ class WorkerDispatcher(IndexingDispatcher):
                 f"Task {task_id} was rejected because file {file_id!r} in partition {partition!r} is being deleted"
             )
 
+        await self._record_job(
+            task_id,
+            status=DocumentStatus.QUEUED,
+            partition=partition,
+            file_id=file_id,
+            user_id=task_details["user_id"],
+        )
+
         task: Any | None = None
         submission_started = False
         try:
@@ -361,7 +373,21 @@ class WorkerDispatcher(IndexingDispatcher):
                 if not submission_outcome_unknown:
                     await self._record_finished_at(task_id, task_details)
                     if mark_submit_failed:
-                        await self._mark_submit_failed(task_id, traceback.format_exc())
+                        tb = traceback.format_exc()
+                        await self._mark_submit_failed(task_id, tb)
+                        # The completion tracker never saw this task, so nothing
+                        # else settles its row: it would stay QUEUED until a
+                        # restart reconciled it, long after the actor forgot the
+                        # failure.
+                        await self._record_job(
+                            task_id,
+                            status=DocumentStatus.FAILED,
+                            partition=partition,
+                            file_id=file_id,
+                            user_id=task_details["user_id"],
+                            error=tb,
+                            completed_at=datetime.now(UTC),
+                        )
             finally:
                 if claimed_content and not submission_outcome_unknown and (task is None or mark_submit_failed):
                     await self._document_repo.release_content_sha256_claim(
@@ -620,11 +646,13 @@ class WorkerDispatcher(IndexingDispatcher):
                 return
 
             public_metadata = strip_internal_metadata(metadata)
+            indexed_at = datetime.now(UTC)
             entities = []
             for row in rows:
                 entity = strip_internal_metadata(row)
                 entity.pop("_id", None)
                 entity.update(public_metadata)
+                entity["indexed_at"] = indexed_at.isoformat()
                 entities.append(entity)
 
             provenance: dict[str, Any] = {}
@@ -635,6 +663,7 @@ class WorkerDispatcher(IndexingDispatcher):
 
             file_metadata = self._file_metadata_from_chunk(rows[0])
             file_metadata.update(public_metadata)
+            file_metadata["indexed_at"] = indexed_at.isoformat()
             await self._document_repo.add_file_to_partition(
                 file_id=target_file_id,
                 partition=target_partition,
@@ -643,6 +672,7 @@ class WorkerDispatcher(IndexingDispatcher):
                 relationship_id=file_metadata.get("relationship_id"),
                 parent_id=file_metadata.get("parent_id"),
                 content_sha256=content_sha256,
+                indexed_at=indexed_at,
                 **({"indexation_config": provenance} if provenance else {}),
             )
         finally:
@@ -717,17 +747,73 @@ class WorkerDispatcher(IndexingDispatcher):
             and not is_vector_field_key(k)
         }
 
+    async def _record_job(
+        self,
+        task_id: str,
+        *,
+        status: DocumentStatus,
+        partition: str,
+        file_id: str | None = None,
+        user_id: int | None = None,
+        error: str | None = None,
+        started_at: datetime | None = None,
+        completed_at: datetime | None = None,
+    ) -> None:
+        """Mirror a task transition to Postgres. History must never fail indexing."""
+        if self._job_repo is None:
+            return
+        try:
+            await self._job_repo.upsert_job(
+                IndexationJob(
+                    id=task_id,
+                    status=status,
+                    partition=partition,
+                    file_id=file_id,
+                    user_id=user_id,
+                    error=error,
+                    started_at=started_at,
+                    completed_at=completed_at,
+                )
+            )
+        except Exception as exc:
+            logger.warning("Failed to record indexing job", task_id=task_id, error=str(exc))
+
+    async def _durable_job(self, task_id: str) -> IndexationJob | None:
+        """Read the durable row, or ``None`` if it cannot be read.
+
+        Reads are best-effort for the same reason writes are: this is a
+        fallback for tasks the actor has already forgotten, and a status route
+        that 500s during a Postgres outage is worse than one that reports what
+        the actor still knows.
+        """
+        if self._job_repo is None:
+            return None
+        try:
+            return await self._job_repo.get_job(task_id)
+        except Exception as exc:
+            logger.warning("Failed to read durable job", task_id=task_id, error=str(exc))
+            return None
+
     async def get_task_state(self, task_id: str) -> str | None:
-        return await self._call_method(
+        state = await self._call_method(
             lambda: self._tsm.get_state.remote(task_id),
             task_description=f"get_state({task_id})",
         )
+        if state is not None:
+            return state
+        # The actor forgets settled tasks; the durable record outlives it.
+        job = await self._durable_job(task_id)
+        return job.status.value if job is not None else None
 
     async def get_task_error(self, task_id: str) -> str | None:
-        return await self._call_method(
+        error = await self._call_method(
             lambda: self._tsm.get_error.remote(task_id),
             task_description=f"get_error({task_id})",
         )
+        if error is not None:
+            return error
+        job = await self._durable_job(task_id)
+        return job.error if job is not None else None
 
     async def cancel_task(self, task_id: str) -> bool:
         import ray
@@ -765,6 +851,7 @@ def from_ray_namespace(
     document_repo: Any,
     workspace_repo: Any,
     collection: str,
+    job_repo: Any = None,
 ) -> WorkerDispatcher:
     import ray
     from services.workers.indexer_pool import build_indexer_pool
@@ -777,6 +864,7 @@ def from_ray_namespace(
         document_repo=document_repo,
         workspace_repo=workspace_repo,
         collection=collection,
+        job_repo=job_repo,
         timeout=timeout,
     )
 

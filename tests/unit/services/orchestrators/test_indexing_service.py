@@ -756,13 +756,14 @@ async def test_update_metadata_drops_protected_keys():
             "text": "spoofed",
             "_id": "x",
             "file_count": 42,
+            "indexed_at": "2099-01-01T00:00:00+00:00",
         },
         "p1",
         {"id": 1},
     )
     _, md, _, _ = disp.updated[0]
     assert md == {"author": "bob", "file_id": "f1"}
-    for key in ("source", "created_by", "file_size", "vector", "text", "_id", "file_count"):
+    for key in ("source", "created_by", "file_size", "vector", "text", "_id", "file_count", "indexed_at"):
         assert key not in md
 
 

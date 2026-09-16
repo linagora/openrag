@@ -354,9 +354,15 @@ to an internal address.
 `indexer_pool.py` (v3 → v4 for `callback_url`/`callback_token`; v5 added worker-ref-registration wait
 and TSM `set_state` fencing; v7 folds in a second, independent v6 lineage — STT-preset-aware registry
 hydration plus the `_active_indexation_config` contextvar — that landed on `develop` under the same
-version string while this branch's own v6 was in flight). Without the bump, new replicas attach to the
-previous release's actors and every submit raises `TypeError`. Old generations are retired with
-`services/workers/retire_indexer_generation.py`.
+version string while this branch's own v6 was in flight; v8 (develop) added `max_restarts` on the
+dispatcher and workers, since Ray only applies actor options when it creates the actor and
+`get_if_exists=True` would otherwise silently keep the previous release's restart policy (#846); v8
+(this branch, independently) covers `TaskStateManager` bounding its in-memory retention and being
+replaced during bootstrap when an older actor lacks that support — that replacement changes the
+`TaskStateManager` actor id, which strands the dispatcher's and workers' cached handles to it unless
+the whole generation rolls together; v9 folds in both independent v8 lineages). Without the bump, new
+replicas attach to the previous release's actors and every submit raises `TypeError`. Old generations
+are retired with `services/workers/retire_indexer_generation.py`.
 
 **Key files:**
 - `openrag/services/workers/indexing_callback.py` — `send_indexing_callback()` (was `webhook.py`; the
