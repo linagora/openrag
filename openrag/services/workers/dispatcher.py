@@ -21,7 +21,7 @@ from core.utils.exceptions import ConflictError, mark_indexing_worker_may_be_run
 from core.utils.logging import get_logger
 from core.vector_stores.vector_field import is_vector_field_key
 from ray.exceptions import TaskCancelledError
-from services.workers.pipeline_builder import embedder_provenance
+from services.workers.embedder_provenance import embedder_provenance
 from services.workers.ray_utils import call_ray_actor_with_timeout, retry_idempotent_ray_actor_method
 from services.workers.stages.store import INDEXING_TASK_ID_METADATA_KEY
 from services.workers.task_cancellation import cancel_active_indexing_tasks
