@@ -489,6 +489,12 @@ openrag:
   # the one networkPolicy.externalPorts opens to the Ingress controller, so an
   # open /metrics is reachable wherever the API is. See
   # docs/documentation/prometheus_metrics.md.
+  #
+  # Uvicorn topology only (ray.enabled=false, the default). With Ray Serve
+  # (ray.enabled=true + ENABLE_RAY_SERVE=true, as in values-linagora.yaml) the
+  # API listens on the RayCluster head Service, not on this Deployment's 8080,
+  # and every Serve replica has its own registry: the annotations below are
+  # then not rendered and enabling the ServiceMonitor fails the install.
   metrics:
     # prometheus.io/* pod annotations for annotation-based discovery (plain
     # Prometheus with a kubernetes_sd relabel config). The scrape job behind
