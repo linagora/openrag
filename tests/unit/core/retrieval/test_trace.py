@@ -185,6 +185,12 @@ def test_safe_public_value_sanitizes_relative_endpoint_urls(endpoint, expected):
     assert safe_public_value({"endpoint": endpoint}) == {"endpoint": expected}
 
 
+def test_safe_public_value_fails_closed_for_malformed_endpoint():
+    endpoint = "https://user:password@[invalid/path"
+
+    assert safe_public_value({"endpoint": endpoint}) == {"endpoint": "redacted"}
+
+
 def test_canonical_fingerprint_is_order_independent():
     expected = hashlib.sha256(b'{"a":1,"b":2}').hexdigest()
     assert canonical_fingerprint({"b": 2, "a": 1}) == expected

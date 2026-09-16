@@ -160,7 +160,7 @@ def _public_endpoint(value: str) -> str:
     try:
         parts = urlsplit(value)
     except ValueError:
-        return value.split("?", 1)[0].split("#", 1)[0]
+        return "redacted"
     netloc = ""
     if parts.netloc:
         hostname = parts.hostname or ""
