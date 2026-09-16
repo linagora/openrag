@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import pytest
+from core.models.chunk import Chunk
 from core.retrieval.rrf import rrf_reranking
+from core.retrieval.trace import RetrievalTraceBuilder
 
 
 def test_rrf_empty_returns_empty():
@@ -47,3 +49,72 @@ def test_rrf_smaller_k_emphasizes_top_ranks():
 def test_rrf_rejects_negative_k():
     with pytest.raises(ValueError, match="non-negative"):
         rrf_reranking([[{"id": "a"}], [{"id": "b"}]], key_fn=lambda x: x["id"], k=-1)
+
+
+def test_rrf_trace_retains_duplicate_membership_and_fused_score():
+    first_a = Chunk(id="a", text="first-a")
+    duplicate_a = Chunk(id="a", text="duplicate-a")
+    b = Chunk(id="b", text="b")
+    c = Chunk(id="c", text="c")
+    trace = RetrievalTraceBuilder("req-1", "q")
+
+    fused = rrf_reranking(
+        [[first_a, b], [c, duplicate_a]],
+        key_fn=lambda chunk: chunk.id,
+        trace=trace,
+    )
+
+    assert fused == [first_a, c, b]
+    candidates = trace.stages["hybrid_fused"].candidates
+    assert [(candidate.id, candidate.rank) for candidate in candidates] == [
+        ("a", 1),
+        ("a", 1),
+        ("c", 2),
+        ("b", 3),
+    ]
+    duplicate = next(candidate for candidate in candidates if candidate.duplicate_of is not None)
+    assert duplicate.duplicate_of == "a"
+    assert duplicate.removal_reason.code == "duplicate"
+    assert duplicate.scores["fused"] == pytest.approx(1 / 61 + 1 / 62)
+
+
+def test_rrf_trace_marks_public_cutoff_without_changing_fused_objects():
+    a, b, c = (Chunk(id=cid, text=cid) for cid in ("a", "b", "c"))
+    trace = RetrievalTraceBuilder("req-1", "q")
+
+    fused = rrf_reranking(
+        [[a, b], [b, c]],
+        key_fn=lambda chunk: chunk.id,
+        top_k=2,
+        trace=trace,
+    )
+
+    assert fused == [b, a]
+    canonical_c = next(
+        candidate
+        for candidate in trace.stages["hybrid_fused"].candidates
+        if candidate.id == "c" and candidate.duplicate_of is None
+    )
+    assert canonical_c.removal_reason.code == "final_top_n"
+
+
+def test_rrf_single_list_trace_records_each_duplicate_once():
+    first_a = Chunk(id="a", text="first-a")
+    duplicate_a = Chunk(id="a", text="duplicate-a")
+    trace = RetrievalTraceBuilder("req-1", "q")
+
+    result = rrf_reranking(
+        [[first_a, duplicate_a]],
+        key_fn=lambda chunk: chunk.id,
+        trace=trace,
+    )
+
+    assert result == [first_a, duplicate_a]
+    candidates = trace.stages["hybrid_fused"].candidates
+    assert [(candidate.id, candidate.rank) for candidate in candidates] == [("a", 1), ("a", 2)]
+    assert candidates[0].duplicate_of is None
+    assert candidates[1].duplicate_of == "a"
+    assert candidates[1].removal_reason.code == "duplicate"
+    expected_score = 1 / 61 + 1 / 62
+    assert candidates[0].scores["fused"] == pytest.approx(expected_score)
+    assert candidates[1].scores["fused"] == pytest.approx(expected_score)

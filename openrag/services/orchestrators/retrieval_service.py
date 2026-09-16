@@ -535,9 +535,11 @@ class RetrievalService:
         query: Query,
         top_k: int | None = None,
         filter_params: dict | None = None,
+        trace: RetrievalTraceBuilder | None = None,
     ) -> list[Chunk]:
         """Single ``Query`` through retrieve → expand → rerank."""
         groups = await self._pipeline_groups_for_partitions(partitions)
+        pipeline_trace = trace if len(groups) == 1 else None
         ranked_lists = await self._gather_partition_groups(
             [
                 (
@@ -547,12 +549,17 @@ class RetrievalService:
                         query=query,
                         top_k=top_k if top_k is not None else default_top_k,
                         filter_params=filter_params,
+                        trace=pipeline_trace,
                     ),
                 )
                 for partition_group, pipeline, default_top_k in groups
             ]
         )
-        return ranked_lists[0] if len(ranked_lists) == 1 else self.fuse(ranked_lists, top_k=top_k)
+        return (
+            ranked_lists[0]
+            if len(ranked_lists) == 1
+            else self.fuse(ranked_lists, top_k=top_k, trace=trace)
+        )
 
     async def retrieve_multi(
         self,
@@ -561,9 +568,11 @@ class RetrievalService:
         search_queries: SearchQueries,
         top_k: int | None = None,
         filter_params: dict | None = None,
+        trace: RetrievalTraceBuilder | None = None,
     ) -> list[Chunk]:
         """Every sub-query in parallel, fused with RRF."""
         groups = await self._pipeline_groups_for_partitions(partitions)
+        pipeline_trace = trace if len(groups) == 1 else None
         ranked_lists = await self._gather_partition_groups(
             [
                 (
@@ -573,12 +582,17 @@ class RetrievalService:
                         search_queries=search_queries,
                         top_k=top_k if top_k is not None else default_top_k,
                         filter_params=filter_params,
+                        trace=pipeline_trace,
                     ),
                 )
                 for partition_group, pipeline, default_top_k in groups
             ]
         )
-        return ranked_lists[0] if len(ranked_lists) == 1 else self.fuse(ranked_lists, top_k=top_k)
+        return (
+            ranked_lists[0]
+            if len(ranked_lists) == 1
+            else self.fuse(ranked_lists, top_k=top_k, trace=trace)
+        )
 
     async def retrieve_per_query(
         self,
@@ -587,6 +601,7 @@ class RetrievalService:
         queries: list[Query],
         top_k: int | None = None,
         filter_params: dict | None = None,
+        trace: RetrievalTraceBuilder | None = None,
     ) -> list[list[Chunk]]:
         """Per-sub-query ranked lists (NOT fused).
 
@@ -594,12 +609,26 @@ class RetrievalService:
         searches concurrently, then fuses; exposing the un-fused lists
         lets it run one ``asyncio.gather`` over both.
         """
+        query_trace = trace if len(queries) == 1 else None
         return await asyncio.gather(
-            *[self.retrieve(partitions=partitions, query=q, top_k=top_k, filter_params=filter_params) for q in queries]
+            *[
+                self.retrieve(
+                    partitions=partitions,
+                    query=q,
+                    top_k=top_k,
+                    filter_params=filter_params,
+                    trace=query_trace,
+                )
+                for q in queries
+            ]
         )
 
     @staticmethod
-    def fuse(doc_lists: list[list[Chunk]], top_k: int | None = None) -> list[Chunk]:
+    def fuse(
+        doc_lists: list[list[Chunk]],
+        top_k: int | None = None,
+        trace: RetrievalTraceBuilder | None = None,
+    ) -> list[Chunk]:
         """RRF-fuse ranked lists across partitions (and doc+web).
 
         Uses the canonical RRF constant (60) rather than a preset's ``rrf_k``:
@@ -607,8 +636,25 @@ class RetrievalService:
         single partition's ``rrf_k`` applies. Per-partition ``rrf_k`` is honoured
         one layer down, in ``RetrieverPipeline.get_relevant_docs`` (#707).
         """
-        fused = rrf_reranking(doc_lists, key_fn=_chunk_key)
-        return fused[:top_k] if top_k is not None else fused
+        fused = rrf_reranking(
+            doc_lists,
+            key_fn=_chunk_key,
+            top_k=top_k,
+            trace=trace,
+        )
+        if trace is not None:
+            try:
+                trace.record_stage(
+                    "final",
+                    status="complete",
+                    candidates=candidates_from_chunks(fused),
+                )
+            except Exception as error:
+                try:
+                    trace.record_error("final", error)
+                except Exception:
+                    pass
+        return fused
 
 
 __all__ = ["RetrievalService"]
