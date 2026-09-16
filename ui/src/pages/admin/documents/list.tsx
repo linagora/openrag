@@ -351,8 +351,11 @@ export default function DocumentListPage() {
     const counts = new Map<string, { label: string; file_count: number; drifted: boolean }>();
     for (const f of fileRows) {
       const label = fileModel(f) ?? "unrecorded";
-      const entry = counts.get(label) ?? { label, file_count: 0, drifted: driftedFrom(f) !== null };
+      const entry = counts.get(label) ?? { label, file_count: 0, drifted: false };
       entry.file_count += 1;
+      // Any drifted file marks the group: one model can be recorded under
+      // endpoint labels that disagree, and the first file seen decides nothing.
+      entry.drifted ||= driftedFrom(f) !== null;
       counts.set(label, entry);
     }
     return [...counts.values()].sort((a, b) => b.file_count - a.file_count);
