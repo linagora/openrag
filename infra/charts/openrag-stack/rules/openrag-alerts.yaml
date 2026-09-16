@@ -88,15 +88,11 @@ groups:
           runbook_url: "https://github.com/linagora/openrag/blob/main/docs/deployment/runbooks/OpenRagIngestFailureRate.md"
 
       - alert: OpenRagBacklogGrowing
-        # Two conditions, both required: the queue is trending up over half an
-        # hour (deriv, which needs a gauge and this is one), and it is large
-        # enough to matter. Either alone is noisy — a burst upload rises
-        # steeply and drains fine; a steady small queue is a healthy pipeline.
-        # Depth first, trend second. `and` takes the value of its left-hand
-        # side, so this ordering is what makes {{ $value }} in the annotation
-        # the queue depth rather than the derivative — a per-second slope like
-        # 0.083 read as "the backlog is 0.083" is worse than no number at all.
-        # Filtering is symmetric, so the firing condition is unchanged.
+        # Both conditions required: either alone is noisy — a burst upload
+        # rises steeply and drains fine, a steady small queue is healthy.
+        # Depth is on the left because `and` takes its left-hand side's value,
+        # which is what puts the queue depth in the annotation rather than the
+        # derivative's per-second slope. Filtering is symmetric either way.
         expr: |
           openrag_ingest_tasks{state="QUEUED"} > 50
           and
