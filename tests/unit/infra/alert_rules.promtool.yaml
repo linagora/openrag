@@ -105,7 +105,7 @@ tests:
           - exp_labels:
               severity: warning
             exp_annotations:
-              description: "50% of documents reaching a terminal state over the last 15 minutes failed."
+              description: "50% of documents reaching a terminal state over the last 5 minutes failed."
               runbook_url: "https://github.com/linagora/openrag/blob/main/docs/deployment/runbooks/OpenRagIngestFailureRate.md"
               summary: "More than 25% of documents are failing to index"
 
@@ -125,7 +125,37 @@ tests:
           - exp_labels:
               severity: warning
             exp_annotations:
-              description: "50% of documents reaching a terminal state over the last 15 minutes failed."
+              description: "50% of documents reaching a terminal state over the last 5 minutes failed."
+              runbook_url: "https://github.com/linagora/openrag/blob/main/docs/deployment/runbooks/OpenRagIngestFailureRate.md"
+              summary: "More than 25% of documents are failing to index"
+
+  - interval: 1m
+    name: a slow trickle still alerts — why the volume floor keeps its 15m window
+    input_series:
+      # One document every three minutes, all of them failing: five terminal
+      # documents per 15 minutes, exactly the floor. Inside a 5m window that is
+      # under two, so a floor that also read 5m would never let this fire —
+      # measured, it is never detected at all. This case is the reason the
+      # ratio window and the floor window differ; matching them up would look
+      # like a tidy-up and would silently blind the alert to slow instances.
+      - series: 'openrag_ingest_documents_total{status="failed"}'
+        values: "0 0 0 1 1 1 2 2 2 3 3 3 4 4 4 5 5 5 6 6 6 7 7 7 8+0x40"
+    alert_rule_test:
+      # Floor not yet met: fewer than five terminal documents in the last 15m.
+      - eval_time: 12m
+        alertname: OpenRagIngestFailureRate
+        exp_alerts: []
+      # Floor met at 15m, but `for: 5m` is not satisfied until 21m.
+      - eval_time: 18m
+        alertname: OpenRagIngestFailureRate
+        exp_alerts: []
+      - eval_time: 21m
+        alertname: OpenRagIngestFailureRate
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              description: "100% of documents reaching a terminal state over the last 5 minutes failed."
               runbook_url: "https://github.com/linagora/openrag/blob/main/docs/deployment/runbooks/OpenRagIngestFailureRate.md"
               summary: "More than 25% of documents are failing to index"
 

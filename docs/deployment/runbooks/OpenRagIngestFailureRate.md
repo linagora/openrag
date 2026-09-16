@@ -1,11 +1,11 @@
 # OpenRagIngestFailureRate
 
-**Severity:** warning · **Fires after:** 10 min above threshold
+**Severity:** warning · **Fires after:** ~8 min from the onset of failures
 
 ```
-sum(rate(openrag_ingest_documents_total{status="failed"}[15m]))
+sum(rate(openrag_ingest_documents_total{status="failed"}[5m]))
 /
-sum(rate(openrag_ingest_documents_total{status=~"completed|failed"}[15m])) > 0.25
+sum(rate(openrag_ingest_documents_total{status=~"completed|failed"}[5m])) > 0.25
 and sum(increase(openrag_ingest_documents_total{status=~"completed|failed"}[15m])) >= 5
 ```
 
@@ -14,6 +14,13 @@ and sum(increase(openrag_ingest_documents_total{status=~"completed|failed"}[15m]
 More than a quarter of documents reaching a terminal state are failing. `cancelled` is
 excluded from both sides — a user cancelling an upload is not a failure — and the volume
 floor of 5 documents stops a quiet instance paging on one bad file.
+
+**The two windows are different on purpose.** The ratio reads the last **5 minutes**, so
+a real failure surfaces in about 8 minutes. The volume floor reads the last **15
+minutes**, because it is answering "did enough work happen to judge at all?" — an
+instance finishing one document every few minutes never reaches five inside a 5-minute
+window, and with both windows short it is never detected. `for: 5m` is what rejects a
+brief blip, so the short ratio window costs no stability.
 
 ## First checks
 

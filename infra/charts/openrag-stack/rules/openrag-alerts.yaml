@@ -69,22 +69,30 @@ groups:
         # When no documents finish at all the denominator is 0, the ratio is NaN
         # and no series is produced, so this stays silent rather than dividing by
         # zero — "nothing is completing" is OpenRagIngestStalled's job.
+        #
+        # The two windows differ on purpose. The ratio reads 5m so a real failure
+        # is caught in ~8 minutes rather than ~15; the floor reads 15m because it
+        # is counting whether enough work happened to judge at all, and a slow
+        # instance that finishes one document every few minutes never reaches
+        # five inside a 5m window — measured, it is never detected at all. `for`
+        # is what rejects a brief blip, so shortening the ratio window costs no
+        # stability.
         expr: |
           (
-            sum(rate(openrag_ingest_documents_total{status="failed"}[15m]))
+            sum(rate(openrag_ingest_documents_total{status="failed"}[5m]))
             /
-            sum(rate(openrag_ingest_documents_total{status=~"completed|failed"}[15m]))
+            sum(rate(openrag_ingest_documents_total{status=~"completed|failed"}[5m]))
           ) > 0.25
           and
           sum(increase(openrag_ingest_documents_total{status=~"completed|failed"}[15m])) >= 5
-        for: 10m
+        for: 5m
         labels:
           severity: warning
         annotations:
           summary: "More than 25% of documents are failing to index"
           description: >-
             {{ $value | humanizePercentage }} of documents reaching a terminal state
-            over the last 15 minutes failed.
+            over the last 5 minutes failed.
           runbook_url: "https://github.com/linagora/openrag/blob/main/docs/deployment/runbooks/OpenRagIngestFailureRate.md"
 
       - alert: OpenRagBacklogGrowing
