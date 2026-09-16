@@ -108,3 +108,106 @@ In `values.yaml`, disable the bundled PostgreSQL chart, set `postgresProvisionin
 The migration Job (`templates/postgres-migration-job.yaml`) is a Helm hook, annotated with `helm.sh/hook: pre-install,pre-upgrade`. You never invoke it directly: Helm runs it automatically as part of each `helm install` and `helm upgrade`, before it creates or updates the OpenRAG Deployment, and waits for it to finish. It applies the Alembic migrations against the pre-created database (it migrates the schema but does not create the database). The OpenRAG API then starts against an already-migrated schema.
 
 When `postgresProvisioning.migrationJob` is disabled (the default), the Job is not rendered at all and the application runs migrations itself at startup instead.
+
+## Monitoring Ray, Postgres and Milvus
+
+The chart does not deploy Prometheus. It wires the stack's three dependencies
+into one that already runs with the Prometheus Operator (kube-prometheus-stack
+or a standalone operator), and every part of it is off by default:
+
+```yaml
+networkPolicy:
+  metricsFrom:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: monitoring   # the namespace Prometheus runs in
+ray:
+  metrics:
+    podMonitor:
+      enabled: true                                  # requires ray.enabled=true
+      labels: { release: kube-prometheus-stack }
+postgresql:
+  metrics:
+    enabled: true                                    # adds the exporter sidecar: restarts Postgres
+    serviceMonitor:
+      enabled: true
+      labels: { release: kube-prometheus-stack }
+milvus:
+  metrics:
+    serviceMonitor:
+      enabled: true
+      additionalLabels: { release: kube-prometheus-stack }
+```
+
+Ray gets a `PodMonitor` rather than a `ServiceMonitor` because every Ray node
+exports its own metrics. Milvus already exports from all five components (proxy,
+mixcoord, datanode, querynode, streamingnode); only its `ServiceMonitor` is new.
+None of the three endpoints authenticates, so none is routed through the Ingress.
+
+Three things can go wrong without failing the install:
+
+- **Selector labels.** A monitor without the label its Prometheus selects on is
+  created and never scraped. Read the selectors with
+  `kubectl get prometheus -A -o jsonpath='{..podMonitorSelector}{..serviceMonitorSelector}'`.
+  The Postgres sub-chart calls the key `labels`; the Milvus one calls it `additionalLabels`.
+- **NetworkPolicy.** The default-deny policy admits only same-namespace traffic.
+  Until Prometheus's namespace is listed in `networkPolicy.metricsFrom`, its
+  targets report `up == 0`. Each entry opens only the metrics port, and only on
+  the pods that export it.
+- **Ray pods after upgrading from chart 0.6.5 or earlier.** KubeRay does not
+  recreate Ray pods when the `RayCluster` changes. Until they are recreated, the
+  workers keep exporting on 8080, which `networkPolicy.externalPorts` opens to
+  every source, and the head target is down. Recreate them once:
+  `kubectl delete pod -l ray.io/cluster=openrag-raycluster`.
+
+Once enabled, this should return 1 for every Ray node, the Postgres pod and the
+five Milvus pods:
+
+```promql
+up{namespace="<release namespace>", job=~".*(raycluster|postgresql|milvus).*"}
+```
+
+### What to watch
+
+| Dependency | Query | Signal |
+|---|---|---|
+| Ray | `ray_tasks{State="PENDING_NODE_ASSIGNMENT"}` | Tasks no node has the resources to run |
+| Ray | `ray_actors{State="RESTARTING"}` | Actors being restarted. This gauge is sampled, so it catches a crash loop but can miss a single fast restart |
+| Ray | `ray_resources{Name="GPU"}` by `State` (`USED`, `AVAILABLE`) | GPU allocation per node |
+| Ray | `ray_node_mem_used`, `ray_node_cpu_utilization`, `ray_object_store_memory` | Node resources |
+| Postgres | `sum(pg_stat_activity_count) / scalar(pg_settings_max_connections)` | Connections against the server limit |
+| Postgres | `pg_stat_activity_max_tx_duration` | Longest open transaction |
+| Postgres | `pg_database_size_bytes`, `pg_locks_count` | Database size, lock contention |
+| Milvus | `milvus_proxy_req_latency`, `milvus_proxy_sq_latency` | Request and search/query latency |
+| Milvus | `milvus_proxy_insert_vectors_count`, `milvus_proxy_search_vectors_count` | Insert and search throughput |
+| Milvus | `milvus_querycoord_collection_num` | Loaded collections |
+| Milvus | `milvus_datacoord_segment_num` by `segment_state`, `milvus_datacoord_compaction_task_num` | Segment and compaction backlog |
+| Milvus | `process_resident_memory_bytes` by `component` | Memory per component |
+
+### Not covered
+
+- **The API's connection-pool wait.** The pool lives in the OpenRAG process, so
+  Postgres cannot see a request queued for a connection. That needs an
+  application metric.
+- **Slow queries.** These need `pg_stat_statements`, which means a
+  `shared_preload_libraries` change on the server plus the exporter's
+  `--collector.stat_statements`. Without it, `pg_stat_activity_max_tx_duration`
+  still shows long-running transactions.
+- **Volume fill.** `pg_database_size_bytes` is the database size, not how full
+  its PVC is; use the kubelet's `kubelet_volume_stats_*` series for that.
+- **Embedded Ray** (`ray.enabled=false`), which exports on no fixed port.
+- **MinIO and etcd**, Milvus's own dependencies.
+
+### Series volume
+
+Milvus and Ray are chatty. Samples per scrape on a single-node install holding
+one 5 000-row collection:
+
+| Target | Samples per scrape |
+|---|---|
+| Milvus, all five components | ~45 000 (the streaming node alone ~20 000) |
+| Ray, head and one worker, lightly loaded | ~1 150 |
+| Postgres | ~550 |
+
+Where the Prometheus belongs to a platform team, agree on that volume before
+enabling Milvus's monitor.
