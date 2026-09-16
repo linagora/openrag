@@ -42,6 +42,31 @@ jobs:
         run: |
           uv sync
 
+      # promtool unit-tests the shipped alert rules (tests/unit/infra/
+      # alert_rules.promtool.yaml). Pinned to the version the Compose overlay
+      # runs, so CI checks the rules against the promtool that will evaluate
+      # them. Verified by checksum: this is a binary from outside the repo
+      # landing on PATH in a job that can read the workflow token.
+      - name: Install promtool
+        env:
+          PROMETHEUS_VERSION: "2.54.1"
+          PROMETHEUS_SHA256: "31715ef65e8a898d0f97c8c08c03b6b9afe485ac84e1698bcfec90fc6e62924f"
+        run: |
+          set -euo pipefail
+          archive="prometheus-${PROMETHEUS_VERSION}.linux-amd64.tar.gz"
+          curl -fsSLO "https://github.com/prometheus/prometheus/releases/download/v${PROMETHEUS_VERSION}/${archive}"
+          echo "${PROMETHEUS_SHA256}  ${archive}" | sha256sum --check --strict -
+          tar -xzf "${archive}" --strip-components=1 \
+            "prometheus-${PROMETHEUS_VERSION}.linux-amd64/promtool"
+          sudo install -m 0755 promtool /usr/local/bin/promtool
+          promtool --version
+
       - name: Run tests
+        env:
+          # promtool is installed above, so a skipped alert-rule test now means
+          # something broke rather than "not available here". Without this the
+          # suite would go green while the rules went unchecked — the same
+          # failure mode as an alert rule that matches nothing.
+          REQUIRE_PROMTOOL: "1"
         run: |
           uv run pytest tests/unit/

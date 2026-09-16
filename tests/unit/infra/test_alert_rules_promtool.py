@@ -18,6 +18,7 @@ must install promtool (or pre-pull the image) for this to execute there.
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -61,6 +62,11 @@ def _dockerised_promtool() -> list[str] | None:
 def test_alert_rules_behave_as_specified() -> None:
     command = _local_promtool() or _dockerised_promtool()
     if command is None:
+        # CI installs promtool and sets this, so a skip there is a broken
+        # install step, not an absent tool. Skipping silently would leave the
+        # rules unchecked behind a green suite.
+        if os.environ.get("REQUIRE_PROMTOOL", "").strip().lower() in {"1", "true", "yes"}:
+            pytest.fail("REQUIRE_PROMTOOL is set but no promtool is available")
         pytest.skip(f"needs a promtool binary, or the {PROMETHEUS_IMAGE} image already pulled")
 
     result = subprocess.run(command, capture_output=True, text=True, check=False, cwd=ROOT)
