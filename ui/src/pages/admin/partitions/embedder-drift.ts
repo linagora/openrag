@@ -14,6 +14,7 @@ type EmbedderGroup = {
   /** False only for files indexed before provenance existed. */
   recorded: boolean;
   dimension: number | null;
+  vector_field: string | null;
   file_count: number;
 };
 
@@ -91,6 +92,7 @@ export function computeEmbedderDrift(
           (widthDrifted || fieldDrifted || (model !== null && currentModel !== null && model !== currentModel)),
         recorded,
         dimension: r.dimension,
+        vector_field: r.vector_field ?? null,
         file_count: 0,
       };
       byKey.set(id, group);
@@ -110,13 +112,15 @@ export function computeEmbedderDrift(
 }
 
 /** Identifies a drift state, so an acknowledgement covers that state and no
- *  later one. Width is part of it: the same model and file count at another
- *  dimension is a new drift, not the one already dismissed.
+ *  later one. Width and field are part of it, as they are of a group: the same
+ *  model and file count at another dimension, or in another field, is a new
+ *  drift, not the one already dismissed.
  */
 export function driftSignature(drift: ReturnType<typeof computeEmbedderDrift>): string {
   if (!drift.hasDrift) return "";
   // Sorted by id: groups with equal counts keep the API's row order, which must
   // not bring back a warning already dismissed.
   const groups = [...drift.drifted].sort((a, b) => a.id.localeCompare(b.id));
-  return `${drift.current}<-${groups.map((g) => `${g.key}@${g.dimension ?? "?"}:${g.file_count}`).join(",")}`;
+  const group = (g: EmbedderGroup) => `${g.key}@${g.dimension ?? "?"}#${g.vector_field ?? "?"}:${g.file_count}`;
+  return `${drift.current}<-${groups.map(group).join(",")}`;
 }

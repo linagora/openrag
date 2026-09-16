@@ -121,11 +121,14 @@ describe("computeEmbedderDrift", () => {
   });
 
   it("leaves files with no recorded field alone", () => {
-    // Indexed before the field was recorded: unknown, not known-bad.
+    // Indexed before the field was recorded: unknown, not known-bad. The
+    // endpoint's own field is known here, so the row's missing one is what the
+    // verdict has to turn on — with both sides unknown the test would pass
+    // against an implementation that reads a missing field as drift.
     const drift = computeEmbedderDrift(
       "qwen",
       [{ embedder: "qwen", model_name: "Qwen3-Embedding-0.6B", dimension: 1024, file_count: 4 }],
-      endpoints,
+      [{ ...endpoints[0], vector_field: "vector_qwen" }, endpoints[1]] as ModelEndpointResponse[],
     );
 
     expect(drift.hasDrift).toBe(false);
@@ -212,6 +215,26 @@ describe("computeEmbedderDrift", () => {
     ];
     const signature = (r: typeof rows) => driftSignature(computeEmbedderDrift("qwen", r, endpoints));
     expect(signature(rows)).toBe(signature([...rows].reverse()));
+  });
+
+  it("gives a drift in another field a signature of its own", () => {
+    // Same model, width and file count, but sitting in another endpoint's
+    // field: dismissing one must not dismiss the other.
+    const fields = [
+      { name: "qwen", model_name: "Qwen3-Embedding-0.6B", vector_field: "vector_qwen" },
+      { name: "qwen-b", model_name: "Qwen3-Embedding-0.6B", vector_field: "vector_qwen_b" },
+      { name: "qwen-c", model_name: "Qwen3-Embedding-0.6B", vector_field: "vector_qwen_c" },
+    ] as ModelEndpointResponse[];
+    const inField = (embedder: string, vector_field: string) =>
+      computeEmbedderDrift(
+        "qwen",
+        [{ embedder, model_name: "Qwen3-Embedding-0.6B", dimension: 1024, vector_field, file_count: 2 }],
+        fields,
+      );
+    expect(inField("qwen-b", "vector_qwen_b").hasDrift).toBe(true);
+    expect(driftSignature(inField("qwen-b", "vector_qwen_b"))).not.toBe(
+      driftSignature(inField("qwen-c", "vector_qwen_c")),
+    );
   });
 
   it("has nothing to say about an empty partition", () => {
