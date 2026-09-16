@@ -125,3 +125,22 @@ Usage: {{ include "openrag-stack.securityFieldOverride" (dict "component" .Value
 {{- .default -}}
 {{- end -}}
 {{- end }}
+
+{{/*
+Render an OpenRAG container probe. Ray Serve exposes the HTTP application from
+the Ray head rather than from the OpenRAG driver pod, so Kubernetes must run
+the request inside the container where cluster DNS can resolve the head
+Service. Timing and threshold settings continue to come from openrag.probes.
+*/}}
+{{- define "openrag-stack.openragProbe" -}}
+{{- $probe := deepCopy .probe -}}
+{{- if .rayServe -}}
+{{- $_ := unset $probe "httpGet" -}}
+{{- $_ := unset $probe "tcpSocket" -}}
+{{- $_ := unset $probe "grpc" -}}
+{{- $host := printf "%s-raycluster-head-svc" (include "openrag-stack.fullname" .context) -}}
+{{- $url := printf "http://%s:80%s" $host .path -}}
+{{- $_ := set $probe "exec" (dict "command" (list "curl" "--fail" "--silent" "--show-error" $url)) -}}
+{{- end -}}
+{{- $probe | toYaml -}}
+{{- end }}

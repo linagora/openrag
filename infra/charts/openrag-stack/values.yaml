@@ -523,8 +523,9 @@ openrag:
     runAsUser: 10001
     runAsGroup: 0
     fsGroup: 10001
-  # Probe configuration. Override with exec probes when ENABLE_RAY_SERVE=true,
-  # since the Ray Serve HTTP proxy runs on the Ray head (not on this pod).
+  # Probe configuration. The chart keeps these HTTP probes for the direct API
+  # and automatically converts them to exec probes against the Ray head when
+  # ENABLE_RAY_SERVE=true.
   probes:
     startup:
       httpGet:

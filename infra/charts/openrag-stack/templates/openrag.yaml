@@ -1,3 +1,7 @@
+{{- $rayServeEnabled := eq (toString .Values.env.config.ENABLE_RAY_SERVE) "true" -}}
+{{- if and $rayServeEnabled (not .Values.ray.enabled) -}}
+{{- fail "ENABLE_RAY_SERVE=true requires ray.enabled=true" -}}
+{{- end -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -63,15 +67,15 @@ spec:
             {{- toYaml .Values.openrag.resources | nindent 12 }}
           {{- if .Values.openrag.probes.startup }}
           startupProbe:
-            {{- toYaml .Values.openrag.probes.startup | nindent 12 }}
+            {{- include "openrag-stack.openragProbe" (dict "probe" .Values.openrag.probes.startup "rayServe" $rayServeEnabled "path" "/ready" "context" $) | nindent 12 }}
           {{- end }}
           {{- if .Values.openrag.probes.readiness }}
           readinessProbe:
-            {{- toYaml .Values.openrag.probes.readiness | nindent 12 }}
+            {{- include "openrag-stack.openragProbe" (dict "probe" .Values.openrag.probes.readiness "rayServe" $rayServeEnabled "path" "/ready" "context" $) | nindent 12 }}
           {{- end }}
           {{- if .Values.openrag.probes.liveness }}
           livenessProbe:
-            {{- toYaml .Values.openrag.probes.liveness | nindent 12 }}
+            {{- include "openrag-stack.openragProbe" (dict "probe" .Values.openrag.probes.liveness "rayServe" $rayServeEnabled "path" "/health_check" "context" $) | nindent 12 }}
           {{- end }}
           envFrom:
             - configMapRef:

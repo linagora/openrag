@@ -10,7 +10,8 @@ from __future__ import annotations
 from collections.abc import Callable
 
 import asyncpg
-from core.config.model_endpoints import ModelEndpointRow
+from core.config.model_endpoints import ModelEndpointConfig, ModelEndpointRow, ModelEndpointType
+from core.models.readiness import ConfigurationReferenceFinding, ModelEndpointDiscovery, ModelEndpointTarget
 from core.ports.model_endpoint_repo import ModelEndpointRepository
 from core.utils.exceptions import NotFoundError, ValidationError
 
@@ -125,6 +126,219 @@ class PgModelEndpointRepository(ModelEndpointRepository):
                 "SELECT * FROM model_endpoints ORDER BY model_type, name",
             )
         return [self._to_model(r) for r in rows]
+
+    async def discover_readiness_targets(
+        self, *, default_model_kinds: tuple[ModelEndpointType, ...] = ()
+    ) -> ModelEndpointDiscovery:
+        rows = await self.pool.fetch(
+            """
+            WITH used_presets AS (
+                SELECT DISTINCT indexation_preset AS name, 'indexation'::text AS preset_type
+                FROM partitions
+                WHERE indexation_preset IS NOT NULL
+                UNION
+                SELECT DISTINCT retrieval_preset AS name, 'retrieval'::text AS preset_type
+                FROM partitions
+                WHERE retrieval_preset IS NOT NULL
+            ),
+            missing_presets AS (
+                SELECT
+                    used.name,
+                    CASE used.preset_type
+                        WHEN 'indexation' THEN 'indexation_preset'
+                        ELSE 'retrieval_preset'
+                    END AS reference_kind
+                FROM used_presets AS used
+                LEFT JOIN pipeline_presets AS preset
+                    ON preset.name IS NOT DISTINCT FROM used.name
+                    AND preset.preset_type = used.preset_type
+                WHERE preset.name IS NULL
+            ),
+            direct_references AS (
+                SELECT embedder AS provider, 'embedder'::text AS kind
+                FROM partitions
+                UNION
+                SELECT chat_llm AS provider, 'llm'::text AS kind
+                FROM partitions
+                WHERE chat_llm IS NOT NULL AND chat_llm <> ''
+            ),
+            preset_references AS (
+                SELECT preset.config ->> 'llm' AS provider, 'llm'::text AS kind
+                FROM used_presets AS used
+                JOIN pipeline_presets AS preset
+                    ON preset.name = used.name
+                    AND preset.preset_type = used.preset_type
+                WHERE used.preset_type = 'retrieval'
+                UNION
+                SELECT COALESCE(NULLIF(preset.config ->> 'reranker', ''), 'default'), 'reranker'::text
+                FROM used_presets AS used
+                JOIN pipeline_presets AS preset
+                    ON preset.name = used.name
+                    AND preset.preset_type = used.preset_type
+                WHERE used.preset_type = 'retrieval'
+                    AND CASE
+                        WHEN preset.config ? 'enable_reranker'
+                        THEN preset.config -> 'enable_reranker' = 'true'::jsonb
+                        ELSE true
+                    END
+                UNION
+                SELECT preset.config ->> 'vlm', 'vlm'::text
+                FROM used_presets AS used
+                JOIN pipeline_presets AS preset
+                    ON preset.name = used.name
+                    AND preset.preset_type = used.preset_type
+                WHERE used.preset_type = 'indexation'
+                UNION
+                SELECT btrim(preset.config ->> 'stt'), 'stt'::text
+                FROM used_presets AS used
+                JOIN pipeline_presets AS preset
+                    ON preset.name = used.name
+                    AND preset.preset_type = used.preset_type
+                WHERE used.preset_type = 'indexation'
+                    AND 'stt' = ANY($1::text[])
+                UNION
+                SELECT preset.config ->> 'contextualization_llm', 'llm'::text
+                FROM used_presets AS used
+                JOIN pipeline_presets AS preset
+                    ON preset.name = used.name
+                    AND preset.preset_type = used.preset_type
+                WHERE used.preset_type = 'indexation'
+                UNION
+                SELECT preset.config ->> 'metadata_extraction_llm', 'llm'::text
+                FROM used_presets AS used
+                JOIN pipeline_presets AS preset
+                    ON preset.name = used.name
+                    AND preset.preset_type = used.preset_type
+                WHERE used.preset_type = 'indexation'
+                UNION
+                SELECT preset.config ->> 'topic_tagging_llm', 'llm'::text
+                FROM used_presets AS used
+                JOIN pipeline_presets AS preset
+                    ON preset.name = used.name
+                    AND preset.preset_type = used.preset_type
+                WHERE used.preset_type = 'indexation'
+            ),
+            endpoint_references AS (
+                SELECT provider, kind
+                FROM direct_references
+                WHERE provider IS NOT NULL AND provider <> ''
+                UNION
+                SELECT provider, kind
+                FROM preset_references
+                WHERE provider IS NOT NULL AND provider <> ''
+            ),
+            reference_targets AS (
+                SELECT
+                    COALESCE(endpoint.name, reference.provider) AS provider,
+                    reference.kind,
+                    endpoint.endpoint,
+                    endpoint.model_name,
+                    endpoint.batch_size,
+                    endpoint.timeout,
+                    endpoint.extra,
+                    COALESCE(endpoint.is_default, false) AS is_default
+                FROM endpoint_references AS reference
+                LEFT JOIN model_endpoints AS endpoint
+                    ON endpoint.model_type = reference.kind
+                    AND (
+                        (reference.provider = 'default' AND endpoint.is_default)
+                        OR (reference.provider <> 'default' AND endpoint.name = reference.provider)
+                    )
+            ),
+            default_targets AS (
+                SELECT
+                    name AS provider,
+                    model_type AS kind,
+                    endpoint,
+                    model_name,
+                    batch_size,
+                    timeout,
+                    extra,
+                    is_default
+                FROM model_endpoints
+                WHERE is_default
+                    AND model_type = ANY($1::text[])
+            )
+            SELECT
+                'endpoint'::text AS record_type,
+                provider,
+                kind,
+                endpoint,
+                model_name,
+                batch_size,
+                timeout,
+                extra,
+                is_default,
+                NULL::text AS reference_kind,
+                NULL::text AS reference_name
+            FROM reference_targets
+            UNION
+            SELECT
+                'endpoint'::text,
+                provider,
+                kind,
+                endpoint,
+                model_name,
+                batch_size,
+                timeout,
+                extra,
+                is_default,
+                NULL::text,
+                NULL::text
+            FROM default_targets
+            UNION
+            SELECT
+                'configuration_reference'::text,
+                NULL::text,
+                NULL::text,
+                NULL::text,
+                NULL::text,
+                NULL::integer,
+                NULL::double precision,
+                NULL::jsonb,
+                false,
+                reference_kind,
+                name
+            FROM missing_presets
+            """,
+            list(default_model_kinds),
+        )
+
+        targets: list[ModelEndpointTarget] = []
+        findings: list[ConfigurationReferenceFinding] = []
+        for row in rows:
+            if row["record_type"] == "configuration_reference":
+                findings.append(
+                    ConfigurationReferenceFinding(
+                        kind=row["reference_kind"],
+                        name=row["reference_name"],
+                    )
+                )
+                continue
+
+            config = None
+            if row["endpoint"] is not None:
+                config = ModelEndpointConfig(
+                    name=row["provider"],
+                    endpoint=row["endpoint"],
+                    model_name=row["model_name"],
+                    batch_size=row["batch_size"],
+                    timeout=row["timeout"],
+                    extra=row["extra"] or {},
+                )
+            targets.append(
+                ModelEndpointTarget(
+                    provider=row["provider"],
+                    kind=row["kind"],
+                    config=config,
+                    is_default=row["is_default"],
+                )
+            )
+
+        return ModelEndpointDiscovery(
+            targets=tuple(sorted(targets, key=lambda target: (target.kind, target.provider))),
+            configuration_references=tuple(sorted(findings, key=lambda finding: (finding.kind, finding.name))),
+        )
 
     async def update(self, name: str, model_type: str, **fields: object) -> ModelEndpointRow | None:
         updates = {k: v for k, v in fields.items() if k in _ALLOWED_UPDATE_FIELDS}
