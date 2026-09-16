@@ -53,6 +53,8 @@ class OpenAIChatCompletionRequest(BaseModel):
                         "spoken_style_answer": False,
                         "websearch": False,
                         "include_all_retrieved_sources": False,
+                        "include_retrieval_trace": False,
+                        "compare_original_query": False,
                         "require_retrieval": False,
                     },
                 }
@@ -89,6 +91,8 @@ class OpenAIChatCompletionRequest(BaseModel):
             "websearch": False,
             "llm_override": None,
             "include_all_retrieved_sources": False,
+            "include_retrieval_trace": False,
+            "compare_original_query": False,
             "require_retrieval": False,
         },
         description=(
@@ -106,6 +110,9 @@ class OpenAIChatCompletionRequest(BaseModel):
             "'include_all_retrieved_sources' (default false) adds the full, unfiltered retrieval "
             "set to the response's extra.all_retrieved_sources — off by default since it can be "
             "large; opt in only for debugging/evaluation."
+            " 'include_retrieval_trace' (default false) adds content-free stage telemetry to extra. "
+            "'compare_original_query' runs an isolated original-query retrieval only when tracing is enabled; "
+            "it never changes the documents used for the answer."
         ),
     )
 
