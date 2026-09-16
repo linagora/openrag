@@ -44,7 +44,7 @@ from core.config.model_endpoints import DEFAULT_ENDPOINT_ALIAS
 from core.models.embedder_swap import EmbedderSwapStatus
 from core.utils.exceptions import ConflictError, NotFoundError, PartitionNotFoundError, ValidationError, VDBError
 from core.utils.logging import get_logger
-from services.workers.pipeline_builder import embedder_provenance
+from services.workers.embedder_provenance import embedder_provenance
 from services.workers.task_cancellation import count_active_indexing_tasks
 
 if TYPE_CHECKING:

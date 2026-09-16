@@ -16,6 +16,7 @@ from core.models.document import Document, DocumentType
 from core.utils.logging import get_logger
 from core.vector_stores.vector_store import VectorStore
 from core.vlm.vlm import VLM
+from services.workers.embedder_provenance import embedder_provenance
 from services.workers.stages._common import run_with_optional_timeout
 from services.workers.stages.caption import caption_stage
 from services.workers.stages.chunk import chunk_stage
@@ -35,36 +36,6 @@ _ENVELOPE_HEADROOM_TOKENS = 512
 
 REPLACE_OLD_CHUNK_COLLECTION_ROW_KEY = "_replace_old_chunk_collection"
 REPLACE_OLD_CHUNK_IDS_ROW_KEY = "_replace_old_chunk_ids"
-
-
-def embedder_provenance(embedder: Embedder, reference: Any, vector_field: str | None = None) -> dict[str, Any]:
-    """What actually produced this file's vectors, and where they are.
-
-    ``embedder`` is the endpoint reference the partition carried, kept as given
-    (the ``"default"`` alias included); the model/endpoint pair is what that
-    reference resolved to, and is the only thing that catches an endpoint
-    repointed at a different model without being renamed.
-
-    ``embedder_vector_field`` is the dense field the vectors were written to
-    (#762 F). The model alone does not say it: an endpoint repointed at another
-    model keeps its field, so a file can record the right model and still sit
-    in the wrong field. A re-embed skips a file only when both match.
-
-    Every field degrades to ``None`` rather than raising: describing a run that
-    already succeeded must not be able to fail it.
-    """
-    try:
-        dimension = embedder.dimension
-    except Exception:
-        # Raises until the first embed returns, so: no chunks, no dimension.
-        dimension = None
-    return {
-        "embedder": str(reference) if reference else "default",
-        "embedder_model_name": getattr(embedder, "model_name", None),
-        "embedder_endpoint": getattr(embedder, "endpoint", None),
-        "embedder_dimension": dimension,
-        "embedder_vector_field": vector_field,
-    }
 
 
 @dataclass(slots=True, frozen=True)
