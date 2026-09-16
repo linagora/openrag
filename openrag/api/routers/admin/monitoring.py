@@ -14,11 +14,15 @@ itself. It fails closed:
   can reach the API port. A deliberate opt-in: the API port is what the
   Ingress / admin-ui proxy forwards, so "no token" must never be the default.
 * neither → 403 on every scrape, with the two settings named in the body.
+
+The admin UI does not read ``/metrics``: it uses ``GET /monitoring/metrics``
+(``admin_router`` below), the same exposition behind the ordinary admin gate.
 """
 
 import asyncio
 import secrets
 
+from api.dependencies.auth import require_admin
 from core.config import load_config
 from core.config.infrastructure import ServerConfig
 from core.observability.monitoring import get_metrics
@@ -68,8 +72,27 @@ def require_metrics_token(request: Request, server: ServerConfig = Depends(get_m
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid metrics token")
 
 
+async def _render_metrics() -> Response:
+    content = await asyncio.to_thread(get_metrics)
+    return Response(content=content, media_type="text/plain; version=0.0.4; charset=utf-8")
+
+
 @router.get("/metrics", summary="Prometheus metrics endpoint", dependencies=[Depends(require_metrics_token)])
 async def prometheus_metrics():
     """Return all metrics in Prometheus text exposition format."""
-    content = await asyncio.to_thread(get_metrics)
-    return Response(content=content, media_type="text/plain; version=0.0.4; charset=utf-8")
+    return await _render_metrics()
+
+
+# Same exposition for a signed-in admin (the admin UI's System > Metrics tab).
+# Mounted under ``/monitoring`` (an API prefix, so unauthenticated calls get a
+# JSON 401/403 rather than a login redirect) and gated by ``require_admin``
+# like the other ops routes. Kept apart from ``/metrics`` on purpose: the
+# scraper credential must never touch the Postgres token lookup, and an admin
+# session must never need the scrape secret.
+admin_router = APIRouter(dependencies=[Depends(require_admin)])
+
+
+@admin_router.get("/metrics", summary="Prometheus metrics for a signed-in admin")
+async def prometheus_metrics_for_admin():
+    """Return the same exposition as ``GET /metrics``, gated by the admin role."""
+    return await _render_metrics()
