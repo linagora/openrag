@@ -53,11 +53,10 @@ class MockVectorStore(VectorStore):
     def __init__(self) -> None:
         self.collections: dict[str, dict[str, Any]] = {}
         self.search_results: list[dict[str, Any]] = []
-        # What the "live collection" reports as its dense-vector dimension.
-        # None models "nothing indexed yet", which the API renders as null
-        # rather than inventing a number (#762 G).
-        self.dimension: int | None = 1024
-        # Per-embedder dense fields ensured on this store (#762 F).
+        # Per-embedder dense fields ensured on this store, with the dimension
+        # each reports (#762 F). A field absent here models "nothing indexed
+        # with that embedder yet", which the API renders as null rather than
+        # inventing a number (#762 G).
         self.vector_fields: dict[str, int] = {}
         # Which dense field each search was aimed at, in call order.
         self.searched_vector_fields: list[str | None] = []
@@ -123,8 +122,10 @@ class MockVectorStore(VectorStore):
     async def collection_exists(self, name: str) -> bool:
         return name in self.collections
 
-    async def vector_dimension(self) -> int | None:
-        return self.dimension if self.collections else None
+    async def vector_dimension(self, vector_field: str | None = None) -> int | None:
+        if not vector_field:
+            return None
+        return self.vector_fields.get(vector_field)
 
     async def query_ids_by_filter(self, collection: str, filters: dict[str, Any]) -> list[str]:
         return list(self.collections.get(collection, {}).keys())

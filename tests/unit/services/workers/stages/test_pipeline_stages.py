@@ -161,8 +161,8 @@ class FakeVectorStore(VectorStore):
     async def collection_exists(self, name: str) -> bool:
         return True
 
-    async def vector_dimension(self) -> int | None:
-        return 1024
+    async def vector_dimension(self, vector_field: str | None = None) -> int | None:
+        return 1024 if vector_field else None
 
     async def query_ids_by_filter(self, collection: str, filters: dict) -> list[str]:
         return []
