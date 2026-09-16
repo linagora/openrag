@@ -1518,6 +1518,7 @@ def test_indexer_pool_wires_contextualizer_factory_and_worker_namespace(monkeypa
             embed_concurrency=2,
         ),
         loader=SimpleNamespace(parse_timeout=3600, save_uploaded_files=True),
+        semaphore=SimpleNamespace(vlm_semaphore=10),
         vectordb=SimpleNamespace(collection_name="vdb_test"),
         rdb=RDBConfig(),
     )
@@ -1607,6 +1608,7 @@ def test_indexer_pool_loads_caption_prompt_without_global_vlm_default(monkeypatc
             embed_concurrency=2,
         ),
         loader=SimpleNamespace(parse_timeout=3600, save_uploaded_files=True),
+        semaphore=SimpleNamespace(vlm_semaphore=10),
         vectordb=SimpleNamespace(collection_name="vdb_test"),
         rdb=RDBConfig(),
     )
