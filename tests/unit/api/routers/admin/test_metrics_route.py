@@ -11,18 +11,31 @@ Admin/user tokens are never accepted here — one mechanism, no fallback.
 from __future__ import annotations
 
 import pytest
-from api.routers.admin.monitoring import get_metrics_access, router
+from api.dependencies.auth import require_admin
+from api.middleware.auth import is_bypass_path, is_ui_path
+from api.routers.admin.monitoring import admin_router, get_metrics_access, router
 from core.config.infrastructure import ServerConfig
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 
 pytestmark = pytest.mark.asyncio
 
 
-def _app(token: str | None = None, *, allow_unauthenticated: bool = False) -> FastAPI:
+def _app(token: str | None = None, *, allow_unauthenticated: bool = False, admin: bool | None = None) -> FastAPI:
+    """``admin``: None mounts no admin route; True/False mounts it behind a
+    stubbed ``require_admin`` that passes or refuses."""
     app = FastAPI()
     app.include_router(router)
     server = ServerConfig(metrics_token=token, metrics_allow_unauthenticated=allow_unauthenticated)
     app.dependency_overrides[get_metrics_access] = lambda: server
+    if admin is not None:
+        app.include_router(admin_router, prefix="/monitoring")
+
+        def _gate():
+            if not admin:
+                raise HTTPException(status_code=403, detail="Admin privileges required")
+            return {"id": 1, "is_admin": True}
+
+        app.dependency_overrides[require_admin] = _gate
     return app
 
 
@@ -91,6 +104,39 @@ async def test_metrics_requires_bearer_scheme(async_client_factory):
         response = await client.get("/metrics", headers={"Authorization": "scrape-secret"})
 
     assert response.status_code == 403
+
+
+async def test_admin_route_serves_metrics_to_an_admin_regardless_of_scrape_settings(async_client_factory):
+    """The admin UI's Metrics tab reads ``/monitoring/metrics`` with its session,
+    so it keeps working while ``/metrics`` is closed to it (review on #914)."""
+    async with async_client_factory(_app(admin=True)) as client:
+        response = await client.get("/monitoring/metrics")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/plain")
+    assert b"openrag_http_requests_total" in response.content
+
+
+async def test_admin_route_refuses_non_admins(async_client_factory):
+    async with async_client_factory(_app(admin=False)) as client:
+        response = await client.get("/monitoring/metrics")
+
+    assert response.status_code == 403
+
+
+async def test_admin_route_ignores_the_scrape_token(async_client_factory):
+    """One credential per audience: the scrape bearer is not an admin session."""
+    async with async_client_factory(_app("scrape-secret", admin=False)) as client:
+        response = await client.get("/monitoring/metrics", headers={"Authorization": "Bearer scrape-secret"})
+
+    assert response.status_code == 403
+
+
+def test_admin_route_goes_through_the_auth_middleware():
+    """``/monitoring/metrics`` is an ordinary API path: not bypassed, and (in
+    oidc mode) a JSON 401 when unauthenticated rather than a login redirect."""
+    assert not is_bypass_path("/monitoring/metrics")
+    assert not is_ui_path("/monitoring/metrics")
 
 
 async def test_token_wins_over_allow_unauthenticated(async_client_factory):

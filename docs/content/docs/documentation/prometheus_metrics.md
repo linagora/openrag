@@ -57,6 +57,11 @@ contain no request payloads, user data or secrets. Reserve
 at the edge and scrapes the service from inside the network; see
 [Opening the endpoint](#opening-the-endpoint-without-a-token).
 
+The admin UI's **System > Metrics** tab does not read `/metrics`: it calls
+`GET /monitoring/metrics`, the same exposition behind the ordinary admin
+session, so it keeps working whatever the scrape settings are and an admin
+never needs the scrape secret.
+
 The bearer travels in clear on plain HTTP. Scrapes over a Compose network or
 between pods carry it like every other request on that network; from outside,
 scrape through TLS (the reverse proxy or Ingress that already terminates it).
