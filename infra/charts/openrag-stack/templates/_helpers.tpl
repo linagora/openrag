@@ -125,3 +125,14 @@ Usage: {{ include "openrag-stack.securityFieldOverride" (dict "component" .Value
 {{- .default -}}
 {{- end -}}
 {{- end }}
+
+{{/*
+Port every Ray node exports its metrics on, head and workers alike. Kept off
+networkPolicy.externalPorts' 8080 on purpose: that rule matches by port number
+across every pod in the namespace, and these metrics are unauthenticated.
+KubeRay's own default is exactly 8080, so both halves of raycluster.yaml must
+override it — see the comments there.
+*/}}
+{{- define "openrag-stack.rayMetricsPort" -}}
+8090
+{{- end }}
