@@ -1756,6 +1756,24 @@ class TestVectorFieldRouting:
 
         store._async_client.hybrid_search.assert_awaited_once()
 
+    async def test_a_cold_field_cache_is_read_off_the_event_loop(self, store: MilvusVectorStore) -> None:
+        # Every search asks, and the cache is cold at startup and after each
+        # field is added or dropped: a describe on the loop stalls the API.
+        described_on: list[int] = []
+
+        def describe(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+            described_on.append(threading.get_ident())
+            return _descriptor("text", FIELD, vector_fields=(FIELD,))
+
+        store._dense_fields_cache = None
+        store._client.describe_collection.side_effect = describe
+
+        assert await store._has_dense_field(FIELD)
+
+        # Once: a cold cache has nothing stale to re-read.
+        assert len(described_on) == 1
+        assert described_on[0] != threading.get_ident()
+
     async def test_search_refuses_a_collection_awaiting_migration(self, store: MilvusVectorStore) -> None:
         # Indexing checks the version on initialize; the API process never
         # calls it, so search checks too — once.

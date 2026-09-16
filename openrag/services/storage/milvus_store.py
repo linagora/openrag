@@ -1209,11 +1209,18 @@ class MilvusVectorStore(VectorStore):
 
         The cached names only follow fields added by this process; another
         process (an indexer) may have added this one since.
+
+        Only a warm cache is read inline. A cold one means a ``describe_collection``
+        RPC, which runs off the event loop like the re-read below: this is on
+        every search, and the cache is cold at startup and after each field is
+        added or dropped.
         """
-        if field in self._dense_field_names():
-            return True
-        self._dense_fields_cache = None
-        self._schema_vector_dim = None
+        cached = self._dense_fields_cache
+        if cached is not None:
+            if field in cached:
+                return True
+            self._dense_fields_cache = None
+            self._schema_vector_dim = None
         return field in await asyncio.to_thread(self._dense_field_names)
 
     async def _check_search_schema_version(self) -> None:
