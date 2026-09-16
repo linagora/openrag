@@ -1,0 +1,286 @@
+# promtool unit tests for infra/charts/openrag-stack/rules/openrag-alerts.yaml.
+#
+#   promtool test rules tests/unit/infra/alert_rules.promtool.yaml
+#
+# `rule_files` below is resolved relative to THIS file, not the working
+# directory. tests/unit/infra/test_alert_rules_promtool.py runs this under
+# pytest when promtool or Docker is available, and skips when neither is.
+#
+# NOT placed beside the rules themselves on purpose: the Compose overlay loads
+# `rule_files: /etc/prometheus/rules/*.yaml`, so a test file in that directory
+# would be handed to Prometheus as a rule file and fail the config.
+#
+# The synthetic clock starts at epoch, so `time()` at eval_time 25m is 1500.
+# That is why the parse-completion gauge is written as 0 below: the alert reads
+# `time() - <gauge>`, which then equals seconds since the test began.
+#
+# exp_annotations is pinned, not omitted, and that is the point: promtool
+# renders the templates, so these assertions cover what the on-call engineer
+# actually reads. The first run of this file caught OpenRagBacklogGrowing
+# reporting a per-second slope (0.083) where the annotation claimed to give the
+# queue depth (275) — a label-correct, expression-correct alert that lied in the
+# one field a human reads first.
+
+rule_files:
+  - ../../../infra/charts/openrag-stack/rules/openrag-alerts.yaml
+
+evaluation_interval: 1m
+
+tests:
+  # ── OpenRagIngestStalled ────────────────────────────────────────────────
+  - interval: 1m
+    name: work is queued and no parse completes — fires past 15m idle plus for 5m
+    input_series:
+      - series: 'openrag_ingest_tasks{state="QUEUED"}'
+        values: "3+0x40"
+      - series: 'openrag_ingest_last_parse_completion_timestamp_seconds{pool="marker"}'
+        values: "0+0x40"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: OpenRagIngestStalled
+        exp_alerts: []
+      - eval_time: 18m
+        alertname: OpenRagIngestStalled
+        exp_alerts: []
+      - eval_time: 22m
+        alertname: OpenRagIngestStalled
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              state: QUEUED
+            exp_annotations:
+              description: "3 task(s) are QUEUED and no parser pool has completed a parse for over 15 minutes. Uploads are being accepted and never indexed."
+              runbook_url: "https://github.com/linagora/openrag/blob/main/docs/deployment/runbooks/OpenRagIngestStalled.md"
+              summary: "Ingestion is stalled — documents are queued and nothing is completing"
+
+  - interval: 1m
+    name: nothing queued — an idle pipeline is not a stalled one
+    input_series:
+      - series: 'openrag_ingest_tasks{state="QUEUED"}'
+        values: "0+0x40"
+      - series: 'openrag_ingest_last_parse_completion_timestamp_seconds{pool="marker"}'
+        values: "0+0x40"
+    alert_rule_test:
+      - eval_time: 35m
+        alertname: OpenRagIngestStalled
+        exp_alerts: []
+
+  - interval: 1m
+    name: "documented blind spot: an instance that has never parsed cannot fire this"
+    input_series:
+      - series: 'openrag_ingest_tasks{state="QUEUED"}'
+        values: "5+0x40"
+    alert_rule_test:
+      - eval_time: 35m
+        alertname: OpenRagIngestStalled
+        exp_alerts: []
+
+  # ── OpenRagIngestFailureRate ────────────────────────────────────────────
+  - interval: 1m
+    name: one failure out of two is above 25% but below the volume floor
+    input_series:
+      - series: 'openrag_ingest_documents_total{status="failed"}'
+        values: "0 1 1+0x40"
+      - series: 'openrag_ingest_documents_total{status="completed"}'
+        values: "0 1 1+0x40"
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: OpenRagIngestFailureRate
+        exp_alerts: []
+
+  - interval: 1m
+    name: half of a real volume failing — fires
+    input_series:
+      - series: 'openrag_ingest_documents_total{status="failed"}'
+        values: "0+1x40"
+      - series: 'openrag_ingest_documents_total{status="completed"}'
+        values: "0+1x40"
+    alert_rule_test:
+      - eval_time: 35m
+        alertname: OpenRagIngestFailureRate
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              description: "50% of documents reaching a terminal state over the last 15 minutes failed."
+              runbook_url: "https://github.com/linagora/openrag/blob/main/docs/deployment/runbooks/OpenRagIngestFailureRate.md"
+              summary: "More than 25% of documents are failing to index"
+
+  - interval: 1m
+    name: cancellations neither dilute nor inflate the ratio
+    input_series:
+      - series: 'openrag_ingest_documents_total{status="failed"}'
+        values: "0+1x40"
+      - series: 'openrag_ingest_documents_total{status="completed"}'
+        values: "0+1x40"
+      - series: 'openrag_ingest_documents_total{status="cancelled"}'
+        values: "0+20x40"
+    alert_rule_test:
+      - eval_time: 35m
+        alertname: OpenRagIngestFailureRate
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              description: "50% of documents reaching a terminal state over the last 15 minutes failed."
+              runbook_url: "https://github.com/linagora/openrag/blob/main/docs/deployment/runbooks/OpenRagIngestFailureRate.md"
+              summary: "More than 25% of documents are failing to index"
+
+  # ── OpenRagBacklogGrowing ───────────────────────────────────────────────
+  - interval: 1m
+    name: a burst that drains does not alert
+    input_series:
+      - series: 'openrag_ingest_tasks{state="QUEUED"}'
+        values: "0+20x10 200-20x10 0+0x40"
+    alert_rule_test:
+      - eval_time: 55m
+        alertname: OpenRagBacklogGrowing
+        exp_alerts: []
+
+  - interval: 1m
+    name: a queue past the floor and still climbing — annotation reports depth, not slope
+    input_series:
+      - series: 'openrag_ingest_tasks{state="QUEUED"}'
+        values: "0+5x60"
+    alert_rule_test:
+      - eval_time: 55m
+        alertname: OpenRagBacklogGrowing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              state: QUEUED
+            exp_annotations:
+              description: "The QUEUED task count has trended upward for 30 minutes and now stands at 275. Ingestion capacity is below the arrival rate."
+              runbook_url: "https://github.com/linagora/openrag/blob/main/docs/deployment/runbooks/OpenRagBacklogGrowing.md"
+              summary: "Indexing backlog is growing faster than it drains"
+
+  - interval: 1m
+    name: a small queue rising slowly stays below the absolute floor
+    input_series:
+      - series: 'openrag_ingest_tasks{state="QUEUED"}'
+        values: "0+0.2x60"
+    alert_rule_test:
+      - eval_time: 55m
+        alertname: OpenRagBacklogGrowing
+        exp_alerts: []
+
+  # ── OpenRagInferenceProviderDown ────────────────────────────────────────
+  - interval: 1m
+    name: error ratio above half for one provider
+    input_series:
+      - series: 'openrag_inference_requests_total{provider="embedder-main",operation="embed",outcome="error"}'
+        values: "0+8x40"
+      - series: 'openrag_inference_requests_total{provider="embedder-main",operation="embed",outcome="success"}'
+        values: "0+2x40"
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: OpenRagInferenceProviderDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              provider: embedder-main
+            exp_annotations:
+              description: "Provider embedder-main is either returning errors/timeouts for more than half of its calls, or its circuit breaker is open. Chat and indexing that depend on it will fail."
+              runbook_url: "https://github.com/linagora/openrag/blob/main/docs/deployment/runbooks/OpenRagInferenceProviderDown.md"
+              summary: "Inference provider embedder-main is failing or circuit-broken"
+
+  - interval: 1m
+    name: an open breaker alone fires, and label_replace supplies provider
+    input_series:
+      - series: 'openrag_circuit_breaker_state{name="llm"}'
+        values: "1+0x40"
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: OpenRagInferenceProviderDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              name: llm
+              provider: llm
+            exp_annotations:
+              description: "Provider llm is either returning errors/timeouts for more than half of its calls, or its circuit breaker is open. Chat and indexing that depend on it will fail."
+              runbook_url: "https://github.com/linagora/openrag/blob/main/docs/deployment/runbooks/OpenRagInferenceProviderDown.md"
+              summary: "Inference provider llm is failing or circuit-broken"
+
+  - interval: 1m
+    name: a closed breaker and healthy traffic stay quiet
+    input_series:
+      - series: 'openrag_circuit_breaker_state{name="llm"}'
+        values: "0+0x40"
+      - series: 'openrag_inference_requests_total{provider="llm-main",operation="chat",outcome="success"}'
+        values: "0+10x40"
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: OpenRagInferenceProviderDown
+        exp_alerts: []
+
+  - interval: 1m
+    name: circuit_open traffic alone does not trip the ratio clause
+    input_series:
+      - series: 'openrag_inference_requests_total{provider="llm-main",operation="chat",outcome="circuit_open"}'
+        values: "0+10x40"
+      - series: 'openrag_circuit_breaker_state{name="llm"}'
+        values: "0+0x40"
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: OpenRagInferenceProviderDown
+        exp_alerts: []
+
+  # ── OpenRagCatalogDriftDetected ─────────────────────────────────────────
+  - interval: 1m
+    name: any sustained non-zero drop rate fires
+    input_series:
+      - series: "openrag_retrieval_orphan_chunks_dropped_total"
+        values: "0+1x40"
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: OpenRagCatalogDriftDetected
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              description: "Chunks are being returned by the vector store for files the catalog does not know about. Retrieval quality is silently degraded."
+              runbook_url: "https://github.com/linagora/openrag/blob/main/docs/deployment/runbooks/OpenRagCatalogDriftDetected.md"
+              summary: "Retrieval is dropping chunks whose file is missing from the catalog"
+
+  - interval: 1m
+    name: a flat counter is silence, not drift
+    input_series:
+      - series: "openrag_retrieval_orphan_chunks_dropped_total"
+        values: "7+0x40"
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: OpenRagCatalogDriftDetected
+        exp_alerts: []
+
+  # ── OpenRagTargetDown ───────────────────────────────────────────────────
+  - interval: 1m
+    name: a down openrag target fires after 5m
+    input_series:
+      - series: 'up{job="openrag",instance="openrag:8080"}'
+        values: "0+0x20"
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: OpenRagTargetDown
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: OpenRagTargetDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: openrag
+              instance: openrag:8080
+            exp_annotations:
+              description: "The target has been unreachable for 5 minutes. Every other OpenRag alert is inert while this is firing, because absent series cannot breach a threshold."
+              runbook_url: "https://github.com/linagora/openrag/blob/main/docs/deployment/runbooks/OpenRagTargetDown.md"
+              summary: "Prometheus cannot scrape OpenRag (openrag:8080)"
+
+  - interval: 1m
+    name: another service being down is not our alert
+    input_series:
+      - series: 'up{job="node-exporter",instance="node-exporter:9100"}'
+        values: "0+0x20"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: OpenRagTargetDown
+        exp_alerts: []
