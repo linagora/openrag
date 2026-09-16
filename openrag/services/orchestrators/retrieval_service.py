@@ -182,7 +182,7 @@ class RetrievalService:
             "model": getattr(endpoint, "model_name", None),
         }
 
-    def _public_retrieval_configuration(self, partitions: Sequence[str]) -> dict[str, object]:
+    def public_retrieval_configuration(self, partitions: Sequence[str]) -> dict[str, object]:
         """Build the stable public retrieval-setting subset used for fingerprints."""
         configured_partitions = self._partition_configs()
         public_partitions: list[dict[str, object]] = []
@@ -252,7 +252,7 @@ class RetrievalService:
 
     def configuration_fingerprint(self, partitions: Sequence[str]) -> str:
         """Fingerprint only allowlisted public settings for the authorized scope."""
-        return canonical_fingerprint(self._public_retrieval_configuration(partitions))
+        return canonical_fingerprint(self.public_retrieval_configuration(partitions))
 
     def _require_partition_config(self, partition: str):
         partitions = self._partition_configs()

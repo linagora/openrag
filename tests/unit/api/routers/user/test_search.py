@@ -8,7 +8,13 @@ from api.dependencies.auth import (
 from api.error_handlers import register_error_handlers
 from api.routers.user.search import router as search_router
 from core.models.chunk import Chunk
-from di.providers import get_auth_service, get_partition_service, get_retrieval_service, get_workspace_service
+from di.providers import (
+    get_auth_service,
+    get_partition_service,
+    get_retrieval_service,
+    get_retrieval_snapshot_service,
+    get_workspace_service,
+)
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -156,6 +162,34 @@ def test_search_with_trace_returns_same_documents_and_trace():
     assert payload["retrieval_trace"]["request_id"] == "trace-request"
     assert payload["retrieval_trace"]["configuration_fingerprint"] == "fingerprint"
     assert retrieval.calls[-1]["trace"] is not None
+
+
+def test_snapshot_route_forwards_opt_in_document_ids():
+    from api.dependencies.auth import require_partition_viewer
+
+    class _Snapshots:
+        def __init__(self):
+            self.calls = []
+
+        async def snapshot(self, partition, *, include_document_ids=False):
+            self.calls.append((partition, include_document_ids))
+            return {"configuration": {}, "index": {"partition": partition}, "fingerprint": "fp"}
+
+    snapshots = _Snapshots()
+    app = FastAPI()
+    register_error_handlers(app)
+    app.include_router(search_router, prefix="/search")
+    app.dependency_overrides[require_partition_viewer] = lambda: None
+    app.dependency_overrides[get_retrieval_snapshot_service] = lambda: snapshots
+
+    response = TestClient(app).get(
+        "/search/partition/legal/snapshot",
+        params={"include_document_ids": True},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["fingerprint"] == "fp"
+    assert snapshots.calls == [("legal", True)]
 
 
 # --------------------------------------------------------------------------- #

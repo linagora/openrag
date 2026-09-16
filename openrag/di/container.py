@@ -70,6 +70,7 @@ if TYPE_CHECKING:
     from services.orchestrators.prompt_service import PromptService
     from services.orchestrators.query_service import QueryService
     from services.orchestrators.retrieval_service import RetrievalService
+    from services.orchestrators.retrieval_snapshot_service import RetrievalSnapshotService
     from services.orchestrators.user_service import UserService
     from services.orchestrators.workspace_service import WorkspaceService
 
@@ -128,6 +129,7 @@ class ServiceContainer:
         self._prompt_service: PromptService | None = None
         self._workspace_service: WorkspaceService | None = None
         self._retrieval_service: RetrievalService | None = None
+        self._retrieval_snapshot_service: RetrievalSnapshotService | None = None
         self._query_service: QueryService | None = None
         self._indexing_service: IndexingService | None = None
         self._job_service: JobService | None = None
@@ -573,6 +575,19 @@ class ServiceContainer:
                 prompt_service=self.prompt_service,
             )
         return self._retrieval_service
+
+    @property
+    def retrieval_snapshot_service(self) -> RetrievalSnapshotService:
+        """Public retrieval/index snapshots for reproducible benchmark runs."""
+        if self._retrieval_snapshot_service is None:
+            from services.orchestrators.retrieval_snapshot_service import RetrievalSnapshotService
+
+            self._retrieval_snapshot_service = RetrievalSnapshotService(
+                partition_service=self.partition_service,
+                document_repo=self.document_repo,
+                retrieval_service=self.retrieval_service,
+            )
+        return self._retrieval_snapshot_service
 
     @property
     def query_service(self) -> QueryService:

@@ -21,7 +21,7 @@ from api.dependencies.files import validate_file_id
 from core.retrieval.trace import RetrievalTraceBuilder, canonical_fingerprint
 from core.utils.filter_validation import validate_search_filter
 from core.utils.logging import get_logger
-from di.providers import get_retrieval_service, get_workspace_service
+from di.providers import get_retrieval_service, get_retrieval_snapshot_service, get_workspace_service
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import JSONResponse
 
@@ -117,6 +117,22 @@ def _response_payload(request: Request, chunks, trace, service, partitions: list
         fingerprint = canonical_fingerprint({})
     payload["retrieval_trace"] = trace.finish(configuration_fingerprint=fingerprint)
     return payload
+
+
+@router.get(
+    "/partition/{partition}/snapshot",
+    description="Return the public retrieval and index configuration used to reproduce benchmark runs.",
+)
+async def retrieval_snapshot(
+    partition: str,
+    include_document_ids: bool = Query(
+        False,
+        description="Include sorted indexed document identifiers for index-health checks.",
+    ),
+    partition_viewer=Depends(require_partition_viewer),
+    service=Depends(get_retrieval_snapshot_service),
+):
+    return await service.snapshot(partition, include_document_ids=include_document_ids)
 
 
 @router.get(
