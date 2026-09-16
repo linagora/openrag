@@ -96,6 +96,7 @@ class RetrievalSnapshotService:
         return {
             "configuration": configuration,
             "index": index,
+            "retrieval_configuration_fingerprint": self._retrieval.configuration_fingerprint([partition]),
             "fingerprint": canonical_fingerprint(
                 {"configuration": configuration, "index": fingerprint_index}
             ),

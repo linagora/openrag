@@ -26,6 +26,10 @@ class _Documents:
 
 class _Retrieval:
     @staticmethod
+    def configuration_fingerprint(_partitions):
+        return "retrieval-fingerprint"
+
+    @staticmethod
     def public_retrieval_configuration(partitions):
         assert partitions == ["legal-rag-bench"]
         return {
@@ -56,6 +60,7 @@ async def test_snapshot_is_allowlisted_and_fingerprinted():
     snapshot = await service.snapshot("legal-rag-bench", include_document_ids=True)
 
     assert snapshot["configuration"]["reranker"]["top_n"] == 10
+    assert snapshot["retrieval_configuration_fingerprint"] == "retrieval-fingerprint"
     assert snapshot["configuration"]["embedder"]["dimensions"] == 768
     assert snapshot["index"]["document_ids"] == ["doc-1", "doc-2"]
     serialized = json.dumps(snapshot)

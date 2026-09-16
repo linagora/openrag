@@ -261,6 +261,7 @@ Perform semantic search across specified partitions.
 | `include_ancestors` (optional) | boolean | `false`   | Include chunks from ancestor files (via `parent_id` chain) |
 | `related_limit` (optional)     | integer | 20      | Max related/ancestor chunks to fetch per result (used when `include_related` or `include_ancestors` is true) |
 | `filter` (optional)            | string  | None    | Milvus filter expression string for additional filtering. Supports comparison (`==`, `!=`, `>`, `<`, `>=`, `<=`), range (`IN`, `LIKE`), and logical (`AND`, `OR`, `NOT`) operators. |
+| `include_retrieval_trace` (optional) | boolean | `false` | Adds schema-versioned, content-free retrieval diagnostics. May execute additional dense and sparse diagnostic searches. |
 
 **Responses:**
 - `200 OK`: JSON list of document links (HATEOAS format)
@@ -283,8 +284,23 @@ Search within a specific partition only.
 | `include_ancestors` (optional) | boolean | `false`   | Include chunks from ancestor files (via `parent_id` chain) |
 | `related_limit` (optional)     | integer | 20      | Max related/ancestor chunks to fetch per result (used when `include_related` or `include_ancestors` is true) |
 | `filter` (optional)            | string  | None    | Milvus filter expression string for additional filtering. Supports comparison (`==`, `!=`, `>`, `<`, `>=`, `<=`), range (`IN`, `LIKE`), and logical (`AND`, `OR`, `NOT`) operators. |
+| `include_retrieval_trace` (optional) | boolean | `false` | Adds schema-versioned, content-free retrieval diagnostics. May execute additional dense and sparse diagnostic searches. |
 
 **Response:** Same as multi-partition search
+
+Tracing is opt-in because it adds diagnostic work and can make responses large. The trace is returned as
+`retrieval_trace` and contains identifiers, ranks, public scores, decisions, timings, and configuration identity;
+it excludes document content, prompt content, credentials, and endpoint secrets. If a diagnostic leg fails, the
+search result remains authoritative and the affected stage is marked unavailable or errored.
+
+* Retrieval Snapshot
+```http
+GET /search/partition/{partition}/snapshot
+```
+
+Returns the allowlisted retrieval, model, and index configuration used to reproduce a run. Set
+`include_document_ids=true` only for index-health checks; document identifiers are excluded from the snapshot
+fingerprint so compact and expanded snapshots remain comparable.
 
 * Search Within Specific File
 ```http
@@ -756,6 +772,12 @@ ambiguous, mixed, and factual messages retrieve. Text completions retain their c
 | `use_map_reduce` | Chat only | `bool` | `false` | Uses a map-reduce strategy to aggregate information from multiple documents. See [map-reduce configuration](/openrag/documentation/env_vars/#map--reduce-configuration). |
 | `llm_override` | Chat and text completions | `object` | `null` | Overrides the downstream LLM for this request. Accepts `model` (string), always honored. Also accepts `base_url` and `api_key`, which are honored **only** when the deployment sets `LLM_OVERRIDE_ALLOW_CUSTOM_ENDPOINT` — otherwise they are ignored and the request goes to the server's configured endpoint. See [custom LLM endpoints](/openrag/documentation/env_vars/#client-supplied-llm-endpoints). |
 | `attachments` | Chat only | `list[{"id": string}]` | `null` | Scopes RAG retrieval to a specific list of file IDs within the target partition, instead of searching the whole partition. Unknown or unindexed IDs are silently dropped; duplicates are deduplicated. The response's `extra.attachments` reports which IDs were actually used. |
+| `include_retrieval_trace` | Chat only | `bool` | `false` | Adds trace schema version 1 to `extra.retrieval_trace`. The streaming endpoint emits it only in terminal metadata. |
+| `compare_original_query` | Chat only | `bool` | `false` | With tracing enabled, runs an isolated retrieval for the original message and stores it under `comparisons.original_query`. It never changes the answer's documents. |
+
+Chat tracing persists the exact contextualized query, temporal filters, retrieval decision, fallback state, prompt
+hash, and retrieval stages. It is not regenerated when results are inspected. Both tracing and original-query
+comparison add work, so they should be reserved for evaluation and diagnostics.
 
 Common English and French casual messages are recognized directly; other phrasing is checked conservatively by the
 contextualizer. Casual replies use a dedicated instruction in the detected language. Only greetings introduce
