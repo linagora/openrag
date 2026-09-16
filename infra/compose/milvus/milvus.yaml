@@ -16,7 +16,7 @@ services:
       retries: 3
 
   minio:
-    image: minio/minio:RELEASE.2024-12-18T13-15-44Z
+    image: quay.io/minio/minio:RELEASE.2024-12-18T13-15-44Z
     environment:
       MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:?Set MINIO_ACCESS_KEY in your .env}
       MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:?Set MINIO_SECRET_KEY in your .env}
