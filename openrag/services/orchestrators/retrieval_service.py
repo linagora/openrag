@@ -25,7 +25,7 @@ built ``searcher`` / ``reranker`` / ``llm`` plus ``config``.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from typing import TYPE_CHECKING, Any
 
 from core.prompts import load_template_by_key
@@ -37,6 +37,7 @@ from core.retrieval.retriever import (
     _expand_with_related_chunks,
 )
 from core.retrieval.rrf import rrf_reranking
+from core.retrieval.trace import candidates_from_chunks, canonical_fingerprint
 from core.utils.exceptions import PartitionNotFoundError
 from core.utils.logging import get_logger
 
@@ -47,6 +48,7 @@ if TYPE_CHECKING:
     from core.models.query import Query, SearchQueries
     from core.rerankers.reranker import Reranker
     from core.retrieval.searcher import RetrievalSearcher
+    from core.retrieval.trace import RetrievalTraceBuilder
 
 logger = get_logger()
 
@@ -169,6 +171,88 @@ class RetrievalService:
 
     def _partition_configs(self) -> dict[str, Any]:
         return getattr(self._config, "partitions", {}) or {}
+
+    @staticmethod
+    def _public_endpoint(config: Settings, endpoint_type: str, name: str | None) -> dict[str, object]:
+        """Return endpoint identity only, excluding URLs, keys, and arbitrary extras."""
+        registry = getattr(getattr(config, "models", None), endpoint_type, {}) or {}
+        endpoint = registry.get(name) if name is not None else None
+        return {
+            "name": name,
+            "model": getattr(endpoint, "model_name", None),
+        }
+
+    def _public_retrieval_configuration(self, partitions: Sequence[str]) -> dict[str, object]:
+        """Build the stable public retrieval-setting subset used for fingerprints."""
+        configured_partitions = self._partition_configs()
+        public_partitions: list[dict[str, object]] = []
+        for partition_name in sorted(set(partitions)):
+            partition = configured_partitions.get(partition_name)
+            retrieval = partition.retrieval if partition is not None else self._config.retriever
+            embedder_name = partition.embedder if partition is not None else "default"
+            reranker_enabled = bool(
+                getattr(
+                    retrieval,
+                    "enable_reranker",
+                    getattr(getattr(self._config, "reranker", None), "enabled", False),
+                )
+            )
+            reranker_name = getattr(retrieval, "reranker", None) or ("default" if reranker_enabled else None)
+            contextualizer_name = (
+                getattr(retrieval, "llm", None)
+                or (getattr(partition, "chat_llm", None) if partition is not None else None)
+                or "default"
+            )
+            public_partitions.append(
+                {
+                    "name": partition_name,
+                    "embedder": self._public_endpoint(self._config, "embedder", embedder_name),
+                    "retrieval": {
+                        "type": getattr(retrieval, "type", None),
+                        "top_k": getattr(retrieval, "top_k", None),
+                        "similarity_threshold": getattr(retrieval, "similarity_threshold", None),
+                    },
+                    "reranker": {
+                        **self._public_endpoint(self._config, "reranker", reranker_name),
+                        "enabled": reranker_enabled,
+                        "top_n": getattr(
+                            retrieval,
+                            "top_n",
+                            getattr(getattr(self._config, "reranker", None), "top_k", None),
+                        ),
+                    },
+                    "contextualizer": {
+                        **self._public_endpoint(self._config, "llm", contextualizer_name),
+                        "prompt_name": getattr(retrieval, "query_contextualizer_prompt_name", None),
+                    },
+                    "expansion": {
+                        "include_related": getattr(retrieval, "include_related", False),
+                        "include_ancestors": getattr(retrieval, "include_ancestors", False),
+                        "related_limit": getattr(
+                            retrieval,
+                            "related_limit",
+                            self._legacy_retriever_value("related_limit", None),
+                        ),
+                        "max_ancestor_depth": getattr(
+                            retrieval,
+                            "max_ancestor_depth",
+                            self._legacy_retriever_value("max_ancestor_depth", None),
+                        ),
+                    },
+                }
+            )
+        hybrid_enabled = getattr(getattr(self._config, "vectordb", None), "hybrid_search", None)
+        return {
+            "hybrid": {
+                "enabled": hybrid_enabled,
+                "fusion": "rrf" if hybrid_enabled else None,
+            },
+            "partitions": public_partitions,
+        }
+
+    def configuration_fingerprint(self, partitions: Sequence[str]) -> str:
+        """Fingerprint only allowlisted public settings for the authorized scope."""
+        return canonical_fingerprint(self._public_retrieval_configuration(partitions))
 
     def _require_partition_config(self, partition: str):
         partitions = self._partition_configs()
@@ -342,6 +426,7 @@ class RetrievalService:
         include_ancestors: bool = False,
         related_limit: int = 20,
         max_ancestor_depth: int | None = None,
+        trace: RetrievalTraceBuilder | None = None,
     ) -> list[Chunk]:
         """One similarity search, then optional related/ancestor expansion.
 
@@ -350,6 +435,11 @@ class RetrievalService:
         query generation / reranking / RRF — those belong to QueryService).
         """
         parts = [partitions] if isinstance(partitions, str) else list(partitions)
+        if trace is not None:
+            trace.record_stage("original_query", status="complete", candidates=[])
+        trace_kwargs = {}
+        if trace is not None:
+            trace_kwargs["trace"] = trace
         chunks = await self._searcher.search(
             query=text,
             partition=parts,
@@ -358,6 +448,7 @@ class RetrievalService:
             filter_params=filter_params,
             similarity_threshold=similarity_threshold,
             with_surrounding_chunks=True,
+            **trace_kwargs,
         )
         if include_related or include_ancestors:
             chunks = await _expand_with_related_chunks(
@@ -369,6 +460,11 @@ class RetrievalService:
                 max_ancestor_depth=max_ancestor_depth,
                 filter_params=filter_params,
             )
+        if trace is not None:
+            try:
+                trace.record_stage("final", status="complete", candidates=candidates_from_chunks(chunks))
+            except Exception as error:
+                trace.record_error("final", error)
         return chunks
 
     # ------------------------------------------------------------------

@@ -18,6 +18,7 @@ from core.config.retrieval_pipeline import RetrievalPipelineConfig
 from core.models.chunk import Chunk
 from core.models.preset import PartitionConfig
 from core.models.query import Query, SearchQueries
+from core.retrieval.trace import RetrievalTraceBuilder
 from core.utils.exceptions import PartitionNotFoundError
 from services.orchestrators.retrieval_service import RetrievalService
 
@@ -127,6 +128,46 @@ async def test_search_normalizes_str_partition_and_passes_params():
     assert call["filter"] == "file_id == 'x'"
     assert call["filter_params"] == {"a": 1}
     assert call["with_surrounding_chunks"] is True
+
+
+@pytest.mark.asyncio
+async def test_search_forwards_request_local_trace():
+    searcher = FakeSearcher()
+    trace = RetrievalTraceBuilder("req-1", "hello")
+
+    await _svc(searcher).search(
+        text="hello",
+        partitions="p1",
+        top_k=7,
+        similarity_threshold=0.8,
+        trace=trace,
+    )
+
+    assert searcher.search_calls[0]["trace"] is trace
+
+
+def test_configuration_fingerprint_is_stable_and_ignores_secret_endpoint_fields():
+    searcher = FakeSearcher()
+    cfg = _config()
+    cfg.vectordb = SimpleNamespace(hybrid_search=True, api_key="secret-a")
+    cfg.embedder = SimpleNamespace(model_name="legacy-embedder", api_key="secret-b")
+    cfg.partitions = {
+        "tenant-b": _partition(name="tenant-b", embedder="embed-b"),
+        "tenant-a": _partition(name="tenant-a", embedder="embed-a"),
+    }
+    cfg.models.embedder = {
+        "embed-a": SimpleNamespace(model_name="model-a", endpoint="https://user:pass@example.test", extra={"api_key": "x"}),
+        "embed-b": SimpleNamespace(model_name="model-b", endpoint="https://example.test", extra={}),
+    }
+    service = RetrievalService(searcher=searcher, reranker=None, llm=None, config=cfg)
+
+    first = service.configuration_fingerprint(["tenant-b", "tenant-a"])
+    cfg.vectordb.api_key = "changed-secret"
+    cfg.models.embedder["embed-a"].endpoint = "https://changed-secret.example.test"
+    second = service.configuration_fingerprint(["tenant-a", "tenant-b"])
+
+    assert first == second
+    assert len(first) == 64
 
 
 @pytest.mark.asyncio

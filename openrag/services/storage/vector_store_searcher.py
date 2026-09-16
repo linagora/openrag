@@ -8,7 +8,8 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from typing import Any
+from time import perf_counter
+from typing import TYPE_CHECKING, Any
 
 from core.embeddings import Embedder
 from core.models.chunk import Chunk, _coerce_chunk_type
@@ -16,6 +17,9 @@ from core.ports.document_repo import DocumentRepository
 from core.retrieval.searcher import RetrievalSearcher, file_id_restriction
 from core.utils.consts import RETRIEVAL_SCORE_KEYS, is_internal_metadata_key
 from core.vector_stores import VectorStore
+
+if TYPE_CHECKING:
+    from core.retrieval.trace import RetrievalTraceBuilder
 
 
 def _dict_to_chunk(row: dict[str, Any]) -> Chunk:
@@ -81,13 +85,20 @@ class VectorStoreSearcher(RetrievalSearcher):
         filter_params: dict | None = None,
         similarity_threshold: float = 0.0,
         with_surrounding_chunks: bool = True,
+        trace: RetrievalTraceBuilder | None = None,
     ) -> list[Chunk]:
+        embedding_started = perf_counter() if trace is not None else None
         (embedding,) = await self._embedder.embed([query])
+        if trace is not None and embedding_started is not None:
+            trace.timings["embedding"] = perf_counter() - embedding_started
         filters: dict[str, Any] = {"partition": partition}
         if filter:
             filters["expr"] = filter
         if filter_params:
             filters.update(filter_params)
+        trace_kwargs = {}
+        if trace is not None:
+            trace_kwargs["trace"] = trace
         results = await self._store.search(
             embedding=embedding,
             query_text=query,
@@ -95,6 +106,7 @@ class VectorStoreSearcher(RetrievalSearcher):
             filters=filters,
             top_k=top_k,
             similarity_threshold=similarity_threshold or None,
+            **trace_kwargs,
         )
         chunks = [_dict_to_chunk(r) for r in results]
         if with_surrounding_chunks and chunks:
@@ -112,13 +124,20 @@ class VectorStoreSearcher(RetrievalSearcher):
         filter_params: dict | None = None,
         similarity_threshold: float = 0.0,
         with_surrounding_chunks: bool = True,
+        trace: RetrievalTraceBuilder | None = None,
     ) -> list[Chunk]:
+        embedding_started = perf_counter() if trace is not None else None
         embeddings = await self._embedder.embed(queries)
+        if trace is not None and embedding_started is not None:
+            trace.timings["embedding"] = perf_counter() - embedding_started
         filters: dict[str, Any] = {"partition": partition}
         if filter:
             filters["expr"] = filter
         if filter_params:
             filters.update(filter_params)
+        trace_kwargs = {}
+        if trace is not None:
+            trace_kwargs["trace"] = trace
         per_query = await asyncio.gather(
             *[
                 self._store.search(
@@ -128,6 +147,7 @@ class VectorStoreSearcher(RetrievalSearcher):
                     filters=filters,
                     top_k=top_k_per_query,
                     similarity_threshold=similarity_threshold or None,
+                    **trace_kwargs,
                 )
                 for emb, q in zip(embeddings, queries)
             ]

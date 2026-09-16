@@ -9,6 +9,7 @@ workspace-not-found 404 guard, ``request.url_for`` links, and response
 shaping (domain ``Chunk`` → ``{link, metadata, content}``).
 """
 
+import uuid
 from typing import Annotated
 
 from api.dependencies.auth import (
@@ -17,6 +18,7 @@ from api.dependencies.auth import (
     require_partitions_viewer,
 )
 from api.dependencies.files import validate_file_id
+from core.retrieval.trace import RetrievalTraceBuilder, canonical_fingerprint
 from core.utils.filter_validation import validate_search_filter
 from core.utils.logging import get_logger
 from di.providers import get_retrieval_service, get_workspace_service
@@ -58,6 +60,10 @@ class CommonSearchParams:
             default=None,
             description="""Milvus filter expression string.""",
         ),
+        include_retrieval_trace: bool = Query(
+            False,
+            description="Include opt-in retrieval diagnostics. This performs additional search legs.",
+        ),
     ):
         # Reject filter expressions that could break out of the partition
         # scope (unbalanced parens rebalancing the `(partition …) and (…)`
@@ -67,6 +73,7 @@ class CommonSearchParams:
         self.top_k = top_k
         self.similarity_threshold = similarity_threshold
         self.filter = filter
+        self.include_retrieval_trace = include_retrieval_trace
 
 
 def _documents(request: Request, chunks) -> list[dict]:
@@ -86,6 +93,30 @@ def _documents(request: Request, chunks) -> list[dict]:
             }
         )
     return docs
+
+
+def _new_trace(request: Request, search_params: CommonSearchParams) -> RetrievalTraceBuilder | None:
+    if not search_params.include_retrieval_trace:
+        return None
+    request_id = (
+        getattr(request.state, "request_id", None)
+        or request.headers.get("X-Request-ID")
+        or str(uuid.uuid4())
+    )
+    return RetrievalTraceBuilder(request_id=request_id, original_query=search_params.text)
+
+
+def _response_payload(request: Request, chunks, trace, service, partitions: list[str]) -> dict[str, object]:
+    payload: dict[str, object] = {"documents": _documents(request, chunks)}
+    if trace is None:
+        return payload
+    try:
+        fingerprint = service.configuration_fingerprint(partitions)
+    except Exception as error:
+        trace.record_error("configuration_fingerprint", error)
+        fingerprint = canonical_fingerprint({})
+    payload["retrieval_trace"] = trace.finish(configuration_fingerprint=fingerprint)
+    return payload
 
 
 @router.get(
@@ -173,6 +204,7 @@ async def search_multiple_partitions(
         partitions = [scope.partition]
         filter_params = {"file_id": scope.file_ids}
 
+    trace = _new_trace(request, search_params)
     results = await service.search(
         text=search_params.text,
         partitions=partitions,
@@ -184,12 +216,13 @@ async def search_multiple_partitions(
         include_ancestors=related_params.include_ancestors,
         related_limit=related_params.related_limit,
         max_ancestor_depth=related_params.max_ancestor_depth,
+        trace=trace,
     )
     log.info("Semantic search on multiple partitions completed.", result_count=len(results))
 
     return JSONResponse(
         status_code=status.HTTP_200_OK,
-        content={"documents": _documents(request, results)},
+        content=_response_payload(request, results, trace, service, partitions),
     )
 
 
@@ -258,6 +291,7 @@ async def search_one_partition(
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Workspace not found")
         filter_params = {"file_id": scope.file_ids}
 
+    trace = _new_trace(request, search_params)
     results = await service.search(
         text=search_params.text,
         partitions=partition,
@@ -269,12 +303,13 @@ async def search_one_partition(
         include_ancestors=related_params.include_ancestors,
         related_limit=related_params.related_limit,
         max_ancestor_depth=related_params.max_ancestor_depth,
+        trace=trace,
     )
     log.info("Semantic search on single partition completed.", result_count=len(results))
 
     return JSONResponse(
         status_code=status.HTTP_200_OK,
-        content={"documents": _documents(request, results)},
+        content=_response_payload(request, results, trace, service, [partition]),
     )
 
 
@@ -331,6 +366,7 @@ async def search_file(
     # with the raw `filter` expr and parenthesises each operand, so a caller
     # filter like ``page > 5 OR 1==1`` cannot widen the file_id scope. It is
     # already validated by CommonSearchParams.
+    trace = _new_trace(request, search_params)
     results = await service.search(
         text=search_params.text,
         partitions=partition,
@@ -338,10 +374,11 @@ async def search_file(
         similarity_threshold=search_params.similarity_threshold,
         filter=search_params.filter,
         filter_params={"file_id": file_id},
+        trace=trace,
     )
     log.info("Semantic search on specific file completed.", result_count=len(results))
 
     return JSONResponse(
         status_code=status.HTTP_200_OK,
-        content={"documents": _documents(request, results)},
+        content=_response_payload(request, results, trace, service, [partition]),
     )

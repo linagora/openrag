@@ -20,7 +20,7 @@ import asyncio
 import logging
 from abc import ABC, abstractmethod
 from itertools import chain as ichain
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from core.llm.llm import LLM, chat_content
 from core.models.chunk import Chunk
@@ -34,6 +34,9 @@ from core.utils.registry import Registry
 
 logger = logging.getLogger(__name__)
 
+if TYPE_CHECKING:
+    from core.retrieval.trace import RetrievalTraceBuilder
+
 
 class Retriever(ABC):
     """Common surface for all retrieval strategies."""
@@ -45,6 +48,7 @@ class Retriever(ABC):
         query: str,
         filter: str | None = None,
         filter_params: dict | None = None,
+        trace: RetrievalTraceBuilder | None = None,
     ) -> list[Chunk]:
         """Run the strategy and return scored chunks."""
         ...
@@ -91,7 +95,11 @@ class BaseRetriever(Retriever):
         query: str,
         filter: str | None = None,
         filter_params: dict | None = None,
+        trace: RetrievalTraceBuilder | None = None,
     ) -> list[Chunk]:
+        kwargs = {}
+        if trace is not None:
+            kwargs["trace"] = trace
         return await self.searcher.search(
             query=query,
             partition=partition,
@@ -100,6 +108,7 @@ class BaseRetriever(Retriever):
             filter_params=filter_params,
             similarity_threshold=self.similarity_threshold,
             with_surrounding_chunks=self.with_surrounding_chunks,
+            **kwargs,
         )
 
     async def expand_search_results(self, results: list[Chunk], filter_params: dict | None = None) -> list[Chunk]:
@@ -150,8 +159,12 @@ class MultiQueryRetriever(BaseRetriever):
         query: str,
         filter: str | None = None,
         filter_params: dict | None = None,
+        trace: RetrievalTraceBuilder | None = None,
     ) -> list[Chunk]:
         queries = await self._generate_queries(query)
+        kwargs = {}
+        if trace is not None:
+            kwargs["trace"] = trace
         return await self.searcher.multi_query_search(
             queries=queries,
             partition=partition,
@@ -160,6 +173,7 @@ class MultiQueryRetriever(BaseRetriever):
             filter_params=filter_params,
             similarity_threshold=self.similarity_threshold,
             with_surrounding_chunks=self.with_surrounding_chunks,
+            **kwargs,
         )
 
 
@@ -196,12 +210,16 @@ class HyDeRetriever(BaseRetriever):
         query: str,
         filter: str | None = None,
         filter_params: dict | None = None,
+        trace: RetrievalTraceBuilder | None = None,
     ) -> list[Chunk]:
         hyde = (await self.get_hyde(query)).strip()
         if not hyde:
             queries = [query]
         else:
             queries = [hyde, query] if self.combine else [hyde]
+        kwargs = {}
+        if trace is not None:
+            kwargs["trace"] = trace
         return await self.searcher.multi_query_search(
             queries=queries,
             partition=partition,
@@ -210,6 +228,7 @@ class HyDeRetriever(BaseRetriever):
             filter_params=filter_params,
             similarity_threshold=self.similarity_threshold,
             with_surrounding_chunks=self.with_surrounding_chunks,
+            **kwargs,
         )
 
 

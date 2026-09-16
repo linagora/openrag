@@ -7,6 +7,7 @@ from api.dependencies.auth import (
 )
 from api.error_handlers import register_error_handlers
 from api.routers.user.search import router as search_router
+from core.models.chunk import Chunk
 from di.providers import get_auth_service, get_partition_service, get_retrieval_service, get_workspace_service
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -97,6 +98,64 @@ def test_search_file_binds_file_id_via_filter_params():
     assert resp.status_code == 200
     assert captured["filter"] == "page > 5 OR page < 2"
     assert captured["filter_params"] == {"file_id": "abc123"}
+
+
+def _trace_client():
+    from api.dependencies.auth import require_partition_viewer
+
+    class _TraceRetrieval:
+        def __init__(self):
+            self.calls: list[dict] = []
+
+        async def search(self, **kwargs):
+            self.calls.append(kwargs)
+            return [Chunk(id="chunk-1", document_id="doc-1", text="answer", partition="mine")]
+
+        def configuration_fingerprint(self, partitions):
+            assert list(partitions) == ["mine"]
+            return "fingerprint"
+
+    retrieval = _TraceRetrieval()
+    app = FastAPI()
+    register_error_handlers(app)
+
+    @app.get("/extract/{extract_id}", name="get_extract")
+    async def get_extract(extract_id: str):
+        return {"id": extract_id}
+
+    app.include_router(search_router, prefix="/search")
+    app.dependency_overrides[require_partition_viewer] = lambda: None
+    app.dependency_overrides[get_retrieval_service] = lambda: retrieval
+    app.dependency_overrides[get_workspace_service] = lambda: _FakeWorkspaces()
+    return TestClient(app), retrieval
+
+
+def test_search_without_trace_preserves_response_shape_and_does_not_create_collector():
+    client, retrieval = _trace_client()
+
+    payload = client.get("/search/partition/mine", params={"text": "q"}).json()
+
+    assert set(payload) == {"documents"}
+    assert retrieval.calls[0].get("trace") is None
+
+
+def test_search_with_trace_returns_same_documents_and_trace():
+    client, retrieval = _trace_client()
+    plain = client.get("/search/partition/mine", params={"text": "q"}).json()["documents"]
+
+    response = client.get(
+        "/search/partition/mine",
+        params={"text": "q", "include_retrieval_trace": True},
+        headers={"X-Request-ID": "trace-request"},
+    )
+    payload = response.json()
+
+    assert response.status_code == 200
+    assert payload["documents"] == plain
+    assert payload["retrieval_trace"]["schema_version"] == 1
+    assert payload["retrieval_trace"]["request_id"] == "trace-request"
+    assert payload["retrieval_trace"]["configuration_fingerprint"] == "fingerprint"
+    assert retrieval.calls[-1]["trace"] is not None
 
 
 # --------------------------------------------------------------------------- #
