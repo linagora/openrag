@@ -1,0 +1,108 @@
+{{- /*
+Scrape wiring for the stack's own dependencies: Ray, Postgres and Milvus.
+
+Postgres and Milvus export through their sub-charts' own switches
+(postgresql.metrics.*, milvus.metrics.*), which this chart cannot template;
+Ray is ours. What lives here is what the sub-charts cannot do for themselves:
+refuse monitor settings that would render nothing, the Ray PodMonitor, and a
+way through the default-deny NetworkPolicy for a Prometheus in another
+namespace.
+*/}}
+
+{{- /* A monitor switched on over an exporter switched off renders nothing,
+   which is indistinguishable from a target that is being scraped. */}}
+{{- if and .Values.ray.metrics.podMonitor.enabled (not .Values.ray.enabled) }}
+{{- fail "ray.metrics.podMonitor.enabled requires ray.enabled=true: the embedded Ray (ray.enabled=false) runs inside the openrag pod and exports on no fixed port, so there is nothing for a PodMonitor to select." }}
+{{- end }}
+{{- if and .Values.postgresql.enabled .Values.postgresql.metrics.serviceMonitor.enabled (not .Values.postgresql.metrics.enabled) }}
+{{- fail "postgresql.metrics.serviceMonitor.enabled requires postgresql.metrics.enabled=true: without the exporter sidecar the sub-chart renders no ServiceMonitor at all." }}
+{{- end }}
+{{- if and .Values.milvus.enabled .Values.milvus.metrics.serviceMonitor.enabled (not .Values.milvus.metrics.enabled) }}
+{{- fail "milvus.metrics.serviceMonitor.enabled requires milvus.metrics.enabled=true: without it the sub-chart renders no ServiceMonitor at all." }}
+{{- end }}
+
+{{- if and .Values.ray.enabled .Values.ray.metrics.podMonitor.enabled }}
+---
+# A PodMonitor, not a ServiceMonitor: every Ray node exports its own metrics,
+# and the head Service only reaches the head. Requires the monitoring.coreos.com
+# CRDs (kube-prometheus-stack or a standalone Prometheus Operator).
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: {{ include "openrag-stack.fullname" . }}-raycluster
+  labels:
+    {{- include "openrag-stack.componentLabels" (dict "component" "raycluster" "context" $) | nindent 4 }}
+    {{- with .Values.ray.metrics.podMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  namespaceSelector:
+    matchNames:
+      - {{ .Release.Namespace }}
+  selector:
+    matchLabels:
+      ray.io/cluster: {{ include "openrag-stack.fullname" . }}-raycluster
+      ray.io/is-ray-node: "yes"
+  podMetricsEndpoints:
+    - port: metrics
+      path: /metrics
+      interval: {{ .Values.ray.metrics.podMonitor.interval }}
+      scrapeTimeout: {{ .Values.ray.metrics.podMonitor.scrapeTimeout }}
+      relabelings:
+        # Ray's bundled Grafana dashboards filter on these two labels.
+        - sourceLabels: [__meta_kubernetes_pod_label_ray_io_cluster]
+          targetLabel: ray_io_cluster
+        - sourceLabels: [__meta_kubernetes_pod_label_ray_io_node_type]
+          targetLabel: ray_io_node_type
+      metricRelabelings:
+        # Ray prefixes everything recorded through ray.util.metrics with ray_.
+        # Stripping it stores OpenRAG's series under the names the API process
+        # and the alert rules use, so ray_openrag_ingest_documents_total is
+        # queried as openrag_ingest_documents_total. Ray's own ray_* metrics
+        # keep their names for its dashboards. Only the name changes: WorkerId
+        # must survive, or concurrent workers' series collide within one scrape
+        # and Prometheus rejects all of it.
+        - sourceLabels: [__name__]
+          regex: ray_(openrag_.+)
+          targetLabel: __name__
+          replacement: $1
+{{- end }}
+
+{{- if and .Values.networkPolicy.enabled .Values.networkPolicy.metricsFrom }}
+{{- /* One policy per exporter, each selecting only the pods that export and
+   opening only their metrics port. A namespace-wide rule would match by port
+   number on every pod, which is how the workers' 8080 ended up public. */}}
+{{- $targets := list }}
+{{- if .Values.ray.enabled }}
+{{- $rayCluster := printf "%s-raycluster" (include "openrag-stack.fullname" .) }}
+{{- $targets = append $targets (dict "component" "raycluster" "selector" (dict "ray.io/cluster" $rayCluster) "port" (include "openrag-stack.rayMetricsPort" .)) }}
+{{- end }}
+{{- if and .Values.postgresql.enabled .Values.postgresql.metrics.enabled }}
+{{- $targets = append $targets (dict "component" "postgresql" "selector" (dict "app.kubernetes.io/name" "postgresql" "app.kubernetes.io/instance" .Release.Name) "port" .Values.postgresql.metrics.containerPorts.metrics) }}
+{{- end }}
+{{- if and .Values.milvus.enabled .Values.milvus.metrics.enabled }}
+{{- /* 9091 is fixed in the milvus sub-chart's templates, not a value. */}}
+{{- $targets = append $targets (dict "component" "milvus" "selector" (dict "app.kubernetes.io/name" "milvus" "app.kubernetes.io/instance" .Release.Name) "port" 9091) }}
+{{- end }}
+{{- range $targets }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "openrag-stack.fullname" $ }}-{{ .component }}-metrics
+  labels:
+    {{- include "openrag-stack.labels" $ | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- toYaml .selector | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        {{- toYaml $.Values.networkPolicy.metricsFrom | nindent 8 }}
+      ports:
+        - port: {{ .port }}
+          protocol: TCP
+{{- end }}
+{{- end }}
