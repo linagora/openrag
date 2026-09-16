@@ -92,10 +92,15 @@ groups:
         # hour (deriv, which needs a gauge and this is one), and it is large
         # enough to matter. Either alone is noisy — a burst upload rises
         # steeply and drains fine; a steady small queue is a healthy pipeline.
+        # Depth first, trend second. `and` takes the value of its left-hand
+        # side, so this ordering is what makes {{ $value }} in the annotation
+        # the queue depth rather than the derivative — a per-second slope like
+        # 0.083 read as "the backlog is 0.083" is worse than no number at all.
+        # Filtering is symmetric, so the firing condition is unchanged.
         expr: |
-          deriv(openrag_ingest_tasks{state="QUEUED"}[30m]) > 0
-          and
           openrag_ingest_tasks{state="QUEUED"} > 50
+          and
+          deriv(openrag_ingest_tasks{state="QUEUED"}[30m]) > 0
         for: 15m
         labels:
           severity: warning
