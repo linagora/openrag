@@ -52,9 +52,17 @@ async def _caption_document(
     processed_document: ProcessedDocument,
     vlm: VLM,
     prompt: str | None,
-    max_concurrency: int | None = None,
+    max_concurrency: int | None,
 ) -> ProcessedDocument:
-    """Return a copy of ``processed_document`` with captions materialized."""
+    """Return a copy of ``processed_document`` with captions materialized.
+
+    ``max_concurrency`` has no default on purpose. It defaulted to ``None`` when
+    the cap was introduced, and the second caller — the file-serializer path
+    behind the extractText tool and ``/extract`` — silently kept fanning out
+    unbounded because omitting the argument was legal. Requiring it makes a new
+    call site fail loudly instead of quietly uncapped; ``None`` is still how a
+    caller asks for no bound, it just has to ask.
+    """
     images = processed_document.images
     if not images:
         return processed_document
