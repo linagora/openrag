@@ -185,6 +185,10 @@ milvus:
   minio:
     mode: distributed
     replicas: 3
+    # MinIO pulled minio/minio from Docker Hub; pull the same pinned tag from
+    # quay.io instead (mirrors the compose stacks' fix for the same issue).
+    image:
+      repository: quay.io/minio/minio
     persistence:
       enabled: true
       size: 20Gi
