@@ -38,7 +38,7 @@ import asyncio
 import json
 import unicodedata
 from collections.abc import AsyncIterator, Callable
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import Enum
 from typing import TYPE_CHECKING, Any, NamedTuple
 
@@ -423,7 +423,10 @@ class QueryService:
             "query_contextualizer",
             names=[self._retrieval_prompt_name("query_contextualizer_prompt_name", partition)],
         )
-        now = datetime.now()
+        # UTC, not the host clock: the anchors are compared against UTC
+        # created_at timestamps, and near midnight the local date is a
+        # different day.
+        now = datetime.now(UTC)
         prompt = contextualizer.format(
             query_language=detect_language(last_user),
             current_date=now.strftime("%A, %B %d, %Y, %H:%M:%S"),
