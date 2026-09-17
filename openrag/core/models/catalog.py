@@ -24,6 +24,22 @@ class DocumentStatus(str, Enum):
 # re-declaring the set.
 TERMINAL_TASK_STATES = frozenset({DocumentStatus.COMPLETED, DocumentStatus.FAILED, DocumentStatus.CANCELLED})
 
+# Enrichment can fail without making the base-content index unusable. Keep the
+# names bounded and stable because they are persisted and exposed through APIs.
+DEGRADABLE_ENRICHMENT_STAGES = frozenset({"caption", "contextualize", "topic_tag"})
+
+
+def normalize_degraded_stages(value: Any) -> list[str]:
+    """Return a stable, bounded stage-name list from pipeline or API data."""
+    if isinstance(value, dict):
+        candidates = value.keys()
+    elif isinstance(value, list | tuple | set | frozenset):
+        candidates = value
+    else:
+        return []
+    return sorted({stage for stage in candidates if stage in DEGRADABLE_ENRICHMENT_STAGES})
+
+
 # Kept inside TaskInfo.details.metadata (a free-form dict) rather than as
 # first-class TaskInfo fields, so lifecycle timing stays readable even against a
 # TaskStateManager still running the old schema. This only matters in cluster
@@ -74,6 +90,7 @@ class IndexationJob(BaseModel):
     file_id: str | None = None
     user_id: int | None = None
     error: str | None = None
+    degraded_stages: list[str] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime | None = None
     started_at: datetime | None = None

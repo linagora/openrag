@@ -1252,3 +1252,45 @@ async def test_details_written_on_an_evicted_id_does_not_leak_a_stateless_record
     monkeypatch.setattr(task_state_module.time, "time", lambda: 1_122.0)
     assert await manager.get_all_user_info(7) == {}
     assert manager.tasks == {}
+
+
+@pytest.mark.asyncio
+async def test_degraded_stages_are_added_to_active_task_details() -> None:
+    manager = _task_state_manager()
+    await manager.set_queued_details(
+        "degraded-task",
+        file_id="f1",
+        partition="tenant-a",
+        metadata={"filename": "report.pdf"},
+        user_id=7,
+    )
+
+    accepted = await manager.set_degraded_stages("degraded-task", ["caption", "topic_tag"])
+
+    assert accepted is True
+    assert await manager.get_details("degraded-task") == {
+        "file_id": "f1",
+        "partition": "tenant-a",
+        "metadata": {"filename": "report.pdf"},
+        "user_id": 7,
+        "degraded_stages": ["caption", "topic_tag"],
+    }
+
+    await manager.set_details(
+        "degraded-task",
+        file_id="f1",
+        partition="tenant-a",
+        metadata={"filename": "report.pdf", "finished": True},
+        user_id=7,
+    )
+    assert (await manager.get_details("degraded-task"))["degraded_stages"] == ["caption", "topic_tag"]
+
+
+@pytest.mark.asyncio
+async def test_degraded_stages_do_not_recreate_an_unknown_task() -> None:
+    manager = _task_state_manager()
+
+    accepted = await manager.set_degraded_stages("expired-task", ["caption"])
+
+    assert accepted is False
+    assert manager.tasks == {}

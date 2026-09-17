@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from core.models.catalog import DocumentStatus, IndexationJob
+from core.models.catalog import DocumentStatus, IndexationJob, normalize_degraded_stages
 from core.models.document import Document
 from core.utils.logging import get_logger
 from services.workers.indexing_callback import send_indexing_callback
@@ -96,6 +96,27 @@ class IndexerWorker:
         except Exception as exc:
             logger.warning("Failed to record indexing job start", task_id=task_id, error=str(exc))
 
+    async def _record_degraded_stages(self, task_id: str, stages: list[str]) -> None:
+        """Best-effort task visibility; catalog persistence remains authoritative."""
+        if not stages:
+            return
+        method = getattr(self._tsm, "set_degraded_stages", None)
+        remote = getattr(method, "remote", None)
+        if remote is None:
+            logger.warning("Task state manager cannot record enrichment degradation", task_id=task_id)
+            return
+        try:
+            await retry_idempotent_ray_actor_method(
+                lambda: remote(task_id, stages),
+                task_description=f"set_degraded_stages({task_id})",
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to record enrichment degradation in task state",
+                task_id=task_id,
+                error=str(exc),
+            )
+
     async def process_file(
         self,
         *,
@@ -115,9 +136,9 @@ class IndexerWorker:
     ) -> dict[str, Any]:
         """Run one file through the indexing pipeline.
 
-        Returns a plain dict ``{"stored_count": int, "stage": "stored"}``
-        on success.  On failure, state is set to FAILED and the exception
-        is re-raised so the Ray task is marked as errored.
+        Returns a plain dict with the stored count, final stage and any degraded
+        enrichment stage names. On failure, state is set to FAILED and the
+        exception is re-raised so the Ray task is marked as errored.
 
         When *callback_url* is provided, a best-effort ``POST`` notification is
         sent to it once the task reaches a terminal state; never affects the
@@ -159,6 +180,7 @@ class IndexerWorker:
                 row.update(resolved_prompts)
             row = await self._pipeline.run(row)
             indexed_at = row.get("indexed_at")
+            degraded_stages = normalize_degraded_stages(row.get("degraded_stages"))
 
             if self._document_repo is not None:
                 wrote_catalog = await _write_catalog_record(
@@ -171,6 +193,7 @@ class IndexerWorker:
                     indexed_at=indexed_at,
                     require_existing_partition=require_existing_partition,
                     workspace_ids=workspace_ids,
+                    degraded_stages=degraded_stages,
                 )
                 if not wrote_catalog:
                     raise RuntimeError("Catalog row was not written after vector indexing")
@@ -188,6 +211,7 @@ class IndexerWorker:
                     partition=partition,
                     indexation_config=indexation_config,
                 )
+            await self._record_degraded_stages(task_id, degraded_stages)
             await retry_idempotent_ray_actor_method(
                 lambda: self._tsm.set_state.remote(task_id, "COMPLETED"),
                 task_description=f"set_state({task_id}, COMPLETED)",
@@ -230,7 +254,11 @@ class IndexerWorker:
             await send_indexing_callback(
                 callback_url, partition, file_id, "success", metadata, callback_token=callback_token
             )
-            return {"stored_count": row.get("stored_count", 0), "stage": row.get("stage", "")}
+            return {
+                "stored_count": row.get("stored_count", 0),
+                "stage": row.get("stage", ""),
+                "degraded_stages": degraded_stages,
+            }
         # The raw upload is purged (when configured) by the enclosing actor, not
         # here: cleanup must also cover failures that happen *before* this method
         # runs (catalog/registry init, the SERIALIZING state update). See
@@ -248,9 +276,11 @@ async def _write_catalog_record(
     indexed_at: datetime | None = None,
     require_existing_partition: bool = False,
     workspace_ids: list[str] | None = None,
+    degraded_stages: list[str] | None = None,
 ) -> bool:
     file_id = metadata.get("file_id", "")
     file_metadata = {key: value for key, value in metadata.items() if key != "page"}
+    file_metadata["degraded_stages"] = list(degraded_stages or [])
     config_kwargs = {"indexation_config": indexation_config} if indexation_config is not None else {}
     if replace:
         return await doc_repo.update_file_in_partition(

@@ -624,9 +624,18 @@ class PartitionService:
     # File / chunk reads
     # ------------------------------------------------------------------
 
-    async def list_files(self, partition: str, limit: int | None = None) -> list[dict]:
+    async def list_files(
+        self,
+        partition: str,
+        limit: int | None = None,
+        degraded_stage: str | None = None,
+    ) -> list[dict]:
         await self._ensure_partition(partition)
-        result = await self._document_repo.list_partition_files(partition=partition, limit=limit)
+        result = await self._document_repo.list_partition_files(
+            partition=partition,
+            limit=limit,
+            degraded_stage=degraded_stage,
+        )
         return result.get("files", [])
 
     async def get_file_chunks(self, partition: str, file_id: str, limit: int = 2000) -> list[dict]:

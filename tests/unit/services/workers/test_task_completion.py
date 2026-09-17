@@ -469,6 +469,7 @@ async def test_settled_task_is_written_to_the_job_history() -> None:
         "partition": "tenant-a",
         "metadata": {},
         "user_id": 42,
+        "degraded_stages": ["caption"],
     }
 
     with patch("services.workers.task_completion.ray.get_actor", return_value=tsm):
@@ -485,6 +486,7 @@ async def test_settled_task_is_written_to_the_job_history() -> None:
         42,
     )
     assert job.completed_at is not None
+    assert job.degraded_stages == ["caption"]
 
 
 class _RayLikeActorMethod:

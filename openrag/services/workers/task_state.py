@@ -16,6 +16,7 @@ from core.models.catalog import (
     TASK_FINISHED_AT_METADATA_KEY,
     TERMINAL_TASK_STATES,
     DocumentStatus,
+    normalize_degraded_stages,
 )
 
 ACTIVE_INDEXING_STATES = frozenset({"QUEUED", "SERIALIZING"})
@@ -422,12 +423,15 @@ class TaskStateManager:
         metadata: dict[str, Any],
         user_id: int | None,
     ) -> None:
+        previous_details = info.details
         info.details = {
             "file_id": file_id,
             "partition": partition,
             "metadata": metadata,
             "user_id": user_id,
         }
+        if "degraded_stages" in previous_details:
+            info.details["degraded_stages"] = normalize_degraded_stages(previous_details["degraded_stages"])
         self.user_index.setdefault(user_id, set()).add(task_id)
 
     def _prune_expired_file_delete_fences(self) -> None:
@@ -641,6 +645,17 @@ class TaskStateManager:
                 user_id=user_id,
             )
             self._persist_task_locked(task_id, info)
+
+    @ray.method(concurrency_group="set")
+    async def set_degraded_stages(self, task_id: str, stages: list[str]) -> bool:
+        """Attach safe enrichment outcomes without reviving an expired task."""
+        with self.lock:
+            info = self.tasks.get(task_id)
+            if info is None or info.state not in CANCELLABLE_INDEXING_STATES:
+                return False
+            info.details["degraded_stages"] = normalize_degraded_stages(stages)
+            self._persist_task_locked(task_id, info)
+            return True
 
     @ray.method(concurrency_group="set")
     async def set_queued_details(

@@ -11,6 +11,7 @@ from core.models.catalog import (
     TERMINAL_TASK_STATES,
     DocumentStatus,
     IndexationJob,
+    normalize_degraded_stages,
 )
 from services.workers.ray_utils import call_ray_actor_method_with_timeout
 
@@ -322,6 +323,7 @@ class TaskCompletionTracker:
                 file_id=details.get("file_id"),
                 user_id=details.get("user_id"),
                 error=error,
+                degraded_stages=normalize_degraded_stages(details.get("degraded_stages")),
                 completed_at=datetime.now(UTC),
             )
         except Exception as exc:

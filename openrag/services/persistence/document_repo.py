@@ -740,10 +740,14 @@ class PgDocumentRepository(DocumentRepository):
         self,
         partition: str,
         limit: int | None = None,
+        degraded_stage: str | None = None,
     ) -> dict:
         """TODO(phase-9): remove. Returns ``{"files": [...]}`` shape used by routers."""
         sql = "SELECT * FROM files WHERE partition_name = $1"
         params: list[Any] = [partition]
+        if degraded_stage is not None:
+            params.append(degraded_stage)
+            sql += f" AND COALESCE(file_metadata::jsonb -> 'degraded_stages', '[]'::jsonb) ? ${len(params)}"
         if limit is not None:
             params.append(limit)
             sql += f" LIMIT ${len(params)}"
