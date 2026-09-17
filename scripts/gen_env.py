@@ -205,7 +205,16 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 problems = True
         else:
-            print(f"Template not found: {args.template}; checked placeholders only.", file=sys.stderr)
+            # Not a downgrade to a weaker check: --check exists to verify, and
+            # without the template the parity half cannot run at all. Reporting
+            # success for a check that did not happen is the failure this whole
+            # path was just fixed for. The generate path below already refuses
+            # a missing template; this matches it.
+            print(
+                f"Template not found: {args.template}; cannot verify that every variable is present.",
+                file=sys.stderr,
+            )
+            problems = True
 
         if problems:
             return 1

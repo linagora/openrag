@@ -141,3 +141,15 @@ def test_generated_file_is_private(tmp_path: Path) -> None:
 
     assert stat.S_IMODE(output.stat().st_mode) == 0o600
     assert os.environ.get("AUTH_TOKEN") is None  # the script writes, it does not export
+
+
+def test_check_fails_when_the_template_is_missing(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
+    """Without the template the parity half cannot run, so success would report
+    a check that did not happen — the same shape as the two bugs above. The
+    generate path already refuses a missing template; this matches it."""
+    output = _write(tmp_path / ".env", "AUTH_TOKEN=or-generated\n")
+
+    rc = gen_env.main(["--check", "-t", str(tmp_path / "absent.example"), "-o", str(output)])
+
+    assert rc == 1
+    assert "cannot verify" in capsys.readouterr().err
