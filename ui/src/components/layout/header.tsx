@@ -10,6 +10,24 @@ import { toast } from "sonner";
 
 const CHAT_HANDOFF_TIMEOUT_MS = 3000;
 
+// Waits for a Chat session request, but never longer than CHAT_HANDOFF_TIMEOUT_MS.
+async function settleChatSessionRequest(pending: Promise<unknown>): Promise<"ready" | "failed" | "timeout"> {
+  let timer: number | undefined;
+  try {
+    return await Promise.race([
+      pending.then(
+        () => "ready" as const,
+        () => "failed" as const,
+      ),
+      new Promise<"timeout">((resolve) => {
+        timer = window.setTimeout(() => resolve("timeout"), CHAT_HANDOFF_TIMEOUT_MS);
+      }),
+    ]);
+  } finally {
+    window.clearTimeout(timer);
+  }
+}
+
 export function Header() {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
@@ -21,19 +39,8 @@ export function Header() {
       chatWindow.opener = null;
     }
 
-    try {
-      const result = await Promise.race([
-        request("/auth/chainlit-session", { method: "POST" })
-          .then(() => "ready" as const)
-          .catch(() => "failed" as const),
-        new Promise<"timeout">((resolve) => {
-          window.setTimeout(() => resolve("timeout"), CHAT_HANDOFF_TIMEOUT_MS);
-        }),
-      ]);
-      if (result !== "ready") {
-        throw new Error("Chainlit handoff was not ready");
-      }
-    } catch {
+    const result = await settleChatSessionRequest(request("/auth/chainlit-session", { method: "POST" }));
+    if (result !== "ready") {
       // Keep the previous fallback behavior: if the handoff cannot be prepared,
       // still let Chainlit handle its own login flow.
       toast.error("Could not prepare Chat session. Opening Chat login instead.");
@@ -47,20 +54,15 @@ export function Header() {
   };
 
   const handleLogout = async () => {
-    const token = localStorage.getItem(TOKEN_KEY);
-    const clearChainlitSession =
-      token !== null
-        ? request("/auth/chainlit-session", {
-            method: "DELETE",
-            headers: { Authorization: `Bearer ${token}` },
-          }).catch(() => {
-            // Local token logout should still complete even if the optional
-            // chat cookie cleanup request fails.
-          })
-        : undefined;
+    if (localStorage.getItem(TOKEN_KEY) !== null) {
+      // Clear the Chat cookies before logging out locally, not alongside it:
+      // logout() swaps this page for the login screen, and closing the tab from
+      // there would abort a cleanup still in flight. A failed cleanup still ends
+      // in a local logout; a stalled one does once the timeout expires.
+      await settleChatSessionRequest(request("/auth/chainlit-session", { method: "DELETE" }));
+    }
 
     const wasOidcSession = logout();
-    void clearChainlitSession;
     if (wasOidcSession) {
       // Full-page navigation to the backend's RP-initiated logout: it revokes
       // the server session, clears the cookie, and redirects on to the IdP.
