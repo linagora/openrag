@@ -10,6 +10,7 @@ and without vLLM-only fields (``truncate_prompt_tokens``).
 
 from __future__ import annotations
 
+import time
 from collections.abc import AsyncIterator
 
 import httpx
@@ -29,7 +30,7 @@ from services.inference.vllm_client import _parse_response, _strip_falsy_logprob
 
 from ._call_log import log_llm_call
 from ._circuit_breaker import with_circuit_breaker
-from ._metrics import with_inference_metrics
+from ._metrics import record_inference, resolve_provider, with_inference_metrics
 from ._retry import with_retry
 
 logger = get_logger()
@@ -135,6 +136,12 @@ class OllamaClient(LLM):
             messages=messages,
             stream=True,
         )
+        provider = resolve_provider(self, kwargs)
+        started = time.perf_counter()
+        # Pessimistic: a generator abandoned mid-stream never reaches the success
+        # assignment, and assuming success instead would report every dropped
+        # connection as a finished chat. Mirrors the vLLM streaming path.
+        outcome = "error"
         try:
             async with self._client.stream("POST", f"{self._endpoint}/chat/completions", json=payload) as resp:
                 if resp.status_code >= 400:
@@ -145,10 +152,21 @@ class OllamaClient(LLM):
                     )
                 async for line in resp.aiter_lines():
                     yield line
+                outcome = "success"
         except httpx.ConnectError as exc:
             raise InferenceConnectionError(f"Cannot reach Ollama at {self._endpoint}") from exc
         except httpx.TimeoutException as exc:
+            outcome = "timeout"
             raise InferenceTimeoutError(f"Ollama streaming request timed out at {self._endpoint}") from exc
+        finally:
+            # Hand-instrumented: @with_inference_metrics would time only the
+            # creation of this async generator, not the transfer.
+            record_inference(
+                provider=provider,
+                operation="chat",
+                outcome=outcome,
+                duration_seconds=time.perf_counter() - started,
+            )
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -179,6 +197,7 @@ class OllamaEmbedder(Embedder):
         self._dimension: int | None = dimension
         self._client = httpx.AsyncClient(timeout=timeout)
 
+    @with_inference_metrics("embed")
     @with_circuit_breaker("embedder")
     @with_retry(max_attempts=3)
     async def embed(self, texts: list[str]) -> list[list[float]]:

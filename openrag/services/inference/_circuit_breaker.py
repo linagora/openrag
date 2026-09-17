@@ -5,7 +5,7 @@ from functools import wraps
 import httpx
 from aiobreaker import CircuitBreaker, CircuitBreakerError, CircuitBreakerListener
 from core.observability.inference_metrics import record_circuit_breaker_state
-from core.utils.exceptions import InferenceConnectionError, LLMParsingError, OpenRAGError
+from core.utils.exceptions import CircuitBreakerOpenError, LLMParsingError, OpenRAGError
 from core.utils.logging import get_logger
 
 logger = get_logger()
@@ -84,8 +84,19 @@ def with_circuit_breaker(
             breaker = get_breaker(name, fail_max, timeout_duration)
             try:
                 return await breaker.call_async(fn, *args, **kwargs)
-            except CircuitBreakerError:
-                raise InferenceConnectionError(f"Circuit open for '{name}'")
+            except CircuitBreakerError as exc:
+                # A dedicated type so the metrics decorator wrapping this one can
+                # tell an open circuit from a connection failure: it sat outside
+                # this decorator and only ever saw the converted error, which made
+                # outcome="circuit_open" unreachable and counted open-circuit calls
+                # as errors — holding a provider's error ratio high for as long as
+                # the breaker protected the endpoint.
+                #
+                # This is a 503 where the old InferenceConnectionError was not.
+                # Nothing in the repository catches that type, and "we stopped
+                # calling the endpoint" is service-unavailable rather than a
+                # connection fault, so the status is the more accurate one.
+                raise CircuitBreakerOpenError(name) from exc
 
         return wrapper
 

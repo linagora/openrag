@@ -22,7 +22,12 @@ from typing import Any
 
 import pytest
 from core.observability import inference_metrics
-from core.utils.exceptions import InferenceError, InferenceTimeoutError
+from core.utils.exceptions import (
+    CircuitBreakerOpenError,
+    EmbeddingTimeoutError,
+    InferenceError,
+    InferenceTimeoutError,
+)
 from services.inference._metrics import (
     PROVIDER_NAME_ATTR,
     resolve_provider,
@@ -147,22 +152,50 @@ async def test_failure_outcomes(recorded, exc: Exception, expected: str) -> None
 @pytest.mark.asyncio
 async def test_open_circuit_is_its_own_outcome(recorded) -> None:
     """ "We stopped even trying" is a different condition from "it returned an
-    error", for the dashboard and for the alert. Seeing it at all requires the
-    decorator to sit *outside* ``@with_circuit_breaker``, which raises it.
-    """
-    from datetime import timedelta
+    error", for the dashboard and for the alert.
 
-    from aiobreaker import CircuitBreakerError
+    Driven through the real decorator stack rather than by raising aiobreaker's
+    error by hand: ``with_circuit_breaker`` converts that one, so a test that
+    raises it directly passes while production records every open circuit as a
+    plain ``error``. The first version of this test did exactly that, and the
+    bug it was meant to guard shipped underneath it.
+    """
+    from services.inference._circuit_breaker import with_circuit_breaker
 
     class Svc(_Client):
         @with_inference_metrics("chat")
+        @with_circuit_breaker("test-open-outcome", fail_max=2, timeout_duration=60.0)
         async def call(self) -> None:
-            raise CircuitBreakerError("open", timedelta(seconds=30))
+            raise ConnectionError("endpoint down")
 
-    with pytest.raises(CircuitBreakerError):
+    svc = Svc()
+    # Propagates and trips the breaker (fail_max=2 means the *next* call is the
+    # one aiobreaker refuses); recorded as a plain error, which it is.
+    with pytest.raises(ConnectionError):
+        await svc.call()
+    # Open now, so this one never reaches the endpoint.
+    with pytest.raises(CircuitBreakerOpenError):
+        await svc.call()
+
+    outcomes = [c["outcome"] for c in recorded["inference"]]
+    assert "circuit_open" in outcomes, f"an open circuit was not recorded as such: {outcomes}"
+
+
+async def test_embedding_timeouts_are_counted_as_timeouts(recorded) -> None:
+    """``EmbeddingTimeoutError`` descends from ``EmbeddingError``, not from
+    ``InferenceTimeoutError``, so a vLLM embedding timeout used to land in the
+    generic ``error`` bucket — leaving the timeout ratio reading low exactly
+    where embedding capacity was the problem."""
+
+    class Svc(_Client):
+        @with_inference_metrics("embed")
+        async def call(self) -> None:
+            raise EmbeddingTimeoutError("embedder timed out")
+
+    with pytest.raises(EmbeddingTimeoutError):
         await Svc().call()
 
-    assert recorded["inference"][0]["outcome"] == "circuit_open"
+    assert [c["outcome"] for c in recorded["inference"]] == ["timeout"]
 
 
 @pytest.mark.asyncio

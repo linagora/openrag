@@ -50,9 +50,22 @@ async def _refresh_ingest_tasks(request: Request) -> None:
         logger.debug(f"ingest task gauge not sampled for this scrape: {exc}")
 
 
+#: Serialises refresh-then-collect. ``openrag_ingest_tasks`` is a process-global
+#: gauge, so two concurrent scrapes can interleave: one clears or overwrites the
+#: snapshot the other is about to serialise, and a response goes out describing
+#: state that never existed. Prometheus scrapes on a timer, and a second scraper
+#: — an agent, a curious operator, the admin UI polling — is enough to overlap.
+#:
+#: The lock covers the collect as well as the refresh, not just the write: the
+#: race is between one request's sample and another's exposition, so guarding
+#: only the sampling would leave it intact.
+_scrape_lock = asyncio.Lock()
+
+
 @router.get("/metrics", summary="Prometheus metrics endpoint", dependencies=[Depends(require_admin)])
 async def prometheus_metrics(request: Request):
     """Return all metrics in Prometheus text exposition format."""
-    await _refresh_ingest_tasks(request)
-    content = await asyncio.to_thread(get_metrics)
+    async with _scrape_lock:
+        await _refresh_ingest_tasks(request)
+        content = await asyncio.to_thread(get_metrics)
     return Response(content=content, media_type="text/plain; version=0.0.4; charset=utf-8")

@@ -30,14 +30,13 @@ from collections.abc import Callable
 from functools import wraps
 from typing import Any
 
-from aiobreaker import CircuitBreakerError
 from core.observability.inference_metrics import (
     CLIENT_OVERRIDE_PROVIDER,
     PROVIDER_NAME_ATTR,
     record_inference,
     record_usage_from_response,
 )
-from core.utils.exceptions import InferenceTimeoutError
+from core.utils.exceptions import CircuitBreakerOpenError, EmbeddingTimeoutError, InferenceTimeoutError
 
 #: Fallback for a client built outside the factory (tests, scripts): it still
 #: records, and lands in a fixed bucket instead of minting a label value.
@@ -64,9 +63,22 @@ def resolve_provider(instance: Any, kwargs: dict[str, Any]) -> str:
 
 
 def _outcome_for(exc: BaseException) -> str:
-    if isinstance(exc, CircuitBreakerError):
+    """Classify a failed call into one of ``INFERENCE_OUTCOME_VALUES``.
+
+    Both checks are on *families*, deliberately.
+
+    ``CircuitBreakerOpenError`` rather than aiobreaker's ``CircuitBreakerError``:
+    ``with_circuit_breaker`` sits inside this decorator and converts the latter,
+    so matching on it recorded every open circuit as a plain ``error``.
+
+    Embedding clients raise ``EmbeddingTimeoutError``, which descends from
+    ``EmbeddingError`` and not from ``InferenceTimeoutError`` — so a vLLM
+    embedding timeout landed in the generic bucket and left the timeout ratio
+    reading low exactly where embedding capacity was the problem.
+    """
+    if isinstance(exc, CircuitBreakerOpenError):
         return "circuit_open"
-    if isinstance(exc, InferenceTimeoutError):
+    if isinstance(exc, (InferenceTimeoutError, EmbeddingTimeoutError)):
         return "timeout"
     return "error"
 

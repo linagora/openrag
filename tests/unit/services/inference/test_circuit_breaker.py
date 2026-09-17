@@ -1,6 +1,6 @@
 import httpx
 import pytest
-from core.utils.exceptions import InferenceConnectionError, LLMParsingError
+from core.utils.exceptions import CircuitBreakerOpenError, LLMParsingError
 from services.inference._circuit_breaker import (
     _breaker_config,
     _breakers,
@@ -95,7 +95,7 @@ class TestWithCircuitBreaker:
         assert await ok() == "result"
 
     @pytest.mark.asyncio
-    async def test_raises_inference_connection_error_when_open(self):
+    async def test_raises_circuit_breaker_open_error_when_open(self):
         call_count = 0
 
         @with_circuit_breaker("test-open", fail_max=2, timeout_duration=60.0)
@@ -107,10 +107,10 @@ class TestWithCircuitBreaker:
         with pytest.raises(ConnectionError):
             await always_fail()
 
-        with pytest.raises(InferenceConnectionError, match="Circuit open"):
+        with pytest.raises(CircuitBreakerOpenError, match="Circuit breaker open"):
             await always_fail()
 
-        with pytest.raises(InferenceConnectionError, match="Circuit open"):
+        with pytest.raises(CircuitBreakerOpenError, match="Circuit breaker open"):
             await always_fail()
 
         assert call_count == 2
