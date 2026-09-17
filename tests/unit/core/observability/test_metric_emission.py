@@ -132,6 +132,95 @@ def test_every_declared_spec_is_in_all_specs() -> None:
     )
 
 
+def _spec_to_instrument_vars() -> dict[str, set[str]]:
+    """Module-level ``_X = _counter(SPEC)`` bindings, per spec.
+
+    ``ray_metrics`` names its instruments; ``inference_metrics`` builds them
+    inside a factory and ``monitoring`` declares some without a spec at all, so
+    this is one of two ways a function is linked to a spec — the other is the
+    call graph below.
+    """
+    out: dict[str, set[str]] = {}
+    for path in _python_files(_OBSERVABILITY_DIR):
+        if path.name == "metric_specs.py":
+            continue
+        for node in _parse(path).body:
+            if not (isinstance(node, ast.Assign) and isinstance(node.value, ast.Call)):
+                continue
+            referenced = {n.id for n in ast.walk(node.value) if isinstance(n, ast.Name)}
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    for spec in referenced:
+                        out.setdefault(spec, set()).add(target.id)
+    return out
+
+
+def _functions_touching_each_spec() -> dict[str, set[str]]:
+    """Spec name -> observability functions that reach it, directly or by call."""
+    spec_vars = _spec_to_instrument_vars()
+    bodies: dict[str, ast.AST] = {}
+    for path in _python_files(_OBSERVABILITY_DIR):
+        for node in ast.walk(_parse(path)):
+            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+                bodies.setdefault(node.name, node)
+
+    touches: dict[str, set[str]] = {}
+    for fn_name, fn in bodies.items():
+        names = {n.id for n in ast.walk(fn) if isinstance(n, ast.Name)}
+        for spec in _spec_variable_names():
+            if spec in names or (spec_vars.get(spec, set()) & names):
+                touches.setdefault(fn_name, set()).add(spec)
+
+    # Propagate along calls: a recorder that calls the factory touches what the
+    # factory touches. inference_metrics reaches its specs only this way.
+    changed = True
+    while changed:
+        changed = False
+        for fn_name, fn in bodies.items():
+            called = _called_names(fn) & bodies.keys()
+            inherited = set().union(*(touches.get(c, set()) for c in called)) if called else set()
+            if inherited - touches.get(fn_name, set()):
+                touches.setdefault(fn_name, set()).update(inherited)
+                changed = True
+
+    by_spec: dict[str, set[str]] = {s: set() for s in _spec_variable_names()}
+    for fn_name, specs in touches.items():
+        for spec in specs:
+            by_spec.setdefault(spec, set()).add(fn_name)
+    return by_spec
+
+
+@pytest.mark.parametrize("spec_name", _spec_variable_names())
+def test_every_spec_has_a_recorder_reached_from_production(spec_name: str) -> None:
+    """The middle link: an instrument with no recorder writing it.
+
+    The two checks either side of this one do not catch it. A spec can be in
+    ``ALL_SPECS``, have an instrument built from it, and still have no function
+    that writes it — the spec check sees the instrument and passes, and the
+    recorder check only inspects recorders that exist, so there is nothing to
+    fail. The metric is then declared, registered, instrumented, and absent from
+    every scrape.
+    """
+    recorders = _recorders()
+    external = _production_calls()
+    reached = {name for name in recorders if name in external}
+    changed = True
+    while changed:
+        changed = False
+        for caller in list(reached):
+            for callee in recorders[caller] & recorders.keys():
+                if callee not in reached:
+                    reached.add(callee)
+                    changed = True
+
+    writers = _functions_touching_each_spec().get(spec_name, set())
+    assert writers & reached, (
+        f"{spec_name} has no recorder that production reaches. Functions touching it: "
+        f"{sorted(writers) or 'none'}; recorders reached from production: {sorted(reached)}. "
+        f"The metric would be declared and instrumented but never written."
+    )
+
+
 @pytest.mark.parametrize("spec_name", _spec_variable_names())
 def test_every_spec_is_instrumented(spec_name: str) -> None:
     """Link 1: a spec that no module turns into an instrument is inert.
