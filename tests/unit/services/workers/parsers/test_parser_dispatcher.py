@@ -276,3 +276,70 @@ def test_build_eml_wires_nested_email_parser_with_depth_limit(monkeypatch: pytes
     nested_2 = nested_1._attachment_parsers["eml"]
     nested_3 = nested_2._attachment_parsers["eml"]
     assert "eml" not in nested_3._attachment_parsers
+
+
+# ---------------------------------------------------------------------------
+# The progress watchdog stamp (openrag_ingest_last_parse_completion_timestamp_seconds)
+# ---------------------------------------------------------------------------
+
+
+class _StubParser:
+    """Minimal backend: returns a document, or raises."""
+
+    def __init__(self, error: Exception | None = None) -> None:
+        self.error = error
+
+    async def parse(self, document: Document) -> ProcessedDocument:
+        if self.error is not None:
+            raise self.error
+        return ProcessedDocument(document_id=document.id, text_blocks=[TextBlock(text="x")])
+
+    def supported_types(self) -> list[str]:
+        return [doc_type.value for doc_type in DocumentType]
+
+
+def _text_document() -> Document:
+    return Document(filename="note.txt", raw_bytes=b"x", content_type=DocumentType.TEXT)
+
+
+@pytest.mark.asyncio
+async def test_successful_parse_stamps_the_watchdog(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``_parse_with`` is the single point where a parse has both a backend and a
+    completion. Drop the stamp and ``openrag_ingest_last_parse_completion_timestamp_seconds``
+    is never written; the gauge is then absent, and ``OpenRagIngestStalled`` — which
+    reads ``time() - max(<gauge>)`` — silently cannot fire. An alert that cannot fire
+    is indistinguishable from a healthy system, so the call site is pinned here and
+    not only the recorder it calls.
+    """
+    import services.workers.parsers.parser_dispatcher as module
+
+    stamped: list[str] = []
+    monkeypatch.setattr(module, "record_parse_completion", lambda pool: stamped.append(pool))
+
+    disp = ParserDispatcher(_config())
+    monkeypatch.setattr(disp, "_get", lambda _name: _StubParser())
+
+    await disp.parse(_text_document())
+
+    assert stamped == ["text"]
+
+
+@pytest.mark.asyncio
+async def test_failed_parse_does_not_stamp_the_watchdog(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stamped on success only — a pool whose workers are wedged must stop
+    updating it, which is what lets the watchdog's ``time() - <stamp>`` climb.
+    Also guards the test above against passing for the wrong reason: a stamp
+    placed before the parse would satisfy it too.
+    """
+    import services.workers.parsers.parser_dispatcher as module
+
+    stamped: list[str] = []
+    monkeypatch.setattr(module, "record_parse_completion", lambda pool: stamped.append(pool))
+
+    disp = ParserDispatcher(_config())
+    monkeypatch.setattr(disp, "_get", lambda _name: _StubParser(error=RuntimeError("backend wedged")))
+
+    with pytest.raises(RuntimeError, match="backend wedged"):
+        await disp.parse(_text_document())
+
+    assert stamped == []

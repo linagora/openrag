@@ -4,6 +4,7 @@ from functools import wraps
 
 import httpx
 from aiobreaker import CircuitBreaker, CircuitBreakerError, CircuitBreakerListener
+from aiobreaker.state import CircuitBreakerState
 from core.observability.inference_metrics import record_circuit_breaker_state
 from core.utils.exceptions import CircuitBreakerOpenError, LLMParsingError, OpenRAGError
 from core.utils.logging import get_logger
@@ -13,7 +14,17 @@ logger = get_logger()
 _breakers: dict[str, CircuitBreaker] = {}
 _breaker_config: dict[str, tuple[int, float]] = {}
 
-_STATE_VALUES = {"ClosedState": 0, "OpenState": 1, "HalfOpenState": 2}
+#: Keyed on aiobreaker's own enum, not on ``type(state).__name__``. The class
+#: names are ``CircuitOpenState``/``CircuitClosedState``/``CircuitHalfOpenState``;
+#: keying on ``"OpenState"`` matched none of them, so every transition recorded
+#: ``_UNKNOWN_STATE`` and ``openrag_circuit_breaker_state`` was permanently -1 —
+#: which makes ``OpenRagCircuitBreakerOpen`` (``== 1``) unable to fire. Using the
+#: enum means a library rename breaks the import loudly instead.
+_STATE_VALUES = {
+    CircuitBreakerState.CLOSED: 0,
+    CircuitBreakerState.OPEN: 1,
+    CircuitBreakerState.HALF_OPEN: 2,
+}
 _UNKNOWN_STATE = -1
 
 
@@ -42,7 +53,7 @@ class _LoggingListener(CircuitBreakerListener):
             old=type(old).__name__,
             new=state_name,
         )
-        record_circuit_breaker_state(breaker.name, _STATE_VALUES.get(state_name, _UNKNOWN_STATE))
+        record_circuit_breaker_state(breaker.name, _STATE_VALUES.get(new.state, _UNKNOWN_STATE))
 
 
 def get_breaker(name: str, fail_max: int = 50, timeout_duration: float = 60.0) -> CircuitBreaker:

@@ -114,3 +114,52 @@ class TestWithCircuitBreaker:
             await always_fail()
 
         assert call_count == 2
+
+
+class TestStateIsExported:
+    """``openrag_circuit_breaker_state`` must be written when the breaker moves.
+
+    The export path itself is covered in ``tests/integration/test_ray_metrics_export.py``;
+    what is pinned here is that the listener actually calls it. Without this, dropping
+    the ``record_circuit_breaker_state`` call leaves the series absent, and
+    ``OpenRagCircuitBreakerOpen`` (``max by (name) (openrag_circuit_breaker_state) == 1``,
+    severity critical) can never fire — which looks exactly like a breaker that never
+    opens.
+    """
+
+    @pytest.mark.asyncio
+    async def test_opening_the_breaker_records_the_open_state(self, monkeypatch):
+        import services.inference._circuit_breaker as module
+
+        recorded: list[tuple[str, int]] = []
+        monkeypatch.setattr(module, "record_circuit_breaker_state", lambda n, s: recorded.append((n, s)))
+
+        @with_circuit_breaker("test-state-export", fail_max=2, timeout_duration=60.0)
+        async def always_fail():
+            raise ConnectionError("down")
+
+        # Drive the real breaker rather than calling the listener by hand: the
+        # listener is wired in get_breaker, and only a real transition proves it.
+        with pytest.raises(ConnectionError):
+            await always_fail()
+        with pytest.raises(CircuitBreakerOpenError):
+            await always_fail()
+
+        assert ("test-state-export", 1) in recorded, f"open state was not exported: {recorded}"
+
+    @pytest.mark.asyncio
+    async def test_recovery_records_a_non_open_state(self, monkeypatch):
+        """A breaker that opens and never reports closing would leave the alert
+        firing forever, so the closing transition must be exported too."""
+        import services.inference._circuit_breaker as module
+
+        recorded: list[tuple[str, int]] = []
+        monkeypatch.setattr(module, "record_circuit_breaker_state", lambda n, s: recorded.append((n, s)))
+
+        breaker = get_breaker("test-state-recovery", fail_max=2, timeout_duration=60.0)
+        breaker.open()
+        breaker.close()
+
+        states = [s for n, s in recorded if n == "test-state-recovery"]
+        assert 1 in states, f"open not exported: {recorded}"
+        assert 0 in states, f"closed not exported: {recorded}"
