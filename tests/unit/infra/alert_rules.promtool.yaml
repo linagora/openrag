@@ -328,7 +328,34 @@ tests:
           - exp_labels:
               severity: critical
             exp_annotations:
-              description: "Chunks are being returned by the vector store for files the catalog does not know about. Retrieval quality is silently degraded."
+              description: "Retrieval dropped chunks in the last hour for files the catalog does not know about. Answers are quietly missing content, with no error to show for it."
+              runbook_url: "https://github.com/linagora/openrag/blob/main/docs/deployment/runbooks/OpenRagCatalogDriftDetected.md"
+              summary: "Retrieval is dropping chunks whose file is missing from the catalog"
+
+  - interval: 1m
+    name: "a single dropped chunk fires — the case rate[15m] + for 15m missed entirely"
+    input_series:
+      # One query touches one orphaned file, once, and nothing after. The most
+      # likely shape for a file nobody retrieves often, and just as much a
+      # data-integrity problem as a busy one.
+      #
+      # The previous rule never fired on this: one drop holds rate[15m] above
+      # zero for exactly 15 minutes, never the 15 *continuous* minutes `for`
+      # demanded. Measured, it fired only when the orphan was retrieved
+      # constantly — an alert biased entirely toward busy orphans.
+      - series: "openrag_retrieval_orphan_chunks_dropped_total"
+        values: "0+0x5 3+0x80"
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: OpenRagCatalogDriftDetected
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: OpenRagCatalogDriftDetected
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              description: "Retrieval dropped chunks in the last hour for files the catalog does not know about. Answers are quietly missing content, with no error to show for it."
               runbook_url: "https://github.com/linagora/openrag/blob/main/docs/deployment/runbooks/OpenRagCatalogDriftDetected.md"
               summary: "Retrieval is dropping chunks whose file is missing from the catalog"
 

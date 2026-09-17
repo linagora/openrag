@@ -1,9 +1,9 @@
 # OpenRagCatalogDriftDetected
 
-**Severity:** critical · **Fires after:** 15 min
+**Severity:** critical · **Fires after:** ~11 min from a single dropped chunk
 
 ```
-sum(rate(openrag_retrieval_orphan_chunks_dropped_total[15m])) > 0
+sum(increase(openrag_retrieval_orphan_chunks_dropped_total[1h])) > 0
 ```
 
 ## What it means
@@ -82,6 +82,25 @@ That is deliberate: the alert exists because the damage is otherwise invisible, 
 silencing it is a decision someone should have to make explicitly. Silence it for a
 bounded window while reconciling, rather than downgrading it.
 
+## Resolving is not the same as fixed
+
+**This alert clearing tells you nothing about whether the drift is gone.**
+
+The counter only moves when a query happens to touch an orphaned file. The rule therefore
+sees drops, never the underlying disagreement between the stores — so it resolves when
+*no drop has been observed for an hour*, which happens both when you have reconciled the
+data and when nobody has queried the affected files lately. The orphans are still there in
+the second case, waiting for the next query that touches them.
+
+The hour-long window exists to make that mistake less likely: a shorter one resolved
+fifteen minutes after the last query and re-fired the next time someone searched, which
+reads as a flapping alert rather than an unfixed problem. It does not eliminate the
+mistake.
+
+Treat this as resolved only once you have confirmed the two stores agree for the affected
+files. Reconcile first, then let it clear — never the other way round.
+
 ## Verify recovery
 
-The rate returns to zero and stays there for a full 15-minute window.
+No further drops are observed for a full hour. See the caveat above: that is
+evidence of absence only if you have already reconciled the stores.
