@@ -125,3 +125,16 @@ Usage: {{ include "openrag-stack.securityFieldOverride" (dict "component" .Value
 {{- .default -}}
 {{- end -}}
 {{- end }}
+
+{{/*
+"true" when the API is served by Ray Serve replicas behind the RayCluster head
+Service (port ray-serve) rather than by uvicorn on the openrag Deployment's
+port 8080. Both switches are required: ray.enabled renders the RayCluster,
+ENABLE_RAY_SERVE makes the app hand itself to serve.run. Anything that must
+target "where the API actually listens" (Ingress backend, metrics discovery)
+branches on this.
+Usage: {{- if eq (include "openrag-stack.rayServeApi" .) "true" }}
+*/}}
+{{- define "openrag-stack.rayServeApi" -}}
+{{- if and .Values.ray.enabled (eq (toString .Values.env.config.ENABLE_RAY_SERVE) "true") -}}true{{- else -}}false{{- end -}}
+{{- end }}
