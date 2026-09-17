@@ -662,6 +662,7 @@ class WorkerDispatcher(IndexingDispatcher):
                 parent_id=file_metadata.get("parent_id"),
                 content_sha256=content_sha256,
                 indexed_at=indexed_at,
+                chunk_count=len(entities),
             )
         finally:
             if claimed_content:

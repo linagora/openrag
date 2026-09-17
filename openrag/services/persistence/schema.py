@@ -225,6 +225,7 @@ files = Table(
     Column("relationship_id", String, nullable=True, index=True),
     Column("parent_id", String, nullable=True, index=True),
     Column("content_sha256", String(64), nullable=True),
+    Column("chunk_count", Integer, nullable=True),
     Column(
         "indexed_at",
         DateTime(timezone=True),
@@ -232,6 +233,7 @@ files = Table(
         nullable=False,
     ),
     UniqueConstraint("file_id", "partition_name", name="uix_file_id_partition"),
+    CheckConstraint("chunk_count >= 0", name="ck_files_chunk_count_non_negative"),
     Index("ix_partition_file", "partition_name", "file_id"),
     Index("ix_relationship_partition", "relationship_id", "partition_name"),
     Index("ix_parent_partition", "parent_id", "partition_name"),
