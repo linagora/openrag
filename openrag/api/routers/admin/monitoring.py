@@ -43,8 +43,8 @@ async def _refresh_ingest_tasks(request: Request) -> None:
     """
     try:
         service = get_job_service(request)
-        info = await asyncio.wait_for(service.get_queue_info(), timeout=_QUEUE_INFO_TIMEOUT_SECONDS)
-        set_ingest_task_counts(info["tasks"]["active_statuses"])
+        counts = await asyncio.wait_for(service.get_active_task_counts(), timeout=_QUEUE_INFO_TIMEOUT_SECONDS)
+        set_ingest_task_counts(counts)
     except Exception as exc:  # noqa: BLE001 - the scrape must survive any of this
         clear_ingest_task_counts()
         logger.debug(f"ingest task gauge not sampled for this scrape: {exc}")
