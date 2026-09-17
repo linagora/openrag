@@ -15,9 +15,14 @@ with no annotation: it promises help at three in the morning and does not delive
 | [OpenRagIngestStalled](OpenRagIngestStalled.md) | critical | Documents queued, nothing completing |
 | [OpenRagIngestFailureRate](OpenRagIngestFailureRate.md) | warning | Over 25% of documents failing to index |
 | [OpenRagBacklogGrowing](OpenRagBacklogGrowing.md) | warning | Queue rising faster than it drains |
-| [OpenRagInferenceProviderDown](OpenRagInferenceProviderDown.md) | critical | An inference endpoint is failing or circuit-broken |
+| [OpenRagInferenceProviderDown](OpenRagInferenceProviderDown.md) | critical | Over half the calls to one registry endpoint are failing |
+| [OpenRagCircuitBreakerOpen](OpenRagCircuitBreakerOpen.md) | critical | OpenRag has stopped calling an endpoint after repeated failures |
 | [OpenRagCatalogDriftDetected](OpenRagCatalogDriftDetected.md) | critical | Vector store and catalog disagree |
 | [OpenRagTargetDown](OpenRagTargetDown.md) | critical | Prometheus cannot scrape — **every other alert is inert** |
+
+`OpenRagInferenceProviderDown` and `OpenRagCircuitBreakerOpen` usually fire together —
+the breaker opens *because* calls were failing. They are separate alerts so routing can
+inhibit one while the other is firing; a unioned alert cannot be half-inhibited.
 
 Start with `OpenRagTargetDown` whenever several alerts look wrong at once, and with
 `OpenRagIngestStalled` before `OpenRagBacklogGrowing`: "nothing is completing" and

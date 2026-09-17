@@ -258,27 +258,32 @@ tests:
               severity: critical
               provider: embedder-main
             exp_annotations:
-              description: "Provider embedder-main is either returning errors/timeouts for more than half of its calls, or its circuit breaker is open. Chat and indexing that depend on it will fail."
+              description: "More than half the calls to registry endpoint embedder-main are returning errors or timing out. Chat and any indexing stage that depends on it will fail."
               runbook_url: "https://github.com/linagora/openrag/blob/main/docs/deployment/runbooks/OpenRagInferenceProviderDown.md"
-              summary: "Inference provider embedder-main is failing or circuit-broken"
+              summary: "Inference provider embedder-main is failing most of its calls"
 
   - interval: 1m
-    name: an open breaker alone fires, and label_replace supplies provider
+    name: an open breaker fires its own alert, keyed on the breaker kind
     input_series:
       - series: 'openrag_circuit_breaker_state{name="llm"}'
         values: "1+0x40"
     alert_rule_test:
       - eval_time: 30m
-        alertname: OpenRagInferenceProviderDown
+        alertname: OpenRagCircuitBreakerOpen
         exp_alerts:
           - exp_labels:
               severity: critical
               name: llm
-              provider: llm
             exp_annotations:
-              description: "Provider llm is either returning errors/timeouts for more than half of its calls, or its circuit breaker is open. Chat and indexing that depend on it will fail."
-              runbook_url: "https://github.com/linagora/openrag/blob/main/docs/deployment/runbooks/OpenRagInferenceProviderDown.md"
-              summary: "Inference provider llm is failing or circuit-broken"
+              description: "OpenRag has stopped calling its llm endpoint after repeated failures. Calls return immediately without reaching it, so chat and indexing that depend on it fail fast."
+              runbook_url: "https://github.com/linagora/openrag/blob/main/docs/deployment/runbooks/OpenRagCircuitBreakerOpen.md"
+              summary: "The llm circuit breaker is open"
+      # The breaker must NOT synthesise a `provider` label onto the error-rate
+      # alert: `name` is a breaker kind, not a registry entry, and projecting one
+      # onto the other made the annotation name something absent from the registry.
+      - eval_time: 30m
+        alertname: OpenRagInferenceProviderDown
+        exp_alerts: []
 
   - interval: 1m
     name: a closed breaker and healthy traffic stay quiet
@@ -291,6 +296,9 @@ tests:
       - eval_time: 30m
         alertname: OpenRagInferenceProviderDown
         exp_alerts: []
+      - eval_time: 30m
+        alertname: OpenRagCircuitBreakerOpen
+        exp_alerts: []
 
   - interval: 1m
     name: circuit_open traffic alone does not trip the ratio clause
@@ -302,6 +310,9 @@ tests:
     alert_rule_test:
       - eval_time: 30m
         alertname: OpenRagInferenceProviderDown
+        exp_alerts: []
+      - eval_time: 30m
+        alertname: OpenRagCircuitBreakerOpen
         exp_alerts: []
 
   # ── OpenRagCatalogDriftDetected ─────────────────────────────────────────

@@ -158,39 +158,59 @@ groups:
   - name: openrag-inference
     rules:
       - alert: OpenRagInferenceProviderDown
-        # Two independent signals for one condition, unioned.
+        # `circuit_open` is deliberately NOT in the numerator: it is a
+        # consequence of the breaker, which OpenRagCircuitBreakerOpen detects.
+        # Counting it here as well would make the ratio self-sustaining once the
+        # breaker trips, so this could never clear on its own.
         #
-        # `circuit_open` is deliberately NOT in the error numerator: it is a
-        # consequence of the breaker, which the second clause already detects.
-        # Counting it in both would make the ratio self-sustaining once the
-        # breaker trips, so the alert could never clear on its own.
-        #
-        # label_replace projects the breaker's `name` onto `provider` so both
-        # sides of the union carry the same label and the annotation resolves
-        # either way. The two label spaces are related but not identical —
-        # `name` is the breaker kind (llm, embedder, vlm, reranker), `provider`
-        # is the registry entry — which the runbook spells out.
+        # `provider` is the registry entry name — admin-created, and the string
+        # to look up when this fires. It is deliberately NOT unified with the
+        # breaker's `name`, which is a code-defined kind; the two were once
+        # projected onto one label and that made the annotation resolve to a
+        # value that did not exist in the registry.
         expr: |
           (
             sum by (provider) (rate(openrag_inference_requests_total{outcome=~"error|timeout"}[10m]))
             /
             sum by (provider) (rate(openrag_inference_requests_total[10m]))
           ) > 0.5
-          or
-          label_replace(
-            max by (name) (openrag_circuit_breaker_state) == 1,
-            "provider", "$1", "name", "(.*)"
-          )
         for: 5m
         labels:
           severity: critical
         annotations:
-          summary: "Inference provider {{ $labels.provider }} is failing or circuit-broken"
+          summary: "Inference provider {{ $labels.provider }} is failing most of its calls"
           description: >-
-            Provider {{ $labels.provider }} is either returning errors/timeouts for more
-            than half of its calls, or its circuit breaker is open. Chat and indexing that
-            depend on it will fail.
+            More than half the calls to registry endpoint {{ $labels.provider }} are
+            returning errors or timing out. Chat and any indexing stage that depends on it
+            will fail.
           runbook_url: "https://github.com/linagora/openrag/blob/main/docs/deployment/runbooks/OpenRagInferenceProviderDown.md"
+
+      - alert: OpenRagCircuitBreakerOpen
+        # Separate from the error-rate alert on purpose. The two need different
+        # first responses — a tripped breaker means OpenRag has *stopped*
+        # calling, so calls return circuit_open immediately and the endpoint is
+        # under no load from us — and a single unioned alert forced the runbook
+        # to open with "work out which half fired".
+        #
+        # Being separate is also what makes an Alertmanager inhibit rule
+        # possible: a breaker opening causes the error ratio to change, so the
+        # routing can suppress the other alert for the same outage. You cannot
+        # inhibit half a unioned alert.
+        #
+        # `name` is the breaker kind declared in services/inference — llm,
+        # embedder, vlm, reranker. Code-defined and therefore bounded, but NOT
+        # a registry entry name.
+        expr: max by (name) (openrag_circuit_breaker_state) == 1
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "The {{ $labels.name }} circuit breaker is open"
+          description: >-
+            OpenRag has stopped calling its {{ $labels.name }} endpoint after repeated
+            failures. Calls return immediately without reaching it, so chat and indexing
+            that depend on it fail fast.
+          runbook_url: "https://github.com/linagora/openrag/blob/main/docs/deployment/runbooks/OpenRagCircuitBreakerOpen.md"
 
   # ── Meta ─────────────────────────────────────────────────────────────────
   - name: openrag-meta
