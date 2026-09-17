@@ -80,7 +80,7 @@ class _Service:
     def __init__(self, result: Any = None, exc: BaseException | None = None, delay: float = 0.0) -> None:
         self._result, self._exc, self._delay = result, exc, delay
 
-    async def get_queue_info(self) -> Any:
+    async def get_active_task_counts(self) -> Any:
         if self._delay:
             await asyncio.sleep(self._delay)
         if self._exc is not None:
@@ -90,7 +90,7 @@ class _Service:
 
 @pytest.mark.asyncio
 async def test_healthy_actor_populates_the_gauge(monkeypatch: pytest.MonkeyPatch) -> None:
-    await _refresh(monkeypatch, _Service({"tasks": {"active_statuses": {"QUEUED": 3, "SERIALIZING": 2}}}))
+    await _refresh(monkeypatch, _Service({"QUEUED": 3, "SERIALIZING": 2}))
 
     assert _samples() == {"QUEUED": 3.0, "SERIALIZING": 2.0}
 
@@ -139,8 +139,12 @@ async def test_hung_actor_is_bounded_by_the_timeout(monkeypatch: pytest.MonkeyPa
 
 @pytest.mark.asyncio
 async def test_malformed_payload_is_treated_as_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A shape change in ``get_queue_info`` must degrade to no data rather than
-    raising inside a scrape."""
-    await _refresh(monkeypatch, _Service({"tasks": {}}))
+    """A shape change in ``get_active_task_counts`` must degrade to no data rather
+    than raising inside a scrape.
+
+    An empty mapping is no longer malformed — it is a valid "nothing in flight" —
+    so the payload here is the wrong type entirely, which is what a contract
+    change would actually look like."""
+    await _refresh(monkeypatch, _Service("not-a-mapping"))
 
     assert _samples() == {}
