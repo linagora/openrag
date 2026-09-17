@@ -1183,7 +1183,7 @@ async def test_enrichment_cancellation_still_aborts_the_pipeline():
 # ---------------------------------------------------------------------------
 
 
-def _payload_pipeline(parser=None, **kwargs):
+def _payload_pipeline(parser=None, vector_store=None, **kwargs):
     document = Document(
         filename="report.pdf",
         raw_bytes=b"x" * 4096,
@@ -1195,7 +1195,7 @@ def _payload_pipeline(parser=None, **kwargs):
         parser=parser or FakeParser(processed),
         chunker=FakeChunker([Chunk(id="c1", text="hello", partition="tenant-a")]),
         embedder=FakeEmbedder([[1.0]]),
-        vector_store=FakeVectorStore(),
+        vector_store=vector_store or FakeVectorStore(),
         **kwargs,
     )
     return pipeline, document
@@ -1259,13 +1259,14 @@ async def test_a_failed_parse_leaves_the_payload_intact():
 
 
 @pytest.mark.asyncio
-async def test_release_keeps_the_fields_later_stages_read():
-    """The caption decision reads ``content_type``; the re-index delete target
-    reads ``id``/``partition``. Dropping the whole Document would break both."""
-    pipeline, document = _payload_pipeline()
-    document_id, partition, content_type = document.id, document.partition, document.content_type
+async def test_reindex_still_resolves_its_delete_target_after_the_release():
+    """The re-index snapshot reads ``row["document"].id`` after the release.
+    Dropping the whole Document instead of its payload would silently skip the
+    snapshot and leave the file's old chunks duplicated (#657)."""
+    vs = RecordingVectorStore(existing_ids=["101", "102"])
+    pipeline, document = _payload_pipeline(vector_store=vs)
 
-    row = {"document": document, "partition": "tenant-a", "filename": "report.pdf"}
-    await pipeline.run(row)
+    await pipeline.run({"document": document, "partition": "tenant-a", "filename": "report.pdf", "replace": True})
 
-    assert (document.id, document.partition, document.content_type) == (document_id, partition, content_type)
+    assert vs.query_filters == [{"partition": "tenant-a", "file_id": document.id}]
+    assert vs.deleted == [["101", "102"]]
