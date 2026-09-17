@@ -165,11 +165,16 @@ Three things can go wrong without failing the install:
   Until Prometheus's namespace is listed in `networkPolicy.metricsFrom`, its
   targets report `up == 0`. Each entry opens only the metrics port, and only on
   the pods that export it.
-- **Ray pods after upgrading from chart 0.6.5 or earlier.** KubeRay does not
-  recreate Ray pods when the `RayCluster` changes. Until they are recreated, the
+- **Ray pods created before this change.** KubeRay does not recreate Ray pods
+  when the `RayCluster` changes, so after upgrading an existing release the
   workers keep exporting on 8080, which `networkPolicy.externalPorts` opens to
   every source, and the head target is down. Recreate them once:
-  `kubectl delete pod -l ray.io/cluster=openrag-raycluster`.
+  `kubectl delete pod -n <release namespace> -l ray.io/cluster=<RayCluster name>`.
+  The selector must name your own `RayCluster`, or it matches no pods and
+  nothing is recreated. The name is `<fullname>-raycluster`, which is
+  `openrag-raycluster` with the default `fullnameOverride`; if you have set
+  another `fullnameOverride`, or left it empty so that Helm derives the name
+  from the release, `kubectl get raycluster -n <release namespace>` prints it.
 
 Once enabled, this should return 1 for every Ray node, the Postgres pod and the
 five Milvus pods:
