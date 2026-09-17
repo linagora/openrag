@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -9,6 +10,7 @@ from api.dependencies.auth import (
 from api.error_handlers import register_error_handlers
 from api.routers.user.search import router as search_router
 from core.models.chunk import Chunk
+from core.retrieval.trace import candidates_from_chunks
 from di.providers import (
     get_auth_service,
     get_partition_service,
@@ -116,7 +118,17 @@ def _trace_client():
 
         async def search(self, **kwargs):
             self.calls.append(kwargs)
-            return [Chunk(id="chunk-1", document_id="doc-1", text="answer", partition="mine")]
+            chunk = Chunk(
+                id="chunk-1",
+                document_id="doc-1",
+                text="private document body",
+                metadata={"api_key": "secret-token"},
+                partition="mine",
+            )
+            trace = kwargs.get("trace")
+            if trace is not None:
+                trace.record_stage("final", status="complete", candidates=candidates_from_chunks([chunk]))
+            return [chunk]
 
         def configuration_fingerprint(self, partitions):
             assert list(partitions) == ["mine"]
@@ -146,7 +158,7 @@ def test_search_without_trace_preserves_response_shape_and_does_not_create_colle
     assert retrieval.calls[0].get("trace") is None
 
 
-def test_search_with_trace_returns_same_documents_and_trace():
+def test_search_with_trace_returns_same_documents_without_sensitive_trace_payload():
     client, retrieval = _trace_client()
     plain = client.get("/search/partition/mine", params={"text": "q"}).json()["documents"]
 
@@ -163,6 +175,9 @@ def test_search_with_trace_returns_same_documents_and_trace():
     assert payload["retrieval_trace"]["request_id"] == "trace-request"
     assert payload["retrieval_trace"]["configuration_fingerprint"] == "fingerprint"
     assert retrieval.calls[-1]["trace"] is not None
+    serialized_trace = json.dumps(payload["retrieval_trace"])
+    assert "private document body" not in serialized_trace
+    assert "secret-token" not in serialized_trace
 
 
 def test_snapshot_route_forwards_opt_in_document_ids():
