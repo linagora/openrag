@@ -8,6 +8,7 @@ from typing import Any
 
 from core.models.catalog import DocumentStatus, IndexationJob
 from core.models.document import Document
+from core.utils.exceptions import NoIndexableContentError
 from core.utils.logging import get_logger
 from services.workers.indexing_callback import send_indexing_callback
 from services.workers.pipeline_builder import (
@@ -27,10 +28,6 @@ class _TaskCancelledBeforeStart(Exception):
     fenced (cancelled) — not a failure, so it must skip failure-marking and the
     error callback entirely (distinct from the TSM *raising*, which is a real
     outage and does need both)."""
-
-
-class NoIndexableContentError(RuntimeError):
-    """The parser/chunker produced no content that retrieval could return."""
 
 
 class IndexerWorker:

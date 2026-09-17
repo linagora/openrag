@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from core.models.chunk import Chunk
 from core.models.document import Document, DocumentType, ProcessedDocument, TextBlock
+from core.utils.exceptions import NoIndexableContentError, PipelineError
 from ray.exceptions import ActorUnavailableError
 from services.workers.indexer_actor import IndexerWorker, _load_document
 from services.workers.pipeline_builder import (
@@ -347,7 +348,7 @@ async def test_process_file_fails_when_no_chunks_are_produced(
     )
     metadata = {"file_id": "f-empty"}
 
-    with pytest.raises(RuntimeError, match="No indexable content was extracted"):
+    with pytest.raises(NoIndexableContentError, match="No indexable content was extracted") as exc_info:
         await worker.process_file(
             task_id="t-empty",
             path=str(path),
@@ -355,6 +356,10 @@ async def test_process_file_fails_when_no_chunks_are_produced(
             partition="p",
             callback_url="https://cozy.example.com/callback",
         )
+
+    assert exc_info.value.code == "NO_INDEXABLE_CONTENT"
+    assert exc_info.value.status_code == 422
+    assert isinstance(exc_info.value, PipelineError)
 
     assert repo.add_calls == []
     assert repo.update_calls == []
@@ -390,7 +395,7 @@ async def test_process_file_zero_chunk_replacement_keeps_existing_catalog_and_ve
         vector_store=vector_store,
     )
 
-    with pytest.raises(RuntimeError, match="No indexable content was extracted"):
+    with pytest.raises(NoIndexableContentError, match="No indexable content was extracted"):
         await worker.process_file(
             task_id="t-replace-empty",
             path=str(path),
