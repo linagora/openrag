@@ -1270,3 +1270,25 @@ async def test_reindex_still_resolves_its_delete_target_after_the_release():
 
     assert vs.query_filters == [{"partition": "tenant-a", "file_id": document.id}]
     assert vs.deleted == [["101", "102"]]
+
+
+@pytest.mark.asyncio
+async def test_reindex_falls_back_to_the_documents_own_partition_after_the_release():
+    """``_replace_target`` scopes the delete by ``row["partition"] or
+    document.partition``. The fallback is the branch the release could break
+    without anything noticing: ``indexer_actor`` always sets ``row["partition"]``,
+    so every other test takes the first arm and a cleared ``document.partition``
+    stays invisible.
+
+    An unscoped or wrongly-scoped delete on the re-index path is the dangerous
+    kind, so the defensive arm gets its own coverage rather than being trusted
+    because production does not reach it.
+    """
+    vs = RecordingVectorStore(existing_ids=["201"])
+    pipeline, document = _payload_pipeline(vector_store=vs)
+
+    # No "partition" key: the resolver must read it off the Document.
+    await pipeline.run({"document": document, "filename": "report.pdf", "replace": True})
+
+    assert vs.query_filters == [{"partition": "tenant-a", "file_id": document.id}]
+    assert vs.deleted == [["201"]]
