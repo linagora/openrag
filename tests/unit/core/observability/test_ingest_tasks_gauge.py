@@ -148,3 +148,54 @@ async def test_malformed_payload_is_treated_as_unavailable(monkeypatch: pytest.M
     await _refresh(monkeypatch, _Service("not-a-mapping"))
 
     assert _samples() == {}
+
+
+# ---------------------------------------------------------------------------
+# Concurrent scrapes must not interleave
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_concurrent_scrapes_do_not_interleave(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``INGEST_TASKS`` is a process-global gauge, so refresh-then-collect has to
+    be atomic across requests.
+
+    Without the lock, two overlapping scrapes interleave: the second request's
+    refresh overwrites (or clears) the snapshot the first is about to serialise,
+    and a response goes out describing state that never existed at any instant.
+    Prometheus scrapes on a timer, so a second scraper — the admin UI polling, an
+    operator with curl — is enough to overlap.
+
+    Asserting on the event order rather than on the exposed numbers is what makes
+    this fail for the right reason: a value assertion could pass by luck of
+    scheduling, whereas an interleaved sequence is the race itself.
+    """
+    import api.routers.admin.monitoring as route
+
+    events: list[str] = []
+
+    async def _slow_refresh(_request: Any) -> None:
+        events.append("refresh:start")
+        await asyncio.sleep(0.01)  # force a yield inside the critical section
+        events.append("refresh:end")
+
+    def _collect() -> str:
+        events.append("collect")
+        return "# HELP openrag_ingest_tasks\n"
+
+    monkeypatch.setattr(route, "_refresh_ingest_tasks", _slow_refresh)
+    monkeypatch.setattr(route, "get_metrics", _collect)
+
+    await asyncio.gather(
+        route.prometheus_metrics(_Request()),
+        route.prometheus_metrics(_Request()),
+    )
+
+    assert events == [
+        "refresh:start",
+        "refresh:end",
+        "collect",
+        "refresh:start",
+        "refresh:end",
+        "collect",
+    ], f"scrapes interleaved: {events}"
