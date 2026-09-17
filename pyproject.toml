@@ -9,6 +9,7 @@ dependencies = [
     "chainlit>=2.2.1",
     "docling>=2.24.0",
     "einops>=0.8.1",
+    "filetype>=1.2.0",
     "pyyaml>=6.0",
     "langchain-community>=0.3.18",
     "langchain-core>=0.3.39",
@@ -57,11 +58,16 @@ dependencies = [
     "cryptography>=42",
     # Moving-window rate limiter backing api.middleware.rate_limit.
     "limits>=3.6",
-    # Starlette < 0.47.2 is vulnerable to the multipart upload DoS CVE-2025-54121.
-    # Constrain starlette and the coordinated fastapi line (fastapi 0.115.x pins
-    # starlette<0.47). Both are otherwise pulled transitively (e.g. via chainlit).
-    "starlette>=0.47.2,<0.48",
-    "fastapi>=0.116.1,<0.117",
+    # Security floor for starlette, which every request crosses before the auth
+    # middleware, with the coordinated fastapi line. Both are otherwise pulled
+    # transitively (e.g. via chainlit).
+    # fastapi is capped below 0.137: from 0.137 an included router is no longer
+    # flattened into app.routes, so InstrumentationMiddleware's route-table walk
+    # cannot name requests rejected before routing (auth 403s, rate-limit 429s)
+    # and records them as not-found. starlette 1.x needs that fastapi line, so
+    # lift both caps together, once that walk handles the new route type.
+    "starlette>=0.49.1,<1.0",
+    "fastapi>=0.116.1,<0.137",
     "tenacity>=8.2.0",
     "aiobreaker>=1.2.0",
     "mcp>=1.11.0",
