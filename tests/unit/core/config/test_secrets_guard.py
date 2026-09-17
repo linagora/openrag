@@ -149,6 +149,48 @@ def test_opt_out_downgrades_to_a_warning(caplog):
     with caplog.at_level("WARNING"):
         enforce_secret_policy(env=env)
     assert ALLOW_INSECURE_SECRETS_ENV_VAR in caplog.text
+    assert "or-openrag-1234" not in caplog.text
+
+
+def test_the_warning_path_never_echoes_a_value(caplog):
+    """The opt-out path logs on every boot, so it is the one that would leak
+    repeatedly and into whatever ships the logs — not once into a crash message.
+
+    ``find_insecure_secrets`` reads each value to decide whether to complain and
+    builds the message from the variable *name*, never the value. That is a
+    control dependence, not a data one, which is why static analysis flags this
+    line; the assertion below is what actually holds it.
+    """
+    # Canary values, not words: "short" would be found inside "shorter than"
+    # and report a leak that is not there.
+    values = {
+        "AUTH_TOKEN": "or-openrag-1234",
+        "POSTGRES_PASSWORD": "qzx7wv",
+        "CHAINLIT_AUTH_SECRET": "jvb9kq",
+    }
+    with caplog.at_level("WARNING"):
+        enforce_secret_policy(env={**values, ALLOW_INSECURE_SECRETS_ENV_VAR: "true"})
+
+    assert caplog.text, "guard logged nothing, so this asserts nothing"
+    for name, value in values.items():
+        assert name in caplog.text, f"{name} was not reported at all"
+        assert value not in caplog.text, f"{name}'s value was logged in clear text"
+
+
+def test_no_reported_problem_contains_its_value():
+    """The same invariant at the source, so it holds for every consumer of
+    ``find_insecure_secrets`` rather than only the two call sites below it."""
+    values = {
+        "AUTH_TOKEN": "or-openrag-1234",
+        "POSTGRES_PASSWORD": "qzx7wv",
+        "CHAINLIT_AUTH_SECRET": "jvb9kq",
+    }
+    problems = find_insecure_secrets(env=values)
+
+    assert problems, "no problems reported, so this asserts nothing"
+    joined = " ".join(problems)
+    for value in values.values():
+        assert value not in joined
 
 
 def test_opt_out_is_never_an_opt_in():
