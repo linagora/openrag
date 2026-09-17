@@ -1986,7 +1986,7 @@ async def test_actor_keeps_concurrent_preset_transcription_settings_task_local(t
     class ParsingPipeline:
         async def run(self, row: dict[str, object]) -> dict[str, object]:
             await parse_stage(row, ResolverParser(), timeout=0.5)
-            row["stored_count"] = 0
+            row["stored_count"] = 1
             row["stage"] = "stored"
             return row
 

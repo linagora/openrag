@@ -29,6 +29,10 @@ class _TaskCancelledBeforeStart(Exception):
     outage and does need both)."""
 
 
+class NoIndexableContentError(RuntimeError):
+    """The parser/chunker produced no content that retrieval could return."""
+
+
 class IndexerWorker:
     """Pure-Python core of the thin indexer actor.
 
@@ -158,6 +162,9 @@ class IndexerWorker:
             if resolved_prompts:
                 row.update(resolved_prompts)
             row = await self._pipeline.run(row)
+            stored_count = row.get("stored_count", 0)
+            if stored_count == 0:
+                raise NoIndexableContentError("No indexable content was extracted from this document.")
             indexed_at = row.get("indexed_at")
 
             if self._document_repo is not None:
@@ -169,6 +176,7 @@ class IndexerWorker:
                     replace=replace,
                     indexation_config=indexation_config,
                     indexed_at=indexed_at,
+                    chunk_count=stored_count,
                     require_existing_partition=require_existing_partition,
                     workspace_ids=workspace_ids,
                 )
@@ -246,6 +254,7 @@ async def _write_catalog_record(
     replace: bool,
     indexation_config: dict[str, Any] | None,
     indexed_at: datetime | None = None,
+    chunk_count: int | None = None,
     require_existing_partition: bool = False,
     workspace_ids: list[str] | None = None,
 ) -> bool:
@@ -260,6 +269,7 @@ async def _write_catalog_record(
             relationship_id=metadata.get("relationship_id"),
             parent_id=metadata.get("parent_id"),
             indexed_at=indexed_at,
+            chunk_count=chunk_count,
             content_sha256=metadata.get("content_sha256"),
             **config_kwargs,
         )
@@ -272,6 +282,7 @@ async def _write_catalog_record(
         relationship_id=metadata.get("relationship_id"),
         parent_id=metadata.get("parent_id"),
         indexed_at=indexed_at,
+        chunk_count=chunk_count,
         require_existing_partition=require_existing_partition,
         # Stay protected until the outer worker has completed every attachment.
         independently_indexed=True,
