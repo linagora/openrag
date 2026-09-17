@@ -7,6 +7,10 @@ services:
       - "127.0.0.1:9090:9090"
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      # Generated from the chart's rule template with default values by
+      # scripts/gen_alert_rules.py, so Compose and Kubernetes alert on one
+      # definition. Regenerate rather than editing; CI checks for drift.
+      - ./prometheus/rules:/etc/prometheus/rules:ro
       - ./prometheus/openrag_token:/etc/prometheus/openrag_token:ro
       - prometheus_data:/prometheus
     command:

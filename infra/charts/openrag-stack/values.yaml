@@ -29,6 +29,55 @@ networkPolicy:
     - 8080  # openrag API/UI & admin-ui
     # - 8265  # ray dashboard - Security issue, the ray dashboard is not protected by any auth, so it should not be exposed to the public internet.
 
+# === Monitoring artifacts ===
+# OpenRag-specific wiring for a Prometheus that already exists — the chart does
+# not deploy Prometheus, Grafana or Alertmanager. Rules come from
+# rules/openrag-alerts.yaml, the same file the Compose stack loads, so both
+# deployments alert on one definition.
+monitoring:
+  prometheusRule:
+    # Needs the monitoring.coreos.com CRDs (kube-prometheus-stack or a
+    # standalone Prometheus Operator). Off by default: creating the CRD object
+    # without the operator present fails the install.
+    enabled: false
+    # Labels the operator's ruleSelector matches on, e.g.
+    # release: kube-prometheus-stack. An unmatched PrometheusRule is created
+    # and never loaded, which is indistinguishable from having no alerts.
+    labels: {}
+    # Labels stamped onto every alert, to match the Alertmanager routing of the
+    # stack receiving them. A rule's own labels win on conflict.
+    # e.g. team: platform / service: openrag
+    commonLabels: {}
+    # Override the runbook_url base baked into the rules. Leave empty to keep
+    # the published GitHub location; set it for an air-gapped or mirrored copy.
+    runbookBaseUrl: ""
+    # Alert thresholds. Empty keeps what the rules ship with; set one to retune
+    # without cutting a chart release. Every threshold here was chosen against
+    # synthetic traffic, not yours — expect to move them in the first weeks.
+    # `for` durations are the other half of each decision; see below.
+    thresholds:
+      ingestIdleSeconds: ""    # 720 — no parse completed for this long = stalled
+      ingestFailureRatio: ""   # 0.25 — share of terminal documents that failed
+      ingestVolumeFloor: ""    # 5 — terminal documents in 15m before judging the ratio
+      backlogDepth: ""         # 50 — queue depth below which growth is not worth alerting on
+      inferenceErrorRatio: ""  # 0.5 — share of a provider's calls erroring or timing out
+    # How long a condition must hold before the alert fires, keyed by alert
+    # name. Shortening one trades false positives for detection speed; each
+    # default was measured against the failure shape it has to tolerate, so
+    # read the rule's comment before changing it.
+    #   OpenRagIngestStalled: 2m      OpenRagIngestFailureRate: 5m
+    #   OpenRagBacklogGrowing: 25m    OpenRagCatalogDriftDetected: 5m
+    #   OpenRagInferenceProviderDown: 5m
+    #   OpenRagCircuitBreakerOpen: 5m OpenRagTargetDown: 5m
+    for: {}
+    # Regex OpenRagTargetDown matches the `job` label on, default `.*openrag.*`.
+    # The label is assigned by whoever configures the scrape — the Operator
+    # derives it from the Service name, Compose sets job_name: "openrag" — so a
+    # platform that relabels `job` breaks the match. Set this to whatever `job`
+    # the scrape actually produces. Getting it wrong is silent: the alert simply
+    # never fires, and never firing is indistinguishable from healthy.
+    jobMatcher: ""
+
 # === Global shared persistence ===
 persistence:
   enabled: true

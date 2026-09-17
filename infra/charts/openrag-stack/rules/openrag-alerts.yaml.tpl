@@ -1,0 +1,252 @@
+# OpenRag alert rules — a Helm template, and the single source of truth.
+#
+# Thresholds and `for` durations are values because they are deployment
+# config, not constants: they depend on a client's SLO, the size of the
+# corpus and how many people are querying it. Every default here was
+# measured against synthetic traffic, so treat them as a starting point.
+#
+# `{{ "{{ $value }}" }}` and friends are Prometheus' templating, escaped so
+# Helm emits them literally instead of failing on an undefined variable.
+#
+# One source of truth, two consumers:
+#   * Kubernetes — templates/prometheusrule.yaml wraps these groups in a
+#     monitoring.coreos.com/v1 PrometheusRule via .Files.Get.
+#   * Compose    — loads infra/compose/prometheus/rules/openrag-alerts.yaml,
+#     which is GENERATED from this file with default values by
+#     scripts/gen_alert_rules.py. Never edit that copy; CI regenerates it
+#     and fails on any difference.
+#
+# Metric names and label values follow core/observability/metric_specs.py.
+# Nothing here may reference a caller-controlled label (partition, user_id,
+# file_id, task_id, request_id, filename): those are unbounded by construction,
+# and a recording rule or alert that groups by one reintroduces the cardinality
+# the metric design excluded. tests/unit/infra/test_alert_rules.py enforces it.
+#
+# KNOWN LIMITATION — Ray Serve multi-replica. Every expression below reads
+# per-process counters. With ENABLE_RAY_SERVE=true and num_replicas > 1
+# (api/main.py), a scrape reaches one replica at random, so rates and gauges are
+# a random 1/N sample that appears to reset between scrapes. These rules will
+# both miss real conditions and fire on phantom ones under that topology. Run
+# num_replicas=1, or treat the alerts as advisory, until per-replica scraping
+# exists.
+
+groups:
+  # ── Ingestion ────────────────────────────────────────────────────────────
+  - name: openrag-ingestion
+    rules:
+      - alert: OpenRagIngestStalled
+        # Work is waiting and nothing has finished parsing for 12 minutes.
+        # The gauge is a completion *timestamp*, not a seconds-since counter, so
+        # the age is computed here at evaluation time — a seconds-since gauge
+        # reads 0 when nothing updates it, which is exactly the wedged-pool
+        # condition this detects.
+        #
+        # max() over pools, not per pool: one idle pool is normal (no audio
+        # uploads today), every pool idle while work is queued is not. If no
+        # pool has *ever* completed a parse the gauge is absent and this cannot
+        # fire — OpenRagBacklogGrowing covers a queue that rises from zero.
+        expr: |
+          (openrag_ingest_tasks{state="QUEUED"} > 0)
+          and on()
+          (time() - max(openrag_ingest_last_parse_completion_timestamp_seconds) > {{ .Values.monitoring.prometheusRule.thresholds.ingestIdleSeconds | default 720 }})
+        for: {{ get .Values.monitoring.prometheusRule.for "OpenRagIngestStalled" | default "2m" }}
+        labels:
+          severity: critical
+        annotations:
+          summary: "Ingestion is stalled — documents are queued and nothing is completing"
+          description: >-
+            {{ "{{ $value }}" }} task(s) are QUEUED and no parser pool has completed a parse
+            for over 12 minutes. Uploads are being accepted and never indexed.
+          runbook_url: "{{ .Values.monitoring.prometheusRule.runbookBaseUrl | default "https://github.com/linagora/openrag/blob/main/docs/deployment/runbooks" }}/OpenRagIngestStalled.md"
+
+      - alert: OpenRagIngestFailureRate
+        # Ratio over terminal outcomes only. `cancelled` is excluded from both
+        # sides: a user cancelling an upload is not a failure, and counting it
+        # would either dilute a real spike or page on ordinary behaviour.
+        #
+        # The volume floor stops 1-failed-of-2 from paging on a quiet instance.
+        # When no documents finish at all the denominator is 0, the ratio is NaN
+        # and no series is produced, so this stays silent rather than dividing by
+        # zero — "nothing is completing" is OpenRagIngestStalled's job.
+        #
+        # The two windows differ on purpose. The ratio reads 5m so a real failure
+        # is caught in ~8 minutes rather than ~15; the floor reads 15m because it
+        # is counting whether enough work happened to judge at all, and a slow
+        # instance that finishes one document every few minutes never reaches
+        # five inside a 5m window — measured, it is never detected at all. `for`
+        # is what rejects a brief blip, so shortening the ratio window costs no
+        # stability.
+        expr: |
+          (
+            sum(rate(openrag_ingest_documents_total{status="failed"}[5m]))
+            /
+            sum(rate(openrag_ingest_documents_total{status=~"completed|failed"}[5m]))
+          ) > {{ .Values.monitoring.prometheusRule.thresholds.ingestFailureRatio | default 0.25 }}
+          and
+          sum(increase(openrag_ingest_documents_total{status=~"completed|failed"}[15m])) >= {{ .Values.monitoring.prometheusRule.thresholds.ingestVolumeFloor | default 5 }}
+        for: {{ get .Values.monitoring.prometheusRule.for "OpenRagIngestFailureRate" | default "5m" }}
+        labels:
+          severity: warning
+        annotations:
+          summary: "More than 25% of documents are failing to index"
+          description: >-
+            {{ "{{ $value | humanizePercentage }}" }} of documents reaching a terminal state
+            over the last 5 minutes failed.
+          runbook_url: "{{ .Values.monitoring.prometheusRule.runbookBaseUrl | default "https://github.com/linagora/openrag/blob/main/docs/deployment/runbooks" }}/OpenRagIngestFailureRate.md"
+
+      - alert: OpenRagBacklogGrowing
+        # Both conditions required: either alone is noisy — a burst upload
+        # rises steeply and drains fine, a steady small queue is healthy.
+        # Depth is on the left because `and` takes its left-hand side's value,
+        # which is what puts the queue depth in the annotation rather than the
+        # derivative's per-second slope. Filtering is symmetric either way.
+        #
+        # The derivative window is deliberately SHORT. A 30m window lags: while
+        # the queue is actively draining it still contains the earlier rise, so
+        # the slope stays positive and the alert fires on a bulk import that is
+        # clearing normally — measured, the 30m/15m pair false-alarmed on every
+        # burst tested. At 5m the slope turns with the queue.
+        #
+        # `for` is then the only thing separating "growing" from "grew, now
+        # draining", so it is long: 25m outlasts the arrival phase of the bulk
+        # imports measured. A slower import whose queue climbs for longer than
+        # that will still trip this, and no threshold on these two series can
+        # prevent it — "2000 documents just arrived" and "we are underwater"
+        # are the same shape. The signal that separates them is the age of the
+        # oldest pending item, which this deployment cannot measure.
+        #
+        # END OF LIFE: this rule reads the in-process queue
+        # (TaskStateManager). Once ingestion sits behind a broker the backlog
+        # lives there, openrag_ingest_tasks collapses to "work already pulled"
+        # — bounded by prefetch, near-constant however deep the real queue is —
+        # and this rule stops measuring anything. Retire it then in favour of
+        # broker-native signals (queue depth, consumer lag, oldest unacked
+        # message age); do not retune it.
+        expr: |
+          openrag_ingest_tasks{state="QUEUED"} > {{ .Values.monitoring.prometheusRule.thresholds.backlogDepth | default 50 }}
+          and
+          deriv(openrag_ingest_tasks{state="QUEUED"}[5m]) > 0
+        for: {{ get .Values.monitoring.prometheusRule.for "OpenRagBacklogGrowing" | default "25m" }}
+        labels:
+          severity: warning
+        annotations:
+          summary: "Indexing backlog is growing faster than it drains"
+          description: >-
+            The QUEUED task count has risen continuously for 25 minutes and now stands at
+            {{ "{{ $value }}" }}. Ingestion capacity is below the arrival rate.
+          runbook_url: "{{ .Values.monitoring.prometheusRule.runbookBaseUrl | default "https://github.com/linagora/openrag/blob/main/docs/deployment/runbooks" }}/OpenRagBacklogGrowing.md"
+
+      - alert: OpenRagCatalogDriftDetected
+        # openrag_retrieval_orphan_chunks_dropped_total counts retrieval hits
+        # dropped because the file is absent from the catalog — vector store and
+        # catalog disagree. Its own definition notes repeated retrievals can
+        # count the same chunk again, so the rate is not a document count: only
+        # "non-zero" is meaningful here, never a magnitude threshold.
+        #
+        # increase() over an hour, not rate() over the `for` duration. The
+        # counter only moves when a query happens to touch an orphaned file, so
+        # the signal is sparse and its frequency says nothing about how bad the
+        # drift is. A `[15m]` window with `for: 15m` was self-defeating: one
+        # drop holds the rate above zero for exactly 15 minutes and never quite
+        # the 15 *continuous* minutes the timer wanted, so a single or sporadic
+        # drop — the likeliest shape, an orphan nobody queries often — never
+        # fired at all. Measured: it fired only when the orphan was retrieved
+        # constantly.
+        #
+        # The hour is also about how this CLEARS. Drift needs manual
+        # reconciliation, so an alert that resolves fifteen minutes after the
+        # last query is reporting "nobody looked recently", not "it is fixed".
+        # A longer window keeps it up between sporadic hits. It still cannot
+        # distinguish the two — see the runbook.
+        expr: sum(increase(openrag_retrieval_orphan_chunks_dropped_total[1h])) > 0
+        for: {{ get .Values.monitoring.prometheusRule.for "OpenRagCatalogDriftDetected" | default "5m" }}
+        labels:
+          severity: critical
+        annotations:
+          summary: "Retrieval is dropping chunks whose file is missing from the catalog"
+          description: >-
+            Retrieval dropped chunks in the last hour for files the catalog does not know
+            about. Answers are quietly missing content, with no error to show for it.
+          runbook_url: "{{ .Values.monitoring.prometheusRule.runbookBaseUrl | default "https://github.com/linagora/openrag/blob/main/docs/deployment/runbooks" }}/OpenRagCatalogDriftDetected.md"
+
+  # ── Inference ────────────────────────────────────────────────────────────
+  - name: openrag-inference
+    rules:
+      - alert: OpenRagInferenceProviderDown
+        # `circuit_open` is deliberately NOT in the numerator: it is a
+        # consequence of the breaker, which OpenRagCircuitBreakerOpen detects.
+        # Counting it here as well would make the ratio self-sustaining once the
+        # breaker trips, so this could never clear on its own.
+        #
+        # `provider` is the registry entry name — admin-created, and the string
+        # to look up when this fires. It is deliberately NOT unified with the
+        # breaker's `name`, which is a code-defined kind; the two were once
+        # projected onto one label and that made the annotation resolve to a
+        # value that did not exist in the registry.
+        expr: |
+          (
+            sum by (provider) (rate(openrag_inference_requests_total{outcome=~"error|timeout"}[10m]))
+            /
+            sum by (provider) (rate(openrag_inference_requests_total[10m]))
+          ) > {{ .Values.monitoring.prometheusRule.thresholds.inferenceErrorRatio | default 0.5 }}
+        for: {{ get .Values.monitoring.prometheusRule.for "OpenRagInferenceProviderDown" | default "5m" }}
+        labels:
+          severity: critical
+        annotations:
+          summary: "Inference provider {{ "{{ $labels.provider }}" }} is failing most of its calls"
+          description: >-
+            More than half the calls to registry endpoint {{ "{{ $labels.provider }}" }} are
+            returning errors or timing out. Chat and any indexing stage that depends on it
+            will fail.
+          runbook_url: "{{ .Values.monitoring.prometheusRule.runbookBaseUrl | default "https://github.com/linagora/openrag/blob/main/docs/deployment/runbooks" }}/OpenRagInferenceProviderDown.md"
+
+      - alert: OpenRagCircuitBreakerOpen
+        # Separate from the error-rate alert on purpose. The two need different
+        # first responses — a tripped breaker means OpenRag has *stopped*
+        # calling, so calls return circuit_open immediately and the endpoint is
+        # under no load from us — and a single unioned alert forced the runbook
+        # to open with "work out which half fired".
+        #
+        # Being separate is also what makes an Alertmanager inhibit rule
+        # possible: a breaker opening causes the error ratio to change, so the
+        # routing can suppress the other alert for the same outage. You cannot
+        # inhibit half a unioned alert.
+        #
+        # `name` is the breaker kind declared in services/inference — llm,
+        # embedder, vlm, reranker. Code-defined and therefore bounded, but NOT
+        # a registry entry name.
+        expr: max by (name) (openrag_circuit_breaker_state) == 1
+        for: {{ get .Values.monitoring.prometheusRule.for "OpenRagCircuitBreakerOpen" | default "5m" }}
+        labels:
+          severity: critical
+        annotations:
+          summary: "The {{ "{{ $labels.name }}" }} circuit breaker is open"
+          description: >-
+            OpenRag has stopped calling its {{ "{{ $labels.name }}" }} endpoint after repeated
+            failures. Calls return immediately without reaching it, so chat and indexing
+            that depend on it fail fast.
+          runbook_url: "{{ .Values.monitoring.prometheusRule.runbookBaseUrl | default "https://github.com/linagora/openrag/blob/main/docs/deployment/runbooks" }}/OpenRagCircuitBreakerOpen.md"
+
+  # ── Meta ─────────────────────────────────────────────────────────────────
+  - name: openrag-meta
+    rules:
+      - alert: OpenRagTargetDown
+        # The meta-alert: without it, every rule above fails silent. A target
+        # that stops answering produces no series, and "no series" is
+        # indistinguishable from "healthy" to every other expression here.
+        #
+        # This is NOT OpenRagNotReady. `up` reports whether /metrics answered,
+        # and /metrics deliberately keeps answering while the container is
+        # degraded (it reads process config, not the service container) — so a
+        # degraded instance is up==1 and not ready at the same time. Readiness
+        # needs a gauge exported from readiness_service; see S3-1b.
+        expr: up{job=~"{{ .Values.monitoring.prometheusRule.jobMatcher | default ".*openrag.*" }}"} == 0
+        for: {{ get .Values.monitoring.prometheusRule.for "OpenRagTargetDown" | default "5m" }}
+        labels:
+          severity: critical
+        annotations:
+          summary: "Prometheus cannot scrape OpenRag ({{ "{{ $labels.instance }}" }})"
+          description: >-
+            The target has been unreachable for 5 minutes. Every other OpenRag alert is
+            inert while this is firing, because absent series cannot breach a threshold.
+          runbook_url: "{{ .Values.monitoring.prometheusRule.runbookBaseUrl | default "https://github.com/linagora/openrag/blob/main/docs/deployment/runbooks" }}/OpenRagTargetDown.md"

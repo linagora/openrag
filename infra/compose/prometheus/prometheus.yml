@@ -2,6 +2,17 @@ global:
   scrape_interval: 15s
   evaluation_interval: 15s
 
+# Alert rules, generated from the chart's rule template with default values
+# (scripts/gen_alert_rules.py) and mounted by the monitoring overlay. Kubernetes
+# renders the same template with its own threshold values, so both deployments
+# alert on one definition instead of two that drift.
+#
+# There is no Alertmanager in this overlay: rules evaluate and show as firing in
+# the Prometheus UI (Alerts tab), but nothing routes or notifies. Point
+# `alerting.alertmanagers` at one to receive them.
+rule_files:
+  - /etc/prometheus/rules/*.yaml
+
 scrape_configs:
   - job_name: "prometheus"
     static_configs:
