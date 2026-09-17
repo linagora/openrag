@@ -28,8 +28,8 @@ import argparse
 import os
 import re
 import secrets
-import stat
 import sys
+import tempfile
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -71,11 +71,19 @@ def _write_private(path: Path, text: str) -> None:
     and rename it over instead.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, stat.S_IRUSR | stat.S_IWUSR)
+    # ``mkstemp`` opens a *unique* name with O_EXCL at 0600, so the open cannot
+    # land on a path someone else prepared. The previous predictable
+    # ``.{name}.tmp`` used O_CREAT without O_EXCL: if that path already existed
+    # as a symlink, ``open`` followed it, and the mode argument — which applies
+    # only when open() creates the file — was ignored, so the credentials were
+    # written into the link's target with whatever permissions it already had.
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    tmp = Path(tmp_name)
     try:
         with os.fdopen(fd, "w") as handle:
             handle.write(text)
+        # Renaming over the target replaces the *name*, so a symlink at ``path``
+        # is replaced rather than written through.
         os.replace(tmp, path)
     except BaseException:
         tmp.unlink(missing_ok=True)
@@ -116,6 +124,41 @@ def find_placeholders(text: str) -> list[str]:
     ]
 
 
+def add_missing(existing_text: str, template_text: str) -> tuple[str, list[str]]:
+    """Append template assignments ``existing_text`` lacks, preserving what is there.
+
+    Warning about a variable the template gained and returning success left the
+    credential unset while the exit code said otherwise — so an upgrade that
+    added a required secret looked like it had worked. Generating it is the only
+    outcome that makes the documented "re-run after adding a secret" path true.
+
+    Existing assignments are never rewritten: an operator's endpoints and tuning
+    survive, and a credential the data was written under is not regenerated.
+    """
+    have = set(_assignment_keys(existing_text))
+    added: list[str] = []
+    new_lines: list[str] = []
+
+    for line in template_text.splitlines():
+        match = _ASSIGNMENT.match(line)
+        if not match or match.group("key") in have:
+            continue
+        key = match.group("key")
+        if match.group("value").strip() == PLACEHOLDER:
+            new_lines.append(f"{key}={_generate(key)}")
+        else:
+            new_lines.append(line)
+        added.append(key)
+
+    if not new_lines:
+        return existing_text, []
+
+    text = existing_text if existing_text.endswith("\n") else existing_text + "\n"
+    text += "\n# Added by gen_env.py: variables the template gained since this file was written.\n"
+    text += "\n".join(new_lines) + "\n"
+    return text, added
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("-t", "--template", type=Path, default=DEFAULT_TEMPLATE, help="example env file to read")
@@ -137,14 +180,36 @@ def main(argv: list[str] | None = None) -> int:
         if not args.output.exists():
             print(f"{args.output} does not exist; run this script without --check to create it.", file=sys.stderr)
             return 1
-        remaining = find_placeholders(args.output.read_text())
+        output_text = args.output.read_text()
+        problems = False
+
+        remaining = find_placeholders(output_text)
         if remaining:
             print(
                 f"{args.output} still has generated values missing: {', '.join(remaining)}",
                 file=sys.stderr,
             )
+            problems = True
+
+        # Parity with the template, not just leftover placeholders. A variable
+        # the template requires and this file never had holds no placeholder to
+        # find, so checking only for markers reported success on a file missing
+        # a credential outright.
+        if args.template.exists():
+            absent = sorted(set(_assignment_keys(args.template.read_text())) - set(_assignment_keys(output_text)))
+            if absent:
+                print(
+                    f"{args.output} is missing variables the template defines: {', '.join(absent)}. "
+                    f"Re-run without --check to add them.",
+                    file=sys.stderr,
+                )
+                problems = True
+        else:
+            print(f"Template not found: {args.template}; checked placeholders only.", file=sys.stderr)
+
+        if problems:
             return 1
-        print(f"{args.output}: no placeholders left.")
+        print(f"{args.output}: no placeholders left, and every template variable is present.")
         return 0
 
     if not args.template.exists():
@@ -157,16 +222,11 @@ def main(argv: list[str] | None = None) -> int:
         # operator set by hand, and regenerating a credential that data was
         # already written under (a database password, say) breaks the stack.
         text, filled = fill(args.output.read_text())
+        text, added = add_missing(text, args.template.read_text())
         _write_private(args.output, text)
         print(f"Updated {args.output}; generated {len(filled)} missing value(s): {', '.join(filled) or 'none'}")
-
-        missing = sorted(set(_assignment_keys(args.template.read_text())) - set(_assignment_keys(text)))
-        if missing:
-            print(
-                f"The template has variables this file does not: {', '.join(missing)}. "
-                f"Add the ones you need, then re-run to fill them.",
-                file=sys.stderr,
-            )
+        if added:
+            print(f"Added {len(added)} variable(s) the template defines: {', '.join(added)}")
         return 0
 
     text, filled = fill(args.template.read_text())
