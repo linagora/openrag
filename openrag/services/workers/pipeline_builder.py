@@ -173,6 +173,7 @@ class IndexingPipeline:
 
         try:
             await _timed("parse", parse_stage(row, parser, timeout=self.timeouts.parse))
+            _release_raw_bytes(row)
             # The caption decision needs the parsed document (standalone images
             # always caption), so the VLM is resolved after parse.
             vlm, vlm_name = self._select_vlm(config) if self._should_caption(row, config) else (None, None)
@@ -574,6 +575,35 @@ def build_indexing_pipeline(
         topic_tagger_factory=topic_tagger_factory,
         defer_replace_cleanup=defer_replace_cleanup,
     )
+
+
+def _release_raw_bytes(row: MutableMapping[str, Any]) -> None:
+    """Drop the file payload once parsing has consumed it.
+
+    ``Document.raw_bytes`` is the whole file, read into memory by
+    ``indexer_actor._load_document`` before the pipeline starts. Nothing after
+    ``parse_stage`` needs it: the remaining reads of ``row["document"]`` are
+    ``content_type`` (the caption decision) and ``id``/``partition`` (the
+    re-index delete target) — all of which survive this.
+
+    Holding it to the end of ``run()`` kept the payload resident through
+    contextualization, embedding and the vector-store write — the slow,
+    network-bound stages where a batch spends nearly all its wall-clock. With
+    ``ray.indexer.max_tasks_per_worker`` defaulting to 50, that is up to 50 whole
+    files resident in one worker process at once, which is the OOM that #909's
+    ``max_restarts`` recovers *from*. Freeing here bounds residency to the parse.
+
+    Only reached on a successful parse: ``parse_stage`` re-raises, so a failure
+    leaves the payload intact for the caller. Rows are never re-run
+    (``ingest_batch`` runs each exactly once, and a task retry builds a fresh row
+    by re-reading the file), so no parser sees a document this has emptied.
+
+    This is the residency half of #846. It does not stop the file being read into
+    memory in the first place — that needs a path-carrying ``Document``.
+    """
+    document = row.get("document")
+    if isinstance(document, Document):
+        document.raw_bytes = None
 
 
 def _replace_target(row: MutableMapping[str, Any]) -> tuple[str | None, str | None]:

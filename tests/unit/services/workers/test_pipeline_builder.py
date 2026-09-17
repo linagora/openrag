@@ -1176,3 +1176,96 @@ async def test_enrichment_cancellation_still_aborts_the_pipeline():
         await pipeline.run(row)
 
     assert vector_store.calls == []
+
+
+# ---------------------------------------------------------------------------
+# #846 — the file payload must not outlive the parse
+# ---------------------------------------------------------------------------
+
+
+def _payload_pipeline(parser=None, **kwargs):
+    document = Document(
+        filename="report.pdf",
+        raw_bytes=b"x" * 4096,
+        content_type=DocumentType.PDF,
+        partition="tenant-a",
+    )
+    processed = ProcessedDocument(document_id=document.id, text_blocks=[TextBlock(text="hello")])
+    pipeline = build_indexing_pipeline(
+        parser=parser or FakeParser(processed),
+        chunker=FakeChunker([Chunk(id="c1", text="hello", partition="tenant-a")]),
+        embedder=FakeEmbedder([[1.0]]),
+        vector_store=FakeVectorStore(),
+        **kwargs,
+    )
+    return pipeline, document
+
+
+@pytest.mark.asyncio
+async def test_raw_bytes_are_released_once_parsing_has_consumed_them():
+    """The payload is the whole file. Holding it to the end of ``run()`` kept it
+    resident through embed and store — the slow stages — so up to
+    ``max_tasks_per_worker`` whole files piled up in one worker process."""
+    pipeline, document = _payload_pipeline()
+
+    row = {"document": document, "partition": "tenant-a", "filename": "report.pdf"}
+    await pipeline.run(row)
+
+    assert row["stage"] == "stored", "guard: the pipeline must have run to completion"
+    assert row["document"] is document, "the Document itself stays — only the payload goes"
+    assert document.raw_bytes is None
+
+
+@pytest.mark.asyncio
+async def test_the_parser_still_receives_the_payload():
+    """Guards the test above against passing for the wrong reason: freeing the
+    bytes *before* the parser reads them would also satisfy it."""
+    seen: list[int | None] = []
+
+    class RecordingParser:
+        async def parse(self, document: Document) -> ProcessedDocument:
+            seen.append(len(document.raw_bytes) if document.raw_bytes is not None else None)
+            return ProcessedDocument(document_id=document.id, text_blocks=[TextBlock(text="hello")])
+
+        def supported_types(self) -> list[str]:
+            return [DocumentType.PDF.value]
+
+    pipeline, document = _payload_pipeline(parser=RecordingParser())
+
+    await pipeline.run({"document": document, "partition": "tenant-a", "filename": "report.pdf"})
+
+    assert seen == [4096]
+    assert document.raw_bytes is None
+
+
+@pytest.mark.asyncio
+async def test_a_failed_parse_leaves_the_payload_intact():
+    """``parse_stage`` re-raises, so the release is never reached. The caller
+    still owns the bytes for error reporting or a retry decision."""
+
+    class BrokenParser:
+        async def parse(self, document: Document) -> ProcessedDocument:
+            raise RuntimeError("parser exploded")
+
+        def supported_types(self) -> list[str]:
+            return [DocumentType.PDF.value]
+
+    pipeline, document = _payload_pipeline(parser=BrokenParser())
+
+    with pytest.raises(RuntimeError, match="parser exploded"):
+        await pipeline.run({"document": document, "partition": "tenant-a", "filename": "report.pdf"})
+
+    assert document.raw_bytes is not None
+
+
+@pytest.mark.asyncio
+async def test_release_keeps_the_fields_later_stages_read():
+    """The caption decision reads ``content_type``; the re-index delete target
+    reads ``id``/``partition``. Dropping the whole Document would break both."""
+    pipeline, document = _payload_pipeline()
+    document_id, partition, content_type = document.id, document.partition, document.content_type
+
+    row = {"document": document, "partition": "tenant-a", "filename": "report.pdf"}
+    await pipeline.run(row)
+
+    assert (document.id, document.partition, document.content_type) == (document_id, partition, content_type)
