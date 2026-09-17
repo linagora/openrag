@@ -103,6 +103,9 @@ class IndexingPipeline:
     contextualizer_factory: Callable[[str], ChunkContextualizer] | None = None
     topic_tagger_factory: Callable[[str], TopicTagger] | None = None
     defer_replace_cleanup: bool = False
+    # How many of a document's images may contend for the shared VLM gate at
+    # once. ``None`` leaves the fan-out unbounded (one caller per image).
+    caption_concurrency: int | None = None
 
     async def run(self, row: MutableMapping[str, Any]) -> MutableMapping[str, Any]:
         """Run a single row through parse, optional enrichments, embed, and store.
@@ -206,6 +209,7 @@ class IndexingPipeline:
                         vlm,
                         timeout=self.timeouts.caption,
                         per_image_timeout=self.timeouts.caption_per_image,
+                        max_concurrency=self.caption_concurrency,
                     ),
                 )
             await _timed("chunk", chunk_stage(row, chunker, timeout=self.timeouts.chunk))
@@ -552,6 +556,7 @@ def build_indexing_pipeline(
     contextualizer_factory: Callable[[str], ChunkContextualizer] | None = None,
     topic_tagger_factory: Callable[[str], TopicTagger] | None = None,
     defer_replace_cleanup: bool = False,
+    caption_concurrency: int | None = None,
 ) -> IndexingPipeline:
     """Build the default sequential indexing pipeline."""
 
@@ -574,6 +579,7 @@ def build_indexing_pipeline(
         contextualizer_factory=contextualizer_factory,
         topic_tagger_factory=topic_tagger_factory,
         defer_replace_cleanup=defer_replace_cleanup,
+        caption_concurrency=caption_concurrency,
     )
 
 
