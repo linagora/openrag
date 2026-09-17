@@ -45,12 +45,13 @@ def _doc(file_id: str, partition: str = "p", **extra) -> DocumentRecord:
 class TestCreateGetDelete:
     async def test_create_then_get(self, postgres_store: PostgresStore):
         partition = await _seed_partition(postgres_store)
-        await postgres_store.document_repo.create_document(_doc("f1", partition))
+        await postgres_store.document_repo.create_document(_doc("f1", partition, chunk_count=4))
         fetched = await postgres_store.document_repo.get_document("f1")
         assert fetched is not None
         assert fetched.file_id == "f1"
         assert fetched.partition == partition
         assert fetched.filename == "f1.pdf"
+        assert fetched.chunk_count == 4
 
     async def test_get_missing_returns_none(self, postgres_store: PostgresStore):
         assert await postgres_store.document_repo.get_document("nope") is None
@@ -103,6 +104,16 @@ class TestListFilter:
 
 
 class TestUpdate:
+    async def test_update_chunk_count(self, postgres_store: PostgresStore):
+        partition = await _seed_partition(postgres_store)
+        repo = postgres_store.document_repo
+        await repo.create_document(_doc("chunks", partition, chunk_count=2))
+
+        updated = await repo.update_document("chunks", chunk_count=5)
+
+        assert updated is not None
+        assert updated.chunk_count == 5
+
     async def test_update_status_folds_into_metadata(
         self,
         postgres_store: PostgresStore,

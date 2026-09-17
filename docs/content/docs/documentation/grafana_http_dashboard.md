@@ -36,6 +36,12 @@ Open Grafana through the URL configured in `GRAFANA_URL` and sign in with `GRAFA
 
 Open **Connections → Data sources → Prometheus**. The bundled data source uses `http://prometheus:9090` and the UID `prometheus`.
 
+The bundled Prometheus scrapes `GET /metrics` on the API with the
+`METRICS_TOKEN` from the OpenRAG `.env`: the overlay writes it into the
+Prometheus container, so the API and its scraper always agree, and the overlay
+refuses to start without it. For an external Prometheus or Grafana, see
+[Prometheus metrics](/openrag/documentation/prometheus_metrics/).
+
 Open **Explore**, select Prometheus, and run:
 
 ```promql

@@ -7,6 +7,7 @@ from fastapi.responses import JSONResponse
 
 router = APIRouter()
 _CORE_READINESS_CHECKS = frozenset({"postgres", "milvus", "ray"})
+_PUBLIC_MODEL_ENDPOINT_CATEGORY = "configured"
 
 
 @router.get("/health_check", summary="Health check endpoint for API", dependencies=[])
@@ -18,12 +19,32 @@ async def health_check(request: Request) -> str:
 async def ready(request: Request) -> JSONResponse:
     container = getattr(request.app.state, "container", None)
     if container is None or not container.is_initialized:
-        return JSONResponse({"status": "not_ready", "checks": {"startup": "unavailable"}}, status_code=503)
-    checks = await container.readiness_service.check()
+        return JSONResponse(
+            {
+                "status": "not_ready",
+                "checks": {"startup": "unavailable"},
+                "model_endpoints": [],
+                "configuration_references": [],
+            },
+            status_code=503,
+        )
+    snapshot = await container.readiness_service.snapshot()
+    checks = dict(snapshot.checks)
     required_checks = _CORE_READINESS_CHECKS.intersection(checks)
     is_ready = bool(required_checks) and all(checks[name] == "ok" for name in required_checks)
     return JSONResponse(
-        {"status": "ready" if is_ready else "not_ready", "checks": checks},
+        {
+            "status": "ready" if is_ready else "not_ready",
+            "checks": checks,
+            "model_endpoints": [
+                {"provider": _PUBLIC_MODEL_ENDPOINT_CATEGORY, "kind": endpoint.kind, "status": endpoint.status}
+                for endpoint in snapshot.model_endpoints
+            ],
+            "configuration_references": [
+                {"kind": finding.kind, "count": finding.count, "status": finding.status}
+                for finding in snapshot.configuration_references
+            ],
+        },
         status_code=200 if is_ready else 503,
     )
 
