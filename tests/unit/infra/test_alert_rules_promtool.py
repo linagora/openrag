@@ -21,6 +21,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -57,6 +58,27 @@ def _dockerised_promtool() -> list[str] | None:
         PROMETHEUS_IMAGE,
         "test", "rules", str(TEST_FILE.relative_to(ROOT)),
     ]
+
+
+def test_generated_rules_match_the_template() -> None:
+    """The behaviour tests below read the *generated* rules, so a template edit
+    without a regeneration leaves them asserting against a stale file — green
+    locally, and only caught in CI. This closes that gap where helm is present.
+
+    CI runs the same check directly (``gen_alert_rules.py --check``), so this is
+    the developer's copy of it, not its only home.
+    """
+    if shutil.which("helm") is None:
+        pytest.skip("needs helm to render the chart's rule template")
+
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / "gen_alert_rules.py"), "--check"],
+        capture_output=True, text=True, check=False, cwd=ROOT,
+    )
+    assert result.returncode == 0, (
+        f"the generated rules are out of date; run scripts/gen_alert_rules.py\n"
+        f"{result.stdout}\n{result.stderr}"
+    )
 
 
 def test_alert_rules_behave_as_specified() -> None:

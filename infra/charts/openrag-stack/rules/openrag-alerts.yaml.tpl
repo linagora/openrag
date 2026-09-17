@@ -13,7 +13,7 @@
 #     monitoring.coreos.com/v1 PrometheusRule via .Files.Get.
 #   * Compose    — loads infra/compose/prometheus/rules/openrag-alerts.yaml,
 #     which is GENERATED from this file with default values by
-#     scripts/gen_alert_rules.sh. Never edit that copy; CI regenerates it
+#     scripts/gen_alert_rules.py. Never edit that copy; CI regenerates it
 #     and fails on any difference.
 #
 # Metric names and label values follow core/observability/metric_specs.py.

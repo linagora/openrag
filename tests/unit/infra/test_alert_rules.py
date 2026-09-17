@@ -24,9 +24,8 @@ RUNBOOK_DIR = ROOT / "docs" / "deployment" / "runbooks"
 CHART_DIR = ROOT / "infra" / "charts" / "openrag-stack"
 COMPOSE_DIR = ROOT / "infra" / "compose"
 
-#: The published base the rules' ``runbook_url`` annotations are built on. The chart
-#: rewrites it when ``monitoring.prometheusRule.runbookBaseUrl`` is set, so this string
-#: appears in two places and they must agree — asserted below.
+#: The published base the rules' ``runbook_url`` annotations are built on, and the
+#: template's default for ``monitoring.prometheusRule.runbookBaseUrl``.
 RUNBOOK_BASE = "https://github.com/linagora/openrag/blob/main/docs/deployment/runbooks"
 
 #: Metric names an expression is allowed to reference.

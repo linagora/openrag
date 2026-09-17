@@ -61,15 +61,16 @@ jobs:
           sudo install -m 0755 promtool /usr/local/bin/promtool
           promtool --version
 
-      # The Compose copy of the alert rules is generated from the chart template;
-      # this renders it and fails if the checked-in file differs. Without it the
-      # two deployments quietly drift apart, which is the whole failure the
-      # generate-and-verify layout exists to prevent.
+      # Needed to render the chart's rule template in the next step.
       - name: Set up Helm
         uses: azure/setup-helm@v4
         with:
           version: v3.14.4
 
+      # The Compose copy of the alert rules is generated from the chart template;
+      # this renders it and fails if the checked-in file differs. Without it the
+      # two deployments quietly drift apart, which is the whole failure the
+      # generate-and-verify layout exists to prevent.
       - name: Check the generated alert rules are up to date
         run: |
           uv run python scripts/gen_alert_rules.py --check
