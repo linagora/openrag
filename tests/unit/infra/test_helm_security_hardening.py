@@ -141,3 +141,30 @@ def test_ingress_is_not_exposed_by_default_and_supports_tls() -> None:
         assert "required" in template
         assert "ingress.host must be set" in template
         assert "tls:" in template
+
+
+# ---------------------------------------------------------------------------
+# Required secrets: whitespace is not "set"
+# ---------------------------------------------------------------------------
+
+
+def test_required_secret_check_trims_before_testing_emptiness() -> None:
+    """``AUTH_TOKEN: "   "`` used to satisfy "must be set before installing the
+    chart": the requiredness test read the raw value, where a whitespace string
+    is non-empty, while the placeholder and length checks beside it both trim —
+    and the length check explicitly skips blank-after-trim. The runtime guard
+    strips too, so nothing downstream caught it either and the install succeeded
+    with a credential every layer reads as unset.
+    """
+    source = _template("secrets-env.yaml")
+
+    match = re.search(
+        r"if has \$key \$requiredSecrets \}\}\s*\{\{-\s*if empty (?P<expr>[^}]+?)\s*\}\}",
+        source,
+        re.DOTALL,
+    )
+    assert match, "the requiredness check in secrets-env.yaml has moved; update this test"
+    assert "trim" in match.group("expr"), (
+        f"requiredness tests {match.group('expr').strip()!r} without trimming, "
+        f"so a whitespace-only required secret passes chart rendering"
+    )
