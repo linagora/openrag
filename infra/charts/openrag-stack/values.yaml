@@ -51,6 +51,25 @@ monitoring:
     # Override the runbook_url base baked into the rules. Leave empty to keep
     # the published GitHub location; set it for an air-gapped or mirrored copy.
     runbookBaseUrl: ""
+    # Alert thresholds. Empty keeps what the rules ship with; set one to retune
+    # without cutting a chart release. Every threshold here was chosen against
+    # synthetic traffic, not yours — expect to move them in the first weeks.
+    # `for` durations are the other half of each decision; see below.
+    thresholds:
+      ingestIdleSeconds: ""    # 720 — no parse completed for this long = stalled
+      ingestFailureRatio: ""   # 0.25 — share of terminal documents that failed
+      ingestVolumeFloor: ""    # 5 — terminal documents in 15m before judging the ratio
+      backlogDepth: ""         # 50 — queue depth below which growth is not worth alerting on
+      inferenceErrorRatio: ""  # 0.5 — share of a provider's calls erroring or timing out
+    # How long a condition must hold before the alert fires, keyed by alert
+    # name. Shortening one trades false positives for detection speed; each
+    # default was measured against the failure shape it has to tolerate, so
+    # read the rule's comment before changing it.
+    #   OpenRagIngestStalled: 2m      OpenRagIngestFailureRate: 5m
+    #   OpenRagBacklogGrowing: 25m    OpenRagCatalogDriftDetected: 5m
+    #   OpenRagInferenceProviderDown: 5m
+    #   OpenRagCircuitBreakerOpen: 5m OpenRagTargetDown: 5m
+    for: {}
     # Regex OpenRagTargetDown matches the `job` label on, default `.*openrag.*`.
     # The label is assigned by whoever configures the scrape — the Operator
     # derives it from the Service name, Compose sets job_name: "openrag" — so a

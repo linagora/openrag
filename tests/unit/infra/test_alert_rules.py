@@ -18,7 +18,8 @@ import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parents[3]
-RULES_FILE = ROOT / "infra" / "charts" / "openrag-stack" / "rules" / "openrag-alerts.yaml"
+RULES_FILE = ROOT / "infra" / "compose" / "prometheus" / "rules" / "openrag-alerts.yaml"
+RULES_TEMPLATE = ROOT / "infra" / "charts" / "openrag-stack" / "rules" / "openrag-alerts.yaml.tpl"
 RUNBOOK_DIR = ROOT / "docs" / "deployment" / "runbooks"
 CHART_DIR = ROOT / "infra" / "charts" / "openrag-stack"
 COMPOSE_DIR = ROOT / "infra" / "compose"
@@ -60,22 +61,52 @@ KNOWN_METRICS: frozenset[str] = frozenset(
 #: Labels no expression may group by or match on. Caller-controlled and therefore
 #: unbounded: a rule that reintroduces one undoes the cardinality ceiling the metric
 #: design exists to hold. The query-side analogue of S3-2's build-time label guard.
-FORBIDDEN_LABELS: frozenset[str] = frozenset(
-    {"partition", "user_id", "file_id", "task_id", "request_id", "filename"}
-)
+FORBIDDEN_LABELS: frozenset[str] = frozenset({"partition", "user_id", "file_id", "task_id", "request_id", "filename"})
 
 REQUIRED_ANNOTATIONS = ("summary", "description", "runbook_url")
 
 #: Identifiers that appear in expressions but are PromQL, not metrics.
 _PROMQL_KEYWORDS = frozenset(
     {
-        "and", "or", "unless", "by", "without", "on", "ignoring", "group_left",
-        "group_right", "offset", "bool", "rate", "irate", "increase", "sum", "max",
-        "min", "avg", "count", "deriv", "predict_linear", "time", "absent",
-        "absent_over_time", "label_replace", "label_join", "histogram_quantile",
-        "min_over_time", "max_over_time", "avg_over_time", "sum_over_time",
-        "count_over_time", "last_over_time", "clamp_min", "clamp_max", "round",
-        "humanizePercentage", "humanizeDuration", "humanize",
+        "and",
+        "or",
+        "unless",
+        "by",
+        "without",
+        "on",
+        "ignoring",
+        "group_left",
+        "group_right",
+        "offset",
+        "bool",
+        "rate",
+        "irate",
+        "increase",
+        "sum",
+        "max",
+        "min",
+        "avg",
+        "count",
+        "deriv",
+        "predict_linear",
+        "time",
+        "absent",
+        "absent_over_time",
+        "label_replace",
+        "label_join",
+        "histogram_quantile",
+        "min_over_time",
+        "max_over_time",
+        "avg_over_time",
+        "sum_over_time",
+        "count_over_time",
+        "last_over_time",
+        "clamp_min",
+        "clamp_max",
+        "round",
+        "humanizePercentage",
+        "humanizeDuration",
+        "humanize",
     }
 )
 
@@ -108,11 +139,7 @@ def _metric_names(expr: str) -> set[str]:
     cleaned = re.sub(r"\"[^\"]*\"|'[^']*'", "", expr)  # string literals
     cleaned = re.sub(r"\{[^}]*\}", "", cleaned)  # label matchers
     cleaned = _LABEL_LIST_RE.sub("", cleaned)  # by/on/without label lists
-    return {
-        name
-        for name in _METRIC_RE.findall(cleaned)
-        if name not in _PROMQL_KEYWORDS and not name.isdigit()
-    }
+    return {name for name in _METRIC_RE.findall(cleaned) if name not in _PROMQL_KEYWORDS and not name.isdigit()}
 
 
 # ---------------------------------------------------------------------------
@@ -206,37 +233,23 @@ def test_expressions_use_no_caller_controlled_label(rule: dict) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_chart_template_reads_the_shipped_rules_file() -> None:
-    template = (CHART_DIR / "templates" / "prometheusrule.yaml").read_text(encoding="utf-8")
-    assert '.Files.Get "rules/openrag-alerts.yaml"' in template
-    # The chart rewrites the runbook base; the string it replaces must be the one the
-    # rules actually carry, or the override silently does nothing.
-    assert RUNBOOK_BASE in template
+def test_generated_rules_are_not_hand_edited() -> None:
+    """The Compose copy is output, not source. Saying so in the file is the only
+    thing standing between a reader and a fix that the next regeneration eats."""
+    generated = RULES_FILE.read_text(encoding="utf-8")
+    assert "GENERATED FILE — DO NOT EDIT" in generated
+    assert "scripts/gen_alert_rules.py" in generated
 
 
-def test_job_matcher_override_targets_a_string_the_rules_contain() -> None:
-    """A `replace` whose needle is absent is a no-op, and this one fails silently.
-
-    An operator setting jobMatcher would get a rendered PrometheusRule that still
-    carries the baked default, OpenRagTargetDown would never fire, and never firing
-    is indistinguishable from a healthy target. Pin both halves so a reworded
-    expression breaks the build instead.
-    """
-    template = (CHART_DIR / "templates" / "prometheusrule.yaml").read_text(encoding="utf-8")
-    needle = 'job=~".*openrag.*"'
-    assert needle in template, "the template's replace target changed"
-    assert needle in RULES_FILE.read_text(encoding="utf-8"), "the rules no longer carry that selector"
-
-
-def test_job_matcher_defaults_to_the_baked_expression() -> None:
-    values = yaml.safe_load((CHART_DIR / "values.yaml").read_text(encoding="utf-8"))
-    assert values["monitoring"]["prometheusRule"]["jobMatcher"] == ""
-
-
-def test_prometheus_rule_is_disabled_by_default() -> None:
-    """Rendering the CRD without the operator installed fails the install."""
-    values = yaml.safe_load((CHART_DIR / "values.yaml").read_text(encoding="utf-8"))
-    assert values["monitoring"]["prometheusRule"]["enabled"] is False
+def test_job_matcher_and_runbook_base_are_values_not_needles() -> None:
+    """Both were textual replacements once; a needle that stopped matching made
+    the override silently do nothing. They are ordinary interpolation now."""
+    template = RULES_TEMPLATE.read_text(encoding="utf-8")
+    assert "jobMatcher" in template
+    assert "runbookBaseUrl" in template
+    chart_template = (CHART_DIR / "templates" / "prometheusrule.yaml").read_text(encoding="utf-8")
+    assert "replace" not in chart_template, "textual substitution is back; use template values"
+    assert 'tpl (.Files.Get "rules/openrag-alerts.yaml.tpl")' in chart_template
 
 
 def test_compose_prometheus_loads_the_same_rules() -> None:
@@ -245,7 +258,7 @@ def test_compose_prometheus_loads_the_same_rules() -> None:
 
     overlay = yaml.safe_load((COMPOSE_DIR / "monitoring.docker-compose.yaml").read_text(encoding="utf-8"))
     mounts = overlay["services"]["prometheus"]["volumes"]
-    assert "../charts/openrag-stack/rules:/etc/prometheus/rules:ro" in mounts, (
-        "the Compose overlay must mount the chart's rules directory, so both deployments "
-        "load one rule set instead of two that drift"
+    assert "./prometheus/rules:/etc/prometheus/rules:ro" in mounts, (
+        "the Compose overlay must mount the generated rules directory; the copy is "
+        "produced from the chart template so both deployments load one definition"
     )

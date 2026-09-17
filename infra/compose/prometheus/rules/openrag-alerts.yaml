@@ -1,27 +1,34 @@
-# OpenRag alert rules — plain Prometheus rule groups, deployment-agnostic.
+# GENERATED FILE — DO NOT EDIT.
+#
+# Rendered from infra/charts/openrag-stack/rules/openrag-alerts.yaml.tpl with
+# default values by scripts/gen_alert_rules.py. Edit that template instead; CI
+# regenerates this file and fails on any difference.
+#
+# Compose loads it through `rule_files` in prometheus.yml. Kubernetes renders the
+# same template itself, with this deployment's threshold values applied.
+# OpenRag alert rules — a Helm template, and the single source of truth.
+#
+# Thresholds and `for` durations are values because they are deployment
+# config, not constants: they depend on a client's SLO, the size of the
+# corpus and how many people are querying it. Every default here was
+# measured against synthetic traffic, so treat them as a starting point.
+#
+# `{{ $value }}` and friends are Prometheus' templating, escaped so
+# Helm emits them literally instead of failing on an undefined variable.
 #
 # One source of truth, two consumers:
 #   * Kubernetes — templates/prometheusrule.yaml wraps these groups in a
 #     monitoring.coreos.com/v1 PrometheusRule via .Files.Get.
-#   * Compose    — infra/compose/prometheus/prometheus.yml references this
-#     directory through rule_files.
-#
-# Helm's .Files.Get cannot read outside the chart directory, which is why the
-# file lives here and Compose mounts it from here rather than the reverse. Two
-# copies is how the Compose and Kubernetes alerting drift apart unnoticed.
+#   * Compose    — loads infra/compose/prometheus/rules/openrag-alerts.yaml,
+#     which is GENERATED from this file with default values by
+#     scripts/gen_alert_rules.sh. Never edit that copy; CI regenerates it
+#     and fails on any difference.
 #
 # Metric names and label values follow core/observability/metric_specs.py.
 # Nothing here may reference a caller-controlled label (partition, user_id,
 # file_id, task_id, request_id, filename): those are unbounded by construction,
 # and a recording rule or alert that groups by one reintroduces the cardinality
 # the metric design excluded. tests/unit/infra/test_alert_rules.py enforces it.
-#
-# runbook_url is a literal base URL, not a template. $externalLabels would
-# read from Prometheus' own external_labels, and in the integrated
-# deployment the platform owns that config — so the one delivery path we
-# cannot configure is the one where every link would break. The chart
-# rewrites the base when monitoring.prometheusRule.runbookBaseUrl is set;
-# unset, the shipped URL works in every path including Compose.
 #
 # KNOWN LIMITATION — Ray Serve multi-replica. Every expression below reads
 # per-process counters. With ENABLE_RAY_SERVE=true and num_replicas > 1

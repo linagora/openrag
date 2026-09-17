@@ -1,23 +1,21 @@
 {{- if .Values.monitoring.prometheusRule.enabled }}
 {{- /*
-Alert rules for the Prometheus Operator. The groups come verbatim from
-rules/openrag-alerts.yaml so Compose and Kubernetes alert on one rule set
-rather than two that drift; .Files.Get cannot read outside the chart
-directory, which is why the file lives there.
+Alert rules for the Prometheus Operator.
+
+rules/openrag-alerts.yaml.tpl is the single source of truth and a Helm template,
+so thresholds and `for` durations are ordinary values — they are deployment
+config, varying with a client's SLO, corpus size and query volume, not
+constants. `tpl` renders it against this release's values.
+
+The Compose stack cannot render Helm templates, so it loads a generated copy at
+infra/compose/prometheus/rules/, produced from this same file with default
+values by scripts/gen_alert_rules.sh and checked for drift in CI. Generated, not
+duplicated: one definition still decides what both deployments alert on.
 
 Requires the monitoring.coreos.com CRDs (kube-prometheus-stack or a standalone
 operator). Disabled by default, like the ServiceMonitor.
 */}}
-{{- $rules := .Files.Get "rules/openrag-alerts.yaml" }}
-{{- with .Values.monitoring.prometheusRule.runbookBaseUrl }}
-{{- $rules = replace "https://github.com/linagora/openrag/blob/main/docs/deployment/runbooks" . $rules }}
-{{- end }}
-{{- /* The `job` label is assigned by the scrape config, not by us, so the baked
-   default is a convention rather than a guarantee. A wrong matcher is silent —
-   OpenRagTargetDown never fires, and never firing looks exactly like healthy. */}}
-{{- with .Values.monitoring.prometheusRule.jobMatcher }}
-{{- $rules = replace `job=~".*openrag.*"` (printf `job=~%q` .) $rules }}
-{{- end }}
+{{- $rules := tpl (.Files.Get "rules/openrag-alerts.yaml.tpl") . }}
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
 metadata:
@@ -31,13 +29,14 @@ metadata:
     {{- toYaml . | nindent 4 }}
     {{- end }}
 spec:
-{{- if .Values.monitoring.prometheusRule.commonLabels }}
+{{- with .Values.monitoring.prometheusRule.commonLabels }}
 {{- /* Stamp deployment-wide routing labels onto every alert, so they match the
    Alertmanager conventions of whichever stack is running. A rule whose labels
    miss those conventions fires into a void indistinguishable from silence.
-   A rule's own labels win on conflict: severity is the rule's to decide. */}}
+   A rule's own labels win on conflict: severity is the rule's to decide.
+   Structural rather than textual — `severity` appears on every rule. */}}
+{{- $common := . }}
 {{- $parsed := $rules | fromYaml }}
-{{- $common := .Values.monitoring.prometheusRule.commonLabels }}
 {{- range $group := $parsed.groups }}
 {{- range $rule := $group.rules }}
 {{- $_ := set $rule "labels" (merge ($rule.labels | default dict) $common) }}
@@ -45,8 +44,8 @@ spec:
 {{- end }}
   {{- toYaml $parsed | nindent 2 }}
 {{- else }}
-{{- /* No routing labels to inject: pass the file through untouched, which keeps
-   its comments in `helm get manifest` for whoever is reading it at 3am. */}}
+{{- /* Nothing to inject: pass the rendered rules through as text, which keeps
+   their comments in `helm get manifest` for whoever is reading it at 3am. */}}
 {{- $rules | nindent 2 }}
 {{- end }}
 {{- end }}

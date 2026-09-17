@@ -1,4 +1,10 @@
-# promtool unit tests for infra/charts/openrag-stack/rules/openrag-alerts.yaml.
+# promtool unit tests for the generated alert rules
+# (infra/compose/prometheus/rules/openrag-alerts.yaml).
+#
+# Deliberately the generated file and not the .tpl it comes from: the .tpl is a
+# Helm template and not valid YAML on its own, and this is the artifact
+# Prometheus actually loads. scripts/gen_alert_rules.py keeps the two in step
+# and CI fails on drift, so testing the output tests the template.
 #
 #   promtool test rules tests/unit/infra/alert_rules.promtool.yaml
 #
@@ -6,7 +12,7 @@
 # directory. tests/unit/infra/test_alert_rules_promtool.py runs this under
 # pytest when promtool or Docker is available, and skips when neither is.
 #
-# NOT placed beside the rules themselves on purpose: the Compose overlay loads
+# NOT placed beside the rules on purpose: the Compose overlay loads
 # `rule_files: /etc/prometheus/rules/*.yaml`, so a test file in that directory
 # would be handed to Prometheus as a rule file and fail the config.
 #
@@ -22,7 +28,7 @@
 # one field a human reads first.
 
 rule_files:
-  - ../../../infra/charts/openrag-stack/rules/openrag-alerts.yaml
+  - ../../../infra/compose/prometheus/rules/openrag-alerts.yaml
 
 evaluation_interval: 1m
 
