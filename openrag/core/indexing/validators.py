@@ -9,8 +9,11 @@ from __future__ import annotations
 
 import json
 import re
+import zipfile
 from collections.abc import Iterable
-from typing import Any
+from typing import IO, Any
+
+import filetype
 
 from ..utils.exceptions import ValidationError
 
@@ -105,3 +108,136 @@ def validate_file_format(
         )
         raise ValidationError(details, status_code=415)
     return file_extension
+
+
+#: Bytes read from the head of an upload for signature detection. The matchers
+#: that need the most read a few hundred bytes; 8 KiB is well clear of that and
+#: is read once per upload.
+CONTENT_SNIFF_BYTES = 8192
+
+#: Extensions whose content carries a signature we can check, mapped to what
+#: ``filetype`` reports for that signature.
+#:
+#: An extension absent from this map is not verified, and that is deliberate
+#: rather than an oversight:
+#:
+#: * ``txt``/``md``/``html``/``htm``/``eml``/``svg`` are text formats with no
+#:   signature to check.
+#: * ``doc`` (OLE2) and ``wma`` were verified empirically against the bundled
+#:   matchers and are not reliably detected, so enforcing them would reject
+#:   legitimate uploads.
+#: * Audio and video containers other than those above are left out until the
+#:   accepted brand variants can be checked against real samples; guessing at
+#:   them risks refusing valid media.
+#: * ``docx``/``pptx`` are **not** here: a ZIP's authoritative index is its
+#:   central directory, which sits at the end of the file, so no head buffer can
+#:   settle them. They are checked by :func:`validate_ooxml_package` instead.
+_VERIFIABLE_SIGNATURES: dict[str, frozenset[str]] = {
+    "pdf": frozenset({"pdf"}),
+    "png": frozenset({"png"}),
+    "jpg": frozenset({"jpg"}),
+    "jpeg": frozenset({"jpg"}),
+    "gif": frozenset({"gif"}),
+    "bmp": frozenset({"bmp"}),
+    "webp": frozenset({"webp"}),
+}
+
+#: The part whose presence makes an OPC package a document of that kind, per
+#: ECMA-376.
+_OOXML_MAIN_PARTS: dict[str, str] = {
+    "docx": "word/document.xml",
+    "pptx": "ppt/presentation.xml",
+}
+
+#: Parts every OPC package carries whatever its flavour: the content-type map
+#: and the package relationships. Both are mandatory, and an archive that only
+#: borrowed a document's entry names has neither.
+_OOXML_PACKAGE_PARTS = frozenset({"[Content_Types].xml", "_rels/.rels"})
+
+
+def validate_content_matches_extension(extension: str, head: bytes) -> None:
+    """Reject an upload whose bytes contradict the extension it was named with.
+
+    The extension alone decides which parser a document reaches, so a file
+    renamed to ``.pdf`` is handed to the PDF backend whatever it actually
+    contains. For the formats in :data:`_VERIFIABLE_SIGNATURES` the signature
+    must match; an unrecognised signature is a failure too, because arbitrary
+    content is exactly what this rejects.
+
+    Extensions outside that map pass through untouched — there is nothing to
+    check, and refusing them would be a guess.
+
+    Raises:
+        ValidationError: HTTP 415, when the content contradicts the extension.
+    """
+    expected = _VERIFIABLE_SIGNATURES.get(extension)
+    if expected is None:
+        return
+
+    kind = filetype.guess(head)
+    detected = kind.extension if kind is not None else None
+    if detected in expected:
+        return
+
+    found = f"looks like a {detected} file" if detected else f"is not a recognised {extension} file"
+    raise ValidationError(
+        f"Uploaded file does not match its .{extension} extension: it {found}. "
+        f"Upload it with the extension matching its actual format.",
+        status_code=415,
+    )
+
+
+def validate_ooxml_package(extension: str, stream: IO[bytes]) -> None:
+    """Reject a ``.docx``/``.pptx`` upload that is not a real OOXML package.
+
+    ``filetype`` cannot settle this, and was verified failing both ways: its
+    matcher looks for an entry *named* ``word/`` or ``ppt/`` among the first few
+    ZIP local file headers, so a plain archive containing ``word/anything.txt``
+    is reported as a docx, while a genuine document whose ``customXml``/
+    ``docProps`` parts are written first is reported as a plain zip and would be
+    refused. The package is opened instead and its central directory — the
+    authoritative index, at the end of the file — is read.
+
+    Only the directory is parsed; no member is decompressed, so a compression
+    bomb is never expanded here.
+
+    Blocking by design, like the parsers in ``core/indexing/parsers/``. Callers
+    on the event loop wrap it in ``asyncio.to_thread``: reading the directory of
+    an attacker-supplied archive is unbounded work, and the API serves streaming
+    responses and ``/health_check`` from the same loop.
+
+    Args:
+        extension: Lowercased extension without the dot. Anything that is not an
+            OOXML format returns without reading the stream.
+        stream: Seekable binary stream holding the **whole** file. Its position
+            is restored before returning, on success and on rejection alike, so
+            a caller can go on to stream the same handle to disk.
+
+    Raises:
+        ValidationError: HTTP 415, when the archive is not a package of that kind.
+    """
+    main_part = _OOXML_MAIN_PARTS.get(extension)
+    if main_part is None:
+        return
+
+    position = stream.tell()
+    try:
+        with zipfile.ZipFile(stream) as package:
+            names = set(package.namelist())
+    except (zipfile.BadZipFile, OSError, ValueError) as exc:
+        raise ValidationError(
+            f"Uploaded file does not match its .{extension} extension: it is not a readable "
+            f"Office package. Upload it with the extension matching its actual format.",
+            status_code=415,
+        ) from exc
+    finally:
+        stream.seek(position)
+
+    missing = (_OOXML_PACKAGE_PARTS | {main_part}) - names
+    if missing:
+        raise ValidationError(
+            f"Uploaded file does not match its .{extension} extension: the archive is missing "
+            f"{', '.join(sorted(missing))}, so it is not a valid Office package. "
+            f"Upload it with the extension matching its actual format.",
+            status_code=415,
+        )

@@ -195,6 +195,74 @@ async def test_pipeline_indexation_config_disables_caption_and_contextualization
     assert row["stage"] == "stored"
 
 
+class PeakTrackingVLM:
+    """Records the peak number of caption calls running at once."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.in_flight = 0
+        self.peak = 0
+
+    async def caption_image(self, image_bytes: bytes, prompt: str | None = None) -> str:
+        self.calls += 1
+        self.in_flight += 1
+        self.peak = max(self.peak, self.in_flight)
+        try:
+            await asyncio.sleep(0.01)
+        finally:
+            self.in_flight -= 1
+        return "caption"
+
+
+def _many_image_pipeline(vlm, *, caption_concurrency: int | None, image_count: int = 20):
+    document = Document(filename="album.txt", text="hello", partition="tenant-a")
+    processed = ProcessedDocument(
+        document_id=document.id,
+        text_blocks=[TextBlock(text="hello")],
+        images=[ImageBlock(image_bytes=b"png") for _ in range(image_count)],
+    )
+    pipeline = build_indexing_pipeline(
+        parser=FakeParser(processed),
+        chunker=FakeChunker([Chunk(id="c1", text="hello", partition="tenant-a")]),
+        embedder=FakeEmbedder([[1.0]]),
+        vector_store=FakeVectorStore(),
+        vlm=vlm,
+        caption_concurrency=caption_concurrency,
+    )
+    return pipeline, document
+
+
+@pytest.mark.asyncio
+async def test_pipeline_run_forwards_caption_concurrency_to_the_caption_stage():
+    # caption_stage's own bound is covered in test_pipeline_stages; this covers
+    # the forwarding hop. Drop ``max_concurrency=self.caption_concurrency`` from
+    # ``run()`` and the stage silently goes unbounded again.
+    vlm = PeakTrackingVLM()
+    pipeline, document = _many_image_pipeline(vlm, caption_concurrency=3)
+
+    row = {"document": document, "partition": "tenant-a", "filename": "album.txt"}
+    await pipeline.run(row)
+
+    # Captioning is a best-effort enrichment: a raising stage is swallowed and
+    # would leave peak at 0, so assert the work actually happened.
+    assert vlm.calls == 20
+    assert "degraded_stages" not in row
+    assert vlm.peak <= 3
+
+
+@pytest.mark.asyncio
+async def test_pipeline_run_leaves_caption_fan_out_unbounded_without_a_limit():
+    # Guards the test above against passing for the wrong reason (the stage
+    # having gone serial), and preserves the pre-cap default.
+    vlm = PeakTrackingVLM()
+    pipeline, document = _many_image_pipeline(vlm, caption_concurrency=None)
+
+    await pipeline.run({"document": document, "partition": "tenant-a", "filename": "album.txt"})
+
+    assert vlm.calls == 20
+    assert vlm.peak > 3
+
+
 def _caption_pipeline(vlm: FakeVLM, caption_prompt: str | None):
     document = Document(filename="note.txt", text="hello", partition="tenant-a")
     processed = ProcessedDocument(

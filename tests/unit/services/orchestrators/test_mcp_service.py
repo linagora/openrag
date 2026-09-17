@@ -15,6 +15,10 @@ import pytest
 from core.utils.exceptions import ValidationError
 from services.orchestrators.mcp_service import MCPService
 
+#: index_url verifies downloaded bytes against the URL extension; these
+#: fixtures use .pdf URLs, so their payloads must carry a PDF signature.
+_PDF_HEADER = b"%PDF-1.7\n"
+
 # ---------------------------------------------------------------------------
 # Fakes
 # ---------------------------------------------------------------------------
@@ -630,7 +634,7 @@ async def test_index_url_auto_creates_partition_and_indexes(monkeypatch):
     svc = _service(partitions=parts, indexing=indexing)
 
     async def fake_download(url, dest):
-        dest.write_bytes(b"data")
+        dest.write_bytes(_PDF_HEADER + b"data")
 
     monkeypatch.setattr(svc, "_safe_download", fake_download)
 
@@ -671,7 +675,7 @@ async def test_index_url_removes_download_when_content_is_duplicate(monkeypatch)
     async def fake_download(url, dest):
         nonlocal downloaded_path
         downloaded_path = dest
-        dest.write_bytes(b"duplicate")
+        dest.write_bytes(_PDF_HEADER + b"duplicate")
 
     monkeypatch.setattr(svc, "_safe_download", fake_download)
 
@@ -698,7 +702,7 @@ async def test_index_url_removes_download_when_dispatch_is_cancelled(monkeypatch
     async def fake_download(url, dest):
         nonlocal downloaded_path
         downloaded_path = dest
-        dest.write_bytes(b"partial")
+        dest.write_bytes(_PDF_HEADER + b"partial")
 
     monkeypatch.setattr(svc, "_safe_download", fake_download)
 
@@ -716,13 +720,73 @@ async def test_index_url_removes_download_when_dispatch_is_cancelled(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_index_url_removes_download_when_the_content_check_is_cancelled(monkeypatch):
+    """The package check awaits, so a cancelled request raises CancelledError
+    inside the validation block — a BaseException, which an `except Exception`
+    would let past while leaving the download on disk."""
+    parts = FakePartitions(exists=False, partition_exists=True, members=[{"user_id": 7, "role": "editor"}])
+    svc = _service(partitions=parts, indexing=FakeIndexing())
+    downloaded_path = None
+
+    async def fake_download(url, dest):
+        nonlocal downloaded_path
+        downloaded_path = dest
+        dest.write_bytes(b"PK\x03\x04 not a real package")
+
+    def cancelled(*_args):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(svc, "_safe_download", fake_download)
+    monkeypatch.setattr("services.orchestrators.mcp_service.validate_ooxml_package", cancelled)
+
+    with pytest.raises(asyncio.CancelledError):
+        await svc.index_url(
+            url="https://example.com/report.docx",
+            partition="p1",
+            file_id="f3",
+            allowed_partitions=["p1"],
+            user_id=7,
+        )
+
+    assert downloaded_path is not None
+    assert not downloaded_path.exists()
+
+
+@pytest.mark.asyncio
+async def test_index_url_removes_download_when_the_content_contradicts_the_url(monkeypatch):
+    """The other exit from the same block: a refused file must not be left behind."""
+    parts = FakePartitions(exists=False, partition_exists=True, members=[{"user_id": 7, "role": "editor"}])
+    svc = _service(partitions=parts, indexing=FakeIndexing())
+    downloaded_path = None
+
+    async def fake_download(url, dest):
+        nonlocal downloaded_path
+        downloaded_path = dest
+        dest.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 64)  # a PNG at a .pdf URL
+
+    monkeypatch.setattr(svc, "_safe_download", fake_download)
+
+    with pytest.raises(ValidationError):
+        await svc.index_url(
+            url="https://example.com/report.pdf",
+            partition="p1",
+            file_id="f4",
+            allowed_partitions=["p1"],
+            user_id=7,
+        )
+
+    assert downloaded_path is not None
+    assert not downloaded_path.exists()
+
+
+@pytest.mark.asyncio
 async def test_index_url_admin_auto_create_bypasses_partition_cap(monkeypatch):
     parts = FakePartitions(exists=False, partition_exists=False)
     indexing = FakeIndexing()
     svc = _service(partitions=parts, indexing=indexing)
 
     async def fake_download(url, dest):
-        dest.write_bytes(b"data")
+        dest.write_bytes(_PDF_HEADER + b"data")
 
     monkeypatch.setattr(svc, "_safe_download", fake_download)
 
@@ -746,7 +810,7 @@ async def test_index_url_treats_partition_exists_race_as_success(monkeypatch):
     svc = _service(partitions=parts, indexing=indexing)
 
     async def fake_download(url, dest):
-        dest.write_bytes(b"data")
+        dest.write_bytes(_PDF_HEADER + b"data")
 
     monkeypatch.setattr(svc, "_safe_download", fake_download)
 
