@@ -23,6 +23,7 @@ from core.config.model_endpoints import (
     STT_REQUEST_CONTROL_EXTRA_KEYS,
     ModelEndpointConfig,
     ModelEndpointRow,
+    is_placeholder_api_key,
 )
 from core.utils.exceptions import NotFoundError, ValidationError
 from core.utils.logging import get_logger
@@ -36,10 +37,6 @@ logger = get_logger()
 
 _VALID_TYPES = frozenset({"embedder", "reranker", "llm", "vlm", "stt"})
 _SAMPLING_TYPES = frozenset({"llm", "vlm"})
-# `EMPTY` is the config's stand-in for "no key configured" (see endpoints.py), not
-# a credential. Treating it as one would let boot-time sync overwrite a real
-# hand-set key with a placeholder the moment sync_on_boot was switched on.
-_PLACEHOLDER_API_KEYS = frozenset({"", "EMPTY"})
 _STT_VALIDATION_TIMEOUT_SECONDS = 15.0
 _STT_TEXT_RESPONSE_FORMATS = frozenset({"text", "srt", "vtt"})
 # Which env var, if any, owns a given tunable per model type. `_build_default_seeds`
@@ -146,7 +143,7 @@ def _slug(model_name: str) -> str:
 
 def _with_api_key(extra: dict[str, Any], api_key: str | None) -> dict[str, Any]:
     """Add ``api_key`` to endpoint extras when configured."""
-    if api_key:
+    if not is_placeholder_api_key(api_key):
         return {**extra, "api_key": api_key}
     return extra
 
@@ -340,7 +337,7 @@ class ModelEndpointService:
         seed_extra: dict = data.get("extra", {}) or {}
         new_extra = {**row.extra, ENV_MANAGED_KEY: ENV_MANAGED_VALUE}
         env_api_key = seed_extra.get("api_key")
-        if env_api_key and env_api_key not in _PLACEHOLDER_API_KEYS:
+        if not is_placeholder_api_key(env_api_key):
             new_extra["api_key"] = env_api_key
 
         fields: dict[str, Any] = {
@@ -418,7 +415,7 @@ class ModelEndpointService:
                 "timeout": s.loader.transcriber.timeout,
                 "extra": _with_api_key(
                     {},
-                    None if s.loader.transcriber.api_key in _PLACEHOLDER_API_KEYS else s.loader.transcriber.api_key,
+                    s.loader.transcriber.api_key,
                 ),
             },
         }
@@ -720,6 +717,9 @@ class ModelEndpointService:
             return result
         if parsed.username or parsed.password:
             result["detail"] = "Endpoint URL must not include credentials."
+            return result
+        if api_key and parsed.scheme != "https":
+            result["detail"] = "Model endpoints with API keys must use HTTPS."
             return result
         if model_type != "stt":
             from services.orchestrators.readiness_service import (
