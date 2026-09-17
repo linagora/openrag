@@ -96,6 +96,14 @@ def is_bypass_path(path: str, *, bypass_config: AuthBypassConfig | None = None) 
     return path in cfg.bypass_paths or path == "/chainlit" or path.startswith(("/chainlit/", "/assets/"))
 
 
+def _login_redirect(request: Request, path: str) -> RedirectResponse:
+    # The query comes from the scope for the same reason ``path`` does (see
+    # ``AuthMiddleware.dispatch``).
+    query = request.scope.get("query_string", b"").decode()
+    next_path = f"{path}?{query}" if query else path
+    return RedirectResponse(url=f"/auth/login?next={quote(next_path, safe='')}", status_code=302)
+
+
 def _allow_no_auth() -> bool:
     """Whether the no-auth dev bypass (AUTH_TOKEN unset → admin) is allowed.
 
@@ -158,7 +166,7 @@ class AuthFailureRateLimiter:
         stats = await self._limiter.get_window_stats(self._limit, tier, identity)
         retry_after = max(1, int(stats.reset_time - time.time()))
         logger.bind(
-            path=self._safe_log_value(str(request.url.path)),
+            path=self._safe_log_value(str(request.scope["path"])),
             identity=self._safe_log_value(identity),
         ).warning("Auth failure rate limit exceeded")
         return JSONResponse(
@@ -221,7 +229,10 @@ class AuthMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         # --- Bypass list (docs, health, /auth/* callbacks, chainlit).
-        path = request.url.path
+        # Decisions below key on ``scope["path"]``, the path the router
+        # dispatches on. ``request.url.path`` is parsed back out of a URL rebuilt
+        # from the Host header, so it is not guaranteed to be the same string.
+        path = request.scope["path"]
 
         # In oidc mode the interactive API docs are gated behind login rather
         # than served anonymously: they expose the full route + schema surface,
@@ -275,13 +286,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
                             )
                             session_valid = False
                 if not session_valid:
-                    next_path = path
-                    if request.url.query:
-                        next_path = f"{path}?{request.url.query}"
-                    return RedirectResponse(
-                        url=f"/auth/login?next={quote(next_path, safe='')}",
-                        status_code=302,
-                    )
+                    return _login_redirect(request, path)
             return await call_next(request)
 
         limited = await self._auth_failure_limiter.response_if_limited(request)
@@ -293,7 +298,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         try:
             auth_service = self._get_auth_service(request)
         except RuntimeError:
-            logger.warning("Auth service unavailable", reason="service_unavailable", path=request.url.path)
+            logger.warning("Auth service unavailable", reason="service_unavailable", path=path)
             return JSONResponse(status_code=503, content={"detail": "Service unavailable"})
 
         # --- 1) Cookie session (OIDC UI flow). Gated on oidc mode so the
@@ -368,13 +373,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         #        mode, else 401 JSON. ``oidc_gated`` is already mode-checked.
         if user is None:
             if oidc_gated or (auth_mode == "oidc" and is_ui_path(path, bypass_config=self._bypass_config)):
-                next_path = path
-                if request.url.query:
-                    next_path = f"{path}?{request.url.query}"
-                return RedirectResponse(
-                    url=f"/auth/login?next={quote(next_path, safe='')}",
-                    status_code=302,
-                )
+                return _login_redirect(request, path)
             return await self._auth_failure(request, status_code=401, detail="Unauthenticated")
 
         # --- Happy path: user resolved.
