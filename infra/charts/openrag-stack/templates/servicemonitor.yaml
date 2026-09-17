@@ -1,0 +1,41 @@
+{{- if .Values.openrag.metrics.serviceMonitor.enabled }}
+{{- if eq (include "openrag-stack.rayServeApi" .) "true" }}
+{{- /* Under Ray Serve the API listens on the RayCluster head Service (port
+   ray-serve), not on the openrag Service:8080 this monitor targets, and each
+   Serve replica keeps its own metrics registry behind one load-balancing
+   proxy — a scrape would return a random replica's counters. Refuse rather
+   than render a target that scrapes nothing. */}}
+{{- fail "openrag.metrics.serviceMonitor is not supported with ray.enabled=true and ENABLE_RAY_SERVE=true: the API is served by Ray Serve replicas (per-replica metric registries behind the head Service), not by the openrag Service this ServiceMonitor targets. Disable the ServiceMonitor, or run the uvicorn topology. See docs/documentation/prometheus_metrics.md, Limitations." }}
+{{- end }}
+# Prometheus Operator discovery of the API's GET /metrics (same port as the
+# API — there is no dedicated metrics port). Requires the monitoring.coreos.com
+# CRDs (kube-prometheus-stack or a standalone operator) to be installed first.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "openrag-stack.fullname" . }}-openrag
+  labels:
+    {{- include "openrag-stack.componentLabels" (dict "component" "openrag" "context" $) | nindent 4 }}
+    {{- with .Values.openrag.metrics.serviceMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "openrag-stack.componentSelectorLabels" (dict "component" "openrag" "context" $) | nindent 6 }}
+  namespaceSelector:
+    matchNames:
+      - {{ .Release.Namespace }}
+  endpoints:
+    - port: openrag
+      path: /metrics
+      interval: {{ .Values.openrag.metrics.serviceMonitor.interval }}
+      scrapeTimeout: {{ .Values.openrag.metrics.serviceMonitor.scrapeTimeout }}
+      {{- if .Values.openrag.metrics.serviceMonitor.bearerTokenFromSecret }}
+      authorization:
+        type: Bearer
+        credentials:
+          name: {{ include "openrag-stack.secretName" . }}
+          key: METRICS_TOKEN
+      {{- end }}
+{{- end }}

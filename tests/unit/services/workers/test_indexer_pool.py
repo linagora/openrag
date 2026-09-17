@@ -157,12 +157,15 @@ def test_build_indexer_pool_uses_current_protocol_dispatcher_name(
     opts = options_calls[0]
     # A protocol-specific name prevents a rolling deployment from attaching to
     # a detached actor that still runs the previous claim implementation.
-    assert opts["name"] == "IndexerPoolDispatcher-v7"
+    assert opts["name"] == "IndexerPoolDispatcher-v9"
     assert opts["namespace"] == "openrag"
     assert opts["get_if_exists"] is True
     assert opts["lifetime"] == "detached"
     # max_concurrency bounds concurrent submit() calls → whole-fleet capacity.
     assert opts["max_concurrency"] == 12
+    # Detached actors default to max_restarts=0: without this the dispatcher
+    # stays dead after a crash until the next deploy (#846).
+    assert opts["max_restarts"] == 5
     # pool_size / max_tasks_per_worker are passed to the actor constructor.
     assert remote_calls == [{"pool_size": 3, "max_tasks_per_worker": 4, "namespace": "openrag"}]
 
@@ -195,13 +198,14 @@ def test_indexer_pool_actor_spawns_pool_size_detached_workers(
     # One detached worker actor per pool_size slot, each capped at max_tasks_per_worker.
     assert len(pool._workers) == 3
     assert {c["name"] for c in calls} == {
-        "IndexerWorker-v7-0",
-        "IndexerWorker-v7-1",
-        "IndexerWorker-v7-2",
+        "IndexerWorker-v9-0",
+        "IndexerWorker-v9-1",
+        "IndexerWorker-v9-2",
     }
     for c in calls:
         assert c["lifetime"] == "detached"
         assert c["max_concurrency"] == 4
+        assert c["max_restarts"] == 5  # a worker that OOMs must come back (#846)
         assert c["get_if_exists"] is True
         assert c["namespace"] == "tenant-ray"
     assert remote_calls == ["tenant-ray", "tenant-ray", "tenant-ray"]
@@ -1192,7 +1196,7 @@ async def test_pool_drain_rejects_new_work_and_reports_accepted_work(monkeypatch
     await pool.submit(task_id="accepted-before-drain")
 
     assert await pool.begin_drain() == {
-        "protocol_version": "v7",
+        "protocol_version": "v9",
         "accepting_tasks": False,
         "inflight_jobs": 1,
         "worker_names": ["test-worker-0"],
@@ -1225,7 +1229,7 @@ async def test_pool_drain_rejects_new_work_and_reports_accepted_work(monkeypatch
 
     await _settle_pool_release_tasks(pool, worker.futures[0])
     assert await pool.status() == {
-        "protocol_version": "v7",
+        "protocol_version": "v9",
         "accepting_tasks": False,
         "inflight_jobs": 0,
         "worker_names": ["test-worker-0"],
@@ -1260,7 +1264,7 @@ async def test_pool_abort_drain_restores_acceptance() -> None:
         await pool.submit(task_id="rejected-while-draining")
 
     assert await pool.abort_drain() == {
-        "protocol_version": "v7",
+        "protocol_version": "v9",
         "accepting_tasks": True,
         "inflight_jobs": 0,
         "worker_names": ["test-worker-0"],
@@ -1275,7 +1279,7 @@ async def test_pool_abort_drain_restores_acceptance() -> None:
 async def test_pool_reports_current_protocol_version() -> None:
     pool = _bare_pool([_FakeWorker()])
 
-    assert await pool.protocol_version() == "v7"
+    assert await pool.protocol_version() == "v9"
 
 
 @pytest.mark.asyncio
@@ -1514,6 +1518,7 @@ def test_indexer_pool_wires_contextualizer_factory_and_worker_namespace(monkeypa
             embed_concurrency=2,
         ),
         loader=SimpleNamespace(parse_timeout=3600, save_uploaded_files=True),
+        semaphore=SimpleNamespace(vlm_semaphore=7),
         vectordb=SimpleNamespace(collection_name="vdb_test"),
         rdb=RDBConfig(),
     )
@@ -1521,6 +1526,7 @@ def test_indexer_pool_wires_contextualizer_factory_and_worker_namespace(monkeypa
     class Store:
         document_repo = object()
         topic_tag_repo = object()
+        job_repo = object()
 
     class Worker:
         def __init__(self, **kwargs):
@@ -1568,6 +1574,11 @@ def test_indexer_pool_wires_contextualizer_factory_and_worker_namespace(monkeypa
     assert captured["catalog_config"] is cfg.rdb
     assert captured["catalog_config"].database == "custom_catalog"
     assert captured["catalog_run_migrations"] is False
+    # The per-document caption cap is the VLM gate's own budget: no point letting
+    # one document queue more of its images on that gate than it will ever admit.
+    # Without this the actor could stop forwarding it and every test still passed.
+    assert captured["caption_concurrency"] == 7
+    assert captured["caption_concurrency"] == cfg.semaphore.vlm_semaphore
 
 
 def test_indexer_pool_loads_caption_prompt_without_global_vlm_default(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1602,6 +1613,7 @@ def test_indexer_pool_loads_caption_prompt_without_global_vlm_default(monkeypatc
             embed_concurrency=2,
         ),
         loader=SimpleNamespace(parse_timeout=3600, save_uploaded_files=True),
+        semaphore=SimpleNamespace(vlm_semaphore=10),
         vectordb=SimpleNamespace(collection_name="vdb_test"),
         rdb=RDBConfig(),
     )
@@ -1609,6 +1621,7 @@ def test_indexer_pool_loads_caption_prompt_without_global_vlm_default(monkeypatc
     class Store:
         document_repo = object()
         topic_tag_repo = object()
+        job_repo = object()
 
     class Worker:
         def __init__(self, **kwargs):

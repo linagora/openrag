@@ -20,6 +20,18 @@ async def test_batched_lookup_keeps_partition_file_pairs():
     pool.fetch.assert_not_awaited()
 
 
+async def test_catalog_pages_use_age_and_exclusive_cursor():
+    pool = AsyncMock()
+    pool.fetch.return_value = [{"file_id": "next"}]
+    repo = PgDocumentRepository(lambda: pool)
+    before = datetime(2026, 9, 1, tzinfo=UTC)
+    assert await repo.list_indexed_documents("a", before=before, after="last", limit=2) == ["next"]
+    query, *params = pool.fetch.call_args.args
+    assert params == ["a", before, "last", 2]
+    assert "file_id > $3" in query
+    assert "indexed_at < $2" in query
+
+
 async def test_catalog_lookup_does_not_hide_outages():
     pool = AsyncMock()
     pool.fetch.side_effect = RuntimeError("offline")
@@ -27,15 +39,12 @@ async def test_catalog_lookup_does_not_hide_outages():
         await PgDocumentRepository(lambda: pool).get_indexed_documents({("a", "f")})
 
 
-def test_repository_without_catalog_lookup_cannot_be_constructed():
+@pytest.mark.parametrize("method", ["get_indexed_documents", "list_indexed_documents"])
+def test_repository_without_catalog_lookup_cannot_be_constructed(method):
     incomplete = type(
         "IncompleteRepository",
         (DocumentRepository,),
-        {
-            name: lambda *args, **kwargs: None
-            for name in DocumentRepository.__abstractmethods__
-            if name != "get_indexed_documents"
-        },
+        {name: lambda *args, **kwargs: None for name in DocumentRepository.__abstractmethods__ if name != method},
     )
-    with pytest.raises(TypeError, match="get_indexed_documents"):
+    with pytest.raises(TypeError, match=method):
         incomplete()

@@ -1,0 +1,197 @@
+# Security scanning of the source tree: dependencies, secrets and code.
+# Published images are scanned separately, by image_scan.yml.
+#
+# The repository already carries findings that predate these checks, so each
+# gate fails only on what a pull request itself introduces, and what already
+# exists is reported to code scanning (the Security tab) instead:
+#
+#   dependencies  Trivy over the lockfiles that ship. A pull request fails when
+#                 its head has a HIGH or CRITICAL advisory its base does not
+#                 (scripts/new_vulnerabilities.py). Pushes to main/develop and
+#                 the weekly run upload every finding to code scanning.
+#   secrets       gitleaks over all history reachable from the checked-out
+#                 commit. Findings already in public history are fingerprinted
+#                 in .gitleaksignore, placeholder shapes allowlisted in
+#                 .gitleaks.toml.
+#   codeql        CodeQL over the Python backend, the TypeScript UI and these
+#                 workflow files. Results go to code scanning; whether a new
+#                 alert blocks a merge is a repository ruleset, not this file.
+#
+# Trivy and gitleaks run from container images pinned by digest, not through
+# their marketplace actions: a tag can be re-pointed and a digest cannot. The
+# dependency findings are written to files, never to the job log, because the
+# Actions logs of a public repository are public and code scanning is not.
+name: Security
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+  schedule:
+    # Weekly, so an advisory published against an unchanged lockfile still
+    # surfaces; scheduled runs use the default branch.
+    - cron: "0 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  TRIVY_IMAGE: ghcr.io/aquasecurity/trivy:0.74.0@sha256:62b1e65e8869bc4b4c6aa4fa2b21595256c7c2f6018a9d9ad61caf87187c1969
+  GITLEAKS_IMAGE: ghcr.io/gitleaks/gitleaks:v8.30.1@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f
+
+jobs:
+  dependencies:
+    name: Dependencies (${{ matrix.lockfile }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        # The lockfiles whose packages reach a deployment: the backend (the API
+        # and Ray images install it at container start) and the admin UI bundle.
+        # The docs site and tests/load are deliberately out of scope.
+        lockfile: [uv.lock, ui/package-lock.json]
+    env:
+      LOCKFILE: ${{ matrix.lockfile }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # One database for every scan in this job, so a base/head difference is
+      # caused by the change and not by an advisory published in between.
+      - name: Download the vulnerability database
+        run: |
+          mkdir -p "$RUNNER_TEMP/trivy-cache" "$RUNNER_TEMP/reports/base" "$RUNNER_TEMP/reports/head"
+          docker run --rm -v "$RUNNER_TEMP/trivy-cache:/root/.cache/trivy" "$TRIVY_IMAGE" \
+            fs --quiet --download-db-only
+
+      # Advisories accepted in .trivyignore.yaml are left out of the head scan,
+      # which is what lets a reviewed pull request through the gate below. The
+      # file comes from the pull request itself — accepting a finding belongs in
+      # the change that introduces it — so --show-suppressed keeps each
+      # suppression, with its statement, in the report: the gate lists them in
+      # the step summary and annotates the ones this change adds.
+      - name: Scan the head revision
+        run: |
+          docker run --rm -v "$PWD:/src:ro" -w /src \
+            -v "$RUNNER_TEMP/trivy-cache:/root/.cache/trivy" -v "$RUNNER_TEMP/reports:/reports" \
+            "$TRIVY_IMAGE" fs --quiet --skip-db-update --scanners vuln \
+            --ignorefile .trivyignore.yaml --show-suppressed \
+            --format json --output /reports/head/report.json "$LOCKFILE"
+
+      # The lockfile is scanned alone, extracted from the base commit into an
+      # empty directory at the same relative path. A pull request that adds the
+      # lockfile has no base report, and every head finding counts as new.
+      # The base's own .trivyignore.yaml comes along, with --show-suppressed, so
+      # the gate can tell a suppression this change adds from one the base
+      # already had — including one on an advisory the base already reported.
+      - name: Scan the base revision
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          git fetch --no-tags --depth=1 origin "$BASE_SHA"
+          if ! git cat-file -e "$BASE_SHA:$LOCKFILE" 2>/dev/null; then
+            echo "$LOCKFILE does not exist on the base revision."
+            exit 0
+          fi
+          mkdir -p "$RUNNER_TEMP/base/$(dirname "$LOCKFILE")"
+          git show "$BASE_SHA:$LOCKFILE" > "$RUNNER_TEMP/base/$LOCKFILE"
+          ignore=()
+          if git cat-file -e "$BASE_SHA:.trivyignore.yaml" 2>/dev/null; then
+            git show "$BASE_SHA:.trivyignore.yaml" > "$RUNNER_TEMP/base/.trivyignore.yaml"
+            ignore=(--ignorefile .trivyignore.yaml --show-suppressed)
+          fi
+          docker run --rm -v "$RUNNER_TEMP/base:/src:ro" -w /src \
+            -v "$RUNNER_TEMP/trivy-cache:/root/.cache/trivy" -v "$RUNNER_TEMP/reports:/reports" \
+            "$TRIVY_IMAGE" fs --quiet --skip-db-update --scanners vuln "${ignore[@]}" \
+            --format json --output /reports/base/report.json "$LOCKFILE"
+
+      - name: Fail on HIGH or CRITICAL vulnerabilities this pull request introduces
+        if: github.event_name == 'pull_request'
+        run: |
+          shopt -s nullglob
+          python3 scripts/new_vulnerabilities.py --min-severity HIGH \
+            --base "$RUNNER_TEMP"/reports/base/*.json --head "$RUNNER_TEMP"/reports/head/report.json
+
+      # Trivy records a single-file scan under the file's basename and a root
+      # of file:///src/<lockfile>/, which code scanning would resolve against
+      # the repository root — putting ui/package-lock.json's alerts on the docs
+      # site's package-lock.json. Point every location at the real path.
+      - name: Write the full report as SARIF
+        if: github.event_name != 'pull_request'
+        run: |
+          docker run --rm -v "$PWD:/src:ro" -w /src \
+            -v "$RUNNER_TEMP/trivy-cache:/root/.cache/trivy" -v "$RUNNER_TEMP/reports:/reports" \
+            "$TRIVY_IMAGE" fs --quiet --skip-db-update --scanners vuln \
+            --format sarif --output /reports/trivy.sarif "$LOCKFILE"
+          jq --arg path "$LOCKFILE" \
+            '.runs[] |= (del(.originalUriBaseIds) | (.results[].locations[].physicalLocation.artifactLocation) = {uri: $path})' \
+            "$RUNNER_TEMP/reports/trivy.sarif" > "$RUNNER_TEMP/dependencies.sarif"
+
+      - name: Upload the report to code scanning
+        if: github.event_name != 'pull_request'
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: ${{ runner.temp }}/dependencies.sarif
+          category: dependencies/${{ matrix.lockfile }}
+
+  secrets:
+    name: Secrets
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The whole history, not just the tip: a secret committed and then
+          # deleted in a later commit of the same pull request is still public.
+          fetch-depth: 0
+          persist-credentials: false
+
+      # --log-opts=HEAD limits the scan to history reachable from the checkout
+      # (for a pull request, its merge commit), not every branch the full fetch
+      # brought down — another contributor's unmerged branch must not fail it.
+      # --redact keeps the value out of the public log; the location is enough.
+      - name: Scan the history for secrets
+        run: |
+          docker run --rm -v "$PWD:/repo:ro" "$GITLEAKS_IMAGE" git /repo \
+            --log-opts=HEAD \
+            --config /repo/.gitleaks.toml \
+            --gitleaks-ignore-path /repo/.gitleaksignore \
+            --redact --verbose --no-banner --exit-code 1
+
+  codeql:
+    name: CodeQL (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [python, javascript-typescript, actions]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: github/codeql-action/init@v4
+        with:
+          languages: ${{ matrix.language }}
+          # Interpreted languages: analysed from source, no build step.
+          build-mode: none
+          config: |
+            paths-ignore:
+              - tests
+              - docs
+              - extern
+
+      - uses: github/codeql-action/analyze@v4
+        with:
+          category: /language:${{ matrix.language }}
