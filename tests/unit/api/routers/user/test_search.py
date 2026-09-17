@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 
+import pytest
 from api.dependencies.auth import (
     current_user,
     current_user_or_admin_partitions_list,
@@ -130,7 +131,7 @@ def _trace_client():
         return {"id": extract_id}
 
     app.include_router(search_router, prefix="/search")
-    app.dependency_overrides[require_partition_viewer] = lambda: None
+    app.dependency_overrides[require_partition_viewer] = lambda: {"id": 1, "is_admin": True}
     app.dependency_overrides[get_retrieval_service] = lambda: retrieval
     app.dependency_overrides[get_workspace_service] = lambda: _FakeWorkspaces()
     return TestClient(app), retrieval
@@ -179,7 +180,7 @@ def test_snapshot_route_forwards_opt_in_document_ids():
     app = FastAPI()
     register_error_handlers(app)
     app.include_router(search_router, prefix="/search")
-    app.dependency_overrides[require_partition_viewer] = lambda: None
+    app.dependency_overrides[require_partition_viewer] = lambda: {"id": 1, "is_admin": True}
     app.dependency_overrides[get_retrieval_snapshot_service] = lambda: snapshots
 
     response = TestClient(app).get(
@@ -190,6 +191,65 @@ def test_snapshot_route_forwards_opt_in_document_ids():
     assert response.status_code == 200
     assert response.json()["fingerprint"] == "fp"
     assert snapshots.calls == [("legal", True)]
+
+
+def test_search_rejects_top_k_above_resource_limit():
+    response = _client(user_partitions=[{"partition": "mine", "role": "viewer"}]).get(
+        "/search", params={"text": "hello", "top_k": 201}
+    )
+
+    assert response.status_code == 422
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"include_related": True, "related_limit": 101},
+        {"include_ancestors": True, "max_ancestor_depth": 51},
+    ],
+)
+def test_search_rejects_unbounded_expansion_parameters(params):
+    client, _ = _trace_client()
+
+    response = client.get("/search/partition/mine", params={"text": "q", **params})
+
+    assert response.status_code == 422
+
+
+def test_search_trace_requires_admin_privileges():
+    from api.dependencies.auth import require_partition_viewer
+
+    app = FastAPI()
+    register_error_handlers(app)
+    app.include_router(search_router, prefix="/search")
+    app.dependency_overrides[require_partition_viewer] = lambda: {"id": 7, "is_admin": False}
+    app.dependency_overrides[get_retrieval_service] = lambda: _RetrievalService()
+    app.dependency_overrides[get_workspace_service] = lambda: object()
+
+    response = TestClient(app).get(
+        "/search/partition/mine",
+        params={"text": "q", "include_retrieval_trace": True},
+    )
+
+    assert response.status_code == 403
+
+
+def test_snapshot_requires_admin_privileges_even_without_document_ids():
+    from api.dependencies.auth import require_partition_viewer
+
+    class _Snapshots:
+        async def snapshot(self, partition, *, include_document_ids=False):
+            return {"index": {"partition": partition}}
+
+    app = FastAPI()
+    register_error_handlers(app)
+    app.include_router(search_router, prefix="/search")
+    app.dependency_overrides[require_partition_viewer] = lambda: {"id": 7, "is_admin": False}
+    app.dependency_overrides[get_retrieval_snapshot_service] = lambda: _Snapshots()
+
+    response = TestClient(app).get("/search/partition/legal/snapshot")
+
+    assert response.status_code == 403
 
 
 # --------------------------------------------------------------------------- #

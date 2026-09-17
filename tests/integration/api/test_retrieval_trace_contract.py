@@ -41,7 +41,7 @@ def _client() -> TestClient:
         return {"id": extract_id}
 
     app.include_router(search_router, prefix="/search")
-    app.dependency_overrides[require_partition_viewer] = lambda: None
+    app.dependency_overrides[require_partition_viewer] = lambda: {"id": 1, "is_admin": True}
     app.dependency_overrides[get_retrieval_service] = lambda: _Retrieval()
     app.dependency_overrides[get_workspace_service] = lambda: object()
     return TestClient(app)

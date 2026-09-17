@@ -18,6 +18,7 @@ from api.dependencies.auth import (
     require_partitions_viewer,
 )
 from api.dependencies.files import validate_file_id
+from api.dependencies.retrieval_diagnostics import get_retrieval_diagnostics_guard
 from core.retrieval.trace import RetrievalTraceBuilder, canonical_fingerprint
 from core.utils.filter_validation import validate_search_filter
 from core.utils.logging import get_logger
@@ -36,10 +37,16 @@ class RelatedDocSearchParams:
         include_related: bool = Query(False, description="Include chunks from files with same relationship_id"),
         include_ancestors: bool = Query(False, description="Include chunks from ancestor files in hierarchy"),
         related_limit: int = Query(
-            20, ge=0, description="Maximum number of related/ancestor chunks to fetch per result"
+            20,
+            ge=0,
+            le=100,
+            description="Maximum number of related/ancestor chunks to fetch per result",
         ),
         max_ancestor_depth: int | None = Query(
-            None, ge=0, description="Maximum depth of ancestor files to include. None means unlimited."
+            None,
+            ge=0,
+            le=50,
+            description="Maximum depth of ancestor files to include. None uses the server default.",
         ),
     ):
         self.include_related = include_related
@@ -52,7 +59,7 @@ class CommonSearchParams:
     def __init__(
         self,
         text: str = Query(..., description="Text to search semantically"),
-        top_k: int = Query(5, ge=1, description="Number of top results to return"),
+        top_k: int = Query(5, ge=1, le=200, description="Number of top results to return"),
         similarity_threshold: float = Query(
             0.75, ge=0, le=1, description="Minimum similarity score for results (0 to 1)"
         ),
@@ -98,11 +105,7 @@ def _documents(request: Request, chunks) -> list[dict]:
 def _new_trace(request: Request, search_params: CommonSearchParams) -> RetrievalTraceBuilder | None:
     if not search_params.include_retrieval_trace:
         return None
-    request_id = (
-        getattr(request.state, "request_id", None)
-        or request.headers.get("X-Request-ID")
-        or str(uuid.uuid4())
-    )
+    request_id = getattr(request.state, "request_id", None) or request.headers.get("X-Request-ID") or str(uuid.uuid4())
     return RetrievalTraceBuilder(request_id=request_id, original_query=search_params.text)
 
 
@@ -121,7 +124,7 @@ def _response_payload(request: Request, chunks, trace, service, partitions: list
 
 @router.get(
     "/partition/{partition}/snapshot",
-    description="Return the public retrieval and index configuration used to reproduce benchmark runs.",
+    description="Return the administrator-only retrieval and index configuration used to reproduce benchmark runs.",
 )
 async def retrieval_snapshot(
     partition: str,
@@ -131,7 +134,9 @@ async def retrieval_snapshot(
     ),
     partition_viewer=Depends(require_partition_viewer),
     service=Depends(get_retrieval_snapshot_service),
+    diagnostics_guard=Depends(get_retrieval_diagnostics_guard),
 ):
+    await diagnostics_guard.authorize(partition_viewer)
     return await service.snapshot(partition, include_document_ids=include_document_ids)
 
 
@@ -194,6 +199,7 @@ async def search_multiple_partitions(
     user_partitions=Depends(current_user_or_admin_partitions_list),
     service=Depends(get_retrieval_service),
     workspaces=Depends(get_workspace_service),
+    diagnostics_guard=Depends(get_retrieval_diagnostics_guard),
 ):
     if partitions == ["all"]:
         partitions = user_partitions
@@ -220,6 +226,8 @@ async def search_multiple_partitions(
         partitions = [scope.partition]
         filter_params = {"file_id": scope.file_ids}
 
+    if search_params.include_retrieval_trace:
+        await diagnostics_guard.authorize(partition_viewer)
     trace = _new_trace(request, search_params)
     results = await service.search(
         text=search_params.text,
@@ -291,6 +299,7 @@ async def search_one_partition(
     partition_viewer=Depends(require_partition_viewer),
     service=Depends(get_retrieval_service),
     workspaces=Depends(get_workspace_service),
+    diagnostics_guard=Depends(get_retrieval_diagnostics_guard),
 ):
     log = logger.bind(
         partition=partition,
@@ -307,6 +316,8 @@ async def search_one_partition(
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Workspace not found")
         filter_params = {"file_id": scope.file_ids}
 
+    if search_params.include_retrieval_trace:
+        await diagnostics_guard.authorize(partition_viewer)
     trace = _new_trace(request, search_params)
     results = await service.search(
         text=search_params.text,
@@ -372,6 +383,7 @@ async def search_file(
     file_id: str = Depends(validate_file_id),
     partition_viewer=Depends(require_partition_viewer),
     service=Depends(get_retrieval_service),
+    diagnostics_guard=Depends(get_retrieval_diagnostics_guard),
 ):
     log = logger.bind(
         partition=partition, file_id=file_id, query_len=len(search_params.text), top_k=search_params.top_k
@@ -382,6 +394,8 @@ async def search_file(
     # with the raw `filter` expr and parenthesises each operand, so a caller
     # filter like ``page > 5 OR 1==1`` cannot widen the file_id scope. It is
     # already validated by CommonSearchParams.
+    if search_params.include_retrieval_trace:
+        await diagnostics_guard.authorize(partition_viewer)
     trace = _new_trace(request, search_params)
     results = await service.search(
         text=search_params.text,

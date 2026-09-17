@@ -68,7 +68,6 @@ def test_safe_public_value_redacts_secrets_and_content():
         "model": "public",
         "contextualization": {
             "model": "also-public",
-            "endpoint": "https://example.test/v1",
             "prompt": {"content_hash": "hash"},
         },
     }
@@ -109,9 +108,7 @@ def test_safe_public_value_projects_nested_contextualization_by_container():
             "subqueries": [
                 {
                     "query": "generated query",
-                    "temporal_filters": [
-                        {"operator": ">=", "value": "2026-01-01T00:00:00+00:00"}
-                    ],
+                    "temporal_filters": [{"operator": ">=", "value": "2026-01-01T00:00:00+00:00"}],
                 }
             ],
             "prompt": {
@@ -152,9 +149,7 @@ def test_trace_error_messages_are_replaced_with_safe_metadata():
 
     final_stage = next(stage for stage in trace["stages"] if stage["name"] == "final")
     assert final_stage["error"] == "redacted"
-    assert trace["errors"] == [
-        {"stage": "final", "message": "redacted", "kind": "RuntimeError"}
-    ]
+    assert trace["errors"] == [{"stage": "final", "message": "redacted", "kind": "RuntimeError"}]
     assert trace["contextualization"]["error"] == {
         "stage": "contextualization",
         "message": "redacted",
@@ -174,21 +169,8 @@ def test_trace_error_messages_are_replaced_with_safe_metadata():
         assert prohibited not in serialized
 
 
-@pytest.mark.parametrize(
-    ("endpoint", "expected"),
-    [
-        ("/v1?api_key=relative-secret#fragment", "/v1"),
-        ("//user:password@example.test/path?token=network-secret#fragment", "//example.test/path"),
-    ],
-)
-def test_safe_public_value_sanitizes_relative_endpoint_urls(endpoint, expected):
-    assert safe_public_value({"endpoint": endpoint}) == {"endpoint": expected}
-
-
-def test_safe_public_value_fails_closed_for_malformed_endpoint():
-    endpoint = "https://user:password@[invalid/path"
-
-    assert safe_public_value({"endpoint": endpoint}) == {"endpoint": "redacted"}
+def test_safe_public_value_omits_internal_endpoint_urls():
+    assert safe_public_value({"endpoint": "https://internal-llm.example.test/v1"}) == {}
 
 
 def test_canonical_fingerprint_is_order_independent():
@@ -272,3 +254,16 @@ def test_trace_errors_are_safe_and_unvisited_stages_are_explicit():
         "attachment_filter",
         "temporal_filter",
     )
+
+
+def test_trace_stage_caps_serialized_candidates_but_keeps_true_count():
+    builder = RetrievalTraceBuilder("request", "query")
+    candidates = [TraceCandidate(id=f"chunk-{index}", rank=index + 1) for index in range(201)]
+
+    builder.record_stage("final", status="complete", candidates=candidates)
+    trace = builder.finish(configuration_fingerprint="fingerprint")
+
+    final_stage = next(stage for stage in trace["stages"] if stage["name"] == "final")
+    assert final_stage["candidate_count"] == 201
+    assert len(final_stage["candidates"]) == 200
+    assert final_stage["candidates"][-1]["id"] == "chunk-199"

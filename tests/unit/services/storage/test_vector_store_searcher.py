@@ -332,6 +332,7 @@ async def test_get_related_chunks_queries_store_with_file_ids():
     doc_repo.get_file_ids_by_relationship.assert_awaited_once_with(partition="p1", relationship_id="r1")
     call_args = store.query_chunks_by_filter.call_args
     assert call_args.args[1]["file_id"] == ["f1", "f2"]
+    assert call_args.kwargs["limit"] == 2
 
 
 @pytest.mark.asyncio
@@ -379,6 +380,7 @@ async def test_get_ancestor_chunks_applies_limit():
     )
     chunks = await searcher.get_ancestor_chunks(partition="p1", file_id="f1", limit=4)
     assert len(chunks) == 4
+    assert store.query_chunks_by_filter.call_args.kwargs["limit"] == 4
 
 
 @pytest.mark.asyncio

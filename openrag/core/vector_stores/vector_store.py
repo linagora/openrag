@@ -100,6 +100,7 @@ class VectorStore(ABC):
         collection: str,
         filters: dict[str, Any],
         output_fields: list[str] | None = None,
+        limit: int | None = None,
     ) -> list[dict[str, Any]]:
-        """Return full chunk data matching the given filter expression."""
+        """Return full chunk data matching the filter, optionally bounded by ``limit``."""
         ...

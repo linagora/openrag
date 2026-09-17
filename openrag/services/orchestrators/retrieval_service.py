@@ -35,6 +35,8 @@ from core.retrieval.retriever import (
     MultiQueryRetriever,
     SingleRetriever,
     _expand_with_related_chunks,
+    bounded_ancestor_depth,
+    bounded_related_limit,
 )
 from core.retrieval.rrf import rrf_reranking
 from core.retrieval.trace import candidates_from_chunks, canonical_fingerprint
@@ -203,6 +205,16 @@ class RetrievalService:
                 or (getattr(partition, "chat_llm", None) if partition is not None else None)
                 or "default"
             )
+            related_limit = getattr(
+                retrieval,
+                "related_limit",
+                self._legacy_retriever_value("related_limit", 10),
+            )
+            max_ancestor_depth = getattr(
+                retrieval,
+                "max_ancestor_depth",
+                self._legacy_retriever_value("max_ancestor_depth", None),
+            )
             public_partitions.append(
                 {
                     "name": partition_name,
@@ -228,16 +240,8 @@ class RetrievalService:
                     "expansion": {
                         "include_related": getattr(retrieval, "include_related", False),
                         "include_ancestors": getattr(retrieval, "include_ancestors", False),
-                        "related_limit": getattr(
-                            retrieval,
-                            "related_limit",
-                            self._legacy_retriever_value("related_limit", None),
-                        ),
-                        "max_ancestor_depth": getattr(
-                            retrieval,
-                            "max_ancestor_depth",
-                            self._legacy_retriever_value("max_ancestor_depth", None),
-                        ),
+                        "related_limit": bounded_related_limit(related_limit),
+                        "max_ancestor_depth": bounded_ancestor_depth(max_ancestor_depth),
                     },
                 }
             )
@@ -555,11 +559,7 @@ class RetrievalService:
                 for partition_group, pipeline, default_top_k in groups
             ]
         )
-        return (
-            ranked_lists[0]
-            if len(ranked_lists) == 1
-            else self.fuse(ranked_lists, top_k=top_k, trace=trace)
-        )
+        return ranked_lists[0] if len(ranked_lists) == 1 else self.fuse(ranked_lists, top_k=top_k, trace=trace)
 
     async def retrieve_multi(
         self,
@@ -588,11 +588,7 @@ class RetrievalService:
                 for partition_group, pipeline, default_top_k in groups
             ]
         )
-        return (
-            ranked_lists[0]
-            if len(ranked_lists) == 1
-            else self.fuse(ranked_lists, top_k=top_k, trace=trace)
-        )
+        return ranked_lists[0] if len(ranked_lists) == 1 else self.fuse(ranked_lists, top_k=top_k, trace=trace)
 
     async def retrieve_per_query(
         self,

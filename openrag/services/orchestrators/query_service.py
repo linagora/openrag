@@ -435,7 +435,9 @@ class QueryService:
             contextualizer = await resolve_with_identity("query_contextualizer", names=[prompt_name])
         else:
             content = await self._prompt_service.resolve_prompt("query_contextualizer", names=[prompt_name])
-            contextualizer = ResolvedPrompt.create(content, name=prompt_name, source="named" if prompt_name else "default")
+            contextualizer = ResolvedPrompt.create(
+                content, name=prompt_name, source="named" if prompt_name else "default"
+            )
         prompt = contextualizer.content.format(
             query_language=detect_language(last_user),
             current_date=datetime.now().strftime("%A, %B %d, %Y, %H:%M:%S"),
@@ -522,7 +524,6 @@ class QueryService:
                     else None
                 ),
                 duration_seconds=duration_seconds,
-                endpoint=getattr(llm, "_endpoint", None),
                 model=getattr(llm, "_model", None),
                 prompt=(
                     PromptTrace(content_hash=prompt.content_hash, name=prompt.name, source=prompt.source)
@@ -708,11 +709,7 @@ class QueryService:
             web_results = _dedupe_web(await asyncio.gather(*[self._web.search(q.query) for q in queries.query_list]))
             chunks = []
 
-        if (
-            trace is not None
-            and partition is not None
-            and metadata.get("compare_original_query") is True
-        ):
+        if trace is not None and partition is not None and metadata.get("compare_original_query") is True:
             await self._compare_original_query(
                 trace,
                 original_query=last_user_message,
@@ -829,8 +826,7 @@ class QueryService:
             update={
                 "fallback_used": True,
                 "subqueries": [
-                    ContextualizedSubqueryTrace(query=query.query, temporal_filters=[])
-                    for query in queries.query_list
+                    ContextualizedSubqueryTrace(query=query.query, temporal_filters=[]) for query in queries.query_list
                 ],
             }
         )
@@ -1088,9 +1084,7 @@ class QueryService:
                 )
             trace.timings["total"] = time.perf_counter() - request_started
             terminal_extra_fields = {
-                "retrieval_trace": trace.finish(
-                    configuration_fingerprint=self._configuration_fingerprint(partitions)
-                )
+                "retrieval_trace": trace.finish(configuration_fingerprint=self._configuration_fingerprint(partitions))
             }
 
         payload["messages"] = self._sanitize_messages(payload["messages"])

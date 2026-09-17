@@ -117,6 +117,5 @@ class ContextualizationTrace(_TraceModel):
     fallback_used: bool = False
     error: TraceError | None = None
     duration_seconds: float | None = Field(default=None, ge=0)
-    endpoint: str | None = None
     model: str | None = None
     prompt: PromptTrace | None = None

@@ -570,6 +570,22 @@ class TestSafeBatchSize:
         assert page == (32 * 1024 * 1024) // (4096 * 4 + 6_144)  # 1489
         assert page < 3_276  # bigger vectors → fewer rows per page
 
+
+def test_bounded_query_stops_iterator_at_requested_limit(store: MilvusVectorStore) -> None:
+    iterator = MagicMock()
+    iterator.next.side_effect = [
+        [{"_id": 1}, {"_id": 2}],
+        [{"_id": 3}],
+    ]
+    store._client.query_iterator.return_value = iterator
+
+    rows = store._iter_query("partition == 'p1'", ["_id"], limit=2)
+
+    assert rows == [{"_id": 1}, {"_id": 2}]
+    assert iterator.next.call_count == 1
+    assert store._client.query_iterator.call_args.kwargs["batch_size"] == 2
+    iterator.close.assert_called_once()
+
     def test_schema_dim_preferred_over_initialize_value(self, store: MilvusVectorStore) -> None:
         # The edge case: initialize() recorded 1024, but the existing collection
         # is really 4096 (initialize's value is ignored for an existing
@@ -852,12 +868,15 @@ class TestHybridDispatch:
         assert [row["id"] for row in result] == ["30", "10"]
         finished = trace.finish(configuration_fingerprint="fingerprint")
         stages = {stage["name"]: stage for stage in finished["stages"]}
-        assert [stages[name]["status"] for name in (
-            "dense_before_threshold",
-            "dense_after_threshold",
-            "sparse",
-            "hybrid_fused",
-        )] == ["complete", "complete", "complete", "complete"]
+        assert [
+            stages[name]["status"]
+            for name in (
+                "dense_before_threshold",
+                "dense_after_threshold",
+                "sparse",
+                "hybrid_fused",
+            )
+        ] == ["complete", "complete", "complete", "complete"]
         assert [candidate["id"] for candidate in stages["dense_before_threshold"]["candidates"]] == ["10", "20"]
         assert [candidate["id"] for candidate in stages["dense_after_threshold"]["candidates"]] == ["10"]
         assert [candidate["id"] for candidate in stages["sparse"]["candidates"]] == ["20", "30"]
@@ -901,9 +920,7 @@ class TestHybridDispatch:
         assert before_stage["candidates"][0]["removal_reason"] is None
 
     @pytest.mark.asyncio
-    async def test_hybrid_aggregate_duration_is_not_reported_as_fusion_timing(
-        self, store: MilvusVectorStore
-    ) -> None:
+    async def test_hybrid_aggregate_duration_is_not_reported_as_fusion_timing(self, store: MilvusVectorStore) -> None:
         store._async_client.hybrid_search = AsyncMock(return_value=[[self._hit(10, 0.08)]])  # type: ignore[attr-defined]
         store._async_client.search = AsyncMock(  # type: ignore[attr-defined]
             side_effect=[[[self._hit(10, 0.95)]], [[self._hit(10, 0.95)]], [[]]]

@@ -175,6 +175,24 @@ async def test_reranker_trace_keeps_pre_and_post_ranks_and_final_cutoff():
 
 
 @pytest.mark.asyncio
+async def test_final_cutoff_keeps_true_count_when_trace_candidates_are_capped():
+    retriever = FakeRetriever()
+    retriever.results_queue = [_chunks(*(f"chunk-{index}" for index in range(201)))]
+    trace = RetrievalTraceBuilder("req-1", "hi")
+    pipeline = RetrieverPipeline(retriever=retriever)
+
+    await pipeline.retrieve_docs(
+        partition=["p1"],
+        query=Query(query="hi"),
+        top_k=1,
+        trace=trace,
+    )
+
+    assert trace.stages["pre_rerank"].candidate_count == 201
+    assert len(trace.stages["pre_rerank"].candidates) == 200
+
+
+@pytest.mark.asyncio
 async def test_reranker_trace_marks_only_candidates_omitted_by_the_reranker():
     r = FakeRetriever()
     r.results_queue = [_chunks("a", "b", "c")]

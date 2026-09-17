@@ -156,7 +156,9 @@ def test_configuration_fingerprint_is_stable_and_ignores_secret_endpoint_fields(
         "tenant-a": _partition(name="tenant-a", embedder="embed-a"),
     }
     cfg.models.embedder = {
-        "embed-a": SimpleNamespace(model_name="model-a", endpoint="https://user:pass@example.test", extra={"api_key": "x"}),
+        "embed-a": SimpleNamespace(
+            model_name="model-a", endpoint="https://user:pass@example.test", extra={"api_key": "x"}
+        ),
         "embed-b": SimpleNamespace(model_name="model-b", endpoint="https://example.test", extra={}),
     }
     service = RetrievalService(searcher=searcher, reranker=None, llm=None, config=cfg)
@@ -168,6 +170,19 @@ def test_configuration_fingerprint_is_stable_and_ignores_secret_endpoint_fields(
 
     assert first == second
     assert len(first) == 64
+
+
+def test_public_configuration_reports_effective_expansion_limits():
+    config = _config()
+    config.vectordb = SimpleNamespace(hybrid_search=False)
+    config.retriever.related_limit = 500
+    config.retriever.max_ancestor_depth = None
+    service = RetrievalService(searcher=FakeSearcher(), reranker=None, llm=None, config=config)
+
+    public = service.public_retrieval_configuration(["tenant-a"])
+
+    assert public["partitions"][0]["expansion"]["related_limit"] == 100
+    assert public["partitions"][0]["expansion"]["max_ancestor_depth"] == 50
 
 
 @pytest.mark.asyncio

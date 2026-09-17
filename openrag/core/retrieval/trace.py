@@ -8,7 +8,6 @@ from collections.abc import Mapping, Sequence
 from datetime import date, datetime
 from enum import Enum
 from typing import Any
-from urllib.parse import urlsplit, urlunsplit
 
 from core.models.chunk import Chunk
 from core.models.retrieval_result import ScoredChunk
@@ -22,6 +21,7 @@ from core.models.retrieval_trace import (
 from pydantic import BaseModel
 
 TRACE_SCHEMA_VERSION = 1
+MAX_TRACE_CANDIDATES_PER_STAGE = 200
 TRACE_STAGE_NAMES = (
     "original_query",
     "contextualized_query",
@@ -82,7 +82,6 @@ _ROOT_PUBLIC_KEYS = frozenset(
         "intent",
         "requires_retrieval",
         "fallback_used",
-        "endpoint",
         "model",
         "prompt",
         "source",
@@ -110,7 +109,6 @@ _PUBLIC_KEYS_BY_CONTEXT = {
             "fallback_used",
             "error",
             "duration_seconds",
-            "endpoint",
             "model",
             "prompt",
         }
@@ -155,25 +153,6 @@ _CHILD_CONTEXTS = {
 _OMITTED = object()
 
 
-def _public_endpoint(value: str) -> str:
-    """Remove URL credentials, query parameters, and fragments."""
-    try:
-        parts = urlsplit(value)
-    except ValueError:
-        return "redacted"
-    netloc = ""
-    if parts.netloc:
-        hostname = parts.hostname or ""
-        if ":" in hostname:
-            hostname = f"[{hostname}]"
-        try:
-            port = f":{parts.port}" if parts.port is not None else ""
-        except ValueError:
-            port = ""
-        netloc = f"{hostname}{port}"
-    return urlunsplit((parts.scheme, netloc, parts.path, "", ""))
-
-
 def _child_context(context: str, key: str) -> str:
     if context == "comparisons" and key == "original_query":
         return "comparison"
@@ -206,18 +185,12 @@ def _safe_public_value(value: object, *, context: str = "root", key: str | None 
                 public[raw_key] = safe_value
         return public
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
-        return [
-            safe
-            for item in value
-            if (safe := _safe_public_value(item, context=context)) is not _OMITTED
-        ]
+        return [safe for item in value if (safe := _safe_public_value(item, context=context)) is not _OMITTED]
     if isinstance(value, Enum):
         return _safe_public_value(value.value, context=context, key=key)
     if isinstance(value, (datetime, date)):
         return value.isoformat()
     if value is None or isinstance(value, (bool, int, float, str)):
-        if key == "endpoint" and isinstance(value, str):
-            return _public_endpoint(value)
         if key in {"error", "message"} and isinstance(value, str):
             return REDACTED_ERROR_MESSAGE
         return value
@@ -277,6 +250,7 @@ class RetrievalTraceBuilder:
         *,
         status: str,
         candidates: Sequence[TraceCandidate],
+        candidate_count: int | None = None,
         duration_seconds: float | None = None,
         error: str | None = None,
     ) -> None:
@@ -284,8 +258,8 @@ class RetrievalTraceBuilder:
             name=name,
             status=status,
             duration_seconds=duration_seconds,
-            candidate_count=len(candidates),
-            candidates=list(candidates),
+            candidate_count=len(candidates) if candidate_count is None else candidate_count,
+            candidates=list(candidates[:MAX_TRACE_CANDIDATES_PER_STAGE]),
             error=REDACTED_ERROR_MESSAGE if error is not None else None,
         )
 

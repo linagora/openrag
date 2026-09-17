@@ -787,18 +787,23 @@ class MilvusVectorStore(VectorStore):
         expr: str,
         output_fields: list[str],
         batch_size: int | None = None,
+        limit: int | None = None,
     ) -> list[dict[str, Any]]:
         """Drain a Milvus 3.0 ``query_iterator`` into a list.
 
         ``batch_size`` defaults to :meth:`_safe_batch_size`, which shrinks the
         page for vector-inclusive projections so one page stays under Milvus's
-        result-size limit. Total result-set size is unaffected — the iterator
-        paginates until the filter is drained.
+        result-size limit. Without ``limit`` the iterator drains the filter;
+        with it, iteration stops as soon as the requested number of rows exists.
 
         Synchronous; call via :func:`asyncio.to_thread` from async methods.
         """
         if batch_size is None:
             batch_size = self._safe_batch_size(output_fields)
+        if limit is not None:
+            if limit <= 0:
+                return []
+            batch_size = min(batch_size, limit)
         iterator = self._client.query_iterator(
             collection_name=self._collection_name,
             filter=expr,
@@ -812,9 +817,11 @@ class MilvusVectorStore(VectorStore):
                 if not batch:
                     break
                 out.extend(batch)
+                if limit is not None and len(out) >= limit:
+                    break
         finally:
             iterator.close()
-        return out
+        return out if limit is None else out[:limit]
 
     # ------------------------------------------------------------------
     # ID round-trip (Chunk.id: str  <-->  Milvus _id: INT64 auto_id PK)
@@ -1841,8 +1848,9 @@ class MilvusVectorStore(VectorStore):
         collection: str,
         filters: dict[str, Any],
         output_fields: list[str] | None = None,
+        limit: int | None = None,
     ) -> list[dict[str, Any]]:
-        """Return full row data for every chunk matching ``filters``.
+        """Return full row data for chunks matching ``filters``, optionally bounded.
 
         ``output_fields`` defaults to ``["*"]``, which in Milvus 3.0 includes
         the dense ``vector`` field (unlike :meth:`search`, which strips it via
@@ -1850,6 +1858,8 @@ class MilvusVectorStore(VectorStore):
         should pass an explicit scalar projection instead of ``["*"]``.
         """
         self._resolve_collection(collection)
+        if limit is not None and limit <= 0:
+            return []
         expr = self._build_filter_expr(filters)
         fields = output_fields or ["*"]
-        return await asyncio.to_thread(self._iter_query, expr, fields)
+        return await asyncio.to_thread(self._iter_query, expr, fields, limit=limit)

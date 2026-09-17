@@ -1,4 +1,4 @@
-"""Public, reproducible retrieval and index configuration snapshots."""
+"""Reproducible retrieval and index configuration snapshots for administrators."""
 
 from __future__ import annotations
 
@@ -9,6 +9,8 @@ from importlib.metadata import version as package_version
 from typing import TYPE_CHECKING, Any
 
 from core.retrieval.trace import canonical_fingerprint
+
+MAX_SNAPSHOT_DOCUMENT_IDS = 10_000
 
 if TYPE_CHECKING:
     from core.ports.document_repo import DocumentRepository
@@ -90,34 +92,42 @@ class RetrievalSnapshotService:
             "fingerprint": canonical_fingerprint(index_base),
         }
         if include_document_ids:
-            index["document_ids"] = await self._document_ids(partition)
+            document_ids, truncated = await self._document_ids(partition)
+            index["document_ids"] = document_ids
+            index["document_ids_limit"] = MAX_SNAPSHOT_DOCUMENT_IDS
+            index["document_ids_truncated"] = truncated
 
-        fingerprint_index = {key: value for key, value in index.items() if key != "document_ids"}
+        fingerprint_index = {
+            key: value
+            for key, value in index.items()
+            if key not in {"document_ids", "document_ids_limit", "document_ids_truncated"}
+        }
         return {
             "configuration": configuration,
             "index": index,
             "retrieval_configuration_fingerprint": self._retrieval.configuration_fingerprint([partition]),
-            "fingerprint": canonical_fingerprint(
-                {"configuration": configuration, "index": fingerprint_index}
-            ),
+            "fingerprint": canonical_fingerprint({"configuration": configuration, "index": fingerprint_index}),
         }
 
-    async def _document_ids(self, partition: str) -> list[str]:
+    async def _document_ids(self, partition: str) -> tuple[list[str], bool]:
         before = datetime.now(UTC)
         after: str | None = None
-        document_ids: list[str] = []
+        document_ids: set[str] = set()
         while True:
+            page_limit = min(1000, MAX_SNAPSHOT_DOCUMENT_IDS - len(document_ids) + 1)
             page = await self._documents.list_indexed_documents(
                 partition,
                 before=before,
                 after=after,
-                limit=1000,
+                limit=page_limit,
             )
-            document_ids.extend(page)
-            if len(page) < 1000:
+            document_ids.update(page)
+            if len(document_ids) > MAX_SNAPSHOT_DOCUMENT_IDS:
+                return sorted(document_ids)[:MAX_SNAPSHOT_DOCUMENT_IDS], True
+            if len(page) < page_limit:
                 break
             after = page[-1]
-        return sorted(set(document_ids))
+        return sorted(document_ids), False
 
     @staticmethod
     def _keys(value: object, *keys: str) -> dict[str, object]:
@@ -129,4 +139,4 @@ class RetrievalSnapshotService:
         return value.isoformat() if hasattr(value, "isoformat") else value
 
 
-__all__ = ["RetrievalSnapshotService"]
+__all__ = ["MAX_SNAPSHOT_DOCUMENT_IDS", "RetrievalSnapshotService"]

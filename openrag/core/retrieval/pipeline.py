@@ -57,9 +57,7 @@ def _with_removal_reasons(
     explanation: str,
 ) -> list[TraceCandidate]:
     return [
-        candidate.model_copy(
-            update={"removal_reason": TraceRemovalReason(code=code, explanation=explanation)}
-        )
+        candidate.model_copy(update={"removal_reason": TraceRemovalReason(code=code, explanation=explanation)})
         if candidate.id in removed_ids and candidate.duplicate_of is None
         else candidate
         for candidate in candidates
@@ -197,17 +195,13 @@ class RetrieverPipeline:
             _safe_trace(
                 trace,
                 "reranking",
-                lambda: trace.timings.__setitem__(
-                    "reranking", trace.timings.get("reranking", 0.0) + elapsed
-                ),
+                lambda: trace.timings.__setitem__("reranking", trace.timings.get("reranking", 0.0) + elapsed),
             )
         else:
             _safe_trace(
                 trace,
                 "pre_rerank",
-                lambda: trace.record_stage(
-                    "pre_rerank", status="complete", candidates=candidates_from_chunks(chunks)
-                ),
+                lambda: trace.record_stage("pre_rerank", status="complete", candidates=candidates_from_chunks(chunks)),
             )
 
         if self.expansion_enabled:
@@ -231,9 +225,7 @@ class RetrieverPipeline:
                     _safe_trace(
                         trace,
                         "pre_rerank",
-                        lambda: trace.record_stage(
-                            "pre_rerank", status="complete", candidates=pre_candidates
-                        ),
+                        lambda: trace.record_stage("pre_rerank", status="complete", candidates=pre_candidates),
                     )
                     _safe_trace(
                         trace,
@@ -248,9 +240,7 @@ class RetrieverPipeline:
                     _safe_trace(
                         trace,
                         "reranking",
-                        lambda: trace.timings.__setitem__(
-                            "reranking", trace.timings.get("reranking", 0.0) + elapsed
-                        ),
+                        lambda: trace.timings.__setitem__("reranking", trace.timings.get("reranking", 0.0) + elapsed),
                     )
 
         # `reranker_top_k` is NOT applied here as a final cutoff — only
@@ -276,6 +266,7 @@ class RetrieverPipeline:
                             "final_top_n",
                             "Excluded by the final public result cutoff.",
                         ),
+                        candidate_count=trace.stages[stage_name].candidate_count,
                         duration_seconds=trace.stages[stage_name].duration_seconds,
                     ),
                 )
@@ -283,9 +274,7 @@ class RetrieverPipeline:
         _safe_trace(
             trace,
             "final",
-            lambda: trace.record_stage(
-                "final", status="complete", candidates=candidates_from_chunks(chunks)
-            ),
+            lambda: trace.record_stage("final", status="complete", candidates=candidates_from_chunks(chunks)),
         )
         return chunks
 
@@ -319,8 +308,6 @@ class RetrieverPipeline:
         _safe_trace(
             trace,
             "final",
-            lambda: trace.record_stage(
-                "final", status="complete", candidates=candidates_from_chunks(fused)
-            ),
+            lambda: trace.record_stage("final", status="complete", candidates=candidates_from_chunks(fused)),
         )
         return fused
