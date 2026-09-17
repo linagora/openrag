@@ -1294,3 +1294,74 @@ async def test_degraded_stages_do_not_recreate_an_unknown_task() -> None:
 
     assert accepted is False
     assert manager.tasks == {}
+
+
+@pytest.mark.asyncio
+async def test_complete_with_degraded_stages_persists_one_settled_snapshot(monkeypatch) -> None:
+    manager = _task_state_manager()
+    await manager.set_queued_details(
+        "degraded-task",
+        file_id="f1",
+        partition="tenant-a",
+        metadata={"filename": "report.pdf"},
+        user_id=7,
+    )
+    saved: list[TaskInfo] = []
+    monkeypatch.setattr(
+        task_state_module, "_save_recoverable_task", lambda _task_id, info: saved.append(deepcopy(info))
+    )
+
+    accepted = await manager.complete_with_degraded_stages(
+        "degraded-task",
+        ["topic_tag", "caption", "caption", "provider-secret"],
+    )
+
+    assert accepted is True
+    assert len(saved) == 1
+    assert saved[0].state == "COMPLETED"
+    assert saved[0].details["degraded_stages"] == ["caption", "topic_tag"]
+    assert await manager.get_state("degraded-task") == "COMPLETED"
+
+
+@pytest.mark.asyncio
+async def test_complete_with_degraded_stages_is_idempotent_for_same_value(monkeypatch) -> None:
+    manager = _task_state_manager()
+    await manager.set_queued_details("task-1", file_id="f1", partition="tenant-a", metadata={}, user_id=7)
+    saved: list[TaskInfo] = []
+    monkeypatch.setattr(
+        task_state_module, "_save_recoverable_task", lambda _task_id, info: saved.append(deepcopy(info))
+    )
+
+    assert await manager.complete_with_degraded_stages("task-1", []) is True
+    assert await manager.complete_with_degraded_stages("task-1", []) is True
+
+    assert len(saved) == 1
+    assert saved[0].details["degraded_stages"] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("terminal_state", ["CANCELLED", "FAILED"])
+async def test_complete_with_degraded_stages_rejects_fenced_terminal_state(terminal_state: str) -> None:
+    manager = _task_state_manager()
+    await manager.set_state("task-1", terminal_state)
+
+    assert await manager.complete_with_degraded_stages("task-1", ["caption"]) is False
+    assert await manager.get_state("task-1") == terminal_state
+
+
+@pytest.mark.asyncio
+async def test_complete_with_degraded_stages_rejects_conflicting_retry() -> None:
+    manager = _task_state_manager()
+    await manager.set_state("task-1", "QUEUED")
+    assert await manager.complete_with_degraded_stages("task-1", ["caption"]) is True
+
+    assert await manager.complete_with_degraded_stages("task-1", ["topic_tag"]) is False
+    assert (await manager.get_details("task-1"))["degraded_stages"] == ["caption"]
+
+
+@pytest.mark.asyncio
+async def test_complete_with_degraded_stages_does_not_recreate_unknown_task() -> None:
+    manager = _task_state_manager()
+
+    assert await manager.complete_with_degraded_stages("expired-task", ["caption"]) is False
+    assert manager.tasks == {}

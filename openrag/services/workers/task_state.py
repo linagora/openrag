@@ -658,6 +658,23 @@ class TaskStateManager:
             return True
 
     @ray.method(concurrency_group="set")
+    async def complete_with_degraded_stages(self, task_id: str, stages: list[str]) -> bool:
+        """Atomically settle an active task with its bounded degradation outcome."""
+        normalized = normalize_degraded_stages(stages)
+        with self.lock:
+            info = self.tasks.get(task_id)
+            if info is None:
+                return False
+            if info.state == "COMPLETED":
+                return normalize_degraded_stages(info.details.get("degraded_stages")) == normalized
+            if info.state not in CANCELLABLE_INDEXING_STATES:
+                return False
+            info.details["degraded_stages"] = normalized
+            info.state = "COMPLETED"
+            self._settle_task_locked(task_id, info)
+            return True
+
+    @ray.method(concurrency_group="set")
     async def set_queued_details(
         self,
         task_id: str,

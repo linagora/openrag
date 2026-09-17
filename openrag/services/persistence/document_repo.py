@@ -111,8 +111,8 @@ class PgDocumentRepository(DocumentRepository):
             """
             INSERT INTO files (file_id, partition_name, file_metadata,
                                indexation_config, created_by, relationship_id, parent_id,
-                               content_sha256)
-            VALUES ($1, $2, $3::json, $4::jsonb, $5, $6, $7, $8)
+                               content_sha256, chunk_count)
+            VALUES ($1, $2, $3::json, $4::jsonb, $5, $6, $7, $8, $9)
             """,
             file_id,
             doc.partition,
@@ -122,6 +122,7 @@ class PgDocumentRepository(DocumentRepository):
             doc.relationship_id,
             doc.parent_id,
             doc.content_sha256,
+            doc.chunk_count,
         )
         return doc.model_copy(update={"file_id": file_id, "metadata": metadata})
 
@@ -205,7 +206,7 @@ class PgDocumentRepository(DocumentRepository):
                 params.append(fields.pop("indexation_config"))
                 sets.append(f"indexation_config = ${len(params)}::jsonb")
 
-            for column in ("relationship_id", "parent_id", "created_by"):
+            for column in ("relationship_id", "parent_id", "created_by", "chunk_count"):
                 if column in fields:
                     params.append(fields.pop(column))
                     sets.append(f"{column} = ${len(params)}")
@@ -296,6 +297,14 @@ class PgDocumentRepository(DocumentRepository):
             file_id,
             partition,
         )
+
+    async def get_file_metadata(self, file_id: str, partition: str) -> dict[str, Any] | None:
+        metadata = await self.pool.fetchval(
+            "SELECT file_metadata FROM files WHERE file_id = $1 AND partition_name = $2",
+            file_id,
+            partition,
+        )
+        return dict(metadata) if isinstance(metadata, dict) else None
 
     async def get_content_sha256(self, file_id: str, partition: str) -> str | None:
         return await self.pool.fetchval(
@@ -486,6 +495,7 @@ class PgDocumentRepository(DocumentRepository):
         require_existing_partition: bool = False,
         content_sha256: str | None = None,
         independently_indexed: bool = True,
+        chunk_count: int | None = None,
     ) -> bool:
         """TODO(phase-9): remove. Mirror of legacy ``add_file_to_partition``.
 
@@ -548,6 +558,7 @@ class PgDocumentRepository(DocumentRepository):
                     "parent_id",
                     "content_sha256",
                     "independently_indexed",
+                    "chunk_count",
                 ]
                 values: list[Any] = [
                     file_id,
@@ -559,6 +570,7 @@ class PgDocumentRepository(DocumentRepository):
                     parent_id,
                     content_sha256,
                     independently_indexed,
+                    chunk_count,
                 ]
                 # Omit indexed_at to let the server default fire (legacy path).
                 if indexed_at is not None:
@@ -653,22 +665,23 @@ class PgDocumentRepository(DocumentRepository):
         self,
         file_id: str,
         partition: str,
-        file_metadata: dict,
+        metadata_patch: dict,
     ) -> bool:
-        """TODO(phase-9): remove. Updates ``file_metadata`` + syncs structured columns.
+        """TODO(phase-9): remove. Merges ``file_metadata`` + syncs structured columns.
 
-        Mirrors the legacy behaviour: when the new metadata blob contains
+        Mirrors the legacy behaviour: when the metadata patch contains
         ``relationship_id`` or ``parent_id`` keys, the dedicated columns are
         rewritten too so the JSON never diverges from the structured fields.
         """
-        rel_id = file_metadata.get("relationship_id") if "relationship_id" in file_metadata else None
-        parent_id = file_metadata.get("parent_id") if "parent_id" in file_metadata else None
-        sets = ["file_metadata = $1::json"]
-        params: list[Any] = [file_metadata]
-        if "relationship_id" in file_metadata:
+        metadata_patch = {key: value for key, value in metadata_patch.items() if key != "degraded_stages"}
+        rel_id = metadata_patch.get("relationship_id") if "relationship_id" in metadata_patch else None
+        parent_id = metadata_patch.get("parent_id") if "parent_id" in metadata_patch else None
+        sets = ["file_metadata = (COALESCE(file_metadata::jsonb, '{}'::jsonb) || $1::jsonb)::json"]
+        params: list[Any] = [metadata_patch]
+        if "relationship_id" in metadata_patch:
             params.append(rel_id)
             sets.append(f"relationship_id = ${len(params)}")
-        if "parent_id" in file_metadata:
+        if "parent_id" in metadata_patch:
             params.append(parent_id)
             sets.append(f"parent_id = ${len(params)}")
         params.extend([file_id, partition])
@@ -693,6 +706,7 @@ class PgDocumentRepository(DocumentRepository):
         indexation_config: object = _UNSET,
         indexed_at: datetime | None = None,
         content_sha256: object = _UNSET,
+        chunk_count: object = _UNSET,
     ) -> bool:
         """TODO(phase-9): remove. PUT-style in-place update.
 
@@ -723,6 +737,9 @@ class PgDocumentRepository(DocumentRepository):
         if content_sha256 is not self._UNSET:
             params.append(content_sha256)
             sets.append(f"content_sha256 = ${len(params)}")
+        if chunk_count is not self._UNSET:
+            params.append(chunk_count)
+            sets.append(f"chunk_count = ${len(params)}")
         if not sets:
             # Match legacy: report whether the row exists at all.
             return await self.file_exists_in_partition(file_id, partition)
@@ -871,6 +888,7 @@ class PgDocumentRepository(DocumentRepository):
             "parent_id": row["parent_id"],
             **metadata,
             "content_sha256": row.get("content_sha256"),
+            "chunk_count": row.get("chunk_count"),
             # Authoritative system insert time, materialized on the row. Placed
             # after the spread so the column wins over any ``indexed_at`` the
             # copy/restore path copies into file_metadata from chunk metadata
@@ -901,6 +919,7 @@ class PgDocumentRepository(DocumentRepository):
             relationship_id=row["relationship_id"],
             parent_id=row["parent_id"],
             content_sha256=row.get("content_sha256"),
+            chunk_count=row.get("chunk_count"),
             indexation_config=row["indexation_config"],
         )
 

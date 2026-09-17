@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from core.models.chunk import Chunk
 from core.models.document import Document, DocumentType, ProcessedDocument, TextBlock
+from core.utils.exceptions import NoIndexableContentError, PipelineError
 from ray.exceptions import ActorUnavailableError
 from services.workers.indexer_actor import IndexerWorker, _load_document
 from services.workers.pipeline_builder import (
@@ -86,6 +87,8 @@ def _fake_tsm() -> MagicMock:
     tsm.set_failed_if_not_cancelled.remote = AsyncMock(return_value=True)
     tsm.set_degraded_stages = MagicMock()
     tsm.set_degraded_stages.remote = AsyncMock(return_value=True)
+    tsm.complete_with_degraded_stages = MagicMock()
+    tsm.complete_with_degraded_stages.remote = AsyncMock(return_value=True)
     return tsm
 
 
@@ -191,7 +194,7 @@ async def test_load_document_falls_back_to_stored_path_name(tmp_path: Path) -> N
 
 
 @pytest.mark.asyncio
-async def test_process_file_success_sets_state_and_returns_count(tmp_path: Path) -> None:
+async def test_process_file_success_completes_atomically_and_returns_count(tmp_path: Path) -> None:
     path = tmp_path / "doc.txt"
     path.write_bytes(b"content")
     processed = ProcessedDocument(document_id="d1", text_blocks=[TextBlock(text="content")])
@@ -211,7 +214,8 @@ async def test_process_file_success_sets_state_and_returns_count(tmp_path: Path)
     assert result["stage"] == "stored"
     state_calls = [call.args for call in tsm.set_state.remote.call_args_list]
     assert ("t1", "SERIALIZING") in state_calls
-    assert ("t1", "COMPLETED") in state_calls
+    assert ("t1", "COMPLETED") not in state_calls
+    tsm.complete_with_degraded_stages.remote.assert_awaited_once_with("t1", [])
     tsm.set_failed_if_not_cancelled.remote.assert_not_called()
     tsm.set_degraded_stages.remote.assert_not_called()
 
@@ -260,7 +264,8 @@ async def test_process_file_retries_state_write_during_actor_reconstruction(tmp_
     )
 
     assert result["stored_count"] == 1
-    assert tsm.set_state.remote.await_count == 3
+    assert tsm.set_state.remote.await_count == 2
+    tsm.complete_with_degraded_stages.remote.assert_awaited_once_with("t1", [])
 
 
 @pytest.mark.asyncio
@@ -323,6 +328,92 @@ async def test_process_file_pipeline_failure_sets_failed_and_reraises(tmp_path: 
     call_args = tsm.set_failed_if_not_cancelled.remote.call_args
     assert call_args.args[0] == "t2"
     assert "parser exploded" in call_args.args[1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("filename", "raw_bytes"),
+    [("empty.txt", b""), ("scan.pdf", b"%PDF-1.4")],
+)
+async def test_process_file_fails_when_no_chunks_are_produced(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    filename: str,
+    raw_bytes: bytes,
+) -> None:
+    path = tmp_path / filename
+    path.write_bytes(raw_bytes)
+    processed = ProcessedDocument(document_id="d1", text_blocks=[])
+    repo = FakeDocumentRepo()
+    tsm = _fake_tsm()
+    callback = AsyncMock()
+    monkeypatch.setattr("services.workers.indexer_actor.send_indexing_callback", callback)
+    worker = IndexerWorker(
+        pipeline=_make_pipeline(processed, []),
+        task_state_manager=tsm,
+        document_repo=repo,
+    )
+    metadata = {"file_id": "f-empty"}
+
+    with pytest.raises(NoIndexableContentError, match="No indexable content was extracted") as exc_info:
+        await worker.process_file(
+            task_id="t-empty",
+            path=str(path),
+            metadata=metadata,
+            partition="p",
+            callback_url="https://cozy.example.com/callback",
+        )
+
+    assert exc_info.value.code == "NO_INDEXABLE_CONTENT"
+    assert exc_info.value.status_code == 422
+    assert isinstance(exc_info.value, PipelineError)
+
+    assert repo.add_calls == []
+    assert repo.update_calls == []
+    completed_calls = [call for call in tsm.set_state.remote.call_args_list if call.args == ("t-empty", "COMPLETED")]
+    assert completed_calls == []
+    failure = tsm.set_failed_if_not_cancelled.remote.await_args.args
+    assert failure[0] == "t-empty"
+    assert "No indexable content was extracted" in failure[1]
+    callback.assert_awaited_once_with(
+        "https://cozy.example.com/callback", "p", "f-empty", "error", metadata, callback_token=None
+    )
+
+
+@pytest.mark.asyncio
+async def test_process_file_zero_chunk_replacement_keeps_existing_catalog_and_vectors(tmp_path: Path) -> None:
+    path = tmp_path / "empty.txt"
+    path.write_bytes(b"")
+
+    class EmptyReplacementPipeline:
+        async def run(self, row: dict[str, Any]) -> dict[str, Any]:
+            row["stored_count"] = 0
+            row["stage"] = "stored"
+            row[REPLACE_OLD_CHUNK_COLLECTION_ROW_KEY] = "default"
+            row[REPLACE_OLD_CHUNK_IDS_ROW_KEY] = ["old-1"]
+            return row
+
+    repo = FakeDocumentRepo()
+    vector_store = FakeVectorStore()
+    worker = IndexerWorker(
+        pipeline=EmptyReplacementPipeline(),
+        task_state_manager=_fake_tsm(),
+        document_repo=repo,
+        vector_store=vector_store,
+    )
+
+    with pytest.raises(NoIndexableContentError, match="No indexable content was extracted"):
+        await worker.process_file(
+            task_id="t-replace-empty",
+            path=str(path),
+            metadata={"file_id": "f1"},
+            partition="p",
+            replace=True,
+        )
+
+    assert repo.update_calls == []
+    assert vector_store.deleted_ids == []
+    assert vector_store.deleted_filters == []
 
 
 @pytest.mark.asyncio
@@ -420,6 +511,7 @@ async def test_process_file_creates_catalog_record_after_successful_pipeline(
             "parent_id": "parent",
             "degraded_stages": [],
         },
+        "chunk_count": 1,
         "user_id": 42,
         "relationship_id": "rel",
         "parent_id": "parent",
@@ -538,6 +630,7 @@ async def test_process_file_updates_catalog_record_on_replace(tmp_path: Path) ->
         "file_id": "f1",
         "partition": "p",
         "file_metadata": {"file_id": "f1", "degraded_stages": []},
+        "chunk_count": 1,
         "relationship_id": None,
         "parent_id": None,
         "content_sha256": None,
@@ -577,10 +670,12 @@ async def test_process_file_persists_only_degraded_stage_names(tmp_path: Path) -
     )
 
     assert repo.add_calls[0]["file_metadata"]["degraded_stages"] == ["caption", "topic_tag"]
-    tsm.set_degraded_stages.remote.assert_awaited_once_with(
+    tsm.complete_with_degraded_stages.remote.assert_awaited_once_with(
         "t-degraded",
         ["caption", "topic_tag"],
     )
+    tsm.set_degraded_stages.remote.assert_not_awaited()
+    assert ("t-degraded", "COMPLETED") not in [call.args for call in tsm.set_state.remote.call_args_list]
     assert result["degraded_stages"] == ["caption", "topic_tag"]
     assert "bearer-secret" not in str(repo.add_calls[0])
 
@@ -770,15 +865,70 @@ async def test_a_broken_success_callback_does_not_flip_a_completed_task_to_faile
             callback_url="https://cozy.example.com/callback",
         )
 
-    # set_state is also called for SERIALIZING, hence the call-list filter.
-    completed_calls = [
-        call for call in tsm.set_state.remote.call_args_list if call.args == ("t-cb-broken", "COMPLETED")
-    ]
-    assert len(completed_calls) == 1
+    tsm.complete_with_degraded_stages.remote.assert_awaited_once_with("t-cb-broken", [])
     tsm.set_failed_if_not_cancelled.remote.assert_not_awaited()
     # Only the one (failing) "success" attempt — no follow-up "error" callback.
     callback_mock.assert_awaited_once()
     assert callback_mock.await_args[0][3] == "success"
+
+
+@pytest.mark.asyncio
+async def test_completion_retry_exhaustion_never_sends_success_callback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"content")
+    processed = ProcessedDocument(document_id="d1", text_blocks=[TextBlock(text="content")])
+    chunks = [Chunk(id="c1", text="content", partition="p")]
+    tsm = _fake_tsm()
+    worker = IndexerWorker(pipeline=_make_pipeline(processed, chunks), task_state_manager=tsm)
+    callback_mock = AsyncMock()
+    monkeypatch.setattr("services.workers.indexer_actor.send_indexing_callback", callback_mock)
+
+    async def _completion_unavailable(submit, task_description: str = ""):
+        if "complete_with_degraded_stages" in task_description:
+            raise RuntimeError("task state completion did not recover")
+        return await submit()
+
+    monkeypatch.setattr(
+        "services.workers.indexer_actor.retry_idempotent_ray_actor_method",
+        _completion_unavailable,
+    )
+
+    with pytest.raises(RuntimeError, match="completion did not recover"):
+        await worker.process_file(
+            task_id="t-completion-down",
+            path=str(path),
+            metadata={"file_id": "f1"},
+            partition="p",
+            callback_url="https://cozy.example.com/callback",
+        )
+
+    assert [call.args[3] for call in callback_mock.await_args_list] == ["error"]
+    tsm.set_degraded_stages.remote.assert_not_awaited()
+    assert ("t-completion-down", "COMPLETED") not in [call.args for call in tsm.set_state.remote.call_args_list]
+
+
+@pytest.mark.asyncio
+async def test_rejected_atomic_completion_never_falls_back_to_split_writes(tmp_path: Path) -> None:
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"content")
+    processed = ProcessedDocument(document_id="d1", text_blocks=[TextBlock(text="content")])
+    chunks = [Chunk(id="c1", text="content", partition="p")]
+    tsm = _fake_tsm()
+    tsm.complete_with_degraded_stages.remote.return_value = False
+    worker = IndexerWorker(pipeline=_make_pipeline(processed, chunks), task_state_manager=tsm)
+
+    with pytest.raises(RuntimeError, match="rejected completion"):
+        await worker.process_file(
+            task_id="t-rejected-completion",
+            path=str(path),
+            metadata={"file_id": "f1"},
+            partition="p",
+        )
+
+    tsm.set_degraded_stages.remote.assert_not_awaited()
+    assert ("t-rejected-completion", "COMPLETED") not in [call.args for call in tsm.set_state.remote.call_args_list]
 
 
 @pytest.mark.asyncio

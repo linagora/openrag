@@ -8,6 +8,7 @@ from typing import Any
 
 from core.models.catalog import DocumentStatus, IndexationJob, normalize_degraded_stages
 from core.models.document import Document
+from core.utils.exceptions import NoIndexableContentError
 from core.utils.logging import get_logger
 from services.workers.indexing_callback import send_indexing_callback
 from services.workers.pipeline_builder import (
@@ -96,27 +97,6 @@ class IndexerWorker:
         except Exception as exc:
             logger.warning("Failed to record indexing job start", task_id=task_id, error=str(exc))
 
-    async def _record_degraded_stages(self, task_id: str, stages: list[str]) -> None:
-        """Best-effort task visibility; catalog persistence remains authoritative."""
-        if not stages:
-            return
-        method = getattr(self._tsm, "set_degraded_stages", None)
-        remote = getattr(method, "remote", None)
-        if remote is None:
-            logger.warning("Task state manager cannot record enrichment degradation", task_id=task_id)
-            return
-        try:
-            await retry_idempotent_ray_actor_method(
-                lambda: remote(task_id, stages),
-                task_description=f"set_degraded_stages({task_id})",
-            )
-        except Exception as exc:
-            logger.warning(
-                "Failed to record enrichment degradation in task state",
-                task_id=task_id,
-                error=str(exc),
-            )
-
     async def process_file(
         self,
         *,
@@ -179,6 +159,9 @@ class IndexerWorker:
             if resolved_prompts:
                 row.update(resolved_prompts)
             row = await self._pipeline.run(row)
+            stored_count = row.get("stored_count", 0)
+            if stored_count == 0:
+                raise NoIndexableContentError("No indexable content was extracted from this document.")
             indexed_at = row.get("indexed_at")
             degraded_stages = normalize_degraded_stages(row.get("degraded_stages"))
 
@@ -191,6 +174,7 @@ class IndexerWorker:
                     replace=replace,
                     indexation_config=indexation_config,
                     indexed_at=indexed_at,
+                    chunk_count=stored_count,
                     require_existing_partition=require_existing_partition,
                     workspace_ids=workspace_ids,
                     degraded_stages=degraded_stages,
@@ -211,11 +195,12 @@ class IndexerWorker:
                     partition=partition,
                     indexation_config=indexation_config,
                 )
-            await self._record_degraded_stages(task_id, degraded_stages)
-            await retry_idempotent_ray_actor_method(
-                lambda: self._tsm.set_state.remote(task_id, "COMPLETED"),
-                task_description=f"set_state({task_id}, COMPLETED)",
+            completion_accepted = await retry_idempotent_ray_actor_method(
+                lambda: self._tsm.complete_with_degraded_stages.remote(task_id, degraded_stages),
+                task_description=f"complete_with_degraded_stages({task_id})",
             )
+            if completion_accepted is False:
+                raise RuntimeError(f"Task state manager rejected completion for task {task_id}")
         except _TaskCancelledBeforeStart:
             # The TSM already told us this task is fenced/cancelled — no need to
             # ask it again, and a cancellation must not fire an error callback.
@@ -274,6 +259,7 @@ async def _write_catalog_record(
     replace: bool,
     indexation_config: dict[str, Any] | None,
     indexed_at: datetime | None = None,
+    chunk_count: int | None = None,
     require_existing_partition: bool = False,
     workspace_ids: list[str] | None = None,
     degraded_stages: list[str] | None = None,
@@ -290,6 +276,7 @@ async def _write_catalog_record(
             relationship_id=metadata.get("relationship_id"),
             parent_id=metadata.get("parent_id"),
             indexed_at=indexed_at,
+            chunk_count=chunk_count,
             content_sha256=metadata.get("content_sha256"),
             **config_kwargs,
         )
@@ -302,6 +289,7 @@ async def _write_catalog_record(
         relationship_id=metadata.get("relationship_id"),
         parent_id=metadata.get("parent_id"),
         indexed_at=indexed_at,
+        chunk_count=chunk_count,
         require_existing_partition=require_existing_partition,
         # Stay protected until the outer worker has completed every attachment.
         independently_indexed=True,

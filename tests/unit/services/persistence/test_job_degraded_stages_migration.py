@@ -50,6 +50,12 @@ def test_upgrade_adds_the_column_once(monkeypatch, migration) -> None:
     assert str(column.server_default.arg) == "ARRAY[]::text[]"
 
 
+def test_migration_follows_chunk_count_migration(migration) -> None:
+    assert migration is not None
+
+    assert migration.down_revision == "09f6c4b8a2d1"
+
+
 def test_upgrade_is_a_no_op_when_the_column_exists(monkeypatch, migration) -> None:
     assert migration is not None
     op = _FakeOp()

@@ -49,6 +49,10 @@ class TaskCompletionTracker:
         """Identify trackers that preserve unsettled cancellation fences."""
         return True
 
+    def supports_degraded_stage_history(self) -> bool:
+        """Identify trackers that persist bounded degradation with settled jobs."""
+        return True
+
     async def track(self, task_id: str, object_ref: dict[str, Any]) -> None:
         ref = object_ref.get("ref")
         if ref is None:

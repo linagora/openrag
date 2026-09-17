@@ -1,7 +1,7 @@
 """add job degraded stages
 
 Revision ID: 2a3b4c5d6e7f
-Revises: 1f53920217de
+Revises: 09f6c4b8a2d1
 Create Date: 2026-09-17 00:00:00.000000
 
 """
@@ -14,7 +14,7 @@ from schema_helpers import column_exists, table_exists
 from sqlalchemy.dialects import postgresql
 
 revision: str = "2a3b4c5d6e7f"
-down_revision: str | Sequence[str] | None = "1f53920217de"
+down_revision: str | Sequence[str] | None = "09f6c4b8a2d1"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

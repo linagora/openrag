@@ -49,6 +49,12 @@ def _task_state_manager(
     return tsm
 
 
+def test_tracker_reports_degraded_stage_history_capability() -> None:
+    from services.workers.task_completion import TaskCompletionTracker
+
+    assert TaskCompletionTracker().supports_degraded_stage_history() is True
+
+
 @pytest.mark.asyncio
 async def test_tracker_records_completion_after_worker_settles() -> None:
     from services.workers.task_completion import TaskCompletionTracker
