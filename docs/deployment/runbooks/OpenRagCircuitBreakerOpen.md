@@ -1,6 +1,16 @@
 # OpenRagCircuitBreakerOpen
 
-**Severity:** critical · **Fires after:** 5 min
+**Severity:** critical · **Fires after:** 5 min by default
+
+> **The numbers on this page are defaults; your deployment may differ.** Alert
+> thresholds and `for` durations are chart values, because they depend on the SLO,
+> the corpus size and the query volume of the deployment they run in — here `for.OpenRagCircuitBreakerOpen` (default 5m).
+> If the behaviour here does not match what you are seeing, read the rule that is
+> actually loaded:
+>
+> ```
+> kubectl -n <namespace> get prometheusrule <release>-alerts -o yaml
+> ```
 
 ```
 max by (name) (openrag_circuit_breaker_state) == 1

@@ -1,6 +1,16 @@
 # OpenRagBacklogGrowing
 
-**Severity:** warning · **Fires after:** 25 min of continuous growth
+**Severity:** warning · **Fires after:** 25 min of continuous growth by default
+
+> **The numbers on this page are defaults; your deployment may differ.** Alert
+> thresholds and `for` durations are chart values, because they depend on the SLO,
+> the corpus size and the query volume of the deployment they run in — here `thresholds.backlogDepth` (default 50) and `for.OpenRagBacklogGrowing` (default 25m).
+> If the behaviour here does not match what you are seeing, read the rule that is
+> actually loaded:
+>
+> ```
+> kubectl -n <namespace> get prometheusrule <release>-alerts -o yaml
+> ```
 
 ```
 openrag_ingest_tasks{state="QUEUED"} > 50
@@ -9,7 +19,8 @@ and deriv(openrag_ingest_tasks{state="QUEUED"}[5m]) > 0
 
 ## What it means
 
-The queue has trended upward for half an hour **and** is over 50 tasks. Both conditions
+The queue has trended upward for half an hour **and** is over the depth floor, 50
+tasks by default. Both conditions
 matter: a burst upload rises steeply and drains fine, and a steady small queue is a
 healthy pipeline. This is arrival rate exceeding capacity.
 

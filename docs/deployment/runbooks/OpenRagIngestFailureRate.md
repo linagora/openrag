@@ -1,6 +1,16 @@
 # OpenRagIngestFailureRate
 
-**Severity:** warning · **Fires after:** ~8 min from the onset of failures
+**Severity:** warning · **Fires after:** ~8 min from the onset of failures, with default thresholds
+
+> **The numbers on this page are defaults; your deployment may differ.** Alert
+> thresholds and `for` durations are chart values, because they depend on the SLO,
+> the corpus size and the query volume of the deployment they run in — here `thresholds.ingestFailureRatio` (default 0.25), `thresholds.ingestVolumeFloor` (default 5) and `for.OpenRagIngestFailureRate` (default 5m).
+> If the behaviour here does not match what you are seeing, read the rule that is
+> actually loaded:
+>
+> ```
+> kubectl -n <namespace> get prometheusrule <release>-alerts -o yaml
+> ```
 
 ```
 sum(rate(openrag_ingest_documents_total{status="failed"}[5m]))
@@ -11,9 +21,10 @@ and sum(increase(openrag_ingest_documents_total{status=~"completed|failed"}[15m]
 
 ## What it means
 
-More than a quarter of documents reaching a terminal state are failing. `cancelled` is
+More than a quarter of documents reaching a terminal state are failing — a quarter
+being the default threshold. `cancelled` is
 excluded from both sides — a user cancelling an upload is not a failure — and the volume
-floor of 5 documents stops a quiet instance paging on one bad file.
+floor (5 documents by default) stops a quiet instance paging on one bad file.
 
 **The two windows are different on purpose.** The ratio reads the last **5 minutes**, so
 a real failure surfaces in about 8 minutes. The volume floor reads the last **15

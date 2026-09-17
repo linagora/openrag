@@ -1,6 +1,16 @@
 # OpenRagCatalogDriftDetected
 
-**Severity:** critical · **Fires after:** ~11 min from a single dropped chunk
+**Severity:** critical · **Fires after:** ~11 min from a single dropped chunk, by default
+
+> **The numbers on this page are defaults; your deployment may differ.** Alert
+> thresholds and `for` durations are chart values, because they depend on the SLO,
+> the corpus size and the query volume of the deployment they run in — here `for.OpenRagCatalogDriftDetected` (default 5m); the `> 0` test is semantic and not tunable.
+> If the behaviour here does not match what you are seeing, read the rule that is
+> actually loaded:
+>
+> ```
+> kubectl -n <namespace> get prometheusrule <release>-alerts -o yaml
+> ```
 
 ```
 sum(increase(openrag_retrieval_orphan_chunks_dropped_total[1h])) > 0

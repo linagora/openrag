@@ -196,6 +196,24 @@ def test_runbook_page_is_named_after_its_alert(rule: dict) -> None:
     assert (RUNBOOK_DIR / f"{rule['alert']}.md").is_file()
 
 
+@pytest.mark.parametrize("rule", _all_rules(), ids=lambda r: r["alert"])
+def test_runbook_says_its_numbers_are_defaults(rule: dict) -> None:
+    """Every threshold and `for` duration is a chart value, so a runbook that
+    states one as fact is wrong for any deployment that retuned it — and it is
+    wrong at 3am, to someone who trusts it. Each page must say so and show how to
+    read the rule that is actually loaded."""
+    page = (RUNBOOK_DIR / f"{rule['alert']}.md").read_text(encoding="utf-8")
+    assert "are defaults; your deployment may differ" in page, (
+        f"{rule['alert']}.md states numbers without saying they are defaults"
+    )
+    assert "get prometheusrule" in page, (
+        f"{rule['alert']}.md does not show how to read the rule actually loaded"
+    )
+    assert f"for.{rule['alert']}" in page, (
+        f"{rule['alert']}.md does not name the value that changes its `for` duration"
+    )
+
+
 def test_runbook_index_lists_every_alert() -> None:
     index = (RUNBOOK_DIR / "README.md").read_text(encoding="utf-8")
     for rule in _all_rules():

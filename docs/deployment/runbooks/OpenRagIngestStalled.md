@@ -1,6 +1,16 @@
 # OpenRagIngestStalled
 
-**Severity:** critical · **Fires after:** ~14 min (12 min idle + `for: 2m`)
+**Severity:** critical · **Fires after:** ~14 min by default (12 min idle + `for: 2m`)
+
+> **The numbers on this page are defaults; your deployment may differ.** Alert
+> thresholds and `for` durations are chart values, because they depend on the SLO,
+> the corpus size and the query volume of the deployment they run in — here `thresholds.ingestIdleSeconds` (default 720) and `for.OpenRagIngestStalled` (default 2m).
+> If the behaviour here does not match what you are seeing, read the rule that is
+> actually loaded:
+>
+> ```
+> kubectl -n <namespace> get prometheusrule <release>-alerts -o yaml
+> ```
 
 ```
 (openrag_ingest_tasks{state="QUEUED"} > 0)

@@ -1,6 +1,18 @@
 # OpenRagTargetDown
 
-**Severity:** critical · **Fires after:** 5 min
+**Severity:** critical · **Fires after:** 5 min by default
+
+> **The numbers on this page are defaults; your deployment may differ.** Alert
+> thresholds and `for` durations are chart values, because they depend on the SLO,
+> the corpus size and the query volume of the deployment they run in — here
+> `for.OpenRagTargetDown` (default 5m) and `jobMatcher`, the regex this alert
+> matches the `job` label on.
+> If the behaviour here does not match what you are seeing, read the rule that is
+> actually loaded:
+>
+> ```
+> kubectl -n <namespace> get prometheusrule <release>-alerts -o yaml
+> ```
 
 ```
 up{job=~".*openrag.*"} == 0
