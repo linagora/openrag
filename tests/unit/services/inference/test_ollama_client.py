@@ -12,6 +12,7 @@ from core.utils.exceptions import (
     InferenceError,
     InferenceTimeoutError,
 )
+from services.inference import _metrics
 from services.inference._circuit_breaker import _breakers
 from services.inference.ollama_client import OllamaClient, OllamaEmbedder
 
@@ -26,6 +27,22 @@ def _clean_breakers():
 
 def _make_transport(handler):
     return httpx.MockTransport(handler)
+
+
+@pytest.fixture
+def recorded_inference(monkeypatch: pytest.MonkeyPatch) -> list[dict]:
+    """Capture what the metric layer was asked to record.
+
+    Patches the symbol the clients call, so a path that is simply not
+    instrumented shows up as an empty list rather than passing silently — which
+    is how stream_chat and OllamaEmbedder.embed stayed invisible.
+    """
+    calls: list[dict] = []
+    monkeypatch.setattr(_metrics, "record_inference", lambda **kw: calls.append(kw))
+    import services.inference.ollama_client as ollama_module
+
+    monkeypatch.setattr(ollama_module, "record_inference", lambda **kw: calls.append(kw), raising=False)
+    return calls
 
 
 def _chat_response(content: str = "hello") -> httpx.Response:
@@ -93,6 +110,29 @@ class TestOllamaClient:
         lines = [line async for line in client.stream_chat([{"role": "user", "content": "hi"}])]
         assert 'data: {"choices":[{"delta":{"content":"Hello"}}]}' in lines
         assert 'data: {"choices":[{"delta":{"content":" world"}}]}' in lines
+
+    @pytest.mark.asyncio
+    async def test_stream_chat_records_a_metric_for_the_whole_transfer(self, recorded_inference):
+        """A supported deployment stayed partly invisible: stream_chat emitted no
+        request or duration metric at all, so Ollama chat traffic never reached
+        the inference counters the alerts read."""
+        sse_body = 'data: {"choices":[{"delta":{"content":"hi"}}]}\ndata: [DONE]\n'
+        client = self._make_client(lambda req: httpx.Response(200, text=sse_body))
+
+        [line async for line in client.stream_chat([{"role": "user", "content": "hi"}])]
+
+        assert [c["outcome"] for c in recorded_inference] == ["success"]
+        assert recorded_inference[0]["operation"] == "chat"
+
+    @pytest.mark.asyncio
+    async def test_stream_chat_failure_is_recorded_as_a_failure(self, recorded_inference):
+        client = self._make_client(lambda req: httpx.Response(503, text="unavailable"))
+
+        with pytest.raises(InferenceError):
+            async for _ in client.stream_chat([{"role": "user", "content": "hi"}]):
+                pass
+
+        assert [c["outcome"] for c in recorded_inference] == ["error"]
 
     @pytest.mark.asyncio
     async def test_stream_chat_error_raises(self):
@@ -310,6 +350,18 @@ class TestOllamaClient:
 
 
 class TestOllamaEmbedder:
+    @pytest.mark.asyncio
+    async def test_embed_records_a_metric(self, recorded_inference):
+        """OllamaEmbedder.embed carried no metrics decorator, so embedding traffic
+        on a supported backend never reached openrag_inference_requests_total."""
+        embedder = OllamaEmbedder(endpoint="http://ollama:11434/v1", model_name="nomic-embed-text")
+        embedder._client = httpx.AsyncClient(transport=_make_transport(lambda req: _embed_response()))
+
+        await embedder.embed(["hello"])
+
+        assert [c["outcome"] for c in recorded_inference] == ["success"]
+        assert recorded_inference[0]["operation"] == "embed"
+
     def _make_embedder(self, handler, endpoint="http://ollama:11434", **kwargs):
         embedder = OllamaEmbedder(endpoint=endpoint, model_name="nomic-embed-text", **kwargs)
         embedder._client = httpx.AsyncClient(transport=_make_transport(handler))

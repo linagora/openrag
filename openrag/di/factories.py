@@ -32,6 +32,7 @@ from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Any, Protocol, TypeVar
 
 from core.config.model_endpoints import CONTROL_EXTRA_KEYS
+from core.observability.inference_metrics import PROVIDER_NAME_ATTR
 
 if TYPE_CHECKING:
     from core.utils.registry import Registry
@@ -112,6 +113,11 @@ def make_component_factory(
             if extra_kwargs_fn is not None:
                 kwargs.update(extra_kwargs_fn(model_cfg))
             instance = registry.create(impl, **kwargs)
+            # The bounded identifier the inference metrics label by. Set after
+            # construction rather than passed in: every client splats unknown
+            # kwargs into the outbound request body, the trap batch_size fell
+            # into (#712).
+            setattr(instance, PROVIDER_NAME_ATTR, name)
             cache[name] = instance
             return instance
 
