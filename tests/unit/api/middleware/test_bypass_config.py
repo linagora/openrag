@@ -457,3 +457,62 @@ async def test_anonymous_scrape_reaches_metrics_route(monkeypatch, auth_mode) ->
 
     assert resp.status_code == 200
     assert resp.body == b"scraped"
+
+
+# ---------------------------------------------------------------------------
+# Path decisions use the routed path
+# ---------------------------------------------------------------------------
+
+# A Host header under which ``request.url.path`` reads differently from the
+# path the router dispatches.
+_MISMATCHED_HOST = "testserver/health_check?x="
+
+
+def _auth_app(monkeypatch, *, auth_mode: str) -> FastAPI:
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setenv("AUTH_MODE", auth_mode)
+    monkeypatch.setenv("AUTH_TOKEN", "secret")
+
+    svc = type("S", (), {})()
+    svc.get_oidc_session_by_token_for_request = AsyncMock(return_value=None)
+    svc.get_user_by_token_for_request = AsyncMock(return_value=None)
+
+    app = FastAPI()
+
+    @app.get("/indexer/files")
+    async def protected() -> dict[str, str]:
+        return {"served": "yes"}
+
+    @app.get("/static/{file_id}")
+    async def static_file(file_id: str) -> dict[str, str]:
+        return {"served": file_id}
+
+    app.add_middleware(AuthMiddleware, get_auth_service=lambda _request: svc)
+    return app
+
+
+def test_bypass_check_uses_the_routed_path(monkeypatch) -> None:
+    from fastapi.testclient import TestClient
+
+    client = TestClient(_auth_app(monkeypatch, auth_mode="token"))
+
+    response = client.get("/indexer/files", headers={"host": _MISMATCHED_HOST})
+
+    assert response.status_code == 403
+    assert response.json() == {"detail": "Missing token"}
+
+
+def test_oidc_login_redirect_uses_the_routed_path_and_query(monkeypatch) -> None:
+    from fastapi.testclient import TestClient
+
+    client = TestClient(_auth_app(monkeypatch, auth_mode="oidc"))
+
+    response = client.get(
+        "/static/abc?page=2",
+        headers={"host": _MISMATCHED_HOST, "accept": "text/html"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 302
+    assert response.headers["location"] == "/auth/login?next=%2Fstatic%2Fabc%3Fpage%3D2"
