@@ -787,6 +787,16 @@ class PartitionService:
         )
         return result.get("files", [])
 
+    async def get_file_metadata(self, partition: str, file_id: str) -> dict:
+        """Return authoritative metadata from the partition-scoped catalog row."""
+        metadata = await self._document_repo.get_file_metadata(file_id, partition)
+        if metadata is None:
+            raise NotFoundError(
+                f"'{file_id}' not found in partition '{partition}'",
+                code="FILE_NOT_FOUND",
+            )
+        return metadata
+
     async def get_file_chunks(self, partition: str, file_id: str, limit: int = 2000) -> list[dict]:
         """Return chunk rows (``_id`` kept, ``text`` dropped) for one file.
 

@@ -4,7 +4,14 @@ import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { toast } from "sonner";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { cancelTask, getQueueInfo, listTasks, type TaskState } from "@/lib/api/jobs";
+import {
+  cancelTask,
+  getQueueInfo,
+  listTasks,
+  type TaskListItem,
+  type TaskOutcome,
+  type TaskState,
+} from "@/lib/api/jobs";
 import { downloadCsv } from "@/lib/csv";
 import JobListPage from "./list";
 
@@ -70,8 +77,13 @@ const task = (
   state: TaskState,
   filename: string,
   partition = "docs",
-  timing: { created_at?: string; duration_ms?: number } = {},
-) => ({
+  timing: {
+    created_at?: string;
+    duration_ms?: number;
+    outcome?: "completed" | "completed_degraded" | "failed" | "cancelled" | "active";
+    degraded_stages?: string[];
+  } = {},
+): TaskListItem => ({
   task_id,
   state,
   details: {
@@ -79,8 +91,19 @@ const task = (
     partition,
     metadata: { filename },
     user_id: 1,
+    ...(timing.degraded_stages ? { degraded_stages: timing.degraded_stages } : {}),
   },
-  ...timing,
+  created_at: timing.created_at,
+  duration_ms: timing.duration_ms,
+  outcome:
+    timing.outcome ??
+    ({
+      QUEUED: "active",
+      SERIALIZING: "active",
+      COMPLETED: "completed",
+      FAILED: "failed",
+      CANCELLED: "cancelled",
+    } satisfies Record<TaskState, TaskOutcome>)[state],
   url: `/indexer/task/${task_id}`,
 });
 
@@ -147,6 +170,22 @@ describe("JobListPage filters", () => {
 
     await waitFor(() => expect(search.value).toBe(""));
     expect(await screen.findByText("failed.pdf")).not.toBeNull();
+  });
+
+  it("distinguishes completed jobs with degraded enrichment", async () => {
+    listTasksMock.mockResolvedValue({
+      tasks: [
+        task("degraded-task", "COMPLETED", "degraded.pdf", "docs", {
+          outcome: "completed_degraded",
+          degraded_stages: ["caption", "topic_tag"],
+        }),
+      ],
+    });
+
+    renderJobs();
+
+    expect(await screen.findByText("Completed with degradation")).not.toBeNull();
+    expect(screen.getByText("Caption, Topic tagging")).not.toBeNull();
   });
 
   it("scopes its queries by account and authorization role and polls them itself", async () => {
@@ -278,6 +317,29 @@ describe("JobListPage filters", () => {
 
     await userEvent.click(screen.getByRole("tab", { name: "Failed" }));
     await waitFor(() => expect(screen.getByText("docs.pdf")).not.toBeNull());
+  });
+
+  it("exports degraded outcomes and stages", async () => {
+    const degradedTask = task("degraded-task", "COMPLETED", "degraded.pdf", "docs", {
+      outcome: "completed_degraded",
+      degraded_stages: ["caption", "topic_tag"],
+    });
+    listTasksMock.mockResolvedValue({ tasks: [degradedTask] });
+
+    renderJobs();
+
+    expect(await screen.findByText("degraded.pdf")).not.toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: /export csv/i }));
+
+    const columns = downloadCsvMock.mock.calls[0][1] as Array<{
+      header: string;
+      value: (row: TaskListItem) => unknown;
+    }>;
+    const exported = Object.fromEntries(columns.map((column) => [column.header, column.value(degradedTask)]));
+    expect(exported).toMatchObject({
+      outcome: "completed_degraded",
+      degraded_stages: "caption,topic_tag",
+    });
   });
 
   it("reports CSV download failures", async () => {
