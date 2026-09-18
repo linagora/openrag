@@ -5,8 +5,14 @@ Exposes request metrics (count, failures, duration histograms)
 via prometheus_client.
 """
 
+import threading
+
+from core.models.readiness import ReadinessSnapshot
 from prometheus_client import (
+    REGISTRY,
+    CollectorRegistry,
     Counter,
+    Gauge,
     Histogram,
     generate_latest,
 )
@@ -40,6 +46,39 @@ REQUEST_DURATION = Histogram(
     ["method", "endpoint"],
     buckets=(0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, float("inf")),
 )
+
+
+class ModelEndpointReadinessMetrics:
+    """Synchronize the current bounded model-endpoint readiness series."""
+
+    def __init__(self, registry: CollectorRegistry = REGISTRY) -> None:
+        self._ready = Gauge(
+            "openrag_model_endpoint_ready",
+            "Whether a default or referenced model endpoint is ready",
+            ["provider", "kind"],
+            registry=registry,
+        )
+        self._discovery_up = Gauge(
+            "openrag_model_endpoint_discovery_up",
+            "Whether the authoritative model endpoint snapshot was read successfully",
+            registry=registry,
+        )
+        self._published: set[tuple[str, str]] = set()
+        self._lock = threading.Lock()
+        self._discovery_up.set(0)
+
+    def publish(self, snapshot: ReadinessSnapshot) -> None:
+        current = {(endpoint.provider, endpoint.kind): endpoint.status for endpoint in snapshot.model_endpoints}
+        with self._lock:
+            for provider, kind in self._published - current.keys():
+                self._ready.remove(provider, kind)
+            for (provider, kind), status in current.items():
+                self._ready.labels(provider=provider, kind=kind).set(status == "ok")
+            self._published = set(current)
+            self._discovery_up.set(snapshot.checks.get("model_endpoint_discovery") == "ok")
+
+
+MODEL_ENDPOINT_READINESS_METRICS = ModelEndpointReadinessMetrics()
 
 
 def record_request(method: str, path: str, status_code: int, duration: float) -> None:

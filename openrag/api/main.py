@@ -43,6 +43,8 @@ from api.routers.admin.cluster import router as actors_router
 from api.routers.admin.indexing import router as indexer_router
 from api.routers.admin.jobs import router as queue_router
 from api.routers.admin.model_endpoints import router as model_endpoints_router
+from api.routers.admin.monitoring import admin_router as monitoring_admin_router
+from api.routers.admin.monitoring import describe_metrics_access
 from api.routers.admin.monitoring import router as monitoring_router
 from api.routers.admin.partitions import router as partition_router
 from api.routers.admin.presets import router as presets_router
@@ -223,6 +225,11 @@ async def lifespan(app: FastAPI):
     # degraded boot keeps di.providers serving the intended 503.
     logger.info("Startup: registering process container", available=getattr(app.state, "container", None) is not None)
     set_container(getattr(app.state, "container", None))
+    # Prometheus only shows "403 Forbidden" on its targets page; name the
+    # fix here so an empty Grafana is diagnosed from the API log.
+    metrics_notice = describe_metrics_access(settings.server)
+    if metrics_notice:
+        logger.warning(metrics_notice)
     logger.info("Startup: complete")
     print_startup_banner(app_version)
 
@@ -367,6 +374,7 @@ app.include_router(actors_router, prefix="/actors", tags=[Tags.ACTORS])
 app.include_router(users_router, prefix="/users", tags=[Tags.USERS])
 app.include_router(workspaces_router, tags=[Tags.WORKSPACES])
 app.include_router(monitoring_router, tags=[Tags.MONITORING])
+app.include_router(monitoring_admin_router, prefix="/monitoring", tags=[Tags.MONITORING])
 app.include_router(tools_router, prefix="/v1", tags=[Tags.TOOLS])
 # Mount the auth router (OIDC flows). Most routes are bypassed by
 # AuthMiddleware; ``/auth/me`` remains protected.

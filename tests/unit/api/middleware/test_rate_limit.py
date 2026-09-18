@@ -230,5 +230,13 @@ def test_auth_login_cannot_be_exempted_via_narrower_prefix_override(monkeypatch)
     assert client.get("/auth/login").status_code == 429
 
 
+def test_probe_exemption_uses_the_routed_path(monkeypatch):
+    # Under this Host header request.url.path reads "/health_check"; "/other" is routed.
+    client = TestClient(_build_app(monkeypatch, RATE_LIMIT_DEFAULT="1/minute"))
+    headers = {"host": "testserver/health_check?x="}
+    assert client.get("/other", headers=headers).status_code == 200
+    assert client.get("/other", headers=headers).status_code == 429
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-q"])

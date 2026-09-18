@@ -22,11 +22,13 @@ columns is a post-refactoring feature.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Collection
+from collections.abc import Callable, Collection, Mapping
 from typing import TYPE_CHECKING, Any
 
+from core.config.model_endpoints import DEFAULT_ENDPOINT_ALIAS, embedder_fingerprint
 from core.models.catalog import INDEXING_CONTENT_CLAIM_TOKEN_PREFIX, DocumentRecord, DocumentStatus
 from core.ports.document_repo import ContentClaimLease, DocumentRepository
+from core.utils.exceptions import ConflictError
 from core.utils.logging import get_logger
 from services.persistence.file_count import decrement_file_counts
 
@@ -41,6 +43,55 @@ if TYPE_CHECKING:
 # therefore never calls ``json.dumps`` itself.
 
 logger = get_logger()
+
+# The endpoint a partition's files are embedded with, as the catalog write
+# records a file against it (#958): the partition's own embedder, or the default
+# one when it rides the alias. Both FOR SHARE, see _refuse_if_embedder_changed.
+_LOCK_PARTITION_EMBEDDER_SQL = "SELECT embedder FROM partitions WHERE partition = $1 FOR SHARE"
+_LOCK_EMBEDDER_ENDPOINT_SQL = """
+    SELECT name, endpoint, model_name, extra
+    FROM model_endpoints
+    WHERE model_type = 'embedder' AND (name = $1 OR ($1 = $2 AND is_default))
+    FOR SHARE
+    """
+
+
+async def _refuse_if_embedder_changed(
+    conn: asyncpg.Connection,
+    partition: str,
+    fingerprint: Mapping[str, str | None],
+) -> None:
+    """Refuse to record a file whose vectors its partition's embedder no longer makes (#958).
+
+    The vectors are already stored, built from whatever endpoint config the
+    indexer held when it embedded them. An edit to that endpoint, or a move of
+    the partition to another, can commit while the file is still indexing,
+    unseen by the edit guard: it counts catalog rows, and this is the row.
+
+    So the check runs here, in the transaction that makes the file visible, with
+    the partition and its endpoint row locked FOR SHARE. An endpoint edit locks
+    that row FOR UPDATE before it counts indexed files: either this file commits
+    first and the edit counts it, or the edit commits first and this check sees
+    it. ``partitions`` is locked before the endpoint row, the order
+    ``set_default`` takes; the other way round, the two can deadlock.
+    """
+    await conn.execute("LOCK TABLE partitions IN ROW EXCLUSIVE MODE")
+    # No row yet: this write creates the partition, on the column default.
+    embedder = await conn.fetchval(_LOCK_PARTITION_EMBEDDER_SQL, partition) or DEFAULT_ENDPOINT_ALIAS
+    endpoint = await conn.fetchrow(_LOCK_EMBEDDER_ENDPOINT_SQL, embedder, DEFAULT_ENDPOINT_ALIAS)
+    if endpoint is None:
+        # Nothing registered to compare with (an env-only embedder): nothing an
+        # admin can have edited.
+        return
+    current = embedder_fingerprint(endpoint["endpoint"], endpoint["model_name"], endpoint["extra"])
+    changed = [key for key, value in current.items() if fingerprint.get(key) != value]
+    if changed:
+        raise ConflictError(
+            f"Embedder '{endpoint['name']}' of partition '{partition}' changed ({', '.join(changed)}) while "
+            "this file was being indexed, so its vectors came from the previous configuration and were not "
+            "kept. Index the file again.",
+            code="EMBEDDER_CHANGED_DURING_INDEXING",
+        )
 
 
 class PgDocumentRepository(DocumentRepository):
@@ -111,8 +162,8 @@ class PgDocumentRepository(DocumentRepository):
             """
             INSERT INTO files (file_id, partition_name, file_metadata,
                                indexation_config, created_by, relationship_id, parent_id,
-                               content_sha256)
-            VALUES ($1, $2, $3::json, $4::jsonb, $5, $6, $7, $8)
+                               content_sha256, chunk_count)
+            VALUES ($1, $2, $3::json, $4::jsonb, $5, $6, $7, $8, $9)
             """,
             file_id,
             doc.partition,
@@ -122,6 +173,7 @@ class PgDocumentRepository(DocumentRepository):
             doc.relationship_id,
             doc.parent_id,
             doc.content_sha256,
+            doc.chunk_count,
         )
         return doc.model_copy(update={"file_id": file_id, "metadata": metadata})
 
@@ -205,7 +257,7 @@ class PgDocumentRepository(DocumentRepository):
                 params.append(fields.pop("indexation_config"))
                 sets.append(f"indexation_config = ${len(params)}::jsonb")
 
-            for column in ("relationship_id", "parent_id", "created_by"):
+            for column in ("relationship_id", "parent_id", "created_by", "chunk_count"):
                 if column in fields:
                     params.append(fields.pop(column))
                     sets.append(f"{column} = ${len(params)}")
@@ -296,6 +348,14 @@ class PgDocumentRepository(DocumentRepository):
             file_id,
             partition,
         )
+
+    async def get_file_metadata(self, file_id: str, partition: str) -> dict[str, Any] | None:
+        metadata = await self.pool.fetchval(
+            "SELECT file_metadata FROM files WHERE file_id = $1 AND partition_name = $2",
+            file_id,
+            partition,
+        )
+        return dict(metadata) if isinstance(metadata, dict) else None
 
     async def get_content_sha256(self, file_id: str, partition: str) -> str | None:
         return await self.pool.fetchval(
@@ -486,6 +546,8 @@ class PgDocumentRepository(DocumentRepository):
         require_existing_partition: bool = False,
         content_sha256: str | None = None,
         independently_indexed: bool = True,
+        chunk_count: int | None = None,
+        embedder_fingerprint: Mapping[str, str | None] | None = None,
     ) -> bool:
         """TODO(phase-9): remove. Mirror of legacy ``add_file_to_partition``.
 
@@ -494,6 +556,10 @@ class PgDocumentRepository(DocumentRepository):
 
         ``indexed_at`` pins the indexation timestamp so it matches the Milvus
         chunks; when ``None`` the ``files.indexed_at`` server default applies.
+
+        ``embedder_fingerprint`` is the config the file's vectors were built
+        with; the file is refused if the partition's embedder no longer matches
+        it (see ``_refuse_if_embedder_changed``).
         """
         async with self.pool.acquire() as conn:
             async with conn.transaction():
@@ -537,6 +603,8 @@ class PgDocumentRepository(DocumentRepository):
                         partition,
                         user_id,
                     )
+                if embedder_fingerprint is not None:
+                    await _refuse_if_embedder_changed(conn, partition, embedder_fingerprint)
 
                 columns = [
                     "file_id",
@@ -548,6 +616,7 @@ class PgDocumentRepository(DocumentRepository):
                     "parent_id",
                     "content_sha256",
                     "independently_indexed",
+                    "chunk_count",
                 ]
                 values: list[Any] = [
                     file_id,
@@ -559,6 +628,7 @@ class PgDocumentRepository(DocumentRepository):
                     parent_id,
                     content_sha256,
                     independently_indexed,
+                    chunk_count,
                 ]
                 # Omit indexed_at to let the server default fire (legacy path).
                 if indexed_at is not None:
@@ -653,22 +723,23 @@ class PgDocumentRepository(DocumentRepository):
         self,
         file_id: str,
         partition: str,
-        file_metadata: dict,
+        metadata_patch: dict,
     ) -> bool:
-        """TODO(phase-9): remove. Updates ``file_metadata`` + syncs structured columns.
+        """TODO(phase-9): remove. Merges ``file_metadata`` + syncs structured columns.
 
-        Mirrors the legacy behaviour: when the new metadata blob contains
+        Mirrors the legacy behaviour: when the metadata patch contains
         ``relationship_id`` or ``parent_id`` keys, the dedicated columns are
         rewritten too so the JSON never diverges from the structured fields.
         """
-        rel_id = file_metadata.get("relationship_id") if "relationship_id" in file_metadata else None
-        parent_id = file_metadata.get("parent_id") if "parent_id" in file_metadata else None
-        sets = ["file_metadata = $1::json"]
-        params: list[Any] = [file_metadata]
-        if "relationship_id" in file_metadata:
+        metadata_patch = {key: value for key, value in metadata_patch.items() if key != "degraded_stages"}
+        rel_id = metadata_patch.get("relationship_id") if "relationship_id" in metadata_patch else None
+        parent_id = metadata_patch.get("parent_id") if "parent_id" in metadata_patch else None
+        sets = ["file_metadata = (COALESCE(file_metadata::jsonb, '{}'::jsonb) || $1::jsonb)::json"]
+        params: list[Any] = [metadata_patch]
+        if "relationship_id" in metadata_patch:
             params.append(rel_id)
             sets.append(f"relationship_id = ${len(params)}")
-        if "parent_id" in file_metadata:
+        if "parent_id" in metadata_patch:
             params.append(parent_id)
             sets.append(f"parent_id = ${len(params)}")
         params.extend([file_id, partition])
@@ -693,6 +764,8 @@ class PgDocumentRepository(DocumentRepository):
         indexation_config: object = _UNSET,
         indexed_at: datetime | None = None,
         content_sha256: object = _UNSET,
+        chunk_count: object = _UNSET,
+        embedder_fingerprint: Mapping[str, str | None] | None = None,
     ) -> bool:
         """TODO(phase-9): remove. PUT-style in-place update.
 
@@ -702,6 +775,9 @@ class PgDocumentRepository(DocumentRepository):
 
         ``indexed_at`` refreshes the indexation timestamp on re-index so it
         matches the freshly re-upserted Milvus chunks; ``None`` leaves it.
+
+        ``embedder_fingerprint`` refuses the update the way it refuses
+        ``add_file_to_partition``'s insert.
         """
         sets: list[str] = []
         params: list[Any] = []
@@ -723,27 +799,38 @@ class PgDocumentRepository(DocumentRepository):
         if content_sha256 is not self._UNSET:
             params.append(content_sha256)
             sets.append(f"content_sha256 = ${len(params)}")
+        if chunk_count is not self._UNSET:
+            params.append(chunk_count)
+            sets.append(f"chunk_count = ${len(params)}")
         if not sets:
             # Match legacy: report whether the row exists at all.
             return await self.file_exists_in_partition(file_id, partition)
         params.extend([file_id, partition])
-        result = await self.pool.execute(
-            f"""
+        sql = f"""
             UPDATE files SET {", ".join(sets)}
             WHERE file_id = ${len(params) - 1} AND partition_name = ${len(params)}
-            """,
-            *params,
-        )
+            """
+        if embedder_fingerprint is None:
+            result = await self.pool.execute(sql, *params)
+        else:
+            async with self.pool.acquire() as conn:
+                async with conn.transaction():
+                    await _refuse_if_embedder_changed(conn, partition, embedder_fingerprint)
+                    result = await conn.execute(sql, *params)
         return result.endswith(" 1")
 
     async def list_partition_files(
         self,
         partition: str,
         limit: int | None = None,
+        degraded_stage: str | None = None,
     ) -> dict:
         """TODO(phase-9): remove. Returns ``{"files": [...]}`` shape used by routers."""
         sql = "SELECT * FROM files WHERE partition_name = $1"
         params: list[Any] = [partition]
+        if degraded_stage is not None:
+            params.append(degraded_stage)
+            sql += f" AND COALESCE(file_metadata::jsonb -> 'degraded_stages', '[]'::jsonb) ? ${len(params)}"
         if limit is not None:
             params.append(limit)
             sql += f" LIMIT ${len(params)}"
@@ -751,6 +838,39 @@ class PgDocumentRepository(DocumentRepository):
         if not rows:
             return {}
         return {"files": [self._row_to_dict(r) for r in rows]}
+
+    async def count_files_by_embedder(self, partition: str) -> list[dict]:
+        """How many files in *partition* were indexed with each embedder.
+
+        One aggregate over ``files.indexation_config``, the per-file snapshot
+        the indexing run already writes. Files indexed before provenance
+        existed have no keys there and come back as ``None`` — unknown, not
+        assumed to match the partition's current setting.
+
+        Ordered most-files-first, so a drifted remainder reads as the exception.
+        """
+        rows = await self.pool.fetch(
+            """
+            SELECT indexation_config->>'embedder'            AS embedder,
+                   indexation_config->>'embedder_model_name' AS model_name,
+                   (indexation_config->>'embedder_dimension')::int AS dimension,
+                   COUNT(*)::int                             AS file_count
+            FROM files
+            WHERE partition_name = $1
+            GROUP BY 1, 2, 3
+            ORDER BY file_count DESC, embedder NULLS LAST
+            """,
+            partition,
+        )
+        return [
+            {
+                "embedder": r["embedder"],
+                "model_name": r["model_name"],
+                "dimension": r["dimension"],
+                "file_count": r["file_count"],
+            }
+            for r in rows
+        ]
 
     async def get_files_by_relationship(
         self,
@@ -860,13 +980,25 @@ class PgDocumentRepository(DocumentRepository):
         """
         metadata = row["file_metadata"] or {}
         indexed_at = row["indexed_at"]
+        indexation_config = row.get("indexation_config") if hasattr(row, "get") else None
         return {
             "partition": row["partition_name"],
             "file_id": row["file_id"],
             "relationship_id": row["relationship_id"],
             "parent_id": row["parent_id"],
             **metadata,
+            # Just the recorded embedder, not the whole config snapshot: a file
+            # list flags rows that disagree with the current setting, it does
+            # not need every chunking knob per row. Both the endpoint reference
+            # and the model it ran: the reference is a renameable label and the
+            # endpoint may since have been repointed or deleted, so the model is
+            # the only durable record of which vector space the file is in.
+            "embedder": (indexation_config or {}).get("embedder") if isinstance(indexation_config, dict) else None,
+            "embedder_model_name": (
+                (indexation_config or {}).get("embedder_model_name") if isinstance(indexation_config, dict) else None
+            ),
             "content_sha256": row.get("content_sha256"),
+            "chunk_count": row.get("chunk_count"),
             # Authoritative system insert time, materialized on the row. Placed
             # after the spread so the column wins over any ``indexed_at`` the
             # copy/restore path copies into file_metadata from chunk metadata
@@ -897,6 +1029,7 @@ class PgDocumentRepository(DocumentRepository):
             relationship_id=row["relationship_id"],
             parent_id=row["parent_id"],
             content_sha256=row.get("content_sha256"),
+            chunk_count=row.get("chunk_count"),
             indexation_config=row["indexation_config"],
         )
 
