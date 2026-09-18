@@ -14,13 +14,13 @@ _lang_detector = LangDetector(
 )
 
 
-def detect_language(text: str):
-    """Detect the primary language of ``text``."""
+def detect_language(text: str, *, min_confidence: float = 0.0):
+    """Detect the primary language of ``text`` above an optional confidence floor."""
     normalized = text.strip() if isinstance(text, str) else ""
     if not normalized:
         return None
     try:
-        outputs = _lang_detector.detect(normalized, k=1)
+        outputs = _lang_detector.detect(normalized, k=1, threshold=min_confidence)
     except Exception:
         return None
     if not outputs:

@@ -733,13 +733,7 @@ async def on_message(message: cl.Message):
                 if isinstance(extra, str):
                     extra = json.loads(extra)
                 if extra:
-                    if "cited_sources" in extra:
-                        # Strictly what the model cited; fall back to
-                        # everything it was shown when nothing was cited
-                        # (e.g. it didn't report citations at all).
-                        sources = extra["cited_sources"] or extra.get("presented_sources")
-                    elif "sources" in extra:
-                        sources = extra["sources"]
+                    sources = extra.get("cited_sources")
 
                 if chunk.choices and chunk.choices[0].delta.content:
                     token = chunk.choices[0].delta.content

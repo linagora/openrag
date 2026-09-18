@@ -1,15 +1,22 @@
 Produce a JSON object listing sub-queries derived from the user's last message.
 
 Output shape (return this JSON object, nothing else):
-{{"requires_retrieval": <true|false>, "query_list": [ {{"query": "<rewritten search string>", "temporal_filters": <list of predicates | null>}} ]}}
+{{"intent": <"greeting"|"gratitude"|"farewell"|"capability"|"other">, "requires_retrieval": <true|false>, "query_list": [ {{"query": "<rewritten search string>", "temporal_filters": <list of predicates | null>}} ]}}
 
 Current date: {current_date}
 Language for `query` field: {query_language}
 Timestamps: UTC (`+00:00`). Week starts Monday.
 
+# Intent and retrieval rules
+- Retrieval is the default. If there is any uncertainty, use `intent: "other"`, set `requires_retrieval: true`, and return a search query.
+- Use `intent: "greeting"`, `"gratitude"`, `"farewell"`, or `"capability"` only when the complete latest user message consists exclusively of that social intent. For those messages, set `requires_retrieval: false` and return an empty `query_list`.
+- Greetings and salutations include brief wellbeing exchanges. Capability means a question about what the assistant can do. Understand common wording variations and obvious typing mistakes conservatively.
+- Gratitude also covers brief acknowledgements and positive reactions with no request attached, in any language: "ok", "okay", "cool", "great", "nice", "perfect", "got it", "d'accord", "super", "parfait", "👍". These are not greetings and not uncertain: use `intent: "gratitude"`.
+- Exception: only when such a reply accepts an offer or answers a question from the assistant's previous turn that requests factual, informational, analytical, or document-backed continuation (for example "ok" after "Would you like the dosage details?") is it a request. Use `intent: "other"`, set `requires_retrieval: true`, and rewrite the accepted request as the query. Replies to social, wellbeing, or feedback questions remain gratitude and skip retrieval.
+- Use `intent: "other"` and set `requires_retrieval: true` for any factual, document-backed, informational, analytical, or mixed request. A social phrase combined with such a request still requires retrieval.
+- A factual claim or scientific statement also requires retrieval, even without a question mark or an explicit request to verify it. Treat it as a request to find evidence, not as casual conversation.
+
 # Rewrite rules (`query` field)
-- Set `requires_retrieval: false` and return an empty `query_list` when the entire last user message is only a greeting, thanks, casual conversation, or a question about the assistant's general capabilities.
-- Set `requires_retrieval: true` for any request that asks for factual or document-backed information. A greeting combined with a factual question still requires retrieval.
 - Rewrite the last `user:` line as one standalone descriptive sentence.
 - Use earlier turns only to resolve pronouns or add context directly relevant to the query; do not inject unrelated history.
 - For independent questions: minimal changes (grammar, missing keywords).
@@ -47,25 +54,54 @@ For exclusions, split into two sub-queries covering each remaining range. Never 
 # Examples (Current date = Wednesday, April 15, 2026)
 
 User: "Summary of meeting notes uploaded in the past month"
-{{"requires_retrieval":true,"query_list":[{{"query":"Summary of meeting notes uploaded in the past month","temporal_filters":[{{"field":"created_at","operator":">=","value":"2026-03-15T00:00:00+00:00"}},{{"field":"created_at","operator":"<","value":"2026-04-16T00:00:00+00:00"}}]}}]}}
+{{"intent":"other","requires_retrieval":true,"query_list":[{{"query":"Summary of meeting notes uploaded in the past month","temporal_filters":[{{"field":"created_at","operator":">=","value":"2026-03-15T00:00:00+00:00"}},{{"field":"created_at","operator":"<","value":"2026-04-16T00:00:00+00:00"}}]}}]}}
 
 User: "Sales figures for Product A and Product B"
-{{"requires_retrieval":true,"query_list":[{{"query":"Sales figures for Product A","temporal_filters":null}},{{"query":"Sales figures for Product B","temporal_filters":null}}]}}
+{{"intent":"other","requires_retrieval":true,"query_list":[{{"query":"Sales figures for Product A","temporal_filters":null}},{{"query":"Sales figures for Product B","temporal_filters":null}}]}}
 
 User: "Documents from last year except March"
-{{"requires_retrieval":true,"query_list":[{{"query":"Documents from January or February 2025","temporal_filters":[{{"field":"created_at","operator":">=","value":"2025-01-01T00:00:00+00:00"}},{{"field":"created_at","operator":"<","value":"2025-03-01T00:00:00+00:00"}}]}},{{"query":"Documents from April to December 2025","temporal_filters":[{{"field":"created_at","operator":">=","value":"2025-04-01T00:00:00+00:00"}},{{"field":"created_at","operator":"<","value":"2026-01-01T00:00:00+00:00"}}]}}]}}
+{{"intent":"other","requires_retrieval":true,"query_list":[{{"query":"Documents from January or February 2025","temporal_filters":[{{"field":"created_at","operator":">=","value":"2025-01-01T00:00:00+00:00"}},{{"field":"created_at","operator":"<","value":"2025-03-01T00:00:00+00:00"}}]}},{{"query":"Documents from April to December 2025","temporal_filters":[{{"field":"created_at","operator":">=","value":"2025-04-01T00:00:00+00:00"}},{{"field":"created_at","operator":"<","value":"2026-01-01T00:00:00+00:00"}}]}}]}}
 
 User: "Q3 2024 reporting template"
-{{"requires_retrieval":true,"query_list":[{{"query":"Q3 2024 reporting template","temporal_filters":null}}]}}
+{{"intent":"other","requires_retrieval":true,"query_list":[{{"query":"Q3 2024 reporting template","temporal_filters":null}}]}}
 
 User: "Evolution of the Department of Justice budget between 2020 and 2022"
-{{"requires_retrieval":true,"query_list":[{{"query":"Department of Justice budget in 2020","temporal_filters":null}},{{"query":"Department of Justice budget in 2021","temporal_filters":null}},{{"query":"Department of Justice budget in 2022","temporal_filters":null}}]}}
+{{"intent":"other","requires_retrieval":true,"query_list":[{{"query":"Department of Justice budget in 2020","temporal_filters":null}},{{"query":"Department of Justice budget in 2021","temporal_filters":null}},{{"query":"Department of Justice budget in 2022","temporal_filters":null}}]}}
 
 User: "Latest safety bulletins"
-{{"requires_retrieval":true,"query_list":[{{"query":"Latest safety bulletins","temporal_filters":[{{"field":"created_at","operator":">=","value":"2026-01-15T00:00:00+00:00"}},{{"field":"created_at","operator":"<","value":"2026-04-16T00:00:00+00:00"}}]}}]}}
+{{"intent":"other","requires_retrieval":true,"query_list":[{{"query":"Latest safety bulletins","temporal_filters":[{{"field":"created_at","operator":">=","value":"2026-01-15T00:00:00+00:00"}},{{"field":"created_at","operator":"<","value":"2026-04-16T00:00:00+00:00"}}]}}]}}
 
 User: "How can you help me?"
-{{"requires_retrieval":false,"query_list":[]}}
+{{"intent":"capability","requires_retrieval":false,"query_list":[]}}
+
+User: "Thanks"
+{{"intent":"gratitude","requires_retrieval":false,"query_list":[]}}
+
+User: "ok"
+{{"intent":"gratitude","requires_retrieval":false,"query_list":[]}}
+
+User: "Great 👍"
+{{"intent":"gratitude","requires_retrieval":false,"query_list":[]}}
+
+Chat history:
+assistant: Was that helpful?
+user: ok
+{{"intent":"gratitude","requires_retrieval":false,"query_list":[]}}
+
+Chat history:
+user: What is albendazole used for?
+assistant: Albendazole treats lymphatic filariasis and several worm infections. Would you like the recommended dosages?
+user: ok
+{{"intent":"other","requires_retrieval":true,"query_list":[{{"query":"Recommended dosages of albendazole","temporal_filters":null}}]}}
+
+User: "Cool, and what was Product B revenue in Q1?"
+{{"intent":"other","requires_retrieval":true,"query_list":[{{"query":"Product B revenue in Q1","temporal_filters":null}}]}}
+
+User: "Hello, how can you helpe me?"
+{{"intent":"capability","requires_retrieval":false,"query_list":[]}}
 
 User: "Hello, what was Product A revenue in Q1?"
-{{"requires_retrieval":true,"query_list":[{{"query":"Product A revenue in Q1","temporal_filters":null}}]}}
+{{"intent":"other","requires_retrieval":true,"query_list":[{{"query":"Product A revenue in Q1","temporal_filters":null}}]}}
+
+User: "Albendazole is used to treat lymphatic filariasis."
+{{"intent":"other","requires_retrieval":true,"query_list":[{{"query":"Albendazole is used to treat lymphatic filariasis.","temporal_filters":null}}]}}

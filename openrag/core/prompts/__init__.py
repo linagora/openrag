@@ -1,5 +1,6 @@
 """Prompt assembly helpers — pure string-formatting builders + disk loader."""
 
+from .casual_response import build_casual_response_prompt
 from .chat_prompt_builder import (
     EMPTY_CONTEXT_MESSAGE,
     SOURCE_SEPARATOR,
@@ -47,6 +48,7 @@ __all__ = [
     "SOURCE_SEPARATOR",
     "EMPTY_CONTEXT_MESSAGE",
     "WebSourceLike",
+    "build_casual_response_prompt",
     # contextualization
     "BASE_CHUNK_FORMAT",
     "CHUNK_FORMAT",
