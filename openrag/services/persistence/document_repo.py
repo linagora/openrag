@@ -349,6 +349,14 @@ class PgDocumentRepository(DocumentRepository):
             partition,
         )
 
+    async def get_file_metadata(self, file_id: str, partition: str) -> dict[str, Any] | None:
+        metadata = await self.pool.fetchval(
+            "SELECT file_metadata FROM files WHERE file_id = $1 AND partition_name = $2",
+            file_id,
+            partition,
+        )
+        return dict(metadata) if isinstance(metadata, dict) else None
+
     async def get_content_sha256(self, file_id: str, partition: str) -> str | None:
         return await self.pool.fetchval(
             "SELECT content_sha256 FROM files WHERE file_id = $1 AND partition_name = $2",
@@ -715,22 +723,23 @@ class PgDocumentRepository(DocumentRepository):
         self,
         file_id: str,
         partition: str,
-        file_metadata: dict,
+        metadata_patch: dict,
     ) -> bool:
-        """TODO(phase-9): remove. Updates ``file_metadata`` + syncs structured columns.
+        """TODO(phase-9): remove. Merges ``file_metadata`` + syncs structured columns.
 
-        Mirrors the legacy behaviour: when the new metadata blob contains
+        Mirrors the legacy behaviour: when the metadata patch contains
         ``relationship_id`` or ``parent_id`` keys, the dedicated columns are
         rewritten too so the JSON never diverges from the structured fields.
         """
-        rel_id = file_metadata.get("relationship_id") if "relationship_id" in file_metadata else None
-        parent_id = file_metadata.get("parent_id") if "parent_id" in file_metadata else None
-        sets = ["file_metadata = $1::json"]
-        params: list[Any] = [file_metadata]
-        if "relationship_id" in file_metadata:
+        metadata_patch = {key: value for key, value in metadata_patch.items() if key != "degraded_stages"}
+        rel_id = metadata_patch.get("relationship_id") if "relationship_id" in metadata_patch else None
+        parent_id = metadata_patch.get("parent_id") if "parent_id" in metadata_patch else None
+        sets = ["file_metadata = (COALESCE(file_metadata::jsonb, '{}'::jsonb) || $1::jsonb)::json"]
+        params: list[Any] = [metadata_patch]
+        if "relationship_id" in metadata_patch:
             params.append(rel_id)
             sets.append(f"relationship_id = ${len(params)}")
-        if "parent_id" in file_metadata:
+        if "parent_id" in metadata_patch:
             params.append(parent_id)
             sets.append(f"parent_id = ${len(params)}")
         params.extend([file_id, partition])
@@ -814,10 +823,14 @@ class PgDocumentRepository(DocumentRepository):
         self,
         partition: str,
         limit: int | None = None,
+        degraded_stage: str | None = None,
     ) -> dict:
         """TODO(phase-9): remove. Returns ``{"files": [...]}`` shape used by routers."""
         sql = "SELECT * FROM files WHERE partition_name = $1"
         params: list[Any] = [partition]
+        if degraded_stage is not None:
+            params.append(degraded_stage)
+            sql += f" AND COALESCE(file_metadata::jsonb -> 'degraded_stages', '[]'::jsonb) ? ${len(params)}"
         if limit is not None:
             params.append(limit)
             sql += f" LIMIT ${len(params)}"

@@ -208,11 +208,13 @@ class FakeDocumentRepo:
     def __init__(self, files: set[tuple[str, str]] | None = None, listing: dict | None = None):
         self._files = files or set()
         self._listing = listing if listing is not None else {}
+        self.list_calls: list[dict] = []
 
     async def file_exists_in_partition(self, file_id: str, partition: str) -> bool:
         return (file_id, partition) in self._files
 
-    async def list_partition_files(self, partition: str, limit=None) -> dict:
+    async def list_partition_files(self, partition: str, limit=None, degraded_stage=None) -> dict:
+        self.list_calls.append({"partition": partition, "limit": limit, "degraded_stage": degraded_stage})
         return self._listing
 
     async def get_files_by_relationship(self, partition: str, relationship_id: str) -> list[dict]:
@@ -792,6 +794,17 @@ async def test_list_files_missing_partition_404():
 async def test_list_files_empty_listing_returns_empty_list():
     svc = _svc(prepo=FakePartitionRepo({"p"}), drepo=FakeDocumentRepo(listing={}))
     assert await svc.list_files("p") == []
+
+
+@pytest.mark.asyncio
+async def test_list_files_pushes_degraded_stage_filter_to_catalog() -> None:
+    repo = FakeDocumentRepo(listing={"files": [{"file_id": "f1", "degraded_stages": ["caption"]}]})
+    svc = _svc(prepo=FakePartitionRepo({"p"}), drepo=repo)
+
+    files = await svc.list_files("p", limit=20, degraded_stage="caption")
+
+    assert files == [{"file_id": "f1", "degraded_stages": ["caption"]}]
+    assert repo.list_calls == [{"partition": "p", "limit": 20, "degraded_stage": "caption"}]
 
 
 @pytest.mark.asyncio

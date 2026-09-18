@@ -26,12 +26,25 @@ async def topic_tag_stage(
         # DB-resolved per-partition prompt for this file, if any; otherwise the
         # tagger falls back to its own (disk-loaded) default.
         system_prompt = row.get("topic_tagger_prompt")
+        failures: list[Exception] = []
+
+        def record_failure(exc: Exception) -> None:
+            if not failures:
+                failures.append(exc)
+
         row["topic_tags"] = await run_with_optional_timeout(
             lambda: topic_tagger.tag(
-                chunks, filename=filename, max_tags=max_tags, lang=language, system_prompt=system_prompt
+                chunks,
+                filename=filename,
+                max_tags=max_tags,
+                lang=language,
+                system_prompt=system_prompt,
+                on_failure=record_failure,
             ),
             timeout,
         )
+        if failures:
+            row.setdefault("degraded_stages", {})["topic_tag"] = str(failures[0])
         row["stage"] = "topic_tagged"
         row.pop("error", None)
         return row

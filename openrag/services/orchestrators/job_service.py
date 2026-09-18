@@ -22,6 +22,7 @@ from core.models.catalog import (
     TASK_CREATED_AT_METADATA_KEY,
     TASK_FINISHED_AT_METADATA_KEY,
     TERMINAL_TASK_STATES,
+    normalize_degraded_stages,
 )
 from core.utils.logging import get_logger
 
@@ -144,6 +145,7 @@ class JobService:
         return {
             "task_id": task_id,
             "state": info["state"],
+            "outcome": _task_outcome(info["state"], details),
             "details": details,
             "created_at": created_at,
             "duration_ms": duration_ms,
@@ -230,6 +232,7 @@ def _job_to_info(job: Any) -> dict[str, Any]:
             "partition": job.partition,
             "metadata": {},
             "user_id": job.user_id,
+            "degraded_stages": job.degraded_stages,
         },
         "created_at": created_at,
         "duration_ms": _duration_ms(created_at, completed_at, state=state, now=datetime.now(UTC)),
@@ -256,6 +259,8 @@ def _duration_ms(
 
 def _task_details(details: Any) -> tuple[dict[str, Any], Any, Any]:
     public_details = dict(details) if isinstance(details, dict) else {}
+    if "degraded_stages" in public_details:
+        public_details["degraded_stages"] = normalize_degraded_stages(public_details["degraded_stages"])
     raw_metadata = public_details.get("metadata")
     if not isinstance(raw_metadata, dict):
         return public_details, None, None
@@ -265,6 +270,12 @@ def _task_details(details: Any) -> tuple[dict[str, Any], Any, Any]:
     finished_at = metadata.pop(TASK_FINISHED_AT_METADATA_KEY, None)
     public_details["metadata"] = metadata
     return public_details, created_at, finished_at
+
+
+def _task_outcome(state: str, details: dict[str, Any]) -> str:
+    if state == "COMPLETED" and details.get("degraded_stages"):
+        return "completed_degraded"
+    return state.lower()
 
 
 def _parse_timestamp(value: Any) -> datetime | None:
