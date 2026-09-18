@@ -7,6 +7,7 @@ from core.indexing.contextualize import ChunkContextualizer
 from core.indexing.topic_tags import TopicTagger
 from core.models.chunk import Chunk
 from core.models.document import Document, DocumentType, ImageBlock, ProcessedDocument, TextBlock
+from core.prompts.vlm_prompt_builder import wrap_caption
 from core.utils.exceptions import InferenceError
 from services.workers.pipeline_builder import build_indexing_pipeline
 from services.workers.stages import caption as caption_module
@@ -1494,15 +1495,65 @@ async def test_image_bytes_are_released_when_captioning_fails():
 
 @pytest.mark.asyncio
 async def test_release_keeps_everything_the_caption_substitution_reads():
-    """Only the payload goes. Dropping the whole ImageBlock, or its caption or
-    page number, would also satisfy an assertion about ``image_bytes``."""
+    """Only the payload goes.
+
+    The previous version of this test asserted ``page_number`` and ``caption``
+    and never ran a substitution, so it did not cover the fields
+    ``_release_image_bytes`` actually promises to keep — ``metadata``,
+    ``mime_type`` and ``source_url`` — nor the thing they exist to serve.
+
+    Here each image carries a ``markdown_ref`` that ``_replace_markdown_ref``
+    must find in the text block and swap for the wrapped caption, so the test
+    exercises the substitution its name refers to and fails if the release
+    disturbs ``text_blocks``.
+
+    Note the two halves guard different things. The release runs *after*
+    ``caption_stage``, so clearing ``metadata`` could not un-substitute text
+    that is already written — the text assertions cannot stand in for the field
+    assertions. The per-field checks below are what pin a release that clears
+    more than the payload.
+    """
+    refs = [f"![](figure-{i}.png)" for i in range(3)]
+    document = Document(filename="figs.pdf", raw_bytes=b"z" * 512, content_type=DocumentType.PDF, partition="tenant-a")
+    processed = ProcessedDocument(
+        document_id=document.id,
+        text_blocks=[TextBlock(text=f"intro {refs[0]} middle {refs[1]} tail {refs[2]} end", page_number=1)],
+        images=[
+            ImageBlock(
+                image_bytes=b"\x89PNG" + b"y" * 4096,
+                page_number=i,
+                mime_type="image/jpeg",
+                source_url=f"https://example.com/figure-{i}.png",
+                metadata={"markdown_ref": ref},
+            )
+            for i, ref in enumerate(refs)
+        ],
+    )
     vlm = FakeVLM()
-    pipeline, document = _image_pipeline(vlm=vlm, image_count=3)
+    pipeline = build_indexing_pipeline(
+        parser=FakeParser(processed),
+        chunker=FakeChunker([Chunk(id="c1", text="body", partition="tenant-a")]),
+        embedder=FakeEmbedder([[1.0]]),
+        vector_store=FakeVectorStore(),
+        vlm=vlm,
+    )
 
     row = _row(document)
     await pipeline.run(row)
 
     images = row["processed_document"].images
-    assert len(images) == 3
+    assert len(images) == 3, "guard: the images must survive the release"
+    assert all(image.image_bytes == b"" for image in images), "guard: the payload must have been released"
+
+    # The substitution itself — what the surviving metadata is for.
+    text = " ".join(block.text for block in row["processed_document"].text_blocks)
+    assert text.count(wrap_caption("caption")) == 3, "the captions were not substituted into the text"
+    for ref in refs:
+        assert ref not in text, f"{ref} survived unsubstituted"
+
+    # Every field the release docstring promises to keep.
     assert [image.page_number for image in images] == [0, 1, 2]
     assert all(image.caption == "caption" for image in images)
+    assert all(image.mime_type == "image/jpeg" for image in images)
+    assert [image.source_url for image in images] == [f"https://example.com/figure-{i}.png" for i in range(3)]
+    assert [image.metadata.get("markdown_ref") for image in images] == refs

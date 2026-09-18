@@ -618,11 +618,16 @@ def _release_image_bytes(row: MutableMapping[str, Any]) -> None:
     """Drop extracted image payloads once the caption decision has resolved.
 
     ``ImageBlock.image_bytes`` is raw PNG/JPEG lifted out of the document. The
-    only consumer is ``ImageBlock.image_url``, which base64-encodes it for the
-    VLM request — nothing downstream reads it. Chunking works from
-    ``text_blocks``, and the caption has already been substituted into those via
-    ``metadata["markdown_ref"]``; no post-caption stage touches ``.images`` at
-    all.
+    only consumer is ``caption_stage``: ``caption_one``
+    (``services/workers/stages/caption.py``) hands the payload straight to
+    ``VLM.caption_image``, which base64-encodes it for the request. Nothing
+    downstream reads it. Chunking works from ``text_blocks``, and the caption has
+    already been substituted into those via ``metadata["markdown_ref"]``; no
+    post-caption stage touches ``.images`` at all.
+
+    ``ImageBlock.image_url`` would also encode these bytes, but it has no callers
+    anywhere in the tree — do not grep for it when re-checking this release, or
+    the real reader above is the one you will miss.
 
     Held to the end of ``run()`` they outlast the file itself: a figure-heavy
     PDF through Marker extracts images that routinely exceed the source, and
