@@ -55,6 +55,7 @@ class OpenAIChatCompletionRequest(BaseModel):
                         "include_all_retrieved_sources": False,
                         "include_retrieval_trace": False,
                         "compare_original_query": False,
+                        "bypass_query_contextualization": False,
                         "require_retrieval": False,
                     },
                 }
@@ -93,6 +94,7 @@ class OpenAIChatCompletionRequest(BaseModel):
             "include_all_retrieved_sources": False,
             "include_retrieval_trace": False,
             "compare_original_query": False,
+            "bypass_query_contextualization": False,
             "require_retrieval": False,
         },
         description=(
@@ -112,7 +114,9 @@ class OpenAIChatCompletionRequest(BaseModel):
             "large; opt in only for debugging/evaluation."
             " 'include_retrieval_trace' (default false) adds content-free stage telemetry to extra. "
             "'compare_original_query' runs an isolated original-query retrieval only when tracing is enabled; "
-            "it never changes the documents used for the answer."
+            "it never changes the documents used for the answer. "
+            "'bypass_query_contextualization' skips query rewriting for a traced, explicitly required retrieval; "
+            "it cannot be combined with 'compare_original_query'."
         ),
     )
 
@@ -126,6 +130,19 @@ class OpenAIChatCompletionRequest(BaseModel):
         # omits it entirely.
         if self.top_logprobs is not None and not self.logprobs:
             self.top_logprobs = None
+        return self
+
+    @model_validator(mode="after")
+    def _validate_contextualization_bypass(self) -> "OpenAIChatCompletionRequest":
+        metadata = self.metadata or {}
+        if metadata.get("bypass_query_contextualization") is not True:
+            return self
+        if metadata.get("include_retrieval_trace") is not True:
+            raise ValueError("bypass_query_contextualization requires include_retrieval_trace")
+        if metadata.get("require_retrieval") is not True:
+            raise ValueError("bypass_query_contextualization requires require_retrieval")
+        if metadata.get("compare_original_query") is True:
+            raise ValueError("bypass_query_contextualization cannot be combined with compare_original_query")
         return self
 
 

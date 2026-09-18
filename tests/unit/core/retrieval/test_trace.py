@@ -120,6 +120,18 @@ def test_safe_public_value_projects_nested_contextualization_by_container():
     }
 
 
+def test_contextualization_bypass_is_preserved_by_safe_serialization():
+    builder = RetrievalTraceBuilder("request", "exact original query")
+    builder.contextualization = ContextualizationTrace(
+        original_query="exact original query",
+        bypassed=True,
+    )
+
+    trace = builder.finish(configuration_fingerprint="fingerprint")
+
+    assert trace["contextualization"]["bypassed"] is True
+
+
 @pytest.mark.parametrize(
     "values",
     [

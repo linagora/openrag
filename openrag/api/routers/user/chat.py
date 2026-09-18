@@ -503,7 +503,11 @@ async def openai_chat_completion(
         )
 
     metadata = request.metadata or {}
-    if metadata.get("include_retrieval_trace") is True or metadata.get("compare_original_query") is True:
+    if (
+        metadata.get("include_retrieval_trace") is True
+        or metadata.get("compare_original_query") is True
+        or metadata.get("bypass_query_contextualization") is True
+    ):
         await diagnostics_guard.authorize(user)
 
     log.debug("Received chat completion request with messages: {}", truncate(str(request.messages)))
@@ -635,7 +639,11 @@ async def openai_completion(
         )
 
     metadata = request.metadata or {}
-    if metadata.get("include_retrieval_trace") is True or metadata.get("compare_original_query") is True:
+    if (
+        metadata.get("include_retrieval_trace") is True
+        or metadata.get("compare_original_query") is True
+        or metadata.get("bypass_query_contextualization") is True
+    ):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Retrieval diagnostics are supported only by chat completions",

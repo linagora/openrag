@@ -537,6 +537,24 @@ class QueryService:
         except Exception as trace_error:
             trace.record_error("contextualization", trace_error)
 
+    @staticmethod
+    def _record_contextualization_bypass(
+        trace: RetrievalTraceBuilder | None,
+        *,
+        original_query: str,
+    ) -> None:
+        if trace is None:
+            return
+        try:
+            trace.contextualization = ContextualizationTrace(
+                original_query=original_query,
+                bypassed=True,
+            )
+            trace.record_stage("original_query", status="complete", candidates=[])
+            trace.record_stage("contextualized_query", status="not_run", candidates=[])
+        except Exception as trace_error:
+            trace.record_error("contextualization", trace_error)
+
     # ------------------------------------------------------------------
     # Map-reduce (was map_reduce.RAGMapReduce — no LangChain)
     # ------------------------------------------------------------------
@@ -641,8 +659,12 @@ class QueryService:
 
         retrieval_forced = explicitly_required or existing_force_retrieval
         queries: SearchQueries | None = None
+        bypass_contextualization = metadata.get("bypass_query_contextualization") is True
 
-        if casual_policy is None or retrieval_forced:
+        if bypass_contextualization:
+            queries = SearchQueries(query_list=[Query(query=last_user_message)])
+            self._record_contextualization_bypass(trace, original_query=last_user_message)
+        elif casual_policy is None or retrieval_forced:
             queries = await self.generate_query(messages, llm=llm, partition=partition, trace=trace)
             usable_queries = [query for query in queries.query_list if query.query.strip()]
             contextualizer_found_casual = (

@@ -13,6 +13,11 @@ from fastapi import HTTPException
     [
         {"include_retrieval_trace": True},
         {"compare_original_query": True},
+        {
+            "include_retrieval_trace": True,
+            "require_retrieval": True,
+            "bypass_query_contextualization": True,
+        },
     ],
 )
 async def test_chat_diagnostics_require_admin_privileges(metadata):
@@ -43,6 +48,7 @@ async def test_chat_diagnostics_require_admin_privileges(metadata):
     [
         {"include_retrieval_trace": True},
         {"compare_original_query": True},
+        {"bypass_query_contextualization": True},
     ],
 )
 @pytest.mark.parametrize("user", [{"id": 7, "is_admin": False}, {"id": 1, "is_admin": True}])

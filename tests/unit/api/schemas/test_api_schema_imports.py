@@ -105,6 +105,47 @@ def test_chat_request_defaults_logprobs_off():
     assert OpenAIChatCompletionRequest.model_json_schema()["properties"]["logprobs"]["default"] is False
 
 
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {"bypass_query_contextualization": True},
+        {
+            "bypass_query_contextualization": True,
+            "include_retrieval_trace": True,
+        },
+        {
+            "bypass_query_contextualization": True,
+            "include_retrieval_trace": True,
+            "require_retrieval": True,
+            "compare_original_query": True,
+        },
+    ],
+)
+def test_contextualization_bypass_rejects_unsafe_or_ambiguous_combinations(metadata):
+    with pytest.raises(ValidationError):
+        OpenAIChatCompletionRequest.model_validate(
+            {
+                "messages": [{"role": "user", "content": "question"}],
+                "metadata": metadata,
+            }
+        )
+
+
+def test_contextualization_bypass_accepts_traced_required_retrieval():
+    request = OpenAIChatCompletionRequest.model_validate(
+        {
+            "messages": [{"role": "user", "content": "question"}],
+            "metadata": {
+                "bypass_query_contextualization": True,
+                "include_retrieval_trace": True,
+                "require_retrieval": True,
+            },
+        }
+    )
+
+    assert request.metadata["bypass_query_contextualization"] is True
+
+
 @pytest.mark.parametrize("model", [OpenAIChatCompletionRequest, OpenAICompletionRequest])
 def test_openapi_example_is_a_valid_request(model):
     """The Swagger "Try it out" bodies are hand-written dicts in ``json_schema_extra``

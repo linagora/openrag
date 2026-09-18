@@ -115,6 +115,7 @@ class ContextualizationTrace(_TraceModel):
     intent: str | None = None
     requires_retrieval: bool | None = None
     fallback_used: bool = False
+    bypassed: bool = False
     error: TraceError | None = None
     duration_seconds: float | None = Field(default=None, ge=0)
     model: str | None = None
