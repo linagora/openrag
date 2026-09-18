@@ -8,6 +8,11 @@ import { toast } from "sonner";
 import { PageHeader } from "@/components/shared/page-header";
 import { DataTable, SortableHeader } from "@/components/shared/data-table";
 import { ConfirmDialog } from "@/components/shared/confirm-dialog";
+import {
+  DEGRADED_STAGE_OPTIONS,
+  DegradedStageBadges,
+  type DegradedStage,
+} from "@/components/shared/degraded-stages";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -41,6 +46,7 @@ const fileHref = (partition: string, fileId: string) =>
   `/documents/${encodeURIComponent(partition)}/${encodeURIComponent(fileId)}`;
 const fileLabel = (f: PartitionFile) => (f.filename as string) || f.file_id;
 const str = (v: unknown) => (v == null ? "" : String(v));
+const ALL_DEGRADED_STAGES = "all";
 
 export default function DocumentListPage() {
   const queryClient = useQueryClient();
@@ -60,6 +66,9 @@ export default function DocumentListPage() {
   const [uploading, setUploading] = useState(false);
   const [fileSearch, setFileSearch] = useState("");
   const [indexedSince, setIndexedSince] = useState("");
+  const [degradedStage, setDegradedStage] = useState<DegradedStage | typeof ALL_DEGRADED_STAGES>(
+    ALL_DEGRADED_STAGES,
+  );
   const [fileSelection, setFileSelection] = useState<{
     partition: string;
     rows: RowSelectionState;
@@ -148,8 +157,11 @@ export default function DocumentListPage() {
   };
 
   const filesQuery = useQuery({
-    queryKey: ["partition-files", selected],
-    queryFn: () => listPartitionFiles(selected),
+    queryKey: ["partition-files", selected, degradedStage],
+    queryFn: () =>
+      listPartitionFiles(selected, {
+        ...(degradedStage === ALL_DEGRADED_STAGES ? {} : { degradedStage }),
+      }),
     // Only fetch once we've confirmed `selected` is a real, still-existing
     // partition — avoids a 404 flash for a stale/deleted selection during load.
     enabled: !!selected && selectedPartitionExists,
@@ -206,6 +218,7 @@ export default function DocumentListPage() {
           { header: "embedder", value: (file) => fileModel(file) ?? "" },
           { header: "indexed_at", value: (file) => file.indexed_at },
           { header: "created_at", value: (file) => file.created_at },
+          { header: "degraded_stages", value: (file) => file.degraded_stages?.join(",") },
         ],
         filteredFileRows,
       );
@@ -398,6 +411,16 @@ export default function DocumentListPage() {
         formatDate((row.original.indexed_at as string) ?? (row.original.created_at as string) ?? null),
     },
     {
+      id: "enrichment",
+      header: "Enrichment",
+      cell: ({ row }) =>
+        row.original.degraded_stages?.length ? (
+          <DegradedStageBadges stages={row.original.degraded_stages} />
+        ) : (
+          <span className="text-muted-foreground">No failures recorded</span>
+        ),
+    },
+    {
       id: "actions",
       header: "Actions",
       cell: ({ row }) => (
@@ -518,6 +541,22 @@ export default function DocumentListPage() {
           className="w-[150px]"
           aria-label="Indexed since"
         />
+        <Select
+          value={degradedStage}
+          onValueChange={(value) => setDegradedStage(value as DegradedStage | typeof ALL_DEGRADED_STAGES)}
+        >
+          <SelectTrigger className="w-[210px]" aria-label="Filter by degraded stage">
+            <SelectValue placeholder="All enrichment outcomes" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value={ALL_DEGRADED_STAGES}>All enrichment outcomes</SelectItem>
+            {DEGRADED_STAGE_OPTIONS.map((stage) => (
+              <SelectItem key={stage.value} value={stage.value}>
+                {stage.label}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
         {writable && selectedFiles.length > 0 && (
           <>
             <ConfirmDialog

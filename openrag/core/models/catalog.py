@@ -24,6 +24,10 @@ class DocumentStatus(str, Enum):
 # re-declaring the set.
 TERMINAL_TASK_STATES = frozenset({DocumentStatus.COMPLETED, DocumentStatus.FAILED, DocumentStatus.CANCELLED})
 
+# Detached pre-#721 actors may still emit these internal states during a
+# rolling deployment. Keep the compatibility set shared without importing Ray.
+LEGACY_ACTIVE_INDEXING_STATES = frozenset({"CHUNKING", "INSERTING"})
+
 # Enrichment can fail without making the base-content index unusable. Keep the
 # names bounded and stable because they are persisted and exposed through APIs.
 DEGRADABLE_ENRICHMENT_STAGES = frozenset({"caption", "contextualize", "topic_tag"})

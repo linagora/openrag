@@ -52,7 +52,7 @@ function renderJobDetail(taskId = "task-1") {
   );
 }
 
-describe("JobDetailPage failed diagnostics", () => {
+describe("JobDetailPage", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     getTaskStatusMock.mockResolvedValue({
@@ -122,5 +122,24 @@ describe("JobDetailPage failed diagnostics", () => {
     expect(copyToClipboardMock.mock.calls[0][0]).not.toContain("Failed stage:");
     expect(copyToClipboardMock.mock.calls[0][0]).not.toContain("draft");
     expect(copyToClipboardMock.mock.calls[0][0]).not.toContain("user-tag");
+  });
+
+  it("distinguishes completed jobs with degraded enrichment", async () => {
+    getTaskStatusMock.mockResolvedValue({
+      task_id: "task-1",
+      task_state: "COMPLETED",
+      details: {
+        file_id: "file-1",
+        partition: "docs",
+        metadata: { filename: "degraded.pdf" },
+        user_id: 1,
+        degraded_stages: ["caption", "contextualize"],
+      },
+    });
+
+    renderJobDetail();
+
+    expect((await screen.findAllByText("Completed with degradation")).length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Caption, Contextualization").length).toBeGreaterThan(0);
   });
 });

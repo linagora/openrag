@@ -209,11 +209,23 @@ export interface PartitionFile {
   /** Model that actually produced this file's vectors; null when unrecorded.
    *  Survives renames, repoints and deletions of the endpoint. */
   embedder_model_name?: string | null;
+  degraded_stages?: string[];
   [key: string]: unknown;
 }
 
-export function listPartitionFiles(name: string, limit?: number): Promise<{ files: PartitionFile[] }> {
-  const qs = limit != null ? `?limit=${limit}` : "";
+export interface ListPartitionFilesOptions {
+  limit?: number;
+  degradedStage?: "caption" | "contextualize" | "topic_tag";
+}
+
+export function listPartitionFiles(
+  name: string,
+  options: ListPartitionFilesOptions = {},
+): Promise<{ files: PartitionFile[] }> {
+  const query = new URLSearchParams();
+  if (options.limit != null) query.set("limit", String(options.limit));
+  if (options.degradedStage) query.set("degraded_stage", options.degradedStage);
+  const qs = query.size ? `?${query.toString()}` : "";
   return request<{ files: PartitionFile[] }>(`${P}/${enc(name)}${qs}`);
 }
 

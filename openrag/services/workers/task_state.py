@@ -12,6 +12,7 @@ from typing import Any
 
 import ray
 from core.models.catalog import (
+    LEGACY_ACTIVE_INDEXING_STATES,
     TASK_CREATED_AT_METADATA_KEY,
     TASK_FINISHED_AT_METADATA_KEY,
     TERMINAL_TASK_STATES,
@@ -26,7 +27,6 @@ ACTIVE_INDEXING_STATES = frozenset({"QUEUED", "SERIALIZING"})
 # must keep treating them as in-flight so cleanup never misses such a task and
 # lets a stale worker write data after the file/partition is gone. Kept out of
 # the public active counts and the DocumentStatus enum on purpose — fencing only.
-LEGACY_ACTIVE_INDEXING_STATES = frozenset({"CHUNKING", "INSERTING"})
 CANCELLABLE_INDEXING_STATES = ACTIVE_INDEXING_STATES | LEGACY_ACTIVE_INDEXING_STATES
 RECOVERABLE_TASK_STATES = CANCELLABLE_INDEXING_STATES | {"CANCELLED"}
 TERMINAL_INDEXING_STATES = frozenset({"COMPLETED", "FAILED"})
