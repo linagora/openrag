@@ -51,7 +51,13 @@ class DocParser(DocumentParser):
             docx_bytes, fallback_text = await asyncio.to_thread(self._convert, str(src_path))
 
         if docx_bytes:
-            docx_doc = document.model_copy(update={"raw_bytes": docx_bytes, "content_type": DocumentType.DOCX})
+            # ``source_path`` must be cleared, not inherited: ``model_copy``
+            # propagates every field, and this derived document's bytes are the
+            # *converted* .docx. Leaving it set would hand ``DocxParser`` the
+            # original .doc path and it would parse the wrong file (#911).
+            docx_doc = document.model_copy(
+                update={"raw_bytes": docx_bytes, "content_type": DocumentType.DOCX, "source_path": None}
+            )
             return await self._docx.parse(docx_doc)
 
         text = (fallback_text or "").strip()

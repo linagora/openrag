@@ -110,3 +110,19 @@ async def test_serialize_leaves_caption_fan_out_unbounded_without_a_budget(monke
 
     assert vlm.calls == 20
     assert vlm.peak > 3
+
+
+@pytest.mark.asyncio
+async def test_serialize_carries_the_files_own_path_on_the_document(monkeypatch, tmp_path):
+    """#911: the extract path builds its own Document, so it needs the same
+    ``source_path`` the indexer sets — otherwise a pooled parser reached through
+    ``/extract`` still materialises a node-local temp file."""
+    path = tmp_path / "album.docx"
+    path.write_bytes(b"x")
+    serializer, _ = _build_serializer(monkeypatch, PeakTrackingVLM(), vlm_semaphore=3)
+
+    await serializer.serialize(str(path), {"filename": "album.docx"})
+
+    dispatcher = serializer._dispatcher
+    assert len(dispatcher.calls) == 1, "guard: the dispatcher must have been handed a document"
+    assert dispatcher.calls[0].source_path == str(path)

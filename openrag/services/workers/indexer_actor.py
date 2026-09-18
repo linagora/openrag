@@ -481,6 +481,12 @@ async def _load_document(
         id=file_id,
         filename=filename,
         raw_bytes=raw_bytes,
+        # The upload's own path under ``config.paths.data_dir`` — node-shared in
+        # both deployment shapes. Path-based parsers hand this across the actor
+        # boundary instead of a node-local temp file (#911). It outlives the
+        # pipeline: ``indexer_pool`` purges the upload only after indexing
+        # settles, and only when ``save_uploaded_files`` is off.
+        source_path=str(p),
         content_type=Document.detect_content_type(filename),
         partition=partition,
         metadata=dict(metadata),
