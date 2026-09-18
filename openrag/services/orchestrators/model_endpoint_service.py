@@ -8,10 +8,11 @@ so the system works without any admin interaction.
 
 from __future__ import annotations
 
+import functools
 import io
 import os
 import wave
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
@@ -23,8 +24,10 @@ from core.config.model_endpoints import (
     STT_REQUEST_CONTROL_EXTRA_KEYS,
     ModelEndpointConfig,
     ModelEndpointRow,
+    is_placeholder_api_key,
+    material_embedder_changes,
 )
-from core.utils.exceptions import NotFoundError, ValidationError
+from core.utils.exceptions import ConflictError, NotFoundError, ValidationError
 from core.utils.logging import get_logger
 from core.utils.redaction import preserve_existing_secrets
 
@@ -36,10 +39,6 @@ logger = get_logger()
 
 _VALID_TYPES = frozenset({"embedder", "reranker", "llm", "vlm", "stt"})
 _SAMPLING_TYPES = frozenset({"llm", "vlm"})
-# `EMPTY` is the config's stand-in for "no key configured" (see endpoints.py), not
-# a credential. Treating it as one would let boot-time sync overwrite a real
-# hand-set key with a placeholder the moment sync_on_boot was switched on.
-_PLACEHOLDER_API_KEYS = frozenset({"", "EMPTY"})
 _STT_VALIDATION_TIMEOUT_SECONDS = 15.0
 _STT_TEXT_RESPONSE_FORMATS = frozenset({"text", "srt", "vtt"})
 # Which env var, if any, owns a given tunable per model type. `_build_default_seeds`
@@ -146,7 +145,7 @@ def _slug(model_name: str) -> str:
 
 def _with_api_key(extra: dict[str, Any], api_key: str | None) -> dict[str, Any]:
     """Add ``api_key`` to endpoint extras when configured."""
-    if api_key:
+    if not is_placeholder_api_key(api_key):
         return {**extra, "api_key": api_key}
     return extra
 
@@ -180,6 +179,39 @@ def _with_sampling_params(extra: dict[str, Any], llm_cfg: Any) -> dict[str, Any]
     return {**extra, **_sampling_params(llm_cfg)}
 
 
+async def _refuse_unacknowledged_repoint(
+    locked: ModelEndpointRow,
+    indexed_file_usage: Callable[[], Awaitable[list[dict]]],
+    *,
+    fields: Mapping[str, object],
+) -> None:
+    """Raise unless this embedder edit leaves every indexed file's vectors valid.
+
+    Runs inside the repo's update, on the row as locked there, so the usage it
+    reads cannot go stale before the edit commits: a file being indexed against
+    this endpoint is either counted here or refused when the indexer records it
+    (#958). What counts as a change is ``material_embedder_changes``, the same
+    fingerprint the indexer compares.
+    """
+    changed = material_embedder_changes(locked, fields)
+    if not changed:
+        return
+    usage = await indexed_file_usage()
+    total = sum(row["file_count"] for row in usage)
+    if not total:
+        return
+    shown = ", ".join(row["partition"] for row in usage[:5])
+    if len(usage) > 5:
+        shown += f" and {len(usage) - 5} more"
+    raise ConflictError(
+        f"Changing {', '.join(changed)} on embedder '{locked.name}' leaves {total} indexed file(s) in "
+        f"{len(usage)} partition(s) ({shown}) with vectors a different configuration no longer matches. "
+        "Resend with acknowledge_indexed_data=true to apply it anyway, or create a new endpoint and move "
+        "partitions to it.",
+        code="EMBEDDER_EDIT_AFFECTS_INDEXED_DATA",
+    )
+
+
 def _is_unmodified_seed(row: ModelEndpointRow, data: dict[str, Any]) -> bool:
     """Is *row* still byte-identical to what the seeder would have written?
 
@@ -193,6 +225,12 @@ def _is_unmodified_seed(row: ModelEndpointRow, data: dict[str, Any]) -> bool:
     has touched it, it is left alone and simply never adopted.
     """
     return row.endpoint == data["endpoint"] and (row.model_name or "") == (data["model_name"] or "")
+
+
+def _with_usage(row: ModelEndpointRow, counts: Mapping[tuple[str, str], int]) -> dict[str, Any]:
+    # Types with no partition column (reranker/vlm/stt) count 0: partitions
+    # reference them through presets, not by name.
+    return {**row.model_dump(), "used_by_partitions": counts.get((row.name, row.model_type), 0)}
 
 
 class ModelEndpointService:
@@ -340,7 +378,7 @@ class ModelEndpointService:
         seed_extra: dict = data.get("extra", {}) or {}
         new_extra = {**row.extra, ENV_MANAGED_KEY: ENV_MANAGED_VALUE}
         env_api_key = seed_extra.get("api_key")
-        if env_api_key and env_api_key not in _PLACEHOLDER_API_KEYS:
+        if not is_placeholder_api_key(env_api_key):
             new_extra["api_key"] = env_api_key
 
         fields: dict[str, Any] = {
@@ -418,7 +456,7 @@ class ModelEndpointService:
                 "timeout": s.loader.transcriber.timeout,
                 "extra": _with_api_key(
                     {},
-                    None if s.loader.transcriber.api_key in _PLACEHOLDER_API_KEYS else s.loader.transcriber.api_key,
+                    s.loader.transcriber.api_key,
                 ),
             },
         }
@@ -504,6 +542,8 @@ class ModelEndpointService:
                 code="ENDPOINT_EXISTS",
             )
         result = await self._repo.create(row)
+        if row.is_default:
+            await self._reload_partitions_after_default_change(row.model_type)
         await self.load_all()
         if row.is_default:
             # The new endpoint became the default (repo demoted the previous one in
@@ -519,10 +559,46 @@ class ModelEndpointService:
             raise NotFoundError(f"Endpoint '{name}' of type '{model_type}' not found.")
         return row
 
-    async def list_model_endpoints(self, model_type: str | None = None) -> list[ModelEndpointRow]:
-        return await self._repo.list_all(model_type=model_type)
+    async def list_model_endpoints(self, model_type: str | None = None) -> list[dict[str, Any]]:
+        """List endpoints, each annotated with ``used_by_partitions``.
 
-    async def update_model_endpoint(self, name: str, model_type: str, **fields: object) -> ModelEndpointRow:
+        One aggregate query for the counts rather than one per endpoint. The
+        count is what makes the delete dialog honest: an embedder with a
+        nonzero count cannot be deleted (the repo refuses it), so the UI can
+        say so up front instead of offering a button that 409s.
+        """
+        rows = await self._repo.list_all(model_type=model_type)
+        counts = await self._repo.usage_counts()
+        return [_with_usage(row, counts) for row in rows]
+
+    async def with_partition_usage(self, row: ModelEndpointRow) -> dict[str, Any]:
+        """One endpoint annotated with ``used_by_partitions``, as the list has it.
+
+        For every other route answering with an endpoint (get, create, update,
+        set-default), so an endpoint never reads as unused on one route and in
+        use on another. Same aggregate query as the list, so the two counts
+        cannot disagree.
+        """
+        return _with_usage(row, await self._repo.usage_counts())
+
+    async def indexed_file_usage(self, name: str, model_type: str) -> list[dict[str, Any]]:
+        """Per-partition indexed-file counts for one endpoint, most files first.
+
+        Sizes what an in-place edit would strand, so the confirmation can name a
+        real number instead of warning in the abstract (#762 C). Empty when the
+        endpoint holds no indexed data — nothing is at stake and the UI can say
+        so rather than warning anyway.
+        """
+        return await self._repo.indexed_file_usage(name, model_type)
+
+    async def update_model_endpoint(
+        self,
+        name: str,
+        model_type: str,
+        *,
+        acknowledge_indexed_data: bool = False,
+        **fields: object,
+    ) -> ModelEndpointRow:
         """Update endpoint fields and/or rename it.
 
         Pass ``new_name=`` to rename. After any change the in-memory config is
@@ -551,6 +627,17 @@ class ModelEndpointService:
         call above raising: the registry stays queryable under both names,
         correctly, instead of the update's failure leaving it stuck on a stale
         config until process restart.
+
+        An embedder edit that changes what its vectors are — URL, model,
+        ``implementation`` or ``max_model_len`` — while partitions resolving to
+        it hold indexed files is refused with ``EMBEDDER_EDIT_AFFECTS_INDEXED_DATA``
+        (409) unless ``acknowledge_indexed_data`` is set (#762). Nothing errors
+        after such an edit: queries are just embedded with another model than
+        the stored vectors, so the caller has to have seen that first. The
+        admin UI's confirmation dialog is one such caller, not the guard. The
+        check runs in the repo's update transaction with the row locked, and
+        the indexer refuses a file whose embedder changed under it, so a file
+        still indexing during the edit cannot slip past it (#958).
         """
         existing = await self._repo.get(name, model_type)
         if existing is None:
@@ -567,8 +654,12 @@ class ModelEndpointService:
         if isinstance(fields.get("extra"), dict):
             fields["extra"] = preserve_existing_secrets(existing.extra, fields["extra"])  # type: ignore[arg-type]
 
+        guard = None
+        if model_type == "embedder" and not acknowledge_indexed_data:
+            guard = functools.partial(_refuse_unacknowledged_repoint, fields=fields)
+
         if fields:
-            updated = await self._repo.update(name, model_type, **fields)
+            updated = await self._repo.update(name, model_type, guard=guard, **fields)
         else:
             updated = existing
 
@@ -607,6 +698,7 @@ class ModelEndpointService:
             # Clears any prior default and sets this row in one transaction, then
             # re-points the 'default' alias to it — never leaves two defaults.
             await self._repo.set_default(model_type, effective_name)
+            await self._reload_partitions_after_default_change(model_type)
         # The 'default' alias client is stale when this endpoint becomes the default
         # OR was already the default (its config just changed).
         evict_default = bool(promote_to_default or existing.is_default)
@@ -621,6 +713,23 @@ class ModelEndpointService:
             self._invalidate_client_cache(model_type, "default")
         return await self._repo.get(effective_name, model_type) or (updated or existing)
 
+    async def _reload_partitions_after_default_change(self, model_type: str) -> None:
+        """Show this replica the partitions a new default embedder pinned (#762).
+
+        Changing the default embedder writes the old default's name onto
+        indexed partitions still riding the alias (see
+        ``PgModelEndpointRepository.set_default``); the in-memory partition
+        configs would otherwise keep resolving them through the moved alias.
+
+        Call it before ``load_all()`` moves the alias. The other way round, a
+        query landing while this reload awaits its read still finds an indexed
+        partition on ``default`` and embeds with the new model; this way round,
+        an empty partition briefly keeps the old default, which holds no vectors
+        to mismatch.
+        """
+        if model_type == "embedder" and self._partition_service is not None:
+            await self._partition_service.load_partitions()
+
     async def delete_model_endpoint(self, name: str, model_type: str) -> None:
         """Delete an endpoint.
 
@@ -634,6 +743,16 @@ class ModelEndpointService:
         clears those selections in the delete's own transaction (see
         ``_clear_preset_references``), returning the preset to the default
         fallback; the cache reloads below make that visible to this replica.
+
+        Partition references are settled in that same transaction, and not the
+        same way for both columns (#762). An ``embedder`` a partition still
+        names — or, for the default, that an alias partition with indexed files
+        resolves to — refuses the delete outright — ConflictError, 409 — because
+        clearing it would repoint indexed vectors at a different embedding
+        model without saying so. Empty partitions on the alias just follow the
+        promoted default. A ``chat_llm`` reference is cleared to NULL,
+        which is precisely the request-time default it would have fallen back
+        to anyway. See ``PgModelEndpointRepository._settle_partition_references``.
         """
         # The last-endpoint guard and the survivor/default choice are made INSIDE
         # the repo's locked transaction (not from a stale snapshot here), so
@@ -672,6 +791,7 @@ class ModelEndpointService:
         if existing is None:
             raise NotFoundError(f"Endpoint '{name}' of type '{model_type}' not found.")
         await self._repo.set_default(model_type, name)
+        await self._reload_partitions_after_default_change(model_type)
         # Reload before evicting so a client rebuilt during the window can't survive.
         await self.load_all()
         self._invalidate_client_cache(model_type, "default")
@@ -720,6 +840,53 @@ class ModelEndpointService:
             return result
         if parsed.username or parsed.password:
             result["detail"] = "Endpoint URL must not include credentials."
+            return result
+        if api_key and parsed.scheme != "https":
+            result["detail"] = "Model endpoints with API keys must use HTTPS."
+            return result
+        if model_type != "stt":
+            from services.orchestrators.readiness_service import (
+                ModelEndpointProbeError,
+                ModelListUnavailableError,
+                ModelNotFoundError,
+                check_model_endpoint,
+            )
+
+            config = ModelEndpointConfig(
+                endpoint=url,
+                model_name=normalized_model_name,
+                timeout=timeout or 5.0,
+                extra={
+                    **(extra or {}),
+                    **({"api_key": api_key} if api_key else {}),
+                },
+            )
+            try:
+                model_ids = await check_model_endpoint(config, model_type=model_type, timeout=timeout or 5.0)
+            except httpx.TimeoutException:
+                result["detail"] = "Model list request timed out."
+            except ModelEndpointProbeError as exc:
+                result["reachable"] = True
+                result["detail"] = f"Model list returned HTTP {exc.status_code}."
+            except ModelListUnavailableError as exc:
+                result["reachable"] = True
+                result["detail"] = str(exc)
+            except ModelNotFoundError as exc:
+                result["reachable"] = True
+                result["models_served"] = exc.model_ids
+                result["model_found"] = False
+            except Exception as exc:
+                result["detail"] = str(exc)
+            else:
+                result["reachable"] = True
+                result["models_served"] = model_ids
+                result["model_found"] = (
+                    None
+                    if model_ids is None
+                    else True
+                    if normalized_model_name is None
+                    else normalized_model_name in model_ids
+                )
             return result
         base_url = url.rstrip("/")
         models_url = base_url + "/models"

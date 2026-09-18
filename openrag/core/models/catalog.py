@@ -24,6 +24,26 @@ class DocumentStatus(str, Enum):
 # re-declaring the set.
 TERMINAL_TASK_STATES = frozenset({DocumentStatus.COMPLETED, DocumentStatus.FAILED, DocumentStatus.CANCELLED})
 
+# Detached pre-#721 actors may still emit these internal states during a
+# rolling deployment. Keep the compatibility set shared without importing Ray.
+LEGACY_ACTIVE_INDEXING_STATES = frozenset({"CHUNKING", "INSERTING"})
+
+# Enrichment can fail without making the base-content index unusable. Keep the
+# names bounded and stable because they are persisted and exposed through APIs.
+DEGRADABLE_ENRICHMENT_STAGES = frozenset({"caption", "contextualize", "topic_tag"})
+
+
+def normalize_degraded_stages(value: Any) -> list[str]:
+    """Return a stable, bounded stage-name list from pipeline or API data."""
+    if isinstance(value, dict):
+        candidates = value.keys()
+    elif isinstance(value, list | tuple | set | frozenset):
+        candidates = value
+    else:
+        return []
+    return sorted({stage for stage in candidates if isinstance(stage, str) and stage in DEGRADABLE_ENRICHMENT_STAGES})
+
+
 # Kept inside TaskInfo.details.metadata (a free-form dict) rather than as
 # first-class TaskInfo fields, so lifecycle timing stays readable even against a
 # TaskStateManager still running the old schema. This only matters in cluster
@@ -35,14 +55,6 @@ TASK_FINISHED_AT_METADATA_KEY = "_openrag_job_finished_at"
 CONTENT_CLAIM_TOKEN_METADATA_KEY = "_openrag_content_claim_token"
 INDEXING_CONTENT_CLAIM_TOKEN_PREFIX = "task:"
 COPY_CONTENT_CLAIM_TOKEN_PREFIX = "copy:"
-
-
-class JobStatus(str, Enum):
-    QUEUED = "QUEUED"
-    RUNNING = "RUNNING"
-    SUCCESS = "SUCCESS"
-    FAILED = "FAILED"
-    PARTIAL = "PARTIAL"
 
 
 class DocumentRecord(BaseModel):
@@ -60,16 +72,31 @@ class DocumentRecord(BaseModel):
     relationship_id: str | None = None
     parent_id: str | None = None
     content_sha256: str | None = None
+    chunk_count: int | None = Field(default=None, ge=0)
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
 class IndexationJob(BaseModel):
-    """An indexation job tracking batch document processing."""
+    """The durable record of one indexing task.
+
+    The Postgres row is what remains of a task after the ``TaskStateManager``
+    actor evicts it, so job state survives a restart and stays visible to
+    operators. ``status`` reuses :class:`DocumentStatus`, the state machine the
+    indexing path already writes.
+
+    ``started_at`` is stamped when the task leaves the queue and ``completed_at``
+    when it settles, so queue wait and service time are separable rather than
+    collapsed into one settle timestamp.
+    """
 
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    status: JobStatus = JobStatus.QUEUED
-    total_documents: int = 0
+    status: DocumentStatus = DocumentStatus.QUEUED
     partition: str = "default"
+    file_id: str | None = None
+    user_id: int | None = None
+    error: str | None = None
+    degraded_stages: list[str] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    updated_at: datetime | None = None
     started_at: datetime | None = None
     completed_at: datetime | None = None

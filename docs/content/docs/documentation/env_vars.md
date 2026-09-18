@@ -9,6 +9,56 @@ OpenRAG provides a large range of environment variables that allow you to custom
 This page is up-to-date with OpenRAG v2.0.0. Types and defaults are cross-checked against `conf/config.yaml` and the config loader. Authentication and SSO variables (`AUTH_MODE`, `OIDC_*`) are documented separately in the [OIDC guide](/openrag/documentation/oidc/).
 :::
 
+# Secrets
+
+OpenRAG validates its credentials once, at startup, and **refuses to start** on any value
+published in this repository — the dev defaults in `.env.example`, the placeholders in the
+Helm chart, and the values used in the documentation and the test stacks. The same check
+runs at `helm template` time for the chart's `values` secrets provider.
+
+This exists because the common way a deployment ends up with a known credential is not a
+weak choice but no choice at all: a template copied verbatim. So the example files ship
+`__GENERATE_ME__` where a credential belongs, and one command fills them in:
+
+```bash
+python3 scripts/gen_env.py           # writes infra/compose/.env
+python3 scripts/gen_env.py --check   # verify nothing is left unset
+```
+
+## What must be supplied
+
+| Variable | Required | Notes |
+|---|---|---|
+| `AUTH_TOKEN` | Yes, unless using SSO | Bootstraps the admin user and guards the API. Minimum 12 characters. Leaving it unset enables the no-auth development mode only when `ALLOW_NO_AUTH=true`. |
+| `POSTGRES_PASSWORD` | Yes | Minimum 12 characters. Compose fails closed without it; the chart reads it from `postgresql.auth.password`. |
+| `CHAINLIT_AUTH_SECRET` | When the chat interface is enabled | Signs the chat session cookie. Minimum 12 characters; generate with `python -c "import secrets; print(secrets.token_urlsafe(32))"`. Rotating it invalidates live sessions. In the Helm chart the chat interface is off by default (`env.WITH_CHAINLIT_UI`). |
+| `MINIO_ACCESS_KEY` / `MINIO_SECRET_KEY` | Compose only | Shared by the MinIO service and Milvus — both sides must match. `MINIO_SECRET_KEY` has a 12-character minimum. Kubernetes deployments use external object storage instead. |
+| `GRAFANA_ADMIN_PASSWORD` | When bundled Grafana is enabled | Minimum 12 characters. |
+| `OIDC_CLIENT_SECRET`, `OIDC_TOKEN_ENCRYPTION_KEY` | SSO only | Formats are set by your identity provider and by Fernet respectively, so no length floor is applied. See the [OIDC guide](/openrag/documentation/oidc/). |
+| `HF_TOKEN` | When pulling gated model weights | |
+| `API_KEY`, `VLM_API_KEY`, `EMBEDDER_API_KEY`, `RERANKER_API_KEY`, `TRANSCRIBER_API_KEY`, `WEBSEARCH_API_TOKEN` | Per integration | Set by the provider, so no length floor. Use the literal `EMPTY` for a local OpenAI-compatible server that requires no credential — that is the documented sentinel and is always accepted. |
+
+`UVICORN_FORWARDED_ALLOW_IPS` is not a secret but belongs in the same conversation: it
+must name your proxy's subnet for session cookies and per-IP rate limits to behave
+correctly behind a reverse proxy. See [FastAPI & Access Control](#fastapi--access-control).
+
+## What will be refused
+
+Any value this project publishes, matched case-insensitively — including the
+`__GENERATE_ME__` marker itself — and any value shorter than 12 characters for the
+variables marked with a minimum above. The canonical list lives in
+`openrag/core/config/secrets_guard.py`; the chart carries the same list and a unit test
+fails the build if the two disagree.
+
+The startup error names the variables at fault and never prints their values.
+
+## Overriding the check
+
+`ALLOW_INSECURE_SECRETS=true` downgrades the refusal to a warning logged on every boot.
+It is an opt-out, never an opt-in: an unset value means the check is enforced. Use it for
+disposable development and CI stacks — the bundled API test stack sets it — and not in a
+deployment that holds real data.
+
 # Backend
 ## Indexer Pipeline
 ### Loaders
@@ -179,10 +229,10 @@ The default OpenRAG transcriber stack now ships with **vLLM v0.19.1**, which inc
 
 | Variable               | Type | Default              | Description |
 |------------------------|------|----------------------|-------------|
-| `CHUNKER`              | `str`  | recursive_splitter   | Defines the chunking strategy: `recursive_splitter`. |
+| `CHUNKER`              | `str`  | structured_section   | Defines the chunking strategy: `structured_section` or `recursive_splitter`. |
 | `CONTEXTUAL_RETRIEVAL` | `bool` | true                 | Enables contextual retrieval to chunk context, a technique introduced by Anthropic to improve retrieval performance ([Contextual Retrieval](https://www.anthropic.com/news/contextual-retrieval)) |
-| `CHUNK_SIZE`           | `int`  | 512                  | Maximum size (in characters) of each chunk. |
-| `CHUNK_OVERLAP_RATE`   | `float`| 0.2                  | Percentage of overlap between consecutive chunks. |
+| `CHUNK_SIZE`           | `int`  | 512                  | Target size of each chunk, in **tokens** — counted with the LLM tokenizer (`tiktoken` `cl100k_base` when the LLM is unreachable), not in characters. |
+| `CHUNK_OVERLAP_RATE`   | `float`| 0.2                  | Fraction of `CHUNK_SIZE` replayed between consecutive chunks. Applies to `recursive_splitter` only — `structured_section` forces overlap to 0. |
 | `CONTEXTUALIZATION_TIMEOUT` | `int` | 120 | Timeout in seconds for individual chunk contextualization LLM calls. Prevents long-running contextualization tasks from blocking the system. |
 | `MAX_CONCURRENT_CONTEXTUALIZATION` | `int` | 10 | Maximum number of concurrent chunk contextualization tasks. Limits parallel LLM requests to prevent CPU exhaustion during batch indexing. |
 
@@ -191,7 +241,8 @@ After files are converted to Markdown, only the **text content** is chunked.
 
 **Chunker strategies:**
 
-* **`recursive_splitter`**: Uses hierarchical text structure (sections, paragraphs, sentences). Based on [RecursiveCharacterTextSplitter](https://docs.langchain.com/oss/python/integrations/splitters/index#text-structure-based), it preserves natural boundaries whenever possible while ensuring chunks never exceeding the `CHUNK_SIZE`.
+* **`structured_section`** *(default)*: Cuts on the document's own structure instead of on character separators. It detects headings (Markdown `#`, plus keyword headings such as `Titre` / `Chapitre` / `Section`) and leaf units (e.g. `Article L110-1`) by matching line content, keeps each leaf atomic, greedily packs consecutive short leaves up to `CHUNK_SIZE`, and prepends the heading path so every chunk is self-describing at retrieval time. Overlap is always 0 — leaves are atomic, so replaying a tail would only duplicate whole sections, and `CHUNK_OVERLAP_RATE` is therefore ignored by this strategy. Best for structured documents (legal codes, standards, reports, technical manuals).
+* **`recursive_splitter`**: Uses hierarchical text structure (sections, paragraphs, sentences). Based on [RecursiveCharacterTextSplitter](https://docs.langchain.com/oss/python/integrations/splitters/index#text-structure-based), it preserves natural boundaries whenever possible while ensuring chunks never exceed `CHUNK_SIZE`, and replays `CHUNK_OVERLAP_RATE` of each chunk into the next. Set `CHUNKER=recursive_splitter` for unstructured prose, or to reproduce the chunking of earlier OpenRAG releases.
 
 ### Embedding
 Our embedder is **OpenAI-compatible** and runs on a **VLLM** instance configured with the following variables:
@@ -289,7 +340,6 @@ For an opt-in named-volume profile, copy the values from `infra/compose/.env.nam
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `DATA_VOLUME` | `../../data` | OpenRAG uploaded files and app data mounted at `/app/data`. |
-| `LOG_VOLUME` | `../../logs` | OpenRAG logs mounted at `/app/logs`. |
 | `MODEL_WEIGHTS_VOLUME` | `~/.cache/huggingface` | Model cache mounted at `/app/model_weights`. |
 | `VLLM_CACHE` | `/root/.cache/huggingface` | Hugging Face cache used by vLLM, reranker, and transcriber services. |
 | `DB_VOLUME` | `../../db` | PostgreSQL data mounted at `/var/lib/postgresql/data`. |
@@ -458,52 +508,38 @@ To customize prompt:
 | `PROMPTS_DIR` | str | (bundled `openrag/prompts/templates`) | Path to a directory of prompt templates. Unset uses the templates bundled in the package; set it only to override with a custom directory. |
 
 ### Logging
-Our application uses Loguru with custom formatting. Log messages appear in two places:
-- **Terminal (stderr)**: Human-readable formatted output
-- **Log file** (`logs/app.json`): JSON format for monitoring tools like Grafana. This file resides at the mounted folder `./logs` 
+OpenRAG logs with Loguru on the process **stderr**, and nowhere else. Docker
+and Kubernetes capture that stream; a collector ships it to Loki (see
+[Loki logs](/openrag/documentation/loki_logs/)). "stderr" is the
+conventional diagnostic channel, not an error level: an `INFO` line goes
+there too.
 
-#### Log Message Format
-Terminal output follows this format:
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `LOG_LEVEL` | `str` | `INFO` | Minimum level emitted. `DEBUG` logs user queries and other request data; keep it for short-lived troubleshooting. |
+| `LOG_FORMAT` | `text` \| `json` | `text` | `text` is the colorized human format below. `json` writes one flat JSON object per line, no colour, for log collectors; it also routes every library's stdlib logs through the same sink (the five named ones — `asyncio`, `httpcore`, `httpx`, `urllib3` and `openai` — capped at WARNING), so with a collector attached `LOG_LEVEL=DEBUG` is a troubleshooting setting, not a production one. |
+
+#### Text format
 ```bash title="Logging message in the terminal..."
 LEVEL    | module:function:line - message [context_key=value]
 ```
-#### Logging Levels & What They Mean
-There are several logging levels available (TRACE, DEBUG, INFO, SUCCESS, WARNING, ERROR, CRITICAL). Only the levels intended for use in this project are documented here.
 
+Since this release every request-scoped line ends with
+`[request_id=req_…]` in text mode too — the same correlation id the
+response carries in its `X-Request-ID` header.
+
+#### JSON format
+```json
+{"ts":"2026-09-07T14:03:12.481000+00:00","level":"INFO","logger":"api.routers.user.chat","function":"chat_completions","line":212,"msg":"Retrieved 8 documents","request_id":"req_7f3c…","partition":"docs"}
+```
+Reserved keys: `ts`, `level`, `logger`, `function`, `line`, `msg`, `exception` (only when a traceback is attached). Every field bound with `logger.bind()` is emitted at the top level; a bound field named like a reserved key is prefixed `extra_`.
+
+#### Logging levels
 | Level | What You'll See in Logs |
 |-------|-------------------------|
 | **WARNING** | Potential issues that don't stop execution: approaching rate limits, deprecated features used, retryable failures, configuration concerns. Review these periodically. |
 | **DEBUG** | Detailed diagnostic information including variable states, intermediate processing steps, and function entry/exit points. Useful during development and troubleshooting. |
 | **INFO** | Standard operational messages showing normal application behavior: server startup, request handling, major workflow stages. This is the typical production level. |
-
-#### Configuration
-Set the logging level via environment variable:
-
-```bash
-// .env
-# Show only warnings and errors
-LOG_LEVEL=WARNING
-
-# Show detailed debug information (use in dev and pre-prod)
-LOG_LEVEL=DEBUG
-
-# Production default (informational messages)
-LOG_LEVEL=INFO
-```
-
-#### Log File Features
-
-- **Rotation**: Files rotate automatically at 10 MB
-- **Retention**: Logs kept for 10 days
-- **Format**: JSON for easy parsing and ingestion into monitoring systems
-- **Async**: Queued writing (`enqueue=True`) prevents blocking operations
-
-:::tip[Reading Logs]
-- **In development**: Watch terminal output with DEBUG level
-- **In production**: Use INFO level and monitor the JSON log file
-- **For troubleshooting**: Temporarily switch to DEBUG or TRACE
-- **For monitoring**: Parse `logs/app.json` with your observability stack
-:::
 
 ### RAY
 Ray is used for distributed task processing and parallel execution in the RAG pipeline. This configuration controls **`resource allocation`**, **`concurrency limits`**, and **`serving options`**.
@@ -524,7 +560,8 @@ The following environment variables control Ray's logging behavior, task retry s
 
 | Variable | Type | value | Description |
 |----------|------|---------|-------------|
-| `RAY_DEDUP_LOGS` | `number` | `0` | Turns off Ray log deduplication that appears across multiple processes. Set to `0` to see all logs from each process. |
+| `RAY_DEDUP_LOGS` | `number` | `0` | Turns off Ray log deduplication that appears across multiple processes. Set to `0` to see all logs from each process. Required (`0`) with `LOG_FORMAT=json`: the deduplicated survivor is rewritten as `{…} [repeated 2x across cluster]`, which is no longer JSON. The logging overlay and the Helm chart set it. |
+| `RAY_COLOR_PREFIX` | `number` | `0` | Turns off the ANSI colorization of Ray's `(Actor pid=N)` relay prefix, which is applied even when the output is a pipe. Required (`0`) with `LOG_FORMAT=json`, or every relayed worker line reaches the collector prefixed with escape sequences and fails to parse as JSON. |
 | `RAY_ENABLE_RECORD_ACTOR_TASK_LOGGING` | `number` | `1` | Enables logs at task level in the Ray dashboard for better debugging and monitoring. |
 | `RAY_task_retry_delay_ms` | `number` | `3000` | Delay (in milliseconds) before retrying a failed task. Controls the wait time between retry attempts. |
 | `RAY_ENABLE_UV_RUN_RUNTIME_ENV` | `number` | `0` | Controls UV runtime environment integration. **Critical**: Must be set to `0` when using the newest version of UV to avoid compatibility issues. |
@@ -641,6 +678,8 @@ The following environment variables configure the FastAPI server and control acc
 | `SUPER_ADMIN_MODE` | `boolean` | `false` | Enables super admin privileges when set to `true`, [granting unrestricted access](/openrag/documentation/data_model/#access-control) to all operations and bypassing standard access controls. This is for debugging |
 | `DEFAULT_FILE_QUOTA` | `int` | `-1` | Default per-user file quota. `<0` disables quotas globally; `>=0` sets the default limit when a user has no explicit quota. |
 | `PREFERRED_URL_SCHEME` | `string` | `null` | URL scheme (`http` or `https`) used when generating URLs in API responses (e.g., `task_status_url`). When running behind a reverse proxy that terminates SSL, set this to `https` to ensure generated URLs use the correct scheme. If unset, the scheme from the incoming request is used. |
+| `METRICS_TOKEN` | `string` | unset | Bearer a Prometheus scraper must send on `GET /metrics`. The route bypasses the auth middleware and admin tokens are not accepted there. It fails closed: with the token unset and `METRICS_ALLOW_UNAUTHENTICATED` off, every scrape gets `403`. The compose monitoring overlay forwards this value to its Prometheus. See [Prometheus metrics](/openrag/documentation/prometheus_metrics/). |
+| `METRICS_ALLOW_UNAUTHENTICATED` | `boolean` | `false` | Serve `GET /metrics` to anyone who can reach the API port when `METRICS_TOKEN` is unset. Only for deployments that block `/metrics` at the edge and scrape from inside the network; a configured token always wins. |
 | `CORS_EXTRA_ORIGINS` | `string` | _(unset)_ | Semicolon-separated list of additional origins allowed by CORS (e.g. `https://app.example.com;https://other.example.com`). Extends the default list without replacing it. |
 | `UVICORN_FORWARDED_ALLOW_IPS` | `string` | `127.0.0.1` | Comma-separated CIDRs/IPs (or `*`) whose `X-Forwarded-*` headers uvicorn trusts. **Required when OpenRAG runs behind a reverse proxy that lives outside loopback** (typical docker-compose / k8s — including the bundled admin-ui proxy). Otherwise `X-Forwarded-Proto` is dropped and OIDC cookies ship with `Secure=False` even over HTTPS, and `X-Forwarded-For` is dropped so per-user rate limits collapse onto the proxy's single IP. **Set this to your proxy's subnet, not `*`** — see the proxy-trust caution under [Rate Limiting](#rate-limiting) for why `*` can be spoofed. |
 | `MAX_UPLOAD_SIZE_MB` | `int` | `1024` | Maximum accepted upload size, in MB. `0` or a negative value means unlimited. |
@@ -770,7 +809,6 @@ Deployment-level knobs; most deployments never need to touch these — the compo
 | `OPENRAG_CONF_DIR` | `str` | bundled `conf/` | Directory containing `config.yaml`. Override to run against a custom configuration tree. |
 | `DATA_DIR` | `str` | `/app/data` (container) | Where uploaded files and app data are stored. In compose, relocate it via `DATA_VOLUME` rather than this variable. |
 | `DB_DIR` | `str` | `/app/db` | Local database directory. |
-| `LOG_DIR` | `str` | `/app/logs` | Log directory. In compose, relocate it via `LOG_VOLUME` rather than this variable. |
 | `OPENRAG_CONTAINER_STARTUP_TIMEOUT` | `float` | `max(60, 4 × POSTGRES_COMMAND_TIMEOUT)` (= 120 with defaults) | Seconds the API's service container (DB pools, Ray actors, …) is allowed to initialize at startup before the app fails fast. |
 | `OPENRAG_BANNER` | `bool` | `true` | Set to `false` to suppress the ASCII startup banner. Its colors also auto-disable under the standard `NO_COLOR` / `TERM=dumb` conventions. |
 | `UVICORN_RELOAD` | `bool` | `false` | Development only — starts uvicorn with `--reload` (auto-restart on code changes). Also forces a single worker. Never enable in production. |

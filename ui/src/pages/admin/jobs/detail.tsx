@@ -5,6 +5,10 @@ import { ArrowLeft, Ban, Copy } from "lucide-react";
 import { toast } from "sonner";
 
 import { StatusBadge } from "@/components/shared/status-badge";
+import {
+  DegradedCompletionStatus,
+  normalizeDegradedStages,
+} from "@/components/shared/degraded-stages";
 import { ConfirmDialog } from "@/components/shared/confirm-dialog";
 import { Button } from "@/components/ui/button";
 import {
@@ -91,6 +95,8 @@ export default function JobDetailPage() {
   if (!task) return null;
 
   const details = task.details;
+  const degradedStages = normalizeDegradedStages(details?.degraded_stages);
+  const degraded = task.task_state === "COMPLETED" && degradedStages.length > 0;
   const filename = str(details?.metadata?.filename) || str(details?.file_id) || "—";
   const traceback = errorQuery.data?.traceback ?? [];
   const summary = errorSummary(traceback);
@@ -136,7 +142,11 @@ export default function JobDetailPage() {
           </p>
         </div>
         <div className="flex items-center gap-3">
-          <StatusBadge status={task.task_state} />
+          {degraded ? (
+            <DegradedCompletionStatus stages={degradedStages} />
+          ) : (
+            <StatusBadge status={task.task_state} />
+          )}
           {active && (
             <span className="text-sm text-muted-foreground animate-pulse">
               Auto-refreshing…
@@ -170,7 +180,11 @@ export default function JobDetailPage() {
             <div className="flex justify-between sm:flex-col sm:gap-1">
               <dt className="text-muted-foreground">State</dt>
               <dd>
-                <StatusBadge status={task.task_state} />
+                {degraded ? (
+                  <DegradedCompletionStatus stages={degradedStages} />
+                ) : (
+                  <StatusBadge status={task.task_state} />
+                )}
               </dd>
             </div>
             <Separator className="sm:col-span-2" />

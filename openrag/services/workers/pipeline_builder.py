@@ -37,6 +37,30 @@ REPLACE_OLD_CHUNK_COLLECTION_ROW_KEY = "_replace_old_chunk_collection"
 REPLACE_OLD_CHUNK_IDS_ROW_KEY = "_replace_old_chunk_ids"
 
 
+def _embedder_provenance(embedder: Embedder, reference: Any) -> dict[str, Any]:
+    """What actually produced this file's vectors.
+
+    ``embedder`` is the endpoint reference the partition carried, kept as given
+    (the ``"default"`` alias included); the model/endpoint pair is what that
+    reference resolved to, and is the only thing that catches an endpoint
+    repointed at a different model without being renamed.
+
+    Every field degrades to ``None`` rather than raising: describing a run that
+    already succeeded must not be able to fail it.
+    """
+    try:
+        dimension = embedder.dimension
+    except Exception:
+        # Raises until the first embed returns, so: no chunks, no dimension.
+        dimension = None
+    return {
+        "embedder": str(reference) if reference else "default",
+        "embedder_model_name": getattr(embedder, "model_name", None),
+        "embedder_endpoint": getattr(embedder, "endpoint", None),
+        "embedder_dimension": dimension,
+    }
+
+
 @dataclass(slots=True, frozen=True)
 class PipelineTimeouts:
     """Per-stage timeout configuration for an indexing pipeline row."""
@@ -103,6 +127,9 @@ class IndexingPipeline:
     contextualizer_factory: Callable[[str], ChunkContextualizer] | None = None
     topic_tagger_factory: Callable[[str], TopicTagger] | None = None
     defer_replace_cleanup: bool = False
+    # How many of a document's images may contend for the shared VLM gate at
+    # once. ``None`` leaves the fan-out unbounded (one caller per image).
+    caption_concurrency: int | None = None
 
     async def run(self, row: MutableMapping[str, Any]) -> MutableMapping[str, Any]:
         """Run a single row through parse, optional enrichments, embed, and store.
@@ -141,6 +168,36 @@ class IndexingPipeline:
             finally:
                 timings[name] = (time.perf_counter() - start) * 1000.0
 
+        async def _timed_enrichment(name: str, coro: Any) -> None:
+            """Run an enrichment stage best-effort (#702).
+
+            Captioning, contextualization and topic tagging improve a file's
+            index; they are not what makes it indexable. A failure here — a VLM
+            timeout, an unreachable LLM, a malformed response — used to abort
+            ``run()`` before chunk/embed/store, losing the whole file over an
+            enrichment step even though the base content was ready to store.
+            Skip the stage instead: warn, note it on the row, and index what we
+            have. This extends to *invocation* the reasoning ``_select_vlm`` /
+            ``_select_contextualizer`` / ``_select_topic_tagger`` already apply
+            to endpoint *resolution*.
+
+            Cancellation still propagates: ``CancelledError`` is a
+            ``BaseException``, so a cancelled task is never mistaken for a
+            degraded one. Each stage leaves the row's input intact on failure
+            (only successful stages overwrite ``processed_document``/``chunks``),
+            so the next stage runs on the un-enriched value.
+            """
+            try:
+                await _timed(name, coro)
+            except Exception as exc:  # noqa: BLE001 - enrichment must not fail the file
+                row.setdefault("degraded_stages", {})[name] = str(exc)
+                logger.bind(
+                    task_id=row.get("task_id"),
+                    filename=row.get("filename", ""),
+                    partition=row.get("partition"),
+                    stage=name,
+                ).warning(f"{name} stage failed; indexing the file without it: {exc}")
+
         try:
             await _timed("parse", parse_stage(row, parser, timeout=self.timeouts.parse))
             # The caption decision needs the parsed document (standalone images
@@ -168,18 +225,19 @@ class IndexingPipeline:
                 # per-row value win, so that migration is a one-line change.
                 if self.caption_prompt is not None:
                     row.setdefault("caption_prompt", self.caption_prompt)
-                await _timed(
+                await _timed_enrichment(
                     "caption",
                     caption_stage(
                         row,
                         vlm,
                         timeout=self.timeouts.caption,
                         per_image_timeout=self.timeouts.caption_per_image,
+                        max_concurrency=self.caption_concurrency,
                     ),
                 )
             await _timed("chunk", chunk_stage(row, chunker, timeout=self.timeouts.chunk))
             if contextualizer is not None:
-                await _timed(
+                await _timed_enrichment(
                     "contextualize",
                     contextualize_stage(
                         row,
@@ -194,7 +252,7 @@ class IndexingPipeline:
             self._warn_on_embedder_overflow(row, embedder_window, getattr(chunker, "length_function", None))
             if topic_tagger is not None:
                 max_tags = config.max_topic_tags if config is not None else 7
-                await _timed(
+                await _timed_enrichment(
                     "topic_tag",
                     topic_tag_stage(
                         row,
@@ -212,6 +270,10 @@ class IndexingPipeline:
                     per_chunk_timeout=self.timeouts.embed_per_chunk,
                 ),
             )
+            # After the embed: the dimension is measured, not configured.
+            row["embedder_provenance"] = _embedder_provenance(embedder, row.get("embedder_name"))
+            # What the catalog write checks the partition's embedder against (#958).
+            row["embedder_fingerprint"] = getattr(embedder, "vector_fingerprint", None)
             # Re-index (``replace=True``) is insert-before-delete: snapshot the
             # file's existing chunk ids *before* the store stage inserts the new
             # set, then delete exactly that old set after a successful insert.
@@ -521,6 +583,7 @@ def build_indexing_pipeline(
     contextualizer_factory: Callable[[str], ChunkContextualizer] | None = None,
     topic_tagger_factory: Callable[[str], TopicTagger] | None = None,
     defer_replace_cleanup: bool = False,
+    caption_concurrency: int | None = None,
 ) -> IndexingPipeline:
     """Build the default sequential indexing pipeline."""
 
@@ -543,6 +606,7 @@ def build_indexing_pipeline(
         contextualizer_factory=contextualizer_factory,
         topic_tagger_factory=topic_tagger_factory,
         defer_replace_cleanup=defer_replace_cleanup,
+        caption_concurrency=caption_concurrency,
     )
 
 

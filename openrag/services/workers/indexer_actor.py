@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import traceback
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from core.models.catalog import DocumentStatus, IndexationJob, normalize_degraded_stages
 from core.models.document import Document
+from core.utils.exceptions import NoIndexableContentError
 from core.utils.logging import get_logger
 from services.workers.indexing_callback import send_indexing_callback
 from services.workers.pipeline_builder import (
@@ -54,6 +56,7 @@ class IndexerWorker:
         topic_tag_repo: Any = None,
         vector_store: Any = None,
         collection: str = "default",
+        job_repo: Any = None,
     ) -> None:
         self._pipeline = pipeline
         self._tsm = task_state_manager
@@ -61,6 +64,65 @@ class IndexerWorker:
         self._topic_tag_repo = topic_tag_repo
         self._vector_store = vector_store
         self._collection = collection
+        self._job_repo = job_repo
+
+    async def _record_started(
+        self,
+        task_id: str,
+        *,
+        partition: str,
+        metadata: dict[str, Any],
+        user: dict[str, Any] | None,
+    ) -> None:
+        """Stamp the durable row with the moment the task left the queue.
+
+        Best-effort like every other job write: history must never fail
+        indexing. Written here because this is the only place that observes the
+        queued-to-running transition, and ``started_at`` is what makes queue
+        wait separable from service time.
+        """
+        if self._job_repo is None:
+            return
+        try:
+            await self._job_repo.upsert_job(
+                IndexationJob(
+                    id=task_id,
+                    status=DocumentStatus.SERIALIZING,
+                    partition=partition,
+                    file_id=metadata.get("file_id"),
+                    user_id=(user or {}).get("id"),
+                    started_at=datetime.now(UTC),
+                )
+            )
+        except Exception as exc:
+            logger.warning("Failed to record indexing job start", task_id=task_id, error=str(exc))
+
+    async def _record_completed(
+        self,
+        task_id: str,
+        *,
+        partition: str,
+        metadata: dict[str, Any],
+        user: dict[str, Any] | None,
+        degraded_stages: list[str],
+    ) -> None:
+        """Repair durable history when the in-memory task receipt was evicted."""
+        if self._job_repo is None:
+            return
+        try:
+            await self._job_repo.upsert_job(
+                IndexationJob(
+                    id=task_id,
+                    status=DocumentStatus.COMPLETED,
+                    partition=partition,
+                    file_id=metadata.get("file_id"),
+                    user_id=(user or {}).get("id"),
+                    degraded_stages=degraded_stages,
+                    completed_at=datetime.now(UTC),
+                )
+            )
+        except Exception as exc:
+            logger.warning("Failed to repair completed indexing job", task_id=task_id, error=str(exc))
 
     async def process_file(
         self,
@@ -81,9 +143,9 @@ class IndexerWorker:
     ) -> dict[str, Any]:
         """Run one file through the indexing pipeline.
 
-        Returns a plain dict ``{"stored_count": int, "stage": "stored"}``
-        on success.  On failure, state is set to FAILED and the exception
-        is re-raised so the Ray task is marked as errored.
+        Returns a plain dict with the stored count, final stage and any degraded
+        enrichment stage names. On failure, state is set to FAILED and the
+        exception is re-raised so the Ray task is marked as errored.
 
         When *callback_url* is provided, a best-effort ``POST`` notification is
         sent to it once the task reaches a terminal state; never affects the
@@ -102,6 +164,7 @@ class IndexerWorker:
             )
             if accepted is False:
                 raise _TaskCancelledBeforeStart
+            await self._record_started(task_id, partition=partition, metadata=metadata, user=user)
             document = await _load_document(path, metadata, partition)
             # One indexation timestamp for this file, shared by the Milvus chunks
             # (via the store stage) and the Postgres catalog row, so they agree.
@@ -123,7 +186,12 @@ class IndexerWorker:
             if resolved_prompts:
                 row.update(resolved_prompts)
             row = await self._pipeline.run(row)
+            stored_count = row.get("stored_count", 0)
+            if stored_count == 0:
+                raise NoIndexableContentError("No indexable content was extracted from this document.")
             indexed_at = row.get("indexed_at")
+            catalog_config = _with_embedder_provenance(indexation_config, row.get("embedder_provenance"))
+            degraded_stages = normalize_degraded_stages(row.get("degraded_stages"))
 
             if self._document_repo is not None:
                 wrote_catalog = await _write_catalog_record(
@@ -132,9 +200,13 @@ class IndexerWorker:
                     partition=partition,
                     user=user,
                     replace=replace,
-                    indexation_config=indexation_config,
+                    indexation_config=catalog_config,
                     indexed_at=indexed_at,
+                    chunk_count=stored_count,
                     require_existing_partition=require_existing_partition,
+                    workspace_ids=workspace_ids,
+                    embedder_fingerprint=row.get("embedder_fingerprint"),
+                    degraded_stages=degraded_stages,
                 )
                 if not wrote_catalog:
                     raise RuntimeError("Catalog row was not written after vector indexing")
@@ -152,10 +224,28 @@ class IndexerWorker:
                     partition=partition,
                     indexation_config=indexation_config,
                 )
-            await retry_idempotent_ray_actor_method(
-                lambda: self._tsm.set_state.remote(task_id, "COMPLETED"),
-                task_description=f"set_state({task_id}, COMPLETED)",
+            completion_outcome = await retry_idempotent_ray_actor_method(
+                lambda: self._tsm.complete_with_degraded_stages.remote(task_id, degraded_stages),
+                task_description=f"complete_with_degraded_stages({task_id})",
             )
+            if completion_outcome == "missing":
+                await self._record_completed(
+                    task_id,
+                    partition=partition,
+                    metadata=metadata,
+                    user=user,
+                    degraded_stages=degraded_stages,
+                )
+                log.warning("Task receipt was missing after the catalog commit; durable history was repaired")
+            elif completion_outcome == "cancelled":
+                log.info("Task was cancelled after the catalog commit; suppressing terminal callback")
+                return {
+                    "stored_count": row.get("stored_count", 0),
+                    "stage": row.get("stage", ""),
+                    "degraded_stages": degraded_stages,
+                }
+            elif completion_outcome != "completed":
+                raise RuntimeError(f"Task state manager rejected completion for task {task_id}")
         except _TaskCancelledBeforeStart:
             # The TSM already told us this task is fenced/cancelled — no need to
             # ask it again, and a cancellation must not fire an error callback.
@@ -194,11 +284,30 @@ class IndexerWorker:
             await send_indexing_callback(
                 callback_url, partition, file_id, "success", metadata, callback_token=callback_token
             )
-            return {"stored_count": row.get("stored_count", 0), "stage": row.get("stage", "")}
+            return {
+                "stored_count": row.get("stored_count", 0),
+                "stage": row.get("stage", ""),
+                "degraded_stages": degraded_stages,
+            }
         # The raw upload is purged (when configured) by the enclosing actor, not
         # here: cleanup must also cover failures that happen *before* this method
         # runs (catalog/registry init, the SERIALIZING state update). See
         # ``delete_uploaded_file`` and ``IndexerWorkerActor.process_file``.
+
+
+def _with_embedder_provenance(
+    indexation_config: dict[str, Any] | None,
+    provenance: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Fold the run's embedder provenance into the stored config snapshot.
+
+    Copies rather than mutates: the dispatched ``indexation_config`` is still
+    read after this point (topic tags, the active-config contextvar) and must
+    stay the config that was dispatched. A ``None`` config still gets a record.
+    """
+    if not provenance:
+        return indexation_config
+    return {**(indexation_config or {}), **provenance}
 
 
 async def _write_catalog_record(
@@ -210,11 +319,24 @@ async def _write_catalog_record(
     replace: bool,
     indexation_config: dict[str, Any] | None,
     indexed_at: datetime | None = None,
+    chunk_count: int | None = None,
     require_existing_partition: bool = False,
+    workspace_ids: list[str] | None = None,
+    embedder_fingerprint: dict[str, str | None] | None = None,
+    degraded_stages: list[str] | None = None,
 ) -> bool:
+    """Record an indexed file in the catalog, which is what makes it visible.
+
+    With ``embedder_fingerprint``, the repo first checks that the partition's
+    embedder is still the config the vectors were built with, and refuses the
+    file otherwise (#958); the caller's failure path then removes its vectors.
+    """
     file_id = metadata.get("file_id", "")
     file_metadata = {key: value for key, value in metadata.items() if key != "page"}
+    file_metadata["degraded_stages"] = list(degraded_stages or [])
     config_kwargs = {"indexation_config": indexation_config} if indexation_config is not None else {}
+    if embedder_fingerprint is not None:
+        config_kwargs["embedder_fingerprint"] = embedder_fingerprint
     if replace:
         return await doc_repo.update_file_in_partition(
             file_id=file_id,
@@ -223,6 +345,7 @@ async def _write_catalog_record(
             relationship_id=metadata.get("relationship_id"),
             parent_id=metadata.get("parent_id"),
             indexed_at=indexed_at,
+            chunk_count=chunk_count,
             content_sha256=metadata.get("content_sha256"),
             **config_kwargs,
         )
@@ -235,7 +358,10 @@ async def _write_catalog_record(
         relationship_id=metadata.get("relationship_id"),
         parent_id=metadata.get("parent_id"),
         indexed_at=indexed_at,
+        chunk_count=chunk_count,
         require_existing_partition=require_existing_partition,
+        # Stay protected until the outer worker has completed every attachment.
+        independently_indexed=True,
         content_sha256=metadata.get("content_sha256"),
         **config_kwargs,
     )

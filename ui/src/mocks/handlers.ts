@@ -403,19 +403,6 @@ export const handlers = [
     });
   }),
 
-  http.get(`${API}/indexer/task/:taskId/logs`, ({ params }) => {
-    const id = String(params.taskId);
-    return HttpResponse.json({
-      task_id: id,
-      logs: [
-        `2024-01-15 10:32:01 | INFO | task ${id} QUEUED`,
-        `2024-01-15 10:32:03 | INFO | task ${id} SERIALIZING`,
-        `2024-01-15 10:32:09 | INFO | task ${id} serializing: 47 chunks embedded`,
-        `2024-01-15 10:32:14 | INFO | task ${id} COMPLETED`,
-      ],
-    });
-  }),
-
   http.delete(`${API}/indexer/task/:taskId`, ({ params }) =>
     HttpResponse.json({ message: `Cancellation signal sent for task ${params.taskId}` }),
   ),
@@ -654,7 +641,7 @@ export const handlers = [
     }),
   ),
 
-  http.get(`${API}/metrics`, () => {
+  http.get(`${API}/monitoring/metrics`, () => {
     return HttpResponse.text(
       `# HELP openrag_requests_total Total API requests\n# TYPE openrag_requests_total counter\nopenrag_requests_total{method="POST",endpoint="/v1/chat/completions"} 1247\nopenrag_requests_total{method="POST",endpoint="/api/v1/retrieve"} 893\nopenrag_requests_total{method="POST",endpoint="/api/v1/admin/indexing/document"} 156\n# HELP openrag_request_duration_seconds Request duration\n# TYPE openrag_request_duration_seconds histogram\nopenrag_request_duration_seconds_bucket{le="0.1"} 450\nopenrag_request_duration_seconds_bucket{le="0.5"} 1800\nopenrag_request_duration_seconds_bucket{le="1.0"} 2100\nopenrag_request_duration_seconds_bucket{le="5.0"} 2290\nopenrag_request_duration_seconds_bucket{le="+Inf"} 2296\n# HELP openrag_documents_indexed_total Total documents indexed\n# TYPE openrag_documents_indexed_total counter\nopenrag_documents_indexed_total 342\n# HELP openrag_chunks_total Total chunks in vector store\n# TYPE openrag_chunks_total gauge\nopenrag_chunks_total 18947\n`,
     );

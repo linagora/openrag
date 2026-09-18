@@ -50,7 +50,7 @@ def _patch_infra(monkeypatch):
         yield
 
     monkeypatch.setattr(qs, "get_llm_semaphore", _noop_sem)
-    monkeypatch.setattr(qs, "detect_language", lambda _t: "en")
+    monkeypatch.setattr(qs, "detect_language", lambda _t, **_kwargs: "en")
 
 
 class FakeLLM:
@@ -389,11 +389,61 @@ async def test_generate_query_chatbotrag_parses_json():
 
 @pytest.mark.asyncio
 async def test_generate_query_chatbotrag_can_skip_retrieval():
-    payload = json.dumps({"requires_retrieval": False, "query_list": []})
+    payload = json.dumps({"intent": "capability", "requires_retrieval": False, "query_list": []})
     svc = _svc(llm=FakeLLM(chat_responses=[payload]), mode="ChatBotRag")
     sq = await svc.generate_query([{"role": "user", "content": "How can you help me?"}])
+    assert sq.intent == "capability"
     assert sq.requires_retrieval is False
     assert sq.query_list == []
+
+
+@pytest.mark.asyncio
+async def test_contextualizer_prompt_distinguishes_social_acknowledgement_from_factual_acceptance():
+    payload = json.dumps({"intent": "gratitude", "requires_retrieval": False, "query_list": []})
+    llm = FakeLLM(chat_responses=[payload])
+    svc = _svc(llm=llm, mode="ChatBotRag")
+
+    await svc.generate_query(
+        [
+            {"role": "assistant", "content": "Was that helpful?"},
+            {"role": "user", "content": "ok"},
+        ]
+    )
+
+    contextualizer_prompt = llm.chat_calls[0][0][0]["content"]
+    assert "Replies to social, wellbeing, or feedback questions remain gratitude" in contextualizer_prompt
+    assert (
+        'assistant: Was that helpful?\nuser: ok\n{"intent":"gratitude","requires_retrieval":false,"query_list":[]}'
+    ) in contextualizer_prompt
+    assert (
+        "assistant: Albendazole treats lymphatic filariasis and several worm infections. "
+        "Would you like the recommended dosages?\nuser: ok\n"
+        '{"intent":"other","requires_retrieval":true,'
+    ) in contextualizer_prompt
+
+
+@pytest.mark.asyncio
+async def test_query_hint_preserves_acknowledgement_rules_with_a_stored_contextualizer():
+    class StoredPromptService:
+        async def resolve_prompt(self, prompt_type, names=None):
+            assert prompt_type == "query_contextualizer"
+            return "Stored contextualizer for {query_language} on {current_date}."
+
+    payload = json.dumps({"intent": "gratitude", "requires_retrieval": False, "query_list": []})
+    llm = FakeLLM(chat_responses=[payload])
+    svc = _svc(llm=llm, mode="ChatBotRag")
+    svc._prompt_service = StoredPromptService()
+
+    await svc.generate_query(
+        [
+            {"role": "assistant", "content": "Was that helpful?"},
+            {"role": "user", "content": "ok"},
+        ]
+    )
+
+    contextualizer_prompt = llm.chat_calls[0][0][0]["content"]
+    assert "social, wellbeing, or feedback question" in contextualizer_prompt
+    assert "factual, informational, analytical, or document-backed continuation" in contextualizer_prompt
 
 
 @pytest.mark.asyncio
@@ -455,7 +505,41 @@ async def test_chat_direct_mode_skips_retrieval():
     assert called["n"] == 0  # no retrieval in direct mode
     assert out["model"] == "m1"
     assert out["choices"][0]["message"]["content"] == "hello [Sources: none]"
-    assert json.loads(out["extra"])["sources"] == []
+    assert out["extra"]["sources"] == []
+
+
+@pytest.mark.asyncio
+async def test_chat_extra_is_a_json_object_not_an_encoded_string():
+    """`extra` is a nested JSON object on the wire, not a JSON-encoded string.
+
+    Asserted explicitly because every other test reads `out["extra"][...]`, which
+    happens to raise on a string too -- but as a `TypeError` about subscripting,
+    which reads like a broken test rather than a reverted response contract. This
+    one names the contract, so a regression says what it broke.
+    """
+    svc = _svc(llm=FakeLLM(chat_responses=["hello [Sources: none]"]))
+    out = await svc.chat(
+        partitions=None,
+        payload={"messages": [{"role": "user", "content": "hi"}], "metadata": {}},
+        prepare_sources=lambda d, w: [],
+        model_name="m1",
+    )
+    assert isinstance(out["extra"], dict)
+    # Survives serialization: the router hands this straight to the JSON encoder.
+    assert json.loads(json.dumps(out["extra"]))["sources"] == []
+
+
+@pytest.mark.asyncio
+async def test_complete_extra_is_a_json_object_not_an_encoded_string():
+    """Same contract on the legacy /completions path -- see the chat counterpart."""
+    svc = _svc(llm=FakeLLM(gen_text="text body\n[Sources: none]"))
+    out = await svc.complete(
+        partitions=None,
+        payload={"prompt": "do x"},
+        prepare_sources=lambda d, w: [],
+    )
+    assert isinstance(out["extra"], dict)
+    assert json.loads(json.dumps(out["extra"]))["sources"] == []
 
 
 @pytest.mark.asyncio
@@ -471,7 +555,7 @@ async def test_chat_direct_mode_preserves_literal_source_marker():
     )
 
     assert out["choices"][0]["message"]["content"] == answer
-    assert json.loads(out["extra"])["sources"] == []
+    assert out["extra"]["sources"] == []
 
 
 @pytest.mark.asyncio
@@ -487,7 +571,7 @@ async def test_chat_direct_mode_preserves_literal_terminal_sources_marker():
     )
 
     assert out["choices"][0]["message"]["content"] == answer
-    assert json.loads(out["extra"])["sources"] == []
+    assert out["extra"]["sources"] == []
 
 
 @pytest.mark.asyncio
@@ -503,7 +587,7 @@ async def test_chat_with_partition_retrieves_and_filters_sources():
         prepare_sources=lambda d, w: sources,
         model_name="m",
     )
-    extra = json.loads(out["extra"])
+    extra = out["extra"]
     assert extra["sources"] == [{"source_type": "document", "n": 1}]  # only cited source 1
     assert extra["presented_sources"] == sources  # everything shown to the model
     assert extra["cited_sources"] == [{"source_type": "document", "n": 1}]  # strictly what was cited
@@ -524,7 +608,7 @@ async def test_chat_all_retrieved_sources_omitted_by_default():
         model_name="m",
     )
 
-    extra = json.loads(out["extra"])
+    extra = out["extra"]
     assert "all_retrieved_sources" not in extra
     assert extra["sources"] == sources
     assert extra["presented_sources"] == sources
@@ -553,7 +637,7 @@ async def test_chat_all_retrieved_sources_survives_context_budget_truncation():
         model_name="m",
     )
 
-    extra = json.loads(out["extra"])
+    extra = out["extra"]
     assert extra["sources"] == [{"id": "c1"}]  # only the doc that fit the prompt and was cited
     assert extra["all_retrieved_sources"] == [{"id": "c1"}, {"id": "c2"}]  # both, unfiltered
 
@@ -589,7 +673,7 @@ async def test_chat_stream_all_retrieved_sources_survives_context_budget_truncat
         for line in lines
         if line.startswith("data: ") and line.strip() != "data: [DONE]"
     ]
-    extra = next(json.loads(c["extra"]) for c in reversed(chunks_out) if c.get("extra") not in (None, "{}"))
+    extra = next(c["extra"] for c in reversed(chunks_out) if c.get("extra") not in (None, {}))
 
     assert extra["sources"] == [{"id": "c1"}]
     assert extra["all_retrieved_sources"] == [{"id": "c1"}, {"id": "c2"}]
@@ -610,7 +694,7 @@ async def test_complete_all_retrieved_sources_survives_context_budget_truncation
         prepare_sources=lambda d, w: [{"id": doc.metadata.get("_id")} for doc in d],
     )
 
-    extra = json.loads(out["extra"])
+    extra = out["extra"]
     assert extra["sources"] == [{"id": "c1"}]
     assert extra["all_retrieved_sources"] == [{"id": "c1"}, {"id": "c2"}]
 
@@ -627,53 +711,101 @@ async def test_chat_recovers_context_markers_as_citations():
     )
 
     assert out["choices"][0]["message"]["content"] == "First claim. Second claim."
-    assert json.loads(out["extra"])["sources"] == sources
+    assert out["extra"]["sources"] == sources
 
 
 @pytest.mark.asyncio
-async def test_chat_conversational_request_skips_partition_retrieval():
-    query_json = json.dumps({"requires_retrieval": False, "query_list": []})
-    llm = FakeLLM(chat_responses=[query_json, "I can help you search and summarize documents."])
+async def test_chat_casual_greeting_uses_the_dedicated_openrag_prompt_without_retrieval():
+    llm = FakeLLM(chat_responses=["Bonjour ! Je suis OpenRAG."])
     retrieval = FakeRetrieval()
     svc = _svc(mode="ChatBotRag", llm=llm, retrieval=retrieval)
 
     out = await svc.chat(
         partitions=["p"],
-        payload={"messages": [{"role": "user", "content": "How can you help me?"}], "metadata": {}},
+        payload={"messages": [{"role": "user", "content": "Bonjour ! 👋"}], "metadata": {}},
         prepare_sources=lambda d, w: [{"source_type": "document"}] if d or w else [],
         model_name="m",
     )
 
     assert retrieval.retrieve_multi_calls == []
-    assert out["choices"][0]["message"]["content"] == "I can help you search and summarize documents."
-    assert json.loads(out["extra"])["sources"] == []
-    answer_messages = llm.chat_calls[1][0]
+    assert len(llm.chat_calls) == 1
+    assert out["choices"][0]["message"]["content"] == "Bonjour ! Je suis OpenRAG."
+    assert out["extra"]["sources"] == []
+    answer_messages = llm.chat_calls[0][0]
     assert answer_messages[0]["role"] == "system"
-    assert "OpenRAG" in answer_messages[0]["content"]
-    assert "LINAGORA" in answer_messages[0]["content"]
-    assert "document-grounded RAG system" in answer_messages[0]["content"]
+    casual_prompt = answer_messages[0]["content"]
+    assert "Respond in French" in casual_prompt
+    assert "OpenRAG" in casual_prompt
+    assert "LINAGORA" in casual_prompt
+    assert "PDF" in casual_prompt
+    assert "office documents" in casual_prompt
+    assert "images" in casual_prompt
+    assert "audio" in casual_prompt
+    assert "video" in casual_prompt
+    assert "general knowledge" in casual_prompt
+    assert "Do not include citations" in casual_prompt
+    assert "Here are the retrieved documents" not in casual_prompt
 
 
 @pytest.mark.asyncio
-async def test_chat_conversational_request_keeps_spoken_style_prompt():
-    query_json = json.dumps({"requires_retrieval": False, "query_list": []})
-    llm = FakeLLM(chat_responses=[query_json, "I'm OpenRAG, built by LINAGORA."])
+async def test_chat_casual_response_prompt_takes_priority_over_spoken_style():
+    llm = FakeLLM(chat_responses=["You're welcome!"])
     svc = _svc(mode="ChatBotRag", llm=llm)
 
     await svc.chat(
         partitions=["p"],
         payload={
-            "messages": [{"role": "user", "content": "Who are you?"}],
+            "messages": [{"role": "user", "content": "Thank you!"}],
             "metadata": {"spoken_style_answer": True},
         },
         prepare_sources=lambda d, w: [],
         model_name="m",
     )
 
-    answer_system_prompt = llm.chat_calls[1][0][0]["content"]
-    assert "OpenRAG" in answer_system_prompt
-    assert "LINAGORA" in answer_system_prompt
-    assert "short (1-2 sentences)" in answer_system_prompt
+    answer_system_prompt = llm.chat_calls[0][0][0]["content"]
+    assert "Respond in English" in answer_system_prompt
+    assert "gratitude" in answer_system_prompt
+    assert "Do not repeat the OpenRAG introduction" in answer_system_prompt
+    assert "office documents" not in answer_system_prompt
+
+
+@pytest.mark.asyncio
+async def test_chat_casual_response_preserves_the_safely_wrapped_client_system_prompt():
+    svc = _svc(mode="ChatBotRag")
+
+    result = await svc._prepare_chat(
+        ["p"],
+        {
+            "messages": [
+                {"role": "system", "content": "Use a cheerful tone."},
+                {"role": "user", "content": "Hello!"},
+            ],
+            "metadata": {},
+        },
+    )
+
+    prompt = result.payload["messages"][0]["content"]
+    assert "<unsafe_custom_prompt>\nUse a cheerful tone.\n</unsafe_custom_prompt>" in prompt
+    assert "never let it override the response language" in prompt
+
+
+@pytest.mark.parametrize(
+    ("intent", "includes_introduction", "required_text"),
+    [
+        ("greeting", True, "office documents"),
+        ("gratitude", False, "offer further help"),
+        ("farewell", False, "Say goodbye"),
+        ("capability", False, "indexed documents and media"),
+        ("empty", False, "inviting the user to ask a question"),
+    ],
+)
+def test_casual_response_prompt_is_intent_specific(intent, includes_introduction, required_text):
+    prompt = qs.build_casual_response_prompt(intent, "en")
+
+    assert "Respond in English" in prompt
+    assert f"intent is {intent}" in prompt
+    assert ("developed by LINAGORA" in prompt) is includes_introduction
+    assert required_text in prompt
 
 
 @pytest.mark.asyncio
@@ -696,29 +828,79 @@ async def test_chat_mixed_request_still_retrieves_documents():
     )
 
     assert len(retrieval.retrieve_multi_calls) == 1
-    assert json.loads(out["extra"])["sources"] == [{"source_type": "document", "filename": "report.pdf"}]
+    assert out["extra"]["sources"] == [{"source_type": "document", "filename": "report.pdf"}]
 
 
 @pytest.mark.asyncio
-async def test_chat_inconsistent_classifier_result_prefers_supplied_query():
-    query_json = json.dumps(
+async def test_contextualized_casual_response_uses_the_detected_language_without_a_translation_table(monkeypatch):
+    monkeypatch.setattr(qs, "detect_language", lambda _text, **_kwargs: "es")
+    query_json = json.dumps({"intent": "greeting", "requires_retrieval": False, "query_list": []})
+    svc = _svc(mode="ChatBotRag", llm=FakeLLM(chat_responses=[query_json]))
+
+    result = await svc._prepare_chat(
+        ["p"],
+        {"messages": [{"role": "user", "content": "Hola, espero que estés bien"}], "metadata": {}},
+    )
+
+    assert 'ISO 639-1 language code "es"' in result.payload["messages"][0]["content"]
+
+
+@pytest.mark.asyncio
+async def test_contextualized_casual_response_defaults_to_english_for_ambiguous_language(monkeypatch):
+    def detect_ambiguous_language(_text, *, min_confidence=0.0):
+        return None if min_confidence >= 0.8 else "xx"
+
+    monkeypatch.setattr(qs, "detect_language", detect_ambiguous_language)
+    query_json = json.dumps({"intent": "greeting", "requires_retrieval": False, "query_list": []})
+    svc = _svc(mode="ChatBotRag", llm=FakeLLM(chat_responses=[query_json]))
+
+    result = await svc._prepare_chat(
+        ["p"],
+        {"messages": [{"role": "user", "content": "Ambiguous social phrase"}], "metadata": {}},
+    )
+
+    assert "Respond in English" in result.payload["messages"][0]["content"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "contextualizer_result",
+    [
+        {"requires_retrieval": False, "query_list": []},
+        {"intent": "other", "requires_retrieval": False, "query_list": []},
+        {"intent": "greeting", "requires_retrieval": True, "query_list": []},
         {
+            "intent": "greeting",
             "requires_retrieval": False,
             "query_list": [{"query": "Product A revenue", "temporal_filters": None}],
-        }
-    )
-    llm = FakeLLM(chat_responses=[query_json, "Revenue was 10 million. [Sources: 1]"])
+        },
+        {
+            "intent": "greeting",
+            "requires_retrieval": False,
+            "query_list": [{"query": "   ", "temporal_filters": None}],
+        },
+    ],
+)
+async def test_chat_fails_closed_to_retrieval_for_incomplete_or_inconsistent_casual_results(
+    contextualizer_result,
+):
+    message = "Product A revenue was ten million dollars."
+    llm = FakeLLM(chat_responses=[json.dumps(contextualizer_result)])
     retrieval = FakeRetrieval()
     svc = _svc(mode="ChatBotRag", llm=llm, retrieval=retrieval)
 
-    await svc.chat(
-        partitions=["p"],
-        payload={"messages": [{"role": "user", "content": "What was Product A revenue?"}]},
-        prepare_sources=lambda d, w: [{"source_type": "document"}],
-        model_name="m",
+    await svc._prepare_chat(
+        ["p"],
+        {"messages": [{"role": "user", "content": message}], "metadata": {}},
     )
 
     assert len(retrieval.retrieve_multi_calls) == 1
+    queries = retrieval.retrieve_multi_calls[0]["search_queries"].query_list
+    expected_query = next(
+        (query["query"] for query in contextualizer_result["query_list"] if query["query"].strip()),
+        message,
+    )
+    assert [query.query for query in queries] == [expected_query]
 
 
 @pytest.mark.asyncio
@@ -729,12 +911,12 @@ async def test_chat_without_citation_keeps_retrieved_sources():
 
     out = await svc.chat(
         partitions=["p"],
-        payload={"messages": [{"role": "user", "content": "How can you help me?"}], "metadata": {}},
+        payload={"messages": [{"role": "user", "content": "What does the report say?"}], "metadata": {}},
         prepare_sources=lambda d, w: sources,
         model_name="m",
     )
 
-    extra = json.loads(out["extra"])
+    extra = out["extra"]
     assert extra["sources"] == sources
     # No tag at all → not reported, even though `sources` ends up covering
     # everything, same as if the model had explicitly cited all of them (#847 review).
@@ -758,7 +940,7 @@ async def test_chat_invalid_citation_does_not_fallback_to_unrelated_sources():
         model_name="m",
     )
 
-    extra = json.loads(out["extra"])
+    extra = out["extra"]
     assert extra["sources"] == []
     assert extra["citations_reported"] is True  # a tag was present, just out of range
 
@@ -781,7 +963,7 @@ async def test_chat_structured_output_keeps_retrieved_sources_without_citation_m
     )
 
     assert out["choices"][0]["message"]["content"] == structured_answer
-    assert json.loads(out["extra"])["sources"] == sources
+    assert out["extra"]["sources"] == sources
 
 
 @pytest.mark.asyncio
@@ -827,7 +1009,7 @@ async def test_chat_stream_structured_output_preserves_source_like_json_values()
     content = "".join(
         choice.get("delta", {}).get("content", "") for chunk in chunks for choice in chunk.get("choices", [])
     )
-    extra = next(json.loads(chunk["extra"]) for chunk in reversed(chunks) if chunk.get("extra") not in (None, "{}"))
+    extra = next(chunk["extra"] for chunk in reversed(chunks) if chunk.get("extra") not in (None, {}))
 
     assert content == structured_answer
     assert extra["sources"] == sources
@@ -866,7 +1048,7 @@ async def test_structured_websearch_returns_only_sources_included_in_context():
         model_name="m",
     )
 
-    extra = json.loads(out["extra"])
+    extra = out["extra"]
     assert extra["sources"] == [{"url": "https://example.test/included"}]
     # #847 review: excluded (didn't fit the web token budget) still shows up
     # in all_retrieved_sources.
@@ -877,7 +1059,7 @@ async def test_structured_websearch_returns_only_sources_included_in_context():
 
 
 @pytest.mark.asyncio
-async def test_explicit_websearch_forces_retrieval_for_conversational_classifier_result():
+async def test_explicit_websearch_forces_retrieval_for_allowlisted_casual_message():
     query_json = json.dumps({"requires_retrieval": False, "query_list": []})
     llm = FakeLLM(chat_responses=[query_json])
     retrieval = FakeRetrieval(chunks=[])
@@ -887,13 +1069,32 @@ async def test_explicit_websearch_forces_retrieval_for_conversational_classifier
     await svc._prepare_chat(
         ["p"],
         {
-            "messages": [{"role": "user", "content": "What is happening today?"}],
+            "messages": [{"role": "user", "content": "Hello!"}],
             "metadata": {"websearch": True},
         },
     )
 
     assert len(retrieval.retrieve_multi_calls) == 1
-    assert web.calls == ["What is happening today?"]
+    assert web.calls == ["Hello!"]
+
+
+@pytest.mark.asyncio
+async def test_map_reduce_forces_retrieval_for_allowlisted_casual_message():
+    query_json = json.dumps({"requires_retrieval": False, "query_list": []})
+    llm = FakeLLM(chat_responses=[query_json])
+    retrieval = FakeRetrieval(chunks=[])
+    svc = _svc(mode="ChatBotRag", llm=llm, retrieval=retrieval)
+
+    await svc._prepare_chat(
+        ["p"],
+        {
+            "messages": [{"role": "user", "content": "Merci!"}],
+            "metadata": {"use_map_reduce": True},
+        },
+    )
+
+    assert len(retrieval.retrieve_multi_calls) == 1
+    assert retrieval.retrieve_multi_calls[0]["search_queries"].query_list[0].query == "Merci!"
 
 
 @pytest.mark.asyncio
@@ -1166,7 +1367,7 @@ async def test_chat_attachments_force_retrieval_even_when_classifier_skips():
     await svc.chat(
         partitions=["p1"],
         payload={
-            "messages": [{"role": "user", "content": "thanks!"}],
+            "messages": [{"role": "user", "content": "Thank you!"}],
             "metadata": {"attachments": [{"id": "fa"}]},
         },
         prepare_sources=lambda d, w: [],
@@ -1284,7 +1485,7 @@ async def test_chat_attachments_drops_unindexed_and_reports_in_extra():
     # Only the indexed id drives the filter...
     assert retrieval.retrieve_multi_calls[0]["filter_params"] == {"file_id": ["fa"]}
     # ...and the same validated list is reported back to the client in extra.
-    assert json.loads(chunk["extra"])["attachments"] == ["fa"]
+    assert chunk["extra"]["attachments"] == ["fa"]
 
 
 @pytest.mark.asyncio
@@ -1305,7 +1506,7 @@ async def test_chat_attachments_duplicate_ids_deduped():
         model_name="m",
     )
     assert retrieval.retrieve_multi_calls[0]["filter_params"] == {"file_id": ["fa"]}
-    assert json.loads(chunk["extra"])["attachments"] == ["fa"]
+    assert chunk["extra"]["attachments"] == ["fa"]
 
 
 @pytest.mark.asyncio
@@ -1347,7 +1548,7 @@ async def test_chat_attachments_all_partition_looks_up_any_partition():
         model_name="m",
     )
     assert retrieval.retrieve_multi_calls[0]["filter_params"] == {"file_id": ["fa"]}
-    assert json.loads(chunk["extra"])["attachments"] == ["fa"]
+    assert chunk["extra"]["attachments"] == ["fa"]
 
 
 @pytest.mark.asyncio
@@ -1375,7 +1576,7 @@ async def test_complete_direct_mode_preserves_literal_source_marker():
         prepare_sources=lambda d, w: [{"x": 1}] if d or w else [],
     )
     assert out["choices"][0]["text"] == answer
-    assert json.loads(out["extra"])["sources"] == []
+    assert out["extra"]["sources"] == []
 
 
 @pytest.mark.asyncio
@@ -1412,7 +1613,7 @@ async def test_complete_partition_request_keeps_context_and_filters_citations():
         prepare_sources=lambda d, w: sources,
     )
 
-    extra = json.loads(out["extra"])
+    extra = out["extra"]
     assert out["choices"][0]["text"] == "The answer is grounded."
     assert extra["sources"] == sources
     assert extra["citations_reported"] is True
@@ -1435,7 +1636,7 @@ async def test_complete_without_citation_keeps_retrieved_sources():
         prepare_sources=lambda d, w: sources,
     )
 
-    extra = json.loads(out["extra"])
+    extra = out["extra"]
     assert out["choices"][0]["text"] == "A general answer with no citation marker."
     assert extra["sources"] == sources
     assert extra["citations_reported"] is False
@@ -1500,7 +1701,7 @@ async def test_chat_all_retrieved_sources_survives_map_reduce_replacement():
         model_name="m",
     )
 
-    extra = json.loads(out["extra"])
+    extra = out["extra"]
     # What the LLM actually saw and cited: the map-reduce summaries.
     assert extra["sources"] == [
         {"id": "c1", "text": "summary one"},
@@ -1666,42 +1867,23 @@ def test_sanitize_system_message_preserved():
 
 
 @pytest.mark.asyncio
-async def test_conversational_reply_resolves_its_prompt_from_the_library():
-    """The no-retrieval path (a greeting / capability question) came from #807
-    and read an __init__-time snapshot this branch removes. Git auto-merged that
-    reference without flagging a conflict, so nothing but this test proves the
-    conversational reply resolves through PromptService at all.
-    """
+@pytest.mark.parametrize("message", [*sorted(qs.CASUAL_MESSAGES), "   ?! 👋   "])
+async def test_allowlisted_or_normalized_empty_chat_bypasses_contextualization_and_retrieval(message):
+    llm = FakeLLM(chat_responses=[json.dumps({"requires_retrieval": True, "query_list": [{"query": "wrong"}]})])
+    retrieval = FakeRetrieval()
+    svc = _svc(llm=llm, retrieval=retrieval, mode="ChatBotRag")
 
-    class RecordingPromptService:
-        def __init__(self):
-            self.calls: list = []
+    result = await svc._prepare_chat(["p"], {"messages": [{"role": "user", "content": message}], "metadata": {}})
 
-        async def resolve_prompt(self, prompt_type, names=None):
-            self.calls.append((prompt_type, tuple(names or ())))
-            # Each type is rendered with its own placeholders, so the stub has
-            # to answer in kind rather than with one shared string.
-            if prompt_type == "query_contextualizer":
-                return "CTX {query_language} {current_date}"
-            return "CONVERSATIONAL {context} {current_date}"
-
-    payload = json.dumps({"requires_retrieval": False, "query_list": []})
-    svc = _svc(llm=FakeLLM(chat_responses=[payload]), mode="ChatBotRag")
-    rec = RecordingPromptService()
-    svc._prompt_service = rec
-    svc._config.partitions = {
-        "p": SimpleNamespace(generation_prompt_names={"sys_prompt": "chatty"}, chat_history_depth=4)
-    }
-
-    result = await svc._prepare_chat(["p"], {"messages": [{"role": "user", "content": "hello!"}], "metadata": {}})
-    out, docs, web = result.payload, result.docs, result.web_results
-
-    # Resolved from the library, honouring the partition's selection, and no
-    # retrieval happened.
-    assert ("sys_prompt", ("chatty",)) in rec.calls
-    assert docs == [] and web == []
-    assert out["messages"][0]["role"] == "system"
-    assert "CONVERSATIONAL" in out["messages"][0]["content"]
+    policy = qs.casual_message_policy(message)
+    assert policy is not None
+    if not qs.normalize_casual_message(message):
+        assert policy == qs.CasualMessagePolicy("empty", "en")
+    assert llm.chat_calls == []
+    assert retrieval.retrieve_multi_calls == []
+    assert result.docs == []
+    assert result.web_results == []
+    assert result.payload["messages"][0]["role"] == "system"
 
 
 def test_split_leading_system_prompt_tolerates_content_free_system_turn():
@@ -1734,3 +1916,254 @@ def test_split_leading_system_prompt_returns_none_when_every_system_turn_is_empt
 
     assert pinned is None
     assert rest == [{"role": "user", "content": "hi"}]
+
+
+@pytest.mark.parametrize(
+    ("message", "normalized"),
+    [
+        ("Bonjour ! 👋", "bonjour"),
+        ("BONJOUR", "bonjour"),
+        ("Hey, how are you?", "hey how are you"),
+        ("Merci.", "merci"),
+        ("THANK YOU!", "thank you"),
+        ("   ?! 👋   ", ""),
+        ("Bonjour, qu’est-ce qu’OpenRAG ?", "bonjour qu est ce qu openrag"),
+        ("  ÉTÉ\t東京  １２３  ", "été 東京 123"),
+        ("👩‍💻 ❤️ 1️⃣", "1"),
+    ],
+)
+def test_normalize_casual_message_preserves_words_while_removing_symbols_and_punctuation(message, normalized):
+    assert qs.normalize_casual_message(message) == normalized
+
+
+@pytest.mark.parametrize(
+    ("message", "intent", "language"),
+    [
+        ("bonjour", "greeting", "fr"),
+        ("salut", "greeting", "fr"),
+        ("hello", "greeting", "en"),
+        ("hey", "greeting", "en"),
+        ("comment allez vous", "greeting", "fr"),
+        ("how are you", "greeting", "en"),
+        ("hey how are you", "greeting", "en"),
+        ("merci", "gratitude", "fr"),
+        ("thank you", "gratitude", "en"),
+        ("au revoir", "farewell", "fr"),
+        ("bye", "farewell", "en"),
+    ],
+)
+def test_casual_message_policy_classifies_every_allowlisted_expression(message, intent, language):
+    policy = qs.casual_message_policy(message)
+
+    assert policy is not None
+    assert policy.intent == intent
+    assert policy.language == language
+
+
+@pytest.mark.asyncio
+async def test_chainlit_reported_typo_is_classified_by_the_contextualizer_without_retrieval():
+    message = "hello, how can you helpe me ?"
+    llm = FakeLLM(chat_responses=[json.dumps({"intent": "capability", "requires_retrieval": False, "query_list": []})])
+    retrieval = FakeRetrieval()
+    svc = _svc(mode="ChatBotRag", llm=llm, retrieval=retrieval)
+
+    result = await svc._prepare_chat(
+        ["p"],
+        {"messages": [{"role": "user", "content": message}], "metadata": {}},
+    )
+
+    assert len(llm.chat_calls) == 1
+    assert retrieval.retrieve_multi_calls == []
+    assert result.docs == []
+    assert result.web_results == []
+    prompt = result.payload["messages"][0]["content"]
+    assert "intent is capability" in prompt
+    assert "indexed documents and media" in prompt
+    assert "developed by LINAGORA" not in prompt
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Bonjour, qu’est-ce qu’OpenRAG ?",
+        "Hello, summarize the uploaded document.",
+        "Merci, mais que dit le rapport sur ce problème ?",
+        "Albendazole is used to treat lymphatic filariasis.",
+        "OpenRAG utilise Milvus.",
+        "say hello",
+    ],
+)
+def test_casual_message_policy_requires_an_exact_complete_message_match(message):
+    assert qs.casual_message_policy(message) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["chat", "chat_stream"])
+@pytest.mark.parametrize("require_retrieval", [True, False, None, "true", 1])
+async def test_partition_chat_retrieves_factual_statement_regardless_of_classifier_or_metadata(
+    operation, require_retrieval
+):
+    claim = "A deficiency of vitamin B12 increases blood levels of homocysteine."
+    llm = FakeLLM(chat_responses=[json.dumps({"requires_retrieval": False, "query_list": []})])
+    retrieval = FakeRetrieval()
+    svc = _svc(mode="ChatBotRag", llm=llm, retrieval=retrieval)
+    metadata = {"include_all_retrieved_sources": True}
+    if require_retrieval is not None:
+        metadata["require_retrieval"] = require_retrieval
+    payload = {"metadata": metadata}
+    payload["messages"] = [{"role": "user", "content": claim}]
+    kwargs = {
+        "partitions": ["p"],
+        "payload": payload,
+        "prepare_sources": lambda docs, web: [{"id": d.metadata["_id"]} for d in docs],
+        "model_name": "m",
+    }
+    if operation == "chat_stream":
+        events = [
+            json.loads(line[6:])
+            async for line in svc.chat_stream(**kwargs)
+            if line.startswith("data: ") and line.strip() != "data: [DONE]"
+        ]
+        extra = next(event["extra"] for event in reversed(events) if event.get("extra"))
+    else:
+        extra = (await getattr(svc, operation)(**kwargs))["extra"]
+
+    assert len(retrieval.retrieve_multi_calls) == 1
+    call = retrieval.retrieve_multi_calls[0]
+    assert call["partitions"] == ["p"]
+    assert call["search_queries"].query_list[0].query == claim
+    assert extra["all_retrieved_sources"] == [{"id": "c1"}]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("require_retrieval", [True, False, None, "true", 1])
+async def test_text_completion_retrieval_remains_opt_in(require_retrieval):
+    claim = "A deficiency of vitamin B12 increases blood levels of homocysteine."
+    llm = FakeLLM(chat_responses=[json.dumps({"requires_retrieval": False, "query_list": []})])
+    retrieval = FakeRetrieval()
+    svc = _svc(mode="ChatBotRag", llm=llm, retrieval=retrieval)
+    metadata = {"include_all_retrieved_sources": True}
+    if require_retrieval is not None:
+        metadata["require_retrieval"] = require_retrieval
+
+    extra = (
+        await svc.complete(
+            partitions=["p"],
+            payload={"prompt": claim, "metadata": metadata},
+            prepare_sources=lambda docs, web: [{"id": d.metadata["_id"]} for d in docs],
+        )
+    )["extra"]
+
+    if require_retrieval is True:
+        assert len(retrieval.retrieve_multi_calls) == 1
+        assert retrieval.retrieve_multi_calls[0]["search_queries"].query_list[0].query == claim
+        assert extra["all_retrieved_sources"] == [{"id": "c1"}]
+    else:
+        assert retrieval.retrieve_multi_calls == []
+        assert extra["all_retrieved_sources"] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("message", ["Hello!", "  ?! 👋  "])
+@pytest.mark.parametrize("require_retrieval", [True, False, None, "true", 1])
+async def test_only_explicit_json_true_forces_retrieval_for_casual_or_normalized_empty_chat(message, require_retrieval):
+    llm = FakeLLM(chat_responses=[json.dumps({"requires_retrieval": False, "query_list": []})])
+    retrieval = FakeRetrieval()
+    svc = _svc(mode="ChatBotRag", llm=llm, retrieval=retrieval)
+    metadata = {}
+    if require_retrieval is not None:
+        metadata["require_retrieval"] = require_retrieval
+
+    await svc._prepare_chat(
+        ["p"],
+        {"messages": [{"role": "user", "content": message}], "metadata": metadata},
+    )
+
+    if require_retrieval is True:
+        assert len(llm.chat_calls) == 1
+        assert len(retrieval.retrieve_multi_calls) == 1
+        assert retrieval.retrieve_multi_calls[0]["search_queries"].query_list[0].query == message
+    else:
+        assert llm.chat_calls == []
+        assert retrieval.retrieve_multi_calls == []
+
+
+@pytest.mark.asyncio
+async def test_require_retrieval_preserves_workspace_scope():
+    retrieval = FakeRetrieval()
+    svc = _svc(
+        mode="ChatBotRag",
+        retrieval=retrieval,
+        llm=FakeLLM(chat_responses=[json.dumps({"requires_retrieval": False, "query_list": []})]),
+        workspace=FakeWorkspace(scope=WorkspaceScope(workspace_id="w1", partition="p1", file_ids=["allowed-file"])),
+    )
+    await svc._prepare_chat(
+        ["p1", "p2"],
+        {
+            "messages": [{"role": "user", "content": "Verify this claim."}],
+            "metadata": {"require_retrieval": True, "workspace": "w1"},
+        },
+    )
+    call = retrieval.retrieve_multi_calls[0]
+    assert call["partitions"] == ["p1"]
+    assert call["filter_params"] == {"file_id": ["allowed-file"]}
+
+
+@pytest.mark.asyncio
+async def test_require_retrieval_does_not_bypass_missing_workspace():
+    retrieval = FakeRetrieval()
+    svc = _svc(
+        mode="ChatBotRag",
+        retrieval=retrieval,
+        workspace=FakeWorkspace(scope=None),
+        llm=FakeLLM(chat_responses=[json.dumps({"requires_retrieval": False, "query_list": []})]),
+    )
+    with pytest.raises(WorkspaceNotFoundError):
+        await svc._prepare_chat(
+            ["p"],
+            {
+                "messages": [{"role": "user", "content": "Verify this claim."}],
+                "metadata": {"require_retrieval": True, "workspace": "missing"},
+            },
+        )
+    assert retrieval.retrieve_multi_calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("has_query", [False, True])
+async def test_require_retrieval_keeps_generated_filters_and_allows_no_matches(has_query):
+    query = {
+        "query": "papers published in 2020",
+        "temporal_filters": [
+            {"field": "created_at", "operator": ">=", "value": "2020-01-01T00:00:00+00:00"},
+        ],
+    }
+    retrieval = FakeRetrieval(chunks=[])
+    svc = _svc(
+        mode="ChatBotRag",
+        retrieval=retrieval,
+        llm=FakeLLM(
+            chat_responses=[
+                json.dumps(
+                    {
+                        "requires_retrieval": has_query,
+                        "query_list": [query] if has_query else [],
+                    }
+                )
+            ]
+        ),
+    )
+    result = await svc._prepare_chat(
+        ["p"],
+        {
+            "messages": [{"role": "user", "content": "Find papers from 2020."}],
+            "metadata": {"require_retrieval": True},
+        },
+    )
+    assert len(retrieval.retrieve_multi_calls) == 1
+    if has_query:
+        generated = retrieval.retrieve_multi_calls[0]["search_queries"].query_list[0]
+        assert generated.query == query["query"]
+        assert generated.to_milvus_filter()
+    assert result.docs == []
+    assert result.retrieved_docs == []

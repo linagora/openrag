@@ -2,11 +2,28 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 import pytest
 from core.models.catalog import DocumentRecord, DocumentStatus
 from services.storage.postgres_store import PostgresStore
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio(loop_scope="session")]
+
+
+async def test_reconciliation_lookup_and_pages(postgres_store):
+    for partition in ("a", "b"):
+        await _seed_partition(postgres_store, partition)
+    repo = postgres_store.document_repo
+    for partition, file_id in (("a", "a1"), ("a", "a2"), ("a", "recent"), ("b", "b1")):
+        await repo.create_document(_doc(file_id, partition))
+    before = datetime.now(UTC) - timedelta(hours=1)
+    await repo.pool.execute("UPDATE files SET indexed_at = $1 WHERE file_id != 'recent'", before - timedelta(hours=1))
+    existing = await repo.get_indexed_documents({("a", "a1"), ("b", "b1"), ("a", "b1"), ("b", "a1")})
+    assert set(existing) == {("a", "a1"), ("b", "b1")}
+    assert await repo.list_indexed_documents("a", before=before, limit=1) == ["a1"]
+    assert await repo.list_indexed_documents("a", before=before, after="a1", limit=1) == ["a2"]
+    assert await repo.list_indexed_documents("a", before=before, after="a2", limit=1) == []
 
 
 async def _seed_partition(store: PostgresStore, name: str = "p") -> str:
@@ -28,12 +45,13 @@ def _doc(file_id: str, partition: str = "p", **extra) -> DocumentRecord:
 class TestCreateGetDelete:
     async def test_create_then_get(self, postgres_store: PostgresStore):
         partition = await _seed_partition(postgres_store)
-        await postgres_store.document_repo.create_document(_doc("f1", partition))
+        await postgres_store.document_repo.create_document(_doc("f1", partition, chunk_count=4))
         fetched = await postgres_store.document_repo.get_document("f1")
         assert fetched is not None
         assert fetched.file_id == "f1"
         assert fetched.partition == partition
         assert fetched.filename == "f1.pdf"
+        assert fetched.chunk_count == 4
 
     async def test_get_missing_returns_none(self, postgres_store: PostgresStore):
         assert await postgres_store.document_repo.get_document("nope") is None
@@ -86,6 +104,16 @@ class TestListFilter:
 
 
 class TestUpdate:
+    async def test_update_chunk_count(self, postgres_store: PostgresStore):
+        partition = await _seed_partition(postgres_store)
+        repo = postgres_store.document_repo
+        await repo.create_document(_doc("chunks", partition, chunk_count=2))
+
+        updated = await repo.update_document("chunks", chunk_count=5)
+
+        assert updated is not None
+        assert updated.chunk_count == 5
+
     async def test_update_status_folds_into_metadata(
         self,
         postgres_store: PostgresStore,
@@ -113,6 +141,32 @@ class TestUpdate:
 
     async def test_update_missing_returns_none(self, postgres_store: PostgresStore):
         assert await postgres_store.document_repo.update_document("nope") is None
+
+    async def test_metadata_patch_preserves_concurrently_written_degradation(
+        self,
+        postgres_store: PostgresStore,
+    ):
+        partition = await _seed_partition(postgres_store)
+        repo = postgres_store.document_repo
+        await repo.create_document(_doc("metadata-race", partition, metadata={"title": "old"}))
+        stale_metadata = await repo.get_file_metadata("metadata-race", partition)
+        assert stale_metadata is not None
+
+        await repo.update_file_in_partition(
+            "metadata-race",
+            partition,
+            file_metadata={**stale_metadata, "degraded_stages": ["caption"]},
+        )
+        await repo.update_file_metadata_in_db(
+            "metadata-race",
+            partition,
+            {**stale_metadata, "title": "new", "degraded_stages": []},
+        )
+
+        metadata = await repo.get_file_metadata("metadata-race", partition)
+        assert metadata is not None
+        assert metadata["title"] == "new"
+        assert metadata["degraded_stages"] == ["caption"]
 
 
 class TestDeleteByPartition:

@@ -132,7 +132,12 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         if not self.enabled:
             return await call_next(request)
 
-        path = request.url.path
+        # ``scope["path"]`` is what the router dispatches on; ``request.url.path``
+        # is rebuilt from the Host header and not guaranteed to match it.
+        path = request.scope["path"]
+
+        if path in {"/health_check", "/ready"}:
+            return await call_next(request)
 
         # Exempt prefixes are checked before the admin bypass on purpose: these
         # paths never run through AuthMiddleware, so request.state.user is unset

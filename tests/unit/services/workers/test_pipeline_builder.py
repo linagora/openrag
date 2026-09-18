@@ -1,9 +1,13 @@
+import asyncio
 from contextlib import asynccontextmanager
 
 import pytest
 from core.config.indexation_pipeline import IndexationPipelineConfig
+from core.indexing.contextualize import ChunkContextualizer
+from core.indexing.topic_tags import TopicTagger
 from core.models.chunk import Chunk
 from core.models.document import Document, DocumentType, ImageBlock, ProcessedDocument, TextBlock
+from core.utils.exceptions import InferenceError
 from services.workers.pipeline_builder import build_indexing_pipeline
 from services.workers.stages import caption as caption_module
 
@@ -84,7 +88,13 @@ class FakeContextualizer:
         self.calls: list[tuple[list[Chunk], str, str]] = []
 
     async def contextualize(
-        self, chunks, *, filename: str = "", lang: str = "en", system_prompt: str | None = None
+        self,
+        chunks,
+        *,
+        filename: str = "",
+        lang: str = "en",
+        system_prompt: str | None = None,
+        on_failure=None,
     ) -> list[Chunk]:
         self.calls.append((list(chunks), filename, lang))
         return [chunk.model_copy(update={"text": f"ctx {chunk.text}", "context": "ctx"}) for chunk in chunks]
@@ -103,6 +113,7 @@ class FakeTopicTagger:
         max_tags: int = 7,
         lang: str = "en",
         system_prompt: str | None = None,
+        on_failure=None,
     ) -> list[str]:
         self.calls.append((list(chunks), filename, max_tags, lang))
         return self.tags
@@ -192,6 +203,74 @@ async def test_pipeline_indexation_config_disables_caption_and_contextualization
     assert vlm.calls == []
     assert contextualizer.calls == []
     assert row["stage"] == "stored"
+
+
+class PeakTrackingVLM:
+    """Records the peak number of caption calls running at once."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.in_flight = 0
+        self.peak = 0
+
+    async def caption_image(self, image_bytes: bytes, prompt: str | None = None) -> str:
+        self.calls += 1
+        self.in_flight += 1
+        self.peak = max(self.peak, self.in_flight)
+        try:
+            await asyncio.sleep(0.01)
+        finally:
+            self.in_flight -= 1
+        return "caption"
+
+
+def _many_image_pipeline(vlm, *, caption_concurrency: int | None, image_count: int = 20):
+    document = Document(filename="album.txt", text="hello", partition="tenant-a")
+    processed = ProcessedDocument(
+        document_id=document.id,
+        text_blocks=[TextBlock(text="hello")],
+        images=[ImageBlock(image_bytes=b"png") for _ in range(image_count)],
+    )
+    pipeline = build_indexing_pipeline(
+        parser=FakeParser(processed),
+        chunker=FakeChunker([Chunk(id="c1", text="hello", partition="tenant-a")]),
+        embedder=FakeEmbedder([[1.0]]),
+        vector_store=FakeVectorStore(),
+        vlm=vlm,
+        caption_concurrency=caption_concurrency,
+    )
+    return pipeline, document
+
+
+@pytest.mark.asyncio
+async def test_pipeline_run_forwards_caption_concurrency_to_the_caption_stage():
+    # caption_stage's own bound is covered in test_pipeline_stages; this covers
+    # the forwarding hop. Drop ``max_concurrency=self.caption_concurrency`` from
+    # ``run()`` and the stage silently goes unbounded again.
+    vlm = PeakTrackingVLM()
+    pipeline, document = _many_image_pipeline(vlm, caption_concurrency=3)
+
+    row = {"document": document, "partition": "tenant-a", "filename": "album.txt"}
+    await pipeline.run(row)
+
+    # Captioning is a best-effort enrichment: a raising stage is swallowed and
+    # would leave peak at 0, so assert the work actually happened.
+    assert vlm.calls == 20
+    assert "degraded_stages" not in row
+    assert vlm.peak <= 3
+
+
+@pytest.mark.asyncio
+async def test_pipeline_run_leaves_caption_fan_out_unbounded_without_a_limit():
+    # Guards the test above against passing for the wrong reason (the stage
+    # having gone serial), and preserves the pre-cap default.
+    vlm = PeakTrackingVLM()
+    pipeline, document = _many_image_pipeline(vlm, caption_concurrency=None)
+
+    await pipeline.run({"document": document, "partition": "tenant-a", "filename": "album.txt"})
+
+    assert vlm.calls == 20
+    assert vlm.peak > 3
 
 
 def _caption_pipeline(vlm: FakeVLM, caption_prompt: str | None):
@@ -1084,3 +1163,132 @@ def test_overflow_warning_skips_chunks_far_below_the_limit():
         _logger.remove(sink_id)
     assert counted == [], "chunks far below the limit must not be re-tokenised"
     assert not messages
+
+
+class FailingVLM:
+    async def caption_image(self, image_bytes: bytes, prompt: str | None = None) -> str:
+        raise RuntimeError("vlm unreachable")
+
+
+class FailingContextualizer:
+    async def contextualize(self, chunks, *, filename="", lang="en", system_prompt=None, on_failure=None):
+        raise RuntimeError("llm unreachable")
+
+
+class FailingTopicTagger:
+    async def tag(self, chunks, *, filename="", max_tags=7, lang="en", system_prompt=None, on_failure=None):
+        raise RuntimeError("llm unreachable")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("stage", "components", "config"),
+    [
+        ("caption", {"vlm": FailingVLM()}, {"enable_image_captioning": True}),
+        (
+            "contextualize",
+            {"contextualizer": FailingContextualizer()},
+            {"enable_contextualization": True},
+        ),
+        ("topic_tag", {"topic_tagger": FailingTopicTagger()}, {"enable_topic_tagging": True}),
+    ],
+)
+async def test_enrichment_stage_failure_does_not_lose_the_file(stage, components, config):
+    # #702: an enrichment failure (VLM/LLM timeout, unreachable endpoint, bad
+    # response) must not abort parse->chunk->embed->store. The file is still
+    # indexed from its base content, minus that enrichment.
+    document = Document(filename="note.txt", text="hello", partition="tenant-a")
+    processed = ProcessedDocument(
+        document_id=document.id,
+        text_blocks=[TextBlock(text="hello")],
+        images=[ImageBlock(image_bytes=b"png")],
+    )
+    vector_store = FakeVectorStore()
+    pipeline = build_indexing_pipeline(
+        parser=FakeParser(processed),
+        chunker=FakeChunker([Chunk(id="c1", text="hello", partition="tenant-a")]),
+        embedder=FakeEmbedder([[1.0]]),
+        vector_store=vector_store,
+        **components,
+    )
+    row = {
+        "document": document,
+        "partition": "tenant-a",
+        "filename": "note.txt",
+        "indexation_config": config,
+    }
+
+    result = await pipeline.run(row)
+
+    assert result["stage"] == "stored"
+    assert result["stored_count"] == 1
+    assert vector_store.calls, "chunks were never stored"
+    assert stage in result["degraded_stages"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stage", ["contextualize", "topic_tag"])
+async def test_enrichment_records_failures_swallowed_by_best_effort_helpers(stage: str):
+    class UnreachableLLM:
+        async def chat(self, messages, **kwargs):
+            raise InferenceError("llm unavailable")
+
+    document = Document(filename="note.txt", text="hello", partition="tenant-a")
+    processed = ProcessedDocument(document_id=document.id, text_blocks=[TextBlock(text="hello")])
+    vector_store = FakeVectorStore()
+    components = (
+        {"contextualizer": ChunkContextualizer(UnreachableLLM(), "context prompt")}
+        if stage == "contextualize"
+        else {"topic_tagger": TopicTagger(UnreachableLLM(), "topic prompt")}
+    )
+    config = {"enable_contextualization": True} if stage == "contextualize" else {"enable_topic_tagging": True}
+    pipeline = build_indexing_pipeline(
+        parser=FakeParser(processed),
+        chunker=FakeChunker([Chunk(id="c1", text="hello", partition="tenant-a")]),
+        embedder=FakeEmbedder([[1.0]]),
+        vector_store=vector_store,
+        **components,
+    )
+
+    result = await pipeline.run(
+        {
+            "document": document,
+            "partition": "tenant-a",
+            "filename": "note.txt",
+            "indexation_config": config,
+        }
+    )
+
+    assert result["stored_count"] == 1
+    assert set(result["degraded_stages"]) == {stage}
+    assert "llm unavailable" in result["degraded_stages"][stage]
+
+
+@pytest.mark.asyncio
+async def test_enrichment_cancellation_still_aborts_the_pipeline():
+    # Degrading on failure must not swallow cancellation: a cancelled task has
+    # to stop, not quietly index a half-enriched file.
+    class CancelledVLM:
+        async def caption_image(self, image_bytes: bytes, prompt: str | None = None) -> str:
+            raise asyncio.CancelledError
+
+    document = Document(filename="note.txt", text="hello", partition="tenant-a")
+    processed = ProcessedDocument(
+        document_id=document.id,
+        text_blocks=[TextBlock(text="hello")],
+        images=[ImageBlock(image_bytes=b"png")],
+    )
+    vector_store = FakeVectorStore()
+    pipeline = build_indexing_pipeline(
+        parser=FakeParser(processed),
+        chunker=FakeChunker([Chunk(id="c1", text="hello", partition="tenant-a")]),
+        embedder=FakeEmbedder([[1.0]]),
+        vector_store=vector_store,
+        vlm=CancelledVLM(),
+    )
+    row = {"document": document, "partition": "tenant-a", "filename": "note.txt"}
+
+    with pytest.raises(asyncio.CancelledError):
+        await pipeline.run(row)
+
+    assert vector_store.calls == []

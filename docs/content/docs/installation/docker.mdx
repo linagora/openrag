@@ -19,28 +19,13 @@ The optional monitoring stack provides ready-to-use dashboards for OpenRAG HTTP
 traffic, host resources, and NVIDIA GPUs. It is separate from the default stack
 so deployments that do not need monitoring keep the same footprint.
 
-Before starting it, set a strong `GRAFANA_ADMIN_PASSWORD` in `.env`. The
-`GRAFANA_ADMIN_USER` defaults to `admin`. Create the Prometheus token file from
-the same `AUTH_TOKEN` used by OpenRAG:
-
-```bash
-cd infra/compose
-compose_environment="$(docker compose --env-file .env config --environment)"
-AUTH_TOKEN="$(printf '%s\n' "$compose_environment" | sed -n 's/^AUTH_TOKEN=//p')"
-allow_no_auth="$(
-  printf '%s\n' "$compose_environment" |
-    sed -n 's/^ALLOW_NO_AUTH=//p' |
-    tr '[:upper:]' '[:lower:]' |
-    sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
-)"
-if [ -z "$AUTH_TOKEN" ] && [ "$allow_no_auth" != "true" ]; then
-  echo "AUTH_TOKEN must be set unless ALLOW_NO_AUTH=true." >&2
-  exit 1
-fi
-printf '%s' "$AUTH_TOKEN" | sudo tee prometheus/openrag_token >/dev/null
-sudo chown 65534:65534 prometheus/openrag_token
-sudo chmod 0400 prometheus/openrag_token
-```
+Before starting it, set a strong `GRAFANA_ADMIN_PASSWORD` and a random
+`METRICS_TOKEN` (`openssl rand -hex 16`) in `.env`. The `GRAFANA_ADMIN_USER`
+defaults to `admin`. The bundled Prometheus scrapes `GET /metrics` on the API
+over the Compose network with that token, which the overlay hands to it
+directly; nothing else to mount. See
+[Prometheus metrics](/openrag/documentation/prometheus_metrics/) to scrape the
+endpoint from an external Prometheus.
 
 Start OpenRAG with the monitoring overlay:
 
@@ -71,3 +56,14 @@ GF_SERVER_SERVE_FROM_SUB_PATH=true
 Grafana has its own login. Its admin password is initialized when the persistent
 Grafana volume is created; changing the environment variable later does not
 reset an existing password.
+
+## Log shipping to Loki
+
+An opt-in overlay ships the API and worker logs to an external Loki:
+
+```bash
+docker compose -f docker-compose.yaml -f logging.docker-compose.yaml up -d
+```
+
+Set `LOKI_URL` (and the optional `LOKI_USERNAME`, `LOKI_PASSWORD`,
+`LOKI_TENANT_ID`) in `.env`. See [Loki logs](/openrag/documentation/loki_logs/).

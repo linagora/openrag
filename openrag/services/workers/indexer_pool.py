@@ -9,7 +9,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import ray
-from core.config.model_endpoints import CONTROL_EXTRA_KEYS
+from core.config.model_endpoints import CONTROL_EXTRA_KEYS, DEFAULT_ENDPOINT_ALIAS, embedder_fingerprint
 from core.config.root import Settings
 from core.models.catalog import CONTENT_CLAIM_TOKEN_METADATA_KEY
 from core.utils.exceptions import NotFoundError
@@ -37,8 +37,29 @@ _MISSING_WORKER_REF_ERROR = "Indexer worker did not receive a registered task re
 # _active_indexation_config contextvar — a different contract that happened
 # to reuse the same version string on its own branch.
 # v7: merge of both v6 lineages — neither alone is compatible with this one.
-_INDEXER_ACTOR_PROTOCOL_VERSION = "v7"
+# v8 (develop): max_restarts on the dispatcher and the workers. Ray applies
+# actor options only when it creates the actor, and get_if_exists=True reuses a
+# detached actor left by the previous release — so without a new name the
+# restart policy would silently not apply to exactly the long-running
+# deployments that need it (#846).
+# v8 (this branch, independently): TaskStateManager now bounds its in-memory
+# retention and replaces any actor without that support during bootstrap. That
+# replacement kills the old actor id, which strands the dispatcher's and
+# workers' cached handles to it, so the indexer generation has to roll too — a
+# different contract that happened to reuse the same version string.
+# v9: merge of both v8 lineages — neither alone is compatible with this one.
+# v10: successful completion and bounded degradation now use one atomic task-
+# state method; prior workers can silently settle degraded jobs as clean.
+# v11: atomic completion reports cancellation, missing state, and conflicts
+# separately; v10 workers interpret all three as the same indexing failure.
+_INDEXER_ACTOR_PROTOCOL_VERSION = "v11"
 _INDEXER_POOL_DISPATCHER_ACTOR_NAME = f"IndexerPoolDispatcher-{_INDEXER_ACTOR_PROTOCOL_VERSION}"
+
+# Detached actors default to max_restarts=0, so one that dies — an OOM on a
+# large document, a node fault — stays dead and its pool slot is lost until the
+# next deploy. Marker and Docling already set 5 on both their pool and their
+# workers; the indexer tier had nothing (#846).
+_ACTOR_MAX_RESTARTS = 5
 
 
 def _explicit_indexation_selection(config: dict[str, Any] | None, key: str) -> str | None:
@@ -69,11 +90,9 @@ def _indexer_worker_actor_name(index: int) -> str:
 
 
 def _catalog_rdb_config(settings: Settings) -> Any:
-    if settings.rdb.database is not None:
-        return settings.rdb
-    return settings.rdb.model_copy(
-        update={"database": f"partitions_for_collection_{settings.vectordb.collection_name}"}
-    )
+    from services.storage.postgres_store import catalog_rdb_config
+
+    return catalog_rdb_config(settings)
 
 
 @ray.remote
@@ -153,6 +172,9 @@ class IndexerWorkerActor:
             contextualizer_factory=contextualizer_factory,
             topic_tagger_factory=topic_tagger_factory,
             defer_replace_cleanup=True,
+            # No point letting more of one document's images queue on the VLM
+            # gate than the gate will ever admit at once.
+            caption_concurrency=cfg.semaphore.vlm_semaphore,
         )
         self._catalog_store = PostgresStore(_catalog_rdb_config(cfg), run_migrations=False)
         self._catalog_initialized = False
@@ -203,6 +225,7 @@ class IndexerWorkerActor:
             task_state_manager=task_state_manager,
             document_repo=self._catalog_store.document_repo,
             topic_tag_repo=self._catalog_store.topic_tag_repo,
+            job_repo=self._catalog_store.job_repo,
             vector_store=self._vector_store,
             collection=cfg.vectordb.collection_name,
         )
@@ -320,24 +343,69 @@ class IndexerWorkerActor:
             decision = self._reload_decision(required_model_names)
             if decision is None:  # another reload refreshed it while we waited
                 return
-            try:
-                if self._model_endpoint_service is None:
-                    from services.orchestrators.model_endpoint_service import ModelEndpointService
-
-                    self._model_endpoint_service = ModelEndpointService(
-                        model_endpoint_repo=self._catalog_store.model_endpoint_repo,
-                        config=self._cfg,
-                    )
-                await self._model_endpoint_service.load_all()
-            except Exception as exc:  # noqa: BLE001 - a reload must never fail (or crash) a file
-                self._logger.warning(f"Model endpoint registry reload failed ({decision}): {exc}")
-            # Stamp the clock even on failure so a persistent error degrades to
-            # one retry per window rather than one attempt per file.
-            now = time.monotonic()
-            self._registry_loaded_at = now
+            now = await self._load_registry(decision)
             if decision == "miss":
                 self._last_miss_reload_at = now
                 self._last_miss_reload_key = _required_model_names_key(required_model_names)
+
+    async def _load_registry(self, reason: str) -> float:
+        """Reload ``cfg.models`` from the DB. The caller holds ``_registry_lock``."""
+        try:
+            if self._model_endpoint_service is None:
+                from services.orchestrators.model_endpoint_service import ModelEndpointService
+
+                self._model_endpoint_service = ModelEndpointService(
+                    model_endpoint_repo=self._catalog_store.model_endpoint_repo,
+                    config=self._cfg,
+                )
+            await self._model_endpoint_service.load_all()
+        except Exception as exc:  # noqa: BLE001 - a reload must never fail (or crash) a file
+            self._logger.warning(f"Model endpoint registry reload failed ({reason}): {exc}")
+        # Stamp the clock even on failure so a persistent error degrades to
+        # one retry per window rather than one attempt per file.
+        now = time.monotonic()
+        self._registry_loaded_at = now
+        return now
+
+    async def _reload_if_embedder_edited(self, embedder_name: str | None) -> None:
+        """Reload the registry now if this file's embedder was edited since it loaded (#958).
+
+        The catalog write refuses a file whose partition's embedder no longer
+        matches the config it embedded with. Left to the TTL, every file started
+        in the minute after an edit would embed with the old config and be
+        refused at the end; one read of the endpoint's row here lets them embed
+        with the new one instead. Never raises: the catalog write is the check
+        that holds, this only keeps it from having to fail files.
+        """
+        name = embedder_name or DEFAULT_ENDPOINT_ALIAS
+        try:
+            stored = await self._stored_embedder_fingerprint(name)
+        except Exception as exc:  # noqa: BLE001 - see above
+            self._logger.warning(f"Could not check embedder '{name}' for edits: {exc}")
+            return
+        if stored is None or stored == self._loaded_embedder_fingerprint(name):
+            return
+        async with self._registry_lock:
+            # Files started together all see the edit; the first one reloads.
+            if stored != self._loaded_embedder_fingerprint(name):
+                await self._load_registry("edited")
+
+    async def _stored_embedder_fingerprint(self, name: str) -> dict[str, str | None] | None:
+        repo = self._catalog_store.model_endpoint_repo
+        if name == DEFAULT_ENDPOINT_ALIAS:
+            row = next((r for r in await repo.list_all("embedder") if r.is_default), None)
+        else:
+            row = await repo.get(name, "embedder")
+        return embedder_fingerprint(row.endpoint, row.model_name, row.extra) if row is not None else None
+
+    def _loaded_embedder_fingerprint(self, name: str) -> dict[str, str | None] | None:
+        models = getattr(self._cfg, "models", None)
+        model_cfg = models.embedder.get(name) if models is not None else None
+        if model_cfg is None and name == DEFAULT_ENDPOINT_ALIAS:
+            model_cfg = _global_embedder_endpoint_config(self._cfg)
+        if model_cfg is None:
+            return None
+        return embedder_fingerprint(model_cfg.endpoint, model_cfg.model_name, model_cfg.extra)
 
     def _reload_decision(self, required_model_names: dict[str, list[str]] | list[str]) -> str | None:
         models = getattr(self._cfg, "models", None)
@@ -436,6 +504,7 @@ class IndexerWorkerActor:
                         ),
                     )
                 )
+                await self._reload_if_embedder_edited(embedder_name)
                 # Resolve the enrichment-stage prompts once for this file (partition
                 # override → global default → disk seed). Done here, at the job
                 # boundary, so per-chunk work reuses one resolved string instead of
@@ -483,15 +552,38 @@ class IndexerWorkerActor:
                 self._active_indexation_config.reset(token)
             file_id = metadata.get("file_id", "")
             if workspace_ids and not replace and file_id:
-                try:
-                    await asyncio.gather(
-                        *(
-                            self._catalog_store.workspace_repo.add_files_to_workspace(workspace_id, [file_id])
-                            for workspace_id in workspace_ids
-                        )
+                results = await asyncio.gather(
+                    *(
+                        self._catalog_store.workspace_repo.add_files_to_workspace(workspace_id, [file_id])
+                        for workspace_id in workspace_ids
+                    ),
+                    return_exceptions=True,
+                )
+                cancelled = next((result for result in results if isinstance(result, asyncio.CancelledError)), None)
+                if cancelled is not None:
+                    raise cancelled
+                failures = [
+                    (workspace_id, result)
+                    for workspace_id, result in zip(workspace_ids, results, strict=True)
+                    if isinstance(result, Exception) or result
+                ]
+                if failures:
+                    protected = await self._catalog_store.document_repo.mark_file_independently_indexed(
+                        file_id, partition
                     )
-                except Exception:
-                    pass
+                    if not protected:
+                        raise RuntimeError(
+                            f"Cannot protect indexed file '{file_id}': cleanup already started or file missing"
+                        )
+                    for workspace_id, error in failures:
+                        self._logger.warning(
+                            f"Failed to attach indexed file to workspace '{workspace_id}'; "
+                            f"file retained independently: {error}"
+                        )
+                else:
+                    await self._catalog_store.document_repo.finalize_file_workspace_ownership(
+                        file_id, partition, workspace_ids
+                    )
             return result
         finally:
             content_sha256 = metadata.get("content_sha256")
@@ -575,6 +667,7 @@ class IndexerPool:
                 get_if_exists=True,
                 lifetime="detached",
                 max_concurrency=max_tasks_per_worker,
+                max_restarts=_ACTOR_MAX_RESTARTS,
             ).remote(namespace)
             for i in range(pool_size)
         ]
@@ -833,6 +926,7 @@ def build_indexer_pool(namespace: str = "openrag") -> Any:
         get_if_exists=True,
         lifetime="detached",
         max_concurrency=max(1, pool_size * max_tasks_per_worker),
+        max_restarts=_ACTOR_MAX_RESTARTS,
     ).remote(
         pool_size=pool_size,
         max_tasks_per_worker=max_tasks_per_worker,
@@ -1050,6 +1144,11 @@ def _build_embedder_factory(cfg: Settings) -> Any:
                 batch_size=model_cfg.batch_size,
                 timeout=model_cfg.timeout,
                 **impl_kwargs,
+            )
+            # From the config this client was built with, not the registry at
+            # catalog-write time: a background reload can land mid-file.
+            instance.vector_fingerprint = embedder_fingerprint(
+                model_cfg.endpoint, model_cfg.model_name, model_cfg.extra
             )
             cache[name] = (identity, instance)
             return instance

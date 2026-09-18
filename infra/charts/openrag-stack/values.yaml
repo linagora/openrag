@@ -40,7 +40,6 @@ persistence:
     modelWeights: { size: 50Gi }
     data: { size: 20Gi }
     hydraConfig: { size: 10Mi }
-    logs: { size: 1Gi }
     venv: { size: 10Gi }
 
 # === Shared security defaults ===
@@ -186,6 +185,10 @@ milvus:
   minio:
     mode: distributed
     replicas: 3
+    # MinIO pulled minio/minio from Docker Hub; pull the same pinned tag from
+    # quay.io instead (mirrors the compose stacks' fix for the same issue).
+    image:
+      repository: quay.io/minio/minio
     persistence:
       enabled: true
       size: 20Gi
@@ -479,6 +482,37 @@ openrag:
       tls: []
       path: /
       pathType: Prefix
+  # Prometheus scrapes GET /metrics on the API port (no extra port). The route
+  # fails closed: set env.secrets.METRICS_TOKEN and have the scraper send it
+  # as a bearer, or set env.config.METRICS_ALLOW_UNAUTHENTICATED="true" when
+  # the path is blocked at the Ingress and scraped in-cluster. Port 8080 is
+  # the one networkPolicy.externalPorts opens to the Ingress controller, so an
+  # open /metrics is reachable wherever the API is. See
+  # docs/documentation/prometheus_metrics.md.
+  #
+  # Uvicorn topology only (ray.enabled=false, the default). With Ray Serve
+  # (ray.enabled=true + ENABLE_RAY_SERVE=true, as in values-linagora.yaml) the
+  # API listens on the RayCluster head Service, not on this Deployment's 8080,
+  # and every Serve replica has its own registry: the annotations below are
+  # then not rendered and enabling the ServiceMonitor fails the install.
+  metrics:
+    # prometheus.io/* pod annotations for annotation-based discovery (plain
+    # Prometheus with a kubernetes_sd relabel config). The scrape job behind
+    # them must send METRICS_TOKEN as a bearer (authorization.credentials_file
+    # in its kubernetes_sd job) unless METRICS_ALLOW_UNAUTHENTICATED is on;
+    # otherwise every scrape gets 403.
+    prometheusAnnotations: true
+    # Prometheus Operator / kube-prometheus-stack discovery.
+    serviceMonitor:
+      enabled: false
+      # Labels the operator's serviceMonitorSelector expects, e.g.
+      # release: kube-prometheus-stack
+      labels: {}
+      interval: 30s
+      scrapeTimeout: 10s
+      # Read METRICS_TOKEN from the chart env Secret (or env.existingSecret)
+      # and send it as the scrape bearer. Enable together with the token.
+      bearerTokenFromSecret: false
   resources:
     requests:
       cpu: "4"
@@ -508,31 +542,34 @@ openrag:
   # containerSecurityContext: {}
   # infra/docker/api.Dockerfile bakes an "openrag" user as uid 10001, primary
   # gid 0 (`useradd --uid 10001 --gid 0`), and grants group-write on the paths
-  # it writes at runtime (venv, egg-info, HOME, data/db/logs, HF cache, uv
+  # it writes at runtime (venv, egg-info, HOME, data/db, HF cache, uv
   # cache) via `chgrp -R 0` + `chmod g=u` — the OpenShift arbitrary-UID
   # pattern. runAsGroup must stay 0 (not 10001) to match, or e.g. the editable
   # install's `openrag.egg-info` isn't writable and uv fails at startup
   # ("Cannot update time stamp of directory 'openrag.egg-info'"). fsGroup can
   # stay 10001: it's only applied (and added as a supplementary group) to the
-  # mounted PVCs (data/logs/model_weights/venv), not to the image's own paths.
+  # mounted PVCs (data/model_weights/venv), not to the image's own paths.
   # Merged with the shared security.podSecurityContext defaults above.
   podSecurityContext:
     runAsUser: 10001
     runAsGroup: 0
     fsGroup: 10001
-  # Probe configuration. Override with exec probes when ENABLE_RAY_SERVE=true,
-  # since the Ray Serve HTTP proxy runs on the Ray head (not on this pod).
+  # Probe configuration. The chart keeps these HTTP probes for the direct API
+  # and automatically converts them to exec probes against the Ray head when
+  # ENABLE_RAY_SERVE=true.
   probes:
     startup:
       httpGet:
         path: /health_check
         port: openrag
+      timeoutSeconds: 5
       failureThreshold: 30
       periodSeconds: 10
     readiness:
       httpGet:
-        path: /health_check
+        path: /ready
         port: openrag
+      timeoutSeconds: 5
       initialDelaySeconds: 10
       periodSeconds: 10
       failureThreshold: 3
@@ -622,6 +659,31 @@ env:
     RAY_SERVE_NUM_REPLICAS: "4"
     RAY_SERVE_PORT: "80"
     GRAFANA_URL: ""
+    # GET /metrics fails closed. "true" serves it to anyone reaching port 8080
+    # (the Ingress port) without env.secrets.METRICS_TOKEN — only for clusters
+    # that block /metrics at the Ingress and scrape the Service in-cluster.
+    METRICS_ALLOW_UNAUTHENTICATED: "false"
+
+    # One flat JSON object per log line on stderr, for the platform's log
+    # collector. PREREQUISITE: this chart ships no collector and no longer
+    # mounts a logs volume — a DaemonSet (Alloy, Fluent Bit, …)
+    # must already ship pod stdout to Loki. Without one, logs exist only in
+    # the container runtime (`kubectl logs`) and are lost with the pod. See
+    # docs/documentation/loki_logs.md for the pipeline to add on the
+    # collector side. Set to "text" for the colorized human format.
+    LOG_FORMAT: "json"
+    # Ray relays worker output onto the API process. Its log deduplication
+    # merges same-shape lines from several workers and rewrites the survivor
+    # as "{...} [repeated 2x across cluster]" — no longer JSON — and the
+    # "(Actor pid=N)" relay prefix is ANSI-colorized even on a pipe. Both off.
+    RAY_DEDUP_LOGS: "0"
+    RAY_COLOR_PREFIX: "0"
+    # With ray.enabled=true the chart also sets RAY_LOG_TO_STDERR=1 (see
+    # configmap-env.yaml): worker lines are then written to the Ray pods' own
+    # stderr for the DaemonSet, instead of being relayed to the API driver —
+    # a relay that only carries lines from actors created by the *current*
+    # driver job and so goes silent for the detached workers after an API
+    # restart.
 
     WITH_CHAINLIT_UI: "false"
     SAVE_UPLOADED_FILES: "true"
@@ -701,6 +763,7 @@ env:
     # --set/-f) so the secret always matches the actual DB credential.
     POSTGRES_PASSWORD: "{{ .Values.postgresql.auth.password }}"
     AUTH_TOKEN: "" # API KEY for OpenRAG
+    METRICS_TOKEN: "" # Bearer for Prometheus on GET /metrics; empty = 403 unless METRICS_ALLOW_UNAUTHENTICATED
     HF_TOKEN: "" # HuggingFace token
     RERANKER_API_KEY: "EMPTY"  # Set when using an external reranker that requires authentication
 

@@ -28,6 +28,8 @@ def strip_internal_metadata(row: dict) -> dict:
 # ``content_sha256`` is the server-computed dedup hash: a caller-set value would
 # corrupt dedup (spoofed ``DOCUMENT_CONTENT_EXISTS``), so it is protected here and
 # re-set from the server side on the copy path after this strip runs.
+# ``indexed_at`` controls reconciliation's grace period and repair eligibility,
+# so only storage paths may assign it.
 #
 # ``partition`` is intentionally NOT here — the MCP update tool uses it as an
 # authorized move control and re-checks editor access on the destination.
@@ -36,7 +38,19 @@ def strip_internal_metadata(row: dict) -> dict:
 # the upload path, the MCP tools, and the REST PATCH path previously each
 # re-implemented this and the REST one simply omitted it.
 PROTECTED_METADATA_KEYS: frozenset[str] = frozenset(
-    {"file_id", "source", "created_by", "file_size", "file_count", "_id", "vector", "text", "content_sha256"}
+    {
+        "file_id",
+        "source",
+        "created_by",
+        "file_size",
+        "file_count",
+        "_id",
+        "vector",
+        "text",
+        "content_sha256",
+        "indexed_at",
+        "degraded_stages",
+    }
 )
 
 
@@ -61,3 +75,20 @@ def strip_protected_metadata(metadata: dict | None) -> tuple[dict, list[str]]:
 UPLOAD_METADATA_SERVER_KEYS: frozenset[str] = frozenset(
     {"source", "filename", "original_filename", "file_size", "file_id", "content_sha256"}
 )
+
+
+# Retrieval scores are *request-scoped*: they say how one query ranked a chunk,
+# not what the chunk is. They live as typed fields on ``ScoredChunk`` and are
+# stamped into metadata only at ``to_langchain()``, the boundary the API
+# response is built from.
+#
+# Listed here so the two ends agree on the spelling: the read boundary
+# (``vector_store_searcher._dict_to_chunk``) drops them, and the response
+# builder (``api/routers/user/source_links``) promotes them. Without the read
+# guard, a caller who wrote ``metadata: {"rerank_score": 0.99}`` on upload would
+# have it persisted in Milvus (the collection has a dynamic field), read back
+# into ``Chunk.metadata``, and promoted to a top-level sibling of ``chunk`` —
+# indistinguishable from the score this retrieval actually computed.
+#
+# A tuple, not a frozenset: the promotion order is the response's key order.
+RETRIEVAL_SCORE_KEYS: tuple[str, ...] = ("vector_score", "rerank_score", "combined_score")

@@ -42,7 +42,7 @@ services:
       retries: 5
 
   minio:
-    image: minio/minio:RELEASE.2024-12-18T13-15-44Z
+    image: quay.io/minio/minio:RELEASE.2024-12-18T13-15-44Z
     environment:
       MINIO_ACCESS_KEY: minioadmin
       MINIO_SECRET_KEY: minioadmin
@@ -106,6 +106,11 @@ services:
       - DEFAULT_FILE_QUOTA=10
       - AUTH_TOKEN=${AUTH_TOKEN:-test-admin-token}
       - SUPER_ADMIN_MODE=${SUPER_ADMIN_MODE:-true}
+      # This stack is disposable and its credentials are published in this file,
+      # so the boot-time secret policy would (correctly) refuse to start it. The
+      # policy itself is covered by tests/unit/core/config/test_secrets_guard.py,
+      # including a case asserting it still trips.
+      - ALLOW_INSECURE_SECRETS=true
     ports:
       - "8080:8080"
     volumes:

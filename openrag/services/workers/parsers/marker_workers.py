@@ -19,6 +19,7 @@ from core.models.document import (
 )
 from core.utils.logging import get_logger
 from marker.converters.pdf import PdfConverter
+from ray.exceptions import TaskCancelledError
 
 from ..ray_utils import call_ray_actor_with_timeout, retry_with_backoff
 
@@ -32,8 +33,9 @@ def _force_kill_executor(executor, log) -> None:
     current task finishes. A worker wedged on a pathological PDF never finishes,
     so a plain shutdown leaves it running — holding its pool slot and the GPU
     indefinitely (#659). Killing the OS processes directly is the only way to
-    reclaim a wedged worker; the whole pool is recycled because
-    ``ProcessPoolExecutor`` doesn't expose which worker ran a given task.
+    reclaim a wedged worker. ``ProcessPoolExecutor`` doesn't expose which
+    process ran a given task, which is why ``MarkerWorker`` gives every slot its
+    own single-process executor: killing one never touches another slot's parse.
     """
     if executor is None:
         return
@@ -78,6 +80,11 @@ def _marker_num_gpus(config) -> float:
 # 0 or negative disables the cap.
 _MAX_PDF_PAGES = 2000
 
+# How many times a pool-recycle retries after its own reset call is cancelled
+# (rather than failing) before the worker slot is dropped for good.
+_RECYCLE_CANCEL_RETRIES = 3
+_RECYCLE_CANCEL_RETRY_DELAY = 0.5
+
 
 @ray.remote
 class MarkerWorker:
@@ -102,10 +109,14 @@ class MarkerWorker:
         }
         os.environ["RAY_ADDRESS"] = "auto"
 
-        self.executor = None
-        # Serializes executor submit vs. teardown/rebuild: a parse timeout can
-        # reset the pool from a worker thread while other threads are submitting.
-        self._executor_lock = threading.Lock()
+        # One single-process executor per slot. MarkerPool hands each slot to at
+        # most one chunk at a time, so recycling a slot (cancel, timeout, broken
+        # pool) kills only the child running that slot's chunk — never a
+        # concurrent parse from another file on the same actor.
+        self.executors = [None] * self._workers
+        # Serializes a slot's submit vs. its teardown/rebuild: a parse timeout can
+        # reset the slot from a worker thread while MarkerPool is resetting it too.
+        self._executor_locks = [threading.Lock() for _ in range(self._workers)]
         self.init_resources()
 
     def init_resources(self):
@@ -116,10 +127,12 @@ class MarkerWorker:
             if hasattr(v.model, "share_memory"):
                 v.model.share_memory()
 
-        self.setup_mp()
+        for slot in range(self._workers):
+            self.setup_mp(slot)
+        self.logger.info(f"MarkerWorker initialized with {self._workers} single-process executors")
 
-    def setup_mp(self, old_executor=None):
-        """Initialize (or rebuild) the ProcessPoolExecutor for PDF processing.
+    def setup_mp(self, slot: int, old_executor=None):
+        """Initialize (or rebuild) the ProcessPoolExecutor backing one slot.
 
         We use ProcessPoolExecutor instead of multiprocessing.Pool because:
         - Ray actors run as daemon processes
@@ -127,27 +140,27 @@ class MarkerWorker:
         - The pdftext library (used by Marker) internally spawns processes
         - ProcessPoolExecutor workers are non-daemon, allowing nested process creation
 
-        ``old_executor`` guards against concurrent timeouts cascading: a timeout
-        handler passes the executor it timed out on, and if another handler has
-        already recycled the pool since then (``self.executor`` has moved on), we
-        skip — otherwise the second handler would force-kill the fresh pool the
-        first just built. ``None`` (init / explicit pool reset) always rebuilds.
+        ``old_executor`` guards against concurrent resets cascading: a timeout
+        handler passes the executor it timed out on, and if the slot has already
+        been recycled since then (its executor has moved on), we skip — otherwise
+        the second handler would force-kill the fresh executor the first just
+        built. ``None`` (init / explicit slot reset) always rebuilds.
         """
         from concurrent.futures import ProcessPoolExecutor
 
         import torch.multiprocessing as mp
 
-        with self._executor_lock:
-            if old_executor is not None and self.executor is not old_executor:
-                # Another timeout already recycled the pool; nothing wedged to reclaim.
+        with self._executor_locks[slot]:
+            if old_executor is not None and self.executors[slot] is not old_executor:
+                # The slot was already recycled; nothing wedged to reclaim.
                 return
 
-            if self.executor is not None:
+            if self.executors[slot] is not None:
                 # Force-kill: a wedged worker won't exit on a plain shutdown, so
                 # it would keep holding its slot and the GPU (#659).
-                self.logger.warning("Resetting ProcessPoolExecutor (killing worker processes)")
-                _force_kill_executor(self.executor, self.logger)
-                self.executor = None
+                self.logger.warning(f"Resetting ProcessPoolExecutor for slot {slot} (killing its worker process)")
+                _force_kill_executor(self.executors[slot], self.logger)
+                self.executors[slot] = None
 
             # Ensure spawn method for CUDA compatibility
             try:
@@ -156,15 +169,14 @@ class MarkerWorker:
             except RuntimeError:
                 self.logger.warning("Process start method already set, using existing method")
 
-            self.logger.info(f"Initializing MarkerWorker with {self._workers} workers")
-            self.executor = ProcessPoolExecutor(
-                max_workers=self._workers,
+            self.executors[slot] = ProcessPoolExecutor(
+                max_workers=1,
                 initializer=self._worker_init,
                 initargs=(self.model_dict,),
                 mp_context=mp.get_context("spawn"),
                 max_tasks_per_child=self.config.loader.marker_max_tasks_per_child,
             )
-            self.logger.info("MarkerWorker initialized with ProcessPoolExecutor")
+            self.logger.debug(f"MarkerWorker slot {slot} executor ready")
 
     @staticmethod
     def _worker_init(model_dict):
@@ -199,7 +211,7 @@ class MarkerWorker:
                 torch.cuda.empty_cache()
                 torch.cuda.ipc_collect()
 
-    async def process_pdf(self, file_path: str, page_range: list[int] | None = None):
+    async def process_pdf(self, file_path: str, page_range: list[int] | None = None, *, slot: int):
         from concurrent.futures import TimeoutError as FuturesTimeoutError
 
         converter_config = self.converter_config.copy()
@@ -207,27 +219,29 @@ class MarkerWorker:
             converter_config["page_range"] = page_range
 
         loop = asyncio.get_event_loop()
-        timeout = self.config.loader.marker_timeout
+        # Expires before the bounds wrapping this call, so the recycle below
+        # actually runs instead of being cancelled from outside (#894).
+        timeout = self.config.loader.marker_child_timeout
 
         def run_with_timeout():
-            with self._executor_lock:
-                current_executor = self.executor
+            with self._executor_locks[slot]:
+                current_executor = self.executors[slot]
                 future = current_executor.submit(self._process_pdf, file_path, converter_config)
             try:
                 result = future.result(timeout=timeout)
                 return result
             except FuturesTimeoutError:
                 # The child is still computing on the GPU and won't stop on its
-                # own; recycle the pool to reclaim the wedged worker's slot so it
-                # isn't lost forever (#659). Sibling parses in this worker are
-                # recycled too and retried by MarkerPool. Pass the executor we
-                # timed out on so a concurrent timeout can't kill a pool that was
-                # already rebuilt in the meantime.
+                # own; recycle this slot's executor to reclaim it so the slot
+                # isn't lost forever (#659). Other slots keep parsing. Pass the
+                # executor we timed out on so a concurrent reset of this slot
+                # can't kill an executor that was already rebuilt in the meantime.
                 self.logger.exception(
-                    "MarkerWorker child process timed out; recycling the pool to reclaim the slot",
+                    "MarkerWorker child process timed out; recycling its slot",
                     path=file_path,
+                    slot=slot,
                 )
-                self.setup_mp(old_executor=current_executor)
+                self.setup_mp(slot, old_executor=current_executor)
                 raise
             except Exception:
                 self.logger.exception("Error processing with MarkerWorker", path=file_path)
@@ -236,24 +250,25 @@ class MarkerWorker:
         result = await loop.run_in_executor(None, run_with_timeout)
         return result.markdown, result.images
 
-    def is_pool_broken(self):
+    def is_pool_broken(self, slot: int):
         # ProcessPoolExecutor auto-replaces dead/finished workers on next
         # submit(), so counting live processes is unreliable and unnecessary.
         # Only a None or shut-down executor requires reinitialization.
-        return self.executor is None or bool(getattr(self.executor, "_broken", False))
+        executor = self.executors[slot]
+        return executor is None or bool(getattr(executor, "_broken", False))
 
     def __del__(self):
-        """Clean up ProcessPoolExecutor on actor destruction.
+        """Clean up every slot's ProcessPoolExecutor on actor destruction.
 
         Force-kill so a worker still wedged on a parse doesn't outlive the actor
         and keep holding the GPU (#659).
         """
-        executor = getattr(self, "executor", None)
-        if executor:
-            try:
-                _force_kill_executor(executor, self.logger)
-            except Exception:
-                pass  # Best effort cleanup
+        for executor in getattr(self, "executors", None) or []:
+            if executor:
+                try:
+                    _force_kill_executor(executor, self.logger)
+                except Exception:
+                    pass  # Best effort cleanup
 
 
 @ray.remote(max_restarts=5)
@@ -270,11 +285,13 @@ class MarkerPool:
             MarkerWorker.options(num_gpus=_marker_num_gpus(self.config), max_restarts=5).remote()
             for _ in range(self.pool_size)
         ]
-        self._queue: asyncio.Queue[ray.actor.ActorHandle] = asyncio.Queue()
+        # A slot is ``(actor, slot index)``: the index picks that actor's
+        # single-process executor, so a slot recycle only touches its own child.
+        self._queue: asyncio.Queue[tuple[ray.actor.ActorHandle, int]] = asyncio.Queue()
 
-        for _ in range(self.max_processes):
+        for slot in range(self.max_processes):
             for actor in self.actors:
-                self._queue.put_nowait(actor)
+                self._queue.put_nowait((actor, slot))
 
         self.logger.info(
             f"Marker pool: {self.pool_size} actors × {self.max_processes} slots = "
@@ -302,30 +319,73 @@ class MarkerPool:
         return chunks
 
     async def _check_pool_broken(self, worker):
+        actor, slot = worker
         return await call_ray_actor_with_timeout(
-            worker.is_pool_broken.remote(),
+            actor.is_pool_broken.remote(slot),
             timeout=self.config.loader.marker_timeout,
-            task_description="MarkerWorker pool health check",
+            task_description=f"MarkerWorker slot {slot} health check",
         )
 
     async def _reset_worker_pool(self, worker):
+        actor, slot = worker
         return await call_ray_actor_with_timeout(
-            worker.setup_mp.remote(),
+            actor.setup_mp.remote(slot),
             timeout=self.config.loader.marker_timeout,
-            task_description="MarkerWorker pool reset",
+            task_description=f"MarkerWorker slot {slot} reset",
         )
 
     async def ensure_worker_pool_healthy(self, worker):
         if await self._check_pool_broken(worker):
-            self.logger.warning("Worker ProcessPoolExecutor is broken. Reinitializing pool...")
+            self.logger.warning(f"Worker ProcessPoolExecutor for slot {worker[1]} is broken. Reinitializing it...")
             await self._reset_worker_pool(worker)
 
     async def _run_chunk(self, worker, file_path: str, page_range: list[int] | None, label: str):
+        actor, slot = worker
         return await call_ray_actor_with_timeout(
-            worker.process_pdf.remote(file_path, page_range=page_range),
+            actor.process_pdf.remote(file_path, page_range=page_range, slot=slot),
             timeout=self.config.loader.marker_timeout,
             task_description=f"MarkerPool PDF {label} ({file_path})",
         )
+
+    async def _recycle_and_release(self, worker, label: str):
+        """Rebuild a slot's executor before handing the slot back.
+
+        Runs after a timed-out or cancelled ``_run_chunk``: ``run_in_executor``
+        isn't cancellable, so the child may still be parsing when we get here.
+        Recycling first (kills the slot's child, rebuilds its executor) stops the
+        next dispatched chunk from landing on a slot still busy with this one
+        (#723). Other slots on the same actor are untouched.
+
+        A cancel delivered to the reset call itself (the same delete that is
+        tearing down this chunk can recursively cancel it) is not a failed
+        reset, so it is retried instead of dropping the slot. If recycling
+        genuinely keeps failing, the worker is never returned to ``_queue`` —
+        a slot silently lost is safer than one that might still be busy.
+        """
+        for cancel_attempt in range(_RECYCLE_CANCEL_RETRIES + 1):
+            try:
+                await retry_with_backoff(
+                    lambda _i: self._reset_worker_pool(worker),
+                    max_retries=self.config.loader.marker_max_task_retry,
+                    base_delay=self.config.loader.marker_retry_base_delay,
+                    task_description=f"MarkerWorker recycle after {label}",
+                )
+            except (asyncio.CancelledError, TaskCancelledError):
+                if cancel_attempt >= _RECYCLE_CANCEL_RETRIES:
+                    self.logger.exception(
+                        f"MarkerWorker recycle after {label} kept getting cancelled; dropping its slot"
+                    )
+                    return
+                self.logger.warning(f"MarkerWorker recycle after {label} was cancelled; retrying")
+                await asyncio.sleep(_RECYCLE_CANCEL_RETRY_DELAY)
+                continue
+            except Exception:
+                self.logger.exception(f"MarkerWorker recycle after {label} failed; dropping its slot")
+                return
+            break
+
+        await self._queue.put(worker)
+        self.logger.debug(f"MarkerWorker returned to pool for {label}")
 
     async def _process_chunk(self, file_path: str, page_range: list[int] | None, label: str):
         """Acquire a worker slot, process a PDF chunk, and release the slot.
@@ -337,13 +397,30 @@ class MarkerPool:
 
         async def attempt(_i: int):
             worker = await self._queue.get()
+            completed = False
+            child_may_still_run = False
             try:
                 self.logger.info(f"MarkerWorker allocated for {label}")
                 await self.ensure_worker_pool_healthy(worker)
-                return await self._run_chunk(worker, file_path, page_range, label)
+                result = await self._run_chunk(worker, file_path, page_range, label)
+                completed = True
+                return result
+            except (TimeoutError, asyncio.CancelledError, TaskCancelledError):
+                child_may_still_run = True
+                raise
             finally:
-                await self._queue.put(worker)
-                self.logger.debug(f"MarkerWorker returned to pool for {label}")
+                if completed:
+                    await self._queue.put(worker)
+                    self.logger.debug(f"MarkerWorker returned to pool for {label}")
+                elif child_may_still_run:
+                    self.logger.warning(f"MarkerWorker for {label} did not complete cleanly; recycling before reuse")
+                    asyncio.create_task(self._recycle_and_release(worker, label))
+                else:
+                    # An ordinary exception (parse error, OOM) means the child
+                    # already stopped on its own; nothing to reclaim, and a
+                    # recycle would only cost a respawn of the slot's child.
+                    await self._queue.put(worker)
+                    self.logger.debug(f"MarkerWorker returned to pool for {label} without recycling")
 
         return await retry_with_backoff(
             attempt,

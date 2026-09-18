@@ -81,3 +81,33 @@ def test_indexation_pipeline_rejects_out_of_range_chunk_overlap_rate(rate: float
 def test_indexation_pipeline_accepts_in_range_chunk_overlap_rate(rate: float):
     cfg = IndexationPipelineConfig(chunking={"chunk_size": 512, "chunk_overlap_rate": rate})
     assert cfg.chunking.chunk_overlap_rate == rate
+
+
+def test_default_chunker_is_structured_section():
+    """The default chunking strategy is ``structured_section``.
+
+    Pinned because nothing else fails when the default flips: the name is a free
+    string, every registered strategy validates, and a silent revert would only
+    surface as a change in retrieval quality long after the fact. It is asserted
+    on three surfaces at once because they must not drift apart — the Pydantic
+    default, the ``conf/config.yaml`` shipped value, and the ``default``
+    indexation preset seed all have to name the same strategy.
+    """
+    from pathlib import Path
+
+    import core.chunking.factory  # noqa: F401  (registration side-effect)
+    import yaml
+    from core.chunking.registry import chunking_registry
+    from core.config.chunking import ChunkerConfig
+    from services.orchestrators.preset_service import _DEFAULT_SEEDS
+
+    assert ChunkerConfig().name == "structured_section"
+    assert IndexationPipelineConfig().chunking.name == "structured_section"
+    assert _DEFAULT_SEEDS["indexation"]["default"]["chunking"]["name"] == "structured_section"
+
+    shipped = yaml.safe_load(Path(__file__).parents[4].joinpath("conf/config.yaml").read_text())
+    assert shipped["chunker"]["name"] == "structured_section"
+
+    # A default that is not registered would fail every partition at chunker
+    # build time (create_chunker) rather than at config load.
+    assert ChunkerConfig().name in chunking_registry

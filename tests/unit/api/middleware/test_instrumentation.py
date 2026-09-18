@@ -70,6 +70,7 @@ def test_skips_excluded_paths(monkeypatch) -> None:
     client = TestClient(app)
     client.get("/metrics")
     client.get("/health_check")
+    client.get("/ready")
     client.get("/docs")
     client.get("/openapi.json")
 
@@ -192,3 +193,9 @@ def test_slash_redirect_is_attributed_to_its_route(labels) -> None:
     TestClient(_instrumented_app(), follow_redirects=False).get("/partition")
 
     assert labels == [("GET", "/partition/", 307)]
+
+
+def test_excluded_prefixes_use_the_routed_path(labels) -> None:
+    # Under this Host header request.url.path reads "/health_check"; "/partition/" is routed.
+    TestClient(_instrumented_app()).get("/partition/", headers={"host": "testserver/health_check?x="})
+    assert [route for _, route, _ in labels] == ["/partition/"]

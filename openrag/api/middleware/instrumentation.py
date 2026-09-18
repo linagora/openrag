@@ -16,7 +16,7 @@ from starlette.routing import Match, Mount
 
 # Paths to exclude from metric recording — avoids self-referential noise
 # and inflated counters on probe traffic.
-_EXCLUDED_PREFIXES = ("/metrics", "/health_check", "/docs", "/openapi.json", "/redoc")
+_EXCLUDED_PREFIXES = ("/metrics", "/health_check", "/ready", "/docs", "/openapi.json", "/redoc")
 
 # Label for a URL no route in the app can serve. A *fixed* string is the whole
 # point: the endpoint label must stay bounded, or a scanner walking 10k random
@@ -37,7 +37,8 @@ class InstrumentationMiddleware(BaseHTTPMiddleware):
     """
 
     async def dispatch(self, request: Request, call_next):
-        raw_path = request.url.path
+        # The routed path, not ``request.url.path`` (rebuilt from the Host header).
+        raw_path = request.scope["path"]
         if any(raw_path.startswith(p) for p in _EXCLUDED_PREFIXES):
             return await call_next(request)
 

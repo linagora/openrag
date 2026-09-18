@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import datetime
 from typing import Any, Literal
 
@@ -9,6 +10,27 @@ from core.config.base import ConfigMixin
 from pydantic import BaseModel, Field
 
 ModelEndpointType = Literal["embedder", "reranker", "llm", "vlm", "stt"]
+PLACEHOLDER_API_KEYS = frozenset({"", "EMPTY"})
+DEFAULT_MODEL_IMPLEMENTATIONS = {
+    "embedder": "vllm",
+    "llm": "vllm",
+    "vlm": "vllm",
+    "reranker": "infinity",
+    "stt": "vllm",
+}
+
+# Virtual endpoint name. No ``model_endpoints`` row carries it: it is the key
+# ``ModelEndpointService.load_all`` files the ``is_default=True`` row under, so
+# a partition or preset can reference "whichever endpoint is default" without
+# naming it. Anything that resolves a stored reference against the DB has to
+# account for it — see ``PgPartitionRepository`` (assignment checks) and
+# ``PgModelEndpointRepository`` (usage counts, delete guard).
+DEFAULT_ENDPOINT_ALIAS = "default"
+
+
+def is_placeholder_api_key(value: object) -> bool:
+    """Return whether a configured API key represents anonymous access."""
+    return value is None or (isinstance(value, str) and value.strip() in PLACEHOLDER_API_KEYS)
 
 
 class ModelEndpointConfig(BaseModel):
@@ -160,14 +182,73 @@ class ModelEndpointRow(BaseModel):
     updated_at: datetime
 
 
+# What decides the vectors an embedder produces, and so what an in-place edit
+# can move out from under already-indexed files (#762). Mirrored by
+# MATERIAL_FIELDS / MATERIAL_EXTRA_KEYS in ui/src/pages/admin/embedder-edit-guard.ts,
+# which decides when the UI asks for the acknowledgement the API requires.
+# `max_model_len` becomes the embedder's truncation limit: the same model at
+# another limit embeds long chunks differently.
+MATERIAL_EMBEDDER_EXTRA_KEYS = ("implementation", "max_model_len")
+
+
+def _shown(value: object) -> str | None:
+    """Compare stored and submitted values the way the edit form renders them."""
+    return None if value is None or value == "" else str(value)
+
+
+def embedder_fingerprint(
+    endpoint: str | None,
+    model_name: str | None,
+    extra: Mapping[str, Any] | None,
+) -> dict[str, str | None]:
+    """The part of an embedder's config that decides its vectors, normalized.
+
+    Two configs with the same fingerprint embed alike; what else they differ in
+    (timeout, batch size, API key) cannot change a vector. The edit guard uses it
+    to decide whether an edit needs acknowledging, and the indexer to check,
+    before it records a file, that the partition's embedder is still the one it
+    embedded with (#958), so both judge a change the same way.
+    """
+    extra = extra or {}
+    fingerprint = {
+        "endpoint": (endpoint or "").strip().rstrip("/") or None,
+        "model_name": _shown(model_name),
+    }
+    for key in MATERIAL_EMBEDDER_EXTRA_KEYS:
+        # An endpoint saved without `implementation` runs the default client,
+        # so stamping that default on a later save changes nothing.
+        fallback = DEFAULT_MODEL_IMPLEMENTATIONS["embedder"] if key == "implementation" else None
+        fingerprint[f"extra.{key}"] = _shown(extra.get(key, fallback))
+    return fingerprint
+
+
+def material_embedder_changes(existing: ModelEndpointRow, fields: Mapping[str, object]) -> list[str]:
+    """Fields of an embedder update that would change the vectors it produces."""
+    endpoint = fields.get("endpoint")
+    model_name = fields.get("model_name", existing.model_name)
+    extra = fields.get("extra")
+    before = embedder_fingerprint(existing.endpoint, existing.model_name, existing.extra)
+    after = embedder_fingerprint(
+        endpoint if isinstance(endpoint, str) else existing.endpoint,
+        None if model_name is None else str(model_name),
+        extra if isinstance(extra, dict) else existing.extra,
+    )
+    return [key for key in before if before[key] != after[key]]
+
+
 __all__ = [
     "LLM_CONTEXT_SIZE_KEY",
     "LLM_OUTPUT_TOKENS_KEY",
+    "MATERIAL_EMBEDDER_EXTRA_KEYS",
     "MOSS_SPEAKER_AWARE_KEY",
+    "PLACEHOLDER_API_KEYS",
     "STT_REQUEST_CONTROL_EXTRA_KEYS",
     "STT_LANGUAGE_KEY",
     "ModelEndpointConfig",
     "ModelsConfig",
     "ModelEndpointRow",
     "ModelEndpointType",
+    "embedder_fingerprint",
+    "is_placeholder_api_key",
+    "material_embedder_changes",
 ]

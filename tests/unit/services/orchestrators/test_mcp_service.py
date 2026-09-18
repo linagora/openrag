@@ -8,13 +8,16 @@ fuzzy ranking, task assembly and URL-indexation guards in isolation.
 from __future__ import annotations
 
 import asyncio
-import json
 from types import SimpleNamespace
 
 import httpx
 import pytest
 from core.utils.exceptions import ValidationError
 from services.orchestrators.mcp_service import MCPService
+
+#: index_url verifies downloaded bytes against the URL extension; these
+#: fixtures use .pdf URLs, so their payloads must carry a PDF signature.
+_PDF_HEADER = b"%PDF-1.7\n"
 
 # ---------------------------------------------------------------------------
 # Fakes
@@ -459,54 +462,6 @@ async def test_list_my_tasks_keeps_raw_failed_error_for_admin():
     assert out["tasks"][0]["error"] == "why"
 
 
-@pytest.mark.asyncio
-async def test_get_task_logs_ownership_and_parsing(tmp_path):
-    log = tmp_path / "app.json"
-    lines = [
-        {"record": {"time": {"repr": "T1"}, "level": {"name": "INFO"}, "message": "first", "extra": {"task_id": "t1"}}},
-        {
-            "record": {
-                "time": {"repr": "T2"},
-                "level": {"name": "INFO"},
-                "message": "other",
-                "extra": {"task_id": "zzz"},
-            }
-        },
-        {
-            "record": {
-                "time": {"repr": "T3"},
-                "level": {"name": "ERROR"},
-                "message": "second",
-                "extra": {"task_id": "t1"},
-            }
-        },
-    ]
-    log.write_text("\n".join(json.dumps(line) for line in lines))
-    svc = _service(jobs=FakeJobs(details={"user_id": 1}))
-    out = await svc.get_task_logs(task_id="t1", user_id=1, is_admin=False, log_file=log, max_lines=100)
-    assert out["count"] == 2
-    assert "first" in out["logs"][0]
-    assert "second" in out["logs"][1]
-
-
-@pytest.mark.asyncio
-async def test_get_task_logs_missing_file_raises(tmp_path):
-    svc = _service(jobs=FakeJobs(details={"user_id": 1}))
-    with pytest.raises(FileNotFoundError):
-        await svc.get_task_logs(task_id="t1", user_id=1, is_admin=False, log_file=tmp_path / "nope.json")
-
-
-@pytest.mark.asyncio
-async def test_get_task_logs_rejects_out_of_range_max_lines(tmp_path):
-    # The shared core.collect_task_logs enforces the 1..MAX_TASK_LOG_LINES bound,
-    # same as the admin task-logs route.
-    log = tmp_path / "app.json"
-    log.write_text("")
-    svc = _service(jobs=FakeJobs(details={"user_id": 1}))
-    with pytest.raises(ValueError):
-        await svc.get_task_logs(task_id="t1", user_id=1, is_admin=False, log_file=log, max_lines=10_000)
-
-
 # ---------------------------------------------------------------------------
 # Chunk lookup
 # ---------------------------------------------------------------------------
@@ -599,9 +554,11 @@ async def test_copy_file_success():
         dest_file_id="d",
         allowed_partitions=["all"],
         user_id=1,
+        extra_metadata={"author": "alice", "degraded_stages": ["caption"]},
     )
     assert indexing.copied[0]["source_file_id"] == "s"
     assert indexing.copied[0]["target_partition"] == "b"
+    assert indexing.copied[0]["metadata"] == {"author": "alice"}
     assert out["dest_file_id"] == "d"
 
 
@@ -679,7 +636,7 @@ async def test_index_url_auto_creates_partition_and_indexes(monkeypatch):
     svc = _service(partitions=parts, indexing=indexing)
 
     async def fake_download(url, dest):
-        dest.write_bytes(b"data")
+        dest.write_bytes(_PDF_HEADER + b"data")
 
     monkeypatch.setattr(svc, "_safe_download", fake_download)
 
@@ -689,7 +646,11 @@ async def test_index_url_auto_creates_partition_and_indexes(monkeypatch):
         file_id="f1",
         allowed_partitions=["other"],
         user_id=7,
-        extra_metadata={"author": "me", "created_by": 999},  # created_by must be stripped
+        extra_metadata={
+            "author": "me",
+            "created_by": 999,
+            "degraded_stages": ["caption"],
+        },
     )
     # auto-created the missing partition, owned by the caller
     assert parts.created == [("newpart", 7, 100)]
@@ -700,6 +661,7 @@ async def test_index_url_auto_creates_partition_and_indexes(monkeypatch):
     assert added["metadata"]["source_url"] == "https://example.com/report.pdf"
     assert added["metadata"]["author"] == "me"
     assert "created_by" not in added["metadata"]  # protected key dropped
+    assert "degraded_stages" not in added["metadata"]
     assert out["task_id"] == "task-123"
 
 
@@ -720,7 +682,7 @@ async def test_index_url_removes_download_when_content_is_duplicate(monkeypatch)
     async def fake_download(url, dest):
         nonlocal downloaded_path
         downloaded_path = dest
-        dest.write_bytes(b"duplicate")
+        dest.write_bytes(_PDF_HEADER + b"duplicate")
 
     monkeypatch.setattr(svc, "_safe_download", fake_download)
 
@@ -747,7 +709,7 @@ async def test_index_url_removes_download_when_dispatch_is_cancelled(monkeypatch
     async def fake_download(url, dest):
         nonlocal downloaded_path
         downloaded_path = dest
-        dest.write_bytes(b"partial")
+        dest.write_bytes(_PDF_HEADER + b"partial")
 
     monkeypatch.setattr(svc, "_safe_download", fake_download)
 
@@ -765,13 +727,73 @@ async def test_index_url_removes_download_when_dispatch_is_cancelled(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_index_url_removes_download_when_the_content_check_is_cancelled(monkeypatch):
+    """The package check awaits, so a cancelled request raises CancelledError
+    inside the validation block — a BaseException, which an `except Exception`
+    would let past while leaving the download on disk."""
+    parts = FakePartitions(exists=False, partition_exists=True, members=[{"user_id": 7, "role": "editor"}])
+    svc = _service(partitions=parts, indexing=FakeIndexing())
+    downloaded_path = None
+
+    async def fake_download(url, dest):
+        nonlocal downloaded_path
+        downloaded_path = dest
+        dest.write_bytes(b"PK\x03\x04 not a real package")
+
+    def cancelled(*_args):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(svc, "_safe_download", fake_download)
+    monkeypatch.setattr("services.orchestrators.mcp_service.validate_ooxml_package", cancelled)
+
+    with pytest.raises(asyncio.CancelledError):
+        await svc.index_url(
+            url="https://example.com/report.docx",
+            partition="p1",
+            file_id="f3",
+            allowed_partitions=["p1"],
+            user_id=7,
+        )
+
+    assert downloaded_path is not None
+    assert not downloaded_path.exists()
+
+
+@pytest.mark.asyncio
+async def test_index_url_removes_download_when_the_content_contradicts_the_url(monkeypatch):
+    """The other exit from the same block: a refused file must not be left behind."""
+    parts = FakePartitions(exists=False, partition_exists=True, members=[{"user_id": 7, "role": "editor"}])
+    svc = _service(partitions=parts, indexing=FakeIndexing())
+    downloaded_path = None
+
+    async def fake_download(url, dest):
+        nonlocal downloaded_path
+        downloaded_path = dest
+        dest.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 64)  # a PNG at a .pdf URL
+
+    monkeypatch.setattr(svc, "_safe_download", fake_download)
+
+    with pytest.raises(ValidationError):
+        await svc.index_url(
+            url="https://example.com/report.pdf",
+            partition="p1",
+            file_id="f4",
+            allowed_partitions=["p1"],
+            user_id=7,
+        )
+
+    assert downloaded_path is not None
+    assert not downloaded_path.exists()
+
+
+@pytest.mark.asyncio
 async def test_index_url_admin_auto_create_bypasses_partition_cap(monkeypatch):
     parts = FakePartitions(exists=False, partition_exists=False)
     indexing = FakeIndexing()
     svc = _service(partitions=parts, indexing=indexing)
 
     async def fake_download(url, dest):
-        dest.write_bytes(b"data")
+        dest.write_bytes(_PDF_HEADER + b"data")
 
     monkeypatch.setattr(svc, "_safe_download", fake_download)
 
@@ -795,7 +817,7 @@ async def test_index_url_treats_partition_exists_race_as_success(monkeypatch):
     svc = _service(partitions=parts, indexing=indexing)
 
     async def fake_download(url, dest):
-        dest.write_bytes(b"data")
+        dest.write_bytes(_PDF_HEADER + b"data")
 
     monkeypatch.setattr(svc, "_safe_download", fake_download)
 
@@ -852,14 +874,20 @@ async def test_update_metadata_strips_protected_keys_keeps_move():
     await _service(partitions=FakePartitions(exists=True), indexing=indexing).update_file_metadata(
         partition="a",
         file_id="f1",
-        metadata={"author": "x", "source": "/evil", "created_by": 999, "partition": "dest"},
+        metadata={
+            "author": "x",
+            "source": "/evil",
+            "created_by": 999,
+            "degraded_stages": ["caption"],
+            "partition": "dest",
+        },
         allowed_partitions=["all"],
         user_id=1,
     )
     _file_id, sent_md, _partition, _user = indexing.updated[0]
     assert sent_md["author"] == "x"
     assert sent_md["partition"] == "dest"  # authorized move control preserved
-    assert "source" not in sent_md and "created_by" not in sent_md
+    assert "source" not in sent_md and "created_by" not in sent_md and "degraded_stages" not in sent_md
 
 
 @pytest.mark.asyncio
