@@ -1057,6 +1057,71 @@ async def test_process_file_cleans_vectors_when_catalog_write_loses_delete_race(
 
 
 @pytest.mark.asyncio
+async def test_process_file_hands_the_catalog_write_the_config_that_built_the_vectors(tmp_path: Path) -> None:
+    """The catalog write checks the partition's embedder against the config the
+    client was built from, stamped on it by the worker's factory (#958)."""
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"content")
+    processed = ProcessedDocument(document_id="d1", text_blocks=[TextBlock(text="content")])
+    chunks = [Chunk(id="c1", text="content", partition="p")]
+    fingerprint = {"endpoint": "http://fake:8000/v1", "model_name": "fake-embed-v1"}
+    embedder = FakeEmbedder()
+    embedder.vector_fingerprint = fingerprint
+    repo = FakeDocumentRepo()
+    worker = IndexerWorker(
+        pipeline=build_indexing_pipeline(
+            parser=FakeParser(processed),
+            chunker=FakeChunker(chunks),
+            embedder=embedder,
+            vector_store=FakeVectorStore(),
+        ),
+        task_state_manager=_fake_tsm(),
+        document_repo=repo,
+    )
+
+    await worker.process_file(task_id="t", path=str(path), metadata={"file_id": "f1"}, partition="p", user={"id": 1})
+
+    assert repo.add_calls[0]["embedder_fingerprint"] == fingerprint
+
+
+@pytest.mark.asyncio
+async def test_process_file_drops_vectors_the_catalog_refuses_as_stale(tmp_path: Path) -> None:
+    """An embedder edited while the file indexed fails the file, and the vectors
+    built with the previous config go with it."""
+    from core.utils.exceptions import ConflictError
+
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"content")
+
+    class StoredPipeline:
+        async def run(self, row: dict[str, Any]) -> dict[str, Any]:
+            row["stored_count"] = 1
+            row["stage"] = "stored"
+            row["embedder_fingerprint"] = {"model_name": "jina-v3"}
+            return row
+
+    class EditedEmbedderRepo:
+        async def add_file_to_partition(self, **kwargs: Any) -> bool:
+            raise ConflictError("changed", code="EMBEDDER_CHANGED_DURING_INDEXING")
+
+    tsm = _fake_tsm()
+    vector_store = FakeVectorStore()
+    worker = IndexerWorker(
+        pipeline=StoredPipeline(),
+        task_state_manager=tsm,
+        document_repo=EditedEmbedderRepo(),
+        vector_store=vector_store,
+        collection="vdb",
+    )
+
+    with pytest.raises(ConflictError):
+        await worker.process_file(task_id="t-stale", path=str(path), metadata={"file_id": "f1"}, partition="p")
+
+    assert vector_store.deleted_filters == [{"partition": "p", "file_id": "f1", "_openrag_indexing_task_id": "t-stale"}]
+    tsm.set_failed_if_not_cancelled.remote.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_process_file_cleans_task_marked_vectors_when_store_stage_fails(tmp_path: Path) -> None:
     path = tmp_path / "doc.txt"
     path.write_bytes(b"content")

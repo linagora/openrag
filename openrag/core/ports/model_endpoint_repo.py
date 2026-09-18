@@ -3,9 +3,15 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Awaitable, Callable
 
 from core.config.model_endpoints import ModelEndpointRow, ModelEndpointType
 from core.models.readiness import ModelEndpointDiscovery
+
+#: Vets an endpoint edit inside ``update``'s transaction. Handed the row as
+#: locked there and a reader of its indexed-file usage on the same connection;
+#: raising refuses the edit.
+EndpointEditGuard = Callable[[ModelEndpointRow, Callable[[], Awaitable[list[dict]]]], Awaitable[None]]
 
 
 class ModelEndpointRepository(ABC):
@@ -26,7 +32,21 @@ class ModelEndpointRepository(ABC):
     ) -> ModelEndpointDiscovery: ...
 
     @abstractmethod
-    async def update(self, name: str, model_type: str, **fields: object) -> ModelEndpointRow | None: ...
+    async def update(
+        self,
+        name: str,
+        model_type: str,
+        *,
+        guard: EndpointEditGuard | None = None,
+        **fields: object,
+    ) -> ModelEndpointRow | None:
+        """Apply ``fields`` to the endpoint; ``None`` if it does not exist.
+
+        With ``guard``, the row is locked FOR UPDATE and handed to the guard
+        before the write, in one transaction: a file being recorded against
+        this endpoint meanwhile either commits first, and the guard's usage read
+        counts it, or waits for the edit and sees it (#958).
+        """
 
     @abstractmethod
     async def rename(self, name: str, model_type: str, new_name: str) -> None: ...

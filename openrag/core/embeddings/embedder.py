@@ -8,6 +8,12 @@ from abc import ABC, abstractmethod
 class Embedder(ABC):
     """Base class for all embedding providers."""
 
+    #: ``embedder_fingerprint`` of the endpoint config this client was built
+    #: from, stamped by the factory that built it; ``None`` when unknown. It
+    #: travels with the client rather than being looked up again, because the
+    #: registry can reload while a file is still embedding (#958).
+    vector_fingerprint: dict[str, str | None] | None = None
+
     @abstractmethod
     async def embed(self, texts: list[str]) -> list[list[float]]:
         """Embed a batch of texts, returning vectors."""

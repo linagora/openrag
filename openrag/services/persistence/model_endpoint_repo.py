@@ -12,7 +12,7 @@ from collections.abc import Callable
 import asyncpg
 from core.config.model_endpoints import DEFAULT_ENDPOINT_ALIAS, ModelEndpointConfig, ModelEndpointRow, ModelEndpointType
 from core.models.readiness import ConfigurationReferenceFinding, ModelEndpointDiscovery, ModelEndpointTarget
-from core.ports.model_endpoint_repo import ModelEndpointRepository
+from core.ports.model_endpoint_repo import EndpointEditGuard, ModelEndpointRepository
 from core.utils.exceptions import ConflictError, NotFoundError, ValidationError
 from core.utils.logging import get_logger
 
@@ -430,7 +430,14 @@ class PgModelEndpointRepository(ModelEndpointRepository):
             configuration_references=tuple(sorted(findings, key=lambda finding: (finding.kind, finding.name))),
         )
 
-    async def update(self, name: str, model_type: str, **fields: object) -> ModelEndpointRow | None:
+    async def update(
+        self,
+        name: str,
+        model_type: str,
+        *,
+        guard: EndpointEditGuard | None = None,
+        **fields: object,
+    ) -> ModelEndpointRow | None:
         updates = {k: v for k, v in fields.items() if k in _ALLOWED_UPDATE_FIELDS}
         if not updates:
             return await self.get(name, model_type)
@@ -441,12 +448,29 @@ class PgModelEndpointRepository(ModelEndpointRepository):
             idx = len(params) + 1
             sets.append(f"{col} = ${idx}::jsonb" if col == "extra" else f"{col} = ${idx}")
             params.append(val)
-
-        rec = await self.pool.fetchrow(
+        sql = (
             f"UPDATE model_endpoints SET {', '.join(sets)}, updated_at = now() "
-            f"WHERE name = $1 AND model_type = $2 RETURNING *",
-            *params,
+            f"WHERE name = $1 AND model_type = $2 RETURNING *"
         )
+
+        if guard is None:
+            rec = await self.pool.fetchrow(sql, *params)
+            return self._to_model(rec) if rec else None
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                # The lock a catalog write takes FOR SHARE on this row to record
+                # a file (document_repo._refuse_if_embedder_changed). Only this
+                # row: the usage read below locks nothing, so this never waits
+                # on `partitions` and cannot deadlock with that write.
+                locked = await conn.fetchrow(
+                    "SELECT * FROM model_endpoints WHERE name = $1 AND model_type = $2 FOR UPDATE",
+                    name,
+                    model_type,
+                )
+                if locked is None:
+                    return None
+                await guard(self._to_model(locked), lambda: self._indexed_file_usage(conn, name, model_type))
+                rec = await conn.fetchrow(sql, *params)
         return self._to_model(rec) if rec else None
 
     async def rename(self, name: str, model_type: str, new_name: str) -> None:
@@ -693,7 +717,15 @@ class PgModelEndpointRepository(ModelEndpointRepository):
         table, so nothing else in the schema records that it happened — this is
         the only way to size it before it does.
         """
-        rows = await self.pool.fetch(_EMBEDDER_INDEXED_USAGE_SQL, name, model_type, DEFAULT_ENDPOINT_ALIAS)
+        return await self._indexed_file_usage(self.pool, name, model_type)
+
+    @staticmethod
+    async def _indexed_file_usage(
+        conn: asyncpg.Connection | asyncpg.Pool,
+        name: str,
+        model_type: str,
+    ) -> list[dict]:
+        rows = await conn.fetch(_EMBEDDER_INDEXED_USAGE_SQL, name, model_type, DEFAULT_ENDPOINT_ALIAS)
         return [{"partition": r["partition"], "file_count": r["file_count"]} for r in rows]
 
     async def delete_and_promote_default(self, name: str, model_type: str) -> tuple[str, str | None]:

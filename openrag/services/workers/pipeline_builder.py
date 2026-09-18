@@ -272,6 +272,8 @@ class IndexingPipeline:
             )
             # After the embed: the dimension is measured, not configured.
             row["embedder_provenance"] = _embedder_provenance(embedder, row.get("embedder_name"))
+            # What the catalog write checks the partition's embedder against (#958).
+            row["embedder_fingerprint"] = getattr(embedder, "vector_fingerprint", None)
             # Re-index (``replace=True``) is insert-before-delete: snapshot the
             # file's existing chunk ids *before* the store stage inserts the new
             # set, then delete exactly that old set after a successful insert.

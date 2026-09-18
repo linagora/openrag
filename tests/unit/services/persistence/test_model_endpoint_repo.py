@@ -315,6 +315,68 @@ async def test_update_ignores_unknown_fields():
 
 
 @pytest.mark.asyncio
+async def test_update_with_a_guard_vets_the_locked_row_in_the_same_transaction():
+    """The edit guard counts indexed files with the endpoint row locked, and the
+    write follows in that transaction. The indexer locks the same row to record a
+    file, so that file either commits before the count or sees the edit (#958)."""
+    from services.persistence.model_endpoint_repo import PgModelEndpointRepository
+
+    pool = _FakePool()
+    pool.conn._fetchrow_result = _make_row(name="jina", is_default=False)
+    pool.conn._fetch_result = [{"partition": "docs", "file_count": 3}]
+    repo = PgModelEndpointRepository(pool_getter=lambda: pool)
+    seen: dict = {}
+
+    async def guard(locked, indexed_file_usage):
+        seen["locked"] = locked.name
+        seen["usage"] = await indexed_file_usage()
+
+    await repo.update("jina", "embedder", guard=guard, model_name="bge-m3")
+
+    queries = [q for q, _ in pool.conn.executed]
+    assert "FOR UPDATE" in queries[0]
+    assert "JOIN files" in queries[1]
+    assert "UPDATE model_endpoints SET" in queries[2]
+    assert seen == {"locked": "jina", "usage": [{"partition": "docs", "file_count": 3}]}
+    # Nothing ran outside the transaction.
+    assert pool.executed == []
+
+
+@pytest.mark.asyncio
+async def test_update_refused_by_its_guard_writes_nothing():
+    from core.utils.exceptions import ConflictError
+    from services.persistence.model_endpoint_repo import PgModelEndpointRepository
+
+    pool = _FakePool()
+    pool.conn._fetchrow_result = _make_row(name="jina", is_default=False)
+    repo = PgModelEndpointRepository(pool_getter=lambda: pool)
+
+    async def guard(locked, indexed_file_usage):
+        raise ConflictError("refused", code="EMBEDDER_EDIT_AFFECTS_INDEXED_DATA")
+
+    with pytest.raises(ConflictError):
+        await repo.update("jina", "embedder", guard=guard, model_name="bge-m3")
+
+    assert not any("UPDATE model_endpoints" in q for q, _ in pool.conn.executed)
+
+
+@pytest.mark.asyncio
+async def test_update_with_a_guard_of_a_vanished_endpoint_returns_none():
+    from services.persistence.model_endpoint_repo import PgModelEndpointRepository
+
+    pool = _FakePool()
+    pool.conn._fetchrow_result = None
+    repo = PgModelEndpointRepository(pool_getter=lambda: pool)
+    guard_calls: list = []
+
+    async def guard(locked, indexed_file_usage):
+        guard_calls.append(locked)
+
+    assert await repo.update("gone", "embedder", guard=guard, model_name="bge-m3") is None
+    assert guard_calls == []
+
+
+@pytest.mark.asyncio
 async def test_delete_returns_true_on_success():
     from services.persistence.model_endpoint_repo import PgModelEndpointRepository
 

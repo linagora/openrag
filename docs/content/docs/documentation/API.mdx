@@ -663,6 +663,8 @@ DELETE /model-endpoints/{model_type}/{name}    # 204 No Content
 
 Changing an **embedder**'s `endpoint`, `model_name`, `extra.implementation` or `extra.max_model_len` changes the vectors it produces. While partitions hold files indexed with it, such an edit returns `409 EMBEDDER_EDIT_AFFECTS_INDEXED_DATA` naming the partitions and file counts; resend it with `"acknowledge_indexed_data": true` to apply it anyway. The existing vectors are not rebuilt, so queries on those partitions are then compared against vectors from the previous configuration. `GET /model-endpoints/{model_type}/{name}/indexed-usage` returns the same counts ahead of time.
 
+Files still indexing when such an edit is saved are not counted, since a file is only counted once indexing finishes. Instead, when the file is recorded, the indexer checks that the partition's embedder still has the configuration it embedded with. If it doesn't, the file fails with `EMBEDDER_CHANGED_DURING_INDEXING`, its vectors are removed, and it has to be indexed again. Indexers reload an edited endpoint before embedding, so only files already embedding during the edit are affected.
+
 `DELETE` of an embedder returns `409` while a partition names it or, for the default embedder, while a partition following the `default` alias already holds indexed files. Reassign those partitions first.
 
 #### Set as default for its type

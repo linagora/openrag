@@ -29,7 +29,8 @@ const MATERIAL_FIELDS = new Set(["endpoint", "model_name"]);
  */
 const MATERIAL_EXTRA_KEYS = new Set(["implementation", "max_model_len"]);
 // The server applies the same two lists when it decides an embedder edit needs
-// `acknowledge_indexed_data` (model_endpoint_service.py); keep them in step.
+// `acknowledge_indexed_data` (`embedder_fingerprint` in
+// openrag/core/config/model_endpoints.py); keep them in step.
 
 const LABELS: Record<string, string> = {
   name: "Name",

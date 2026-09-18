@@ -82,11 +82,14 @@ class _FakeEndpointRepo:
             rows = [r for r in rows if r.model_type == model_type]
         return rows
 
-    async def update(self, name: str, model_type: str, **fields):
-        self.calls.append(("update", (name, model_type)))
+    async def update(self, name: str, model_type: str, *, guard=None, **fields):
         row = self._store.get((name, model_type))
         if row is None:
             return None
+        # The real repo runs the guard on the row it just locked, before writing.
+        if guard is not None:
+            await guard(row, lambda: self.indexed_file_usage(name, model_type))
+        self.calls.append(("update", (name, model_type)))
         updated = row.model_copy(update=fields)
         self._store[(name, model_type)] = updated
         return updated
