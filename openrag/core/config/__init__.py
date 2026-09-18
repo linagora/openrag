@@ -16,10 +16,21 @@ from .root import Settings
 
 @lru_cache
 def get_settings() -> Settings:
-    """Cached singleton — one Settings instance per process."""
-    from .loader import load_config as _load
+    """Cached singleton — one Settings instance per process.
 
-    return _load()
+    The secret policy is enforced here rather than in an application lifespan
+    because this accessor is the one hook every entrypoint crosses: the API, the
+    Chainlit front end (via ``get_logger``), the Ray actors and the migration
+    runner all reach configuration through it, and ``lru_cache`` means the check
+    runs once per process. It runs *after* the loader, so values merged in from
+    a ``.env`` file are visible to it.
+    """
+    from .loader import load_config as _load
+    from .secrets_guard import enforce_secret_policy
+
+    settings = _load()
+    enforce_secret_policy(settings)
+    return settings
 
 
 def load_config(

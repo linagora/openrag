@@ -9,6 +9,56 @@ OpenRAG provides a large range of environment variables that allow you to custom
 This page is up-to-date with OpenRAG v2.0.0. Types and defaults are cross-checked against `conf/config.yaml` and the config loader. Authentication and SSO variables (`AUTH_MODE`, `OIDC_*`) are documented separately in the [OIDC guide](/openrag/documentation/oidc/).
 :::
 
+# Secrets
+
+OpenRAG validates its credentials once, at startup, and **refuses to start** on any value
+published in this repository — the dev defaults in `.env.example`, the placeholders in the
+Helm chart, and the values used in the documentation and the test stacks. The same check
+runs at `helm template` time for the chart's `values` secrets provider.
+
+This exists because the common way a deployment ends up with a known credential is not a
+weak choice but no choice at all: a template copied verbatim. So the example files ship
+`__GENERATE_ME__` where a credential belongs, and one command fills them in:
+
+```bash
+python3 scripts/gen_env.py           # writes infra/compose/.env
+python3 scripts/gen_env.py --check   # verify nothing is left unset
+```
+
+## What must be supplied
+
+| Variable | Required | Notes |
+|---|---|---|
+| `AUTH_TOKEN` | Yes, unless using SSO | Bootstraps the admin user and guards the API. Minimum 12 characters. Leaving it unset enables the no-auth development mode only when `ALLOW_NO_AUTH=true`. |
+| `POSTGRES_PASSWORD` | Yes | Minimum 12 characters. Compose fails closed without it; the chart reads it from `postgresql.auth.password`. |
+| `CHAINLIT_AUTH_SECRET` | When the chat interface is enabled | Signs the chat session cookie. Minimum 12 characters; generate with `python -c "import secrets; print(secrets.token_urlsafe(32))"`. Rotating it invalidates live sessions. In the Helm chart the chat interface is off by default (`env.WITH_CHAINLIT_UI`). |
+| `MINIO_ACCESS_KEY` / `MINIO_SECRET_KEY` | Compose only | Shared by the MinIO service and Milvus — both sides must match. `MINIO_SECRET_KEY` has a 12-character minimum. Kubernetes deployments use external object storage instead. |
+| `GRAFANA_ADMIN_PASSWORD` | When bundled Grafana is enabled | Minimum 12 characters. |
+| `OIDC_CLIENT_SECRET`, `OIDC_TOKEN_ENCRYPTION_KEY` | SSO only | Formats are set by your identity provider and by Fernet respectively, so no length floor is applied. See the [OIDC guide](/openrag/documentation/oidc/). |
+| `HF_TOKEN` | When pulling gated model weights | |
+| `API_KEY`, `VLM_API_KEY`, `EMBEDDER_API_KEY`, `RERANKER_API_KEY`, `TRANSCRIBER_API_KEY`, `WEBSEARCH_API_TOKEN` | Per integration | Set by the provider, so no length floor. Use the literal `EMPTY` for a local OpenAI-compatible server that requires no credential — that is the documented sentinel and is always accepted. |
+
+`UVICORN_FORWARDED_ALLOW_IPS` is not a secret but belongs in the same conversation: it
+must name your proxy's subnet for session cookies and per-IP rate limits to behave
+correctly behind a reverse proxy. See [FastAPI & Access Control](#fastapi--access-control).
+
+## What will be refused
+
+Any value this project publishes, matched case-insensitively — including the
+`__GENERATE_ME__` marker itself — and any value shorter than 12 characters for the
+variables marked with a minimum above. The canonical list lives in
+`openrag/core/config/secrets_guard.py`; the chart carries the same list and a unit test
+fails the build if the two disagree.
+
+The startup error names the variables at fault and never prints their values.
+
+## Overriding the check
+
+`ALLOW_INSECURE_SECRETS=true` downgrades the refusal to a warning logged on every boot.
+It is an opt-out, never an opt-in: an unset value means the check is enforced. Use it for
+disposable development and CI stacks — the bundled API test stack sets it — and not in a
+deployment that holds real data.
+
 # Backend
 ## Indexer Pipeline
 ### Loaders
