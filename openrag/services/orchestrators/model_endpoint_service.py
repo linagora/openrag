@@ -34,6 +34,7 @@ from core.utils.redaction import preserve_existing_secrets
 if TYPE_CHECKING:
     from core.config.root import Settings
     from core.ports.model_endpoint_repo import ModelEndpointRepository
+    from core.vector_stores import VectorStore
 
 logger = get_logger()
 
@@ -245,6 +246,7 @@ class ModelEndpointService:
         preset_service: Any = None,
         prompt_service: Any = None,
         client_caches: dict[str, dict[str, Any]] | None = None,
+        vector_store: VectorStore | None = None,
     ) -> None:
         self._repo = model_endpoint_repo
         self._config = config
@@ -252,6 +254,7 @@ class ModelEndpointService:
         self._preset_service = preset_service
         self._prompt_service = prompt_service
         self._client_caches: dict[str, dict[str, Any]] = client_caches or {}
+        self._vector_store = vector_store
 
     async def _resolve_stt_validation_prompt(self) -> str | None:
         """Resolve the same managed prompt used by runtime transcription."""
@@ -503,6 +506,7 @@ class ModelEndpointService:
                 batch_size=row.batch_size,
                 timeout=row.timeout,
                 extra=row.extra,
+                vector_field=row.vector_field,
             )
             bucket[row.name] = cfg
             if row.is_default:
@@ -753,7 +757,13 @@ class ModelEndpointService:
         promoted default. A ``chat_llm`` reference is cleared to NULL,
         which is precisely the request-time default it would have fallen back
         to anyway. See ``PgModelEndpointRepository._settle_partition_references``.
+
+        A deleted embedder's dense vector field is dropped too, once the delete
+        has committed (see :meth:`_drop_vector_field`).
         """
+        # Read before the delete: the field is pinned to the row for its whole
+        # life, so this is the field the delete below removes the owner of.
+        doomed = await self._repo.get(name, model_type) if model_type == "embedder" else None
         # The last-endpoint guard and the survivor/default choice are made INSIDE
         # the repo's locked transaction (not from a stale snapshot here), so
         # concurrent deletes of the same type can't both pass the count check or
@@ -784,6 +794,26 @@ class ModelEndpointService:
         if promoted is not None:
             # The deleted endpoint was the default; its 'default' alias client is now stale.
             self._invalidate_client_cache(model_type, "default")
+        if doomed is not None and doomed.vector_field:
+            await self._drop_vector_field(name, doomed.vector_field)
+
+    async def _drop_vector_field(self, name: str, field: str) -> None:
+        """Drop a deleted embedder's dense field, never failing the delete.
+
+        Left in place, the field holds one of the collection's few vector-field
+        slots for good (#762 F). It is empty by now: the delete is refused while
+        any partition uses the embedder, and deleting a partition deletes its
+        chunks. A failure only leaves that empty field behind, so it is logged
+        rather than raised — the endpoint is already gone.
+        """
+        if self._vector_store is None:
+            return
+        try:
+            await self._vector_store.drop_vector_field(field)
+        except Exception as exc:  # noqa: BLE001 - the delete has committed; report, don't undo
+            logger.bind(endpoint=name, vector_field=field, error=str(exc)).warning(
+                "Deleted embedder but kept its empty vector field"
+            )
 
     async def set_default(self, model_type: str, name: str) -> None:
         """Promote ``name`` to the default endpoint for ``model_type``."""
@@ -1036,6 +1066,9 @@ class ModelEndpointService:
             batch_size=row.batch_size,
             timeout=row.timeout,
             extra=row.extra,
+            # Survives the rename by construction: the field is pinned to the
+            # row, never recomputed from the name (#762 F).
+            vector_field=row.vector_field,
         )
         bucket[old_name] = cfg
         bucket[new_name] = cfg

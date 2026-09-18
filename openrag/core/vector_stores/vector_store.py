@@ -29,11 +29,18 @@ class VectorStore(ABC):
         collection: str = "default",
         *,
         indexed_at: datetime | None = None,
+        vector_field: str | None = None,
     ) -> int:
         """Insert or update chunks. Returns count of upserted items.
 
         ``indexed_at`` optionally pins the indexation timestamp stamped on the
         chunks so it can match the catalog row; ``None`` means "use now".
+
+        ``vector_field`` names the dense field of the embedder that produced
+        the embeddings (#762 F) — every embedder owns one, so it is required in
+        practice and a missing one is an error. Writing to a field the backend
+        does not have yet fails, so callers pair this with
+        :meth:`ensure_vector_field`.
         """
         ...
 
@@ -46,8 +53,16 @@ class VectorStore(ABC):
         collection: str = "default",
         filters: dict[str, Any] | None = None,
         similarity_threshold: float | None = None,
+        vector_field: str | None = None,
     ) -> list[dict[str, Any]]:
         """Similarity search returning raw result dicts.
+
+        ``vector_field`` names the dense field of the query's embedder
+        (#762 F); a missing one is an error. Rows that carry no value in that
+        field are absent from the results rather than scored as zero, so
+        searching a field an embedder has not backfilled yet returns fewer
+        results, never wrong ones — and a field that does not exist yet returns
+        none.
 
         Hybrid (dense + lexical) retrieval is a backend configuration
         concern, not a separate entry point: when a backend has it enabled
@@ -58,6 +73,22 @@ class VectorStore(ABC):
         ``similarity_threshold`` (when set) lower-bounds the dense leg's
         similarity; backends supporting range search drop anything scoring at
         or below it. ``None`` disables the bound.
+        """
+        ...
+
+    @abstractmethod
+    async def write_vectors(self, field: str, vectors: dict[str, list[float] | None]) -> int:
+        """Set one dense field on existing chunks, leaving the rest of each row as is.
+
+        ``vectors`` maps chunk IDs to the new value; ``None`` clears the field,
+        which takes the chunk out of that field's searches. IDs, text, metadata
+        and every other vector field are untouched — this is how a partition's
+        chunks are re-embedded in place when its embedder changes.
+
+        The field must exist (see :meth:`ensure_vector_field`), and so must
+        every chunk: a backend may refuse the whole batch when one ID names no
+        chunk, rather than create a row holding nothing but that vector.
+        Returns the number of chunks written.
         """
         ...
 
@@ -73,7 +104,12 @@ class VectorStore(ABC):
 
     @abstractmethod
     async def ensure_collection(self, name: str, dimension: int, **kwargs: Any) -> None:
-        """Create collection if it doesn't exist."""
+        """Create collection if it doesn't exist.
+
+        A fresh collection is created with the dense field named by the
+        ``vector_field`` keyword, sized to ``dimension``; both are ignored when
+        the collection exists.
+        """
         ...
 
     @abstractmethod
@@ -82,11 +118,61 @@ class VectorStore(ABC):
         ...
 
     @abstractmethod
-    async def vector_dimension(self) -> int | None:
+    async def ensure_vector_field(self, field: str, dimension: int) -> bool:
+        """Make ``field`` exist, be indexed, and be searchable. Idempotent.
+
+        Per-embedder dense fields (#762 F) are added to a collection that is
+        already live and serving, so this must not disturb the fields already
+        in it: existing searches keep working throughout, and no data is
+        rewritten. Returns whether this call created the field.
+
+        Three properties are required of an implementation, because the
+        scheme is unsafe without them:
+
+        - The field is **nullable**, so rows written before it existed stay
+          valid rather than being back-filled with a fake zero vector.
+        - A search on the field **skips** rows where it is null instead of
+          reading them as zero. This is what makes a partition pointed at a
+          not-yet-backfilled embedder return *fewer* results rather than
+          wrong ones.
+        - The field is indexed **identically** to every other dense field.
+          An embedder whose field is indexed differently would retrieve
+          differently for reasons that have nothing to do with the
+          model, which is the confusion this whole feature exists to remove.
+
+        ``dimension`` sizes a newly created field and is ignored when the
+        field already exists — re-sizing would invalidate the index.
+
+        Raises:
+            ValueError: the backend cannot hold another dense field.
+        """
+        ...
+
+    @abstractmethod
+    async def drop_vector_field(self, field: str) -> bool:
+        """Remove a deleted embedder's dense field, and every vector in it.
+
+        Frees the slot the field held against the backend's vector-field
+        ceiling. The caller guarantees no partition still uses the field — an
+        embedder delete is refused while one does. Idempotent: returns whether
+        this call dropped the field, ``False`` when it was already gone.
+
+        Raises:
+            ValueError: ``field`` is not a per-embedder dense field, or it is
+                the collection's only vector field, which the backend cannot
+                drop.
+        """
+        ...
+
+    @abstractmethod
+    async def vector_dimension(self, vector_field: str | None = None) -> int | None:
         """Dense-vector dimension the live collection actually stores.
 
-        ``None`` when it cannot be established — no collection yet, or the
-        backend can't be reached. Callers that need a number to size buffers
+        ``vector_field`` selects which embedder's field to measure (#762 F);
+        fields differ in width, so without one there is no answer.
+
+        ``None`` when it cannot be established — no field given, nothing
+        indexed with it yet, or the backend can't be reached. Callers that need a number to size buffers
         should pick their own fallback; callers that *report* the dimension
         must pass the ``None`` through rather than substitute a guess.
         """

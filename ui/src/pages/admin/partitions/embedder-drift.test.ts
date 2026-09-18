@@ -86,6 +86,51 @@ describe("computeEmbedderDrift", () => {
     expect(drift.driftedFiles).toBe(3);
   });
 
+  it("flags files sitting in another endpoint's field, same model or not", () => {
+    // Two endpoints, one model, a field each (#762 F): searches read the
+    // partition's field only, so the other endpoint's files are missing from
+    // results even though every model name on screen matches.
+    const twoEndpoints = [
+      { name: "qwen", model_name: "Qwen3-Embedding-0.6B", vector_field: "vector_qwen" },
+      { name: "qwen-b", model_name: "Qwen3-Embedding-0.6B", vector_field: "vector_qwen_b" },
+    ] as ModelEndpointResponse[];
+
+    const drift = computeEmbedderDrift(
+      "qwen",
+      [
+        {
+          embedder: "qwen",
+          model_name: "Qwen3-Embedding-0.6B",
+          dimension: 1024,
+          vector_field: "vector_qwen",
+          file_count: 5,
+        },
+        {
+          embedder: "qwen-b",
+          model_name: "Qwen3-Embedding-0.6B",
+          dimension: 1024,
+          vector_field: "vector_qwen_b",
+          file_count: 2,
+        },
+      ],
+      twoEndpoints,
+    );
+
+    expect(drift.hasDrift).toBe(true);
+    expect(drift.driftedFiles).toBe(2);
+  });
+
+  it("leaves files with no recorded field alone", () => {
+    // Indexed before the field was recorded: unknown, not known-bad.
+    const drift = computeEmbedderDrift(
+      "qwen",
+      [{ embedder: "qwen", model_name: "Qwen3-Embedding-0.6B", dimension: 1024, file_count: 4 }],
+      endpoints,
+    );
+
+    expect(drift.hasDrift).toBe(false);
+  });
+
   const twoWidths = [
     { embedder: "qwen", model_name: "Qwen3-Embedding-0.6B", dimension: 1024, file_count: 7 },
     { embedder: "qwen", model_name: "Qwen3-Embedding-0.6B", dimension: 768, file_count: 2 },
@@ -167,6 +212,26 @@ describe("computeEmbedderDrift", () => {
     ];
     const signature = (r: typeof rows) => driftSignature(computeEmbedderDrift("qwen", r, endpoints));
     expect(signature(rows)).toBe(signature([...rows].reverse()));
+  });
+
+  it("gives a drift in another field a signature of its own", () => {
+    // Same model, width and file count, but sitting in another endpoint's
+    // field: dismissing one must not dismiss the other.
+    const fields = [
+      { name: "qwen", model_name: "Qwen3-Embedding-0.6B", vector_field: "vector_qwen" },
+      { name: "qwen-b", model_name: "Qwen3-Embedding-0.6B", vector_field: "vector_qwen_b" },
+      { name: "qwen-c", model_name: "Qwen3-Embedding-0.6B", vector_field: "vector_qwen_c" },
+    ] as ModelEndpointResponse[];
+    const inField = (embedder: string, vector_field: string) =>
+      computeEmbedderDrift(
+        "qwen",
+        [{ embedder, model_name: "Qwen3-Embedding-0.6B", dimension: 1024, vector_field, file_count: 2 }],
+        fields,
+      );
+    expect(inField("qwen-b", "vector_qwen_b").hasDrift).toBe(true);
+    expect(driftSignature(inField("qwen-b", "vector_qwen_b"))).not.toBe(
+      driftSignature(inField("qwen-c", "vector_qwen_c")),
+    );
   });
 
   it("has nothing to say about an empty partition", () => {

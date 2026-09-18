@@ -19,7 +19,9 @@ from core.models.catalog import (
 from core.utils.consts import is_internal_metadata_key, strip_internal_metadata
 from core.utils.exceptions import ConflictError, mark_indexing_worker_may_be_running
 from core.utils.logging import get_logger
+from core.vector_stores.vector_field import is_vector_field_key
 from ray.exceptions import TaskCancelledError
+from services.workers.embedder_provenance import embedder_provenance
 from services.workers.ray_utils import call_ray_actor_with_timeout, retry_idempotent_ray_actor_method
 from services.workers.stages.store import INDEXING_TASK_ID_METADATA_KEY
 from services.workers.task_cancellation import cancel_active_indexing_tasks
@@ -571,7 +573,9 @@ class WorkerDispatcher(IndexingDispatcher):
         rows = await self._vector_store.query_chunks_by_filter(
             self._collection,
             {"partition": partition, "file_id": file_id},
-            output_fields=["*", "vector"],
+            # "*" carries every dense field — one per embedder (#762 F) — and
+            # the whole row is written back, so none of them may be missing.
+            output_fields=["*"],
         )
         if not rows:
             return
@@ -595,6 +599,10 @@ class WorkerDispatcher(IndexingDispatcher):
         metadata: dict,
         partition: str,
         user: dict | None,
+        *,
+        vector_field: str | None = None,
+        embedder: Any = None,
+        embedder_reference: str | None = None,
     ) -> None:
         source_file_metadata = await self._document_repo.get_file_metadata(file_id, partition)
         if source_file_metadata is None:
@@ -623,7 +631,7 @@ class WorkerDispatcher(IndexingDispatcher):
             rows = await self._vector_store.query_chunks_by_filter(
                 self._collection,
                 {"partition": partition, "file_id": file_id},
-                output_fields=["*", "vector"],
+                output_fields=["*"],
             )
             if not rows:
                 return
@@ -637,6 +645,10 @@ class WorkerDispatcher(IndexingDispatcher):
                 entity.update(public_metadata)
                 entity["indexed_at"] = indexed_at.isoformat()
                 entities.append(entity)
+
+            provenance: dict[str, Any] = {}
+            if vector_field is not None and embedder is not None:
+                provenance = await self._route_to_vector_field(entities, vector_field, embedder, embedder_reference)
 
             await self._insert_entities(entities)
 
@@ -653,6 +665,7 @@ class WorkerDispatcher(IndexingDispatcher):
                 content_sha256=content_sha256,
                 indexed_at=indexed_at,
                 chunk_count=len(entities),
+                **({"indexation_config": provenance} if provenance else {}),
             )
         finally:
             if claimed_content:
@@ -662,6 +675,48 @@ class WorkerDispatcher(IndexingDispatcher):
                     content_sha256=content_sha256,
                     claim_token=claim_token,
                 )
+
+    async def _route_to_vector_field(
+        self,
+        entities: list[dict[str, Any]],
+        vector_field: str,
+        embedder: Any,
+        embedder_reference: str | None,
+    ) -> dict[str, Any]:
+        """Put copied chunks' vectors in the target partition's embedder field (#762 F).
+
+        A chunk holds a vector only in the field of the embedder that produced
+        it, and a partition searches only its own embedder's field: copied as
+        is into a partition on another embedder, the file is never found.
+        Chunks with no vector in the target field are re-embedded from their
+        stored text — the input the source embedder was given, context
+        included — and every other embedder's field is left empty on the copy.
+
+        Returns the embedder record for the copy either way: the copy's vectors
+        sit in this embedder's field whether they were re-embedded here or
+        carried over from a source partition on the same embedder, and a file
+        with no record reads as "indexed before provenance existed" — unknown
+        rather than known-good — everywhere it is surfaced.
+        """
+        missing = [entity for entity in entities if entity.get(vector_field) is None]
+        if missing:
+            vectors = await embedder.embed([entity.get("text") or "" for entity in missing])
+            if len(vectors) != len(missing):
+                raise ValueError(f"Embedder returned {len(vectors)} vectors for {len(missing)} copied chunks.")
+            await self._vector_store.ensure_vector_field(vector_field, len(vectors[0]))
+            for entity, vector in zip(missing, vectors, strict=True):
+                entity[vector_field] = vector
+        for entity in entities:
+            for key in [key for key in entity if is_vector_field_key(key) and key != vector_field]:
+                del entity[key]
+        provenance = embedder_provenance(embedder, embedder_reference, vector_field)
+        if provenance.get("embedder_dimension") is None:
+            # An embedder that never ran cannot report its width, but the
+            # vectors being copied are exactly that wide.
+            widths = {len(entity[vector_field]) for entity in entities if entity.get(vector_field) is not None}
+            if len(widths) == 1:
+                provenance["embedder_dimension"] = widths.pop()
+        return provenance
 
     async def _upsert_entities(self, entities: list[dict[str, Any]]) -> None:
         upsert_entities = getattr(self._vector_store, "upsert_entities", None)

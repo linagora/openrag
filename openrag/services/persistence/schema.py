@@ -50,6 +50,10 @@ model_endpoints = Table(
     Column("timeout", Float, server_default="30.0", nullable=False),
     Column("extra", JSONB, server_default=text("'{}'::jsonb"), nullable=False),
     Column("is_default", Boolean, server_default="false", nullable=False),
+    # Dense vector field owned by this embedder (#762 F). Nullable only because
+    # non-embedder rows never own one; ck_embedder_has_vector_field below
+    # makes it mandatory for embedders.
+    Column("vector_field", String, nullable=True),
     Column(
         "created_at",
         DateTime(timezone=True),
@@ -65,6 +69,19 @@ model_endpoints = Table(
     CheckConstraint(
         "model_type IN ('embedder','reranker','llm','vlm','stt')",
         name="ck_model_endpoint_type",
+    ),
+    CheckConstraint(
+        "model_type <> 'embedder' OR vector_field IS NOT NULL",
+        name="ck_embedder_has_vector_field",
+    ),
+    # Two endpoints sharing a dense field would make their vectors
+    # indistinguishable — the exact failure #762 exists to stop. Partial
+    # because every non-embedder row is NULL.
+    Index(
+        "uq_model_endpoint_vector_field",
+        "vector_field",
+        unique=True,
+        postgresql_where=text("vector_field IS NOT NULL"),
     ),
 )
 
@@ -192,6 +209,29 @@ partitions = Table(
         server_default=text("now()"),
         nullable=False,
     ),
+)
+
+
+# At most one row per partition: the running swap, or the outcome of the last
+# one. Deleted with its partition.
+partition_embedder_swaps = Table(
+    "partition_embedder_swaps",
+    metadata,
+    Column(
+        "partition",
+        String,
+        ForeignKey("partitions.partition", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    Column("source_embedder", String, nullable=False),
+    Column("target_embedder", String, nullable=False, index=True),
+    Column("status", String, nullable=False, index=True),
+    Column("files_total", Integer, server_default="0", nullable=False),
+    Column("files_done", Integer, server_default="0", nullable=False),
+    Column("error", String, nullable=True),
+    Column("started_at", DateTime(timezone=True), server_default=text("now()"), nullable=False),
+    Column("updated_at", DateTime(timezone=True), server_default=text("now()"), nullable=False),
+    Column("finished_at", DateTime(timezone=True), nullable=True),
 )
 
 
@@ -492,6 +532,7 @@ __all__ = [
     "prompts",
     "topic_tags",
     "partitions",
+    "partition_embedder_swaps",
     "files",
     "users",
     "oidc_sessions",

@@ -17,11 +17,18 @@ async def store_stage(
     *,
     timeout: float | None = None,
     per_chunk_timeout: float = 0.0,
+    vector_field: str | None = None,
 ) -> MutableMapping[str, Any]:
     """Upsert ``row["chunks"]`` into the configured vector collection.
 
     Tenant routing stays on each chunk's ``partition`` field. The vector
     store collection argument remains the configured backend collection.
+
+    ``vector_field`` is the dense field this partition's embedder owns
+    (#762 F). A fresh collection is created with it; otherwise it is ensured
+    here, on the same call that sizes the collection, because a field cannot
+    be provisioned when the endpoint is created — endpoints are seeded at
+    startup, before any collection exists.
     """
 
     try:
@@ -32,7 +39,11 @@ async def store_stage(
             embedding = chunks[0].embedding
             if embedding is None:
                 raise ValueError("store_stage received chunks without embeddings")
-            await vector_store.ensure_collection("default", len(embedding))
+            await vector_store.ensure_collection("default", len(embedding), vector_field=vector_field)
+            if vector_field is not None:
+                # Re-checked on every batch, not memoized: the field may have
+                # been dropped since by another process (see the store).
+                await vector_store.ensure_vector_field(vector_field, len(embedding))
             task_id = row.get("task_id")
             if task_id:
                 for chunk in chunks:
@@ -47,7 +58,7 @@ async def store_stage(
         row["indexed_at"] = indexed_at
 
         row["stored_count"] = await run_with_optional_timeout(
-            lambda: vector_store.upsert(chunks, indexed_at=indexed_at),
+            lambda: vector_store.upsert(chunks, indexed_at=indexed_at, vector_field=vector_field),
             effective_timeout,
         )
         row["stage"] = "stored"

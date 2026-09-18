@@ -166,6 +166,7 @@ class IndexerWorkerActor:
             timeouts=_build_pipeline_timeouts(cfg),
             chunker_factory=_build_chunker_from_config,
             embedder_window_resolver=_build_embedder_window_resolver(cfg),
+            vector_field_resolver=_build_vector_field_resolver(cfg),
             parser_factory=parser_factory,
             embedder_factory=embedder_factory,
             vlm_factory=vlm_factory,
@@ -1064,6 +1065,32 @@ def _build_embedder_window_resolver(cfg: Settings) -> Any:
             if window:
                 return int(window)
         return int(global_default) if global_default else None
+
+    return resolve
+
+
+def _build_vector_field_resolver(cfg: Settings) -> Any:
+    """The dense field an embedder endpoint writes its vectors into (#762 F).
+
+    Resolution mirrors ``_build_embedder_window_resolver``: the named endpoint
+    first, then the global default for the ``default`` alias. ``None`` for an
+    unknown name or an embedder whose SQL migrations have not run; the store
+    refuses to write either rather than guess a field.
+
+    Read from the registry rather than recomputed from the endpoint name: the
+    field is pinned to the endpoint row at creation and survives a rename, so
+    deriving it here would send a renamed endpoint's vectors somewhere its own
+    searches would never look.
+    """
+    models = getattr(cfg, "models", None)
+    named_embedders = models.embedder if models is not None else {}
+    fallback_cfg = _global_embedder_endpoint_config(cfg)
+
+    def resolve(name: str = "default") -> str | None:
+        model_cfg = named_embedders.get(name)
+        if model_cfg is None and name == "default":
+            model_cfg = fallback_cfg
+        return getattr(model_cfg, "vector_field", None) if model_cfg is not None else None
 
     return resolve
 

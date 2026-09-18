@@ -19,6 +19,9 @@ def _make_row(**kwargs):
         "timeout": 30.0,
         "extra": {},
         "is_default": True,
+        # NULL is the common real-world value: every row predating #762 F
+        # shares the legacy `vector` field rather than owning one.
+        "vector_field": None,
         "created_at": _NOW,
         "updated_at": _NOW,
     }
@@ -49,9 +52,17 @@ class _FakeConn:
         # Partitions a change of default embedder finds on the alias with files.
         self.pinned_partitions: list[dict] = []
         self._fetchval_result = None
+        # Running embedder swaps targeting the endpoint (#762 F4).
+        self.running_swaps = 0
 
     def transaction(self):
         return _AsyncCtx(self)
+
+    async def fetchval(self, query: str, *params):
+        self.executed.append((query, params))
+        if "FROM partition_embedder_swaps" in query:
+            return self.running_swaps
+        return self._fetchval_result
 
     async def execute(self, query: str, *params):
         self.executed.append((query, params))
@@ -62,10 +73,6 @@ class _FakeConn:
         if query.lstrip().startswith("UPDATE partitions"):
             return self.pinned_partitions
         return self._fetch_result
-
-    async def fetchval(self, query: str, *params):
-        self.executed.append((query, params))
-        return self._fetchval_result
 
     async def fetchrow(self, query: str, *params):
         self.executed.append((query, params))
@@ -757,6 +764,57 @@ async def test_delete_refuses_when_a_partition_names_the_embedder():
 
 
 @pytest.mark.asyncio
+async def test_delete_refuses_while_a_swap_is_filling_the_embedders_field():
+    """No partition names the target of a running swap yet, but deleting it
+    would drop the field the swap is writing into (#762 F4)."""
+    from core.utils.exceptions import ConflictError
+    from services.persistence.model_endpoint_repo import PgModelEndpointRepository
+
+    pool = _FakePool()
+    pool.conn._fetch_result = [_row("e5", False), _row("jina", True)]
+    pool.conn.running_swaps = 2
+    repo = PgModelEndpointRepository(pool_getter=lambda: pool)
+
+    with pytest.raises(ConflictError) as exc:
+        await repo.delete_and_promote_default("e5", "embedder")
+
+    assert exc.value.code == "EMBEDDER_SWAP_IN_PROGRESS"
+    assert "2 running embedder swap(s)" in exc.value.message
+    queries = [q for q, _ in pool.conn.executed]
+    assert not any("DELETE FROM model_endpoints" in q for q in queries)
+
+
+@pytest.mark.asyncio
+async def test_rename_carries_embedder_swaps_along():
+    """A running swap completes by writing its target into the partition, so it
+    has to name the endpoint by its new name."""
+    from services.persistence.model_endpoint_repo import PgModelEndpointRepository
+
+    pool = _FakePool()
+    pool.conn._fetchrow_result = {"name": "new"}
+    repo = PgModelEndpointRepository(pool_getter=lambda: pool)
+
+    await repo.rename("old", "embedder", "new")
+
+    swap_updates = [(q, p) for q, p in pool.conn.executed if "UPDATE partition_embedder_swaps" in q]
+    assert [q.split("SET ")[1].split(" =")[0] for q, _ in swap_updates] == ["source_embedder", "target_embedder"]
+    assert all(p == ("old", "new") for _, p in swap_updates)
+
+
+@pytest.mark.asyncio
+async def test_rename_of_a_non_embedder_leaves_embedder_swaps_alone():
+    from services.persistence.model_endpoint_repo import PgModelEndpointRepository
+
+    pool = _FakePool()
+    pool.conn._fetchrow_result = {"name": "new"}
+    repo = PgModelEndpointRepository(pool_getter=lambda: pool)
+
+    await repo.rename("old", "llm", "new")
+
+    assert not any("partition_embedder_swaps" in q for q, _ in pool.conn.executed)
+
+
+@pytest.mark.asyncio
 async def test_delete_refuses_when_partitions_ride_the_default_alias():
     """Deleting the default embedder promotes a survivor, which silently moves
     every partition on the `default` alias to a different model — the same
@@ -1074,3 +1132,158 @@ async def test_discovery_normalizes_stt_names_and_excludes_null_preset_reference
     assert "'stt' = ANY($1::text[])" in query
     assert "COALESCE(NULLIF(preset.config ->> 'reranker', ''), 'default')" in query
     assert params == (["embedder", "llm", "vlm"],)
+
+
+# ----------------------------------------------------------------------
+# Per-embedder dense vector fields (#762 F)
+# ----------------------------------------------------------------------
+
+
+def _insert_params(pool) -> tuple:
+    """Bind parameters of the INSERT the repo issued."""
+    return next(p for q, p in pool.conn.executed if "INSERT INTO model_endpoints" in q)
+
+
+@pytest.mark.asyncio
+async def test_create_allocates_a_dense_field_for_an_embedder():
+    from core.config.model_endpoints import ModelEndpointRow
+    from services.persistence.model_endpoint_repo import PgModelEndpointRepository
+
+    pool = _FakePool()
+    pool.conn._fetchrow_result = _make_row(name="bge-m3", vector_field="vector_bge_m3")
+    repo = PgModelEndpointRepository(pool_getter=lambda: pool)
+
+    result = await repo.create(
+        ModelEndpointRow(
+            name="bge-m3",
+            model_type="embedder",
+            endpoint="http://vllm:8000/v1",
+            created_at=_NOW,
+            updated_at=_NOW,
+        )
+    )
+
+    assert _insert_params(pool)[-1] == "vector_bge_m3"
+    assert result.vector_field == "vector_bge_m3"
+
+
+@pytest.mark.asyncio
+async def test_create_allocates_nothing_for_a_non_embedder():
+    # Only embedders write vectors, so only embedders own a dense field.
+    from core.config.model_endpoints import ModelEndpointRow
+    from services.persistence.model_endpoint_repo import PgModelEndpointRepository
+
+    pool = _FakePool()
+    pool.conn._fetchrow_result = _make_row(model_type="llm", vector_field=None)
+    repo = PgModelEndpointRepository(pool_getter=lambda: pool)
+
+    await repo.create(
+        ModelEndpointRow(
+            name="mistral",
+            model_type="llm",
+            endpoint="http://vllm:8000/v1",
+            created_at=_NOW,
+            updated_at=_NOW,
+        )
+    )
+
+    assert _insert_params(pool)[-1] is None
+
+
+@pytest.mark.asyncio
+async def test_create_avoids_a_field_another_endpoint_already_owns():
+    # "a-b" and "a.b" both prefer vector_a_b. Handing the second the first's
+    # field would put two embedders' vectors in one index — #762's core defect.
+    from core.config.model_endpoints import ModelEndpointRow
+    from services.persistence.model_endpoint_repo import PgModelEndpointRepository
+
+    pool = _FakePool()
+    pool.conn._fetch_result = [{"vector_field": "vector_a_b"}]
+    pool.conn._fetchrow_result = _make_row(name="a.b", vector_field="vector_a_b_2")
+    repo = PgModelEndpointRepository(pool_getter=lambda: pool)
+
+    await repo.create(
+        ModelEndpointRow(
+            name="a.b",
+            model_type="embedder",
+            endpoint="http://vllm:8000/v1",
+            created_at=_NOW,
+            updated_at=_NOW,
+        )
+    )
+
+    assert _insert_params(pool)[-1] == "vector_a_b_2"
+
+
+@pytest.mark.asyncio
+async def test_create_ignores_a_client_supplied_vector_field():
+    # The column is server-owned. Honouring an incoming value would let a
+    # caller point a new endpoint at an existing embedder's vectors.
+    from core.config.model_endpoints import ModelEndpointRow
+    from services.persistence.model_endpoint_repo import PgModelEndpointRepository
+
+    pool = _FakePool()
+    pool.conn._fetch_result = [{"vector_field": "vector_victim"}]
+    pool.conn._fetchrow_result = _make_row(name="attacker", vector_field="vector_attacker")
+    repo = PgModelEndpointRepository(pool_getter=lambda: pool)
+
+    await repo.create(
+        ModelEndpointRow(
+            name="attacker",
+            model_type="embedder",
+            endpoint="http://vllm:8000/v1",
+            vector_field="vector_victim",
+            created_at=_NOW,
+            updated_at=_NOW,
+        )
+    )
+
+    assert _insert_params(pool)[-1] == "vector_attacker"
+
+
+@pytest.mark.asyncio
+async def test_update_cannot_change_the_dense_field():
+    # Pinned for life: a rename or re-point must never move an endpoint's
+    # vectors to a different field.
+    from services.persistence.model_endpoint_repo import PgModelEndpointRepository
+
+    pool = _FakePool()
+    pool._fetchrow_result = _make_row()
+    repo = PgModelEndpointRepository(pool_getter=lambda: pool)
+
+    await repo.update("default", "embedder", vector_field="vector_somewhere_else")
+
+    assert not any("vector_field" in q for q, _ in pool.executed)
+
+
+@pytest.mark.asyncio
+async def test_create_reports_a_field_collision_as_itself_not_a_duplicate_endpoint():
+    import asyncpg
+    from core.config.model_endpoints import ModelEndpointRow
+    from core.utils.exceptions import ValidationError
+    from services.persistence.model_endpoint_repo import PgModelEndpointRepository
+
+    class _CollidingConn(_FakeConn):
+        async def fetchrow(self, query: str, *params):
+            if "INSERT INTO model_endpoints" in query:
+                exc = asyncpg.UniqueViolationError("duplicate key")
+                exc.constraint_name = "uq_model_endpoint_vector_field"
+                raise exc
+            return await super().fetchrow(query, *params)
+
+    pool = _FakePool()
+    pool.conn = _CollidingConn()
+    repo = PgModelEndpointRepository(pool_getter=lambda: pool)
+
+    with pytest.raises(ValidationError) as excinfo:
+        await repo.create(
+            ModelEndpointRow(
+                name="bge-m3",
+                model_type="embedder",
+                endpoint="http://vllm:8000/v1",
+                created_at=_NOW,
+                updated_at=_NOW,
+            )
+        )
+
+    assert excinfo.value.code == "VECTOR_FIELD_CONFLICT"

@@ -111,15 +111,27 @@ class FakeVectorStore(VectorStore):
         self.error = error
         self.calls: list[tuple[list[Chunk], str]] = []
         self.ensure_calls: list[tuple[str, int]] = []
+        self.vector_field_calls: list[tuple[str, int]] = []
+        self.upsert_vector_fields: list[str | None] = []
 
-    async def upsert(self, chunks: list[Chunk], collection: str = "default", *, indexed_at=None) -> int:
+    async def upsert(
+        self, chunks: list[Chunk], collection: str = "default", *, indexed_at=None, vector_field=None
+    ) -> int:
         self.calls.append((chunks, collection))
+        self.upsert_vector_fields.append(vector_field)
         if self.error is not None:
             raise self.error
         return self.count
 
     async def search(
-        self, embedding, query_text=None, top_k=10, collection="default", filters=None, similarity_threshold=None
+        self,
+        embedding,
+        query_text=None,
+        top_k=10,
+        collection="default",
+        filters=None,
+        similarity_threshold=None,
+        vector_field=None,
     ):
         return []
 
@@ -133,14 +145,24 @@ class FakeVectorStore(VectorStore):
         self.ensure_calls.append((name, dimension))
         return None
 
+    async def ensure_vector_field(self, field: str, dimension: int) -> bool:
+        self.vector_field_calls.append((field, dimension))
+        return True
+
+    async def drop_vector_field(self, field: str) -> bool:
+        return False
+
+    async def write_vectors(self, field: str, vectors: dict[str, list[float] | None]) -> int:
+        return 0
+
     async def drop_collection(self, name: str) -> None:
         return None
 
     async def collection_exists(self, name: str) -> bool:
         return True
 
-    async def vector_dimension(self) -> int | None:
-        return 1024
+    async def vector_dimension(self, vector_field: str | None = None) -> int | None:
+        return 1024 if vector_field else None
 
     async def query_ids_by_filter(self, collection: str, filters: dict) -> list[str]:
         return []
@@ -493,3 +515,56 @@ async def test_caption_stage_fan_out_is_unbounded_without_a_limit():
     await caption_stage(row, vlm)
 
     assert vlm.peak > 3
+
+
+@pytest.mark.asyncio
+async def test_store_stage_provisions_and_writes_the_partitions_own_field():
+    # The field cannot be created when the endpoint is — endpoints are seeded
+    # at startup, before any collection exists — so the write path provisions
+    # it, sized from the embedding actually produced.
+    chunks = [Chunk(id="c1", text="alpha", embedding=[1.0, 0.0, 1.0])]
+    store = FakeVectorStore(count=1)
+
+    await store_stage({"chunks": chunks}, store, vector_field="vector_bge_m3")
+
+    assert store.vector_field_calls == [("vector_bge_m3", 3)]
+    assert store.upsert_vector_fields == ["vector_bge_m3"]
+
+
+@pytest.mark.asyncio
+async def test_store_stage_provisions_nothing_without_a_field():
+    # There is nothing to provision; the upsert gets None and the store
+    # refuses it with the reason.
+    chunks = [Chunk(id="c1", text="alpha", embedding=[1.0])]
+    store = FakeVectorStore(count=1)
+
+    await store_stage({"chunks": chunks}, store)
+
+    assert store.vector_field_calls == []
+    assert store.upsert_vector_fields == [None]
+
+
+@pytest.mark.asyncio
+async def test_store_stage_provisions_the_field_before_writing_to_it():
+    # Reversing these writes to a field that does not exist yet.
+    order: list[str] = []
+    store = FakeVectorStore(count=1)
+    store.ensure_vector_field = lambda field, dim: order.append("ensure") or _completed(True)  # type: ignore[assignment]
+    original_upsert = store.upsert
+
+    async def recording_upsert(*args, **kwargs):
+        order.append("upsert")
+        return await original_upsert(*args, **kwargs)
+
+    store.upsert = recording_upsert  # type: ignore[assignment]
+
+    await store_stage({"chunks": [Chunk(id="c1", text="a", embedding=[1.0])]}, store, vector_field="vector_x")
+
+    assert order == ["ensure", "upsert"]
+
+
+def _completed(value):
+    """An already-resolved awaitable, for stubbing an async method with a lambda."""
+    future: asyncio.Future = asyncio.get_event_loop().create_future()
+    future.set_result(value)
+    return future
