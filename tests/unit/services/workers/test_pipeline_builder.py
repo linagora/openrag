@@ -1401,7 +1401,12 @@ async def test_image_bytes_are_released_after_captioning():
     await pipeline.run(row)
 
     assert row["stage"] == "stored", "guard: the pipeline must have run to completion"
-    assert len(vlm.calls) == 6, "guard: the VLM must have read the bytes first"
+    # ``FakeVLM.calls`` stores the payload, so a count alone would pass against
+    # six empty ones — i.e. against the release running *before* the caption.
+    assert len(vlm.calls) == 6, "guard: the VLM must have been called once per image"
+    assert all(call.startswith(b"\x89PNG") and len(call) > 4096 for call in vlm.calls), (
+        "the VLM received empty payloads — the release ran before captioning"
+    )
     assert all(image.image_bytes == b"" for image in row["processed_document"].images)
 
 
