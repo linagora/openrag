@@ -193,14 +193,11 @@ async def get_file(
     service=Depends(get_partition_service),
 ):
     """Return metadata and chunk links for one file in a partition."""
-    if not await service.file_exists(file_id, partition):
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"'{file_id}' not found in partition '{partition}'",
-        )
-    rows = await service.get_file_chunks(partition=partition, file_id=file_id, limit=limit)
+    catalog_metadata = await service.get_file_metadata(partition=partition, file_id=file_id)
+    rows = await service.get_file_chunks(partition=partition, file_id=file_id, limit=limit) if limit else []
     documents = [{"link": str(request.url_for("get_extract", extract_id=row["_id"]))} for row in rows]
-    metadata = {k: v for k, v in rows[0].items() if k != "_id"} if rows else {}
+    chunk_metadata = {k: v for k, v in rows[0].items() if k != "_id"} if rows else {}
+    metadata = {**chunk_metadata, **catalog_metadata}
 
     return JSONResponse(
         status_code=status.HTTP_200_OK,

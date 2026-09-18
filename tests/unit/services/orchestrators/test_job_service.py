@@ -112,6 +112,30 @@ async def test_list_tasks_reports_live_degraded_completion() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("state", ["QUEUED", "SERIALIZING"])
+async def test_list_tasks_maps_active_states_to_one_bounded_outcome(state: str) -> None:
+    info = {"t1": {"state": state, "details": {}, "user": 1}}
+
+    rows = await JobService(FakeTSM(info=info)).list_tasks(is_admin=True, user_id=1)
+
+    assert rows[0]["outcome"] == "active"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("legacy_state", ["CHUNKING", "INSERTING"])
+async def test_list_tasks_normalizes_legacy_active_states_at_the_public_boundary(legacy_state: str) -> None:
+    info = {"t1": {"state": legacy_state, "details": {}, "user": 1}}
+
+    rows = await JobService(FakeTSM(info=info)).list_tasks(
+        is_admin=True,
+        user_id=1,
+        task_status="active",
+    )
+
+    assert [(row["state"], row["outcome"]) for row in rows] == [("SERIALIZING", "active")]
+
+
+@pytest.mark.asyncio
 async def test_list_tasks_uses_legacy_actor_timing_metadata_without_exposing_it():
     info = {
         "t1": {

@@ -3,7 +3,7 @@ import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { MouseEvent as ReactMouseEvent } from "react";
 import { MemoryRouter, useLocation } from "react-router-dom";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { toast } from "sonner";
 import type { Action } from "sonner";
 import { listPartitionFiles } from "@/lib/api/documents";
@@ -56,24 +56,7 @@ vi.mock("@/lib/api/partitions", () => ({
 }));
 
 vi.mock("@/lib/api/documents", () => ({
-  listPartitionFiles: vi.fn().mockResolvedValue({
-    files: [
-      {
-        file_id: "file-a",
-        partition: "docs",
-        filename: "a.pdf",
-        mimetype: "application/pdf",
-        indexed_at: "2026-01-01T00:00:00Z",
-      },
-      {
-        file_id: "file-b",
-        partition: "docs",
-        filename: "b.pdf",
-        mimetype: "application/pdf",
-        indexed_at: new Date(2026, 0, 2, 0, 30).toISOString(),
-      },
-    ],
-  }),
+  listPartitionFiles: vi.fn(),
 }));
 
 vi.mock("@/lib/api/indexing", () => ({
@@ -111,6 +94,13 @@ const uploadFileMock = vi.mocked(uploadFile);
 const getQueueInfoMock = vi.mocked(getQueueInfo);
 const downloadCsvMock = vi.mocked(downloadCsv);
 const toastSuccessMock = vi.mocked(toast.success);
+
+beforeAll(() => {
+  if (!Element.prototype.hasPointerCapture) Element.prototype.hasPointerCapture = () => false;
+  if (!Element.prototype.setPointerCapture) Element.prototype.setPointerCapture = () => {};
+  if (!Element.prototype.releasePointerCapture) Element.prototype.releasePointerCapture = () => {};
+  if (!Element.prototype.scrollIntoView) Element.prototype.scrollIntoView = () => {};
+});
 
 const queueInfo = (active: number): QueueInfo => ({
   workers: { total_slots: 4, pool_size: 2, max_per_actor: 2 },
@@ -163,6 +153,28 @@ describe("DocumentListPage", () => {
     deleteFileMock.mockClear();
     uploadFileMock.mockReset();
     getQueueInfoMock.mockReset();
+    listPartitionFilesMock.mockReset();
+    listPartitionFilesMock.mockResolvedValue({
+      files: [
+        {
+          file_id: "file-a",
+          partition: "docs",
+          link: "/partition/docs/file/file-a",
+          filename: "a.pdf",
+          mimetype: "application/pdf",
+          indexed_at: "2026-01-01T00:00:00Z",
+          degraded_stages: ["caption"],
+        },
+        {
+          file_id: "file-b",
+          partition: "docs",
+          link: "/partition/docs/file/file-b",
+          filename: "b.pdf",
+          mimetype: "application/pdf",
+          indexed_at: new Date(2026, 0, 2, 0, 30).toISOString(),
+        },
+      ],
+    });
     downloadCsvMock.mockClear();
     toastSuccessMock.mockClear();
   });
@@ -180,6 +192,29 @@ describe("DocumentListPage", () => {
     const fileLink = await screen.findByRole("link", { name: "a.pdf" });
     expect(fileLink.getAttribute("title")).toBe("a.pdf");
     expect(fileLink.className).toContain("truncate");
+  });
+
+  it("shows degraded stages and filters them through the catalog API", async () => {
+    renderDocuments();
+
+    expect(await screen.findByText("Caption")).not.toBeNull();
+    listPartitionFilesMock.mockClear();
+
+    await userEvent.click(screen.getByRole("combobox", { name: "Filter by degraded stage" }));
+    await userEvent.click(screen.getByRole("option", { name: "Caption" }));
+
+    await waitFor(() =>
+      expect(listPartitionFilesMock).toHaveBeenCalledWith("docs", {
+        degradedStage: "caption",
+      }),
+    );
+  });
+
+  it("does not claim enrichment completed when no failure was recorded", async () => {
+    renderDocuments();
+
+    expect(await screen.findByText("No failures recorded")).not.toBeNull();
+    expect(screen.queryByText("Complete")).toBeNull();
   });
 
   it("filters documents by file name and indexed date before exporting", async () => {

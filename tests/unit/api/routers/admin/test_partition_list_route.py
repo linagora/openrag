@@ -39,6 +39,8 @@ class _FakeService:
     def __init__(self, summaries: dict[str, dict]) -> None:
         self._summaries = summaries
         self.file_calls: list[dict] = []
+        self.file_chunks: list[dict] = []
+        self.file_chunk_calls: list[dict] = []
 
     async def list_partition_summaries(self) -> dict[str, dict]:
         return self._summaries
@@ -46,6 +48,13 @@ class _FakeService:
     async def list_files(self, partition: str, limit: int | None = None, degraded_stage: str | None = None) -> list:
         self.file_calls.append({"partition": partition, "limit": limit, "degraded_stage": degraded_stage})
         return []
+
+    async def get_file_metadata(self, partition: str, file_id: str) -> dict:
+        return {"filename": "catalog.pdf", "degraded_stages": ["caption"]}
+
+    async def get_file_chunks(self, partition: str, file_id: str, limit: int = 2000) -> list:
+        self.file_chunk_calls.append({"partition": partition, "file_id": file_id, "limit": limit})
+        return self.file_chunks[:limit]
 
 
 def _build_app(
@@ -55,6 +64,10 @@ def _build_app(
     is_admin: bool = False,
 ) -> FastAPI:
     app = FastAPI()
+
+    @app.get("/extract/{extract_id}", name="get_extract")
+    async def _get_extract(extract_id: str):
+        return {"extract_id": extract_id}
 
     @app.middleware("http")
     async def _set_user(request, call_next):
@@ -143,3 +156,41 @@ async def test_file_list_rejects_an_unbounded_degraded_stage(async_client_factor
 
     assert response.status_code == 422
     assert service.file_calls == []
+
+
+@pytest.mark.asyncio
+async def test_file_detail_uses_authoritative_catalog_metadata(async_client_factory) -> None:
+    service = _FakeService({})
+    service.file_chunks = [{"_id": "chunk-1", "filename": "stale-chunk-name.pdf", "page": 1}]
+    app = _build_app(service, [])
+
+    async with async_client_factory(app) as client:
+        response = await client.get("/partition/legal/file/file-1")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["metadata"] == {
+        "filename": "catalog.pdf",
+        "page": 1,
+        "degraded_stages": ["caption"],
+    }
+    assert body["documents"] == [
+        {"link": "http://testserver/extract/chunk-1"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_file_detail_with_zero_limit_skips_chunk_storage(async_client_factory) -> None:
+    service = _FakeService({})
+    service.file_chunks = [{"_id": "chunk-1", "filename": "stale.pdf"}]
+    app = _build_app(service, [])
+
+    async with async_client_factory(app) as client:
+        response = await client.get("/partition/legal/file/file-1", params={"limit": 0})
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "metadata": {"filename": "catalog.pdf", "degraded_stages": ["caption"]},
+        "documents": [],
+    }
+    assert service.file_chunk_calls == []
