@@ -94,16 +94,27 @@ class RetrievalService:
             partition_configs=len(getattr(config, "partitions", {}) or {}),
         )
 
-    def _build_legacy_pipeline(self, *, reranker: Reranker | None, llm: LLM | None) -> RetrieverPipeline:
+    def _build_legacy_pipeline(
+        self,
+        *,
+        reranker: Reranker | None,
+        llm: LLM | None,
+        top_k: int | None = None,
+        similarity_threshold: float | None = None,
+        disable_reranker: bool = False,
+        disable_expansion: bool = False,
+    ) -> RetrieverPipeline:
         config = self._config
         rcfg = config.retriever
         common = {
             "searcher": self._searcher,
-            "top_k": rcfg.top_k,
-            "similarity_threshold": rcfg.similarity_threshold,
+            "top_k": top_k if top_k is not None else rcfg.top_k,
+            "similarity_threshold": (
+                similarity_threshold if similarity_threshold is not None else rcfg.similarity_threshold
+            ),
             "with_surrounding_chunks": rcfg.with_surrounding_chunks,
-            "include_related": rcfg.include_related,
-            "include_ancestors": rcfg.include_ancestors,
+            "include_related": False if disable_expansion else rcfg.include_related,
+            "include_ancestors": False if disable_expansion else rcfg.include_ancestors,
             "related_limit": rcfg.related_limit,
             "max_ancestor_depth": rcfg.max_ancestor_depth,
         }
@@ -127,7 +138,7 @@ class RetrievalService:
 
         return RetrieverPipeline(
             retriever=retriever,
-            reranker=reranker if config.reranker.enabled else None,
+            reranker=reranker if config.reranker.enabled and not disable_reranker else None,
             reranker_top_k=config.reranker.top_k,
             allow_filterless_fallback=rcfg.allow_filterless_fallback,
         )
@@ -332,7 +343,15 @@ class RetrievalService:
                     return name
         return "default"
 
-    async def _pipeline_for_partition(self, partition: str) -> tuple[RetrieverPipeline, int | None]:
+    async def _pipeline_for_partition(
+        self,
+        partition: str,
+        *,
+        top_k: int | None = None,
+        similarity_threshold: float | None = None,
+        disable_reranker: bool = False,
+        disable_expansion: bool = False,
+    ) -> tuple[RetrieverPipeline, int | None]:
         # Callers only ever pass a concrete partition name — the "all" sentinel is
         # expanded to concrete keys by _pipeline_groups_for_partitions before this
         # runs. With no per-partition configs at all, fall back to the legacy pipeline.
@@ -360,18 +379,24 @@ class RetrievalService:
         elif rtype == "hyde":
             template = await self._resolve_query_template("hyde", pipeline_cfg.hyde_prompt_name, "hyde")
 
-        reranker = self._resolve_reranker(pipeline_cfg.reranker, partition) if pipeline_cfg.enable_reranker else None
+        reranker = (
+            self._resolve_reranker(pipeline_cfg.reranker, partition)
+            if pipeline_cfg.enable_reranker and not disable_reranker
+            else None
+        )
 
         retriever = self._build_retriever(
             rtype=rtype,
             template=template,
             common={
                 "searcher": searcher,
-                "top_k": pipeline_cfg.top_k,
-                "similarity_threshold": pipeline_cfg.similarity_threshold,
+                "top_k": top_k if top_k is not None else pipeline_cfg.top_k,
+                "similarity_threshold": (
+                    similarity_threshold if similarity_threshold is not None else pipeline_cfg.similarity_threshold
+                ),
                 "with_surrounding_chunks": self._legacy_retriever_value("with_surrounding_chunks", False),
-                "include_related": pipeline_cfg.include_related,
-                "include_ancestors": pipeline_cfg.include_ancestors,
+                "include_related": False if disable_expansion else pipeline_cfg.include_related,
+                "include_ancestors": False if disable_expansion else pipeline_cfg.include_ancestors,
                 "related_limit": self._legacy_retriever_value("related_limit", 10),
                 "max_ancestor_depth": self._legacy_retriever_value("max_ancestor_depth", None),
             },
@@ -389,7 +414,13 @@ class RetrievalService:
         return pipeline, pipeline_cfg.top_n
 
     async def _pipeline_groups_for_partitions(
-        self, partitions: list[str]
+        self,
+        partitions: list[str],
+        *,
+        top_k: int | None = None,
+        similarity_threshold: float | None = None,
+        disable_reranker: bool = False,
+        disable_expansion: bool = False,
     ) -> list[tuple[list[str], RetrieverPipeline, int | None]]:
         configs = self._partition_configs()
         # Expand the "all" sentinel to concrete partitions so each is retrieved
@@ -406,10 +437,26 @@ class RetrievalService:
         elif not partitions or not configs:
             # Nothing to expand (no partitions exist yet) — keep the single
             # legacy pipeline; there is no per-partition config to honour.
-            return [(["all"] if "all" in partitions else partitions, self._pipeline, None)]
+            pipeline = self._pipeline
+            if any((top_k is not None, similarity_threshold is not None, disable_reranker, disable_expansion)):
+                pipeline = self._build_legacy_pipeline(
+                    reranker=self._legacy_reranker,
+                    llm=self._legacy_llm,
+                    top_k=top_k,
+                    similarity_threshold=similarity_threshold,
+                    disable_reranker=disable_reranker,
+                    disable_expansion=disable_expansion,
+                )
+            return [(["all"] if "all" in partitions else partitions, pipeline, None)]
         groups: list[tuple[list[str], RetrieverPipeline, int | None]] = []
         for partition in partitions:
-            pipeline, default_top_k = await self._pipeline_for_partition(partition)
+            pipeline, default_top_k = await self._pipeline_for_partition(
+                partition,
+                top_k=top_k,
+                similarity_threshold=similarity_threshold,
+                disable_reranker=disable_reranker,
+                disable_expansion=disable_expansion,
+            )
             groups.append(([partition], pipeline, default_top_k))
         return groups
 
@@ -540,9 +587,18 @@ class RetrievalService:
         top_k: int | None = None,
         filter_params: dict | None = None,
         trace: RetrievalTraceBuilder | None = None,
+        similarity_threshold: float | None = None,
+        disable_reranker: bool = False,
+        disable_expansion: bool = False,
     ) -> list[Chunk]:
         """Single ``Query`` through retrieve → expand → rerank."""
-        groups = await self._pipeline_groups_for_partitions(partitions)
+        groups = await self._pipeline_groups_for_partitions(
+            partitions,
+            top_k=top_k,
+            similarity_threshold=similarity_threshold,
+            disable_reranker=disable_reranker,
+            disable_expansion=disable_expansion,
+        )
         pipeline_trace = trace if len(groups) == 1 else None
         ranked_lists = await self._gather_partition_groups(
             [
@@ -569,9 +625,18 @@ class RetrievalService:
         top_k: int | None = None,
         filter_params: dict | None = None,
         trace: RetrievalTraceBuilder | None = None,
+        similarity_threshold: float | None = None,
+        disable_reranker: bool = False,
+        disable_expansion: bool = False,
     ) -> list[Chunk]:
         """Every sub-query in parallel, fused with RRF."""
-        groups = await self._pipeline_groups_for_partitions(partitions)
+        groups = await self._pipeline_groups_for_partitions(
+            partitions,
+            top_k=top_k,
+            similarity_threshold=similarity_threshold,
+            disable_reranker=disable_reranker,
+            disable_expansion=disable_expansion,
+        )
         pipeline_trace = trace if len(groups) == 1 else None
         ranked_lists = await self._gather_partition_groups(
             [
@@ -598,6 +663,9 @@ class RetrievalService:
         top_k: int | None = None,
         filter_params: dict | None = None,
         trace: RetrievalTraceBuilder | None = None,
+        similarity_threshold: float | None = None,
+        disable_reranker: bool = False,
+        disable_expansion: bool = False,
     ) -> list[list[Chunk]]:
         """Per-sub-query ranked lists (NOT fused).
 
@@ -614,6 +682,9 @@ class RetrievalService:
                     top_k=top_k,
                     filter_params=filter_params,
                     trace=query_trace,
+                    similarity_threshold=similarity_threshold,
+                    disable_reranker=disable_reranker,
+                    disable_expansion=disable_expansion,
                 )
                 for q in queries
             ]

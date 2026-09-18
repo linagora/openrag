@@ -874,9 +874,7 @@ async def test_chat_contextualization_bypass_retrieves_exact_original_query_with
     )
 
     assert len(llm.chat_calls) == 1
-    assert retrieval.retrieve_multi_calls[0]["search_queries"].query_list[0].query == (
-        "Exact original legal question?"
-    )
+    assert retrieval.retrieve_multi_calls[0]["search_queries"].query_list[0].query == ("Exact original legal question?")
     context = out["extra"]["retrieval_trace"]["contextualization"]
     assert context == {
         "original_query": "Exact original legal question?",
@@ -893,6 +891,36 @@ async def test_chat_contextualization_bypass_retrieves_exact_original_query_with
     stages = {stage["name"]: stage for stage in out["extra"]["retrieval_trace"]["stages"]}
     assert stages["original_query"]["status"] == "complete"
     assert stages["contextualized_query"]["status"] == "not_run"
+
+
+@pytest.mark.asyncio
+async def test_chat_forwards_bounded_retrieval_diagnostic_overrides():
+    retrieval = FakeRetrieval()
+    svc = _svc(mode="ChatBotRag", llm=FakeLLM(chat_responses=["answer"]), retrieval=retrieval)
+
+    await svc.chat(
+        partitions=["p"],
+        payload={
+            "messages": [{"role": "user", "content": "Exact original legal question?"}],
+            "metadata": {
+                "include_retrieval_trace": True,
+                "require_retrieval": True,
+                "bypass_query_contextualization": True,
+                "retrieval_similarity_threshold": 0.35,
+                "retrieval_top_k": 100,
+                "retrieval_disable_reranker": True,
+                "retrieval_disable_expansion": True,
+            },
+        },
+        prepare_sources=lambda docs, _web: [doc.metadata["_id"] for doc in docs],
+        model_name="m",
+    )
+
+    call = retrieval.retrieve_multi_calls[0]
+    assert call["similarity_threshold"] == 0.35
+    assert call["top_k"] == 100
+    assert call["disable_reranker"] is True
+    assert call["disable_expansion"] is True
 
 
 @pytest.mark.asyncio

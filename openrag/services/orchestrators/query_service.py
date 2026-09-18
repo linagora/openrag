@@ -632,7 +632,16 @@ class QueryService:
         workspace = metadata.get("workspace")
         attachment_ids = _extract_attachment_ids(metadata)
 
-        top_k = self._mr_max if use_map_reduce else None
+        top_k = metadata.get("retrieval_top_k")
+        if top_k is None:
+            top_k = self._mr_max if use_map_reduce else None
+        retrieval_overrides = {}
+        if metadata.get("retrieval_similarity_threshold") is not None:
+            retrieval_overrides["similarity_threshold"] = float(metadata["retrieval_similarity_threshold"])
+        if metadata.get("retrieval_disable_reranker") is True:
+            retrieval_overrides["disable_reranker"] = True
+        if metadata.get("retrieval_disable_expansion") is True:
+            retrieval_overrides["disable_expansion"] = True
 
         filter_params = None
         indexed_attachment_ids: list[str] = []
@@ -725,6 +734,7 @@ class QueryService:
                 search_queries=queries,
                 top_k=top_k,
                 filter_params=filter_params,
+                **retrieval_overrides,
                 **trace_kwargs,
             )
         else:
@@ -738,6 +748,7 @@ class QueryService:
                 partition=partition,
                 top_k=top_k,
                 filter_params=filter_params,
+                **retrieval_overrides,
             )
 
         if not chunks and not web_results and partition is None:
@@ -861,6 +872,7 @@ class QueryService:
         partition: list[str],
         top_k: int | None,
         filter_params: dict | None,
+        **retrieval_overrides,
     ) -> None:
         """Run an isolated diagnostic retrieval that cannot alter the answer."""
         shadow = RetrievalTraceBuilder(request_id=f"{trace.request_id}:original", original_query=original_query)
@@ -873,6 +885,7 @@ class QueryService:
                 top_k=top_k,
                 filter_params=filter_params,
                 trace=shadow,
+                **retrieval_overrides,
             )
         except Exception as error:  # noqa: BLE001 - comparison is optional telemetry
             status = "error"

@@ -337,6 +337,48 @@ async def test_retrieve_uses_partition_retrieval_config_and_named_reranker():
 
 
 @pytest.mark.asyncio
+async def test_retrieve_diagnostic_overrides_threshold_depth_reranker_and_expansion():
+    s = FakeSearcher()
+    s.search_result = [_chunk("a"), _chunk("b")]
+    reranker = FakeReranker()
+    cfg = _config()
+    cfg.partitions = {
+        "tenant-a": _partition(
+            retrieval=RetrievalPipelineConfig(
+                top_k=3,
+                top_n=2,
+                similarity_threshold=0.77,
+                include_related=True,
+                include_ancestors=True,
+                enable_reranker=True,
+                reranker="fast-ranker",
+            )
+        )
+    }
+    svc = RetrievalService(
+        searcher=s,
+        reranker=None,
+        llm=None,
+        config=cfg,
+        searcher_factory=lambda _name: s,
+        reranker_factory=lambda _name: reranker,
+    )
+
+    await svc.retrieve_multi(
+        partitions=["tenant-a"],
+        search_queries=SearchQueries(query_list=[Query(query="hello")]),
+        top_k=100,
+        similarity_threshold=0.35,
+        disable_reranker=True,
+        disable_expansion=True,
+    )
+
+    assert s.search_calls[0]["top_k"] == 100
+    assert s.search_calls[0]["similarity_threshold"] == 0.35
+    assert reranker.calls == []
+
+
+@pytest.mark.asyncio
 async def test_retrieve_falls_back_to_default_reranker_when_preset_stale():
     """A partition's ``reranker`` preset can go stale (renamed/deleted after
     assignment — this field has no create/PATCH-time validation, unlike
