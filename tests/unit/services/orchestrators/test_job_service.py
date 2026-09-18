@@ -89,6 +89,50 @@ async def test_list_tasks_admin_sees_all():
     assert rows[0]["duration_ms"] == 1200
     assert rows[1]["created_at"] is None
     assert rows[1]["duration_ms"] is None
+    assert rows[1]["outcome"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_list_tasks_reports_live_degraded_completion() -> None:
+    info = {
+        "t1": {
+            "state": "COMPLETED",
+            "details": {
+                "file_id": "file-1",
+                "degraded_stages": ["caption", "provider error must not escape"],
+            },
+            "user": 1,
+        }
+    }
+
+    rows = await JobService(FakeTSM(info=info)).list_tasks(is_admin=True, user_id=1)
+
+    assert rows[0]["outcome"] == "completed_degraded"
+    assert rows[0]["details"]["degraded_stages"] == ["caption"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("state", ["QUEUED", "SERIALIZING"])
+async def test_list_tasks_maps_active_states_to_one_bounded_outcome(state: str) -> None:
+    info = {"t1": {"state": state, "details": {}, "user": 1}}
+
+    rows = await JobService(FakeTSM(info=info)).list_tasks(is_admin=True, user_id=1)
+
+    assert rows[0]["outcome"] == "active"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("legacy_state", ["CHUNKING", "INSERTING"])
+async def test_list_tasks_normalizes_legacy_active_states_at_the_public_boundary(legacy_state: str) -> None:
+    info = {"t1": {"state": legacy_state, "details": {}, "user": 1}}
+
+    rows = await JobService(FakeTSM(info=info)).list_tasks(
+        is_admin=True,
+        user_id=1,
+        task_status="active",
+    )
+
+    assert [(row["state"], row["outcome"]) for row in rows] == [("SERIALIZING", "active")]
 
 
 @pytest.mark.asyncio
@@ -114,6 +158,7 @@ async def test_list_tasks_uses_legacy_actor_timing_metadata_without_exposing_it(
         {
             "task_id": "t1",
             "state": "COMPLETED",
+            "outcome": "completed",
             "details": {
                 "file_id": "file-1",
                 "metadata": {"filename": "report.pdf"},
@@ -275,6 +320,19 @@ async def test_list_tasks_includes_jobs_the_actor_has_forgotten():
 
 
 @pytest.mark.asyncio
+async def test_list_tasks_reports_durable_degraded_completion() -> None:
+    service = JobService(
+        FakeTSM(info={}),
+        job_repo=FakeJobRepo([_job(degraded_stages=["contextualize"])]),
+    )
+
+    rows = await service.list_tasks(is_admin=True, user_id=7)
+
+    assert rows[0]["outcome"] == "completed_degraded"
+    assert rows[0]["details"]["degraded_stages"] == ["contextualize"]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("task_status", "expected"),
     [("failed", ["FAILED"]), ("active", ["QUEUED", "SERIALIZING"]), (None, None)],
@@ -309,7 +367,13 @@ async def test_get_task_details_falls_back_to_the_durable_row():
 
     details = await service.get_task_details("t-old")
 
-    assert details == {"file_id": "file-1", "partition": "tenant-a", "metadata": {}, "user_id": 7}
+    assert details == {
+        "file_id": "file-1",
+        "partition": "tenant-a",
+        "metadata": {},
+        "user_id": 7,
+        "degraded_stages": [],
+    }
 
 
 @pytest.mark.asyncio

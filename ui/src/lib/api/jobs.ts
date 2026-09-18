@@ -33,12 +33,16 @@ export interface TaskDetails {
   metadata: Record<string, unknown>;
   user_id: number;
   failed_stage?: string;
+  degraded_stages?: string[];
 }
+
+export type TaskOutcome = "active" | "completed" | "completed_degraded" | "failed" | "cancelled";
 
 /** Row from GET /queue/tasks — note `state` (vs `task_state` in the detail). */
 export interface TaskListItem {
   task_id: string;
   state: TaskState;
+  outcome: TaskOutcome;
   details: TaskDetails;
   created_at?: string | null;
   duration_ms?: number | null;

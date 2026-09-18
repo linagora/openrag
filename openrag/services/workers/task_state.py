@@ -12,10 +12,12 @@ from typing import Any
 
 import ray
 from core.models.catalog import (
+    LEGACY_ACTIVE_INDEXING_STATES,
     TASK_CREATED_AT_METADATA_KEY,
     TASK_FINISHED_AT_METADATA_KEY,
     TERMINAL_TASK_STATES,
     DocumentStatus,
+    normalize_degraded_stages,
 )
 
 ACTIVE_INDEXING_STATES = frozenset({"QUEUED", "SERIALIZING"})
@@ -25,7 +27,6 @@ ACTIVE_INDEXING_STATES = frozenset({"QUEUED", "SERIALIZING"})
 # must keep treating them as in-flight so cleanup never misses such a task and
 # lets a stale worker write data after the file/partition is gone. Kept out of
 # the public active counts and the DocumentStatus enum on purpose — fencing only.
-LEGACY_ACTIVE_INDEXING_STATES = frozenset({"CHUNKING", "INSERTING"})
 CANCELLABLE_INDEXING_STATES = ACTIVE_INDEXING_STATES | LEGACY_ACTIVE_INDEXING_STATES
 RECOVERABLE_TASK_STATES = CANCELLABLE_INDEXING_STATES | {"CANCELLED"}
 TERMINAL_INDEXING_STATES = frozenset({"COMPLETED", "FAILED"})
@@ -422,12 +423,15 @@ class TaskStateManager:
         metadata: dict[str, Any],
         user_id: int | None,
     ) -> None:
+        previous_details = info.details
         info.details = {
             "file_id": file_id,
             "partition": partition,
             "metadata": metadata,
             "user_id": user_id,
         }
+        if "degraded_stages" in previous_details:
+            info.details["degraded_stages"] = normalize_degraded_stages(previous_details["degraded_stages"])
         self.user_index.setdefault(user_id, set()).add(task_id)
 
     def _prune_expired_file_delete_fences(self) -> None:
@@ -641,6 +645,38 @@ class TaskStateManager:
                 user_id=user_id,
             )
             self._persist_task_locked(task_id, info)
+
+    @ray.method(concurrency_group="set")
+    async def set_degraded_stages(self, task_id: str, stages: list[str]) -> bool:
+        """Attach safe enrichment outcomes without reviving an expired task."""
+        with self.lock:
+            info = self.tasks.get(task_id)
+            if info is None or info.state not in CANCELLABLE_INDEXING_STATES:
+                return False
+            info.details["degraded_stages"] = normalize_degraded_stages(stages)
+            self._persist_task_locked(task_id, info)
+            return True
+
+    @ray.method(concurrency_group="set")
+    async def complete_with_degraded_stages(self, task_id: str, stages: list[str]) -> str:
+        """Atomically settle a task and report why completion was accepted or fenced."""
+        normalized = normalize_degraded_stages(stages)
+        with self.lock:
+            info = self.tasks.get(task_id)
+            if info is None:
+                return "missing"
+            if info.state == "COMPLETED":
+                if normalize_degraded_stages(info.details.get("degraded_stages")) == normalized:
+                    return "completed"
+                return "conflict"
+            if info.state == "CANCELLED":
+                return "cancelled"
+            if info.state not in CANCELLABLE_INDEXING_STATES:
+                return "conflict"
+            info.details["degraded_stages"] = normalized
+            info.state = "COMPLETED"
+            self._settle_task_locked(task_id, info)
+            return "completed"
 
     @ray.method(concurrency_group="set")
     async def set_queued_details(
@@ -868,6 +904,11 @@ class TaskStateManager:
     @ray.method(concurrency_group="queue_info")
     async def supports_bounded_task_retention(self) -> bool:
         """Identify actors that bound terminal task retention (#660)."""
+        return True
+
+    @ray.method(concurrency_group="queue_info")
+    async def supports_explicit_completion_outcomes(self) -> bool:
+        """Identify actors that distinguish cancellation, loss, and conflicts."""
         return True
 
     @ray.method(concurrency_group="queue_info")

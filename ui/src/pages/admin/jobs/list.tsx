@@ -10,6 +10,7 @@ import { usePermissions } from "@/lib/permissions";
 import { PageHeader } from "@/components/shared/page-header";
 import { DataTable, SortableHeader } from "@/components/shared/data-table";
 import { StatusBadge } from "@/components/shared/status-badge";
+import { DegradedCompletionStatus } from "@/components/shared/degraded-stages";
 import { ConfirmDialog } from "@/components/shared/confirm-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -120,7 +121,12 @@ const columns: ColumnDef<TaskListItem, unknown>[] = [
   {
     accessorKey: "state",
     header: "State",
-    cell: ({ row }) => <StatusBadge status={row.original.state} />,
+    cell: ({ row }) => {
+      if (row.original.outcome !== "completed_degraded") {
+        return <StatusBadge status={row.original.state} />;
+      }
+      return <DegradedCompletionStatus stages={row.original.details?.degraded_stages} />;
+    },
   },
   {
     id: "file",
@@ -239,6 +245,8 @@ export default function JobListPage() {
         [
           { header: "task_id", value: (task) => task.task_id },
           { header: "state", value: (task) => task.state },
+          { header: "outcome", value: (task) => task.outcome },
+          { header: "degraded_stages", value: (task) => task.details?.degraded_stages?.join(",") },
           { header: "filename", value: (task) => str(task.details?.metadata?.filename) },
           { header: "file_id", value: (task) => str(task.details?.file_id) },
           { header: "partition", value: (task) => str(task.details?.partition) },

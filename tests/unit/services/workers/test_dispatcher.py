@@ -65,6 +65,14 @@ def _document_repo() -> MagicMock:
     repo.renew_content_sha256_claim = AsyncMock(return_value=True)
     repo.release_content_sha256_claim = AsyncMock()
     repo.remove_file_from_partition = AsyncMock()
+    repo.get_file_metadata = AsyncMock(
+        return_value={
+            "file_id": "file-1",
+            "partition": "tenant-a",
+            "title": "old",
+            "indexed_at": "2000-01-01T00:00:00+00:00",
+        }
+    )
     repo.update_file_metadata_in_db = AsyncMock(return_value=True)
     repo.add_file_to_partition = AsyncMock(return_value=True)
     return repo
@@ -1166,7 +1174,7 @@ async def test_worker_dispatcher_mutates_files_without_legacy_indexer() -> None:
     document_repo.update_file_metadata_in_db.assert_called_once_with(
         "file-1",
         "tenant-a",
-        {"file_id": "file-1", "partition": "tenant-a", "title": "new", "indexed_at": "2000-01-01T00:00:00+00:00"},
+        {"title": "new"},
     )
     document_repo.add_file_to_partition.assert_called_once_with(
         file_id="copy-1",
@@ -1188,6 +1196,105 @@ async def test_worker_dispatcher_mutates_files_without_legacy_indexer() -> None:
     vector_store.insert_entities.assert_awaited_once()
     assert vector_store.upsert_entities.await_args.args[0][0]["_openrag_indexing_task_id"] == "task-1"
     assert "_openrag_indexing_task_id" not in vector_store.insert_entities.await_args.args[0][0]
+
+
+@pytest.mark.asyncio
+async def test_metadata_update_writes_patch_instead_of_stale_catalog_snapshot() -> None:
+    from services.workers.dispatcher import WorkerDispatcher
+
+    document_repo = _document_repo()
+    document_repo.get_file_metadata.return_value = {
+        "file_id": "file-1",
+        "partition": "tenant-a",
+        "title": "old",
+        "degraded_stages": ["caption", "topic_tag"],
+    }
+    dispatcher = WorkerDispatcher(
+        pool=_pool_with_ref(object()),
+        task_state_manager=_task_state_manager(),
+        completion_tracker=_completion_tracker(),
+        vector_store=_vector_store(),
+        document_repo=document_repo,
+        workspace_repo=_workspace_repo(),
+        collection="default",
+    )
+
+    await dispatcher.update_file_metadata("file-1", {"title": "new"}, "tenant-a", user={"id": 7})
+
+    assert document_repo.update_file_metadata_in_db.await_args.args[2] == {"title": "new"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("degraded_stages", [["caption"], []])
+async def test_copy_inherits_catalog_degraded_stages(degraded_stages: list[str]) -> None:
+    from services.workers.dispatcher import WorkerDispatcher
+
+    document_repo = _document_repo()
+    document_repo.get_file_metadata.return_value = {
+        "file_id": "source",
+        "partition": "tenant-a",
+        "title": "Source",
+        "degraded_stages": degraded_stages,
+    }
+    vector_store = _vector_store()
+    dispatcher = WorkerDispatcher(
+        pool=_pool_with_ref(object()),
+        task_state_manager=_task_state_manager(),
+        completion_tracker=_completion_tracker(),
+        vector_store=vector_store,
+        document_repo=document_repo,
+        workspace_repo=_workspace_repo(),
+        collection="default",
+    )
+
+    await dispatcher.copy_file(
+        "source",
+        {"file_id": "copy", "partition": "tenant-b", "title": "Copy"},
+        "tenant-a",
+        user={"id": 7},
+    )
+
+    copied_metadata = document_repo.add_file_to_partition.await_args.kwargs["file_metadata"]
+    assert copied_metadata["file_id"] == "copy"
+    assert copied_metadata["partition"] == "tenant-b"
+    assert copied_metadata["title"] == "Copy"
+    assert copied_metadata["degraded_stages"] == degraded_stages
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["update", "copy"])
+async def test_metadata_mutation_aborts_when_catalog_row_is_missing(operation: str) -> None:
+    from services.workers.dispatcher import WorkerDispatcher
+
+    document_repo = _document_repo()
+    document_repo.get_file_metadata.return_value = None
+    vector_store = _vector_store()
+    dispatcher = WorkerDispatcher(
+        pool=_pool_with_ref(object()),
+        task_state_manager=_task_state_manager(),
+        completion_tracker=_completion_tracker(),
+        vector_store=vector_store,
+        document_repo=document_repo,
+        workspace_repo=_workspace_repo(),
+        collection="default",
+    )
+
+    if operation == "update":
+        await dispatcher.update_file_metadata("missing", {"title": "new"}, "tenant-a", user=None)
+    else:
+        await dispatcher.copy_file(
+            "missing",
+            {"file_id": "copy", "partition": "tenant-b", "content_sha256": "abc123"},
+            "tenant-a",
+            user=None,
+        )
+
+    vector_store.query_chunks_by_filter.assert_not_awaited()
+    vector_store.upsert_entities.assert_not_awaited()
+    vector_store.insert_entities.assert_not_awaited()
+    document_repo.update_file_metadata_in_db.assert_not_awaited()
+    document_repo.add_file_to_partition.assert_not_awaited()
+    document_repo.claim_content_sha256.assert_not_awaited()
 
 
 @pytest.mark.asyncio

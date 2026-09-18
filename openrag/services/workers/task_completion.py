@@ -11,6 +11,7 @@ from core.models.catalog import (
     TERMINAL_TASK_STATES,
     DocumentStatus,
     IndexationJob,
+    normalize_degraded_stages,
 )
 from services.workers.ray_utils import call_ray_actor_method_with_timeout
 
@@ -46,6 +47,10 @@ class TaskCompletionTracker:
 
     def supports_cancellation_recovery(self) -> bool:
         """Identify trackers that preserve unsettled cancellation fences."""
+        return True
+
+    def supports_degraded_stage_history(self) -> bool:
+        """Identify trackers that persist bounded degradation with settled jobs."""
         return True
 
     async def track(self, task_id: str, object_ref: dict[str, Any]) -> None:
@@ -322,6 +327,7 @@ class TaskCompletionTracker:
                 file_id=details.get("file_id"),
                 user_id=details.get("user_id"),
                 error=error,
+                degraded_stages=normalize_degraded_stages(details.get("degraded_stages")),
                 completed_at=datetime.now(UTC),
             )
         except Exception as exc:

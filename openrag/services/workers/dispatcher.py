@@ -38,19 +38,6 @@ class WorkerDispatcher(IndexingDispatcher):
     depends on the legacy ``Indexer`` actor being present.
     """
 
-    _FILE_METADATA_EXCLUDED_KEYS = frozenset(
-        {
-            "_id",
-            "id",
-            "text",
-            "vector",
-            "page",
-            "section_id",
-            "prev_section_id",
-            "next_section_id",
-        }
-    )
-
     def __init__(
         self,
         *,
@@ -579,6 +566,8 @@ class WorkerDispatcher(IndexingDispatcher):
         partition: str,
         user: dict | None,
     ) -> None:
+        if await self._document_repo.get_file_metadata(file_id, partition) is None:
+            return
         rows = await self._vector_store.query_chunks_by_filter(
             self._collection,
             {"partition": partition, "file_id": file_id},
@@ -598,9 +587,7 @@ class WorkerDispatcher(IndexingDispatcher):
 
         await self._upsert_entities(entities)
 
-        file_metadata = self._file_metadata_from_chunk(rows[0])
-        file_metadata.update(public_metadata)
-        await self._document_repo.update_file_metadata_in_db(file_id, partition, file_metadata)
+        await self._document_repo.update_file_metadata_in_db(file_id, partition, public_metadata)
 
     async def copy_file(
         self,
@@ -609,6 +596,9 @@ class WorkerDispatcher(IndexingDispatcher):
         partition: str,
         user: dict | None,
     ) -> None:
+        source_file_metadata = await self._document_repo.get_file_metadata(file_id, partition)
+        if source_file_metadata is None:
+            return
         target_file_id = metadata.get("file_id", file_id)
         target_partition = metadata.get("partition", partition)
         content_sha256 = metadata.get("content_sha256")
@@ -650,7 +640,7 @@ class WorkerDispatcher(IndexingDispatcher):
 
             await self._insert_entities(entities)
 
-            file_metadata = self._file_metadata_from_chunk(rows[0])
+            file_metadata = dict(source_file_metadata)
             file_metadata.update(public_metadata)
             file_metadata["indexed_at"] = indexed_at.isoformat()
             await self._document_repo.add_file_to_partition(
@@ -684,13 +674,6 @@ class WorkerDispatcher(IndexingDispatcher):
         if insert_entities is None:
             raise TypeError("vector_store must expose insert_entities for file copy mutations")
         await insert_entities(entities, self._collection)
-
-    def _file_metadata_from_chunk(self, chunk: dict[str, Any]) -> dict[str, Any]:
-        return {
-            k: v
-            for k, v in chunk.items()
-            if k not in self._FILE_METADATA_EXCLUDED_KEYS and not is_internal_metadata_key(k)
-        }
 
     async def _record_job(
         self,
