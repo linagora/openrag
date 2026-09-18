@@ -60,6 +60,7 @@ class ResolvedPrompt:
             content_hash=hashlib.sha256(content.encode()).hexdigest(),
         )
 
+
 _VALID_TYPES = frozenset(t.value for t in PromptType)
 
 # Prompt types whose content is a ``str.format`` template rendered on the hot

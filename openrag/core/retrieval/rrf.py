@@ -93,9 +93,7 @@ def _record_rrf_trace(
         return
     try:
         candidates: list[TraceCandidate] = []
-        key_for_object: dict[int, Hashable] = {
-            id(item): key for key, items in occurrences.items() for item in items
-        }
+        key_for_object: dict[int, Hashable] = {id(item): key for key, items in occurrences.items() for item in items}
         for rank, item in enumerate(ordered, start=1):
             key = key_for_object.get(id(item), id(item))
             removal = None
