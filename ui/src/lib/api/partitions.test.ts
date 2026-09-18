@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { createPartition, listPartitionMemberCandidates } from "./partitions";
+import { createPartition, listPartitionFiles, listPartitionMemberCandidates } from "./partitions";
 
 // Minimal Response-like object covering what `request` reads (mirrors client.test.ts).
 function fakeResponse({ status = 200, body = "" }: { status?: number; body?: string } = {}): Response {
@@ -97,5 +97,20 @@ describe("listPartitionMemberCandidates", () => {
         ["limit", "10"],
       ]),
     );
+  });
+});
+
+describe("listPartitionFiles", () => {
+  it("passes the bounded degraded-stage filter to the catalog endpoint", async () => {
+    fetchMock.mockResolvedValue(fakeResponse({ body: JSON.stringify({ files: [] }) }));
+
+    await listPartitionFiles("legal docs", { limit: 20, degradedStage: "caption" });
+
+    const requestedUrl = String(fetchMock.mock.calls[0][0]);
+    expect(requestedUrl).toContain("/partition/legal%20docs?");
+    expect(Array.from(new URLSearchParams(requestedUrl.split("?")[1]).entries())).toEqual([
+      ["limit", "20"],
+      ["degraded_stage", "caption"],
+    ]);
   });
 });

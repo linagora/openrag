@@ -205,9 +205,15 @@ class FakeMembershipRepo:
 
 
 class FakeDocumentRepo:
-    def __init__(self, files: set[tuple[str, str]] | None = None, listing: dict | None = None):
+    def __init__(
+        self,
+        files: set[tuple[str, str]] | None = None,
+        listing: dict | None = None,
+        metadata: dict | None = None,
+    ):
         self._files = files or set()
         self._listing = listing if listing is not None else {}
+        self._metadata = metadata
         self.list_calls: list[dict] = []
 
     async def file_exists_in_partition(self, file_id: str, partition: str) -> bool:
@@ -216,6 +222,9 @@ class FakeDocumentRepo:
     async def list_partition_files(self, partition: str, limit=None, degraded_stage=None) -> dict:
         self.list_calls.append({"partition": partition, "limit": limit, "degraded_stage": degraded_stage})
         return self._listing
+
+    async def get_file_metadata(self, file_id: str, partition: str) -> dict | None:
+        return self._metadata
 
     async def get_files_by_relationship(self, partition: str, relationship_id: str) -> list[dict]:
         return [{"file_id": "a", "relationship_id": relationship_id}]
@@ -805,6 +814,24 @@ async def test_list_files_pushes_degraded_stage_filter_to_catalog() -> None:
 
     assert files == [{"file_id": "f1", "degraded_stages": ["caption"]}]
     assert repo.list_calls == [{"partition": "p", "limit": 20, "degraded_stage": "caption"}]
+
+
+@pytest.mark.asyncio
+async def test_get_file_metadata_reads_the_authoritative_catalog_row() -> None:
+    metadata = {"filename": "catalog.pdf", "degraded_stages": ["caption"]}
+    svc = _svc(drepo=FakeDocumentRepo(files={("f", "p")}, metadata=metadata))
+
+    assert await svc.get_file_metadata("p", "f") == metadata
+
+
+@pytest.mark.asyncio
+async def test_get_file_metadata_rejects_a_missing_catalog_row() -> None:
+    svc = _svc(drepo=FakeDocumentRepo(metadata=None))
+
+    with pytest.raises(NotFoundError) as exc_info:
+        await svc.get_file_metadata("p", "missing")
+
+    assert exc_info.value.status_code == 404
 
 
 @pytest.mark.asyncio

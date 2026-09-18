@@ -19,6 +19,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from core.models.catalog import (
+    LEGACY_ACTIVE_INDEXING_STATES,
     TASK_CREATED_AT_METADATA_KEY,
     TASK_FINISHED_AT_METADATA_KEY,
     TERMINAL_TASK_STATES,
@@ -112,6 +113,7 @@ class JobService:
             **await self._durable_task_info(is_admin=is_admin, user_id=user_id, task_status=task_status),
             **all_info,
         }
+        all_info = {task_id: {**info, "state": _public_task_state(info["state"])} for task_id, info in all_info.items()}
 
         if task_status is None:
             filtered = list(all_info.items())
@@ -273,9 +275,18 @@ def _task_details(details: Any) -> tuple[dict[str, Any], Any, Any]:
 
 
 def _task_outcome(state: str, details: dict[str, Any]) -> str:
+    if state in _ACTIVE_STATES:
+        return "active"
     if state == "COMPLETED" and details.get("degraded_stages"):
         return "completed_degraded"
     return state.lower()
+
+
+def _public_task_state(state: str) -> str:
+    # Detached pre-#721 actors may still emit these internal states during a
+    # rolling deployment. Keep them out of the public contract while retaining
+    # active filtering and cancellation behavior.
+    return "SERIALIZING" if state in LEGACY_ACTIVE_INDEXING_STATES else state
 
 
 def _parse_timestamp(value: Any) -> datetime | None:
