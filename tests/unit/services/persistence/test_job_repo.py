@@ -19,6 +19,7 @@ def _row(**kwargs):
         "user_id": 7,
         "status": "QUEUED",
         "error": None,
+        "degraded_stages": [],
         "created_at": _NOW,
         "updated_at": _NOW,
         "started_at": None,
@@ -74,6 +75,26 @@ async def test_upsert_job_writes_the_task_row_and_maps_it_back():
 
 
 @pytest.mark.asyncio
+async def test_upsert_job_persists_degraded_stages() -> None:
+    pool = _FakePool(fetchrow=_row(status="COMPLETED", degraded_stages=["caption", "topic_tag"]))
+    repo = _repo(pool)
+
+    job = await repo.upsert_job(
+        IndexationJob(
+            id="task-1",
+            status=DocumentStatus.COMPLETED,
+            partition="tenant-a",
+            degraded_stages=["caption", "topic_tag"],
+        )
+    )
+
+    query, params = pool.calls[0]
+    assert params[8] == ["caption", "topic_tag"]
+    assert "degraded_stages" in query
+    assert job.degraded_stages == ["caption", "topic_tag"]
+
+
+@pytest.mark.asyncio
 async def test_upsert_job_keeps_settled_states_and_bounds_the_error():
     pool = _FakePool(fetchrow=_row(status="FAILED", error="boom"))
     repo = _repo(pool)
@@ -84,8 +105,8 @@ async def test_upsert_job_keeps_settled_states_and_bounds_the_error():
 
     query, params = pool.calls[0]
     # A settled row never reopens, mirroring the TaskStateManager guard.
-    assert "WHEN jobs.status = ANY($9::text[]) THEN jobs.status" in query
-    assert sorted(params[8]) == ["CANCELLED", "COMPLETED", "FAILED"]
+    assert "WHEN jobs.status = ANY($10::text[]) THEN jobs.status" in query
+    assert sorted(params[9]) == ["CANCELLED", "COMPLETED", "FAILED"]
     assert len(params[5]) == 8_000
 
 
@@ -111,8 +132,13 @@ async def test_upsert_job_freezes_the_outcome_fields_together_on_a_settled_row()
 
     query, _params = pool.calls[0]
     compact = " ".join(query.split())
-    settled = "jobs.status = ANY($9::text[])"
-    for field, frozen in (("status", "jobs.status"), ("error", "jobs.error"), ("completed_at", "jobs.completed_at")):
+    settled = "jobs.status = ANY($10::text[])"
+    for field, frozen in (
+        ("status", "jobs.status"),
+        ("error", "jobs.error"),
+        ("completed_at", "jobs.completed_at"),
+        ("degraded_stages", "jobs.degraded_stages"),
+    ):
         assert f"{field} = CASE WHEN {settled} THEN {frozen}" in compact, field
 
 

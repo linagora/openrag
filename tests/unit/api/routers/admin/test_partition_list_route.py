@@ -10,7 +10,7 @@ every partition.
 from __future__ import annotations
 
 import pytest
-from api.dependencies.auth import partitions_with_details
+from api.dependencies.auth import partitions_with_details, require_partition_viewer
 from api.routers.admin import partitions
 from di.providers import get_partition_service
 from fastapi import FastAPI
@@ -38,9 +38,14 @@ class _FakeService:
 
     def __init__(self, summaries: dict[str, dict]) -> None:
         self._summaries = summaries
+        self.file_calls: list[dict] = []
 
     async def list_partition_summaries(self) -> dict[str, dict]:
         return self._summaries
+
+    async def list_files(self, partition: str, limit: int | None = None, degraded_stage: str | None = None) -> list:
+        self.file_calls.append({"partition": partition, "limit": limit, "degraded_stage": degraded_stage})
+        return []
 
 
 def _build_app(
@@ -59,6 +64,7 @@ def _build_app(
     app.include_router(partitions.router, prefix="/partition")
     app.dependency_overrides[partitions_with_details] = lambda: principal_partitions
     app.dependency_overrides[get_partition_service] = lambda: service
+    app.dependency_overrides[require_partition_viewer] = lambda: {"partition": "legal", "role": "viewer"}
     return app
 
 
@@ -113,3 +119,27 @@ async def test_list_falls_back_when_summary_missing(async_client_factory):
     assert resp.json()["partitions"] == [
         {"partition": "ghost", "document_count": 0, "role": "editor"},
     ]
+
+
+@pytest.mark.asyncio
+async def test_file_list_accepts_a_bounded_degraded_stage_filter(async_client_factory) -> None:
+    service = _FakeService({})
+    app = _build_app(service, [])
+
+    async with async_client_factory(app) as client:
+        response = await client.get("/partition/legal", params={"limit": 20, "degraded_stage": "caption"})
+
+    assert response.status_code == 200
+    assert service.file_calls == [{"partition": "legal", "limit": 20, "degraded_stage": "caption"}]
+
+
+@pytest.mark.asyncio
+async def test_file_list_rejects_an_unbounded_degraded_stage(async_client_factory) -> None:
+    service = _FakeService({})
+    app = _build_app(service, [])
+
+    async with async_client_factory(app) as client:
+        response = await client.get("/partition/legal", params={"degraded_stage": "raw-provider-error"})
+
+    assert response.status_code == 422
+    assert service.file_calls == []

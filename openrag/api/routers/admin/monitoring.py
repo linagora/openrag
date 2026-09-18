@@ -72,15 +72,24 @@ def require_metrics_token(request: Request, server: ServerConfig = Depends(get_m
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid metrics token")
 
 
-async def _render_metrics() -> Response:
+async def _render_metrics(request: Request) -> Response:
+    container = getattr(request.app.state, "container", None)
+    if container is not None and container.is_initialized:
+        try:
+            await container.readiness_service.snapshot()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # A scrape must remain available while readiness dependencies fail.
+            pass
     content = await asyncio.to_thread(get_metrics)
     return Response(content=content, media_type="text/plain; version=0.0.4; charset=utf-8")
 
 
 @router.get("/metrics", summary="Prometheus metrics endpoint", dependencies=[Depends(require_metrics_token)])
-async def prometheus_metrics():
+async def prometheus_metrics(request: Request):
     """Return all metrics in Prometheus text exposition format."""
-    return await _render_metrics()
+    return await _render_metrics(request)
 
 
 # Same exposition for a signed-in admin (the admin UI's System > Metrics tab).
@@ -93,6 +102,6 @@ admin_router = APIRouter(dependencies=[Depends(require_admin)])
 
 
 @admin_router.get("/metrics", summary="Prometheus metrics for a signed-in admin")
-async def prometheus_metrics_for_admin():
+async def prometheus_metrics_for_admin(request: Request):
     """Return the same exposition as ``GET /metrics``, gated by the admin role."""
-    return await _render_metrics()
+    return await _render_metrics(request)
