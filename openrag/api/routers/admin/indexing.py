@@ -94,6 +94,9 @@ router = APIRouter()
 **Response:**
 Returns a list of supported file extensions and MIME types that can be indexed by the system.
 """,
+    # The handler doesn't read the user, so the dependency is declared here
+    # rather than left to AuthMiddleware alone.
+    dependencies=[Depends(current_user)],
 )
 async def get_supported_types(config=Depends(get_config)):
     """
