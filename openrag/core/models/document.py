@@ -62,10 +62,20 @@ class ImageBlock(BaseModel):
       and leave ``source_url`` as ``None``.
     - Remote images parsed from a markdown ``![](http://…)`` ref leave
       ``image_bytes`` empty and set ``source_url`` to the URL. A
-      downstream fetch stage may populate ``image_bytes`` later.
+      downstream fetch stage may populate ``image_bytes`` later — but see
+      the lifetime note below: such a stage has to run *before* the caption
+      decision.
     - The :attr:`image_url` property is the unified VLM-friendly form:
       a ``data:`` URI built from the bytes when present, otherwise the
       ``source_url`` as-is.
+
+    Lifetime of ``image_bytes`` during indexing:
+    - ``IndexingPipeline`` clears it (``_release_image_bytes``) as soon as the
+      caption decision resolves — whether captioning ran, was skipped or
+      failed — because the payloads outlast the file itself and survived embed
+      and store. A stage added after that point reads ``b""``, not the image.
+      Everything else on this block survives: ``caption``, ``page_number``,
+      ``mime_type``, ``source_url`` and ``metadata``.
     """
 
     image_bytes: bytes = Field(default=b"", exclude=True, repr=False)
