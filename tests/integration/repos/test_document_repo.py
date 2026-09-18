@@ -142,6 +142,32 @@ class TestUpdate:
     async def test_update_missing_returns_none(self, postgres_store: PostgresStore):
         assert await postgres_store.document_repo.update_document("nope") is None
 
+    async def test_metadata_patch_preserves_concurrently_written_degradation(
+        self,
+        postgres_store: PostgresStore,
+    ):
+        partition = await _seed_partition(postgres_store)
+        repo = postgres_store.document_repo
+        await repo.create_document(_doc("metadata-race", partition, metadata={"title": "old"}))
+        stale_metadata = await repo.get_file_metadata("metadata-race", partition)
+        assert stale_metadata is not None
+
+        await repo.update_file_in_partition(
+            "metadata-race",
+            partition,
+            file_metadata={**stale_metadata, "degraded_stages": ["caption"]},
+        )
+        await repo.update_file_metadata_in_db(
+            "metadata-race",
+            partition,
+            {**stale_metadata, "title": "new", "degraded_stages": []},
+        )
+
+        metadata = await repo.get_file_metadata("metadata-race", partition)
+        assert metadata is not None
+        assert metadata["title"] == "new"
+        assert metadata["degraded_stages"] == ["caption"]
+
 
 class TestDeleteByPartition:
     async def test_returns_deletion_count(self, postgres_store: PostgresStore):

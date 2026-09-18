@@ -275,6 +275,26 @@ async def test_add_file_builds_metadata_and_dispatches(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_add_file_drops_caller_supplied_degraded_stages(tmp_path):
+    file_path = tmp_path / "doc.txt"
+    file_path.write_text("hello world")
+    dispatcher = FakeDispatcher()
+    service = _service(disp=dispatcher)
+
+    await service.add_file(
+        file_path=str(file_path),
+        file_id="f1",
+        partition="p1",
+        metadata={"author": "alice", "degraded_stages": ["caption"]},
+        sanitized_filename="doc.txt",
+        original_filename=None,
+        user={"id": 7},
+    )
+
+    assert dispatcher.dispatched[0]["metadata"].get("degraded_stages") is None
+
+
+@pytest.mark.asyncio
 async def test_add_file_uses_precomputed_content_hash_when_deduplication_is_enabled(tmp_path):
     f = tmp_path / "doc.txt"
     f.write_text("hello world")
@@ -750,13 +770,24 @@ async def test_update_metadata_drops_protected_keys():
             "_id": "x",
             "file_count": 42,
             "indexed_at": "2099-01-01T00:00:00+00:00",
+            "degraded_stages": ["caption"],
         },
         "p1",
         {"id": 1},
     )
     _, md, _, _ = disp.updated[0]
     assert md == {"author": "bob", "file_id": "f1"}
-    for key in ("source", "created_by", "file_size", "vector", "text", "_id", "file_count", "indexed_at"):
+    for key in (
+        "source",
+        "created_by",
+        "file_size",
+        "vector",
+        "text",
+        "_id",
+        "file_count",
+        "indexed_at",
+        "degraded_stages",
+    ):
         assert key not in md
 
 
@@ -769,11 +800,16 @@ async def test_copy_file_drops_protected_keys():
         source_partition="p1",
         target_file_id="dst",
         target_partition="p2",
-        metadata={"author": "bob", "source": "/app/data/other_tenant_secret.pdf"},
+        metadata={
+            "author": "bob",
+            "source": "/app/data/other_tenant_secret.pdf",
+            "degraded_stages": ["caption"],
+        },
         user={"id": 1},
     )
     _, md, _, _ = disp.copied[0]
     assert "source" not in md
+    assert "degraded_stages" not in md
     assert md["author"] == "bob"
     assert md["file_id"] == "dst"
     assert md["partition"] == "p2"

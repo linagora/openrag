@@ -118,7 +118,9 @@ class IndexingService:
 
         The keys added below must match ``UPLOAD_METADATA_SERVER_KEYS`` exactly.
         """
-        metadata = dict(metadata or {})
+        metadata, dropped = strip_protected_metadata(metadata)
+        if dropped:
+            logger.bind(file_id=file_id).warning(f"Dropped protected metadata keys from file upload: {dropped}")
         metadata.update(
             {
                 "source": str(file_path),
