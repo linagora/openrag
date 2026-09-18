@@ -123,6 +123,7 @@ async def delete_partition(
 **Parameters:**
 - `partition`: The partition name
 - `limit`: Optional maximum number of files to return
+- `degraded_stage`: Optional enrichment stage requiring re-indexing
 
 **Response:**
 Returns a list of files with:
@@ -139,11 +140,12 @@ async def list_files(
     request: Request,
     partition: str,
     limit: int | None = None,
+    degraded_stage: Literal["caption", "contextualize", "topic_tag"] | None = Query(default=None),
     partition_viewer=Depends(require_partition_viewer),
     service=Depends(get_partition_service),
 ):
     """List files stored in a partition."""
-    file_dicts = await service.list_files(partition, limit)
+    file_dicts = await service.list_files(partition, limit, degraded_stage)
 
     def process_file(file_dict):
         """Add a canonical file-detail link to one file row."""
@@ -321,7 +323,7 @@ async def create_partition(
 **Body:**
 Accepts partition config fields such as:
 - `description`
-- `embedder`
+- `embedder` (must name a registered embedder endpoint — 422 otherwise; `default` resolves to the endpoint marked default)
 - `indexation_preset`
 - `retrieval_preset`
 - `chat_history_depth`

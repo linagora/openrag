@@ -3,8 +3,15 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Awaitable, Callable
 
-from core.config.model_endpoints import ModelEndpointRow
+from core.config.model_endpoints import ModelEndpointRow, ModelEndpointType
+from core.models.readiness import ModelEndpointDiscovery
+
+#: Vets an endpoint edit inside ``update``'s transaction. Handed the row as
+#: locked there and a reader of its indexed-file usage on the same connection;
+#: raising refuses the edit.
+EndpointEditGuard = Callable[[ModelEndpointRow, Callable[[], Awaitable[list[dict]]]], Awaitable[None]]
 
 
 class ModelEndpointRepository(ABC):
@@ -20,7 +27,26 @@ class ModelEndpointRepository(ABC):
     async def list_all(self, model_type: str | None = None) -> list[ModelEndpointRow]: ...
 
     @abstractmethod
-    async def update(self, name: str, model_type: str, **fields: object) -> ModelEndpointRow | None: ...
+    async def discover_readiness_targets(
+        self, *, default_model_kinds: tuple[ModelEndpointType, ...] = ()
+    ) -> ModelEndpointDiscovery: ...
+
+    @abstractmethod
+    async def update(
+        self,
+        name: str,
+        model_type: str,
+        *,
+        guard: EndpointEditGuard | None = None,
+        **fields: object,
+    ) -> ModelEndpointRow | None:
+        """Apply ``fields`` to the endpoint; ``None`` if it does not exist.
+
+        With ``guard``, the row is locked FOR UPDATE and handed to the guard
+        before the write, in one transaction: a file being recorded against
+        this endpoint meanwhile either commits first, and the guard's usage read
+        counts it, or waits for the edit and sees it (#958).
+        """
 
     @abstractmethod
     async def rename(self, name: str, model_type: str, new_name: str) -> None: ...
@@ -35,5 +61,24 @@ class ModelEndpointRepository(ABC):
     async def delete_and_promote_default(self, name: str, model_type: str) -> tuple[str, str | None]:
         """Atomically delete an endpoint and, if it was the default, promote a
         survivor. Decides under a row lock. Returns ``(status, promoted_name)``
-        where status is ``"not_found" | "last" | "ok"``."""
+        where status is ``"not_found" | "last" | "ok"``.
+
+        Raises :class:`ConflictError` if a partition still references an
+        ``embedder`` endpoint; a ``chat_llm`` reference is cleared instead."""
+        ...
+
+    @abstractmethod
+    async def usage_counts(self) -> dict[tuple[str, str], int]:
+        """Return ``{(name, model_type): partition_count}`` for every endpoint."""
+        ...
+
+    @abstractmethod
+    async def indexed_file_usage(self, name: str, model_type: str) -> list[dict]:
+        """Partitions resolving to this endpoint that already hold indexed files.
+
+        What an in-place edit of an embedder's URL or model would strand (#762
+        C). Unlike a delete or a rename, that edit never touches the partitions
+        table, so nothing else in the schema can tell you it happened — this is
+        the only way to size it before it does.
+        """
         ...

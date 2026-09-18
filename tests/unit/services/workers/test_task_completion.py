@@ -49,6 +49,12 @@ def _task_state_manager(
     return tsm
 
 
+def test_tracker_reports_degraded_stage_history_capability() -> None:
+    from services.workers.task_completion import TaskCompletionTracker
+
+    assert TaskCompletionTracker().supports_degraded_stage_history() is True
+
+
 @pytest.mark.asyncio
 async def test_tracker_records_completion_after_worker_settles() -> None:
     from services.workers.task_completion import TaskCompletionTracker
@@ -469,6 +475,7 @@ async def test_settled_task_is_written_to_the_job_history() -> None:
         "partition": "tenant-a",
         "metadata": {},
         "user_id": 42,
+        "degraded_stages": ["caption"],
     }
 
     with patch("services.workers.task_completion.ray.get_actor", return_value=tsm):
@@ -485,6 +492,7 @@ async def test_settled_task_is_written_to_the_job_history() -> None:
         42,
     )
     assert job.completed_at is not None
+    assert job.degraded_stages == ["caption"]
 
 
 class _RayLikeActorMethod:

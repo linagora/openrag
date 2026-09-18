@@ -22,7 +22,9 @@ from core.ports.job_repo import JobRepository
 if TYPE_CHECKING:
     import asyncpg
 
-_COLUMNS = "id, partition, file_id, user_id, status, error, created_at, updated_at, started_at, completed_at"
+_COLUMNS = (
+    "id, partition, file_id, user_id, status, error, degraded_stages, created_at, updated_at, started_at, completed_at"
+)
 _TERMINAL_STATUSES = sorted(state.value for state in TERMINAL_TASK_STATES)
 _MAX_ERROR_CHARS = 8_000
 
@@ -44,12 +46,15 @@ class PgJobRepository(JobRepository):
     async def upsert_job(self, job: IndexationJob) -> IndexationJob:
         row = await self.pool.fetchrow(
             f"""
-            INSERT INTO jobs (id, partition, file_id, user_id, status, error, started_at, completed_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            INSERT INTO jobs (
+                id, partition, file_id, user_id, status, error,
+                started_at, completed_at, degraded_stages
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
             ON CONFLICT (id) DO UPDATE SET
                 -- A settled job never reopens, mirroring TaskStateManager.
                 status = CASE
-                    WHEN jobs.status = ANY($9::text[]) THEN jobs.status
+                    WHEN jobs.status = ANY($10::text[]) THEN jobs.status
                     ELSE EXCLUDED.status
                 END,
                 -- The outcome is decided by whichever write settled the row, and
@@ -57,12 +62,16 @@ class PgJobRepository(JobRepository):
                 -- status alone lets a FAILED write that lost the cancel race
                 -- staple its traceback onto a row reading CANCELLED.
                 error = CASE
-                    WHEN jobs.status = ANY($9::text[]) THEN jobs.error
+                    WHEN jobs.status = ANY($10::text[]) THEN jobs.error
                     ELSE COALESCE(EXCLUDED.error, jobs.error)
                 END,
                 completed_at = CASE
-                    WHEN jobs.status = ANY($9::text[]) THEN jobs.completed_at
+                    WHEN jobs.status = ANY($10::text[]) THEN jobs.completed_at
                     ELSE COALESCE(jobs.completed_at, EXCLUDED.completed_at)
+                END,
+                degraded_stages = CASE
+                    WHEN jobs.status = ANY($10::text[]) THEN jobs.degraded_stages
+                    ELSE EXCLUDED.degraded_stages
                 END,
                 -- First stamp wins: a retried transition must not restart the
                 -- clock queue wait is measured against.
@@ -86,6 +95,7 @@ class PgJobRepository(JobRepository):
             job.error[:_MAX_ERROR_CHARS] if job.error else None,
             job.started_at,
             job.completed_at,
+            job.degraded_stages,
             _TERMINAL_STATUSES,
         )
         return self._row_to_job(row)

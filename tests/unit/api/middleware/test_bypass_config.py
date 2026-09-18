@@ -48,9 +48,23 @@ def test_default_bypass_paths_match_legacy_set() -> None:
         "/auth/backchannel-logout",
         "/auth/logout",
         "/auth/chainlit-logout-signal",
+        "/metrics",
     }
     assert set(DEFAULT_BYPASS_PATHS) == expected
     assert set(AuthBypassConfig().bypass_paths) == expected
+
+
+def test_metrics_is_bypassed_by_default() -> None:
+    """Prometheus scrapes ``/metrics`` without a user token: the route enforces
+    its own optional ``METRICS_TOKEN`` (see api.routers.admin.monitoring), so
+    the middleware must not demand a bearer first."""
+    assert is_bypass_path("/metrics")
+
+
+def test_metrics_is_not_login_gated_under_oidc() -> None:
+    """A scraper can't follow an IdP redirect; ``/metrics`` stays out of the
+    oidc-gated subset."""
+    assert "/metrics" not in AuthBypassConfig().oidc_gated_paths
 
 
 def test_default_api_prefixes_match_legacy_set() -> None:
@@ -390,3 +404,115 @@ def test_request_object_is_unused_by_helpers() -> None:
 
     sig = inspect.signature(is_ui_path)
     assert Request not in {p.annotation for p in sig.parameters.values()}
+
+
+# ---------------------------------------------------------------------------
+# /metrics reaches the route without a user token, in both auth modes
+# ---------------------------------------------------------------------------
+
+
+def _anonymous_request(path: str) -> Request:
+    return Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": path,
+            "headers": [],
+            "query_string": b"",
+            "client": ("10.0.0.9", 4321),
+        }
+    )
+
+
+async def _route_reached(_request) -> Response:
+    return Response("scraped", status_code=200)
+
+
+def _anonymous_auth_service():
+    from unittest.mock import AsyncMock
+
+    svc = AsyncMock()
+    svc.get_oidc_session_by_token_for_request = AsyncMock(return_value=None)
+    svc.get_user_by_token_for_request = AsyncMock(return_value=None)
+    return svc
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("auth_mode", ["token", "oidc"])
+async def test_anonymous_scrape_reaches_metrics_route(monkeypatch, auth_mode) -> None:
+    """A Prometheus scraper sends no user credential. The middleware must hand
+    ``/metrics`` straight to the route (which applies METRICS_TOKEN itself)
+    instead of answering 403 "Missing token" (token mode) or redirecting to
+    the IdP (oidc mode)."""
+    monkeypatch.setenv("AUTH_MODE", auth_mode)
+    monkeypatch.setenv("AUTH_TOKEN", "an-admin-token")
+    monkeypatch.setenv("OIDC_TOKEN_ENCRYPTION_KEY", "x")
+    monkeypatch.setenv("RATE_LIMIT_ENABLED", "false")
+    mw = AuthMiddleware(
+        lambda scope, receive, send: None,
+        get_auth_service=lambda _r: _anonymous_auth_service(),
+    )
+
+    resp = await mw.dispatch(_anonymous_request("/metrics"), _route_reached)
+
+    assert resp.status_code == 200
+    assert resp.body == b"scraped"
+
+
+# ---------------------------------------------------------------------------
+# Path decisions use the routed path
+# ---------------------------------------------------------------------------
+
+# A Host header under which ``request.url.path`` reads differently from the
+# path the router dispatches.
+_MISMATCHED_HOST = "testserver/health_check?x="
+
+
+def _auth_app(monkeypatch, *, auth_mode: str) -> FastAPI:
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setenv("AUTH_MODE", auth_mode)
+    monkeypatch.setenv("AUTH_TOKEN", "secret")
+
+    svc = type("S", (), {})()
+    svc.get_oidc_session_by_token_for_request = AsyncMock(return_value=None)
+    svc.get_user_by_token_for_request = AsyncMock(return_value=None)
+
+    app = FastAPI()
+
+    @app.get("/indexer/files")
+    async def protected() -> dict[str, str]:
+        return {"served": "yes"}
+
+    @app.get("/static/{file_id}")
+    async def static_file(file_id: str) -> dict[str, str]:
+        return {"served": file_id}
+
+    app.add_middleware(AuthMiddleware, get_auth_service=lambda _request: svc)
+    return app
+
+
+def test_bypass_check_uses_the_routed_path(monkeypatch) -> None:
+    from fastapi.testclient import TestClient
+
+    client = TestClient(_auth_app(monkeypatch, auth_mode="token"))
+
+    response = client.get("/indexer/files", headers={"host": _MISMATCHED_HOST})
+
+    assert response.status_code == 403
+    assert response.json() == {"detail": "Missing token"}
+
+
+def test_oidc_login_redirect_uses_the_routed_path_and_query(monkeypatch) -> None:
+    from fastapi.testclient import TestClient
+
+    client = TestClient(_auth_app(monkeypatch, auth_mode="oidc"))
+
+    response = client.get(
+        "/static/abc?page=2",
+        headers={"host": _MISMATCHED_HOST, "accept": "text/html"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 302
+    assert response.headers["location"] == "/auth/login?next=%2Fstatic%2Fabc%3Fpage%3D2"
