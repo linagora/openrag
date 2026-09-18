@@ -100,6 +100,7 @@ class Document(BaseModel):
     content_type: DocumentType = DocumentType.TEXT
     text: str | None = None
     raw_bytes: bytes | None = Field(None, exclude=True)
+    source_path: str | None = Field(None, exclude=True)
     partition: str = "default"
     tags: list[str] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
@@ -161,21 +162,44 @@ class Document(BaseModel):
 
     @asynccontextmanager
     async def as_temporary_file(self, *, suffix: str | None = None) -> AsyncIterator[Path]:
-        """Materialize ``raw_bytes`` to a temporary file and yield its ``Path``.
+        """Yield a filesystem path for this document's content.
 
         Parsers wrapping a sync library that requires a path on disk
         (Marker, Whisper, MarkItDown, python-pptx, Spire.Doc, …) use this
         helper instead of rolling their own ``NamedTemporaryFile`` dance.
-        The file is removed on context exit even if the body raises.
 
-        ``suffix`` defaults to ``filename``'s extension, falling back to
-        a content-type-appropriate default.
+        When :attr:`source_path` is set, that path is yielded **as-is** and
+        nothing is written or deleted: the document already has a file, under
+        ``config.paths.data_dir``, which is node-shared in both deployment
+        shapes (Helm ``persistence.accessMode: ReadWriteMany``, Compose's
+        ``${DATA_VOLUME}:/app/data`` bind mount). That is what makes the pooled
+        parsers placeable — ``MarkerPool``/``DoclingPool``/``WhisperPool`` hand
+        this path to worker actors that may be on another node, and a
+        ``NamedTemporaryFile`` written here is visible only to the node that
+        wrote it (#911).
+
+        Otherwise ``raw_bytes`` is materialized to a temporary file, which *is*
+        removed on context exit even if the body raises. That is the path for
+        **derived** documents — the ``.docx`` that ``DocParser`` converts a
+        legacy ``.doc`` into, EML attachments — which have no file of their own.
+
+        ``suffix`` defaults to ``filename``'s extension, falling back to a
+        content-type-appropriate default. A ``source_path`` is only yielded
+        when its own extension matches, since the sync libraries below dispatch
+        on it; a mismatch falls back to writing the bytes out under the
+        requested suffix.
         """
-        if self.raw_bytes is None:
-            raise ValueError("Document.as_temporary_file requires raw_bytes")
-
         if suffix is None:
             suffix = Path(self.filename).suffix or _DEFAULT_TEMPFILE_SUFFIX.get(self.content_type, "")
+
+        if self.source_path is not None and Path(self.source_path).suffix == suffix:
+            # Never unlinked: this is the caller's file, not ours. The upload is
+            # purged by ``indexer_pool`` after indexing settles, if configured.
+            yield Path(self.source_path)
+            return
+
+        if self.raw_bytes is None:
+            raise ValueError("Document.as_temporary_file requires raw_bytes or source_path")
 
         raw = self.raw_bytes
 

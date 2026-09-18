@@ -68,6 +68,10 @@ class ParserFileSerializer(FileSerializer):
         document = Document(
             filename=name_for_type,
             raw_bytes=raw_bytes,
+            # See ``_load_document``: the extract path's file is on the same
+            # shared volume, so path-based parsers can be dispatched to a
+            # worker on another node (#911).
+            source_path=str(p),
             content_type=Document.detect_content_type(name_for_type),
             metadata=metadata,
         )

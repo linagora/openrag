@@ -179,6 +179,25 @@ async def test_load_document_reads_bytes_and_detects_type_from_original_filename
 
 
 @pytest.mark.asyncio
+async def test_load_document_carries_the_uploads_own_path(tmp_path: Path) -> None:
+    """#911: path-based parsers hand this across the actor boundary, so it must
+    be the shared-volume upload rather than a node-local temp copy."""
+    p = tmp_path / "1713700000000_a1b2_report.pdf"
+    p.write_bytes(b"%PDF-1.4")
+
+    doc = await _load_document(
+        str(p),
+        {"file_id": "fid-1", "filename": "report.pdf", "original_filename": "report.pdf"},
+        "tenant-a",
+    )
+
+    assert doc.source_path == str(p)
+    # The extension has to survive, or as_temporary_file rejects the path as a
+    # suffix mismatch and silently falls back to writing the bytes out again.
+    assert Path(doc.source_path).suffix == ".pdf"
+
+
+@pytest.mark.asyncio
 async def test_load_document_requires_file_id(tmp_path: Path) -> None:
     p = tmp_path / "note.txt"
     p.write_bytes(b"hi")
