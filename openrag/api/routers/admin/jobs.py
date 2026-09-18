@@ -69,6 +69,7 @@ async def get_queue_info(
 Returns list of tasks with:
 - `task_id`: Unique task identifier
 - `state`: Current task state
+- `outcome`: Completion result, including `completed_degraded`
 - `details`: Task metadata (file_id, partition, etc.)
 - `created_at`: Date and time when the task was created
 - `duration_ms`: Total task duration in milliseconds
@@ -106,6 +107,7 @@ async def list_tasks(
         item = {
             "task_id": task_id,
             "state": row["state"],
+            "outcome": row["outcome"],
             "details": row["details"],
             "created_at": row["created_at"],
             "duration_ms": row["duration_ms"],

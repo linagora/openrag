@@ -172,6 +172,20 @@ class FakePartitionService:
         return list(self._members.get(partition, []))
 
 
+class _PinningPartitionService(FakePartitionService):
+    """Pins a partition off the `default` alias the way the real service does."""
+
+    def __init__(self, config, **kwargs):
+        super().__init__(config, **kwargs)
+        self.pins: list[tuple[str, int]] = []
+
+    async def pin_embedder_for_write(self, partition: str) -> None:
+        self.pins.append((partition, self.admission_depth))
+        cfg = self._config.partitions.get(partition)
+        if cfg is not None and cfg.embedder == "default":
+            self._config.partitions[partition] = cfg.model_copy(update={"embedder": "jina"})
+
+
 class _RefreshingPresetService:
     def __init__(self, config) -> None:
         self.calls = 0
@@ -272,6 +286,26 @@ async def test_add_file_builds_metadata_and_dispatches(tmp_path):
     assert md["file_id"] == "f1"
     assert md["file_size"] == "11.00 B"
     assert md["content_sha256"] is None
+
+
+@pytest.mark.asyncio
+async def test_add_file_drops_caller_supplied_degraded_stages(tmp_path):
+    file_path = tmp_path / "doc.txt"
+    file_path.write_text("hello world")
+    dispatcher = FakeDispatcher()
+    service = _service(disp=dispatcher)
+
+    await service.add_file(
+        file_path=str(file_path),
+        file_id="f1",
+        partition="p1",
+        metadata={"author": "alice", "degraded_stages": ["caption"]},
+        sanitized_filename="doc.txt",
+        original_filename=None,
+        user={"id": 7},
+    )
+
+    assert dispatcher.dispatched[0]["metadata"].get("degraded_stages") is None
 
 
 @pytest.mark.asyncio
@@ -441,6 +475,55 @@ async def test_add_file_dispatches_partition_indexation_config_and_embedder(tmp_
     assert sent["indexation_config"]["contextualization_llm"] == "llm-context"
     assert sent["require_existing_partition"] is True
     assert sent["allow_legacy_require_existing_partition_retry"] is True
+
+
+@pytest.mark.asyncio
+async def test_add_file_pins_the_partition_and_dispatches_the_pinned_embedder(tmp_path):
+    """A partition on the `default` alias is pinned under the admission fence,
+    and the worker is handed the endpoint name — never `default`, which it
+    would resolve on its own, later, after the default may have moved (#762)."""
+    f = tmp_path / "doc.txt"
+    f.write_text("x")
+    disp = FakeDispatcher()
+    config = SimpleNamespace(partitions={})
+    partition_service = _PinningPartitionService(config, db_partitions={"tenant-a"})
+    config.partitions["tenant-a"] = partition_service._cfg("tenant-a")
+    svc = _service(disp=disp, config=config, partition_service=partition_service)
+
+    await svc.add_file(
+        file_path=str(f),
+        file_id="f1",
+        partition="tenant-a",
+        metadata={},
+        sanitized_filename="doc.txt",
+        original_filename="doc.txt",
+        user=None,
+    )
+
+    assert partition_service.pins == [("tenant-a", 1)]
+    assert disp.dispatched[0]["embedder_name"] == "jina"
+
+
+@pytest.mark.asyncio
+async def test_copy_file_pins_the_target_partition_before_dispatch():
+    disp = FakeDispatcher()
+    config = SimpleNamespace(partitions={})
+    partition_service = _PinningPartitionService(config)
+    config.partitions["p-dst"] = partition_service._cfg("p-dst")
+    svc = _service(disp=disp, config=config, partition_service=partition_service)
+
+    await svc.copy_file(
+        source_file_id="src",
+        source_partition="p-src",
+        target_file_id="dst",
+        target_partition="p-dst",
+        metadata={},
+        user={"id": 2},
+    )
+
+    assert [p for p, _ in partition_service.pins] == ["p-dst"]
+    assert config.partitions["p-dst"].embedder == "jina"
+    assert disp.copied
 
 
 @pytest.mark.asyncio
@@ -750,13 +833,24 @@ async def test_update_metadata_drops_protected_keys():
             "_id": "x",
             "file_count": 42,
             "indexed_at": "2099-01-01T00:00:00+00:00",
+            "degraded_stages": ["caption"],
         },
         "p1",
         {"id": 1},
     )
     _, md, _, _ = disp.updated[0]
     assert md == {"author": "bob", "file_id": "f1"}
-    for key in ("source", "created_by", "file_size", "vector", "text", "_id", "file_count", "indexed_at"):
+    for key in (
+        "source",
+        "created_by",
+        "file_size",
+        "vector",
+        "text",
+        "_id",
+        "file_count",
+        "indexed_at",
+        "degraded_stages",
+    ):
         assert key not in md
 
 
@@ -769,11 +863,16 @@ async def test_copy_file_drops_protected_keys():
         source_partition="p1",
         target_file_id="dst",
         target_partition="p2",
-        metadata={"author": "bob", "source": "/app/data/other_tenant_secret.pdf"},
+        metadata={
+            "author": "bob",
+            "source": "/app/data/other_tenant_secret.pdf",
+            "degraded_stages": ["caption"],
+        },
         user={"id": 1},
     )
     _, md, _, _ = disp.copied[0]
     assert "source" not in md
+    assert "degraded_stages" not in md
     assert md["author"] == "bob"
     assert md["file_id"] == "dst"
     assert md["partition"] == "p2"

@@ -554,9 +554,11 @@ async def test_copy_file_success():
         dest_file_id="d",
         allowed_partitions=["all"],
         user_id=1,
+        extra_metadata={"author": "alice", "degraded_stages": ["caption"]},
     )
     assert indexing.copied[0]["source_file_id"] == "s"
     assert indexing.copied[0]["target_partition"] == "b"
+    assert indexing.copied[0]["metadata"] == {"author": "alice"}
     assert out["dest_file_id"] == "d"
 
 
@@ -644,7 +646,11 @@ async def test_index_url_auto_creates_partition_and_indexes(monkeypatch):
         file_id="f1",
         allowed_partitions=["other"],
         user_id=7,
-        extra_metadata={"author": "me", "created_by": 999},  # created_by must be stripped
+        extra_metadata={
+            "author": "me",
+            "created_by": 999,
+            "degraded_stages": ["caption"],
+        },
     )
     # auto-created the missing partition, owned by the caller
     assert parts.created == [("newpart", 7, 100)]
@@ -655,6 +661,7 @@ async def test_index_url_auto_creates_partition_and_indexes(monkeypatch):
     assert added["metadata"]["source_url"] == "https://example.com/report.pdf"
     assert added["metadata"]["author"] == "me"
     assert "created_by" not in added["metadata"]  # protected key dropped
+    assert "degraded_stages" not in added["metadata"]
     assert out["task_id"] == "task-123"
 
 
@@ -867,14 +874,20 @@ async def test_update_metadata_strips_protected_keys_keeps_move():
     await _service(partitions=FakePartitions(exists=True), indexing=indexing).update_file_metadata(
         partition="a",
         file_id="f1",
-        metadata={"author": "x", "source": "/evil", "created_by": 999, "partition": "dest"},
+        metadata={
+            "author": "x",
+            "source": "/evil",
+            "created_by": 999,
+            "degraded_stages": ["caption"],
+            "partition": "dest",
+        },
         allowed_partitions=["all"],
         user_id=1,
     )
     _file_id, sent_md, _partition, _user = indexing.updated[0]
     assert sent_md["author"] == "x"
     assert sent_md["partition"] == "dest"  # authorized move control preserved
-    assert "source" not in sent_md and "created_by" not in sent_md
+    assert "source" not in sent_md and "created_by" not in sent_md and "degraded_stages" not in sent_md
 
 
 @pytest.mark.asyncio

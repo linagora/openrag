@@ -51,7 +51,13 @@ class FakeContextualizer(ChunkContextualizer):
         self.system_prompts: list[str | None] = []
 
     async def contextualize(
-        self, chunks, *, filename: str = "", lang: str = "en", system_prompt: str | None = None
+        self,
+        chunks,
+        *,
+        filename: str = "",
+        lang: str = "en",
+        system_prompt: str | None = None,
+        on_failure=None,
     ) -> list[Chunk]:
         self.calls.append((list(chunks), filename, lang))
         self.system_prompts.append(system_prompt)
@@ -132,6 +138,9 @@ class FakeVectorStore(VectorStore):
 
     async def collection_exists(self, name: str) -> bool:
         return True
+
+    async def vector_dimension(self) -> int | None:
+        return 1024
 
     async def query_ids_by_filter(self, collection: str, filters: dict) -> list[str]:
         return []
