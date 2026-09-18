@@ -133,14 +133,26 @@ def test_check_passes_on_a_complete_file(tmp_path: Path) -> None:
     assert gen_env.main(["--check", "-t", str(template), "-o", str(output)]) == 0
 
 
-def test_generated_file_is_private(tmp_path: Path) -> None:
+def test_generated_file_is_private(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The output is 0600, and the generator writes it without touching the
+    caller's environment.
+
+    The non-export half is asserted against an injected sentinel rather than
+    against ``AUTH_TOKEN`` being absent: absence proves nothing about whether
+    the script exports, and ``AUTH_TOKEN`` is set in any shell that runs this
+    stack — so the previous form failed on a developer machine for a reason
+    that had nothing to do with the code.
+    """
+    sentinel = "sentinel-value-the-generator-must-not-touch"
+    monkeypatch.setenv("AUTH_TOKEN", sentinel)
     template = _write(tmp_path / ".env.example", "AUTH_TOKEN=__GENERATE_ME__\n")
     output = tmp_path / ".env"
 
     gen_env.main(["-t", str(template), "-o", str(output)])
 
     assert stat.S_IMODE(output.stat().st_mode) == 0o600
-    assert os.environ.get("AUTH_TOKEN") is None  # the script writes, it does not export
+    assert os.environ["AUTH_TOKEN"] == sentinel
+    assert sentinel not in output.read_text()  # nor did the ambient value leak in
 
 
 def test_check_fails_when_the_template_is_missing(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
