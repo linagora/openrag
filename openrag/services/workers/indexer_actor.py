@@ -190,6 +190,7 @@ class IndexerWorker:
             if stored_count == 0:
                 raise NoIndexableContentError("No indexable content was extracted from this document.")
             indexed_at = row.get("indexed_at")
+            catalog_config = _with_embedder_provenance(indexation_config, row.get("embedder_provenance"))
             degraded_stages = normalize_degraded_stages(row.get("degraded_stages"))
 
             if self._document_repo is not None:
@@ -199,11 +200,12 @@ class IndexerWorker:
                     partition=partition,
                     user=user,
                     replace=replace,
-                    indexation_config=indexation_config,
+                    indexation_config=catalog_config,
                     indexed_at=indexed_at,
                     chunk_count=stored_count,
                     require_existing_partition=require_existing_partition,
                     workspace_ids=workspace_ids,
+                    embedder_fingerprint=row.get("embedder_fingerprint"),
                     degraded_stages=degraded_stages,
                 )
                 if not wrote_catalog:
@@ -293,6 +295,21 @@ class IndexerWorker:
         # ``delete_uploaded_file`` and ``IndexerWorkerActor.process_file``.
 
 
+def _with_embedder_provenance(
+    indexation_config: dict[str, Any] | None,
+    provenance: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Fold the run's embedder provenance into the stored config snapshot.
+
+    Copies rather than mutates: the dispatched ``indexation_config`` is still
+    read after this point (topic tags, the active-config contextvar) and must
+    stay the config that was dispatched. A ``None`` config still gets a record.
+    """
+    if not provenance:
+        return indexation_config
+    return {**(indexation_config or {}), **provenance}
+
+
 async def _write_catalog_record(
     *,
     doc_repo: Any,
@@ -305,12 +322,21 @@ async def _write_catalog_record(
     chunk_count: int | None = None,
     require_existing_partition: bool = False,
     workspace_ids: list[str] | None = None,
+    embedder_fingerprint: dict[str, str | None] | None = None,
     degraded_stages: list[str] | None = None,
 ) -> bool:
+    """Record an indexed file in the catalog, which is what makes it visible.
+
+    With ``embedder_fingerprint``, the repo first checks that the partition's
+    embedder is still the config the vectors were built with, and refuses the
+    file otherwise (#958); the caller's failure path then removes its vectors.
+    """
     file_id = metadata.get("file_id", "")
     file_metadata = {key: value for key, value in metadata.items() if key != "page"}
     file_metadata["degraded_stages"] = list(degraded_stages or [])
     config_kwargs = {"indexation_config": indexation_config} if indexation_config is not None else {}
+    if embedder_fingerprint is not None:
+        config_kwargs["embedder_fingerprint"] = embedder_fingerprint
     if replace:
         return await doc_repo.update_file_in_partition(
             file_id=file_id,

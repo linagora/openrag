@@ -22,11 +22,13 @@ columns is a post-refactoring feature.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Collection
+from collections.abc import Callable, Collection, Mapping
 from typing import TYPE_CHECKING, Any
 
+from core.config.model_endpoints import DEFAULT_ENDPOINT_ALIAS, embedder_fingerprint
 from core.models.catalog import INDEXING_CONTENT_CLAIM_TOKEN_PREFIX, DocumentRecord, DocumentStatus
 from core.ports.document_repo import ContentClaimLease, DocumentRepository
+from core.utils.exceptions import ConflictError
 from core.utils.logging import get_logger
 from services.persistence.file_count import decrement_file_counts
 
@@ -41,6 +43,55 @@ if TYPE_CHECKING:
 # therefore never calls ``json.dumps`` itself.
 
 logger = get_logger()
+
+# The endpoint a partition's files are embedded with, as the catalog write
+# records a file against it (#958): the partition's own embedder, or the default
+# one when it rides the alias. Both FOR SHARE, see _refuse_if_embedder_changed.
+_LOCK_PARTITION_EMBEDDER_SQL = "SELECT embedder FROM partitions WHERE partition = $1 FOR SHARE"
+_LOCK_EMBEDDER_ENDPOINT_SQL = """
+    SELECT name, endpoint, model_name, extra
+    FROM model_endpoints
+    WHERE model_type = 'embedder' AND (name = $1 OR ($1 = $2 AND is_default))
+    FOR SHARE
+    """
+
+
+async def _refuse_if_embedder_changed(
+    conn: asyncpg.Connection,
+    partition: str,
+    fingerprint: Mapping[str, str | None],
+) -> None:
+    """Refuse to record a file whose vectors its partition's embedder no longer makes (#958).
+
+    The vectors are already stored, built from whatever endpoint config the
+    indexer held when it embedded them. An edit to that endpoint, or a move of
+    the partition to another, can commit while the file is still indexing,
+    unseen by the edit guard: it counts catalog rows, and this is the row.
+
+    So the check runs here, in the transaction that makes the file visible, with
+    the partition and its endpoint row locked FOR SHARE. An endpoint edit locks
+    that row FOR UPDATE before it counts indexed files: either this file commits
+    first and the edit counts it, or the edit commits first and this check sees
+    it. ``partitions`` is locked before the endpoint row, the order
+    ``set_default`` takes; the other way round, the two can deadlock.
+    """
+    await conn.execute("LOCK TABLE partitions IN ROW EXCLUSIVE MODE")
+    # No row yet: this write creates the partition, on the column default.
+    embedder = await conn.fetchval(_LOCK_PARTITION_EMBEDDER_SQL, partition) or DEFAULT_ENDPOINT_ALIAS
+    endpoint = await conn.fetchrow(_LOCK_EMBEDDER_ENDPOINT_SQL, embedder, DEFAULT_ENDPOINT_ALIAS)
+    if endpoint is None:
+        # Nothing registered to compare with (an env-only embedder): nothing an
+        # admin can have edited.
+        return
+    current = embedder_fingerprint(endpoint["endpoint"], endpoint["model_name"], endpoint["extra"])
+    changed = [key for key, value in current.items() if fingerprint.get(key) != value]
+    if changed:
+        raise ConflictError(
+            f"Embedder '{endpoint['name']}' of partition '{partition}' changed ({', '.join(changed)}) while "
+            "this file was being indexed, so its vectors came from the previous configuration and were not "
+            "kept. Index the file again.",
+            code="EMBEDDER_CHANGED_DURING_INDEXING",
+        )
 
 
 class PgDocumentRepository(DocumentRepository):
@@ -496,6 +547,7 @@ class PgDocumentRepository(DocumentRepository):
         content_sha256: str | None = None,
         independently_indexed: bool = True,
         chunk_count: int | None = None,
+        embedder_fingerprint: Mapping[str, str | None] | None = None,
     ) -> bool:
         """TODO(phase-9): remove. Mirror of legacy ``add_file_to_partition``.
 
@@ -504,6 +556,10 @@ class PgDocumentRepository(DocumentRepository):
 
         ``indexed_at`` pins the indexation timestamp so it matches the Milvus
         chunks; when ``None`` the ``files.indexed_at`` server default applies.
+
+        ``embedder_fingerprint`` is the config the file's vectors were built
+        with; the file is refused if the partition's embedder no longer matches
+        it (see ``_refuse_if_embedder_changed``).
         """
         async with self.pool.acquire() as conn:
             async with conn.transaction():
@@ -547,6 +603,8 @@ class PgDocumentRepository(DocumentRepository):
                         partition,
                         user_id,
                     )
+                if embedder_fingerprint is not None:
+                    await _refuse_if_embedder_changed(conn, partition, embedder_fingerprint)
 
                 columns = [
                     "file_id",
@@ -707,6 +765,7 @@ class PgDocumentRepository(DocumentRepository):
         indexed_at: datetime | None = None,
         content_sha256: object = _UNSET,
         chunk_count: object = _UNSET,
+        embedder_fingerprint: Mapping[str, str | None] | None = None,
     ) -> bool:
         """TODO(phase-9): remove. PUT-style in-place update.
 
@@ -716,6 +775,9 @@ class PgDocumentRepository(DocumentRepository):
 
         ``indexed_at`` refreshes the indexation timestamp on re-index so it
         matches the freshly re-upserted Milvus chunks; ``None`` leaves it.
+
+        ``embedder_fingerprint`` refuses the update the way it refuses
+        ``add_file_to_partition``'s insert.
         """
         sets: list[str] = []
         params: list[Any] = []
@@ -744,13 +806,17 @@ class PgDocumentRepository(DocumentRepository):
             # Match legacy: report whether the row exists at all.
             return await self.file_exists_in_partition(file_id, partition)
         params.extend([file_id, partition])
-        result = await self.pool.execute(
-            f"""
+        sql = f"""
             UPDATE files SET {", ".join(sets)}
             WHERE file_id = ${len(params) - 1} AND partition_name = ${len(params)}
-            """,
-            *params,
-        )
+            """
+        if embedder_fingerprint is None:
+            result = await self.pool.execute(sql, *params)
+        else:
+            async with self.pool.acquire() as conn:
+                async with conn.transaction():
+                    await _refuse_if_embedder_changed(conn, partition, embedder_fingerprint)
+                    result = await conn.execute(sql, *params)
         return result.endswith(" 1")
 
     async def list_partition_files(
@@ -772,6 +838,39 @@ class PgDocumentRepository(DocumentRepository):
         if not rows:
             return {}
         return {"files": [self._row_to_dict(r) for r in rows]}
+
+    async def count_files_by_embedder(self, partition: str) -> list[dict]:
+        """How many files in *partition* were indexed with each embedder.
+
+        One aggregate over ``files.indexation_config``, the per-file snapshot
+        the indexing run already writes. Files indexed before provenance
+        existed have no keys there and come back as ``None`` — unknown, not
+        assumed to match the partition's current setting.
+
+        Ordered most-files-first, so a drifted remainder reads as the exception.
+        """
+        rows = await self.pool.fetch(
+            """
+            SELECT indexation_config->>'embedder'            AS embedder,
+                   indexation_config->>'embedder_model_name' AS model_name,
+                   (indexation_config->>'embedder_dimension')::int AS dimension,
+                   COUNT(*)::int                             AS file_count
+            FROM files
+            WHERE partition_name = $1
+            GROUP BY 1, 2, 3
+            ORDER BY file_count DESC, embedder NULLS LAST
+            """,
+            partition,
+        )
+        return [
+            {
+                "embedder": r["embedder"],
+                "model_name": r["model_name"],
+                "dimension": r["dimension"],
+                "file_count": r["file_count"],
+            }
+            for r in rows
+        ]
 
     async def get_files_by_relationship(
         self,
@@ -881,12 +980,23 @@ class PgDocumentRepository(DocumentRepository):
         """
         metadata = row["file_metadata"] or {}
         indexed_at = row["indexed_at"]
+        indexation_config = row.get("indexation_config") if hasattr(row, "get") else None
         return {
             "partition": row["partition_name"],
             "file_id": row["file_id"],
             "relationship_id": row["relationship_id"],
             "parent_id": row["parent_id"],
             **metadata,
+            # Just the recorded embedder, not the whole config snapshot: a file
+            # list flags rows that disagree with the current setting, it does
+            # not need every chunking knob per row. Both the endpoint reference
+            # and the model it ran: the reference is a renameable label and the
+            # endpoint may since have been repointed or deleted, so the model is
+            # the only durable record of which vector space the file is in.
+            "embedder": (indexation_config or {}).get("embedder") if isinstance(indexation_config, dict) else None,
+            "embedder_model_name": (
+                (indexation_config or {}).get("embedder_model_name") if isinstance(indexation_config, dict) else None
+            ),
             "content_sha256": row.get("content_sha256"),
             "chunk_count": row.get("chunk_count"),
             # Authoritative system insert time, materialized on the row. Placed

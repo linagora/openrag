@@ -116,6 +116,22 @@ class UpdatePartitionRequest(BaseModel):
         return self
 
 
+class IndexedEmbedderCount(BaseModel):
+    """One group in a partition's embedder breakdown, not a file: reads as
+    "``file_count`` files were indexed with ``embedder``".
+
+    Computed per request by a ``GROUP BY`` over the per-file
+    ``files.indexation_config`` snapshots, so there is no stored counter to keep
+    in sync — unlike ``users.file_count``, which is a real column. ``embedder``
+    is ``None`` for files indexed before provenance was recorded.
+    """
+
+    embedder: str | None = None
+    model_name: str | None = None
+    dimension: int | None = None
+    file_count: int = 0
+
+
 class PartitionDetailResponse(BaseModel):
     """Response body for a resolved partition configuration."""
 
@@ -126,9 +142,16 @@ class PartitionDetailResponse(BaseModel):
     retrieval_preset: str
     indexation_pipeline: dict[str, Any]
     retrieval_pipeline: dict[str, Any]
-    dimension: int
+    # Dense-vector dimension of the live collection. Null when nothing has been
+    # indexed yet (no collection to read) or the vector store is unreachable —
+    # this used to echo `partitions.dimension`, a column nothing writes, so it
+    # reported 1024 regardless of the embedder actually in use (#762 G).
+    dimension: int | None = None
     created_at: datetime
     document_count: int = 0
+    # Most files first. Disagreement with `embedder` above is the drift signal:
+    # those files' vectors came from a different model than queries now use.
+    indexed_embedders: list[IndexedEmbedderCount] = Field(default_factory=list)
     chat_history_depth: int = 4
     chat_llm: str | None = None
     generation_prompt_names: dict[str, str] = Field(default_factory=dict)
@@ -136,6 +159,7 @@ class PartitionDetailResponse(BaseModel):
 
 __all__ = [
     "CreatePartitionRequest",
+    "IndexedEmbedderCount",
     "PartitionDetailResponse",
     "UpdatePartitionRequest",
 ]

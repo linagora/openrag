@@ -32,6 +32,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from core.config.indexation_pipeline import IndexationPipelineConfig
+from core.config.model_endpoints import DEFAULT_ENDPOINT_ALIAS
 from core.config.retrieval_pipeline import RetrievalPipelineConfig
 from core.indexing.validators import validate_partition_name
 from core.models.preset import PartitionConfig
@@ -181,6 +182,41 @@ class PartitionService:
             finally:
                 _ACTIVE_PARTITION_OPERATIONS.reset(token)
 
+    async def pin_embedder_for_write(self, partition: str) -> None:
+        """Take *partition* off the ``default`` embedder alias before it gets data (#762).
+
+        A partition on the alias follows every change of default embedder. That
+        is only harmless while it holds nothing: once it has vectors, following
+        the alias sends its queries to a model its files were never embedded
+        with. So the first upload or copy replaces the alias with the endpoint
+        it resolves to, and a later default change passes the partition by —
+        empty partitions keep following the default, indexed ones keep their
+        embedder.
+
+        Runs at admission, before the job captures the partition's embedder, so
+        the worker is handed that concrete name. Handed ``default``, it would
+        resolve the alias itself, later, against its own copy of the catalog —
+        possibly after the default moved, writing the file into another
+        embedder than the one the partition was just pinned to.
+
+        A partition emptied afterwards stays pinned: a concrete name cannot be
+        told apart from one an admin chose, and PATCHing ``embedder`` back to
+        ``default`` is how an admin opts back in.
+        """
+        if self._config is None:
+            return
+        cached = self._config.partitions.get(partition)
+        if cached is not None and cached.embedder != DEFAULT_ENDPOINT_ALIAS:
+            return
+        operation = self._active_partition_operation(partition)
+        embedder = await self._pin_default_embedder_for_operation(partition, operation=operation)
+        if embedder is None or embedder == DEFAULT_ENDPOINT_ALIAS:
+            # No such partition, or no default embedder to resolve to: nothing
+            # to pin, and the upload fails on its own further down.
+            return
+        logger.bind(partition=partition, embedder=embedder).info("Pinned partition to its embedder on first write.")
+        await self.load_partitions()
+
     @asynccontextmanager
     async def _partition_operation_lock(self, partition: str) -> AsyncIterator[Any]:
         lock_factory = getattr(self._partition_repo, "partition_operation_lock", None)
@@ -236,6 +272,12 @@ class PartitionService:
             return await list_partition_rows()
         return await self._partition_repo.list_partition_rows()
 
+    async def _pin_default_embedder_for_operation(self, partition: str, *, operation: Any = None) -> str | None:
+        pin = getattr(operation, "pin_default_embedder", None)
+        if pin is not None:
+            return await pin(partition)
+        return await self._partition_repo.pin_default_embedder(partition)
+
     def _active_partition_operation(self, partition: str | None = None) -> Any:
         active_operations = _ACTIVE_PARTITION_OPERATIONS.get() or {}
         if partition is not None:
@@ -258,13 +300,14 @@ class PartitionService:
         """Per-partition stored config columns + ``document_count``, keyed by name.
 
         Lightweight list view: returns the stored columns (description, embedder,
-        preset references, dimension, chat config) WITHOUT resolving the
-        indexation/retrieval pipelines — so this stays two queries regardless of
+        preset references, chat config) plus the live vector dimension, WITHOUT
+        resolving the indexation/retrieval pipelines — so this stays two queries regardless of
         partition count. Pipeline resolution is reserved for the single-partition
         detail (``get_partition_config``). Values are JSON-ready.
         """
         rows = await self._partition_repo.list_partition_rows()
         counts = await self.file_counts_by_partition()
+        dimension = await self._live_vector_dimension()
         summaries: dict[str, dict] = {}
         for r in rows:
             name = r["partition"]
@@ -275,7 +318,7 @@ class PartitionService:
                 "embedder": r.get("embedder") or "default",
                 "indexation_preset": r.get("indexation_preset") or "default",
                 "retrieval_preset": r.get("retrieval_preset") or "default",
-                "dimension": r.get("dimension"),
+                "dimension": dimension,
                 "chat_history_depth": r.get("chat_history_depth") or self._legacy_chat_history_depth_fallback(),
                 "chat_llm": r.get("chat_llm"),
                 "created_at": created.isoformat() if hasattr(created, "isoformat") else created,
@@ -303,9 +346,10 @@ class PartitionService:
         this raises only if the race is lost between that check and here.
 
         When ``config`` was supplied to the service, the referenced presets
-        are validated *before* the row is written (so a bad preset name fails
-        fast and atomically), the non-default config columns are persisted,
-        and the in-memory partition cache is re-resolved.
+        and model endpoints are validated *before* the row is written (so a bad
+        preset or embedder name fails fast and atomically), the non-default
+        config columns are persisted, and the in-memory partition cache is
+        re-resolved.
         """
         # Reserved-name check first so a name that normalises to a reserved
         # sentinel (e.g. "  all  ") returns the specific RESERVED_PARTITION_NAME
@@ -339,6 +383,7 @@ class PartitionService:
             self._validate_preset_refs({"partition": partition, **config_fields})
             if chat_llm:
                 self._validate_chat_llm_ref(chat_llm)
+            self._validate_embedder_ref(embedder)
 
         await self._create_partition_for_operation(
             partition,
@@ -351,10 +396,36 @@ class PartitionService:
         # and re-resolve the in-memory cache. Only done in the Phase 14 flow
         # where a config was supplied.
         if self._config is not None:
-            await self._update_partition_for_operation(partition, operation=operation, **config_fields)
+            try:
+                await self._update_partition_for_operation(partition, operation=operation, **config_fields)
+            except Exception:
+                # The update re-checks preset and endpoint references under its
+                # own transaction, so a concurrent delete of one lands here
+                # after the row exists. Leaving it would answer the caller with
+                # an error and their retry with "already exists" — against a
+                # partition holding none of what they asked for.
+                await self._discard_half_created_partition(partition, operation=operation)
+                raise
             await self.load_partitions()
 
         logger.info(f"Partition '{partition}' created by user_id {user_id}.")
+
+    async def _discard_half_created_partition(self, partition: str, *, operation: Any = None) -> None:
+        """Undo the row this call created when its config could not be written.
+
+        Best-effort: whatever made the update fail may well fail this too, and
+        the original error is the one worth reporting. The partition holds no
+        files — nothing has been able to write to it yet — so this only ever
+        drops an empty row.
+        """
+        try:
+            await self._delete_partition_for_operation(partition, operation=operation)
+        except Exception as exc:
+            logger.warning(
+                "Could not remove a partition whose configuration failed to persist",
+                partition=partition,
+                error=str(exc),
+            )
 
     async def delete_partition(self, partition: str) -> None:
         """Drop a partition's vectors *and* relational rows (cross-cutting)."""
@@ -422,10 +493,11 @@ class PartitionService:
         explicit ``None`` clears the column back to its default. When a
         preset reference changes, the merged row is validated against the
         in-memory cache *before* the write so an unknown preset name fails
-        fast, and an assigned ``chat_llm`` must name a catalogued LLM
-        endpoint; the repository additionally re-checks preset existence
-        atomically under the write's transaction, closing the race with a
-        concurrent preset delete (see
+        fast, and an assigned ``chat_llm`` / ``embedder`` must name a
+        catalogued endpoint of the matching type; the repository additionally
+        re-checks preset and endpoint existence atomically under the write's
+        transaction, closing the race with a concurrent preset delete or
+        endpoint rename (see
         :meth:`PgPartitionRepository.update_partition`).
         """
         await self._ensure_partition(partition)
@@ -441,6 +513,8 @@ class PartitionService:
             # QueryService falls back to the default LLM for those at runtime.
             if updates.get("chat_llm"):
                 self._validate_chat_llm_ref(updates["chat_llm"])
+            if updates.get("embedder"):
+                self._validate_embedder_ref(updates["embedder"])
             if updates.get("generation_prompt_names"):
                 await self._validate_generation_prompt_names(updates["generation_prompt_names"])
 
@@ -464,13 +538,62 @@ class PartitionService:
         if row is None:
             raise PartitionNotFoundError(f"Partition '{partition}' does not exist.")
         detail = self._partition_detail(row, self.resolve_partition_row(row))
+        detail["dimension"] = await self._live_vector_dimension()
         detail["document_count"] = await self._partition_repo.get_partition_file_count(partition)
+        detail["indexed_embedders"] = await self._indexed_embedders(partition)
         return detail
 
     async def update_partition_config(self, partition: str, **fields: object) -> dict:
         """Update a partition's preset references and return the resolved detail."""
         await self.update_partition(partition, **fields)
         return await self.get_partition_config(partition)
+
+    async def _indexed_embedders(self, partition: str) -> list[dict]:
+        """Which embedders actually produced this partition's files.
+
+        The partition row says what is configured *now*; this says what the
+        files were built with, so the difference is the set a swap left behind.
+
+        Empty when the catalog cannot answer. Files indexed before provenance
+        existed report ``embedder: null`` rather than being backfilled with the
+        current setting — a guess dressed as a record, and wrong for exactly
+        the files worth finding.
+        """
+        counter = getattr(self._document_repo, "count_files_by_embedder", None)
+        if counter is None:
+            return []
+        try:
+            return await counter(partition)
+        except Exception as exc:
+            logger.debug("Could not read per-file embedder provenance", partition=partition, error=str(exc))
+            return []
+
+    async def _live_vector_dimension(self) -> int | None:
+        """Dimension of the vectors that actually exist, or ``None``.
+
+        Replaces ``partitions.dimension``, which no code path has ever written:
+        it sits at its ``server_default`` of 1024 forever, so a client reading
+        it got a *wrong* number rather than a missing one whenever the embedder
+        was anything but 1024-d (#762 G). The column stays — it is the hook a
+        per-partition-collection topology would need — but it is no longer
+        reported as fact.
+
+        One collection serves every partition today, so this is the same value
+        for all of them. That is the honest answer to "what dimension are this
+        partition's vectors", not a limitation of the lookup.
+
+        A vector-store failure yields ``None`` rather than propagating: the
+        dimension is informational, and a briefly unreachable Milvus should not
+        turn a partition-config read into a 500.
+        """
+        getter = getattr(self._vector_store, "vector_dimension", None)
+        if getter is None:
+            return None
+        try:
+            return await getter()
+        except Exception as exc:
+            logger.debug("Could not read the live vector dimension", error=str(exc))
+            return None
 
     def _validate_preset_refs(self, row: dict) -> None:
         """Validate a row's preset references for create/update.
@@ -494,6 +617,29 @@ class PartitionService:
         if chat_llm not in self._require_config().models.llm:
             raise ValidationError(
                 f"LLM endpoint '{chat_llm}' referenced by chat_llm not found.",
+                code="MODEL_ENDPOINT_NOT_FOUND",
+            )
+
+    def _validate_embedder_ref(self, embedder: str) -> None:
+        """Assignment-time check: ``embedder`` must name a catalogued embedder endpoint.
+
+        Unlike :meth:`_validate_chat_llm_ref`, this is not merely a nicety.
+        ``chat_llm`` has a runtime fallback — an unknown name resolves to the
+        default LLM — so it can only be validated at assignment. The embedder
+        has no fallback: ``_build_embedder_factory`` raises a bare ``KeyError``
+        for an unknown name, taking down every upload *and* every query on the
+        partition. That is why the write is additionally re-checked against the
+        DB inside its own transaction (see
+        :meth:`PgPartitionRepository.update_partition`) rather than trusting
+        this in-memory catalog alone.
+
+        ``"default"`` is checked like any other name: it is the alias
+        ``ModelEndpointService.load_all`` files the default endpoint under, so
+        its absence means there is no embedder to index with at all.
+        """
+        if embedder not in self._require_config().models.embedder:
+            raise ValidationError(
+                f"Embedder endpoint '{embedder}' not found.",
                 code="MODEL_ENDPOINT_NOT_FOUND",
             )
 
@@ -523,7 +669,10 @@ class PartitionService:
             "retrieval_preset": row.get("retrieval_preset") or "default",
             "indexation_pipeline": cfg.indexation.model_dump(mode="json"),
             "retrieval_pipeline": cfg.retrieval.model_dump(mode="json"),
-            "dimension": row.get("dimension"),
+            # Placeholder: the column is not the dimension of anything (see
+            # _live_vector_dimension). get_partition_config overwrites it with
+            # the live value; nothing else should read it.
+            "dimension": None,
             "created_at": row.get("created_at"),
             "chat_history_depth": row.get("chat_history_depth") or self._legacy_chat_history_depth_fallback(),
             "chat_llm": row.get("chat_llm"),
