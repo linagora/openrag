@@ -212,6 +212,9 @@ class IndexingPipeline:
                         max_concurrency=self.caption_concurrency,
                     ),
                 )
+            # Outside the ``vlm is not None`` branch on purpose: if captioning
+            # was skipped, the bytes were never going to be read at all.
+            _release_image_bytes(row)
             await _timed("chunk", chunk_stage(row, chunker, timeout=self.timeouts.chunk))
             if contextualizer is not None:
                 await _timed_enrichment(
@@ -581,6 +584,38 @@ def build_indexing_pipeline(
         defer_replace_cleanup=defer_replace_cleanup,
         caption_concurrency=caption_concurrency,
     )
+
+
+def _release_image_bytes(row: MutableMapping[str, Any]) -> None:
+    """Drop extracted image payloads once the caption decision has resolved.
+
+    ``ImageBlock.image_bytes`` is raw PNG/JPEG lifted out of the document. The
+    only consumer is ``ImageBlock.image_url``, which base64-encodes it for the
+    VLM request — nothing downstream reads it. Chunking works from
+    ``text_blocks``, and the caption has already been substituted into those via
+    ``metadata["markdown_ref"]``; no post-caption stage touches ``.images`` at
+    all.
+
+    Held to the end of ``run()`` they outlast the file itself: a figure-heavy
+    PDF through Marker extracts images that routinely exceed the source, and
+    they survived embed and store — measured at 10.5 MB on a ten-image document
+    where ``raw_bytes`` had already been freed. Same failure as
+    ``_release_raw_bytes`` fixes, on the larger payload.
+
+    Deliberately outside the ``vlm is not None`` branch. Captioning is optional
+    and best-effort, so when it is disabled or the VLM is unresolvable the bytes
+    are never read by anyone — holding them then is pure waste. Reached whether
+    captioning ran, was skipped, or failed: ``_timed_enrichment`` swallows an
+    enrichment failure, and a failed caption makes the bytes no more useful than
+    a successful one.
+
+    Only ``image_bytes`` is cleared. ``caption``, ``page_number``, ``mime_type``,
+    ``source_url`` and ``metadata`` stay — the substitution and the chunkers read
+    them.
+    """
+    processed = row.get("processed_document")
+    for image in getattr(processed, "images", ()) or ():
+        image.image_bytes = b""
 
 
 def _release_raw_bytes(row: MutableMapping[str, Any]) -> None:

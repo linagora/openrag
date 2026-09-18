@@ -1360,3 +1360,88 @@ async def test_reindex_falls_back_to_the_documents_own_partition_after_the_relea
 
     assert vs.query_filters == [{"partition": "tenant-a", "file_id": document.id}]
     assert vs.deleted == [["201"]]
+
+
+# ---------------------------------------------------------------------------
+# #846 — extracted image payloads must not outlive the caption decision
+# ---------------------------------------------------------------------------
+
+
+def _image_pipeline(vlm=None, image_count: int = 6, **kwargs):
+    document = Document(filename="figs.pdf", raw_bytes=b"z" * 512, content_type=DocumentType.PDF, partition="tenant-a")
+    processed = ProcessedDocument(
+        document_id=document.id,
+        text_blocks=[TextBlock(text="body")],
+        images=[ImageBlock(image_bytes=b"\x89PNG" + b"y" * 4096, page_number=i) for i in range(image_count)],
+    )
+    pipeline = build_indexing_pipeline(
+        parser=FakeParser(processed),
+        chunker=FakeChunker([Chunk(id="c1", text="body", partition="tenant-a")]),
+        embedder=FakeEmbedder([[1.0]]),
+        vector_store=FakeVectorStore(),
+        vlm=vlm,
+        **kwargs,
+    )
+    return pipeline, document
+
+
+def _row(document):
+    return {"document": document, "partition": "tenant-a", "filename": "figs.pdf"}
+
+
+@pytest.mark.asyncio
+async def test_image_bytes_are_released_after_captioning():
+    """The only consumer is ``ImageBlock.image_url`` for the VLM request. Held to
+    the end of ``run()`` they survive embed and store — the larger half of the
+    payload ``_release_raw_bytes`` frees."""
+    vlm = FakeVLM()
+    pipeline, document = _image_pipeline(vlm=vlm)
+
+    row = _row(document)
+    await pipeline.run(row)
+
+    assert row["stage"] == "stored", "guard: the pipeline must have run to completion"
+    assert len(vlm.calls) == 6, "guard: the VLM must have read the bytes first"
+    assert all(image.image_bytes == b"" for image in row["processed_document"].images)
+
+
+@pytest.mark.asyncio
+async def test_image_bytes_are_released_even_when_captioning_never_runs():
+    """No VLM means nothing was ever going to read them, so holding them is pure
+    waste. This is why the release sits outside the ``vlm is not None`` branch."""
+    pipeline, document = _image_pipeline(vlm=None)
+
+    row = _row(document)
+    await pipeline.run(row)
+
+    assert row["stage"] == "stored"
+    assert all(image.image_bytes == b"" for image in row["processed_document"].images)
+
+
+@pytest.mark.asyncio
+async def test_image_bytes_are_released_when_captioning_fails():
+    """``_timed_enrichment`` swallows the failure and indexes the file anyway; a
+    failed caption makes the bytes no more useful than a successful one."""
+    pipeline, document = _image_pipeline(vlm=FailingVLM())
+
+    row = _row(document)
+    await pipeline.run(row)
+
+    assert "caption" in row.get("degraded_stages", {}), "guard: captioning must have failed"
+    assert all(image.image_bytes == b"" for image in row["processed_document"].images)
+
+
+@pytest.mark.asyncio
+async def test_release_keeps_everything_the_caption_substitution_reads():
+    """Only the payload goes. Dropping the whole ImageBlock, or its caption or
+    page number, would also satisfy an assertion about ``image_bytes``."""
+    vlm = FakeVLM()
+    pipeline, document = _image_pipeline(vlm=vlm, image_count=3)
+
+    row = _row(document)
+    await pipeline.run(row)
+
+    images = row["processed_document"].images
+    assert len(images) == 3
+    assert [image.page_number for image in images] == [0, 1, 2]
+    assert all(image.caption == "caption" for image in images)
