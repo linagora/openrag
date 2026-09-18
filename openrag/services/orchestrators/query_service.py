@@ -37,7 +37,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator, Callable
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import Enum
 from typing import TYPE_CHECKING, Any, NamedTuple
 
@@ -45,6 +45,7 @@ from core.models.preset import resolve_partition_chat_llm
 from core.models.query import Query, SearchQueries
 from core.prompts import (
     SOURCE_SEPARATOR,
+    calendar_anchors,
     format_context,
     format_web_context,
     prepend_system_prompt,
@@ -365,9 +366,16 @@ class QueryService:
             "query_contextualizer",
             names=[self._retrieval_prompt_name("query_contextualizer_prompt_name", partition)],
         )
+        # UTC, not the host clock: the anchors are compared against UTC
+        # created_at timestamps, and near midnight the local date is a
+        # different day.
+        now = datetime.now(UTC)
         prompt = contextualizer.format(
             query_language=detect_language(last_user),
-            current_date=datetime.now().strftime("%A, %B %d, %Y, %H:%M:%S"),
+            current_date=now.strftime("%A, %B %d, %Y, %H:%M:%S"),
+            # Pre-computed week/month/year ranges: the model must not do the
+            # calendar arithmetic itself (see core.prompts.calendar_anchors).
+            calendar_anchors=calendar_anchors(now),
         )
         llm_messages = [
             {"role": "system", "content": prompt + _QUERY_JSON_HINT},
@@ -376,6 +384,9 @@ class QueryService:
         params = {
             "max_completion_tokens": self._max_contextualized_query_len,
             "response_format": {"type": "json_object"},
+            # Structured extraction, not generation: sampling made the same
+            # question flip between a date filter and none across requests.
+            "temperature": 0,
         }
         for attempt in (1, 2):
             try:
