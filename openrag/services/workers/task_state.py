@@ -658,21 +658,25 @@ class TaskStateManager:
             return True
 
     @ray.method(concurrency_group="set")
-    async def complete_with_degraded_stages(self, task_id: str, stages: list[str]) -> bool:
-        """Atomically settle an active task with its bounded degradation outcome."""
+    async def complete_with_degraded_stages(self, task_id: str, stages: list[str]) -> str:
+        """Atomically settle a task and report why completion was accepted or fenced."""
         normalized = normalize_degraded_stages(stages)
         with self.lock:
             info = self.tasks.get(task_id)
             if info is None:
-                return False
+                return "missing"
             if info.state == "COMPLETED":
-                return normalize_degraded_stages(info.details.get("degraded_stages")) == normalized
+                if normalize_degraded_stages(info.details.get("degraded_stages")) == normalized:
+                    return "completed"
+                return "conflict"
+            if info.state == "CANCELLED":
+                return "cancelled"
             if info.state not in CANCELLABLE_INDEXING_STATES:
-                return False
+                return "conflict"
             info.details["degraded_stages"] = normalized
             info.state = "COMPLETED"
             self._settle_task_locked(task_id, info)
-            return True
+            return "completed"
 
     @ray.method(concurrency_group="set")
     async def set_queued_details(
@@ -900,6 +904,11 @@ class TaskStateManager:
     @ray.method(concurrency_group="queue_info")
     async def supports_bounded_task_retention(self) -> bool:
         """Identify actors that bound terminal task retention (#660)."""
+        return True
+
+    @ray.method(concurrency_group="queue_info")
+    async def supports_explicit_completion_outcomes(self) -> bool:
+        """Identify actors that distinguish cancellation, loss, and conflicts."""
         return True
 
     @ray.method(concurrency_group="queue_info")

@@ -97,6 +97,33 @@ class IndexerWorker:
         except Exception as exc:
             logger.warning("Failed to record indexing job start", task_id=task_id, error=str(exc))
 
+    async def _record_completed(
+        self,
+        task_id: str,
+        *,
+        partition: str,
+        metadata: dict[str, Any],
+        user: dict[str, Any] | None,
+        degraded_stages: list[str],
+    ) -> None:
+        """Repair durable history when the in-memory task receipt was evicted."""
+        if self._job_repo is None:
+            return
+        try:
+            await self._job_repo.upsert_job(
+                IndexationJob(
+                    id=task_id,
+                    status=DocumentStatus.COMPLETED,
+                    partition=partition,
+                    file_id=metadata.get("file_id"),
+                    user_id=(user or {}).get("id"),
+                    degraded_stages=degraded_stages,
+                    completed_at=datetime.now(UTC),
+                )
+            )
+        except Exception as exc:
+            logger.warning("Failed to repair completed indexing job", task_id=task_id, error=str(exc))
+
     async def process_file(
         self,
         *,
@@ -195,11 +222,27 @@ class IndexerWorker:
                     partition=partition,
                     indexation_config=indexation_config,
                 )
-            completion_accepted = await retry_idempotent_ray_actor_method(
+            completion_outcome = await retry_idempotent_ray_actor_method(
                 lambda: self._tsm.complete_with_degraded_stages.remote(task_id, degraded_stages),
                 task_description=f"complete_with_degraded_stages({task_id})",
             )
-            if completion_accepted is False:
+            if completion_outcome == "missing":
+                await self._record_completed(
+                    task_id,
+                    partition=partition,
+                    metadata=metadata,
+                    user=user,
+                    degraded_stages=degraded_stages,
+                )
+                log.warning("Task receipt was missing after the catalog commit; durable history was repaired")
+            elif completion_outcome == "cancelled":
+                log.info("Task was cancelled after the catalog commit; suppressing terminal callback")
+                return {
+                    "stored_count": row.get("stored_count", 0),
+                    "stage": row.get("stage", ""),
+                    "degraded_stages": degraded_stages,
+                }
+            elif completion_outcome != "completed":
                 raise RuntimeError(f"Task state manager rejected completion for task {task_id}")
         except _TaskCancelledBeforeStart:
             # The TSM already told us this task is fenced/cancelled — no need to

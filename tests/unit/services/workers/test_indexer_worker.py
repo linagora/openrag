@@ -88,7 +88,7 @@ def _fake_tsm() -> MagicMock:
     tsm.set_degraded_stages = MagicMock()
     tsm.set_degraded_stages.remote = AsyncMock(return_value=True)
     tsm.complete_with_degraded_stages = MagicMock()
-    tsm.complete_with_degraded_stages.remote = AsyncMock(return_value=True)
+    tsm.complete_with_degraded_stages.remote = AsyncMock(return_value="completed")
     return tsm
 
 
@@ -916,7 +916,7 @@ async def test_rejected_atomic_completion_never_falls_back_to_split_writes(tmp_p
     processed = ProcessedDocument(document_id="d1", text_blocks=[TextBlock(text="content")])
     chunks = [Chunk(id="c1", text="content", partition="p")]
     tsm = _fake_tsm()
-    tsm.complete_with_degraded_stages.remote.return_value = False
+    tsm.complete_with_degraded_stages.remote.return_value = "conflict"
     worker = IndexerWorker(pipeline=_make_pipeline(processed, chunks), task_state_manager=tsm)
 
     with pytest.raises(RuntimeError, match="rejected completion"):
@@ -929,6 +929,78 @@ async def test_rejected_atomic_completion_never_falls_back_to_split_writes(tmp_p
 
     tsm.set_degraded_stages.remote.assert_not_awaited()
     assert ("t-rejected-completion", "COMPLETED") not in [call.args for call in tsm.set_state.remote.call_args_list]
+
+
+@pytest.mark.asyncio
+async def test_missing_task_state_after_catalog_commit_reports_success_and_repairs_history(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from core.models.catalog import DocumentStatus
+
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"content")
+    processed = ProcessedDocument(document_id="d1", text_blocks=[TextBlock(text="content")])
+    chunks = [Chunk(id="c1", text="content", partition="p")]
+    tsm = _fake_tsm()
+    tsm.complete_with_degraded_stages.remote.return_value = "missing"
+    job_repo = _RecordingJobRepo()
+    callback = AsyncMock()
+    monkeypatch.setattr("services.workers.indexer_actor.send_indexing_callback", callback)
+    worker = IndexerWorker(
+        pipeline=_make_pipeline(processed, chunks),
+        task_state_manager=tsm,
+        document_repo=FakeDocumentRepo(),
+        job_repo=job_repo,
+    )
+
+    result = await worker.process_file(
+        task_id="lost-task",
+        path=str(path),
+        metadata={"file_id": "f1"},
+        partition="p",
+        user={"id": 42},
+        callback_url="https://cozy.example.com/callback",
+    )
+
+    assert result["stored_count"] == 1
+    assert [job.status for job in job_repo.saved] == [DocumentStatus.SERIALIZING, DocumentStatus.COMPLETED]
+    assert job_repo.saved[-1].completed_at is not None
+    callback.assert_awaited_once()
+    assert callback.await_args.args[3] == "success"
+    tsm.set_failed_if_not_cancelled.remote.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_task_after_catalog_commit_finishes_without_error_or_callback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"content")
+    processed = ProcessedDocument(document_id="d1", text_blocks=[TextBlock(text="content")])
+    chunks = [Chunk(id="c1", text="content", partition="p")]
+    tsm = _fake_tsm()
+    tsm.complete_with_degraded_stages.remote.return_value = "cancelled"
+    callback = AsyncMock()
+    monkeypatch.setattr("services.workers.indexer_actor.send_indexing_callback", callback)
+    worker = IndexerWorker(
+        pipeline=_make_pipeline(processed, chunks),
+        task_state_manager=tsm,
+        document_repo=FakeDocumentRepo(),
+    )
+
+    result = await worker.process_file(
+        task_id="cancelled-task",
+        path=str(path),
+        metadata={"file_id": "f1"},
+        partition="p",
+        callback_url="https://cozy.example.com/callback",
+    )
+
+    assert result["stored_count"] == 1
+    callback.assert_not_awaited()
+    tsm.set_failed_if_not_cancelled.remote.assert_not_awaited()
 
 
 @pytest.mark.asyncio

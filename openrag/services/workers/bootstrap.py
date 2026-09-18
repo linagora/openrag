@@ -116,6 +116,9 @@ def _supports_task_state_recovery(actor) -> bool:
         # Degradation and COMPLETED must be one actor mutation. An older actor
         # can only perform the unsafe split writes and must not survive rollout.
         and getattr(actor, "complete_with_degraded_stages", None) is not None
+        # The Boolean contract cannot distinguish a cancellation from actor
+        # eviction after the catalog commit, so those actors are incompatible.
+        and getattr(actor, "supports_explicit_completion_outcomes", None) is not None
     )
 
 

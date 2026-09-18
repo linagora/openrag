@@ -50,7 +50,9 @@ _MISSING_WORKER_REF_ERROR = "Indexer worker did not receive a registered task re
 # v9: merge of both v8 lineages — neither alone is compatible with this one.
 # v10: successful completion and bounded degradation now use one atomic task-
 # state method; prior workers can silently settle degraded jobs as clean.
-_INDEXER_ACTOR_PROTOCOL_VERSION = "v10"
+# v11: atomic completion reports cancellation, missing state, and conflicts
+# separately; v10 workers interpret all three as the same indexing failure.
+_INDEXER_ACTOR_PROTOCOL_VERSION = "v11"
 _INDEXER_POOL_DISPATCHER_ACTOR_NAME = f"IndexerPoolDispatcher-{_INDEXER_ACTOR_PROTOCOL_VERSION}"
 
 # Detached actors default to max_restarts=0, so one that dies — an OOM on a
