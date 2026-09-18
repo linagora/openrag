@@ -5,11 +5,12 @@ from __future__ import annotations
 import asyncio
 import threading
 from concurrent.futures import Future, ThreadPoolExecutor
-from functools import partial
 from typing import TYPE_CHECKING, cast
 
 import ray
-from services.orchestrators.readiness_service import ReadinessService, check_model_endpoint
+from core.config.model_endpoints import ModelEndpointType
+from core.observability.monitoring import MODEL_ENDPOINT_READINESS_METRICS
+from services.orchestrators.readiness_service import ReadinessService
 from services.storage.milvus_store import MilvusVectorStore
 from services.storage.postgres_store import PostgresStore
 from services.workers.ray_utils import call_ray_actor_method_with_timeout
@@ -65,21 +66,27 @@ async def _check_ray() -> None:
 
 def create_readiness_service(container: ServiceContainer) -> ReadinessService:
     settings = container._require_settings()
-
-    async def check_model(kind: str) -> None:
-        # Resolve on every refresh so admin changes do not leave a stale target.
-        config = getattr(settings.models, kind).get("default")
-        if config is None:
-            raise RuntimeError("Default model endpoint is not configured")
-        await check_model_endpoint(config, model_type=kind)
-
     checks = {
         "postgres": cast(PostgresStore, container.catalog_store).check_health,
         "milvus": cast(MilvusVectorStore, container.vector_store).check_health,
         "ray": _check_ray,
-        "embedder": partial(check_model, "embedder"),
-        "llm": partial(check_model, "llm"),
     }
+    summary_model_kinds: list[ModelEndpointType] = ["embedder", "llm"]
+    default_model_kinds: list[ModelEndpointType] = ["embedder", "llm", "vlm"]
     if settings.reranker.enabled:
-        checks["reranker"] = partial(check_model, "reranker")
-    return ReadinessService(checks)
+        summary_model_kinds.append("reranker")
+        default_model_kinds.append("reranker")
+    if "OpenAIAudioLoader" in settings.loader.file_loaders.model_dump().values():
+        default_model_kinds.append("stt")
+
+    async def discover_model_endpoints():
+        return await container.model_endpoint_repo.discover_readiness_targets(
+            default_model_kinds=tuple(default_model_kinds)
+        )
+
+    return ReadinessService(
+        checks,
+        discover_model_endpoints=discover_model_endpoints,
+        summary_model_kinds=tuple(summary_model_kinds),
+        publish=MODEL_ENDPOINT_READINESS_METRICS.publish,
+    )

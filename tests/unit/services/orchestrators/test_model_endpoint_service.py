@@ -263,6 +263,17 @@ async def test_seed_defaults_preserves_endpoint_api_keys(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_seed_defaults_omits_placeholder_api_keys(monkeypatch):
+    monkeypatch.delenv("LLM_ENDPOINT", raising=False)
+    monkeypatch.delenv("LLM_MODEL", raising=False)
+
+    repo = _FakeEndpointRepo()
+    await _make_service(repo).seed_defaults()
+
+    assert all("api_key" not in row.extra for row in repo._store.values())
+
+
+@pytest.mark.asyncio
 async def test_seed_defaults_preserves_endpoint_timeouts_and_batch_size(monkeypatch):
     from core.config.root import Settings
 
@@ -2088,7 +2099,7 @@ async def test_validate_stt_endpoint_rejects_unsuccessful_audio_probe(monkeypatc
     monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
 
     result = await svc.validate_endpoint(
-        "http://moss:8000/v1",
+        "https://moss:8000/v1",
         "moss-transcribe-diarize",
         api_key="bad-key",
         model_type="stt",
@@ -2297,7 +2308,7 @@ async def test_validate_stt_endpoint_rejects_auth_failure_on_audio_probe(monkeyp
     monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
 
     result = await svc.validate_endpoint(
-        "http://moss:8000/v1",
+        "https://moss:8000/v1",
         "moss-transcribe-diarize",
         api_key="bad-key",
         model_type="stt",
@@ -2344,13 +2355,13 @@ async def test_validate_stt_endpoint_stops_after_model_list_auth_failure(monkeyp
     monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
 
     result = await svc.validate_endpoint(
-        "http://moss:8000/v1",
+        "https://moss:8000/v1",
         "moss-transcribe-diarize",
         api_key="bad-key",
         model_type="stt",
     )
 
-    assert calls == [("get", "http://moss:8000/v1/models")]
+    assert calls == [("get", "https://moss:8000/v1/models")]
     assert result == {
         "reachable": False,
         "model_found": None,
@@ -2388,7 +2399,7 @@ async def test_validate_non_stt_endpoint_keeps_auth_gated_model_list_reachable(m
     monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
 
     result = await svc.validate_endpoint(
-        "http://llm:8000/v1",
+        "https://llm:8000/v1",
         "mistral-small",
         api_key="scoped-key",
         model_type="llm",
@@ -2432,9 +2443,32 @@ async def test_validate_endpoint_sends_api_key(monkeypatch):
 
     monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
 
-    await svc.validate_endpoint("http://llm:8000/v1", "mistral-small", api_key="secret-token")
+    await svc.validate_endpoint("https://llm:8000/v1", "mistral-small", api_key="secret-token")
 
     assert captured_headers == [{"Authorization": "Bearer secret-token"}]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_type", [None, "stt"])
+async def test_validate_endpoint_rejects_api_key_over_http_without_request(monkeypatch, model_type):
+    import httpx
+
+    svc = _make_service()
+
+    def fail_client(**_kwargs):
+        raise AssertionError("HTTP client should not be created for credential-bearing HTTP URLs")
+
+    monkeypatch.setattr(httpx, "AsyncClient", fail_client)
+
+    result = await svc.validate_endpoint(
+        "http://model:8000/v1",
+        "model",
+        api_key="secret-token",
+        model_type=model_type,
+    )
+
+    assert result["reachable"] is False
+    assert result["detail"] == "Model endpoints with API keys must use HTTPS."
 
 
 @pytest.mark.asyncio

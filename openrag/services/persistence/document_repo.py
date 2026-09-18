@@ -71,6 +71,25 @@ class PgDocumentRepository(DocumentRepository):
         )
         return {(r["partition_name"], r["file_id"]): r["indexed_at"] for r in rows}
 
+    async def list_indexed_documents(
+        self, partition: str, *, before: datetime, after: str | None = None, limit: int = 500
+    ) -> list[str]:
+        if not partition or not 1 <= limit <= 1000:
+            raise ValueError("A partition and a page size between 1 and 1000 are required")
+        rows = await self.pool.fetch(
+            """
+            SELECT file_id FROM files
+            WHERE partition_name = $1 AND indexed_at < $2
+              AND ($3::text IS NULL OR file_id > $3)
+            ORDER BY file_id LIMIT $4
+            """,
+            partition,
+            before,
+            after,
+            limit,
+        )
+        return [r["file_id"] for r in rows]
+
     async def create_document(self, doc: DocumentRecord) -> DocumentRecord:
         """Insert a document row keyed by (file_id, partition).
 
@@ -92,8 +111,8 @@ class PgDocumentRepository(DocumentRepository):
             """
             INSERT INTO files (file_id, partition_name, file_metadata,
                                indexation_config, created_by, relationship_id, parent_id,
-                               content_sha256)
-            VALUES ($1, $2, $3::json, $4::jsonb, $5, $6, $7, $8)
+                               content_sha256, chunk_count)
+            VALUES ($1, $2, $3::json, $4::jsonb, $5, $6, $7, $8, $9)
             """,
             file_id,
             doc.partition,
@@ -103,6 +122,7 @@ class PgDocumentRepository(DocumentRepository):
             doc.relationship_id,
             doc.parent_id,
             doc.content_sha256,
+            doc.chunk_count,
         )
         return doc.model_copy(update={"file_id": file_id, "metadata": metadata})
 
@@ -186,7 +206,7 @@ class PgDocumentRepository(DocumentRepository):
                 params.append(fields.pop("indexation_config"))
                 sets.append(f"indexation_config = ${len(params)}::jsonb")
 
-            for column in ("relationship_id", "parent_id", "created_by"):
+            for column in ("relationship_id", "parent_id", "created_by", "chunk_count"):
                 if column in fields:
                     params.append(fields.pop(column))
                     sets.append(f"{column} = ${len(params)}")
@@ -467,6 +487,7 @@ class PgDocumentRepository(DocumentRepository):
         require_existing_partition: bool = False,
         content_sha256: str | None = None,
         independently_indexed: bool = True,
+        chunk_count: int | None = None,
     ) -> bool:
         """TODO(phase-9): remove. Mirror of legacy ``add_file_to_partition``.
 
@@ -529,6 +550,7 @@ class PgDocumentRepository(DocumentRepository):
                     "parent_id",
                     "content_sha256",
                     "independently_indexed",
+                    "chunk_count",
                 ]
                 values: list[Any] = [
                     file_id,
@@ -540,6 +562,7 @@ class PgDocumentRepository(DocumentRepository):
                     parent_id,
                     content_sha256,
                     independently_indexed,
+                    chunk_count,
                 ]
                 # Omit indexed_at to let the server default fire (legacy path).
                 if indexed_at is not None:
@@ -674,6 +697,7 @@ class PgDocumentRepository(DocumentRepository):
         indexation_config: object = _UNSET,
         indexed_at: datetime | None = None,
         content_sha256: object = _UNSET,
+        chunk_count: object = _UNSET,
     ) -> bool:
         """TODO(phase-9): remove. PUT-style in-place update.
 
@@ -704,6 +728,9 @@ class PgDocumentRepository(DocumentRepository):
         if content_sha256 is not self._UNSET:
             params.append(content_sha256)
             sets.append(f"content_sha256 = ${len(params)}")
+        if chunk_count is not self._UNSET:
+            params.append(chunk_count)
+            sets.append(f"chunk_count = ${len(params)}")
         if not sets:
             # Match legacy: report whether the row exists at all.
             return await self.file_exists_in_partition(file_id, partition)
@@ -892,6 +919,7 @@ class PgDocumentRepository(DocumentRepository):
                 (indexation_config or {}).get("embedder_model_name") if isinstance(indexation_config, dict) else None
             ),
             "content_sha256": row.get("content_sha256"),
+            "chunk_count": row.get("chunk_count"),
             # Authoritative system insert time, materialized on the row. Placed
             # after the spread so the column wins over any ``indexed_at`` the
             # copy/restore path copies into file_metadata from chunk metadata
@@ -922,6 +950,7 @@ class PgDocumentRepository(DocumentRepository):
             relationship_id=row["relationship_id"],
             parent_id=row["parent_id"],
             content_sha256=row.get("content_sha256"),
+            chunk_count=row.get("chunk_count"),
             indexation_config=row["indexation_config"],
         )
 

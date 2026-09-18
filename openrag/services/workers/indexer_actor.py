@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import traceback
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from core.models.catalog import DocumentStatus, IndexationJob
 from core.models.document import Document
+from core.utils.exceptions import NoIndexableContentError
 from core.utils.logging import get_logger
 from services.workers.indexing_callback import send_indexing_callback
 from services.workers.pipeline_builder import (
@@ -54,6 +56,7 @@ class IndexerWorker:
         topic_tag_repo: Any = None,
         vector_store: Any = None,
         collection: str = "default",
+        job_repo: Any = None,
     ) -> None:
         self._pipeline = pipeline
         self._tsm = task_state_manager
@@ -61,6 +64,38 @@ class IndexerWorker:
         self._topic_tag_repo = topic_tag_repo
         self._vector_store = vector_store
         self._collection = collection
+        self._job_repo = job_repo
+
+    async def _record_started(
+        self,
+        task_id: str,
+        *,
+        partition: str,
+        metadata: dict[str, Any],
+        user: dict[str, Any] | None,
+    ) -> None:
+        """Stamp the durable row with the moment the task left the queue.
+
+        Best-effort like every other job write: history must never fail
+        indexing. Written here because this is the only place that observes the
+        queued-to-running transition, and ``started_at`` is what makes queue
+        wait separable from service time.
+        """
+        if self._job_repo is None:
+            return
+        try:
+            await self._job_repo.upsert_job(
+                IndexationJob(
+                    id=task_id,
+                    status=DocumentStatus.SERIALIZING,
+                    partition=partition,
+                    file_id=metadata.get("file_id"),
+                    user_id=(user or {}).get("id"),
+                    started_at=datetime.now(UTC),
+                )
+            )
+        except Exception as exc:
+            logger.warning("Failed to record indexing job start", task_id=task_id, error=str(exc))
 
     async def process_file(
         self,
@@ -102,6 +137,7 @@ class IndexerWorker:
             )
             if accepted is False:
                 raise _TaskCancelledBeforeStart
+            await self._record_started(task_id, partition=partition, metadata=metadata, user=user)
             document = await _load_document(path, metadata, partition)
             # One indexation timestamp for this file, shared by the Milvus chunks
             # (via the store stage) and the Postgres catalog row, so they agree.
@@ -123,6 +159,9 @@ class IndexerWorker:
             if resolved_prompts:
                 row.update(resolved_prompts)
             row = await self._pipeline.run(row)
+            stored_count = row.get("stored_count", 0)
+            if stored_count == 0:
+                raise NoIndexableContentError("No indexable content was extracted from this document.")
             indexed_at = row.get("indexed_at")
             catalog_config = _with_embedder_provenance(indexation_config, row.get("embedder_provenance"))
 
@@ -135,6 +174,7 @@ class IndexerWorker:
                     replace=replace,
                     indexation_config=catalog_config,
                     indexed_at=indexed_at,
+                    chunk_count=stored_count,
                     require_existing_partition=require_existing_partition,
                     workspace_ids=workspace_ids,
                 )
@@ -227,6 +267,7 @@ async def _write_catalog_record(
     replace: bool,
     indexation_config: dict[str, Any] | None,
     indexed_at: datetime | None = None,
+    chunk_count: int | None = None,
     require_existing_partition: bool = False,
     workspace_ids: list[str] | None = None,
 ) -> bool:
@@ -241,6 +282,7 @@ async def _write_catalog_record(
             relationship_id=metadata.get("relationship_id"),
             parent_id=metadata.get("parent_id"),
             indexed_at=indexed_at,
+            chunk_count=chunk_count,
             content_sha256=metadata.get("content_sha256"),
             **config_kwargs,
         )
@@ -253,6 +295,7 @@ async def _write_catalog_record(
         relationship_id=metadata.get("relationship_id"),
         parent_id=metadata.get("parent_id"),
         indexed_at=indexed_at,
+        chunk_count=chunk_count,
         require_existing_partition=require_existing_partition,
         # Stay protected until the outer worker has completed every attachment.
         independently_indexed=True,

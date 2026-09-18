@@ -9,6 +9,7 @@ from core.config.base import ConfigMixin
 from pydantic import BaseModel, Field
 
 ModelEndpointType = Literal["embedder", "reranker", "llm", "vlm", "stt"]
+PLACEHOLDER_API_KEYS = frozenset({"", "EMPTY"})
 DEFAULT_MODEL_IMPLEMENTATIONS = {
     "embedder": "vllm",
     "llm": "vllm",
@@ -24,6 +25,11 @@ DEFAULT_MODEL_IMPLEMENTATIONS = {
 # account for it — see ``PgPartitionRepository`` (assignment checks) and
 # ``PgModelEndpointRepository`` (usage counts, delete guard).
 DEFAULT_ENDPOINT_ALIAS = "default"
+
+
+def is_placeholder_api_key(value: object) -> bool:
+    """Return whether a configured API key represents anonymous access."""
+    return value is None or (isinstance(value, str) and value.strip() in PLACEHOLDER_API_KEYS)
 
 
 class ModelEndpointConfig(BaseModel):
@@ -179,10 +185,12 @@ __all__ = [
     "LLM_CONTEXT_SIZE_KEY",
     "LLM_OUTPUT_TOKENS_KEY",
     "MOSS_SPEAKER_AWARE_KEY",
+    "PLACEHOLDER_API_KEYS",
     "STT_REQUEST_CONTROL_EXTRA_KEYS",
     "STT_LANGUAGE_KEY",
     "ModelEndpointConfig",
     "ModelsConfig",
     "ModelEndpointRow",
     "ModelEndpointType",
+    "is_placeholder_api_key",
 ]

@@ -931,3 +931,84 @@ async def test_delete_of_unknown_endpoint_clears_nothing():
     status, _ = await repo.delete_and_promote_default("ghost", "stt")
     assert status == "not_found"
     assert not any("config - $1::text" in q for q, _ in pool.conn.executed)
+
+
+@pytest.mark.asyncio
+async def test_discover_readiness_targets_maps_endpoints_and_configuration_findings():
+    from services.persistence.model_endpoint_repo import PgModelEndpointRepository
+
+    pool = _FakePool()
+    pool._fetch_result = [
+        {
+            "record_type": "endpoint",
+            "provider": "large-context",
+            "kind": "llm",
+            "endpoint": "https://llm.test/v1",
+            "model_name": "llama",
+            "batch_size": 8,
+            "timeout": 12.0,
+            "extra": {"implementation": "vllm", "api_key": "secret"},
+            "is_default": False,
+            "reference_kind": None,
+            "reference_name": None,
+        },
+        {
+            "record_type": "endpoint",
+            "provider": "deleted-transcriber",
+            "kind": "stt",
+            "endpoint": None,
+            "model_name": None,
+            "batch_size": None,
+            "timeout": None,
+            "extra": None,
+            "is_default": False,
+            "reference_kind": None,
+            "reference_name": None,
+        },
+        {
+            "record_type": "configuration_reference",
+            "provider": None,
+            "kind": None,
+            "endpoint": None,
+            "model_name": None,
+            "batch_size": None,
+            "timeout": None,
+            "extra": None,
+            "is_default": False,
+            "reference_kind": "indexation_preset",
+            "reference_name": "deleted-pipeline",
+        },
+    ]
+
+    snapshot = await PgModelEndpointRepository(lambda: pool).discover_readiness_targets()
+
+    assert [(target.kind, target.provider, target.config is None) for target in snapshot.targets] == [
+        ("llm", "large-context", False),
+        ("stt", "deleted-transcriber", True),
+    ]
+    assert snapshot.targets[0].config is not None
+    assert snapshot.targets[0].config.extra["api_key"] == "secret"
+    assert [(finding.kind, finding.name) for finding in snapshot.configuration_references] == [
+        ("indexation_preset", "deleted-pipeline")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_discovery_normalizes_stt_names_and_excludes_null_preset_references():
+    from services.persistence.model_endpoint_repo import PgModelEndpointRepository
+
+    pool = _FakePool()
+
+    await PgModelEndpointRepository(lambda: pool).discover_readiness_targets(
+        default_model_kinds=("embedder", "llm", "vlm")
+    )
+
+    query, params = pool.executed[0]
+    assert "btrim(preset.config ->> 'stt')" in query
+    assert "WHERE indexation_preset IS NOT NULL" in query
+    assert "WHERE retrieval_preset IS NOT NULL" in query
+    assert "preset.name IS NOT DISTINCT FROM used.name" in query
+    assert "model_type = ANY($1::text[])" in query
+    assert "'stt' = ANY($1::text[])" in query
+    assert "COALESCE(NULLIF(preset.config ->> 'reranker', ''), 'default')" in query
+    assert params == (["embedder", "llm", "vlm"],)

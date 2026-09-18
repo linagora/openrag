@@ -203,6 +203,10 @@ Three caveats:
   order is the RRF rank; a chunk retrieved by several sub-queries keeps the score from
   whichever list RRF saw first.
 
+### Prometheus Metrics
+
+`GET /metrics` (`openrag/api/routers/admin/monitoring.py`) serves the default `prometheus_client` registry: HTTP counters/histogram recorded by `api/middleware/instrumentation.py` plus the inference circuit-breaker gauge. The path is in `DEFAULT_BYPASS_PATHS` (no user token needed) and the route enforces its own `METRICS_TOKEN` (`server.metrics_token`, blank = unset) via `require_metrics_token`; admin tokens are deliberately not accepted there — one mechanism, no fallback. It **fails closed**: token unset and `METRICS_ALLOW_UNAUTHENTICATED` (`server.metrics_allow_unauthenticated`) false → 403 on every scrape, with a startup warning from `describe_metrics_access`. The opt-in exists because the API port is exactly what the Ingress / admin-ui proxy forwards (review on PR #914), so "no token" must never silently mean "open"; a configured token always wins over the opt-in. The admin UI's System > Metrics tab reads `GET /monitoring/metrics` (`admin_router`, `require_admin`, an API prefix) instead — same exposition, separate audience, so the scrape path never touches the Postgres token lookup and an admin never holds the scrape secret. The config is read through `load_config()` rather than the request container so a scrape keeps working while the container is degraded. Compose: the monitoring overlay writes `METRICS_TOKEN` into the Prometheus container via a `configs.content` entry (Compose ≥ 2.23.1) and fails fast without it; the admin-ui nginx returns 404 on `/metrics`. Helm: `openrag.metrics.*` (pod annotations + optional ServiceMonitor with `bearerTokenFromSecret`), `env.secrets.METRICS_TOKEN`, `env.config.METRICS_ALLOW_UNAUTHENTICATED`. Docs: `docs/content/docs/documentation/prometheus_metrics.md`.
+
 ### API Routers (`openrag/api/routers/`)
 
 - `user/chat.py` - OpenAI-compatible `/v1/chat/completions` endpoint
@@ -354,9 +358,15 @@ to an internal address.
 `indexer_pool.py` (v3 → v4 for `callback_url`/`callback_token`; v5 added worker-ref-registration wait
 and TSM `set_state` fencing; v7 folds in a second, independent v6 lineage — STT-preset-aware registry
 hydration plus the `_active_indexation_config` contextvar — that landed on `develop` under the same
-version string while this branch's own v6 was in flight). Without the bump, new replicas attach to the
-previous release's actors and every submit raises `TypeError`. Old generations are retired with
-`services/workers/retire_indexer_generation.py`.
+version string while this branch's own v6 was in flight; v8 (develop) added `max_restarts` on the
+dispatcher and workers, since Ray only applies actor options when it creates the actor and
+`get_if_exists=True` would otherwise silently keep the previous release's restart policy (#846); v8
+(this branch, independently) covers `TaskStateManager` bounding its in-memory retention and being
+replaced during bootstrap when an older actor lacks that support — that replacement changes the
+`TaskStateManager` actor id, which strands the dispatcher's and workers' cached handles to it unless
+the whole generation rolls together; v9 folds in both independent v8 lineages). Without the bump, new
+replicas attach to the previous release's actors and every submit raises `TypeError`. Old generations
+are retired with `services/workers/retire_indexer_generation.py`.
 
 **Key files:**
 - `openrag/services/workers/indexing_callback.py` — `send_indexing_callback()` (was `webhook.py`; the

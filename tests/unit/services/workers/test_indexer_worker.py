@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from core.models.chunk import Chunk
 from core.models.document import Document, DocumentType, ProcessedDocument, TextBlock
+from core.utils.exceptions import NoIndexableContentError, PipelineError
 from ray.exceptions import ActorUnavailableError
 from services.workers.indexer_actor import IndexerWorker, _load_document
 from services.workers.pipeline_builder import (
@@ -348,6 +349,92 @@ async def test_process_file_pipeline_failure_sets_failed_and_reraises(tmp_path: 
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("filename", "raw_bytes"),
+    [("empty.txt", b""), ("scan.pdf", b"%PDF-1.4")],
+)
+async def test_process_file_fails_when_no_chunks_are_produced(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    filename: str,
+    raw_bytes: bytes,
+) -> None:
+    path = tmp_path / filename
+    path.write_bytes(raw_bytes)
+    processed = ProcessedDocument(document_id="d1", text_blocks=[])
+    repo = FakeDocumentRepo()
+    tsm = _fake_tsm()
+    callback = AsyncMock()
+    monkeypatch.setattr("services.workers.indexer_actor.send_indexing_callback", callback)
+    worker = IndexerWorker(
+        pipeline=_make_pipeline(processed, []),
+        task_state_manager=tsm,
+        document_repo=repo,
+    )
+    metadata = {"file_id": "f-empty"}
+
+    with pytest.raises(NoIndexableContentError, match="No indexable content was extracted") as exc_info:
+        await worker.process_file(
+            task_id="t-empty",
+            path=str(path),
+            metadata=metadata,
+            partition="p",
+            callback_url="https://cozy.example.com/callback",
+        )
+
+    assert exc_info.value.code == "NO_INDEXABLE_CONTENT"
+    assert exc_info.value.status_code == 422
+    assert isinstance(exc_info.value, PipelineError)
+
+    assert repo.add_calls == []
+    assert repo.update_calls == []
+    completed_calls = [call for call in tsm.set_state.remote.call_args_list if call.args == ("t-empty", "COMPLETED")]
+    assert completed_calls == []
+    failure = tsm.set_failed_if_not_cancelled.remote.await_args.args
+    assert failure[0] == "t-empty"
+    assert "No indexable content was extracted" in failure[1]
+    callback.assert_awaited_once_with(
+        "https://cozy.example.com/callback", "p", "f-empty", "error", metadata, callback_token=None
+    )
+
+
+@pytest.mark.asyncio
+async def test_process_file_zero_chunk_replacement_keeps_existing_catalog_and_vectors(tmp_path: Path) -> None:
+    path = tmp_path / "empty.txt"
+    path.write_bytes(b"")
+
+    class EmptyReplacementPipeline:
+        async def run(self, row: dict[str, Any]) -> dict[str, Any]:
+            row["stored_count"] = 0
+            row["stage"] = "stored"
+            row[REPLACE_OLD_CHUNK_COLLECTION_ROW_KEY] = "default"
+            row[REPLACE_OLD_CHUNK_IDS_ROW_KEY] = ["old-1"]
+            return row
+
+    repo = FakeDocumentRepo()
+    vector_store = FakeVectorStore()
+    worker = IndexerWorker(
+        pipeline=EmptyReplacementPipeline(),
+        task_state_manager=_fake_tsm(),
+        document_repo=repo,
+        vector_store=vector_store,
+    )
+
+    with pytest.raises(NoIndexableContentError, match="No indexable content was extracted"):
+        await worker.process_file(
+            task_id="t-replace-empty",
+            path=str(path),
+            metadata={"file_id": "f1"},
+            partition="p",
+            replace=True,
+        )
+
+    assert repo.update_calls == []
+    assert vector_store.deleted_ids == []
+    assert vector_store.deleted_filters == []
+
+
+@pytest.mark.asyncio
 async def test_process_file_missing_path_raises_and_sets_failed() -> None:
     processed = ProcessedDocument(document_id="d1", text_blocks=[TextBlock(text="x")])
     pipeline = _make_pipeline(processed, [Chunk(id="c1", text="x")])
@@ -441,6 +528,7 @@ async def test_process_file_creates_catalog_record_after_successful_pipeline(
         "file_id": "f1",
         "partition": "p",
         "file_metadata": {"file_id": "f1", "relationship_id": "rel", "parent_id": "parent"},
+        "chunk_count": 1,
         "user_id": 42,
         "relationship_id": "rel",
         "parent_id": "parent",
@@ -568,6 +656,7 @@ async def test_process_file_updates_catalog_record_on_replace(tmp_path: Path) ->
         "file_id": "f1",
         "partition": "p",
         "file_metadata": {"file_id": "f1"},
+        "chunk_count": 1,
         "relationship_id": None,
         "parent_id": None,
         "content_sha256": None,
@@ -1166,3 +1255,99 @@ async def test_serializing_state_failure_still_sends_the_error_callback(
     callback_mock.assert_awaited_once_with(
         "https://cozy.example.com/ai/index/status", "p", "f1", "error", metadata, callback_token="jwt"
     )
+
+
+# ---------------------------------------------------------------------------
+# Durable job start (issue #660)
+# ---------------------------------------------------------------------------
+
+
+class _RecordingJobRepo:
+    """Captures ``upsert_job`` calls; optionally raises to prove writes are best-effort."""
+
+    def __init__(self, *, raises: bool = False) -> None:
+        self.saved: list[Any] = []
+        self._raises = raises
+
+    async def upsert_job(self, job: Any) -> Any:
+        if self._raises:
+            raise RuntimeError("postgres is down")
+        self.saved.append(job)
+        return job
+
+
+@pytest.mark.asyncio
+async def test_process_file_stamps_started_at_when_the_task_leaves_the_queue(tmp_path: Path) -> None:
+    """``started_at`` is what makes queue wait separable from service time."""
+    from core.models.catalog import DocumentStatus
+
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"content")
+    processed = ProcessedDocument(document_id="d1", text_blocks=[TextBlock(text="content")])
+    chunks = [Chunk(id="c1", text="content", partition="p")]
+    repo = _RecordingJobRepo()
+
+    worker = IndexerWorker(
+        pipeline=_make_pipeline(processed, chunks),
+        task_state_manager=_fake_tsm(),
+        job_repo=repo,
+    )
+    await worker.process_file(
+        task_id="t1",
+        path=str(path),
+        metadata={"file_id": "f1"},
+        partition="p",
+        user={"id": 42},
+    )
+
+    assert len(repo.saved) == 1
+    job = repo.saved[0]
+    assert (job.id, job.status, job.partition, job.file_id, job.user_id) == (
+        "t1",
+        DocumentStatus.SERIALIZING,
+        "p",
+        "f1",
+        42,
+    )
+    assert job.started_at is not None
+    assert job.completed_at is None
+
+
+@pytest.mark.asyncio
+async def test_process_file_does_not_stamp_a_task_cancelled_before_start(tmp_path: Path) -> None:
+    """A task fenced before it ran never left the queue, so it has no start."""
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"content")
+    tsm = _fake_tsm()
+    tsm.set_state.remote.return_value = False
+    repo = _RecordingJobRepo()
+
+    worker = IndexerWorker(pipeline=AsyncMock(), task_state_manager=tsm, job_repo=repo)
+
+    with pytest.raises(RuntimeError, match="cancelled before indexing started"):
+        await worker.process_file(task_id="t1", path=str(path), metadata={"file_id": "f1"}, partition="p")
+
+    assert repo.saved == []
+
+
+@pytest.mark.asyncio
+async def test_a_failed_job_write_does_not_fail_indexing(tmp_path: Path) -> None:
+    """History is best-effort: a Postgres outage must not lose the document."""
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"content")
+    processed = ProcessedDocument(document_id="d1", text_blocks=[TextBlock(text="content")])
+    chunks = [Chunk(id="c1", text="content", partition="p")]
+
+    worker = IndexerWorker(
+        pipeline=_make_pipeline(processed, chunks),
+        task_state_manager=_fake_tsm(),
+        job_repo=_RecordingJobRepo(raises=True),
+    )
+    result = await worker.process_file(
+        task_id="t1",
+        path=str(path),
+        metadata={"file_id": "f1"},
+        partition="p",
+    )
+
+    assert result["stored_count"] == 1

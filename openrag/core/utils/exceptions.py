@@ -9,6 +9,7 @@ The hierarchy is organised by concern:
     +-- ConfigError
     +-- RegistryError
     +-- PipelineError
+    |   +-- NoIndexableContentError     (422)
     +-- AuthError
     |   +-- AuthenticationError          (401)
     +-- ValidationError                  (422)
@@ -108,8 +109,15 @@ class RegistryError(OpenRAGError):
 class PipelineError(OpenRAGError):
     """Pipeline execution errors."""
 
+    def __init__(self, message: str, *, code: str = "PIPELINE_ERROR", status_code: int = 500, **kwargs):
+        super().__init__(message, code=code, status_code=status_code, **kwargs)
+
+
+class NoIndexableContentError(PipelineError):
+    """The pipeline produced no content that retrieval could return."""
+
     def __init__(self, message: str, **kwargs):
-        super().__init__(message, code="PIPELINE_ERROR", status_code=500, **kwargs)
+        super().__init__(message, code="NO_INDEXABLE_CONTENT", status_code=422, **kwargs)
 
 
 # ---------------------------------------------------------------------------

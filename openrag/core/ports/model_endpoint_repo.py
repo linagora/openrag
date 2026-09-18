@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
-from core.config.model_endpoints import ModelEndpointRow
+from core.config.model_endpoints import ModelEndpointRow, ModelEndpointType
+from core.models.readiness import ModelEndpointDiscovery
 
 
 class ModelEndpointRepository(ABC):
@@ -18,6 +19,11 @@ class ModelEndpointRepository(ABC):
 
     @abstractmethod
     async def list_all(self, model_type: str | None = None) -> list[ModelEndpointRow]: ...
+
+    @abstractmethod
+    async def discover_readiness_targets(
+        self, *, default_model_kinds: tuple[ModelEndpointType, ...] = ()
+    ) -> ModelEndpointDiscovery: ...
 
     @abstractmethod
     async def update(self, name: str, model_type: str, **fields: object) -> ModelEndpointRow | None: ...
