@@ -398,6 +398,55 @@ async def test_generate_query_chatbotrag_can_skip_retrieval():
 
 
 @pytest.mark.asyncio
+async def test_contextualizer_prompt_distinguishes_social_acknowledgement_from_factual_acceptance():
+    payload = json.dumps({"intent": "gratitude", "requires_retrieval": False, "query_list": []})
+    llm = FakeLLM(chat_responses=[payload])
+    svc = _svc(llm=llm, mode="ChatBotRag")
+
+    await svc.generate_query(
+        [
+            {"role": "assistant", "content": "Was that helpful?"},
+            {"role": "user", "content": "ok"},
+        ]
+    )
+
+    contextualizer_prompt = llm.chat_calls[0][0][0]["content"]
+    assert "Replies to social, wellbeing, or feedback questions remain gratitude" in contextualizer_prompt
+    assert (
+        'assistant: Was that helpful?\nuser: ok\n{"intent":"gratitude","requires_retrieval":false,"query_list":[]}'
+    ) in contextualizer_prompt
+    assert (
+        "assistant: Albendazole treats lymphatic filariasis and several worm infections. "
+        "Would you like the recommended dosages?\nuser: ok\n"
+        '{"intent":"other","requires_retrieval":true,'
+    ) in contextualizer_prompt
+
+
+@pytest.mark.asyncio
+async def test_query_hint_preserves_acknowledgement_rules_with_a_stored_contextualizer():
+    class StoredPromptService:
+        async def resolve_prompt(self, prompt_type, names=None):
+            assert prompt_type == "query_contextualizer"
+            return "Stored contextualizer for {query_language} on {current_date}."
+
+    payload = json.dumps({"intent": "gratitude", "requires_retrieval": False, "query_list": []})
+    llm = FakeLLM(chat_responses=[payload])
+    svc = _svc(llm=llm, mode="ChatBotRag")
+    svc._prompt_service = StoredPromptService()
+
+    await svc.generate_query(
+        [
+            {"role": "assistant", "content": "Was that helpful?"},
+            {"role": "user", "content": "ok"},
+        ]
+    )
+
+    contextualizer_prompt = llm.chat_calls[0][0][0]["content"]
+    assert "social, wellbeing, or feedback question" in contextualizer_prompt
+    assert "factual, informational, analytical, or document-backed continuation" in contextualizer_prompt
+
+
+@pytest.mark.asyncio
 async def test_generate_query_chatbotrag_falls_back_on_garbage():
     svc = _svc(llm=FakeLLM(chat_responses=["not json", "still not json"]), mode="ChatBotRag")
     sq = await svc.generate_query([{"role": "user", "content": "raw question"}])
