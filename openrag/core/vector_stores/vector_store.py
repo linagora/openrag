@@ -11,6 +11,8 @@ from core.models.chunk import Chunk
 if TYPE_CHECKING:
     from datetime import datetime
 
+    from core.retrieval.trace import RetrievalTraceBuilder
+
 
 class VectorStore(ABC):
     """Base class for vector database backends."""
@@ -46,6 +48,7 @@ class VectorStore(ABC):
         collection: str = "default",
         filters: dict[str, Any] | None = None,
         similarity_threshold: float | None = None,
+        trace: RetrievalTraceBuilder | None = None,
     ) -> list[dict[str, Any]]:
         """Similarity search returning raw result dicts.
 
@@ -108,6 +111,7 @@ class VectorStore(ABC):
         collection: str,
         filters: dict[str, Any],
         output_fields: list[str] | None = None,
+        limit: int | None = None,
     ) -> list[dict[str, Any]]:
-        """Return full chunk data matching the given filter expression."""
+        """Return full chunk data matching the filter, optionally bounded by ``limit``."""
         ...

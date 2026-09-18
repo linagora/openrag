@@ -6,6 +6,8 @@ the new core/ retriever has clean dependencies.
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 from core.llm.llm import chat_content
 from core.models.chunk import Chunk
@@ -189,6 +191,16 @@ async def test_expansion_with_ancestors_calls_searcher():
 
 
 @pytest.mark.asyncio
+async def test_expansion_applies_safe_default_ancestor_depth():
+    searcher = FakeSearcher()
+    retriever = SingleRetriever(searcher=searcher, include_ancestors=True, max_ancestor_depth=None)
+
+    await retriever.expand_search_results([Chunk(id="1", text="x", partition="p1", document_id="f1")])
+
+    assert searcher.ancestor_calls[0]["max_ancestor_depth"] == 50
+
+
+@pytest.mark.asyncio
 async def test_expansion_swallows_per_call_errors():
     class BoomSearcher(FakeSearcher):
         async def get_related_chunks(self, **kwargs):
@@ -212,6 +224,50 @@ async def test_expansion_swallows_ancestor_errors():
     initial = [Chunk(id="1", text="x", partition="p1", document_id="f1")]
     out = await r.expand_search_results(initial)
     assert [c.id for c in out] == ["1"]
+
+
+@pytest.mark.asyncio
+async def test_expansion_caps_total_output():
+    searcher = FakeSearcher()
+    searcher.related_result = [_chunk(f"related-{index}") for index in range(1_001)]
+    retriever = SingleRetriever(searcher=searcher, include_related=True, related_limit=100)
+    initial = [Chunk(id="initial", text="x", partition="p1", metadata={"relationship_id": "r1"})]
+
+    expanded = await retriever.expand_search_results(initial)
+
+    assert len(expanded) == 1_000
+
+
+@pytest.mark.asyncio
+async def test_expansion_bounds_lookup_concurrency():
+    class ConcurrencySearcher(FakeSearcher):
+        def __init__(self):
+            super().__init__()
+            self.active = 0
+            self.max_active = 0
+
+        async def get_related_chunks(self, **kwargs):
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+            await asyncio.sleep(0.01)
+            self.active -= 1
+            return []
+
+    searcher = ConcurrencySearcher()
+    retriever = SingleRetriever(searcher=searcher, include_related=True)
+    initial = [
+        Chunk(
+            id=f"chunk-{index}",
+            text="x",
+            partition="p1",
+            metadata={"relationship_id": f"relationship-{index}"},
+        )
+        for index in range(20)
+    ]
+
+    await retriever.expand_search_results(initial)
+
+    assert searcher.max_active == 16
 
 
 def test_multi_query_retriever_rejects_missing_llm():
