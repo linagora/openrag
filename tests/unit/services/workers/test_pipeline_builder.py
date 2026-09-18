@@ -1455,7 +1455,9 @@ async def test_image_bytes_are_released_after_captioning():
     assert all(call.startswith(b"\x89PNG") and len(call) > 4096 for call in vlm.calls), (
         "the VLM received empty payloads — the release ran before captioning"
     )
-    assert all(image.image_bytes == b"" for image in row["processed_document"].images)
+    images = row["processed_document"].images
+    assert len(images) == 6, "guard: the images must survive the release"
+    assert all(image.image_bytes == b"" for image in images)
 
 
 @pytest.mark.asyncio
@@ -1468,7 +1470,11 @@ async def test_image_bytes_are_released_even_when_captioning_never_runs():
     await pipeline.run(row)
 
     assert row["stage"] == "stored"
-    assert all(image.image_bytes == b"" for image in row["processed_document"].images)
+    images = row["processed_document"].images
+    # ``all`` is vacuously true over an empty list, so a release that dropped the
+    # ImageBlocks outright would satisfy the payload assertion below.
+    assert len(images) == 6, "guard: the images must survive the release"
+    assert all(image.image_bytes == b"" for image in images)
 
 
 @pytest.mark.asyncio
@@ -1481,7 +1487,9 @@ async def test_image_bytes_are_released_when_captioning_fails():
     await pipeline.run(row)
 
     assert "caption" in row.get("degraded_stages", {}), "guard: captioning must have failed"
-    assert all(image.image_bytes == b"" for image in row["processed_document"].images)
+    images = row["processed_document"].images
+    assert len(images) == 6, "guard: the images must survive the release"
+    assert all(image.image_bytes == b"" for image in images)
 
 
 @pytest.mark.asyncio
