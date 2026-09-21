@@ -20,20 +20,21 @@ router = APIRouter(dependencies=[Depends(require_admin)])
 - Requires admin role
 
 **Response:**
-Returns list of all Ray actors with:
-- `actor_id`: Unique actor identifier
-- `name`: Actor name
-- `class_name`: Actor class type
-- `state`: Current state (ALIVE, DEAD, etc.)
-- `namespace`: Ray namespace
+- `actors`: list of Ray actors, each with:
+  - `actor_id`: Unique actor identifier
+  - `name`: Actor name
+  - `class_name`: Actor class type
+  - `state`: Current state (ALIVE, DEAD, etc.)
+  - `namespace`: Ray namespace
+- `complete`: `false` when Ray could not return every actor record (more than
+  10,000 in one state across the cluster), so `actors` may be missing some.
 
 **Note:** This shows the internal distributed computing actors used by OpenRAG.
 """,
 )
 async def list_ray_actors():
     """List all known Ray actors and their status."""
-    actors = list_ray_actor_states()
-    return JSONResponse(status_code=status.HTTP_200_OK, content={"actors": actors})
+    return JSONResponse(status_code=status.HTTP_200_OK, content=list_ray_actor_states())
 
 
 @router.post(
