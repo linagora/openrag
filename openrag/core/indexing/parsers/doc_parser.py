@@ -15,6 +15,7 @@ import asyncio
 import logging
 import os
 import tempfile
+import threading
 from contextlib import suppress
 from pathlib import Path
 
@@ -48,22 +49,29 @@ class DocParser(DocumentParser):
                 metadata=dict(document.metadata),
             )
 
-        async with document.as_temporary_file() as src_path:
-            docx_path, fallback_text = await asyncio.to_thread(self._convert, str(src_path))
+        # ``asyncio.to_thread`` cannot be interrupted, so on cancellation — a parse
+        # timeout (``asyncio.wait_for`` in ``services/workers/stages/parse.py``) or
+        # ``ray.cancel`` — this unwinds while Spire is still converting, and the
+        # ``finally`` below would run before the file exists. ``_convert`` re-checks
+        # the flag after writing and cleans up when nobody is left to receive it.
+        abandoned = threading.Event()
+        docx_path: str | None = None
+        try:
+            async with document.as_temporary_file() as src_path:
+                docx_path, fallback_text = await asyncio.to_thread(self._convert, str(src_path), abandoned)
 
-        if docx_path:
-            # ``source_path`` is the *converted* file, never the inherited one:
-            # ``model_copy`` propagates every field, so leaving the original
-            # would hand ``DocxParser`` the .doc and it would parse the wrong
-            # file. ``raw_bytes`` is dropped for the same reason it is not read
-            # — the .docx stays on disk and the DOCX parser opens it (#846).
-            try:
-                # ``filename`` moves to .docx with the content. ``as_temporary_file``
+            if docx_path:
+                # ``source_path`` is the *converted* file, never the inherited one:
+                # ``model_copy`` propagates every field, so leaving the original
+                # would hand ``DocxParser`` the .doc and it would parse the wrong
+                # file. ``raw_bytes`` is dropped for the same reason it is not read
+                # — the .docx stays on disk and the DOCX parser opens it (#846).
+                #
+                # ``filename`` moves to .docx with the content: ``as_temporary_file``
                 # only yields a ``source_path`` whose suffix matches the filename's —
                 # the sync libraries dispatch on it — so leaving "legacy.doc" here
                 # makes it reject the converted file, fall through to ``raw_bytes``
-                # (now None) and raise. Built inside the ``try`` so the converted
-                # file is removed even if constructing the document fails.
+                # (now None) and raise.
                 docx_doc = document.model_copy(
                     update={
                         "raw_bytes": None,
@@ -73,7 +81,9 @@ class DocParser(DocumentParser):
                     }
                 )
                 return await self._docx.parse(docx_doc)
-            finally:
+        finally:
+            abandoned.set()
+            if docx_path:
                 # Ownership moved here with the path; ``as_temporary_file``
                 # deliberately does not unlink a ``source_path``, since that
                 # normally belongs to the uploader rather than to us.
@@ -90,7 +100,7 @@ class DocParser(DocumentParser):
         )
 
     @staticmethod
-    def _convert(path: str) -> tuple[str | None, str | None]:
+    def _convert(path: str, abandoned: threading.Event) -> tuple[str | None, str | None]:
         """Run blocking Spire.Doc conversion. Returns ``(docx_path, fallback_text)``.
 
         Exactly one of the two will be non-None on success; both ``None``
@@ -98,8 +108,10 @@ class DocParser(DocumentParser):
 
         Returns the converted file's **path**, not its bytes: reading it here
         put the whole .docx in memory on top of the .doc already there (#846).
-        Ownership moves with it — the caller deletes it once the DOCX parser is
-        done, which is why the ``finally`` below no longer does.
+        Ownership moves with it, so the ``finally`` below stops removing it —
+        unless ``abandoned`` says there is no longer anyone to hand it to. This
+        runs in a thread the event loop cannot interrupt, so a cancelled caller
+        is gone before the file exists and can neither receive nor remove it.
         """
         try:
             from spire.doc import Document as SpireDocument
@@ -115,6 +127,10 @@ class DocParser(DocumentParser):
             with tempfile.NamedTemporaryFile(suffix=".docx", delete=False) as out:
                 out_path = out.name
             spire_doc.SaveToFile(out_path, FileFormat.Docx2016)
+            if abandoned.is_set():
+                # Nobody left to receive it; leaving ``out_path`` set has the
+                # ``finally`` below remove it.
+                return None, None
             converted, out_path = out_path, None  # handed to the caller; not ours to remove
             return converted, None
         except Exception as exc:

@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import io
 import os
 import pathlib
 import sys
+import threading
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -237,6 +239,41 @@ class TestConvertedFileIsAPathNotBytes:
             await DocParser(docx_parser=docx_parser).parse(document)
 
         assert not os.path.exists(captured["path"]), "the converted .docx leaked on the failure path"
+
+    @pytest.mark.asyncio
+    async def test_the_converted_file_is_removed_when_the_task_is_cancelled(self, fake_spire):
+        """``asyncio.to_thread`` cannot be interrupted, so a cancelled ``parse``
+        unwinds while Spire is still converting and its own cleanup runs before the
+        file exists. ``_convert`` re-checks after the write and removes it instead.
+        """
+        converting = threading.Event()
+        proceed = threading.Event()
+        captured: dict[str, str] = {}
+
+        def save_to_file(path: str, _fmt) -> None:
+            captured["path"] = path
+            converting.set()
+            proceed.wait(5)  # hold the worker until ``parse`` has unwound
+            with open(path, "wb") as fh:
+                fh.write(b"DOCX")
+
+        instance = MagicMock()
+        instance.SaveToFile.side_effect = save_to_file
+        fake_spire.return_value = instance
+
+        task = asyncio.create_task(DocParser(docx_parser=MagicMock()).parse(_doc_document()))
+        await asyncio.to_thread(converting.wait, 5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        proceed.set()
+
+        for _ in range(500):  # the uninterruptible worker outlives the cancelled task
+            if not os.path.exists(captured["path"]):
+                break
+            await asyncio.sleep(0.01)
+        else:
+            pytest.fail("the converted .docx leaked on cancellation")
 
 
 class TestAgainstTheRealDocxParser:
