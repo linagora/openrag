@@ -2362,6 +2362,50 @@ async def test_task_state_falls_back_to_the_durable_job() -> None:
 
 
 @pytest.mark.asyncio
+async def test_task_error_reason_falls_back_to_the_durable_job() -> None:
+    from core.models.catalog import DocumentStatus, IndexationJob
+
+    tsm = _task_state_manager()
+    tsm._ray_actor_method_names = {"get_error"}
+    job = IndexationJob(
+        id="task-1",
+        status=DocumentStatus.FAILED,
+        partition="tenant-a",
+        error="traceback",
+        error_reason="RuntimeError: durable failure",
+    )
+    dispatcher = _dispatcher_with_job_repo(tsm, _JobRepoSpy(job))
+
+    assert await dispatcher.get_task_error_reason("task-1") == "RuntimeError: durable failure"
+
+
+@pytest.mark.asyncio
+async def test_submit_failure_captures_reason_with_new_task_state_actor() -> None:
+    tsm = _task_state_manager()
+    set_failed = AsyncMock(return_value=True)
+    tsm._ray_actor_method_names = {
+        "set_failed_if_not_cancelled",
+        "set_failed_with_reason_if_not_cancelled",
+    }
+    tsm.set_failed_with_reason_if_not_cancelled = MagicMock()
+    tsm.set_failed_with_reason_if_not_cancelled.remote = set_failed
+    dispatcher = _dispatcher_with_job_repo(tsm, _JobRepoSpy())
+
+    await dispatcher._mark_submit_failed(
+        "task-1",
+        "traceback",
+        "RuntimeError: submission failed",
+    )
+
+    set_failed.assert_awaited_once_with(
+        "task-1",
+        "traceback",
+        "RuntimeError: submission failed",
+    )
+    tsm.set_failed_if_not_cancelled.remote.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_live_actor_state_is_not_overridden_by_the_durable_job() -> None:
     from core.models.catalog import DocumentStatus, IndexationJob
 

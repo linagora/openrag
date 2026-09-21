@@ -8,8 +8,10 @@ from typing import Any
 
 from core.models.catalog import DocumentStatus, IndexationJob, normalize_degraded_stages
 from core.models.document import Document
+from core.utils.error_summary import failure_reason_from_exception
 from core.utils.exceptions import NoIndexableContentError
 from core.utils.logging import get_logger
+from services.workers.failure_reporting import submit_task_failure
 from services.workers.indexing_callback import send_indexing_callback
 from services.workers.pipeline_builder import (
     REPLACE_OLD_CHUNK_COLLECTION_ROW_KEY,
@@ -250,7 +252,7 @@ class IndexerWorker:
             # The TSM already told us this task is fenced/cancelled — no need to
             # ask it again, and a cancellation must not fire an error callback.
             raise RuntimeError(f"Task {task_id} was cancelled before indexing started") from None
-        except Exception:
+        except Exception as exc:
             should_cleanup_vectors = row is not None and (
                 row.get("stored_count", 0) > 0 or row.get("stage") == "store_failed"
             )
@@ -263,9 +265,15 @@ class IndexerWorker:
                     task_id=task_id,
                 )
             tb = traceback.format_exc()
+            error_reason = failure_reason_from_exception(exc)
             try:
                 was_failed = await retry_idempotent_ray_actor_method(
-                    lambda: self._tsm.set_failed_if_not_cancelled.remote(task_id, tb),
+                    lambda: submit_task_failure(
+                        self._tsm,
+                        task_id,
+                        tb,
+                        error_reason,
+                    ),
                     task_description=f"set_failed_if_not_cancelled({task_id})",
                 )
             except Exception:

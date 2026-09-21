@@ -59,6 +59,40 @@ async def test_reports_support_for_explicit_completion_outcomes() -> None:
 
 
 @pytest.mark.asyncio
+async def test_failure_reason_settles_atomically_with_traceback() -> None:
+    manager = _task_state_manager()
+    await manager.set_state("task-1", "QUEUED")
+
+    accepted = await manager.set_failed_with_reason_if_not_cancelled(
+        "task-1",
+        "traceback",
+        "RuntimeError: parser failed",
+    )
+
+    assert accepted is True
+    assert await manager.get_state("task-1") == "FAILED"
+    assert await manager.get_error("task-1") == "traceback"
+    assert await manager.get_error_reason("task-1") == "RuntimeError: parser failed"
+
+
+@pytest.mark.asyncio
+async def test_failure_reason_does_not_overwrite_cancellation() -> None:
+    manager = _task_state_manager()
+    await manager.set_state("task-1", "QUEUED")
+    await manager.set_cancelled_if_active("task-1")
+
+    accepted = await manager.set_failed_with_reason_if_not_cancelled(
+        "task-1",
+        "traceback",
+        "RuntimeError: late failure",
+    )
+
+    assert accepted is False
+    assert await manager.get_state("task-1") == "CANCELLED"
+    assert await manager.get_error_reason("task-1") is None
+
+
+@pytest.mark.asyncio
 async def test_cancelled_state_is_not_overwritten_by_worker_transitions() -> None:
     manager = _task_state_manager()
 
