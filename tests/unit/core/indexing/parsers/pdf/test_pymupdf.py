@@ -101,9 +101,13 @@ class TestRecoveryPathResidency:
 
 
 class TestOpensThePathWhenThereIsOne:
-    """#846 §1a. The shipped default PDF backend used to open a byte stream, so
-    the whole document was resident in this process for the length of the parse.
-    With a ``source_path`` it opens the file and MuPDF reads it instead."""
+    """#846 §1a. With a ``source_path`` the parser opens the file and lets MuPDF
+    read it, instead of opening a byte stream.
+
+    These pin *which source is read*, not a memory saving: ``fz_open_memory``
+    does not copy, and production documents carry ``raw_bytes`` alongside the
+    path until ``_release_raw_bytes`` runs. The saving arrives with #1001; this
+    preference is what lets it reach PDFs."""
 
     @pytest.mark.asyncio
     async def test_parse_opens_the_path_and_never_touches_the_bytes(self, tmp_path):
@@ -114,12 +118,12 @@ class TestOpensThePathWhenThereIsOne:
         result = await PyMuPDFParser().parse(document)
 
         assert [block.text for block in result.text_blocks] == ["hello world"]
-        assert document.raw_bytes is None, "a path-opened parse must not materialize the file"
+        assert document.raw_bytes is None, "the parser must not materialize a file it was given a path to"
 
     @pytest.mark.asyncio
     async def test_the_path_wins_when_both_are_present(self, tmp_path):
-        """Mutation guard: drop the preference and this reads the bytes instead,
-        which is exactly the residency the issue is about."""
+        """The production shape — both fields set, as ``_load_document`` builds it.
+        Mutation guard: drop the preference and this reads the bytes instead."""
         pdf = tmp_path / "on-disk.pdf"
         pdf.write_bytes(_minimal_pdf_bytes())
         document = Document(

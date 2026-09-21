@@ -109,8 +109,9 @@ def _extract_markdown(source: str | bytes, filename: str) -> tuple[list[str], li
     #
     # The recovery path allocates one full copy whatever ``source`` was:
     # ``tobytes`` produces bytes by construction, so a path-opened document
-    # still materializes here. That is inherent to rewriting the file, and it
-    # is one copy rather than the two this path used to hold (#846).
+    # still materializes here. Inherent to rewriting the file — and note the
+    # caller's ``raw_bytes`` is normally still resident too, so this is a
+    # second copy in practice, not the only one (#846, #1001).
     with pymupdf.open(stream=cleaned, filetype="pdf") as clean_doc:
         chunks = _to_markdown(clean_doc)
     pages = [(chunk.get("text") or "").strip() for chunk in chunks]
@@ -137,9 +138,14 @@ class PyMuPDFParser(DocumentParser):
         return [DocumentType.PDF.value]
 
     async def parse(self, document: Document) -> ProcessedDocument:
-        # Prefer the path: MuPDF reads the file itself, so the document is not
-        # held in this process for the length of the parse (#846). Bytes are
-        # the fallback for documents with no file behind them.
+        # Prefer the path so MuPDF reads the file itself. This does *not* on its
+        # own keep the document out of memory: ``fz_open_memory`` never copied
+        # the buffer, and every production ``Document`` still carries
+        # ``raw_bytes`` until ``_release_raw_bytes`` runs after ``parse_stage``.
+        # Measured, stream-open and path-open peak the same; the file-sized
+        # saving arrives only when the eager read in ``_load_document`` goes
+        # (#1001), which needs this preference to already be here. Bytes are the
+        # fallback for documents with no file behind them (EML attachments).
         source: str | bytes | None = document.source_path or document.raw_bytes
         if not source:
             return ProcessedDocument(
