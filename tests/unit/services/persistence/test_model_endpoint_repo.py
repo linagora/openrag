@@ -675,7 +675,7 @@ async def test_delete_and_promote_not_found_no_delete():
     pool.conn._fetch_result = [_row("e5", False), _row("jina", True)]
     repo = PgModelEndpointRepository(pool_getter=lambda: pool)
 
-    status, promoted = await repo.delete_and_promote_default("ghost", "embedder")
+    status, promoted, _ = await repo.delete_and_promote_default("ghost", "embedder")
     assert status == "not_found"
     assert promoted is None
     assert not any("DELETE FROM model_endpoints" in q for q, _ in pool.conn.executed)
@@ -689,7 +689,7 @@ async def test_delete_and_promote_last_no_delete():
     pool.conn._fetch_result = [_row("jina", True)]
     repo = PgModelEndpointRepository(pool_getter=lambda: pool)
 
-    status, promoted = await repo.delete_and_promote_default("jina", "embedder")
+    status, promoted, _ = await repo.delete_and_promote_default("jina", "embedder")
     assert status == "last"
     assert promoted is None
     assert not any("DELETE FROM model_endpoints" in q for q, _ in pool.conn.executed)
@@ -703,7 +703,7 @@ async def test_delete_and_promote_non_default_deletes_no_promotion():
     pool.conn._fetch_result = [_row("e5", False), _row("jina", True)]
     repo = PgModelEndpointRepository(pool_getter=lambda: pool)
 
-    status, promoted = await repo.delete_and_promote_default("e5", "embedder")
+    status, promoted, _ = await repo.delete_and_promote_default("e5", "embedder")
     assert status == "ok"
     assert promoted is None
     queries = [q for q, _ in pool.conn.executed]
@@ -714,6 +714,26 @@ async def test_delete_and_promote_non_default_deletes_no_promotion():
 
 
 @pytest.mark.asyncio
+async def test_delete_reports_the_vector_field_of_the_row_it_deleted():
+    from services.persistence.model_endpoint_repo import PgModelEndpointRepository
+
+    pool = _FakePool()
+    pool.conn._fetch_result = [_row("e5", False), _row("jina", True)]
+    fetchval = pool.conn.fetchval
+
+    async def returning(query, *params):
+        value = await fetchval(query, *params)
+        return "vector_e5" if query.startswith("DELETE FROM model_endpoints") else value
+
+    pool.conn.fetchval = returning
+    repo = PgModelEndpointRepository(pool_getter=lambda: pool)
+
+    assert await repo.delete_and_promote_default("e5", "embedder") == ("ok", None, "vector_e5")
+    delete = next(q for q, _ in pool.conn.executed if q.startswith("DELETE FROM model_endpoints"))
+    assert "RETURNING vector_field" in delete
+
+
+@pytest.mark.asyncio
 async def test_delete_and_promote_default_promotes_survivor_under_lock():
     from services.persistence.model_endpoint_repo import PgModelEndpointRepository
 
@@ -721,7 +741,7 @@ async def test_delete_and_promote_default_promotes_survivor_under_lock():
     pool.conn._fetch_result = [_row("e5", False), _row("jina", True)]
     repo = PgModelEndpointRepository(pool_getter=lambda: pool)
 
-    status, promoted = await repo.delete_and_promote_default("jina", "embedder")
+    status, promoted, _ = await repo.delete_and_promote_default("jina", "embedder")
     assert status == "ok"
     assert promoted == "e5"  # first survivor by name
     queries = [q for q, _ in pool.conn.executed]
@@ -797,7 +817,7 @@ async def test_delete_unreferenced_embedder_still_proceeds():
     pool.conn.embedder_usage = {"direct": 0, "via_default": 0}
     repo = PgModelEndpointRepository(pool_getter=lambda: pool)
 
-    status, _ = await repo.delete_and_promote_default("e5", "embedder")
+    status, _, _ = await repo.delete_and_promote_default("e5", "embedder")
 
     assert status == "ok"
     assert any("DELETE FROM model_endpoints" in q for q, _ in pool.conn.executed)
@@ -814,7 +834,7 @@ async def test_delete_clears_chat_llm_references_instead_of_blocking():
     pool.conn._fetch_result = [_row("mistral", True), _row("doomed", False)]
     repo = PgModelEndpointRepository(pool_getter=lambda: pool)
 
-    status, _ = await repo.delete_and_promote_default("doomed", "llm")
+    status, _, _ = await repo.delete_and_promote_default("doomed", "llm")
 
     assert status == "ok"
     cleared = [(q, params) for q, params in pool.conn.executed if "SET chat_llm = NULL" in q]
@@ -944,7 +964,7 @@ async def test_delete_clears_preset_selections_naming_the_endpoint():
     pool.conn._fetch_result = [_row("whisper", True), _row("doomed", False)]
     repo = PgModelEndpointRepository(pool_getter=lambda: pool)
 
-    status, _ = await repo.delete_and_promote_default("doomed", "stt")
+    status, _, _ = await repo.delete_and_promote_default("doomed", "stt")
     assert status == "ok"
 
     clears = [(q, p) for q, p in pool.conn.executed if "config - $1::text" in q]
@@ -970,7 +990,7 @@ async def test_delete_clears_every_preset_key_for_multi_key_types():
     pool.conn._fetch_result = [_row("keep", True), _row("doomed", False)]
     repo = PgModelEndpointRepository(pool_getter=lambda: pool)
 
-    status, _ = await repo.delete_and_promote_default("doomed", "llm")
+    status, _, _ = await repo.delete_and_promote_default("doomed", "llm")
     assert status == "ok"
 
     cleared = {p[0] for q, p in pool.conn.executed if "config - $1::text" in q}
@@ -991,7 +1011,7 @@ async def test_delete_of_unknown_endpoint_clears_nothing():
     pool.conn._fetch_result = [_row("whisper", True), _row("other", False)]
     repo = PgModelEndpointRepository(pool_getter=lambda: pool)
 
-    status, _ = await repo.delete_and_promote_default("ghost", "stt")
+    status, _, _ = await repo.delete_and_promote_default("ghost", "stt")
     assert status == "not_found"
     assert not any("config - $1::text" in q for q, _ in pool.conn.executed)
 

@@ -748,16 +748,17 @@ class PgModelEndpointRepository(ModelEndpointRepository):
         rows = await conn.fetch(_EMBEDDER_INDEXED_USAGE_SQL, name, model_type, DEFAULT_ENDPOINT_ALIAS)
         return [{"partition": r["partition"], "file_count": r["file_count"]} for r in rows]
 
-    async def delete_and_promote_default(self, name: str, model_type: str) -> tuple[str, str | None]:
+    async def delete_and_promote_default(self, name: str, model_type: str) -> tuple[str, str | None, str | None]:
         """Delete an endpoint and, if it was the default, promote a survivor to
         default — all atomically and decided under a row lock.
 
         Locking and deciding inside one transaction means concurrent deletes of the
         same model type can't both pass a stale last-endpoint check or promote an
         already-deleted survivor, so the type is never left with no endpoint or no
-        default. Returns ``(status, promoted_name)`` where ``status`` is
-        ``"not_found" | "last" | "ok"`` and ``promoted_name`` is set only when a
-        deleted default was replaced.
+        default. Returns ``(status, promoted_name, vector_field)`` where
+        ``status`` is ``"not_found" | "last" | "ok"``, ``promoted_name`` is set
+        only when a deleted default was replaced, and ``vector_field`` is the
+        deleted row's own, so a concurrent rename cannot swap it for another's.
 
         Partition references are settled here too, differently per column (#762):
         an ``embedder`` still referenced refuses the delete with
@@ -795,14 +796,14 @@ class PgModelEndpointRepository(ModelEndpointRepository):
                 )
                 names = [r["name"] for r in rows]
                 if name not in names:
-                    return ("not_found", None)
+                    return ("not_found", None, None)
                 if len(names) <= 1:
-                    return ("last", None)
+                    return ("last", None, None)
                 was_default = next(r["is_default"] for r in rows if r["name"] == name)
                 await self._settle_partition_references(conn, name, model_type, was_default=was_default)
                 await self._clear_preset_references(conn, name, model_type)
-                await conn.execute(
-                    "DELETE FROM model_endpoints WHERE name = $1 AND model_type = $2",
+                vector_field = await conn.fetchval(
+                    "DELETE FROM model_endpoints WHERE name = $1 AND model_type = $2 RETURNING vector_field",
                     name,
                     model_type,
                 )
@@ -819,7 +820,7 @@ class PgModelEndpointRepository(ModelEndpointRepository):
                         promoted,
                         model_type,
                     )
-                return ("ok", promoted)
+                return ("ok", promoted, vector_field)
 
 
 def _embedder_in_use_message(name: str, direct: int, via_default: int) -> str:

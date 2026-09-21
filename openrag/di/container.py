@@ -460,6 +460,7 @@ class ServiceContainer:
                     "llm": self._llm_cache,
                     "vlm": self._vlm_cache,
                 },
+                vector_store=self.vector_store,
             )
         return self._model_endpoint_service
 

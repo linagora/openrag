@@ -665,7 +665,7 @@ Changing an **embedder**'s `endpoint`, `model_name`, `extra.implementation` or `
 
 Files still indexing when such an edit is saved are not counted, since a file is only counted once indexing finishes. Instead, when the file is recorded, the indexer checks that the partition's embedder still has the configuration it embedded with. If it doesn't, the file fails with `EMBEDDER_CHANGED_DURING_INDEXING`, its vectors are removed, and it has to be indexed again. Indexers reload an edited endpoint before embedding, so only files already embedding during the edit are affected.
 
-`DELETE` of an embedder returns `409` while a partition names it or, for the default embedder, while a partition following the `default` alias already holds indexed files. Reassign those partitions first.
+`DELETE` of an embedder returns `409` while a partition names it or, for the default embedder, while a partition following the `default` alias already holds indexed files. Reassign those partitions first. Deleting an embedder also drops its vector field from the collection, on a best-effort basis: if the drop fails, the delete still succeeds and the empty field stays until removed by hand.
 
 #### Set as default for its type
 ```http
