@@ -46,6 +46,7 @@ from core.utils.exceptions import (
     ValidationError,
 )
 from core.utils.logging import get_logger
+from core.vector_stores.vector_field import is_vector_field_key
 from services.workers.task_cancellation import cancel_active_indexing_tasks
 
 if TYPE_CHECKING:
@@ -307,7 +308,10 @@ class PartitionService:
         """
         rows = await self._partition_repo.list_partition_rows()
         counts = await self.file_counts_by_partition()
-        dimension = await self._live_vector_dimension()
+        dimensions = {
+            embedder: await self._live_vector_dimension(embedder)
+            for embedder in {r.get("embedder") or "default" for r in rows}
+        }
         summaries: dict[str, dict] = {}
         for r in rows:
             name = r["partition"]
@@ -318,7 +322,7 @@ class PartitionService:
                 "embedder": r.get("embedder") or "default",
                 "indexation_preset": r.get("indexation_preset") or "default",
                 "retrieval_preset": r.get("retrieval_preset") or "default",
-                "dimension": dimension,
+                "dimension": dimensions[r.get("embedder") or "default"],
                 "chat_history_depth": r.get("chat_history_depth") or self._legacy_chat_history_depth_fallback(),
                 "chat_llm": r.get("chat_llm"),
                 "created_at": created.isoformat() if hasattr(created, "isoformat") else created,
@@ -538,7 +542,7 @@ class PartitionService:
         if row is None:
             raise PartitionNotFoundError(f"Partition '{partition}' does not exist.")
         detail = self._partition_detail(row, self.resolve_partition_row(row))
-        detail["dimension"] = await self._live_vector_dimension()
+        detail["dimension"] = await self._live_vector_dimension(row.get("embedder"))
         detail["document_count"] = await self._partition_repo.get_partition_file_count(partition)
         detail["indexed_embedders"] = await self._indexed_embedders(partition)
         return detail
@@ -568,8 +572,8 @@ class PartitionService:
             logger.debug("Could not read per-file embedder provenance", partition=partition, error=str(exc))
             return []
 
-    async def _live_vector_dimension(self) -> int | None:
-        """Dimension of the vectors that actually exist, or ``None``.
+    async def _live_vector_dimension(self, embedder: str | None) -> int | None:
+        """Dimension of the vectors ``embedder`` actually stored, or ``None``.
 
         Replaces ``partitions.dimension``, which no code path has ever written:
         it sits at its ``server_default`` of 1024 forever, so a client reading
@@ -578,19 +582,22 @@ class PartitionService:
         per-partition-collection topology would need — but it is no longer
         reported as fact.
 
-        One collection serves every partition today, so this is the same value
-        for all of them. That is the honest answer to "what dimension are this
-        partition's vectors", not a limitation of the lookup.
+        Read from the dense field of ``embedder``: ``None`` before anything was
+        indexed with it.
 
         A vector-store failure yields ``None`` rather than propagating: the
         dimension is informational, and a briefly unreachable Milvus should not
         turn a partition-config read into a 500.
         """
         getter = getattr(self._vector_store, "vector_dimension", None)
-        if getter is None:
+        if getter is None or self._config is None:
+            return None
+        endpoint = self._config.models.embedder.get(embedder or "default")
+        field = getattr(endpoint, "vector_field", None)
+        if field is None:
             return None
         try:
-            return await getter()
+            return await getter(field)
         except Exception as exc:
             logger.debug("Could not read the live vector dimension", error=str(exc))
             return None
@@ -834,15 +841,14 @@ class PartitionService:
         """
         _validate_limit(limit)
         await self._ensure_partition(partition)
-        excluded = {"text"} if include_embedding else {"text", "vector"}
-        output_fields = ["*", "vector"] if include_embedding else ["*"]
+        excluded = {"text"}
         filters: dict[str, Any] = {"partition": partition}
         if file_id is not None:
             filters["file_id"] = file_id
         rows = await self._vector_store.query_chunks_by_filter(
             self._collection,
             filters,
-            output_fields=output_fields,
+            output_fields=["*"],
         )
         if limit is not None and len(rows) > limit:
             rows = rows[:limit]
@@ -854,9 +860,12 @@ class PartitionService:
                     continue
                 if is_internal_metadata_key(k):
                     continue
-                if k == "vector":
-                    # Legacy surfaced the embedding as a flat string.
-                    v = str(np.array(v).flatten().tolist())
+                if is_vector_field_key(k):
+                    # "*" returns every embedder's field, null but for the one
+                    # that embedded this chunk. Surfaced as a string under "vector".
+                    if include_embedding and v is not None:
+                        meta["vector"] = str(np.array(v).flatten().tolist())
+                    continue
                 meta[k] = v
             return meta
 

@@ -575,7 +575,8 @@ class WorkerDispatcher(IndexingDispatcher):
         rows = await self._vector_store.query_chunks_by_filter(
             self._collection,
             {"partition": partition, "file_id": file_id},
-            output_fields=["*", "vector"],
+            # The whole row is written back, so "*" must include the vectors.
+            output_fields=["*"],
         )
         if not rows:
             return
@@ -627,7 +628,7 @@ class WorkerDispatcher(IndexingDispatcher):
             rows = await self._vector_store.query_chunks_by_filter(
                 self._collection,
                 {"partition": partition, "file_id": file_id},
-                output_fields=["*", "vector"],
+                output_fields=["*"],
             )
             if not rows:
                 return
