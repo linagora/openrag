@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pathlib
 import sys
 from unittest.mock import AsyncMock, MagicMock
 
@@ -76,6 +77,37 @@ class TestParse:
         assert forwarded.content_type is DocumentType.DOCX
         instance.LoadFromFile.assert_called_once()
         instance.Close.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_converted_docx_does_not_inherit_the_source_path(self, fake_spire, tmp_path):
+        """#911 trap. ``model_copy`` propagates every field, so the derived
+        ``.docx`` would carry the original ``.doc``'s ``source_path``. Since
+        ``as_temporary_file`` prefers ``source_path`` over ``raw_bytes``,
+        ``DocxParser`` would then reopen the *unconverted* ``.doc`` — parsing
+        the wrong file, with the conversion silently discarded."""
+        src = tmp_path / "legacy.doc"
+        src.write_bytes(b"\xd0\xcf\x11\xe0fake-doc")
+
+        instance = MagicMock()
+        instance.SaveToFile.side_effect = lambda path, _fmt: pathlib.Path(path).write_bytes(b"DOCX-CONTENT")
+        fake_spire.return_value = instance
+
+        docx_parser = MagicMock()
+        docx_parser.parse = AsyncMock(return_value=ProcessedDocument(document_id="test", text_blocks=[], page_count=0))
+
+        document = Document(
+            filename="legacy.doc",
+            content_type=DocumentType.DOC,
+            raw_bytes=b"\xd0\xcf\x11\xe0fake-doc",
+            source_path=str(src),
+        )
+        await DocParser(docx_parser=docx_parser).parse(document)
+
+        forwarded = docx_parser.parse.await_args.args[0]
+        assert forwarded.source_path is None, "the converted .docx still points at the original .doc"
+        assert forwarded.raw_bytes == b"DOCX-CONTENT", "guard: the conversion must have produced the .docx bytes"
+        # The path the derived document would have to resolve through.
+        assert document.source_path == str(src), "guard: the original must keep its own path"
 
     @pytest.mark.asyncio
     async def test_save_failure_falls_back_to_get_text(self, fake_spire):
