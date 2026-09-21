@@ -28,6 +28,7 @@ PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
 JPG = b"\xff\xd8\xff\xe0\x00\x10JFIF" + b"\x00" * 64
 GIF = b"GIF89a" + b"\x00" * 64
 ELF = b"\x7fELF\x02\x01\x01\x00" + b"\x00" * 64
+OLE2 = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + b"\x00" * 64  # compound file: .doc, and .xls/.ppt/.msi too
 TEXT = b"just some words, no signature at all\n"
 
 
@@ -87,10 +88,13 @@ def test_unrecognised_content_is_refused_not_waved_through():
         validate_content_matches_extension("pdf", ELF)
 
 
-@pytest.mark.parametrize("extension", ["txt", "md", "html", "htm", "eml", "svg", "doc", "wma", "mp3", ""])
+@pytest.mark.parametrize("extension", ["txt", "md", "html", "htm", "eml", "svg", "wma", "mp3", ""])
 def test_unverifiable_extensions_pass_through(extension):
-    """Text formats have no signature, and .doc/.wma are not reliably detected
-    by the bundled matchers. Enforcing them would refuse valid uploads."""
+    """Text formats have no signature, and .wma is not reliably detected by the
+    bundled matchers. Enforcing them would refuse valid uploads.
+
+    ``.doc`` used to be on this list — it is checked by its container signature
+    now (#964), so it has its own tests below."""
     validate_content_matches_extension(extension, ELF)
     validate_content_matches_extension(extension, TEXT)
 
@@ -319,3 +323,71 @@ async def test_genuine_image_attachment_without_a_parser_still_becomes_an_image(
     )
 
     assert len(images) == 1
+
+
+# ---------------------------------------------------------------------------
+# .doc — the one accepted format that had no check at all (#964, audit A2)
+# ---------------------------------------------------------------------------
+#
+# Spire.Doc loads OLE2, RTF, HTML and plain text under a .doc name — verified
+# against the real library — and Word has written all four that way. So .doc
+# cannot use the allowlist the other formats use: requiring a known-good
+# signature would refuse uploads that index today, which is why .doc was left
+# unchecked in #957. It refuses what `filetype` recognises as something else
+# instead.
+
+RTF = rb"{\rtf1\ansi\deff0 {\fonttbl{\f0 Times;}}\f0\fs24 hello\par}"
+HTML_DOC = b"<html><body><p>a .doc that is really html</p></body></html>"
+
+
+@pytest.mark.parametrize(
+    ("head", "why"),
+    [
+        (OLE2, "a real compound-file document"),
+        (RTF, "RTF, which Word wrote under .doc for years"),
+        (HTML_DOC, "HTML, likewise"),
+        (TEXT, "plain text, which has no signature by definition"),
+        (b"", "an empty upload, which Spire rejects on its own"),
+    ],
+)
+def test_everything_spire_can_load_is_still_accepted(head, why):
+    """Guard against re-introducing the gap: a stricter rule here refuses
+    uploads that index today, which is what kept .doc unchecked until now."""
+    validate_content_matches_extension("doc", head)
+    assert why
+
+
+@pytest.mark.parametrize(
+    ("head", "detected"),
+    [
+        (PDF, "pdf"),
+        # ``filetype`` reports *docx* here, not zip: its matcher keys on an entry
+        # named ``word/`` near the head — the same quirk ``validate_ooxml_package``
+        # exists for. Either way it is a recognised foreign format and is refused.
+        (_zip("word/document.xml"), "docx"),
+        (_zip("payload.bin"), "zip"),
+        (ELF, "elf"),
+        (PNG, "png"),
+        (b"\x1f\x8b\x08" + b"\x00" * 64, "gz"),
+    ],
+)
+def test_a_recognised_foreign_format_no_longer_reaches_the_doc_parser(head, detected):
+    """The gap this closes. Every parser-bomb vector worth the name is a
+    structured format, and ``filetype`` names each one."""
+    with pytest.raises(ValidationError, match=detected):
+        validate_content_matches_extension("doc", head)
+
+
+def test_unsignatured_content_still_reaches_the_parser_and_that_is_deliberate():
+    """Records the trade rather than leaving it implicit: .doc is a blocklist
+    where every other format is an allowlist. Arbitrary bytes with no signature
+    reach Spire, fail its load, and fall back to ``GetText()``. Narrowing this
+    to OLE2+RTF is possible once the corpora are known to hold no HTML/text
+    .doc files — a corpus question, not a code one."""
+    validate_content_matches_extension("doc", b"\x01\x02\x03 arbitrary, unrecognised")
+
+
+def test_the_doc_rule_does_not_leak_to_other_extensions():
+    """Only .doc is tolerant; .pdf must still require its own signature."""
+    with pytest.raises(ValidationError):
+        validate_content_matches_extension("pdf", TEXT)

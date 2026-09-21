@@ -123,9 +123,10 @@ CONTENT_SNIFF_BYTES = 8192
 #:
 #: * ``txt``/``md``/``html``/``htm``/``eml``/``svg`` are text formats with no
 #:   signature to check.
-#: * ``doc`` (OLE2) and ``wma`` were verified empirically against the bundled
-#:   matchers and are not reliably detected, so enforcing them would reject
-#:   legitimate uploads.
+#: * ``wma`` was verified empirically against the bundled matchers and is not
+#:   reliably detected, so enforcing it would reject legitimate uploads.
+#: * ``doc`` is **not** here either: its parser accepts several formats, so it
+#:   is checked against :data:`_TOLERANT_SIGNATURES` instead.
 #: * Audio and video containers other than those above are left out until the
 #:   accepted brand variants can be checked against real samples; guessing at
 #:   them risks refusing valid media.
@@ -140,6 +141,35 @@ _VERIFIABLE_SIGNATURES: dict[str, frozenset[str]] = {
     "gif": frozenset({"gif"}),
     "bmp": frozenset({"bmp"}),
     "webp": frozenset({"webp"}),
+}
+
+#: Extensions whose parser legitimately consumes several formats, so the check
+#: refuses what ``filetype`` recognises as *something else* rather than
+#: requiring a signature of its own. The value is what stays acceptable beyond
+#: "no signature at all".
+#:
+#: ``doc`` is the only one, and it is the exception to the allowlist above for a
+#: reason that is a property of the format, not a shortcut. Spire.Doc loads
+#: OLE2, RTF, HTML and plain text under a ``.doc`` name — all four were verified
+#: loading — and Word has historically written all of them that way. OLE2 and
+#: HTML/text are indistinguishable to ``filetype`` (it reports ``None`` for
+#: each), so requiring a known-good signature would refuse legitimate uploads.
+#: That is exactly why ``.doc`` was excluded from #957 and became the only
+#: accepted format with no check at all (#964).
+#:
+#: What this does close: a renamed PDF, ZIP/OOXML, image, archive or executable
+#: reaching Spire. Those are the parser-bomb vectors, and ``filetype`` names
+#: every one of them.
+#:
+#: What it deliberately does not: arbitrary *unsignatured* bytes still reach
+#: Spire, where they fail the load and fall back to ``GetText()`` — the path
+#: ``DocParser`` already has. Nor does it stop a crafted ``.doc``, which carries
+#: a real document's signature; bounding that is #997's job. Narrowing this to
+#: an allowlist (OLE2 + RTF only) is possible once someone confirms no legacy
+#: HTML/text ``.doc`` files exist in the corpora — a corpus question, not a code
+#: one.
+_TOLERANT_SIGNATURES: dict[str, frozenset[str]] = {
+    "doc": frozenset({"rtf"}),
 }
 
 #: The part whose presence makes an OPC package a document of that kind, per
@@ -161,8 +191,11 @@ def validate_content_matches_extension(extension: str, head: bytes) -> None:
     The extension alone decides which parser a document reaches, so a file
     renamed to ``.pdf`` is handed to the PDF backend whatever it actually
     contains. For the formats in :data:`_VERIFIABLE_SIGNATURES` the signature
-    must match; an unrecognised signature is a failure too, because arbitrary
-    content is exactly what this rejects.
+    ``filetype`` reports must match; an unrecognised signature is a failure too,
+    because arbitrary content is exactly what this rejects. The formats in
+    :data:`_TOLERANT_SIGNATURES` invert that: their parser accepts several
+    formats, so anything ``filetype`` recognises as *something else* is refused
+    and everything it cannot place is allowed.
 
     Extensions outside that map pass through untouched — there is nothing to
     check, and refusing them would be a guess.
@@ -170,6 +203,18 @@ def validate_content_matches_extension(extension: str, head: bytes) -> None:
     Raises:
         ValidationError: HTTP 415, when the content contradicts the extension.
     """
+    tolerated = _TOLERANT_SIGNATURES.get(extension)
+    if tolerated is not None:
+        kind = filetype.guess(head)
+        # ``None`` covers OLE2, HTML and plain text alike — all three load.
+        if kind is None or kind.extension in tolerated:
+            return
+        raise ValidationError(
+            f"Uploaded file does not match its .{extension} extension: it looks like a "
+            f"{kind.extension} file. Upload it with the extension matching its actual format.",
+            status_code=415,
+        )
+
     expected = _VERIFIABLE_SIGNATURES.get(extension)
     if expected is None:
         return
