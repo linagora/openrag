@@ -4,6 +4,8 @@ import type { MouseEvent } from "react";
 import { ArrowLeft, Ban, Copy } from "lucide-react";
 import { toast } from "sonner";
 
+import { useAuth } from "@/lib/auth";
+import { usePermissions } from "@/lib/permissions";
 import { StatusBadge } from "@/components/shared/status-badge";
 import {
   DegradedCompletionStatus,
@@ -30,10 +32,6 @@ import { copyToClipboard } from "@/lib/utils";
 
 const str = (v: unknown) => (v == null ? "" : String(v));
 
-function errorSummary(lines: string[]): string {
-  return [...lines].reverse().find((line) => line.trim() && !line.trim().startsWith("Traceback"))?.trim() ?? "";
-}
-
 function failedStage(details: unknown): string {
   if (!details || typeof details !== "object") return "";
   const record = details as Record<string, unknown>;
@@ -42,13 +40,17 @@ function failedStage(details: unknown): string {
 
 export default function JobDetailPage() {
   const { id } = useParams<{ id: string }>();
+  const { user } = useAuth();
+  const { isAdmin } = usePermissions();
   const queryClient = useQueryClient();
+  const userId = user?.id ?? 0;
+  const authorizationScope = isAdmin ? "admin" : "user";
 
   // OpenRag has no task SSE — poll status until it reaches a terminal state.
   const taskQuery = useQuery({
-    queryKey: ["task", id],
+    queryKey: ["task", id, userId, authorizationScope],
     queryFn: () => getTaskStatus(id!),
-    enabled: !!id,
+    enabled: !!id && !!user,
     refetchInterval: (query) => {
       const state = query.state.data?.task_state;
       return state && isTerminalState(state) ? false : 3000;
@@ -60,9 +62,9 @@ export default function JobDetailPage() {
   const failed = state === "FAILED";
 
   const errorQuery = useQuery({
-    queryKey: ["task-error", id],
+    queryKey: ["task-error", id, userId, authorizationScope],
     queryFn: () => getTaskError(id!),
-    enabled: !!id && failed,
+    enabled: !!id && !!user && failed,
   });
 
   const cancelMutation = useMutation({
@@ -99,7 +101,7 @@ export default function JobDetailPage() {
   const degraded = task.task_state === "COMPLETED" && degradedStages.length > 0;
   const filename = str(details?.metadata?.filename) || str(details?.file_id) || "—";
   const traceback = errorQuery.data?.traceback ?? [];
-  const summary = errorSummary(traceback);
+  const summary = errorQuery.data?.summary ?? "";
   const stage = failedStage(details);
   const diagnostics = [
     `Task ID: ${task.task_id}`,

@@ -15,6 +15,19 @@ vi.mock("sonner", () => ({
   },
 }));
 
+const permissions = vi.hoisted(() => ({ isAdmin: true }));
+const auth = vi.hoisted(() => ({
+  user: { id: 7, is_admin: true },
+}));
+
+vi.mock("@/lib/permissions", () => ({
+  usePermissions: () => ({ isAdmin: permissions.isAdmin }),
+}));
+
+vi.mock("@/lib/auth", () => ({
+  useAuth: () => auth,
+}));
+
 vi.mock("@/lib/api/jobs", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/api/jobs")>()),
   getTaskError: vi.fn(),
@@ -33,6 +46,18 @@ const cancelTaskMock = vi.mocked(cancelTask);
 const copyToClipboardMock = vi.mocked(copyToClipboard);
 const toastSuccessMock = vi.mocked(toast.success);
 
+function jobDetailTree(queryClient: QueryClient, taskId: string) {
+  return (
+    <QueryClientProvider client={queryClient}>
+      <MemoryRouter initialEntries={[`/jobs/${taskId}`]}>
+        <Routes>
+          <Route path="/jobs/:id" element={<JobDetailPage />} />
+        </Routes>
+      </MemoryRouter>
+    </QueryClientProvider>
+  );
+}
+
 function renderJobDetail(taskId = "task-1") {
   const queryClient = new QueryClient({
     defaultOptions: {
@@ -41,19 +66,18 @@ function renderJobDetail(taskId = "task-1") {
     },
   });
 
-  return render(
-    <QueryClientProvider client={queryClient}>
-      <MemoryRouter initialEntries={[`/jobs/${taskId}`]}>
-        <Routes>
-          <Route path="/jobs/:id" element={<JobDetailPage />} />
-        </Routes>
-      </MemoryRouter>
-    </QueryClientProvider>,
-  );
+  const rendered = render(jobDetailTree(queryClient, taskId));
+  return {
+    ...rendered,
+    queryClient,
+    rerenderJobDetail: () => rendered.rerender(jobDetailTree(queryClient, taskId)),
+  };
 }
 
 describe("JobDetailPage", () => {
   beforeEach(() => {
+    permissions.isAdmin = true;
+    auth.user = { id: 7, is_admin: true };
     vi.clearAllMocks();
     getTaskStatusMock.mockResolvedValue({
       task_id: "task-1",
@@ -68,6 +92,7 @@ describe("JobDetailPage", () => {
     });
     getTaskErrorMock.mockResolvedValue({
       task_id: "task-1",
+      summary: "ValueError: canonical parser failure",
       traceback: [
         "Traceback (most recent call last):",
         "  File \"worker.py\", line 10, in run",
@@ -81,7 +106,7 @@ describe("JobDetailPage", () => {
   it("shows readable failed-job diagnostics and copies them", async () => {
     renderJobDetail();
 
-    expect(await screen.findByText("ValueError: parser failed")).not.toBeNull();
+    expect(await screen.findByText("ValueError: canonical parser failure")).not.toBeNull();
     expect(screen.getByText("chunking")).not.toBeNull();
     expect(screen.getByText("Raw traceback")).not.toBeNull();
 
@@ -93,7 +118,7 @@ describe("JobDetailPage", () => {
         expect.any(HTMLButtonElement),
       ),
     );
-    expect(copyToClipboardMock.mock.calls[0][0]).toContain("ValueError: parser failed");
+    expect(copyToClipboardMock.mock.calls[0][0]).toContain("ValueError: canonical parser failure");
     expect(copyToClipboardMock.mock.calls[0][0]).toContain("Failed stage: chunking");
     expect(toastSuccessMock).toHaveBeenCalledWith("Diagnostics copied to clipboard");
   });
@@ -112,7 +137,7 @@ describe("JobDetailPage", () => {
 
     renderJobDetail();
 
-    expect(await screen.findByText("ValueError: parser failed")).not.toBeNull();
+    expect(await screen.findByText("ValueError: canonical parser failure")).not.toBeNull();
     expect(screen.queryByText("draft")).toBeNull();
     expect(screen.queryByText("user-tag")).toBeNull();
 
@@ -122,6 +147,35 @@ describe("JobDetailPage", () => {
     expect(copyToClipboardMock.mock.calls[0][0]).not.toContain("Failed stage:");
     expect(copyToClipboardMock.mock.calls[0][0]).not.toContain("draft");
     expect(copyToClipboardMock.mock.calls[0][0]).not.toContain("user-tag");
+  });
+
+  it("does not reuse cached admin diagnostics after an account change", async () => {
+    getTaskErrorMock.mockImplementation(async () =>
+      auth.user.is_admin
+        ? {
+            task_id: "task-1",
+            summary: "ValueError: internal parser failure",
+            traceback: ["ValueError: internal parser failure"],
+          }
+        : {
+            task_id: "task-1",
+            summary: "Task failed. Contact an administrator for details.",
+            traceback: ["Task failed. Contact an administrator for details."],
+          },
+    );
+    const { rerenderJobDetail } = renderJobDetail();
+
+    expect((await screen.findAllByText("ValueError: internal parser failure")).length).toBeGreaterThan(0);
+
+    permissions.isAdmin = false;
+    auth.user = { id: 8, is_admin: false };
+    rerenderJobDetail();
+
+    expect(
+      (await screen.findAllByText("Task failed. Contact an administrator for details.")).length,
+    ).toBeGreaterThan(0);
+    expect(screen.queryAllByText("ValueError: internal parser failure")).toHaveLength(0);
+    expect(getTaskErrorMock).toHaveBeenCalledTimes(2);
   });
 
   it("distinguishes completed jobs with degraded enrichment", async () => {
