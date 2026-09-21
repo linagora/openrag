@@ -123,6 +123,21 @@ describe("JobDetailPage", () => {
     expect(toastSuccessMock).toHaveBeenCalledWith("Diagnostics copied to clipboard");
   });
 
+  it("keeps the traceback-derived reason when an older server omits the summary", async () => {
+    getTaskErrorMock.mockResolvedValue({
+      task_id: "task-1",
+      traceback: [
+        "Traceback (most recent call last):",
+        '  File "worker.py", line 10, in run',
+        "ValueError: parser failed",
+      ],
+    } as Awaited<ReturnType<typeof getTaskError>>);
+
+    renderJobDetail();
+
+    expect(await screen.findByText("ValueError: parser failed")).not.toBeNull();
+  });
+
   it("does not treat user metadata as the failed stage", async () => {
     getTaskStatusMock.mockResolvedValue({
       task_id: "task-1",
@@ -149,7 +164,7 @@ describe("JobDetailPage", () => {
     expect(copyToClipboardMock.mock.calls[0][0]).not.toContain("user-tag");
   });
 
-  it("does not reuse cached admin diagnostics after an account change", async () => {
+  it("does not reuse cached admin diagnostics after a same-account role downgrade", async () => {
     getTaskErrorMock.mockImplementation(async () =>
       auth.user.is_admin
         ? {
@@ -168,7 +183,7 @@ describe("JobDetailPage", () => {
     expect((await screen.findAllByText("ValueError: internal parser failure")).length).toBeGreaterThan(0);
 
     permissions.isAdmin = false;
-    auth.user = { id: 8, is_admin: false };
+    auth.user = { id: 7, is_admin: false };
     rerenderJobDetail();
 
     expect(

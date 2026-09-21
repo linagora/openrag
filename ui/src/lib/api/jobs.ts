@@ -83,8 +83,8 @@ export function getTaskStatus(taskId: string): Promise<TaskStatus> {
   return request<TaskStatus>(`${TASK}/${encodeURIComponent(taskId)}`);
 }
 
-export function getTaskError(taskId: string): Promise<{ task_id: string; summary: string; traceback: string[] }> {
-  return request<{ task_id: string; summary: string; traceback: string[] }>(
+export function getTaskError(taskId: string): Promise<{ task_id: string; summary?: string; traceback: string[] }> {
+  return request<{ task_id: string; summary?: string; traceback: string[] }>(
     `${TASK}/${encodeURIComponent(taskId)}/error`,
   );
 }

@@ -25,6 +25,7 @@ from core.models.catalog import (
     TERMINAL_TASK_STATES,
     normalize_degraded_stages,
 )
+from core.utils.error_summary import summarize_task_error
 from core.utils.logging import get_logger
 
 logger = get_logger()
@@ -32,22 +33,6 @@ logger = get_logger()
 _ACTIVE_STATES = ("QUEUED", "SERIALIZING")
 _DURABLE_TASK_LIMIT = 500
 _TERMINAL_STATES = frozenset(state.value for state in TERMINAL_TASK_STATES)
-_ERROR_SUMMARY_MAX_LENGTH = 500
-
-
-def summarize_task_error(error: str | None) -> str | None:
-    """Return a compact failure reason suitable for admin list views."""
-    if not error:
-        return None
-
-    for line in reversed(error.splitlines()):
-        summary = " ".join(line.split())
-        if not summary or summary.startswith("Traceback"):
-            continue
-        if len(summary) > _ERROR_SUMMARY_MAX_LENGTH:
-            return f"{summary[: _ERROR_SUMMARY_MAX_LENGTH - 3].rstrip()}..."
-        return summary
-    return None
 
 
 class JobService:

@@ -32,6 +32,7 @@ from api.dependencies.files import (
     validate_metadata,
 )
 from core.models.catalog import TERMINAL_TASK_STATES
+from core.utils.error_summary import summarize_task_error
 from core.utils.exceptions import OpenRAGError, indexing_worker_may_be_running
 from core.utils.filename import sanitize_filename
 from core.utils.logging import get_logger
@@ -48,7 +49,6 @@ from fastapi import (
     status,
 )
 from fastapi.responses import JSONResponse
-from services.orchestrators.job_service import summarize_task_error
 
 logger = get_logger()
 

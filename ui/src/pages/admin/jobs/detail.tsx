@@ -32,6 +32,10 @@ import { copyToClipboard } from "@/lib/utils";
 
 const str = (v: unknown) => (v == null ? "" : String(v));
 
+function tracebackSummary(lines: string[]): string {
+  return [...lines].reverse().find((line) => line.trim() && !line.trim().startsWith("Traceback"))?.trim() ?? "";
+}
+
 function failedStage(details: unknown): string {
   if (!details || typeof details !== "object") return "";
   const record = details as Record<string, unknown>;
@@ -101,7 +105,7 @@ export default function JobDetailPage() {
   const degraded = task.task_state === "COMPLETED" && degradedStages.length > 0;
   const filename = str(details?.metadata?.filename) || str(details?.file_id) || "—";
   const traceback = errorQuery.data?.traceback ?? [];
-  const summary = errorQuery.data?.summary ?? "";
+  const summary = errorQuery.data?.summary?.trim() || tracebackSummary(traceback);
   const stage = failedStage(details);
   const diagnostics = [
     `Task ID: ${task.task_id}`,
