@@ -179,14 +179,18 @@ class Document(BaseModel):
         helper instead of rolling their own ``NamedTemporaryFile`` dance.
 
         When :attr:`source_path` is set, that path is yielded **as-is** and
-        nothing is written or deleted: the document already has a file, under
-        ``config.paths.data_dir``, which is node-shared in both deployment
-        shapes (Helm ``persistence.accessMode: ReadWriteMany``, Compose's
-        ``${DATA_VOLUME}:/app/data`` bind mount). That is what makes the pooled
-        parsers placeable — ``MarkerPool``/``DoclingPool``/``WhisperPool`` hand
-        this path to worker actors that may be on another node, and a
-        ``NamedTemporaryFile`` written here is visible only to the node that
-        wrote it (#911).
+        nothing is written or deleted: the document already has a file, and a
+        ``NamedTemporaryFile`` written here would be visible only to the node
+        that wrote it — which is what stops ``MarkerPool``/``DoclingPool``/
+        ``WhisperPool`` handing a path to a worker actor on another node
+        (#911).
+
+        Whether the yielded path is reachable from another node is the
+        *caller's* property, not this method's: the upload routes save under
+        ``config.paths.data_dir`` (Helm ``persistence.accessMode:
+        ReadWriteMany``, Compose's ``${DATA_VOLUME}:/app/data`` bind mount) and
+        are placeable; ``index_url``'s download is in the node's own temp dir
+        and is not.
 
         Otherwise ``raw_bytes`` is materialized to a temporary file, which *is*
         removed on context exit even if the body raises. That is the path for

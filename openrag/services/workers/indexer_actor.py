@@ -481,11 +481,20 @@ async def _load_document(
         id=file_id,
         filename=filename,
         raw_bytes=raw_bytes,
-        # The upload's own path under ``config.paths.data_dir`` — node-shared in
-        # both deployment shapes. Path-based parsers hand this across the actor
-        # boundary instead of a node-local temp file (#911). It outlives the
-        # pipeline: ``indexer_pool`` purges the upload only after indexing
-        # settles, and only when ``save_uploaded_files`` is off.
+        # The file the caller supplied, so path-based parsers can hand it
+        # across the actor boundary instead of writing a node-local temp
+        # (#911). It outlives the pipeline: ``indexer_pool`` purges the upload
+        # only after indexing settles, and only when ``save_uploaded_files``
+        # is off.
+        #
+        # Placeable only when that file is on shared storage, which is a
+        # property of the caller, not of this function. The upload routes save
+        # under ``config.paths.data_dir`` (Helm RWX volume, Compose bind
+        # mount), so they are. ``MCPService.index_url`` downloads to a
+        # ``NamedTemporaryFile`` in the node's own temp dir, so it is not — on
+        # a multi-node cluster a worker elsewhere cannot open it. That is the
+        # pre-existing #911 behaviour for that route rather than a regression,
+        # and closing it means downloading into ``data_dir``.
         source_path=str(p),
         content_type=Document.detect_content_type(filename),
         partition=partition,
