@@ -693,6 +693,18 @@ The following environment variables configure the FastAPI server and control acc
 Always set a strong **`AUTH_TOKEN`** in production environments. Never leave it empty or use default values in production deployments.
 :::
 
+### Synthetic Canary
+
+Indexes, retrieves and deletes a known document on a schedule, in the reserved `openrag-canary` partition, as a system user with no token and no quota. See [Synthetic canary](/openrag/documentation/synthetic_canary/).
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `CANARY_ENABLED` | `bool` | `false` | Run the canary. The Helm chart sets it to `true`. Pair it with the `OpenRagCanaryFailing` alert. |
+| `CANARY_INTERVAL_SECONDS` | `int` | `900` | Seconds between the starts of two runs (at least 60). |
+| `CANARY_INITIAL_DELAY_SECONDS` | `int` | `60` | Wait after API startup before the first run. |
+| `CANARY_INDEX_TIMEOUT_SECONDS` | `int` | `600` | Time allowed for the canary's indexing task to finish, queue wait included. |
+| `CANARY_REQUEST_TIMEOUT_SECONDS` | `int` | `60` | Time allowed for each other call: submission, retrieval and deletion. |
+
 ### Rate Limiting
 
 Per-identity request rate limiting, tiered by path prefix. Requests are keyed on the authenticated user id, falling back to the client IP for unauthenticated paths (`/auth/*`). **Admin users bypass rate limiting entirely.** Limits use a moving window and are enforced **per worker/replica** — front OpenRAG with shared storage (e.g. Redis) if you scale out and need a global budget. Exceeding a limit returns **429** with a `Retry-After` header.

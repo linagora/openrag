@@ -1,0 +1,106 @@
+# promtool unit tests for the canary alert:
+#   promtool test rules tests/unit/infra/prometheus/openrag-canary.rules.test.yaml
+# Run by tests/unit/infra/test_canary_alert_rules.py when promtool is on PATH.
+rule_files:
+  - ../../../../infra/charts/openrag-stack/rules/openrag-canary.rules.yaml
+
+evaluation_interval: 1m
+
+tests:
+  # Two replicas: "a" runs the canary and fails twice in a row; "b" stands by.
+  - interval: 1m
+    input_series:
+      - series: openrag_canary_consecutive_failures{instance="a"}
+        values: "0x14 1x14 2x10"
+      - series: openrag_canary_consecutive_failures{instance="b"}
+        values: "0x40"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: OpenRagCanaryFailing
+        exp_alerts: []
+      - eval_time: 32m
+        alertname: OpenRagCanaryFailing
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              condition: runs-failing
+            exp_annotations:
+              summary: "The synthetic canary failed 2 runs in a row"
+              description: >-
+                Indexing, retrieving or deleting the canary's known document fails.
+                The API log line "Canary run failed" names the failed stage and the
+                reason; openrag_canary_failures_total{stage} shows which stage over time.
+              runbook_url: https://linagora.github.io/openrag/documentation/runbooks/openrag-canary-failing/
+
+  # A single failure followed by a pass never pages.
+  - interval: 1m
+    input_series:
+      - series: openrag_canary_consecutive_failures{instance="a"}
+        values: "0x14 1x14 0x14"
+    alert_rule_test:
+      - eval_time: 40m
+        alertname: OpenRagCanaryFailing
+        exp_alerts: []
+
+  # Runs stop finishing: the last one ended at 10m, the interval is 15m, so
+  # the silence counts from 55m and the alert fires after its 15m hold.
+  - interval: 1m
+    input_series:
+      - series: openrag_canary_enabled{instance="a"}
+        values: "1x100"
+      - series: openrag_canary_interval_seconds{instance="a"}
+        values: "900x100"
+      - series: openrag_canary_last_run_timestamp_seconds{instance="a"}
+        values: "0x9 600x90"
+      - series: openrag_canary_consecutive_failures{instance="a"}
+        values: "0x100"
+    alert_rule_test:
+      - eval_time: 60m
+        alertname: OpenRagCanaryFailing
+        exp_alerts: []
+      - eval_time: 71m
+        alertname: OpenRagCanaryFailing
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              condition: not-running
+            exp_annotations:
+              summary: The synthetic canary is enabled but has not completed a run
+              description: >-
+                No canary run has finished in over two intervals. Check that an API
+                replica exports openrag_canary_leader 1; if none does, the lease on
+                Postgres cannot be taken.
+              runbook_url: https://linagora.github.io/openrag/documentation/runbooks/openrag-canary-failing/
+
+  # The runner changed replicas: "a" ran until 20m and went away, "b" took the
+  # lease and keeps running. max() follows the most recent run anywhere.
+  - interval: 1m
+    input_series:
+      - series: openrag_canary_enabled{instance="a"}
+        values: "1x20"
+      - series: openrag_canary_enabled{instance="b"}
+        values: "1x100"
+      - series: openrag_canary_interval_seconds{instance="b"}
+        values: "900x100"
+      - series: openrag_canary_last_run_timestamp_seconds{instance="a"}
+        values: "0x9 600x11"
+      - series: openrag_canary_last_run_timestamp_seconds{instance="b"}
+        values: "0x29 1800x15 2700x15 3600x15 4500x15 5400x10"
+    alert_rule_test:
+      - eval_time: 95m
+        alertname: OpenRagCanaryFailing
+        exp_alerts: []
+
+  # Disabled: nothing fires, whatever the timestamps say.
+  - interval: 1m
+    input_series:
+      - series: openrag_canary_enabled{instance="a"}
+        values: "0x100"
+      - series: openrag_canary_interval_seconds{instance="a"}
+        values: "900x100"
+      - series: openrag_canary_last_run_timestamp_seconds{instance="a"}
+        values: "0x100"
+    alert_rule_test:
+      - eval_time: 90m
+        alertname: OpenRagCanaryFailing
+        exp_alerts: []

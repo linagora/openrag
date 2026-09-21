@@ -2,6 +2,13 @@ global:
   scrape_interval: 15s
   evaluation_interval: 15s
 
+# OpenRag's alert rules. The directory is the chart's rules/ (mounted by
+# monitoring.docker-compose.yaml), the same files the Helm chart ships as a
+# PrometheusRule. This stack has no Alertmanager: firing alerts show on
+# Prometheus's /alerts page; point alerting.alertmanagers at one to be paged.
+rule_files:
+  - /etc/prometheus/rules/*.yaml
+
 scrape_configs:
   - job_name: "prometheus"
     static_configs:

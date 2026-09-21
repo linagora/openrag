@@ -31,6 +31,44 @@ cardinality stays bounded. Probe and documentation paths (`/health_check`,
 `/metrics`, `/docs`, `/openapi.json`, `/redoc`) are not recorded. The standard
 `process_*` and `python_*` series from the Prometheus client are exposed too.
 
+### Synthetic canary
+
+Outcome of the [synthetic canary](/openrag/documentation/synthetic_canary/).
+Every replica exports these series and one runs the canary at a time, so
+aggregate across replicas with `max()`.
+
+| Metric | Type | Labels | Meaning |
+| --- | --- | --- | --- |
+| `openrag_canary_enabled` | gauge | | 1 when `CANARY_ENABLED` is on. |
+| `openrag_canary_interval_seconds` | gauge | | Configured seconds between runs. |
+| `openrag_canary_leader` | gauge | | 1 on the replica that holds the lease and runs the canary. |
+| `openrag_canary_runs_total` | counter | `outcome` | Runs, `success` or `failure`. |
+| `openrag_canary_failures_total` | counter | `stage` | Failed runs by the first stage that failed: `setup`, `queue`, `index`, `query`, `cleanup`. |
+| `openrag_canary_consecutive_failures` | gauge | | Failed runs since the last pass, on the runner. Resets to 0 on a replica that loses the lease. |
+| `openrag_canary_last_run_timestamp_seconds` | gauge | | Unix time the last run finished, whatever its outcome; 0 before the first. |
+| `openrag_canary_last_success_timestamp_seconds` | gauge | | Unix time the last run passed; 0 before the first. |
+| `openrag_canary_stage_duration_seconds` | gauge | `stage` | Seconds the last run spent in each stage, plus `stage="total"`. A stage the run did not reach reads 0. |
+
+The canary calls the services directly, so its own traffic is absent from the
+`openrag_http_*` series.
+
+## Alert rules
+
+The alert rules live in `infra/charts/openrag-stack/rules/`, in Prometheus
+rule-file format. The chart and the Compose monitoring overlay deliver the
+same files:
+
+- **Kubernetes:** `openrag.metrics.prometheusRule.enabled: true` renders them
+  as a `PrometheusRule`. `labels` must match the operator's `ruleSelector`;
+  `ruleLabels` are added to every alert for Alertmanager routing.
+- **Docker Compose:** the overlay mounts the directory into Prometheus, which
+  loads it through `rule_files`. There is no Alertmanager in that stack, so
+  firing alerts appear only on Prometheus's `/alerts` page.
+
+| Alert | Fires on | Runbook |
+| --- | --- | --- |
+| `OpenRagCanaryFailing` | Two canary runs in a row failed (`condition="runs-failing"`), or no run has finished for two intervals while the canary is enabled (`condition="not-running"`). | [OpenRagCanaryFailing](/openrag/documentation/runbooks/openrag-canary-failing/) |
+
 ## Access control
 
 `/metrics` bypasses the regular authentication middleware: a scraper never
@@ -198,5 +236,5 @@ your setup; see [Grafana HTTP dashboard](/openrag/documentation/grafana_http_das
   a dedicated metrics port) and is not implemented yet.
 - Counters reset when the API restarts; use `rate()` and `increase()` rather
   than raw values.
-- Indexing, inference and vector-store metrics are not exposed yet; only the
-  HTTP layer and the circuit breakers are instrumented.
+- Indexing, inference and vector-store metrics are not exposed yet. The
+  synthetic canary's outcome is the only signal covering that path end to end.

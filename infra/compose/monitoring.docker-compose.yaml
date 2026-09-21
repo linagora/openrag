@@ -7,6 +7,8 @@ services:
       - "127.0.0.1:9090:9090"
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      # Alert rules: the Helm chart's copy, so Compose and Kubernetes alert alike.
+      - ../charts/openrag-stack/rules:/etc/prometheus/rules:ro
       - prometheus_data:/prometheus
     configs:
       # The scrape bearer, read by prometheus.yml (credentials_file). Written

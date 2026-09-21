@@ -1,0 +1,30 @@
+{{- if .Values.openrag.metrics.prometheusRule.enabled }}
+{{- $ruleLabels := .Values.openrag.metrics.prometheusRule.ruleLabels | default dict }}
+# OpenRag's alert rules for the Prometheus Operator. The rules are the files
+# under rules/ in this chart, the same ones the Compose monitoring overlay
+# mounts, so the two deployments cannot drift apart. ruleLabels are added to
+# every alert so the platform's Alertmanager routes it; a label the rule sets
+# itself (severity, condition) wins over a ruleLabels entry of the same name.
+# Requires the monitoring.coreos.com CRDs.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "openrag-stack.fullname" . }}-openrag
+  labels:
+    {{- include "openrag-stack.componentLabels" (dict "component" "openrag" "context" $) | nindent 4 }}
+    {{- with .Values.openrag.metrics.prometheusRule.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  groups:
+  {{- range $path, $_ := .Files.Glob "rules/*.yaml" }}
+  {{- range $group := (fromYaml ($.Files.Get $path)).groups }}
+    - name: {{ $group.name }}
+      rules:
+      {{- range $rule := $group.rules }}
+      {{- $labels := merge (dict) ($rule.labels | default dict) $ruleLabels }}
+        - {{ toYaml (merge (dict "labels" $labels) (omit $rule "labels")) | indent 10 | trim }}
+      {{- end }}
+  {{- end }}
+  {{- end }}
+{{- end }}

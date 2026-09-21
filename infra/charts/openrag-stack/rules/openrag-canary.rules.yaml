@@ -1,0 +1,50 @@
+# OpenRag alert rules, in Prometheus rule-file format.
+#
+# One copy for every deployment: the chart wraps these groups in a
+# PrometheusRule (templates/prometheusrule.yaml, openrag.metrics.prometheusRule),
+# and the Compose monitoring overlay mounts this directory into Prometheus
+# (rule_files in infra/compose/prometheus/prometheus.yml). The file lives in the
+# chart because Helm reads files only from inside the chart directory.
+#
+# Every API replica exports the canary series and one of them runs the canary
+# at a time, hence max() across replicas. The canary is off unless
+# CANARY_ENABLED=true; while it is off neither rule can fire.
+groups:
+  - name: openrag-canary
+    rules:
+      # Runs happen and fail. One failure can be a blip (a model endpoint
+      # restarting); two in a row is a broken path, found within two intervals.
+      - alert: OpenRagCanaryFailing
+        expr: max(openrag_canary_consecutive_failures) >= 2
+        for: 1m
+        labels:
+          severity: critical
+          condition: runs-failing
+        annotations:
+          summary: "The synthetic canary failed {{ $value }} runs in a row"
+          description: >-
+            Indexing, retrieving or deleting the canary's known document fails.
+            The API log line "Canary run failed" names the failed stage and the
+            reason; openrag_canary_failures_total{stage} shows which stage over time.
+          runbook_url: https://linagora.github.io/openrag/documentation/runbooks/openrag-canary-failing/
+      # No run finishes at all while the canary is enabled: none since the API
+      # started, no replica holds the lease (Postgres unreachable), or the loop
+      # died. A run is bounded by its own timeouts, so a long silence is never a
+      # slow run. The 15m hold covers a restart: the first run starts a minute
+      # after boot and, behind a full indexing queue, can take ten more.
+      - alert: OpenRagCanaryFailing
+        expr: |
+          max(openrag_canary_enabled) == 1
+          unless on()
+          (time() - max(openrag_canary_last_run_timestamp_seconds) < 2 * max(openrag_canary_interval_seconds) + 900)
+        for: 15m
+        labels:
+          severity: critical
+          condition: not-running
+        annotations:
+          summary: The synthetic canary is enabled but has not completed a run
+          description: >-
+            No canary run has finished in over two intervals. Check that an API
+            replica exports openrag_canary_leader 1; if none does, the lease on
+            Postgres cannot be taken.
+          runbook_url: https://linagora.github.io/openrag/documentation/runbooks/openrag-canary-failing/
