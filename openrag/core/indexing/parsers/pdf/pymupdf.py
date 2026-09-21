@@ -45,16 +45,13 @@ from ..registry import parser_registry
 
 ParseMode = Literal["markdown", "text"]
 
-#: What a parse reads from: an on-disk path, or the document's bytes.
-Source = str | bytes
-
 logger = get_logger()
 
 # Single dedicated worker for pymupdf — see "Threading note" in module docstring.
 _PYMUPDF_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="pymupdf")
 
 
-def _open(source: Source) -> pymupdf.Document:
+def _open(source: str | bytes) -> pymupdf.Document:
     """Open ``source`` as a PDF, whether it is a path or a byte string.
 
     No ``filetype`` on the path branch: MuPDF identifies the format from the
@@ -68,7 +65,7 @@ def _open(source: Source) -> pymupdf.Document:
     return pymupdf.open(stream=source, filetype="pdf")
 
 
-def _extract_text(source: Source, filename: str) -> tuple[list[str], list[ImageBlock]]:
+def _extract_text(source: str | bytes, filename: str) -> tuple[list[str], list[ImageBlock]]:
     """Return one stripped plain-text string per page; no images."""
     with _open(source) as doc:
         return [page.get_text().strip() for page in doc], []
@@ -78,7 +75,7 @@ def _to_markdown(doc: pymupdf.Document) -> list[dict]:
     return pymupdf4llm.to_markdown(doc, page_chunks=True, embed_images=False, write_images=False)
 
 
-def _extract_markdown(source: Source, filename: str) -> tuple[list[str], list[ImageBlock]]:
+def _extract_markdown(source: str | bytes, filename: str) -> tuple[list[str], list[ImageBlock]]:
     """Return structured Markdown per page (no images).
 
     pymupdf is the lightweight, no-VLM backend. ``pymupdf4llm`` preserves
@@ -143,7 +140,7 @@ class PyMuPDFParser(DocumentParser):
         # Prefer the path: MuPDF reads the file itself, so the document is not
         # held in this process for the length of the parse (#846). Bytes are
         # the fallback for documents with no file behind them.
-        source: Source | None = document.source_path or document.raw_bytes or None
+        source: str | bytes | None = document.source_path or document.raw_bytes
         if not source:
             return ProcessedDocument(
                 document_id=document.id,
