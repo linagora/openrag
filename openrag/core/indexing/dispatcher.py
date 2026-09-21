@@ -83,6 +83,11 @@ class IndexingDispatcher(ABC):
         ...
 
     @abstractmethod
+    async def get_task_error_reason(self, task_id: str) -> str | None:
+        """Canonical failure reason for a failed task, or ``None``."""
+        ...
+
+    @abstractmethod
     async def cancel_task(self, task_id: str) -> bool:
         """Cancel a running/queued task.
 

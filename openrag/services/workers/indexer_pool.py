@@ -12,7 +12,9 @@ import ray
 from core.config.model_endpoints import CONTROL_EXTRA_KEYS, DEFAULT_ENDPOINT_ALIAS, embedder_fingerprint
 from core.config.root import Settings
 from core.models.catalog import CONTENT_CLAIM_TOKEN_METADATA_KEY
+from core.utils.error_summary import failure_reason_from_exception
 from core.utils.exceptions import NotFoundError
+from services.workers.failure_reporting import submit_task_failure
 from services.workers.indexer_actor import IndexerWorker, _display_filename, delete_uploaded_file
 from services.workers.indexing_callback import send_indexing_callback
 from services.workers.ray_utils import retry_idempotent_ray_actor_method
@@ -510,13 +512,19 @@ class IndexerWorkerActor:
                 # boundary, so per-chunk work reuses one resolved string instead of
                 # hitting the DB per chunk.
                 resolved_prompts = await self._resolve_ingest_prompts(partition, indexation_config or {})
-            except Exception:
+            except Exception as exc:
                 # Not BaseException: a cancellation here must not notify or be
                 # reported as failed (same rule as set_failed_if_not_cancelled).
                 tb = traceback.format_exc()
+                error_reason = failure_reason_from_exception(exc)
                 try:
                     was_failed = await retry_idempotent_ray_actor_method(
-                        lambda: self._tsm.set_failed_if_not_cancelled.remote(task_id, tb),
+                        lambda: submit_task_failure(
+                            self._tsm,
+                            task_id,
+                            tb,
+                            error_reason,
+                        ),
                         task_description=f"set_failed_if_not_cancelled({task_id})",
                     )
                 except Exception:
@@ -623,7 +631,12 @@ class IndexerWorkerActor:
             await asyncio.sleep(min(_WORKER_REF_REGISTRATION_POLL_SECONDS, remaining))
 
         await retry_idempotent_ray_actor_method(
-            lambda: self._task_state_manager.set_failed_if_not_cancelled.remote(task_id, _MISSING_WORKER_REF_ERROR),
+            lambda: submit_task_failure(
+                self._task_state_manager,
+                task_id,
+                _MISSING_WORKER_REF_ERROR,
+                _MISSING_WORKER_REF_ERROR,
+            ),
             task_description=f"set_failed_if_not_cancelled({task_id}) after missing worker ref",
         )
         raise RuntimeError(_MISSING_WORKER_REF_ERROR)
@@ -814,7 +827,12 @@ class IndexerPool:
         remote = getattr(set_failed, "remote", None)
         if remote is not None:
             await retry_idempotent_ray_actor_method(
-                lambda: remote(task_id, _REJECTED_SUBMISSION_ERROR),
+                lambda: submit_task_failure(
+                    task_state_manager,
+                    task_id,
+                    _REJECTED_SUBMISSION_ERROR,
+                    _REJECTED_SUBMISSION_ERROR,
+                ),
                 task_description=f"set_failed_if_not_cancelled({task_id}) from indexer pool",
             )
 

@@ -356,6 +356,48 @@ async def test_process_file_pipeline_failure_sets_failed_and_reraises(tmp_path: 
 
 
 @pytest.mark.asyncio
+async def test_process_file_captures_reason_when_task_state_actor_supports_it(tmp_path: Path) -> None:
+    path = tmp_path / "bad.txt"
+    path.write_bytes(b"x")
+
+    class BrokenParser:
+        async def parse(self, document: Document) -> ProcessedDocument:
+            raise RuntimeError("parser exploded\n<html>\n</html>")
+
+        def supported_types(self) -> list[str]:
+            return [DocumentType.TEXT.value]
+
+    pipeline = build_indexing_pipeline(
+        parser=BrokenParser(),
+        chunker=FakeChunker([]),
+        embedder=FakeEmbedder(),
+        vector_store=FakeVectorStore(),
+    )
+    tsm = _fake_tsm()
+    tsm._ray_actor_method_names = {
+        "set_failed_if_not_cancelled",
+        "set_failed_with_reason_if_not_cancelled",
+    }
+    tsm.set_failed_with_reason_if_not_cancelled = MagicMock()
+    tsm.set_failed_with_reason_if_not_cancelled.remote = AsyncMock(return_value=True)
+    worker = IndexerWorker(pipeline=pipeline, task_state_manager=tsm)
+
+    with pytest.raises(RuntimeError, match="parser exploded"):
+        await worker.process_file(
+            task_id="t2",
+            path=str(path),
+            metadata={"file_id": "f1"},
+            partition="p",
+        )
+
+    failure = tsm.set_failed_with_reason_if_not_cancelled.remote.await_args.args
+    assert failure[0] == "t2"
+    assert "parser exploded" in failure[1]
+    assert failure[2] == "RuntimeError: parser exploded"
+    tsm.set_failed_if_not_cancelled.remote.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("filename", "raw_bytes"),
     [("empty.txt", b""), ("scan.pdf", b"%PDF-1.4")],

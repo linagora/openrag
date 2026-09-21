@@ -160,7 +160,7 @@ class JobService:
             "duration_ms": duration_ms,
         }
         if include_error_summary and info["state"] == "FAILED":
-            summary = summarize_task_error(info.get("error"))
+            summary = summarize_task_error(info.get("error"), reason=info.get("error_reason"))
             if summary:
                 row["error_summary"] = summary
         return row
@@ -241,6 +241,7 @@ def _job_to_info(job: Any) -> dict[str, Any]:
     return {
         "state": state,
         "error": job.error,
+        "error_reason": job.error_reason,
         "details": {
             "file_id": job.file_id,
             "partition": job.partition,

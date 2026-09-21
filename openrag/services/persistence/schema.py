@@ -296,6 +296,7 @@ jobs = Table(
     Column("user_id", Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True),
     Column("status", String, nullable=False),
     Column("error", String, nullable=True),
+    Column("error_reason", String, nullable=True),
     Column(
         "degraded_stages",
         ARRAY(String),

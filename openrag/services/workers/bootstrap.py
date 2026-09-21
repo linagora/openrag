@@ -163,7 +163,12 @@ def _supports_task_completion_recovery(actor) -> bool:
     method_names = getattr(actor, "_ray_actor_method_names", None)
     # ``reconcile_jobs`` came with durable history: a tracker that predates it
     # would never write a settled row or recover one a restart orphaned.
-    required = ("supports_cancellation_recovery", "supports_degraded_stage_history", "reconcile_jobs")
+    required = (
+        "supports_cancellation_recovery",
+        "supports_degraded_stage_history",
+        "supports_error_reason_history",
+        "reconcile_jobs",
+    )
     if isinstance(method_names, (frozenset, list, set, tuple)) and not set(required) <= set(method_names):
         return False
     if getattr(actor, "reconcile_jobs", None) is None:
@@ -171,7 +176,11 @@ def _supports_task_completion_recovery(actor) -> bool:
     try:
         import ray
 
-        for capability in ("supports_cancellation_recovery", "supports_degraded_stage_history"):
+        for capability in (
+            "supports_cancellation_recovery",
+            "supports_degraded_stage_history",
+            "supports_error_reason_history",
+        ):
             method = getattr(actor, capability, None)
             remote = getattr(method, "remote", None)
             if remote is None or ray.get(remote(), timeout=_TRACKER_PROTOCOL_TIMEOUT_SECONDS) is not True:

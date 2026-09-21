@@ -390,6 +390,28 @@ async def test_list_tasks_summarizes_durable_failures_without_an_extra_lookup() 
 
 
 @pytest.mark.asyncio
+async def test_list_tasks_prefers_the_stored_durable_failure_reason() -> None:
+    from core.models.catalog import DocumentStatus
+
+    service = JobService(
+        FakeTSM(info={}),
+        job_repo=FakeJobRepo(
+            [
+                _job(
+                    status=DocumentStatus.FAILED,
+                    error="Traceback (most recent call last):\nValueError: legacy fallback",
+                    error_reason="RuntimeError: canonical failure",
+                )
+            ]
+        ),
+    )
+
+    rows = await service.list_tasks(is_admin=True, user_id=7)
+
+    assert rows[0]["error_summary"] == "RuntimeError: canonical failure"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("task_status", "expected"),
     [("failed", ["FAILED"]), ("active", ["QUEUED", "SERIALIZING"]), (None, None)],
