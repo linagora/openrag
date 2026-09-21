@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
+import multiprocessing
+import sys
 import threading
 from types import SimpleNamespace
 
+import pytest
 from services.workers.parsers import marker_workers
 
 
@@ -108,7 +112,9 @@ def _bare_marker_worker(slots: int = 1):
     worker._executor_locks = [threading.Lock() for _ in range(slots)]
     worker.model_dict = {}
     worker.converter_config = {}
-    worker.config = SimpleNamespace(loader=SimpleNamespace(marker_max_tasks_per_child=1, marker_child_timeout=1))
+    worker.config = SimpleNamespace(
+        loader=SimpleNamespace(marker_max_tasks_per_child=1, marker_child_timeout=1, marker_parse_memory_limit_mb=0)
+    )
     return worker
 
 
@@ -191,7 +197,7 @@ def test_setup_mp_resets_only_its_own_slot(monkeypatch):
         {
             "max_workers": 1,
             "initializer": worker._worker_init,
-            "initargs": ({},),
+            "initargs": ({}, 0),  # (model_dict, marker_parse_memory_limit_mb)
             "mp_context": built[0]["mp_context"],
             "max_tasks_per_child": 1,
         }
@@ -437,3 +443,96 @@ async def _noop():
 
 async def _return(value):
     return value
+
+
+# ---------------------------------------------------------------------------
+# _apply_parse_memory_limit — a hard ceiling on one parse (#997, audit A2)
+# ---------------------------------------------------------------------------
+
+
+def _child_alloc(mib: int) -> str:
+    """Allocate ``mib`` MiB in this process; report what happened."""
+    try:
+        buf = bytearray(mib * 1024 * 1024)
+        return f"allocated {len(buf) // (1024 * 1024)}"
+    except MemoryError:
+        return "MemoryError"
+
+
+def _vmdata_mib() -> int:
+    """This process's current private data size — what RLIMIT_DATA is measured against."""
+    with open("/proc/self/status") as status:
+        for line in status:
+            if line.startswith("VmData:"):
+                return int(line.split()[1]) // 1024
+    raise RuntimeError("VmData not reported")
+
+
+def _child_probe(headroom_mb: int | None, alloc_mib: int) -> str:
+    from services.workers.parsers.marker_workers import _apply_parse_memory_limit
+
+    # The ceiling covers the whole child, not just the parse's own growth, so it
+    # has to sit above whatever the process already holds — a forked test child
+    # inherits the runner's heap, and a real Marker child holds torch's.
+    _apply_parse_memory_limit(0 if headroom_mb is None else _vmdata_mib() + headroom_mb)
+    return _child_alloc(alloc_mib)
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="RLIMIT_DATA only covers mmap on Linux")
+@pytest.mark.parametrize(
+    ("headroom_mb", "alloc_mib", "expected"),
+    [
+        (256, 1024, "MemoryError"),  # over the ceiling -> refused
+        (256, 64, "allocated 64"),  # under it -> untouched
+        (None, 1024, "allocated 1024"),  # disabled -> no ceiling at all
+    ],
+)
+def test_the_limit_actually_bounds_an_allocation_in_a_real_child(headroom_mb, alloc_mib, expected):
+    """Run it for real in a forked child.
+
+    Asserting that ``setrlimit`` was *called* would pass just as well with the
+    wrong resource — and ``RLIMIT_AS`` is the wrong one here (it also refuses
+    file-backed mappings, so Marker's weights and CUDA's device maps would fail).
+    Only allocating against the live limit distinguishes them.
+    """
+    ctx = multiprocessing.get_context("fork")
+    with concurrent.futures.ProcessPoolExecutor(max_workers=1, mp_context=ctx) as pool:
+        assert pool.submit(_child_probe, headroom_mb, alloc_mib).result(timeout=60) == expected
+
+
+def _child_mmap_probe(headroom_mb: int) -> str:
+    """A file-backed mapping far over the ceiling must still be allowed."""
+    import mmap
+    import tempfile
+
+    from services.workers.parsers.marker_workers import _apply_parse_memory_limit
+
+    _apply_parse_memory_limit(_vmdata_mib() + headroom_mb)
+    with tempfile.NamedTemporaryFile() as fh:
+        fh.truncate(2 * 1024 * 1024 * 1024)
+        try:
+            with mmap.mmap(fh.fileno(), 0, prot=mmap.PROT_READ):
+                return "mapped"
+        except OSError as exc:
+            return f"refused: {exc.errno}"
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="RLIMIT_DATA only covers mmap on Linux")
+def test_a_file_backed_mapping_is_not_counted_against_the_limit():
+    """Mutation guard for the choice of resource: with ``RLIMIT_AS`` this returns
+    ``refused: 12``, which is Marker failing to load its model weights."""
+    ctx = multiprocessing.get_context("fork")
+    with concurrent.futures.ProcessPoolExecutor(max_workers=1, mp_context=ctx) as pool:
+        assert pool.submit(_child_mmap_probe, 256).result(timeout=60) == "mapped"
+
+
+def test_an_unavailable_limit_does_not_stop_the_worker_starting(monkeypatch):
+    """Best-effort: a platform that refuses the call must still yield a worker."""
+
+    def _boom(*_args, **_kwargs):
+        raise OSError("not supported here")
+
+    monkeypatch.setattr(marker_workers.resource, "setrlimit", _boom)
+    monkeypatch.setattr(marker_workers, "logger", _NullLogger())
+
+    marker_workers._apply_parse_memory_limit(256)  # must not raise

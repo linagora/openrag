@@ -1,6 +1,7 @@
 import asyncio
 import gc
 import re
+import resource
 import threading
 import time
 
@@ -73,6 +74,34 @@ def _marker_num_gpus(config) -> float:
     except Exception as exc:
         logger.warning("Failed to query Ray cluster GPU resources; falling back to CUDA check", error=str(exc))
         return requested_gpus if torch.cuda.is_available() else 0
+
+
+def _apply_parse_memory_limit(memory_limit_mb: int) -> None:
+    """Cap what this child process may allocate, so one parse cannot take the pod.
+
+    Runs in the slot's child process, which ``MarkerPool`` hands at most one chunk
+    at a time — so the bound is per-parse, and a document that blows through it
+    raises ``MemoryError`` in the process responsible instead of tripping a
+    pod-level OOM kill that takes every file sharing the worker with it (#997).
+
+    ``RLIMIT_DATA`` bounds the heap and private anonymous mappings. Deliberately
+    not ``RLIMIT_AS``: that also counts file-backed mappings, so it would refuse
+    the model weights and CUDA's device maps and break the parse outright.
+
+    Best-effort — a platform without ``RLIMIT_DATA``, or an existing hard limit
+    below the request, must not stop the worker from starting.
+    """
+    if memory_limit_mb <= 0:
+        return
+    try:
+        limit = memory_limit_mb * 1024 * 1024
+        _, hard = resource.getrlimit(resource.RLIMIT_DATA)
+        if hard != resource.RLIM_INFINITY:
+            limit = min(limit, hard)
+        resource.setrlimit(resource.RLIMIT_DATA, (limit, hard))
+        logger.debug(f"Marker child memory limit set to {limit // (1024 * 1024)} MiB")
+    except (ValueError, OSError, AttributeError) as exc:
+        logger.warning(f"Could not apply Marker child memory limit ({memory_limit_mb} MiB): {exc}")
 
 
 # Parser-bomb cap: never process more than this many pages from one PDF, so a
@@ -172,16 +201,17 @@ class MarkerWorker:
             self.executors[slot] = ProcessPoolExecutor(
                 max_workers=1,
                 initializer=self._worker_init,
-                initargs=(self.model_dict,),
+                initargs=(self.model_dict, self.config.loader.marker_parse_memory_limit_mb),
                 mp_context=mp.get_context("spawn"),
                 max_tasks_per_child=self.config.loader.marker_max_tasks_per_child,
             )
             self.logger.debug(f"MarkerWorker slot {slot} executor ready")
 
     @staticmethod
-    def _worker_init(model_dict):
+    def _worker_init(model_dict, memory_limit_mb: int = 0):
         global worker_model_dict
         worker_model_dict = model_dict
+        _apply_parse_memory_limit(memory_limit_mb)
         logger.debug("Worker initialized with model dictionary")
 
     @staticmethod

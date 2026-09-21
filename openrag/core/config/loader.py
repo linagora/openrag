@@ -107,6 +107,7 @@ _ENV_OVERRIDES: list[tuple[str, str, type]] = [
     ("PDFLOADER", "loader.file_loaders.pdf", str),
     ("AUDIOLOADER", "loader.file_loaders.wav", str),
     ("MARKER_MAX_TASKS_PER_CHILD", "loader.marker_max_tasks_per_child", int),
+    ("MARKER_PARSE_MEMORY_LIMIT_MB", "loader.marker_parse_memory_limit_mb", int),
     ("MARKER_POOL_SIZE", "loader.marker_pool_size", int),
     ("MARKER_MAX_PROCESSES", "loader.marker_max_processes", int),
     ("MARKER_NUM_GPUS", "loader.marker_num_gpus", float),
