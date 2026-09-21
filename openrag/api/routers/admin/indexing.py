@@ -48,6 +48,7 @@ from fastapi import (
     status,
 )
 from fastapi.responses import JSONResponse
+from services.orchestrators.job_service import summarize_task_error
 
 logger = get_logger()
 
@@ -565,6 +566,7 @@ async def get_task_status(
 **Response:**
 Returns error information including:
 - `task_id`: The task identifier
+- `summary`: Concise failure reason
 - `traceback`: Error traceback as an array of lines
 
 **Note:** Only available if task state is FAILED.
@@ -585,8 +587,13 @@ async def get_task_error(
     # The raw traceback exposes filesystem paths and internals; only return it
     # to admins. Task owners get a generic failure indicator.
     if user and user.get("is_admin", False):
-        return {"task_id": task_id, "traceback": error.splitlines()}
-    return {"task_id": task_id, "traceback": ["Task failed. Contact an administrator for details."]}
+        return {
+            "task_id": task_id,
+            "summary": summarize_task_error(error) or "Task failed.",
+            "traceback": error.splitlines(),
+        }
+    message = "Task failed. Contact an administrator for details."
+    return {"task_id": task_id, "summary": message, "traceback": [message]}
 
 
 @router.delete(

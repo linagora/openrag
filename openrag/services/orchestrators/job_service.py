@@ -32,6 +32,22 @@ logger = get_logger()
 _ACTIVE_STATES = ("QUEUED", "SERIALIZING")
 _DURABLE_TASK_LIMIT = 500
 _TERMINAL_STATES = frozenset(state.value for state in TERMINAL_TASK_STATES)
+_ERROR_SUMMARY_MAX_LENGTH = 500
+
+
+def summarize_task_error(error: str | None) -> str | None:
+    """Return a compact failure reason suitable for admin list views."""
+    if not error:
+        return None
+
+    for line in reversed(error.splitlines()):
+        summary = " ".join(line.split())
+        if not summary or summary.startswith("Traceback"):
+            continue
+        if len(summary) > _ERROR_SUMMARY_MAX_LENGTH:
+            return f"{summary[: _ERROR_SUMMARY_MAX_LENGTH - 3].rstrip()}..."
+        return summary
+    return None
 
 
 class JobService:
@@ -124,14 +140,20 @@ class JobService:
             filtered = [(tid, i) for tid, i in all_info.items() if i["state"].lower() == task_status.lower()]
 
         now = self._now()
-        return [self._task_row(task_id, info, now=now) for task_id, info in filtered]
+        return [self._task_row(task_id, info, now=now, include_error_summary=is_admin) for task_id, info in filtered]
 
     @staticmethod
     def _now() -> datetime:
         return datetime.now(UTC)
 
     @staticmethod
-    def _task_row(task_id: str, info: dict[str, Any], *, now: datetime) -> dict[str, Any]:
+    def _task_row(
+        task_id: str,
+        info: dict[str, Any],
+        *,
+        now: datetime,
+        include_error_summary: bool,
+    ) -> dict[str, Any]:
         details, fallback_created_at, fallback_finished_at = _task_details(info.get("details"))
 
         created_at = info.get("created_at") or fallback_created_at
@@ -144,7 +166,7 @@ class JobService:
                 now=now,
             )
 
-        return {
+        row = {
             "task_id": task_id,
             "state": info["state"],
             "outcome": _task_outcome(info["state"], details),
@@ -152,6 +174,11 @@ class JobService:
             "created_at": created_at,
             "duration_ms": duration_ms,
         }
+        if include_error_summary and info["state"] == "FAILED":
+            summary = summarize_task_error(info.get("error"))
+            if summary:
+                row["error_summary"] = summary
+        return row
 
     async def get_user_pending_task_count(self, user_id: int | None) -> int:
         """Pending (not-yet-completed) indexing tasks for one user.
