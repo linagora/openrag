@@ -1,3 +1,4 @@
+import math
 from typing import Any, Literal
 
 from core.utils import consts
@@ -53,6 +54,9 @@ class OpenAIChatCompletionRequest(BaseModel):
                         "spoken_style_answer": False,
                         "websearch": False,
                         "include_all_retrieved_sources": False,
+                        "include_retrieval_trace": False,
+                        "compare_original_query": False,
+                        "bypass_query_contextualization": False,
                         "require_retrieval": False,
                     },
                 }
@@ -89,6 +93,9 @@ class OpenAIChatCompletionRequest(BaseModel):
             "websearch": False,
             "llm_override": None,
             "include_all_retrieved_sources": False,
+            "include_retrieval_trace": False,
+            "compare_original_query": False,
+            "bypass_query_contextualization": False,
             "require_retrieval": False,
         },
         description=(
@@ -106,6 +113,11 @@ class OpenAIChatCompletionRequest(BaseModel):
             "'include_all_retrieved_sources' (default false) adds the full, unfiltered retrieval "
             "set to the response's extra.all_retrieved_sources — off by default since it can be "
             "large; opt in only for debugging/evaluation."
+            " 'include_retrieval_trace' (default false) adds content-free stage telemetry to extra. "
+            "'compare_original_query' runs an isolated original-query retrieval only when tracing is enabled; "
+            "it never changes the documents used for the answer. "
+            "'bypass_query_contextualization' skips query rewriting for a traced, explicitly required retrieval; "
+            "it cannot be combined with 'compare_original_query'."
         ),
     )
 
@@ -119,6 +131,53 @@ class OpenAIChatCompletionRequest(BaseModel):
         # omits it entirely.
         if self.top_logprobs is not None and not self.logprobs:
             self.top_logprobs = None
+        return self
+
+    @model_validator(mode="after")
+    def _validate_contextualization_bypass(self) -> "OpenAIChatCompletionRequest":
+        metadata = self.metadata or {}
+        if metadata.get("bypass_query_contextualization") is not True:
+            return self
+        if metadata.get("include_retrieval_trace") is not True:
+            raise ValueError("bypass_query_contextualization requires include_retrieval_trace")
+        if metadata.get("require_retrieval") is not True:
+            raise ValueError("bypass_query_contextualization requires require_retrieval")
+        if metadata.get("compare_original_query") is True:
+            raise ValueError("bypass_query_contextualization cannot be combined with compare_original_query")
+        return self
+
+    @model_validator(mode="after")
+    def _validate_retrieval_diagnostic_overrides(self) -> "OpenAIChatCompletionRequest":
+        metadata = self.metadata or {}
+        keys = {
+            "retrieval_similarity_threshold",
+            "retrieval_top_k",
+            "retrieval_disable_reranker",
+            "retrieval_disable_expansion",
+        }
+        if not keys.intersection(metadata):
+            return self
+        if metadata.get("include_retrieval_trace") is not True:
+            raise ValueError("retrieval diagnostic overrides require include_retrieval_trace")
+        if metadata.get("require_retrieval") is not True:
+            raise ValueError("retrieval diagnostic overrides require require_retrieval")
+        if metadata.get("websearch") is True:
+            raise ValueError("retrieval diagnostic overrides cannot be combined with websearch")
+
+        threshold = metadata.get("retrieval_similarity_threshold")
+        if threshold is not None:
+            if isinstance(threshold, bool) or not isinstance(threshold, (int, float)):
+                raise ValueError("retrieval_similarity_threshold must be a number")
+            if not math.isfinite(float(threshold)) or not 0 <= float(threshold) <= 1:
+                raise ValueError("retrieval_similarity_threshold must be between 0 and 1")
+
+        top_k = metadata.get("retrieval_top_k")
+        if top_k is not None and (isinstance(top_k, bool) or not isinstance(top_k, int) or not 1 <= top_k <= 100):
+            raise ValueError("retrieval_top_k must be an integer between 1 and 100")
+
+        for key in ("retrieval_disable_reranker", "retrieval_disable_expansion"):
+            if key in metadata and not isinstance(metadata[key], bool):
+                raise ValueError(f"{key} must be a boolean")
         return self
 
 

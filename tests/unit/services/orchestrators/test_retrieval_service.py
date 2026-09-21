@@ -18,6 +18,7 @@ from core.config.retrieval_pipeline import RetrievalPipelineConfig
 from core.models.chunk import Chunk
 from core.models.preset import PartitionConfig
 from core.models.query import Query, SearchQueries
+from core.retrieval.trace import RetrievalTraceBuilder
 from core.utils.exceptions import PartitionNotFoundError
 from services.orchestrators.retrieval_service import RetrievalService
 
@@ -130,6 +131,61 @@ async def test_search_normalizes_str_partition_and_passes_params():
 
 
 @pytest.mark.asyncio
+async def test_search_forwards_request_local_trace():
+    searcher = FakeSearcher()
+    trace = RetrievalTraceBuilder("req-1", "hello")
+
+    await _svc(searcher).search(
+        text="hello",
+        partitions="p1",
+        top_k=7,
+        similarity_threshold=0.8,
+        trace=trace,
+    )
+
+    assert searcher.search_calls[0]["trace"] is trace
+
+
+def test_configuration_fingerprint_is_stable_and_ignores_secret_endpoint_fields():
+    searcher = FakeSearcher()
+    cfg = _config()
+    cfg.vectordb = SimpleNamespace(hybrid_search=True, api_key="secret-a")
+    cfg.embedder = SimpleNamespace(model_name="legacy-embedder", api_key="secret-b")
+    cfg.partitions = {
+        "tenant-b": _partition(name="tenant-b", embedder="embed-b"),
+        "tenant-a": _partition(name="tenant-a", embedder="embed-a"),
+    }
+    cfg.models.embedder = {
+        "embed-a": SimpleNamespace(
+            model_name="model-a", endpoint="https://user:pass@example.test", extra={"api_key": "x"}
+        ),
+        "embed-b": SimpleNamespace(model_name="model-b", endpoint="https://example.test", extra={}),
+    }
+    service = RetrievalService(searcher=searcher, reranker=None, llm=None, config=cfg)
+
+    first = service.configuration_fingerprint(["tenant-b", "tenant-a"])
+    cfg.vectordb.api_key = "changed-secret"
+    cfg.models.embedder["embed-a"].endpoint = "https://changed-secret.example.test"
+    second = service.configuration_fingerprint(["tenant-a", "tenant-b"])
+
+    assert first == second
+    assert len(first) == 64
+
+
+def test_public_configuration_reports_effective_expansion_limits():
+    config = _config()
+    config.vectordb = SimpleNamespace(hybrid_search=False)
+    config.retriever.related_limit = 500
+    config.retriever.max_ancestor_depth = None
+    service = RetrievalService(searcher=FakeSearcher(), reranker=None, llm=None, config=config)
+
+    public = service.public_retrieval_configuration(["tenant-a"])
+
+    assert public["partitions"][0]["expansion"]["related_limit"] == 100
+    assert public["partitions"][0]["expansion"]["max_ancestor_depth"] == 50
+
+
+@pytest.mark.asyncio
 async def test_search_no_expansion_when_flags_off():
     s = FakeSearcher()
     s.search_result = [_chunk("1")]
@@ -172,6 +228,19 @@ async def test_retrieve_single_query_via_pipeline():
 
 
 @pytest.mark.asyncio
+async def test_retrieve_threads_trace_through_pipeline_and_records_final_stage():
+    s = FakeSearcher()
+    s.search_result = [_chunk("a"), _chunk("b")]
+    trace = RetrievalTraceBuilder("req-1", "hi")
+
+    out = await _svc(s).retrieve(partitions=["p"], query=Query(query="hi"), trace=trace)
+
+    assert [c.id for c in out] == ["a", "b"]
+    assert s.search_calls[0]["trace"] is trace
+    assert [c.id for c in trace.stages["final"].candidates] == ["a", "b"]
+
+
+@pytest.mark.asyncio
 async def test_retrieve_multi_fuses_subqueries():
     s = FakeSearcher()
     s.search_result = [_chunk("a"), _chunk("b")]
@@ -200,6 +269,23 @@ def test_fuse_rrf_merges_and_dedupes():
 def test_fuse_respects_top_k():
     a, b, c = _chunk("a"), _chunk("b"), _chunk("c")
     assert len(RetrievalService.fuse([[a, b], [b, c]], top_k=2)) == 2
+
+
+def test_fuse_trace_records_duplicates_scores_and_public_cutoff():
+    first_b = _chunk("b")
+    duplicate_b = _chunk("b")
+    a, c = _chunk("a"), _chunk("c")
+    trace = RetrievalTraceBuilder("req-1", "q")
+
+    fused = RetrievalService.fuse([[a, first_b], [duplicate_b, c]], top_k=2, trace=trace)
+
+    assert fused == [first_b, a]
+    hybrid = trace.stages["hybrid_fused"].candidates
+    duplicate = next(candidate for candidate in hybrid if candidate.duplicate_of is not None)
+    assert duplicate.id == "b"
+    assert duplicate.scores["fused"] == pytest.approx(1 / 62 + 1 / 61)
+    assert next(candidate for candidate in hybrid if candidate.id == "c").removal_reason.code == "final_top_n"
+    assert [candidate.id for candidate in trace.stages["final"].candidates] == ["b", "a"]
 
 
 # --------------------------------------------------------------------------- #
@@ -248,6 +334,48 @@ async def test_retrieve_uses_partition_retrieval_config_and_named_reranker():
     assert call["partition"] == ["tenant-a"]
     assert call["top_k"] == 3
     assert call["similarity_threshold"] == 0.77
+
+
+@pytest.mark.asyncio
+async def test_retrieve_diagnostic_overrides_threshold_depth_reranker_and_expansion():
+    s = FakeSearcher()
+    s.search_result = [_chunk("a"), _chunk("b")]
+    reranker = FakeReranker()
+    cfg = _config()
+    cfg.partitions = {
+        "tenant-a": _partition(
+            retrieval=RetrievalPipelineConfig(
+                top_k=3,
+                top_n=2,
+                similarity_threshold=0.77,
+                include_related=True,
+                include_ancestors=True,
+                enable_reranker=True,
+                reranker="fast-ranker",
+            )
+        )
+    }
+    svc = RetrievalService(
+        searcher=s,
+        reranker=None,
+        llm=None,
+        config=cfg,
+        searcher_factory=lambda _name: s,
+        reranker_factory=lambda _name: reranker,
+    )
+
+    await svc.retrieve_multi(
+        partitions=["tenant-a"],
+        search_queries=SearchQueries(query_list=[Query(query="hello")]),
+        top_k=100,
+        similarity_threshold=0.35,
+        disable_reranker=True,
+        disable_expansion=True,
+    )
+
+    assert s.search_calls[0]["top_k"] == 100
+    assert s.search_calls[0]["similarity_threshold"] == 0.35
+    assert reranker.calls == []
 
 
 @pytest.mark.asyncio

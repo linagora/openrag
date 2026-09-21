@@ -19,8 +19,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from abc import ABC, abstractmethod
-from itertools import chain as ichain
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from core.llm.llm import LLM, chat_content
 from core.models.chunk import Chunk
@@ -34,6 +33,25 @@ from core.utils.registry import Registry
 
 logger = logging.getLogger(__name__)
 
+MAX_RELATED_CHUNKS_PER_LOOKUP = 100
+MAX_ANCESTOR_DEPTH = 50
+MAX_EXPANSION_CONCURRENCY = 16
+MAX_EXPANDED_RESULT_CHUNKS = 1_000
+
+
+def bounded_related_limit(value: int) -> int:
+    return min(max(0, value), MAX_RELATED_CHUNKS_PER_LOOKUP)
+
+
+def bounded_ancestor_depth(value: int | None) -> int:
+    if value is None:
+        return MAX_ANCESTOR_DEPTH
+    return min(max(0, value), MAX_ANCESTOR_DEPTH)
+
+
+if TYPE_CHECKING:
+    from core.retrieval.trace import RetrievalTraceBuilder
+
 
 class Retriever(ABC):
     """Common surface for all retrieval strategies."""
@@ -45,6 +63,7 @@ class Retriever(ABC):
         query: str,
         filter: str | None = None,
         filter_params: dict | None = None,
+        trace: RetrievalTraceBuilder | None = None,
     ) -> list[Chunk]:
         """Run the strategy and return scored chunks."""
         ...
@@ -81,8 +100,8 @@ class BaseRetriever(Retriever):
         self.with_surrounding_chunks = with_surrounding_chunks
         self.include_related = include_related
         self.include_ancestors = include_ancestors
-        self.related_limit = related_limit
-        self.max_ancestor_depth = max_ancestor_depth
+        self.related_limit = bounded_related_limit(related_limit)
+        self.max_ancestor_depth = bounded_ancestor_depth(max_ancestor_depth)
         self.expansion_enabled = include_related or include_ancestors
 
     async def retrieve(
@@ -91,7 +110,11 @@ class BaseRetriever(Retriever):
         query: str,
         filter: str | None = None,
         filter_params: dict | None = None,
+        trace: RetrievalTraceBuilder | None = None,
     ) -> list[Chunk]:
+        kwargs = {}
+        if trace is not None:
+            kwargs["trace"] = trace
         return await self.searcher.search(
             query=query,
             partition=partition,
@@ -100,6 +123,7 @@ class BaseRetriever(Retriever):
             filter_params=filter_params,
             similarity_threshold=self.similarity_threshold,
             with_surrounding_chunks=self.with_surrounding_chunks,
+            **kwargs,
         )
 
     async def expand_search_results(self, results: list[Chunk], filter_params: dict | None = None) -> list[Chunk]:
@@ -150,8 +174,12 @@ class MultiQueryRetriever(BaseRetriever):
         query: str,
         filter: str | None = None,
         filter_params: dict | None = None,
+        trace: RetrievalTraceBuilder | None = None,
     ) -> list[Chunk]:
         queries = await self._generate_queries(query)
+        kwargs = {}
+        if trace is not None:
+            kwargs["trace"] = trace
         return await self.searcher.multi_query_search(
             queries=queries,
             partition=partition,
@@ -160,6 +188,7 @@ class MultiQueryRetriever(BaseRetriever):
             filter_params=filter_params,
             similarity_threshold=self.similarity_threshold,
             with_surrounding_chunks=self.with_surrounding_chunks,
+            **kwargs,
         )
 
 
@@ -196,12 +225,16 @@ class HyDeRetriever(BaseRetriever):
         query: str,
         filter: str | None = None,
         filter_params: dict | None = None,
+        trace: RetrievalTraceBuilder | None = None,
     ) -> list[Chunk]:
         hyde = (await self.get_hyde(query)).strip()
         if not hyde:
             queries = [query]
         else:
             queries = [hyde, query] if self.combine else [hyde]
+        kwargs = {}
+        if trace is not None:
+            kwargs["trace"] = trace
         return await self.searcher.multi_query_search(
             queries=queries,
             partition=partition,
@@ -210,6 +243,7 @@ class HyDeRetriever(BaseRetriever):
             filter_params=filter_params,
             similarity_threshold=self.similarity_threshold,
             with_surrounding_chunks=self.with_surrounding_chunks,
+            **kwargs,
         )
 
 
@@ -236,9 +270,15 @@ async def _expand_with_related_chunks(
     if not results or (not include_related and not include_ancestors):
         return results
 
+    related_limit = bounded_related_limit(related_limit)
+    max_ancestor_depth = bounded_ancestor_depth(max_ancestor_depth)
+    if related_limit == 0 or len(results) >= MAX_EXPANDED_RESULT_CHUNKS:
+        return results
+
     allowed_file_ids = file_id_restriction(filter_params)
     seen_ids = {c.id for c in results if c.id}
     expanded: list[Chunk] = list(results)
+    semaphore = asyncio.Semaphore(MAX_EXPANSION_CONCURRENCY)
 
     relationship_ids: set[tuple[str, str]] = set()
     file_infos: set[tuple[str, str]] = set()
@@ -253,22 +293,27 @@ async def _expand_with_related_chunks(
 
     async def _safe_related(part: str, rel_id: str) -> list[Chunk]:
         try:
-            return await searcher.get_related_chunks(
-                partition=part, relationship_id=rel_id, limit=related_limit, allowed_file_ids=allowed_file_ids
-            )
+            async with semaphore:
+                return await searcher.get_related_chunks(
+                    partition=part,
+                    relationship_id=rel_id,
+                    limit=related_limit,
+                    allowed_file_ids=allowed_file_ids,
+                )
         except Exception:
             logger.warning("get_related_chunks failed (partition=%s, relationship_id=%s)", part, rel_id, exc_info=True)
             return []
 
     async def _safe_ancestors(part: str, file_id: str) -> list[Chunk]:
         try:
-            return await searcher.get_ancestor_chunks(
-                partition=part,
-                file_id=file_id,
-                limit=related_limit,
-                max_ancestor_depth=max_ancestor_depth,
-                allowed_file_ids=allowed_file_ids,
-            )
+            async with semaphore:
+                return await searcher.get_ancestor_chunks(
+                    partition=part,
+                    file_id=file_id,
+                    limit=related_limit,
+                    max_ancestor_depth=max_ancestor_depth,
+                    allowed_file_ids=allowed_file_ids,
+                )
         except Exception:
             logger.warning("get_ancestor_chunks failed (partition=%s, file_id=%s)", part, file_id, exc_info=True)
             return []
@@ -281,12 +326,15 @@ async def _expand_with_related_chunks(
 
     if tasks:
         all_results = await asyncio.gather(*tasks)
-        for chunk in ichain.from_iterable(all_results):
-            if chunk.id and chunk.id in seen_ids:
-                continue
-            if chunk.id:
-                seen_ids.add(chunk.id)
-            expanded.append(chunk)
+        for result_group in all_results:
+            for chunk in result_group:
+                if chunk.id and chunk.id in seen_ids:
+                    continue
+                if chunk.id:
+                    seen_ids.add(chunk.id)
+                expanded.append(chunk)
+                if len(expanded) >= MAX_EXPANDED_RESULT_CHUNKS:
+                    return expanded
 
     return expanded
 

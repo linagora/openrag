@@ -8,6 +8,7 @@ up with the on-disk filenames for all managed types.
 
 from __future__ import annotations
 
+import hashlib
 from types import SimpleNamespace
 from typing import get_args
 
@@ -187,6 +188,18 @@ class TestSeeding:
 
 
 class TestResolution:
+    async def test_resolution_with_identity_preserves_prompt_provenance(self):
+        repo = FakePromptRepo()
+        svc = _service(repo)
+        await repo.create(Prompt(prompt_type="query_contextualizer", name="legal", content="LEGAL"))
+
+        resolved = await svc.resolve_prompt_with_identity("query_contextualizer", names=["legal"])
+
+        assert resolved.content == "LEGAL"
+        assert resolved.name == "legal"
+        assert resolved.source == "named"
+        assert resolved.content_hash == hashlib.sha256(b"LEGAL").hexdigest()
+
     async def test_precedence_named_then_default_then_disk(self):
         repo = FakePromptRepo()
         svc = _service(repo)

@@ -9,6 +9,7 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from core.retrieval.trace import RetrievalTraceBuilder
 from services.storage.vector_store_searcher import VectorStoreSearcher, _dict_to_chunk
 
 # ---------------------------------------------------------------------------
@@ -100,6 +101,24 @@ async def test_search_embeds_query_and_calls_store():
     assert call_kwargs["query_text"] == "hello"
     assert call_kwargs["top_k"] == 5
     assert call_kwargs["filters"]["partition"] == ["p1"]
+
+
+@pytest.mark.asyncio
+async def test_search_forwards_trace_and_records_embedding_duration():
+    searcher, store, _, _ = _make_searcher(search_results=[_make_row("1")])
+    trace = RetrievalTraceBuilder("req-1", "hello")
+
+    chunks = await searcher.search(
+        query="hello",
+        partition=["p1"],
+        top_k=5,
+        with_surrounding_chunks=False,
+        trace=trace,
+    )
+
+    assert [chunk.id for chunk in chunks] == ["1"]
+    assert store.search.call_args.kwargs["trace"] is trace
+    assert trace.timings["embedding"] >= 0
 
 
 @pytest.mark.asyncio
@@ -313,6 +332,7 @@ async def test_get_related_chunks_queries_store_with_file_ids():
     doc_repo.get_file_ids_by_relationship.assert_awaited_once_with(partition="p1", relationship_id="r1")
     call_args = store.query_chunks_by_filter.call_args
     assert call_args.args[1]["file_id"] == ["f1", "f2"]
+    assert call_args.kwargs["limit"] == 2
 
 
 @pytest.mark.asyncio
@@ -360,6 +380,7 @@ async def test_get_ancestor_chunks_applies_limit():
     )
     chunks = await searcher.get_ancestor_chunks(partition="p1", file_id="f1", limit=4)
     assert len(chunks) == 4
+    assert store.query_chunks_by_filter.call_args.kwargs["limit"] == 4
 
 
 @pytest.mark.asyncio

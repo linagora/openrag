@@ -93,7 +93,11 @@ class FakeRetrieval:
         return [list(self._chunks) for _ in queries]
 
     @staticmethod
-    def fuse(doc_lists, top_k=None):
+    def configuration_fingerprint(_partitions):
+        return "fake-fingerprint"
+
+    @staticmethod
+    def fuse(doc_lists, top_k=None, trace=None):
         return doc_lists[0] if doc_lists else []
 
 
@@ -829,6 +833,174 @@ async def test_chat_mixed_request_still_retrieves_documents():
 
     assert len(retrieval.retrieve_multi_calls) == 1
     assert out["extra"]["sources"] == [{"source_type": "document", "filename": "report.pdf"}]
+
+
+@pytest.mark.asyncio
+async def test_chat_trace_persists_exact_contextualized_query():
+    generated = {
+        "intent": "other",
+        "requires_retrieval": True,
+        "query_list": [
+            {
+                "query": "exact generated legal query",
+                "temporal_filters": [
+                    {
+                        "field": "created_at",
+                        "operator": ">=",
+                        "value": "2026-01-01T00:00:00+00:00",
+                    }
+                ],
+            }
+        ],
+    }
+    llm = FakeLLM(chat_responses=[json.dumps(generated), "answer"])
+    svc = _svc(mode="ChatBotRag", llm=llm)
+
+    out = await svc.chat(
+        partitions=["p"],
+        payload={
+            "messages": [{"role": "user", "content": "Original legal question?"}],
+            "metadata": {"include_retrieval_trace": True},
+        },
+        prepare_sources=lambda _d, _w: [],
+        model_name="m",
+    )
+
+    trace = out["extra"]["retrieval_trace"]
+    assert trace["original_query"] == "Original legal question?"
+    assert trace["contextualization"]["subqueries"] == [
+        {
+            "query": "exact generated legal query",
+            "temporal_filters": [{"operator": ">=", "value": "2026-01-01T00:00:00+00:00"}],
+        }
+    ]
+    assert trace["contextualization"]["intent"] == "other"
+    assert trace["contextualization"]["requires_retrieval"] is True
+    assert trace["contextualization"]["fallback_used"] is False
+    assert len(trace["contextualization"]["prompt"]["content_hash"]) == 64
+
+
+@pytest.mark.asyncio
+async def test_chat_trace_records_contextualizer_parse_fallback():
+    llm = FakeLLM(chat_responses=["not json", "still not json", "answer"])
+    svc = _svc(mode="ChatBotRag", llm=llm)
+
+    out = await svc.chat(
+        partitions=["p"],
+        payload={
+            "messages": [{"role": "user", "content": "Original legal question?"}],
+            "metadata": {"include_retrieval_trace": True},
+        },
+        prepare_sources=lambda _d, _w: [],
+        model_name="m",
+    )
+
+    context = out["extra"]["retrieval_trace"]["contextualization"]
+    assert context["fallback_used"] is True
+    assert context["subqueries"][0]["query"] == "Original legal question?"
+    assert context["error"]["kind"] == "ValidationError"
+    assert context["error"]["message"] == "redacted"
+
+
+@pytest.mark.asyncio
+async def test_chat_contextualization_bypass_retrieves_exact_original_query_without_rewrite():
+    llm = FakeLLM(chat_responses=["answer"])
+    retrieval = FakeRetrieval([Chunk(id="actual", text="actual", metadata={"_id": "actual"})])
+    svc = _svc(mode="ChatBotRag", llm=llm, retrieval=retrieval)
+
+    out = await svc.chat(
+        partitions=["p"],
+        payload={
+            "messages": [{"role": "user", "content": "Exact original legal question?"}],
+            "metadata": {
+                "include_retrieval_trace": True,
+                "require_retrieval": True,
+                "bypass_query_contextualization": True,
+            },
+        },
+        prepare_sources=lambda docs, _web: [doc.metadata["_id"] for doc in docs],
+        model_name="m",
+    )
+
+    assert len(llm.chat_calls) == 1
+    assert retrieval.retrieve_multi_calls[0]["search_queries"].query_list[0].query == ("Exact original legal question?")
+    context = out["extra"]["retrieval_trace"]["contextualization"]
+    assert context == {
+        "original_query": "Exact original legal question?",
+        "subqueries": [],
+        "intent": None,
+        "requires_retrieval": None,
+        "fallback_used": False,
+        "bypassed": True,
+        "error": None,
+        "duration_seconds": None,
+        "model": None,
+        "prompt": None,
+    }
+    stages = {stage["name"]: stage for stage in out["extra"]["retrieval_trace"]["stages"]}
+    assert stages["original_query"]["status"] == "complete"
+    assert stages["contextualized_query"]["status"] == "not_run"
+
+
+@pytest.mark.asyncio
+async def test_chat_forwards_bounded_retrieval_diagnostic_overrides():
+    retrieval = FakeRetrieval()
+    svc = _svc(mode="ChatBotRag", llm=FakeLLM(chat_responses=["answer"]), retrieval=retrieval)
+
+    await svc.chat(
+        partitions=["p"],
+        payload={
+            "messages": [{"role": "user", "content": "Exact original legal question?"}],
+            "metadata": {
+                "include_retrieval_trace": True,
+                "require_retrieval": True,
+                "bypass_query_contextualization": True,
+                "retrieval_similarity_threshold": 0.35,
+                "retrieval_top_k": 100,
+                "retrieval_disable_reranker": True,
+                "retrieval_disable_expansion": True,
+            },
+        },
+        prepare_sources=lambda docs, _web: [doc.metadata["_id"] for doc in docs],
+        model_name="m",
+    )
+
+    call = retrieval.retrieve_multi_calls[0]
+    assert call["similarity_threshold"] == 0.35
+    assert call["top_k"] == 100
+    assert call["disable_reranker"] is True
+    assert call["disable_expansion"] is True
+
+
+@pytest.mark.asyncio
+async def test_original_query_comparison_never_changes_actual_documents():
+    generated = json.dumps(
+        {
+            "intent": "other",
+            "requires_retrieval": True,
+            "query_list": [{"query": "rewritten query", "temporal_filters": None}],
+        }
+    )
+    retrieval = FakeRetrieval([Chunk(id="actual", text="actual")])
+    svc = _svc(mode="ChatBotRag", llm=FakeLLM(chat_responses=[generated, "answer"]), retrieval=retrieval)
+
+    out = await svc.chat(
+        partitions=["p"],
+        payload={
+            "messages": [{"role": "user", "content": "original query"}],
+            "metadata": {"include_retrieval_trace": True, "compare_original_query": True},
+        },
+        prepare_sources=lambda docs, _web: [doc.metadata["_id"] for doc in docs],
+        model_name="m",
+    )
+
+    assert out["extra"]["presented_sources"] == ["actual"]
+    assert [call["search_queries"].query_list[0].query for call in retrieval.retrieve_multi_calls] == [
+        "rewritten query",
+        "original query",
+    ]
+    comparison = out["extra"]["retrieval_trace"]["comparisons"]["original_query"]
+    assert comparison["status"] == "complete"
 
 
 @pytest.mark.asyncio
@@ -1656,6 +1828,51 @@ async def test_chat_stream_yields_sse_and_done():
     ):
         lines.append(line)
     assert any("[DONE]" in ln for ln in lines)
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_emits_trace_only_in_terminal_metadata():
+    svc = _svc(llm=FakeLLM())
+    lines = [
+        line
+        async for line in svc.chat_stream(
+            partitions=["p"],
+            payload={
+                "messages": [{"role": "user", "content": "original"}],
+                "metadata": {"include_retrieval_trace": True},
+            },
+            prepare_sources=lambda _d, _w: [],
+            model_name="m",
+        )
+    ]
+    chunks = [
+        json.loads(line[len("data: ") :])
+        for line in lines
+        if line.startswith("data: ") and line.strip() != "data: [DONE]"
+    ]
+
+    assert all("retrieval_trace" not in chunk.get("extra", {}) for chunk in chunks[:-1])
+    assert chunks[-1]["extra"]["retrieval_trace"]["original_query"] == "original"
+
+
+@pytest.mark.asyncio
+async def test_empty_casual_trace_records_the_actual_no_retrieval_decision():
+    svc = _svc(mode="ChatBotRag", llm=FakeLLM(chat_responses=["answer"]))
+
+    out = await svc.chat(
+        partitions=["p"],
+        payload={
+            "messages": [{"role": "user", "content": ""}],
+            "metadata": {"include_retrieval_trace": True},
+        },
+        prepare_sources=lambda _d, _w: [],
+        model_name="m",
+    )
+
+    context = out["extra"]["retrieval_trace"]["contextualization"]
+    assert context["intent"] == "empty"
+    assert context["requires_retrieval"] is False
+    assert context["subqueries"] == []
 
 
 # --------------------------------------------------------------------------- #

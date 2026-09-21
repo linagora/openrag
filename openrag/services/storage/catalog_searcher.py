@@ -5,6 +5,7 @@ from __future__ import annotations
 from itertools import islice
 from threading import Lock
 from time import monotonic
+from typing import TYPE_CHECKING
 
 from core.models.chunk import Chunk
 from core.observability.monitoring import ORPHAN_CHUNKS_DROPPED
@@ -13,6 +14,9 @@ from core.retrieval.searcher import RetrievalSearcher
 from core.utils.logging import get_logger
 
 logger = get_logger()
+
+if TYPE_CHECKING:
+    from core.retrieval.trace import RetrievalTraceBuilder
 
 # Shared across named searchers so creating a new instance cannot bypass the
 # warning budget. This stores no document identities or catalog decisions.
@@ -65,7 +69,11 @@ class CatalogSearcher(RetrievalSearcher):
         filter_params: dict | None = None,
         similarity_threshold: float = 0.0,
         with_surrounding_chunks: bool = True,
+        trace: RetrievalTraceBuilder | None = None,
     ) -> list[Chunk]:
+        kwargs = {}
+        if trace is not None:
+            kwargs["trace"] = trace
         return await self._filter(
             await self._searcher.search(
                 query=query,
@@ -75,6 +83,7 @@ class CatalogSearcher(RetrievalSearcher):
                 filter_params=filter_params,
                 similarity_threshold=similarity_threshold,
                 with_surrounding_chunks=with_surrounding_chunks,
+                **kwargs,
             )
         )
 
@@ -87,7 +96,11 @@ class CatalogSearcher(RetrievalSearcher):
         filter_params: dict | None = None,
         similarity_threshold: float = 0.0,
         with_surrounding_chunks: bool = True,
+        trace: RetrievalTraceBuilder | None = None,
     ) -> list[Chunk]:
+        kwargs = {}
+        if trace is not None:
+            kwargs["trace"] = trace
         return await self._filter(
             await self._searcher.multi_query_search(
                 queries=queries,
@@ -97,6 +110,7 @@ class CatalogSearcher(RetrievalSearcher):
                 filter_params=filter_params,
                 similarity_threshold=similarity_threshold,
                 with_surrounding_chunks=with_surrounding_chunks,
+                **kwargs,
             )
         )
 

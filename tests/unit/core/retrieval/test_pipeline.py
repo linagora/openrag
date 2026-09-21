@@ -8,6 +8,7 @@ from core.models.query import Query, SearchQueries, TemporalPredicate
 from core.models.retrieval_result import ScoredChunk
 from core.retrieval.pipeline import RetrieverPipeline
 from core.retrieval.retriever import Retriever
+from core.retrieval.trace import RetrievalTraceBuilder
 
 
 class FakeRetriever(Retriever):
@@ -21,8 +22,16 @@ class FakeRetriever(Retriever):
         self.expand_filter_params: dict | None = None
         self.expansion_enabled = expansion_enabled
 
-    async def retrieve(self, partition, query, filter=None, filter_params=None):
-        self.calls.append({"partition": partition, "query": query, "filter": filter, "filter_params": filter_params})
+    async def retrieve(self, partition, query, filter=None, filter_params=None, trace=None):
+        self.calls.append(
+            {
+                "partition": partition,
+                "query": query,
+                "filter": filter,
+                "filter_params": filter_params,
+                "trace": trace,
+            }
+        )
         if self.results_queue:
             return self.results_queue.pop(0)
         return []
@@ -120,6 +129,13 @@ class ScoringReranker:
         return [(2, 0.91), (0, 0.42), (1, 0.07)]
 
 
+class TruncatingReranker:
+    """Ranks only its hard top two, omitting the remaining candidate."""
+
+    async def rerank(self, query, documents, top_k=None):
+        return [(2, 0.91), (0, 0.42)]
+
+
 @pytest.mark.asyncio
 async def test_reranked_chunks_come_back_as_scored_chunks():
     """The reranker's score survives on the chunk as a typed field, and the
@@ -132,6 +148,99 @@ async def test_reranked_chunks_come_back_as_scored_chunks():
     assert [(c.id, c.rerank_score) for c in out] == [("c", 0.91), ("a", 0.42), ("b", 0.07)]
     assert all(isinstance(c, ScoredChunk) for c in out)
     assert all(isinstance(c, Chunk) for c in out)
+
+
+@pytest.mark.asyncio
+async def test_reranker_trace_keeps_pre_and_post_ranks_and_final_cutoff():
+    r = FakeRetriever()
+    r.results_queue = [_chunks("a", "b", "c")]
+    trace = RetrievalTraceBuilder("req-1", "hi")
+    p = RetrieverPipeline(retriever=r, reranker=ScoringReranker())
+
+    out = await p.retrieve_docs(partition=["p1"], query=Query(query="hi"), top_k=2, trace=trace)
+
+    assert [(c.id, c.rerank_score) for c in out] == [("c", 0.91), ("a", 0.42)]
+    assert [(c.id, c.rank) for c in trace.stages["pre_rerank"].candidates] == [
+        ("a", 1),
+        ("b", 2),
+        ("c", 3),
+    ]
+    assert [(c.id, c.rank, c.scores.get("reranker")) for c in trace.stages["post_rerank"].candidates] == [
+        ("c", 1, 0.91),
+        ("a", 2, 0.42),
+        ("b", 3, 0.07),
+    ]
+    assert trace.stages["post_rerank"].candidates[2].removal_reason.code == "final_top_n"
+    assert [c.id for c in trace.stages["final"].candidates] == ["c", "a"]
+
+
+@pytest.mark.asyncio
+async def test_final_cutoff_keeps_true_count_when_trace_candidates_are_capped():
+    retriever = FakeRetriever()
+    retriever.results_queue = [_chunks(*(f"chunk-{index}" for index in range(201)))]
+    trace = RetrievalTraceBuilder("req-1", "hi")
+    pipeline = RetrieverPipeline(retriever=retriever)
+
+    await pipeline.retrieve_docs(
+        partition=["p1"],
+        query=Query(query="hi"),
+        top_k=1,
+        trace=trace,
+    )
+
+    assert trace.stages["pre_rerank"].candidate_count == 201
+    assert len(trace.stages["pre_rerank"].candidates) == 200
+
+
+@pytest.mark.asyncio
+async def test_reranker_trace_marks_only_candidates_omitted_by_the_reranker():
+    r = FakeRetriever()
+    r.results_queue = [_chunks("a", "b", "c")]
+    trace = RetrievalTraceBuilder("req-1", "hi")
+    p = RetrieverPipeline(retriever=r, reranker=TruncatingReranker())
+
+    await p.retrieve_docs(partition=["p1"], query=Query(query="hi"), trace=trace)
+
+    pre = trace.stages["pre_rerank"].candidates
+    assert [c.removal_reason for c in pre if c.id in {"a", "c"}] == [None, None]
+    assert next(c for c in pre if c.id == "b").removal_reason.code == "reranker_top_n"
+    assert [c.id for c in trace.stages["post_rerank"].candidates] == ["c", "a"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("with_trace", [False, True])
+async def test_tracing_does_not_change_reranked_ids_order_or_scores(with_trace):
+    r = FakeRetriever()
+    r.results_queue = [_chunks("a", "b", "c")]
+    p = RetrieverPipeline(retriever=r, reranker=ScoringReranker())
+    trace = RetrievalTraceBuilder("req-1", "hi") if with_trace else None
+
+    out = await p.retrieve_docs(partition=["p1"], query=Query(query="hi"), top_k=2, trace=trace)
+
+    assert [(c.id, c.rerank_score) for c in out] == [("c", 0.91), ("a", 0.42)]
+
+
+@pytest.mark.asyncio
+async def test_trace_recording_errors_do_not_fail_retrieval():
+    class BrokenTrace:
+        def record_stage(self, *args, **kwargs):
+            raise RuntimeError("trace write failed")
+
+        def record_error(self, *args, **kwargs):
+            raise RuntimeError("trace error write failed")
+
+    r = FakeRetriever()
+    r.results_queue = [_chunks("a", "b", "c")]
+    p = RetrieverPipeline(retriever=r, reranker=ScoringReranker())
+
+    out = await p.retrieve_docs(
+        partition=["p1"],
+        query=Query(query="hi"),
+        top_k=2,
+        trace=BrokenTrace(),
+    )
+
+    assert [(c.id, c.rerank_score) for c in out] == [("c", 0.91), ("a", 0.42)]
 
 
 @pytest.mark.asyncio
@@ -217,6 +326,24 @@ async def test_get_relevant_docs_runs_one_call_per_subquery_and_fuses():
     assert {c.id for c in out} == {"a", "b", "c"}
     # 'b' appears in both lists -> highest fused score
     assert out[0].id == "b"
+
+
+@pytest.mark.asyncio
+async def test_get_relevant_docs_traces_single_query_reranking_stages():
+    r = FakeRetriever()
+    r.results_queue = [_chunks("a", "b", "c")]
+    trace = RetrievalTraceBuilder("req-1", "q1")
+    p = RetrieverPipeline(retriever=r, reranker=ScoringReranker())
+
+    out = await p.get_relevant_docs(
+        partition=["p1"],
+        search_queries=SearchQueries(query_list=[Query(query="q1")]),
+        trace=trace,
+    )
+
+    assert [chunk.id for chunk in out] == ["c", "a", "b"]
+    assert [candidate.id for candidate in trace.stages["pre_rerank"].candidates] == ["a", "b", "c"]
+    assert [candidate.id for candidate in trace.stages["post_rerank"].candidates] == ["c", "a", "b"]
 
 
 @pytest.mark.asyncio
