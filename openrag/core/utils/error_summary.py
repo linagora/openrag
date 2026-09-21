@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 
 _ERROR_SUMMARY_MAX_LENGTH = 500
+_FAILURE_REASON_MAX_LENGTH = 8_000
 _EXCEPTION_HEADER = re.compile(r"^(?:[\w.]+\.)?(?P<type>[A-Z]\w*)(?::\s*(?P<message>.*))?$")
 _CHAIN_SEPARATORS = (
     "During handling of the above exception",
@@ -16,7 +17,10 @@ def failure_reason_from_exception(exc: BaseException) -> str:
     """Capture the exception type and first meaningful message line."""
     exception_type = type(exc).__name__
     message = next((" ".join(line.split()) for line in str(exc).splitlines() if line.strip()), "")
-    return f"{exception_type}: {message}" if message else exception_type
+    reason = f"{exception_type}: {message}" if message else exception_type
+    if len(reason) <= _FAILURE_REASON_MAX_LENGTH:
+        return reason
+    return f"{reason[: _FAILURE_REASON_MAX_LENGTH - 3]}..."
 
 
 def extract_task_error_reason(error: str | None) -> str | None:

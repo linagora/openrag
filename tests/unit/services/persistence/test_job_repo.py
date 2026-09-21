@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from core.models.catalog import DocumentStatus, IndexationJob
+from core.utils.error_summary import failure_reason_from_exception
 from services.persistence.job_repo import PgJobRepository
 
 _NOW = datetime(2026, 9, 1, tzinfo=UTC)
@@ -112,8 +113,8 @@ async def test_upsert_job_keeps_settled_states_and_bounds_the_error():
 
 
 @pytest.mark.asyncio
-async def test_upsert_job_persists_the_uncapped_failure_reason() -> None:
-    reason = "RuntimeError: " + "x" * 10_000
+async def test_upsert_job_persists_the_capped_failure_reason() -> None:
+    reason = failure_reason_from_exception(RuntimeError("x" * 10_000))
     pool = _FakePool(fetchrow=_row(status="FAILED", error="traceback", error_reason=reason))
     repo = _repo(pool)
 
@@ -128,7 +129,9 @@ async def test_upsert_job_persists_the_uncapped_failure_reason() -> None:
     )
 
     query, params = pool.calls[0]
-    assert reason in params
+    assert len(reason) == 8_000
+    assert reason.endswith("...")
+    assert params[6] == reason
     assert "THEN jobs.error_reason" in " ".join(query.split())
     assert job.error_reason == reason
 
