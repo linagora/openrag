@@ -9,7 +9,7 @@ import pytest
 from core.config.indexation_pipeline import IndexationPipelineConfig
 from core.config.retrieval_pipeline import RetrievalPipelineConfig
 from core.models.preset import PartitionConfig
-from core.utils.exceptions import AuthError, PartitionNotFoundError, ValidationError
+from core.utils.exceptions import AuthError, ConfigError, PartitionNotFoundError, ValidationError
 from services.orchestrators.indexing_service import IndexingService
 
 
@@ -85,8 +85,9 @@ class FakeDispatcher:
     async def update_file_metadata(self, file_id, metadata, partition, user):
         self.updated.append((file_id, metadata, partition, user))
 
-    async def copy_file(self, file_id, metadata, partition, user):
+    async def copy_file(self, file_id, metadata, partition, user, **destination):
         self.copied.append((file_id, metadata, partition, user))
+        self.copy_destination = destination
 
     async def get_task_state(self, task_id):
         return "QUEUED"
@@ -962,3 +963,121 @@ async def test_add_file_survives_a_failing_preset_staleness_probe(tmp_path):
 
     assert preset_service.calls == 1
     assert len(dispatcher.dispatched) == 1
+
+
+# ---------------------------------------------------------------------------
+# Copy into a partition on another embedder
+# ---------------------------------------------------------------------------
+
+
+def _copy_config(embedders: dict) -> SimpleNamespace:
+    from core.config.model_endpoints import ModelEndpointConfig
+
+    return SimpleNamespace(
+        partitions={
+            "p-dst": PartitionConfig(
+                name="p-dst",
+                embedder="bge-m3",
+                indexation=IndexationPipelineConfig(),
+                retrieval=RetrievalPipelineConfig(),
+            )
+        },
+        models=SimpleNamespace(
+            embedder={
+                name: ModelEndpointConfig(endpoint="http://bge:8000/v1", vector_field=field)
+                for name, field in embedders.items()
+            }
+        ),
+        loader=SimpleNamespace(content_deduplication_enabled=False),
+    )
+
+
+def _copy_destination(vector_field: str, embedder: str) -> dict:
+    from core.config.model_endpoints import embedder_fingerprint
+
+    return {
+        "vector_field": vector_field,
+        "embedder": f"embedder:{embedder}",
+        "embedder_reference": embedder,
+        "embedder_fingerprint": embedder_fingerprint("http://bge:8000/v1", None, {}),
+    }
+
+
+def _copy_service(config: SimpleNamespace, disp: FakeDispatcher, partition_service=None) -> IndexingService:
+    return IndexingService(
+        document_repo=FakeDocumentRepo(),
+        workspace_repo=FakeWorkspaceRepo(),
+        dispatcher=disp,
+        config=config,
+        partition_service=partition_service,
+        embedder_factory=lambda name: f"embedder:{name}",
+    )
+
+
+async def _copy_into_p_dst(svc: IndexingService) -> None:
+    await svc.copy_file(
+        source_file_id="src",
+        source_partition="p-src",
+        target_file_id="dst",
+        target_partition="p-dst",
+        metadata={},
+        user=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_copy_lands_in_the_target_partitions_embedder_field():
+    disp = FakeDispatcher()
+
+    await _copy_into_p_dst(_copy_service(_copy_config({"bge-m3": "vector_bge_m3"}), disp))
+
+    assert disp.copy_destination == _copy_destination("vector_bge_m3", "bge-m3")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("embedders", [{}, {"bge-m3": None}], ids=["unknown embedder", "no vector field"])
+async def test_a_copy_that_cannot_be_routed_is_refused(embedders):
+    # Written to any other field, the copy would never be found.
+    disp = FakeDispatcher()
+
+    with pytest.raises(ConfigError, match="no vector field to go to"):
+        await _copy_into_p_dst(_copy_service(_copy_config(embedders), disp))
+
+    assert disp.copied == []
+
+
+@pytest.mark.asyncio
+async def test_a_copy_into_a_missing_partition_creates_it_like_an_upload():
+    config = _copy_config({"jina": "vector_jina"})
+    partition_service = _PinningPartitionService(config, db_partitions={"p-dst"})
+    disp = FakeDispatcher()
+
+    await _copy_service(config, disp, partition_service).copy_file(
+        source_file_id="src",
+        source_partition="p-src",
+        target_file_id="dst",
+        target_partition="p-new",
+        metadata={},
+        user={"id": 2},
+    )
+
+    assert partition_service.created == [("p-new", 2)]
+    # Created on the `default` alias, then pinned to the embedder it resolves to.
+    assert disp.copy_destination == _copy_destination("vector_jina", "jina")
+
+
+@pytest.mark.asyncio
+async def test_a_copy_is_admitted_under_the_fence_but_does_not_hold_it():
+    # Uploads to the partition wait on the fence, and a copy can re-embed for minutes.
+    config = _copy_config({"bge-m3": "vector_bge_m3"})
+    partition_service = FakePartitionService(config, db_partitions={"p-dst"})
+    depths = []
+
+    class _Dispatcher(FakeDispatcher):
+        async def copy_file(self, *args, **kwargs):
+            depths.append(partition_service.admission_depth)
+
+    await _copy_into_p_dst(_copy_service(config, _Dispatcher(), partition_service))
+
+    assert partition_service.admissions == ["p-dst"]
+    assert depths == [0]

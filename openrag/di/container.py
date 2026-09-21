@@ -642,6 +642,7 @@ class ServiceContainer:
                 config=settings,
                 partition_service=self.partition_service,
                 preset_service=self.preset_service,
+                embedder_factory=lambda name: self.embedder_factory(name),
             )
         return self._indexing_service
 
