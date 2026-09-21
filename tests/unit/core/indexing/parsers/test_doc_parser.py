@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import os
 import pathlib
 import sys
@@ -236,3 +237,43 @@ class TestConvertedFileIsAPathNotBytes:
             await DocParser(docx_parser=docx_parser).parse(document)
 
         assert not os.path.exists(captured["path"]), "the converted .docx leaked on the failure path"
+
+
+class TestAgainstTheRealDocxParser:
+    """Every other test here mocks ``DocxParser``, which hid a real break: the
+    derived document kept ``filename="legacy.doc"`` while its ``source_path``
+    was a ``.docx``, and ``as_temporary_file`` only yields a path whose suffix
+    matches the filename's. It rejected the converted file, fell through to
+    ``raw_bytes`` (None) and raised — every legacy .doc upload would have
+    failed. A mocked collaborator cannot catch a contract between two real ones.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_real_docx_parser_can_open_the_handed_over_file(self, fake_spire, tmp_path):
+        docx = pytest.importorskip("docx", reason="python-docx is only available transitively")
+        from core.indexing.parsers.docx_parser import DocxParser
+
+        built = io.BytesIO()
+        d = docx.Document()
+        d.add_paragraph("converted content")
+        d.save(built)
+        payload = built.getvalue()
+
+        instance = MagicMock()
+        instance.SaveToFile.side_effect = lambda path, _fmt: pathlib.Path(path).write_bytes(payload)
+        fake_spire.return_value = instance
+
+        src = tmp_path / "legacy.doc"
+        src.write_bytes(b"\xd0\xcf\x11\xe0fake")
+        document = Document(
+            filename="legacy.doc",
+            content_type=DocumentType.DOC,
+            raw_bytes=src.read_bytes(),
+            source_path=str(src),
+        )
+
+        result = await DocParser(docx_parser=DocxParser()).parse(document)
+
+        assert any("converted content" in b.text for b in result.text_blocks), (
+            "the real DocxParser produced nothing from the handed-over path"
+        )

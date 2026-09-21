@@ -16,6 +16,7 @@ import logging
 import os
 import tempfile
 from contextlib import suppress
+from pathlib import Path
 
 from ...models.document import Document, DocumentType, ProcessedDocument, TextBlock
 from .document_parser import DocumentParser
@@ -56,10 +57,21 @@ class DocParser(DocumentParser):
             # would hand ``DocxParser`` the .doc and it would parse the wrong
             # file. ``raw_bytes`` is dropped for the same reason it is not read
             # — the .docx stays on disk and the DOCX parser opens it (#846).
-            docx_doc = document.model_copy(
-                update={"raw_bytes": None, "content_type": DocumentType.DOCX, "source_path": docx_path}
-            )
             try:
+                # ``filename`` moves to .docx with the content. ``as_temporary_file``
+                # only yields a ``source_path`` whose suffix matches the filename's —
+                # the sync libraries dispatch on it — so leaving "legacy.doc" here
+                # makes it reject the converted file, fall through to ``raw_bytes``
+                # (now None) and raise. Built inside the ``try`` so the converted
+                # file is removed even if constructing the document fails.
+                docx_doc = document.model_copy(
+                    update={
+                        "raw_bytes": None,
+                        "content_type": DocumentType.DOCX,
+                        "source_path": docx_path,
+                        "filename": f"{Path(document.filename).stem}.docx",
+                    }
+                )
                 return await self._docx.parse(docx_doc)
             finally:
                 # Ownership moved here with the path; ``as_temporary_file``
