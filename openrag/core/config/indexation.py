@@ -174,6 +174,14 @@ class LoaderConfig(ConfigMixin):
     local_whisper: LocalWhisperConfig = Field(default_factory=LocalWhisperConfig)
     file_loaders: FileLoadersConfig = Field(default_factory=FileLoadersConfig)
     marker_max_tasks_per_child: int = 20
+    # PyMuPDF (the default PDF backend) parses in child processes, not threads:
+    # it is not thread-safe, so one shared thread used to serialize every PDF in
+    # a worker. Processes lift that and take a memory ceiling (#997, audit A2).
+    # 1 worker / 0 MiB keeps the previous behaviour, so an unconfigured
+    # deployment sees no change.
+    pymupdf_pool_size: int = Field(default=1, ge=1)
+    pymupdf_parse_memory_limit_mb: int = Field(default=0, ge=0)
+    pymupdf_max_tasks_per_child: int = Field(default=20, ge=0)
     marker_pool_size: int = 1
     marker_max_processes: int = 2
     marker_num_gpus: float = 0.01

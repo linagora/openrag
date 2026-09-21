@@ -4,27 +4,36 @@ The lightweight, no-VLM, no-GPU PDF backend. Uses ``pymupdf`` (a.k.a.
 ``fitz``) for plain-text extraction and ``pymupdf4llm`` for Markdown
 extraction. Operates on ``Document.raw_bytes`` — file I/O is upstream.
 
-In ``mode="markdown"``, embedded images are surfaced as ``ImageBlock``s
-via ``pymupdf4llm``'s ``embed_images=True`` (each image becomes a
-``data:image/png;base64,…`` ref in the markdown, which we decode into
-an :class:`ImageBlock` with ``markdown_ref`` set so a downstream caption
-stage can substitute a description back in). ``mode="text"`` does not
-extract images.
+Neither mode produces ``ImageBlock``s: ``embed_images=False`` and
+``write_images=False`` keep base64 data out of the text (small chunks, no
+rendering cost) and image-aware parsing is Marker's and Docling's job. The
+docstring here previously described an ``embed_images=True`` path that the
+code has never taken.
 
-Threading note: PyMuPDF is **not** thread-safe — concurrent calls to
+Concurrency note: PyMuPDF is **not** thread-safe — concurrent calls to
 ``page.get_text`` / ``pymupdf4llm.to_markdown`` from different threads
 can raise ``ValueError: not a textpage of this page`` (upstream
-maintainer position: documented limitation, won't fix). We therefore
-serialize all pymupdf work onto a single dedicated worker thread via
-``_PYMUPDF_EXECUTOR``. The async ``parse`` method stays concurrent —
-multiple callers will queue on the executor, but only one pymupdf
-operation runs at a time.
+maintainer position: documented limitation, won't fix). That is a
+*thread* constraint: each process gets its own MuPDF state, so parses
+are run in a pool of child processes rather than on one shared thread.
+
+Two things follow, and both were measured (300-page PDF, 4 parses):
+threads cannot parallelize this at all — one dedicated thread took 92s
+and four threads took 113s, slower as well as unsafe — while four
+processes took 31s. And a child process can be given a hard memory
+ceiling, so a crafted PDF fails as one parse instead of OOM-killing the
+worker and every file sharing it (#997).
 """
 
 from __future__ import annotations
 
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
+import resource
+import threading
+from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
+from dataclasses import dataclass
+from multiprocessing import get_context
 from typing import Literal
 
 import pymupdf
@@ -39,8 +48,91 @@ ParseMode = Literal["markdown", "text"]
 
 logger = get_logger()
 
-# Single dedicated worker for pymupdf — see "Threading note" in module docstring.
-_PYMUPDF_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="pymupdf")
+
+@dataclass(frozen=True)
+class PyMuPDFPoolSettings:
+    """How the parse pool is sized and bounded.
+
+    Defaults keep the pre-#997 behaviour — one parse at a time, no ceiling — so
+    a deployment that configures nothing sees no change. ``services`` pushes the
+    real values in via :func:`configure_pool`; ``core`` never reads config.
+    """
+
+    max_workers: int = 1
+    memory_limit_mb: int = 0
+    max_tasks_per_child: int = 20
+
+
+_POOL_LOCK = threading.Lock()
+_POOL_SETTINGS = PyMuPDFPoolSettings()
+_POOL: ProcessPoolExecutor | None = None
+
+
+def configure_pool(settings: PyMuPDFPoolSettings) -> None:
+    """Install pool settings, discarding any pool already built on the old ones."""
+    global _POOL_SETTINGS, _POOL
+    with _POOL_LOCK:
+        if settings == _POOL_SETTINGS and _POOL is not None:
+            return
+        _POOL_SETTINGS = settings
+        old, _POOL = _POOL, None
+    if old is not None:
+        old.shutdown(wait=False, cancel_futures=True)
+
+
+def _pool_worker_init(memory_limit_mb: int) -> None:
+    """Cap what one parse may allocate, in the child that runs it.
+
+    ``RLIMIT_DATA``, not ``RLIMIT_AS``: measured, ``RLIMIT_AS`` also refuses
+    file-backed mappings, which a PDF parse needs. Best-effort — a platform that
+    refuses the call must still yield a usable worker.
+    """
+    if memory_limit_mb <= 0:
+        return
+    try:
+        limit = memory_limit_mb * 1024 * 1024
+        _, hard = resource.getrlimit(resource.RLIMIT_DATA)
+        if hard != resource.RLIM_INFINITY:
+            limit = min(limit, hard)
+        resource.setrlimit(resource.RLIMIT_DATA, (limit, hard))
+    except (ValueError, OSError, AttributeError) as exc:  # pragma: no cover - platform dependent
+        logger.warning(f"Could not apply PyMuPDF parse memory limit ({memory_limit_mb} MiB): {exc}")
+
+
+def _build_pool(settings: PyMuPDFPoolSettings) -> ProcessPoolExecutor:
+    # "spawn", not fork: this runs inside a Ray actor with threads already
+    # started, and forking those is how you get a child that deadlocks on an
+    # allocator lock it inherited mid-hold.
+    return ProcessPoolExecutor(
+        max_workers=max(1, settings.max_workers),
+        initializer=_pool_worker_init,
+        initargs=(settings.memory_limit_mb,),
+        mp_context=get_context("spawn"),
+        max_tasks_per_child=settings.max_tasks_per_child or None,
+    )
+
+
+def _get_pool() -> ProcessPoolExecutor:
+    global _POOL
+    with _POOL_LOCK:
+        if _POOL is None:
+            _POOL = _build_pool(_POOL_SETTINGS)
+        return _POOL
+
+
+def _discard_pool(broken: ProcessPoolExecutor) -> None:
+    """Drop a pool a child died in, so the next parse builds a fresh one.
+
+    A child killed outright — the kernel OOM killer, or a segfault in MuPDF —
+    breaks the whole executor, and every later submit would raise
+    ``BrokenProcessPool`` forever. Only discard the pool we actually failed on:
+    a concurrent caller may already have replaced it.
+    """
+    global _POOL
+    with _POOL_LOCK:
+        if _POOL is broken:
+            _POOL = None
+    broken.shutdown(wait=False, cancel_futures=True)
 
 
 def _extract_text(raw: bytes, filename: str) -> tuple[list[str], list[ImageBlock]]:
@@ -117,9 +209,17 @@ class PyMuPDFParser(DocumentParser):
                 metadata=dict(document.metadata),
             )
 
-        pages, images = await asyncio.get_running_loop().run_in_executor(
-            _PYMUPDF_EXECUTOR, self._extract, document.raw_bytes, document.filename
-        )
+        pool = _get_pool()
+        try:
+            pages, images = await asyncio.get_running_loop().run_in_executor(
+                pool, self._extract, document.raw_bytes, document.filename
+            )
+        except BrokenProcessPool:
+            # The child died rather than raising — OOM killer, or a segfault in
+            # MuPDF. Without discarding it, every later parse in this worker
+            # would fail too, long after the file that caused it is gone.
+            _discard_pool(pool)
+            raise
         # Keep one TextBlock per source page (including empties) so callers
         # can preserve a 1-to-1 mapping with the original PDF's pagination.
         text_blocks = [TextBlock(text=text, page_number=i) for i, text in enumerate(pages, start=1)]

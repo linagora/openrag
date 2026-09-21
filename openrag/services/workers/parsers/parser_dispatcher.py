@@ -179,6 +179,12 @@ class ParserDispatcher(DocumentParser):
                 logger.warning(f"EML attachment parser for '.{ext}' unavailable: {exc}")
         return _create("core.indexing.parsers.eml_parser", "eml", attachment_parsers=attachment_parsers)
 
+    def _build_pymupdf(self) -> DocumentParser:
+        # Sizing and the memory ceiling are config, and ``core`` does not read
+        # config — so they are pushed into the module before the pool is built.
+        _configure_pymupdf_pool(self._config)
+        return _create("core.indexing.parsers.pdf.pymupdf", "pymupdf")
+
     def _build_marker(self) -> DocumentParser:
         from services.workers.parsers.marker_workers import MarkerLoader
 
@@ -233,6 +239,24 @@ class ParserDispatcher(DocumentParser):
         return _create("core.indexing.parsers.audio.client_based", "audio_client", client=client)
 
 
+def _configure_pymupdf_pool(config) -> None:
+    """Push pool settings into the parser module.
+
+    ``core`` never reads config, so the composition root hands it the numbers.
+    Idempotent: identical settings leave a running pool alone.
+    """
+    from core.indexing.parsers.pdf.pymupdf import PyMuPDFPoolSettings, configure_pool
+
+    loader = config.loader
+    configure_pool(
+        PyMuPDFPoolSettings(
+            max_workers=loader.pymupdf_pool_size,
+            memory_limit_mb=loader.pymupdf_parse_memory_limit_mb,
+            max_tasks_per_child=loader.pymupdf_max_tasks_per_child,
+        )
+    )
+
+
 class _PdfStrategyParser(DocumentParser):
     """Force a specific PDF backend (a preset's ``parsing_strategy``) for PDF
     documents, delegating every other content type to the shared dispatcher so
@@ -259,7 +283,7 @@ _BUILDERS: dict[str, Any] = {
     # (the default): pymupdf4llm preserves structure (headings/tables) for the
     # markdown-aware chunker, with embed_images=False so no base64 bloats chunks
     # and no image rendering happens. Images/captioning are marker/docling's job.
-    "pymupdf": lambda d: _create("core.indexing.parsers.pdf.pymupdf", "pymupdf"),
+    "pymupdf": lambda d: d._build_pymupdf(),
     "eml": lambda d: d._build_eml(),
     "marker": lambda d: d._build_marker(),
     "docling": lambda d: d._build_docling(),
