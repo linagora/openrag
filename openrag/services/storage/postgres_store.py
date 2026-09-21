@@ -144,6 +144,10 @@ class PostgresStore(CatalogStore):
     # Connection access (escape hatch for Phase 8 orchestrators)
     # ------------------------------------------------------------------
 
+    async def connect(self, *, server_settings: dict[str, str] | None = None) -> asyncpg.Connection:
+        """Dedicated connection outside the pool, for long-lived session state."""
+        return await self._conn.connect(server_settings=server_settings)
+
     @property
     def pool(self) -> asyncpg.Pool:
         """Raw asyncpg pool for cross-repo transactional work.

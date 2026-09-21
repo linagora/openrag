@@ -8,6 +8,7 @@ via prometheus_client.
 import threading
 
 from core.models.readiness import ReadinessSnapshot
+from core.observability.canary import CanaryRunResult, CanaryStage
 from prometheus_client import (
     REGISTRY,
     CollectorRegistry,
@@ -79,6 +80,106 @@ class ModelEndpointReadinessMetrics:
 
 
 MODEL_ENDPOINT_READINESS_METRICS = ModelEndpointReadinessMetrics()
+
+
+class CanaryMetrics:
+    """Outcome of the synthetic canary, exported by the replica that runs it.
+
+    Every replica exports these series; only the one holding the canary lease
+    runs it. Timestamps keep their last value when a replica loses the lease,
+    so ``max()`` across replicas is the most recent run anywhere. The failure
+    streak resets instead: a former runner must not keep an alert firing for
+    runs it no longer makes.
+    """
+
+    def __init__(self, registry: CollectorRegistry = REGISTRY) -> None:
+        self._enabled = Gauge(
+            "openrag_canary_enabled",
+            "Whether the synthetic canary is configured to run on this replica",
+            registry=registry,
+        )
+        self._interval = Gauge(
+            "openrag_canary_interval_seconds",
+            "Configured seconds between synthetic canary runs",
+            registry=registry,
+        )
+        self._leader = Gauge(
+            "openrag_canary_leader",
+            "Whether this replica holds the canary lease and runs the canary",
+            registry=registry,
+        )
+        self._runs = Counter(
+            "openrag_canary_runs_total",
+            "Synthetic canary runs by outcome",
+            ["outcome"],
+            registry=registry,
+        )
+        self._failures = Counter(
+            "openrag_canary_failures_total",
+            "Failed synthetic canary runs by the stage that failed",
+            ["stage"],
+            registry=registry,
+        )
+        self._consecutive_failures = Gauge(
+            "openrag_canary_consecutive_failures",
+            "Failed synthetic canary runs since the last successful one, on the runner",
+            registry=registry,
+        )
+        self._last_run = Gauge(
+            "openrag_canary_last_run_timestamp_seconds",
+            "Unix time the last synthetic canary run finished, whatever its outcome; 0 before the first",
+            registry=registry,
+        )
+        self._last_success = Gauge(
+            "openrag_canary_last_success_timestamp_seconds",
+            "Unix time the last synthetic canary run passed; 0 before the first",
+            registry=registry,
+        )
+        self._duration = Gauge(
+            "openrag_canary_stage_duration_seconds",
+            "Seconds the last synthetic canary run spent in each stage; stage=total is the whole run",
+            ["stage"],
+            registry=registry,
+        )
+        self._streak = 0
+        self._lock = threading.Lock()
+        # Materialize every bounded label value so rate() starts from zero
+        # rather than from the first failure.
+        for outcome in ("success", "failure"):
+            self._runs.labels(outcome=outcome)
+        for stage in CanaryStage:
+            self._failures.labels(stage=stage.value)
+
+    def configure(self, *, enabled: bool, interval_seconds: float) -> None:
+        self._enabled.set(1 if enabled else 0)
+        self._interval.set(interval_seconds)
+
+    def set_leader(self, leader: bool) -> None:
+        with self._lock:
+            self._leader.set(1 if leader else 0)
+            if not leader:
+                self._streak = 0
+                self._consecutive_failures.set(0)
+
+    def record(self, result: CanaryRunResult, *, finished_at: float) -> None:
+        with self._lock:
+            self._runs.labels(outcome="success" if result.passed else "failure").inc()
+            if result.passed:
+                self._streak = 0
+                self._last_success.set(finished_at)
+            else:
+                self._streak += 1
+                if result.failed_stage is not None:
+                    self._failures.labels(stage=result.failed_stage.value).inc()
+            self._consecutive_failures.set(self._streak)
+            self._last_run.set(finished_at)
+            # Stages the run never reached read 0, not the previous run's value.
+            for stage in CanaryStage:
+                self._duration.labels(stage=stage.value).set(result.durations.get(stage, 0.0))
+            self._duration.labels(stage="total").set(result.total_seconds)
+
+
+CANARY_METRICS = CanaryMetrics()
 
 
 def record_request(method: str, path: str, status_code: int, duration: float) -> None:
