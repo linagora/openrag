@@ -7,7 +7,7 @@ import { request } from "./client";
 //   GET    /queue/info                          queue + worker pool summary
 //   GET    /queue/tasks[?task_status=]          list tasks → { tasks: [...] }
 //   GET    /indexer/task/{id}                   status → { task_id, task_state, details, error_url? }
-//   GET    /indexer/task/{id}/error             { task_id, summary, traceback: string[] }
+//   GET    /indexer/task/{id}/error             { task_id, reason?, summary?, traceback: string[] }
 //   DELETE /indexer/task/{id}                   cancel → { message }
 
 const QUEUE = "/queue";
@@ -83,8 +83,13 @@ export function getTaskStatus(taskId: string): Promise<TaskStatus> {
   return request<TaskStatus>(`${TASK}/${encodeURIComponent(taskId)}`);
 }
 
-export function getTaskError(taskId: string): Promise<{ task_id: string; summary?: string; traceback: string[] }> {
-  return request<{ task_id: string; summary?: string; traceback: string[] }>(
+export function getTaskError(taskId: string): Promise<{
+  task_id: string;
+  reason?: string;
+  summary?: string;
+  traceback: string[];
+}> {
+  return request<{ task_id: string; reason?: string; summary?: string; traceback: string[] }>(
     `${TASK}/${encodeURIComponent(taskId)}/error`,
   );
 }

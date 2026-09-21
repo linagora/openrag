@@ -123,6 +123,23 @@ describe("JobDetailPage", () => {
     expect(toastSuccessMock).toHaveBeenCalledWith("Diagnostics copied to clipboard");
   });
 
+  it("uses the complete reason in details and copied diagnostics", async () => {
+    const reason = `RuntimeError: ${"x".repeat(700)}`;
+    getTaskErrorMock.mockResolvedValue({
+      task_id: "task-1",
+      reason,
+      summary: `${reason.slice(0, 497)}...`,
+      traceback: ["RuntimeError: fallback"],
+    });
+
+    renderJobDetail();
+
+    expect(await screen.findByText(reason)).not.toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: /copy diagnostics/i }));
+    await waitFor(() => expect(copyToClipboardMock).toHaveBeenCalled());
+    expect(copyToClipboardMock.mock.calls[0][0]).toContain(`Reason: ${reason}`);
+  });
+
   it("keeps the traceback-derived reason when an older server omits the summary", async () => {
     getTaskErrorMock.mockResolvedValue({
       task_id: "task-1",

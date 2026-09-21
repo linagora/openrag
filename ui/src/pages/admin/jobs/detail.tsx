@@ -105,7 +105,10 @@ export default function JobDetailPage() {
   const degraded = task.task_state === "COMPLETED" && degradedStages.length > 0;
   const filename = str(details?.metadata?.filename) || str(details?.file_id) || "—";
   const traceback = errorQuery.data?.traceback ?? [];
-  const summary = errorQuery.data?.summary?.trim() || tracebackSummary(traceback);
+  const reason =
+    errorQuery.data?.reason?.trim() ||
+    errorQuery.data?.summary?.trim() ||
+    tracebackSummary(traceback);
   const stage = failedStage(details);
   const diagnostics = [
     `Task ID: ${task.task_id}`,
@@ -113,7 +116,7 @@ export default function JobDetailPage() {
     `File: ${filename}`,
     `Partition: ${str(details?.partition) || "—"}`,
     stage ? `Failed stage: ${stage}` : null,
-    summary ? `Reason: ${summary}` : null,
+    reason ? `Reason: ${reason}` : null,
     traceback.length ? `\nTraceback:\n${traceback.join("\n")}` : null,
   ]
     .filter(Boolean)
@@ -252,7 +255,7 @@ export default function JobDetailPage() {
                 <div className="rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm">
                   <dl className="grid gap-2 sm:grid-cols-[8rem_1fr]">
                     <dt className="text-muted-foreground">Reason</dt>
-                    <dd className="font-medium break-words">{summary || "Task failed"}</dd>
+                    <dd className="font-medium break-words">{reason || "Task failed"}</dd>
                     {stage && (
                       <>
                         <dt className="text-muted-foreground">Failed stage</dt>
