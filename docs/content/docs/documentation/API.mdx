@@ -413,7 +413,7 @@ GET /partition/{partition}/config
 ```http
 PATCH /partition/{partition}
 ```
-**Owner** only. Body fields (all optional): `description`, `embedder`, `indexation_preset`, `retrieval_preset`, `chat_history_depth`, `chat_llm`. Returns the updated resolved config.
+**Owner** only. Body fields (all optional): `description`, `embedder`, `indexation_preset`, `retrieval_preset`, `chat_history_depth`, `chat_llm`. Returns the updated resolved config. Changing `embedder` is refused on a partition that holds indexed files (`409 PARTITION_HAS_INDEXED_FILES`, or `409 INDEXING_IN_PROGRESS` while files are still being indexed or copied into it): each embedder keeps its vectors in its own field, which only its partitions search.
 
 ```bash frame="none"
 curl -X PATCH http://localhost:8080/partition/my_partition \
@@ -673,7 +673,7 @@ POST /model-endpoints/{model_type}/{name}/set-default
 ```
 Promotes the endpoint to the default used for its `model_type`, and returns it.
 
-For embedders, a new default only reaches partitions that have no data yet. A partition stays on the `default` alias until it first receives a file (upload or copy), at which point the alias is replaced by the embedder it resolved to; a partition indexed before that is pinned the same way when the default changes. Partitions with files therefore keep the embedder that built their vectors, and an admin moves one deliberately by setting its `embedder`. An emptied partition stays pinned — set its `embedder` back to `default` to follow the default again.
+For embedders, a new default only reaches partitions that have no data yet. A partition stays on the `default` alias until it first receives a file (upload or copy), at which point the alias is replaced by the embedder it resolved to; a partition indexed before that is pinned the same way when the default changes. Partitions with files therefore keep the embedder that built their vectors. An emptied partition stays pinned — set its `embedder` back to `default` to follow the default again.
 
 #### Reveal the stored API key
 ```http

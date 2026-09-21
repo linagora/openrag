@@ -40,6 +40,7 @@ class _FakePartitionRepo:
         self.calls: list[tuple[str, tuple]] = []
         # What `pin_default_embedder` resolves the alias to; None = no default endpoint.
         self.default_embedder: str | None = "jina"
+        self.copying: set[str] = set()
 
     async def partition_exists(self, name: str) -> bool:
         return name in self._store
@@ -71,6 +72,9 @@ class _FakePartitionRepo:
 
     async def count_files_by_partition(self) -> dict[str, int]:
         return dict(self._counts)
+
+    async def copy_in_progress(self, name: str) -> bool:
+        return name in self.copying
 
     async def pin_default_embedder(self, name: str) -> str | None:
         """The SQL's effect: a partition on the alias takes `default_embedder`."""
@@ -485,6 +489,80 @@ async def test_update_partition_accepts_catalogued_embedder():
 
     assert repo._store["p1"]["embedder"] == "bge-m3"
     assert settings.partitions["p1"].embedder == "bge-m3"
+
+
+# ------------------------------------------------------------------
+# embedder change on a partition with files
+# ------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_an_embedder_change_on_a_partition_with_files_is_refused():
+    """The files' vectors would stay in the old embedder's field, which searches stop reading."""
+    from core.utils.exceptions import ConflictError
+
+    repo = _FakePartitionRepo(rows=[_full_row("p1")])
+    repo._counts["p1"] = 3
+    svc = _make_service(repo, settings=_settings(embedders=("default", "bge-m3")))
+
+    with pytest.raises(ConflictError) as exc:
+        await svc.update_partition("p1", embedder="bge-m3")
+
+    assert exc.value.code == "PARTITION_HAS_INDEXED_FILES"
+    assert repo._store["p1"]["embedder"] == "default"
+
+
+@pytest.mark.asyncio
+async def test_an_embedder_change_waits_for_indexing_in_flight():
+    """An upload in flight has no file row yet but already writes with the old embedder."""
+    from core.utils.exceptions import ConflictError
+
+    async def two_active(*_args, **_kwargs):
+        return 2
+
+    repo = _FakePartitionRepo(rows=[_full_row("p1")])
+    svc = _make_service(repo, settings=_settings(embedders=("default", "bge-m3")))
+    svc._count_active_indexing_tasks = two_active
+
+    with pytest.raises(ConflictError) as exc:
+        await svc.update_partition("p1", embedder="bge-m3")
+
+    assert exc.value.code == "INDEXING_IN_PROGRESS"
+    assert repo._store["p1"]["embedder"] == "default"
+
+
+@pytest.mark.asyncio
+async def test_an_embedder_change_waits_for_a_copy_in_flight():
+    """A copy's file row is written last, after its vectors."""
+    from core.utils.exceptions import ConflictError
+
+    repo = _FakePartitionRepo(rows=[_full_row("p1")])
+    repo.copying.add("p1")
+    svc = _make_service(repo, settings=_settings(embedders=("default", "bge-m3")))
+
+    with pytest.raises(ConflictError, match="being copied") as exc:
+        await svc.update_partition("p1", embedder="bge-m3")
+
+    assert exc.value.code == "INDEXING_IN_PROGRESS"
+    assert repo._store["p1"]["embedder"] == "default"
+
+
+@pytest.mark.asyncio
+async def test_naming_the_endpoint_the_alias_resolves_to_is_not_a_change():
+    """Same vector field, so nothing is left behind."""
+    from core.config.model_endpoints import ModelEndpointConfig
+
+    settings = _settings(embedders=("bge-m3",))
+    settings.models.embedder["default"] = ModelEndpointConfig(
+        endpoint="http://emb:8000/v1", vector_field="vector_bge-m3"
+    )
+    repo = _FakePartitionRepo(rows=[_full_row("p1")])
+    repo._counts["p1"] = 3
+    svc = _make_service(repo, settings=settings)
+
+    await svc.update_partition("p1", embedder="bge-m3")
+
+    assert repo._store["p1"]["embedder"] == "bge-m3"
 
 
 @pytest.mark.asyncio

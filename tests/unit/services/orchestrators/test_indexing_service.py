@@ -134,6 +134,8 @@ class FakePartitionService:
         self.loaded = 0
         self.admissions: list[str] = []
         self.admission_depth = 0
+        self.copy_locks: list[tuple[str, int]] = []
+        self.copying = 0
 
     def _cfg(self, partition: str) -> PartitionConfig:
         return PartitionConfig(
@@ -154,6 +156,15 @@ class FakePartitionService:
             yield await self.partition_exists(partition)
         finally:
             self.admission_depth -= 1
+
+    @asynccontextmanager
+    async def copy_in_flight(self, partition: str):
+        self.copy_locks.append((partition, self.admission_depth))
+        self.copying += 1
+        try:
+            yield
+        finally:
+            self.copying -= 1
 
     async def create_partition(self, partition: str, *, user_id: int, **_) -> None:
         self.created.append((partition, user_id))
@@ -1068,16 +1079,19 @@ async def test_a_copy_into_a_missing_partition_creates_it_like_an_upload():
 
 @pytest.mark.asyncio
 async def test_a_copy_is_admitted_under_the_fence_but_does_not_hold_it():
-    # Uploads to the partition wait on the fence, and a copy can re-embed for minutes.
+    # Uploads to the partition wait on the fence, and a copy can re-embed for
+    # minutes. An embedder change sees the copy lock instead, taken under the fence.
     config = _copy_config({"bge-m3": "vector_bge_m3"})
     partition_service = FakePartitionService(config, db_partitions={"p-dst"})
-    depths = []
+    seen = []
 
     class _Dispatcher(FakeDispatcher):
         async def copy_file(self, *args, **kwargs):
-            depths.append(partition_service.admission_depth)
+            seen.append((partition_service.admission_depth, partition_service.copying))
 
     await _copy_into_p_dst(_copy_service(config, _Dispatcher(), partition_service))
 
     assert partition_service.admissions == ["p-dst"]
-    assert depths == [0]
+    assert partition_service.copy_locks == [("p-dst", 1)]
+    assert seen == [(0, 1)]
+    assert partition_service.copying == 0

@@ -16,7 +16,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 from collections.abc import AsyncIterator, Callable
-from contextlib import asynccontextmanager
+from contextlib import AbstractAsyncContextManager, AsyncExitStack, asynccontextmanager, nullcontext
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -356,13 +356,20 @@ class IndexingService:
         metadata["content_sha256"] = content_sha256
         # Admitted like an upload, so a missing target is created and pinned.
         # The copy itself runs outside the fence, which uploads wait on: it can
-        # re-embed for minutes.
-        async with self._partition_admission(target_partition):
-            await self._ensure_partition_exists(target_partition, user)
-            await self._refresh_preset_config_if_stale()
-            await self._pin_partition_embedder(target_partition)
-            destination = self._copy_destination(target_partition)
-        await self._dispatcher.copy_file(source_file_id, metadata, source_partition, user, **destination)
+        # re-embed for minutes. It holds the copy lock instead, taken under the
+        # fence, which keeps the target's embedder from changing meanwhile.
+        async with AsyncExitStack() as copying:
+            async with self._partition_admission(target_partition):
+                await self._ensure_partition_exists(target_partition, user)
+                await self._refresh_preset_config_if_stale()
+                await self._pin_partition_embedder(target_partition)
+                destination = self._copy_destination(target_partition)
+                await copying.enter_async_context(self._copy_in_flight(target_partition))
+            await self._dispatcher.copy_file(source_file_id, metadata, source_partition, user, **destination)
+
+    def _copy_in_flight(self, partition: str) -> AbstractAsyncContextManager[None]:
+        copy_in_flight = getattr(self._partition_service, "copy_in_flight", None)
+        return copy_in_flight(partition) if copy_in_flight is not None else nullcontext()
 
     def _copy_destination(self, partition: str) -> dict[str, Any]:
         """The vector field and embedder a copy into *partition* must use.

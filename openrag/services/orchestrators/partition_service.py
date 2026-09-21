@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator, Callable
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any
 
@@ -47,7 +47,7 @@ from core.utils.exceptions import (
 )
 from core.utils.logging import get_logger
 from core.vector_stores.vector_field import is_vector_field_key
-from services.workers.task_cancellation import cancel_active_indexing_tasks
+from services.workers.task_cancellation import cancel_active_indexing_tasks, count_active_indexing_tasks
 
 if TYPE_CHECKING:
     from core.config.root import Settings
@@ -217,6 +217,20 @@ class PartitionService:
             return
         logger.bind(partition=partition, embedder=embedder).info("Pinned partition to its embedder on first write.")
         await self.load_partitions()
+
+    @asynccontextmanager
+    async def copy_in_flight(self, partition: str) -> AsyncIterator[None]:
+        """Held by a copy into *partition* until its file row exists.
+
+        Take it under :meth:`indexing_admission`, the fence an embedder change
+        checks it under.
+        """
+        copy_lock = getattr(self._partition_repo, "copy_lock", None)
+        if copy_lock is None:
+            yield
+            return
+        async with copy_lock(partition):
+            yield
 
     @asynccontextmanager
     async def _partition_operation_lock(self, partition: str) -> AsyncIterator[Any]:
@@ -507,22 +521,27 @@ class PartitionService:
         await self._ensure_partition(partition)
         updates = {k: v for k, v in fields.items() if v is not None or k in _NULLABLE_COLUMNS}
 
-        if self._config is not None and updates:
-            current = await self._partition_repo.get_partition_row(partition)
-            if current is None:
-                raise PartitionNotFoundError(f"Partition '{partition}' does not exist.")
-            self._validate_preset_refs({**current, **updates})
-            # Only the incoming value is checked — a *stored* name that went
-            # stale (endpoint deleted later) must not block unrelated PATCHes;
-            # QueryService falls back to the default LLM for those at runtime.
-            if updates.get("chat_llm"):
-                self._validate_chat_llm_ref(updates["chat_llm"])
-            if updates.get("embedder"):
-                self._validate_embedder_ref(updates["embedder"])
-            if updates.get("generation_prompt_names"):
-                await self._validate_generation_prompt_names(updates["generation_prompt_names"])
+        # An embedder change is checked and written under the fence upload
+        # admission takes, so no upload can resolve the old embedder in between.
+        changes_embedder = self._config is not None and bool(updates.get("embedder"))
+        async with self._partition_operation_lock(partition) if changes_embedder else nullcontext():
+            if self._config is not None and updates:
+                current = await self._partition_repo.get_partition_row(partition)
+                if current is None:
+                    raise PartitionNotFoundError(f"Partition '{partition}' does not exist.")
+                self._validate_preset_refs({**current, **updates})
+                # Only the incoming value is checked — a *stored* name that went
+                # stale (endpoint deleted later) must not block unrelated PATCHes;
+                # QueryService falls back to the default LLM for those at runtime.
+                if updates.get("chat_llm"):
+                    self._validate_chat_llm_ref(updates["chat_llm"])
+                if updates.get("embedder"):
+                    self._validate_embedder_ref(updates["embedder"])
+                    await self._refuse_embedder_change_with_data(partition, current, updates["embedder"])
+                if updates.get("generation_prompt_names"):
+                    await self._validate_generation_prompt_names(updates["generation_prompt_names"])
 
-        result = await self._partition_repo.update_partition(partition, **updates)
+            result = await self._partition_repo.update_partition(partition, **updates)
 
         if self._config is not None:
             await self.load_partitions()
@@ -546,6 +565,47 @@ class PartitionService:
         detail["document_count"] = await self._partition_repo.get_partition_file_count(partition)
         detail["indexed_embedders"] = await self._indexed_embedders(partition)
         return detail
+
+    async def _refuse_embedder_change_with_data(self, partition: str, current: dict, embedder: str) -> None:
+        """Refuse moving a partition that holds data to another embedder's vector field.
+
+        Its vectors would stay in the old field, which its searches stop reading.
+        """
+        embedders = self._require_config().models.embedder
+        old_field = getattr(embedders.get(current.get("embedder") or DEFAULT_ENDPOINT_ALIAS), "vector_field", None)
+        new_field = getattr(embedders.get(embedder), "vector_field", None)
+        if old_field is not None and old_field == new_field:
+            return
+        if await self._partition_repo.get_partition_file_count(partition) > 0:
+            raise ConflictError(
+                f"Partition '{partition}' has indexed files, which would disappear from search "
+                "if its embedder changed.",
+                code="PARTITION_HAS_INDEXED_FILES",
+            )
+        # An upload in flight has no file row yet, but already writes with the old embedder.
+        active = await self._count_active_indexing_tasks(partition)
+        if active:
+            raise ConflictError(
+                f"Partition '{partition}' has {active} indexing task(s) in progress. "
+                "Change its embedder once they finish.",
+                code="INDEXING_IN_PROGRESS",
+            )
+        copy_in_progress = getattr(self._partition_repo, "copy_in_progress", None)
+        if copy_in_progress is not None and await copy_in_progress(partition):
+            raise ConflictError(
+                f"A file is being copied into partition '{partition}'. Change its embedder once the copy finishes.",
+                code="INDEXING_IN_PROGRESS",
+            )
+
+    async def _count_active_indexing_tasks(self, partition: str) -> int:
+        task_state_manager = self._task_state_manager
+        if task_state_manager is None and self._task_state_manager_factory is not None:
+            task_state_manager = self._task_state_manager_factory()
+        if task_state_manager is None:
+            return 0
+        return await count_active_indexing_tasks(
+            task_state_manager, partition=partition, timeout=self._task_cancel_timeout
+        )
 
     async def update_partition_config(self, partition: str, **fields: object) -> dict:
         """Update a partition's preset references and return the resolved detail."""
