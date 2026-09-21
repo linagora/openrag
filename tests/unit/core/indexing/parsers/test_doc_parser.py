@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import pathlib
 import sys
 from unittest.mock import AsyncMock, MagicMock
@@ -65,7 +66,14 @@ class TestParse:
             text_blocks=[TextBlock(text="from-docx", page_number=1)],
             page_count=1,
         )
-        docx_parser.parse = AsyncMock(return_value=expected)
+        seen_content = None
+
+        async def capture(doc):
+            nonlocal seen_content
+            seen_content = pathlib.Path(doc.source_path).read_bytes()
+            return expected
+
+        docx_parser.parse = AsyncMock(side_effect=capture)
 
         parser = DocParser(docx_parser=docx_parser)
         result = await parser.parse(_doc_document())
@@ -73,13 +81,15 @@ class TestParse:
         assert result is expected
         docx_parser.parse.assert_awaited_once()
         forwarded = docx_parser.parse.await_args.args[0]
-        assert forwarded.raw_bytes == dummy_docx
+        assert forwarded.raw_bytes is None, "the converted .docx was read into memory"
+        # Read while the call was live: the file is removed once parse returns.
+        assert seen_content == dummy_docx
         assert forwarded.content_type is DocumentType.DOCX
         instance.LoadFromFile.assert_called_once()
         instance.Close.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_converted_docx_does_not_inherit_the_source_path(self, fake_spire, tmp_path):
+    async def test_the_forwarded_document_points_at_the_converted_file_not_the_original(self, fake_spire, tmp_path):
         """#911 trap. ``model_copy`` propagates every field, so the derived
         ``.docx`` would carry the original ``.doc``'s ``source_path``. Since
         ``as_temporary_file`` prefers ``source_path`` over ``raw_bytes``,
@@ -93,7 +103,14 @@ class TestParse:
         fake_spire.return_value = instance
 
         docx_parser = MagicMock()
-        docx_parser.parse = AsyncMock(return_value=ProcessedDocument(document_id="test", text_blocks=[], page_count=0))
+        seen_content = None
+
+        async def capture(doc):
+            nonlocal seen_content
+            seen_content = pathlib.Path(doc.source_path).read_bytes()
+            return ProcessedDocument(document_id="test", text_blocks=[], page_count=0)
+
+        docx_parser.parse = AsyncMock(side_effect=capture)
 
         document = Document(
             filename="legacy.doc",
@@ -104,8 +121,10 @@ class TestParse:
         await DocParser(docx_parser=docx_parser).parse(document)
 
         forwarded = docx_parser.parse.await_args.args[0]
-        assert forwarded.source_path is None, "the converted .docx still points at the original .doc"
-        assert forwarded.raw_bytes == b"DOCX-CONTENT", "guard: the conversion must have produced the .docx bytes"
+        assert forwarded.source_path != str(src), "the converted .docx still points at the original .doc"
+        assert forwarded.source_path.endswith(".docx")
+        assert forwarded.raw_bytes is None, "the converted .docx was read into memory anyway"
+        assert seen_content == b"DOCX-CONTENT", "guard: the conversion must have produced the .docx"
         # The path the derived document would have to resolve through.
         assert document.source_path == str(src), "guard: the original must keep its own path"
 
@@ -147,3 +166,73 @@ class TestParse:
         monkeypatch.setitem(sys.modules, "spire.doc", None)
         result = await DocParser().parse(_doc_document())
         assert result.text_blocks == [] and result.page_count == 0
+
+
+class TestConvertedFileIsAPathNotBytes:
+    """#846 §3. The converted .docx used to be read whole into memory on top of
+    the .doc already there. It is handed over as a path instead."""
+
+    @pytest.mark.asyncio
+    async def test_the_converted_file_is_removed_after_the_docx_parser_returns(self, fake_spire, tmp_path):
+        """Ownership moved out of ``_convert``: nothing else will clean it up."""
+        seen: dict[str, str] = {}
+        instance = MagicMock()
+
+        def save_to_file(path: str, _fmt) -> None:
+            with open(path, "wb") as fh:
+                fh.write(b"DOCX")
+
+        instance.SaveToFile.side_effect = save_to_file
+        fake_spire.return_value = instance
+
+        async def capture(doc):
+            seen["path"] = doc.source_path
+            seen["existed"] = os.path.exists(doc.source_path)
+            return ProcessedDocument(document_id="test", text_blocks=[], page_count=0)
+
+        docx_parser = MagicMock()
+        docx_parser.parse = AsyncMock(side_effect=capture)
+
+        src = tmp_path / "legacy.doc"
+        src.write_bytes(b"\xd0\xcf\x11\xe0fake")
+        document = Document(
+            filename="legacy.doc",
+            content_type=DocumentType.DOC,
+            raw_bytes=src.read_bytes(),
+            source_path=str(src),
+        )
+
+        await DocParser(docx_parser=docx_parser).parse(document)
+
+        assert seen["existed"] is True, "the DOCX parser was handed a path that did not exist"
+        assert not os.path.exists(seen["path"]), "the converted .docx leaked"
+
+    @pytest.mark.asyncio
+    async def test_the_converted_file_is_removed_even_when_the_docx_parser_raises(self, fake_spire, tmp_path):
+        instance = MagicMock()
+        captured: dict[str, str] = {}
+
+        def save_to_file(path: str, _fmt) -> None:
+            captured["path"] = path
+            with open(path, "wb") as fh:
+                fh.write(b"DOCX")
+
+        instance.SaveToFile.side_effect = save_to_file
+        fake_spire.return_value = instance
+
+        docx_parser = MagicMock()
+        docx_parser.parse = AsyncMock(side_effect=RuntimeError("boom"))
+
+        src = tmp_path / "legacy.doc"
+        src.write_bytes(b"\xd0\xcf\x11\xe0fake")
+        document = Document(
+            filename="legacy.doc",
+            content_type=DocumentType.DOC,
+            raw_bytes=src.read_bytes(),
+            source_path=str(src),
+        )
+
+        with pytest.raises(RuntimeError, match="boom"):
+            await DocParser(docx_parser=docx_parser).parse(document)
+
+        assert not os.path.exists(captured["path"]), "the converted .docx leaked on the failure path"

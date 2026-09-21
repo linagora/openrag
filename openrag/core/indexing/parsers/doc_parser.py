@@ -15,7 +15,7 @@ import asyncio
 import logging
 import os
 import tempfile
-from pathlib import Path
+from contextlib import suppress
 
 from ...models.document import Document, DocumentType, ProcessedDocument, TextBlock
 from .document_parser import DocumentParser
@@ -48,17 +48,25 @@ class DocParser(DocumentParser):
             )
 
         async with document.as_temporary_file() as src_path:
-            docx_bytes, fallback_text = await asyncio.to_thread(self._convert, str(src_path))
+            docx_path, fallback_text = await asyncio.to_thread(self._convert, str(src_path))
 
-        if docx_bytes:
-            # ``source_path`` must be cleared, not inherited: ``model_copy``
-            # propagates every field, and this derived document's bytes are the
-            # *converted* .docx. Leaving it set would hand ``DocxParser`` the
-            # original .doc path and it would parse the wrong file (#911).
+        if docx_path:
+            # ``source_path`` is the *converted* file, never the inherited one:
+            # ``model_copy`` propagates every field, so leaving the original
+            # would hand ``DocxParser`` the .doc and it would parse the wrong
+            # file. ``raw_bytes`` is dropped for the same reason it is not read
+            # — the .docx stays on disk and the DOCX parser opens it (#846).
             docx_doc = document.model_copy(
-                update={"raw_bytes": docx_bytes, "content_type": DocumentType.DOCX, "source_path": None}
+                update={"raw_bytes": None, "content_type": DocumentType.DOCX, "source_path": docx_path}
             )
-            return await self._docx.parse(docx_doc)
+            try:
+                return await self._docx.parse(docx_doc)
+            finally:
+                # Ownership moved here with the path; ``as_temporary_file``
+                # deliberately does not unlink a ``source_path``, since that
+                # normally belongs to the uploader rather than to us.
+                with suppress(OSError):
+                    os.remove(docx_path)
 
         text = (fallback_text or "").strip()
         text_blocks = [TextBlock(text=text, page_number=1)] if text else []
@@ -70,11 +78,16 @@ class DocParser(DocumentParser):
         )
 
     @staticmethod
-    def _convert(path: str) -> tuple[bytes | None, str | None]:
-        """Run blocking Spire.Doc conversion. Returns ``(docx_bytes, fallback_text)``.
+    def _convert(path: str) -> tuple[str | None, str | None]:
+        """Run blocking Spire.Doc conversion. Returns ``(docx_path, fallback_text)``.
 
         Exactly one of the two will be non-None on success; both ``None``
         means total failure (caller emits an empty ProcessedDocument).
+
+        Returns the converted file's **path**, not its bytes: reading it here
+        put the whole .docx in memory on top of the .doc already there (#846).
+        Ownership moves with it — the caller deletes it once the DOCX parser is
+        done, which is why the ``finally`` below no longer does.
         """
         try:
             from spire.doc import Document as SpireDocument
@@ -90,7 +103,8 @@ class DocParser(DocumentParser):
             with tempfile.NamedTemporaryFile(suffix=".docx", delete=False) as out:
                 out_path = out.name
             spire_doc.SaveToFile(out_path, FileFormat.Docx2016)
-            return Path(out_path).read_bytes(), None
+            converted, out_path = out_path, None  # handed to the caller; not ours to remove
+            return converted, None
         except Exception as exc:
             logger.warning("Spire.Doc .doc → .docx conversion failed (%s); falling back to plain text", exc)
             try:
