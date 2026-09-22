@@ -19,11 +19,16 @@ from api.dependencies.auth import (
     require_partition_viewer,
 )
 from api.dependencies.files import validate_file_id
-from api.schemas.admin.partition_schemas import PartitionDetailResponse, UpdatePartitionRequest
+from api.schemas.admin.partition_schemas import (
+    EmbedderSwapResponse,
+    PartitionDetailResponse,
+    StartEmbedderSwapRequest,
+    UpdatePartitionRequest,
+)
 from core.utils.exceptions import ConfigError
 from core.utils.logging import get_logger
 from core.utils.partition_limits import max_partitions_for_user
-from di.providers import get_partition_service
+from di.providers import get_embedder_swap_service, get_partition_service
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request, Response, status
 from fastapi.responses import JSONResponse
 
@@ -320,7 +325,7 @@ async def create_partition(
 **Body:**
 Accepts partition config fields such as:
 - `description`
-- `embedder` (must name a registered embedder endpoint — 422 otherwise; `default` resolves to the endpoint marked default). Each embedder stores its vectors in its own field, so a partition that holds indexed files cannot change embedder: 409 `PARTITION_HAS_INDEXED_FILES`, or 409 `INDEXING_IN_PROGRESS` while its first files are still being indexed or copied in
+- `embedder` (must name a registered embedder endpoint — 422 otherwise; `default` resolves to the endpoint marked default). Each embedder stores its vectors in its own field, so a partition that holds indexed files cannot change embedder: 409 `PARTITION_HAS_INDEXED_FILES`, or 409 `INDEXING_IN_PROGRESS` while its first files are still being indexed or copied in. To move a partition with files, use `POST /partition/{partition}/embedder-swap`, which re-embeds them first
 - `indexation_preset`
 - `retrieval_preset`
 - `chat_history_depth`
@@ -345,6 +350,104 @@ async def update_partition_config(
         partition=partition,
         **body.model_dump(exclude_unset=True),
     )
+
+
+@router.post(
+    "/{partition}/embedder-swap",
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=EmbedderSwapResponse,
+    description="""Re-embed a partition's files with an embedder, then point the partition at it.
+
+One endpoint for two jobs, told apart only by `embedder` in the body:
+
+- **Move to another embedder**: name a different endpoint. Nearly every file is re-embedded, since none has
+  vectors in that embedder's field yet, and the partition switches to it when the swap completes.
+- **Repair drift**: name the embedder the partition already uses. Only the drifted files are re-embedded, and the
+  partition keeps its embedder.
+
+A file is skipped when the model and vector field it was indexed with both match the target endpoint as it is now.
+Every other file is re-embedded, including files indexed before the vector field was recorded. Drift shows in
+`GET /partition/{partition}/config`, as an `indexed_embedders` entry whose `model_name` or `vector_field` differs
+from the partition's embedder.
+
+Each chunk's stored text is embedded again: nothing is re-parsed or re-chunked. Searches keep using the current
+embedder until every file is done.
+
+While the swap runs, uploads, file replacements, metadata updates, copies into the partition and changes to its
+`embedder` return 409 `EMBEDDER_SWAP_IN_PROGRESS`. So do deleting the target embedder and edits to it that change
+its vectors. Deleting files stays allowed.
+
+**Body:**
+- `embedder`: name of a registered embedder endpoint (not the `default` alias)
+
+**Errors:**
+- 409 `EMBEDDER_SWAP_IN_PROGRESS`: a swap is already running on this partition
+- 409 `INDEXING_IN_PROGRESS`: files are still being indexed or copied into this partition
+- 422 `MODEL_ENDPOINT_NOT_FOUND` / `EMBEDDER_ALIAS_NOT_ALLOWED`
+
+**Permissions:**
+- Requires partition owner role
+
+**Response:**
+The swap. `files_total` counts the files to re-embed, not the ones skipped. Poll
+`GET /partition/{partition}/embedder-swap` for progress.
+""",
+)
+async def start_embedder_swap(
+    partition: str,
+    body: StartEmbedderSwapRequest,
+    partition_owner=Depends(require_partition_owner),
+    service=Depends(get_embedder_swap_service),
+):
+    """Start re-embedding a partition with an embedder: another one, or its own to repair drift."""
+    return await service.start(partition, body.embedder)
+
+
+@router.get(
+    "/{partition}/embedder-swap",
+    response_model=EmbedderSwapResponse | None,
+    description="""Progress of a partition's embedder swap, or how its last one ended.
+
+`status` is `running`, `completed`, `failed` (see `error`) or `cancelled`; `files_done` of the `files_total` files
+to re-embed are done. `source_embedder` equals `target_embedder` on a drift repair. `null` when the
+partition never had one.
+
+**Permissions:**
+- Requires partition viewer role
+""",
+)
+async def get_embedder_swap(
+    partition: str,
+    partition_viewer=Depends(require_partition_viewer),
+    service=Depends(get_embedder_swap_service),
+):
+    """Return the partition's embedder swap, or ``None`` if it never had one."""
+    return await service.get(partition)
+
+
+@router.delete(
+    "/{partition}/embedder-swap",
+    response_model=EmbedderSwapResponse,
+    description="""Cancel a running embedder swap.
+
+The partition stays on its current embedder, and files can be written to it again. On a drift repair, the files
+already re-embedded are in the field the partition searches: they are repaired, and a later repair skips them. On a
+move to another embedder, they keep vectors nothing searches until a later swap to that embedder, which skips them.
+
+**Permissions:**
+- Requires partition owner role
+
+**Errors:**
+- 409 `EMBEDDER_SWAP_NOT_RUNNING`
+""",
+)
+async def cancel_embedder_swap(
+    partition: str,
+    partition_owner=Depends(require_partition_owner),
+    service=Depends(get_embedder_swap_service),
+):
+    """Cancel the partition's running embedder swap."""
+    return await service.cancel(partition)
 
 
 @router.get(

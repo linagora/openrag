@@ -719,6 +719,26 @@ async def test_every_route_returning_an_endpoint_reports_its_partition_count(asy
     assert response.json()["used_by_partitions"] == 3
 
 
+@pytest.mark.asyncio
+async def test_an_embedder_endpoint_reports_the_vector_field_it_owns(async_client_factory):
+    """The admin UI compares it with the field each file was indexed into."""
+    from core.config.model_endpoints import ModelEndpointRow
+
+    model_service = FakeModelEndpointService()
+
+    async def get_model_endpoint(name: str, model_type: str) -> ModelEndpointRow:
+        return ModelEndpointRow(**_model_endpoint_row(name=name, model_type=model_type, vector_field="vector_jina"))
+
+    model_service.get_model_endpoint = get_model_endpoint
+    app = _build_app(model_service=model_service)
+
+    async with async_client_factory(app) as client:
+        response = await client.get("/model-endpoints/embedder/jina")
+
+    assert response.status_code == 200
+    assert response.json()["vector_field"] == "vector_jina"
+
+
 # --------------------------------------------------------------------------- #
 # Auto-probed max_model_len cache refresh after an LLM endpoint write (#639) —
 # config.models.llm itself is refreshed synchronously inside the service call

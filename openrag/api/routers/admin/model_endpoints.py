@@ -193,7 +193,9 @@ async def update_model_endpoint(
 
     Returns 409 ``EMBEDDER_EDIT_AFFECTS_INDEXED_DATA`` when an embedder's URL,
     model, ``implementation`` or ``max_model_len`` changes while partitions hold
-    files indexed with it, unless ``acknowledge_indexed_data`` is true.
+    files indexed with it, unless ``acknowledge_indexed_data`` is true. The same
+    change on the target of a running embedder swap returns 409
+    ``EMBEDDER_SWAP_IN_PROGRESS``, acknowledged or not.
     """
     fields = body.model_dump(exclude_unset=True)
     acknowledge_indexed_data = bool(fields.pop("acknowledge_indexed_data", False))

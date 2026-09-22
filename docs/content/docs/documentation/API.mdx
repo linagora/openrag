@@ -422,6 +422,89 @@ curl -X PATCH http://localhost:8080/partition/my_partition \
   -d '{"indexation_preset": "legal", "retrieval_preset": "hyde"}'
 ```
 
+:::tip
+To move a partition that holds files to another embedder, use the embedder swap below, which re-embeds them
+first.
+:::
+
+#### Partition Embedder Swap
+
+Re-embed a partition's files with an embedder, then point the partition at it. Each chunk's **stored text** is
+embedded again — nothing is re-parsed or re-chunked — and searches keep using the current embedder until every
+file is done, so no query returns results from a half-filled index.
+
+| Endpoint | Method | Role | Description |
+|----------|--------|------|-------------|
+| `/partition/{partition}/embedder-swap` | POST | Owner | Start a swap → `202` with the swap |
+| `/partition/{partition}/embedder-swap` | GET | Viewer | Progress, or how the last one ended → `null` if the partition never had one |
+| `/partition/{partition}/embedder-swap` | DELETE | Owner | Cancel a running swap → `409 EMBEDDER_SWAP_NOT_RUNNING` otherwise |
+
+The same `POST` does two jobs. Only `embedder` in the body tells them apart:
+
+| Goal | `embedder` in the body | Files re-embedded | Partition afterwards |
+|------|------------------------|-------------------|----------------------|
+| Move to another embedder | another endpoint | nearly all: none has vectors in that embedder's field yet | on the new embedder |
+| Repair drift | the partition's current endpoint | only the drifted ones | on the same embedder |
+
+```bash frame="none"
+# Move my_partition to bge-m3
+curl -X POST http://localhost:8080/partition/my_partition/embedder-swap \
+  -H "Authorization: Bearer YOUR_AUTH_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"embedder": "bge-m3"}'
+
+# Repair drift: name the embedder my_partition already uses
+curl -X POST http://localhost:8080/partition/my_partition/embedder-swap \
+  -H "Authorization: Bearer YOUR_AUTH_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"embedder": "e5-large"}'
+```
+
+A file is skipped when the model and vector field it was indexed with both match the target endpoint as it is
+now. Every other file is re-embedded, including files indexed before the vector field was recorded, since nothing
+says where their vectors are. Drift shows in `GET /partition/{partition}/config`, as an `indexed_embedders` entry
+whose `model_name` or `vector_field` differs from the partition's embedder.
+
+The response is the swap:
+
+```json
+{
+  "partition": "my_partition",
+  "source_embedder": "e5-large",
+  "target_embedder": "bge-m3",
+  "status": "running",
+  "files_total": 19,
+  "files_done": 7,
+  "error": null,
+  "started_at": "2026-09-22T14:13:34Z",
+  "updated_at": "2026-09-22T14:13:38Z",
+  "finished_at": null
+}
+```
+
+- `status`: `running`, `completed`, `failed` (see `error`) or `cancelled`.
+- `files_done` of `files_total`: files re-embedded so far, of those the swap re-embeds. Skipped files are not
+  counted, so a drift repair on 19 files with 8 drifted counts to 8.
+- `source_embedder` equals `target_embedder` on a drift repair.
+
+There is no push notification: poll the `GET` route for progress.
+
+`embedder` must name a registered embedder endpoint, not the `default` alias (422 otherwise) — the alias can
+move to another model later, which would leave the partition pointing at a field it never filled.
+
+:::caution
+While a swap runs, uploads, file replacements, metadata updates and copies **into** that partition return
+`409 EMBEDDER_SWAP_IN_PROGRESS`, and so does changing its `embedder`; deleting files stays allowed. Deleting the
+target embedder, or editing its `endpoint`, `model_name`, `extra.implementation` or `extra.max_model_len`, returns
+the same 409. Starting one is refused with `409 INDEXING_IN_PROGRESS` while files are still being indexed or
+copied into it.
+
+Cancelling leaves the partition on its current embedder. What the files re-embedded before it are worth depends on
+which of the two jobs was cancelled: on a **drift repair** the target field is the one the partition already
+searches, so those files are repaired and stay searchable; on a **move to another embedder** their new vectors sit
+in a field nothing reads until a later swap to that embedder, which skips them.
+:::
+
 #### Partition Members
 
 Manage who can access a partition and with which role — all **owner** only.
@@ -661,7 +744,7 @@ DELETE /model-endpoints/{model_type}/{name}    # 204 No Content
 ```
 `PUT` takes a partial body (any of the create fields, plus `name` to rename) and returns the updated endpoint.
 
-Changing an **embedder**'s `endpoint`, `model_name`, `extra.implementation` or `extra.max_model_len` changes the vectors it produces. While partitions hold files indexed with it, such an edit returns `409 EMBEDDER_EDIT_AFFECTS_INDEXED_DATA` naming the partitions and file counts; resend it with `"acknowledge_indexed_data": true` to apply it anyway. The existing vectors are not rebuilt, so queries on those partitions are then compared against vectors from the previous configuration. `GET /model-endpoints/{model_type}/{name}/indexed-usage` returns the same counts ahead of time.
+Changing an **embedder**'s `endpoint`, `model_name`, `extra.implementation` or `extra.max_model_len` changes the vectors it produces. While partitions hold files indexed with it, such an edit returns `409 EMBEDDER_EDIT_AFFECTS_INDEXED_DATA` naming the partitions and file counts; resend it with `"acknowledge_indexed_data": true` to apply it anyway. The existing vectors are not rebuilt, so queries on those partitions are then compared against vectors from the previous configuration. `GET /model-endpoints/{model_type}/{name}/indexed-usage` returns the same counts ahead of time. While a partition embedder swap re-embeds with that embedder, such an edit returns `409 EMBEDDER_SWAP_IN_PROGRESS` instead, acknowledged or not: wait for the swap to finish, or cancel it.
 
 Files still indexing when such an edit is saved are not counted, since a file is only counted once indexing finishes. Instead, when the file is recorded, the indexer checks that the partition's embedder still has the configuration it embedded with. If it doesn't, the file fails with `EMBEDDER_CHANGED_DURING_INDEXING`, its vectors are removed, and it has to be indexed again. Indexers reload an edited endpoint before embedding, so only files already embedding during the edit are affected.
 

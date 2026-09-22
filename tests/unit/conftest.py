@@ -56,6 +56,8 @@ class MockVectorStore(VectorStore):
         # Dense fields ensured on this store, with their dimension. A field
         # absent here models "nothing indexed with that embedder yet".
         self.vector_fields: dict[str, int] = {}
+        # Partial writes per field: {field: {chunk_id: vector or None}}.
+        self.written_vectors: dict[str, dict[str, list[float] | None]] = {}
 
     async def upsert(
         self, chunks: list[Any], collection: str = "default", *, indexed_at=None, vector_field=None
@@ -104,6 +106,10 @@ class MockVectorStore(VectorStore):
 
     async def drop_vector_field(self, field: str) -> bool:
         return self.vector_fields.pop(field, None) is not None
+
+    async def write_vectors(self, field: str, vectors: dict[str, list[float] | None]) -> int:
+        self.written_vectors.setdefault(field, {}).update(vectors)
+        return len(vectors)
 
     async def drop_collection(self, name: str) -> None:
         self.collections.pop(name, None)

@@ -35,6 +35,7 @@ from core.config.indexation_pipeline import IndexationPipelineConfig
 from core.config.model_endpoints import DEFAULT_ENDPOINT_ALIAS
 from core.config.retrieval_pipeline import RetrievalPipelineConfig
 from core.indexing.validators import validate_partition_name
+from core.models.embedder_swap import EmbedderSwapStatus
 from core.models.preset import PartitionConfig
 from core.utils.consts import is_internal_metadata_key
 from core.utils.exceptions import (
@@ -231,6 +232,36 @@ class PartitionService:
             return
         async with copy_lock(partition):
             yield
+
+    @asynccontextmanager
+    async def operation_lock(self, partition: str) -> AsyncIterator[None]:
+        """Hold the cross-process partition fence uploads and deletes serialize on.
+
+        For operations that must not interleave with an upload admission or a
+        partition delete — an embedder swap starting or completing.
+        """
+        async with self._partition_operation_lock(partition):
+            yield
+
+    async def ensure_no_embedder_swap(self, partition: str) -> None:
+        """Refuse a write to *partition* while an embedder swap is re-embedding it.
+
+        The swap re-embeds the chunks the partition has when it starts, and
+        completes by pointing the partition at the new embedder. A file written
+        meanwhile would land in the old embedder's field and be left behind; a
+        metadata update would rewrite chunks under the swap. Repositories
+        without swap support never report one.
+        """
+        getter = getattr(self._partition_repo, "get_embedder_swap", None)
+        if getter is None:
+            return
+        swap = await getter(partition)
+        if swap is not None and swap.get("status") == EmbedderSwapStatus.RUNNING:
+            raise ConflictError(
+                f"Partition '{partition}' is being re-embedded with '{swap.get('target_embedder')}'. "
+                "Files can be added or changed once the embedder swap completes.",
+                code="EMBEDDER_SWAP_IN_PROGRESS",
+            )
 
     @asynccontextmanager
     async def _partition_operation_lock(self, partition: str) -> AsyncIterator[Any]:
@@ -571,6 +602,14 @@ class PartitionService:
 
         Its vectors would stay in the old field, which its searches stop reading.
         """
+        if embedder == current.get("embedder"):
+            return  # the value it already holds: nothing to refuse
+        # Ahead of the same-field shortcut below: a swap ends by pointing the
+        # partition at its target, so no other write may move the reference
+        # meanwhile — not even one the fields agree on, like the `default` alias
+        # for the endpoint it resolves to today, which a later set-default
+        # would then carry to another field under the partition's files.
+        await self.ensure_no_embedder_swap(partition)
         embedders = self._require_config().models.embedder
         old_field = getattr(embedders.get(current.get("embedder") or DEFAULT_ENDPOINT_ALIAS), "vector_field", None)
         new_field = getattr(embedders.get(embedder), "vector_field", None)
@@ -579,7 +618,7 @@ class PartitionService:
         if await self._partition_repo.get_partition_file_count(partition) > 0:
             raise ConflictError(
                 f"Partition '{partition}' has indexed files, which would disappear from search "
-                "if its embedder changed.",
+                f"if its embedder changed. Use POST /partition/{partition}/embedder-swap to re-embed them.",
                 code="PARTITION_HAS_INDEXED_FILES",
             )
         # An upload in flight has no file row yet, but already writes with the old embedder.
@@ -661,6 +700,19 @@ class PartitionService:
         except Exception as exc:
             logger.debug("Could not read the live vector dimension", error=str(exc))
             return None
+
+    async def _active_vector_field(self, partition: str) -> str | None:
+        """The dense field *partition*'s current embedder reads and writes.
+
+        ``None`` when it cannot be resolved, which callers read as "do not
+        surface an embedding" rather than as "any field will do".
+        """
+        if self._config is None:
+            return None
+        row = await self._partition_repo.get_partition_row(partition)
+        embedder = (row or {}).get("embedder") or DEFAULT_ENDPOINT_ALIAS
+        endpoint = self._config.models.embedder.get(embedder)
+        return getattr(endpoint, "vector_field", None)
 
     def _validate_preset_refs(self, row: dict) -> None:
         """Validate a row's preset references for create/update.
@@ -901,6 +953,11 @@ class PartitionService:
         """
         _validate_limit(limit)
         await self._ensure_partition(partition)
+        # Which field to export: a chunk keeps the old embedder's vector after a
+        # swap (nothing clears it), so "the non-null one" is ambiguous and can
+        # return the stale space. None leaves the embedding out rather than
+        # guessing — the same stance resolve_vector_field takes.
+        active_field = await self._active_vector_field(partition) if include_embedding else None
         excluded = {"text"}
         filters: dict[str, Any] = {"partition": partition}
         if file_id is not None:
@@ -921,9 +978,9 @@ class PartitionService:
                 if is_internal_metadata_key(k):
                     continue
                 if is_vector_field_key(k):
-                    # "*" returns every embedder's field, null but for the one
-                    # that embedded this chunk. Surfaced as a string under "vector".
-                    if include_embedding and v is not None:
+                    # "*" returns one dense field per embedder. Legacy
+                    # surfaced the embedding as a flat string under "vector".
+                    if k == active_field and v is not None:
                         meta["vector"] = str(np.array(v).flatten().tolist())
                     continue
                 meta[k] = v

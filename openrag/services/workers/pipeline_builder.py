@@ -256,7 +256,7 @@ class IndexingPipeline:
                 ),
             )
             # After the embed: the dimension is measured, not configured.
-            row["embedder_provenance"] = embedder_provenance(embedder, row.get("embedder_name"))
+            row["embedder_provenance"] = embedder_provenance(embedder, row.get("embedder_name"), vector_field)
             # What the catalog write checks the partition's embedder against (#958).
             row["embedder_fingerprint"] = getattr(embedder, "vector_fingerprint", None)
             # Re-index (``replace=True``) is insert-before-delete: snapshot the

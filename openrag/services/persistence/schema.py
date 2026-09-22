@@ -207,6 +207,29 @@ partitions = Table(
 )
 
 
+# At most one row per partition: the running swap, or the outcome of the last
+# one. Deleted with its partition.
+partition_embedder_swaps = Table(
+    "partition_embedder_swaps",
+    metadata,
+    Column(
+        "partition",
+        String,
+        ForeignKey("partitions.partition", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    Column("source_embedder", String, nullable=False),
+    Column("target_embedder", String, nullable=False, index=True),
+    Column("status", String, nullable=False, index=True),
+    Column("files_total", Integer, server_default="0", nullable=False),
+    Column("files_done", Integer, server_default="0", nullable=False),
+    Column("error", String, nullable=True),
+    Column("started_at", DateTime(timezone=True), server_default=text("now()"), nullable=False),
+    Column("updated_at", DateTime(timezone=True), server_default=text("now()"), nullable=False),
+    Column("finished_at", DateTime(timezone=True), nullable=True),
+)
+
+
 files = Table(
     "files",
     metadata,
@@ -505,6 +528,7 @@ __all__ = [
     "prompts",
     "topic_tags",
     "partitions",
+    "partition_embedder_swaps",
     "files",
     "users",
     "oidc_sessions",

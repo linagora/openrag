@@ -24,6 +24,7 @@ from core.models.chunk import Chunk, ChunkType
 from core.utils.exceptions import (
     VDBConnectionError,
     VDBCreateOrLoadCollectionError,
+    VDBInsertError,
     VDBSchemaMigrationRequiredError,
     VDBSearchError,
 )
@@ -1560,6 +1561,42 @@ class TestDropVectorField:
         with pytest.raises(ValueError, match="only vector field"):
             await store.drop_vector_field(FIELD)
         store._client.drop_collection_field.assert_not_called()
+
+
+class TestWriteVectors:
+    async def test_only_the_named_field_is_written(self, store: MilvusVectorStore) -> None:
+        store._async_client.upsert = AsyncMock(return_value={"upsert_count": 2})
+
+        written = await store.write_vectors("vector_bge_m3", {"11": [0.1, 0.2], "12": None})
+
+        assert written == 2
+        store._async_client.upsert.assert_awaited_once_with(
+            collection_name=store._collection_name,
+            # A partial upsert: every field it does not name keeps its value,
+            # and None clears the vector. Milvus's primary key is INT64.
+            data=[{"_id": 11, "vector_bge_m3": [0.1, 0.2]}, {"_id": 12, "vector_bge_m3": None}],
+            partial_update=True,
+        )
+
+    async def test_nothing_to_write_makes_no_call(self, store: MilvusVectorStore) -> None:
+        store._async_client.upsert = AsyncMock()
+
+        assert await store.write_vectors("vector_bge_m3", {}) == 0
+        store._async_client.upsert.assert_not_called()
+
+    @pytest.mark.parametrize("field", ["vector", "sparse", "text"])
+    async def test_only_a_per_embedder_field_can_be_written(self, store: MilvusVectorStore, field: str) -> None:
+        store._async_client.upsert = AsyncMock()
+
+        with pytest.raises(ValueError, match="per-embedder"):
+            await store.write_vectors(field, {"11": [0.1]})
+        store._async_client.upsert.assert_not_called()
+
+    async def test_a_backend_failure_is_an_insert_error(self, store: MilvusVectorStore) -> None:
+        store._async_client.upsert = AsyncMock(side_effect=MilvusException(1, "boom"))
+
+        with pytest.raises(VDBInsertError, match="vector_bge_m3"):
+            await store.write_vectors("vector_bge_m3", {"11": [0.1]})
 
 
 class TestVectorFieldRouting:
