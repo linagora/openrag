@@ -169,7 +169,13 @@ _VERIFIABLE_SIGNATURES: dict[str, frozenset[str]] = {
 #: HTML/text ``.doc`` files exist in the corpora — a corpus question, not a code
 #: one.
 _TOLERANT_SIGNATURES: dict[str, frozenset[str]] = {
-    "doc": frozenset({"rtf"}),
+    # ``doc`` is here as well as ``rtf``: ``filetype`` *does* recognise a real
+    # Word 97-2003 document — the FIB marker at offset 512, or the
+    # ``Word.Document.8`` string at 2075-2142 — and omitting it would 415 the
+    # one file this extension exists for. It stays unreliable in the other
+    # direction: an OLE2 document without either marker reports ``None``, which
+    # is why the rule cannot simply require ``doc``.
+    "doc": frozenset({"doc", "rtf"}),
 }
 
 #: The part whose presence makes an OPC package a document of that kind, per

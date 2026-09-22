@@ -340,10 +340,29 @@ RTF = rb"{\rtf1\ansi\deff0 {\fonttbl{\f0 Times;}}\f0\fs24 hello\par}"
 HTML_DOC = b"<html><body><p>a .doc that is really html</p></body></html>"
 
 
+def _word_doc(marker: str) -> bytes:
+    """A Word 97-2003 document in one of the two shapes ``filetype`` recognises.
+
+    The short OLE2 stub above is *not* enough: ``filetype.guess`` returns None
+    for it, so a test built only on that never reaches the branch a real
+    document takes — which is how a 415 on genuine .doc files got this far.
+    """
+    buf = bytearray(b"\x00" * 4096)
+    buf[0:8] = OLE2[:8]
+    if marker == "fib":
+        buf[512:516] = b"\xec\xa5\xc1\x00"
+    else:
+        word8 = b"\x00\x0a\x00\x00\x00MSWordDoc\x00\x10\x00\x00\x00Word.Document.8\x00\xf49\xb2q"
+        buf[2075 : 2075 + len(word8)] = word8
+    return bytes(buf)
+
+
 @pytest.mark.parametrize(
     ("head", "why"),
     [
-        (OLE2, "a real compound-file document"),
+        (OLE2, "a compound-file document filetype cannot place"),
+        (_word_doc("fib"), "a real Word 97-2003 doc — filetype reports 'doc'"),
+        (_word_doc("word8"), "the Word.Document.8 shape, likewise"),
         (RTF, "RTF, which Word wrote under .doc for years"),
         (HTML_DOC, "HTML, likewise"),
         (TEXT, "plain text, which has no signature by definition"),
@@ -391,3 +410,12 @@ def test_the_doc_rule_does_not_leak_to_other_extensions():
     """Only .doc is tolerant; .pdf must still require its own signature."""
     with pytest.raises(ValidationError):
         validate_content_matches_extension("pdf", TEXT)
+
+
+def test_filetype_recognising_a_real_word_document_is_not_a_rejection():
+    """Regression guard. ``filetype`` reports ``doc`` for a genuine Word 97-2003
+    file, and an earlier version of this rule tolerated only ``rtf`` — so the
+    one format the extension exists for got a 415. Caught in review on #1006."""
+    real = _word_doc("fib")
+    assert filetype.guess(real).extension == "doc", "guard: the fixture must be recognisable"
+    validate_content_matches_extension("doc", real)
