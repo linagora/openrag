@@ -534,6 +534,7 @@ def _child_mmap_probe(headroom_mb: int) -> str:
             return f"refused: {exc.errno}"
 
 
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="RLIMIT_DATA only covers mmap on Linux")
 def test_a_disabled_limit_leaves_the_rlimit_untouched():
     """0 must not lower the ceiling at all, not merely leave room for the test's
     own allocation."""
@@ -551,25 +552,28 @@ def test_a_file_backed_mapping_is_not_counted_against_the_limit():
         assert pool.submit(_child_mmap_probe, 256).result(timeout=60) == "mapped"
 
 
-@pytest.mark.parametrize(
-    "failure",
-    [OSError("not supported here"), ImportError("no module named 'resource'")],
-    ids=["the call is refused", "the module does not exist"],
-)
-def test_an_unavailable_limit_does_not_stop_the_worker_starting(monkeypatch, failure):
-    """Best-effort: a platform without this must still yield a working worker.
-
-    ``ImportError`` is in the list because ``resource`` is Unix-only. That is
-    also why the import sits inside the function — at module scope it would
-    raise before any handler here could run, and the worker would not start at
-    all rather than starting without a ceiling.
-    """
-    import resource as _resource
+def test_a_refused_setrlimit_does_not_stop_the_worker_starting(monkeypatch):
+    """Best-effort: a platform that refuses the call must still yield a worker."""
+    resource = pytest.importorskip("resource", reason="Unix-only; the missing case is covered below")
 
     def _boom(*_args, **_kwargs):
-        raise failure
+        raise OSError("not supported here")
 
-    monkeypatch.setattr(_resource, "setrlimit", _boom)
+    monkeypatch.setattr(resource, "setrlimit", _boom)
+    monkeypatch.setattr(marker_workers, "logger", _NullLogger())
+
+    marker_workers._apply_parse_memory_limit(256)  # must not raise
+
+
+def test_a_missing_resource_module_does_not_stop_the_worker_starting(monkeypatch):
+    """The case the import placement exists for — and it cannot import the module
+    it is proving absent, which is why it is separate from the test above.
+
+    ``resource`` is Unix-only. At module scope its absence would raise before any
+    handler could run and the worker would not start at all; inside the function
+    it degrades to a worker with no ceiling, which is the intended behaviour.
+    """
+    monkeypatch.setitem(sys.modules, "resource", None)  # import raises ImportError
     monkeypatch.setattr(marker_workers, "logger", _NullLogger())
 
     marker_workers._apply_parse_memory_limit(256)  # must not raise
