@@ -413,7 +413,7 @@ GET /partition/{partition}/config
 ```http
 PATCH /partition/{partition}
 ```
-**Owner** only. Body fields (all optional): `description`, `embedder`, `indexation_preset`, `retrieval_preset`, `chat_history_depth`, `chat_llm`. Returns the updated resolved config.
+**Owner** only. Body fields (all optional): `description`, `embedder`, `indexation_preset`, `retrieval_preset`, `chat_history_depth`, `chat_llm`. Returns the updated resolved config. Changing `embedder` is refused on a partition that holds indexed files (`409 PARTITION_HAS_INDEXED_FILES`, or `409 INDEXING_IN_PROGRESS` while files are still being indexed or copied into it): each embedder keeps its vectors in its own field, which only its partitions search.
 
 ```bash frame="none"
 curl -X PATCH http://localhost:8080/partition/my_partition \
@@ -665,7 +665,7 @@ Changing an **embedder**'s `endpoint`, `model_name`, `extra.implementation` or `
 
 Files still indexing when such an edit is saved are not counted, since a file is only counted once indexing finishes. Instead, when the file is recorded, the indexer checks that the partition's embedder still has the configuration it embedded with. If it doesn't, the file fails with `EMBEDDER_CHANGED_DURING_INDEXING`, its vectors are removed, and it has to be indexed again. Indexers reload an edited endpoint before embedding, so only files already embedding during the edit are affected.
 
-`DELETE` of an embedder returns `409` while a partition names it or, for the default embedder, while a partition following the `default` alias already holds indexed files. Reassign those partitions first.
+`DELETE` of an embedder returns `409` while a partition names it or, for the default embedder, while a partition following the `default` alias already holds indexed files. Reassign those partitions first. Deleting an embedder also drops its vector field from the collection, on a best-effort basis: if the drop fails, the delete still succeeds and the empty field stays until removed by hand.
 
 #### Set as default for its type
 ```http
@@ -673,7 +673,7 @@ POST /model-endpoints/{model_type}/{name}/set-default
 ```
 Promotes the endpoint to the default used for its `model_type`, and returns it.
 
-For embedders, a new default only reaches partitions that have no data yet. A partition stays on the `default` alias until it first receives a file (upload or copy), at which point the alias is replaced by the embedder it resolved to; a partition indexed before that is pinned the same way when the default changes. Partitions with files therefore keep the embedder that built their vectors, and an admin moves one deliberately by setting its `embedder`. An emptied partition stays pinned — set its `embedder` back to `default` to follow the default again.
+For embedders, a new default only reaches partitions that have no data yet. A partition stays on the `default` alias until it first receives a file (upload or copy), at which point the alias is replaced by the embedder it resolved to; a partition indexed before that is pinned the same way when the default changes. Partitions with files therefore keep the embedder that built their vectors. An emptied partition stays pinned — set its `embedder` back to `default` to follow the default again.
 
 #### Reveal the stored API key
 ```http

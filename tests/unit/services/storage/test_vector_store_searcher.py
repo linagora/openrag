@@ -454,3 +454,13 @@ def test_dict_to_chunk_drops_persisted_retrieval_scores():
     c = _dict_to_chunk(row)
     assert not {"vector_score", "rerank_score", "combined_score"} & set(c.metadata)
     assert c.metadata["author"] == "alice"
+
+
+@pytest.mark.asyncio
+async def test_the_searcher_reads_its_own_embedders_field():
+    searcher, store, _, _ = _make_searcher()
+    searcher._vector_field = "vector_bge_m3"
+
+    await searcher.search("q", partition=["p1"], top_k=5)
+
+    assert store.search.await_args.kwargs["vector_field"] == "vector_bge_m3"

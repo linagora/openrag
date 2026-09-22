@@ -14,12 +14,14 @@ decremented in application code (no SQL trigger) so the books stay balanced.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Callable
+import asyncio
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from core.ports.partition_repo import PartitionRepository
-from core.utils.exceptions import ValidationError
+from core.utils.exceptions import ServiceUnavailableError, ValidationError
 from core.utils.logging import get_logger
 from services.persistence.file_count import decrement_file_counts
 
@@ -84,6 +86,9 @@ _PARTITION_UPDATE_COLUMNS = frozenset(
     }
 )
 _PARTITION_OPERATION_LOCK_NAMESPACE = 20260720
+_PARTITION_COPY_LOCK_NAMESPACE = 20260921
+_HOLD_COPY_LOCK_SQL = "SELECT pg_advisory_lock_shared($1::integer, hashtext($2)::integer)"
+_RELEASE_COPY_LOCK_SQL = "SELECT pg_advisory_unlock_shared($1::integer, hashtext($2)::integer)"
 
 logger = get_logger()
 
@@ -134,11 +139,126 @@ class _PartitionOperationGuard:
         return await self._repo._pin_default_embedder_on_conn(self._conn, name)
 
 
+@dataclass(eq=False)
+class _CopyHold:
+    name: str
+    conn: asyncpg.Connection
+    task: asyncio.Task
+    # The task's pending cancellations when the hold was taken, to tell ours apart.
+    cancelling: int
+    lost: bool = False
+
+
+class _CopyLocks:
+    """The shared locks of this process's copies in flight, on a connection of their own.
+
+    A copy can re-embed for minutes, so a pool connection per copy would let a
+    few large ones starve every request. A session can hold a shared lock
+    several times over: each copy takes and releases one hold.
+
+    Losing the session releases its holds at once. Taking them back later would
+    leave a gap an embedder change could slip through, so the copies they
+    protected are cancelled instead.
+    """
+
+    def __init__(self, connect: Callable[[], Awaitable[asyncpg.Connection]]) -> None:
+        self._connect = connect
+        self._conn: asyncpg.Connection | None = None
+        self._holds: set[_CopyHold] = set()
+        self._mutex = asyncio.Lock()
+
+    async def hold(self, name: str) -> _CopyHold:
+        task = asyncio.current_task()
+        assert task is not None
+        # Shielded: a lock granted to a caller cancelled meanwhile would stay
+        # on the session with no hold to release it.
+        taking = asyncio.ensure_future(self._take(name, task))
+        try:
+            return await asyncio.shield(taking)
+        except asyncio.CancelledError:
+            await asyncio.shield(self._give_back(taking))
+            raise
+
+    async def _take(self, name: str, task: asyncio.Task) -> _CopyHold:
+        async with self._mutex:
+            try:
+                conn = await self._connection()
+                await conn.execute(_HOLD_COPY_LOCK_SQL, _PARTITION_COPY_LOCK_NAMESPACE, name)
+            except Exception:  # noqa: BLE001 - most likely a lost session: retry once on a new one
+                self._discard()
+                conn = await self._connection()
+                await conn.execute(_HOLD_COPY_LOCK_SQL, _PARTITION_COPY_LOCK_NAMESPACE, name)
+            hold = _CopyHold(name, conn, task, task.cancelling())
+            self._holds.add(hold)
+            return hold
+
+    async def _give_back(self, taking: asyncio.Future[_CopyHold]) -> None:
+        """Release the lock a cancelled caller was granted all the same."""
+        try:
+            hold = await taking
+        except Exception:  # noqa: BLE001 - never granted: nothing to release
+            return
+        self.forget(hold)
+        await self.release(hold)
+
+    def forget(self, hold: _CopyHold) -> None:
+        """Stop guarding *hold*: its copy is over, and must no longer be cancelled."""
+        self._holds.discard(hold)
+
+    async def release(self, hold: _CopyHold) -> None:
+        async with self._mutex:
+            if hold.conn is not self._conn:
+                return  # its session is gone, and the hold with it
+            try:
+                await hold.conn.execute(_RELEASE_COPY_LOCK_SQL, _PARTITION_COPY_LOCK_NAMESPACE, hold.name)
+            except Exception as exc:  # noqa: BLE001 - dropping the session releases the hold anyway
+                logger.bind(partition=hold.name, error=str(exc)).warning("Dropped the copy-lock connection")
+                self._discard()
+
+    async def close(self) -> None:
+        async with self._mutex:
+            if self._conn is not None:
+                await self._conn.close()
+            self._conn = None
+
+    def _discard(self) -> None:
+        """Drop the session, and every copy holding a lock on it."""
+        conn = self._conn
+        if conn is not None:
+            self._lose(conn)
+            conn.terminate()
+
+    def _lose(self, conn: asyncpg.Connection) -> None:
+        """Cancel the copies whose holds went with *conn*'s session."""
+        if self._conn is conn:
+            self._conn = None
+        for hold in [hold for hold in self._holds if hold.conn is conn]:
+            self._holds.discard(hold)
+            hold.lost = True
+            hold.task.cancel()
+            logger.bind(partition=hold.name).warning("Lost a copy lock: stopping the copy")
+
+    async def _connection(self) -> asyncpg.Connection:
+        if self._conn is not None and self._conn.is_closed():
+            self._discard()
+        if self._conn is None:
+            conn = await self._connect()
+            conn.add_termination_listener(self._lose)
+            self._conn = conn
+        return self._conn
+
+
 class PgPartitionRepository(PartitionRepository):
     """asyncpg-backed implementation of :class:`PartitionRepository`."""
 
-    def __init__(self, pool_getter: Callable[[], asyncpg.Pool]) -> None:
+    def __init__(
+        self,
+        pool_getter: Callable[[], asyncpg.Pool],
+        connect: Callable[[], Awaitable[asyncpg.Connection]] | None = None,
+    ) -> None:
         self._pool_getter = pool_getter
+        # Opens the connection copy locks live on, outside the pool.
+        self._copy_locks = _CopyLocks(connect) if connect is not None else None
 
     @property
     def pool(self) -> asyncpg.Pool:
@@ -161,6 +281,48 @@ class PgPartitionRepository(PartitionRepository):
                     _PARTITION_OPERATION_LOCK_NAMESPACE,
                     name,
                 )
+
+    @asynccontextmanager
+    async def copy_lock(self, name: str) -> AsyncIterator[None]:
+        """Mark a copy into partition *name* as in flight, for :meth:`copy_in_progress`.
+
+        Shared: copies never wait on each other, and uploads never take it.
+        Held outside the request pool, see :class:`_CopyLocks`. Raises
+        :class:`ServiceUnavailableError` from the copy if the lock is lost.
+        """
+        if self._copy_locks is None:
+            raise RuntimeError("PgPartitionRepository was built without a connect callable for copy locks.")
+        hold = await self._copy_locks.hold(name)
+        try:
+            yield
+        except asyncio.CancelledError:
+            if hold.lost and hold.task.uncancel() <= hold.cancelling:
+                raise ServiceUnavailableError(
+                    f"The copy into partition '{name}' was stopped: it lost the lock that keeps "
+                    "the partition's embedder from changing meanwhile. Retry the copy.",
+                    code="COPY_INTERRUPTED",
+                ) from None
+            raise
+        finally:
+            # Before any await, so a copy that finished is never cancelled.
+            self._copy_locks.forget(hold)
+            # Shielded: a hold left behind would block the partition's
+            # embedder changes until the process exits.
+            await asyncio.shield(self._copy_locks.release(hold))
+
+    async def aclose(self) -> None:
+        if self._copy_locks is not None:
+            await self._copy_locks.close()
+
+    async def copy_in_progress(self, name: str) -> bool:
+        """Whether a copy into partition *name* holds :meth:`copy_lock`. Never waits."""
+        # Released as soon as the statement's own transaction ends.
+        acquired = await self.pool.fetchval(
+            "SELECT pg_try_advisory_xact_lock($1::integer, hashtext($2)::integer)",
+            _PARTITION_COPY_LOCK_NAMESPACE,
+            name,
+        )
+        return not acquired
 
     # ── PartitionRepository port methods ─────────────────────────────
 
