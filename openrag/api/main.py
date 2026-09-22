@@ -169,9 +169,18 @@ async def lifespan(app: FastAPI):
             # Jobs API is unauthenticated (CVE-2023-48022 "ShadowRay") so it
             # must never listen on a routable interface. Operators that front it
             # with an auth proxy can override via RAY_DASHBOARD_HOST.
+            #
+            # Ray also picks a random port for its metrics agent unless given
+            # one, and a scrape config can only name a fixed port: without
+            # RAY_METRICS_EXPORT_PORT the metrics recorded in Ray actors are
+            # exported but never collected. The Compose monitoring overlay
+            # sets it. Like the dashboard it is unauthenticated, so it must
+            # not be published on the host.
+            metrics_port = os.environ.get("RAY_METRICS_EXPORT_PORT", "").strip()
             ray.init(
                 dashboard_host=os.environ.get("RAY_DASHBOARD_HOST", "127.0.0.1"),
                 ignore_reinit_error=True,
+                _metrics_export_port=int(metrics_port) if metrics_port else None,
             )
     logger.info("Startup: Ray is initialized")
 
