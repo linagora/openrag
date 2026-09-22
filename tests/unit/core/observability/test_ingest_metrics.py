@@ -214,6 +214,60 @@ async def test_pre_dispatch_failure_is_counted(counted: list[str]) -> None:
 
 
 @pytest.mark.asyncio
+async def test_worker_completion_is_counted_once(counted: list[str]) -> None:
+    """``complete_with_degraded_stages`` is how the indexer worker settles every
+    successful task, so missing it would drop nearly all completions."""
+    manager = _manager()
+
+    await manager.set_state("task-1", "QUEUED")
+    assert await manager.complete_with_degraded_stages("task-1", []) == "completed"
+    await manager.complete_with_degraded_stages("task-1", [])
+
+    assert counted == ["COMPLETED"]
+
+
+@pytest.mark.asyncio
+async def test_worker_failure_with_reason_is_counted_once(counted: list[str]) -> None:
+    """``submit_task_failure`` prefers this setter whenever the actor has it."""
+    manager = _manager()
+
+    await manager.set_state("task-1", "QUEUED")
+    assert await manager.set_failed_with_reason_if_not_cancelled("task-1", "boom", "pipeline_error") is True
+    await manager.set_failed_with_reason_if_not_cancelled("task-1", "boom again", "pipeline_error")
+
+    assert counted == ["FAILED"]
+
+
+def test_every_terminal_write_is_counted() -> None:
+    """A setter that writes a terminal state without counting it drops that
+    path from ``openrag_ingest_documents_total`` silently. Two such setters
+    arrived from develop after this metric was written, so check them all."""
+    import ast
+    import inspect
+
+    import services.workers.task_state as task_state_module
+
+    terminal = {"COMPLETED", "FAILED", "CANCELLED"}
+    counting = {"_count_terminal", "_set_cancelled_locked"}
+    uncounted = []
+    for node in ast.walk(ast.parse(inspect.getsource(task_state_module))):
+        if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) or node.name in counting:
+            continue
+        writes_terminal = any(
+            isinstance(n, ast.Assign)
+            and any(isinstance(t, ast.Attribute) and t.attr == "state" for t in n.targets)
+            and isinstance(n.value, ast.Constant)
+            and n.value.value in terminal
+            for n in ast.walk(node)
+        )
+        calls = {n.func.attr for n in ast.walk(node) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)}
+        if writes_terminal and not calls & counting:
+            uncounted.append(node.name)
+
+    assert not uncounted, f"terminal state written without _count_terminal in: {uncounted}"
+
+
+@pytest.mark.asyncio
 async def test_queued_state_is_not_counted(counted: list[str]) -> None:
     """In-flight states belong to the ``openrag_ingest_tasks`` gauge."""
     manager = _manager()
