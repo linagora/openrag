@@ -59,11 +59,15 @@ def exported_metrics() -> str:
     # this is unnecessary — it is harness plumbing, not behaviour under test.
     package_root = pathlib.Path(__file__).resolve().parents[2] / "openrag"
 
+    # A session started earlier in this pytest process would silently ignore
+    # the runtime_env below, and the actor would fail to import ``core``. Own
+    # the session instead of borrowing it.
+    if ray.is_initialized():
+        ray.shutdown()
     ray.init(
         num_cpus=2,
         include_dashboard=False,
         object_store_memory=150 * 1024 * 1024,
-        ignore_reinit_error=True,
         log_to_driver=False,
         runtime_env={"env_vars": {"PYTHONPATH": str(package_root)}},
     )
