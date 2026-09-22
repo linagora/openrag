@@ -118,7 +118,9 @@ class IndexingService:
 
         The keys added below must match ``UPLOAD_METADATA_SERVER_KEYS`` exactly.
         """
-        metadata = dict(metadata or {})
+        metadata, dropped = strip_protected_metadata(metadata)
+        if dropped:
+            logger.bind(file_id=file_id).warning(f"Dropped protected metadata keys from file upload: {dropped}")
         metadata.update(
             {
                 "source": str(file_path),
@@ -168,6 +170,16 @@ class IndexingService:
             # Forbidden; a builtin PermissionError would fall through to the
             # catch-all handler and surface as a 500.
             raise AuthError(f"Editor role required for partition: {partition}")
+
+    async def _pin_partition_embedder(self, partition: str) -> None:
+        """Pin *partition* off the ``default`` embedder alias before data lands in it.
+
+        See :meth:`PartitionService.pin_embedder_for_write`. Must run before the
+        job's embedder is captured, so the worker gets the pinned name.
+        """
+        pin = getattr(self._partition_service, "pin_embedder_for_write", None)
+        if pin is not None:
+            await pin(partition)
 
     def _resolve_indexation_dispatch_config(self, partition: str) -> tuple[dict | None, str | None]:
         partitions = self._partition_configs()
@@ -271,6 +283,7 @@ class IndexingService:
         async with self._partition_admission(partition) as partition_existed_at_admission:
             await self._ensure_partition_exists(partition, user)
             await self._refresh_preset_config_if_stale()
+            await self._pin_partition_embedder(partition)
             require_existing_partition = bool(self._partition_configs()) or partition_existed_at_admission
             indexation_config, embedder_name = self._resolve_indexation_dispatch_config(partition)
             legacy_actor_preserves_partition_guard = require_existing_partition and indexation_config is not None
@@ -337,6 +350,7 @@ class IndexingService:
         metadata["file_id"] = target_file_id
         metadata["partition"] = target_partition
         metadata["content_sha256"] = content_sha256
+        await self._pin_partition_embedder(target_partition)
         await self._dispatcher.copy_file(source_file_id, metadata, source_partition, user)
 
     # ------------------------------------------------------------------
@@ -348,6 +362,9 @@ class IndexingService:
 
     async def get_task_error(self, task_id: str) -> str | None:
         return await self._dispatcher.get_task_error(task_id)
+
+    async def get_task_error_reason(self, task_id: str) -> str | None:
+        return await self._dispatcher.get_task_error_reason(task_id)
 
     async def cancel_task(self, task_id: str) -> bool:
         return await self._dispatcher.cancel_task(task_id)

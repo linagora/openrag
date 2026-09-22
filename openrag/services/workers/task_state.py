@@ -12,10 +12,12 @@ from typing import Any
 
 import ray
 from core.models.catalog import (
+    LEGACY_ACTIVE_INDEXING_STATES,
     TASK_CREATED_AT_METADATA_KEY,
     TASK_FINISHED_AT_METADATA_KEY,
     TERMINAL_TASK_STATES,
     DocumentStatus,
+    normalize_degraded_stages,
 )
 from core.observability.ray_metrics import (
     observe_queue_wait_from,
@@ -29,7 +31,6 @@ ACTIVE_INDEXING_STATES = frozenset({"QUEUED", "SERIALIZING"})
 # must keep treating them as in-flight so cleanup never misses such a task and
 # lets a stale worker write data after the file/partition is gone. Kept out of
 # the public active counts and the DocumentStatus enum on purpose — fencing only.
-LEGACY_ACTIVE_INDEXING_STATES = frozenset({"CHUNKING", "INSERTING"})
 CANCELLABLE_INDEXING_STATES = ACTIVE_INDEXING_STATES | LEGACY_ACTIVE_INDEXING_STATES
 RECOVERABLE_TASK_STATES = CANCELLABLE_INDEXING_STATES | {"CANCELLED"}
 TERMINAL_INDEXING_STATES = frozenset({"COMPLETED", "FAILED"})
@@ -265,6 +266,7 @@ except (ImportError, AttributeError) as _cfg_err:
 class TaskInfo:
     state: str | None = None
     error: str | None = None
+    error_reason: str | None = None
     details: dict[str, Any] = field(default_factory=dict)
     object_ref: ray.ObjectRef | None = None
     worker_submitted: bool = False
@@ -442,12 +444,15 @@ class TaskStateManager:
         metadata: dict[str, Any],
         user_id: int | None,
     ) -> None:
+        previous_details = info.details
         info.details = {
             "file_id": file_id,
             "partition": partition,
             "metadata": metadata,
             "user_id": user_id,
         }
+        if "degraded_stages" in previous_details:
+            info.details["degraded_stages"] = normalize_degraded_stages(previous_details["degraded_stages"])
         self.user_index.setdefault(user_id, set()).add(task_id)
 
     def _prune_expired_file_delete_fences(self) -> None:
@@ -632,6 +637,25 @@ class TaskStateManager:
             return True
 
     @ray.method(concurrency_group="set")
+    async def set_failed_with_reason_if_not_cancelled(
+        self,
+        task_id: str,
+        tb_str: str,
+        error_reason: str,
+    ) -> bool:
+        """Atomically record a failed task's traceback and canonical reason."""
+        with self.lock:
+            info = self.tasks.get(task_id)
+            if info is not None and info.state == "CANCELLED":
+                return False
+            if info is not None:
+                info.state = "FAILED"
+                info.error = _truncate_error(tb_str)
+                info.error_reason = error_reason
+                self._settle_task_locked(task_id, info)
+            return True
+
+    @ray.method(concurrency_group="set")
     async def set_cancelled_if_active(self, task_id: str) -> bool:
         with self.lock:
             info = self.tasks.get(task_id)
@@ -701,6 +725,38 @@ class TaskStateManager:
                 user_id=user_id,
             )
             self._persist_task_locked(task_id, info)
+
+    @ray.method(concurrency_group="set")
+    async def set_degraded_stages(self, task_id: str, stages: list[str]) -> bool:
+        """Attach safe enrichment outcomes without reviving an expired task."""
+        with self.lock:
+            info = self.tasks.get(task_id)
+            if info is None or info.state not in CANCELLABLE_INDEXING_STATES:
+                return False
+            info.details["degraded_stages"] = normalize_degraded_stages(stages)
+            self._persist_task_locked(task_id, info)
+            return True
+
+    @ray.method(concurrency_group="set")
+    async def complete_with_degraded_stages(self, task_id: str, stages: list[str]) -> str:
+        """Atomically settle a task and report why completion was accepted or fenced."""
+        normalized = normalize_degraded_stages(stages)
+        with self.lock:
+            info = self.tasks.get(task_id)
+            if info is None:
+                return "missing"
+            if info.state == "COMPLETED":
+                if normalize_degraded_stages(info.details.get("degraded_stages")) == normalized:
+                    return "completed"
+                return "conflict"
+            if info.state == "CANCELLED":
+                return "cancelled"
+            if info.state not in CANCELLABLE_INDEXING_STATES:
+                return "conflict"
+            info.details["degraded_stages"] = normalized
+            info.state = "COMPLETED"
+            self._settle_task_locked(task_id, info)
+            return "completed"
 
     @ray.method(concurrency_group="set")
     async def set_queued_details(
@@ -779,6 +835,12 @@ class TaskStateManager:
         with self.lock:
             info = self.tasks.get(task_id)
             return info.error if info else None
+
+    @ray.method(concurrency_group="get")
+    async def get_error_reason(self, task_id: str) -> str | None:
+        with self.lock:
+            info = self.tasks.get(task_id)
+            return getattr(info, "error_reason", None) if info else None
 
     @ray.method(concurrency_group="get")
     async def get_details(self, task_id: str) -> dict | None:
@@ -888,6 +950,7 @@ class TaskStateManager:
                 task_id: {
                     "state": info.state,
                     "error": info.error,
+                    "error_reason": getattr(info, "error_reason", None),
                     "details": info.details,
                     "worker_submitted": getattr(info, "worker_submitted", False),
                     "submission_started_at": getattr(info, "submission_started_at", None),
@@ -906,6 +969,7 @@ class TaskStateManager:
                 tid: {
                     "state": self.tasks[tid].state,
                     "error": self.tasks[tid].error,
+                    "error_reason": getattr(self.tasks[tid], "error_reason", None),
                     "details": self.tasks[tid].details,
                 }
                 for tid in task_ids
@@ -928,6 +992,11 @@ class TaskStateManager:
     @ray.method(concurrency_group="queue_info")
     async def supports_bounded_task_retention(self) -> bool:
         """Identify actors that bound terminal task retention (#660)."""
+        return True
+
+    @ray.method(concurrency_group="queue_info")
+    async def supports_explicit_completion_outcomes(self) -> bool:
+        """Identify actors that distinguish cancellation, loss, and conflicts."""
         return True
 
     @ray.method(concurrency_group="queue_info")

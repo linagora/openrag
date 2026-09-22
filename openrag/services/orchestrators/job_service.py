@@ -19,10 +19,13 @@ from datetime import UTC, datetime
 from typing import Any
 
 from core.models.catalog import (
+    LEGACY_ACTIVE_INDEXING_STATES,
     TASK_CREATED_AT_METADATA_KEY,
     TASK_FINISHED_AT_METADATA_KEY,
     TERMINAL_TASK_STATES,
+    normalize_degraded_stages,
 )
+from core.utils.error_summary import summarize_task_error
 from core.utils.logging import get_logger
 
 logger = get_logger()
@@ -121,6 +124,7 @@ class JobService:
             **await self._durable_task_info(is_admin=is_admin, user_id=user_id, task_status=task_status),
             **all_info,
         }
+        all_info = {task_id: {**info, "state": _public_task_state(info["state"])} for task_id, info in all_info.items()}
 
         if task_status is None:
             filtered = list(all_info.items())
@@ -131,14 +135,20 @@ class JobService:
             filtered = [(tid, i) for tid, i in all_info.items() if i["state"].lower() == task_status.lower()]
 
         now = self._now()
-        return [self._task_row(task_id, info, now=now) for task_id, info in filtered]
+        return [self._task_row(task_id, info, now=now, include_error_summary=is_admin) for task_id, info in filtered]
 
     @staticmethod
     def _now() -> datetime:
         return datetime.now(UTC)
 
     @staticmethod
-    def _task_row(task_id: str, info: dict[str, Any], *, now: datetime) -> dict[str, Any]:
+    def _task_row(
+        task_id: str,
+        info: dict[str, Any],
+        *,
+        now: datetime,
+        include_error_summary: bool,
+    ) -> dict[str, Any]:
         details, fallback_created_at, fallback_finished_at = _task_details(info.get("details"))
 
         created_at = info.get("created_at") or fallback_created_at
@@ -151,13 +161,19 @@ class JobService:
                 now=now,
             )
 
-        return {
+        row = {
             "task_id": task_id,
             "state": info["state"],
+            "outcome": _task_outcome(info["state"], details),
             "details": details,
             "created_at": created_at,
             "duration_ms": duration_ms,
         }
+        if include_error_summary and info["state"] == "FAILED":
+            summary = summarize_task_error(info.get("error"), reason=info.get("error_reason"))
+            if summary:
+                row["error_summary"] = summary
+        return row
 
     async def get_user_pending_task_count(self, user_id: int | None) -> int:
         """Pending (not-yet-completed) indexing tasks for one user.
@@ -235,11 +251,13 @@ def _job_to_info(job: Any) -> dict[str, Any]:
     return {
         "state": state,
         "error": job.error,
+        "error_reason": job.error_reason,
         "details": {
             "file_id": job.file_id,
             "partition": job.partition,
             "metadata": {},
             "user_id": job.user_id,
+            "degraded_stages": job.degraded_stages,
         },
         "created_at": created_at,
         "duration_ms": _duration_ms(created_at, completed_at, state=state, now=datetime.now(UTC)),
@@ -266,6 +284,8 @@ def _duration_ms(
 
 def _task_details(details: Any) -> tuple[dict[str, Any], Any, Any]:
     public_details = dict(details) if isinstance(details, dict) else {}
+    if "degraded_stages" in public_details:
+        public_details["degraded_stages"] = normalize_degraded_stages(public_details["degraded_stages"])
     raw_metadata = public_details.get("metadata")
     if not isinstance(raw_metadata, dict):
         return public_details, None, None
@@ -275,6 +295,21 @@ def _task_details(details: Any) -> tuple[dict[str, Any], Any, Any]:
     finished_at = metadata.pop(TASK_FINISHED_AT_METADATA_KEY, None)
     public_details["metadata"] = metadata
     return public_details, created_at, finished_at
+
+
+def _task_outcome(state: str, details: dict[str, Any]) -> str:
+    if state in _ACTIVE_STATES:
+        return "active"
+    if state == "COMPLETED" and details.get("degraded_stages"):
+        return "completed_degraded"
+    return state.lower()
+
+
+def _public_task_state(state: str) -> str:
+    # Detached pre-#721 actors may still emit these internal states during a
+    # rolling deployment. Keep them out of the public contract while retaining
+    # active filtering and cancellation behavior.
+    return "SERIALIZING" if state in LEGACY_ACTIVE_INDEXING_STATES else state
 
 
 def _parse_timestamp(value: Any) -> datetime | None:

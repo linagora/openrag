@@ -520,12 +520,23 @@ class MarkerLoader(BasePooledParser):
 
     def __init__(self) -> None:
         self.config = load_config()
+
+    def _pool(self) -> MarkerPool:
+        """Look up the named ``MarkerPool`` actor; call once per dispatch.
+
+        Never cached: this loader lives as long as its indexer worker, and
+        ``POST /actors/MarkerPool/restart`` replaces the pool with a new actor,
+        so a cached handle would keep dispatching to the killed one. Store the
+        result before calling a method on it: Ray's ``ActorMethod`` holds its
+        handle weakly, so ``self._pool().process_pdf.remote()`` raises
+        "Lost reference to actor".
+        """
         # Lazily create the pool if bootstrap didn't (it only pre-warms the
         # globally-configured PDF backend; a preset can select marker even when
         # the global default is docling — see #569/#575).
         from services.workers.bootstrap import get_or_create_actor
 
-        self.worker = get_or_create_actor("MarkerPool", MarkerPool, lifetime="detached")
+        return get_or_create_actor("MarkerPool", MarkerPool, lifetime="detached")
 
     def supported_types(self) -> list[str]:
         return [DocumentType.PDF.value]
@@ -555,8 +566,9 @@ class MarkerLoader(BasePooledParser):
     # ----- helpers -----
 
     async def _convert_pdf(self, file_path: str):
+        pool = self._pool()
         return await call_ray_actor_with_timeout(
-            self.worker.process_pdf.remote(file_path),
+            pool.process_pdf.remote(file_path),
             timeout=self.config.loader.marker_timeout,
             task_description=f"MarkerLoader PDF loading ({file_path})",
         )

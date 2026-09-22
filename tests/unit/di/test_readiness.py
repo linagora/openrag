@@ -4,42 +4,66 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from core.config.model_endpoints import ModelEndpointConfig
 from core.config.root import Settings
+from core.models.readiness import ModelEndpointDiscovery
 from di.readiness import _check_ray, create_readiness_service
 from services.orchestrators.readiness_service import ReadinessService
 
 
 @pytest.mark.parametrize("reranker_enabled", [False, True])
-async def test_wiring_checks_core_dependencies_and_current_default_models(monkeypatch, reranker_enabled):
+async def test_wiring_checks_core_dependencies_and_database_endpoint_discovery(monkeypatch, reranker_enabled):
     settings = Settings(rdb={"password": "test"}, reranker={"provider": "infinity", "enabled": reranker_enabled})
-    config = ModelEndpointConfig(endpoint="https://model.test/v1", model_name="model")
-    settings.models.llm["default"] = config
-    settings.models.embedder["default"] = config
     postgres = AsyncMock(side_effect=RuntimeError("database down"))
     milvus = AsyncMock(side_effect=RuntimeError("Milvus down"))
+    discovery = AsyncMock(return_value=ModelEndpointDiscovery())
+    publisher = MagicMock()
     monkeypatch.setattr("di.readiness._check_ray", AsyncMock(side_effect=RuntimeError("Ray down")))
-    model_probe = AsyncMock()
-    monkeypatch.setattr("di.readiness.check_model_endpoint", model_probe)
+    monkeypatch.setattr(
+        "di.readiness.MODEL_ENDPOINT_READINESS_METRICS",
+        SimpleNamespace(publish=publisher),
+        raising=False,
+    )
     container = SimpleNamespace(
         _require_settings=lambda: settings,
         catalog_store=SimpleNamespace(check_health=postgres),
         vector_store=SimpleNamespace(check_health=milvus),
+        model_endpoint_repo=SimpleNamespace(discover_readiness_targets=discovery),
     )
     service = create_readiness_service(container)
     expected = {
         "postgres": "unavailable",
         "milvus": "unavailable",
         "ray": "unavailable",
-        "embedder": "ok",
-        "llm": "ok",
+        "embedder": "unresolvable",
+        "llm": "unresolvable",
+        "model_endpoint_discovery": "ok",
     }
     if reranker_enabled:
-        expected["reranker"] = "unavailable"
+        expected["reranker"] = "unresolvable"
     assert await service.check() == expected
-    # A missing default must not silently report ready. Optional models are not checked.
-    settings.models.llm.clear()
-    assert (await create_readiness_service(container).check())["llm"] == "unavailable"
+    default_model_kinds = ("embedder", "llm", "vlm", "reranker") if reranker_enabled else ("embedder", "llm", "vlm")
+    discovery.assert_awaited_once_with(default_model_kinds=default_model_kinds)
+    publisher.assert_called_once()
+
+
+async def test_wiring_includes_stt_default_only_for_remote_audio_loader(monkeypatch):
+    settings = Settings(
+        rdb={"password": "test"},
+        reranker={"provider": "infinity", "enabled": False},
+        loader={"file_loaders": {"wav": "OpenAIAudioLoader"}},
+    )
+    discovery = AsyncMock(return_value=ModelEndpointDiscovery())
+    monkeypatch.setattr("di.readiness._check_ray", AsyncMock())
+    container = SimpleNamespace(
+        _require_settings=lambda: settings,
+        catalog_store=SimpleNamespace(check_health=AsyncMock()),
+        vector_store=SimpleNamespace(check_health=AsyncMock()),
+        model_endpoint_repo=SimpleNamespace(discover_readiness_targets=discovery),
+    )
+
+    await create_readiness_service(container).snapshot()
+
+    discovery.assert_awaited_once_with(default_model_kinds=("embedder", "llm", "vlm", "stt"))
 
 
 async def test_ray_probe_requires_a_successful_actor_call(monkeypatch):

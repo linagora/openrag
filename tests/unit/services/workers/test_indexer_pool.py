@@ -157,7 +157,7 @@ def test_build_indexer_pool_uses_current_protocol_dispatcher_name(
     opts = options_calls[0]
     # A protocol-specific name prevents a rolling deployment from attaching to
     # a detached actor that still runs the previous claim implementation.
-    assert opts["name"] == "IndexerPoolDispatcher-v9"
+    assert opts["name"] == "IndexerPoolDispatcher-v11"
     assert opts["namespace"] == "openrag"
     assert opts["get_if_exists"] is True
     assert opts["lifetime"] == "detached"
@@ -198,9 +198,9 @@ def test_indexer_pool_actor_spawns_pool_size_detached_workers(
     # One detached worker actor per pool_size slot, each capped at max_tasks_per_worker.
     assert len(pool._workers) == 3
     assert {c["name"] for c in calls} == {
-        "IndexerWorker-v9-0",
-        "IndexerWorker-v9-1",
-        "IndexerWorker-v9-2",
+        "IndexerWorker-v11-0",
+        "IndexerWorker-v11-1",
+        "IndexerWorker-v11-2",
     }
     for c in calls:
         assert c["lifetime"] == "detached"
@@ -503,6 +503,126 @@ def test_embedder_factory_rebuilds_on_api_key_rotation() -> None:
         assert second.kwargs["api_key"] == "k2"
     finally:
         embedder_registry._registry.pop("key-probe-embedder", None)
+
+
+def test_embedder_factory_stamps_each_client_with_the_config_it_was_built_from() -> None:
+    """What the catalog write compares the partition's embedder with (#958). It
+    rides on the client, so a registry reload mid-file cannot change it."""
+    from core.config.model_endpoints import embedder_fingerprint
+    from core.embeddings import embedder_registry
+    from services.workers.indexer_pool import _build_embedder_factory
+
+    class ProbeEmbedder:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    embedder_registry.register("stamp-probe-embedder")(ProbeEmbedder)
+    try:
+        extra = {"implementation": "stamp-probe-embedder", "max_model_len": 512}
+        registry = {"ep": ModelEndpointConfig(endpoint="http://embed.example/v1", model_name="m1", extra=extra)}
+        cfg = SimpleNamespace(
+            models=SimpleNamespace(embedder=registry),
+            embedder=SimpleNamespace(base_url="", model_name="", api_key=""),
+        )
+        factory = _build_embedder_factory(cfg)
+        first = factory("ep")
+
+        registry["ep"] = ModelEndpointConfig(endpoint="http://embed.example/v1", model_name="m2", extra=extra)
+        second = factory("ep")
+
+        assert first.vector_fingerprint == embedder_fingerprint("http://embed.example/v1", "m1", extra)
+        assert second.vector_fingerprint == embedder_fingerprint("http://embed.example/v1", "m2", extra)
+    finally:
+        embedder_registry._registry.pop("stamp-probe-embedder", None)
+
+
+def _edit_aware_pool(*, loaded: str, stored: str | None, default: bool = False):
+    """A bare actor whose registry loaded model *loaded* while the DB now says *stored*."""
+    from core.config.model_endpoints import ModelEndpointRow
+    from services.workers.indexer_pool import IndexerWorkerActor
+
+    actor_class = IndexerWorkerActor.__ray_metadata__.modified_class
+    pool = actor_class.__new__(actor_class)
+    name = "default" if default else "jina"
+
+    def _config(model: str) -> ModelEndpointConfig:
+        return ModelEndpointConfig(name="jina", endpoint="http://jina:8000/v1", model_name=model)
+
+    registry = {name: _config(loaded)}
+    row = (
+        None
+        if stored is None
+        else ModelEndpointRow(
+            name="jina",
+            model_type="embedder",
+            endpoint="http://jina:8000/v1",
+            model_name=stored,
+            is_default=True,
+            created_at="2026-01-01T00:00:00Z",
+            updated_at="2026-01-01T00:00:00Z",
+        )
+    )
+
+    class Repo:
+        async def get(self, name, model_type):
+            return row
+
+        async def list_all(self, model_type=None):
+            return [row] if row is not None else []
+
+    class Service:
+        calls = 0
+
+        async def load_all(self) -> None:
+            Service.calls += 1
+            await asyncio.sleep(0)
+            if row is not None:
+                registry[name] = _config(row.model_name)
+
+    pool._cfg = SimpleNamespace(models=SimpleNamespace(embedder=registry), embedder=None)
+    pool._catalog_store = SimpleNamespace(model_endpoint_repo=Repo())
+    pool._model_endpoint_service = Service()
+    pool._registry_lock = asyncio.Lock()
+    pool._registry_loaded_at = 0.0
+    pool._logger = SimpleNamespace(warning=lambda *a, **k: None)
+    return pool, Service
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("default", [False, True], ids=["named", "alias"])
+async def test_a_file_reloads_the_registry_when_its_embedder_was_edited(default: bool) -> None:
+    """Without this, files started in the TTL window after an edit would embed
+    with the old config and all be refused when they are recorded."""
+    pool, service = _edit_aware_pool(loaded="jina-v3", stored="jina-v4", default=default)
+
+    await asyncio.gather(*(pool._reload_if_embedder_edited(None if default else "jina") for _ in range(5)))
+
+    assert service.calls == 1
+    assert pool._cfg.models.embedder["default" if default else "jina"].model_name == "jina-v4"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("loaded", "stored"), [("jina-v3", "jina-v3"), ("jina-v3", None)], ids=["same", "unknown"])
+async def test_a_file_keeps_the_registry_when_its_embedder_is_unchanged(loaded: str, stored: str | None) -> None:
+    pool, service = _edit_aware_pool(loaded=loaded, stored=stored)
+
+    await pool._reload_if_embedder_edited("jina")
+
+    assert service.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_a_failed_edit_check_never_fails_the_file() -> None:
+    pool, service = _edit_aware_pool(loaded="jina-v3", stored="jina-v4")
+
+    async def broken(*_a, **_k):
+        raise OSError("db down")
+
+    pool._catalog_store.model_endpoint_repo.get = broken
+
+    await pool._reload_if_embedder_edited("jina")
+
+    assert service.calls == 0
 
 
 def test_vlm_factory_reads_live_registry() -> None:
@@ -1196,7 +1316,7 @@ async def test_pool_drain_rejects_new_work_and_reports_accepted_work(monkeypatch
     await pool.submit(task_id="accepted-before-drain")
 
     assert await pool.begin_drain() == {
-        "protocol_version": "v9",
+        "protocol_version": "v11",
         "accepting_tasks": False,
         "inflight_jobs": 1,
         "worker_names": ["test-worker-0"],
@@ -1229,7 +1349,7 @@ async def test_pool_drain_rejects_new_work_and_reports_accepted_work(monkeypatch
 
     await _settle_pool_release_tasks(pool, worker.futures[0])
     assert await pool.status() == {
-        "protocol_version": "v9",
+        "protocol_version": "v11",
         "accepting_tasks": False,
         "inflight_jobs": 0,
         "worker_names": ["test-worker-0"],
@@ -1264,7 +1384,7 @@ async def test_pool_abort_drain_restores_acceptance() -> None:
         await pool.submit(task_id="rejected-while-draining")
 
     assert await pool.abort_drain() == {
-        "protocol_version": "v9",
+        "protocol_version": "v11",
         "accepting_tasks": True,
         "inflight_jobs": 0,
         "worker_names": ["test-worker-0"],
@@ -1279,7 +1399,7 @@ async def test_pool_abort_drain_restores_acceptance() -> None:
 async def test_pool_reports_current_protocol_version() -> None:
     pool = _bare_pool([_FakeWorker()])
 
-    assert await pool.protocol_version() == "v9"
+    assert await pool.protocol_version() == "v11"
 
 
 @pytest.mark.asyncio
@@ -1518,6 +1638,7 @@ def test_indexer_pool_wires_contextualizer_factory_and_worker_namespace(monkeypa
             embed_concurrency=2,
         ),
         loader=SimpleNamespace(parse_timeout=3600, save_uploaded_files=True),
+        semaphore=SimpleNamespace(vlm_semaphore=7),
         vectordb=SimpleNamespace(collection_name="vdb_test"),
         rdb=RDBConfig(),
     )
@@ -1573,6 +1694,11 @@ def test_indexer_pool_wires_contextualizer_factory_and_worker_namespace(monkeypa
     assert captured["catalog_config"] is cfg.rdb
     assert captured["catalog_config"].database == "custom_catalog"
     assert captured["catalog_run_migrations"] is False
+    # The per-document caption cap is the VLM gate's own budget: no point letting
+    # one document queue more of its images on that gate than it will ever admit.
+    # Without this the actor could stop forwarding it and every test still passed.
+    assert captured["caption_concurrency"] == 7
+    assert captured["caption_concurrency"] == cfg.semaphore.vlm_semaphore
 
 
 def test_indexer_pool_loads_caption_prompt_without_global_vlm_default(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1607,6 +1733,7 @@ def test_indexer_pool_loads_caption_prompt_without_global_vlm_default(monkeypatc
             embed_concurrency=2,
         ),
         loader=SimpleNamespace(parse_timeout=3600, save_uploaded_files=True),
+        semaphore=SimpleNamespace(vlm_semaphore=10),
         vectordb=SimpleNamespace(collection_name="vdb_test"),
         rdb=RDBConfig(),
     )
@@ -1986,12 +2113,13 @@ async def test_actor_keeps_concurrent_preset_transcription_settings_task_local(t
     class ParsingPipeline:
         async def run(self, row: dict[str, object]) -> dict[str, object]:
             await parse_stage(row, ResolverParser(), timeout=0.5)
-            row["stored_count"] = 0
+            row["stored_count"] = 1
             row["stage"] = "stored"
             return row
 
     worker_task_state = SimpleNamespace(
         set_state=SimpleNamespace(remote=AsyncMock(return_value=True)),
+        complete_with_degraded_stages=SimpleNamespace(remote=AsyncMock(return_value="completed")),
         set_failed_if_not_cancelled=SimpleNamespace(remote=AsyncMock(return_value=True)),
     )
     worker = IndexerWorker(pipeline=ParsingPipeline(), task_state_manager=worker_task_state)
@@ -2067,6 +2195,32 @@ async def test_actor_does_not_start_without_registered_worker_ref(
     worker_ref_error = module._MISSING_WORKER_REF_ERROR
     actor._task_state_manager.set_failed_if_not_cancelled.remote.assert_awaited_once_with("t", worker_ref_error)
     assert worker.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_missing_worker_reference_records_a_canonical_reason(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    import services.workers.indexer_pool as module
+
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"x")
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=_RecordingWorker())
+    actor._task_state_manager.get_object_ref.remote.return_value = None
+    set_failed = AsyncMock(return_value=True)
+    actor._task_state_manager._ray_actor_method_names = {
+        "set_failed_if_not_cancelled",
+        "set_failed_with_reason_if_not_cancelled",
+    }
+    actor._task_state_manager.set_failed_with_reason_if_not_cancelled = SimpleNamespace(remote=set_failed)
+    monkeypatch.setattr(module, "_WORKER_REF_REGISTRATION_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(module, "_WORKER_REF_REGISTRATION_POLL_SECONDS", 0.001)
+
+    with pytest.raises(RuntimeError, match="registered task reference"):
+        await actor.process_file(task_id="t", path=str(path), metadata={"file_id": "f"}, partition="p")
+
+    assert set_failed.await_args.args == ("t", module._MISSING_WORKER_REF_ERROR, module._MISSING_WORKER_REF_ERROR)
 
 
 @pytest.mark.asyncio
@@ -2214,6 +2368,36 @@ async def test_preflight_failure_sends_the_error_callback_and_sets_failed(tmp_pa
     callback.assert_awaited_once_with(
         "https://cozy.example.com/ai/index/status", "p", "f", "error", metadata, callback_token="jwt"
     )
+
+
+@pytest.mark.asyncio
+async def test_preflight_failure_captures_reason_with_new_task_state_actor(tmp_path) -> None:
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"x")
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=_RecordingWorker())
+
+    async def _boom(*_args, **_kwargs):
+        raise RuntimeError("postgres down\n<html>\n</html>")
+
+    actor._ensure_catalog = _boom
+    actor._await_worker_ref_registration = AsyncMock(return_value=None)
+    set_failed = AsyncMock(return_value=True)
+    actor._tsm = SimpleNamespace(
+        _ray_actor_method_names={
+            "set_failed_if_not_cancelled",
+            "set_failed_with_reason_if_not_cancelled",
+        },
+        set_failed_if_not_cancelled=SimpleNamespace(remote=AsyncMock(return_value=True)),
+        set_failed_with_reason_if_not_cancelled=SimpleNamespace(remote=set_failed),
+    )
+
+    with pytest.raises(RuntimeError, match="postgres down"):
+        await actor.process_file(task_id="t", path=str(path), metadata={"file_id": "f"}, partition="p")
+
+    failure = set_failed.await_args.args
+    assert failure[0] == "t"
+    assert "postgres down" in failure[1]
+    assert failure[2] == "RuntimeError: postgres down"
 
 
 @pytest.mark.asyncio

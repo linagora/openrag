@@ -66,7 +66,13 @@ def test_clear_withdraws_the_series() -> None:
 
 
 class _Request:
-    """Minimal stand-in; ``get_job_service`` is patched, so nothing reads it."""
+    """Minimal stand-in. ``get_job_service`` is patched, so the refresh reads
+    nothing from it — but ``_render_metrics`` checks ``app.state.container`` for
+    the readiness snapshot, so the double has to carry that far."""
+
+    class app:  # noqa: N801 - a stand-in attribute, not a class in its own right
+        class state:
+            container = None
 
 
 async def _refresh(monkeypatch: pytest.MonkeyPatch, service: Any) -> None:

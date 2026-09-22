@@ -6,7 +6,7 @@ import asyncio
 import json
 import logging
 import re
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 
 from core.llm import LLM
 from core.models.chunk import Chunk
@@ -39,6 +39,7 @@ class TopicTagger:
         max_tags: int = 7,
         lang: str = "en",
         system_prompt: str | None = None,
+        on_failure: Callable[[Exception], None] | None = None,
     ) -> list[str]:
         """Return normalized, unique topic tags for a document.
 
@@ -76,6 +77,8 @@ class TopicTagger:
             CircuitBreakerOpenError,
         ) as exc:
             logger.warning("Error extracting topic tags for %s: %s", filename, exc)
+            if on_failure is not None:
+                on_failure(exc)
             return []
 
 
@@ -108,7 +111,7 @@ def _build_messages(
 def _parse_topic_tags(text: str, *, max_tags: int) -> list[str]:
     parsed = _load_json_array(text)
     if parsed is None:
-        return []
+        raise ValueError("LLM returned malformed topic tags")
 
     tags: list[str] = []
     seen: set[str] = set()

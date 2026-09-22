@@ -110,7 +110,7 @@ async def openrag_exception_handler(request: Request, exc: OpenRAGError) -> JSON
         status_code=status_code,
         message=str(exc),
         method=request.method,
-        path=request.url.path,
+        path=request.scope["path"],
     )
     body = exc.to_dict()
     request_id = _get_request_id(request)
@@ -139,7 +139,7 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
         error_type=type(exc).__name__,
         message=str(exc),
         method=request.method,
-        path=request.url.path,
+        path=request.scope["path"],
     )
     extra: dict[str, object] = {}
     if request_id is not None:

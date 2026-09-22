@@ -16,8 +16,8 @@ export type { PartitionFile };
 const P = "/partition";
 const enc = encodeURIComponent;
 
-/** File detail: `metadata` is flattened from the file's first chunk row;
- *  `documents` are link-only stubs (one per chunk) pointing at /extract/{id}. */
+/** File detail uses authoritative catalog metadata. `documents` are link-only
+ * stubs (one per chunk) pointing at /extract/{id}. */
 export interface FileDetail {
   metadata: Record<string, unknown>;
   documents: { link: string }[];

@@ -62,10 +62,20 @@ class ImageBlock(BaseModel):
       and leave ``source_url`` as ``None``.
     - Remote images parsed from a markdown ``![](http://…)`` ref leave
       ``image_bytes`` empty and set ``source_url`` to the URL. A
-      downstream fetch stage may populate ``image_bytes`` later.
+      downstream fetch stage may populate ``image_bytes`` later — but see
+      the lifetime note below: such a stage has to run *before* the caption
+      decision.
     - The :attr:`image_url` property is the unified VLM-friendly form:
       a ``data:`` URI built from the bytes when present, otherwise the
       ``source_url`` as-is.
+
+    Lifetime of ``image_bytes`` during indexing:
+    - ``IndexingPipeline`` clears it (``_release_image_bytes``) as soon as the
+      caption decision resolves — whether captioning ran, was skipped or
+      failed — because the payloads outlast the file itself and survived embed
+      and store. A stage added after that point reads ``b""``, not the image.
+      Everything else on this block survives: ``caption``, ``page_number``,
+      ``mime_type``, ``source_url`` and ``metadata``.
     """
 
     image_bytes: bytes = Field(default=b"", exclude=True, repr=False)
@@ -100,6 +110,7 @@ class Document(BaseModel):
     content_type: DocumentType = DocumentType.TEXT
     text: str | None = None
     raw_bytes: bytes | None = Field(None, exclude=True)
+    source_path: str | None = Field(None, exclude=True)
     partition: str = "default"
     tags: list[str] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
@@ -161,21 +172,48 @@ class Document(BaseModel):
 
     @asynccontextmanager
     async def as_temporary_file(self, *, suffix: str | None = None) -> AsyncIterator[Path]:
-        """Materialize ``raw_bytes`` to a temporary file and yield its ``Path``.
+        """Yield a filesystem path for this document's content.
 
         Parsers wrapping a sync library that requires a path on disk
         (Marker, Whisper, MarkItDown, python-pptx, Spire.Doc, …) use this
         helper instead of rolling their own ``NamedTemporaryFile`` dance.
-        The file is removed on context exit even if the body raises.
 
-        ``suffix`` defaults to ``filename``'s extension, falling back to
-        a content-type-appropriate default.
+        When :attr:`source_path` is set, that path is yielded **as-is** and
+        nothing is written or deleted: the document already has a file, and a
+        ``NamedTemporaryFile`` written here would be visible only to the node
+        that wrote it — which is what stops ``MarkerPool``/``DoclingPool``/
+        ``WhisperPool`` handing a path to a worker actor on another node
+        (#911).
+
+        Whether the yielded path is reachable from another node is the
+        *caller's* property, not this method's: the upload routes save under
+        ``config.paths.data_dir`` (Helm ``persistence.accessMode:
+        ReadWriteMany``, Compose's ``${DATA_VOLUME}:/app/data`` bind mount) and
+        are placeable; ``index_url``'s download is in the node's own temp dir
+        and is not.
+
+        Otherwise ``raw_bytes`` is materialized to a temporary file, which *is*
+        removed on context exit even if the body raises. That is the path for
+        **derived** documents — the ``.docx`` that ``DocParser`` converts a
+        legacy ``.doc`` into, EML attachments — which have no file of their own.
+
+        ``suffix`` defaults to ``filename``'s extension, falling back to a
+        content-type-appropriate default. A ``source_path`` is only yielded
+        when its own extension matches, since the sync libraries below dispatch
+        on it; a mismatch falls back to writing the bytes out under the
+        requested suffix.
         """
-        if self.raw_bytes is None:
-            raise ValueError("Document.as_temporary_file requires raw_bytes")
-
         if suffix is None:
             suffix = Path(self.filename).suffix or _DEFAULT_TEMPFILE_SUFFIX.get(self.content_type, "")
+
+        if self.source_path is not None and Path(self.source_path).suffix == suffix:
+            # Never unlinked: this is the caller's file, not ours. The upload is
+            # purged by ``indexer_pool`` after indexing settles, if configured.
+            yield Path(self.source_path)
+            return
+
+        if self.raw_bytes is None:
+            raise ValueError("Document.as_temporary_file requires raw_bytes or source_path")
 
         raw = self.raw_bytes
 
