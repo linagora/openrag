@@ -169,6 +169,13 @@ _VERIFIABLE_SIGNATURES: dict[str, frozenset[str]] = {
 #: HTML/text ``.doc`` files exist in the corpora — a corpus question, not a code
 #: one.
 _TOLERANT_SIGNATURES: dict[str, frozenset[str]] = {
+    # ``zip`` is here for the same reason as ``docx``, and it is not the loose
+    # end it looks like: ``filetype``'s OOXML matcher keys on an entry named
+    # ``word/`` near the head, so a document a real producer wrote — its
+    # ``customXml``/``docProps`` parts first — is reported as a plain zip. Both
+    # classifications are sent to the package check below, which is what
+    # separates a document from an archive; an ordinary zip is refused there.
+    #
     # ``docx`` is here because Spire loads an OOXML package under a ``.doc``
     # name and extracts it — a .docx saved or renamed as .doc indexes today, and
     # refusing it would be the regression this rule exists to avoid. It does not
@@ -181,7 +188,7 @@ _TOLERANT_SIGNATURES: dict[str, frozenset[str]] = {
     # one file this extension exists for. It stays unreliable in the other
     # direction: an OLE2 document without either marker reports ``None``, which
     # is why the rule cannot simply require ``doc``.
-    "doc": frozenset({"doc", "docx", "rtf"}),
+    "doc": frozenset({"doc", "docx", "rtf", "zip"}),
 }
 
 #: The part whose presence makes an OPC package a document of that kind, per
@@ -212,7 +219,14 @@ def _ooxml_main_part_by_content(extension: str, stream: IO[bytes]) -> str | None
         kind = filetype.guess(stream.read(CONTENT_SNIFF_BYTES))
     finally:
         stream.seek(position)
-    return _OOXML_MAIN_PARTS.get(kind.extension) if kind is not None else None
+    if kind is None:
+        return None
+    # ``filetype`` cannot tell a deep OOXML package from an ordinary archive, so
+    # both arrive as ``zip``. Check them as the document they claim to be; the
+    # central directory settles which one it actually is.
+    if kind.extension == "zip":
+        return _OOXML_MAIN_PARTS.get("docx") if extension == "doc" else None
+    return _OOXML_MAIN_PARTS.get(kind.extension)
 
 
 def validate_content_matches_extension(extension: str, head: bytes) -> None:

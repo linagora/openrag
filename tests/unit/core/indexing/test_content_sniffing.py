@@ -381,11 +381,10 @@ def test_everything_spire_can_load_is_still_accepted(head, why):
     ("head", "detected"),
     [
         (PDF, "pdf"),
-        # A plain archive is a recognised foreign format and is refused here. An
-        # archive ``filetype`` calls a *docx* is not: .doc tolerates docx, because
-        # Spire reads one. That case is settled by ``validate_ooxml_package``
-        # instead — see ``test_a_docx_named_doc_still_meets_the_package_check``.
-        (_zip("payload.bin"), "zip"),
+        # Archives are not here: .doc tolerates both ``docx`` and ``zip``, because
+        # ``filetype`` reports either for a real document depending on entry
+        # order. Whether one is a document or an ordinary archive is settled by
+        # ``validate_ooxml_package`` — see the tests below.
         (ELF, "elf"),
         (PNG, "png"),
         (b"\x1f\x8b\x08" + b"\x00" * 64, "gz"),
@@ -449,3 +448,43 @@ def test_the_content_route_does_not_open_a_path_for_untolerant_extensions():
     refused by the head check and never reaches the package logic."""
     assert _ooxml_main_part_by_content("pdf", io.BytesIO(_real_docx())) is None
     assert _ooxml_main_part_by_content("doc", io.BytesIO(PDF)) is None
+
+
+def _deep_docx() -> bytes:
+    """A document as a real producer writes it: ``customXml`` parts first, so
+    ``word/document.xml`` sits past the head ``filetype`` inspects."""
+    import zipfile
+
+    src = zipfile.ZipFile(io.BytesIO(_real_docx()))
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w") as z:
+        for i in range(60):
+            z.writestr(f"customXml/item{i}.xml", "<x/>" * 200)
+        for name in src.namelist():
+            z.writestr(name, src.read(name))
+    return out.getvalue()
+
+
+def test_a_deep_package_docx_saved_as_doc_is_accepted():
+    """``filetype`` calls this one a plain ``zip`` — its matcher keys on an entry
+    named ``word/`` near the head, and a real producer writes ``customXml``
+    first. Refusing it would reject documents Word itself produces."""
+    assert filetype.guess(_deep_docx()).extension == "zip", "guard: the fixture must classify as zip"
+    validate_content_matches_extension("doc", _deep_docx()[:CONTENT_SNIFF_BYTES])
+    validate_ooxml_package("doc", io.BytesIO(_deep_docx()))
+
+
+def test_an_ordinary_archive_named_doc_is_still_refused():
+    """Tolerating ``zip`` is not a hole: the central directory is what separates
+    a document from an archive, and an archive has none of the required parts."""
+    archive = io.BytesIO(_zip("payload.bin"))
+    with pytest.raises(ValidationError):
+        validate_ooxml_package("doc", archive)
+    assert archive.tell() == 0, "the stream must be rewound for the caller that streams it on"
+
+
+def test_a_zip_named_pdf_is_still_refused_at_the_head():
+    """The zip tolerance belongs to .doc alone; it must not leak to formats that
+    have a signature of their own."""
+    with pytest.raises(ValidationError):
+        validate_content_matches_extension("pdf", _zip("payload.bin"))
