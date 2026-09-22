@@ -121,7 +121,10 @@ class DocParser(DocumentParser):
         path: str,
         abandoned: threading.Event,
         handoff: dict[str, str],
-        handoff_lock: threading.Lock,
+        # Untyped deliberately: ``threading.Lock`` is only a class from 3.13, and
+        # this project supports 3.12, where it is still a factory function and
+        # the annotation would be wrong.
+        handoff_lock,
     ) -> tuple[str | None, str | None]:
         """Run blocking Spire.Doc conversion. Returns ``(docx_path, fallback_text)``.
 
