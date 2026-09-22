@@ -25,6 +25,7 @@ from core.models.catalog import (
     TERMINAL_TASK_STATES,
     normalize_degraded_stages,
 )
+from core.utils.error_summary import summarize_task_error
 from core.utils.logging import get_logger
 
 logger = get_logger()
@@ -124,14 +125,20 @@ class JobService:
             filtered = [(tid, i) for tid, i in all_info.items() if i["state"].lower() == task_status.lower()]
 
         now = self._now()
-        return [self._task_row(task_id, info, now=now) for task_id, info in filtered]
+        return [self._task_row(task_id, info, now=now, include_error_summary=is_admin) for task_id, info in filtered]
 
     @staticmethod
     def _now() -> datetime:
         return datetime.now(UTC)
 
     @staticmethod
-    def _task_row(task_id: str, info: dict[str, Any], *, now: datetime) -> dict[str, Any]:
+    def _task_row(
+        task_id: str,
+        info: dict[str, Any],
+        *,
+        now: datetime,
+        include_error_summary: bool,
+    ) -> dict[str, Any]:
         details, fallback_created_at, fallback_finished_at = _task_details(info.get("details"))
 
         created_at = info.get("created_at") or fallback_created_at
@@ -144,7 +151,7 @@ class JobService:
                 now=now,
             )
 
-        return {
+        row = {
             "task_id": task_id,
             "state": info["state"],
             "outcome": _task_outcome(info["state"], details),
@@ -152,6 +159,11 @@ class JobService:
             "created_at": created_at,
             "duration_ms": duration_ms,
         }
+        if include_error_summary and info["state"] == "FAILED":
+            summary = summarize_task_error(info.get("error"), reason=info.get("error_reason"))
+            if summary:
+                row["error_summary"] = summary
+        return row
 
     async def get_user_pending_task_count(self, user_id: int | None) -> int:
         """Pending (not-yet-completed) indexing tasks for one user.
@@ -229,6 +241,7 @@ def _job_to_info(job: Any) -> dict[str, Any]:
     return {
         "state": state,
         "error": job.error,
+        "error_reason": job.error_reason,
         "details": {
             "file_id": job.file_id,
             "partition": job.partition,

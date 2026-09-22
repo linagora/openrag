@@ -222,6 +222,42 @@ async def test_list_tasks_exact_status_case_insensitive():
 
 
 @pytest.mark.asyncio
+async def test_list_tasks_gives_admins_a_bounded_failure_summary():
+    info = {
+        "t1": {
+            "state": "FAILED",
+            "details": {},
+            "user": 1,
+            "error": (
+                "Traceback (most recent call last):\n"
+                '  File "/srv/openrag/worker.py", line 10, in run\n'
+                "ValueError:   parser   failed\n"
+            ),
+        }
+    }
+
+    rows = await JobService(FakeTSM(info=info)).list_tasks(is_admin=True, user_id=1)
+
+    assert rows[0]["error_summary"] == "ValueError: parser failed"
+
+
+@pytest.mark.asyncio
+async def test_list_tasks_does_not_expose_failure_details_to_regular_users():
+    info = {
+        "t1": {
+            "state": "FAILED",
+            "details": {},
+            "user": 1,
+            "error": "RuntimeError: internal host failed",
+        }
+    }
+
+    rows = await JobService(FakeTSM(info=info)).list_tasks(is_admin=False, user_id=1)
+
+    assert "error_summary" not in rows[0]
+
+
+@pytest.mark.asyncio
 async def test_get_task_details_uses_task_state_manager():
     info = {
         "t1": {
@@ -330,6 +366,49 @@ async def test_list_tasks_reports_durable_degraded_completion() -> None:
 
     assert rows[0]["outcome"] == "completed_degraded"
     assert rows[0]["details"]["degraded_stages"] == ["contextualize"]
+
+
+@pytest.mark.asyncio
+async def test_list_tasks_summarizes_durable_failures_without_an_extra_lookup() -> None:
+    from core.models.catalog import DocumentStatus
+
+    service = JobService(
+        FakeTSM(info={}),
+        job_repo=FakeJobRepo(
+            [
+                _job(
+                    status=DocumentStatus.FAILED,
+                    error="Traceback (most recent call last):\nRuntimeError: durable failure",
+                )
+            ]
+        ),
+    )
+
+    rows = await service.list_tasks(is_admin=True, user_id=7)
+
+    assert rows[0]["error_summary"] == "RuntimeError: durable failure"
+
+
+@pytest.mark.asyncio
+async def test_list_tasks_prefers_the_stored_durable_failure_reason() -> None:
+    from core.models.catalog import DocumentStatus
+
+    service = JobService(
+        FakeTSM(info={}),
+        job_repo=FakeJobRepo(
+            [
+                _job(
+                    status=DocumentStatus.FAILED,
+                    error="Traceback (most recent call last):\nValueError: legacy fallback",
+                    error_reason="RuntimeError: canonical failure",
+                )
+            ]
+        ),
+    )
+
+    rows = await service.list_tasks(is_admin=True, user_id=7)
+
+    assert rows[0]["error_summary"] == "RuntimeError: canonical failure"
 
 
 @pytest.mark.asyncio

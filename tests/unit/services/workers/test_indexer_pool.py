@@ -2198,6 +2198,32 @@ async def test_actor_does_not_start_without_registered_worker_ref(
 
 
 @pytest.mark.asyncio
+async def test_missing_worker_reference_records_a_canonical_reason(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    import services.workers.indexer_pool as module
+
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"x")
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=_RecordingWorker())
+    actor._task_state_manager.get_object_ref.remote.return_value = None
+    set_failed = AsyncMock(return_value=True)
+    actor._task_state_manager._ray_actor_method_names = {
+        "set_failed_if_not_cancelled",
+        "set_failed_with_reason_if_not_cancelled",
+    }
+    actor._task_state_manager.set_failed_with_reason_if_not_cancelled = SimpleNamespace(remote=set_failed)
+    monkeypatch.setattr(module, "_WORKER_REF_REGISTRATION_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(module, "_WORKER_REF_REGISTRATION_POLL_SECONDS", 0.001)
+
+    with pytest.raises(RuntimeError, match="registered task reference"):
+        await actor.process_file(task_id="t", path=str(path), metadata={"file_id": "f"}, partition="p")
+
+    assert set_failed.await_args.args == ("t", module._MISSING_WORKER_REF_ERROR, module._MISSING_WORKER_REF_ERROR)
+
+
+@pytest.mark.asyncio
 async def test_actor_keeps_upload_by_default(tmp_path) -> None:
     path = tmp_path / "doc.txt"
     path.write_bytes(b"x")
@@ -2342,6 +2368,36 @@ async def test_preflight_failure_sends_the_error_callback_and_sets_failed(tmp_pa
     callback.assert_awaited_once_with(
         "https://cozy.example.com/ai/index/status", "p", "f", "error", metadata, callback_token="jwt"
     )
+
+
+@pytest.mark.asyncio
+async def test_preflight_failure_captures_reason_with_new_task_state_actor(tmp_path) -> None:
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"x")
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=_RecordingWorker())
+
+    async def _boom(*_args, **_kwargs):
+        raise RuntimeError("postgres down\n<html>\n</html>")
+
+    actor._ensure_catalog = _boom
+    actor._await_worker_ref_registration = AsyncMock(return_value=None)
+    set_failed = AsyncMock(return_value=True)
+    actor._tsm = SimpleNamespace(
+        _ray_actor_method_names={
+            "set_failed_if_not_cancelled",
+            "set_failed_with_reason_if_not_cancelled",
+        },
+        set_failed_if_not_cancelled=SimpleNamespace(remote=AsyncMock(return_value=True)),
+        set_failed_with_reason_if_not_cancelled=SimpleNamespace(remote=set_failed),
+    )
+
+    with pytest.raises(RuntimeError, match="postgres down"):
+        await actor.process_file(task_id="t", path=str(path), metadata={"file_id": "f"}, partition="p")
+
+    failure = set_failed.await_args.args
+    assert failure[0] == "t"
+    assert "postgres down" in failure[1]
+    assert failure[2] == "RuntimeError: postgres down"
 
 
 @pytest.mark.asyncio

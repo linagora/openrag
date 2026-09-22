@@ -32,6 +32,7 @@ from api.dependencies.files import (
     validate_metadata,
 )
 from core.models.catalog import TERMINAL_TASK_STATES
+from core.utils.error_summary import summarize_task_error
 from core.utils.exceptions import OpenRAGError, indexing_worker_may_be_running
 from core.utils.filename import sanitize_filename
 from core.utils.logging import get_logger
@@ -565,6 +566,8 @@ async def get_task_status(
 **Response:**
 Returns error information including:
 - `task_id`: The task identifier
+- `reason`: Complete failure reason for administrators
+- `summary`: Concise failure reason for backward-compatible clients
 - `traceback`: Error traceback as an array of lines
 
 **Note:** Only available if task state is FAILED.
@@ -585,8 +588,15 @@ async def get_task_error(
     # The raw traceback exposes filesystem paths and internals; only return it
     # to admins. Task owners get a generic failure indicator.
     if user and user.get("is_admin", False):
-        return {"task_id": task_id, "traceback": error.splitlines()}
-    return {"task_id": task_id, "traceback": ["Task failed. Contact an administrator for details."]}
+        reason = await service.get_task_error_reason(task_id)
+        return {
+            "task_id": task_id,
+            "reason": reason,
+            "summary": summarize_task_error(error, reason=reason) or "Task failed.",
+            "traceback": error.splitlines(),
+        }
+    message = "Task failed. Contact an administrator for details."
+    return {"task_id": task_id, "summary": message, "traceback": [message]}
 
 
 @router.delete(
