@@ -264,9 +264,9 @@ tests:
               severity: critical
               provider: embedder-main
             exp_annotations:
-              description: "More than half the calls to registry endpoint embedder-main are returning errors or timing out. Chat and any indexing stage that depends on it will fail."
+              description: "More than 50% of the calls to registry endpoint embedder-main are returning errors or timing out. Chat and any indexing stage that depends on it will fail."
               runbook_url: "https://github.com/linagora/openrag/blob/main/docs/deployment/runbooks/OpenRagInferenceProviderDown.md"
-              summary: "Inference provider embedder-main is failing most of its calls"
+              summary: "Inference provider embedder-main is failing more than 50% of its calls"
 
   - interval: 1m
     name: an open breaker fires its own alert, keyed on the breaker kind
@@ -290,6 +290,27 @@ tests:
       - eval_time: 30m
         alertname: OpenRagInferenceProviderDown
         exp_alerts: []
+
+  # A hard-down provider cycles the breaker: open for the reset timeout, then
+  # half-open (2) for as long as the trial call takes, then open again. A trial
+  # that times out keeps it half-open for a whole scrape or more. Half-open is
+  # still tripped, so it must not reset the `for` timer.
+  - interval: 1m
+    name: a breaker flapping between open and half-open still fires
+    input_series:
+      - series: 'openrag_circuit_breaker_state{name="embedder"}'
+        values: "1 1 2 1 1 2 1 1 2 1 1 2 1 1 2 1 1 2 1 1 2 1 1 2 1 1 2 1 1 2 1 1 2 1 1 2 1 1 2 1 1 2"
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: OpenRagCircuitBreakerOpen
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              name: embedder
+            exp_annotations:
+              description: "OpenRag has stopped calling its embedder endpoint after repeated failures. Calls return immediately without reaching it, so chat and indexing that depend on it fail fast."
+              runbook_url: "https://github.com/linagora/openrag/blob/main/docs/deployment/runbooks/OpenRagCircuitBreakerOpen.md"
+              summary: "The embedder circuit breaker is open"
 
   - interval: 1m
     name: a closed breaker and healthy traffic stay quiet

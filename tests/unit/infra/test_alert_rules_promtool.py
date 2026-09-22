@@ -51,12 +51,19 @@ def _dockerised_promtool() -> list[str] | None:
     if present.returncode != 0:
         return None
     return [
-        docker, "run", "--rm",
-        "-v", f"{ROOT}:/repo:ro",
-        "-w", "/repo",
-        "--entrypoint", "promtool",
+        docker,
+        "run",
+        "--rm",
+        "-v",
+        f"{ROOT}:/repo:ro",
+        "-w",
+        "/repo",
+        "--entrypoint",
+        "promtool",
         PROMETHEUS_IMAGE,
-        "test", "rules", str(TEST_FILE.relative_to(ROOT)),
+        "test",
+        "rules",
+        str(TEST_FILE.relative_to(ROOT)),
     ]
 
 
@@ -73,11 +80,13 @@ def test_generated_rules_match_the_template() -> None:
 
     result = subprocess.run(
         [sys.executable, str(ROOT / "scripts" / "gen_alert_rules.py"), "--check"],
-        capture_output=True, text=True, check=False, cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=ROOT,
     )
     assert result.returncode == 0, (
-        f"the generated rules are out of date; run scripts/gen_alert_rules.py\n"
-        f"{result.stdout}\n{result.stderr}"
+        f"the generated rules are out of date; run scripts/gen_alert_rules.py\n{result.stdout}\n{result.stderr}"
     )
 
 
