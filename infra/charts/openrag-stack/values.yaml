@@ -173,6 +173,12 @@ postgresql:
       enabled: true
       size: 10Gi
       storageClass: *storageClass
+    # The sub-chart's own policy defaults to allowExternal: true, which opens
+    # every port it lists to any source: 5432, and the exporter's 9187 once
+    # metrics.enabled is on. NetworkPolicies add up, so the default-deny above
+    # could not narrow it. Off, Postgres gets the same rules as every other pod.
+    networkPolicy:
+      enabled: false
   service:
     port: &pgPort 5432
   # postgres_exporter sidecar (port 9187) and its Service. Turning it on changes

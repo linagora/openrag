@@ -39,6 +39,12 @@ def test_ray_metrics_port_is_not_a_public_port() -> None:
     assert _ray_metrics_port() not in _values()["networkPolicy"]["externalPorts"]
 
 
+def test_postgres_subchart_policy_does_not_open_the_exporter_to_every_source() -> None:
+    """bitnami's own policy, with its allowExternal default, admits any source on 5432 and 9187."""
+    policy = _values()["postgresql"]["primary"]["networkPolicy"]
+    assert policy.get("enabled") is False or policy.get("allowExternal") is False
+
+
 def test_workers_override_kuberays_default_metrics_port() -> None:
     """Workers run $KUBERAY_GEN_RAY_START_CMD, which defaults to --metrics-export-port=8080."""
     raycluster = _template("raycluster.yaml")
