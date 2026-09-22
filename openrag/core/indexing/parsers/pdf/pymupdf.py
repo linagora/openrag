@@ -28,7 +28,6 @@ worker and every file sharing it (#997).
 from __future__ import annotations
 
 import asyncio
-import resource
 import threading
 from concurrent.futures import Executor, ProcessPoolExecutor, ThreadPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
@@ -90,12 +89,18 @@ def _pool_worker_init(memory_limit_mb: int) -> None:
     if memory_limit_mb <= 0:
         return
     try:
+        # Imported here, not at module scope: ``resource`` is Unix-only, and this
+        # module is imported at startup by ``register_parsers`` on every
+        # platform. A missing module raises at import time, where the
+        # best-effort contract below cannot catch it.
+        import resource
+
         limit = memory_limit_mb * 1024 * 1024
         _, hard = resource.getrlimit(resource.RLIMIT_DATA)
         if hard != resource.RLIM_INFINITY:
             limit = min(limit, hard)
         resource.setrlimit(resource.RLIMIT_DATA, (limit, hard))
-    except (ValueError, OSError, AttributeError) as exc:  # pragma: no cover - platform dependent
+    except (ImportError, ValueError, OSError, AttributeError) as exc:  # pragma: no cover - platform dependent
         logger.warning(f"Could not apply PyMuPDF parse memory limit ({memory_limit_mb} MiB): {exc}")
 
 
