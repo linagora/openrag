@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     from di.container import ServiceContainer
     from services.orchestrators.auth_service import AuthService
     from services.orchestrators.conversion_service import ConversionService
+    from services.orchestrators.embedder_swap_service import EmbedderSwapService
     from services.orchestrators.indexing_service import IndexingService
     from services.orchestrators.job_service import JobService
     from services.orchestrators.mcp_service import MCPService
@@ -91,6 +92,11 @@ def get_user_service(request: Request = None) -> UserService:
 def get_partition_service(request: Request = None) -> PartitionService:
     """Resolve the partition orchestrator from the active container."""
     return _require_initialized(request).partition_service
+
+
+def get_embedder_swap_service(request: Request = None) -> EmbedderSwapService:
+    """Resolve the embedder swap orchestrator from the active container."""
+    return _require_initialized(request).embedder_swap_service
 
 
 def get_workspace_service(request: Request = None) -> WorkspaceService:

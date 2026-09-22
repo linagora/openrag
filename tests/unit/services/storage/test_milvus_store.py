@@ -24,6 +24,7 @@ from core.models.chunk import Chunk, ChunkType
 from core.utils.exceptions import (
     VDBConnectionError,
     VDBCreateOrLoadCollectionError,
+    VDBInsertError,
     VDBSchemaMigrationRequiredError,
     VDBSearchError,
 )
@@ -1618,6 +1619,77 @@ class TestDropVectorField:
         with pytest.raises(ValueError, match="only vector field"):
             await store.drop_vector_field(FIELD)
         store._client.drop_collection_field.assert_not_called()
+
+
+def _section_ids(store: MilvusVectorStore, rows: list[dict]) -> None:
+    iterator = MagicMock()
+    iterator.next.side_effect = [rows, []]
+    store._client.query_iterator.return_value = iterator
+
+
+class TestWriteVectors:
+    async def test_only_the_named_field_is_written(self, store: MilvusVectorStore) -> None:
+        _section_ids(store, [{"_id": 11, "section_id": 5, "next_section_id": 6}, {"_id": 12, "prev_section_id": 5}])
+        store._async_client.upsert = AsyncMock(return_value={"upsert_count": 2})
+
+        written = await store.write_vectors("vector_bge_m3", {"11": [0.1, 0.2], "12": None})
+
+        assert written == 2
+        store._async_client.upsert.assert_awaited_once_with(
+            collection_name=store._collection_name,
+            # A partial upsert: every field it does not name keeps its value,
+            # and None clears the vector. Milvus's primary key is INT64.
+            data=[{"_id": 11, "vector_bge_m3": [0.1, 0.2]}, {"_id": 12, "vector_bge_m3": None}],
+            partial_update=True,
+        )
+
+    async def test_section_ids_above_2_53_are_folded_and_stay_linked(self, store: MilvusVectorStore) -> None:
+        big = 1_800_000_000_000_000_000
+        _section_ids(
+            store,
+            [
+                {"_id": 11, "prev_section_id": None, "section_id": big, "next_section_id": big + 1},
+                {"_id": 12, "prev_section_id": big, "section_id": big + 1, "next_section_id": None},
+            ],
+        )
+        store._async_client.upsert = AsyncMock(return_value={"upsert_count": 2})
+
+        await store.write_vectors("vector_bge_m3", {"11": [0.1], "12": [0.2]})
+
+        kwargs = store._client.query_iterator.call_args.kwargs
+        assert kwargs["filter"] == "_id in [11, 12]"
+        assert kwargs["output_fields"] == ["prev_section_id", "section_id", "next_section_id"]
+        first, second = store._async_client.upsert.call_args.kwargs["data"]
+        assert first == {
+            "_id": 11,
+            "vector_bge_m3": [0.1],
+            "section_id": big & MAX_SECTION_ID,
+            "next_section_id": (big + 1) & MAX_SECTION_ID,
+        }
+        assert first["next_section_id"] == second["section_id"]
+        assert second["prev_section_id"] == first["section_id"]
+        assert "next_section_id" not in second
+
+    async def test_nothing_to_write_makes_no_call(self, store: MilvusVectorStore) -> None:
+        store._async_client.upsert = AsyncMock()
+
+        assert await store.write_vectors("vector_bge_m3", {}) == 0
+        store._async_client.upsert.assert_not_called()
+
+    @pytest.mark.parametrize("field", ["vector", "sparse", "text"])
+    async def test_only_a_per_embedder_field_can_be_written(self, store: MilvusVectorStore, field: str) -> None:
+        store._async_client.upsert = AsyncMock()
+
+        with pytest.raises(ValueError, match="per-embedder"):
+            await store.write_vectors(field, {"11": [0.1]})
+        store._async_client.upsert.assert_not_called()
+
+    async def test_a_backend_failure_is_an_insert_error(self, store: MilvusVectorStore) -> None:
+        _section_ids(store, [])
+        store._async_client.upsert = AsyncMock(side_effect=MilvusException(1, "boom"))
+
+        with pytest.raises(VDBInsertError, match="vector_bge_m3"):
+            await store.write_vectors("vector_bge_m3", {"11": [0.1]})
 
 
 class TestVectorFieldRouting:

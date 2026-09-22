@@ -250,6 +250,9 @@ class TestCatalogStoreWiring:
             seed_default_partition=lambda: _async_call(calls, "partition.seed"),
             load_partitions=lambda: _async_call(calls, "partition.load"),
         )
+        c._embedder_swap_service = SimpleNamespace(
+            watch=lambda: _async_call(calls, "swaps.watch"),
+        )
 
         await c.initialize()
 
@@ -263,6 +266,7 @@ class TestCatalogStoreWiring:
             "prompt.seed",
             "partition.seed",
             "partition.load",
+            "swaps.watch",
         ]
 
 
@@ -344,6 +348,7 @@ _ORCHESTRATORS = [
     ("auth_service", "get_auth_service"),
     ("user_service", "get_user_service"),
     ("partition_service", "get_partition_service"),
+    ("embedder_swap_service", "get_embedder_swap_service"),
     ("workspace_service", "get_workspace_service"),
     ("retrieval_service", "get_retrieval_service"),
     ("query_service", "get_query_service"),
@@ -843,6 +848,13 @@ class TestPhase14ServiceWiring:
                 """Record partition config loading."""
                 calls.append("partition.load")
 
+        class FakeEmbedderSwapService:
+            """Embedder swap resume recorder."""
+
+            async def watch(self):
+                """Record resuming interrupted swaps — after partitions load, which a swap completes into."""
+                calls.append("swaps.watch")
+
         monkeypatch.setenv("AUTH_TOKEN", "admin-token")
         c = ServiceContainer(_settings())
         c._catalog_store = FakeCatalogStore()
@@ -850,6 +862,7 @@ class TestPhase14ServiceWiring:
         c._preset_service = FakePresetService()
         c._prompt_service = FakePromptService()
         c._partition_service = FakePartitionService()
+        c._embedder_swap_service = FakeEmbedderSwapService()
 
         await c.initialize()
 
@@ -863,5 +876,6 @@ class TestPhase14ServiceWiring:
             "prompt.seed",
             "partition.seed",
             "partition.load",
+            "swaps.watch",
         ]
         assert c.is_initialized is True

@@ -99,6 +99,7 @@ MAX_VECTOR_FIELDS = 10
 #: Milvus partial upsert rewrites every number as a float64, and a float64
 #: rounds integers above 2**53 — so do JavaScript clients.
 MAX_SECTION_ID = 2**53 - 1
+SECTION_ID_KEYS = ("prev_section_id", "section_id", "next_section_id")
 
 
 #: Dense ANN search params for the HNSW/COSINE index on each dense field. ``ef``
@@ -1434,6 +1435,65 @@ class MilvusVectorStore(VectorStore):
         except Exception as e:
             raise UnexpectedVDBError(
                 f"Unexpected error during Milvus raw entity upsert: {e!s}",
+                collection_name=self._collection_name,
+            ) from e
+
+        return int(result.get("upsert_count", len(entities))) if isinstance(result, dict) else len(entities)
+
+    async def write_vectors(self, field: str, vectors: dict[str, list[float] | None]) -> int:
+        """Partial upsert of ``{_id, field}`` per chunk.
+
+        Milvus keeps every field the upsert does not name, including the
+        dynamic ones, and accepts ``None`` for a nullable vector: the chunk then
+        drops out of that field's searches. On an auto-id collection it refuses
+        the whole batch when any ``_id`` no longer exists, so a chunk deleted
+        concurrently fails the write instead of leaving a row holding only a
+        vector (all verified on Milvus 3.0.1).
+
+        It does rewrite every number in the dynamic field as a float64, so an
+        integer beyond ±2**53 in a chunk's metadata comes back rounded, nested
+        ones too, even when the upsert passes the exact value back (verified
+        on Milvus 3.0.2). Section IDs above :data:`MAX_SECTION_ID` are written
+        back folded into their low 53 bits, as Milvus migration 3 does, which
+        keeps chunks linked to their neighbours. Postgres keeps each file's
+        exact upload metadata. A
+        full-row upsert would keep the numbers but reassign ``_id``, which the
+        collection auto-generates.
+
+        Once Storage V3 is enabled, Milvus can generate a field from a function
+        and backfill existing rows itself (``add_function_field``). Today that
+        backfill covers BM25 and MinHash only, and embedding providers are read
+        from ``milvus.yaml`` at startup; when Milvus supports text-embedding
+        functions on existing rows, re-embedding could move there instead of
+        computing vectors client-side and writing them here.
+        """
+        if not field.startswith(VECTOR_FIELD_PREFIX):
+            raise ValueError(f"'{field}' is not a per-embedder dense vector field.")
+        if not vectors:
+            return 0
+
+        entities = {int(chunk_id): {"_id": int(chunk_id), field: vector} for chunk_id, vector in vectors.items()}
+        try:
+            rows = await asyncio.to_thread(self._iter_query, f"_id in {list(entities)}", list(SECTION_ID_KEYS))
+            for row in rows:
+                entities[row["_id"]].update(
+                    (key, row[key] & MAX_SECTION_ID)
+                    for key in SECTION_ID_KEYS
+                    if isinstance(row.get(key), int) and not 0 <= row[key] <= MAX_SECTION_ID
+                )
+            result = await self._async_client.upsert(
+                collection_name=self._collection_name,
+                data=list(entities.values()),
+                partial_update=True,
+            )
+        except MilvusException as e:
+            raise VDBInsertError(
+                f"Milvus partial upsert into `{field}` failed: {e!s}",
+                collection_name=self._collection_name,
+            ) from e
+        except Exception as e:
+            raise UnexpectedVDBError(
+                f"Unexpected error during Milvus partial upsert into `{field}`: {e!s}",
                 collection_name=self._collection_name,
             ) from e
 
