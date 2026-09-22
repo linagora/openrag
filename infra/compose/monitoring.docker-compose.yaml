@@ -11,8 +11,16 @@ services:
       # scripts/gen_alert_rules.py, so Compose and Kubernetes alert on one
       # definition. Regenerate rather than editing; CI checks for drift.
       - ./prometheus/rules:/etc/prometheus/rules:ro
-      - ./prometheus/openrag_token:/etc/prometheus/openrag_token:ro
+      # The token is no longer bind-mounted here: develop supplies it through
+      # the ``configs:`` entry below, written straight from METRICS_TOKEN. Two
+      # sources for one target would collide, and the config is the one that
+      # fails closed when the variable is unset.
       - prometheus_data:/prometheus
+    configs:
+      # The scrape bearer, read by prometheus.yml (credentials_file). Written
+      # straight from METRICS_TOKEN so the API and its scraper can't disagree.
+      - source: openrag_metrics_token
+        target: /etc/prometheus/openrag_token
     command:
       - "--config.file=/etc/prometheus/prometheus.yml"
       - "--storage.tsdb.retention.time=30d"
@@ -76,6 +84,13 @@ services:
               count: all
               capabilities: [gpu]
     restart: unless-stopped
+
+configs:
+  # Inline `content` needs Docker Compose >= 2.23.1. GET /metrics fails closed
+  # without METRICS_TOKEN, so the overlay refuses to start rather than scrape
+  # a 403 forever. Generate one with `openssl rand -hex 16`.
+  openrag_metrics_token:
+    content: "${METRICS_TOKEN:?Set METRICS_TOKEN in .env — the monitoring overlay sends it as the bearer on GET /metrics}"
 
 volumes:
   prometheus_data:

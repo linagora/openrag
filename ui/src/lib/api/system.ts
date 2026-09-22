@@ -4,7 +4,8 @@ import { request } from "./client";
 //   GET  /health_check           → "RAG API is up." (string)
 //   GET  /version                → { version }
 //   GET  /config                 → loaded settings (admin)
-//   GET  /metrics                → Prometheus text (admin)
+//   GET  /monitoring/metrics     → Prometheus text (admin; /metrics itself is
+//                                  scraper-only, gated by METRICS_TOKEN)
 //   GET  /actors/                → { actors: [...] } Ray actors (admin)
 //   POST /actors/{name}/restart  → { message, actor_name, actor_id } (admin)
 
@@ -39,7 +40,7 @@ export function getConfig() {
 }
 
 export function getMetrics() {
-  return request<string>("/metrics");
+  return request<string>("/monitoring/metrics");
 }
 
 export function listActors() {

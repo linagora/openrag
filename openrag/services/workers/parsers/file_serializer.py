@@ -51,6 +51,10 @@ class ParserFileSerializer(FileSerializer):
         # Global gate for captioning images embedded in other documents.
         # Standalone image files are always captioned (see ``serialize``).
         self._image_captioning = bool(config.loader.image_captioning)
+        # Same per-document fan-out bound as IndexerWorkerActor: don't let one
+        # document queue more of its own images on the shared VLM gate than
+        # the gate will ever admit at once.
+        self._caption_concurrency = config.semaphore.vlm_semaphore
 
     async def serialize(self, path: str, metadata: dict) -> str:
         from core.models.document import Document, DocumentType
@@ -64,6 +68,10 @@ class ParserFileSerializer(FileSerializer):
         document = Document(
             filename=name_for_type,
             raw_bytes=raw_bytes,
+            # See ``_load_document``: the extract path's file is on the same
+            # shared volume, so path-based parsers can be dispatched to a
+            # worker on another node (#911).
+            source_path=str(p),
             content_type=Document.detect_content_type(name_for_type),
             metadata=metadata,
         )
@@ -75,7 +83,7 @@ class ParserFileSerializer(FileSerializer):
             and (document.content_type is DocumentType.IMAGE or self._image_captioning)
         )
         if should_caption:
-            processed = await _caption_document(processed, self._vlm, self._caption_prompt)
+            processed = await _caption_document(processed, self._vlm, self._caption_prompt, self._caption_concurrency)
 
         return "\n\n".join(block.text for block in processed.text_blocks if block.text)
 

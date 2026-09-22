@@ -65,6 +65,14 @@ def _document_repo() -> MagicMock:
     repo.renew_content_sha256_claim = AsyncMock(return_value=True)
     repo.release_content_sha256_claim = AsyncMock()
     repo.remove_file_from_partition = AsyncMock()
+    repo.get_file_metadata = AsyncMock(
+        return_value={
+            "file_id": "file-1",
+            "partition": "tenant-a",
+            "title": "old",
+            "indexed_at": "2000-01-01T00:00:00+00:00",
+        }
+    )
     repo.update_file_metadata_in_db = AsyncMock(return_value=True)
     repo.add_file_to_partition = AsyncMock(return_value=True)
     return repo
@@ -1166,7 +1174,7 @@ async def test_worker_dispatcher_mutates_files_without_legacy_indexer() -> None:
     document_repo.update_file_metadata_in_db.assert_called_once_with(
         "file-1",
         "tenant-a",
-        {"file_id": "file-1", "partition": "tenant-a", "title": "new", "indexed_at": "2000-01-01T00:00:00+00:00"},
+        {"title": "new"},
     )
     document_repo.add_file_to_partition.assert_called_once_with(
         file_id="copy-1",
@@ -1182,11 +1190,111 @@ async def test_worker_dispatcher_mutates_files_without_legacy_indexer() -> None:
         parent_id=None,
         content_sha256=None,
         indexed_at=copied_at,
+        chunk_count=1,
     )
     vector_store.upsert_entities.assert_awaited_once()
     vector_store.insert_entities.assert_awaited_once()
     assert vector_store.upsert_entities.await_args.args[0][0]["_openrag_indexing_task_id"] == "task-1"
     assert "_openrag_indexing_task_id" not in vector_store.insert_entities.await_args.args[0][0]
+
+
+@pytest.mark.asyncio
+async def test_metadata_update_writes_patch_instead_of_stale_catalog_snapshot() -> None:
+    from services.workers.dispatcher import WorkerDispatcher
+
+    document_repo = _document_repo()
+    document_repo.get_file_metadata.return_value = {
+        "file_id": "file-1",
+        "partition": "tenant-a",
+        "title": "old",
+        "degraded_stages": ["caption", "topic_tag"],
+    }
+    dispatcher = WorkerDispatcher(
+        pool=_pool_with_ref(object()),
+        task_state_manager=_task_state_manager(),
+        completion_tracker=_completion_tracker(),
+        vector_store=_vector_store(),
+        document_repo=document_repo,
+        workspace_repo=_workspace_repo(),
+        collection="default",
+    )
+
+    await dispatcher.update_file_metadata("file-1", {"title": "new"}, "tenant-a", user={"id": 7})
+
+    assert document_repo.update_file_metadata_in_db.await_args.args[2] == {"title": "new"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("degraded_stages", [["caption"], []])
+async def test_copy_inherits_catalog_degraded_stages(degraded_stages: list[str]) -> None:
+    from services.workers.dispatcher import WorkerDispatcher
+
+    document_repo = _document_repo()
+    document_repo.get_file_metadata.return_value = {
+        "file_id": "source",
+        "partition": "tenant-a",
+        "title": "Source",
+        "degraded_stages": degraded_stages,
+    }
+    vector_store = _vector_store()
+    dispatcher = WorkerDispatcher(
+        pool=_pool_with_ref(object()),
+        task_state_manager=_task_state_manager(),
+        completion_tracker=_completion_tracker(),
+        vector_store=vector_store,
+        document_repo=document_repo,
+        workspace_repo=_workspace_repo(),
+        collection="default",
+    )
+
+    await dispatcher.copy_file(
+        "source",
+        {"file_id": "copy", "partition": "tenant-b", "title": "Copy"},
+        "tenant-a",
+        user={"id": 7},
+    )
+
+    copied_metadata = document_repo.add_file_to_partition.await_args.kwargs["file_metadata"]
+    assert copied_metadata["file_id"] == "copy"
+    assert copied_metadata["partition"] == "tenant-b"
+    assert copied_metadata["title"] == "Copy"
+    assert copied_metadata["degraded_stages"] == degraded_stages
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["update", "copy"])
+async def test_metadata_mutation_aborts_when_catalog_row_is_missing(operation: str) -> None:
+    from services.workers.dispatcher import WorkerDispatcher
+
+    document_repo = _document_repo()
+    document_repo.get_file_metadata.return_value = None
+    vector_store = _vector_store()
+    dispatcher = WorkerDispatcher(
+        pool=_pool_with_ref(object()),
+        task_state_manager=_task_state_manager(),
+        completion_tracker=_completion_tracker(),
+        vector_store=vector_store,
+        document_repo=document_repo,
+        workspace_repo=_workspace_repo(),
+        collection="default",
+    )
+
+    if operation == "update":
+        await dispatcher.update_file_metadata("missing", {"title": "new"}, "tenant-a", user=None)
+    else:
+        await dispatcher.copy_file(
+            "missing",
+            {"file_id": "copy", "partition": "tenant-b", "content_sha256": "abc123"},
+            "tenant-a",
+            user=None,
+        )
+
+    vector_store.query_chunks_by_filter.assert_not_awaited()
+    vector_store.upsert_entities.assert_not_awaited()
+    vector_store.insert_entities.assert_not_awaited()
+    document_repo.update_file_metadata_in_db.assert_not_awaited()
+    document_repo.add_file_to_partition.assert_not_awaited()
+    document_repo.claim_content_sha256.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -2251,6 +2359,50 @@ async def test_task_state_falls_back_to_the_durable_job() -> None:
 
     assert await dispatcher.get_task_state("task-1") == "FAILED"
     assert await dispatcher.get_task_error("task-1") == "boom"
+
+
+@pytest.mark.asyncio
+async def test_task_error_reason_falls_back_to_the_durable_job() -> None:
+    from core.models.catalog import DocumentStatus, IndexationJob
+
+    tsm = _task_state_manager()
+    tsm._ray_actor_method_names = {"get_error"}
+    job = IndexationJob(
+        id="task-1",
+        status=DocumentStatus.FAILED,
+        partition="tenant-a",
+        error="traceback",
+        error_reason="RuntimeError: durable failure",
+    )
+    dispatcher = _dispatcher_with_job_repo(tsm, _JobRepoSpy(job))
+
+    assert await dispatcher.get_task_error_reason("task-1") == "RuntimeError: durable failure"
+
+
+@pytest.mark.asyncio
+async def test_submit_failure_captures_reason_with_new_task_state_actor() -> None:
+    tsm = _task_state_manager()
+    set_failed = AsyncMock(return_value=True)
+    tsm._ray_actor_method_names = {
+        "set_failed_if_not_cancelled",
+        "set_failed_with_reason_if_not_cancelled",
+    }
+    tsm.set_failed_with_reason_if_not_cancelled = MagicMock()
+    tsm.set_failed_with_reason_if_not_cancelled.remote = set_failed
+    dispatcher = _dispatcher_with_job_repo(tsm, _JobRepoSpy())
+
+    await dispatcher._mark_submit_failed(
+        "task-1",
+        "traceback",
+        "RuntimeError: submission failed",
+    )
+
+    set_failed.assert_awaited_once_with(
+        "task-1",
+        "traceback",
+        "RuntimeError: submission failed",
+    )
+    tsm.set_failed_if_not_cancelled.remote.assert_not_awaited()
 
 
 @pytest.mark.asyncio

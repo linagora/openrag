@@ -142,7 +142,7 @@ written against the old shape, which must stop calling `json.loads` on it:
 
 - `sources` — legacy field, kept as-is for existing clients (e.g. Twake): cited sources, or every presented source as a fallback when no `[Sources: ...]` tag was found.
 - `presented_sources` — every source actually shown to the LLM (after `format_context()`/`format_web_context()` truncation), regardless of citation. Always present; a client can fall back to this ("sources consulted") when nothing was cited.
-- `cited_sources` — strictly what the model cited via the tag; unlike `sources`, this never falls back to "everything" — it's `[]` whenever no tag was found. Chainlit is expected to move to this field, falling back to `presented_sources` in its UI when `cited_sources` is empty.
+- `cited_sources` — strictly what the model cited via the tag; unlike `sources`, this never falls back to "everything" — it's `[]` whenever no tag was found. Chainlit uses this field directly so its source panel never presents uncited retrieval candidates.
 - `citations_reported` (bool) — `true` only when the model actually emitted a `[Sources: ...]` tag (even an empty/`none` one); `false` when the tag was missing entirely, which is the only case where `sources` falls back to keeping everything. Lets a client tell "the model cited every source" apart from "the model didn't report citations at all".
 - `all_retrieved_sources` — the complete retrieval set, captured before the context-token-budget truncation, so it also includes documents/web results that didn't fit in the prompt (and, on the map-reduce path, the original retrieved docs rather than the LLM-generated summaries). Only included when the request sets `metadata.include_all_retrieved_sources: true` — it's debug/eval telemetry, gated off by default since retrieval is uncapped up to `retriever.top_k` while the context budget only fits a handful of documents.
 
@@ -202,6 +202,10 @@ Three caveats:
   reranks each sub-query's list separately and then fuses them with RRF, so the final
   order is the RRF rank; a chunk retrieved by several sub-queries keeps the score from
   whichever list RRF saw first.
+
+### Prometheus Metrics
+
+`GET /metrics` (`openrag/api/routers/admin/monitoring.py`) serves the default `prometheus_client` registry: HTTP counters/histogram recorded by `api/middleware/instrumentation.py` plus the inference circuit-breaker gauge. The path is in `DEFAULT_BYPASS_PATHS` (no user token needed) and the route enforces its own `METRICS_TOKEN` (`server.metrics_token`, blank = unset) via `require_metrics_token`; admin tokens are deliberately not accepted there — one mechanism, no fallback. It **fails closed**: token unset and `METRICS_ALLOW_UNAUTHENTICATED` (`server.metrics_allow_unauthenticated`) false → 403 on every scrape, with a startup warning from `describe_metrics_access`. The opt-in exists because the API port is exactly what the Ingress / admin-ui proxy forwards (review on PR #914), so "no token" must never silently mean "open"; a configured token always wins over the opt-in. The admin UI's System > Metrics tab reads `GET /monitoring/metrics` (`admin_router`, `require_admin`, an API prefix) instead — same exposition, separate audience, so the scrape path never touches the Postgres token lookup and an admin never holds the scrape secret. The config is read through `load_config()` rather than the request container so a scrape keeps working while the container is degraded. Compose: the monitoring overlay writes `METRICS_TOKEN` into the Prometheus container via a `configs.content` entry (Compose ≥ 2.23.1) and fails fast without it; the admin-ui nginx returns 404 on `/metrics`. Helm: `openrag.metrics.*` (pod annotations + optional ServiceMonitor with `bearerTokenFromSecret`), `env.secrets.METRICS_TOKEN`, `env.config.METRICS_ALLOW_UNAUTHENTICATED`. Docs: `docs/content/docs/documentation/prometheus_metrics.md`.
 
 ### API Routers (`openrag/api/routers/`)
 

@@ -34,7 +34,7 @@ from sqlalchemy import (
     func,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 
 metadata = MetaData()
 
@@ -225,6 +225,7 @@ files = Table(
     Column("relationship_id", String, nullable=True, index=True),
     Column("parent_id", String, nullable=True, index=True),
     Column("content_sha256", String(64), nullable=True),
+    Column("chunk_count", Integer, nullable=True),
     Column(
         "indexed_at",
         DateTime(timezone=True),
@@ -232,6 +233,7 @@ files = Table(
         nullable=False,
     ),
     UniqueConstraint("file_id", "partition_name", name="uix_file_id_partition"),
+    CheckConstraint("chunk_count >= 0", name="ck_files_chunk_count_non_negative"),
     Index("ix_partition_file", "partition_name", "file_id"),
     Index("ix_relationship_partition", "relationship_id", "partition_name"),
     Index("ix_parent_partition", "parent_id", "partition_name"),
@@ -294,6 +296,13 @@ jobs = Table(
     Column("user_id", Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True),
     Column("status", String, nullable=False),
     Column("error", String, nullable=True),
+    Column("error_reason", String, nullable=True),
+    Column(
+        "degraded_stages",
+        ARRAY(String),
+        server_default=text("ARRAY[]::text[]"),
+        nullable=False,
+    ),
     Column("created_at", DateTime(timezone=True), server_default=text("now()"), nullable=False),
     Column("updated_at", DateTime(timezone=True), server_default=text("now()"), nullable=False),
     # Queue wait is ``started_at - created_at`` and service time is

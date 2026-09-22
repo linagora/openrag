@@ -1,3 +1,7 @@
+{{- $rayServeEnabled := eq (toString .Values.env.config.ENABLE_RAY_SERVE) "true" -}}
+{{- if and $rayServeEnabled (not .Values.ray.enabled) -}}
+{{- fail "ENABLE_RAY_SERVE=true requires ray.enabled=true" -}}
+{{- end -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -13,6 +17,13 @@ spec:
     metadata:
       annotations:
         checksum/config: {{ include (print $.Template.BasePath "/configmap-env.yaml") . | sha256sum }}
+        {{- /* Not under Ray Serve: this pod's 8080 is then the serve driver,
+           not the API (see templates/servicemonitor.yaml). */}}
+        {{- if and .Values.openrag.metrics.prometheusAnnotations (ne (include "openrag-stack.rayServeApi" .) "true") }}
+        prometheus.io/scrape: "true"
+        prometheus.io/path: "/metrics"
+        prometheus.io/port: {{ .Values.openrag.service.targetPort | quote }}
+        {{- end }}
       labels:
         {{- include "openrag-stack.componentSelectorLabels" (dict "component" "openrag" "context" $) | nindent 8 }}
     spec:
@@ -63,15 +74,15 @@ spec:
             {{- toYaml .Values.openrag.resources | nindent 12 }}
           {{- if .Values.openrag.probes.startup }}
           startupProbe:
-            {{- toYaml .Values.openrag.probes.startup | nindent 12 }}
+            {{- include "openrag-stack.openragProbe" (dict "probe" .Values.openrag.probes.startup "rayServe" $rayServeEnabled "path" "/ready" "context" $) | nindent 12 }}
           {{- end }}
           {{- if .Values.openrag.probes.readiness }}
           readinessProbe:
-            {{- toYaml .Values.openrag.probes.readiness | nindent 12 }}
+            {{- include "openrag-stack.openragProbe" (dict "probe" .Values.openrag.probes.readiness "rayServe" $rayServeEnabled "path" "/ready" "context" $) | nindent 12 }}
           {{- end }}
           {{- if .Values.openrag.probes.liveness }}
           livenessProbe:
-            {{- toYaml .Values.openrag.probes.liveness | nindent 12 }}
+            {{- include "openrag-stack.openragProbe" (dict "probe" .Values.openrag.probes.liveness "rayServe" $rayServeEnabled "path" "/health_check" "context" $) | nindent 12 }}
           {{- end }}
           envFrom:
             - configMapRef:
@@ -167,7 +178,7 @@ spec:
                    RayCluster (templates/raycluster.yaml) — ENABLE_RAY_SERVE alone
                    isn't enough, otherwise this Ingress can dangle at a Service
                    that was never created. */}}
-                {{- if and .Values.ray.enabled (eq (toString .Values.env.config.ENABLE_RAY_SERVE) "true") }}
+                {{- if eq (include "openrag-stack.rayServeApi" .) "true" }}
                 name: {{ include "openrag-stack.fullname" . }}-raycluster-head-svc
                 port:
                   name: ray-serve

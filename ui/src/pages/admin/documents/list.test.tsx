@@ -3,10 +3,13 @@ import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { MouseEvent as ReactMouseEvent } from "react";
 import { MemoryRouter, useLocation } from "react-router-dom";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { toast } from "sonner";
 import type { Action } from "sonner";
+import { listPartitionFiles } from "@/lib/api/documents";
 import { deleteFile, uploadFile } from "@/lib/api/indexing";
+import { listModelEndpoints } from "@/lib/api/models";
+import { listPartitions } from "@/lib/api/partitions";
 import { getQueueInfo, type QueueInfo } from "@/lib/api/jobs";
 import { downloadCsv } from "@/lib/csv";
 import { useActiveJobsCount } from "@/lib/jobs-queries";
@@ -21,6 +24,7 @@ vi.mock("sonner", () => ({
 
 const permissions = vi.hoisted(() => ({
   canWrite: vi.fn(() => true),
+  isAdmin: true,
   superAdminModeResolved: true,
 }));
 
@@ -52,24 +56,7 @@ vi.mock("@/lib/api/partitions", () => ({
 }));
 
 vi.mock("@/lib/api/documents", () => ({
-  listPartitionFiles: vi.fn().mockResolvedValue({
-    files: [
-      {
-        file_id: "file-a",
-        partition: "docs",
-        filename: "a.pdf",
-        mimetype: "application/pdf",
-        indexed_at: "2026-01-01T00:00:00Z",
-      },
-      {
-        file_id: "file-b",
-        partition: "docs",
-        filename: "b.pdf",
-        mimetype: "application/pdf",
-        indexed_at: new Date(2026, 0, 2, 0, 30).toISOString(),
-      },
-    ],
-  }),
+  listPartitionFiles: vi.fn(),
 }));
 
 vi.mock("@/lib/api/indexing", () => ({
@@ -82,11 +69,38 @@ vi.mock("@/lib/csv", () => ({
   downloadCsv: vi.fn(),
 }));
 
+vi.mock("@/lib/api/models", async () => {
+  const actual = await vi.importActual<typeof import("@/lib/api/models")>("@/lib/api/models");
+  return {
+    ...actual,
+    // resolveEmbedderName/resolveEmbedderModel stay real: resolving the
+    // `default` alias and the endpoint's model is the behaviour under test,
+    // not a dependency to stub out.
+    listModelEndpoints: vi.fn().mockResolvedValue([
+      {
+        name: "Qwen3-Embedding-0.6B",
+        model_type: "embedder",
+        model_name: "Qwen3-Embedding-0.6B",
+        is_default: true,
+      },
+    ]),
+  };
+});
+
+const listPartitionsMock = vi.mocked(listPartitions);
+const listPartitionFilesMock = vi.mocked(listPartitionFiles);
 const deleteFileMock = vi.mocked(deleteFile);
 const uploadFileMock = vi.mocked(uploadFile);
 const getQueueInfoMock = vi.mocked(getQueueInfo);
 const downloadCsvMock = vi.mocked(downloadCsv);
 const toastSuccessMock = vi.mocked(toast.success);
+
+beforeAll(() => {
+  if (!Element.prototype.hasPointerCapture) Element.prototype.hasPointerCapture = () => false;
+  if (!Element.prototype.setPointerCapture) Element.prototype.setPointerCapture = () => {};
+  if (!Element.prototype.releasePointerCapture) Element.prototype.releasePointerCapture = () => {};
+  if (!Element.prototype.scrollIntoView) Element.prototype.scrollIntoView = () => {};
+});
 
 const queueInfo = (active: number): QueueInfo => ({
   workers: { total_slots: 4, pool_size: 2, max_per_actor: 2 },
@@ -139,6 +153,28 @@ describe("DocumentListPage", () => {
     deleteFileMock.mockClear();
     uploadFileMock.mockReset();
     getQueueInfoMock.mockReset();
+    listPartitionFilesMock.mockReset();
+    listPartitionFilesMock.mockResolvedValue({
+      files: [
+        {
+          file_id: "file-a",
+          partition: "docs",
+          link: "/partition/docs/file/file-a",
+          filename: "a.pdf",
+          mimetype: "application/pdf",
+          indexed_at: "2026-01-01T00:00:00Z",
+          degraded_stages: ["caption"],
+        },
+        {
+          file_id: "file-b",
+          partition: "docs",
+          link: "/partition/docs/file/file-b",
+          filename: "b.pdf",
+          mimetype: "application/pdf",
+          indexed_at: new Date(2026, 0, 2, 0, 30).toISOString(),
+        },
+      ],
+    });
     downloadCsvMock.mockClear();
     toastSuccessMock.mockClear();
   });
@@ -156,6 +192,29 @@ describe("DocumentListPage", () => {
     const fileLink = await screen.findByRole("link", { name: "a.pdf" });
     expect(fileLink.getAttribute("title")).toBe("a.pdf");
     expect(fileLink.className).toContain("truncate");
+  });
+
+  it("shows degraded stages and filters them through the catalog API", async () => {
+    renderDocuments();
+
+    expect(await screen.findByText("Caption")).not.toBeNull();
+    listPartitionFilesMock.mockClear();
+
+    await userEvent.click(screen.getByRole("combobox", { name: "Filter by degraded stage" }));
+    await userEvent.click(screen.getByRole("option", { name: "Caption" }));
+
+    await waitFor(() =>
+      expect(listPartitionFilesMock).toHaveBeenCalledWith("docs", {
+        degradedStage: "caption",
+      }),
+    );
+  });
+
+  it("does not claim enrichment completed when no failure was recorded", async () => {
+    renderDocuments();
+
+    expect(await screen.findByText("No failures recorded")).not.toBeNull();
+    expect(screen.queryByText("Complete")).toBeNull();
   });
 
   it("filters documents by file name and indexed date before exporting", async () => {
@@ -317,5 +376,188 @@ describe("DocumentListPage", () => {
     await userEvent.click(screen.getByRole("button", { name: "Upload" }));
 
     await waitFor(() => expect(screen.getByTestId("active-jobs").textContent).toBe("3"));
+  });
+});
+
+describe("DocumentsPage embedder drift (#762 E)", () => {
+  beforeEach(() => {
+    permissions.isAdmin = true;
+  });
+
+  const file = (extra: Record<string, unknown>) => ({
+    file_id: "file-a",
+    partition: "docs",
+    filename: "a.pdf",
+    mimetype: "application/pdf",
+    indexed_at: "2026-01-01T00:00:00Z",
+    ...extra,
+  });
+
+  const withPartitionEmbedder = (embedder: string) =>
+    listPartitionsMock.mockResolvedValue({
+      partitions: [
+        { partition: "docs", name: "docs", role: "owner", created_at: null, document_count: 1, embedder },
+      ],
+    } as never);
+
+  // The Embedder column shows a value on every row; only a *drifted* cell
+  // carries the explanatory title, so that is what marks drift.
+  const driftMarkers = () => screen.queryAllByTitle(/^Indexed with /);
+
+  it("summarises the embedder in the toolbar even with nothing drifted", async () => {
+    // The value is identical on every row until something drifts, so it is one
+    // line rather than a column — but it must still be somewhere, or the only
+    // way to learn what produced these vectors is to have an incident.
+    withPartitionEmbedder("default");
+    listPartitionFilesMock.mockResolvedValue({
+      files: [file({ embedder: "Qwen3-Embedding-0.6B" })],
+    } as never);
+
+    renderDocuments();
+
+    const summary = await screen.findByTitle("Embedder these files were indexed with");
+    expect(summary.textContent).toContain("Qwen3-Embedding-0.6B");
+    expect(driftMarkers()).toHaveLength(0);
+  });
+
+  it("shows the embedder for every file, drifted or not", async () => {
+    // A column is where a per-file fact belongs — the same reason `Type` is a
+    // column even when every row reads application/pdf.
+    withPartitionEmbedder("default");
+    listPartitionFilesMock.mockResolvedValue({
+      files: [file({ embedder: "Qwen3-Embedding-0.6B" })],
+    } as never);
+
+    renderDocuments();
+
+    await screen.findByText("a.pdf");
+    const cells = await screen.findAllByText("Qwen3-Embedding-0.6B");
+    expect(cells.length).toBeGreaterThan(0);
+    expect(driftMarkers()).toHaveLength(0);
+  });
+
+  it("shows an em dash for files indexed before provenance existed", async () => {
+    withPartitionEmbedder("default");
+    listPartitionFilesMock.mockResolvedValue({ files: [file({ embedder: null })] } as never);
+
+    renderDocuments();
+
+    await screen.findByText("a.pdf");
+    expect(screen.getByText("\u2014")).toBeTruthy();
+    expect(driftMarkers()).toHaveLength(0);
+  });
+
+  it("flags a file recorded against a different embedder", async () => {
+    withPartitionEmbedder("default");
+    listPartitionFilesMock.mockResolvedValue({
+      files: [file({ embedder: "bge-m3", embedder_model_name: "bge-m3" })],
+    } as never);
+
+    renderDocuments();
+
+    await screen.findByText("a.pdf");
+    await waitFor(() => expect(driftMarkers()).toHaveLength(1));
+    expect(driftMarkers()[0].textContent).toBe("bge-m3");
+    // Sortable header proves it is a real column, not decoration.
+    expect(screen.getByRole("button", { name: /Embedder/ })).toBeTruthy();
+  });
+
+  it("stays silent when the file matches through the `default` alias", async () => {
+    // The partition stores "default"; the file recorded the endpoint that
+    // resolved to. Comparing the raw strings would flag every file.
+    withPartitionEmbedder("default");
+    listPartitionFilesMock.mockResolvedValue({
+      files: [file({ embedder: "Qwen3-Embedding-0.6B" })],
+    } as never);
+
+    renderDocuments();
+
+    await screen.findByText("a.pdf");
+    expect(driftMarkers()).toHaveLength(0);
+  });
+
+  it("does not flag files indexed before provenance existed", async () => {
+    // Unknown is not known-bad — a badge on every legacy row says nothing.
+    withPartitionEmbedder("default");
+    listPartitionFilesMock.mockResolvedValue({ files: [file({ embedder: null })] } as never);
+
+    renderDocuments();
+
+    await screen.findByText("a.pdf");
+    expect(driftMarkers()).toHaveLength(0);
+  });
+
+  it("names the model that ran, not the endpoint it ran through", async () => {
+    // The endpoint is a renameable label and may since have been repointed or
+    // deleted; the recorded model is what fixes the vector space, so that is
+    // what the column says.
+    withPartitionEmbedder("default");
+    listPartitionFilesMock.mockResolvedValue({
+      files: [file({ embedder: "Qwen3-Embedding-0.6B", embedder_model_name: "Qwen3-Embedding-0.6B" })],
+    } as never);
+
+    renderDocuments();
+
+    await screen.findByText("a.pdf");
+    expect(await screen.findAllByText("Qwen3-Embedding-0.6B")).not.toHaveLength(0);
+    expect(driftMarkers()).toHaveLength(0);
+  });
+
+  it("does not flag files indexed before the endpoint was renamed", async () => {
+    // The real-world false positive: the endpoint was renamed, so the file's
+    // recorded label no longer matches the partition's. Same model on both
+    // sides, so nothing drifted and nothing may be flagged.
+    vi.mocked(listModelEndpoints).mockResolvedValue([
+      {
+        name: "Qwen3-Embedding",
+        model_type: "embedder",
+        model_name: "Qwen3-Embedding-0.6B",
+        is_default: true,
+      },
+    ] as never);
+    withPartitionEmbedder("Qwen3-Embedding");
+    listPartitionFilesMock.mockResolvedValue({
+      files: [file({ embedder: "Qwen3-Embedding-0.6B", embedder_model_name: "Qwen3-Embedding-0.6B" })],
+    } as never);
+
+    renderDocuments();
+
+    await screen.findByText("a.pdf");
+    await waitFor(() => expect(driftMarkers()).toHaveLength(0));
+    // And the column names the model, which both sides agree on.
+    expect(await screen.findAllByText("Qwen3-Embedding-0.6B")).not.toHaveLength(0);
+  });
+
+  it("does not flag a healthy file for a partition member who cannot read the endpoint list", async () => {
+    // The registry is admin-only, so `default` cannot be resolved to a model.
+    // Comparing what is left — the file's endpoint label with the literal
+    // "default" — flagged every file of every partition on the alias.
+    permissions.isAdmin = false;
+    vi.mocked(listModelEndpoints).mockClear();
+    withPartitionEmbedder("default");
+    listPartitionFilesMock.mockResolvedValue({
+      files: [file({ embedder: "Qwen3-Embedding-0.6B", embedder_model_name: "Qwen3-Embedding-0.6B" })],
+    } as never);
+
+    renderDocuments();
+
+    await screen.findByText("a.pdf");
+    expect(await screen.findAllByText("Qwen3-Embedding-0.6B")).not.toHaveLength(0);
+    expect(driftMarkers()).toHaveLength(0);
+    expect(vi.mocked(listModelEndpoints)).not.toHaveBeenCalled();
+  });
+
+  it("does not flag a file indexed under a since-renamed endpoint for a partition member", async () => {
+    permissions.isAdmin = false;
+    withPartitionEmbedder("qwen-renamed");
+    listPartitionFilesMock.mockResolvedValue({
+      files: [file({ embedder: "qwen", embedder_model_name: "Qwen3-Embedding-0.6B" })],
+    } as never);
+
+    renderDocuments();
+
+    await screen.findByText("a.pdf");
+    expect(await screen.findAllByText("Qwen3-Embedding-0.6B")).not.toHaveLength(0);
+    expect(driftMarkers()).toHaveLength(0);
   });
 });

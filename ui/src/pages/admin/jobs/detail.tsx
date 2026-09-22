@@ -4,7 +4,13 @@ import type { MouseEvent } from "react";
 import { ArrowLeft, Ban, Copy } from "lucide-react";
 import { toast } from "sonner";
 
+import { useAuth } from "@/lib/auth";
+import { usePermissions } from "@/lib/permissions";
 import { StatusBadge } from "@/components/shared/status-badge";
+import {
+  DegradedCompletionStatus,
+  normalizeDegradedStages,
+} from "@/components/shared/degraded-stages";
 import { ConfirmDialog } from "@/components/shared/confirm-dialog";
 import { Button } from "@/components/ui/button";
 import {
@@ -26,7 +32,7 @@ import { copyToClipboard } from "@/lib/utils";
 
 const str = (v: unknown) => (v == null ? "" : String(v));
 
-function errorSummary(lines: string[]): string {
+function tracebackSummary(lines: string[]): string {
   return [...lines].reverse().find((line) => line.trim() && !line.trim().startsWith("Traceback"))?.trim() ?? "";
 }
 
@@ -38,13 +44,17 @@ function failedStage(details: unknown): string {
 
 export default function JobDetailPage() {
   const { id } = useParams<{ id: string }>();
+  const { user } = useAuth();
+  const { isAdmin } = usePermissions();
   const queryClient = useQueryClient();
+  const userId = user?.id ?? 0;
+  const authorizationScope = isAdmin ? "admin" : "user";
 
   // OpenRag has no task SSE — poll status until it reaches a terminal state.
   const taskQuery = useQuery({
-    queryKey: ["task", id],
+    queryKey: ["task", id, userId, authorizationScope],
     queryFn: () => getTaskStatus(id!),
-    enabled: !!id,
+    enabled: !!id && !!user,
     refetchInterval: (query) => {
       const state = query.state.data?.task_state;
       return state && isTerminalState(state) ? false : 3000;
@@ -56,9 +66,9 @@ export default function JobDetailPage() {
   const failed = state === "FAILED";
 
   const errorQuery = useQuery({
-    queryKey: ["task-error", id],
+    queryKey: ["task-error", id, userId, authorizationScope],
     queryFn: () => getTaskError(id!),
-    enabled: !!id && failed,
+    enabled: !!id && !!user && failed,
   });
 
   const cancelMutation = useMutation({
@@ -91,9 +101,14 @@ export default function JobDetailPage() {
   if (!task) return null;
 
   const details = task.details;
+  const degradedStages = normalizeDegradedStages(details?.degraded_stages);
+  const degraded = task.task_state === "COMPLETED" && degradedStages.length > 0;
   const filename = str(details?.metadata?.filename) || str(details?.file_id) || "—";
   const traceback = errorQuery.data?.traceback ?? [];
-  const summary = errorSummary(traceback);
+  const reason =
+    errorQuery.data?.reason?.trim() ||
+    errorQuery.data?.summary?.trim() ||
+    tracebackSummary(traceback);
   const stage = failedStage(details);
   const diagnostics = [
     `Task ID: ${task.task_id}`,
@@ -101,7 +116,7 @@ export default function JobDetailPage() {
     `File: ${filename}`,
     `Partition: ${str(details?.partition) || "—"}`,
     stage ? `Failed stage: ${stage}` : null,
-    summary ? `Reason: ${summary}` : null,
+    reason ? `Reason: ${reason}` : null,
     traceback.length ? `\nTraceback:\n${traceback.join("\n")}` : null,
   ]
     .filter(Boolean)
@@ -136,7 +151,11 @@ export default function JobDetailPage() {
           </p>
         </div>
         <div className="flex items-center gap-3">
-          <StatusBadge status={task.task_state} />
+          {degraded ? (
+            <DegradedCompletionStatus stages={degradedStages} />
+          ) : (
+            <StatusBadge status={task.task_state} />
+          )}
           {active && (
             <span className="text-sm text-muted-foreground animate-pulse">
               Auto-refreshing…
@@ -170,7 +189,11 @@ export default function JobDetailPage() {
             <div className="flex justify-between sm:flex-col sm:gap-1">
               <dt className="text-muted-foreground">State</dt>
               <dd>
-                <StatusBadge status={task.task_state} />
+                {degraded ? (
+                  <DegradedCompletionStatus stages={degradedStages} />
+                ) : (
+                  <StatusBadge status={task.task_state} />
+                )}
               </dd>
             </div>
             <Separator className="sm:col-span-2" />
@@ -232,7 +255,7 @@ export default function JobDetailPage() {
                 <div className="rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm">
                   <dl className="grid gap-2 sm:grid-cols-[8rem_1fr]">
                     <dt className="text-muted-foreground">Reason</dt>
-                    <dd className="font-medium break-words">{summary || "Task failed"}</dd>
+                    <dd className="font-medium break-words">{reason || "Task failed"}</dd>
                     {stage && (
                       <>
                         <dt className="text-muted-foreground">Failed stage</dt>

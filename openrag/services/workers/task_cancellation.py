@@ -7,6 +7,7 @@ from typing import Any
 import ray
 from core.utils.logging import get_logger
 from ray.exceptions import TaskCancelledError
+from services.workers.failure_reporting import submit_task_failure
 from services.workers.ray_utils import call_ray_actor_method_with_timeout, call_ray_actor_with_timeout
 from services.workers.task_state import (
     CANCELLABLE_INDEXING_STATES,
@@ -308,7 +309,12 @@ async def _mark_ref_less_tasks_failed(
     if set_failed is not None:
         for task_id in task_ids:
             await call_ray_actor_method_with_timeout(
-                submit=lambda task_id=task_id: set_failed.remote(task_id, STALE_REFLESS_TASK_ERROR),
+                submit=lambda task_id=task_id: submit_task_failure(
+                    task_state_manager,
+                    task_id,
+                    STALE_REFLESS_TASK_ERROR,
+                    STALE_REFLESS_TASK_ERROR,
+                ),
                 timeout=_remaining_timeout(deadline, partition=partition, file_id=file_id),
                 task_description=f"set_failed_if_not_cancelled({task_id})",
             )

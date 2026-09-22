@@ -17,9 +17,11 @@ from core.models.catalog import (
     IndexationJob,
 )
 from core.utils.consts import is_internal_metadata_key, strip_internal_metadata
+from core.utils.error_summary import extract_task_error_reason, failure_reason_from_exception
 from core.utils.exceptions import ConflictError, mark_indexing_worker_may_be_running
 from core.utils.logging import get_logger
 from ray.exceptions import TaskCancelledError
+from services.workers.failure_reporting import submit_task_failure
 from services.workers.ray_utils import call_ray_actor_with_timeout, retry_idempotent_ray_actor_method
 from services.workers.stages.store import INDEXING_TASK_ID_METADATA_KEY
 from services.workers.task_cancellation import cancel_active_indexing_tasks
@@ -37,19 +39,6 @@ class WorkerDispatcher(IndexingDispatcher):
     File mutation paths use the storage ports directly so the API no longer
     depends on the legacy ``Indexer`` actor being present.
     """
-
-    _FILE_METADATA_EXCLUDED_KEYS = frozenset(
-        {
-            "_id",
-            "id",
-            "text",
-            "vector",
-            "page",
-            "section_id",
-            "prev_section_id",
-            "next_section_id",
-        }
-    )
 
     def __init__(
         self,
@@ -373,7 +362,8 @@ class WorkerDispatcher(IndexingDispatcher):
                     await self._record_finished_at(task_id, task_details)
                     if mark_submit_failed:
                         tb = traceback.format_exc()
-                        await self._mark_submit_failed(task_id, tb)
+                        error_reason = failure_reason_from_exception(exc)
+                        await self._mark_submit_failed(task_id, tb, error_reason)
                         # The completion tracker never saw this task, so nothing
                         # else settles its row: it would stay QUEUED until a
                         # restart reconciled it, long after the actor forgot the
@@ -385,6 +375,7 @@ class WorkerDispatcher(IndexingDispatcher):
                             file_id=file_id,
                             user_id=task_details["user_id"],
                             error=tb,
+                            error_reason=error_reason,
                             completed_at=datetime.now(UTC),
                         )
             finally:
@@ -469,11 +460,11 @@ class WorkerDispatcher(IndexingDispatcher):
         )
         return submitted[0]
 
-    async def _mark_submit_failed(self, task_id: str, tb: str) -> None:
+    async def _mark_submit_failed(self, task_id: str, tb: str, error_reason: str) -> None:
         set_failed = getattr(self._tsm, "set_failed_if_not_cancelled", None)
         if set_failed is not None:
             await self._call_method(
-                lambda: set_failed.remote(task_id, tb),
+                lambda: submit_task_failure(self._tsm, task_id, tb, error_reason),
                 task_description=f"set_failed_if_not_cancelled({task_id})",
             )
             return
@@ -579,6 +570,8 @@ class WorkerDispatcher(IndexingDispatcher):
         partition: str,
         user: dict | None,
     ) -> None:
+        if await self._document_repo.get_file_metadata(file_id, partition) is None:
+            return
         rows = await self._vector_store.query_chunks_by_filter(
             self._collection,
             {"partition": partition, "file_id": file_id},
@@ -598,9 +591,7 @@ class WorkerDispatcher(IndexingDispatcher):
 
         await self._upsert_entities(entities)
 
-        file_metadata = self._file_metadata_from_chunk(rows[0])
-        file_metadata.update(public_metadata)
-        await self._document_repo.update_file_metadata_in_db(file_id, partition, file_metadata)
+        await self._document_repo.update_file_metadata_in_db(file_id, partition, public_metadata)
 
     async def copy_file(
         self,
@@ -609,6 +600,9 @@ class WorkerDispatcher(IndexingDispatcher):
         partition: str,
         user: dict | None,
     ) -> None:
+        source_file_metadata = await self._document_repo.get_file_metadata(file_id, partition)
+        if source_file_metadata is None:
+            return
         target_file_id = metadata.get("file_id", file_id)
         target_partition = metadata.get("partition", partition)
         content_sha256 = metadata.get("content_sha256")
@@ -650,7 +644,7 @@ class WorkerDispatcher(IndexingDispatcher):
 
             await self._insert_entities(entities)
 
-            file_metadata = self._file_metadata_from_chunk(rows[0])
+            file_metadata = dict(source_file_metadata)
             file_metadata.update(public_metadata)
             file_metadata["indexed_at"] = indexed_at.isoformat()
             await self._document_repo.add_file_to_partition(
@@ -662,6 +656,7 @@ class WorkerDispatcher(IndexingDispatcher):
                 parent_id=file_metadata.get("parent_id"),
                 content_sha256=content_sha256,
                 indexed_at=indexed_at,
+                chunk_count=len(entities),
             )
         finally:
             if claimed_content:
@@ -684,13 +679,6 @@ class WorkerDispatcher(IndexingDispatcher):
             raise TypeError("vector_store must expose insert_entities for file copy mutations")
         await insert_entities(entities, self._collection)
 
-    def _file_metadata_from_chunk(self, chunk: dict[str, Any]) -> dict[str, Any]:
-        return {
-            k: v
-            for k, v in chunk.items()
-            if k not in self._FILE_METADATA_EXCLUDED_KEYS and not is_internal_metadata_key(k)
-        }
-
     async def _record_job(
         self,
         task_id: str,
@@ -700,6 +688,7 @@ class WorkerDispatcher(IndexingDispatcher):
         file_id: str | None = None,
         user_id: int | None = None,
         error: str | None = None,
+        error_reason: str | None = None,
         started_at: datetime | None = None,
         completed_at: datetime | None = None,
     ) -> None:
@@ -715,6 +704,7 @@ class WorkerDispatcher(IndexingDispatcher):
                     file_id=file_id,
                     user_id=user_id,
                     error=error,
+                    error_reason=error_reason,
                     started_at=started_at,
                     completed_at=completed_at,
                 )
@@ -758,6 +748,24 @@ class WorkerDispatcher(IndexingDispatcher):
             return error
         job = await self._durable_job(task_id)
         return job.error if job is not None else None
+
+    async def get_task_error_reason(self, task_id: str) -> str | None:
+        method_names = getattr(self._tsm, "_ray_actor_method_names", None)
+        supports_reason = isinstance(method_names, (frozenset, list, set, tuple)) and (
+            "get_error_reason" in method_names
+        )
+        if supports_reason:
+            reason = await self._call_method(
+                lambda: self._tsm.get_error_reason.remote(task_id),
+                task_description=f"get_error_reason({task_id})",
+            )
+            if reason is not None:
+                return reason
+        job = await self._durable_job(task_id)
+        if job is not None and job.error_reason is not None:
+            return job.error_reason
+        error = await self.get_task_error(task_id)
+        return extract_task_error_reason(error)
 
     async def cancel_task(self, task_id: str) -> bool:
         import ray
