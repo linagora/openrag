@@ -17,6 +17,7 @@ import filetype
 import pytest
 from core.indexing.validators import (
     CONTENT_SNIFF_BYTES,
+    _ooxml_main_part_by_content,
     validate_content_matches_extension,
     validate_ooxml_package,
 )
@@ -380,10 +381,10 @@ def test_everything_spire_can_load_is_still_accepted(head, why):
     ("head", "detected"),
     [
         (PDF, "pdf"),
-        # ``filetype`` reports *docx* here, not zip: its matcher keys on an entry
-        # named ``word/`` near the head — the same quirk ``validate_ooxml_package``
-        # exists for. Either way it is a recognised foreign format and is refused.
-        (_zip("word/document.xml"), "docx"),
+        # A plain archive is a recognised foreign format and is refused here. An
+        # archive ``filetype`` calls a *docx* is not: .doc tolerates docx, because
+        # Spire reads one. That case is settled by ``validate_ooxml_package``
+        # instead — see ``test_a_docx_named_doc_still_meets_the_package_check``.
         (_zip("payload.bin"), "zip"),
         (ELF, "elf"),
         (PNG, "png"),
@@ -419,3 +420,32 @@ def test_filetype_recognising_a_real_word_document_is_not_a_rejection():
     real = _word_doc("fib")
     assert filetype.guess(real).extension == "doc", "guard: the fixture must be recognisable"
     validate_content_matches_extension("doc", real)
+
+
+def test_a_real_docx_saved_as_doc_is_accepted():
+    """Spire reads an OOXML package under a .doc name and extracts it, so such a
+    file indexes today. Refusing it would be the regression this rule exists to
+    avoid — and `filetype` reports `docx`, so it needs tolerating explicitly."""
+    validate_content_matches_extension("doc", _real_docx()[:CONTENT_SNIFF_BYTES])
+
+
+def test_a_docx_named_doc_still_meets_the_package_check():
+    """The tolerance must not become a way around `validate_ooxml_package`.
+
+    An archive that merely borrows a document's entry names passes the head
+    check — `filetype` calls it a docx — and is caught only by reading the
+    central directory, exactly as it would be under a .docx name.
+    """
+    validate_ooxml_package("doc", io.BytesIO(_real_docx()))
+
+    borrowed = io.BytesIO(_zip("word/document.xml"))
+    with pytest.raises(ValidationError):
+        validate_ooxml_package("doc", borrowed)
+    assert borrowed.tell() == 0, "the stream must be rewound for the caller that streams it on"
+
+
+def test_the_content_route_does_not_open_a_path_for_untolerant_extensions():
+    """Only tolerant extensions are settled by content. A .pdf carrying a zip is
+    refused by the head check and never reaches the package logic."""
+    assert _ooxml_main_part_by_content("pdf", io.BytesIO(_real_docx())) is None
+    assert _ooxml_main_part_by_content("doc", io.BytesIO(PDF)) is None

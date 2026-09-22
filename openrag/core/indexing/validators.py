@@ -169,13 +169,19 @@ _VERIFIABLE_SIGNATURES: dict[str, frozenset[str]] = {
 #: HTML/text ``.doc`` files exist in the corpora — a corpus question, not a code
 #: one.
 _TOLERANT_SIGNATURES: dict[str, frozenset[str]] = {
+    # ``docx`` is here because Spire loads an OOXML package under a ``.doc``
+    # name and extracts it — a .docx saved or renamed as .doc indexes today, and
+    # refusing it would be the regression this rule exists to avoid. It does not
+    # escape the package check: ``validate_ooxml_package`` settles a tolerant
+    # extension by content, so such a file is checked as the docx it is.
+    #
     # ``doc`` is here as well as ``rtf``: ``filetype`` *does* recognise a real
     # Word 97-2003 document — the FIB marker at offset 512, or the
     # ``Word.Document.8`` string at 2075-2142 — and omitting it would 415 the
     # one file this extension exists for. It stays unreliable in the other
     # direction: an OLE2 document without either marker reports ``None``, which
     # is why the rule cannot simply require ``doc``.
-    "doc": frozenset({"doc", "rtf"}),
+    "doc": frozenset({"doc", "docx", "rtf"}),
 }
 
 #: The part whose presence makes an OPC package a document of that kind, per
@@ -189,6 +195,24 @@ _OOXML_MAIN_PARTS: dict[str, str] = {
 #: and the package relationships. Both are mandatory, and an archive that only
 #: borrowed a document's entry names has neither.
 _OOXML_PACKAGE_PARTS = frozenset({"[Content_Types].xml", "_rels/.rels"})
+
+
+def _ooxml_main_part_by_content(extension: str, stream: IO[bytes]) -> str | None:
+    """The OOXML main part implied by a tolerant extension's *content*, if any.
+
+    Only the tolerant extensions reach here: everything else is settled by the
+    name, and an extension that is not tolerant never accepted foreign content
+    in the first place. The stream position is restored either way, since the
+    caller goes on to read the same handle.
+    """
+    if extension not in _TOLERANT_SIGNATURES:
+        return None
+    position = stream.tell()
+    try:
+        kind = filetype.guess(stream.read(CONTENT_SNIFF_BYTES))
+    finally:
+        stream.seek(position)
+    return _OOXML_MAIN_PARTS.get(kind.extension) if kind is not None else None
 
 
 def validate_content_matches_extension(extension: str, head: bytes) -> None:
@@ -269,7 +293,13 @@ def validate_ooxml_package(extension: str, stream: IO[bytes]) -> None:
     """
     main_part = _OOXML_MAIN_PARTS.get(extension)
     if main_part is None:
-        return
+        # A tolerant extension can still carry an OOXML package: a .docx saved as
+        # .doc is accepted by the head check, because Spire reads it. Settle this
+        # one by content so it meets the same package check a .docx upload does —
+        # otherwise the extension is a way around it.
+        main_part = _ooxml_main_part_by_content(extension, stream)
+        if main_part is None:
+            return
 
     position = stream.tell()
     try:
