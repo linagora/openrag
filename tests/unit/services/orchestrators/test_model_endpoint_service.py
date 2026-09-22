@@ -2420,7 +2420,8 @@ async def test_validate_non_stt_endpoint_keeps_auth_gated_model_list_reachable(m
 
 
 @pytest.mark.asyncio
-async def test_validate_endpoint_sends_api_key(monkeypatch):
+@pytest.mark.parametrize("scheme", ["http", "https"])
+async def test_validate_endpoint_sends_api_key(monkeypatch, scheme):
     import httpx
 
     svc = _make_service()
@@ -2448,32 +2449,11 @@ async def test_validate_endpoint_sends_api_key(monkeypatch):
 
     monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
 
-    await svc.validate_endpoint("https://llm:8000/v1", "mistral-small", api_key="secret-token")
+    result = await svc.validate_endpoint(f"{scheme}://llm:8000/v1", "mistral-small", api_key="secret-token")
 
     assert captured_headers == [{"Authorization": "Bearer secret-token"}]
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("model_type", [None, "stt"])
-async def test_validate_endpoint_rejects_api_key_over_http_without_request(monkeypatch, model_type):
-    import httpx
-
-    svc = _make_service()
-
-    def fail_client(**_kwargs):
-        raise AssertionError("HTTP client should not be created for credential-bearing HTTP URLs")
-
-    monkeypatch.setattr(httpx, "AsyncClient", fail_client)
-
-    result = await svc.validate_endpoint(
-        "http://model:8000/v1",
-        "model",
-        api_key="secret-token",
-        model_type=model_type,
-    )
-
-    assert result["reachable"] is False
-    assert result["detail"] == "Model endpoints with API keys must use HTTPS."
+    assert result["reachable"] is True
+    assert result["model_found"] is True
 
 
 @pytest.mark.asyncio

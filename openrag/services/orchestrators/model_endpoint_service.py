@@ -864,9 +864,6 @@ class ModelEndpointService:
         if parsed.username or parsed.password:
             result["detail"] = "Endpoint URL must not include credentials."
             return result
-        if api_key and parsed.scheme != "https":
-            result["detail"] = "Model endpoints with API keys must use HTTPS."
-            return result
         if model_type != "stt":
             from services.orchestrators.readiness_service import (
                 ModelEndpointProbeError,
