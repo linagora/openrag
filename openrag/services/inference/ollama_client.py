@@ -26,7 +26,7 @@ from core.utils.exceptions import (
     InferenceTimeoutError,
 )
 from core.utils.logging import get_logger
-from services.inference.vllm_client import _parse_response, _strip_falsy_logprobs
+from services.inference.vllm_client import _STREAM_DONE, _parse_response, _record_stream_usage, _strip_falsy_logprobs
 
 from ._call_log import log_llm_call
 from ._circuit_breaker import with_circuit_breaker
@@ -126,7 +126,16 @@ class OllamaClient(LLM):
         return _parse_response(resp)
 
     async def stream_chat(self, messages: list[dict[str, str]], **kwargs) -> AsyncIterator[str]:
-        payload = {**self._defaults, **kwargs, "model": self._model, "messages": messages, "stream": True}
+        payload = {
+            **self._defaults,
+            **kwargs,
+            "model": self._model,
+            "messages": messages,
+            "stream": True,
+            # Same as the vLLM path: without it the stream carries no usage block
+            # and Ollama chat contributes nothing to the token metric.
+            "stream_options": {"include_usage": True},
+        }
         payload.pop("metadata", None)
         _strip_falsy_logprobs(payload)
         log_llm_call(
@@ -138,9 +147,10 @@ class OllamaClient(LLM):
         )
         provider = resolve_provider(self, kwargs)
         started = time.perf_counter()
-        # Pessimistic: a generator abandoned mid-stream never reaches the success
-        # assignment, and assuming success instead would report every dropped
-        # connection as a finished chat. Mirrors the vLLM streaming path.
+        # Pessimistic until `[DONE]` proves the answer complete. The consumer
+        # breaks on `[DONE]` and closes this generator, so the loop below never
+        # runs to its end on a real chat; a stream that does end without it was
+        # truncated. Mirrors the vLLM streaming path.
         outcome = "error"
         try:
             async with self._client.stream("POST", f"{self._endpoint}/chat/completions", json=payload) as resp:
@@ -151,8 +161,10 @@ class OllamaClient(LLM):
                         status_code=resp.status_code,
                     )
                 async for line in resp.aiter_lines():
+                    _record_stream_usage(line)
+                    if line.strip() == _STREAM_DONE:
+                        outcome = "success"
                     yield line
-                outcome = "success"
         except httpx.ConnectError as exc:
             raise InferenceConnectionError(f"Cannot reach Ollama at {self._endpoint}") from exc
         except httpx.TimeoutException as exc:
