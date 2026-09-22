@@ -8,9 +8,10 @@ import os
 import pathlib
 import sys
 import threading
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from core.indexing.parsers import doc_parser as doc_parser_module
 from core.indexing.parsers.doc_parser import DocParser
 from core.models.document import Document, DocumentType, ProcessedDocument, TextBlock
 
@@ -274,6 +275,56 @@ class TestConvertedFileIsAPathNotBytes:
             await asyncio.sleep(0.01)
         else:
             pytest.fail("the converted .docx leaked on cancellation")
+
+    @pytest.mark.asyncio
+    async def test_the_converted_file_is_removed_when_the_result_never_arrives(self, fake_spire, tmp_path):
+        """The window the ``abandoned`` flag alone cannot close.
+
+        ``asyncio.to_thread`` does not deliver the worker's result atomically:
+        ``_convert`` can find the flag clear, hand the path over and return, and
+        cancellation can still reach the awaiting task before the assignment
+        lands. The flag is set too late to help — the worker has already checked
+        it — and ``docx_path`` is still None, so a ``finally`` keyed on it frees
+        nothing. Reproduced by letting the conversion finish and then raising at
+        the await, exactly as a cancelled task would.
+
+        Found by CodeRabbit in review on #1000.
+        """
+        captured: dict[str, str] = {}
+
+        def save_to_file(path: str, _fmt) -> None:
+            captured["path"] = path
+            with open(path, "wb") as fh:
+                fh.write(b"DOCX")
+
+        instance = MagicMock()
+        instance.SaveToFile.side_effect = save_to_file
+        fake_spire.return_value = instance
+
+        # A source_path on disk, as the upload routes build: ``as_temporary_file``
+        # then yields it directly, leaving ``_convert`` the only threaded call to
+        # intercept.
+        src = tmp_path / "legacy.doc"
+        src.write_bytes(b"\xd0\xcf\x11\xe0fake")
+        document = Document(
+            filename="legacy.doc",
+            content_type=DocumentType.DOC,
+            raw_bytes=src.read_bytes(),
+            source_path=str(src),
+        )
+
+        real_to_thread = asyncio.to_thread
+
+        async def hand_off_then_lose_it(func, *args, **kwargs):
+            await real_to_thread(func, *args, **kwargs)  # the worker completes...
+            raise asyncio.CancelledError  # ...and the caller never sees the result
+
+        with patch.object(doc_parser_module.asyncio, "to_thread", hand_off_then_lose_it):
+            with pytest.raises(asyncio.CancelledError):
+                await DocParser(docx_parser=MagicMock()).parse(document)
+
+        assert captured, "guard: the conversion must have produced a file"
+        assert not os.path.exists(captured["path"]), "the converted .docx leaked at the hand-off"
 
 
 class TestAgainstTheRealDocxParser:
