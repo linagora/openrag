@@ -17,9 +17,11 @@ from core.models.catalog import (
     IndexationJob,
 )
 from core.utils.consts import is_internal_metadata_key, strip_internal_metadata
+from core.utils.error_summary import extract_task_error_reason, failure_reason_from_exception
 from core.utils.exceptions import ConflictError, mark_indexing_worker_may_be_running
 from core.utils.logging import get_logger
 from ray.exceptions import TaskCancelledError
+from services.workers.failure_reporting import submit_task_failure
 from services.workers.ray_utils import call_ray_actor_with_timeout, retry_idempotent_ray_actor_method
 from services.workers.stages.store import INDEXING_TASK_ID_METADATA_KEY
 from services.workers.task_cancellation import cancel_active_indexing_tasks
@@ -360,7 +362,8 @@ class WorkerDispatcher(IndexingDispatcher):
                     await self._record_finished_at(task_id, task_details)
                     if mark_submit_failed:
                         tb = traceback.format_exc()
-                        await self._mark_submit_failed(task_id, tb)
+                        error_reason = failure_reason_from_exception(exc)
+                        await self._mark_submit_failed(task_id, tb, error_reason)
                         # The completion tracker never saw this task, so nothing
                         # else settles its row: it would stay QUEUED until a
                         # restart reconciled it, long after the actor forgot the
@@ -372,6 +375,7 @@ class WorkerDispatcher(IndexingDispatcher):
                             file_id=file_id,
                             user_id=task_details["user_id"],
                             error=tb,
+                            error_reason=error_reason,
                             completed_at=datetime.now(UTC),
                         )
             finally:
@@ -456,11 +460,11 @@ class WorkerDispatcher(IndexingDispatcher):
         )
         return submitted[0]
 
-    async def _mark_submit_failed(self, task_id: str, tb: str) -> None:
+    async def _mark_submit_failed(self, task_id: str, tb: str, error_reason: str) -> None:
         set_failed = getattr(self._tsm, "set_failed_if_not_cancelled", None)
         if set_failed is not None:
             await self._call_method(
-                lambda: set_failed.remote(task_id, tb),
+                lambda: submit_task_failure(self._tsm, task_id, tb, error_reason),
                 task_description=f"set_failed_if_not_cancelled({task_id})",
             )
             return
@@ -684,6 +688,7 @@ class WorkerDispatcher(IndexingDispatcher):
         file_id: str | None = None,
         user_id: int | None = None,
         error: str | None = None,
+        error_reason: str | None = None,
         started_at: datetime | None = None,
         completed_at: datetime | None = None,
     ) -> None:
@@ -699,6 +704,7 @@ class WorkerDispatcher(IndexingDispatcher):
                     file_id=file_id,
                     user_id=user_id,
                     error=error,
+                    error_reason=error_reason,
                     started_at=started_at,
                     completed_at=completed_at,
                 )
@@ -742,6 +748,24 @@ class WorkerDispatcher(IndexingDispatcher):
             return error
         job = await self._durable_job(task_id)
         return job.error if job is not None else None
+
+    async def get_task_error_reason(self, task_id: str) -> str | None:
+        method_names = getattr(self._tsm, "_ray_actor_method_names", None)
+        supports_reason = isinstance(method_names, (frozenset, list, set, tuple)) and (
+            "get_error_reason" in method_names
+        )
+        if supports_reason:
+            reason = await self._call_method(
+                lambda: self._tsm.get_error_reason.remote(task_id),
+                task_description=f"get_error_reason({task_id})",
+            )
+            if reason is not None:
+                return reason
+        job = await self._durable_job(task_id)
+        if job is not None and job.error_reason is not None:
+            return job.error_reason
+        error = await self.get_task_error(task_id)
+        return extract_task_error_reason(error)
 
     async def cancel_task(self, task_id: str) -> bool:
         import ray

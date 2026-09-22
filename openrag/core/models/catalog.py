@@ -95,6 +95,7 @@ class IndexationJob(BaseModel):
     file_id: str | None = None
     user_id: int | None = None
     error: str | None = None
+    error_reason: str | None = None
     degraded_stages: list[str] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime | None = None
