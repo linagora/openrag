@@ -23,7 +23,16 @@ Everything below applies to both.
 | `openrag_http_requests_total` | counter | `method`, `endpoint`, `status_code` | Requests served, per route template. |
 | `openrag_http_request_failures_total` | counter | `method`, `endpoint`, `status_code` | Subset with a status of 400 or above. |
 | `openrag_http_request_duration_seconds` | histogram | `method`, `endpoint` | Full request duration, including the streamed body for chat completions. |
-| `openrag_circuit_breaker_state` | gauge | `name` | Inference circuit breaker: 0 closed, 1 open, 2 half-open. |
+| `openrag_circuit_breaker_state` | gauge | `name` | Inference circuit breaker: 0 closed, 1 open, 2 half-open, -1 unknown. |
+| `openrag_ingest_tasks` | gauge | `state` | Indexing tasks in flight (`QUEUED`, `SERIALIZING`), sampled at scrape time. |
+| `openrag_inference_requests_total` | counter | `provider`, `operation`, `outcome` | Calls to inference endpoints made by the API process. |
+| `openrag_inference_duration_seconds` | histogram | `provider`, `operation` | Latency of those calls. |
+| `openrag_llm_tokens_total` | counter | `operation`, `kind` | Tokens reported by the LLM for those calls. |
+
+Metrics produced inside Ray actors (indexing, embedding, captioning, and the
+`embedder` and `vlm` breakers) are exported by Ray's metrics agent, not by this
+endpoint. The [metrics reference](/openrag/documentation/metrics_reference/)
+lists every metric, which target exports it, and how to query it.
 
 `endpoint` is the FastAPI route template (`/v1/chat/completions`,
 `/indexer/partition/{partition}/file/{file_id}`), never the raw URL, so label
@@ -198,5 +207,7 @@ your setup; see [Grafana HTTP dashboard](/openrag/documentation/grafana_http_das
   a dedicated metrics port) and is not implemented yet.
 - Counters reset when the API restarts; use `rate()` and `increase()` rather
   than raw values.
-- Indexing, inference and vector-store metrics are not exposed yet; only the
-  HTTP layer and the circuit breakers are instrumented.
+- Vector-store metrics are not exposed yet. Indexing and worker-side
+  inference metrics are exported on Ray's metrics agent, which neither the
+  chart nor the compose overlay scrapes yet (see the
+  [metrics reference](/openrag/documentation/metrics_reference/)).

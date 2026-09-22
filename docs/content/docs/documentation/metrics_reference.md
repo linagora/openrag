@@ -24,6 +24,11 @@ replicas are not individually addressable over HTTP — a scrape reaches whichev
 replica the proxy picks, so per-replica counters in the API process are
 unreliable too.
 
+Neither the Helm chart nor the compose monitoring overlay scrapes the Ray
+target yet: the chart opens port `8090` on the Ray pods but ships no
+`PodMonitor`, and the overlay's Prometheus has no job for it. Until that is
+added, the Ray-exported series below exist but are not collected.
+
 Ray prefixes every metric it exports with `ray_`. A metric named
 `openrag_ingest_documents_total` is therefore queried as
 `ray_openrag_ingest_documents_total`.
@@ -86,7 +91,7 @@ Label values:
 - `operation` — `embed`, `chat`, `rerank`, `vlm`
 - `outcome` — `success`, `error`, `timeout`, `circuit_open`
 - `kind` — `prompt`, `completion`
-- `pool` — `marker`, `docling`, `pymupdf`, `pdf_client`, `local_whisper`, `audio_client`
+- `pool` — `marker`, `docling`, `pymupdf`, `pdf_client`, `local_whisper`, `audio_client` for PDF and audio; any other format is labelled by its document type (`text`, `docx`, `eml`, `image`, ...)
 - `name` — `llm`, `embedder`, `vlm`, `reranker`
 
 ## No metric carries `partition`
