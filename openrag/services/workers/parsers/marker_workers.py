@@ -1,7 +1,6 @@
 import asyncio
 import gc
 import re
-import resource
 import threading
 import time
 
@@ -94,13 +93,18 @@ def _apply_parse_memory_limit(memory_limit_mb: int) -> None:
     if memory_limit_mb <= 0:
         return
     try:
+        # Imported here rather than at module scope: ``resource`` is Unix-only,
+        # and a missing module raises at import time, where the best-effort
+        # contract below cannot catch it.
+        import resource
+
         limit = memory_limit_mb * 1024 * 1024
         _, hard = resource.getrlimit(resource.RLIMIT_DATA)
         if hard != resource.RLIM_INFINITY:
             limit = min(limit, hard)
         resource.setrlimit(resource.RLIMIT_DATA, (limit, hard))
         logger.debug(f"Marker child memory limit set to {limit // (1024 * 1024)} MiB")
-    except (ValueError, OSError, AttributeError) as exc:
+    except (ImportError, ValueError, OSError, AttributeError) as exc:
         logger.warning(f"Could not apply Marker child memory limit ({memory_limit_mb} MiB): {exc}")
 
 

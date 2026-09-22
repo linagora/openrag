@@ -551,13 +551,25 @@ def test_a_file_backed_mapping_is_not_counted_against_the_limit():
         assert pool.submit(_child_mmap_probe, 256).result(timeout=60) == "mapped"
 
 
-def test_an_unavailable_limit_does_not_stop_the_worker_starting(monkeypatch):
-    """Best-effort: a platform that refuses the call must still yield a worker."""
+@pytest.mark.parametrize(
+    "failure",
+    [OSError("not supported here"), ImportError("no module named 'resource'")],
+    ids=["the call is refused", "the module does not exist"],
+)
+def test_an_unavailable_limit_does_not_stop_the_worker_starting(monkeypatch, failure):
+    """Best-effort: a platform without this must still yield a working worker.
+
+    ``ImportError`` is in the list because ``resource`` is Unix-only. That is
+    also why the import sits inside the function — at module scope it would
+    raise before any handler here could run, and the worker would not start at
+    all rather than starting without a ceiling.
+    """
+    import resource as _resource
 
     def _boom(*_args, **_kwargs):
-        raise OSError("not supported here")
+        raise failure
 
-    monkeypatch.setattr(marker_workers.resource, "setrlimit", _boom)
+    monkeypatch.setattr(_resource, "setrlimit", _boom)
     monkeypatch.setattr(marker_workers, "logger", _NullLogger())
 
     marker_workers._apply_parse_memory_limit(256)  # must not raise
