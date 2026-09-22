@@ -13,7 +13,7 @@ from core.config.model_endpoints import CONTROL_EXTRA_KEYS, DEFAULT_ENDPOINT_ALI
 from core.config.root import Settings
 from core.models.catalog import CONTENT_CLAIM_TOKEN_METADATA_KEY
 from core.utils.error_summary import failure_reason_from_exception
-from core.utils.exceptions import NotFoundError
+from core.utils.exceptions import ConfigError, NotFoundError
 from services.workers.failure_reporting import submit_task_failure
 from services.workers.indexer_actor import IndexerWorker, _display_filename, delete_uploaded_file
 from services.workers.indexing_callback import send_indexing_callback
@@ -54,7 +54,9 @@ _MISSING_WORKER_REF_ERROR = "Indexer worker did not receive a registered task re
 # state method; prior workers can silently settle degraded jobs as clean.
 # v11: atomic completion reports cancellation, missing state, and conflicts
 # separately; v10 workers interpret all three as the same indexing failure.
-_INDEXER_ACTOR_PROTOCOL_VERSION = "v11"
+# v12: workers write each embedder's own vector field; v11 workers still write
+# the shared `vector` field, which the schema-v3 migration drops.
+_INDEXER_ACTOR_PROTOCOL_VERSION = "v12"
 _INDEXER_POOL_DISPATCHER_ACTOR_NAME = f"IndexerPoolDispatcher-{_INDEXER_ACTOR_PROTOCOL_VERSION}"
 
 # Detached actors default to max_restarts=0, so one that dies — an OOM on a
@@ -168,6 +170,7 @@ class IndexerWorkerActor:
             timeouts=_build_pipeline_timeouts(cfg),
             chunker_factory=_build_chunker_from_config,
             embedder_window_resolver=_build_embedder_window_resolver(cfg),
+            vector_field_resolver=_build_vector_field_resolver(cfg),
             parser_factory=parser_factory,
             embedder_factory=embedder_factory,
             vlm_factory=vlm_factory,
@@ -204,13 +207,7 @@ class IndexerWorkerActor:
         # Whether "default" resolves via global env/config fallbacks. This keeps
         # reload-on-miss from looping forever when no is_default row exists for a
         # type but the legacy config block can still serve the default endpoint.
-        transcriber_cfg = getattr(getattr(cfg, "loader", None), "transcriber", None)
-        self._has_default_fallbacks = {
-            "embedder": _global_embedder_endpoint_config(cfg) is not None,
-            "llm": _global_llm_endpoint_config(cfg) is not None,
-            "vlm": _global_vlm_endpoint_config(cfg) is not None,
-            "stt": bool(getattr(transcriber_cfg, "base_url", "") and getattr(transcriber_cfg, "model_name", "")),
-        }
+        self._has_default_fallbacks = _default_fallbacks(cfg)
         self._has_default_fallback = self._has_default_fallbacks["llm"]
         self._model_endpoint_service: Any = None
         self._prompt_service: Any = None
@@ -1006,6 +1003,19 @@ def _required_model_names_key(required: dict[str, list[str]] | list[str]) -> tup
     return tuple((model_type, tuple(sorted(set(names)))) for model_type, names in sorted(normalised.items()) if names)
 
 
+def _default_fallbacks(cfg: Any) -> dict[str, bool]:
+    """Per model type, whether the global config can serve the ``default`` endpoint."""
+    transcriber_cfg = getattr(getattr(cfg, "loader", None), "transcriber", None)
+    return {
+        # Never the embedder: the global config has no vector field to index
+        # into, so a missing default embedder reloads the registry instead.
+        "embedder": False,
+        "llm": _global_llm_endpoint_config(cfg) is not None,
+        "vlm": _global_vlm_endpoint_config(cfg) is not None,
+        "stt": bool(getattr(transcriber_cfg, "base_url", "") and getattr(transcriber_cfg, "model_name", "")),
+    }
+
+
 def _has_default_fallback(pool: Any, model_type: str) -> bool:
     fallbacks = getattr(pool, "_has_default_fallbacks", None)
     if fallbacks is not None:
@@ -1082,6 +1092,31 @@ def _build_embedder_window_resolver(cfg: Settings) -> Any:
             if window:
                 return int(window)
         return int(global_default) if global_default else None
+
+    return resolve
+
+
+def _build_vector_field_resolver(cfg: Settings) -> Any:
+    """The dense field an embedder endpoint writes its vectors into.
+
+    Only a registered endpoint has one, so unlike the other resolvers there is
+    no fallback to the global embedder config: an embedder missing from the
+    registry raises :class:`ConfigError`. ``None`` for a registered endpoint
+    without a field, which the store refuses to write.
+    """
+    models = getattr(cfg, "models", None)
+    named_embedders = models.embedder if models is not None else {}
+
+    def resolve(name: str = DEFAULT_ENDPOINT_ALIAS) -> str | None:
+        model_cfg = named_embedders.get(name)
+        if model_cfg is not None:
+            return model_cfg.vector_field
+        if name == DEFAULT_ENDPOINT_ALIAS:
+            raise ConfigError(
+                "No embedder endpoint is marked as the default, so a partition on the default "
+                "embedder has no vector field to index into. Mark one embedder endpoint as the default."
+            )
+        raise ConfigError(f"Embedder '{name}' is not registered, so it has no vector field to index into.")
 
     return resolve
 

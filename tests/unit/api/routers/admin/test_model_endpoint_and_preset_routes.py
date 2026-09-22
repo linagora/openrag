@@ -217,6 +217,7 @@ async def test_create_model_endpoint_normalizes_payload(async_client_factory):
                 "timeout": 30.0,
                 "extra": {},
                 "is_default": False,
+                "vector_field": None,
             },
         )
     ]
