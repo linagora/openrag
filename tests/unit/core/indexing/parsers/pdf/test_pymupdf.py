@@ -116,6 +116,33 @@ class TestParsesRunInChildProcesses:
     thread. Each process has its own MuPDF state, so they run in a pool instead:
     that lifts the serialization *and* gives the parse a memory ceiling."""
 
+    @pytest.fixture(autouse=True)
+    def _configured_pool(self):
+        """These pin the *configured* pool; the default is threads (see below)."""
+        pymupdf_mod.configure_pool(pymupdf_mod.PyMuPDFPoolSettings(max_workers=2))
+        yield
+        pymupdf_mod.configure_pool(pymupdf_mod.PyMuPDFPoolSettings())
+
+    def test_the_default_is_still_one_thread_and_spawns_nothing(self):
+        """Unconfigured must mean unchanged. This parser is also built in every
+        API replica for the direct-extract path, where a first parse would spawn
+        on the loop that serves /health_check — and under `-m api.main` a spawned
+        child re-imports the whole app module. Opt-in, not a side effect."""
+        pymupdf_mod.configure_pool(pymupdf_mod.PyMuPDFPoolSettings())
+        assert isinstance(pymupdf_mod._get_pool(), concurrent.futures.ThreadPoolExecutor)
+
+    @pytest.mark.parametrize(
+        "settings",
+        [
+            pymupdf_mod.PyMuPDFPoolSettings(max_workers=2),
+            pymupdf_mod.PyMuPDFPoolSettings(memory_limit_mb=4096),
+        ],
+        ids=["parallelism asked for", "a ceiling asked for"],
+    )
+    def test_asking_for_either_capability_gets_processes(self, settings):
+        pymupdf_mod.configure_pool(settings)
+        assert isinstance(pymupdf_mod._get_pool(), concurrent.futures.ProcessPoolExecutor)
+
     @pytest.mark.asyncio
     async def test_the_parse_really_happens_in_another_process(self):
         """Guard for the whole design: if this ever runs in-process again, the

@@ -30,7 +30,7 @@ from __future__ import annotations
 import asyncio
 import resource
 import threading
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import Executor, ProcessPoolExecutor, ThreadPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass
 from multiprocessing import get_context
@@ -65,7 +65,7 @@ class PyMuPDFPoolSettings:
 
 _POOL_LOCK = threading.Lock()
 _POOL_SETTINGS = PyMuPDFPoolSettings()
-_POOL: ProcessPoolExecutor | None = None
+_POOL: Executor | None = None
 
 
 def configure_pool(settings: PyMuPDFPoolSettings) -> None:
@@ -99,7 +99,22 @@ def _pool_worker_init(memory_limit_mb: int) -> None:
         logger.warning(f"Could not apply PyMuPDF parse memory limit ({memory_limit_mb} MiB): {exc}")
 
 
-def _build_pool(settings: PyMuPDFPoolSettings) -> ProcessPoolExecutor:
+def _build_pool(settings: PyMuPDFPoolSettings) -> Executor:
+    if settings.max_workers <= 1 and settings.memory_limit_mb <= 0:
+        # Nothing asked for, so nothing changes: the one dedicated thread, as
+        # before. Spawning a child process by default would alter behaviour
+        # everywhere this parser is built — including **each API replica**,
+        # which constructs the same dispatcher for the direct-extract path
+        # (``di/container.py``: "this parser lives in each API replica"). There
+        # a first parse would spawn on the request loop that also serves
+        # ``/health_check``, and under ``uv run -m api.main`` (the Ray Serve
+        # entrypoint) a spawned child re-imports ``api.main`` as
+        # ``__mp_main__`` — the whole app, per parse worker.
+        #
+        # The pool is worth having where indexing happens; it is opt-in so that
+        # is a deliberate act rather than a side effect of upgrading.
+        return ThreadPoolExecutor(max_workers=1, thread_name_prefix="pymupdf")
+
     # "spawn", not fork: this runs inside a Ray actor with threads already
     # started, and forking those is how you get a child that deadlocks on an
     # allocator lock it inherited mid-hold.
@@ -112,7 +127,7 @@ def _build_pool(settings: PyMuPDFPoolSettings) -> ProcessPoolExecutor:
     )
 
 
-def _get_pool() -> ProcessPoolExecutor:
+def _get_pool() -> Executor:
     global _POOL
     with _POOL_LOCK:
         if _POOL is None:
@@ -120,7 +135,7 @@ def _get_pool() -> ProcessPoolExecutor:
         return _POOL
 
 
-def _discard_pool(broken: ProcessPoolExecutor) -> None:
+def _discard_pool(broken: Executor) -> None:
     """Drop a pool a child died in, so the next parse builds a fresh one.
 
     A child killed outright — the kernel OOM killer, or a segfault in MuPDF —
