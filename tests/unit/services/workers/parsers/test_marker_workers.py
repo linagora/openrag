@@ -468,6 +468,23 @@ def _vmdata_mib() -> int:
     raise RuntimeError("VmData not reported")
 
 
+def _child_limit_unchanged() -> bool:
+    """Is a disabled limit a true no-op?
+
+    The parametrized success case above can only show there is no ceiling *below
+    its own size*, and sizing it to prove more means committing that much memory
+    in a child on a shared runner. Reading the limit back settles it exactly and
+    allocates nothing.
+    """
+    import resource
+
+    from services.workers.parsers.marker_workers import _apply_parse_memory_limit
+
+    before = resource.getrlimit(resource.RLIMIT_DATA)
+    _apply_parse_memory_limit(0)
+    return resource.getrlimit(resource.RLIMIT_DATA) == before
+
+
 def _child_probe(headroom_mb: int | None, alloc_mib: int) -> str:
     from services.workers.parsers.marker_workers import _apply_parse_memory_limit
 
@@ -484,7 +501,7 @@ def _child_probe(headroom_mb: int | None, alloc_mib: int) -> str:
     [
         (256, 1024, "MemoryError"),  # over the ceiling -> refused
         (256, 64, "allocated 64"),  # under it -> untouched
-        (None, 1024, "allocated 1024"),  # disabled -> no ceiling at all
+        (None, 64, "allocated 64"),  # disabled -> the same allocation is fine
     ],
 )
 def test_the_limit_actually_bounds_an_allocation_in_a_real_child(headroom_mb, alloc_mib, expected):
@@ -515,6 +532,14 @@ def _child_mmap_probe(headroom_mb: int) -> str:
                 return "mapped"
         except OSError as exc:
             return f"refused: {exc.errno}"
+
+
+def test_a_disabled_limit_leaves_the_rlimit_untouched():
+    """0 must not lower the ceiling at all, not merely leave room for the test's
+    own allocation."""
+    ctx = multiprocessing.get_context("fork")
+    with concurrent.futures.ProcessPoolExecutor(max_workers=1, mp_context=ctx) as pool:
+        assert pool.submit(_child_limit_unchanged).result(timeout=60) is True
 
 
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="RLIMIT_DATA only covers mmap on Linux")
