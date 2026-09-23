@@ -346,6 +346,43 @@ reranker:
   image:
     repository: "michaelf34/infinity"
     tag: "0.0.75"
+  # How the reranker reaches a GPU. nvidia.com/gpu is an integer resource: a
+  # pod requesting it takes the whole card, so on a card shared with the
+  # openrag/Ray pods (which request it) the reranker has to come in through the
+  # container runtime instead.
+  #   runtime - runtimeClassName + an explicit NVIDIA_VISIBLE_DEVICES; requests
+  #             no nvidia.com/gpu, so it shares the card. Refuses to render
+  #             without a runtimeClassName.
+  #   request - adds nvidia.com/gpu: <gpu.count> to requests/limits; the device
+  #             plugin assigns the device and sets the device list. That is a
+  #             whole card unless the plugin advertises time-sliced or other
+  #             shared replicas as nvidia.com/gpu.
+  #   none    - CPU only. Pins NVIDIA_VISIBLE_DEVICES=void so an image default
+  #             cannot hand it a GPU, and drops runtimeClassName and
+  #             gpu.nodeSelector.
+  # The mode owns nvidia.com/gpu: any entry under reranker.resources is dropped,
+  # and request mode sets it from gpu.count.
+  gpu:
+    mode: runtime
+    # runtime mode: device list for the NVIDIA runtime hook ("all", an index
+    # list like "0", or GPU UUIDs). Set by the chart so device access shows in
+    # the rendered manifest rather than depending on the image's ENV. "none"
+    # and "void" expose no GPU and are refused here; use mode: none instead.
+    visibleDevices: "all"
+    # runtime mode: must include "compute" (or be "all"); without it CUDA is
+    # unavailable and the reranker would run on CPU, so the chart refuses it.
+    driverCapabilities: "compute,utility"
+    # request mode: number of nvidia.com/gpu to request; must be a positive
+    # integer (0 is refused rather than read as "unset").
+    count: 1
+    # Placement used in runtime/request mode when reranker.nodeSelector is
+    # empty: the label the NVIDIA GPU operator's feature discovery puts on GPU
+    # nodes. A non-empty reranker.nodeSelector replaces it rather than merging
+    # with it, so a custom GPU-node label needs no null-out here. To schedule
+    # with no selector at all, set this to null: {} merges with the default
+    # and keeps the label.
+    nodeSelector:
+      nvidia.com/gpu.present: "true"
   nodeSelector: {}
   model:
     id: Alibaba-NLP/gte-multilingual-reranker-base
@@ -356,7 +393,12 @@ reranker:
     - --port
     - *rerankerPort
   replicas: 1
-  runtimeClassName: ""
+  # RuntimeClass whose handler runs the NVIDIA container runtime (the GPU
+  # operator installs one named "nvidia"). Required in gpu.mode=runtime and
+  # ignored in gpu.mode=none. gpu.mode=request renders it too: set it to ""
+  # there when NVIDIA is the node's default runtime and the cluster has no
+  # "nvidia" RuntimeClass, or the pod is rejected.
+  runtimeClassName: nvidia
   service:
     type: ClusterIP
     port: *rerankerPort

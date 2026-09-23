@@ -1,4 +1,50 @@
 {{- if .Values.reranker.enabled }}
+{{- $gpu := .Values.reranker.gpu | default dict }}
+{{- $gpuMode := $gpu.mode | default "runtime" }}
+{{- if not (has $gpuMode (list "runtime" "request" "none")) }}
+{{- fail (printf "invalid reranker.gpu.mode: %q (accepted values: runtime, request, none)" $gpuMode) }}
+{{- end }}
+{{- if and (eq $gpuMode "runtime") (not .Values.reranker.runtimeClassName) }}
+{{- fail "reranker.gpu.mode=runtime needs reranker.runtimeClassName (e.g. \"nvidia\"): without it the NVIDIA runtime hook never runs and the reranker silently falls back to CPU. Set gpu.mode=request to take a whole GPU through the scheduler, or gpu.mode=none to run it on CPU deliberately." }}
+{{- end }}
+{{- /* Neither this nor gpu.count uses `default`: sprig treats a numeric 0 as
+   empty, so GPU index 0 would become "all" and a count of 0 a one-GPU request. */}}
+{{- $visibleDevices := "" }}
+{{- if not (kindIs "invalid" $gpu.visibleDevices) }}
+{{- $visibleDevices = $gpu.visibleDevices | toString | trim }}
+{{- end }}
+{{- $visibleDevices = $visibleDevices | default "all" }}
+{{- if and (eq $gpuMode "runtime") (has (lower $visibleDevices) (list "none" "void")) }}
+{{- fail (printf "reranker.gpu.visibleDevices=%q exposes no GPU, so gpu.mode=runtime would run the reranker on CPU. Set gpu.mode=none to run it on CPU deliberately." $visibleDevices) }}
+{{- end }}
+{{- $driverCapabilities := $gpu.driverCapabilities | default "compute,utility" | toString | trim }}
+{{- $capabilityList := list }}
+{{- range $capability := splitList "," (lower $driverCapabilities) }}
+{{- $capabilityList = append $capabilityList (trim $capability) }}
+{{- end }}
+{{- if and (eq $gpuMode "runtime") (not (or (has "compute" $capabilityList) (has "all" $capabilityList))) }}
+{{- fail (printf "reranker.gpu.driverCapabilities=%q lacks \"compute\", so the reranker would see the GPU but not CUDA and run on CPU. Include compute (the default is \"compute,utility\"), or set gpu.mode=none to run it on CPU deliberately." $driverCapabilities) }}
+{{- end }}
+{{- $gpuCount := 1 }}
+{{- if not (kindIs "invalid" $gpu.count) }}
+{{- $gpuCount = $gpu.count }}
+{{- end }}
+{{- if and (eq $gpuMode "request") (or (lt (int $gpuCount) 1) (ne (float64 (int $gpuCount)) (float64 $gpuCount))) }}
+{{- fail (printf "reranker.gpu.count must be a positive integer in gpu.mode=request (got %v). Set gpu.mode=none to run the reranker without a GPU." $gpuCount) }}
+{{- end }}
+{{- /* gpu.mode owns nvidia.com/gpu: a leftover entry in reranker.resources would
+   take the whole card in runtime mode and reserve an invisible one in none mode. */}}
+{{- $resources := deepCopy (.Values.reranker.resources | default dict) }}
+{{- range $section := list "requests" "limits" }}
+{{- $quantities := get $resources $section | default dict }}
+{{- $_ := unset $quantities "nvidia.com/gpu" }}
+{{- if eq $gpuMode "request" }}
+{{- $_ := set $quantities "nvidia.com/gpu" (int $gpuCount) }}
+{{- end }}
+{{- if $quantities }}
+{{- $_ := set $resources $section $quantities }}
+{{- end }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -21,10 +67,10 @@ spec:
       serviceAccountName: {{ tpl . $ }}
       {{- end }}
       automountServiceAccountToken: {{ include "openrag-stack.securityFieldOverride" (dict "component" .Values.reranker "key" "automountServiceAccountToken" "default" .Values.security.automountServiceAccountToken) }}
-      {{- if .Values.reranker.runtimeClassName }}
+      {{- if and .Values.reranker.runtimeClassName (ne $gpuMode "none") }}
       runtimeClassName: {{ .Values.reranker.runtimeClassName }}
       {{- end }}
-      {{- with .Values.reranker.nodeSelector }}
+      {{- with .Values.reranker.nodeSelector | default (ternary dict ($gpu.nodeSelector | default dict) (eq $gpuMode "none")) }}
       nodeSelector: {{- toYaml . | nindent 8 }}
       {{- end }}
       containers:
@@ -42,7 +88,7 @@ spec:
             - containerPort: {{ .Values.reranker.service.port }}
               name: reranker
           resources:
-            {{- toYaml .Values.reranker.resources | nindent 12 }}
+            {{- toYaml $resources | nindent 12 }}
           readinessProbe:
             httpGet:
               path: /health
@@ -60,6 +106,17 @@ spec:
           volumeMounts:
             - name: hf-cache
               mountPath: /app/.cache/huggingface
+          {{- if eq $gpuMode "runtime" }}
+          env:
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: {{ $visibleDevices | quote }}
+            - name: NVIDIA_DRIVER_CAPABILITIES
+              value: {{ $driverCapabilities | quote }}
+          {{- else if eq $gpuMode "none" }}
+          env:
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: "void"
+          {{- end }}
           envFrom:
             - configMapRef:
                 name: {{ include "openrag-stack.fullname" . }}-env
