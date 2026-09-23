@@ -671,3 +671,62 @@ async def test_an_ordinary_error_still_uses_the_retry_budget(monkeypatch):
         await pool._process_chunk("f.pdf", None, "(all pages)")
 
     assert len(attempts) == 4, f"expected 1 try + 3 retries, got {len(attempts)}"
+
+
+# ---------------------------------------------------------------------------
+# The ceiling reports itself: a bad value must not be silent (#997 review)
+# ---------------------------------------------------------------------------
+
+
+class _RecordingLogger:
+    def __init__(self) -> None:
+        self.records: list[tuple[str, str]] = []
+
+    def _log(self, level):
+        def record(message):
+            self.records.append((level, str(message)))
+
+        return record
+
+    def __getattr__(self, name):
+        return self._log(name)
+
+    def levels(self):
+        return [level for level, _ in self.records]
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="/proc/self/status is Linux-only")
+@pytest.mark.parametrize(
+    ("headroom_mb", "expected"),
+    [
+        (-64, "error"),  # at or below the baseline: every parse fails
+        (32, "warning"),  # technically above it, with no room to work
+        (4096, "info"),  # comfortable
+    ],
+)
+def test_the_limit_reports_how_it_compares_to_the_child_baseline(monkeypatch, headroom_mb, expected):
+    """An operator who picks a value below the child's baseline gets 100% Marker
+    failures. The only thing standing between them and a silent outage is this
+    log line, so its level has to follow the headroom."""
+    from services.workers.parsers import marker_workers as mw
+
+    recorder = _RecordingLogger()
+    monkeypatch.setattr(mw, "logger", recorder)
+    monkeypatch.setattr(mw, "_child_vmdata_mb", lambda: 1000)
+
+    import resource as real_resource
+
+    monkeypatch.setattr(real_resource, "setrlimit", lambda *a: None)
+    monkeypatch.setattr(real_resource, "getrlimit", lambda _w: (real_resource.RLIM_INFINITY,) * 2)
+
+    mw._apply_parse_memory_limit(1000 + headroom_mb)
+
+    assert expected in recorder.levels(), f"headroom {headroom_mb} MiB logged {recorder.levels()}"
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="/proc/self/status is Linux-only")
+def test_child_vmdata_is_readable_and_positive():
+    """The baseline the log line reports has to be a real measurement."""
+    from services.workers.parsers.marker_workers import _child_vmdata_mb
+
+    assert (_child_vmdata_mb() or 0) > 0
