@@ -241,7 +241,15 @@ async def test_worker_failure_with_reason_is_counted_once(counted: list[str]) ->
 def test_every_terminal_write_is_counted() -> None:
     """A setter that writes a terminal state without counting it drops that
     path from ``openrag_ingest_documents_total`` silently. Two such setters
-    arrived from develop after this metric was written, so check them all."""
+    arrived from develop after this metric was written, so check them all.
+
+    A write whose value is not a literal (``info.state = state``, the shape
+    ``set_state`` already uses) is treated as terminal too: the analyser cannot
+    tell which state it carries, and assuming the harmless case is how a setter
+    slips through. Counting is cheap and idempotent on a non-terminal state, so
+    the conservative direction costs nothing; the false positive it can raise is
+    a non-terminal write through a variable, which the message names.
+    """
     import ast
     import inspect
 
@@ -249,22 +257,29 @@ def test_every_terminal_write_is_counted() -> None:
 
     terminal = {"COMPLETED", "FAILED", "CANCELLED"}
     counting = {"_count_terminal", "_set_cancelled_locked"}
+
+    def writes_terminal(assign: ast.Assign) -> bool:
+        if not any(isinstance(t, ast.Attribute) and t.attr == "state" for t in assign.targets):
+            return False
+        if isinstance(assign.value, ast.Constant):
+            return assign.value.value in terminal
+        return True
+
     uncounted = []
     for node in ast.walk(ast.parse(inspect.getsource(task_state_module))):
         if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) or node.name in counting:
             continue
-        writes_terminal = any(
-            isinstance(n, ast.Assign)
-            and any(isinstance(t, ast.Attribute) and t.attr == "state" for t in n.targets)
-            and isinstance(n.value, ast.Constant)
-            and n.value.value in terminal
-            for n in ast.walk(node)
-        )
+        if not any(isinstance(n, ast.Assign) and writes_terminal(n) for n in ast.walk(node)):
+            continue
         calls = {n.func.attr for n in ast.walk(node) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)}
-        if writes_terminal and not calls & counting:
+        if not calls & counting:
             uncounted.append(node.name)
 
-    assert not uncounted, f"terminal state written without _count_terminal in: {uncounted}"
+    assert not uncounted, (
+        f"terminal state written without _count_terminal in: {uncounted}. A write through a "
+        f"variable counts as terminal because its value is unknown here — if one of these only "
+        f"ever writes a non-terminal state, call the counter anyway rather than narrowing this."
+    )
 
 
 @pytest.mark.asyncio
