@@ -32,13 +32,22 @@ class FakeSearcher:
         self.search_result: list[Chunk] = []
         self.related_result: list[Chunk] = []
         self.ancestor_result: list[Chunk] = []
+        self.surrounding_calls: list[dict] = []
+        self.surrounding_result: list[Chunk] = []
+        self.search_error: Exception | None = None
 
     async def search(self, **kwargs):
         self.search_calls.append(kwargs)
+        if self.search_error is not None:
+            raise self.search_error
         return list(self.search_result)
 
     async def multi_query_search(self, **kwargs):
         return list(self.search_result)
+
+    async def get_surrounding_chunks(self, **kwargs):
+        self.surrounding_calls.append(kwargs)
+        return list(self.surrounding_result)
 
     async def get_related_chunks(self, **kwargs):
         return list(self.related_result)
@@ -156,6 +165,129 @@ async def test_search_expands_related_when_requested():
     )
     ids = {c.id for c in out}
     assert "1" in ids and "rel" in ids
+
+
+def _embedder_svc(partitions: dict[str, str], fields: dict[str, str]):
+    """A service whose partitions map to embedders, and embedders to vector fields.
+
+    Returns the service, the default searcher and one searcher per embedder name.
+    """
+    cfg = _config()
+    cfg.partitions = {name: _partition(name=name, embedder=embedder) for name, embedder in partitions.items()}
+    cfg.models = SimpleNamespace(
+        reranker={}, embedder={name: SimpleNamespace(vector_field=field) for name, field in fields.items()}
+    )
+    searchers: dict[str, FakeSearcher] = {}
+    default_searcher = FakeSearcher()
+    svc = RetrievalService(
+        searcher=default_searcher,
+        reranker=None,
+        llm=None,
+        config=cfg,
+        searcher_factory=lambda name: searchers.setdefault(name, FakeSearcher()),
+    )
+    return svc, default_searcher, searchers
+
+
+@pytest.mark.asyncio
+async def test_search_uses_the_partition_embedder():
+    # The default embedder's field holds no vectors of this partition.
+    svc, default_searcher, searchers = _embedder_svc({"p1": "embed-a"}, {"embed-a": "vector_embed_a"})
+    searchers["embed-a"] = FakeSearcher()
+    searchers["embed-a"].search_result = [_chunk("a")]
+
+    out = await svc.search(text="q", partitions="p1", top_k=5, similarity_threshold=0.5)
+
+    assert [c.id for c in out] == ["a"]
+    assert default_searcher.search_calls == []
+    call = searchers["embed-a"].search_calls[0]
+    assert call["partition"] == ["p1"]
+    assert call["with_surrounding_chunks"] is True
+
+
+@pytest.mark.asyncio
+async def test_search_across_embedders_fuses_hits_then_adds_surrounding():
+    svc, _, searchers = _embedder_svc(
+        {"p1": "embed-a", "p2": "embed-b"}, {"embed-a": "vector_embed_a", "embed-b": "vector_embed_b"}
+    )
+    searchers["embed-a"] = FakeSearcher()
+    searchers["embed-a"].search_result = [_chunk("a1"), _chunk("a2")]
+    searchers["embed-a"].surrounding_result = [_chunk("a1-next"), _chunk("b1")]
+    searchers["embed-b"] = FakeSearcher()
+    searchers["embed-b"].search_result = [_chunk("b1"), _chunk("b2")]
+
+    out = await svc.search(
+        text="q",
+        partitions=["p1", "p2"],
+        top_k=3,
+        similarity_threshold=0.5,
+        filter_params={"file_id": ["f"]},
+    )
+
+    # Each field is searched once with its own partitions and no surrounding
+    # chunks, so neighbours cannot take a hit's place in the top_k.
+    for name, partitions in (("embed-a", ["p1"]), ("embed-b", ["p2"])):
+        (call,) = searchers[name].search_calls
+        assert call["partition"] == partitions
+        assert call["top_k"] == 3
+        assert call["with_surrounding_chunks"] is False
+    # Hits interleave by rank and are cut to top_k; neighbours follow, once.
+    assert [c.id for c in out] == ["a1", "b1", "a2", "a1-next"]
+    (surrounding_call,) = searchers["embed-a"].surrounding_calls
+    assert [c.id for c in surrounding_call["chunks"]] == ["a1", "b1", "a2"]
+    assert surrounding_call["allowed_file_ids"] == ["f"]
+
+
+@pytest.mark.asyncio
+async def test_search_keeps_the_default_alias_and_its_embedder_in_one_search():
+    # "default" points at embed-a: both write the same field.
+    svc, _, searchers = _embedder_svc(
+        {"p1": "default", "p2": "embed-a"}, {"default": "vector_embed_a", "embed-a": "vector_embed_a"}
+    )
+
+    await svc.search(text="q", partitions=["p1", "p2"], top_k=5, similarity_threshold=0.5)
+
+    assert list(searchers) == ["default"]
+    (call,) = searchers["default"].search_calls
+    assert call["partition"] == ["p1", "p2"]
+    assert call["with_surrounding_chunks"] is True
+
+
+@pytest.mark.asyncio
+async def test_search_all_on_one_embedder_stays_unscoped():
+    svc, _, searchers = _embedder_svc({"p1": "embed-a", "p2": "embed-a"}, {"embed-a": "vector_embed_a"})
+
+    await svc.search(text="q", partitions=["all"], top_k=5, similarity_threshold=0.5)
+
+    assert searchers["embed-a"].search_calls[0]["partition"] == ["all"]
+
+
+@pytest.mark.asyncio
+async def test_search_all_expands_per_embedder():
+    svc, _, searchers = _embedder_svc(
+        {"p1": "embed-a", "p2": "embed-b", "p3": "embed-a"},
+        {"embed-a": "vector_embed_a", "embed-b": "vector_embed_b"},
+    )
+
+    await svc.search(text="q", partitions=["all"], top_k=5, similarity_threshold=0.5)
+
+    assert searchers["embed-a"].search_calls[0]["partition"] == ["p1", "p3"]
+    assert searchers["embed-b"].search_calls[0]["partition"] == ["p2"]
+
+
+@pytest.mark.asyncio
+async def test_search_across_embedders_drops_a_failing_one():
+    svc, _, searchers = _embedder_svc(
+        {"p1": "embed-a", "p2": "embed-b"}, {"embed-a": "vector_embed_a", "embed-b": "vector_embed_b"}
+    )
+    searchers["embed-a"] = FakeSearcher()
+    searchers["embed-a"].search_result = [_chunk("a1")]
+    searchers["embed-b"] = FakeSearcher()
+    searchers["embed-b"].search_error = RuntimeError("embedder down")
+
+    out = await svc.search(text="q", partitions=["p1", "p2"], top_k=5, similarity_threshold=0.5)
+
+    assert [c.id for c in out] == ["a1"]
 
 
 # --------------------------------------------------------------------------- #
