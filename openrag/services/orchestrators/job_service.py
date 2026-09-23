@@ -6,10 +6,9 @@ the per-status counts, the ``?task_status=`` filter) is business logic
 and lives here; ``request.url_for`` link building stays in the thin
 router (HTTP transport).
 
-This is the one orchestrator that legitimately keeps Ray remote calls
-during the shim — 8H verification explicitly excepts JobService
-wrapping ``TaskStateManager``. Phase 9 swaps the actor for a DB-backed
-job repository (this service is the hook point for that P0 feature).
+The PostgreSQL job repository is authoritative when a durable row exists;
+the TaskStateManager remains a fallback for live tasks that have not yet
+been persisted or while the database is unavailable.
 """
 
 from __future__ import annotations
@@ -36,7 +35,7 @@ _TERMINAL_STATES = frozenset(state.value for state in TERMINAL_TASK_STATES)
 
 
 class JobService:
-    """Queue/worker introspection over the TaskStateManager actor."""
+    """Queue/worker introspection with durable state as the source of truth."""
 
     def __init__(self, task_state_manager: Any, timeout: float = 60.0, *, job_repo: Any = None) -> None:
         self._tsm = task_state_manager
@@ -69,8 +68,10 @@ class JobService:
         }
 
     async def get_queue_info(self) -> dict:
-        all_states: dict = await self._call(lambda: self._tsm.get_all_states.remote(), "get_all_states")
-        status_counts = Counter(all_states.values())
+        status_counts = await self._durable_status_counts()
+        if not status_counts:
+            all_states: dict = await self._call(lambda: self._tsm.get_all_states.remote(), "get_all_states")
+            status_counts = Counter(all_states.values())
 
         active = {s: status_counts.get(s, 0) for s in _ACTIVE_STATES}
         task_summary = {
@@ -110,10 +111,17 @@ class JobService:
 
         # The actor only remembers live and recent tasks. Durable rows fill in
         # history it has evicted, and everything dispatched before a restart.
-        all_info = {
-            **await self._durable_task_info(is_admin=is_admin, user_id=user_id, task_status=task_status),
-            **all_info,
-        }
+        # A second ID-scoped read is required for authority: a status-filtered
+        # durable query can omit a row whose actor state is stale but whose
+        # durable status is different.
+        durable_info = await self._durable_task_info(
+            is_admin=is_admin,
+            user_id=user_id,
+            task_status=task_status,
+        )
+        durable_actor_info = await self._durable_task_info_for_ids(all_info)
+        all_info = {**durable_info, **all_info}
+        all_info.update(durable_actor_info)
         all_info = {task_id: {**info, "state": _public_task_state(info["state"])} for task_id, info in all_info.items()}
 
         if task_status is None:
@@ -178,13 +186,14 @@ class JobService:
 
     async def get_task_details(self, task_id: str) -> dict | None:
         """Return task details for ownership checks and status routes."""
-        details = await self._call(
-            lambda: self._tsm.get_details.remote(task_id),
-            f"get_details({task_id})",
-        )
-        if details is None:
-            job = await self._durable_job(task_id)
-            details = _job_to_info(job)["details"] if job is not None else None
+        job = await self._durable_job(task_id)
+        if job is not None:
+            details = _job_to_info(job)["details"]
+        else:
+            details = await self._call(
+                lambda: self._tsm.get_details.remote(task_id),
+                f"get_details({task_id})",
+            )
         if details is None:
             return None
         public_details, _, _ = _task_details(details)
@@ -218,6 +227,26 @@ class JobService:
             logger.warning("Failed to list durable jobs", error=str(exc))
             return {}
         return {job.id: _job_to_info(job) for job in jobs}
+
+    async def _durable_task_info_for_ids(self, actor_info: dict[str, dict]) -> dict[str, dict]:
+        if self._job_repo is None or not actor_info:
+            return {}
+        try:
+            jobs = await self._job_repo.get_jobs(list(actor_info))
+        except Exception as exc:
+            logger.warning("Failed to read durable jobs for live task IDs", error=str(exc))
+            return {}
+        return {job.id: _job_to_info(job) for job in jobs}
+
+    async def _durable_status_counts(self) -> Counter[str] | None:
+        if self._job_repo is None:
+            return None
+        try:
+            counts = await self._job_repo.count_jobs()
+        except Exception as exc:
+            logger.warning("Failed to count durable jobs", error=str(exc))
+            return None
+        return Counter(counts)
 
 
 def _durable_statuses(task_status: str | None) -> list[str] | None:

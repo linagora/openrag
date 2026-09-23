@@ -305,8 +305,9 @@ async def test_get_user_pending_task_count_uses_task_state_manager():
 class FakeJobRepo:
     """Durable job rows, as the actor would never return them."""
 
-    def __init__(self, jobs=None, *, broken: bool = False):
+    def __init__(self, jobs=None, *, counts=None, broken: bool = False):
         self._jobs = {job.id: job for job in (jobs or [])}
+        self._counts = counts
         self._broken = broken
         self.listed_statuses = []
 
@@ -324,6 +325,21 @@ class FakeJobRepo:
         if self._broken:
             raise RuntimeError("jobs table is missing")
         return self._jobs.get(job_id)
+
+    async def get_jobs(self, job_ids):
+        if self._broken:
+            raise RuntimeError("jobs table is missing")
+        return [self._jobs[task_id] for task_id in job_ids if task_id in self._jobs]
+
+    async def count_jobs(self):
+        if self._broken:
+            raise RuntimeError("jobs table is missing")
+        if self._counts is not None:
+            return dict(self._counts)
+        counts = {}
+        for job in self._jobs.values():
+            counts[job.status.value] = counts.get(job.status.value, 0) + 1
+        return counts
 
 
 def _job(**kwargs):
@@ -431,13 +447,76 @@ async def test_a_status_query_is_filtered_before_the_row_limit(task_status, expe
 
 
 @pytest.mark.asyncio
-async def test_live_actor_state_wins_over_the_durable_row():
+async def test_durable_state_wins_over_live_actor_row():
     info = {"t1": {"state": "SERIALIZING", "details": {}, "user": 7}}
     service = JobService(FakeTSM(info=info), job_repo=FakeJobRepo([_job(id="t1")]))
 
     rows = await service.list_tasks(is_admin=True, user_id=7)
 
-    assert [row["state"] for row in rows] == ["SERIALIZING"]
+    assert [row["state"] for row in rows] == ["COMPLETED"]
+
+
+@pytest.mark.asyncio
+async def test_durable_state_wins_even_when_the_status_filter_excludes_it():
+    info = {"t1": {"state": "SERIALIZING", "details": {}, "user": 7}}
+    service = JobService(FakeTSM(info=info), job_repo=FakeJobRepo([_job(id="t1")]))
+
+    rows = await service.list_tasks(is_admin=True, user_id=7, task_status="active")
+
+    assert rows == []
+
+
+@pytest.mark.asyncio
+async def test_get_task_details_prefers_the_durable_row():
+    info = {
+        "t-old": {
+            "state": "SERIALIZING",
+            "details": {"file_id": "stale-file", "partition": "stale-tenant", "user_id": 7},
+            "user": 7,
+        }
+    }
+    service = JobService(FakeTSM(info=info), job_repo=FakeJobRepo([_job()]))
+
+    details = await service.get_task_details("t-old")
+
+    assert details == {
+        "file_id": "file-1",
+        "partition": "tenant-a",
+        "metadata": {},
+        "user_id": 7,
+        "degraded_stages": [],
+    }
+
+
+@pytest.mark.asyncio
+async def test_get_queue_info_uses_durable_job_counts():
+    tsm = FakeTSM(states={"stale": "SERIALIZING"})
+    repo = FakeJobRepo(counts={"QUEUED": 2, "SERIALIZING": 3, "COMPLETED": 4, "FAILED": 5, "CANCELLED": 6})
+
+    out = await JobService(tsm, job_repo=repo).get_queue_info()
+
+    assert out["tasks"] == {
+        "active": 5,
+        "active_statuses": {"QUEUED": 2, "SERIALIZING": 3},
+        "total_cancelled": 6,
+        "total_completed": 4,
+        "total_failed": 5,
+    }
+
+
+@pytest.mark.asyncio
+async def test_get_queue_info_falls_back_to_actor_when_durable_counts_fail():
+    tsm = FakeTSM(states={"live": "SERIALIZING", "done": "COMPLETED"})
+
+    out = await JobService(tsm, job_repo=FakeJobRepo(broken=True)).get_queue_info()
+
+    assert out["tasks"] == {
+        "active": 1,
+        "active_statuses": {"QUEUED": 0, "SERIALIZING": 1},
+        "total_cancelled": 0,
+        "total_completed": 1,
+        "total_failed": 0,
+    }
 
 
 @pytest.mark.asyncio

@@ -110,6 +110,15 @@ class PgJobRepository(JobRepository):
         row = await self.pool.fetchrow(f"SELECT {_COLUMNS} FROM jobs WHERE id = $1", job_id)
         return self._row_to_job(row) if row is not None else None
 
+    async def get_jobs(self, job_ids: list[str]) -> list[IndexationJob]:
+        if not job_ids:
+            return []
+        rows = await self.pool.fetch(
+            f"SELECT {_COLUMNS} FROM jobs WHERE id = ANY($1::text[])",
+            job_ids,
+        )
+        return [self._row_to_job(row) for row in rows]
+
     async def list_jobs(
         self,
         *,
@@ -134,6 +143,10 @@ class PgJobRepository(JobRepository):
             max(1, limit),
         )
         return [self._row_to_job(row) for row in rows]
+
+    async def count_jobs(self) -> dict[str, int]:
+        rows = await self.pool.fetch("SELECT status, COUNT(*)::int AS count FROM jobs GROUP BY status")
+        return {row["status"]: int(row["count"]) for row in rows}
 
     async def fail_orphaned_jobs(self, *, active_ids: list[str], error: str, before: datetime) -> int:
         return await self.pool.fetchval(

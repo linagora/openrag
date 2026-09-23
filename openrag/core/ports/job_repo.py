@@ -19,6 +19,10 @@ class JobRepository(ABC):
     async def get_job(self, job_id: str) -> IndexationJob | None: ...
 
     @abstractmethod
+    async def get_jobs(self, job_ids: list[str]) -> list[IndexationJob]:
+        """Return durable rows for the supplied task IDs."""
+
+    @abstractmethod
     async def list_jobs(
         self,
         *,
@@ -27,6 +31,10 @@ class JobRepository(ABC):
         offset: int = 0,
         limit: int = 50,
     ) -> list[IndexationJob]: ...
+
+    @abstractmethod
+    async def count_jobs(self) -> dict[str, int]:
+        """Return durable task counts grouped by status."""
 
     @abstractmethod
     async def fail_orphaned_jobs(self, *, active_ids: list[str], error: str, before: datetime) -> int:

@@ -231,6 +231,38 @@ async def test_list_jobs_filters_by_status_and_user():
 
 
 @pytest.mark.asyncio
+async def test_get_jobs_returns_rows_for_known_task_ids():
+    pool = _FakePool(fetch=[_row(), _row(id="task-2")])
+    repo = _repo(pool)
+
+    jobs = await repo.get_jobs(["task-1", "task-2"])
+
+    query, params = pool.calls[0]
+    assert "id = ANY($1::text[])" in query
+    assert params == (["task-1", "task-2"],)
+    assert [job.id for job in jobs] == ["task-1", "task-2"]
+
+
+@pytest.mark.asyncio
+async def test_count_jobs_returns_counts_by_status():
+    pool = _FakePool(
+        fetch=[
+            {"status": "QUEUED", "count": 2},
+            {"status": "COMPLETED", "count": 4},
+        ]
+    )
+    repo = _repo(pool)
+
+    counts = await repo.count_jobs()
+
+    query, params = pool.calls[0]
+    assert "COUNT(*)::int" in query
+    assert "GROUP BY status" in query
+    assert params == ()
+    assert counts == {"QUEUED": 2, "COMPLETED": 4}
+
+
+@pytest.mark.asyncio
 async def test_fail_orphaned_jobs_skips_settled_rows_and_live_tasks():
     pool = _FakePool(fetchval=3)
     repo = _repo(pool)
