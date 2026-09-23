@@ -179,6 +179,12 @@ def test_extract_temporal_fields_with_timezone():
     assert result == {"created_at": "2024-06-15T12:30:00+02:00"}
 
 
+@pytest.mark.parametrize("value", ["", "   "])
+def test_extract_temporal_fields_empty_string_becomes_none(value):
+    result = extract_temporal_fields({"created_at": value}, ["created_at"])
+    assert result == {"created_at": None}
+
+
 def test_extract_temporal_fields_invalid_datetime_raises_400():
     with pytest.raises(ValidationError) as exc_info:
         extract_temporal_fields({"created_at": "not-a-date"}, ["created_at"])
