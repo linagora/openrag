@@ -305,10 +305,11 @@ async def test_get_user_pending_task_count_uses_task_state_manager():
 class FakeJobRepo:
     """Durable job rows, as the actor would never return them."""
 
-    def __init__(self, jobs=None, *, counts=None, broken: bool = False):
+    def __init__(self, jobs=None, *, counts=None, broken: bool = False, fail_get_jobs: bool = False):
         self._jobs = {job.id: job for job in (jobs or [])}
         self._counts = counts
         self._broken = broken
+        self._fail_get_jobs = fail_get_jobs
         self.listed_statuses = []
 
     async def list_jobs(self, *, statuses=None, user_id=None, offset=0, limit=50):
@@ -327,7 +328,7 @@ class FakeJobRepo:
         return self._jobs.get(job_id)
 
     async def get_jobs(self, job_ids):
-        if self._broken:
+        if self._broken or self._fail_get_jobs:
             raise RuntimeError("jobs table is missing")
         return [self._jobs[task_id] for task_id in job_ids if task_id in self._jobs]
 
@@ -471,7 +472,12 @@ async def test_get_task_details_prefers_the_durable_row():
     info = {
         "t-old": {
             "state": "SERIALIZING",
-            "details": {"file_id": "stale-file", "partition": "stale-tenant", "user_id": 7},
+            "details": {
+                "file_id": "stale-file",
+                "partition": "stale-tenant",
+                "metadata": {"filename": "report.pdf"},
+                "user_id": 7,
+            },
             "user": 7,
         }
     }
@@ -482,7 +488,7 @@ async def test_get_task_details_prefers_the_durable_row():
     assert details == {
         "file_id": "file-1",
         "partition": "tenant-a",
-        "metadata": {},
+        "metadata": {"filename": "report.pdf"},
         "user_id": 7,
         "degraded_stages": [],
     }
@@ -520,6 +526,43 @@ async def test_get_queue_info_falls_back_to_actor_when_durable_counts_fail():
         "total_completed": 1,
         "total_failed": 0,
     }
+
+
+@pytest.mark.asyncio
+async def test_get_queue_info_falls_back_when_durable_actor_lookup_fails():
+    tsm = FakeTSM(states={"live": "SERIALIZING", "done": "COMPLETED"})
+    repo = FakeJobRepo(
+        [_job(id="live")],
+        counts={"SERIALIZING": 1, "COMPLETED": 4},
+        fail_get_jobs=True,
+    )
+
+    out = await JobService(tsm, job_repo=repo).get_queue_info()
+
+    assert out["tasks"] == {
+        "active": 1,
+        "active_statuses": {"QUEUED": 0, "SERIALIZING": 1},
+        "total_cancelled": 0,
+        "total_completed": 1,
+        "total_failed": 0,
+    }
+
+
+@pytest.mark.asyncio
+async def test_list_tasks_preserves_actor_metadata_with_durable_state():
+    info = {
+        "t1": {
+            "state": "SERIALIZING",
+            "details": {"metadata": {"filename": "report.pdf"}, "user_id": 7},
+            "user": 7,
+        }
+    }
+    service = JobService(FakeTSM(info=info), job_repo=FakeJobRepo([_job(id="t1")]))
+
+    rows = await service.list_tasks(is_admin=True, user_id=7)
+
+    assert rows[0]["state"] == "COMPLETED"
+    assert rows[0]["details"]["metadata"] == {"filename": "report.pdf"}
 
 
 @pytest.mark.asyncio

@@ -790,27 +790,33 @@ class WorkerDispatcher(IndexingDispatcher):
             return None
 
     async def get_task_state(self, task_id: str) -> str | None:
+        job = await self._durable_job(task_id)
+        if job is not None:
+            return job.status.value
         state = await self._call_method(
             lambda: self._tsm.get_state.remote(task_id),
             task_description=f"get_state({task_id})",
         )
         if state is not None:
             return state
-        # The actor forgets settled tasks; the durable record outlives it.
-        job = await self._durable_job(task_id)
-        return job.status.value if job is not None else None
+        return None
 
     async def get_task_error(self, task_id: str) -> str | None:
+        job = await self._durable_job(task_id)
+        if job is not None:
+            return job.error
         error = await self._call_method(
             lambda: self._tsm.get_error.remote(task_id),
             task_description=f"get_error({task_id})",
         )
         if error is not None:
             return error
-        job = await self._durable_job(task_id)
-        return job.error if job is not None else None
+        return None
 
     async def get_task_error_reason(self, task_id: str) -> str | None:
+        job = await self._durable_job(task_id)
+        if job is not None:
+            return job.error_reason
         method_names = getattr(self._tsm, "_ray_actor_method_names", None)
         supports_reason = isinstance(method_names, (frozenset, list, set, tuple)) and (
             "get_error_reason" in method_names
@@ -822,9 +828,6 @@ class WorkerDispatcher(IndexingDispatcher):
             )
             if reason is not None:
                 return reason
-        job = await self._durable_job(task_id)
-        if job is not None and job.error_reason is not None:
-            return job.error_reason
         error = await self.get_task_error(task_id)
         return extract_task_error_reason(error)
 

@@ -2408,14 +2408,14 @@ async def test_submit_failure_captures_reason_with_new_task_state_actor() -> Non
 
 
 @pytest.mark.asyncio
-async def test_live_actor_state_is_not_overridden_by_the_durable_job() -> None:
+async def test_durable_job_state_overrides_live_actor_state() -> None:
     from core.models.catalog import DocumentStatus, IndexationJob
 
     tsm = _task_state_manager()
     job = IndexationJob(id="task-1", status=DocumentStatus.COMPLETED, partition="tenant-a")
     dispatcher = _dispatcher_with_job_repo(tsm, _JobRepoSpy(job))
 
-    assert await dispatcher.get_task_state("task-1") == "SERIALIZING"
+    assert await dispatcher.get_task_state("task-1") == "COMPLETED"
 
 
 @pytest.mark.asyncio

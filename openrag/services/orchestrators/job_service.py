@@ -75,9 +75,12 @@ class JobService:
         else:
             all_states = await self._call(lambda: self._tsm.get_all_states.remote(), "get_all_states")
             durable_actor_info = await self._durable_task_info_for_ids(all_states)
-            status_counts.update(
-                state for task_id, state in all_states.items() if task_id not in durable_actor_info
-            )
+            if durable_actor_info is None:
+                status_counts = Counter(all_states.values())
+            else:
+                status_counts.update(
+                    state for task_id, state in all_states.items() if task_id not in durable_actor_info
+                )
 
         active = {s: status_counts.get(s, 0) for s in _ACTIVE_STATES}
         task_summary = {
@@ -127,7 +130,9 @@ class JobService:
         )
         durable_actor_info = await self._durable_task_info_for_ids(all_info)
         all_info = {**durable_info, **all_info}
-        all_info.update(durable_actor_info)
+        if durable_actor_info is not None:
+            for task_id, durable_info_for_actor in durable_actor_info.items():
+                all_info[task_id] = _merge_durable_task_info(all_info[task_id], durable_info_for_actor)
         all_info = {task_id: {**info, "state": _public_task_state(info["state"])} for task_id, info in all_info.items()}
 
         if task_status is None:
@@ -194,7 +199,19 @@ class JobService:
         """Return task details for ownership checks and status routes."""
         job = await self._durable_job(task_id)
         if job is not None:
-            details = _job_to_info(job)["details"]
+            durable_info = _job_to_info(job)
+            try:
+                actor_details = await self._call(
+                    lambda: self._tsm.get_details.remote(task_id),
+                    f"get_details({task_id})",
+                )
+            except Exception as exc:
+                logger.warning("Failed to read live task details", task_id=task_id, error=str(exc))
+                actor_details = None
+            details = _merge_durable_task_info(
+                {"details": actor_details or {}},
+                durable_info,
+            )["details"]
         else:
             details = await self._call(
                 lambda: self._tsm.get_details.remote(task_id),
@@ -234,14 +251,14 @@ class JobService:
             return {}
         return {job.id: _job_to_info(job) for job in jobs}
 
-    async def _durable_task_info_for_ids(self, actor_info: dict[str, dict]) -> dict[str, dict]:
+    async def _durable_task_info_for_ids(self, actor_info: dict[str, dict]) -> dict[str, dict] | None:
         if self._job_repo is None or not actor_info:
             return {}
         try:
             jobs = await self._job_repo.get_jobs(list(actor_info))
         except Exception as exc:
             logger.warning("Failed to read durable jobs for live task IDs", error=str(exc))
-            return {}
+            return None
         return {job.id: _job_to_info(job) for job in jobs}
 
     async def _durable_status_counts(self) -> Counter[str] | None:
@@ -287,6 +304,26 @@ def _job_to_info(job: Any) -> dict[str, Any]:
         "created_at": created_at,
         "duration_ms": _duration_ms(created_at, completed_at, state=state, now=datetime.now(UTC)),
     }
+
+
+def _merge_durable_task_info(actor_info: dict[str, Any], durable_info: dict[str, Any]) -> dict[str, Any]:
+    """Keep durable state authoritative without dropping live-only metadata."""
+    merged = {**actor_info, **durable_info}
+    actor_details = actor_info.get("details")
+    durable_details = durable_info.get("details")
+    if not isinstance(actor_details, dict) or not isinstance(durable_details, dict):
+        return merged
+
+    details = {**actor_details, **durable_details}
+    actor_metadata = actor_details.get("metadata")
+    durable_metadata = durable_details.get("metadata")
+    if isinstance(actor_metadata, dict) or isinstance(durable_metadata, dict):
+        details["metadata"] = {
+            **(actor_metadata if isinstance(actor_metadata, dict) else {}),
+            **(durable_metadata if isinstance(durable_metadata, dict) else {}),
+        }
+    merged["details"] = details
+    return merged
 
 
 def _duration_ms(
