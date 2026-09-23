@@ -132,8 +132,11 @@ def test_every_declared_spec_is_in_all_specs() -> None:
     )
 
 
-#: Methods that put a value into an instrument, on either backend.
-_WRITE_METHODS = frozenset({"inc", "dec", "observe", "set", "labels", "clear", "remove"})
+#: Methods that put a value into an instrument, on either backend. Selectors
+#: (``labels``) and withdrawals (``clear``, ``remove``) are deliberately absent:
+#: they reach an instrument without ever writing one, so counting them would let
+#: a spec be satisfied by the very shape this guard exists to reject.
+_WRITE_METHODS = frozenset({"inc", "dec", "observe", "set"})
 
 
 def _spec_aliases(module: ast.Module, specs: set[str]) -> dict[str, str]:
@@ -157,9 +160,10 @@ def _writes_in(fn: ast.AST, bound: dict[str, str], fields: dict[str, str]) -> se
     """Specs *fn* writes: a write method called on an instrument built from them.
 
     The receiver resolves through a module-level binding (``_X.inc()``), a
-    factory field (``_instruments().requests.inc()``) or one local assignment
-    of either (``tokens = _instruments().tokens; tokens.inc()``). Calling the
-    factory alone writes nothing, so it links a function to no spec.
+    factory field (``_instruments().requests.inc()``), one local assignment
+    of either (``tokens = _instruments().tokens; tokens.inc()``), or a
+    ``.labels(...)`` selector in front of any of those. Calling the factory
+    alone writes nothing, so it links a function to no spec.
     """
 
     def resolve(expr: ast.AST, local: dict[str, str]) -> str | None:
@@ -167,6 +171,11 @@ def _writes_in(fn: ast.AST, bound: dict[str, str], fields: dict[str, str]) -> se
             return local.get(expr.id) or bound.get(expr.id)
         if isinstance(expr, ast.Attribute):
             return fields.get(expr.attr)
+        # ``GAUGE.labels(**tags).set(v)``: the selector is not the write, so look
+        # through it to the instrument it came from. Without this the chain
+        # resolves to nothing and the write goes unattributed.
+        if isinstance(expr, ast.Call) and isinstance(expr.func, ast.Attribute) and expr.func.attr == "labels":
+            return resolve(expr.func.value, local)
         return None
 
     local: dict[str, str] = {}
@@ -220,6 +229,42 @@ def _functions_touching_each_spec() -> dict[str, set[str]]:
                 for spec in _writes_in(node, bound, fields):
                     by_spec[spec].add(node.name)
     return by_spec
+
+
+#: ``(source, expected specs)`` for the resolver. ``_SPEC`` is a module-level
+#: binding, ``field`` a factory field; both stand in for the real ones.
+_RESOLUTION_CASES = [
+    ("_SPEC.inc()", {"SPEC"}),
+    ("_instruments().field.observe(1.0)", {"SPEC"}),
+    ("local = _instruments().field\nlocal.inc()", {"SPEC"}),
+    ("_SPEC.labels(state=s).set(2)", {"SPEC"}),
+    ("_instruments().field.labels(state=s).inc()", {"SPEC"}),
+    # Selecting a series is not writing one: the cases below are the shapes the
+    # guard must keep rejecting, or a metric passes while never being written.
+    ("_SPEC.labels(state=s)", set()),
+    ("_SPEC.clear()", set()),
+    ("_SPEC.remove(s)", set()),
+    ("_instruments()", set()),
+]
+
+
+@pytest.mark.parametrize("source, expected", _RESOLUTION_CASES)
+def test_only_a_value_write_links_a_function_to_a_spec(source: str, expected: set[str]) -> None:
+    """Pins the resolver that decides whether a spec is written at all.
+
+    ``INGEST_TASKS`` is written as ``GAUGE.labels(...).set(...)``, whose receiver
+    is itself a call. When the resolver stopped at that call the ``.set()`` was
+    attributed to nothing, and the spec stayed green only because ``labels`` and
+    ``clear`` were counted as writes — so deleting the ``.set(...)`` left the
+    whole suite passing on a gauge that production never wrote.
+
+    Asserting on the resolver rather than on the tree it walks: the failure was a
+    silent pass, which only a case with a known-empty answer can catch.
+    """
+    body = "\n".join(f"    {line}" for line in source.splitlines())
+    fn = ast.parse(f"def f():\n{body}")
+    written = _writes_in(fn, bound={"_SPEC": "SPEC"}, fields={"field": "SPEC"})
+    assert written == expected, f"{source!r} resolved to {written or 'no spec'}, expected {expected or 'no spec'}"
 
 
 def test_recorder_names_are_unique() -> None:
