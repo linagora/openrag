@@ -36,13 +36,16 @@ x-vllm: &vllm_template
   volumes:
     - ${VLLM_CACHE:-/root/.cache/huggingface}:/root/.cache/huggingface # put ./vllm_cache if you want to have the weights on the vllm_cache folder in your project
   command: >
-    --model ${EMBEDDER_MODEL_NAME:-Qwen/Qwen3-Embedding-0.6B}
+    ${EMBEDDER_MODEL_NAME:-Qwen/Qwen3-Embedding-0.6B}
     --trust-remote-code
-    --task embed
+    --runner pooling
+    --convert embed
     --gpu_memory_utilization 0.3
     --max-num-seqs 1
+    ${EMBEDDER_EXTRA_ARGS:-}
   # --max-model-len ${MOX_MODEL_LEN:-2048}
-  # gpu_memory_utilization, max-num-seqs et max-model-len can be tuned depending on your GPU memory
+  # gpu_memory_utilization, max-num-seqs and max-model-len can be tuned for your GPU
+  # through EMBEDDER_EXTRA_ARGS (see .env.example).
   
   healthcheck:
     test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
@@ -93,7 +96,7 @@ services:
 
   vllm-gpu:
     <<: *vllm_template
-    image: vllm/vllm-openai:v0.9.2
+    image: vllm/vllm-openai:v0.30.0
     runtime: nvidia
     deploy:
       resources:
@@ -107,11 +110,7 @@ services:
 
   vllm-cpu:
     <<: *vllm_template
-    build:
-      context: extern/vllm
-      dockerfile: Dockerfile.cpu
-      target: vllm-openai
-    image: openrag-vllm-openai-cpu
+    image: vllm/vllm-openai-cpu:v0.30.0
     deploy: {}
     profiles:
       - 'cpu'
