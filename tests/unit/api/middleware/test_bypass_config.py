@@ -579,3 +579,65 @@ def test_main_resolves_the_auth_service_through_get_container() -> None:
         "the auth service is resolved off a possibly-None container again; "
         "AttributeError there is not caught and surfaces as a 500"
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["/v1/models", "/health_check", "/ready"])
+async def test_dev_bypass_returns_503_when_the_container_is_none(monkeypatch, path) -> None:
+    """The ``ALLOW_NO_AUTH`` branch resolves the auth service before the bypass
+    list, so on a degraded boot an unguarded call there turned *every* path —
+    health and readiness included — into a 500, not only authenticated ones.
+    """
+    monkeypatch.setenv("AUTH_MODE", "token")
+    monkeypatch.delenv("AUTH_TOKEN", raising=False)
+    monkeypatch.setenv("ALLOW_NO_AUTH", "true")
+
+    from types import SimpleNamespace
+
+    from di.providers import get_container
+
+    degraded_app = SimpleNamespace(state=SimpleNamespace(container=None))
+    middleware = AuthMiddleware(
+        lambda scope, receive, send: None,
+        get_auth_service=lambda req: get_container(req).auth_service,
+    )
+
+    response = await middleware.dispatch(_request(path=path, app=degraded_app), _unused_call_next)
+
+    assert response.status_code == 503
+    assert b"container is not available" in response.body
+
+
+@pytest.mark.asyncio
+async def test_unavailable_resolver_status_headers_and_log_are_relayed(monkeypatch) -> None:
+    """The resolver's response is relayed, not rebuilt: its headers survive (a
+    ``Retry-After`` on a 503 is the natural case), and the log names the status
+    the client actually received rather than a fixed one.
+
+    Uses a non-503 status on purpose — with 503 a hardcoded status in the log or
+    the response would pass unnoticed.
+    """
+    from fastapi import HTTPException
+    from loguru import logger
+
+    monkeypatch.setenv("AUTH_MODE", "token")
+    monkeypatch.setenv("AUTH_TOKEN", "secret")
+
+    def unavailable(_request):
+        raise HTTPException(status_code=502, detail="upstream gone", headers={"Retry-After": "7"})
+
+    captured: list[dict] = []
+    handler_id = logger.add(
+        lambda m: captured.append(dict(m.record["extra"], msg=m.record["message"])), level="WARNING"
+    )
+    try:
+        middleware = AuthMiddleware(lambda scope, receive, send: None, get_auth_service=unavailable)
+        response = await middleware.dispatch(_request(headers={"authorization": "Bearer token"}), _unused_call_next)
+    finally:
+        logger.remove(handler_id)
+
+    assert response.status_code == 502
+    assert response.headers["retry-after"] == "7"
+    assert b"upstream gone" in response.body
+    logged = [r for r in captured if r["msg"] == "Auth service unavailable"]
+    assert [r["status"] for r in logged] == [502]
