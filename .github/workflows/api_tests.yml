@@ -59,7 +59,12 @@ jobs:
 
           # Final check
           if ! curl -sf http://localhost:8080/ready; then
-            echo "OpenRAG API failed to start"
+            echo "OpenRAG API failed to start. /ready says:"
+            # The body names the failing dependency, or reports
+            # startup=unavailable when the container never initialised — the
+            # diagnosis this gate used to hide behind a 200 from /health_check.
+            curl -s http://localhost:8080/ready || true
+            echo
             docker compose logs openrag
             exit 1
           fi
