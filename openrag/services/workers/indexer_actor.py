@@ -504,7 +504,7 @@ async def _load_document(
         # pre-existing #911 behaviour for that route rather than a regression,
         # and closing it means downloading into ``data_dir``.
         source_path=str(p),
-        content_type=Document.detect_content_type(filename),
+        content_type=Document.detect_content_type(filename, metadata.get("mimetype")),
         partition=partition,
         metadata=dict(metadata),
     )
