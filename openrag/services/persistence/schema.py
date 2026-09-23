@@ -50,6 +50,8 @@ model_endpoints = Table(
     Column("timeout", Float, server_default="30.0", nullable=False),
     Column("extra", JSONB, server_default=text("'{}'::jsonb"), nullable=False),
     Column("is_default", Boolean, server_default="false", nullable=False),
+    # The dense field an embedder owns; other endpoint types have none.
+    Column("vector_field", String, nullable=True),
     Column(
         "created_at",
         DateTime(timezone=True),
@@ -65,6 +67,16 @@ model_endpoints = Table(
     CheckConstraint(
         "model_type IN ('embedder','reranker','llm','vlm','stt')",
         name="ck_model_endpoint_type",
+    ),
+    CheckConstraint(
+        "model_type <> 'embedder' OR vector_field IS NOT NULL",
+        name="ck_embedder_has_vector_field",
+    ),
+    Index(
+        "uq_model_endpoint_vector_field",
+        "vector_field",
+        unique=True,
+        postgresql_where=text("vector_field IS NOT NULL"),
     ),
 )
 

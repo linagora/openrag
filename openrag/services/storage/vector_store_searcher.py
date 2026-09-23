@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from collections.abc import Callable
 from typing import Any
 
 from core.embeddings import Embedder
@@ -16,6 +17,7 @@ from core.ports.document_repo import DocumentRepository
 from core.retrieval.searcher import RetrievalSearcher, file_id_restriction
 from core.utils.consts import RETRIEVAL_SCORE_KEYS, is_internal_metadata_key
 from core.vector_stores import VectorStore
+from core.vector_stores.vector_field import is_vector_field_key
 
 
 def _dict_to_chunk(row: dict[str, Any]) -> Chunk:
@@ -30,7 +32,6 @@ def _dict_to_chunk(row: dict[str, Any]) -> Chunk:
     # ``RETRIEVAL_SCORE_KEYS``), so a persisted one is never this query's score.
     skip = {
         "text",
-        "vector",
         "_id",
         "id",
         "score",
@@ -40,7 +41,9 @@ def _dict_to_chunk(row: dict[str, Any]) -> Chunk:
         "chunk_type",
         *RETRIEVAL_SCORE_KEYS,
     }
-    metadata = {k: v for k, v in row.items() if k not in skip and not is_internal_metadata_key(k)}
+    metadata = {
+        k: v for k, v in row.items() if k not in skip and not is_vector_field_key(k) and not is_internal_metadata_key(k)
+    }
     return Chunk(
         id=chunk_id,
         document_id=row.get("file_id", ""),
@@ -66,11 +69,19 @@ class VectorStoreSearcher(RetrievalSearcher):
         embedder: Embedder,
         document_repo: DocumentRepository,
         collection: str,
+        vector_field: str | Callable[[], str | None] | None = None,
     ) -> None:
         self._store = vector_store
         self._embedder = embedder
         self._document_repo = document_repo
         self._collection = collection
+        # The dense field of this searcher's embedder. A callable is read on
+        # every search, since the searcher can be built before the endpoint
+        # registry is loaded.
+        self._vector_field = vector_field
+
+    def _field(self) -> str | None:
+        return self._vector_field() if callable(self._vector_field) else self._vector_field
 
     async def search(
         self,
@@ -95,6 +106,7 @@ class VectorStoreSearcher(RetrievalSearcher):
             filters=filters,
             top_k=top_k,
             similarity_threshold=similarity_threshold or None,
+            vector_field=self._field(),
         )
         chunks = [_dict_to_chunk(r) for r in results]
         if with_surrounding_chunks and chunks:
@@ -114,6 +126,7 @@ class VectorStoreSearcher(RetrievalSearcher):
         with_surrounding_chunks: bool = True,
     ) -> list[Chunk]:
         embeddings = await self._embedder.embed(queries)
+        field = self._field()
         filters: dict[str, Any] = {"partition": partition}
         if filter:
             filters["expr"] = filter
@@ -128,6 +141,7 @@ class VectorStoreSearcher(RetrievalSearcher):
                     filters=filters,
                     top_k=top_k_per_query,
                     similarity_threshold=similarity_threshold or None,
+                    vector_field=field,
                 )
                 for emb, q in zip(embeddings, queries)
             ]

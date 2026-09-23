@@ -23,7 +23,7 @@ class VectorDBConfig(ConfigMixin):
     enable: bool = True
     # Per-request timeout (s) applied to the Milvus sync and async clients.
     timeout: float = Field(default=120.0, gt=0)
-    schema_version: int = 2
+    schema_version: int = 3
 
 
 # ---------------------------------------------------------------------------
