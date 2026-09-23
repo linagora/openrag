@@ -101,8 +101,8 @@ class IndexingService:
             logger.exception("File existence check failed.", file_id=file_id, partition=partition, error=str(e))
             return False
 
-    async def get_workspace(self, workspace_id: str) -> dict | None:
-        return await self._workspace_repo.get_workspace_dict(workspace_id)
+    async def get_workspace(self, partition: str, workspace_id: str) -> dict | None:
+        return await self._workspace_repo.get_workspace_dict(partition, workspace_id)
 
     # ------------------------------------------------------------------
     # Ingest

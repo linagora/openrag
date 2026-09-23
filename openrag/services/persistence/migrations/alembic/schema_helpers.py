@@ -51,3 +51,33 @@ def column_type_is(table: str, column: str, sa_type: type) -> bool:
         if col["name"] == column:
             return isinstance(col["type"], sa_type)
     return False
+
+
+def index_is_unique(table: str, index: str) -> bool:
+    """Return True if `table.index` exists and was created as a unique index."""
+    if not table_exists(table):
+        return False
+    return any(i["name"] == index and bool(i.get("unique")) for i in inspect(op.get_bind()).get_indexes(table))
+
+
+def unique_constraints_on(table: str, columns: list[str]) -> list[str]:
+    """Names of the unique constraints on `table` covering exactly `columns`."""
+    if not table_exists(table):
+        return []
+    wanted = sorted(columns)
+    return [
+        uc["name"]
+        for uc in inspect(op.get_bind()).get_unique_constraints(table)
+        if uc["name"] and sorted(uc["column_names"]) == wanted
+    ]
+
+
+def foreign_keys_to(table: str, referred_table: str) -> list[str]:
+    """Names of the foreign keys on `table` that reference `referred_table`."""
+    if not table_exists(table):
+        return []
+    return [
+        fk["name"]
+        for fk in inspect(op.get_bind()).get_foreign_keys(table)
+        if fk["name"] and fk["referred_table"] == referred_table
+    ]

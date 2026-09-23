@@ -563,7 +563,7 @@ class IndexerWorkerActor:
             if workspace_ids and not replace and file_id:
                 results = await asyncio.gather(
                     *(
-                        self._catalog_store.workspace_repo.add_files_to_workspace(workspace_id, [file_id])
+                        self._catalog_store.workspace_repo.add_files_to_workspace(partition, workspace_id, [file_id])
                         for workspace_id in workspace_ids
                     ),
                     return_exceptions=True,
