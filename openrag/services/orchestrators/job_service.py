@@ -6,9 +6,9 @@ the per-status counts, the ``?task_status=`` filter) is business logic
 and lives here; ``request.url_for`` link building stays in the thin
 router (HTTP transport).
 
-The PostgreSQL job repository is authoritative when a durable row exists;
-the TaskStateManager remains a fallback for live tasks that have not yet
-been persisted or while the database is unavailable.
+The PostgreSQL job repository supplies history after the actor evicts a task;
+while both sources still have it, state reconciliation prevents a stale active
+row from hiding a terminal result in the live actor.
 """
 
 from __future__ import annotations
@@ -23,6 +23,7 @@ from core.models.catalog import (
     TASK_FINISHED_AT_METADATA_KEY,
     TERMINAL_TASK_STATES,
     normalize_degraded_stages,
+    reconcile_task_state,
 )
 from core.utils.error_summary import summarize_task_error
 from core.utils.logging import get_logger
@@ -35,7 +36,7 @@ _TERMINAL_STATES = frozenset(state.value for state in TERMINAL_TASK_STATES)
 
 
 class JobService:
-    """Queue/worker introspection with durable state as the source of truth."""
+    """Queue/worker introspection over durable history and live actor state."""
 
     def __init__(self, task_state_manager: Any, timeout: float = 60.0, *, job_repo: Any = None) -> None:
         self._tsm = task_state_manager
@@ -78,9 +79,16 @@ class JobService:
             if durable_actor_info is None:
                 status_counts = Counter(all_states.values())
             else:
-                status_counts.update(
-                    state for task_id, state in all_states.items() if task_id not in durable_actor_info
-                )
+                for task_id, actor_state in all_states.items():
+                    durable_info = durable_actor_info.get(task_id)
+                    if durable_info is None:
+                        status_counts[actor_state] += 1
+                        continue
+                    durable_state = durable_info["state"]
+                    effective_state = reconcile_task_state(actor_state, durable_state)
+                    if effective_state != durable_state:
+                        status_counts[durable_state] -= 1
+                        status_counts[effective_state] += 1
 
         active = {s: status_counts.get(s, 0) for s in _ACTIVE_STATES}
         task_summary = {
@@ -307,8 +315,14 @@ def _job_to_info(job: Any) -> dict[str, Any]:
 
 
 def _merge_durable_task_info(actor_info: dict[str, Any], durable_info: dict[str, Any]) -> dict[str, Any]:
-    """Keep durable state authoritative without dropping live-only metadata."""
+    """Merge durable history without hiding a newer terminal actor state."""
     merged = {**actor_info, **durable_info}
+    effective_state = reconcile_task_state(actor_info.get("state"), durable_info.get("state"))
+    if effective_state is not None:
+        merged["state"] = effective_state
+    if actor_info.get("state") in _TERMINAL_STATES and durable_info.get("state") not in _TERMINAL_STATES:
+        merged["error"] = actor_info.get("error")
+        merged["error_reason"] = actor_info.get("error_reason")
     actor_details = actor_info.get("details")
     durable_details = durable_info.get("details")
     if not isinstance(actor_details, dict) or not isinstance(durable_details, dict):

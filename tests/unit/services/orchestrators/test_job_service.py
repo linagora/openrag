@@ -459,6 +459,22 @@ async def test_durable_state_wins_over_live_actor_row():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("actor_state", ["COMPLETED", "FAILED", "CANCELLED"])
+async def test_live_terminal_state_wins_over_stale_durable_active_row(actor_state: str):
+    from core.models.catalog import DocumentStatus
+
+    actor_info = {"t1": {"state": actor_state, "details": {}, "user": 7}}
+    service = JobService(
+        FakeTSM(info=actor_info),
+        job_repo=FakeJobRepo([_job(id="t1", status=DocumentStatus.SERIALIZING)]),
+    )
+
+    rows = await service.list_tasks(is_admin=True, user_id=7)
+
+    assert [row["state"] for row in rows] == [actor_state]
+
+
+@pytest.mark.asyncio
 async def test_durable_state_wins_even_when_the_status_filter_excludes_it():
     info = {"t1": {"state": "SERIALIZING", "details": {}, "user": 7}}
     service = JobService(FakeTSM(info=info), job_repo=FakeJobRepo([_job(id="t1")]))
@@ -511,6 +527,27 @@ async def test_get_queue_info_merges_actor_only_tasks_without_overriding_durable
         "total_cancelled": 6,
         "total_completed": 4,
         "total_failed": 5,
+    }
+
+
+@pytest.mark.asyncio
+async def test_get_queue_info_reconciles_live_terminal_state_against_durable_counts():
+    from core.models.catalog import DocumentStatus
+
+    tsm = FakeTSM(states={"just-finished": "COMPLETED"})
+    repo = FakeJobRepo(
+        [_job(id="just-finished", status=DocumentStatus.SERIALIZING)],
+        counts={"SERIALIZING": 1},
+    )
+
+    out = await JobService(tsm, job_repo=repo).get_queue_info()
+
+    assert out["tasks"] == {
+        "active": 0,
+        "active_statuses": {"QUEUED": 0, "SERIALIZING": 0},
+        "total_cancelled": 0,
+        "total_completed": 1,
+        "total_failed": 0,
     }
 
 
