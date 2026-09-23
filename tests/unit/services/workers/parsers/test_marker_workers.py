@@ -596,13 +596,13 @@ async def test_process_chunk_recycles_the_slot_after_a_memory_error(monkeypatch)
         reset_calls.append(worker)
 
     async def fake_run_chunk(worker, file_path, page_range, label):
-        raise MemoryError("parse ceiling")
+        raise _as_production_raises_it()
 
     monkeypatch.setattr(pool, "ensure_worker_pool_healthy", lambda worker: _noop())
     monkeypatch.setattr(pool, "_run_chunk", fake_run_chunk)
     monkeypatch.setattr(pool, "_reset_worker_pool", fake_reset)
 
-    with pytest.raises(MemoryError):
+    with pytest.raises(RuntimeError):
         await pool._process_chunk("f.pdf", None, "(all pages)")
 
     await asyncio.sleep(0)  # let the recycle task created in `finally` start
@@ -624,31 +624,71 @@ async def test_process_chunk_does_not_retry_a_memory_error(monkeypatch):
 
     async def fake_run_chunk(worker, file_path, page_range, label):
         attempts.append(1)
-        raise MemoryError("parse ceiling")
+        raise _as_production_raises_it()
 
     monkeypatch.setattr(pool, "ensure_worker_pool_healthy", lambda worker: _noop())
     monkeypatch.setattr(pool, "_run_chunk", fake_run_chunk)
     monkeypatch.setattr(pool, "_reset_worker_pool", lambda worker: _noop())
 
-    with pytest.raises(MemoryError):
+    with pytest.raises(RuntimeError):
         await pool._process_chunk("f.pdf", None, "(all pages)")
 
     assert len(attempts) == 1, f"MemoryError was retried {len(attempts)} times"
 
 
-def test_ray_wrapped_memory_error_is_still_a_memory_error():
-    """Both fixes above key off ``isinstance(exc, MemoryError)``, and the error
-    crosses a Ray boundary first. ``as_instanceof_cause`` keeps the cause's type,
-    so the check survives — pin it, because losing it would silently restore
-    both the retry storm and the poisoned slot."""
+def _as_production_raises_it() -> RuntimeError:
+    """Build the exception `_process_chunk` actually sees for a child OOM.
+
+    The child raises MemoryError; Ray hands it back as RayTaskError(MemoryError);
+    `call_ray_actor_with_timeout` re-raises *that* as RuntimeError with the Ray
+    error only as `__cause__`. Tests that raise MemoryError directly skip the two
+    conversions that decide whether the fix works at all.
+    """
     from ray.exceptions import RayTaskError
 
     try:
-        raise MemoryError("boom")
+        raise MemoryError("parse ceiling")
     except MemoryError as exc:
-        wrapped = RayTaskError("t", "traceback", exc).as_instanceof_cause()
+        ray_error = RayTaskError("t", "traceback", exc).as_instanceof_cause()
+    produced = RuntimeError("MarkerPool PDF (all pages) (f.pdf) failed")
+    produced.__cause__ = ray_error
+    return produced
 
-    assert isinstance(wrapped, MemoryError)
+
+def test_call_ray_actor_with_timeout_really_converts_to_runtimeerror():
+    """The premise of `_as_production_raises_it`. If this ever stops holding —
+    say the wrapper starts re-raising the original type — the helper above is
+    testing a path that no longer exists, and both guards would go untested
+    while staying green."""
+    import inspect
+
+    from services.workers import ray_utils
+
+    source = inspect.getsource(ray_utils.call_ray_actor_with_timeout)
+    assert "except RayTaskError" in source
+    assert "raise RuntimeError" in source
+
+
+def test_caused_by_finds_the_memory_error_through_the_ray_wrapper():
+    """`isinstance(exc, MemoryError)` is False for what production raises; the
+    whole fix depends on looking through `__cause__`."""
+    from services.workers.ray_utils import caused_by
+
+    produced = _as_production_raises_it()
+
+    assert not isinstance(produced, MemoryError), "premise changed: it is a plain RuntimeError"
+    assert caused_by(produced, MemoryError)
+
+
+def test_caused_by_survives_a_chained_cycle():
+    """An explicitly chained cycle must not spin forever."""
+    from services.workers.ray_utils import caused_by
+
+    a, b = RuntimeError("a"), RuntimeError("b")
+    a.__cause__ = b
+    b.__cause__ = a
+
+    assert caused_by(a, MemoryError) is False
 
 
 async def test_an_ordinary_error_still_uses_the_retry_budget(monkeypatch):

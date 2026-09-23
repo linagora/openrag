@@ -21,7 +21,7 @@ from core.utils.logging import get_logger
 from marker.converters.pdf import PdfConverter
 from ray.exceptions import TaskCancelledError
 
-from ..ray_utils import call_ray_actor_with_timeout, retry_with_backoff
+from ..ray_utils import call_ray_actor_with_timeout, caused_by, retry_with_backoff
 
 logger = get_logger()
 
@@ -103,8 +103,10 @@ def _apply_parse_memory_limit(memory_limit_mb: int) -> None:
     """Cap what this child process may allocate, so one parse cannot take the pod.
 
     Runs in the slot's child process, which ``MarkerPool`` hands at most one chunk
-    at a time — so with page chunking on the bound is per *chunk*
-    (``marker_chunk_size`` pages), not per document. A chunk that blows through it
+    at a time — so with page chunking on each chunk runs under this bound rather
+    than a whole document doing so. The limit is set once per child and persists
+    across chunks until that child is recycled, so it is a per-*child* ceiling
+    that each chunk shares, not a fresh allowance per chunk. A chunk that blows through it
     raises ``MemoryError`` in the process responsible instead of tripping a
     pod-level OOM kill that takes every file sharing the worker with it (#997).
 
@@ -133,7 +135,6 @@ def _apply_parse_memory_limit(memory_limit_mb: int) -> None:
         _, hard = resource.getrlimit(resource.RLIMIT_DATA)
         if hard != resource.RLIM_INFINITY:
             limit = min(limit, hard)
-        resource.setrlimit(resource.RLIMIT_DATA, (limit, hard))
         effective_mb = limit // (1024 * 1024)
         baseline_mb = _child_vmdata_mb()
         if baseline_mb is None:
@@ -152,6 +153,12 @@ def _apply_parse_memory_limit(memory_limit_mb: int) -> None:
             )
         else:
             logger.info(f"Marker child memory limit set to {effective_mb} MiB (baseline {baseline_mb} MiB)")
+        # Applied last, deliberately. Reading /proc and formatting these lines
+        # can each need an allocation, and a ceiling at or below current VmData
+        # makes any allocation raise MemoryError — which this handler does not
+        # catch and `_worker_init` has no outer handler for, so the pool's
+        # initializer would die with the diagnostics that explain why.
+        resource.setrlimit(resource.RLIMIT_DATA, (limit, hard))
     except (ImportError, ValueError, OSError, AttributeError) as exc:
         logger.warning(f"Could not apply Marker child memory limit ({memory_limit_mb} MiB): {exc}")
 
@@ -490,7 +497,7 @@ class MarkerPool:
             except (TimeoutError, asyncio.CancelledError, TaskCancelledError):
                 child_may_still_run = True
                 raise
-            except MemoryError:
+            except Exception as exc:
                 # The parse ceiling (#997) is the one failure that leaves the child
                 # *alive*: it raises inside the child rather than killing it, and
                 # freeing the objects afterwards need not bring VmData back below
@@ -498,7 +505,15 @@ class MarkerPool:
                 # keeps it from shrinking. Returning this slot to the pool would
                 # hand the next, innocent chunk a child that fails for a reason
                 # that is not its own, so recycle it the way a timeout does.
-                child_may_still_run = True
+                #
+                # Matched through the cause chain, not with `except MemoryError`:
+                # the child's error reaches here as RayTaskError(MemoryError),
+                # which `call_ray_actor_with_timeout` re-raises as RuntimeError
+                # with the Ray error only as __cause__. A bare isinstance check
+                # never fires in production, however well it passes in a test
+                # that raises MemoryError directly.
+                if caused_by(exc, MemoryError):
+                    child_may_still_run = True
                 raise
             finally:
                 if completed:
