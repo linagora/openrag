@@ -123,6 +123,7 @@ async def delete_partition(
 **Parameters:**
 - `partition`: The partition name
 - `limit`: Optional maximum number of files to return
+- `degraded_stage`: Optional enrichment stage requiring re-indexing
 
 **Response:**
 Returns a list of files with:
@@ -139,11 +140,12 @@ async def list_files(
     request: Request,
     partition: str,
     limit: int | None = None,
+    degraded_stage: Literal["caption", "contextualize", "topic_tag"] | None = Query(default=None),
     partition_viewer=Depends(require_partition_viewer),
     service=Depends(get_partition_service),
 ):
     """List files stored in a partition."""
-    file_dicts = await service.list_files(partition, limit)
+    file_dicts = await service.list_files(partition, limit, degraded_stage)
 
     def process_file(file_dict):
         """Add a canonical file-detail link to one file row."""
@@ -191,14 +193,11 @@ async def get_file(
     service=Depends(get_partition_service),
 ):
     """Return metadata and chunk links for one file in a partition."""
-    if not await service.file_exists(file_id, partition):
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"'{file_id}' not found in partition '{partition}'",
-        )
-    rows = await service.get_file_chunks(partition=partition, file_id=file_id, limit=limit)
+    catalog_metadata = await service.get_file_metadata(partition=partition, file_id=file_id)
+    rows = await service.get_file_chunks(partition=partition, file_id=file_id, limit=limit) if limit else []
     documents = [{"link": str(request.url_for("get_extract", extract_id=row["_id"]))} for row in rows]
-    metadata = {k: v for k, v in rows[0].items() if k != "_id"} if rows else {}
+    chunk_metadata = {k: v for k, v in rows[0].items() if k != "_id"} if rows else {}
+    metadata = {**chunk_metadata, **catalog_metadata}
 
     return JSONResponse(
         status_code=status.HTTP_200_OK,
@@ -321,7 +320,7 @@ async def create_partition(
 **Body:**
 Accepts partition config fields such as:
 - `description`
-- `embedder`
+- `embedder` (must name a registered embedder endpoint — 422 otherwise; `default` resolves to the endpoint marked default). Each embedder stores its vectors in its own field, so a partition that holds indexed files cannot change embedder: 409 `PARTITION_HAS_INDEXED_FILES`, or 409 `INDEXING_IN_PROGRESS` while its first files are still being indexed or copied in
 - `indexation_preset`
 - `retrieval_preset`
 - `chat_history_depth`

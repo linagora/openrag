@@ -9,10 +9,12 @@ from types import SimpleNamespace
 from typing import Any
 
 import ray
-from core.config.model_endpoints import CONTROL_EXTRA_KEYS
+from core.config.model_endpoints import CONTROL_EXTRA_KEYS, DEFAULT_ENDPOINT_ALIAS, embedder_fingerprint
 from core.config.root import Settings
 from core.models.catalog import CONTENT_CLAIM_TOKEN_METADATA_KEY
-from core.utils.exceptions import NotFoundError
+from core.utils.error_summary import failure_reason_from_exception
+from core.utils.exceptions import ConfigError, NotFoundError
+from services.workers.failure_reporting import submit_task_failure
 from services.workers.indexer_actor import IndexerWorker, _display_filename, delete_uploaded_file
 from services.workers.indexing_callback import send_indexing_callback
 from services.workers.ray_utils import retry_idempotent_ray_actor_method
@@ -48,7 +50,13 @@ _MISSING_WORKER_REF_ERROR = "Indexer worker did not receive a registered task re
 # workers' cached handles to it, so the indexer generation has to roll too — a
 # different contract that happened to reuse the same version string.
 # v9: merge of both v8 lineages — neither alone is compatible with this one.
-_INDEXER_ACTOR_PROTOCOL_VERSION = "v9"
+# v10: successful completion and bounded degradation now use one atomic task-
+# state method; prior workers can silently settle degraded jobs as clean.
+# v11: atomic completion reports cancellation, missing state, and conflicts
+# separately; v10 workers interpret all three as the same indexing failure.
+# v12: workers write each embedder's own vector field; v11 workers still write
+# the shared `vector` field, which the schema-v3 migration drops.
+_INDEXER_ACTOR_PROTOCOL_VERSION = "v12"
 _INDEXER_POOL_DISPATCHER_ACTOR_NAME = f"IndexerPoolDispatcher-{_INDEXER_ACTOR_PROTOCOL_VERSION}"
 
 # Detached actors default to max_restarts=0, so one that dies — an OOM on a
@@ -162,6 +170,7 @@ class IndexerWorkerActor:
             timeouts=_build_pipeline_timeouts(cfg),
             chunker_factory=_build_chunker_from_config,
             embedder_window_resolver=_build_embedder_window_resolver(cfg),
+            vector_field_resolver=_build_vector_field_resolver(cfg),
             parser_factory=parser_factory,
             embedder_factory=embedder_factory,
             vlm_factory=vlm_factory,
@@ -198,13 +207,7 @@ class IndexerWorkerActor:
         # Whether "default" resolves via global env/config fallbacks. This keeps
         # reload-on-miss from looping forever when no is_default row exists for a
         # type but the legacy config block can still serve the default endpoint.
-        transcriber_cfg = getattr(getattr(cfg, "loader", None), "transcriber", None)
-        self._has_default_fallbacks = {
-            "embedder": _global_embedder_endpoint_config(cfg) is not None,
-            "llm": _global_llm_endpoint_config(cfg) is not None,
-            "vlm": _global_vlm_endpoint_config(cfg) is not None,
-            "stt": bool(getattr(transcriber_cfg, "base_url", "") and getattr(transcriber_cfg, "model_name", "")),
-        }
+        self._has_default_fallbacks = _default_fallbacks(cfg)
         self._has_default_fallback = self._has_default_fallbacks["llm"]
         self._model_endpoint_service: Any = None
         self._prompt_service: Any = None
@@ -339,24 +342,69 @@ class IndexerWorkerActor:
             decision = self._reload_decision(required_model_names)
             if decision is None:  # another reload refreshed it while we waited
                 return
-            try:
-                if self._model_endpoint_service is None:
-                    from services.orchestrators.model_endpoint_service import ModelEndpointService
-
-                    self._model_endpoint_service = ModelEndpointService(
-                        model_endpoint_repo=self._catalog_store.model_endpoint_repo,
-                        config=self._cfg,
-                    )
-                await self._model_endpoint_service.load_all()
-            except Exception as exc:  # noqa: BLE001 - a reload must never fail (or crash) a file
-                self._logger.warning(f"Model endpoint registry reload failed ({decision}): {exc}")
-            # Stamp the clock even on failure so a persistent error degrades to
-            # one retry per window rather than one attempt per file.
-            now = time.monotonic()
-            self._registry_loaded_at = now
+            now = await self._load_registry(decision)
             if decision == "miss":
                 self._last_miss_reload_at = now
                 self._last_miss_reload_key = _required_model_names_key(required_model_names)
+
+    async def _load_registry(self, reason: str) -> float:
+        """Reload ``cfg.models`` from the DB. The caller holds ``_registry_lock``."""
+        try:
+            if self._model_endpoint_service is None:
+                from services.orchestrators.model_endpoint_service import ModelEndpointService
+
+                self._model_endpoint_service = ModelEndpointService(
+                    model_endpoint_repo=self._catalog_store.model_endpoint_repo,
+                    config=self._cfg,
+                )
+            await self._model_endpoint_service.load_all()
+        except Exception as exc:  # noqa: BLE001 - a reload must never fail (or crash) a file
+            self._logger.warning(f"Model endpoint registry reload failed ({reason}): {exc}")
+        # Stamp the clock even on failure so a persistent error degrades to
+        # one retry per window rather than one attempt per file.
+        now = time.monotonic()
+        self._registry_loaded_at = now
+        return now
+
+    async def _reload_if_embedder_edited(self, embedder_name: str | None) -> None:
+        """Reload the registry now if this file's embedder was edited since it loaded (#958).
+
+        The catalog write refuses a file whose partition's embedder no longer
+        matches the config it embedded with. Left to the TTL, every file started
+        in the minute after an edit would embed with the old config and be
+        refused at the end; one read of the endpoint's row here lets them embed
+        with the new one instead. Never raises: the catalog write is the check
+        that holds, this only keeps it from having to fail files.
+        """
+        name = embedder_name or DEFAULT_ENDPOINT_ALIAS
+        try:
+            stored = await self._stored_embedder_fingerprint(name)
+        except Exception as exc:  # noqa: BLE001 - see above
+            self._logger.warning(f"Could not check embedder '{name}' for edits: {exc}")
+            return
+        if stored is None or stored == self._loaded_embedder_fingerprint(name):
+            return
+        async with self._registry_lock:
+            # Files started together all see the edit; the first one reloads.
+            if stored != self._loaded_embedder_fingerprint(name):
+                await self._load_registry("edited")
+
+    async def _stored_embedder_fingerprint(self, name: str) -> dict[str, str | None] | None:
+        repo = self._catalog_store.model_endpoint_repo
+        if name == DEFAULT_ENDPOINT_ALIAS:
+            row = next((r for r in await repo.list_all("embedder") if r.is_default), None)
+        else:
+            row = await repo.get(name, "embedder")
+        return embedder_fingerprint(row.endpoint, row.model_name, row.extra) if row is not None else None
+
+    def _loaded_embedder_fingerprint(self, name: str) -> dict[str, str | None] | None:
+        models = getattr(self._cfg, "models", None)
+        model_cfg = models.embedder.get(name) if models is not None else None
+        if model_cfg is None and name == DEFAULT_ENDPOINT_ALIAS:
+            model_cfg = _global_embedder_endpoint_config(self._cfg)
+        if model_cfg is None:
+            return None
+        return embedder_fingerprint(model_cfg.endpoint, model_cfg.model_name, model_cfg.extra)
 
     def _reload_decision(self, required_model_names: dict[str, list[str]] | list[str]) -> str | None:
         models = getattr(self._cfg, "models", None)
@@ -455,18 +503,25 @@ class IndexerWorkerActor:
                         ),
                     )
                 )
+                await self._reload_if_embedder_edited(embedder_name)
                 # Resolve the enrichment-stage prompts once for this file (partition
                 # override → global default → disk seed). Done here, at the job
                 # boundary, so per-chunk work reuses one resolved string instead of
                 # hitting the DB per chunk.
                 resolved_prompts = await self._resolve_ingest_prompts(partition, indexation_config or {})
-            except Exception:
+            except Exception as exc:
                 # Not BaseException: a cancellation here must not notify or be
                 # reported as failed (same rule as set_failed_if_not_cancelled).
                 tb = traceback.format_exc()
+                error_reason = failure_reason_from_exception(exc)
                 try:
                     was_failed = await retry_idempotent_ray_actor_method(
-                        lambda: self._tsm.set_failed_if_not_cancelled.remote(task_id, tb),
+                        lambda: submit_task_failure(
+                            self._tsm,
+                            task_id,
+                            tb,
+                            error_reason,
+                        ),
                         task_description=f"set_failed_if_not_cancelled({task_id})",
                     )
                 except Exception:
@@ -573,7 +628,12 @@ class IndexerWorkerActor:
             await asyncio.sleep(min(_WORKER_REF_REGISTRATION_POLL_SECONDS, remaining))
 
         await retry_idempotent_ray_actor_method(
-            lambda: self._task_state_manager.set_failed_if_not_cancelled.remote(task_id, _MISSING_WORKER_REF_ERROR),
+            lambda: submit_task_failure(
+                self._task_state_manager,
+                task_id,
+                _MISSING_WORKER_REF_ERROR,
+                _MISSING_WORKER_REF_ERROR,
+            ),
             task_description=f"set_failed_if_not_cancelled({task_id}) after missing worker ref",
         )
         raise RuntimeError(_MISSING_WORKER_REF_ERROR)
@@ -764,7 +824,12 @@ class IndexerPool:
         remote = getattr(set_failed, "remote", None)
         if remote is not None:
             await retry_idempotent_ray_actor_method(
-                lambda: remote(task_id, _REJECTED_SUBMISSION_ERROR),
+                lambda: submit_task_failure(
+                    task_state_manager,
+                    task_id,
+                    _REJECTED_SUBMISSION_ERROR,
+                    _REJECTED_SUBMISSION_ERROR,
+                ),
                 task_description=f"set_failed_if_not_cancelled({task_id}) from indexer pool",
             )
 
@@ -938,6 +1003,19 @@ def _required_model_names_key(required: dict[str, list[str]] | list[str]) -> tup
     return tuple((model_type, tuple(sorted(set(names)))) for model_type, names in sorted(normalised.items()) if names)
 
 
+def _default_fallbacks(cfg: Any) -> dict[str, bool]:
+    """Per model type, whether the global config can serve the ``default`` endpoint."""
+    transcriber_cfg = getattr(getattr(cfg, "loader", None), "transcriber", None)
+    return {
+        # Never the embedder: the global config has no vector field to index
+        # into, so a missing default embedder reloads the registry instead.
+        "embedder": False,
+        "llm": _global_llm_endpoint_config(cfg) is not None,
+        "vlm": _global_vlm_endpoint_config(cfg) is not None,
+        "stt": bool(getattr(transcriber_cfg, "base_url", "") and getattr(transcriber_cfg, "model_name", "")),
+    }
+
+
 def _has_default_fallback(pool: Any, model_type: str) -> bool:
     fallbacks = getattr(pool, "_has_default_fallbacks", None)
     if fallbacks is not None:
@@ -1018,6 +1096,31 @@ def _build_embedder_window_resolver(cfg: Settings) -> Any:
     return resolve
 
 
+def _build_vector_field_resolver(cfg: Settings) -> Any:
+    """The dense field an embedder endpoint writes its vectors into.
+
+    Only a registered endpoint has one, so unlike the other resolvers there is
+    no fallback to the global embedder config: an embedder missing from the
+    registry raises :class:`ConfigError`. ``None`` for a registered endpoint
+    without a field, which the store refuses to write.
+    """
+    models = getattr(cfg, "models", None)
+    named_embedders = models.embedder if models is not None else {}
+
+    def resolve(name: str = DEFAULT_ENDPOINT_ALIAS) -> str | None:
+        model_cfg = named_embedders.get(name)
+        if model_cfg is not None:
+            return model_cfg.vector_field
+        if name == DEFAULT_ENDPOINT_ALIAS:
+            raise ConfigError(
+                "No embedder endpoint is marked as the default, so a partition on the default "
+                "embedder has no vector field to index into. Mark one embedder endpoint as the default."
+            )
+        raise ConfigError(f"Embedder '{name}' is not registered, so it has no vector field to index into.")
+
+    return resolve
+
+
 def _build_parser_factory(parser: Any) -> Any:
     """Factory honoring a preset's ``parsing_strategy`` for PDFs.
 
@@ -1094,6 +1197,11 @@ def _build_embedder_factory(cfg: Settings) -> Any:
                 batch_size=model_cfg.batch_size,
                 timeout=model_cfg.timeout,
                 **impl_kwargs,
+            )
+            # From the config this client was built with, not the registry at
+            # catalog-write time: a background reload can land mid-file.
+            instance.vector_fingerprint = embedder_fingerprint(
+                model_cfg.endpoint, model_cfg.model_name, model_cfg.extra
             )
             cache[name] = (identity, instance)
             return instance

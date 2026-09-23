@@ -49,6 +49,7 @@ PROTECTED_METADATA_KEYS: frozenset[str] = frozenset(
         "text",
         "content_sha256",
         "indexed_at",
+        "degraded_stages",
     }
 )
 
@@ -59,8 +60,14 @@ def strip_protected_metadata(metadata: dict | None) -> tuple[dict, list[str]]:
     Returns the cleaned dict and the sorted list of dropped keys so the caller
     can log the rejection with its own context. Never mutates the input.
     """
+    # Imported here: core.vector_stores pulls in core.models, which imports
+    # this module.
+    from core.vector_stores.vector_field import is_vector_field_key
+
     md = dict(metadata or {})
-    removed = sorted(k for k in md if k in PROTECTED_METADATA_KEYS)
+    # A metadata update re-upserts whole rows, so a caller-set dense field
+    # would overwrite that embedder's vectors.
+    removed = sorted(k for k in md if k in PROTECTED_METADATA_KEYS or is_vector_field_key(k))
     for key in removed:
         del md[key]
     return md, removed

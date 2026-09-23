@@ -130,3 +130,47 @@ def test_llm_token_budgets_resolved_by_name():
     assert cfg.llm_output_tokens("mistral") == 4096
     assert cfg.llm_context_size("default") == 8192
     assert cfg.llm_context_size("unregistered") is None
+
+
+# ── embedder_fingerprint: what decides an embedder's vectors (#958) ──
+
+
+def test_embedder_fingerprint_ignores_what_cannot_change_a_vector():
+    """Timeout, batch size and the API key change how vectors are fetched, not
+    what they are; the indexer must not refuse a file over them."""
+    from core.config.model_endpoints import embedder_fingerprint
+
+    base = embedder_fingerprint("http://vllm:8000/v1", "bge-m3", {"api_key": "k1", "embed_concurrency": 4})
+    rotated = embedder_fingerprint("http://vllm:8000/v1/ ", "bge-m3", {"api_key": "k2", "implementation": "vllm"})
+
+    assert rotated == base
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "model_name", "extra"),
+    [
+        ("http://other:8000/v1", "bge-m3", {}),
+        ("http://vllm:8000/v1", "e5-large", {}),
+        ("http://vllm:8000/v1", "bge-m3", {"implementation": "ollama"}),
+        ("http://vllm:8000/v1", "bge-m3", {"max_model_len": 512}),
+    ],
+)
+def test_embedder_fingerprint_changes_with_what_decides_the_vectors(endpoint, model_name, extra):
+    from core.config.model_endpoints import embedder_fingerprint
+
+    assert embedder_fingerprint(endpoint, model_name, extra) != embedder_fingerprint(
+        "http://vllm:8000/v1", "bge-m3", {}
+    )
+
+
+def test_material_embedder_changes_names_what_moved_against_the_fingerprint():
+    """The edit guard and the indexer judge a change by the same fingerprint."""
+    from core.config.model_endpoints import material_embedder_changes
+
+    row = ModelEndpointRow(**_row_payload(model_type="embedder", model_name="bge-m3"))
+
+    assert material_embedder_changes(row, {"model_name": "e5-large", "extra": {"max_model_len": 512}}) == [
+        "model_name",
+        "extra.max_model_len",
+    ]
+    assert material_embedder_changes(row, {"timeout": 90.0, "extra": {"implementation": "vllm"}}) == []

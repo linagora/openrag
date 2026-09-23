@@ -482,6 +482,37 @@ openrag:
       tls: []
       path: /
       pathType: Prefix
+  # Prometheus scrapes GET /metrics on the API port (no extra port). The route
+  # fails closed: set env.secrets.METRICS_TOKEN and have the scraper send it
+  # as a bearer, or set env.config.METRICS_ALLOW_UNAUTHENTICATED="true" when
+  # the path is blocked at the Ingress and scraped in-cluster. Port 8080 is
+  # the one networkPolicy.externalPorts opens to the Ingress controller, so an
+  # open /metrics is reachable wherever the API is. See
+  # docs/documentation/prometheus_metrics.md.
+  #
+  # Uvicorn topology only (ray.enabled=false, the default). With Ray Serve
+  # (ray.enabled=true + ENABLE_RAY_SERVE=true, as in values-linagora.yaml) the
+  # API listens on the RayCluster head Service, not on this Deployment's 8080,
+  # and every Serve replica has its own registry: the annotations below are
+  # then not rendered and enabling the ServiceMonitor fails the install.
+  metrics:
+    # prometheus.io/* pod annotations for annotation-based discovery (plain
+    # Prometheus with a kubernetes_sd relabel config). The scrape job behind
+    # them must send METRICS_TOKEN as a bearer (authorization.credentials_file
+    # in its kubernetes_sd job) unless METRICS_ALLOW_UNAUTHENTICATED is on;
+    # otherwise every scrape gets 403.
+    prometheusAnnotations: true
+    # Prometheus Operator / kube-prometheus-stack discovery.
+    serviceMonitor:
+      enabled: false
+      # Labels the operator's serviceMonitorSelector expects, e.g.
+      # release: kube-prometheus-stack
+      labels: {}
+      interval: 30s
+      scrapeTimeout: 10s
+      # Read METRICS_TOKEN from the chart env Secret (or env.existingSecret)
+      # and send it as the scrape bearer. Enable together with the token.
+      bearerTokenFromSecret: false
   resources:
     requests:
       cpu: "4"
@@ -523,8 +554,9 @@ openrag:
     runAsUser: 10001
     runAsGroup: 0
     fsGroup: 10001
-  # Probe configuration. Override with exec probes when ENABLE_RAY_SERVE=true,
-  # since the Ray Serve HTTP proxy runs on the Ray head (not on this pod).
+  # Probe configuration. The chart keeps these HTTP probes for the direct API
+  # and automatically converts them to exec probes against the Ray head when
+  # ENABLE_RAY_SERVE=true.
   probes:
     startup:
       httpGet:
@@ -627,6 +659,10 @@ env:
     RAY_SERVE_NUM_REPLICAS: "4"
     RAY_SERVE_PORT: "80"
     GRAFANA_URL: ""
+    # GET /metrics fails closed. "true" serves it to anyone reaching port 8080
+    # (the Ingress port) without env.secrets.METRICS_TOKEN — only for clusters
+    # that block /metrics at the Ingress and scrape the Service in-cluster.
+    METRICS_ALLOW_UNAUTHENTICATED: "false"
 
     # One flat JSON object per log line on stderr, for the platform's log
     # collector. PREREQUISITE: this chart ships no collector and no longer
@@ -727,6 +763,7 @@ env:
     # --set/-f) so the secret always matches the actual DB credential.
     POSTGRES_PASSWORD: "{{ .Values.postgresql.auth.password }}"
     AUTH_TOKEN: "" # API KEY for OpenRAG
+    METRICS_TOKEN: "" # Bearer for Prometheus on GET /metrics; empty = 403 unless METRICS_ALLOW_UNAUTHENTICATED
     HF_TOKEN: "" # HuggingFace token
     RERANKER_API_KEY: "EMPTY"  # Set when using an external reranker that requires authentication
 

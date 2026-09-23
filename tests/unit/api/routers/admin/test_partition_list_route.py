@@ -10,7 +10,7 @@ every partition.
 from __future__ import annotations
 
 import pytest
-from api.dependencies.auth import partitions_with_details
+from api.dependencies.auth import partitions_with_details, require_partition_viewer
 from api.routers.admin import partitions
 from di.providers import get_partition_service
 from fastapi import FastAPI
@@ -38,9 +38,23 @@ class _FakeService:
 
     def __init__(self, summaries: dict[str, dict]) -> None:
         self._summaries = summaries
+        self.file_calls: list[dict] = []
+        self.file_chunks: list[dict] = []
+        self.file_chunk_calls: list[dict] = []
 
     async def list_partition_summaries(self) -> dict[str, dict]:
         return self._summaries
+
+    async def list_files(self, partition: str, limit: int | None = None, degraded_stage: str | None = None) -> list:
+        self.file_calls.append({"partition": partition, "limit": limit, "degraded_stage": degraded_stage})
+        return []
+
+    async def get_file_metadata(self, partition: str, file_id: str) -> dict:
+        return {"filename": "catalog.pdf", "degraded_stages": ["caption"]}
+
+    async def get_file_chunks(self, partition: str, file_id: str, limit: int = 2000) -> list:
+        self.file_chunk_calls.append({"partition": partition, "file_id": file_id, "limit": limit})
+        return self.file_chunks[:limit]
 
 
 def _build_app(
@@ -51,6 +65,10 @@ def _build_app(
 ) -> FastAPI:
     app = FastAPI()
 
+    @app.get("/extract/{extract_id}", name="get_extract")
+    async def _get_extract(extract_id: str):
+        return {"extract_id": extract_id}
+
     @app.middleware("http")
     async def _set_user(request, call_next):
         request.state.user = {"id": 1, "is_admin": is_admin}
@@ -59,6 +77,7 @@ def _build_app(
     app.include_router(partitions.router, prefix="/partition")
     app.dependency_overrides[partitions_with_details] = lambda: principal_partitions
     app.dependency_overrides[get_partition_service] = lambda: service
+    app.dependency_overrides[require_partition_viewer] = lambda: {"partition": "legal", "role": "viewer"}
     return app
 
 
@@ -113,3 +132,65 @@ async def test_list_falls_back_when_summary_missing(async_client_factory):
     assert resp.json()["partitions"] == [
         {"partition": "ghost", "document_count": 0, "role": "editor"},
     ]
+
+
+@pytest.mark.asyncio
+async def test_file_list_accepts_a_bounded_degraded_stage_filter(async_client_factory) -> None:
+    service = _FakeService({})
+    app = _build_app(service, [])
+
+    async with async_client_factory(app) as client:
+        response = await client.get("/partition/legal", params={"limit": 20, "degraded_stage": "caption"})
+
+    assert response.status_code == 200
+    assert service.file_calls == [{"partition": "legal", "limit": 20, "degraded_stage": "caption"}]
+
+
+@pytest.mark.asyncio
+async def test_file_list_rejects_an_unbounded_degraded_stage(async_client_factory) -> None:
+    service = _FakeService({})
+    app = _build_app(service, [])
+
+    async with async_client_factory(app) as client:
+        response = await client.get("/partition/legal", params={"degraded_stage": "raw-provider-error"})
+
+    assert response.status_code == 422
+    assert service.file_calls == []
+
+
+@pytest.mark.asyncio
+async def test_file_detail_uses_authoritative_catalog_metadata(async_client_factory) -> None:
+    service = _FakeService({})
+    service.file_chunks = [{"_id": "chunk-1", "filename": "stale-chunk-name.pdf", "page": 1}]
+    app = _build_app(service, [])
+
+    async with async_client_factory(app) as client:
+        response = await client.get("/partition/legal/file/file-1")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["metadata"] == {
+        "filename": "catalog.pdf",
+        "page": 1,
+        "degraded_stages": ["caption"],
+    }
+    assert body["documents"] == [
+        {"link": "http://testserver/extract/chunk-1"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_file_detail_with_zero_limit_skips_chunk_storage(async_client_factory) -> None:
+    service = _FakeService({})
+    service.file_chunks = [{"_id": "chunk-1", "filename": "stale.pdf"}]
+    app = _build_app(service, [])
+
+    async with async_client_factory(app) as client:
+        response = await client.get("/partition/legal/file/file-1", params={"limit": 0})
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "metadata": {"filename": "catalog.pdf", "degraded_stages": ["caption"]},
+        "documents": [],
+    }
+    assert service.file_chunk_calls == []

@@ -7,7 +7,7 @@ import { request } from "./client";
 //   GET    /queue/info                          queue + worker pool summary
 //   GET    /queue/tasks[?task_status=]          list tasks → { tasks: [...] }
 //   GET    /indexer/task/{id}                   status → { task_id, task_state, details, error_url? }
-//   GET    /indexer/task/{id}/error             { task_id, traceback: string[] }
+//   GET    /indexer/task/{id}/error             { task_id, reason?, summary?, traceback: string[] }
 //   DELETE /indexer/task/{id}                   cancel → { message }
 
 const QUEUE = "/queue";
@@ -33,15 +33,20 @@ export interface TaskDetails {
   metadata: Record<string, unknown>;
   user_id: number;
   failed_stage?: string;
+  degraded_stages?: string[];
 }
+
+export type TaskOutcome = "active" | "completed" | "completed_degraded" | "failed" | "cancelled";
 
 /** Row from GET /queue/tasks — note `state` (vs `task_state` in the detail). */
 export interface TaskListItem {
   task_id: string;
   state: TaskState;
+  outcome: TaskOutcome;
   details: TaskDetails;
   created_at?: string | null;
   duration_ms?: number | null;
+  error_summary?: string;
   url: string;
   error_url?: string;
 }
@@ -78,8 +83,15 @@ export function getTaskStatus(taskId: string): Promise<TaskStatus> {
   return request<TaskStatus>(`${TASK}/${encodeURIComponent(taskId)}`);
 }
 
-export function getTaskError(taskId: string): Promise<{ task_id: string; traceback: string[] }> {
-  return request<{ task_id: string; traceback: string[] }>(`${TASK}/${encodeURIComponent(taskId)}/error`);
+export function getTaskError(taskId: string): Promise<{
+  task_id: string;
+  reason?: string;
+  summary?: string;
+  traceback: string[];
+}> {
+  return request<{ task_id: string; reason?: string; summary?: string; traceback: string[] }>(
+    `${TASK}/${encodeURIComponent(taskId)}/error`,
+  );
 }
 
 export function cancelTask(taskId: string): Promise<{ message: string }> {

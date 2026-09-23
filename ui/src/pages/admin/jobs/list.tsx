@@ -10,6 +10,7 @@ import { usePermissions } from "@/lib/permissions";
 import { PageHeader } from "@/components/shared/page-header";
 import { DataTable, SortableHeader } from "@/components/shared/data-table";
 import { StatusBadge } from "@/components/shared/status-badge";
+import { DegradedCompletionStatus } from "@/components/shared/degraded-stages";
 import { ConfirmDialog } from "@/components/shared/confirm-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -120,7 +121,12 @@ const columns: ColumnDef<TaskListItem, unknown>[] = [
   {
     accessorKey: "state",
     header: "State",
-    cell: ({ row }) => <StatusBadge status={row.original.state} />,
+    cell: ({ row }) => {
+      if (row.original.outcome !== "completed_degraded") {
+        return <StatusBadge status={row.original.state} />;
+      }
+      return <DegradedCompletionStatus stages={row.original.details?.degraded_stages} />;
+    },
   },
   {
     id: "file",
@@ -156,6 +162,16 @@ const columns: ColumnDef<TaskListItem, unknown>[] = [
     cell: ({ row }) => <span className="whitespace-nowrap tabular-nums">{formatDuration(row.original.duration_ms)}</span>,
   },
 ];
+
+const failureReasonColumn: ColumnDef<TaskListItem, unknown> = {
+  accessorKey: "error_summary",
+  header: "Failure reason",
+  cell: ({ row }) => (
+    <TruncatedValue value={row.original.error_summary ?? ""} className="max-w-[240px] lg:max-w-[320px]" />
+  ),
+};
+
+const adminColumns = [columns[0], columns[1], failureReasonColumn, ...columns.slice(2)];
 
 export default function JobListPage() {
   const { isAdmin } = usePermissions();
@@ -199,13 +215,13 @@ export default function JobListPage() {
       const partition = str(task.details?.partition);
       const matchesSearch =
         !q ||
-        [task.task_id, task.state, filename, fileId, partition].some((value) =>
+        [task.task_id, task.state, filename, fileId, partition, isAdmin ? task.error_summary : ""].some((value) =>
           str(value).toLowerCase().includes(q),
         );
       const matchesPartition = partitionFilter === ALL_PARTITIONS_FILTER || partition === partitionFilter;
       return matchesSearch && matchesPartition;
     });
-  }, [tasks, debouncedSearch, partitionFilter]);
+  }, [tasks, debouncedSearch, partitionFilter, isAdmin]);
   const selectedActiveTasks = useMemo(
     () => filteredTasks.filter((task) => rowSelection[task.task_id] && isActiveState(task.state)),
     [filteredTasks, rowSelection],
@@ -239,11 +255,16 @@ export default function JobListPage() {
         [
           { header: "task_id", value: (task) => task.task_id },
           { header: "state", value: (task) => task.state },
+          { header: "outcome", value: (task) => task.outcome },
+          { header: "degraded_stages", value: (task) => task.details?.degraded_stages?.join(",") },
           { header: "filename", value: (task) => str(task.details?.metadata?.filename) },
           { header: "file_id", value: (task) => str(task.details?.file_id) },
           { header: "partition", value: (task) => str(task.details?.partition) },
           { header: "created_at", value: (task) => task.created_at },
           { header: "duration_ms", value: (task) => task.duration_ms },
+          ...(isAdmin
+            ? [{ header: "failure_reason", value: (task: TaskListItem) => task.error_summary }]
+            : []),
         ],
         filteredTasks,
       );
@@ -373,7 +394,7 @@ export default function JobListPage() {
               // Remounting resets pagination for a new tab/search context; sort state resets with it.
               <DataTable
                 key={`${statusTab}:${debouncedSearch}:${partitionFilter}`}
-                columns={columns}
+                columns={isAdmin ? adminColumns : columns}
                 data={filteredTasks}
                 enableSelection
                 canSelectRow={(task) => isActiveState(task.state)}

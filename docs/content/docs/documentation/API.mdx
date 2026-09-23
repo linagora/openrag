@@ -48,6 +48,18 @@ Verify server status and availability.
 GET /health_check
 ```
 
+Use readiness when deciding whether the API should receive traffic:
+
+```http
+GET /ready
+```
+
+Readiness returns 503 when PostgreSQL, Milvus, or Ray is unavailable. It also
+reports the health of default and partition-referenced inference endpoints, plus
+broken preset references. Those model findings are informational because one
+tenant's configuration must not remove a healthy shared API replica from
+service.
+
 ### ℹ️ openRAG version
 
 Get openRAG version
@@ -401,7 +413,7 @@ GET /partition/{partition}/config
 ```http
 PATCH /partition/{partition}
 ```
-**Owner** only. Body fields (all optional): `description`, `embedder`, `indexation_preset`, `retrieval_preset`, `chat_history_depth`, `chat_llm`. Returns the updated resolved config.
+**Owner** only. Body fields (all optional): `description`, `embedder`, `indexation_preset`, `retrieval_preset`, `chat_history_depth`, `chat_llm`. Returns the updated resolved config. Changing `embedder` is refused on a partition that holds indexed files (`409 PARTITION_HAS_INDEXED_FILES`, or `409 INDEXING_IN_PROGRESS` while files are still being indexed or copied into it): each embedder keeps its vectors in its own field, which only its partitions search.
 
 ```bash frame="none"
 curl -X PATCH http://localhost:8080/partition/my_partition \
@@ -649,11 +661,19 @@ DELETE /model-endpoints/{model_type}/{name}    # 204 No Content
 ```
 `PUT` takes a partial body (any of the create fields, plus `name` to rename) and returns the updated endpoint.
 
+Changing an **embedder**'s `endpoint`, `model_name`, `extra.implementation` or `extra.max_model_len` changes the vectors it produces. While partitions hold files indexed with it, such an edit returns `409 EMBEDDER_EDIT_AFFECTS_INDEXED_DATA` naming the partitions and file counts; resend it with `"acknowledge_indexed_data": true` to apply it anyway. The existing vectors are not rebuilt, so queries on those partitions are then compared against vectors from the previous configuration. `GET /model-endpoints/{model_type}/{name}/indexed-usage` returns the same counts ahead of time.
+
+Files still indexing when such an edit is saved are not counted, since a file is only counted once indexing finishes. Instead, when the file is recorded, the indexer checks that the partition's embedder still has the configuration it embedded with. If it doesn't, the file fails with `EMBEDDER_CHANGED_DURING_INDEXING`, its vectors are removed, and it has to be indexed again. Indexers reload an edited endpoint before embedding, so only files already embedding during the edit are affected.
+
+`DELETE` of an embedder returns `409` while a partition names it or, for the default embedder, while a partition following the `default` alias already holds indexed files. Reassign those partitions first. Deleting an embedder also drops its vector field from the collection, on a best-effort basis: if the drop fails, the delete still succeeds and the empty field stays until removed by hand.
+
 #### Set as default for its type
 ```http
 POST /model-endpoints/{model_type}/{name}/set-default
 ```
 Promotes the endpoint to the default used for its `model_type`, and returns it.
+
+For embedders, a new default only reaches partitions that have no data yet. A partition stays on the `default` alias until it first receives a file (upload or copy), at which point the alias is replaced by the embedder it resolved to; a partition indexed before that is pinned the same way when the default changes. Partitions with files therefore keep the embedder that built their vectors. An emptied partition stays pinned — set its `embedder` back to `default` to follow the default again.
 
 #### Reveal the stored API key
 ```http
@@ -743,15 +763,23 @@ OpenAI-compatible text completion endpoint.
 
 #### Extra arguments
 
-* When using the openai endpoint /v1/chat/completions, you can pass extra arguments **via the `metadata` field** of the request body to customize the RAG behavior:
+* When using `/v1/chat/completions` or `/v1/completions`, you can pass extra arguments **via the `metadata` field** of the request body to customize the RAG behavior. Some options apply only to chat, as shown below:
 
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `websearch` | `bool` | `false` | Augments the RAG context with live web search results. When used with a partition (`openrag-{partition}`), document and web results are combined. When used without a partition (direct LLM mode), web results are the sole context. Requires `WEBSEARCH_API_TOKEN` to be configured. See [web search configuration](/openrag/documentation/env_vars/#web-search-configuration). |
-| `spoken_style_answer` | `bool` | `false` | Generates a succinct spoken-style conversational answer based on the retrieved documents. |
-| `use_map_reduce` | `bool` | `false` | Uses a map-reduce strategy to aggregate information from multiple documents. See [map-reduce configuration](/openrag/documentation/env_vars/#map--reduce-configuration). |
-| `llm_override` | `object` | `null` | Overrides the downstream LLM for this request. Accepts `model` (string), always honored. Also accepts `base_url` and `api_key`, which are honored **only** when the deployment sets `LLM_OVERRIDE_ALLOW_CUSTOM_ENDPOINT` — otherwise they are ignored and the request goes to the server's configured endpoint. See [custom LLM endpoints](/openrag/documentation/env_vars/#client-supplied-llm-endpoints). |
-| `attachments` | `list[{"id": string}]` | `null` | Scopes RAG retrieval to a specific list of file IDs within the target partition, instead of searching the whole partition. Unknown or unindexed IDs are silently dropped; duplicates are deduplicated. The response's `extra.attachments` reports which IDs were actually used. |
+Partition-backed chat retrieves by default. It skips retrieval only for an empty or exclusively casual message;
+ambiguous, mixed, and factual messages retrieve. Text completions retain their contextualizer-controlled default.
+
+| Option | Applies to | Type | Default | Description |
+|--------|------------|------|---------|-------------|
+| `require_retrieval` | Chat and text completions | `bool` | `false` | For partition-backed chat, JSON `true` forces retrieval even for a casual or normalized-empty message. Other chat messages already retrieve by default. For text completions, JSON `true` remains the opt-in override when the contextualizer would skip. The original input is the fallback query. Existing scope and filters still apply; matching sources and answer correctness are not guaranteed. Has no effect in direct LLM mode. |
+| `websearch` | Chat only | `bool` | `false` | Augments the RAG context with live web search results. When used with a partition (`openrag-{partition}`), document and web results are combined. When used without a partition (direct LLM mode), web results are the sole context. Requires `WEBSEARCH_API_TOKEN` to be configured. See [web search configuration](/openrag/documentation/env_vars/#web-search-configuration). |
+| `spoken_style_answer` | Chat and text completions | `bool` | `false` | Generates a succinct spoken-style conversational answer based on the retrieved documents. |
+| `use_map_reduce` | Chat only | `bool` | `false` | Uses a map-reduce strategy to aggregate information from multiple documents. See [map-reduce configuration](/openrag/documentation/env_vars/#map--reduce-configuration). |
+| `llm_override` | Chat and text completions | `object` | `null` | Overrides the downstream LLM for this request. Accepts `model` (string), always honored. Also accepts `base_url` and `api_key`, which are honored **only** when the deployment sets `LLM_OVERRIDE_ALLOW_CUSTOM_ENDPOINT` — otherwise they are ignored and the request goes to the server's configured endpoint. See [custom LLM endpoints](/openrag/documentation/env_vars/#client-supplied-llm-endpoints). |
+| `attachments` | Chat only | `list[{"id": string}]` | `null` | Scopes RAG retrieval to a specific list of file IDs within the target partition, instead of searching the whole partition. Unknown or unindexed IDs are silently dropped; duplicates are deduplicated. The response's `extra.attachments` reports which IDs were actually used. |
+
+Common English and French casual messages are recognized directly; other phrasing is checked conservatively by the
+contextualizer. Casual replies use a dedicated instruction in the detected language. Only greetings introduce
+OpenRAG, and ambiguous or normalized-empty input defaults to English.
 
 Examples:
 
