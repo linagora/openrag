@@ -177,11 +177,27 @@ Point a Prometheus data source at the server that scrapes OpenRAG and query
 `openrag_http_requests_total` in Explore. A working setup returns series with
 `method`, `endpoint` and `status_code` labels.
 
-The dashboards under `infra/compose/grafana/dashboards/` are written for the
-bundled stack: they expect a data source with UID `prometheus`, a scrape job
-named `openrag`, and (for the system overview) node-exporter and the NVIDIA
-GPU exporter. Import them as a starting point and adjust those three points to
-your setup; see [Grafana HTTP dashboard](/openrag/documentation/grafana_http_dashboard/).
+The dashboards under `infra/compose/grafana/dashboards/` load unchanged into
+any Grafana:
+
+| Dashboard | UID | Shows |
+| --- | --- | --- |
+| OpenRAG HTTP Metrics | `openrag-http` | Request rate, errors and latency per route ([guide](/openrag/documentation/grafana_http_dashboard/)) |
+| Infrastructure Overview | `system-overview` | Host CPU, memory, disk and GPU; needs node-exporter and a GPU exporter |
+
+Every panel reads the **Data source** variable (`DS_PROMETHEUS`), which defaults
+to Grafana's default Prometheus data source and can be switched from the top of
+the dashboard; no data source UID is written into the JSON. Panels that need
+the API's scrape job find it from the series the API exports (`openrag` on
+Compose, the ServiceMonitor's Service name on Kubernetes), so no job name is
+written in either.
+
+To load them into your own Grafana, import each file through **Dashboards → New
+→ Import**, or provision them from disk. Keep the files as they are in the
+repository rather than re-exporting them with **Export for sharing externally**:
+that option adds an `__inputs` section, which only the import dialog resolves.
+File provisioning and a ConfigMap sidecar load the JSON as-is and would leave
+it unresolved, so a unit test rejects such an export.
 
 ## Limitations
 
