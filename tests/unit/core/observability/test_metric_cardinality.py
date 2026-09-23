@@ -193,8 +193,9 @@ def test_the_pool_label_domain_is_closed() -> None:
     bounded only by the comment saying so. They are safe because
     ``DocumentType`` is an enum — a closed set fixed at import — which is the
     premise this asserts rather than restates. A ``DocumentType`` that stopped
-    being an enum, or a resolver returning a free-form string, would make the
-    label traffic-bounded and the cardinality argument for this metric false.
+    being an enum would make the label traffic-bounded and the cardinality
+    argument for this metric false. That ``_resolve_backend`` draws its non-PDF
+    and non-audio values from the enum is pinned by the dispatcher tests, not here.
     """
     from enum import Enum
 
