@@ -120,6 +120,19 @@ def _apply_parse_memory_limit(memory_limit_mb: int) -> None:
     not ``RLIMIT_AS``: that also counts file-backed mappings, so it would refuse
     the model weights and CUDA's device maps and break the parse outright.
 
+    **The ceiling is per process, and children inherit it.** Marker runs with
+    ``disable_multiprocessing: False`` and ``pdftext_workers``, so pdftext starts
+    its own processes, each of which gets its own full allowance rather than a
+    share of one. A chunk's process tree can therefore reach roughly
+    ``(1 + marker_pdftext_workers) x MARKER_PARSE_MEMORY_LIMIT_MB``, which can
+    still trip the pod-level OOM kill this exists to prevent. Size it as
+    ``pod budget / (1 + marker_pdftext_workers)``, not as the pod budget.
+
+    The startup diagnostics below measure only the slot's own child: a pdftext
+    process created by fork inherits the parent's ``VmData`` and its baseline is
+    never reported, so under a tight ceiling it can fail immediately with nothing
+    logged about why.
+
     Best-effort — a platform without ``RLIMIT_DATA``, or an existing hard limit
     below the request, must not stop the worker from starting.
     """
