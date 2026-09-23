@@ -734,6 +734,12 @@ env:
     PDFLOADER: "PyMuPDFLoader"
     XDG_CACHE_HOME: "/app/model_weights"
     MARKER_MAX_TASKS_PER_CHILD: "10"
+    # Ceiling (MiB) on what one Marker child may allocate, so an oversized parse
+    # raises MemoryError in that child instead of OOM-killing the pod. Left unset
+    # (off) on purpose: it bounds the child's whole memory, torch included, so a
+    # value below its baseline fails every parse. The worker logs the baseline at
+    # startup — measure there first, then set this well above it.
+    # MARKER_PARSE_MEMORY_LIMIT_MB: "6144"
     MARKER_MAX_PROCESSES: "15"
     MARKER_POOL_SIZE: "3"
     MARKER_NUM_GPUS: "0.6"

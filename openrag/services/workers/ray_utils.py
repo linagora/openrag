@@ -217,6 +217,7 @@ async def retry_with_backoff(
     base_delay: float,
     task_description: str = "task",
     jitter: bool = True,
+    no_retry: tuple[type[BaseException], ...] = (),
 ) -> Any:
     """Run ``attempt_fn(attempt_index)`` with exponential backoff.
 
@@ -224,6 +225,11 @@ async def retry_with_backoff(
     in ``[0, base_delay)`` when ``jitter=True``. ``attempt_fn`` is an
     async callable; it owns acquire/release of any per-attempt resources
     so a flaky resource can be sidestepped on retry.
+
+    ``no_retry`` names failures a second attempt cannot change — a deterministic
+    ceiling, say — so they are raised immediately instead of costing
+    ``max_retries`` more runs and the backoff between them. Empty by default, so
+    every existing caller keeps retrying everything.
     """
     last_exc: Exception | None = None
     for attempt in range(max_retries + 1):
@@ -233,6 +239,9 @@ async def retry_with_backoff(
             raise
         except Exception as e:
             last_exc = e
+            if no_retry and isinstance(e, no_retry):
+                logger.error(f"{task_description} failed with a non-retryable error: {e}")
+                raise
             if attempt >= max_retries:
                 logger.error(f"{task_description} failed after {attempt + 1} attempts: {e}")
                 raise

@@ -577,3 +577,97 @@ def test_a_missing_resource_module_does_not_stop_the_worker_starting(monkeypatch
     monkeypatch.setattr(marker_workers, "logger", _NullLogger())
 
     marker_workers._apply_parse_memory_limit(256)  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# MemoryError is the one failure that leaves the child alive (#997 review)
+# ---------------------------------------------------------------------------
+
+
+async def test_process_chunk_recycles_the_slot_after_a_memory_error(monkeypatch):
+    """The parse ceiling raises *in* the child instead of killing it, and freeing
+    the objects need not bring ``VmData`` back below the limit. Returning that
+    slot to the pool hands the next chunk a child that fails for a reason that is
+    not its own, so a MemoryError must recycle like a timeout does."""
+    pool = _bare_marker_pool()
+    reset_calls = []
+
+    async def fake_reset(worker):
+        reset_calls.append(worker)
+
+    async def fake_run_chunk(worker, file_path, page_range, label):
+        raise MemoryError("parse ceiling")
+
+    monkeypatch.setattr(pool, "ensure_worker_pool_healthy", lambda worker: _noop())
+    monkeypatch.setattr(pool, "_run_chunk", fake_run_chunk)
+    monkeypatch.setattr(pool, "_reset_worker_pool", fake_reset)
+
+    with pytest.raises(MemoryError):
+        await pool._process_chunk("f.pdf", None, "(all pages)")
+
+    await asyncio.sleep(0)  # let the recycle task created in `finally` start
+    await asyncio.sleep(0)
+    assert reset_calls, "a MemoryError left the child alive but the slot was not recycled"
+
+
+async def test_process_chunk_does_not_retry_a_memory_error(monkeypatch):
+    """A chunk over the ceiling is over it again every time: retrying costs
+    ~4x the parse plus backoff and ends with the same error.
+
+    The pool is given a real retry budget on purpose — ``_bare_marker_pool``
+    defaults to ``marker_max_task_retry=0``, where one attempt happens whether
+    or not the fix is present and the assertion below proves nothing.
+    """
+    pool = _bare_marker_pool()
+    pool.config.loader.marker_max_task_retry = 3
+    attempts = []
+
+    async def fake_run_chunk(worker, file_path, page_range, label):
+        attempts.append(1)
+        raise MemoryError("parse ceiling")
+
+    monkeypatch.setattr(pool, "ensure_worker_pool_healthy", lambda worker: _noop())
+    monkeypatch.setattr(pool, "_run_chunk", fake_run_chunk)
+    monkeypatch.setattr(pool, "_reset_worker_pool", lambda worker: _noop())
+
+    with pytest.raises(MemoryError):
+        await pool._process_chunk("f.pdf", None, "(all pages)")
+
+    assert len(attempts) == 1, f"MemoryError was retried {len(attempts)} times"
+
+
+def test_ray_wrapped_memory_error_is_still_a_memory_error():
+    """Both fixes above key off ``isinstance(exc, MemoryError)``, and the error
+    crosses a Ray boundary first. ``as_instanceof_cause`` keeps the cause's type,
+    so the check survives — pin it, because losing it would silently restore
+    both the retry storm and the poisoned slot."""
+    from ray.exceptions import RayTaskError
+
+    try:
+        raise MemoryError("boom")
+    except MemoryError as exc:
+        wrapped = RayTaskError("t", "traceback", exc).as_instanceof_cause()
+
+    assert isinstance(wrapped, MemoryError)
+
+
+async def test_an_ordinary_error_still_uses_the_retry_budget(monkeypatch):
+    """Control for the test above: with the same retry budget, a non-ceiling
+    failure is retried. Without this, a broken `no_retry` that swallowed every
+    retry would look identical to the fix working."""
+    pool = _bare_marker_pool()
+    pool.config.loader.marker_max_task_retry = 3
+    attempts = []
+
+    async def fake_run_chunk(worker, file_path, page_range, label):
+        attempts.append(1)
+        raise RuntimeError("parse error")
+
+    monkeypatch.setattr(pool, "ensure_worker_pool_healthy", lambda worker: _noop())
+    monkeypatch.setattr(pool, "_run_chunk", fake_run_chunk)
+    monkeypatch.setattr(pool, "_reset_worker_pool", lambda worker: _noop())
+
+    with pytest.raises(RuntimeError):
+        await pool._process_chunk("f.pdf", None, "(all pages)")
+
+    assert len(attempts) == 4, f"expected 1 try + 3 retries, got {len(attempts)}"

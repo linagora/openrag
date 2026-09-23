@@ -75,13 +75,44 @@ def _marker_num_gpus(config) -> float:
         return requested_gpus if torch.cuda.is_available() else 0
 
 
+#: Headroom the ceiling must leave above the child's baseline ``VmData`` before a
+#: parse has room to work. Below this the limit is far more likely to be a
+#: misconfiguration than a tight budget, so it is reported rather than left to
+#: surface as a 100% Marker failure rate.
+_MIN_PARSE_HEADROOM_MB = 256
+
+
+def _child_vmdata_mb() -> int | None:
+    """This process's current ``VmData`` in MiB, or ``None`` where unreadable.
+
+    ``VmData`` is exactly what ``RLIMIT_DATA`` bounds, so it is the number an
+    operator needs to pick a ceiling. Linux-only and best-effort: callers treat
+    ``None`` as "could not measure", never as zero.
+    """
+    try:
+        with open("/proc/self/status", encoding="utf-8") as status:
+            for line in status:
+                if line.startswith("VmData:"):
+                    return int(line.split()[1]) // 1024
+    except (OSError, ValueError, IndexError):
+        return None
+    return None
+
+
 def _apply_parse_memory_limit(memory_limit_mb: int) -> None:
     """Cap what this child process may allocate, so one parse cannot take the pod.
 
     Runs in the slot's child process, which ``MarkerPool`` hands at most one chunk
-    at a time — so the bound is per-parse, and a document that blows through it
+    at a time — so with page chunking on the bound is per *chunk*
+    (``marker_chunk_size`` pages), not per document. A chunk that blows through it
     raises ``MemoryError`` in the process responsible instead of tripping a
     pod-level OOM kill that takes every file sharing the worker with it (#997).
+
+    The limit covers the child's *whole* ``VmData`` — torch, Marker's startup
+    allocations and the parse together — and Linux accepts a limit below what the
+    process already uses, after which every allocation fails. The baseline is
+    logged beside the ceiling and thin headroom is reported, because otherwise a
+    plausible-looking value yields 100% Marker failures with nothing saying why.
 
     ``RLIMIT_DATA`` bounds the heap and private anonymous mappings. Deliberately
     not ``RLIMIT_AS``: that also counts file-backed mappings, so it would refuse
@@ -103,7 +134,24 @@ def _apply_parse_memory_limit(memory_limit_mb: int) -> None:
         if hard != resource.RLIM_INFINITY:
             limit = min(limit, hard)
         resource.setrlimit(resource.RLIMIT_DATA, (limit, hard))
-        logger.debug(f"Marker child memory limit set to {limit // (1024 * 1024)} MiB")
+        effective_mb = limit // (1024 * 1024)
+        baseline_mb = _child_vmdata_mb()
+        if baseline_mb is None:
+            logger.info(f"Marker child memory limit set to {effective_mb} MiB (baseline unreadable)")
+        elif effective_mb <= baseline_mb:
+            logger.error(
+                f"Marker child memory limit {effective_mb} MiB is at or below this child's baseline "
+                f"of {baseline_mb} MiB — every parse on it will raise MemoryError. Raise "
+                f"MARKER_PARSE_MEMORY_LIMIT_MB well above {baseline_mb}, or unset it."
+            )
+        elif effective_mb - baseline_mb < _MIN_PARSE_HEADROOM_MB:
+            logger.warning(
+                f"Marker child memory limit {effective_mb} MiB leaves only {effective_mb - baseline_mb} MiB "
+                f"above this child's baseline of {baseline_mb} MiB; parses are likely to fail. "
+                f"Consider at least {baseline_mb + _MIN_PARSE_HEADROOM_MB} MiB."
+            )
+        else:
+            logger.info(f"Marker child memory limit set to {effective_mb} MiB (baseline {baseline_mb} MiB)")
     except (ImportError, ValueError, OSError, AttributeError) as exc:
         logger.warning(f"Could not apply Marker child memory limit ({memory_limit_mb} MiB): {exc}")
 
@@ -442,6 +490,16 @@ class MarkerPool:
             except (TimeoutError, asyncio.CancelledError, TaskCancelledError):
                 child_may_still_run = True
                 raise
+            except MemoryError:
+                # The parse ceiling (#997) is the one failure that leaves the child
+                # *alive*: it raises inside the child rather than killing it, and
+                # freeing the objects afterwards need not bring VmData back below
+                # the limit — one long-lived allocation near the top of the heap
+                # keeps it from shrinking. Returning this slot to the pool would
+                # hand the next, innocent chunk a child that fails for a reason
+                # that is not its own, so recycle it the way a timeout does.
+                child_may_still_run = True
+                raise
             finally:
                 if completed:
                     await self._queue.put(worker)
@@ -450,9 +508,12 @@ class MarkerPool:
                     self.logger.warning(f"MarkerWorker for {label} did not complete cleanly; recycling before reuse")
                     asyncio.create_task(self._recycle_and_release(worker, label))
                 else:
-                    # An ordinary exception (parse error, OOM) means the child
-                    # already stopped on its own; nothing to reclaim, and a
-                    # recycle would only cost a respawn of the slot's child.
+                    # An ordinary exception (a parse error, or an OOM the kernel
+                    # resolved by killing the child) means the child already
+                    # stopped on its own; nothing to reclaim, and a recycle would
+                    # only cost a respawn of the slot's child. The parse ceiling's
+                    # MemoryError is handled above precisely because it is the one
+                    # case where the child survives.
                     await self._queue.put(worker)
                     self.logger.debug(f"MarkerWorker returned to pool for {label} without recycling")
 
@@ -461,6 +522,9 @@ class MarkerPool:
             max_retries=self.config.loader.marker_max_task_retry,
             base_delay=self.config.loader.marker_retry_base_delay,
             task_description=f"MarkerPool PDF {label} ({file_path})",
+            # A chunk over the ceiling is over it again every time, so retrying
+            # costs ~4x the parse plus backoff and ends with the same error.
+            no_retry=(MemoryError,),
         )
 
     async def process_pdf(self, file_path: str):
