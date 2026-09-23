@@ -40,6 +40,7 @@ class _FakePartitionRepo:
         self.calls: list[tuple[str, tuple]] = []
         # What `pin_default_embedder` resolves the alias to; None = no default endpoint.
         self.default_embedder: str | None = "jina"
+        self.copying: set[str] = set()
 
     async def partition_exists(self, name: str) -> bool:
         return name in self._store
@@ -72,6 +73,9 @@ class _FakePartitionRepo:
     async def count_files_by_partition(self) -> dict[str, int]:
         return dict(self._counts)
 
+    async def copy_in_progress(self, name: str) -> bool:
+        return name in self.copying
+
     async def pin_default_embedder(self, name: str) -> str | None:
         """The SQL's effect: a partition on the alias takes `default_embedder`."""
         self.calls.append(("pin_default_embedder", (name,)))
@@ -90,8 +94,8 @@ class _FakeVectorStore:
     async def collection_exists(self, name: str) -> bool:
         return False
 
-    async def vector_dimension(self) -> int | None:
-        return self._dimension
+    async def vector_dimension(self, vector_field: str | None = None) -> int | None:
+        return self._dimension if vector_field else None
 
 
 def _settings(idx=None, ret=None, embedders=("default",)):
@@ -106,7 +110,9 @@ def _settings(idx=None, ret=None, embedders=("default",)):
     # A partition create always assigns embedder="default" (the alias
     # ModelEndpointService files the is_default row under), and that assignment
     # is validated — so the catalog has to hold it for the create to succeed.
-    s.models.embedder.update({n: ModelEndpointConfig(endpoint="http://emb:8000/v1") for n in embedders})
+    s.models.embedder.update(
+        {n: ModelEndpointConfig(endpoint="http://emb:8000/v1", vector_field=f"vector_{n}") for n in embedders}
+    )
     return s
 
 
@@ -485,6 +491,80 @@ async def test_update_partition_accepts_catalogued_embedder():
     assert settings.partitions["p1"].embedder == "bge-m3"
 
 
+# ------------------------------------------------------------------
+# embedder change on a partition with files
+# ------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_an_embedder_change_on_a_partition_with_files_is_refused():
+    """The files' vectors would stay in the old embedder's field, which searches stop reading."""
+    from core.utils.exceptions import ConflictError
+
+    repo = _FakePartitionRepo(rows=[_full_row("p1")])
+    repo._counts["p1"] = 3
+    svc = _make_service(repo, settings=_settings(embedders=("default", "bge-m3")))
+
+    with pytest.raises(ConflictError) as exc:
+        await svc.update_partition("p1", embedder="bge-m3")
+
+    assert exc.value.code == "PARTITION_HAS_INDEXED_FILES"
+    assert repo._store["p1"]["embedder"] == "default"
+
+
+@pytest.mark.asyncio
+async def test_an_embedder_change_waits_for_indexing_in_flight():
+    """An upload in flight has no file row yet but already writes with the old embedder."""
+    from core.utils.exceptions import ConflictError
+
+    async def two_active(*_args, **_kwargs):
+        return 2
+
+    repo = _FakePartitionRepo(rows=[_full_row("p1")])
+    svc = _make_service(repo, settings=_settings(embedders=("default", "bge-m3")))
+    svc._count_active_indexing_tasks = two_active
+
+    with pytest.raises(ConflictError) as exc:
+        await svc.update_partition("p1", embedder="bge-m3")
+
+    assert exc.value.code == "INDEXING_IN_PROGRESS"
+    assert repo._store["p1"]["embedder"] == "default"
+
+
+@pytest.mark.asyncio
+async def test_an_embedder_change_waits_for_a_copy_in_flight():
+    """A copy's file row is written last, after its vectors."""
+    from core.utils.exceptions import ConflictError
+
+    repo = _FakePartitionRepo(rows=[_full_row("p1")])
+    repo.copying.add("p1")
+    svc = _make_service(repo, settings=_settings(embedders=("default", "bge-m3")))
+
+    with pytest.raises(ConflictError, match="being copied") as exc:
+        await svc.update_partition("p1", embedder="bge-m3")
+
+    assert exc.value.code == "INDEXING_IN_PROGRESS"
+    assert repo._store["p1"]["embedder"] == "default"
+
+
+@pytest.mark.asyncio
+async def test_naming_the_endpoint_the_alias_resolves_to_is_not_a_change():
+    """Same vector field, so nothing is left behind."""
+    from core.config.model_endpoints import ModelEndpointConfig
+
+    settings = _settings(embedders=("bge-m3",))
+    settings.models.embedder["default"] = ModelEndpointConfig(
+        endpoint="http://emb:8000/v1", vector_field="vector_bge-m3"
+    )
+    repo = _FakePartitionRepo(rows=[_full_row("p1")])
+    repo._counts["p1"] = 3
+    svc = _make_service(repo, settings=settings)
+
+    await svc.update_partition("p1", embedder="bge-m3")
+
+    assert repo._store["p1"]["embedder"] == "bge-m3"
+
+
 @pytest.mark.asyncio
 async def test_update_partition_stale_stored_embedder_does_not_block_other_updates():
     # Unlike chat_llm a stale embedder has no runtime fallback, but a PATCH
@@ -646,7 +726,7 @@ async def test_detail_dimension_survives_a_vector_store_failure():
     turn a partition-config read into a 500."""
 
     class _BrokenStore(_FakeVectorStore):
-        async def vector_dimension(self) -> int | None:
+        async def vector_dimension(self, vector_field: str | None = None) -> int | None:
             raise RuntimeError("milvus unreachable")
 
     repo = _FakePartitionRepo(rows=[_full_row("p1")])
@@ -660,24 +740,25 @@ async def test_detail_dimension_survives_a_vector_store_failure():
 
 
 @pytest.mark.asyncio
-async def test_list_summaries_report_the_live_dimension_once():
-    """One collection serves every partition, so they share the answer — and
-    the lookup is made once for the whole list, not per row."""
-    calls = {"n": 0}
+async def test_list_summaries_report_the_live_dimension_once_per_embedder():
+    """Each embedder's field has its own width, looked up once per embedder."""
+    calls: list[str | None] = []
 
     class _CountingStore(_FakeVectorStore):
-        async def vector_dimension(self) -> int | None:
-            calls["n"] += 1
-            return 768
+        async def vector_dimension(self, vector_field: str | None = None) -> int | None:
+            calls.append(vector_field)
+            return {"vector_default": 768, "vector_bge": 1024}[vector_field]
 
-    repo = _FakePartitionRepo(rows=[_full_row("a"), _full_row("b"), _full_row("c")])
-    svc = _make_service(repo)
+    repo = _FakePartitionRepo(
+        rows=[_full_row("a"), _full_row("b"), {**_full_row("c"), "embedder": "bge"}],
+    )
+    svc = _make_service(repo, settings=_settings(embedders=("default", "bge")))
     svc._vector_store = _CountingStore()
 
     summaries = await svc.list_partition_summaries()
 
-    assert {s["dimension"] for s in summaries.values()} == {768}
-    assert calls["n"] == 1
+    assert [summaries[p]["dimension"] for p in ("a", "b", "c")] == [768, 768, 1024]
+    assert sorted(calls) == ["vector_bge", "vector_default"]
 
 
 # ------------------------------------------------------------------

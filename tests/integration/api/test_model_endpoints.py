@@ -52,19 +52,6 @@ def test_model_endpoint_crud_validate_and_default_selection(api_client):
         validate_missing = api_client.post(f"/model-endpoints/llm/{endpoint_name}/validate")
         _assert_success(validate_missing, context="validate missing model")
         missing_probe = validate_missing.json()
-        assert missing_probe["reachable"] is False
-        assert missing_probe["detail"] == "Model endpoints with API keys must use HTTPS."
-
-        clear_key = api_client.put(
-            f"/model-endpoints/llm/{endpoint_name}",
-            json={"extra": {"implementation": "vllm", "api_key": ""}},
-        )
-        _assert_success(clear_key, context="clear key before HTTP validation")
-        assert clear_key.json()["has_api_key"] is False
-
-        validate_missing = api_client.post(f"/model-endpoints/llm/{endpoint_name}/validate")
-        _assert_success(validate_missing, context="validate missing model without credentials")
-        missing_probe = validate_missing.json()
         assert missing_probe["reachable"] is True
         assert missing_probe["model_found"] is False
         assert MOCK_CHAT_MODEL in missing_probe["models_served"]

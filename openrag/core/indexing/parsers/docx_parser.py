@@ -69,7 +69,11 @@ class DocxParser(DocumentParser):
         return [DocumentType.DOCX.value]
 
     async def parse(self, document: Document) -> ProcessedDocument:
-        if not document.raw_bytes:
+        # ``source_path`` counts as content: ``DocParser`` converts a legacy
+        # .doc and hands the .docx over as a path rather than reading it into
+        # memory (#846). Gating on ``raw_bytes`` alone would make that document
+        # index as nothing, silently.
+        if not document.raw_bytes and not document.source_path:
             return ProcessedDocument(
                 document_id=document.id,
                 metadata=dict(document.metadata),
