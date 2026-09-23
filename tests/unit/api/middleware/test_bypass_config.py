@@ -641,3 +641,32 @@ async def test_unavailable_resolver_status_headers_and_log_are_relayed(monkeypat
     assert b"upstream gone" in response.body
     logged = [r for r in captured if r["msg"] == "Auth service unavailable"]
     assert [r["status"] for r in logged] == [502]
+
+
+@pytest.mark.asyncio
+async def test_unavailable_resolver_log_escapes_the_request_path(monkeypatch) -> None:
+    """The routed path is percent-decoded, so ``%0A`` reaches here as a real
+    newline. Logged raw, it would forge a second line in the text log format."""
+    from loguru import logger
+
+    monkeypatch.setenv("AUTH_MODE", "token")
+    monkeypatch.setenv("AUTH_TOKEN", "secret")
+
+    def unavailable(_request):
+        raise RuntimeError("container unavailable")
+
+    captured: list[dict] = []
+    handler_id = logger.add(
+        lambda m: captured.append(dict(m.record["extra"], msg=m.record["message"])), level="WARNING"
+    )
+    try:
+        middleware = AuthMiddleware(lambda scope, receive, send: None, get_auth_service=unavailable)
+        await middleware.dispatch(
+            _request(headers={"authorization": "Bearer token"}, path="/v1/x\nFORGED line"), _unused_call_next
+        )
+    finally:
+        logger.remove(handler_id)
+
+    [logged] = [r for r in captured if r["msg"] == "Auth service unavailable"]
+    assert "\n" not in logged["path"]
+    assert logged["path"] == "/v1/x\\nFORGED line"

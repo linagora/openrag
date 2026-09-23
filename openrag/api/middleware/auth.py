@@ -217,7 +217,9 @@ class AuthMiddleware(BaseHTTPMiddleware):
         flattened to 503, so a future resolver reporting something else — or
         attaching ``Retry-After`` — is not masked.
         """
-        path = request.scope["path"]
+        # The routed path is percent-decoded, so `%0A` arrives as a newline and
+        # would forge a line in the text log format.
+        path = AuthFailureRateLimiter._safe_log_value(request.scope["path"])
         try:
             return self._get_auth_service(request), None
         except HTTPException as exc:
