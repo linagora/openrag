@@ -114,3 +114,45 @@ In `values.yaml`, disable the bundled PostgreSQL chart, set `postgresProvisionin
 The migration Job (`templates/postgres-migration-job.yaml`) is a Helm hook, annotated with `helm.sh/hook: pre-install,pre-upgrade`. You never invoke it directly: Helm runs it automatically as part of each `helm install` and `helm upgrade`, before it creates or updates the OpenRAG Deployment, and waits for it to finish. It applies the Alembic migrations against the pre-created database (it migrates the schema but does not create the database). The OpenRAG API then starts against an already-migrated schema.
 
 When `postgresProvisioning.migrationJob` is disabled (the default), the Job is not rendered at all and the application runs migrations itself at startup instead.
+
+## GPU metrics
+
+The chart deploys no GPU exporter. GPU metrics come from the DCGM exporter that
+the NVIDIA GPU Operator — a prerequisite above — runs on every GPU node
+(`dcgmExporter.enabled`, on by default). What is left is getting Prometheus to
+scrape it and Grafana to show it.
+
+1. **Scrape the exporter.** With the Prometheus Operator (e.g.
+   kube-prometheus-stack), have the GPU Operator create its ServiceMonitor. That
+   is the default from GPU Operator v26.7.0; earlier releases ship it disabled:
+
+   ```bash
+   # Pin the version you already run: --reuse-values without --version also
+   # upgrades the GPU Operator to the latest chart.
+   helm upgrade gpu-operator nvidia/gpu-operator -n gpu-operator \
+     --version <installed version> --reuse-values \
+     --set dcgmExporter.serviceMonitor.enabled=true \
+     --set dcgmExporter.serviceMonitor.additionalLabels.release=kube-prometheus-stack
+   ```
+
+   The `release` label must be whatever your Prometheus `serviceMonitorSelector`
+   matches (kube-prometheus-stack selects its own release name). An unmatched
+   ServiceMonitor is created but never scraped. Without the Prometheus Operator,
+   the exporter's `nvidia-dcgm-exporter` Service (port 9400) carries the
+   `prometheus.io/scrape: "true"` annotation for annotation-based discovery.
+
+2. **Check it arrived.** `DCGM_FI_DEV_GPU_UTIL` should return series in
+   Prometheus. Expect one series per GPU — or, when the exporter runs with
+   `KUBERNETES_VIRTUAL_GPUS=true` for time-sliced or MPS-shared GPUs, one per pod
+   using each GPU. The dashboard counts each GPU once either way.
+
+3. **Import the dashboard.** The GPU panels of the Infrastructure Overview
+   dashboard (`infra/compose/grafana/dashboards/system-overview.json`) read the
+   DCGM exporter here and `nvidia_gpu_exporter` under Docker Compose — whichever
+   is scraped — so the same file serves both. Its panels use the datasource uid
+   `prometheus`, which is kube-prometheus-stack's default; with another uid,
+   change it in the JSON before importing.
+
+The GPU panels aggregate every GPU that Prometheus scrapes, not only the nodes
+running OpenRAG, and the host panels likewise need node-exporter
+(kube-prometheus-stack ships it) and aggregate every node.

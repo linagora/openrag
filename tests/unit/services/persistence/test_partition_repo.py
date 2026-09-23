@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+from collections import Counter
 from datetime import UTC, datetime
 
 import pytest
@@ -382,3 +384,52 @@ async def test_update_partition_embedder_check_resolves_the_default_alias():
 
     check = next(q for q, _ in conn.operations if "FROM model_endpoints" in q)
     assert "is_default" in check
+
+
+class _SlowLockConn:
+    """A copy-lock session that grants the lock, then holds back its reply until ``reply`` is set."""
+
+    def __init__(self) -> None:
+        self.held: Counter[str] = Counter()
+        self.granted = asyncio.Event()
+        self.reply = asyncio.Event()
+
+    def is_closed(self) -> bool:
+        return False
+
+    def add_termination_listener(self, callback) -> None:
+        pass
+
+    async def execute(self, query: str, _namespace: int, name: str) -> None:
+        if "unlock" in query:
+            self.held[name] -= 1
+            return
+        self.held[name] += 1
+        self.granted.set()
+        await self.reply.wait()
+
+
+@pytest.mark.asyncio
+async def test_a_copy_lock_granted_to_a_cancelled_copy_is_released():
+    from services.persistence.partition_repo import PgPartitionRepository
+
+    conn = _SlowLockConn()
+
+    async def connect():
+        return conn
+
+    repo = PgPartitionRepository(pool_getter=lambda: None, connect=connect)
+
+    async def copy() -> None:
+        async with repo.copy_lock("p1"):
+            pytest.fail("a copy cancelled while taking its lock must not run")
+
+    running = asyncio.create_task(copy())
+    await conn.granted.wait()
+    running.cancel()
+    conn.reply.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await running
+    # Left held, the lock would block the partition's embedder changes until the process exits.
+    assert conn.held["p1"] == 0

@@ -8,7 +8,7 @@ from core.indexing.topic_tags import TopicTagger
 from core.models.chunk import Chunk
 from core.models.document import Document, DocumentType, ImageBlock, ProcessedDocument, TextBlock
 from core.prompts.vlm_prompt_builder import wrap_caption
-from core.utils.exceptions import InferenceError
+from core.utils.exceptions import ConfigError, InferenceError
 from services.workers.pipeline_builder import build_indexing_pipeline
 from services.workers.stages import caption as caption_module
 
@@ -65,7 +65,9 @@ class FakeVectorStore:
         self.calls: list[tuple[list[Chunk], str]] = []
         self.ensure_calls: list[tuple[str, int]] = []
 
-    async def upsert(self, chunks: list[Chunk], collection: str = "default", *, indexed_at=None) -> int:
+    async def upsert(
+        self, chunks: list[Chunk], collection: str = "default", *, indexed_at=None, vector_field=None
+    ) -> int:
         self.calls.append((chunks, collection))
         return len(chunks)
 
@@ -149,6 +151,31 @@ async def test_pipeline_runs_required_stages_in_order_and_keeps_row_object():
     assert row["stored_count"] == 1
     assert row["chunks"][0].embedding == [1.0, 0.0]
     assert "token" not in row
+
+
+@pytest.mark.asyncio
+async def test_a_file_with_no_vector_field_to_index_into_fails_before_it_is_parsed():
+    document = Document(filename="note.txt", text="hello", partition="tenant-a")
+    processed = ProcessedDocument(document_id=document.id, text_blocks=[TextBlock(text="hello")])
+    parser = FakeParser(processed)
+    embedder = FakeEmbedder([[1.0, 0.0]])
+
+    def no_field(name: str) -> str | None:
+        raise ConfigError(f"Embedder '{name}' is not registered")
+
+    pipeline = build_indexing_pipeline(
+        parser=parser,
+        chunker=FakeChunker([Chunk(id="c1", text="hello", partition="tenant-a")]),
+        embedder=embedder,
+        vector_store=FakeVectorStore(),
+        vector_field_resolver=no_field,
+    )
+
+    with pytest.raises(ConfigError, match="'default' is not registered"):
+        await pipeline.run({"document": document, "partition": "tenant-a"})
+
+    assert parser.calls == []
+    assert embedder.calls == []
 
 
 @pytest.mark.asyncio
@@ -843,7 +870,9 @@ class RecordingVectorStore:
             raise self.query_error
         return list(self.existing_ids)
 
-    async def upsert(self, chunks: list[Chunk], collection: str = "default", *, indexed_at=None) -> int:
+    async def upsert(
+        self, chunks: list[Chunk], collection: str = "default", *, indexed_at=None, vector_field=None
+    ) -> int:
         self.events.append("upsert")
         return len(chunks)
 

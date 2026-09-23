@@ -106,7 +106,7 @@ class _FakeEndpointRepo:
         for key, row in list(self._store.items()):
             self._store[key] = row.model_copy(update={"is_default": key[0] == name and key[1] == model_type})
 
-    async def delete_and_promote_default(self, name: str, model_type: str) -> tuple[str, str | None]:
+    async def delete_and_promote_default(self, name: str, model_type: str) -> tuple[str, str | None, str | None]:
         names = sorted(k[0] for k in self._store if k[1] == model_type)
         self.calls.append(("delete_and_promote_default", (name, model_type)))
         if self.conflict_on_delete is not None:
@@ -114,18 +114,18 @@ class _FakeEndpointRepo:
 
             raise ConflictError(self.conflict_on_delete)
         if name not in names:
-            return ("not_found", None)
+            return ("not_found", None, None)
         if len(names) <= 1:
-            return ("last", None)
+            return ("last", None, None)
         was_default = self._store[(name, model_type)].is_default
-        self._store.pop((name, model_type), None)
+        deleted = self._store.pop((name, model_type))
         promoted = None
         if was_default:
             promoted = next(n for n in names if n != name)
             for key, row in list(self._store.items()):
                 if key[1] == model_type:
                     self._store[key] = row.model_copy(update={"is_default": key[0] == promoted})
-        return ("ok", promoted)
+        return ("ok", promoted, deleted.vector_field)
 
 
 def _make_service(
@@ -135,6 +135,7 @@ def _make_service(
     partition_service=None,
     preset_service=None,
     prompt_service=None,
+    vector_store=None,
 ):
     from core.config.root import Settings
     from services.orchestrators.model_endpoint_service import ModelEndpointService
@@ -145,6 +146,7 @@ def _make_service(
         partition_service=partition_service,
         preset_service=preset_service,
         prompt_service=prompt_service,
+        vector_store=vector_store,
     )
 
 
@@ -2418,7 +2420,8 @@ async def test_validate_non_stt_endpoint_keeps_auth_gated_model_list_reachable(m
 
 
 @pytest.mark.asyncio
-async def test_validate_endpoint_sends_api_key(monkeypatch):
+@pytest.mark.parametrize("scheme", ["http", "https"])
+async def test_validate_endpoint_sends_api_key(monkeypatch, scheme):
     import httpx
 
     svc = _make_service()
@@ -2446,32 +2449,11 @@ async def test_validate_endpoint_sends_api_key(monkeypatch):
 
     monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
 
-    await svc.validate_endpoint("https://llm:8000/v1", "mistral-small", api_key="secret-token")
+    result = await svc.validate_endpoint(f"{scheme}://llm:8000/v1", "mistral-small", api_key="secret-token")
 
     assert captured_headers == [{"Authorization": "Bearer secret-token"}]
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("model_type", [None, "stt"])
-async def test_validate_endpoint_rejects_api_key_over_http_without_request(monkeypatch, model_type):
-    import httpx
-
-    svc = _make_service()
-
-    def fail_client(**_kwargs):
-        raise AssertionError("HTTP client should not be created for credential-bearing HTTP URLs")
-
-    monkeypatch.setattr(httpx, "AsyncClient", fail_client)
-
-    result = await svc.validate_endpoint(
-        "http://model:8000/v1",
-        "model",
-        api_key="secret-token",
-        model_type=model_type,
-    )
-
-    assert result["reachable"] is False
-    assert result["detail"] == "Model endpoints with API keys must use HTTPS."
+    assert result["reachable"] is True
+    assert result["model_found"] is True
 
 
 @pytest.mark.asyncio
@@ -2651,3 +2633,78 @@ async def test_delete_model_endpoint_propagates_conflict_without_touching_caches
 
     assert exc.value.status_code == 409
     assert partition_service.load_partitions_calls == 0
+
+
+# ── dropping a deleted embedder's vector field ──────────────
+
+
+def _embedders_with_fields():
+    return [
+        _make_row(name="jina", is_default=True, vector_field="vector_jina"),
+        _make_row(name="e5", is_default=False, vector_field="vector_e5"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_deleting_an_embedder_drops_its_vector_field(mock_vector_store):
+    mock_vector_store.vector_fields = {"vector_jina": 1024, "vector_e5": 768}
+    svc = _make_service(_FakeEndpointRepo(rows=_embedders_with_fields()), vector_store=mock_vector_store)
+
+    await svc.delete_model_endpoint("e5", "embedder")
+
+    assert mock_vector_store.vector_fields == {"vector_jina": 1024}
+
+
+@pytest.mark.asyncio
+async def test_a_refused_embedder_delete_keeps_its_vector_field(mock_vector_store):
+    from core.utils.exceptions import ConflictError, NotFoundError, ValidationError
+
+    mock_vector_store.vector_fields = {"vector_jina": 1024, "vector_e5": 768}
+    repo = _FakeEndpointRepo(rows=_embedders_with_fields())
+    svc = _make_service(repo, vector_store=mock_vector_store)
+
+    with pytest.raises(NotFoundError):
+        await svc.delete_model_endpoint("ghost", "embedder")
+    repo.conflict_on_delete = "Embedder 'e5' is still in use: 3 partition(s) name it."
+    with pytest.raises(ConflictError):
+        await svc.delete_model_endpoint("e5", "embedder")
+    repo.conflict_on_delete = None
+    await svc.delete_model_endpoint("e5", "embedder")
+    with pytest.raises(ValidationError, match="last"):
+        await svc.delete_model_endpoint("jina", "embedder")
+
+    assert mock_vector_store.vector_fields == {"vector_jina": 1024}
+
+
+@pytest.mark.asyncio
+async def test_the_dropped_field_is_the_one_the_locked_delete_removed(mock_vector_store):
+    # 'e5' was renamed and a new 'e5' created after a read done before the
+    # delete's lock: dropping what that read saw would drop a live field.
+    mock_vector_store.vector_fields = {"vector_jina": 1024, "vector_e5": 768, "vector_e5_2": 768}
+    repo = _FakeEndpointRepo(
+        rows=[
+            _make_row(name="jina", is_default=True, vector_field="vector_jina"),
+            _make_row(name="e5-renamed", is_default=False, vector_field="vector_e5"),
+            _make_row(name="e5", is_default=False, vector_field="vector_e5_2"),
+        ]
+    )
+    repo.get = AsyncMock(return_value=_make_row(name="e5", is_default=False, vector_field="vector_e5"))
+    svc = _make_service(repo, vector_store=mock_vector_store)
+
+    await svc.delete_model_endpoint("e5", "embedder")
+
+    assert mock_vector_store.vector_fields == {"vector_jina": 1024, "vector_e5": 768}
+
+
+@pytest.mark.asyncio
+async def test_a_failed_field_drop_does_not_fail_the_committed_delete():
+    store = SimpleNamespace(drop_vector_field=AsyncMock(side_effect=RuntimeError("milvus down")))
+    repo = _FakeEndpointRepo(rows=_embedders_with_fields())
+    partition_service = _FakePartitionServiceForReload()
+    svc = _make_service(repo, partition_service=partition_service, vector_store=store)
+
+    await svc.delete_model_endpoint("e5", "embedder")
+
+    store.drop_vector_field.assert_awaited_once_with("vector_e5")
+    assert ("e5", "embedder") not in repo._store
+    assert partition_service.load_partitions_calls == 1
