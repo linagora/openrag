@@ -71,20 +71,21 @@ class JobService:
     async def get_queue_info(self) -> dict:
         status_counts = await self._durable_status_counts()
         if not status_counts:
-            all_states: dict = await self._call(lambda: self._tsm.get_all_states.remote(), "get_all_states")
+            all_states: dict[str, str | None] = await self._call(
+                lambda: self._tsm.get_all_states.remote(), "get_all_states"
+            )
             status_counts = Counter(all_states.values())
         else:
             all_states = await self._call(lambda: self._tsm.get_all_states.remote(), "get_all_states")
-            durable_actor_info = await self._durable_task_info_for_ids(all_states)
-            if durable_actor_info is None:
+            durable_actor_states = await self._durable_task_states_for_ids(all_states)
+            if durable_actor_states is None:
                 status_counts = Counter(all_states.values())
             else:
                 for task_id, actor_state in all_states.items():
-                    durable_info = durable_actor_info.get(task_id)
-                    if durable_info is None:
+                    durable_state = durable_actor_states.get(task_id)
+                    if durable_state is None:
                         status_counts[actor_state] += 1
                         continue
-                    durable_state = durable_info["state"]
                     effective_state = reconcile_task_state(actor_state, durable_state)
                     if effective_state != durable_state:
                         status_counts[durable_state] -= 1
@@ -268,6 +269,16 @@ class JobService:
             logger.warning("Failed to read durable jobs for live task IDs", error=str(exc))
             return None
         return {job.id: _job_to_info(job) for job in jobs}
+
+    async def _durable_task_states_for_ids(self, actor_states: dict[str, str | None]) -> dict[str, str] | None:
+        if self._job_repo is None or not actor_states:
+            return {}
+        try:
+            jobs = await self._job_repo.get_jobs(list(actor_states))
+        except Exception as exc:
+            logger.warning("Failed to read durable job states for live task IDs", error=str(exc))
+            return None
+        return {job.id: job.status.value for job in jobs}
 
     async def _durable_status_counts(self) -> Counter[str] | None:
         if self._job_repo is None:
