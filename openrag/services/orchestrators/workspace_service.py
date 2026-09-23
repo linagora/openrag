@@ -24,6 +24,7 @@ import asyncio
 from typing import TYPE_CHECKING
 
 from core.models.workspace import WorkspaceScope
+from core.utils.exceptions import AmbiguousWorkspaceError
 from core.utils.logging import get_logger
 
 if TYPE_CHECKING:
@@ -54,8 +55,8 @@ class WorkspaceService:
     # CRUD / lookups (thin repo delegations)
     # ------------------------------------------------------------------
 
-    async def get_workspace(self, workspace_id: str) -> dict | None:
-        return await self._workspace_repo.get_workspace_dict(workspace_id)
+    async def get_workspace(self, partition: str, workspace_id: str) -> dict | None:
+        return await self._workspace_repo.get_workspace_dict(partition, workspace_id)
 
     async def list_workspaces(self, partition: str) -> list[dict]:
         return await self._workspace_repo.list_workspaces_dict(partition)
@@ -85,15 +86,15 @@ class WorkspaceService:
     async def get_existing_file_ids_any_partition(self, file_ids: list[str]) -> list[str]:
         return list(await self._workspace_repo.get_existing_file_ids_any_partition(file_ids))
 
-    async def add_files(self, workspace_id: str, file_ids: list[str]) -> list[str]:
+    async def add_files(self, partition: str, workspace_id: str, file_ids: list[str]) -> list[str]:
         """Associate files; returns any file_ids that were not found."""
-        return await self._workspace_repo.add_files_to_workspace(workspace_id, file_ids)
+        return await self._workspace_repo.add_files_to_workspace(partition, workspace_id, file_ids)
 
-    async def remove_file(self, workspace_id: str, file_id: str) -> bool:
-        return await self._workspace_repo.remove_file_from_workspace(workspace_id, file_id)
+    async def remove_file(self, partition: str, workspace_id: str, file_id: str) -> bool:
+        return await self._workspace_repo.remove_file_from_workspace(partition, workspace_id, file_id)
 
-    async def list_files(self, workspace_id: str) -> list[str]:
-        return await self._workspace_repo.list_workspace_files(workspace_id)
+    async def list_files(self, partition: str, workspace_id: str) -> list[str]:
+        return await self._workspace_repo.list_workspace_files(partition, workspace_id)
 
     async def get_file_workspaces(self, file_id: str, partition: str) -> list[str]:
         return await self._workspace_repo.get_file_workspaces(file_id, partition)
@@ -106,25 +107,33 @@ class WorkspaceService:
     async def resolve_scope(self, workspace_id: str, allowed_partitions: list[str]) -> WorkspaceScope | None:
         """Resolve ``workspace_id`` to its owning partition and file allowlist.
 
-        Returns ``None`` when the workspace does not exist *or* exists in a
-        partition outside ``allowed_partitions`` — the two cases are
+        Returns ``None`` when the workspace does not exist *or* exists only in
+        partitions outside ``allowed_partitions`` — the two cases are
         intentionally indistinguishable to the caller so a workspace living
         in another tenant's partition is never revealed to exist. ``"all"``
         in ``allowed_partitions`` (the ``openrag-all`` / multi-partition
         sentinel) accepts a workspace from any partition, matching how
         partition access is resolved elsewhere.
 
+        ``workspace_id`` is only unique per partition. The lookup is
+        restricted to the partitions the caller may search, so a same-named
+        workspace elsewhere never gets in the way; if several of *those*
+        partitions own one, the request cannot be scoped and
+        :class:`AmbiguousWorkspaceError` asks the caller to name a single
+        partition rather than silently picking one.
+
         The returned ``file_ids`` may be empty — a workspace with no files
         yet is valid and must scope the search to zero results, not fall
         back to the full partition.
         """
-        ws = await self._workspace_repo.get_workspace_dict(workspace_id)
-        if not ws:
+        partitions = None if "all" in allowed_partitions else list(allowed_partitions)
+        matches = await self._workspace_repo.find_workspaces(workspace_id, partitions)
+        if not matches:
             return None
-        partition = ws["partition_name"]
-        if "all" not in allowed_partitions and partition not in allowed_partitions:
-            return None
-        file_ids = await self._workspace_repo.list_workspace_files(workspace_id)
+        if len(matches) > 1:
+            raise AmbiguousWorkspaceError(workspace_id, sorted(ws.partition for ws in matches))
+        partition = matches[0].partition
+        file_ids = await self._workspace_repo.list_workspace_files(partition, workspace_id)
         return WorkspaceScope(workspace_id=workspace_id, partition=partition, file_ids=file_ids)
 
     # ------------------------------------------------------------------
@@ -147,7 +156,7 @@ class WorkspaceService:
         files stay indexed in the partition and are reported under
         ``kept_files``.
         """
-        orphaned = await self._workspace_repo.delete_workspace(workspace_id, keep_files=keep_files)
+        orphaned = await self._workspace_repo.delete_workspace(partition, workspace_id, keep_files=keep_files)
 
         deleted_count = 0
         failed_file_ids: list[str] = []
