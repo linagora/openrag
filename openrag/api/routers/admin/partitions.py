@@ -320,7 +320,7 @@ async def create_partition(
 **Body:**
 Accepts partition config fields such as:
 - `description`
-- `embedder` (must name a registered embedder endpoint — 422 otherwise; `default` resolves to the endpoint marked default)
+- `embedder` (must name a registered embedder endpoint — 422 otherwise; `default` resolves to the endpoint marked default). Each embedder stores its vectors in its own field, so a partition that holds indexed files cannot change embedder: 409 `PARTITION_HAS_INDEXED_FILES`, or 409 `INDEXING_IN_PROGRESS` while its first files are still being indexed or copied in
 - `indexation_preset`
 - `retrieval_preset`
 - `chat_history_depth`

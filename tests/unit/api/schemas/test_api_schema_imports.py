@@ -146,6 +146,16 @@ def test_contextualization_bypass_accepts_traced_required_retrieval():
     assert request.metadata["bypass_query_contextualization"] is True
 
 
+def test_original_query_comparison_requires_trace_even_without_bypass():
+    with pytest.raises(ValidationError, match="compare_original_query requires include_retrieval_trace"):
+        OpenAIChatCompletionRequest.model_validate(
+            {
+                "messages": [{"role": "user", "content": "question"}],
+                "metadata": {"compare_original_query": True},
+            }
+        )
+
+
 @pytest.mark.parametrize(
     "metadata",
     [
@@ -165,7 +175,7 @@ def test_contextualization_bypass_accepts_traced_required_retrieval():
             "require_retrieval": True,
         },
         {
-            "retrieval_top_k": 101,
+            "retrieval_top_k": 1001,
             "include_retrieval_trace": True,
             "require_retrieval": True,
         },
@@ -189,7 +199,7 @@ def test_retrieval_diagnostic_overrides_accept_bounded_traced_required_retrieval
                 "include_retrieval_trace": True,
                 "require_retrieval": True,
                 "retrieval_similarity_threshold": 0.35,
-                "retrieval_top_k": 100,
+                "retrieval_top_k": 1000,
                 "retrieval_disable_reranker": True,
                 "retrieval_disable_expansion": True,
             },
@@ -197,7 +207,33 @@ def test_retrieval_diagnostic_overrides_accept_bounded_traced_required_retrieval
     )
 
     assert request.metadata["retrieval_similarity_threshold"] == 0.35
-    assert request.metadata["retrieval_top_k"] == 100
+    assert request.metadata["retrieval_top_k"] == 1000
+
+
+def test_inactive_retrieval_diagnostic_defaults_do_not_require_trace_or_force_retrieval():
+    request = OpenAIChatCompletionRequest.model_validate(
+        {
+            "messages": [{"role": "user", "content": "question"}],
+            "metadata": {
+                "retrieval_similarity_threshold": None,
+                "retrieval_top_k": None,
+                "retrieval_disable_reranker": False,
+                "retrieval_disable_expansion": None,
+            },
+        }
+    )
+
+    assert request.metadata["retrieval_disable_reranker"] is False
+
+
+def test_retrieval_diagnostic_values_are_validated_before_trace_requirements():
+    with pytest.raises(ValidationError, match="retrieval_top_k must be an integer"):
+        OpenAIChatCompletionRequest.model_validate(
+            {
+                "messages": [{"role": "user", "content": "question"}],
+                "metadata": {"retrieval_top_k": "many"},
+            }
+        )
 
 
 @pytest.mark.parametrize("model", [OpenAIChatCompletionRequest, OpenAICompletionRequest])

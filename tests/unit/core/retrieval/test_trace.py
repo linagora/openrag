@@ -11,6 +11,7 @@ from core.models.chunk import Chunk
 from core.models.retrieval_result import ScoredChunk
 from core.models.retrieval_trace import (
     ContextualizationTrace,
+    ContextualizedSubqueryTrace,
     TraceCandidate,
     TraceError,
     TraceStage,
@@ -23,6 +24,7 @@ from core.retrieval.trace import (
     RetrievalTraceBuilder,
     candidates_from_chunks,
     canonical_fingerprint,
+    merge_child_traces,
     safe_public_value,
 )
 from pydantic import ValidationError
@@ -133,6 +135,66 @@ def test_contextualization_bypass_is_preserved_by_safe_serialization():
 
 
 @pytest.mark.parametrize(
+    ("query", "secret"),
+    [
+        ("Authorization: Bearer bearer-secret", "bearer-secret"),
+        ("Authorization: Basic basic-secret", "basic-secret"),
+        ("Use Bearer bare-secret for the request", "bare-secret"),
+        ('Find token="quoted-secret" in the policy', "quoted-secret"),
+        ('Find token="multiline-secret\ncontinued-secret" in the policy', "multiline-secret"),
+        ("Find api_key='quoted-key' in the policy", "quoted-key"),
+    ],
+)
+def test_trace_query_fields_scrub_embedded_credentials(query, secret):
+    builder = RetrievalTraceBuilder("request", query)
+    builder.contextualization = ContextualizationTrace(
+        original_query=query,
+        subqueries=[ContextualizedSubqueryTrace(query=query)],
+    )
+    child = RetrievalTraceBuilder("child", query)
+    builder.record_query_trace(child)
+
+    trace = builder.finish(configuration_fingerprint="fingerprint")
+
+    serialized = json.dumps(trace)
+    assert secret not in serialized
+    assert trace["original_query"] != query
+    assert trace["contextualization"]["original_query"] != query
+    assert trace["contextualization"]["subqueries"][0]["query"] != query
+    assert trace["query_traces"][0]["query"] != query
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "What is the basic idea of RAG?",
+        "Explain basic authentication",
+        "How do I reset my password: step by step?",
+        "What does the token: limit mean for the API?",
+        "Bearer bonds vs stocks",
+    ],
+)
+def test_trace_preserves_natural_language_that_mentions_authentication(query):
+    trace = RetrievalTraceBuilder("request", query).finish(configuration_fingerprint="fingerprint")
+
+    assert trace["original_query"] == query
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "What is basic authentication?",
+        "Explain basic concepts.",
+        "What does token: limit mean?",
+    ],
+)
+def test_trace_preserves_sentence_punctuation_after_non_credentials(query):
+    trace = RetrievalTraceBuilder("request", query).finish(configuration_fingerprint="fingerprint")
+
+    assert trace["original_query"] == query
+
+
+@pytest.mark.parametrize(
     "values",
     [
         {"prompt": {"content_hash": "hash", "query": "private prompt"}},
@@ -183,6 +245,80 @@ def test_trace_error_messages_are_replaced_with_safe_metadata():
 
 def test_safe_public_value_omits_internal_endpoint_urls():
     assert safe_public_value({"endpoint": "https://internal-llm.example.test/v1"}) == {}
+
+
+def test_safe_public_value_is_deny_by_default_at_every_trace_boundary():
+    value = safe_public_value(
+        {
+            "chunk_text": "private root text",
+            "embedding": [0.1, 0.2],
+            "stages": [
+                {
+                    "name": "dense_after_threshold",
+                    "status": "complete",
+                    "text": "private stage text",
+                    "embedding": [0.3, 0.4],
+                    "candidates": [
+                        {
+                            "id": "chunk-1",
+                            "rank": 1,
+                            "text": "private candidate text",
+                            "content": "private candidate content",
+                            "metadata": {"source": "private source"},
+                            "scores": {"dense": 0.9, "snippet": "private score text"},
+                        }
+                    ],
+                }
+            ],
+            "comparisons": {
+                "original_query": {
+                    "status": "complete",
+                    "unexpected": {"original_query": "private unknown context"},
+                    "errors": [{"stage": "search", "message": "10.0.0.5:19530 failed"}],
+                }
+            },
+        }
+    )
+
+    assert value == {
+        "stages": [
+            {
+                "name": "dense_after_threshold",
+                "status": "complete",
+                "candidates": [{"id": "chunk-1", "rank": 1, "scores": {"dense": 0.9}}],
+            }
+        ],
+        "comparisons": {
+            "original_query": {
+                "status": "complete",
+                "errors": [{"stage": "search", "message": "redacted"}],
+            }
+        },
+    }
+
+
+@pytest.mark.parametrize("non_finite", [float("nan"), float("inf"), float("-inf")])
+def test_safe_public_value_omits_non_finite_scores(non_finite):
+    value = safe_public_value(
+        {
+            "stages": [
+                {
+                    "name": "post_rerank",
+                    "status": "complete",
+                    "candidates": [
+                        {
+                            "id": "chunk",
+                            "rank": 1,
+                            "scores": {"reranker": non_finite, "dense": 0.5},
+                        }
+                    ],
+                }
+            ]
+        }
+    )
+
+    assert value["stages"][0]["candidates"][0]["scores"] == {"dense": 0.5}
+    json.dumps(value, allow_nan=False)
 
 
 def test_canonical_fingerprint_is_order_independent():
@@ -279,3 +415,65 @@ def test_trace_stage_caps_serialized_candidates_but_keeps_true_count():
     assert final_stage["candidate_count"] == 201
     assert len(final_stage["candidates"]) == 200
     assert final_stage["candidates"][-1]["id"] == "chunk-199"
+
+
+def test_query_traces_preserve_each_subquery_after_parent_candidate_cap():
+    parent = RetrievalTraceBuilder("request", "question")
+    for query_index in range(2):
+        child = RetrievalTraceBuilder(f"child-{query_index}", f"query-{query_index}")
+        child.record_stage(
+            "dense_after_threshold",
+            status="complete",
+            candidates=[
+                TraceCandidate(id=f"query-{query_index}-chunk-{candidate_index}", rank=candidate_index + 1)
+                for candidate_index in range(150)
+            ],
+        )
+        parent.record_query_trace(child)
+
+    trace = parent.finish(configuration_fingerprint="fingerprint")
+
+    assert [query_trace["query"] for query_trace in trace["query_traces"]] == ["query-0", "query-1"]
+    assert [
+        len(next(stage for stage in query_trace["stages"] if stage["name"] == "dense_after_threshold")["candidates"])
+        for query_trace in trace["query_traces"]
+    ] == [150, 150]
+    candidate = next(stage for stage in trace["query_traces"][0]["stages"] if stage["name"] == "dense_after_threshold")[
+        "candidates"
+    ][0]
+    assert set(candidate) == {
+        "id",
+        "document_id",
+        "rank",
+        "scores",
+        "duplicate_of",
+        "removal_reason",
+    }
+
+
+def test_merge_child_traces_preserves_partition_and_nested_query_stages():
+    request = RetrievalTraceBuilder("request", "follow-up question")
+    partition = RetrievalTraceBuilder("partition", None, partition="legal")
+    effective_query = RetrievalTraceBuilder("effective", "contextualized question")
+    generated_query = RetrievalTraceBuilder("generated", "generated variant")
+    generated_query.record_stage(
+        "dense_after_threshold",
+        status="complete",
+        candidates=[TraceCandidate(id="gold", rank=1)],
+    )
+    effective_query.record_query_trace(generated_query)
+    partition.record_query_trace(effective_query)
+
+    merge_child_traces(request, [partition])
+    trace = request.finish(configuration_fingerprint="fingerprint")
+
+    partition_trace = trace["query_traces"][0]
+    assert partition_trace["partition"] == "legal"
+    assert partition_trace["query"] is None
+    effective_trace = partition_trace["query_traces"][0]
+    assert effective_trace["query"] == "contextualized question"
+    generated_trace = effective_trace["query_traces"][0]
+    assert generated_trace["query"] == "generated variant"
+    dense = next(stage for stage in generated_trace["stages"] if stage["name"] == "dense_after_threshold")
+    assert dense["candidates"][0]["id"] == "gold"
+    assert request.stages["dense_after_threshold"].status == "unavailable"

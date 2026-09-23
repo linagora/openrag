@@ -40,6 +40,7 @@ import { listPartitions } from "@/lib/api/partitions";
 import { listModelEndpoints, resolveEmbedderName, resolveEmbedderModel } from "@/lib/api/models";
 import { usePermissions } from "@/lib/permissions";
 import { downloadCsv } from "@/lib/csv";
+import { EmbedderDriftDialog } from "./embedder-drift-dialog";
 import { resolveDocumentsPartition } from "./partition-selection";
 
 const fileHref = (partition: string, fileId: string) =>
@@ -457,6 +458,13 @@ export default function DocumentListPage() {
 
   return (
     <div>
+      {selected && filesQuery.data && currentModel && (
+        <EmbedderDriftDialog
+          partition={selected}
+          currentModel={currentModel}
+          drifted={indexedEmbedders.filter((e) => e.drifted)}
+        />
+      )}
       <PageHeader
         title="Documents"
         description="Files indexed in a partition"

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
+import re
 from collections.abc import Mapping, Sequence
 from datetime import date, datetime
 from enum import Enum
@@ -14,6 +16,7 @@ from core.models.retrieval_result import ScoredChunk
 from core.models.retrieval_trace import (
     REDACTED_ERROR_MESSAGE,
     ContextualizationTrace,
+    QueryRetrievalTrace,
     TraceCandidate,
     TraceError,
     TraceStage,
@@ -29,6 +32,8 @@ TRACE_STAGE_NAMES = (
     "dense_after_threshold",
     "sparse",
     "hybrid_fused",
+    "multi_query_fused",
+    "partition_fused",
     "pre_rerank",
     "post_rerank",
     "final",
@@ -55,6 +60,7 @@ _ROOT_PUBLIC_KEYS = frozenset(
         "stages",
         "timings",
         "comparisons",
+        "query_traces",
         "errors",
         "configuration_fingerprint",
         "name",
@@ -136,6 +142,7 @@ _PUBLIC_KEYS_BY_CONTEXT = {
     ).union(TRACE_STAGE_NAMES),
     "comparisons": frozenset({"original_query"}),
     "comparison": frozenset({"status", "stages", "timings", "errors", "configuration_fingerprint"}),
+    "query_trace": frozenset({"query", "partition", "stages", "timings", "errors", "query_traces"}),
     "empty": frozenset(),
 }
 _CHILD_CONTEXTS = {
@@ -151,8 +158,62 @@ _CHILD_CONTEXTS = {
     "error": "trace_error",
     "timings": "timings",
     "comparisons": "comparisons",
+    "query_traces": "query_trace",
 }
 _OMITTED = object()
+_REDACTED_CREDENTIAL = "[redacted]"
+_AUTH_SCHEME_CREDENTIAL = re.compile(
+    r"\b(?P<scheme>bearer|basic)(?P<spacing>\s+)(?P<credential>[^\s,;]+)",
+    re.IGNORECASE,
+)
+_QUOTED_NAMED_CREDENTIAL = re.compile(
+    r"(?P<prefix>[\"']?(?:api[_-]?key|access[_-]?token|refresh[_-]?token|id[_-]?token|token|credential|secret|password)[\"']?\s*[:=]\s*)"
+    r"(?P<quote>[\"'])(?P<credential>.*?)(?P=quote)",
+    re.IGNORECASE | re.DOTALL,
+)
+_UNQUOTED_NAMED_CREDENTIAL = re.compile(
+    r"(?P<prefix>\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|id[_-]?token|token|credential|secret|password)\b\s*[:=]\s*)"
+    r"(?![\"'])(?P<credential>[^\s,;]+)",
+    re.IGNORECASE,
+)
+_JWT_CREDENTIAL = re.compile(r"[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+")
+
+
+def _looks_like_credential(value: str) -> bool:
+    candidate = value.strip()
+    if candidate.lower().startswith("or-") or _JWT_CREDENTIAL.fullmatch(candidate):
+        return True
+    without_sentence_punctuation = candidate.rstrip(".?!")
+    if without_sentence_punctuation.isalpha():
+        candidate = without_sentence_punctuation
+    if len(candidate) >= 8 and any(not character.isalpha() for character in candidate):
+        return True
+    return len(candidate) >= 20 and candidate.isalnum()
+
+
+def _scrub_query_credentials(value: str) -> str:
+    """Redact credential-shaped values embedded in public query telemetry."""
+
+    value = _QUOTED_NAMED_CREDENTIAL.sub(
+        lambda match: f"{match.group('prefix')}{match.group('quote')}{_REDACTED_CREDENTIAL}{match.group('quote')}",
+        value,
+    )
+    value = _UNQUOTED_NAMED_CREDENTIAL.sub(
+        lambda match: (
+            f"{match.group('prefix')}{_REDACTED_CREDENTIAL}"
+            if _looks_like_credential(match.group("credential"))
+            else match.group(0)
+        ),
+        value,
+    )
+    return _AUTH_SCHEME_CREDENTIAL.sub(
+        lambda match: (
+            f"{match.group('scheme')}{match.group('spacing')}{_REDACTED_CREDENTIAL}"
+            if _looks_like_credential(match.group("credential"))
+            else match.group(0)
+        ),
+        value,
+    )
 
 
 def _child_context(context: str, key: str) -> str:
@@ -192,9 +253,13 @@ def _safe_public_value(value: object, *, context: str = "root", key: str | None 
         return _safe_public_value(value.value, context=context, key=key)
     if isinstance(value, (datetime, date)):
         return value.isoformat()
+    if isinstance(value, float) and not math.isfinite(value):
+        return _OMITTED
     if value is None or isinstance(value, (bool, int, float, str)):
         if key in {"error", "message"} and isinstance(value, str):
             return REDACTED_ERROR_MESSAGE
+        if key in {"original_query", "query"} and isinstance(value, str):
+            return _scrub_query_credentials(value)
         return value
     return _OMITTED
 
@@ -234,16 +299,41 @@ def candidates_from_chunks(chunks: Sequence[Chunk]) -> list[TraceCandidate]:
     return candidates
 
 
+def merge_child_traces(parent: RetrievalTraceBuilder, children: Sequence[RetrievalTraceBuilder]) -> None:
+    """Attach fan-out traces and mark aggregate stages as unavailable."""
+
+    def observed_stage_names(child: RetrievalTraceBuilder | QueryRetrievalTrace) -> set[str]:
+        observed = (
+            {stage.name for stage in child.stages.values() if stage.status != "not_run"}
+            if isinstance(child, RetrievalTraceBuilder)
+            else {stage.name for stage in child.stages if stage.status != "not_run"}
+        )
+        for nested in child.query_traces:
+            observed.update(observed_stage_names(nested))
+        return observed
+
+    observed_stages: set[str] = set()
+    for child in children:
+        observed_stages.update(observed_stage_names(child))
+        parent.record_query_trace(child)
+
+    for stage_name in observed_stages:
+        if parent.stages[stage_name].status == "not_run":
+            parent.record_stage(stage_name, status="unavailable", candidates=[])
+
+
 class RetrievalTraceBuilder:
     """Collect a retrieval trace without changing retrieval return values."""
 
-    def __init__(self, request_id: str, original_query: str) -> None:
+    def __init__(self, request_id: str, original_query: str | None, *, partition: str | None = None) -> None:
         self.request_id = request_id
         self.original_query = original_query
+        self.partition = partition
         self.stages = {name: TraceStage(name=name, status="not_run") for name in TRACE_STAGE_NAMES}
         self.contextualization: ContextualizationTrace | None = None
         self.timings: dict[str, float] = {}
         self.comparisons: dict[str, Mapping[str, object]] = {}
+        self.query_traces: list[QueryRetrievalTrace] = []
         self.errors: list[TraceError] = []
 
     def record_stage(
@@ -269,6 +359,19 @@ class RetrievalTraceBuilder:
         kind = type(error).__name__ if isinstance(error, Exception) else "Error"
         self.errors.append(TraceError(stage=stage, message=REDACTED_ERROR_MESSAGE, kind=kind))
 
+    def record_query_trace(self, child: RetrievalTraceBuilder) -> None:
+        """Attach one isolated child trace while preserving caller order."""
+        self.query_traces.append(
+            QueryRetrievalTrace(
+                query=child.original_query,
+                partition=child.partition,
+                stages=list(child.stages.values()),
+                timings=dict(child.timings),
+                errors=list(child.errors),
+                query_traces=list(child.query_traces),
+            )
+        )
+
     def finish(self, *, configuration_fingerprint: str) -> dict[str, object]:
         trace: dict[str, Any] = {
             "schema_version": TRACE_SCHEMA_VERSION,
@@ -281,4 +384,6 @@ class RetrievalTraceBuilder:
             "errors": self.errors,
             "configuration_fingerprint": configuration_fingerprint,
         }
+        if self.query_traces:
+            trace["query_traces"] = self.query_traces
         return safe_public_value(trace)  # type: ignore[return-value]

@@ -40,6 +40,7 @@ pytestmark = [pytest.mark.integration, pytest.mark.asyncio(loop_scope="session")
 
 _DIM = 4
 _QUERY_VEC = [1.0, 0.0, 0.0, 0.0]
+_FIELD = "vector_itest"
 
 
 class _FixedEmbedder(Embedder):
@@ -86,7 +87,7 @@ async def milvus_store(_live_milvus: None, milvus_host_port: tuple[str, int]) ->
     collection = f"itest_ws706_{uuid.uuid4().hex[:12]}"
     config = VectorDBConfig(host=host, port=port, collection_name=collection, hybrid_search=False, schema_version=1)
     store = MilvusVectorStore(config)
-    await store.initialize(_DIM)
+    await store.initialize(_DIM, _FIELD)
     try:
         yield store
     finally:
@@ -100,6 +101,7 @@ def searcher(milvus_store: MilvusVectorStore) -> VectorStoreSearcher:
         embedder=_FixedEmbedder(),
         document_repo=None,  # not exercised — no related/ancestor expansion here
         collection=milvus_store._collection_name,
+        vector_field=_FIELD,
     )
 
 
@@ -132,7 +134,8 @@ class TestWorkspaceScopingAcrossPartitions:
                 _chunk(part_a, "included-file", "the one that should come back"),
                 _chunk(part_a, "excluded-file", "must never be returned"),
                 _chunk(part_b, "included-file", "same file_id, wrong partition — must never leak"),
-            ]
+            ],
+            vector_field=_FIELD,
         )
 
         workspace_service = WorkspaceService(

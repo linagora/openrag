@@ -136,6 +136,8 @@ class OpenAIChatCompletionRequest(BaseModel):
     @model_validator(mode="after")
     def _validate_contextualization_bypass(self) -> "OpenAIChatCompletionRequest":
         metadata = self.metadata or {}
+        if metadata.get("compare_original_query") is True and metadata.get("include_retrieval_trace") is not True:
+            raise ValueError("compare_original_query requires include_retrieval_trace")
         if metadata.get("bypass_query_contextualization") is not True:
             return self
         if metadata.get("include_retrieval_trace") is not True:
@@ -155,14 +157,9 @@ class OpenAIChatCompletionRequest(BaseModel):
             "retrieval_disable_reranker",
             "retrieval_disable_expansion",
         }
-        if not keys.intersection(metadata):
+        supplied = keys.intersection(metadata)
+        if not supplied:
             return self
-        if metadata.get("include_retrieval_trace") is not True:
-            raise ValueError("retrieval diagnostic overrides require include_retrieval_trace")
-        if metadata.get("require_retrieval") is not True:
-            raise ValueError("retrieval diagnostic overrides require require_retrieval")
-        if metadata.get("websearch") is True:
-            raise ValueError("retrieval diagnostic overrides cannot be combined with websearch")
 
         threshold = metadata.get("retrieval_similarity_threshold")
         if threshold is not None:
@@ -172,12 +169,23 @@ class OpenAIChatCompletionRequest(BaseModel):
                 raise ValueError("retrieval_similarity_threshold must be between 0 and 1")
 
         top_k = metadata.get("retrieval_top_k")
-        if top_k is not None and (isinstance(top_k, bool) or not isinstance(top_k, int) or not 1 <= top_k <= 100):
-            raise ValueError("retrieval_top_k must be an integer between 1 and 100")
+        if top_k is not None and (isinstance(top_k, bool) or not isinstance(top_k, int) or not 1 <= top_k <= 1000):
+            raise ValueError("retrieval_top_k must be an integer between 1 and 1000")
 
-        for key in ("retrieval_disable_reranker", "retrieval_disable_expansion"):
-            if key in metadata and not isinstance(metadata[key], bool):
+        disable_keys = ("retrieval_disable_reranker", "retrieval_disable_expansion")
+        for key in disable_keys:
+            if metadata.get(key) is not None and not isinstance(metadata[key], bool):
                 raise ValueError(f"{key} must be a boolean")
+
+        active = threshold is not None or top_k is not None or any(metadata.get(key) is True for key in disable_keys)
+        if not active:
+            return self
+        if metadata.get("include_retrieval_trace") is not True:
+            raise ValueError("retrieval diagnostic overrides require include_retrieval_trace")
+        if metadata.get("require_retrieval") is not True:
+            raise ValueError("retrieval diagnostic overrides require require_retrieval")
+        if metadata.get("websearch") is True:
+            raise ValueError("retrieval diagnostic overrides cannot be combined with websearch")
         return self
 
 

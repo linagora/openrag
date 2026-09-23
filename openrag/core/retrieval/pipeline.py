@@ -30,7 +30,7 @@ from core.models.retrieval_trace import TraceCandidate, TraceRemovalReason
 from core.rerankers.reranker import Reranker
 from core.retrieval.retriever import Retriever
 from core.retrieval.rrf import rrf_reranking
-from core.retrieval.trace import RetrievalTraceBuilder, candidates_from_chunks
+from core.retrieval.trace import RetrievalTraceBuilder, candidates_from_chunks, merge_child_traces
 
 
 def _chunk_key(c: Chunk) -> Any:
@@ -287,24 +287,38 @@ class RetrieverPipeline:
         trace: RetrievalTraceBuilder | None = None,
     ) -> list[Chunk]:
         """Run every sub-query in parallel and fuse the per-query rankings via RRF."""
-        query_trace = trace if len(search_queries.query_list) == 1 else None
+        child_traces = (
+            [
+                RetrievalTraceBuilder(f"{trace.request_id}:query:{index}", query.query)
+                for index, query in enumerate(search_queries.query_list)
+            ]
+            if trace is not None and len(search_queries.query_list) > 1
+            else None
+        )
         tasks = [
             self.retrieve_docs(
                 partition=partition,
                 query=q,
                 top_k=top_k,
                 filter_params=filter_params,
-                trace=query_trace,
+                trace=child_traces[index] if child_traces is not None else trace,
             )
-            for q in search_queries.query_list
+            for index, q in enumerate(search_queries.query_list)
         ]
         ranked_lists = await asyncio.gather(*tasks)
+        if trace is not None and child_traces is not None:
+            merge_child_traces(trace, child_traces)
         fusion_kwargs: dict[str, Any] = {"k": self.rrf_k}
         if top_k is not None:
             fusion_kwargs["top_k"] = top_k
         if trace is not None:
             fusion_kwargs["trace"] = trace
-        fused = rrf_reranking(ranked_lists, key_fn=_chunk_key, **fusion_kwargs)
+        fused = rrf_reranking(
+            ranked_lists,
+            key_fn=_chunk_key,
+            trace_stage="multi_query_fused",
+            **fusion_kwargs,
+        )
         _safe_trace(
             trace,
             "final",

@@ -8,18 +8,55 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from collections.abc import Callable
 from time import perf_counter
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from core.embeddings import Embedder
 from core.models.chunk import Chunk, _coerce_chunk_type
 from core.ports.document_repo import DocumentRepository
 from core.retrieval.searcher import RetrievalSearcher, file_id_restriction
+from core.retrieval.trace import RetrievalTraceBuilder
 from core.utils.consts import RETRIEVAL_SCORE_KEYS, is_internal_metadata_key
 from core.vector_stores import VectorStore
+from core.vector_stores.vector_field import is_vector_field_key
 
-if TYPE_CHECKING:
-    from core.retrieval.trace import RetrievalTraceBuilder
+_STORE_TRACE_STAGES = (
+    "dense_before_threshold",
+    "dense_after_threshold",
+    "sparse",
+    "hybrid_fused",
+)
+
+
+def _merge_store_traces(parent: RetrievalTraceBuilder, children: list[RetrievalTraceBuilder]) -> None:
+    """Merge completed per-query traces in query order, never completion order."""
+    for child in children:
+        parent.record_query_trace(child)
+    for stage_name in _STORE_TRACE_STAGES:
+        stages = [child.stages[stage_name] for child in children if child.stages[stage_name].status != "not_run"]
+        if not stages:
+            continue
+        statuses = {stage.status for stage in stages}
+        if "error" in statuses:
+            status = "error"
+        elif "complete" in statuses:
+            status = "complete"
+        else:
+            status = "unavailable"
+        durations = [stage.duration_seconds for stage in stages if stage.duration_seconds is not None]
+        parent.record_stage(
+            stage_name,
+            status=status,
+            candidates=[candidate for stage in stages for candidate in stage.candidates],
+            candidate_count=sum(stage.candidate_count for stage in stages),
+            duration_seconds=max(durations) if durations else None,
+            error="sub-query diagnostics failed" if status == "error" else None,
+        )
+    for key in sorted({key for child in children for key in child.timings}):
+        parent.timings[key] = max(child.timings[key] for child in children if key in child.timings)
+    for child in children:
+        parent.errors.extend(child.errors)
 
 
 def _dict_to_chunk(row: dict[str, Any]) -> Chunk:
@@ -34,7 +71,6 @@ def _dict_to_chunk(row: dict[str, Any]) -> Chunk:
     # ``RETRIEVAL_SCORE_KEYS``), so a persisted one is never this query's score.
     skip = {
         "text",
-        "vector",
         "_id",
         "id",
         "score",
@@ -44,7 +80,9 @@ def _dict_to_chunk(row: dict[str, Any]) -> Chunk:
         "chunk_type",
         *RETRIEVAL_SCORE_KEYS,
     }
-    metadata = {k: v for k, v in row.items() if k not in skip and not is_internal_metadata_key(k)}
+    metadata = {
+        k: v for k, v in row.items() if k not in skip and not is_vector_field_key(k) and not is_internal_metadata_key(k)
+    }
     return Chunk(
         id=chunk_id,
         document_id=row.get("file_id", ""),
@@ -70,11 +108,19 @@ class VectorStoreSearcher(RetrievalSearcher):
         embedder: Embedder,
         document_repo: DocumentRepository,
         collection: str,
+        vector_field: str | Callable[[], str | None] | None = None,
     ) -> None:
         self._store = vector_store
         self._embedder = embedder
         self._document_repo = document_repo
         self._collection = collection
+        # The dense field of this searcher's embedder. A callable is read on
+        # every search, since the searcher can be built before the endpoint
+        # registry is loaded.
+        self._vector_field = vector_field
+
+    def _field(self) -> str | None:
+        return self._vector_field() if callable(self._vector_field) else self._vector_field
 
     async def search(
         self,
@@ -106,6 +152,7 @@ class VectorStoreSearcher(RetrievalSearcher):
             filters=filters,
             top_k=top_k,
             similarity_threshold=similarity_threshold or None,
+            vector_field=self._field(),
             **trace_kwargs,
         )
         chunks = [_dict_to_chunk(r) for r in results]
@@ -130,14 +177,20 @@ class VectorStoreSearcher(RetrievalSearcher):
         embeddings = await self._embedder.embed(queries)
         if trace is not None and embedding_started is not None:
             trace.timings["embedding"] = perf_counter() - embedding_started
+        field = self._field()
         filters: dict[str, Any] = {"partition": partition}
         if filter:
             filters["expr"] = filter
         if filter_params:
             filters.update(filter_params)
-        trace_kwargs = {}
-        if trace is not None:
-            trace_kwargs["trace"] = trace
+        query_traces = (
+            [
+                RetrievalTraceBuilder(request_id=f"{trace.request_id}:subquery:{index}", original_query=query)
+                for index, query in enumerate(queries)
+            ]
+            if trace is not None
+            else []
+        )
         per_query = await asyncio.gather(
             *[
                 self._store.search(
@@ -147,11 +200,14 @@ class VectorStoreSearcher(RetrievalSearcher):
                     filters=filters,
                     top_k=top_k_per_query,
                     similarity_threshold=similarity_threshold or None,
-                    **trace_kwargs,
+                    vector_field=field,
+                    **({"trace": query_traces[index]} if trace is not None else {}),
                 )
-                for emb, q in zip(embeddings, queries)
+                for index, (emb, q) in enumerate(zip(embeddings, queries, strict=True))
             ]
         )
+        if trace is not None:
+            _merge_store_traces(trace, query_traces)
         seen_ids: set[str] = set()
         chunks: list[Chunk] = []
         for results in per_query:

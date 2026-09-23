@@ -546,6 +546,7 @@ async def openai_chat_completion(
                     payload=request.model_dump(exclude_none=True),
                     prepare_sources=prep,
                     model_name=model_name,
+                    request_id=getattr(request2.state, "request_id", None),
                 ):
                     yield sse_line
             except asyncio.CancelledError:
@@ -568,6 +569,7 @@ async def openai_chat_completion(
         payload=request.model_dump(exclude_none=True),
         prepare_sources=prep,
         model_name=model_name,
+        request_id=getattr(request2.state, "request_id", None),
     )
     log.debug("Returning non-streaming completion chunk.")
     return JSONResponse(content=chunk)

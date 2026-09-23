@@ -40,7 +40,7 @@ import time
 import unicodedata
 import uuid
 from collections.abc import AsyncIterator, Callable
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import Enum
 from typing import TYPE_CHECKING, Any, NamedTuple
 
@@ -56,11 +56,12 @@ from core.models.retrieval_trace import (
 from core.prompts import (
     SOURCE_SEPARATOR,
     build_casual_response_prompt,
+    calendar_anchors,
     format_context,
     format_web_context,
     prepend_system_prompt,
 )
-from core.retrieval.trace import RetrievalTraceBuilder
+from core.retrieval.trace import RetrievalTraceBuilder, canonical_fingerprint
 from core.utils.exceptions import ValidationError, WorkspaceNotFoundError
 from core.utils.logging import get_logger
 from core.utils.source_filtering import (
@@ -143,6 +144,7 @@ class _PrepareChatResult(NamedTuple):
     retrieved_web_results: list
     citation_protocol_active: bool
     indexed_attachment_ids: list[str]
+    configuration_fingerprint: str
 
 
 _MAP_SYSTEM_PROMPT = """You are an AI assistant specialized in extracting and synthesizing relevant information from text.
@@ -441,9 +443,16 @@ class QueryService:
             contextualizer = ResolvedPrompt.create(
                 content, name=prompt_name, source="named" if prompt_name else "default"
             )
+        # UTC, not the host clock: the anchors are compared against UTC
+        # created_at timestamps, and near midnight the local date is a
+        # different day.
+        now = datetime.now(UTC)
         prompt = contextualizer.content.format(
             query_language=detect_language(last_user),
-            current_date=datetime.now().strftime("%A, %B %d, %Y, %H:%M:%S"),
+            current_date=now.strftime("%A, %B %d, %Y, %H:%M:%S"),
+            # Pre-computed week/month/year ranges: the model must not do the
+            # calendar arithmetic itself (see core.prompts.calendar_anchors).
+            calendar_anchors=calendar_anchors(now),
         )
         llm_messages = [
             {"role": "system", "content": prompt + _QUERY_JSON_HINT},
@@ -452,6 +461,9 @@ class QueryService:
         params = {
             "max_completion_tokens": self._max_contextualized_query_len,
             "response_format": {"type": "json_object"},
+            # Structured extraction, not generation: sampling made the same
+            # question flip between a date filter and none across requests.
+            "temperature": 0,
         }
         started = time.perf_counter()
         last_error: Exception | None = None
@@ -635,16 +647,10 @@ class QueryService:
         workspace = metadata.get("workspace")
         attachment_ids = _extract_attachment_ids(metadata)
 
-        top_k = metadata.get("retrieval_top_k")
-        if top_k is None:
-            top_k = self._mr_max if use_map_reduce else None
-        retrieval_overrides = {}
-        if metadata.get("retrieval_similarity_threshold") is not None:
-            retrieval_overrides["similarity_threshold"] = float(metadata["retrieval_similarity_threshold"])
-        if metadata.get("retrieval_disable_reranker") is True:
-            retrieval_overrides["disable_reranker"] = True
-        if metadata.get("retrieval_disable_expansion") is True:
-            retrieval_overrides["disable_expansion"] = True
+        effective_retrieval_options = self._effective_retrieval_options(metadata)
+        retrieval_top_k = effective_retrieval_options.get("top_k")
+        top_k = self._mr_max if use_map_reduce else retrieval_top_k
+        retrieval_overrides = {key: value for key, value in effective_retrieval_options.items() if key != "top_k"}
 
         filter_params = None
         indexed_attachment_ids: list[str] = []
@@ -672,6 +678,7 @@ class QueryService:
         retrieval_forced = explicitly_required or existing_force_retrieval
         queries: SearchQueries | None = None
         bypass_contextualization = metadata.get("bypass_query_contextualization") is True
+        configuration_fingerprint = "unavailable"
 
         if bypass_contextualization:
             queries = SearchQueries(query_list=[Query(query=last_user_message)])
@@ -697,6 +704,14 @@ class QueryService:
             elif len(usable_queries) != len(queries.query_list):
                 queries = queries.model_copy(update={"query_list": usable_queries})
 
+        if trace is not None:
+            contextualizer_prompt = trace.contextualization.prompt if trace.contextualization is not None else None
+            configuration_fingerprint = await self._configuration_fingerprint(
+                partition,
+                effective_options=effective_retrieval_options,
+                contextualizer_prompt=contextualizer_prompt,
+            )
+
         if casual_policy is not None and not retrieval_forced:
             if trace is not None and trace.contextualization is None:
                 trace.contextualization = ContextualizationTrace(
@@ -715,7 +730,16 @@ class QueryService:
                 current_date=datetime.now().strftime("%A, %B %d, %Y, %H:%M:%S"),
                 custom_prompt=custom_prompt,
             )
-            return _PrepareChatResult(payload, [], [], [], [], True, indexed_attachment_ids)
+            return _PrepareChatResult(
+                payload,
+                [],
+                [],
+                [],
+                [],
+                True,
+                indexed_attachment_ids,
+                configuration_fingerprint,
+            )
 
         if queries is None:  # pragma: no cover - guarded by the casual return above
             queries = SearchQueries(query_list=[Query(query=last_user_message)])
@@ -727,7 +751,9 @@ class QueryService:
                 partition,
                 top_k,
                 filter_params,
+                retrieval_top_k=retrieval_top_k,
                 trace=trace,
+                **retrieval_overrides,
             )
             web_results = _dedupe_web(web_lists)
         elif partition is not None:
@@ -736,6 +762,7 @@ class QueryService:
                 partitions=partition,
                 search_queries=queries,
                 top_k=top_k,
+                retrieval_top_k=retrieval_top_k,
                 filter_params=filter_params,
                 **retrieval_overrides,
                 **trace_kwargs,
@@ -750,12 +777,23 @@ class QueryService:
                 original_query=last_user_message,
                 partition=partition,
                 top_k=top_k,
+                retrieval_top_k=retrieval_top_k,
                 filter_params=filter_params,
+                configuration_fingerprint=configuration_fingerprint,
                 **retrieval_overrides,
             )
 
         if not chunks and not web_results and partition is None:
-            return _PrepareChatResult(payload, [], [], [], [], False, indexed_attachment_ids)
+            return _PrepareChatResult(
+                payload,
+                [],
+                [],
+                [],
+                [],
+                False,
+                indexed_attachment_ids,
+                configuration_fingerprint,
+            )
 
         docs = [c.to_langchain() for c in chunks]
 
@@ -815,7 +853,14 @@ class QueryService:
         )
         payload["messages"] = new_messages
         return _PrepareChatResult(
-            payload, docs, web_results, retrieved_docs, retrieved_web_results, True, indexed_attachment_ids
+            payload,
+            docs,
+            web_results,
+            retrieved_docs,
+            retrieved_web_results,
+            True,
+            indexed_attachment_ids,
+            configuration_fingerprint,
         )
 
     async def _existing_file_ids(self, file_ids: list[str], partitions: list[str]) -> list[str]:
@@ -833,7 +878,16 @@ class QueryService:
             found = {fid for r in results for fid in r}
         return [fid for fid in dict.fromkeys(file_ids) if fid in found]
 
-    async def _gather_rag_and_web(self, queries, partition, top_k, filter_params, trace=None):
+    async def _gather_rag_and_web(
+        self,
+        queries,
+        partition,
+        top_k,
+        filter_params,
+        retrieval_top_k=None,
+        trace=None,
+        **retrieval_overrides,
+    ):
         # Fuse the doc branch through retrieve_multi so a partition's rrf_k drives
         # its sub-query fusion here too (#707). Previously this used
         # retrieve_per_query + fuse() at the hardcoded 60, so enabling websearch
@@ -844,7 +898,9 @@ class QueryService:
             partitions=partition,
             search_queries=queries,
             top_k=top_k,
+            retrieval_top_k=retrieval_top_k,
             filter_params=filter_params,
+            **retrieval_overrides,
             **trace_kwargs,
         )
         web = asyncio.gather(*[self._web.search(q.query) for q in queries.query_list])
@@ -874,7 +930,9 @@ class QueryService:
         original_query: str,
         partition: list[str],
         top_k: int | None,
+        retrieval_top_k: int | None,
         filter_params: dict | None,
+        configuration_fingerprint: str,
         **retrieval_overrides,
     ) -> None:
         """Run an isolated diagnostic retrieval that cannot alter the answer."""
@@ -886,6 +944,7 @@ class QueryService:
                 partitions=partition,
                 search_queries=SearchQueries(query_list=[Query(query=original_query)]),
                 top_k=top_k,
+                retrieval_top_k=retrieval_top_k,
                 filter_params=filter_params,
                 trace=shadow,
                 **retrieval_overrides,
@@ -894,7 +953,7 @@ class QueryService:
             status = "error"
             shadow.record_error("original_query", error)
         shadow.timings["total"] = time.perf_counter() - started
-        finished = shadow.finish(configuration_fingerprint=self._configuration_fingerprint(partition))
+        finished = shadow.finish(configuration_fingerprint=configuration_fingerprint)
         trace.comparisons["original_query"] = {
             "status": status,
             "stages": finished["stages"],
@@ -903,14 +962,51 @@ class QueryService:
             "configuration_fingerprint": finished["configuration_fingerprint"],
         }
 
-    def _configuration_fingerprint(self, partitions: list[str] | None) -> str:
+    def _effective_retrieval_options(self, metadata: dict) -> dict[str, object]:
+        options: dict[str, object] = {}
+        top_k = metadata.get("retrieval_top_k")
+        if top_k is not None:
+            options["top_k"] = top_k
+        threshold = metadata.get("retrieval_similarity_threshold")
+        if threshold is not None:
+            options["similarity_threshold"] = float(threshold)
+        if metadata.get("retrieval_disable_reranker") is True:
+            options["disable_reranker"] = True
+        if metadata.get("retrieval_disable_expansion") is True:
+            options["disable_expansion"] = True
+        return options
+
+    async def _configuration_fingerprint(
+        self,
+        partitions: list[str] | None,
+        *,
+        effective_options: dict[str, object] | None = None,
+        contextualizer_prompt: PromptTrace | None = None,
+    ) -> str:
         if not partitions:
             return "unavailable"
+        resolved_fingerprint = getattr(self._retrieval, "resolved_configuration_fingerprint", None)
         fingerprint = getattr(self._retrieval, "configuration_fingerprint", None)
-        if fingerprint is None:
+        if resolved_fingerprint is None and fingerprint is None:
             return "unavailable"
         try:
-            return str(fingerprint(partitions))
+            if resolved_fingerprint is not None:
+                stored_fingerprint = str(
+                    await resolved_fingerprint(
+                        partitions,
+                        contextualizer_prompt=contextualizer_prompt,
+                    )
+                )
+            else:
+                stored_fingerprint = str(fingerprint(partitions))
+            if not effective_options:
+                return stored_fingerprint
+            return canonical_fingerprint(
+                {
+                    "stored_configuration_fingerprint": stored_fingerprint,
+                    "effective_request_overrides": effective_options,
+                }
+            )
         except Exception:  # noqa: BLE001 - telemetry must never fail a request
             return "unavailable"
 
@@ -1011,6 +1107,7 @@ class QueryService:
         payload: dict,
         prepare_sources: PrepareSources,
         model_name: str,
+        request_id: str | None = None,
     ) -> dict:
         """Non-streaming chat completion → finalized OpenAI dict."""
         request_started = time.perf_counter()
@@ -1019,10 +1116,11 @@ class QueryService:
         include_trace = metadata.get("include_retrieval_trace") is True
         original_query = _latest_user_query(payload.get("messages", []))
         trace = (
-            RetrievalTraceBuilder(request_id=str(uuid.uuid4()), original_query=original_query)
+            RetrievalTraceBuilder(request_id=request_id or str(uuid.uuid4()), original_query=original_query)
             if include_trace
             else None
         )
+        configuration_fingerprint = "unavailable"
         llm = self._resolve_llm(partitions)
         citation_protocol_active = False
         if partitions is None and not metadata.get("websearch", False):
@@ -1037,6 +1135,7 @@ class QueryService:
             retrieved_web_results = result.retrieved_web_results
             citation_protocol_active = result.citation_protocol_active
             attachments = result.indexed_attachment_ids
+            configuration_fingerprint = result.configuration_fingerprint
         sources = prepare_sources(docs, web_results)
         # `all_retrieved_sources` is debug/eval telemetry, not needed by most
         # callers — skip building it (and calling prepare_sources on the full,
@@ -1068,9 +1167,7 @@ class QueryService:
                     original_query=original_query,
                 )
             trace.timings["total"] = time.perf_counter() - request_started
-            extra["retrieval_trace"] = trace.finish(
-                configuration_fingerprint=self._configuration_fingerprint(partitions)
-            )
+            extra["retrieval_trace"] = trace.finish(configuration_fingerprint=configuration_fingerprint)
         chunk["extra"] = extra
         return chunk
 
@@ -1081,6 +1178,7 @@ class QueryService:
         payload: dict,
         prepare_sources: PrepareSources,
         model_name: str,
+        request_id: str | None = None,
     ) -> AsyncIterator[str]:
         """Streaming chat completion → SSE strings with filtered sources."""
         request_started = time.perf_counter()
@@ -1089,10 +1187,11 @@ class QueryService:
         include_trace = metadata.get("include_retrieval_trace") is True
         original_query = _latest_user_query(payload.get("messages", []))
         trace = (
-            RetrievalTraceBuilder(request_id=str(uuid.uuid4()), original_query=original_query)
+            RetrievalTraceBuilder(request_id=request_id or str(uuid.uuid4()), original_query=original_query)
             if include_trace
             else None
         )
+        configuration_fingerprint = "unavailable"
         llm = self._resolve_llm(partitions)
         citation_protocol_active = False
         if partitions is None and not metadata.get("websearch", False):
@@ -1107,6 +1206,7 @@ class QueryService:
             retrieved_web_results = result.retrieved_web_results
             citation_protocol_active = result.citation_protocol_active
             attachments = result.indexed_attachment_ids
+            configuration_fingerprint = result.configuration_fingerprint
         sources = prepare_sources(docs, web_results)
         all_sources = prepare_sources(retrieved_docs, retrieved_web_results) if include_all_retrieved else None
         structured_output = _is_structured_output(payload)
@@ -1120,10 +1220,12 @@ class QueryService:
                     SearchQueries(query_list=[Query(query=original_query)]),
                     original_query=original_query,
                 )
-            trace.timings["total"] = time.perf_counter() - request_started
-            terminal_extra_fields = {
-                "retrieval_trace": trace.finish(configuration_fingerprint=self._configuration_fingerprint(partitions))
-            }
+
+            def finish_trace() -> dict:
+                trace.timings["total"] = time.perf_counter() - request_started
+                return {"retrieval_trace": trace.finish(configuration_fingerprint=configuration_fingerprint)}
+
+            terminal_extra_fields = finish_trace
 
         payload["messages"] = self._sanitize_messages(payload["messages"])
         llm_stream = llm.stream_chat(payload["messages"], **_sampling(payload))

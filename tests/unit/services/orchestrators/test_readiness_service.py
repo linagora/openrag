@@ -500,17 +500,17 @@ async def test_model_probe_uses_provider_path_and_credentials(respx_mock, implem
     assert probe.calls[0].request.headers["Authorization"] == "Bearer test-key"
 
 
-async def test_model_probe_does_not_send_credentials_over_http(respx_mock):
+async def test_model_probe_sends_api_key_over_http(respx_mock):
+    probe = respx_mock.get("http://model.test/v1/models").respond(200, json={"data": [{"id": "model"}]})
     config = ModelEndpointConfig(
         endpoint="http://model.test/v1",
         model_name="model",
         extra={"api_key": "test-key"},
     )
 
-    with pytest.raises(ValueError, match="HTTPS"):
-        await check_model_endpoint(config)
+    await check_model_endpoint(config)
 
-    assert len(respx_mock.calls) == 0
+    assert probe.calls[0].request.headers["Authorization"] == "Bearer test-key"
 
 
 @pytest.mark.parametrize("api_key", ["EMPTY", "  EMPTY  ", "   "])
@@ -528,22 +528,11 @@ async def test_model_probe_treats_placeholder_api_keys_as_credential_free(respx_
     assert "Authorization" not in probe.calls[0].request.headers
 
 
-async def test_model_probe_does_not_send_embedded_credentials_over_http(respx_mock):
+@pytest.mark.parametrize("scheme", ["http", "https"])
+async def test_model_probe_preserves_embedded_credentials(respx_mock, scheme):
+    probe = respx_mock.get(f"{scheme}://model.test/v1/models").respond(200, json={"data": [{"id": "model"}]})
     config = ModelEndpointConfig(
-        endpoint="http://user:password@model.test/v1",
-        model_name="model",
-    )
-
-    with pytest.raises(ValueError, match="HTTPS"):
-        await check_model_endpoint(config)
-
-    assert len(respx_mock.calls) == 0
-
-
-async def test_model_probe_preserves_embedded_credentials_over_https(respx_mock):
-    probe = respx_mock.get("https://model.test/v1/models").respond(200, json={"data": [{"id": "model"}]})
-    config = ModelEndpointConfig(
-        endpoint="https://user:password@model.test/v1",
+        endpoint=f"{scheme}://user:password@model.test/v1",
         model_name="model",
     )
 
@@ -553,12 +542,13 @@ async def test_model_probe_preserves_embedded_credentials_over_https(respx_mock)
     assert probe.calls[0].request.headers["Authorization"].startswith("Basic ")
 
 
-async def test_readiness_marks_credential_bearing_http_endpoint_unavailable(respx_mock):
+async def test_readiness_probes_credential_bearing_http_endpoint(respx_mock):
+    probe = respx_mock.get("http://model.test/v1/models").respond(200, json={"data": [{"id": "model"}]})
     discovery = AsyncMock(
         return_value=ModelEndpointDiscovery(
             targets=(
                 ModelEndpointTarget(
-                    provider="insecure",
+                    provider="internal",
                     kind="llm",
                     config=ModelEndpointConfig(
                         endpoint="http://model.test/v1",
@@ -572,8 +562,8 @@ async def test_readiness_marks_credential_bearing_http_endpoint_unavailable(resp
 
     snapshot = await ReadinessService({}, discover_model_endpoints=discovery).snapshot()
 
-    assert len(respx_mock.calls) == 0
-    assert [(item.provider, item.status) for item in snapshot.model_endpoints] == [("insecure", "unavailable")]
+    assert probe.calls[0].request.headers["Authorization"] == "Bearer test-key"
+    assert [(item.provider, item.status) for item in snapshot.model_endpoints] == [("internal", "ok")]
 
 
 async def test_model_probe_preserves_credential_free_http(respx_mock):

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-from datetime import UTC, datetime
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as package_version
 from typing import TYPE_CHECKING, Any
@@ -41,25 +40,54 @@ class RetrievalSnapshotService:
         self._documents = document_repo
         self._retrieval = retrieval_service
         self._version = version if version is not None else _installed_version()
-        self._commit = commit if commit is not None else os.getenv("OPENRAG_COMMIT")
+        self._commit = (commit if commit is not None else os.getenv("OPENRAG_COMMIT")) or None
 
     async def snapshot(self, partition: str, *, include_document_ids: bool = False) -> dict[str, object]:
         detail = await self._partitions.get_partition_config(partition)
-        public = self._retrieval.public_retrieval_configuration([partition])
+        public = await self._retrieval.resolved_public_retrieval_configuration([partition])
         partition_config = (public.get("partitions") or [{}])[0]
 
         embedder = self._keys(partition_config.get("embedder"), "name", "model")
         embedder["dimensions"] = detail.get("dimension")
+        contextualizer = self._keys(
+            partition_config.get("contextualizer"),
+            "name",
+            "model",
+            "prompt_name",
+        )
+        contextualizer["prompt"] = self._keys(
+            public.get("contextualizer_prompt"),
+            "name",
+            "source",
+            "content_hash",
+        )
+        retrieval = self._keys(
+            partition_config.get("retrieval"),
+            "type",
+            "top_k",
+            "similarity_threshold",
+            "rrf_k",
+            "k_queries",
+            "combine",
+            "with_surrounding_chunks",
+            "allow_filterless_fallback",
+            "hyde_prompt_name",
+            "multi_query_prompt_name",
+        )
+        retrieval_source = partition_config.get("retrieval")
+        query_expansion_prompt = (
+            retrieval_source.get("query_expansion_prompt") if isinstance(retrieval_source, dict) else None
+        )
+        retrieval["query_expansion_prompt"] = (
+            self._keys(query_expansion_prompt, "type", "name", "source", "content_hash")
+            if isinstance(query_expansion_prompt, dict)
+            else None
+        )
         configuration = {
             "openrag": {"version": self._version, "commit": self._commit},
             "embedder": embedder,
             "hybrid": self._keys(public.get("hybrid"), "enabled", "fusion"),
-            "retrieval": self._keys(
-                partition_config.get("retrieval"),
-                "type",
-                "top_k",
-                "similarity_threshold",
-            ),
+            "retrieval": retrieval,
             "reranker": self._keys(
                 partition_config.get("reranker"),
                 "name",
@@ -67,12 +95,7 @@ class RetrievalSnapshotService:
                 "enabled",
                 "top_n",
             ),
-            "contextualizer": self._keys(
-                partition_config.get("contextualizer"),
-                "name",
-                "model",
-                "prompt_name",
-            ),
+            "contextualizer": contextualizer,
             "expansion": self._keys(
                 partition_config.get("expansion"),
                 "include_related",
@@ -82,9 +105,14 @@ class RetrievalSnapshotService:
             ),
         }
 
+        corpus_state = await self._documents.get_indexed_corpus_state(
+            partition,
+            document_ids_limit=MAX_SNAPSHOT_DOCUMENT_IDS + 1 if include_document_ids else 0,
+        )
         index_base: dict[str, object] = {
             "partition": partition,
-            "indexed_corpus_count": detail.get("document_count"),
+            "indexed_corpus_count": corpus_state.count,
+            "indexed_corpus_digest": corpus_state.digest,
             "created_at": self._json_value(detail.get("created_at")),
         }
         index: dict[str, object] = {
@@ -92,10 +120,11 @@ class RetrievalSnapshotService:
             "fingerprint": canonical_fingerprint(index_base),
         }
         if include_document_ids:
-            document_ids, truncated = await self._document_ids(partition)
-            index["document_ids"] = document_ids
+            index["document_ids"] = list(corpus_state.document_ids[:MAX_SNAPSHOT_DOCUMENT_IDS])
             index["document_ids_limit"] = MAX_SNAPSHOT_DOCUMENT_IDS
-            index["document_ids_truncated"] = truncated
+            index["document_ids_truncated"] = (
+                corpus_state.document_ids_truncated or len(corpus_state.document_ids) > MAX_SNAPSHOT_DOCUMENT_IDS
+            )
 
         fingerprint_index = {
             key: value
@@ -105,29 +134,9 @@ class RetrievalSnapshotService:
         return {
             "configuration": configuration,
             "index": index,
-            "retrieval_configuration_fingerprint": self._retrieval.configuration_fingerprint([partition]),
+            "retrieval_configuration_fingerprint": canonical_fingerprint(public),
             "fingerprint": canonical_fingerprint({"configuration": configuration, "index": fingerprint_index}),
         }
-
-    async def _document_ids(self, partition: str) -> tuple[list[str], bool]:
-        before = datetime.now(UTC)
-        after: str | None = None
-        document_ids: set[str] = set()
-        while True:
-            page_limit = min(1000, MAX_SNAPSHOT_DOCUMENT_IDS - len(document_ids) + 1)
-            page = await self._documents.list_indexed_documents(
-                partition,
-                before=before,
-                after=after,
-                limit=page_limit,
-            )
-            document_ids.update(page)
-            if len(document_ids) > MAX_SNAPSHOT_DOCUMENT_IDS:
-                return sorted(document_ids)[:MAX_SNAPSHOT_DOCUMENT_IDS], True
-            if len(page) < page_limit:
-                break
-            after = page[-1]
-        return sorted(document_ids), False
 
     @staticmethod
     def _keys(value: object, *keys: str) -> dict[str, object]:

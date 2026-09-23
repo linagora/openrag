@@ -258,6 +258,7 @@ except (ImportError, AttributeError) as _cfg_err:
 class TaskInfo:
     state: str | None = None
     error: str | None = None
+    error_reason: str | None = None
     details: dict[str, Any] = field(default_factory=dict)
     object_ref: ray.ObjectRef | None = None
     worker_submitted: bool = False
@@ -578,6 +579,25 @@ class TaskStateManager:
             return True
 
     @ray.method(concurrency_group="set")
+    async def set_failed_with_reason_if_not_cancelled(
+        self,
+        task_id: str,
+        tb_str: str,
+        error_reason: str,
+    ) -> bool:
+        """Atomically record a failed task's traceback and canonical reason."""
+        with self.lock:
+            info = self.tasks.get(task_id)
+            if info is not None and info.state == "CANCELLED":
+                return False
+            if info is not None:
+                info.state = "FAILED"
+                info.error = _truncate_error(tb_str)
+                info.error_reason = error_reason
+                self._settle_task_locked(task_id, info)
+            return True
+
+    @ray.method(concurrency_group="set")
     async def set_cancelled_if_active(self, task_id: str) -> bool:
         with self.lock:
             info = self.tasks.get(task_id)
@@ -757,6 +777,12 @@ class TaskStateManager:
             return info.error if info else None
 
     @ray.method(concurrency_group="get")
+    async def get_error_reason(self, task_id: str) -> str | None:
+        with self.lock:
+            info = self.tasks.get(task_id)
+            return getattr(info, "error_reason", None) if info else None
+
+    @ray.method(concurrency_group="get")
     async def get_details(self, task_id: str) -> dict | None:
         with self.lock:
             info = self.tasks.get(task_id)
@@ -864,6 +890,7 @@ class TaskStateManager:
                 task_id: {
                     "state": info.state,
                     "error": info.error,
+                    "error_reason": getattr(info, "error_reason", None),
                     "details": info.details,
                     "worker_submitted": getattr(info, "worker_submitted", False),
                     "submission_started_at": getattr(info, "submission_started_at", None),
@@ -882,6 +909,7 @@ class TaskStateManager:
                 tid: {
                     "state": self.tasks[tid].state,
                     "error": self.tasks[tid].error,
+                    "error_reason": getattr(self.tasks[tid], "error_reason", None),
                     "details": self.tasks[tid].details,
                 }
                 for tid in task_ids

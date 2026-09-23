@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 
+import api.routers.user.chat as chat_router
 import pytest
 from api.dependencies.retrieval_diagnostics import RetrievalDiagnosticsGuard
 from api.routers.user.chat import openai_chat_completion, openai_completion
@@ -8,11 +9,43 @@ from fastapi import HTTPException
 
 
 @pytest.mark.asyncio
+async def test_chat_router_forwards_http_request_id(monkeypatch):
+    captured = {}
+
+    class _Service:
+        async def chat(self, **kwargs):
+            captured.update(kwargs)
+            return {"choices": [{"message": {"content": "answer"}}]}
+
+    monkeypatch.setattr(chat_router, "is_direct_llm_model", lambda *_args: True)
+    monkeypatch.setattr(chat_router, "_apply_default_max_tokens", lambda *_args: None)
+    monkeypatch.setattr(chat_router, "check_tokens_limit", lambda *_args, **_kwargs: None)
+    request = OpenAIChatCompletionRequest(
+        model="direct-model",
+        messages=[{"role": "user", "content": "question"}],
+        metadata={"include_retrieval_trace": True},
+    )
+
+    await openai_chat_completion(
+        request2=SimpleNamespace(state=SimpleNamespace(request_id="http-request-id")),
+        request=request,
+        user={"id": 1, "is_admin": True},
+        user_partitions=[],
+        service=_Service(),
+        partition_service=None,
+        config=SimpleNamespace(llm=SimpleNamespace(model="direct-model")),
+        diagnostics_guard=RetrievalDiagnosticsGuard("2/minute"),
+    )
+
+    assert captured["request_id"] == "http-request-id"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "metadata",
     [
         {"include_retrieval_trace": True},
-        {"compare_original_query": True},
+        {"include_retrieval_trace": True, "compare_original_query": True},
         {
             "include_retrieval_trace": True,
             "require_retrieval": True,

@@ -10,6 +10,8 @@ without inference services.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -18,8 +20,9 @@ from core.config.retrieval_pipeline import RetrievalPipelineConfig
 from core.models.chunk import Chunk
 from core.models.preset import PartitionConfig
 from core.models.query import Query, SearchQueries
-from core.retrieval.trace import RetrievalTraceBuilder
+from core.retrieval.trace import RetrievalTraceBuilder, canonical_fingerprint
 from core.utils.exceptions import PartitionNotFoundError
+from services.orchestrators.prompt_service import ResolvedPrompt
 from services.orchestrators.retrieval_service import RetrievalService
 
 
@@ -172,7 +175,312 @@ def test_configuration_fingerprint_is_stable_and_ignores_secret_endpoint_fields(
     assert len(first) == 64
 
 
-def test_public_configuration_reports_effective_expansion_limits():
+@pytest.mark.parametrize(
+    ("retrieval_type", "setting", "initial", "changed"),
+    [
+        ("single", "rrf_k", 42, 99),
+        ("hyde", "hyde_prompt_name", "hyde-a", "hyde-b"),
+        ("multiQuery", "multi_query_prompt_name", "multi-a", "multi-b"),
+    ],
+)
+def test_configuration_fingerprint_tracks_behavior_changing_pipeline_settings(
+    retrieval_type,
+    setting,
+    initial,
+    changed,
+):
+    config = _config()
+    retrieval = RetrievalPipelineConfig(type=retrieval_type, **{setting: initial})
+    config.partitions = {"tenant-a": _partition(retrieval=retrieval)}
+    service = RetrievalService(searcher=FakeSearcher(), reranker=None, llm=None, config=config)
+
+    first = service.configuration_fingerprint(["tenant-a"])
+    setattr(retrieval, setting, changed)
+    second = service.configuration_fingerprint(["tenant-a"])
+
+    assert first != second
+
+
+@pytest.mark.parametrize(
+    ("retrieval_type", "setting", "initial", "changed"),
+    [
+        ("multiQuery", "k_queries", 3, 5),
+        ("hyde", "combine", False, True),
+        ("single", "with_surrounding_chunks", False, True),
+        ("single", "allow_filterless_fallback", True, False),
+    ],
+)
+def test_configuration_fingerprint_tracks_effective_legacy_pipeline_settings(
+    retrieval_type,
+    setting,
+    initial,
+    changed,
+):
+    config = _config()
+    setattr(config.retriever, setting, initial)
+    config.partitions = {"tenant-a": _partition(retrieval=RetrievalPipelineConfig(type=retrieval_type))}
+    service = RetrievalService(searcher=FakeSearcher(), reranker=None, llm=None, config=config)
+
+    first = service.configuration_fingerprint(["tenant-a"])
+    setattr(config.retriever, setting, changed)
+    second = service.configuration_fingerprint(["tenant-a"])
+
+    assert first != second
+
+
+def test_configuration_fingerprint_expands_all_to_configured_partitions():
+    config = _config()
+    tenant_a = RetrievalPipelineConfig(rrf_k=42)
+    tenant_b = RetrievalPipelineConfig(rrf_k=60)
+    config.partitions = {
+        "tenant-b": _partition(name="tenant-b", retrieval=tenant_b),
+        "tenant-a": _partition(name="tenant-a", retrieval=tenant_a),
+    }
+    service = RetrievalService(searcher=FakeSearcher(), reranker=None, llm=None, config=config)
+
+    public = service.public_retrieval_configuration(["all"])
+    first = service.configuration_fingerprint(["all"])
+    tenant_b.rrf_k = 99
+    second = service.configuration_fingerprint(["all"])
+
+    assert [partition["name"] for partition in public["partitions"]] == ["tenant-a", "tenant-b"]
+    assert first != second
+
+
+@pytest.mark.parametrize(
+    ("retrieval_type", "prompt_type", "prompt_setting"),
+    [
+        ("hyde", "hyde", "hyde_prompt_name"),
+        ("multiQuery", "multi_query", "multi_query_prompt_name"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_resolved_configuration_fingerprint_tracks_query_expansion_prompt_hash(
+    retrieval_type,
+    prompt_type,
+    prompt_setting,
+):
+    class PromptService:
+        def __init__(self):
+            self.content_hash = "expansion-hash-a"
+
+        async def resolve_prompt_with_identity(self, resolved_type, names):
+            assert resolved_type == prompt_type
+            assert names == ["legal-expansion"]
+            return SimpleNamespace(
+                content="private query expansion instructions",
+                content_hash=self.content_hash,
+                name="legal-expansion",
+                source="named",
+            )
+
+    config = _config()
+    retrieval = RetrievalPipelineConfig(
+        type=retrieval_type,
+        **{prompt_setting: "legal-expansion"},
+    )
+    config.partitions = {"tenant-a": _partition(retrieval=retrieval)}
+    prompt_service = PromptService()
+    service = RetrievalService(
+        searcher=FakeSearcher(),
+        reranker=None,
+        llm=None,
+        config=config,
+        prompt_service=prompt_service,
+    )
+    contextualizer_prompt = SimpleNamespace(
+        content_hash="contextualizer-hash",
+        name="legal-contextualizer",
+        source="named",
+    )
+
+    public = await service.resolved_public_retrieval_configuration(
+        ["tenant-a"],
+        contextualizer_prompt=contextualizer_prompt,
+    )
+    first = await service.resolved_configuration_fingerprint(
+        ["tenant-a"],
+        contextualizer_prompt=contextualizer_prompt,
+    )
+    prompt_service.content_hash = "expansion-hash-b"
+    second = await service.resolved_configuration_fingerprint(
+        ["tenant-a"],
+        contextualizer_prompt=contextualizer_prompt,
+    )
+
+    assert public["partitions"][0]["retrieval"]["query_expansion_prompt"] == {
+        "type": prompt_type,
+        "name": "legal-expansion",
+        "source": "named",
+        "content_hash": "expansion-hash-a",
+    }
+    assert first != second
+    assert "private query expansion instructions" not in json.dumps(public)
+
+
+@pytest.mark.asyncio
+async def test_query_expansion_prompt_legacy_resolver_does_not_infer_provenance():
+    class LegacyPromptService:
+        async def resolve_prompt(self, prompt_type, names):
+            assert prompt_type == "hyde"
+            assert names == ["missing-name"]
+            return "resolved default prompt"
+
+    config = _config()
+    config.partitions = {
+        "tenant-a": _partition(retrieval=RetrievalPipelineConfig(type="hyde", hyde_prompt_name="missing-name"))
+    }
+    service = RetrievalService(
+        searcher=FakeSearcher(),
+        reranker=None,
+        llm=None,
+        config=config,
+        prompt_service=LegacyPromptService(),
+    )
+
+    public = await service.resolved_public_retrieval_configuration(
+        ["tenant-a"],
+        contextualizer_prompt=SimpleNamespace(
+            content_hash="contextualizer-hash",
+            name="legal-contextualizer",
+            source="named",
+        ),
+    )
+
+    identity = public["partitions"][0]["retrieval"]["query_expansion_prompt"]
+    assert identity["name"] is None
+    assert identity["source"] is None
+    assert identity["content_hash"] == hashlib.sha256(b"resolved default prompt").hexdigest()
+
+
+@pytest.mark.asyncio
+async def test_resolved_configuration_supports_slotted_resolved_prompt():
+    prompt = ResolvedPrompt.create(
+        "private prompt content",
+        name="legal-contextualizer",
+        source="named",
+    )
+    service = RetrievalService(searcher=FakeSearcher(), reranker=None, llm=None, config=_config())
+
+    public = await service.resolved_public_retrieval_configuration(
+        ["tenant-a"],
+        contextualizer_prompt=prompt,
+    )
+
+    assert public["contextualizer_prompt"] == {
+        "name": "legal-contextualizer",
+        "source": "named",
+        "content_hash": hashlib.sha256(b"private prompt content").hexdigest(),
+    }
+
+
+@pytest.mark.asyncio
+async def test_contextualizer_prompt_legacy_resolver_does_not_infer_provenance():
+    class LegacyPromptService:
+        async def resolve_prompt(self, prompt_type, names):
+            assert prompt_type == "query_contextualizer"
+            assert names == ["missing-name"]
+            return "resolved default contextualizer"
+
+    config = _config()
+    config.partitions = {
+        "tenant-a": _partition(retrieval=RetrievalPipelineConfig(query_contextualizer_prompt_name="missing-name"))
+    }
+    service = RetrievalService(
+        searcher=FakeSearcher(),
+        reranker=None,
+        llm=None,
+        config=config,
+        prompt_service=LegacyPromptService(),
+    )
+
+    public = await service.resolved_public_retrieval_configuration(["tenant-a"])
+
+    assert public["contextualizer_prompt"] == {
+        "name": None,
+        "source": None,
+        "content_hash": hashlib.sha256(b"resolved default contextualizer").hexdigest(),
+    }
+
+
+@pytest.mark.asyncio
+async def test_resolved_configuration_fingerprint_tracks_prompt_hash_without_prompt_content():
+    class PromptService:
+        def __init__(self):
+            self.content_hash = "prompt-hash-a"
+
+        async def resolve_prompt_with_identity(self, prompt_type, names):
+            assert prompt_type == "query_contextualizer"
+            assert names == ["legal"]
+            return SimpleNamespace(
+                content="private contextualizer instructions",
+                content_hash=self.content_hash,
+                name="legal",
+                source="named",
+            )
+
+    config = _config()
+    config.partitions = {
+        "tenant-a": _partition(retrieval=RetrievalPipelineConfig(query_contextualizer_prompt_name="legal"))
+    }
+    prompt_service = PromptService()
+    service = RetrievalService(
+        searcher=FakeSearcher(),
+        reranker=None,
+        llm=None,
+        config=config,
+        prompt_service=prompt_service,
+    )
+
+    public = await service.resolved_public_retrieval_configuration(["tenant-a"])
+    first = await service.resolved_configuration_fingerprint(["tenant-a"])
+    prompt_service.content_hash = "prompt-hash-b"
+    second = await service.resolved_configuration_fingerprint(["tenant-a"])
+
+    assert public["contextualizer_prompt"] == {
+        "name": "legal",
+        "source": "named",
+        "content_hash": "prompt-hash-a",
+    }
+    assert first == canonical_fingerprint(public)
+    assert first != second
+    assert "private contextualizer instructions" not in json.dumps(public)
+
+
+@pytest.mark.asyncio
+async def test_resolved_configuration_reuses_the_request_prompt_identity():
+    class PromptService:
+        async def resolve_prompt_with_identity(self, *_args, **_kwargs):
+            raise AssertionError("the prompt used by the request must not be resolved again")
+
+    service = RetrievalService(
+        searcher=FakeSearcher(),
+        reranker=None,
+        llm=None,
+        config=_config(),
+        prompt_service=PromptService(),
+    )
+    prompt = SimpleNamespace(
+        content="private contextualizer instructions",
+        content_hash="request-prompt-hash",
+        name="legal",
+        source="named",
+    )
+
+    public = await service.resolved_public_retrieval_configuration(
+        ["tenant-a"],
+        contextualizer_prompt=prompt,
+    )
+
+    assert public["contextualizer_prompt"] == {
+        "name": "legal",
+        "source": "named",
+        "content_hash": "request-prompt-hash",
+    }
+    assert "private contextualizer instructions" not in json.dumps(public)
+
+
+def test_public_configuration_preserves_expansion_settings():
     config = _config()
     config.vectordb = SimpleNamespace(hybrid_search=False)
     config.retriever.related_limit = 500
@@ -181,8 +489,8 @@ def test_public_configuration_reports_effective_expansion_limits():
 
     public = service.public_retrieval_configuration(["tenant-a"])
 
-    assert public["partitions"][0]["expansion"]["related_limit"] == 100
-    assert public["partitions"][0]["expansion"]["max_ancestor_depth"] == 50
+    assert public["partitions"][0]["expansion"]["related_limit"] == 500
+    assert public["partitions"][0]["expansion"]["max_ancestor_depth"] is None
 
 
 @pytest.mark.asyncio
@@ -280,12 +588,77 @@ def test_fuse_trace_records_duplicates_scores_and_public_cutoff():
     fused = RetrievalService.fuse([[a, first_b], [duplicate_b, c]], top_k=2, trace=trace)
 
     assert fused == [first_b, a]
-    hybrid = trace.stages["hybrid_fused"].candidates
-    duplicate = next(candidate for candidate in hybrid if candidate.duplicate_of is not None)
+    partition_fused = trace.stages["partition_fused"].candidates
+    duplicate = next(candidate for candidate in partition_fused if candidate.duplicate_of is not None)
     assert duplicate.id == "b"
     assert duplicate.scores["fused"] == pytest.approx(1 / 62 + 1 / 61)
-    assert next(candidate for candidate in hybrid if candidate.id == "c").removal_reason.code == "final_top_n"
+    assert next(candidate for candidate in partition_fused if candidate.id == "c").removal_reason.code == "final_top_n"
     assert [candidate.id for candidate in trace.stages["final"].candidates] == ["b", "a"]
+
+
+@pytest.mark.asyncio
+async def test_retrieve_multi_records_each_partition_group_trace():
+    cfg = _config()
+    cfg.partitions = {
+        "a": _partition(name="a", embedder="embed-a"),
+        "b": _partition(name="b", embedder="embed-b"),
+    }
+    svc = RetrievalService(
+        searcher=FakeSearcher(),
+        reranker=None,
+        llm=None,
+        config=cfg,
+        searcher_factory=_mixed_factory(set()),
+    )
+    trace = RetrievalTraceBuilder("multi-partition", "hello")
+
+    await svc.retrieve_multi(
+        partitions=["a", "b"],
+        search_queries=SearchQueries(query_list=[Query(query="rewritten one"), Query(query="rewritten two")]),
+        trace=trace,
+    )
+
+    assert len(trace.query_traces) == 2
+    assert [child.partition for child in trace.query_traces] == ["a", "b"]
+    assert [child.query for child in trace.query_traces] == [None, None]
+    assert [[nested.query for nested in child.query_traces] for child in trace.query_traces] == [
+        ["rewritten one", "rewritten two"],
+        ["rewritten one", "rewritten two"],
+    ]
+    assert all(
+        next(stage for stage in query_trace.stages if stage.name == "pre_rerank").status == "complete"
+        for partition_trace in trace.query_traces
+        for query_trace in partition_trace.query_traces
+    )
+    assert trace.stages["pre_rerank"].status == "unavailable"
+
+
+@pytest.mark.asyncio
+async def test_retrieve_records_partition_identity_and_effective_query():
+    cfg = _config()
+    cfg.partitions = {
+        "a": _partition(name="a", embedder="embed-a"),
+        "b": _partition(name="b", embedder="embed-b"),
+    }
+    svc = RetrievalService(
+        searcher=FakeSearcher(),
+        reranker=None,
+        llm=None,
+        config=cfg,
+        searcher_factory=_mixed_factory(set()),
+    )
+    trace = RetrievalTraceBuilder("multi-partition", "original follow-up")
+
+    await svc.retrieve(
+        partitions=["a", "b"],
+        query=Query(query="contextualized question"),
+        trace=trace,
+    )
+
+    assert [(child.partition, child.query) for child in trace.query_traces] == [
+        ("a", "contextualized question"),
+        ("b", "contextualized question"),
+    ]
 
 
 # --------------------------------------------------------------------------- #
@@ -368,6 +741,7 @@ async def test_retrieve_diagnostic_overrides_threshold_depth_reranker_and_expans
         partitions=["tenant-a"],
         search_queries=SearchQueries(query_list=[Query(query="hello")]),
         top_k=100,
+        retrieval_top_k=100,
         similarity_threshold=0.35,
         disable_reranker=True,
         disable_expansion=True,
@@ -376,6 +750,30 @@ async def test_retrieve_diagnostic_overrides_threshold_depth_reranker_and_expans
     assert s.search_calls[0]["top_k"] == 100
     assert s.search_calls[0]["similarity_threshold"] == 0.35
     assert reranker.calls == []
+
+
+@pytest.mark.asyncio
+async def test_final_top_k_does_not_reduce_configured_search_depth():
+    searcher = FakeSearcher()
+    searcher.search_result = [_chunk("a"), _chunk("b"), _chunk("c")]
+    cfg = _config()
+    cfg.partitions = {"tenant-a": _partition(retrieval=RetrievalPipelineConfig(top_k=50, enable_reranker=False))}
+    svc = RetrievalService(
+        searcher=searcher,
+        reranker=None,
+        llm=None,
+        config=cfg,
+        searcher_factory=lambda _name: searcher,
+    )
+
+    result = await svc.retrieve_multi(
+        partitions=["tenant-a"],
+        search_queries=SearchQueries(query_list=[Query(query="hello")]),
+        top_k=2,
+    )
+
+    assert searcher.search_calls[0]["top_k"] == 50
+    assert [chunk.id for chunk in result] == ["a", "b"]
 
 
 @pytest.mark.asyncio
@@ -744,10 +1142,12 @@ async def test_retrieve_survives_one_failing_partition():
         config=cfg,
         searcher_factory=_mixed_factory({"embed-bad"}),
     )
+    trace = RetrievalTraceBuilder("degraded-single", "hello")
 
-    out = await svc.retrieve(partitions=["all"], query=Query(query="hello"))
+    out = await svc.retrieve(partitions=["all"], query=Query(query="hello"), trace=trace)
 
     assert [c.id for c in out] == ["embed-good-hit"]
+    assert [candidate.id for candidate in trace.stages["final"].candidates] == ["embed-good-hit"]
 
 
 @pytest.mark.asyncio
@@ -765,10 +1165,16 @@ async def test_retrieve_multi_survives_one_failing_partition():
         config=cfg,
         searcher_factory=_mixed_factory({"embed-bad"}),
     )
+    trace = RetrievalTraceBuilder("degraded-multi", "hello")
 
-    out = await svc.retrieve_multi(partitions=["all"], search_queries=SearchQueries(query_list=[Query(query="hello")]))
+    out = await svc.retrieve_multi(
+        partitions=["all"],
+        search_queries=SearchQueries(query_list=[Query(query="hello")]),
+        trace=trace,
+    )
 
     assert [c.id for c in out] == ["embed-good-hit"]
+    assert [candidate.id for candidate in trace.stages["final"].candidates] == ["embed-good-hit"]
 
 
 @pytest.mark.asyncio

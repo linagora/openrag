@@ -191,13 +191,13 @@ async def test_expansion_with_ancestors_calls_searcher():
 
 
 @pytest.mark.asyncio
-async def test_expansion_applies_safe_default_ancestor_depth():
+async def test_expansion_preserves_unlimited_ancestor_depth():
     searcher = FakeSearcher()
     retriever = SingleRetriever(searcher=searcher, include_ancestors=True, max_ancestor_depth=None)
 
     await retriever.expand_search_results([Chunk(id="1", text="x", partition="p1", document_id="f1")])
 
-    assert searcher.ancestor_calls[0]["max_ancestor_depth"] == 50
+    assert searcher.ancestor_calls[0]["max_ancestor_depth"] is None
 
 
 @pytest.mark.asyncio
@@ -227,7 +227,7 @@ async def test_expansion_swallows_ancestor_errors():
 
 
 @pytest.mark.asyncio
-async def test_expansion_caps_total_output():
+async def test_expansion_preserves_all_unique_results():
     searcher = FakeSearcher()
     searcher.related_result = [_chunk(f"related-{index}") for index in range(1_001)]
     retriever = SingleRetriever(searcher=searcher, include_related=True, related_limit=100)
@@ -235,7 +235,7 @@ async def test_expansion_caps_total_output():
 
     expanded = await retriever.expand_search_results(initial)
 
-    assert len(expanded) == 1_000
+    assert len(expanded) == 1_002
 
 
 @pytest.mark.asyncio

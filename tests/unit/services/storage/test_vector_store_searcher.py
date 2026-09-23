@@ -9,6 +9,7 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from core.models.retrieval_trace import TraceCandidate
 from core.retrieval.trace import RetrievalTraceBuilder
 from services.storage.vector_store_searcher import VectorStoreSearcher, _dict_to_chunk
 
@@ -307,6 +308,107 @@ async def test_multi_query_search_deduplicates_across_queries():
     assert sorted(ids) == ["1", "2", "3"]
 
 
+@pytest.mark.asyncio
+async def test_multi_query_search_uses_independent_traces_and_merges_in_query_order():
+    embedder = MagicMock()
+    embedder.embed = AsyncMock(return_value=[_EMBED_VEC, _EMBED_VEC])
+    child_traces = []
+
+    async def search(*, query_text, trace, **_kwargs):
+        child_traces.append(trace)
+        candidate_id = "first" if query_text == "q1" else "second"
+        trace.record_stage(
+            "dense_after_threshold",
+            status="complete",
+            candidates=[TraceCandidate(id=candidate_id, rank=1)],
+        )
+        trace.record_stage("sparse", status="unavailable", candidates=[])
+        trace.record_stage("hybrid_fused", status="unavailable", candidates=[])
+        return [_make_row(candidate_id)]
+
+    store = MagicMock()
+    store.search = AsyncMock(side_effect=search)
+    store.query_chunks_by_filter = AsyncMock(return_value=[])
+    parent = RetrievalTraceBuilder("request", "question")
+    searcher = VectorStoreSearcher(store, embedder, MagicMock(), "col")
+
+    await searcher.multi_query_search(
+        queries=["q1", "q2"],
+        partition=["p1"],
+        top_k_per_query=3,
+        with_surrounding_chunks=False,
+        trace=parent,
+    )
+
+    assert len({id(trace) for trace in child_traces}) == 2
+    assert all(trace is not parent for trace in child_traces)
+    finished = parent.finish(configuration_fingerprint="fingerprint")
+    assert [query_trace["query"] for query_trace in finished["query_traces"]] == ["q1", "q2"]
+    assert [
+        next(stage for stage in query_trace["stages"] if stage["name"] == "dense_after_threshold")["candidates"][0][
+            "id"
+        ]
+        for query_trace in finished["query_traces"]
+    ] == [
+        "first",
+        "second",
+    ]
+    assert [candidate.id for candidate in parent.stages["dense_after_threshold"].candidates] == [
+        "first",
+        "second",
+    ]
+    assert parent.stages["hybrid_fused"].status == "unavailable"
+
+
+@pytest.mark.asyncio
+async def test_multi_query_search_uses_parallel_wall_clock_latency():
+    embedder = MagicMock()
+    embedder.embed = AsyncMock(return_value=[_EMBED_VEC, _EMBED_VEC])
+
+    async def search(*, query_text, trace, **_kwargs):
+        duration = 0.2 if query_text == "q1" else 0.7
+        trace.timings["dense_search"] = duration
+        trace.record_stage(
+            "dense_after_threshold",
+            status="complete",
+            candidates=[],
+            duration_seconds=duration,
+        )
+        return []
+
+    store = MagicMock()
+    store.search = AsyncMock(side_effect=search)
+    store.query_chunks_by_filter = AsyncMock(return_value=[])
+    parent = RetrievalTraceBuilder("request", "question")
+    searcher = VectorStoreSearcher(store, embedder, MagicMock(), "col")
+
+    await searcher.multi_query_search(
+        queries=["q1", "q2"],
+        partition=["p1"],
+        top_k_per_query=3,
+        with_surrounding_chunks=False,
+        trace=parent,
+    )
+
+    assert parent.stages["dense_after_threshold"].duration_seconds == 0.7
+    assert parent.timings["dense_search"] == 0.7
+
+
+@pytest.mark.asyncio
+async def test_multi_query_search_does_not_create_traces_when_disabled():
+    searcher, store, embedder, _ = _make_searcher()
+    embedder.embed.return_value = [_EMBED_VEC, _EMBED_VEC]
+
+    await searcher.multi_query_search(
+        queries=["q1", "q2"],
+        partition=["p1"],
+        top_k_per_query=3,
+        with_surrounding_chunks=False,
+    )
+
+    assert all("trace" not in call.kwargs for call in store.search.await_args_list)
+
+
 # ---------------------------------------------------------------------------
 # get_related_chunks()
 # ---------------------------------------------------------------------------
@@ -475,3 +577,13 @@ def test_dict_to_chunk_drops_persisted_retrieval_scores():
     c = _dict_to_chunk(row)
     assert not {"vector_score", "rerank_score", "combined_score"} & set(c.metadata)
     assert c.metadata["author"] == "alice"
+
+
+@pytest.mark.asyncio
+async def test_the_searcher_reads_its_own_embedders_field():
+    searcher, store, _, _ = _make_searcher()
+    searcher._vector_field = "vector_bge_m3"
+
+    await searcher.search("q", partition=["p1"], top_k=5)
+
+    assert store.search.await_args.kwargs["vector_field"] == "vector_bge_m3"

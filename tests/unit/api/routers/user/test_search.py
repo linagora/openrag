@@ -1,7 +1,6 @@
 import json
 from types import SimpleNamespace
 
-import pytest
 from api.dependencies.auth import (
     current_user,
     current_user_or_admin_partitions_list,
@@ -10,7 +9,7 @@ from api.dependencies.auth import (
 from api.error_handlers import register_error_handlers
 from api.routers.user.search import router as search_router
 from core.models.chunk import Chunk
-from core.retrieval.trace import candidates_from_chunks
+from core.retrieval.trace import candidates_from_chunks, canonical_fingerprint
 from di.providers import (
     get_auth_service,
     get_partition_service,
@@ -115,6 +114,7 @@ def _trace_client():
     class _TraceRetrieval:
         def __init__(self):
             self.calls: list[dict] = []
+            self.resolved_fingerprint_calls = 0
 
         async def search(self, **kwargs):
             self.calls.append(kwargs)
@@ -132,7 +132,12 @@ def _trace_client():
 
         def configuration_fingerprint(self, partitions):
             assert list(partitions) == ["mine"]
-            return "fingerprint"
+            return "legacy-fingerprint"
+
+        async def resolved_configuration_fingerprint(self, partitions):
+            assert list(partitions) == ["mine"]
+            self.resolved_fingerprint_calls += 1
+            return "prompt-aware-fingerprint"
 
     retrieval = _TraceRetrieval()
     app = FastAPI()
@@ -156,6 +161,7 @@ def test_search_without_trace_preserves_response_shape_and_does_not_create_colle
 
     assert set(payload) == {"documents"}
     assert retrieval.calls[0].get("trace") is None
+    assert retrieval.resolved_fingerprint_calls == 0
 
 
 def test_search_with_trace_returns_same_documents_without_sensitive_trace_payload():
@@ -173,11 +179,57 @@ def test_search_with_trace_returns_same_documents_without_sensitive_trace_payloa
     assert payload["documents"] == plain
     assert payload["retrieval_trace"]["schema_version"] == 1
     assert payload["retrieval_trace"]["request_id"] == "trace-request"
-    assert payload["retrieval_trace"]["configuration_fingerprint"] == "fingerprint"
+    assert payload["retrieval_trace"]["configuration_fingerprint"] == canonical_fingerprint(
+        {
+            "stored_configuration_fingerprint": "prompt-aware-fingerprint",
+            "effective_request_overrides": {
+                "top_k": 5,
+                "similarity_threshold": 0.75,
+                "include_related": False,
+                "include_ancestors": False,
+                "related_limit": 20,
+                "max_ancestor_depth": None,
+            },
+        }
+    )
+    assert retrieval.resolved_fingerprint_calls == 1
     assert retrieval.calls[-1]["trace"] is not None
     serialized_trace = json.dumps(payload["retrieval_trace"])
     assert "private document body" not in serialized_trace
     assert "secret-token" not in serialized_trace
+
+
+def test_search_trace_fingerprint_includes_effective_request_options():
+    client, _retrieval = _trace_client()
+
+    response = client.get(
+        "/search/partition/mine",
+        params={
+            "text": "q",
+            "top_k": 17,
+            "similarity_threshold": 0.35,
+            "include_related": True,
+            "include_ancestors": True,
+            "related_limit": 8,
+            "max_ancestor_depth": 4,
+            "include_retrieval_trace": True,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["retrieval_trace"]["configuration_fingerprint"] == canonical_fingerprint(
+        {
+            "stored_configuration_fingerprint": "prompt-aware-fingerprint",
+            "effective_request_overrides": {
+                "top_k": 17,
+                "similarity_threshold": 0.35,
+                "include_related": True,
+                "include_ancestors": True,
+                "related_limit": 8,
+                "max_ancestor_depth": 4,
+            },
+        }
+    )
 
 
 def test_snapshot_route_forwards_opt_in_document_ids():
@@ -210,25 +262,27 @@ def test_snapshot_route_forwards_opt_in_document_ids():
 
 def test_search_rejects_top_k_above_resource_limit():
     response = _client(user_partitions=[{"partition": "mine", "role": "viewer"}]).get(
-        "/search", params={"text": "hello", "top_k": 201}
+        "/search", params={"text": "hello", "top_k": 1001}
     )
 
     assert response.status_code == 422
 
 
-@pytest.mark.parametrize(
-    "params",
-    [
-        {"include_related": True, "related_limit": 101},
-        {"include_ancestors": True, "max_ancestor_depth": 51},
-    ],
-)
-def test_search_rejects_unbounded_expansion_parameters(params):
+def test_search_preserves_existing_expansion_parameter_ranges():
     client, _ = _trace_client()
 
-    response = client.get("/search/partition/mine", params={"text": "q", **params})
+    response = client.get(
+        "/search/partition/mine",
+        params={
+            "text": "q",
+            "include_related": True,
+            "related_limit": 101,
+            "include_ancestors": True,
+            "max_ancestor_depth": 51,
+        },
+    )
 
-    assert response.status_code == 422
+    assert response.status_code == 200
 
 
 def test_search_trace_requires_admin_privileges():

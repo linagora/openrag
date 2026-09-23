@@ -20,7 +20,7 @@ from __future__ import annotations
 from collections.abc import Callable, Hashable, Sequence
 from typing import TYPE_CHECKING, TypeVar
 
-from core.models.retrieval_trace import TraceCandidate, TraceRemovalReason
+from core.models.retrieval_trace import TraceCandidate, TraceRemovalReason, TraceStageName
 
 if TYPE_CHECKING:
     from core.retrieval.trace import RetrievalTraceBuilder
@@ -34,6 +34,7 @@ def rrf_reranking(
     k: int = 60,
     top_k: int | None = None,
     trace: RetrievalTraceBuilder | None = None,
+    trace_stage: TraceStageName = "hybrid_fused",
 ) -> list[T]:
     """Fuse multiple ranked lists into one via Reciprocal Rank Fusion.
 
@@ -56,11 +57,11 @@ def rrf_reranking(
     if k < 0:
         raise ValueError(f"RRF k must be non-negative, got {k}")
     if not ranked_lists:
-        _record_rrf_trace(trace, [], {}, {}, top_k)
+        _record_rrf_trace(trace, [], {}, {}, top_k, trace_stage)
         return []
     if len(ranked_lists) == 1:
         result = list(ranked_lists[0])
-        _record_single_list_trace(trace, result, key_fn, k, top_k)
+        _record_single_list_trace(trace, result, key_fn, k, top_k, trace_stage)
         return result[:top_k] if top_k is not None else result
 
     if key_fn is None:
@@ -77,7 +78,7 @@ def rrf_reranking(
 
     ordered = sorted(fused.items(), key=lambda entry: entry[1][0], reverse=True)
     result = [item for _, (_, item) in ordered]
-    _record_rrf_trace(trace, result, {key: score for key, (score, _) in fused.items()}, occurrences, top_k)
+    _record_rrf_trace(trace, result, {key: score for key, (score, _) in fused.items()}, occurrences, top_k, trace_stage)
     return result[:top_k] if top_k is not None else result
 
 
@@ -87,6 +88,7 @@ def _record_rrf_trace(
     scores: dict[Hashable, float],
     occurrences: dict[Hashable, list[T]],
     top_k: int | None,
+    trace_stage: TraceStageName,
 ) -> None:
     """Record fused membership without letting optional telemetry affect RRF."""
     if trace is None:
@@ -124,10 +126,10 @@ def _record_rrf_trace(
                         ),
                     )
                 )
-        trace.record_stage("hybrid_fused", status="complete", candidates=candidates)
+        trace.record_stage(trace_stage, status="complete", candidates=candidates)
     except Exception as error:
         try:
-            trace.record_error("hybrid_fused", error)
+            trace.record_error(trace_stage, error)
         except Exception:
             pass
 
@@ -138,6 +140,7 @@ def _record_single_list_trace(
     key_fn: Callable[[T], Hashable] | None,
     k: int,
     top_k: int | None,
+    trace_stage: TraceStageName,
 ) -> None:
     """Trace a pass-through list while retaining duplicate occurrences once."""
     if trace is None:
@@ -175,9 +178,9 @@ def _record_single_list_trace(
                     removal_reason=removal,
                 )
             )
-        trace.record_stage("hybrid_fused", status="complete", candidates=candidates)
+        trace.record_stage(trace_stage, status="complete", candidates=candidates)
     except Exception as error:
         try:
-            trace.record_error("hybrid_fused", error)
+            trace.record_error(trace_stage, error)
         except Exception:
             pass

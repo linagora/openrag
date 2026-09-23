@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
@@ -947,7 +948,7 @@ async def test_chat_forwards_bounded_retrieval_diagnostic_overrides():
     retrieval = FakeRetrieval()
     svc = _svc(mode="ChatBotRag", llm=FakeLLM(chat_responses=["answer"]), retrieval=retrieval)
 
-    await svc.chat(
+    out = await svc.chat(
         partitions=["p"],
         payload={
             "messages": [{"role": "user", "content": "Exact original legal question?"}],
@@ -968,8 +969,107 @@ async def test_chat_forwards_bounded_retrieval_diagnostic_overrides():
     call = retrieval.retrieve_multi_calls[0]
     assert call["similarity_threshold"] == 0.35
     assert call["top_k"] == 100
+    assert call["retrieval_top_k"] == 100
     assert call["disable_reranker"] is True
     assert call["disable_expansion"] is True
+    assert out["extra"]["retrieval_trace"]["configuration_fingerprint"] == qs.canonical_fingerprint(
+        {
+            "stored_configuration_fingerprint": "fake-fingerprint",
+            "effective_request_overrides": {
+                "top_k": 100,
+                "similarity_threshold": 0.35,
+                "disable_reranker": True,
+                "disable_expansion": True,
+            },
+        }
+    )
+
+
+@pytest.mark.asyncio
+async def test_chat_trace_uses_http_request_id():
+    svc = _svc(mode="SimpleRag", llm=FakeLLM(chat_responses=["answer"]), retrieval=FakeRetrieval(chunks=[]))
+
+    out = await svc.chat(
+        partitions=["p"],
+        payload={
+            "messages": [{"role": "user", "content": "question"}],
+            "metadata": {"include_retrieval_trace": True},
+        },
+        prepare_sources=lambda _docs, _web: [],
+        model_name="m",
+        request_id="http-request-id",
+    )
+
+    assert out["extra"]["retrieval_trace"]["request_id"] == "http-request-id"
+
+
+@pytest.mark.asyncio
+async def test_traced_chat_uses_prompt_aware_retrieval_configuration_fingerprint():
+    class PromptAwareRetrieval(FakeRetrieval):
+        async def resolved_configuration_fingerprint(self, partitions, *, contextualizer_prompt=None):
+            assert partitions == ["p"]
+            return "prompt-aware-fingerprint"
+
+    retrieval = PromptAwareRetrieval()
+    svc = _svc(mode="ChatBotRag", llm=FakeLLM(chat_responses=["answer"]), retrieval=retrieval)
+
+    out = await svc.chat(
+        partitions=["p"],
+        payload={
+            "messages": [{"role": "user", "content": "Exact original legal question?"}],
+            "metadata": {
+                "include_retrieval_trace": True,
+                "require_retrieval": True,
+                "bypass_query_contextualization": True,
+            },
+        },
+        prepare_sources=lambda docs, _web: [doc.metadata["_id"] for doc in docs],
+        model_name="m",
+    )
+
+    assert out["extra"]["retrieval_trace"]["configuration_fingerprint"] == "prompt-aware-fingerprint"
+
+
+@pytest.mark.asyncio
+async def test_contextualized_trace_fingerprints_the_prompt_identity_used_by_the_request():
+    generated = json.dumps(
+        {
+            "intent": "other",
+            "requires_retrieval": True,
+            "query_list": [{"query": "rewritten query", "temporal_filters": None}],
+        }
+    )
+
+    class PromptAwareRetrieval(FakeRetrieval):
+        def __init__(self):
+            super().__init__()
+            self.prompt_identities = []
+
+        async def resolved_configuration_fingerprint(self, partitions, *, contextualizer_prompt=None):
+            assert partitions == ["p"]
+            self.prompt_identities.append(contextualizer_prompt)
+            return "prompt-aware-fingerprint"
+
+    retrieval = PromptAwareRetrieval()
+    svc = _svc(
+        mode="ChatBotRag",
+        llm=FakeLLM(chat_responses=[generated, "answer"]),
+        retrieval=retrieval,
+    )
+
+    out = await svc.chat(
+        partitions=["p"],
+        payload={
+            "messages": [{"role": "user", "content": "original query"}],
+            "metadata": {"include_retrieval_trace": True, "require_retrieval": True},
+        },
+        prepare_sources=lambda docs, _web: [doc.metadata["_id"] for doc in docs],
+        model_name="m",
+    )
+
+    recorded_prompt = out["extra"]["retrieval_trace"]["contextualization"]["prompt"]
+    assert len(retrieval.prompt_identities) == 1
+    assert retrieval.prompt_identities[0].content_hash == recorded_prompt["content_hash"]
 
 
 @pytest.mark.asyncio
@@ -988,7 +1088,15 @@ async def test_original_query_comparison_never_changes_actual_documents():
         partitions=["p"],
         payload={
             "messages": [{"role": "user", "content": "original query"}],
-            "metadata": {"include_retrieval_trace": True, "compare_original_query": True},
+            "metadata": {
+                "include_retrieval_trace": True,
+                "compare_original_query": True,
+                "require_retrieval": True,
+                "retrieval_top_k": 7,
+                "retrieval_similarity_threshold": 0.4,
+                "retrieval_disable_reranker": True,
+                "retrieval_disable_expansion": True,
+            },
         },
         prepare_sources=lambda docs, _web: [doc.metadata["_id"] for doc in docs],
         model_name="m",
@@ -1001,6 +1109,19 @@ async def test_original_query_comparison_never_changes_actual_documents():
     ]
     comparison = out["extra"]["retrieval_trace"]["comparisons"]["original_query"]
     assert comparison["status"] == "complete"
+    expected_fingerprint = qs.canonical_fingerprint(
+        {
+            "stored_configuration_fingerprint": "fake-fingerprint",
+            "effective_request_overrides": {
+                "top_k": 7,
+                "similarity_threshold": 0.4,
+                "disable_reranker": True,
+                "disable_expansion": True,
+            },
+        }
+    )
+    assert comparison["configuration_fingerprint"] == expected_fingerprint
+    assert out["extra"]["retrieval_trace"]["configuration_fingerprint"] == expected_fingerprint
 
 
 @pytest.mark.asyncio
@@ -1267,6 +1388,8 @@ async def test_map_reduce_forces_retrieval_for_allowlisted_casual_message():
 
     assert len(retrieval.retrieve_multi_calls) == 1
     assert retrieval.retrieve_multi_calls[0]["search_queries"].query_list[0].query == "Merci!"
+    assert retrieval.retrieve_multi_calls[0]["top_k"] == svc._mr_max
+    assert retrieval.retrieve_multi_calls[0]["retrieval_top_k"] is None
 
 
 @pytest.mark.asyncio
@@ -1285,6 +1408,33 @@ async def test_websearch_with_partition_fuses_docs_via_retrieve_multi():
     assert len(retrieval.retrieve_multi_calls) == 1  # doc branch fused via the rrf_k-aware retrieve_multi
     assert retrieval.retrieve_per_query_calls == []  # legacy per-query + fuse()@60 path NOT used
     assert web and web[0].url == "https://ex.com"  # websearch branch actually taken
+
+
+@pytest.mark.asyncio
+async def test_websearch_with_partition_forwards_retrieval_diagnostic_overrides():
+    retrieval = FakeRetrieval()
+    web_result = SimpleNamespace(url="https://ex.com", title="T", content="web body", snippet="")
+    svc = _svc(retrieval=retrieval, web=FakeWeb(results=[web_result]))
+
+    await svc._prepare_chat(
+        ["p"],
+        {
+            "messages": [{"role": "user", "content": "q"}],
+            "metadata": {
+                "websearch": True,
+                "retrieval_top_k": 73,
+                "retrieval_similarity_threshold": 0.35,
+                "retrieval_disable_reranker": True,
+                "retrieval_disable_expansion": True,
+            },
+        },
+    )
+
+    call = retrieval.retrieve_multi_calls[0]
+    assert call["top_k"] == 73
+    assert call["similarity_threshold"] == 0.35
+    assert call["disable_reranker"] is True
+    assert call["disable_expansion"] is True
 
 
 @pytest.mark.asyncio
@@ -1843,6 +1993,7 @@ async def test_chat_stream_emits_trace_only_in_terminal_metadata():
             },
             prepare_sources=lambda _d, _w: [],
             model_name="m",
+            request_id="stream-request-id",
         )
     ]
     chunks = [
@@ -1853,6 +2004,44 @@ async def test_chat_stream_emits_trace_only_in_terminal_metadata():
 
     assert all("retrieval_trace" not in chunk.get("extra", {}) for chunk in chunks[:-1])
     assert chunks[-1]["extra"]["retrieval_trace"]["original_query"] == "original"
+    assert chunks[-1]["extra"]["retrieval_trace"]["request_id"] == "stream-request-id"
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_finalizes_trace_after_upstream_stream_closes(monkeypatch):
+    state = {"stream_closed": False}
+
+    class LifecycleLLM(FakeLLM):
+        async def stream_chat(self, messages, **kwargs):
+            try:
+                yield 'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'
+                yield "data: [DONE]\n\n"
+            finally:
+                state["stream_closed"] = True
+
+    monkeypatch.setattr(qs.time, "perf_counter", lambda: 5.0 if state["stream_closed"] else 1.0)
+    svc = _svc(llm=LifecycleLLM())
+
+    lines = [
+        line
+        async for line in svc.chat_stream(
+            partitions=None,
+            payload={
+                "messages": [{"role": "user", "content": "original"}],
+                "metadata": {"include_retrieval_trace": True},
+            },
+            prepare_sources=lambda _d, _w: [],
+            model_name="m",
+        )
+    ]
+    terminal = next(
+        json.loads(line[len("data: ") :])
+        for line in reversed(lines)
+        if line.startswith("data: ") and line.strip() != "data: [DONE]"
+    )
+
+    assert state["stream_closed"] is True
+    assert terminal["extra"]["retrieval_trace"]["timings"]["total"] == 4.0
 
 
 @pytest.mark.asyncio
@@ -2384,3 +2573,53 @@ async def test_require_retrieval_keeps_generated_filters_and_allows_no_matches(h
         assert generated.to_milvus_filter()
     assert result.docs == []
     assert result.retrieved_docs == []
+
+
+@pytest.mark.asyncio
+async def test_generate_query_hands_the_contextualizer_precomputed_calendar_anchors():
+    """ "Last week" must reach Milvus as Monday-to-Monday. Mistral Small resolved
+    it to the past seven days when left to do the arithmetic, so the system
+    prompt now carries the boundaries pre-computed through the template's
+    ``{calendar_anchors}`` placeholder.
+    """
+    payload = json.dumps({"requires_retrieval": True, "query_list": [{"query": "q", "temporal_filters": None}]})
+    llm = FakeLLM(chat_responses=[payload])
+    svc = _svc(llm=llm, mode="ChatBotRag")
+
+    await svc.generate_query([{"role": "user", "content": "résume mes échanges de la semaine dernière"}])
+
+    system = llm.chat_calls[0][0][0]
+    assert system["role"] == "system"
+    assert "Calendar anchors (use verbatim, do not recompute)" in system["content"]
+    assert "- last week [" in system["content"]
+    # The bundled template points its resolution rules at those anchors.
+    assert "copy the matching anchor under Current date verbatim" in system["content"]
+
+
+@pytest.mark.asyncio
+async def test_generate_query_reads_the_clock_in_utc(monkeypatch):
+    """23:30 UTC on the 16th is already the 17th in Paris. The anchors are
+    compared against UTC ``created_at`` timestamps, so the day must come from
+    the UTC clock, not the host's local one, and the boundaries the model
+    copies must already carry the ``+00:00`` the Milvus filter requires.
+    """
+    instant = datetime(2026, 9, 16, 23, 30, tzinfo=UTC)
+
+    class FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            if tz is not UTC:
+                raise AssertionError("generate_query must read the UTC clock")
+            return instant
+
+    monkeypatch.setattr(qs, "datetime", FrozenDatetime)
+    payload = json.dumps({"requires_retrieval": True, "query_list": [{"query": "q", "temporal_filters": None}]})
+    llm = FakeLLM(chat_responses=[payload])
+    svc = _svc(llm=llm, mode="ChatBotRag")
+
+    await svc.generate_query([{"role": "user", "content": "what did I receive today?"}])
+
+    system = llm.chat_calls[0][0][0]["content"]
+    assert "Current date: Wednesday, September 16, 2026, 23:30:00" in system
+    assert "- today 2026-09-16T00:00:00+00:00, tomorrow 2026-09-17T00:00:00+00:00" in system
+    assert "- last week [2026-09-07, 2026-09-14)" in system

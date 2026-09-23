@@ -15,6 +15,8 @@ TraceStageName = Literal[
     "dense_after_threshold",
     "sparse",
     "hybrid_fused",
+    "multi_query_fused",
+    "partition_fused",
     "pre_rerank",
     "post_rerank",
     "final",
@@ -83,6 +85,17 @@ class TraceError(_TraceModel):
     @classmethod
     def redact_message(cls, value: object) -> str:
         return REDACTED_ERROR_MESSAGE
+
+
+class QueryRetrievalTrace(_TraceModel):
+    """Content-free retrieval stages produced for one partition or query."""
+
+    query: str | None = None
+    partition: str | None = None
+    stages: list[TraceStage] = Field(default_factory=list)
+    timings: dict[str, float] = Field(default_factory=dict)
+    errors: list[TraceError] = Field(default_factory=list)
+    query_traces: list[QueryRetrievalTrace] = Field(default_factory=list)
 
 
 class TemporalFilterTrace(_TraceModel):

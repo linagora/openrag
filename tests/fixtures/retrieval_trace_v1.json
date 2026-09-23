@@ -64,6 +64,22 @@
       "error": null
     },
     {
+      "name": "multi_query_fused",
+      "status": "not_run",
+      "duration_seconds": null,
+      "candidate_count": 0,
+      "candidates": [],
+      "error": null
+    },
+    {
+      "name": "partition_fused",
+      "status": "not_run",
+      "duration_seconds": null,
+      "candidate_count": 0,
+      "candidates": [],
+      "error": null
+    },
+    {
       "name": "pre_rerank",
       "status": "not_run",
       "duration_seconds": null,

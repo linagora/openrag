@@ -329,6 +329,30 @@ async def test_get_relevant_docs_runs_one_call_per_subquery_and_fuses():
 
 
 @pytest.mark.asyncio
+async def test_multi_query_fusion_does_not_overwrite_store_hybrid_status():
+    retriever = FakeRetriever()
+    retriever.results_queue = [_chunks("a"), _chunks("b")]
+    trace = RetrievalTraceBuilder("req-1", "question")
+    trace.record_stage("hybrid_fused", status="unavailable", candidates=[])
+    pipeline = RetrieverPipeline(retriever=retriever)
+
+    await pipeline.get_relevant_docs(
+        partition=["p1"],
+        search_queries=SearchQueries(query_list=[Query(query="q1"), Query(query="q2")]),
+        trace=trace,
+    )
+
+    assert trace.stages["hybrid_fused"].status == "unavailable"
+    assert trace.stages["multi_query_fused"].status == "complete"
+    assert [item.query for item in trace.query_traces] == ["q1", "q2"]
+    assert all(
+        next(stage for stage in item.stages if stage.name == "pre_rerank").status == "complete"
+        for item in trace.query_traces
+    )
+    assert trace.stages["pre_rerank"].status == "unavailable"
+
+
+@pytest.mark.asyncio
 async def test_get_relevant_docs_traces_single_query_reranking_stages():
     r = FakeRetriever()
     r.results_queue = [_chunks("a", "b", "c")]
@@ -422,9 +446,10 @@ async def test_get_relevant_docs_passes_configured_rrf_k(monkeypatch):
     captured = {}
     real = pipeline_mod.rrf_reranking
 
-    def spy(ranked_lists, key_fn=None, k=60):
+    def spy(ranked_lists, key_fn=None, k=60, **kwargs):
         captured["k"] = k
-        return real(ranked_lists, key_fn=key_fn, k=k)
+        captured["trace_stage"] = kwargs.get("trace_stage")
+        return real(ranked_lists, key_fn=key_fn, k=k, **kwargs)
 
     monkeypatch.setattr(pipeline_mod, "rrf_reranking", spy)
 
@@ -435,6 +460,7 @@ async def test_get_relevant_docs_passes_configured_rrf_k(monkeypatch):
     await p.get_relevant_docs(partition=["p1"], search_queries=sq)
 
     assert captured["k"] == 17
+    assert captured["trace_stage"] == "multi_query_fused"
 
 
 def test_rrf_k_defaults_to_canonical_60():

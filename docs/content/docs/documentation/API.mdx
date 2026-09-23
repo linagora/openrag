@@ -268,10 +268,10 @@ Perform semantic search across specified partitions.
 |---------------------|---------|---------|-------------|
 | `partitions` (optional)        | array   | ["all"] | Partitions to search. (optional) |
 | `text`              | string  | required | Search query |
-| `top_k` (optional)             | integer | 5       | Number of initial results, from 1 to 200 (optional) |
+| `top_k` (optional)             | integer | 5       | Number of initial results, from 1 to 1000 (optional) |
 | `include_related` (optional)   | boolean | `false`   | Include chunks from files with same `relationship_id` |
 | `include_ancestors` (optional) | boolean | `false`   | Include chunks from ancestor files (via `parent_id` chain) |
-| `related_limit` (optional)     | integer | 20      | Max related/ancestor chunks to fetch per result, from 0 to 100 (used when `include_related` or `include_ancestors` is true) |
+| `related_limit` (optional)     | integer | 20      | Max related/ancestor chunks to fetch per result, starting at 0 (used when `include_related` or `include_ancestors` is true) |
 | `filter` (optional)            | string  | None    | Milvus filter expression string for additional filtering. Supports comparison (`==`, `!=`, `>`, `<`, `>=`, `<=`), range (`IN`, `LIKE`), and logical (`AND`, `OR`, `NOT`) operators. |
 | `include_retrieval_trace` (optional) | boolean | `false` | Adds schema-versioned, content-free retrieval diagnostics for administrators. May execute additional dense and sparse diagnostic searches. |
 
@@ -291,10 +291,10 @@ Search within a specific partition only.
 | Parameter           | Type    | Default | Description |
 |---------------------|---------|---------|-------------|
 | `text`              | string  | required | Search query |
-| `top_k` (optional)             | integer | 5       | Number of initial results, from 1 to 200 (optional) |
+| `top_k` (optional)             | integer | 5       | Number of initial results, from 1 to 1000 (optional) |
 | `include_related` (optional)   | boolean | `false`   | Include chunks from files with same `relationship_id` |
 | `include_ancestors` (optional) | boolean | `false`   | Include chunks from ancestor files (via `parent_id` chain) |
-| `related_limit` (optional)     | integer | 20      | Max related/ancestor chunks to fetch per result, from 0 to 100 (used when `include_related` or `include_ancestors` is true) |
+| `related_limit` (optional)     | integer | 20      | Max related/ancestor chunks to fetch per result, starting at 0 (used when `include_related` or `include_ancestors` is true) |
 | `filter` (optional)            | string  | None    | Milvus filter expression string for additional filtering. Supports comparison (`==`, `!=`, `>`, `<`, `>=`, `<=`), range (`IN`, `LIKE`), and logical (`AND`, `OR`, `NOT`) operators. |
 | `include_retrieval_trace` (optional) | boolean | `false` | Adds schema-versioned, content-free retrieval diagnostics for administrators. May execute additional dense and sparse diagnostic searches. |
 
@@ -431,7 +431,7 @@ GET /partition/{partition}/config
 ```http
 PATCH /partition/{partition}
 ```
-**Owner** only. Body fields (all optional): `description`, `embedder`, `indexation_preset`, `retrieval_preset`, `chat_history_depth`, `chat_llm`. Returns the updated resolved config.
+**Owner** only. Body fields (all optional): `description`, `embedder`, `indexation_preset`, `retrieval_preset`, `chat_history_depth`, `chat_llm`. Returns the updated resolved config. Changing `embedder` is refused on a partition that holds indexed files (`409 PARTITION_HAS_INDEXED_FILES`, or `409 INDEXING_IN_PROGRESS` while files are still being indexed or copied into it): each embedder keeps its vectors in its own field, which only its partitions search.
 
 ```bash frame="none"
 curl -X PATCH http://localhost:8080/partition/my_partition \
@@ -683,7 +683,7 @@ Changing an **embedder**'s `endpoint`, `model_name`, `extra.implementation` or `
 
 Files still indexing when such an edit is saved are not counted, since a file is only counted once indexing finishes. Instead, when the file is recorded, the indexer checks that the partition's embedder still has the configuration it embedded with. If it doesn't, the file fails with `EMBEDDER_CHANGED_DURING_INDEXING`, its vectors are removed, and it has to be indexed again. Indexers reload an edited endpoint before embedding, so only files already embedding during the edit are affected.
 
-`DELETE` of an embedder returns `409` while a partition names it or, for the default embedder, while a partition following the `default` alias already holds indexed files. Reassign those partitions first.
+`DELETE` of an embedder returns `409` while a partition names it or, for the default embedder, while a partition following the `default` alias already holds indexed files. Reassign those partitions first. Deleting an embedder also drops its vector field from the collection, on a best-effort basis: if the drop fails, the delete still succeeds and the empty field stays until removed by hand.
 
 #### Set as default for its type
 ```http
@@ -691,7 +691,7 @@ POST /model-endpoints/{model_type}/{name}/set-default
 ```
 Promotes the endpoint to the default used for its `model_type`, and returns it.
 
-For embedders, a new default only reaches partitions that have no data yet. A partition stays on the `default` alias until it first receives a file (upload or copy), at which point the alias is replaced by the embedder it resolved to; a partition indexed before that is pinned the same way when the default changes. Partitions with files therefore keep the embedder that built their vectors, and an admin moves one deliberately by setting its `embedder`. An emptied partition stays pinned — set its `embedder` back to `default` to follow the default again.
+For embedders, a new default only reaches partitions that have no data yet. A partition stays on the `default` alias until it first receives a file (upload or copy), at which point the alias is replaced by the embedder it resolved to; a partition indexed before that is pinned the same way when the default changes. Partitions with files therefore keep the embedder that built their vectors. An emptied partition stays pinned — set its `embedder` back to `default` to follow the default again.
 
 #### Reveal the stored API key
 ```http
@@ -795,7 +795,12 @@ ambiguous, mixed, and factual messages retrieve. Text completions retain their c
 | `llm_override` | Chat and text completions | `object` | `null` | Overrides the downstream LLM for this request. Accepts `model` (string), always honored. Also accepts `base_url` and `api_key`, which are honored **only** when the deployment sets `LLM_OVERRIDE_ALLOW_CUSTOM_ENDPOINT` — otherwise they are ignored and the request goes to the server's configured endpoint. See [custom LLM endpoints](/openrag/documentation/env_vars/#client-supplied-llm-endpoints). |
 | `attachments` | Chat only | `list[{"id": string}]` | `null` | Scopes RAG retrieval to a specific list of file IDs within the target partition, instead of searching the whole partition. Unknown or unindexed IDs are silently dropped; duplicates are deduplicated. The response's `extra.attachments` reports which IDs were actually used. |
 | `include_retrieval_trace` | Chat only | `bool` | `false` | For administrators, adds trace schema version 1 to `extra.retrieval_trace`. The streaming endpoint emits it only in terminal metadata. |
-| `compare_original_query` | Chat only | `bool` | `false` | For administrators with tracing enabled, runs an isolated retrieval for the original message and stores it under `comparisons.original_query`. It never changes the answer's documents. |
+| `compare_original_query` | Chat only | `bool` | `false` | For administrators, runs an isolated retrieval for the original message and stores it under `comparisons.original_query`. Requires `include_retrieval_trace: true`; it never changes the answer's documents. |
+| `bypass_query_contextualization` | Chat only | `bool` | `false` | Uses the latest user message as the exact retrieval query instead of rewriting it. JSON `true` requires both `include_retrieval_trace: true` and `require_retrieval: true`, and cannot be combined with `compare_original_query`. `false` is ignored. |
+| `retrieval_similarity_threshold` | Chat only | `number` | `null` | Diagnostic per-request similarity threshold override. A non-null value must be finite and between `0` and `1`, inclusive. Active values require both `include_retrieval_trace: true` and `require_retrieval: true`, and cannot be combined with `websearch`. `null` is ignored. |
+| `retrieval_top_k` | Chat only | `integer` | `null` | Diagnostic per-request retrieval result limit. A non-null value must be between `1` and `1000`, inclusive. Active values require both `include_retrieval_trace: true` and `require_retrieval: true`, and cannot be combined with `websearch`. `null` is ignored. |
+| `retrieval_disable_reranker` | Chat only | `bool` | `false` | JSON `true` disables reranking for this diagnostic request. It requires both `include_retrieval_trace: true` and `require_retrieval: true`, and cannot be combined with `websearch`. `false` and `null` are ignored. |
+| `retrieval_disable_expansion` | Chat only | `bool` | `false` | JSON `true` disables related-document and ancestor expansion for this diagnostic request. It requires both `include_retrieval_trace: true` and `require_retrieval: true`, and cannot be combined with `websearch`. `false` and `null` are ignored. |
 
 Chat tracing persists the exact contextualized query, temporal filters, retrieval decision, fallback state, prompt
 hash, and retrieval stages. It is not regenerated when results are inspected. Both tracing and original-query

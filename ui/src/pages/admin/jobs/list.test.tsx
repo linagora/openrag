@@ -82,6 +82,7 @@ const task = (
     duration_ms?: number;
     outcome?: "completed" | "completed_degraded" | "failed" | "cancelled" | "active";
     degraded_stages?: string[];
+    error_summary?: string;
   } = {},
 ): TaskListItem => ({
   task_id,
@@ -95,6 +96,7 @@ const task = (
   },
   created_at: timing.created_at,
   duration_ms: timing.duration_ms,
+  error_summary: timing.error_summary,
   outcome:
     timing.outcome ??
     ({
@@ -186,6 +188,56 @@ describe("JobListPage filters", () => {
 
     expect(await screen.findByText("Completed with degradation")).not.toBeNull();
     expect(screen.getByText("Caption, Topic tagging")).not.toBeNull();
+  });
+
+  it("shows, searches, and exports failure reasons for admins", async () => {
+    const failedTask = task("failed-task", "FAILED", "failed.pdf", "docs", {
+      error_summary: "ValueError: parser failed",
+    });
+    listTasksMock.mockResolvedValue({
+      tasks: [failedTask, task("other-task", "COMPLETED", "other.pdf")],
+    });
+
+    renderJobs();
+
+    expect(await screen.findByRole("columnheader", { name: "Failure reason" })).not.toBeNull();
+    expect(screen.getByTitle("ValueError: parser failed")).not.toBeNull();
+
+    await userEvent.type(screen.getByPlaceholderText("Search jobs..."), "parser failed");
+    await waitFor(() => expect(screen.queryByText("other.pdf")).toBeNull());
+    expect(screen.getByText("failed.pdf")).not.toBeNull();
+
+    await userEvent.click(screen.getByRole("button", { name: /export csv/i }));
+
+    const csvColumns = downloadCsvMock.mock.calls[0][1] as Array<{
+      header: string;
+      value: (row: TaskListItem) => unknown;
+    }>;
+    const reasonColumn = csvColumns.find((column) => column.header === "failure_reason");
+    expect(reasonColumn?.value(failedTask)).toBe("ValueError: parser failed");
+  });
+
+  it("does not show or export failure reasons for regular users", async () => {
+    permissions.isAdmin = false;
+    auth.user = { id: 7, is_admin: false };
+    listTasksMock.mockResolvedValue({
+      tasks: [
+        task("failed-task", "FAILED", "failed.pdf", "docs", {
+          error_summary: "ValueError: parser failed",
+        }),
+      ],
+    });
+
+    renderJobs();
+
+    expect(await screen.findByText("failed.pdf")).not.toBeNull();
+    expect(screen.queryByRole("columnheader", { name: "Failure reason" })).toBeNull();
+    expect(screen.queryByTitle("ValueError: parser failed")).toBeNull();
+
+    await userEvent.click(screen.getByRole("button", { name: /export csv/i }));
+    expect(downloadCsvMock.mock.calls[0][1]).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ header: "failure_reason" })]),
+    );
   });
 
   it("scopes its queries by account and authorization role and polls them itself", async () => {

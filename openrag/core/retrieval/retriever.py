@@ -33,20 +33,7 @@ from core.utils.registry import Registry
 
 logger = logging.getLogger(__name__)
 
-MAX_RELATED_CHUNKS_PER_LOOKUP = 100
-MAX_ANCESTOR_DEPTH = 50
 MAX_EXPANSION_CONCURRENCY = 16
-MAX_EXPANDED_RESULT_CHUNKS = 1_000
-
-
-def bounded_related_limit(value: int) -> int:
-    return min(max(0, value), MAX_RELATED_CHUNKS_PER_LOOKUP)
-
-
-def bounded_ancestor_depth(value: int | None) -> int:
-    if value is None:
-        return MAX_ANCESTOR_DEPTH
-    return min(max(0, value), MAX_ANCESTOR_DEPTH)
 
 
 if TYPE_CHECKING:
@@ -100,8 +87,8 @@ class BaseRetriever(Retriever):
         self.with_surrounding_chunks = with_surrounding_chunks
         self.include_related = include_related
         self.include_ancestors = include_ancestors
-        self.related_limit = bounded_related_limit(related_limit)
-        self.max_ancestor_depth = bounded_ancestor_depth(max_ancestor_depth)
+        self.related_limit = related_limit
+        self.max_ancestor_depth = max_ancestor_depth
         self.expansion_enabled = include_related or include_ancestors
 
     async def retrieve(
@@ -270,9 +257,7 @@ async def _expand_with_related_chunks(
     if not results or (not include_related and not include_ancestors):
         return results
 
-    related_limit = bounded_related_limit(related_limit)
-    max_ancestor_depth = bounded_ancestor_depth(max_ancestor_depth)
-    if related_limit == 0 or len(results) >= MAX_EXPANDED_RESULT_CHUNKS:
+    if related_limit == 0:
         return results
 
     allowed_file_ids = file_id_restriction(filter_params)
@@ -333,8 +318,6 @@ async def _expand_with_related_chunks(
                 if chunk.id:
                     seen_ids.add(chunk.id)
                 expanded.append(chunk)
-                if len(expanded) >= MAX_EXPANDED_RESULT_CHUNKS:
-                    return expanded
 
     return expanded
 
