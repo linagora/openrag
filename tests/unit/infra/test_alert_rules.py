@@ -325,3 +325,39 @@ def test_annotations_follow_overridden_values() -> None:
     assert "More than 20%" in rules["OpenRagInferenceProviderDown"]["annotations"]["description"]
     assert "for 40 minutes" in rules["OpenRagBacklogGrowing"]["annotations"]["description"]
     assert "for 10 minutes" in rules["OpenRagTargetDown"]["annotations"]["description"]
+
+
+# ---------------------------------------------------------------------------
+# The override guard refuses bad values, not just unknown keys (#976 review)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("override", "message"),
+    [
+        ("monitoring.prometheusRule.thresholds.ingestIdleSeconds=twelve_minutes", "must be a number"),
+        ("monitoring.prometheusRule.for.OpenRagIngestStalled=soon", "must be a Prometheus duration"),
+        ("monitoring.prometheusRule.for.NoSuchAlert=5m", "is not an alert"),
+    ],
+)
+def test_a_bad_override_is_refused_not_rendered(override: str, message: str) -> None:
+    """A threshold is substituted into a PromQL comparison, so a non-number is
+    not an error: `> twelve_minutes` compares against a metric that does not
+    exist, promtool reports SUCCESS, and the alert never fires again with
+    nothing to say so. Only the unknown-*key* case was covered; these are the
+    three paths that were not.
+    """
+    with pytest.raises(SystemExit, match=message):
+        _render(override)
+
+
+def test_an_unknown_breaker_state_does_not_fire() -> None:
+    """`_STATE_VALUES` maps an unrecognised aiobreaker state to -1, so -1 is
+    reachable whenever that library adds or renames one. The rule uses `>= 1`
+    precisely so unknown stays out; nothing pinned that, and `!= 0` passes the
+    whole suite while paging for a healthy provider.
+    """
+    expr = next(r["expr"] for r in _all_rules() if r["alert"] == "OpenRagCircuitBreakerOpen")
+
+    assert ">= 1" in expr, f"breaker alert no longer excludes the unknown (-1) state: {expr}"
+    assert "!= 0" not in expr
