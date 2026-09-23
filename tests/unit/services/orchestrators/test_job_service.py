@@ -351,6 +351,7 @@ def _job(**kwargs):
         "status": DocumentStatus.COMPLETED,
         "partition": "tenant-a",
         "file_id": "file-1",
+        "filename": "report.pdf",
         "user_id": 7,
         "created_at": datetime(2026, 9, 1, 10, 0, tzinfo=UTC),
         "completed_at": datetime(2026, 9, 1, 10, 0, 30, tzinfo=UTC),
@@ -574,7 +575,7 @@ async def test_get_task_details_falls_back_to_the_durable_row():
     assert details == {
         "file_id": "file-1",
         "partition": "tenant-a",
-        "metadata": {},
+        "metadata": {"filename": "report.pdf"},
         "user_id": 7,
         "degraded_stages": [],
     }

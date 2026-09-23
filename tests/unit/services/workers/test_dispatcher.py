@@ -2481,6 +2481,7 @@ async def test_dispatch_records_the_job_before_the_worker_runs() -> None:
         "file-1",
         42,
     )
+    assert job.filename == "report.txt"
 
 
 @pytest.mark.asyncio

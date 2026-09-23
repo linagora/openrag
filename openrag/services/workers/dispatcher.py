@@ -308,6 +308,7 @@ class WorkerDispatcher(IndexingDispatcher):
             status=DocumentStatus.QUEUED,
             partition=partition,
             file_id=file_id,
+            filename=task_details["metadata"].get("filename"),
             user_id=task_details["user_id"],
         )
 
@@ -376,6 +377,7 @@ class WorkerDispatcher(IndexingDispatcher):
                             status=DocumentStatus.FAILED,
                             partition=partition,
                             file_id=file_id,
+                            filename=task_details["metadata"].get("filename"),
                             user_id=task_details["user_id"],
                             error=tb,
                             error_reason=error_reason,
@@ -747,6 +749,7 @@ class WorkerDispatcher(IndexingDispatcher):
         status: DocumentStatus,
         partition: str,
         file_id: str | None = None,
+        filename: str | None = None,
         user_id: int | None = None,
         error: str | None = None,
         error_reason: str | None = None,
@@ -763,6 +766,7 @@ class WorkerDispatcher(IndexingDispatcher):
                     status=status,
                     partition=partition,
                     file_id=file_id,
+                    filename=filename,
                     user_id=user_id,
                     error=error,
                     error_reason=error_reason,

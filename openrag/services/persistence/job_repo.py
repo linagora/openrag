@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     import asyncpg
 
 _COLUMNS = (
-    "id, partition, file_id, user_id, status, error, error_reason, degraded_stages, "
+    "id, partition, file_id, filename, user_id, status, error, error_reason, degraded_stages, "
     "created_at, updated_at, started_at, completed_at"
 )
 _TERMINAL_STATUSES = sorted(state.value for state in TERMINAL_TASK_STATES)
@@ -49,13 +49,13 @@ class PgJobRepository(JobRepository):
             f"""
             INSERT INTO jobs (
                 id, partition, file_id, user_id, status, error, error_reason,
-                started_at, completed_at, degraded_stages
+                started_at, completed_at, degraded_stages, filename
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
             ON CONFLICT (id) DO UPDATE SET
                 -- A settled job never reopens, mirroring TaskStateManager.
                 status = CASE
-                    WHEN jobs.status = ANY($11::text[]) THEN jobs.status
+                    WHEN jobs.status = ANY($12::text[]) THEN jobs.status
                     ELSE EXCLUDED.status
                 END,
                 -- The outcome is decided by whichever write settled the row, and
@@ -63,25 +63,26 @@ class PgJobRepository(JobRepository):
                 -- status alone lets a FAILED write that lost the cancel race
                 -- staple its traceback onto a row reading CANCELLED.
                 error = CASE
-                    WHEN jobs.status = ANY($11::text[]) THEN jobs.error
+                    WHEN jobs.status = ANY($12::text[]) THEN jobs.error
                     ELSE COALESCE(EXCLUDED.error, jobs.error)
                 END,
                 error_reason = CASE
-                    WHEN jobs.status = ANY($11::text[]) THEN jobs.error_reason
+                    WHEN jobs.status = ANY($12::text[]) THEN jobs.error_reason
                     ELSE COALESCE(EXCLUDED.error_reason, jobs.error_reason)
                 END,
                 completed_at = CASE
-                    WHEN jobs.status = ANY($11::text[]) THEN jobs.completed_at
+                    WHEN jobs.status = ANY($12::text[]) THEN jobs.completed_at
                     ELSE COALESCE(jobs.completed_at, EXCLUDED.completed_at)
                 END,
                 degraded_stages = CASE
-                    WHEN jobs.status = ANY($11::text[]) THEN jobs.degraded_stages
+                    WHEN jobs.status = ANY($12::text[]) THEN jobs.degraded_stages
                     ELSE EXCLUDED.degraded_stages
                 END,
                 -- First stamp wins: a retried transition must not restart the
                 -- clock queue wait is measured against.
                 started_at = COALESCE(jobs.started_at, EXCLUDED.started_at),
                 file_id = COALESCE(EXCLUDED.file_id, jobs.file_id),
+                filename = COALESCE(EXCLUDED.filename, jobs.filename),
                 -- user_id is set once, at insert, and the foreign key owns it
                 -- from then on. Deleting a user nulls it via ON DELETE SET NULL,
                 -- and a later worker write still carries the old id, so taking
@@ -102,6 +103,7 @@ class PgJobRepository(JobRepository):
             job.started_at,
             job.completed_at,
             job.degraded_stages,
+            job.filename,
             _TERMINAL_STATUSES,
         )
         return self._row_to_job(row)

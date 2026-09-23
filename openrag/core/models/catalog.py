@@ -93,6 +93,7 @@ class IndexationJob(BaseModel):
     status: DocumentStatus = DocumentStatus.QUEUED
     partition: str = "default"
     file_id: str | None = None
+    filename: str | None = None
     user_id: int | None = None
     error: str | None = None
     error_reason: str | None = None

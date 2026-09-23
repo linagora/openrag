@@ -297,7 +297,7 @@ def _job_to_info(job: Any) -> dict[str, Any]:
         "details": {
             "file_id": job.file_id,
             "partition": job.partition,
-            "metadata": {},
+            "metadata": {"filename": job.filename} if job.filename else {},
             "user_id": job.user_id,
             "degraded_stages": job.degraded_stages,
         },
