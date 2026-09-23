@@ -9,7 +9,7 @@ import pytest
 from core.config.indexation_pipeline import IndexationPipelineConfig
 from core.config.retrieval_pipeline import RetrievalPipelineConfig
 from core.models.preset import PartitionConfig
-from core.utils.exceptions import AuthError, ConfigError, PartitionNotFoundError, ValidationError
+from core.utils.exceptions import AuthError, ConfigError, ConflictError, PartitionNotFoundError, ValidationError
 from services.orchestrators.indexing_service import IndexingService
 
 
@@ -1095,3 +1095,102 @@ async def test_a_copy_is_admitted_under_the_fence_but_does_not_hold_it():
     assert partition_service.copy_locks == [("p-dst", 1)]
     assert seen == [(0, 1)]
     assert partition_service.copying == 0
+
+
+# ---------------------------------------------------------------------------
+# Embedder swaps
+# ---------------------------------------------------------------------------
+
+
+class SwapAwarePartitionService(FakePartitionService):
+    """Reports a running swap on ``swapping`` and records the fence."""
+
+    def __init__(self, config, *, swapping: set[str] = frozenset(), db_partitions: set[str] | None = None):
+        super().__init__(config, db_partitions=db_partitions)
+        self.swapping = set(swapping)
+        self.events: list[tuple[str, str]] = []
+        self.locked: set[str] = set()
+
+    async def ensure_no_embedder_swap(self, partition: str) -> None:
+        self.events.append(("check", partition))
+        if partition in self.swapping:
+            raise ConflictError("swapping", code="EMBEDDER_SWAP_IN_PROGRESS")
+
+    @asynccontextmanager
+    async def operation_lock(self, partition: str):
+        self.events.append(("lock", partition))
+        self.locked.add(partition)
+        try:
+            yield
+        finally:
+            self.locked.discard(partition)
+            self.events.append(("unlock", partition))
+
+
+@pytest.mark.asyncio
+async def test_an_upload_is_refused_while_the_partition_swaps_embedder(tmp_path):
+    f = tmp_path / "doc.txt"
+    f.write_text("hello")
+    config = _copy_config({"bge-m3": "vector_bge_m3"})
+    partitions = SwapAwarePartitionService(config, swapping={"p-dst"}, db_partitions={"p-dst"})
+    disp = FakeDispatcher()
+    svc = _service(disp=disp, config=config, partition_service=partitions)
+
+    with pytest.raises(ConflictError):
+        await svc.add_file(
+            file_path=str(f),
+            file_id="f1",
+            partition="p-dst",
+            metadata={},
+            sanitized_filename="doc.txt",
+            original_filename="doc.txt",
+            user={"id": 1},
+        )
+
+    # Checked under the admission fence a swap starts under.
+    assert partitions.admissions == ["p-dst"]
+    assert disp.dispatched == []
+
+
+@pytest.mark.asyncio
+async def test_a_metadata_update_is_written_under_the_partition_fence():
+    """It rewrites whole rows, so one interleaving with a swap's partial writes
+    would put the old, empty field back over the new vectors."""
+    partitions = SwapAwarePartitionService(_copy_config({"bge-m3": "vector_bge_m3"}))
+    locked_during_write = []
+
+    class _Dispatcher(FakeDispatcher):
+        async def update_file_metadata(self, file_id, metadata, partition, user):
+            locked_during_write.append(partition in partitions.locked)
+            await super().update_file_metadata(file_id, metadata, partition, user)
+
+    await _service(disp=_Dispatcher(), partition_service=partitions).update_metadata("f1", {"title": "t"}, "p1", None)
+
+    assert partitions.events == [("lock", "p1"), ("check", "p1"), ("unlock", "p1")]
+    assert locked_during_write == [True]
+
+
+@pytest.mark.asyncio
+async def test_a_metadata_update_is_refused_while_the_partition_swaps_embedder():
+    partitions = SwapAwarePartitionService(_copy_config({"bge-m3": "vector_bge_m3"}), swapping={"p1"})
+    disp = FakeDispatcher()
+
+    with pytest.raises(ConflictError):
+        await _service(disp=disp, partition_service=partitions).update_metadata("f1", {"title": "t"}, "p1", None)
+
+    assert disp.updated == []
+
+
+@pytest.mark.asyncio
+async def test_a_copy_into_a_swapping_partition_is_refused_at_admission():
+    config = _copy_config({"bge-m3": "vector_bge_m3"})
+    partitions = SwapAwarePartitionService(config, swapping={"p-dst"}, db_partitions={"p-dst"})
+    disp = FakeDispatcher()
+
+    with pytest.raises(ConflictError):
+        await _copy_into_p_dst(_copy_service(config, disp, partitions))
+
+    assert partitions.admissions == ["p-dst"]
+    # Refused before taking the copy lock, which would hold a later swap off.
+    assert partitions.copy_locks == []
+    assert disp.copied == []

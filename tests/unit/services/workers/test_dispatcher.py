@@ -2625,6 +2625,7 @@ async def test_a_re_embedded_copy_records_the_target_embedder_and_is_checked_aga
         "embedder_model_name": "BAAI/bge-m3",
         "embedder_endpoint": "http://bge/v1",
         "embedder_dimension": 3,
+        "embedder_vector_field": "vector_bge_m3",
     }
     assert catalog["embedder_fingerprint"] == _TARGET_FINGERPRINT
 

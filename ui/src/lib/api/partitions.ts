@@ -8,6 +8,9 @@ import { request } from "./client";
 //   POST   /partition/{p}                   create (name in path, NO body; caller becomes owner) → 201
 //   PATCH  /partition/{p}                   update config → PartitionDetailResponse
 //   DELETE /partition/{p}                   delete → 204
+//   POST   /partition/{p}/embedder-swap     start re-embedding with another embedder → 202 EmbedderSwap
+//   GET    /partition/{p}/embedder-swap     running swap, or how the last one ended (null: never swapped)
+//   DELETE /partition/{p}/embedder-swap     cancel the running swap
 //   GET    /partition/{p}/users             members → { members: [{ user_id, display_name, email, role, added_at }] }
 //   POST   /partition/{p}/users             add member   (multipart: user_id, role)
 //   PATCH  /partition/{p}/users/{user_id}   change role  (multipart: role)
@@ -187,6 +190,41 @@ export function deletePartition(name: string): Promise<void> {
   return request<void>(`${P}/${enc(name)}`, { method: "DELETE" });
 }
 
+// ── Embedder swap ────────────────────────────────────────────────────
+
+export type EmbedderSwapStatus = "running" | "completed" | "failed" | "cancelled";
+
+/** A partition's move to another embedder: its files are re-embedded in place,
+ *  and searches switch to the new embedder only once every file is done. */
+export interface EmbedderSwap {
+  partition: string;
+  source_embedder: string;
+  target_embedder: string;
+  status: EmbedderSwapStatus;
+  files_total: number;
+  files_done: number;
+  error: string | null;
+  started_at: string;
+  updated_at: string;
+  finished_at: string | null;
+}
+
+/** The running swap, or how the last one ended; null when the partition never swapped. */
+export function getEmbedderSwap(name: string): Promise<EmbedderSwap | null> {
+  return request<EmbedderSwap | null>(`${P}/${enc(name)}/embedder-swap`);
+}
+
+export function startEmbedderSwap(name: string, embedder: string): Promise<EmbedderSwap> {
+  return request<EmbedderSwap>(`${P}/${enc(name)}/embedder-swap`, {
+    method: "POST",
+    body: JSON.stringify({ embedder }),
+  });
+}
+
+export function cancelEmbedderSwap(name: string): Promise<EmbedderSwap> {
+  return request<EmbedderSwap>(`${P}/${enc(name)}/embedder-swap`, { method: "DELETE" });
+}
+
 // ── Files (read side; adopted by the documents slice) ─────────────────────────
 
 /** One row of a partition's per-file embedder breakdown. */
@@ -195,6 +233,10 @@ export interface IndexedEmbedderCount {
   embedder: string | null;
   model_name: string | null;
   dimension: number | null;
+  /** Dense field these files' vectors are in; null when unrecorded.
+   *  A search reads one field, so this is what decides whether they are found —
+   *  two endpoints on one model own different fields. */
+  vector_field?: string | null;
   file_count: number;
 }
 

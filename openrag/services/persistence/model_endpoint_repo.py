@@ -10,7 +10,14 @@ from __future__ import annotations
 from collections.abc import Callable
 
 import asyncpg
-from core.config.model_endpoints import DEFAULT_ENDPOINT_ALIAS, ModelEndpointConfig, ModelEndpointRow, ModelEndpointType
+from core.config.model_endpoints import (
+    DEFAULT_ENDPOINT_ALIAS,
+    ModelEndpointConfig,
+    ModelEndpointRow,
+    ModelEndpointType,
+    material_embedder_changes,
+)
+from core.models.embedder_swap import EmbedderSwapStatus
 from core.models.readiness import ConfigurationReferenceFinding, ModelEndpointDiscovery, ModelEndpointTarget
 from core.ports.model_endpoint_repo import EndpointEditGuard, ModelEndpointRepository
 from core.utils.exceptions import ConflictError, NotFoundError, ValidationError
@@ -29,6 +36,11 @@ logger = get_logger()
 # transaction; ModelEndpointService.update_model_endpoint routes is_default there.
 # ``vector_field`` is absent too: an endpoint keeps its vectors' field for life.
 _ALLOWED_UPDATE_FIELDS = frozenset({"endpoint", "model_name", "batch_size", "timeout", "extra"})
+
+# Running embedder swaps re-embedding partitions with an endpoint.
+_RUNNING_SWAPS_ONTO_SQL = (
+    "SELECT COUNT(*)::int FROM partition_embedder_swaps WHERE target_embedder = $1 AND status = $2"
+)
 
 # Endpoint names are referenced by value elsewhere, and nothing updates those
 # references when an endpoint is renamed (#770) — so ``rename()`` cascades to
@@ -473,7 +485,7 @@ class PgModelEndpointRepository(ModelEndpointRepository):
             f"WHERE name = $1 AND model_type = $2 RETURNING *"
         )
 
-        if guard is None:
+        if guard is None and model_type != "embedder":
             rec = await self.pool.fetchrow(sql, *params)
             return self._to_model(rec) if rec else None
         async with self.pool.acquire() as conn:
@@ -489,9 +501,38 @@ class PgModelEndpointRepository(ModelEndpointRepository):
                 )
                 if locked is None:
                     return None
-                await guard(self._to_model(locked), lambda: self._indexed_file_usage(conn, name, model_type))
+                existing = self._to_model(locked)
+                if model_type == "embedder":
+                    await self._refuse_edit_under_a_swap(conn, existing, updates)
+                if guard is not None:
+                    await guard(existing, lambda: self._indexed_file_usage(conn, name, model_type))
                 rec = await conn.fetchrow(sql, *params)
         return self._to_model(rec) if rec else None
+
+    @staticmethod
+    async def _refuse_edit_under_a_swap(
+        conn: asyncpg.Connection, existing: ModelEndpointRow, updates: dict[str, object]
+    ) -> None:
+        """Refuse an edit that changes the vectors of an embedder a running swap fills.
+
+        The swap skips a file recorded with the target's model and field, so the
+        files it re-embedded before such an edit would pass for done after it,
+        and the field would hold vectors from two configurations nothing tells
+        apart. Acknowledging indexed data does not lift this: cancel the swap,
+        or let it finish. A swap starts with this row locked FOR SHARE, so it is
+        either counted here or starts after the edit.
+        """
+        changed = material_embedder_changes(existing, updates)
+        if not changed:
+            return
+        swapping = await conn.fetchval(_RUNNING_SWAPS_ONTO_SQL, existing.name, EmbedderSwapStatus.RUNNING.value)
+        if swapping:
+            raise ConflictError(
+                f"Embedder '{existing.name}' is the target of {swapping} running embedder swap(s), and changing "
+                f"{', '.join(changed)} would change the vectors they write. "
+                "Wait for them to finish, or cancel them, before editing it.",
+                code="EMBEDDER_SWAP_IN_PROGRESS",
+            )
 
     async def rename(self, name: str, model_type: str, new_name: str) -> None:
         """Rename an endpoint and cascade the new name to every stored reference.
@@ -550,6 +591,17 @@ class PgModelEndpointRepository(ModelEndpointRepository):
                         name,
                         new_name,
                     )
+                if model_type == "embedder":
+                    # A running swap completes by writing its target into
+                    # partitions.embedder, so it must name the endpoint as it is
+                    # called by then. Finished ones are history, and
+                    # follow along so they keep resolving too.
+                    for column in ("source_embedder", "target_embedder"):
+                        await conn.execute(
+                            f"UPDATE partition_embedder_swaps SET {column} = $2 WHERE {column} = $1",
+                            name,
+                            new_name,
+                        )
 
                 for preset_type, keys in (
                     ("retrieval", _RETRIEVAL_PRESET_KEYS_BY_TYPE.get(model_type, ())),
@@ -707,6 +759,17 @@ class PgModelEndpointRepository(ModelEndpointRepository):
             direct, via_default = row["direct"], row["via_default"]
             if direct or via_default:
                 raise ConflictError(_embedder_in_use_message(name, direct, via_default))
+            # Not referenced by a partition yet, but a running swap is filling
+            # its field: deleting it would drop that field under the swap. A
+            # swap records itself while holding a lock that conflicts with the
+            # SHARE lock taken on partitions above.
+            swapping = await conn.fetchval(_RUNNING_SWAPS_ONTO_SQL, name, EmbedderSwapStatus.RUNNING.value)
+            if swapping:
+                raise ConflictError(
+                    f"Embedder '{name}' is the target of {swapping} running embedder swap(s). "
+                    "Wait for them to finish, or cancel them, before deleting it.",
+                    code="EMBEDDER_SWAP_IN_PROGRESS",
+                )
             return
 
         column = _CLEARABLE_PARTITION_COLUMN_BY_TYPE.get(model_type)

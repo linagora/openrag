@@ -129,6 +129,12 @@ class IndexedEmbedderCount(BaseModel):
     embedder: str | None = None
     model_name: str | None = None
     dimension: int | None = None
+    # The dense field these files' vectors were written to. A search
+    # reads exactly one field, so a file recorded with the right model but in
+    # another field is as invisible as one indexed by another model — two
+    # endpoints on the same model each own a field. ``None`` for files indexed
+    # before the field was recorded.
+    vector_field: str | None = None
     file_count: int = 0
 
 
@@ -157,9 +163,49 @@ class PartitionDetailResponse(BaseModel):
     generation_prompt_names: dict[str, str] = Field(default_factory=dict)
 
 
+class StartEmbedderSwapRequest(BaseModel):
+    """Request body for re-embedding a partition with an embedder."""
+
+    model_config = ConfigDict(extra="forbid", json_schema_extra={"examples": [{"embedder": "bge-m3"}]})
+
+    embedder: str = Field(
+        description=(
+            "Embedder endpoint to re-embed with. Another endpoint moves the partition to it; the partition's "
+            "current one re-embeds only its drifted files. Not the `default` alias."
+        ),
+    )
+
+    @field_validator("embedder")
+    @classmethod
+    def validate_embedder(cls, value: str) -> str:
+        """Trim the endpoint name and reject a blank one."""
+        return _normalize_name(value)
+
+
+class EmbedderSwapResponse(BaseModel):
+    """A partition's running embedder swap, or how its last one ended."""
+
+    partition: str
+    source_embedder: str = Field(
+        description="Embedder the partition used when the swap started. Equal to `target_embedder` on a drift repair."
+    )
+    target_embedder: str = Field(
+        description="Embedder the files are re-embedded with, and the partition's embedder once the swap completes."
+    )
+    status: str = Field(description="`running`, `completed`, `failed` (see `error`) or `cancelled`.")
+    files_total: int = Field(description="Files the swap re-embeds. Skipped files are not counted.")
+    files_done: int = Field(description="Files re-embedded so far.")
+    error: str | None = Field(default=None, description="Why the swap failed; null otherwise.")
+    started_at: datetime
+    updated_at: datetime
+    finished_at: datetime | None = None
+
+
 __all__ = [
     "CreatePartitionRequest",
+    "EmbedderSwapResponse",
     "IndexedEmbedderCount",
     "PartitionDetailResponse",
+    "StartEmbedderSwapRequest",
     "UpdatePartitionRequest",
 ]

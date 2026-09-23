@@ -28,6 +28,9 @@ export interface ModelEndpointResponse {
    *  plus (for the default endpoint) those riding the `default` alias. 0 for
    *  types referenced through presets. */
   used_by_partitions?: number;
+  /** Dense vector field this embedder owns; null for other model types. Set
+   *  when the endpoint is created and kept through renames. */
+  vector_field?: string | null;
   created_at: string;
   updated_at: string;
 }

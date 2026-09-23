@@ -20,8 +20,9 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from core.models.embedder_swap import EmbedderSwapStatus
 from core.ports.partition_repo import PartitionRepository
-from core.utils.exceptions import ServiceUnavailableError, ValidationError
+from core.utils.exceptions import NotFoundError, ServiceUnavailableError, ValidationError
 from core.utils.logging import get_logger
 from services.persistence.file_count import decrement_file_counts
 
@@ -87,8 +88,14 @@ _PARTITION_UPDATE_COLUMNS = frozenset(
 )
 _PARTITION_OPERATION_LOCK_NAMESPACE = 20260720
 _PARTITION_COPY_LOCK_NAMESPACE = 20260921
-_HOLD_COPY_LOCK_SQL = "SELECT pg_advisory_lock_shared($1::integer, hashtext($2)::integer)"
-_RELEASE_COPY_LOCK_SQL = "SELECT pg_advisory_unlock_shared($1::integer, hashtext($2)::integer)"
+_EMBEDDER_SWAP_RUNNER_LOCK_NAMESPACE = 20260914
+# Shared, and waited for: copies never lock each other out.
+_TAKE_SHARED_LOCK_SQL = "SELECT pg_advisory_lock_shared($1::integer, hashtext($2)::integer)"
+_RELEASE_SHARED_LOCK_SQL = "SELECT pg_advisory_unlock_shared($1::integer, hashtext($2)::integer)"
+# Exclusive, and never waited for: a swap runner only asks whether it is the one.
+_TRY_LOCK_SQL = "SELECT pg_try_advisory_lock($1::integer, hashtext($2)::integer)"
+_RELEASE_LOCK_SQL = "SELECT pg_advisory_unlock($1::integer, hashtext($2)::integer)"
+_EMBEDDER_SWAP_UPDATE_COLUMNS = frozenset({"status", "files_total", "files_done", "error", "finished_at"})
 
 logger = get_logger()
 
@@ -140,8 +147,14 @@ class _PartitionOperationGuard:
 
 
 @dataclass(eq=False)
-class _CopyHold:
+class _SessionHold:
+    """One advisory lock held on :class:`_SessionLocks`' connection."""
+
+    # What holds it, for the log a lost session writes.
+    what: str
+    namespace: int
     name: str
+    release_sql: str
     conn: asyncpg.Connection
     task: asyncio.Task
     # The task's pending cancellations when the hold was taken, to tell ours apart.
@@ -149,70 +162,98 @@ class _CopyHold:
     lost: bool = False
 
 
-class _CopyLocks:
-    """The shared locks of this process's copies in flight, on a connection of their own.
+class _SessionLocks:
+    """The advisory locks of this process's long jobs, on a connection of their own.
 
-    A copy can re-embed for minutes, so a pool connection per copy would let a
-    few large ones starve every request. A session can hold a shared lock
-    several times over: each copy takes and releases one hold.
+    A copy or an embedder swap runs for as long as it re-embeds — minutes, and
+    for a swap however long a partition takes — so a pool connection per job
+    would let a few of them starve every request. A session can hold a shared
+    lock several times over: each job takes and releases one hold.
 
     Losing the session releases its holds at once. Taking them back later would
-    leave a gap an embedder change could slip through, so the copies they
-    protected are cancelled instead.
+    leave a gap an embedder change could slip through, or a second runner claim
+    a swap this one is still running, so the jobs they protected are cancelled
+    instead.
     """
 
     def __init__(self, connect: Callable[[], Awaitable[asyncpg.Connection]]) -> None:
         self._connect = connect
         self._conn: asyncpg.Connection | None = None
-        self._holds: set[_CopyHold] = set()
+        self._holds: set[_SessionHold] = set()
         self._mutex = asyncio.Lock()
 
-    async def hold(self, name: str) -> _CopyHold:
+    async def hold(self, namespace: int, name: str, *, what: str) -> _SessionHold:
+        """Take a shared lock, waiting for it, and keep it until released."""
+        hold = await self._granted(namespace, name, _TAKE_SHARED_LOCK_SQL, _RELEASE_SHARED_LOCK_SQL, what=what)
+        assert hold is not None  # a waited-for lock is always granted in the end
+        return hold
+
+    async def try_hold(self, namespace: int, name: str, *, what: str) -> _SessionHold | None:
+        """Take an exclusive lock if it is free, or answer ``None`` at once."""
+        return await self._granted(namespace, name, _TRY_LOCK_SQL, _RELEASE_LOCK_SQL, what=what)
+
+    async def _granted(
+        self, namespace: int, name: str, take_sql: str, release_sql: str, *, what: str
+    ) -> _SessionHold | None:
         task = asyncio.current_task()
         assert task is not None
         # Shielded: a lock granted to a caller cancelled meanwhile would stay
         # on the session with no hold to release it.
-        taking = asyncio.ensure_future(self._take(name, task))
+        taking = asyncio.ensure_future(self._take(namespace, name, take_sql, release_sql, task, what))
         try:
             return await asyncio.shield(taking)
         except asyncio.CancelledError:
             await asyncio.shield(self._give_back(taking))
             raise
 
-    async def _take(self, name: str, task: asyncio.Task) -> _CopyHold:
+    async def _take(
+        self, namespace: int, name: str, take_sql: str, release_sql: str, task: asyncio.Task, what: str
+    ) -> _SessionHold | None:
         async with self._mutex:
             try:
                 conn = await self._connection()
-                await conn.execute(_HOLD_COPY_LOCK_SQL, _PARTITION_COPY_LOCK_NAMESPACE, name)
+                granted = await self._ask(conn, take_sql, namespace, name)
             except Exception:  # noqa: BLE001 - most likely a lost session: retry once on a new one
                 self._discard()
                 conn = await self._connection()
-                await conn.execute(_HOLD_COPY_LOCK_SQL, _PARTITION_COPY_LOCK_NAMESPACE, name)
-            hold = _CopyHold(name, conn, task, task.cancelling())
+                granted = await self._ask(conn, take_sql, namespace, name)
+            if not granted:
+                return None
+            hold = _SessionHold(what, namespace, name, release_sql, conn, task, task.cancelling())
             self._holds.add(hold)
             return hold
 
-    async def _give_back(self, taking: asyncio.Future[_CopyHold]) -> None:
+    @staticmethod
+    async def _ask(conn: asyncpg.Connection, take_sql: str, namespace: int, name: str) -> bool:
+        """Ask for the lock; ``False`` only from a try-lock someone else holds."""
+        if "pg_try" not in take_sql:
+            await conn.execute(take_sql, namespace, name)
+            return True
+        return bool(await conn.fetchval(take_sql, namespace, name))
+
+    async def _give_back(self, taking: asyncio.Future[_SessionHold | None]) -> None:
         """Release the lock a cancelled caller was granted all the same."""
         try:
             hold = await taking
         except Exception:  # noqa: BLE001 - never granted: nothing to release
             return
+        if hold is None:
+            return
         self.forget(hold)
         await self.release(hold)
 
-    def forget(self, hold: _CopyHold) -> None:
-        """Stop guarding *hold*: its copy is over, and must no longer be cancelled."""
+    def forget(self, hold: _SessionHold) -> None:
+        """Stop guarding *hold*: its job is over, and must no longer be cancelled."""
         self._holds.discard(hold)
 
-    async def release(self, hold: _CopyHold) -> None:
+    async def release(self, hold: _SessionHold) -> None:
         async with self._mutex:
             if hold.conn is not self._conn:
                 return  # its session is gone, and the hold with it
             try:
-                await hold.conn.execute(_RELEASE_COPY_LOCK_SQL, _PARTITION_COPY_LOCK_NAMESPACE, hold.name)
+                await hold.conn.execute(hold.release_sql, hold.namespace, hold.name)
             except Exception as exc:  # noqa: BLE001 - dropping the session releases the hold anyway
-                logger.bind(partition=hold.name, error=str(exc)).warning("Dropped the copy-lock connection")
+                logger.bind(partition=hold.name, error=str(exc)).warning("Dropped the job-lock connection")
                 self._discard()
 
     async def close(self) -> None:
@@ -222,21 +263,21 @@ class _CopyLocks:
             self._conn = None
 
     def _discard(self) -> None:
-        """Drop the session, and every copy holding a lock on it."""
+        """Drop the session, and every job holding a lock on it."""
         conn = self._conn
         if conn is not None:
             self._lose(conn)
             conn.terminate()
 
     def _lose(self, conn: asyncpg.Connection) -> None:
-        """Cancel the copies whose holds went with *conn*'s session."""
+        """Cancel the jobs whose holds went with *conn*'s session."""
         if self._conn is conn:
             self._conn = None
         for hold in [hold for hold in self._holds if hold.conn is conn]:
             self._holds.discard(hold)
             hold.lost = True
             hold.task.cancel()
-            logger.bind(partition=hold.name).warning("Lost a copy lock: stopping the copy")
+            logger.bind(partition=hold.name).warning(f"Lost the lock of a {hold.what}: stopping it")
 
     async def _connection(self) -> asyncpg.Connection:
         if self._conn is not None and self._conn.is_closed():
@@ -257,8 +298,8 @@ class PgPartitionRepository(PartitionRepository):
         connect: Callable[[], Awaitable[asyncpg.Connection]] | None = None,
     ) -> None:
         self._pool_getter = pool_getter
-        # Opens the connection copy locks live on, outside the pool.
-        self._copy_locks = _CopyLocks(connect) if connect is not None else None
+        # Opens the connection the locks of long jobs live on, outside the pool.
+        self._session_locks = _SessionLocks(connect) if connect is not None else None
 
     @property
     def pool(self) -> asyncpg.Pool:
@@ -287,12 +328,12 @@ class PgPartitionRepository(PartitionRepository):
         """Mark a copy into partition *name* as in flight, for :meth:`copy_in_progress`.
 
         Shared: copies never wait on each other, and uploads never take it.
-        Held outside the request pool, see :class:`_CopyLocks`. Raises
+        Held outside the request pool, see :class:`_SessionLocks`. Raises
         :class:`ServiceUnavailableError` from the copy if the lock is lost.
         """
-        if self._copy_locks is None:
+        if self._session_locks is None:
             raise RuntimeError("PgPartitionRepository was built without a connect callable for copy locks.")
-        hold = await self._copy_locks.hold(name)
+        hold = await self._session_locks.hold(_PARTITION_COPY_LOCK_NAMESPACE, name, what="copy")
         try:
             yield
         except asyncio.CancelledError:
@@ -305,14 +346,14 @@ class PgPartitionRepository(PartitionRepository):
             raise
         finally:
             # Before any await, so a copy that finished is never cancelled.
-            self._copy_locks.forget(hold)
+            self._session_locks.forget(hold)
             # Shielded: a hold left behind would block the partition's
             # embedder changes until the process exits.
-            await asyncio.shield(self._copy_locks.release(hold))
+            await asyncio.shield(self._session_locks.release(hold))
 
     async def aclose(self) -> None:
-        if self._copy_locks is not None:
-            await self._copy_locks.close()
+        if self._session_locks is not None:
+            await self._session_locks.close()
 
     async def copy_in_progress(self, name: str) -> bool:
         """Whether a copy into partition *name* holds :meth:`copy_lock`. Never waits."""
@@ -323,6 +364,33 @@ class PgPartitionRepository(PartitionRepository):
             name,
         )
         return not acquired
+
+    @asynccontextmanager
+    async def embedder_swap_runner_lock(self, partition: str) -> AsyncIterator[bool]:
+        """Claim the one runner of *partition*'s swap, for as long as the job runs.
+
+        Session-level, so a runner that dies releases it with its connection —
+        and held outside the request pool, see :class:`_SessionLocks`: a swap
+        keeps it for however long re-embedding the partition takes, which on a
+        request connection would be a seat fewer for every upload and query
+        meanwhile. Losing the session cancels the job, since another process
+        may claim the swap the moment the lock goes; the row still says
+        running, so the swap resumes rather than ending there.
+        """
+        if self._session_locks is None:
+            raise RuntimeError("PgPartitionRepository was built without a connect callable for swap runner locks.")
+        hold = await self._session_locks.try_hold(_EMBEDDER_SWAP_RUNNER_LOCK_NAMESPACE, partition, what="embedder swap")
+        if hold is None:
+            yield False
+            return
+        try:
+            yield True
+        finally:
+            # Before any await, so a swap that finished is never cancelled.
+            self._session_locks.forget(hold)
+            # Shielded: a hold left behind would keep every other process from
+            # running this partition's swaps until this one exits.
+            await asyncio.shield(self._session_locks.release(hold))
 
     # ── PartitionRepository port methods ─────────────────────────────
 
@@ -491,6 +559,111 @@ class PgPartitionRepository(PartitionRepository):
             "SELECT * FROM partitions ORDER BY created_at",
         )
         return [self._row_to_full_dict(r) for r in rows]
+
+    async def start_embedder_swap(
+        self, partition: str, *, source_embedder: str, target_embedder: str, files_total: int
+    ) -> dict | None:
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                # ROW EXCLUSIVE conflicts with the SHARE lock an endpoint delete
+                # or rename takes on ``partitions`` first (see
+                # PgModelEndpointRepository), and is taken in the same order:
+                # partitions, then model_endpoints. Whichever commits first is
+                # what the other sees. The target's row FOR SHARE: an edit that
+                # changes its vectors locks it FOR UPDATE, then counts the swaps
+                # onto it, so this swap is either counted or starts after the edit.
+                await conn.execute("LOCK TABLE partitions IN ROW EXCLUSIVE MODE")
+                exists = await conn.fetchval(
+                    "SELECT 1 FROM model_endpoints WHERE name = $1 AND model_type = 'embedder' FOR SHARE",
+                    target_embedder,
+                )
+                if not exists:
+                    raise NotFoundError(
+                        f"Embedder endpoint '{target_embedder}' not found.",
+                        code="MODEL_ENDPOINT_NOT_FOUND",
+                    )
+                row = await conn.fetchrow(
+                    """
+                    INSERT INTO partition_embedder_swaps AS s
+                        (partition, source_embedder, target_embedder, status, files_total, files_done,
+                         error, started_at, updated_at, finished_at)
+                    VALUES ($1, $2, $3, $4, $5, 0, NULL, now(), now(), NULL)
+                    ON CONFLICT (partition) DO UPDATE SET
+                        source_embedder = EXCLUDED.source_embedder,
+                        target_embedder = EXCLUDED.target_embedder,
+                        status = EXCLUDED.status,
+                        files_total = EXCLUDED.files_total,
+                        files_done = 0,
+                        error = NULL,
+                        started_at = now(),
+                        updated_at = now(),
+                        finished_at = NULL
+                    WHERE s.status <> $4
+                    RETURNING *
+                    """,
+                    partition,
+                    source_embedder,
+                    target_embedder,
+                    EmbedderSwapStatus.RUNNING.value,
+                    files_total,
+                )
+        return dict(row) if row is not None else None
+
+    async def get_embedder_swap(self, partition: str) -> dict | None:
+        row = await self.pool.fetchrow("SELECT * FROM partition_embedder_swaps WHERE partition = $1", partition)
+        return dict(row) if row is not None else None
+
+    async def list_embedder_swaps(self, status: str | None = None) -> list[dict]:
+        if status is None:
+            rows = await self.pool.fetch("SELECT * FROM partition_embedder_swaps ORDER BY started_at")
+        else:
+            rows = await self.pool.fetch(
+                "SELECT * FROM partition_embedder_swaps WHERE status = $1 ORDER BY started_at",
+                status,
+            )
+        return [dict(r) for r in rows]
+
+    async def update_embedder_swap(self, partition: str, **fields: object) -> dict | None:
+        updates = {k: v for k, v in fields.items() if k in _EMBEDDER_SWAP_UPDATE_COLUMNS}
+        sets = [f"{column} = ${i}" for i, column in enumerate(updates, start=3)]
+        row = await self.pool.fetchrow(
+            f"""
+            UPDATE partition_embedder_swaps
+            SET {", ".join([*sets, "updated_at = now()"])}
+            WHERE partition = $1 AND status = $2
+            RETURNING *
+            """,
+            partition,
+            EmbedderSwapStatus.RUNNING.value,
+            *updates.values(),
+        )
+        return dict(row) if row is not None else None
+
+    async def complete_embedder_swap(self, partition: str) -> dict | None:
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                # Same lock order as start_embedder_swap and the endpoint
+                # delete/rename guards: partitions first.
+                await conn.execute("LOCK TABLE partitions IN ROW EXCLUSIVE MODE")
+                swap = await conn.fetchrow(
+                    """
+                    UPDATE partition_embedder_swaps
+                    SET status = $2, finished_at = now(), updated_at = now()
+                    WHERE partition = $1 AND status = $3
+                    RETURNING *
+                    """,
+                    partition,
+                    EmbedderSwapStatus.COMPLETED.value,
+                    EmbedderSwapStatus.RUNNING.value,
+                )
+                if swap is None:
+                    return None
+                await conn.execute(
+                    "UPDATE partitions SET embedder = $2, updated_at = now() WHERE partition = $1",
+                    partition,
+                    swap["target_embedder"],
+                )
+        return dict(swap)
 
     async def update_partition(self, name: str, **fields: object) -> dict | None:
         """Update a partition's config columns.

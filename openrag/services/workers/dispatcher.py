@@ -720,7 +720,7 @@ class WorkerDispatcher(IndexingDispatcher):
         entities: list[dict[str, Any]], vector_field: str, embedder: Any, embedder_reference: str | None
     ) -> dict[str, Any]:
         """The embedder record of a copy that was re-embedded: the target's, not the source's."""
-        provenance = embedder_provenance(embedder, embedder_reference)
+        provenance = embedder_provenance(embedder, embedder_reference, vector_field)
         if provenance["embedder_dimension"] is None:
             # An embedder that does not report its width: the vectors it just made do.
             widths = {len(entity[vector_field]) for entity in entities}

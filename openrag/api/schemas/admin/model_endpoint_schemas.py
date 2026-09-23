@@ -265,6 +265,10 @@ class ModelEndpointResponse(BaseModel):
     extra: dict[str, Any]
     has_api_key: bool = False
     is_default: bool
+    # Dense vector field this embedder owns; null for other model types. Set
+    # when the endpoint is created and kept through renames. The admin UI
+    # compares it with the field each file was indexed into.
+    vector_field: str | None = None
     # Partitions whose resolved reference is this endpoint — those naming it
     # plus, for the default endpoint, those riding the `default` alias. Zero
     # for types with no partition column (reranker/vlm/stt), which are

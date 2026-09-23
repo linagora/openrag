@@ -1410,6 +1410,48 @@ class MilvusVectorStore(VectorStore):
 
         return int(result.get("upsert_count", len(entities))) if isinstance(result, dict) else len(entities)
 
+    async def write_vectors(self, field: str, vectors: dict[str, list[float] | None]) -> int:
+        """Partial upsert of ``{_id, field}`` per chunk.
+
+        Milvus keeps every field the upsert does not name, including the
+        dynamic ones, and accepts ``None`` for a nullable vector: the chunk then
+        drops out of that field's searches. On an auto-id collection it refuses
+        the whole batch when any ``_id`` no longer exists, so a chunk deleted
+        concurrently fails the write instead of leaving a row holding only a
+        vector (all verified on Milvus 3.0.1).
+
+        Once Storage V3 is enabled, Milvus can generate a field from a function
+        and backfill existing rows itself (``add_function_field``). Today that
+        backfill covers BM25 and MinHash only, and embedding providers are read
+        from ``milvus.yaml`` at startup; when Milvus supports text-embedding
+        functions on existing rows, re-embedding could move there instead of
+        computing vectors client-side and writing them here.
+        """
+        if not field.startswith(VECTOR_FIELD_PREFIX):
+            raise ValueError(f"'{field}' is not a per-embedder dense vector field.")
+        if not vectors:
+            return 0
+
+        entities = [{"_id": int(chunk_id), field: vector} for chunk_id, vector in vectors.items()]
+        try:
+            result = await self._async_client.upsert(
+                collection_name=self._collection_name,
+                data=entities,
+                partial_update=True,
+            )
+        except MilvusException as e:
+            raise VDBInsertError(
+                f"Milvus partial upsert into `{field}` failed: {e!s}",
+                collection_name=self._collection_name,
+            ) from e
+        except Exception as e:
+            raise UnexpectedVDBError(
+                f"Unexpected error during Milvus partial upsert into `{field}`: {e!s}",
+                collection_name=self._collection_name,
+            ) from e
+
+        return int(result.get("upsert_count", len(entities))) if isinstance(result, dict) else len(entities)
+
     async def insert_entities(self, entities: list[dict[str, Any]], collection: str = "default") -> int:
         """Insert raw Milvus entities that already include vector data."""
         self._resolve_collection(collection)
