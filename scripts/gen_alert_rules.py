@@ -26,6 +26,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from collections.abc import Sequence
 from pathlib import Path
 
 import yaml
@@ -46,8 +47,12 @@ HEADER = """# GENERATED FILE — DO NOT EDIT.
 """
 
 
-def render() -> str:
-    """Return the rule groups as Helm renders them with default values."""
+def render(overrides: Sequence[str] = ()) -> str:
+    """Return the rule groups as Helm renders them.
+
+    ``overrides`` are extra ``--set`` expressions. The generated file uses none;
+    the tests pass some to check that a retuned deployment renders what it asked for.
+    """
     helm = shutil.which("helm")
     if helm is None:
         raise SystemExit("helm is required to generate the alert rules")
@@ -75,6 +80,7 @@ def render() -> str:
                 "templates/prometheusrule.yaml",
                 "--set",
                 "monitoring.prometheusRule.enabled=true",
+                *(arg for override in overrides for arg in ("--set", override)),
             ],
             capture_output=True,
             text=True,

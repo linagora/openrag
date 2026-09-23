@@ -11,7 +11,9 @@ properties of them. No cluster, no Prometheus, no network.
 
 from __future__ import annotations
 
+import importlib.util
 import re
+import shutil
 from pathlib import Path
 
 import pytest
@@ -205,12 +207,8 @@ def test_runbook_says_its_numbers_are_defaults(rule: dict) -> None:
     assert "are defaults; your deployment may differ" in page, (
         f"{rule['alert']}.md states numbers without saying they are defaults"
     )
-    assert "get prometheusrule" in page, (
-        f"{rule['alert']}.md does not show how to read the rule actually loaded"
-    )
-    assert f"for.{rule['alert']}" in page, (
-        f"{rule['alert']}.md does not name the value that changes its `for` duration"
-    )
+    assert "get prometheusrule" in page, f"{rule['alert']}.md does not show how to read the rule actually loaded"
+    assert f"for.{rule['alert']}" in page, f"{rule['alert']}.md does not name the value that changes its `for` duration"
 
 
 def test_runbook_index_lists_every_alert() -> None:
@@ -279,3 +277,51 @@ def test_compose_prometheus_loads_the_same_rules() -> None:
         "the Compose overlay must mount the generated rules directory; the copy is "
         "produced from the chart template so both deployments load one definition"
     )
+
+
+# ---------------------------------------------------------------------------
+# Overrides — what a retuned deployment actually renders
+# ---------------------------------------------------------------------------
+
+
+def _render(*overrides: str) -> dict[str, dict]:
+    """Render the chart's rules with ``--set`` overrides, keyed by alert name."""
+    if shutil.which("helm") is None:
+        pytest.skip("needs helm to render the chart's rule template")
+    spec = importlib.util.spec_from_file_location("gen_alert_rules", ROOT / "scripts" / "gen_alert_rules.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    doc = yaml.safe_load(module.render(overrides))
+    return {rule["alert"]: rule for group in doc["groups"] for rule in group["rules"]}
+
+
+def test_a_zero_threshold_is_honoured_not_replaced_by_the_default() -> None:
+    """``default`` treats 0 as empty, so ``backlogDepth: 0`` used to render as 50."""
+    rules = _render(
+        "monitoring.prometheusRule.thresholds.backlogDepth=0",
+        "monitoring.prometheusRule.thresholds.ingestVolumeFloor=0",
+    )
+    assert 'openrag_ingest_tasks{state="QUEUED"} > 0\n' in rules["OpenRagBacklogGrowing"]["expr"]
+    assert rules["OpenRagIngestFailureRate"]["expr"].rstrip().endswith(">= 0")
+
+
+def test_an_unknown_threshold_key_is_refused() -> None:
+    """A misspelt key renders the default with nothing to say the override was ignored."""
+    with pytest.raises(SystemExit, match="thresholds.backlogdepth"):
+        _render("monitoring.prometheusRule.thresholds.backlogdepth=10")
+
+
+def test_annotations_follow_overridden_values() -> None:
+    """The text a human reads must state the numbers the rule actually uses."""
+    rules = _render(
+        "monitoring.prometheusRule.thresholds.ingestIdleSeconds=1800",
+        "monitoring.prometheusRule.thresholds.ingestFailureRatio=0.1",
+        "monitoring.prometheusRule.thresholds.inferenceErrorRatio=0.2",
+        "monitoring.prometheusRule.for.OpenRagBacklogGrowing=40m",
+        "monitoring.prometheusRule.for.OpenRagTargetDown=10m",
+    )
+    assert "for over 30 minutes" in rules["OpenRagIngestStalled"]["annotations"]["description"]
+    assert "More than 10%" in rules["OpenRagIngestFailureRate"]["annotations"]["summary"]
+    assert "More than 20%" in rules["OpenRagInferenceProviderDown"]["annotations"]["description"]
+    assert "for 40 minutes" in rules["OpenRagBacklogGrowing"]["annotations"]["description"]
+    assert "for 10 minutes" in rules["OpenRagTargetDown"]["annotations"]["description"]

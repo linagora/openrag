@@ -1,3 +1,67 @@
+{{- /*
+Every tunable is resolved once, here, so an expression and the prose describing
+it cannot disagree: the annotations quote these same values, and a retuned
+deployment must not page someone with the default's numbers.
+
+Defaults live in these two dicts. values.yaml leaves each key empty to mean
+"keep the default". Sprig's `default` is not used because it treats 0 as empty,
+and 0 is a legitimate threshold (backlogDepth: 0 alerts on any sustained growth).
+
+Bad overrides are refused rather than shipped. A threshold is substituted into a
+PromQL comparison, so a value that is not a number is not an error: `>
+twelve_minutes` parses as a comparison against a metric that does not exist,
+`promtool check rules` reports SUCCESS, and the alert never fires again with
+nothing to say so. Prometheus duration literals are allowed because `12m` and
+`720` are genuinely equivalent there. A key that matches nothing is refused too:
+it renders the default, and the operator believes the override took effect.
+*/}}
+{{- $cfg := .Values.monitoring.prometheusRule }}
+{{- $t := dict "ingestIdleSeconds" 720 "ingestFailureRatio" 0.25 "ingestVolumeFloor" 5 "backlogDepth" 50 "inferenceErrorRatio" 0.5 }}
+{{- range $name, $value := ($cfg.thresholds | default dict) }}
+{{- if not (hasKey $t $name) }}
+{{- fail (printf "monitoring.prometheusRule.thresholds.%s is not a threshold in this chart, so setting it would do nothing. Known thresholds: %s" $name (join ", " (keys $t | sortAlpha))) }}
+{{- end }}
+{{- if not (or (kindIs "invalid" $value) (eq (toString $value) "")) }}
+{{- if not (regexMatch `^([0-9]+(\.[0-9]+)?|([0-9]+(ms|[smhdwy]))+)$` (toString $value)) }}
+{{- fail (printf "monitoring.prometheusRule.thresholds.%s must be a number (e.g. 720, 0.25) or a Prometheus duration (e.g. 12m), got %q. Anything else becomes a metric name in the comparison, and the alert silently never fires." $name (toString $value)) }}
+{{- end }}
+{{- $_ := set $t $name $value }}
+{{- end }}
+{{- end }}
+{{- $for := dict "OpenRagIngestStalled" "2m" "OpenRagIngestFailureRate" "5m" "OpenRagBacklogGrowing" "25m" "OpenRagCatalogDriftDetected" "5m" "OpenRagInferenceProviderDown" "5m" "OpenRagCircuitBreakerOpen" "5m" "OpenRagTargetDown" "5m" }}
+{{- range $name, $value := ($cfg.for | default dict) }}
+{{- if not (hasKey $for $name) }}
+{{- fail (printf "monitoring.prometheusRule.for.%s is not an alert in this chart, so setting it would do nothing. Known alerts: %s" $name (join ", " (keys $for | sortAlpha))) }}
+{{- end }}
+{{- if not (or (kindIs "invalid" $value) (eq (toString $value) "")) }}
+{{- if not (regexMatch `^([0-9]+(ms|[smhdwy]))+$` (toString $value)) }}
+{{- fail (printf "monitoring.prometheusRule.for.%s must be a Prometheus duration such as \"5m\", got %q." $name (toString $value)) }}
+{{- end }}
+{{- $_ := set $for $name (toString $value) }}
+{{- end }}
+{{- end }}
+{{- /* The same values in words, for the annotations. A bare number of idle
+   seconds reads as minutes when it divides evenly; anything more exotic than a
+   single-unit duration is quoted as written. */}}
+{{- $idle := toString $t.ingestIdleSeconds }}
+{{- if regexMatch `^[0-9]+$` $idle }}
+{{- $n := atoi $idle }}
+{{- $idle = ternary (printf "%dm" (div $n 60)) (printf "%ds" $n) (and (gt $n 0) (eq (mod $n 60) 0)) }}
+{{- end }}
+{{- $units := dict "s" "second" "m" "minute" "h" "hour" "d" "day" }}
+{{- $words := dict }}
+{{- range $name, $d := (merge (dict "idle" $idle) $for) }}
+{{- $text := $d }}
+{{- if regexMatch `^[0-9]+[smhd]$` $d }}
+{{- $n := regexReplaceAll `[smhd]$` $d "" }}
+{{- $text = printf "%s %s%s" $n (get $units (regexReplaceAll `^[0-9]+` $d "")) (ternary "" "s" (eq $n "1")) }}
+{{- end }}
+{{- $_ := set $words $name $text }}
+{{- end }}
+{{- $pct := dict }}
+{{- range $name := list "ingestFailureRatio" "inferenceErrorRatio" }}
+{{- $_ := set $pct $name (printf "%v%%" (round (mulf (float64 (get $t $name)) 100) 2)) }}
+{{- end -}}
 # OpenRag alert rules — a Helm template, and the single source of truth.
 #
 # Thresholds and `for` durations are values because they are deployment
@@ -48,16 +112,16 @@ groups:
         expr: |
           (openrag_ingest_tasks{state="QUEUED"} > 0)
           and on()
-          (time() - max(openrag_ingest_last_parse_completion_timestamp_seconds) > {{ .Values.monitoring.prometheusRule.thresholds.ingestIdleSeconds | default 720 }})
-        for: {{ get .Values.monitoring.prometheusRule.for "OpenRagIngestStalled" | default "2m" }}
+          (time() - max(openrag_ingest_last_parse_completion_timestamp_seconds) > {{ $t.ingestIdleSeconds }})
+        for: {{ $for.OpenRagIngestStalled }}
         labels:
           severity: critical
         annotations:
           summary: "Ingestion is stalled — documents are queued and nothing is completing"
           description: >-
             {{ "{{ $value }}" }} task(s) are QUEUED and no parser pool has completed a parse
-            for over 12 minutes. Uploads are being accepted and never indexed.
-          runbook_url: "{{ .Values.monitoring.prometheusRule.runbookBaseUrl | default "https://github.com/linagora/openrag/blob/main/docs/deployment/runbooks" }}/OpenRagIngestStalled.md"
+            for over {{ $words.idle }}. Uploads are being accepted and never indexed.
+          runbook_url: "{{ $cfg.runbookBaseUrl | default "https://github.com/linagora/openrag/blob/main/docs/deployment/runbooks" }}/OpenRagIngestStalled.md"
 
       - alert: OpenRagIngestFailureRate
         # Ratio over terminal outcomes only. `cancelled` is excluded from both
@@ -81,18 +145,18 @@ groups:
             sum(rate(openrag_ingest_documents_total{status="failed"}[5m]))
             /
             sum(rate(openrag_ingest_documents_total{status=~"completed|failed"}[5m]))
-          ) > {{ .Values.monitoring.prometheusRule.thresholds.ingestFailureRatio | default 0.25 }}
+          ) > {{ $t.ingestFailureRatio }}
           and
-          sum(increase(openrag_ingest_documents_total{status=~"completed|failed"}[15m])) >= {{ .Values.monitoring.prometheusRule.thresholds.ingestVolumeFloor | default 5 }}
-        for: {{ get .Values.monitoring.prometheusRule.for "OpenRagIngestFailureRate" | default "5m" }}
+          sum(increase(openrag_ingest_documents_total{status=~"completed|failed"}[15m])) >= {{ $t.ingestVolumeFloor }}
+        for: {{ $for.OpenRagIngestFailureRate }}
         labels:
           severity: warning
         annotations:
-          summary: "More than 25% of documents are failing to index"
+          summary: "More than {{ $pct.ingestFailureRatio }} of documents are failing to index"
           description: >-
             {{ "{{ $value | humanizePercentage }}" }} of documents reaching a terminal state
             over the last 5 minutes failed.
-          runbook_url: "{{ .Values.monitoring.prometheusRule.runbookBaseUrl | default "https://github.com/linagora/openrag/blob/main/docs/deployment/runbooks" }}/OpenRagIngestFailureRate.md"
+          runbook_url: "{{ $cfg.runbookBaseUrl | default "https://github.com/linagora/openrag/blob/main/docs/deployment/runbooks" }}/OpenRagIngestFailureRate.md"
 
       - alert: OpenRagBacklogGrowing
         # Both conditions required: either alone is noisy — a burst upload
@@ -123,18 +187,18 @@ groups:
         # broker-native signals (queue depth, consumer lag, oldest unacked
         # message age); do not retune it.
         expr: |
-          openrag_ingest_tasks{state="QUEUED"} > {{ .Values.monitoring.prometheusRule.thresholds.backlogDepth | default 50 }}
+          openrag_ingest_tasks{state="QUEUED"} > {{ $t.backlogDepth }}
           and
           deriv(openrag_ingest_tasks{state="QUEUED"}[5m]) > 0
-        for: {{ get .Values.monitoring.prometheusRule.for "OpenRagBacklogGrowing" | default "25m" }}
+        for: {{ $for.OpenRagBacklogGrowing }}
         labels:
           severity: warning
         annotations:
           summary: "Indexing backlog is growing faster than it drains"
           description: >-
-            The QUEUED task count has risen continuously for 25 minutes and now stands at
+            The QUEUED task count has risen continuously for {{ $words.OpenRagBacklogGrowing }} and now stands at
             {{ "{{ $value }}" }}. Ingestion capacity is below the arrival rate.
-          runbook_url: "{{ .Values.monitoring.prometheusRule.runbookBaseUrl | default "https://github.com/linagora/openrag/blob/main/docs/deployment/runbooks" }}/OpenRagBacklogGrowing.md"
+          runbook_url: "{{ $cfg.runbookBaseUrl | default "https://github.com/linagora/openrag/blob/main/docs/deployment/runbooks" }}/OpenRagBacklogGrowing.md"
 
       - alert: OpenRagCatalogDriftDetected
         # openrag_retrieval_orphan_chunks_dropped_total counts retrieval hits
@@ -159,7 +223,7 @@ groups:
         # A longer window keeps it up between sporadic hits. It still cannot
         # distinguish the two — see the runbook.
         expr: sum(increase(openrag_retrieval_orphan_chunks_dropped_total[1h])) > 0
-        for: {{ get .Values.monitoring.prometheusRule.for "OpenRagCatalogDriftDetected" | default "5m" }}
+        for: {{ $for.OpenRagCatalogDriftDetected }}
         labels:
           severity: critical
         annotations:
@@ -167,7 +231,7 @@ groups:
           description: >-
             Retrieval dropped chunks in the last hour for files the catalog does not know
             about. Answers are quietly missing content, with no error to show for it.
-          runbook_url: "{{ .Values.monitoring.prometheusRule.runbookBaseUrl | default "https://github.com/linagora/openrag/blob/main/docs/deployment/runbooks" }}/OpenRagCatalogDriftDetected.md"
+          runbook_url: "{{ $cfg.runbookBaseUrl | default "https://github.com/linagora/openrag/blob/main/docs/deployment/runbooks" }}/OpenRagCatalogDriftDetected.md"
 
   # ── Inference ────────────────────────────────────────────────────────────
   - name: openrag-inference
@@ -188,17 +252,17 @@ groups:
             sum by (provider) (rate(openrag_inference_requests_total{outcome=~"error|timeout"}[10m]))
             /
             sum by (provider) (rate(openrag_inference_requests_total[10m]))
-          ) > {{ .Values.monitoring.prometheusRule.thresholds.inferenceErrorRatio | default 0.5 }}
-        for: {{ get .Values.monitoring.prometheusRule.for "OpenRagInferenceProviderDown" | default "5m" }}
+          ) > {{ $t.inferenceErrorRatio }}
+        for: {{ $for.OpenRagInferenceProviderDown }}
         labels:
           severity: critical
         annotations:
-          summary: "Inference provider {{ "{{ $labels.provider }}" }} is failing most of its calls"
+          summary: "Inference provider {{ "{{ $labels.provider }}" }} is failing more than {{ $pct.inferenceErrorRatio }} of its calls"
           description: >-
-            More than half the calls to registry endpoint {{ "{{ $labels.provider }}" }} are
+            More than {{ $pct.inferenceErrorRatio }} of the calls to registry endpoint {{ "{{ $labels.provider }}" }} are
             returning errors or timing out. Chat and any indexing stage that depends on it
             will fail.
-          runbook_url: "{{ .Values.monitoring.prometheusRule.runbookBaseUrl | default "https://github.com/linagora/openrag/blob/main/docs/deployment/runbooks" }}/OpenRagInferenceProviderDown.md"
+          runbook_url: "{{ $cfg.runbookBaseUrl | default "https://github.com/linagora/openrag/blob/main/docs/deployment/runbooks" }}/OpenRagInferenceProviderDown.md"
 
       - alert: OpenRagCircuitBreakerOpen
         # Separate from the error-rate alert on purpose. The two need different
@@ -215,8 +279,15 @@ groups:
         # `name` is the breaker kind declared in services/inference — llm,
         # embedder, vlm, reranker. Code-defined and therefore bounded, but NOT
         # a registry entry name.
-        expr: max by (name) (openrag_circuit_breaker_state) == 1
-        for: {{ get .Values.monitoring.prometheusRule.for "OpenRagCircuitBreakerOpen" | default "5m" }}
+        #
+        # `>= 1`, not `== 1`: half-open (2) is still tripped. A hard-down
+        # provider cycles open → half-open for the length of one trial call →
+        # open, and a trial that times out sits at 2 across whole scrapes.
+        # Under `== 1` every such scrape reset the `for` timer, so the alert
+        # could stay pending through exactly the outage it exists for.
+        # Unknown (-1) stays out.
+        expr: max by (name) (openrag_circuit_breaker_state) >= 1
+        for: {{ $for.OpenRagCircuitBreakerOpen }}
         labels:
           severity: critical
         annotations:
@@ -225,7 +296,7 @@ groups:
             OpenRag has stopped calling its {{ "{{ $labels.name }}" }} endpoint after repeated
             failures. Calls return immediately without reaching it, so chat and indexing
             that depend on it fail fast.
-          runbook_url: "{{ .Values.monitoring.prometheusRule.runbookBaseUrl | default "https://github.com/linagora/openrag/blob/main/docs/deployment/runbooks" }}/OpenRagCircuitBreakerOpen.md"
+          runbook_url: "{{ $cfg.runbookBaseUrl | default "https://github.com/linagora/openrag/blob/main/docs/deployment/runbooks" }}/OpenRagCircuitBreakerOpen.md"
 
   # ── Meta ─────────────────────────────────────────────────────────────────
   - name: openrag-meta
@@ -240,13 +311,13 @@ groups:
         # degraded (it reads process config, not the service container) — so a
         # degraded instance is up==1 and not ready at the same time. Readiness
         # needs a gauge exported from readiness_service; see S3-1b.
-        expr: up{job=~"{{ .Values.monitoring.prometheusRule.jobMatcher | default ".*openrag.*" }}"} == 0
-        for: {{ get .Values.monitoring.prometheusRule.for "OpenRagTargetDown" | default "5m" }}
+        expr: up{job=~"{{ $cfg.jobMatcher | default ".*openrag.*" }}"} == 0
+        for: {{ $for.OpenRagTargetDown }}
         labels:
           severity: critical
         annotations:
           summary: "Prometheus cannot scrape OpenRag ({{ "{{ $labels.instance }}" }})"
           description: >-
-            The target has been unreachable for 5 minutes. Every other OpenRag alert is
+            The target has been unreachable for {{ $words.OpenRagTargetDown }}. Every other OpenRag alert is
             inert while this is firing, because absent series cannot breach a threshold.
-          runbook_url: "{{ .Values.monitoring.prometheusRule.runbookBaseUrl | default "https://github.com/linagora/openrag/blob/main/docs/deployment/runbooks" }}/OpenRagTargetDown.md"
+          runbook_url: "{{ $cfg.runbookBaseUrl | default "https://github.com/linagora/openrag/blob/main/docs/deployment/runbooks" }}/OpenRagTargetDown.md"

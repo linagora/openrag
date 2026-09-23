@@ -13,7 +13,7 @@
 > ```
 
 ```
-max by (name) (openrag_circuit_breaker_state) == 1
+max by (name) (openrag_circuit_breaker_state) >= 1
 ```
 
 ## What it means
@@ -38,7 +38,7 @@ preset, `vlm`, `stt` and `contextualization_llm` on the indexation preset.
 
 ## Gauge values
 
-`0` closed · `1` open · `2` half-open · `-1` unknown. Only `1` fires this.
+`0` closed · `1` open · `2` half-open · `-1` unknown. `1` and `2` both fire this: half-open means the breaker is still tripped and probing with one trial call, and a hard-down endpoint cycles between the two.
 
 ## First checks
 

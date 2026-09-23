@@ -201,9 +201,9 @@ groups:
         labels:
           severity: critical
         annotations:
-          summary: "Inference provider {{ $labels.provider }} is failing most of its calls"
+          summary: "Inference provider {{ $labels.provider }} is failing more than 50% of its calls"
           description: >-
-            More than half the calls to registry endpoint {{ $labels.provider }} are
+            More than 50% of the calls to registry endpoint {{ $labels.provider }} are
             returning errors or timing out. Chat and any indexing stage that depends on it
             will fail.
           runbook_url: "https://github.com/linagora/openrag/blob/main/docs/deployment/runbooks/OpenRagInferenceProviderDown.md"
@@ -223,7 +223,14 @@ groups:
         # `name` is the breaker kind declared in services/inference — llm,
         # embedder, vlm, reranker. Code-defined and therefore bounded, but NOT
         # a registry entry name.
-        expr: max by (name) (openrag_circuit_breaker_state) == 1
+        #
+        # `>= 1`, not `== 1`: half-open (2) is still tripped. A hard-down
+        # provider cycles open → half-open for the length of one trial call →
+        # open, and a trial that times out sits at 2 across whole scrapes.
+        # Under `== 1` every such scrape reset the `for` timer, so the alert
+        # could stay pending through exactly the outage it exists for.
+        # Unknown (-1) stays out.
+        expr: max by (name) (openrag_circuit_breaker_state) >= 1
         for: 5m
         labels:
           severity: critical

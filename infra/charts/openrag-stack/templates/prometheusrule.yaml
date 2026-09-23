@@ -15,41 +15,9 @@ duplicated: one definition still decides what both deployments alert on.
 Requires the monitoring.coreos.com CRDs (kube-prometheus-stack or a standalone
 operator). Disabled by default, like the ServiceMonitor.
 */}}
-{{- $cfg := .Values.monitoring.prometheusRule }}
-{{- /* Refuse bad overrides here rather than shipping them.
-
-   A threshold is substituted into a PromQL comparison, so a value that is not a
-   number is not an error — `> twelve_minutes` parses as a comparison against a
-   metric that does not exist, `promtool check rules` reports SUCCESS, and the
-   alert never fires again with nothing to say so. Prometheus duration literals
-   are allowed because `12m` and `720` are genuinely equivalent there.
-
-   A `for` key that matches no alert is a silent no-op: the operator sets it,
-   helm renders happily, and the duration never changes. */}}
-{{- range $name, $value := $cfg.thresholds }}
-{{- if $value }}
-{{- $given := printf "%v" $value }}
-{{- if not (regexMatch `^([0-9]+(\.[0-9]+)?|([0-9]+(ms|[smhdwy]))+)$` $given) }}
-{{- fail (printf "monitoring.prometheusRule.thresholds.%s must be a number (e.g. 720, 0.25) or a Prometheus duration (e.g. 12m), got %q. Anything else becomes a metric name in the comparison, and the alert silently never fires." $name $given) }}
-{{- end }}
-{{- end }}
-{{- end }}
+{{- /* Overrides are validated inside the rule template itself, next to the
+   defaults they override, so the Compose generator gets the same checks. */}}
 {{- $rules := tpl (.Files.Get "rules/openrag-alerts.yaml.tpl") . }}
-{{- $known := dict }}
-{{- range $group := ($rules | fromYaml).groups }}
-{{- range $rule := $group.rules }}
-{{- $_ := set $known $rule.alert true }}
-{{- end }}
-{{- end }}
-{{- range $name, $value := $cfg.for }}
-{{- if not (hasKey $known $name) }}
-{{- fail (printf "monitoring.prometheusRule.for.%s is not an alert in this chart, so setting it would do nothing. Known alerts: %s" $name (join ", " (keys $known | sortAlpha))) }}
-{{- end }}
-{{- $given := printf "%v" $value }}
-{{- if not (regexMatch `^([0-9]+(ms|[smhdwy]))+$` $given) }}
-{{- fail (printf "monitoring.prometheusRule.for.%s must be a Prometheus duration such as \"5m\", got %q." $name $given) }}
-{{- end }}
-{{- end }}
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
 metadata:
