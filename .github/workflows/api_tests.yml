@@ -49,7 +49,7 @@ jobs:
           # Wait for OpenRAG API
           echo "Waiting for OpenRAG API..."
           for i in {1..180}; do
-            if curl -sf http://localhost:8080/health_check 2>/dev/null; then
+            if curl -sf http://localhost:8080/ready 2>/dev/null; then
               echo "OpenRAG API ready after $i attempts"
               break
             fi
@@ -58,7 +58,7 @@ jobs:
           done
 
           # Final check
-          if ! curl -sf http://localhost:8080/health_check; then
+          if ! curl -sf http://localhost:8080/ready; then
             echo "OpenRAG API failed to start"
             docker compose logs openrag
             exit 1

@@ -183,9 +183,11 @@ def test_auth_middleware_accepts_custom_bypass_config() -> None:
     assert instance._bypass_config is custom
 
 
-def _request(headers=None, path="/indexer/files"):
+def _request(headers=None, path="/indexer/files", app=None):
     raw = [(k.lower().encode(), v.encode()) for k, v in (headers or {}).items()]
     scope = {"type": "http", "method": "GET", "path": path, "headers": raw, "query_string": b""}
+    if app is not None:
+        scope["app"] = app
     return Request(scope)
 
 
@@ -516,3 +518,64 @@ def test_oidc_login_redirect_uses_the_routed_path_and_query(monkeypatch) -> None
 
     assert response.status_code == 302
     assert response.headers["location"] == "/auth/login?next=%2Fstatic%2Fabc%3Fpage%3D2"
+
+
+# ---------------------------------------------------------------------------
+# A degraded boot must answer 503, not 500 (#937)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_auth_middleware_returns_503_when_the_container_is_none(monkeypatch) -> None:
+    """The real resolver on a degraded boot.
+
+    `main.py` resolves the auth service through `di.providers.get_container`,
+    which raises `HTTPException(503)` when the boot guard has set
+    `app.state.container = None`. Middleware runs outside the router, so
+    FastAPI's handlers never convert that — uncaught it escapes as a 500
+    `[UNEXPECTED_ERROR]` on every authenticated request, which is the opposite
+    of the "serving degraded (503)" the boot guard logged.
+
+    Exercises the real `get_container`, not a stand-in that raises RuntimeError:
+    the bug was precisely that the production resolver raises something else.
+    """
+    monkeypatch.setenv("AUTH_MODE", "token")
+    monkeypatch.setenv("AUTH_TOKEN", "secret")
+
+    from types import SimpleNamespace
+
+    from di.providers import get_container
+
+    # `get_container` reads `request.app.state.container`, so the request needs a
+    # real app in its scope — a degraded one, exactly as the boot guard leaves it.
+    degraded_app = SimpleNamespace(state=SimpleNamespace(container=None))
+    request = _request(headers={"authorization": "Bearer token"}, app=degraded_app)
+
+    middleware = AuthMiddleware(
+        lambda scope, receive, send: None,
+        get_auth_service=lambda req: get_container(req).auth_service,
+    )
+
+    response = await middleware.dispatch(request, _unused_call_next)
+
+    # 503, and specifically not the 500 `[UNEXPECTED_ERROR]` the bug produced.
+    assert response.status_code == 503
+    # The resolver's own detail is relayed rather than flattened to a generic
+    # string, so the log and the response agree on why the request failed.
+    assert b"container is not available" in response.body
+
+
+def test_main_resolves_the_auth_service_through_get_container() -> None:
+    """The wiring is the fix. Reading `app.state.container.auth_service`
+    directly raises AttributeError on a degraded boot, which no guard catches."""
+    import pathlib
+
+    # Read as text rather than importing: importing `api.main` pulls in the
+    # chainlit entrypoint, which fails outside a running app.
+    source = (pathlib.Path(__file__).resolve().parents[4] / "openrag" / "api" / "main.py").read_text(encoding="utf-8")
+
+    assert "get_auth_service=lambda request: get_container(request).auth_service" in source
+    assert "request.app.state.container.auth_service" not in source, (
+        "the auth service is resolved off a possibly-None container again; "
+        "AttributeError there is not caught and surfaces as a 500"
+    )

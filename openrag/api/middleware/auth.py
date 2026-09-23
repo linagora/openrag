@@ -38,7 +38,7 @@ from urllib.parse import quote
 from core.auth.chainlit import CHAINLIT_TOKEN_COOKIE_NAME
 from core.config.auth import AuthBypassConfig
 from core.utils.logging import get_logger
-from fastapi import Request
+from fastapi import HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 from limits import parse
 from limits.aio.storage import MemoryStorage
@@ -297,6 +297,19 @@ class AuthMiddleware(BaseHTTPMiddleware):
         session = None
         try:
             auth_service = self._get_auth_service(request)
+        except HTTPException as exc:
+            # The resolver goes through `di.providers.get_container`, which raises
+            # `HTTPException(503)` on a degraded boot. Middleware runs outside the
+            # router, so FastAPI's exception handlers never see this — uncaught it
+            # becomes a 500 `[UNEXPECTED_ERROR]` on every authenticated request,
+            # the opposite of the "serving degraded (503)" the boot guard logged
+            # (#937). The resolver's own status is relayed rather than flattened
+            # to 503, so a future resolver reporting something else is not masked.
+            logger.warning("Auth service unavailable", reason="service_unavailable", path=path)
+            return JSONResponse(
+                status_code=exc.status_code,
+                content={"detail": exc.detail or "Service unavailable"},
+            )
         except RuntimeError:
             logger.warning("Auth service unavailable", reason="service_unavailable", path=path)
             return JSONResponse(status_code=503, content={"detail": "Service unavailable"})
