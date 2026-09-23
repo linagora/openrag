@@ -49,6 +49,18 @@ def _task_state_manager(
     return tsm
 
 
+def test_tracker_reports_degraded_stage_history_capability() -> None:
+    from services.workers.task_completion import TaskCompletionTracker
+
+    assert TaskCompletionTracker().supports_degraded_stage_history() is True
+
+
+def test_tracker_reports_error_reason_history_capability() -> None:
+    from services.workers.task_completion import TaskCompletionTracker
+
+    assert TaskCompletionTracker().supports_error_reason_history() is True
+
+
 @pytest.mark.asyncio
 async def test_tracker_records_completion_after_worker_settles() -> None:
     from services.workers.task_completion import TaskCompletionTracker
@@ -469,6 +481,7 @@ async def test_settled_task_is_written_to_the_job_history() -> None:
         "partition": "tenant-a",
         "metadata": {},
         "user_id": 42,
+        "degraded_stages": ["caption"],
     }
 
     with patch("services.workers.task_completion.ray.get_actor", return_value=tsm):
@@ -485,6 +498,39 @@ async def test_settled_task_is_written_to_the_job_history() -> None:
         42,
     )
     assert job.completed_at is not None
+    assert job.degraded_stages == ["caption"]
+
+
+@pytest.mark.asyncio
+async def test_failed_task_reason_is_written_to_job_history() -> None:
+    repo = _FakeJobRepo()
+    tsm = _task_state_manager(state="FAILED")
+    tsm._ray_actor_method_names = {"get_error_reason"}
+    tsm.get_error.remote.return_value = "traceback"
+    tsm.get_error_reason = _remote_mock("RuntimeError: parser failed")
+
+    with patch("services.workers.task_completion.ray.get_actor", return_value=tsm):
+        tracker = _tracker_with_repo(repo)
+        await tracker._record_settled_job("task-1", {"partition": "tenant-a"})
+
+    assert repo.saved[0].error == "traceback"
+    assert repo.saved[0].error_reason == "RuntimeError: parser failed"
+
+
+@pytest.mark.asyncio
+async def test_old_task_state_actor_derives_reason_for_job_history() -> None:
+    repo = _FakeJobRepo()
+    tsm = _task_state_manager(state="FAILED")
+    tsm._ray_actor_method_names = {"get_error"}
+    tsm.get_error.remote.return_value = (
+        "Traceback (most recent call last):\nRuntimeError: parser failed\n<html>\n</html>"
+    )
+
+    with patch("services.workers.task_completion.ray.get_actor", return_value=tsm):
+        tracker = _tracker_with_repo(repo)
+        await tracker._record_settled_job("task-1", {"partition": "tenant-a"})
+
+    assert repo.saved[0].error_reason == "RuntimeError: parser failed"
 
 
 class _RayLikeActorMethod:

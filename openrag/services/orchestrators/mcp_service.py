@@ -32,11 +32,17 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import urljoin, urlparse
 
 import httpx
+from core.indexing.validators import (
+    CONTENT_SNIFF_BYTES,
+    validate_content_matches_extension,
+    validate_ooxml_package,
+)
 from core.utils.consts import is_internal_metadata_key, strip_protected_metadata
 from core.utils.exceptions import ValidationError
 from core.utils.logging import get_logger
 from core.utils.partition_limits import max_partitions_for_user
 from core.utils.url_safety import is_blocked_address, is_safe_url
+from core.vector_stores.vector_field import is_vector_field_key
 
 if TYPE_CHECKING:
     from core.vector_stores import VectorStore
@@ -283,7 +289,7 @@ class MCPService:
             {"partition": partition, "file_id": file_id},
             output_fields=["*"],
         )
-        metadata = _public_chunk_metadata(rows[0], exclude=("_id", "text", "vector")) if rows else {}
+        metadata = _public_chunk_metadata(rows[0], exclude=("_id", "text")) if rows else {}
         return {
             "partition": partition,
             "file_id": file_id,
@@ -331,7 +337,7 @@ class MCPService:
                 {
                     "chunk_id": row.get("_id"),
                     "content": row.get("text"),
-                    "metadata": _public_chunk_metadata(row, exclude=("text", "_id", "vector")),
+                    "metadata": _public_chunk_metadata(row, exclude=("text", "_id")),
                 }
                 for row in page
             ],
@@ -584,6 +590,24 @@ class MCPService:
             if not download_complete:
                 tmp_path.unlink(missing_ok=True)
 
+        # The extension comes from the URL path, and it alone selects the
+        # parser — the same trust the upload routes refuse to extend to a
+        # caller-supplied filename. Check the downloaded bytes agree with it.
+        content_verified = False
+        try:
+            extension = suffix.lstrip(".").lower()
+            with tmp_path.open("rb") as downloaded:
+                validate_content_matches_extension(extension, downloaded.read(CONTENT_SNIFF_BYTES))
+                await asyncio.to_thread(validate_ooxml_package, extension, downloaded)
+            content_verified = True
+        finally:
+            # `finally`, not `except Exception`, and for the same reason as the
+            # download above: the package check awaits, so a cancelled request
+            # raises CancelledError here — a BaseException — and the download
+            # would otherwise be left on disk.
+            if not content_verified:
+                tmp_path.unlink(missing_ok=True)
+
         metadata = _strip_protected_metadata(extra_metadata)
         metadata["source_url"] = url
         guessed_mime, _ = mimetypes.guess_type(filename)
@@ -671,4 +695,8 @@ __all__ = ["MCPService"]
 
 
 def _public_chunk_metadata(row: dict[str, Any], *, exclude: tuple[str, ...]) -> dict[str, Any]:
-    return {key: value for key, value in row.items() if key not in exclude and not is_internal_metadata_key(key)}
+    return {
+        key: value
+        for key, value in row.items()
+        if key not in exclude and not is_vector_field_key(key) and not is_internal_metadata_key(key)
+    }

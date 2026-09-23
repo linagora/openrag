@@ -75,9 +75,9 @@ one before upgrading:
 
 For the default direct-API deployment, startup and liveness probes use
 `/health_check`, while the readiness probe uses `/ready`. When
-`ENABLE_RAY_SERVE=true`, override the HTTP
-probes with exec probes as noted in the chart values: the Ray Serve HTTP proxy
-runs on the Ray head, not on the API pod.
+`ENABLE_RAY_SERVE=true`, the chart automatically uses exec probes against the
+Ray head because the Ray Serve HTTP proxy does not run on the API pod. Ray
+Serve requires `ray.enabled=true`; Helm rejects that invalid combination.
 Readiness returns 503 when startup is incomplete or PostgreSQL, Milvus, or Ray is
 unavailable. Model checks are reported in the response but do not gate the whole
 API, so optional VLM/STT and partition-specific model endpoints do not remove
@@ -89,6 +89,12 @@ includes `/ready` with these probes.
 Readiness uses the configured model endpoints and API keys, just like inference.
 HTTP endpoints do not encrypt those credentials; configure HTTPS when transport
 encryption is required.
+
+Prometheus exposes aggregate endpoint state through
+`openrag_model_endpoint_ready{provider,kind}` and discovery health through
+`openrag_model_endpoint_discovery_up`. These labels are intentionally bounded,
+and the public readiness endpoint reports aggregate configuration-reference
+counts without exposing partition or preset names.
 
 - If using a public IP instead of a hostname, you can leave `ingress.host` empty in your `values.yaml`.  
   The ingress will then match all hosts.

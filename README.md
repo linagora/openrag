@@ -141,11 +141,13 @@ cd openrag
 git checkout main # or a given release
 ```
 #### 2. Create a `.env` File
-Create a `.env` file under `infra/compose/`, mirroring the structure of `infra/compose/.env.example`, to configure your environment and supply blank environment variables.
+Generate a `.env` under `infra/compose/` from `infra/compose/.env.example`. The generator fills every credential with a fresh random value; you then supply the endpoint variables it cannot guess.
 
 ```bash
-cp infra/compose/.env.example infra/compose/.env
+python3 scripts/gen_env.py
 ```
+
+The template marks each credential `__GENERATE_ME__` instead of shipping a working default, and OpenRag refuses to start on any value published in this repository — so copying the template by hand fails at startup with a message naming what is still unset.
 #### 3. File Parser configuration 
 All supported file format parsers are pre-configured. For PDF processing, **[PyMuPDFLoader](https://pymupdf.readthedocs.io/)** is the default parser — a lightweight, fast, CPU-friendly engine well suited to searchable PDFs and quick local testing.
 

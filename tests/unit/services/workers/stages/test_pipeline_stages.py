@@ -51,7 +51,13 @@ class FakeContextualizer(ChunkContextualizer):
         self.system_prompts: list[str | None] = []
 
     async def contextualize(
-        self, chunks, *, filename: str = "", lang: str = "en", system_prompt: str | None = None
+        self,
+        chunks,
+        *,
+        filename: str = "",
+        lang: str = "en",
+        system_prompt: str | None = None,
+        on_failure=None,
     ) -> list[Chunk]:
         self.calls.append((list(chunks), filename, lang))
         self.system_prompts.append(system_prompt)
@@ -105,15 +111,27 @@ class FakeVectorStore(VectorStore):
         self.error = error
         self.calls: list[tuple[list[Chunk], str]] = []
         self.ensure_calls: list[tuple[str, int]] = []
+        self.vector_field_calls: list[tuple[str, int]] = []
+        self.upsert_vector_fields: list[str | None] = []
 
-    async def upsert(self, chunks: list[Chunk], collection: str = "default", *, indexed_at=None) -> int:
+    async def upsert(
+        self, chunks: list[Chunk], collection: str = "default", *, indexed_at=None, vector_field=None
+    ) -> int:
         self.calls.append((chunks, collection))
+        self.upsert_vector_fields.append(vector_field)
         if self.error is not None:
             raise self.error
         return self.count
 
     async def search(
-        self, embedding, query_text=None, top_k=10, collection="default", filters=None, similarity_threshold=None
+        self,
+        embedding,
+        query_text=None,
+        top_k=10,
+        collection="default",
+        filters=None,
+        similarity_threshold=None,
+        vector_field=None,
     ):
         return []
 
@@ -127,11 +145,21 @@ class FakeVectorStore(VectorStore):
         self.ensure_calls.append((name, dimension))
         return None
 
+    async def ensure_vector_field(self, field: str, dimension: int) -> bool:
+        self.vector_field_calls.append((field, dimension))
+        return True
+
+    async def drop_vector_field(self, field: str) -> bool:
+        return False
+
     async def drop_collection(self, name: str) -> None:
         return None
 
     async def collection_exists(self, name: str) -> bool:
         return True
+
+    async def vector_dimension(self, vector_field: str | None = None) -> int | None:
+        return 1024 if vector_field else None
 
     async def query_ids_by_filter(self, collection: str, filters: dict) -> list[str]:
         return []
@@ -432,3 +460,80 @@ async def test_stages_mark_error_and_scrub_credentials_on_invalid_input(
     assert row["stage"] == expected_stage
     assert row["error"] == expected_error
     assert "token" not in row
+
+
+class _ConcurrencyTrackingVLM(VLM):
+    """Records the peak number of caption calls running at once."""
+
+    def __init__(self) -> None:
+        self.in_flight = 0
+        self.peak = 0
+
+    async def caption_image(self, image_bytes: bytes, prompt: str | None = None) -> str:
+        self.in_flight += 1
+        self.peak = max(self.peak, self.in_flight)
+        try:
+            await asyncio.sleep(0.01)
+        finally:
+            self.in_flight -= 1
+        return "caption"
+
+    async def caption_images_batch(self, images: list[bytes], prompt: str | None = None) -> list[str]:
+        return [await self.caption_image(image, prompt=prompt) for image in images]
+
+
+def _document_with_images(count: int) -> ProcessedDocument:
+    return ProcessedDocument(
+        document_id="doc-many-images",
+        text_blocks=[TextBlock(text="body", page_number=1)],
+        images=[ImageBlock(image_bytes=b"img", page_number=1) for _ in range(count)],
+    )
+
+
+@pytest.mark.asyncio
+async def test_caption_stage_bounds_per_document_fan_out():
+    vlm = _ConcurrencyTrackingVLM()
+    row = {"processed_document": _document_with_images(20)}
+
+    await caption_stage(row, vlm, max_concurrency=3)
+
+    assert vlm.peak <= 3
+    assert len(row["processed_document"].images) == 20
+    assert all(image.caption == "caption" for image in row["processed_document"].images)
+
+
+@pytest.mark.asyncio
+async def test_caption_stage_fan_out_is_unbounded_without_a_limit():
+    # Guards the test above against passing for the wrong reason (e.g. the stage
+    # having become serial), and preserves the previous default.
+    vlm = _ConcurrencyTrackingVLM()
+    row = {"processed_document": _document_with_images(20)}
+
+    await caption_stage(row, vlm)
+
+    assert vlm.peak > 3
+
+
+@pytest.mark.asyncio
+async def test_store_stage_provisions_the_partitions_field_then_writes_to_it():
+    # Sized from the embedding actually produced.
+    chunks = [Chunk(id="c1", text="alpha", embedding=[1.0, 0.0, 1.0])]
+    store = FakeVectorStore(count=1)
+    calls: list[str] = []
+    ensure, upsert = store.ensure_vector_field, store.upsert
+
+    async def recording_ensure(*args, **kwargs):
+        calls.append("ensure")
+        return await ensure(*args, **kwargs)
+
+    async def recording_upsert(*args, **kwargs):
+        calls.append("upsert")
+        return await upsert(*args, **kwargs)
+
+    store.ensure_vector_field, store.upsert = recording_ensure, recording_upsert  # type: ignore[method-assign]
+
+    await store_stage({"chunks": chunks}, store, vector_field="vector_bge_m3")
+
+    assert calls == ["ensure", "upsert"]
+    assert store.vector_field_calls == [("vector_bge_m3", 3)]
+    assert store.upsert_vector_fields == ["vector_bge_m3"]

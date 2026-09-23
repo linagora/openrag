@@ -66,6 +66,8 @@ def test_task_state_manager_restarts_without_retrying_mutations(monkeypatch):
         supports_in_place_restart=SimpleNamespace(),
         renew_file_delete=SimpleNamespace(),
         supports_bounded_task_retention=SimpleNamespace(),
+        complete_with_degraded_stages=SimpleNamespace(),
+        supports_explicit_completion_outcomes=SimpleNamespace(),
     )
 
     def fake_get_or_create_actor(name, cls, **options):
@@ -92,6 +94,8 @@ def test_legacy_task_state_manager_is_replaced_before_handle_is_returned(monkeyp
         supports_in_place_restart=SimpleNamespace(),
         renew_file_delete=SimpleNamespace(),
         supports_bounded_task_retention=SimpleNamespace(),
+        complete_with_degraded_stages=SimpleNamespace(),
+        supports_explicit_completion_outcomes=SimpleNamespace(),
     )
     get_or_create = Mock(side_effect=[legacy, replacement])
     kill = Mock()
@@ -112,6 +116,8 @@ def test_task_state_manager_without_renewable_fences_is_replaced(monkeypatch):
         supports_in_place_restart=SimpleNamespace(),
         renew_file_delete=SimpleNamespace(),
         supports_bounded_task_retention=SimpleNamespace(),
+        complete_with_degraded_stages=SimpleNamespace(),
+        supports_explicit_completion_outcomes=SimpleNamespace(),
     )
     get_or_create = Mock(side_effect=[legacy, replacement])
     kill = Mock()
@@ -136,6 +142,59 @@ def test_task_state_manager_without_bounded_retention_is_replaced(monkeypatch):
         supports_in_place_restart=SimpleNamespace(),
         renew_file_delete=SimpleNamespace(),
         supports_bounded_task_retention=SimpleNamespace(),
+        complete_with_degraded_stages=SimpleNamespace(),
+        supports_explicit_completion_outcomes=SimpleNamespace(),
+    )
+    get_or_create = Mock(side_effect=[legacy, replacement])
+    kill = Mock()
+    monkeypatch.setattr(bootstrap, "actor_creation_map", {})
+    monkeypatch.setattr(bootstrap, "get_or_create_actor", get_or_create)
+    monkeypatch.setattr(ray, "kill", kill)
+    monkeypatch.setattr(ray, "get_actor", Mock(side_effect=ValueError("actor removed")))
+
+    assert bootstrap.get_task_state_manager() is replacement
+
+    kill.assert_called_once_with(legacy, no_restart=True)
+
+
+def test_task_state_manager_without_atomic_degraded_completion_is_replaced(monkeypatch):
+    legacy = SimpleNamespace(
+        supports_in_place_restart=SimpleNamespace(),
+        renew_file_delete=SimpleNamespace(),
+        supports_bounded_task_retention=SimpleNamespace(),
+    )
+    replacement = SimpleNamespace(
+        supports_in_place_restart=SimpleNamespace(),
+        renew_file_delete=SimpleNamespace(),
+        supports_bounded_task_retention=SimpleNamespace(),
+        complete_with_degraded_stages=SimpleNamespace(),
+        supports_explicit_completion_outcomes=SimpleNamespace(),
+    )
+    get_or_create = Mock(side_effect=[legacy, replacement])
+    kill = Mock()
+    monkeypatch.setattr(bootstrap, "actor_creation_map", {})
+    monkeypatch.setattr(bootstrap, "get_or_create_actor", get_or_create)
+    monkeypatch.setattr(ray, "kill", kill)
+    monkeypatch.setattr(ray, "get_actor", Mock(side_effect=ValueError("actor removed")))
+
+    assert bootstrap.get_task_state_manager() is replacement
+
+    kill.assert_called_once_with(legacy, no_restart=True)
+
+
+def test_task_state_manager_without_explicit_completion_outcomes_is_replaced(monkeypatch):
+    legacy = SimpleNamespace(
+        supports_in_place_restart=SimpleNamespace(),
+        renew_file_delete=SimpleNamespace(),
+        supports_bounded_task_retention=SimpleNamespace(),
+        complete_with_degraded_stages=SimpleNamespace(),
+    )
+    replacement = SimpleNamespace(
+        supports_in_place_restart=SimpleNamespace(),
+        renew_file_delete=SimpleNamespace(),
+        supports_bounded_task_retention=SimpleNamespace(),
+        complete_with_degraded_stages=SimpleNamespace(),
+        supports_explicit_completion_outcomes=SimpleNamespace(),
     )
     get_or_create = Mock(side_effect=[legacy, replacement])
     kill = Mock()
@@ -153,6 +212,8 @@ def test_task_completion_tracker_is_detached_and_starts_recovery(monkeypatch):
     calls = []
     tracker = Mock()
     tracker.supports_cancellation_recovery.remote.return_value = "capability-ref"
+    tracker.supports_degraded_stage_history.remote.return_value = "degradation-capability-ref"
+    tracker.supports_error_reason_history.remote.return_value = "error-reason-capability-ref"
     monkeypatch.setattr(bootstrap, "actor_creation_map", {})
     monkeypatch.setattr(ray, "get", Mock(return_value=True))
 
@@ -179,6 +240,8 @@ def test_legacy_task_completion_tracker_is_replaced_before_recovery(monkeypatch)
     legacy = SimpleNamespace(recover=SimpleNamespace(remote=Mock()))
     replacement = SimpleNamespace(
         supports_cancellation_recovery=SimpleNamespace(remote=Mock(return_value="capability-ref")),
+        supports_degraded_stage_history=SimpleNamespace(remote=Mock(return_value="degradation-capability-ref")),
+        supports_error_reason_history=SimpleNamespace(remote=Mock(return_value="error-reason-capability-ref")),
         reconcile_jobs=SimpleNamespace(remote=Mock()),
         recover=SimpleNamespace(remote=Mock()),
     )
@@ -207,6 +270,63 @@ def test_task_completion_tracker_without_durable_history_is_replaced(monkeypatch
     )
     replacement = SimpleNamespace(
         supports_cancellation_recovery=SimpleNamespace(remote=Mock(return_value="capability-ref")),
+        supports_degraded_stage_history=SimpleNamespace(remote=Mock(return_value="degradation-capability-ref")),
+        supports_error_reason_history=SimpleNamespace(remote=Mock(return_value="error-reason-capability-ref")),
+        reconcile_jobs=SimpleNamespace(remote=Mock()),
+        recover=SimpleNamespace(remote=Mock()),
+    )
+    get_or_create = Mock(side_effect=[legacy, replacement])
+    kill = Mock()
+
+    monkeypatch.setattr(bootstrap, "actor_creation_map", {})
+    monkeypatch.setattr(bootstrap, "get_or_create_actor", get_or_create)
+    monkeypatch.setattr(ray, "kill", kill)
+    monkeypatch.setattr(ray, "get", Mock(return_value=True))
+    monkeypatch.setattr(ray, "get_actor", Mock(side_effect=ValueError("actor removed")))
+
+    assert bootstrap.get_task_completion_tracker() is replacement
+
+    kill.assert_called_once_with(legacy, no_restart=True)
+
+
+def test_task_completion_tracker_without_degraded_history_capability_is_replaced(monkeypatch):
+    legacy = SimpleNamespace(
+        supports_cancellation_recovery=SimpleNamespace(remote=Mock(return_value="capability-ref")),
+        reconcile_jobs=SimpleNamespace(remote=Mock()),
+        recover=SimpleNamespace(remote=Mock()),
+    )
+    replacement = SimpleNamespace(
+        supports_cancellation_recovery=SimpleNamespace(remote=Mock(return_value="capability-ref")),
+        supports_degraded_stage_history=SimpleNamespace(remote=Mock(return_value="degradation-capability-ref")),
+        supports_error_reason_history=SimpleNamespace(remote=Mock(return_value="error-reason-capability-ref")),
+        reconcile_jobs=SimpleNamespace(remote=Mock()),
+        recover=SimpleNamespace(remote=Mock()),
+    )
+    get_or_create = Mock(side_effect=[legacy, replacement])
+    kill = Mock()
+
+    monkeypatch.setattr(bootstrap, "actor_creation_map", {})
+    monkeypatch.setattr(bootstrap, "get_or_create_actor", get_or_create)
+    monkeypatch.setattr(ray, "kill", kill)
+    monkeypatch.setattr(ray, "get", Mock(return_value=True))
+    monkeypatch.setattr(ray, "get_actor", Mock(side_effect=ValueError("actor removed")))
+
+    assert bootstrap.get_task_completion_tracker() is replacement
+
+    kill.assert_called_once_with(legacy, no_restart=True)
+
+
+def test_task_completion_tracker_without_error_reason_history_is_replaced(monkeypatch):
+    legacy = SimpleNamespace(
+        supports_cancellation_recovery=SimpleNamespace(remote=Mock(return_value="capability-ref")),
+        supports_degraded_stage_history=SimpleNamespace(remote=Mock(return_value="degradation-capability-ref")),
+        reconcile_jobs=SimpleNamespace(remote=Mock()),
+        recover=SimpleNamespace(remote=Mock()),
+    )
+    replacement = SimpleNamespace(
+        supports_cancellation_recovery=SimpleNamespace(remote=Mock(return_value="capability-ref")),
+        supports_degraded_stage_history=SimpleNamespace(remote=Mock(return_value="degradation-capability-ref")),
+        supports_error_reason_history=SimpleNamespace(remote=Mock(return_value="error-reason-capability-ref")),
         reconcile_jobs=SimpleNamespace(remote=Mock()),
         recover=SimpleNamespace(remote=Mock()),
     )

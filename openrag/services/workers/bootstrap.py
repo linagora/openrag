@@ -113,6 +113,12 @@ def _supports_task_state_recovery(actor) -> bool:
         # Retention is a lifecycle change, and creation options cannot retrofit
         # it onto an actor a previous deployment left detached and leaking.
         and getattr(actor, "supports_bounded_task_retention", None) is not None
+        # Degradation and COMPLETED must be one actor mutation. An older actor
+        # can only perform the unsafe split writes and must not survive rollout.
+        and getattr(actor, "complete_with_degraded_stages", None) is not None
+        # The Boolean contract cannot distinguish a cancellation from actor
+        # eviction after the catalog commit, so those actors are incompatible.
+        and getattr(actor, "supports_explicit_completion_outcomes", None) is not None
     )
 
 
@@ -157,19 +163,29 @@ def _supports_task_completion_recovery(actor) -> bool:
     method_names = getattr(actor, "_ray_actor_method_names", None)
     # ``reconcile_jobs`` came with durable history: a tracker that predates it
     # would never write a settled row or recover one a restart orphaned.
-    required = ("supports_cancellation_recovery", "reconcile_jobs")
+    required = (
+        "supports_cancellation_recovery",
+        "supports_degraded_stage_history",
+        "supports_error_reason_history",
+        "reconcile_jobs",
+    )
     if isinstance(method_names, (frozenset, list, set, tuple)) and not set(required) <= set(method_names):
         return False
     if getattr(actor, "reconcile_jobs", None) is None:
         return False
-    method = getattr(actor, "supports_cancellation_recovery", None)
-    remote = getattr(method, "remote", None)
-    if remote is None:
-        return False
     try:
         import ray
 
-        return ray.get(remote(), timeout=_TRACKER_PROTOCOL_TIMEOUT_SECONDS) is True
+        for capability in (
+            "supports_cancellation_recovery",
+            "supports_degraded_stage_history",
+            "supports_error_reason_history",
+        ):
+            method = getattr(actor, capability, None)
+            remote = getattr(method, "remote", None)
+            if remote is None or ray.get(remote(), timeout=_TRACKER_PROTOCOL_TIMEOUT_SECONDS) is not True:
+                return False
+        return True
     except Exception:
         return False
 

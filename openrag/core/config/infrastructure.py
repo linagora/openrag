@@ -23,7 +23,7 @@ class VectorDBConfig(ConfigMixin):
     enable: bool = True
     # Per-request timeout (s) applied to the Milvus sync and async clients.
     timeout: float = Field(default=120.0, gt=0)
-    schema_version: int = 2
+    schema_version: int = 3
 
 
 # ---------------------------------------------------------------------------
@@ -98,6 +98,23 @@ class PathsConfig(ConfigMixin):
 
 class ServerConfig(ConfigMixin):
     preferred_url_scheme: str | None = None
+    # Access to ``GET /metrics``. Fails closed: with neither field set the
+    # route answers 403 to every scrape. ``metrics_token`` (METRICS_TOKEN) is
+    # the bearer a Prometheus scraper must present; ``metrics_allow_unauthenticated``
+    # (METRICS_ALLOW_UNAUTHENTICATED=true) opens the endpoint to anyone who can
+    # reach the API port — a deliberate opt-in for deployments that block the
+    # path at the edge and scrape in-cluster. When both are set, the token wins.
+    metrics_token: str | None = None
+    metrics_allow_unauthenticated: bool = False
+
+    @field_validator("metrics_token", mode="before")
+    @classmethod
+    def _blank_metrics_token_is_unset(cls, value: object) -> object:
+        # ``METRICS_TOKEN=`` in a .env (or whitespace) must disable the check,
+        # not install a token equal to "" that would 403 every scrape.
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value.strip() if isinstance(value, str) else value
 
 
 # ---------------------------------------------------------------------------

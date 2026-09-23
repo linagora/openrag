@@ -11,7 +11,9 @@ from core.models.catalog import (
     TERMINAL_TASK_STATES,
     DocumentStatus,
     IndexationJob,
+    normalize_degraded_stages,
 )
+from core.utils.error_summary import extract_task_error_reason
 from services.workers.ray_utils import call_ray_actor_method_with_timeout
 
 _TERMINAL_STATES = frozenset(state.value for state in TERMINAL_TASK_STATES)
@@ -46,6 +48,14 @@ class TaskCompletionTracker:
 
     def supports_cancellation_recovery(self) -> bool:
         """Identify trackers that preserve unsettled cancellation fences."""
+        return True
+
+    def supports_degraded_stage_history(self) -> bool:
+        """Identify trackers that persist bounded degradation with settled jobs."""
+        return True
+
+    def supports_error_reason_history(self) -> bool:
+        """Identify trackers that persist canonical failure reasons."""
         return True
 
     async def track(self, task_id: str, object_ref: dict[str, Any]) -> None:
@@ -315,6 +325,18 @@ class TaskCompletionTracker:
                 lambda: task_state_manager.get_error.remote(task_id),
                 f"get_error({task_id}) for job history",
             )
+            method_names = getattr(task_state_manager, "_ray_actor_method_names", None)
+            supports_reason = isinstance(method_names, (frozenset, list, set, tuple)) and (
+                "get_error_reason" in method_names
+            )
+            error_reason = None
+            if supports_reason:
+                error_reason = await self._call_task_state(
+                    lambda: task_state_manager.get_error_reason.remote(task_id),
+                    f"get_error_reason({task_id}) for job history",
+                )
+            if error_reason is None:
+                error_reason = extract_task_error_reason(error)
             job = IndexationJob(
                 id=task_id,
                 status=DocumentStatus(state),
@@ -322,6 +344,8 @@ class TaskCompletionTracker:
                 file_id=details.get("file_id"),
                 user_id=details.get("user_id"),
                 error=error,
+                error_reason=error_reason,
+                degraded_stages=normalize_degraded_stages(details.get("degraded_stages")),
                 completed_at=datetime.now(UTC),
             )
         except Exception as exc:

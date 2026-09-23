@@ -37,7 +37,8 @@ class InstrumentationMiddleware(BaseHTTPMiddleware):
     """
 
     async def dispatch(self, request: Request, call_next):
-        raw_path = request.url.path
+        # The routed path, not ``request.url.path`` (rebuilt from the Host header).
+        raw_path = request.scope["path"]
         if any(raw_path.startswith(p) for p in _EXCLUDED_PREFIXES):
             return await call_next(request)
 
