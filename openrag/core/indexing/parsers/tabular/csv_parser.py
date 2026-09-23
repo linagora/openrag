@@ -7,7 +7,7 @@
  but for now it is a limited CSV parser.
 """
 
-# IMPORTS (may be updated later)
+# IMPORTS (may be updated/changed later)
 import asyncio
 import csv
 import html
@@ -22,7 +22,7 @@ from core.models.document import Document, ProcessedDocument, TextBlock
 def markdown_row(cells: list[str]) -> str:
     escaped = []
     for cell in cells:
-        cell = html.escape(cell, quote=False)
+        cell = html.escape(cell, quote=False) #
         cell = cell.replace("|", "&#124;") # escape pipe characters to avoid breaking the table
         cell = cell.replace("\r\n", "\n") # removing carriage returns from windows line endings
         cell = cell.replace("\r", "\n") # removing carriage returns from mac line endings
@@ -33,6 +33,9 @@ def markdown_row(cells: list[str]) -> str:
 
 @parser_registry.register("csv")
 class CsvParser(DocumentParser):
+    def __init__(self, delimiter: str = ","):
+        self.delimiter = delimiter # stores the delimiter chosen on the parser for later
+
     def supported_types(self) -> list[str]:
         return ["csv"]
 
@@ -53,7 +56,7 @@ class CsvParser(DocumentParser):
         # Then read CSV records (skipping blanks)
         with io.StringIO(text, newline="") as stream:
             rows = []
-            for row in csv.reader(stream, delimiter=",", strict=True):
+            for row in csv.reader(stream, delimiter=self.delimiter, strict=True):
                 if row: # removes empty lists but keeps empty cells
                     rows.append(row)
         blocks = []
@@ -63,17 +66,18 @@ class CsvParser(DocumentParser):
             headers = rows[0]
             data_rows = rows[1:]
 
-            # Check that each record has the expected width
-            for row in data_rows:
-                if len(row) != len(headers):
+            # check that each record has the expected width
+            for record_number, row in enumerate(data_rows, start=2):
+                if len(row) != len(headers): # in case ofmismatched number of cells, we raise a ValueError
                     raise ValueError(
+                        f"Record {record_number}: "
                         f"Expected {len(headers)} cells, got {len(row)}"
                     )
 
-            # Render a Markdown table
+            # render a Markdown table
             lines = [
                 markdown_row(headers),
-                markdown_row(["---"] * len(headers)),
+                markdown_row(["---"] * len(headers)), # markdown requires a separator row after the header
             ]
             lines.extend(markdown_row(row) for row in data_rows)
 
