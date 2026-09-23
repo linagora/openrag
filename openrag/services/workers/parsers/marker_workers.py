@@ -99,6 +99,38 @@ def _child_vmdata_mb() -> int | None:
     return None
 
 
+#: Torch's CPU allocator reports a refused allocation as a ``RuntimeError`` with
+#: this text, not as ``MemoryError`` — measured under ``RLIMIT_DATA`` with torch
+#: 2.7.1. CUDA's out-of-memory error is also a ``RuntimeError`` subclass, but it is
+#: a different failure (device memory, not this ceiling), so the match is on this
+#: message and never on the type.
+_TORCH_CPU_ALLOC_FAILURE = "DefaultCPUAllocator: can't allocate memory"
+
+
+def _as_parse_memory_error(exc: BaseException) -> MemoryError | None:
+    """The ``MemoryError`` a child failure stands for, or ``None``.
+
+    Only the top-level exception *type* crosses the process pool back to the
+    parent — ``concurrent.futures`` replaces the chain with a remote traceback —
+    so the guards in ``_process_chunk`` see ``MemoryError`` only if the child
+    raises exactly that. Two shapes would otherwise arrive as something else:
+    torch's allocator ``RuntimeError``, and a ``MemoryError`` a library wrapped in
+    its own exception. ``None`` when *exc* already is one, or is unrelated.
+    """
+    if isinstance(exc, MemoryError):
+        return None
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, MemoryError) or (
+            isinstance(current, RuntimeError) and _TORCH_CPU_ALLOC_FAILURE in str(current)
+        ):
+            return MemoryError(str(current))
+        current = current.__cause__ or current.__context__
+    return None
+
+
 def _apply_parse_memory_limit(memory_limit_mb: int) -> None:
     """Cap what this child process may allocate, so one parse cannot take the pod.
 
@@ -153,11 +185,16 @@ def _apply_parse_memory_limit(memory_limit_mb: int) -> None:
         if baseline_mb is None:
             logger.info(f"Marker child memory limit set to {effective_mb} MiB (baseline unreadable)")
         elif effective_mb <= baseline_mb:
+            # Applying it would fail every parse on this child, and with the
+            # recycle on MemoryError each chunk would also respawn the child — so
+            # Marker would churn processes while doing nothing. Keep it working
+            # unbounded and say so loudly instead.
             logger.error(
                 f"Marker child memory limit {effective_mb} MiB is at or below this child's baseline "
-                f"of {baseline_mb} MiB — every parse on it will raise MemoryError. Raise "
-                f"MARKER_PARSE_MEMORY_LIMIT_MB well above {baseline_mb}, or unset it."
+                f"of {baseline_mb} MiB, so it is NOT applied — this child runs without a ceiling. "
+                f"Raise MARKER_PARSE_MEMORY_LIMIT_MB well above {baseline_mb}, or unset it."
             )
+            return
         elif effective_mb - baseline_mb < _MIN_PARSE_HEADROOM_MB:
             logger.warning(
                 f"Marker child memory limit {effective_mb} MiB leaves only {effective_mb - baseline_mb} MiB "
@@ -283,8 +320,11 @@ class MarkerWorker:
     def _worker_init(model_dict, memory_limit_mb: int = 0):
         global worker_model_dict
         worker_model_dict = model_dict
-        _apply_parse_memory_limit(memory_limit_mb)
+        # Logged before the ceiling, like `_apply_parse_memory_limit`'s own lines:
+        # under a tight limit the log call's allocation could raise MemoryError,
+        # and nothing catches it in the pool initializer.
         logger.debug("Worker initialized with model dictionary")
+        _apply_parse_memory_limit(memory_limit_mb)
 
     @staticmethod
     def _process_pdf(file_path, config):
@@ -306,6 +346,9 @@ class MarkerWorker:
             return render
         except Exception as e:
             logger.exception("Error processing PDF", path=file_path, label=label, error=str(e))
+            ceiling = _as_parse_memory_error(e)
+            if ceiling is not None:
+                raise ceiling from e
             raise
         finally:
             gc.collect()

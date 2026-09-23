@@ -770,3 +770,137 @@ def test_child_vmdata_is_readable_and_positive():
     from services.workers.parsers.marker_workers import _child_vmdata_mb
 
     assert (_child_vmdata_mb() or 0) > 0
+
+
+# ---------------------------------------------------------------------------
+# Torch's allocator fails as RuntimeError, and only the top-level type crosses
+# the process pool (#997 review)
+# ---------------------------------------------------------------------------
+
+
+class _TorchOverTheCeiling:
+    """Stands in for ``PdfConverter``: the parse allocates a tensor, as Marker's do."""
+
+    def __init__(self, artifact_dict=None, config=None):
+        pass
+
+    def __call__(self, file_path):
+        import torch
+
+        return torch.empty(1024 * 1024 * 1024, dtype=torch.uint8)  # 1 GiB, over a 256 MiB ceiling
+
+
+class _WrapsAMemoryError:
+    def __init__(self, artifact_dict=None, config=None):
+        pass
+
+    def __call__(self, file_path):
+        try:
+            raise MemoryError("inner")
+        except MemoryError as exc:
+            raise ValueError("a library wrapped it") from exc
+
+
+def _child_parse(headroom_mb: int) -> str:
+    """Run the real ``_process_pdf`` under a real ceiling, in this (forked) child,
+    set up by the real pool initializer as production does."""
+    from services.workers.parsers import marker_workers as mw
+
+    mw.MarkerWorker._worker_init({}, _vmdata_mib() + headroom_mb)
+    mw.MarkerWorker._process_pdf("f.pdf", {})
+    return "parsed"
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="RLIMIT_DATA only covers mmap on Linux")
+@pytest.mark.parametrize("converter", [_TorchOverTheCeiling, _WrapsAMemoryError])
+def test_a_ceiling_failure_reaches_the_parent_as_memory_error(monkeypatch, converter):
+    """The production path end to end, up to the pool: a real allocation under a
+    real ``RLIMIT_DATA`` in a real child, back through ``concurrent.futures``.
+
+    Torch raises ``RuntimeError`` here, not ``MemoryError``, and the pool keeps
+    only the top-level type — so without the conversion in the child the parent
+    sees ``RuntimeError`` (or the wrapper's ``ValueError``) and neither the
+    recycle nor ``no_retry`` fires. From ``MemoryError`` onwards, the Ray wrapping
+    is pinned by ``_as_production_raises_it``.
+    """
+    monkeypatch.setattr(marker_workers, "PdfConverter", converter)  # inherited by the fork
+    ctx = multiprocessing.get_context("fork")
+    with concurrent.futures.ProcessPoolExecutor(max_workers=1, mp_context=ctx) as pool:
+        with pytest.raises(MemoryError):
+            pool.submit(_child_parse, 256).result(timeout=120)
+
+
+def test_the_real_torch_allocator_error_is_recognised():
+    """Pins the message the conversion matches on to the torch actually installed,
+    so an upgrade that rewords it fails here rather than silently disabling the
+    guard. Needs no ceiling: an impossible size fails the same allocator."""
+    import torch
+
+    with pytest.raises(RuntimeError) as caught:
+        torch.empty(2**62, dtype=torch.uint8)
+
+    assert not isinstance(caught.value, MemoryError), "premise changed: torch now raises MemoryError itself"
+    assert isinstance(marker_workers._as_parse_memory_error(caught.value), MemoryError)
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        pytest.param(RuntimeError("some other failure"), id="ordinary-runtime-error"),
+        pytest.param(ValueError("bad pdf"), id="unrelated"),
+    ],
+)
+def test_other_failures_are_not_turned_into_memory_errors(exc):
+    """Control: converting too much would stop ordinary errors being retried."""
+    assert marker_workers._as_parse_memory_error(exc) is None
+
+
+def test_a_gpu_out_of_memory_is_not_mistaken_for_the_ceiling():
+    """``torch.OutOfMemoryError`` is a ``RuntimeError`` too, but device memory is
+    not what ``RLIMIT_DATA`` bounds, so the conversion must leave it alone."""
+    import torch
+
+    gpu_oom = torch.OutOfMemoryError("CUDA out of memory. Tried to allocate 2.00 GiB")
+
+    assert isinstance(gpu_oom, RuntimeError)
+    assert marker_workers._as_parse_memory_error(gpu_oom) is None
+
+
+# ---------------------------------------------------------------------------
+# A limit that cannot work is not applied, and nothing logs after it (#997 review)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="/proc/self/status is Linux-only")
+@pytest.mark.parametrize(("headroom_mb", "applied"), [(-64, False), (0, False), (32, True), (4096, True)])
+def test_a_limit_at_or_below_the_baseline_is_not_applied(monkeypatch, headroom_mb, applied):
+    """Applied, it would fail every parse and — with the recycle on MemoryError —
+    respawn the child for every chunk. The thin-headroom case stays applied."""
+    from services.workers.parsers import marker_workers as mw
+
+    monkeypatch.setattr(mw, "logger", _RecordingLogger())
+    monkeypatch.setattr(mw, "_child_vmdata_mb", lambda: 1000)
+
+    import resource as real_resource
+
+    calls = []
+    monkeypatch.setattr(real_resource, "setrlimit", lambda *a: calls.append(a))
+    monkeypatch.setattr(real_resource, "getrlimit", lambda _w: (real_resource.RLIM_INFINITY,) * 2)
+
+    mw._apply_parse_memory_limit(1000 + headroom_mb)
+
+    assert bool(calls) is applied, f"headroom {headroom_mb} MiB: setrlimit called={bool(calls)}"
+
+
+def test_worker_init_logs_before_it_applies_the_limit(monkeypatch):
+    """Under a tight ceiling the log call's own allocation could raise, and the
+    pool initializer has no handler — so nothing may log after the limit."""
+    from services.workers.parsers import marker_workers as mw
+
+    order = []
+    monkeypatch.setattr(mw, "logger", SimpleNamespace(debug=lambda *a, **k: order.append("log")))
+    monkeypatch.setattr(mw, "_apply_parse_memory_limit", lambda _mb: order.append("limit"))
+
+    mw.MarkerWorker._worker_init({}, 2048)
+
+    assert order == ["log", "limit"]
