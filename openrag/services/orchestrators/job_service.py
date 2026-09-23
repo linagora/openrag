@@ -72,6 +72,12 @@ class JobService:
         if not status_counts:
             all_states: dict = await self._call(lambda: self._tsm.get_all_states.remote(), "get_all_states")
             status_counts = Counter(all_states.values())
+        else:
+            all_states = await self._call(lambda: self._tsm.get_all_states.remote(), "get_all_states")
+            durable_actor_info = await self._durable_task_info_for_ids(all_states)
+            status_counts.update(
+                state for task_id, state in all_states.items() if task_id not in durable_actor_info
+            )
 
         active = {s: status_counts.get(s, 0) for s in _ACTIVE_STATES}
         task_summary = {

@@ -489,15 +489,18 @@ async def test_get_task_details_prefers_the_durable_row():
 
 
 @pytest.mark.asyncio
-async def test_get_queue_info_uses_durable_job_counts():
-    tsm = FakeTSM(states={"stale": "SERIALIZING"})
-    repo = FakeJobRepo(counts={"QUEUED": 2, "SERIALIZING": 3, "COMPLETED": 4, "FAILED": 5, "CANCELLED": 6})
+async def test_get_queue_info_merges_actor_only_tasks_without_overriding_durable_rows():
+    tsm = FakeTSM(states={"live": "QUEUED", "stale": "SERIALIZING"})
+    repo = FakeJobRepo(
+        [_job(id="stale")],
+        counts={"QUEUED": 2, "SERIALIZING": 3, "COMPLETED": 4, "FAILED": 5, "CANCELLED": 6},
+    )
 
     out = await JobService(tsm, job_repo=repo).get_queue_info()
 
     assert out["tasks"] == {
-        "active": 5,
-        "active_statuses": {"QUEUED": 2, "SERIALIZING": 3},
+        "active": 6,
+        "active_statuses": {"QUEUED": 3, "SERIALIZING": 3},
         "total_cancelled": 6,
         "total_completed": 4,
         "total_failed": 5,
