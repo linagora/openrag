@@ -597,6 +597,55 @@ async def test_get_queue_info_falls_back_to_actor_when_durable_counts_fail():
 
 
 @pytest.mark.asyncio
+async def test_active_task_counts_include_durable_rows_a_restarted_actor_forgot():
+    """A restarted TaskStateManager starts empty; the backlog must not read as zero."""
+    from core.models.catalog import DocumentStatus
+
+    tsm = FakeTSM(states={})
+    repo = FakeJobRepo(
+        [
+            _job(id="q1", status=DocumentStatus.QUEUED, completed_at=None),
+            _job(id="q2", status=DocumentStatus.QUEUED, completed_at=None),
+            _job(id="s1", status=DocumentStatus.SERIALIZING, completed_at=None),
+            _job(id="done"),
+        ]
+    )
+
+    counts = await JobService(tsm, job_repo=repo).get_active_task_counts()
+
+    assert counts == {"QUEUED": 2, "SERIALIZING": 1}
+
+
+@pytest.mark.asyncio
+async def test_active_task_counts_reconcile_like_get_queue_info():
+    """Actor-only tasks add to the durable counts; a live terminal state wins over a stale durable one."""
+    from core.models.catalog import DocumentStatus
+
+    tsm = FakeTSM(states={"live": "QUEUED", "just-finished": "COMPLETED"})
+    repo = FakeJobRepo(
+        [
+            _job(id="just-finished", status=DocumentStatus.SERIALIZING, completed_at=None),
+            _job(id="waiting", status=DocumentStatus.QUEUED, completed_at=None),
+        ]
+    )
+    service = JobService(tsm, job_repo=repo)
+
+    counts = await service.get_active_task_counts()
+
+    assert counts == {"QUEUED": 2, "SERIALIZING": 0}
+    assert counts == (await service.get_queue_info())["tasks"]["active_statuses"]
+
+
+@pytest.mark.asyncio
+async def test_active_task_counts_fall_back_to_actor_when_durable_counts_fail():
+    tsm = FakeTSM(states={"live": "SERIALIZING", "done": "COMPLETED"})
+
+    counts = await JobService(tsm, job_repo=FakeJobRepo(broken=True)).get_active_task_counts()
+
+    assert counts == {"QUEUED": 0, "SERIALIZING": 1}
+
+
+@pytest.mark.asyncio
 async def test_get_queue_info_falls_back_when_durable_actor_lookup_fails():
     tsm = FakeTSM(states={"live": "SERIALIZING", "done": "COMPLETED"})
     repo = FakeJobRepo(

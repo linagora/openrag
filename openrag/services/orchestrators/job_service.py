@@ -68,29 +68,37 @@ class JobService:
             "max_per_actor": worker_info["max_tasks_per_worker"],
         }
 
-    async def get_queue_info(self) -> dict:
+    async def _task_status_counts(self) -> Counter[str]:
+        """Per-state task counts: durable rows first, reconciled with the live actor.
+
+        Falls back to the actor alone only when the durable counts are
+        unavailable, so a restarted actor that has forgotten in-flight tasks
+        cannot make the backlog read as empty.
+        """
         status_counts = await self._durable_status_counts()
         if not status_counts:
             all_states: dict[str, str | None] = await self._call(
                 lambda: self._tsm.get_all_states.remote(), "get_all_states"
             )
-            status_counts = Counter(all_states.values())
-        else:
-            all_states = await self._call(lambda: self._tsm.get_all_states.remote(), "get_all_states")
-            durable_actor_states = await self._durable_task_states_for_ids(all_states)
-            if durable_actor_states is None:
-                status_counts = Counter(all_states.values())
-            else:
-                for task_id, actor_state in all_states.items():
-                    durable_state = durable_actor_states.get(task_id)
-                    if durable_state is None:
-                        status_counts[actor_state] += 1
-                        continue
-                    effective_state = reconcile_task_state(actor_state, durable_state)
-                    if effective_state != durable_state:
-                        status_counts[durable_state] -= 1
-                        status_counts[effective_state] += 1
+            return Counter(all_states.values())
 
+        all_states = await self._call(lambda: self._tsm.get_all_states.remote(), "get_all_states")
+        durable_actor_states = await self._durable_task_states_for_ids(all_states)
+        if durable_actor_states is None:
+            return Counter(all_states.values())
+        for task_id, actor_state in all_states.items():
+            durable_state = durable_actor_states.get(task_id)
+            if durable_state is None:
+                status_counts[actor_state] += 1
+                continue
+            effective_state = reconcile_task_state(actor_state, durable_state)
+            if effective_state != durable_state:
+                status_counts[durable_state] -= 1
+                status_counts[effective_state] += 1
+        return status_counts
+
+    async def get_queue_info(self) -> dict:
+        status_counts = await self._task_status_counts()
         active = {s: status_counts.get(s, 0) for s in _ACTIVE_STATES}
         task_summary = {
             "active": sum(active.values()),
@@ -108,9 +116,9 @@ class JobService:
 
         ``get_queue_info`` always fetches pool info too, which the metrics scrape
         never uses; that second Ray call would just eat into its timeout budget.
+        The counts themselves come from the same durable-first path.
         """
-        all_states: dict = await self._call(lambda: self._tsm.get_all_states.remote(), "get_all_states")
-        status_counts = Counter(all_states.values())
+        status_counts = await self._task_status_counts()
         return {s: status_counts.get(s, 0) for s in _ACTIVE_STATES}
 
     async def list_tasks(

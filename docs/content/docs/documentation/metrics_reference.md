@@ -139,7 +139,9 @@ corrupt the error rate of an endpoint the operator runs.
 
 ## `openrag_ingest_tasks` may be absent
 
-It is sampled during the scrape by asking the TaskStateManager. If that actor is
-unreachable, or the API booted degraded, the gauge is withdrawn and the rest of
+It is sampled during the scrape from the durable `jobs` table, reconciled with the
+live TaskStateManager, so tasks still queued when the actor restarted keep
+counting. Only if Postgres cannot answer does it fall back to the actor alone.
+If the actor is unreachable, or the API booted degraded, the gauge is withdrawn and the rest of
 `/metrics` is served normally. Absence means "could not be read", never "the
 queue is empty" — an idle queue publishes an explicit `0`.

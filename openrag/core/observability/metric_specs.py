@@ -257,10 +257,12 @@ INGEST_CLOCK_SKEW_TOTAL = MetricSpec(
 # Tier 1 — produced in the API process (exported via prometheus_client)
 # ---------------------------------------------------------------------------
 
-#: Sampled at scrape time from ``job_service.get_queue_info()`` rather than
-#: incremented on transitions: the authoritative count lives in the
-#: TaskStateManager actor, and a counter maintained by hand would drift from it
-#: on every restart, cancellation or fenced task.
+#: Sampled at scrape time from ``job_service.get_active_task_counts()`` rather
+#: than incremented on transitions: a counter maintained by hand would drift on
+#: every restart, cancellation or fenced task. The count is durable-first — the
+#: ``jobs`` table is authoritative, reconciled with the live TaskStateManager —
+#: so tasks a restarted actor has forgotten still count; the actor alone is
+#: used only while Postgres cannot answer.
 INGEST_TASKS = MetricSpec(
     name="openrag_ingest_tasks",
     description="Tasks currently in flight, by state",
