@@ -87,6 +87,9 @@ CASUAL_MESSAGE_INTENTS: dict[str, CasualMessagePolicy] = {
     "comment allez vous": CasualMessagePolicy("greeting", "fr"),
     "how are you": CasualMessagePolicy("greeting", "en"),
     "hey how are you": CasualMessagePolicy("greeting", "en"),
+    "comment pouvez vous m aider": CasualMessagePolicy("capability", "fr"),
+    "how can you help me": CasualMessagePolicy("capability", "en"),
+    "what can you do": CasualMessagePolicy("capability", "en"),
     "merci": CasualMessagePolicy("gratitude", "fr"),
     "thank you": CasualMessagePolicy("gratitude", "en"),
     "thanks": CasualMessagePolicy("gratitude", "en"),
@@ -95,7 +98,6 @@ CASUAL_MESSAGE_INTENTS: dict[str, CasualMessagePolicy] = {
 }
 CASUAL_MESSAGES = frozenset(CASUAL_MESSAGE_INTENTS)
 _EMPTY_CASUAL_POLICY = CasualMessagePolicy("empty", "en")
-_CASUAL_LANGUAGE_MIN_CONFIDENCE = 0.8
 
 
 def normalize_casual_message(message: str) -> str:
@@ -551,19 +553,7 @@ class QueryService:
         if casual_policy is None or retrieval_forced:
             queries = await self.generate_query(messages, llm=llm, partition=partition)
             usable_queries = [query for query in queries.query_list if query.query.strip()]
-            contextualizer_found_casual = (
-                not retrieval_forced
-                and not queries.requires_retrieval
-                and queries.intent in {"greeting", "gratitude", "farewell", "capability"}
-                and not queries.query_list
-            )
-            if contextualizer_found_casual:
-                language = detect_language(
-                    last_user_message,
-                    min_confidence=_CASUAL_LANGUAGE_MIN_CONFIDENCE,
-                )
-                casual_policy = CasualMessagePolicy(queries.intent, language or "en")
-            elif not usable_queries:
+            if not usable_queries:
                 queries = SearchQueries(query_list=[Query(query=last_user_message)])
             elif len(usable_queries) != len(queries.query_list):
                 queries = queries.model_copy(update={"query_list": usable_queries})
