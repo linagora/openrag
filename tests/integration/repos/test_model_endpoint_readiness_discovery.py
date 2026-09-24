@@ -113,8 +113,9 @@ async def test_discovery_follows_only_defaults_and_references_used_by_partitions
                 await conn.executemany(
                     """
                     INSERT INTO model_endpoints
-                        (name, model_type, endpoint, model_name, batch_size, timeout, extra, is_default)
-                    VALUES ($1, $2, 'https://models.test/v1', $1, 4, 5, '{}'::jsonb, $3)
+                        (name, model_type, endpoint, model_name, batch_size, timeout, extra, is_default, vector_field)
+                    VALUES ($1, $2, 'https://models.test/v1', $1, 4, 5, '{}'::jsonb, $3,
+                            CASE WHEN $2::varchar = 'embedder' THEN 'vector_' || $1::varchar END)
                     """,
                     endpoint_rows,
                 )

@@ -76,6 +76,11 @@ class DocumentRepository(ABC):
         ...
 
     @abstractmethod
+    async def get_indexation_config(self, file_id: str, partition: str) -> dict[str, Any] | None:
+        """Return the config snapshot, embedder included, one catalog row was indexed with."""
+        ...
+
+    @abstractmethod
     async def mark_file_independently_indexed(self, file_id: str, partition: str) -> bool:
         """Protect a file from workspace-owned cleanup."""
         ...

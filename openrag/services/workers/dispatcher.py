@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import traceback
 import uuid
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Any
 
@@ -13,14 +14,18 @@ from core.models.catalog import (
     INDEXING_CONTENT_CLAIM_TOKEN_PREFIX,
     TASK_CREATED_AT_METADATA_KEY,
     TASK_FINISHED_AT_METADATA_KEY,
+    TERMINAL_TASK_STATES,
     DocumentStatus,
     IndexationJob,
+    reconcile_task_state,
 )
 from core.utils.consts import is_internal_metadata_key, strip_internal_metadata
 from core.utils.error_summary import extract_task_error_reason, failure_reason_from_exception
 from core.utils.exceptions import ConflictError, mark_indexing_worker_may_be_running
 from core.utils.logging import get_logger
+from core.vector_stores.vector_field import is_vector_field_key
 from ray.exceptions import TaskCancelledError
+from services.workers.embedder_provenance import embedder_provenance
 from services.workers.failure_reporting import submit_task_failure
 from services.workers.ray_utils import call_ray_actor_with_timeout, retry_idempotent_ray_actor_method
 from services.workers.stages.store import INDEXING_TASK_ID_METADATA_KEY
@@ -305,6 +310,7 @@ class WorkerDispatcher(IndexingDispatcher):
             status=DocumentStatus.QUEUED,
             partition=partition,
             file_id=file_id,
+            filename=task_details["metadata"].get("filename"),
             user_id=task_details["user_id"],
         )
 
@@ -373,6 +379,7 @@ class WorkerDispatcher(IndexingDispatcher):
                             status=DocumentStatus.FAILED,
                             partition=partition,
                             file_id=file_id,
+                            filename=task_details["metadata"].get("filename"),
                             user_id=task_details["user_id"],
                             error=tb,
                             error_reason=error_reason,
@@ -575,7 +582,8 @@ class WorkerDispatcher(IndexingDispatcher):
         rows = await self._vector_store.query_chunks_by_filter(
             self._collection,
             {"partition": partition, "file_id": file_id},
-            output_fields=["*", "vector"],
+            # The whole row is written back, so "*" must include the vectors.
+            output_fields=["*"],
         )
         if not rows:
             return
@@ -599,6 +607,11 @@ class WorkerDispatcher(IndexingDispatcher):
         metadata: dict,
         partition: str,
         user: dict | None,
+        *,
+        vector_field: str | None = None,
+        embedder: Any = None,
+        embedder_reference: str | None = None,
+        embedder_fingerprint: Mapping[str, str | None] | None = None,
     ) -> None:
         source_file_metadata = await self._document_repo.get_file_metadata(file_id, partition)
         if source_file_metadata is None:
@@ -627,7 +640,7 @@ class WorkerDispatcher(IndexingDispatcher):
             rows = await self._vector_store.query_chunks_by_filter(
                 self._collection,
                 {"partition": partition, "file_id": file_id},
-                output_fields=["*", "vector"],
+                output_fields=["*"],
             )
             if not rows:
                 return
@@ -640,24 +653,45 @@ class WorkerDispatcher(IndexingDispatcher):
                 entity.pop("_id", None)
                 entity.update(public_metadata)
                 entity["indexed_at"] = indexed_at.isoformat()
+                # Marks this copy's chunks, so a refused catalog write removes exactly them.
+                entity[INDEXING_TASK_ID_METADATA_KEY] = claim_token
                 entities.append(entity)
 
+            # The source's record, embedder included, still describes vectors copied as they are.
+            indexation_config = await self._document_repo.get_indexation_config(file_id, partition)
+            catalog_kwargs: dict[str, Any] = {}
+            if vector_field is not None and await self._move_to_vector_field(entities, vector_field, embedder):
+                indexation_config = {
+                    **(indexation_config or {}),
+                    **self._copy_provenance(entities, vector_field, embedder, embedder_reference),
+                }
+                if embedder_fingerprint is not None:
+                    catalog_kwargs["embedder_fingerprint"] = embedder_fingerprint
+            if indexation_config is not None:
+                catalog_kwargs["indexation_config"] = indexation_config
             await self._insert_entities(entities)
 
             file_metadata = dict(source_file_metadata)
             file_metadata.update(public_metadata)
             file_metadata["indexed_at"] = indexed_at.isoformat()
-            await self._document_repo.add_file_to_partition(
-                file_id=target_file_id,
-                partition=target_partition,
-                file_metadata=file_metadata,
-                user_id=user.get("id") if user else None,
-                relationship_id=file_metadata.get("relationship_id"),
-                parent_id=file_metadata.get("parent_id"),
-                content_sha256=content_sha256,
-                indexed_at=indexed_at,
-                chunk_count=len(entities),
-            )
+            try:
+                await self._document_repo.add_file_to_partition(
+                    file_id=target_file_id,
+                    partition=target_partition,
+                    file_metadata=file_metadata,
+                    user_id=user.get("id") if user else None,
+                    relationship_id=file_metadata.get("relationship_id"),
+                    parent_id=file_metadata.get("parent_id"),
+                    content_sha256=content_sha256,
+                    indexed_at=indexed_at,
+                    chunk_count=len(entities),
+                    **catalog_kwargs,
+                )
+            except Exception:
+                await self._cleanup_submitted_vectors(
+                    claim_token, metadata={"file_id": target_file_id}, partition=target_partition
+                )
+                raise
         finally:
             if claimed_content:
                 await self._document_repo.release_content_sha256_claim(
@@ -666,6 +700,37 @@ class WorkerDispatcher(IndexingDispatcher):
                     content_sha256=content_sha256,
                     claim_token=claim_token,
                 )
+
+    async def _move_to_vector_field(self, entities: list[dict[str, Any]], vector_field: str, embedder: Any) -> bool:
+        """Give copied chunks a vector in ``vector_field`` and in no other field.
+
+        A partition only searches its embedder's field, so a chunk copied from a
+        partition on another embedder is re-embedded from its stored text.
+        Returns whether any chunk was.
+        """
+        missing = [entity for entity in entities if entity.get(vector_field) is None]
+        if missing:
+            vectors = await embedder.embed([entity.get("text") or "" for entity in missing])
+            await self._vector_store.ensure_vector_field(vector_field, len(vectors[0]))
+            for entity, vector in zip(missing, vectors, strict=True):
+                entity[vector_field] = vector
+        for entity in entities:
+            for key in [key for key in entity if is_vector_field_key(key) and key != vector_field]:
+                del entity[key]
+        return bool(missing)
+
+    @staticmethod
+    def _copy_provenance(
+        entities: list[dict[str, Any]], vector_field: str, embedder: Any, embedder_reference: str | None
+    ) -> dict[str, Any]:
+        """The embedder record of a copy that was re-embedded: the target's, not the source's."""
+        provenance = embedder_provenance(embedder, embedder_reference)
+        if provenance["embedder_dimension"] is None:
+            # An embedder that does not report its width: the vectors it just made do.
+            widths = {len(entity[vector_field]) for entity in entities}
+            if len(widths) == 1:
+                provenance["embedder_dimension"] = widths.pop()
+        return provenance
 
     async def _upsert_entities(self, entities: list[dict[str, Any]]) -> None:
         upsert_entities = getattr(self._vector_store, "upsert_entities", None)
@@ -686,6 +751,7 @@ class WorkerDispatcher(IndexingDispatcher):
         status: DocumentStatus,
         partition: str,
         file_id: str | None = None,
+        filename: str | None = None,
         user_id: int | None = None,
         error: str | None = None,
         error_reason: str | None = None,
@@ -702,6 +768,7 @@ class WorkerDispatcher(IndexingDispatcher):
                     status=status,
                     partition=partition,
                     file_id=file_id,
+                    filename=filename,
                     user_id=user_id,
                     error=error,
                     error_reason=error_reason,
@@ -729,43 +796,59 @@ class WorkerDispatcher(IndexingDispatcher):
             return None
 
     async def get_task_state(self, task_id: str) -> str | None:
-        state = await self._call_method(
-            lambda: self._tsm.get_state.remote(task_id),
-            task_description=f"get_state({task_id})",
-        )
-        if state is not None:
-            return state
-        # The actor forgets settled tasks; the durable record outlives it.
         job = await self._durable_job(task_id)
-        return job.status.value if job is not None else None
+        actor_state = None
+        if job is None or job.status not in TERMINAL_TASK_STATES:
+            try:
+                actor_state = await self._call_method(
+                    lambda: self._tsm.get_state.remote(task_id),
+                    task_description=f"get_state({task_id})",
+                )
+            except Exception:
+                if job is None:
+                    raise
+                logger.warning("Failed to read live task state", task_id=task_id)
+        return reconcile_task_state(actor_state, job.status.value if job is not None else None)
 
     async def get_task_error(self, task_id: str) -> str | None:
-        error = await self._call_method(
-            lambda: self._tsm.get_error.remote(task_id),
-            task_description=f"get_error({task_id})",
-        )
-        if error is not None:
-            return error
         job = await self._durable_job(task_id)
-        return job.error if job is not None else None
+        if job is not None and job.status in TERMINAL_TASK_STATES and job.error is not None:
+            return job.error
+        try:
+            error = await self._call_method(
+                lambda: self._tsm.get_error.remote(task_id),
+                task_description=f"get_error({task_id})",
+            )
+        except Exception:
+            if job is None:
+                raise
+            logger.warning("Failed to read live task error", task_id=task_id)
+            error = None
+        return error if error is not None else (job.error if job is not None else None)
 
     async def get_task_error_reason(self, task_id: str) -> str | None:
+        job = await self._durable_job(task_id)
+        if job is not None and job.status in TERMINAL_TASK_STATES and job.error_reason is not None:
+            return job.error_reason
         method_names = getattr(self._tsm, "_ray_actor_method_names", None)
         supports_reason = isinstance(method_names, (frozenset, list, set, tuple)) and (
             "get_error_reason" in method_names
         )
         if supports_reason:
-            reason = await self._call_method(
-                lambda: self._tsm.get_error_reason.remote(task_id),
-                task_description=f"get_error_reason({task_id})",
-            )
+            try:
+                reason = await self._call_method(
+                    lambda: self._tsm.get_error_reason.remote(task_id),
+                    task_description=f"get_error_reason({task_id})",
+                )
+            except Exception:
+                if job is None:
+                    raise
+                logger.warning("Failed to read live task error reason", task_id=task_id)
+                reason = None
             if reason is not None:
                 return reason
-        job = await self._durable_job(task_id)
-        if job is not None and job.error_reason is not None:
-            return job.error_reason
         error = await self.get_task_error(task_id)
-        return extract_task_error_reason(error)
+        return extract_task_error_reason(error) or (job.error_reason if job is not None else None)
 
     async def cancel_task(self, task_id: str) -> bool:
         import ray
@@ -787,7 +870,13 @@ class WorkerDispatcher(IndexingDispatcher):
             task_description=f"set_cancelled_if_active({task_id})",
         )
         if not cancelled:
-            state = await self.get_task_state(task_id)
+            state = await self._call_method(
+                lambda: self._tsm.get_state.remote(task_id),
+                task_description=f"get_state({task_id}) after cancellation claim",
+            )
+            if state is None:
+                job = await self._durable_job(task_id)
+                state = reconcile_task_state(None, job.status.value if job is not None else None)
             if state != "CANCELLED":
                 return False
 

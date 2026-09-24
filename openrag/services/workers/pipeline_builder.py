@@ -17,6 +17,7 @@ from core.observability.ray_metrics import observe_stage_duration
 from core.utils.logging import get_logger
 from core.vector_stores.vector_store import VectorStore
 from core.vlm.vlm import VLM
+from services.workers.embedder_provenance import embedder_provenance
 from services.workers.stages._common import run_with_optional_timeout
 from services.workers.stages.caption import caption_stage
 from services.workers.stages.chunk import chunk_stage
@@ -36,30 +37,6 @@ _ENVELOPE_HEADROOM_TOKENS = 512
 
 REPLACE_OLD_CHUNK_COLLECTION_ROW_KEY = "_replace_old_chunk_collection"
 REPLACE_OLD_CHUNK_IDS_ROW_KEY = "_replace_old_chunk_ids"
-
-
-def _embedder_provenance(embedder: Embedder, reference: Any) -> dict[str, Any]:
-    """What actually produced this file's vectors.
-
-    ``embedder`` is the endpoint reference the partition carried, kept as given
-    (the ``"default"`` alias included); the model/endpoint pair is what that
-    reference resolved to, and is the only thing that catches an endpoint
-    repointed at a different model without being renamed.
-
-    Every field degrades to ``None`` rather than raising: describing a run that
-    already succeeded must not be able to fail it.
-    """
-    try:
-        dimension = embedder.dimension
-    except Exception:
-        # Raises until the first embed returns, so: no chunks, no dimension.
-        dimension = None
-    return {
-        "embedder": str(reference) if reference else "default",
-        "embedder_model_name": getattr(embedder, "model_name", None),
-        "embedder_endpoint": getattr(embedder, "endpoint", None),
-        "embedder_dimension": dimension,
-    }
 
 
 @dataclass(slots=True, frozen=True)
@@ -124,6 +101,8 @@ class IndexingPipeline:
     # can derive a hard safety bound from the embedder this partition actually
     # uses rather than from the deployment default.
     embedder_window_resolver: Callable[[str], int | None] | None = None
+    # Resolves an embedder endpoint name to the dense field it writes to.
+    vector_field_resolver: Callable[[str], str | None] | None = None
     vlm_factory: Callable[[str], VLM] | None = None
     contextualizer_factory: Callable[[str], ChunkContextualizer] | None = None
     topic_tagger_factory: Callable[[str], TopicTagger] | None = None
@@ -157,6 +136,8 @@ class IndexingPipeline:
         embedder_window = self.embedder_window_resolver(embedder_name) if self.embedder_window_resolver else None
         chunker = self._select_chunker(config, embedder_name, embedder_window)
         embedder = self._select_embedder(row)
+        # Resolved up front, so a file with nowhere to store its vectors fails before it is parsed and embedded.
+        vector_field = self.vector_field_resolver(embedder_name) if self.vector_field_resolver else None
         contextualizer, contextualization_llm = self._select_contextualizer(config)
         topic_tagger, topic_tagging_llm = self._select_topic_tagger(config)
 
@@ -285,7 +266,7 @@ class IndexingPipeline:
                 ),
             )
             # After the embed: the dimension is measured, not configured.
-            row["embedder_provenance"] = _embedder_provenance(embedder, row.get("embedder_name"))
+            row["embedder_provenance"] = embedder_provenance(embedder, row.get("embedder_name"))
             # What the catalog write checks the partition's embedder against (#958).
             row["embedder_fingerprint"] = getattr(embedder, "vector_fingerprint", None)
             # Re-index (``replace=True``) is insert-before-delete: snapshot the
@@ -319,6 +300,7 @@ class IndexingPipeline:
                     self.vector_store,
                     timeout=self.timeouts.store,
                     per_chunk_timeout=self.timeouts.store_per_chunk,
+                    vector_field=vector_field,
                 ),
             )
             # BUG (#657 follow-up): ``store_stage`` completes successfully even
@@ -592,6 +574,7 @@ def build_indexing_pipeline(
     parser_factory: Callable[[str], DocumentParser] | None = None,
     chunker_factory: Callable[..., ChunkingStrategy] | None = None,
     embedder_window_resolver: Callable[[str], int | None] | None = None,
+    vector_field_resolver: Callable[[str], str | None] | None = None,
     embedder_factory: Callable[[str], Embedder] | None = None,
     vlm_factory: Callable[[str], VLM] | None = None,
     contextualizer_factory: Callable[[str], ChunkContextualizer] | None = None,
@@ -615,6 +598,7 @@ def build_indexing_pipeline(
         parser_factory=parser_factory,
         chunker_factory=chunker_factory,
         embedder_window_resolver=embedder_window_resolver,
+        vector_field_resolver=vector_field_resolver,
         embedder_factory=embedder_factory,
         vlm_factory=vlm_factory,
         contextualizer_factory=contextualizer_factory,

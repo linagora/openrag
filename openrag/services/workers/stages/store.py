@@ -17,11 +17,15 @@ async def store_stage(
     *,
     timeout: float | None = None,
     per_chunk_timeout: float = 0.0,
+    vector_field: str | None = None,
 ) -> MutableMapping[str, Any]:
     """Upsert ``row["chunks"]`` into the configured vector collection.
 
     Tenant routing stays on each chunk's ``partition`` field. The vector
     store collection argument remains the configured backend collection.
+
+    ``vector_field`` is the dense field of the partition's embedder, created
+    here on first use.
     """
 
     try:
@@ -32,7 +36,9 @@ async def store_stage(
             embedding = chunks[0].embedding
             if embedding is None:
                 raise ValueError("store_stage received chunks without embeddings")
-            await vector_store.ensure_collection("default", len(embedding))
+            await vector_store.ensure_collection("default", len(embedding), vector_field=vector_field)
+            if vector_field is not None:
+                await vector_store.ensure_vector_field(vector_field, len(embedding))
             task_id = row.get("task_id")
             if task_id:
                 for chunk in chunks:
@@ -47,7 +53,7 @@ async def store_stage(
         row["indexed_at"] = indexed_at
 
         row["stored_count"] = await run_with_optional_timeout(
-            lambda: vector_store.upsert(chunks, indexed_at=indexed_at),
+            lambda: vector_store.upsert(chunks, indexed_at=indexed_at, vector_field=vector_field),
             effective_timeout,
         )
         row["stage"] = "stored"

@@ -58,6 +58,8 @@ class ModelEndpointConfig(BaseModel):
     batch_size: int = Field(default=32, gt=0)
     timeout: float = Field(default=30.0, gt=0)
     extra: dict[str, Any] = Field(default_factory=dict)
+    # The dense field an embedder reads and writes; None for other types.
+    vector_field: str | None = None
 
 
 def _positive_int(value: Any) -> int | None:
@@ -178,6 +180,9 @@ class ModelEndpointRow(BaseModel):
     timeout: float = Field(default=30.0, gt=0)
     extra: dict[str, Any] = Field(default_factory=dict)
     is_default: bool = False
+    # The dense field an embedder owns, allocated by the server at creation and
+    # never changed; None for other types.
+    vector_field: str | None = None
     created_at: datetime
     updated_at: datetime
 
