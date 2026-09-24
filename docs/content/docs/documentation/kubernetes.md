@@ -236,8 +236,8 @@ up{namespace="<release namespace>", job=~".*(raycluster|postgresql|milvus).*"}
 | Postgres | `sum by (instance) (pg_stat_activity_count{namespace="<release namespace>"}) / sum by (instance) (pg_settings_max_connections{namespace="<release namespace>"})` | Connections against the server limit, per server |
 | Postgres | `pg_stat_activity_max_tx_duration` | Longest open transaction |
 | Postgres | `pg_database_size_bytes`, `pg_locks_count` | Database size, lock contention |
-| Milvus | `milvus_proxy_req_latency`, `milvus_proxy_sq_latency` | Request and search/query latency |
-| Milvus | `milvus_proxy_insert_vectors_count`, `milvus_proxy_search_vectors_count` | Insert and search throughput |
+| Milvus | `histogram_quantile(0.99, sum by (le, function_name) (rate(milvus_proxy_req_latency_bucket{namespace="<release namespace>"}[5m])))`, and the same over `milvus_proxy_sq_latency_bucket` by `query_type` | p99 latency in milliseconds, per request type and per search/query type |
+| Milvus | `sum(rate(milvus_proxy_insert_vectors_count{namespace="<release namespace>"}[5m]))`, `sum(rate(milvus_proxy_search_vectors_count{namespace="<release namespace>"}[5m]))` | Vectors inserted and searched per second |
 | Milvus | `milvus_querycoord_collection_num` | Loaded collections |
 | Milvus | `milvus_datacoord_segment_num` by `segment_state`, `milvus_datacoord_compaction_task_num` | Segment and compaction backlog |
 | Milvus | `process_resident_memory_bytes` by `component` | Memory per component |
