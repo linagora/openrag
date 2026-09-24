@@ -94,9 +94,10 @@ def outcome_for(exc: BaseException) -> str:
     ``metadata.llm_override``, a prompt over the context length — so any user
     could otherwise drive a healthy provider's error ratio up at will. Throttling
     (429) and a provider-side request timeout (408) are the provider struggling,
-    and stay ``error``; so do 401 and 403, a credential the provider refuses,
-    which fails every call alike (``PROVIDER_AUTH_4XX``). The circuit breaker
-    counts 401/403 too, but still excludes 408 and 429 (``_is_excluded``).
+    and stay ``error``; so does 401, a credential the provider refuses, which
+    fails every call alike (``PROVIDER_AUTH_4XX``). 403 stays ``rejected``: it can
+    be one request's model the key may not use. The circuit breaker counts 401
+    too, but still excludes 408 and 429 (``_is_excluded``).
     """
     if isinstance(exc, (asyncio.CancelledError, GeneratorExit)):
         return "cancelled"

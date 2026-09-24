@@ -32,7 +32,12 @@ _UNKNOWN_STATE = -1
 #: or wrong credential — rather than that one request was bad. They count as
 #: failures: every call fails the same way until an operator fixes the key, and
 #: excluding them left both the breaker and the error-ratio alert silent.
-PROVIDER_AUTH_4XX = frozenset({401, 403})
+#:
+#: 401 only. 403 can also mean "this key may not use *that* model", and a
+#: model-only llm_override reaches the configured provider through the shared
+#: breaker: counting it would let any user open the breaker for every tenant
+#: by repeating such a request. OpenAI-compatible APIs answer a bad key with 401.
+PROVIDER_AUTH_4XX = frozenset({401})
 
 
 def _is_client_error(exc: Exception) -> bool:
