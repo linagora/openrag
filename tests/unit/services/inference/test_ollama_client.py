@@ -172,6 +172,38 @@ class TestOllamaClient:
         assert [c["outcome"] for c in recorded_inference] == ["cancelled"]
 
     @pytest.mark.asyncio
+    async def test_a_request_the_provider_refuses_is_rejected_not_an_error(self, recorded_inference):
+        """Through the real retry and breaker stack: an unknown model is the
+        request's fault, and any user can send one."""
+        client = self._make_client(lambda req: httpx.Response(404, text="model not found"))
+
+        with pytest.raises(InferenceError):
+            await client.chat([{"role": "user", "content": "hi"}])
+
+        assert [c["outcome"] for c in recorded_inference] == ["rejected"]
+
+    @pytest.mark.asyncio
+    async def test_a_refused_stream_is_rejected_not_an_error(self, recorded_inference):
+        client = self._make_client(lambda req: httpx.Response(400, text="prompt too long"))
+
+        with pytest.raises(InferenceError):
+            async for _ in client.stream_chat([{"role": "user", "content": "hi"}]):
+                pass
+
+        assert [c["outcome"] for c in recorded_inference] == ["rejected"]
+
+    @pytest.mark.asyncio
+    async def test_throttling_stays_a_provider_error(self, recorded_inference):
+        """429 is the provider out of capacity, which the error ratio must show."""
+        client = self._make_client(lambda req: httpx.Response(429, text="slow down"))
+
+        with pytest.raises(InferenceError):
+            async for _ in client.stream_chat([{"role": "user", "content": "hi"}]):
+                pass
+
+        assert [c["outcome"] for c in recorded_inference] == ["error"]
+
+    @pytest.mark.asyncio
     async def test_stream_chat_counts_the_usage_chunk(self, monkeypatch):
         """Ollama's OpenAI-compatible endpoint only sends usage on a stream when
         asked, and the final usage chunk must reach the token counter."""

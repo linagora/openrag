@@ -44,7 +44,7 @@ from tqdm.asyncio import tqdm
 
 from ._call_log import log_llm_call
 from ._circuit_breaker import with_circuit_breaker
-from ._metrics import resolve_provider, with_inference_metrics
+from ._metrics import outcome_for, resolve_provider, with_inference_metrics
 from ._retry import with_retry
 
 logger = get_logger()
@@ -459,10 +459,12 @@ class VLLMClient(LLM):
             ) as resp:
                 if resp.status_code >= 400:
                     await resp.aread()
-                    raise InferenceError(
+                    error = InferenceError(
                         f"LLM streaming error ({resp.status_code}): {resp.text[:500]}",
                         status_code=resp.status_code,
                     )
+                    outcome = outcome_for(error)
+                    raise error
                 async for line in resp.aiter_lines():
                     _record_stream_usage(line)
                     if line.strip() == _STREAM_DONE:

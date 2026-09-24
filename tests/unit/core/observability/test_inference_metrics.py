@@ -478,7 +478,7 @@ def test_content_mentioning_usage_records_nothing(recorded) -> None:
 # ---------------------------------------------------------------------------
 # Without these, INFERENCE_OUTCOME_VALUES and TOKEN_KIND_VALUES are comments
 # that happen to be typed as tuples: nothing would notice a new outcome string
-# appearing in _outcome_for, and S3-4's alert expressions are written against
+# appearing in outcome_for, and S3-4's alert expressions are written against
 # the declared set.
 
 
@@ -487,20 +487,21 @@ def test_content_mentioning_usage_records_nothing(recorded) -> None:
     [
         InferenceTimeoutError("slow"),
         InferenceError("bad gateway"),
+        InferenceError("unknown model", status_code=404),
         ValueError("unexpected"),
         KeyboardInterrupt(),
     ],
 )
 def test_every_outcome_is_a_declared_value(exc: BaseException) -> None:
     from core.observability.metric_specs import INFERENCE_OUTCOME_VALUES
-    from services.inference._metrics import _outcome_for
+    from services.inference._metrics import outcome_for
 
-    assert _outcome_for(exc) in INFERENCE_OUTCOME_VALUES
+    assert outcome_for(exc) in INFERENCE_OUTCOME_VALUES
 
 
 def test_success_is_a_declared_outcome() -> None:
     """``with_inference_metrics`` writes this one directly rather than through
-    ``_outcome_for``, so it needs its own assertion."""
+    ``outcome_for``, so it needs its own assertion."""
     from core.observability.metric_specs import INFERENCE_OUTCOME_VALUES
 
     assert "success" in INFERENCE_OUTCOME_VALUES

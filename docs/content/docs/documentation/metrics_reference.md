@@ -91,7 +91,8 @@ Label values:
 - `operation` — `embed`, `chat`, `completion` (text completions), `rerank`, `vlm`
 - `outcome` — `success`, `error`, `timeout`, `circuit_open`, `cancelled` (the caller gave
   up: a closed stream, its own deadline, or siblings cancelled after one failed; not a
-  provider failure, so keep it out of error ratios)
+  provider failure, so keep it out of error ratios), `rejected` (a 4xx the request caused,
+  such as an unknown model or an over-long prompt; 408 and 429 stay `error`)
 - `kind` — `prompt`, `completion`
 - `pool` — `marker`, `docling`, `pymupdf`, `pdf_client`, `local_whisper`, `audio_client` for PDF and audio; any other format is labelled by its document type (`text`, `docx`, `eml`, `image`, ...)
 - `name` — `llm`, `embedder`, `vlm`, `reranker`

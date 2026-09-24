@@ -31,13 +31,19 @@ from collections.abc import Callable
 from functools import wraps
 from typing import Any
 
+import httpx
 from core.observability.inference_metrics import (
     CLIENT_OVERRIDE_PROVIDER,
     PROVIDER_NAME_ATTR,
     record_inference,
     record_usage_from_response,
 )
-from core.utils.exceptions import CircuitBreakerOpenError, EmbeddingTimeoutError, InferenceTimeoutError
+from core.utils.exceptions import (
+    CircuitBreakerOpenError,
+    EmbeddingTimeoutError,
+    InferenceTimeoutError,
+    OpenRAGError,
+)
 
 #: Fallback for a client built outside the factory (tests, scripts): it still
 #: records, and lands in a fixed bucket instead of minting a label value.
@@ -63,7 +69,7 @@ def resolve_provider(instance: Any, kwargs: dict[str, Any]) -> str:
     return name if isinstance(name, str) and name else _UNKNOWN_PROVIDER
 
 
-def _outcome_for(exc: BaseException) -> str:
+def outcome_for(exc: BaseException) -> str:
     """Classify a failed call into one of ``INFERENCE_OUTCOME_VALUES``.
 
     Both checks are on *families*, deliberately.
@@ -81,6 +87,12 @@ def _outcome_for(exc: BaseException) -> str:
     stopping a stream, a caller's ``asyncio.wait_for`` deadline, or the sibling
     batches cancelled after one failed. Counting it as ``error`` let one real
     failure — or users pressing stop — raise a healthy provider's error ratio.
+
+    A 4xx is the provider refusing *this request* — an unknown model named in
+    ``metadata.llm_override``, a prompt over the context length — so any user
+    could otherwise drive a healthy provider's error ratio up at will. Throttling
+    (429) and a provider-side request timeout (408) are the provider struggling,
+    and stay ``error``. The circuit breaker draws the same line (``_is_excluded``).
     """
     if isinstance(exc, (asyncio.CancelledError, GeneratorExit)):
         return "cancelled"
@@ -88,7 +100,23 @@ def _outcome_for(exc: BaseException) -> str:
         return "circuit_open"
     if isinstance(exc, (InferenceTimeoutError, EmbeddingTimeoutError)):
         return "timeout"
+    if _is_rejected_request(exc):
+        return "rejected"
     return "error"
+
+
+#: 4xx statuses that describe the provider's state, not the request's.
+_PROVIDER_SIDE_4XX = frozenset({408, 429})
+
+
+def _is_rejected_request(exc: BaseException) -> bool:
+    if isinstance(exc, httpx.HTTPStatusError):
+        status = exc.response.status_code
+    elif isinstance(exc, OpenRAGError):
+        status = exc.status_code
+    else:
+        return False
+    return 400 <= status < 500 and status not in _PROVIDER_SIDE_4XX
 
 
 def with_inference_metrics(operation: str, *, capture_usage: bool = False) -> Callable:
@@ -115,7 +143,7 @@ def with_inference_metrics(operation: str, *, capture_usage: bool = False) -> Ca
                 # BaseException so a cancelled request is not silently recorded
                 # as a success; CancelledError is recorded as "cancelled" and
                 # re-raised untouched.
-                outcome = _outcome_for(exc)
+                outcome = outcome_for(exc)
                 raise
             finally:
                 record_inference(
@@ -133,4 +161,4 @@ def with_inference_metrics(operation: str, *, capture_usage: bool = False) -> Ca
     return decorator
 
 
-__all__ = ["resolve_provider", "with_inference_metrics"]
+__all__ = ["outcome_for", "resolve_provider", "with_inference_metrics"]

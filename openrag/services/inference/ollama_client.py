@@ -31,7 +31,7 @@ from services.inference.vllm_client import _STREAM_DONE, _parse_response, _recor
 
 from ._call_log import log_llm_call
 from ._circuit_breaker import with_circuit_breaker
-from ._metrics import record_inference, resolve_provider, with_inference_metrics
+from ._metrics import outcome_for, record_inference, resolve_provider, with_inference_metrics
 from ._retry import with_retry
 
 logger = get_logger()
@@ -157,10 +157,12 @@ class OllamaClient(LLM):
             async with self._client.stream("POST", f"{self._endpoint}/chat/completions", json=payload) as resp:
                 if resp.status_code >= 400:
                     await resp.aread()
-                    raise InferenceError(
+                    error = InferenceError(
                         f"Ollama streaming error ({resp.status_code}): {resp.text[:500]}",
                         status_code=resp.status_code,
                     )
+                    outcome = outcome_for(error)
+                    raise error
                 async for line in resp.aiter_lines():
                     _record_stream_usage(line)
                     if line.strip() == _STREAM_DONE:

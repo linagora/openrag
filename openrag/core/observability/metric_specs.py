@@ -199,7 +199,7 @@ INFERENCE_OPERATION_VALUES: tuple[str, ...] = ("embed", "chat", "completion", "r
 #: own deadline (``asyncio.wait_for``), sibling batches cancelled after one
 #: failed. The provider did nothing wrong, so it must stay out of the error
 #: ratio the provider alerts threshold on.
-INFERENCE_OUTCOME_VALUES: tuple[str, ...] = ("success", "error", "timeout", "circuit_open", "cancelled")
+INFERENCE_OUTCOME_VALUES: tuple[str, ...] = ("success", "error", "timeout", "circuit_open", "cancelled", "rejected")
 
 #: Token direction.
 TOKEN_KIND_VALUES: tuple[str, ...] = ("prompt", "completion")
