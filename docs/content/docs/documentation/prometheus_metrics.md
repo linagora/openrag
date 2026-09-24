@@ -201,6 +201,7 @@ sidecar ([Kubernetes monitoring](/openrag/documentation/kubernetes/#monitoring))
 | Dashboard | UID | Shows |
 | --- | --- | --- |
 | OpenRAG HTTP Metrics | `openrag-http` | Request rate, errors and latency per route ([guide](/openrag/documentation/grafana_http_dashboard/)) |
+| OpenRAG Service | `openrag-service` | Indexing, inference and catalog drift ([guide](/openrag/documentation/grafana_service_dashboard/)) |
 | Infrastructure Overview | `system-overview` | Host CPU, memory, disk and GPU; needs node-exporter and a GPU exporter |
 
 Every panel reads the **Data source** variable (`DS_PROMETHEUS`), which defaults
