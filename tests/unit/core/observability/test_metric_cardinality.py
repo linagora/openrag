@@ -222,3 +222,23 @@ def test_inference_operation_values_are_bounded_and_lowercase() -> None:
     name is client-controllable through ``metadata.llm_override``."""
     assert all(v.islower() and v.isidentifier() for v in INFERENCE_OPERATION_VALUES)
     assert len(set(INFERENCE_OPERATION_VALUES)) == len(INFERENCE_OPERATION_VALUES)
+
+
+def test_every_emitted_inference_operation_is_declared() -> None:
+    """`INFERENCE_OPERATION_VALUES` is what bounds the `operation` label, but
+    nothing tied it to the values the clients actually emit: a new operation
+    could ship undeclared. Every literal passed to `@with_inference_metrics(...)`
+    or as `operation="..."` under `services/inference/` must be declared."""
+    import pathlib
+    import re
+
+    from core.observability.metric_specs import INFERENCE_OPERATION_VALUES
+
+    root = pathlib.Path(__file__).resolve().parents[4] / "openrag" / "services" / "inference"
+    pattern = re.compile(r'with_inference_metrics\(\s*"([^"]+)"|operation="([^"]+)"')
+    emitted = {a or b for path in root.rglob("*.py") for a, b in pattern.findall(path.read_text(encoding="utf-8"))}
+
+    assert emitted, "found no operation literals: the pattern no longer matches the code"
+    assert emitted <= set(INFERENCE_OPERATION_VALUES), (
+        f"undeclared: {sorted(emitted - set(INFERENCE_OPERATION_VALUES))}"
+    )
