@@ -431,14 +431,16 @@ milvus:
   minio:
     mode: distributed
     replicas: 3
-    # MinIO no longer publishes images (removed from Docker Hub, then quay.io);
-    # linagoraai/minio is an unmodified mirror of the same upstream release,
-    # matching the compose stacks. The tag is pinned here, not left to the
-    # Milvus chart's default, so a chart bump can't select a tag the mirror
-    # doesn't have.
+    # SILO, the maintained MinIO fork, matching the compose stacks. Pinned here
+    # rather than left to the Milvus chart's default (a MinIO image that is no
+    # longer published), and by digest: the chart renders "repository:tag", so
+    # the digest rides in `tag`. linagoraai/silo holds a copy with the same
+    # digest if pgsty/silo ever disappears: only `repository` changes. Moving an
+    # existing release onto it is one-way and needs every MinIO pod stopped
+    # first: see docs/content/docs/documentation/minio_silo_upgrade.md.
     image:
-      repository: linagoraai/minio
-      tag: RELEASE.2024-12-18T13-15-44Z
+      repository: pgsty/silo
+      tag: RELEASE.2026-09-16T00-00-00Z@sha256:635197cb9f36d01bee221d34d1c7d7960f6a95c48b0b6c01d99cd13bdae51a46
     persistence:
       enabled: true
       size: 20Gi
