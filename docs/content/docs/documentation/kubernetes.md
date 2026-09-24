@@ -389,6 +389,8 @@ ray:
       enabled: true                                  # requires ray.enabled=true
       labels: { release: <Prometheus release name> }
 postgresql:
+  auth:
+    postgresPassword: <password>                     # required by metrics.enabled, see below
   metrics:
     enabled: true                                    # adds the exporter sidecar: restarts Postgres
     serviceMonitor:
@@ -408,6 +410,16 @@ stored under the same `openrag_*` names the API's `/metrics` uses, and the alert
 rules match them. Ray's own `ray_*` metrics keep their names. Milvus already exports from all five components (proxy,
 mixcoord, datanode, querynode, streamingnode); only its `ServiceMonitor` is new.
 None of the three endpoints authenticates, so none is routed through the Ingress.
+
+The Postgres exporter signs in as the `postgres` superuser, with the password in
+the sub-chart's Secret. Unless `postgresql.auth.postgresPassword` or
+`postgresql.auth.existingSecret` sets that password, the sub-chart generates it
+again on every render that cannot read the live Secret (`helm template`,
+Argo CD), while the server keeps the first one, and the exporter's login fails
+after a later sync. The chart therefore refuses `postgresql.metrics.enabled`
+without one of the two. On a new release, any password works. On a running
+release, set the one the server already has:
+`kubectl get secret -n <release namespace> openrag-postgresql -o jsonpath='{.data.postgres-password}' | base64 -d`.
 
 Three things can go wrong without failing the install:
 

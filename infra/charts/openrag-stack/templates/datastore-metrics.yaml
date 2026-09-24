@@ -17,6 +17,16 @@ namespace.
 {{- if and .Values.postgresql.enabled .Values.postgresql.metrics.serviceMonitor.enabled (not .Values.postgresql.metrics.enabled) }}
 {{- fail "postgresql.metrics.serviceMonitor.enabled requires postgresql.metrics.enabled=true: without the exporter sidecar the sub-chart renders no ServiceMonitor at all." }}
 {{- end }}
+{{- /* The exporter reads the superuser's password from the Secret. Unset, the
+   sub-chart generates it, and generates it again on every render that cannot
+   look up the live Secret; the server keeps the first one, so the exporter's
+   login starts failing on a later sync, long after the install succeeded. */}}
+{{- $pgAuth := .Values.postgresql.auth }}
+{{- $pgGlobalAuth := dig "postgresql" "auth" dict (.Values.global | default dict) }}
+{{- if and .Values.postgresql.enabled .Values.postgresql.metrics.enabled (not (or $pgAuth.postgresPassword $pgAuth.existingSecret $pgGlobalAuth.postgresPassword $pgGlobalAuth.existingSecret)) }}
+{{- $pgSecret := .Values.postgresql.fullnameOverride | default (printf "%s-postgresql" .Release.Name) }}
+{{- fail (printf "postgresql.metrics.enabled requires postgresql.auth.postgresPassword or postgresql.auth.existingSecret: the exporter signs in as the postgres superuser, and without either the sub-chart generates a new password on every render that cannot read the live Secret (helm template, Argo CD) while the server keeps the old one. On a running release, set the password the server already has: kubectl get secret -n %s %s -o jsonpath='{.data.postgres-password}' | base64 -d" .Release.Namespace $pgSecret) }}
+{{- end }}
 {{- if and .Values.milvus.enabled .Values.milvus.metrics.serviceMonitor.enabled (not .Values.milvus.metrics.enabled) }}
 {{- fail "milvus.metrics.serviceMonitor.enabled requires milvus.metrics.enabled=true: without it the sub-chart renders no ServiceMonitor at all." }}
 {{- end }}

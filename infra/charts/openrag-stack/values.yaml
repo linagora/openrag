@@ -375,6 +375,12 @@ postgresql:
     port: &pgPort 5432
   # postgres_exporter sidecar (port 9187) and its Service. Turning it on changes
   # the StatefulSet's pod template, so the upgrade restarts Postgres.
+  # The exporter signs in as the `postgres` superuser, whose password the
+  # sub-chart regenerates on every render that cannot read the live Secret
+  # (helm template, Argo CD) while the server keeps the first one. So turning
+  # it on requires auth.postgresPassword or auth.existingSecret; on a running
+  # release, set the password Postgres already has:
+  #   kubectl get secret openrag-postgresql -o jsonpath='{.data.postgres-password}' | base64 -d
   metrics:
     enabled: false
     # Prometheus Operator discovery; requires metrics.enabled above. The
