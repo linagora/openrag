@@ -51,13 +51,6 @@ class ModelListUnavailableError(ValueError):
         super().__init__("Endpoint returned an invalid model list.")
 
 
-class InsecureModelEndpointError(ValueError):
-    """A model probe would send credentials over cleartext transport."""
-
-    def __init__(self) -> None:
-        super().__init__("Model endpoints with API keys must use HTTPS.")
-
-
 @dataclass(frozen=True, slots=True)
 class _ModelProbeRequest:
     url: str
@@ -189,13 +182,7 @@ class ReadinessService:
         for target in targets:
             if target.config is None:
                 continue
-            try:
-                request = _model_probe_request(target.config, target.kind)
-            except InsecureModelEndpointError:
-                readiness.append(
-                    ModelEndpointReadiness(provider=target.provider, kind=target.kind, status="unavailable")
-                )
-                continue
+            request = _model_probe_request(target.config, target.kind)
             key = (request.url, request.authorization)
             if key not in groups:
                 groups[key] = (request, [])
@@ -269,15 +256,6 @@ def _model_probe_request(config: ModelEndpointConfig, model_type: str | None = N
     health_only = implementation in {"infinity", "tei"}
     configured_api_key = config.extra.get("api_key")
     api_key = None if is_placeholder_api_key(configured_api_key) else configured_api_key
-    try:
-        parsed_url = httpx.URL(base)
-    except httpx.InvalidURL as exc:
-        if api_key:
-            raise InsecureModelEndpointError from exc
-    else:
-        has_credentials = bool(api_key or parsed_url.username or parsed_url.password)
-        if has_credentials and parsed_url.scheme != "https":
-            raise InsecureModelEndpointError
     authorization = f"Bearer {api_key}" if api_key else None
     return _ModelProbeRequest(
         url=_canonical_probe_url(base + ("/health" if health_only else "/models")),

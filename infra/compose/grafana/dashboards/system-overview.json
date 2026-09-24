@@ -14,7 +14,7 @@
       "title": "CPU Usage (%)",
       "type": "timeseries",
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "palette-classic" },
@@ -65,7 +65,7 @@
       "title": "Memory Usage",
       "type": "timeseries",
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "palette-classic" },
@@ -123,7 +123,7 @@
       "title": "Memory Usage (%)",
       "type": "gauge",
       "gridPos": { "h": 8, "w": 6, "x": 0, "y": 8 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "thresholds" },
@@ -161,7 +161,7 @@
       "title": "CPU Usage (%)",
       "type": "gauge",
       "gridPos": { "h": 8, "w": 6, "x": 6, "y": 8 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "thresholds" },
@@ -199,7 +199,7 @@
       "title": "Disk Usage",
       "type": "timeseries",
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "palette-classic" },
@@ -257,7 +257,7 @@
       "title": "Network I/O",
       "type": "timeseries",
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "palette-classic" },
@@ -316,7 +316,7 @@
       "title": "System Load",
       "type": "timeseries",
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "palette-classic" },
@@ -371,10 +371,10 @@
     {
       "id": 8,
       "title": "GPU Utilization (%)",
-      "description": "Highest compute utilization across all NVIDIA GPUs",
+      "description": "Highest compute utilization across all NVIDIA GPUs. Reads the DCGM exporter (Kubernetes) or nvidia_gpu_exporter (Compose), whichever is scraped.",
       "type": "gauge",
       "gridPos": { "h": 6, "w": 6, "x": 0, "y": 24 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "thresholds" },
@@ -397,7 +397,7 @@
       },
       "targets": [
         {
-          "expr": "max(nvidia_smi_utilization_gpu_ratio) * 100",
+          "expr": "max(DCGM_FI_DEV_GPU_UTIL) or max(nvidia_smi_utilization_gpu_ratio) * 100",
           "legendFormat": "GPU",
           "refId": "A"
         }
@@ -411,10 +411,10 @@
     {
       "id": 9,
       "title": "GPU Memory Usage (%)",
-      "description": "Used VRAM as a percentage of total VRAM across all NVIDIA GPUs",
+      "description": "Used VRAM as a percentage of total VRAM across all NVIDIA GPUs. Reads the DCGM exporter (Kubernetes) or nvidia_gpu_exporter (Compose), whichever is scraped. DCGM series are collapsed to one per GPU first, because with KUBERNETES_VIRTUAL_GPUS on, a time-sliced or MPS-shared GPU is reported once per pod using it; reserved VRAM counts as 0 on DCGM exporters older than 4.4.0, which do not export it.",
       "type": "gauge",
       "gridPos": { "h": 6, "w": 6, "x": 6, "y": 24 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "thresholds" },
@@ -437,7 +437,7 @@
       },
       "targets": [
         {
-          "expr": "(sum(nvidia_smi_memory_used_bytes) / sum(nvidia_smi_memory_total_bytes)) * 100",
+          "expr": "(sum(max by (UUID, GPU_I_ID) (DCGM_FI_DEV_FB_USED)) / (sum(max by (UUID, GPU_I_ID) (DCGM_FI_DEV_FB_USED)) + sum(max by (UUID, GPU_I_ID) (DCGM_FI_DEV_FB_FREE)) + (sum(max by (UUID, GPU_I_ID) (DCGM_FI_DEV_FB_RESERVED)) or vector(0)))) * 100 or (sum(nvidia_smi_memory_used_bytes) / sum(nvidia_smi_memory_total_bytes)) * 100",
           "legendFormat": "GPU Memory",
           "refId": "A"
         }
@@ -451,10 +451,10 @@
     {
       "id": 10,
       "title": "Highest GPU Temperature",
-      "description": "Highest temperature reported by any NVIDIA GPU",
+      "description": "Highest temperature reported by any NVIDIA GPU. Reads the DCGM exporter (Kubernetes) or nvidia_gpu_exporter (Compose), whichever is scraped.",
       "type": "gauge",
       "gridPos": { "h": 6, "w": 6, "x": 12, "y": 24 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "thresholds" },
@@ -477,7 +477,7 @@
       },
       "targets": [
         {
-          "expr": "max(nvidia_smi_temperature_gpu)",
+          "expr": "max(DCGM_FI_DEV_GPU_TEMP) or max(nvidia_smi_temperature_gpu)",
           "legendFormat": "Temperature",
           "refId": "A"
         }
@@ -491,10 +491,10 @@
     {
       "id": 11,
       "title": "Total GPU Power Draw",
-      "description": "Combined power draw reported by all NVIDIA GPUs",
+      "description": "Combined power draw reported by all NVIDIA GPUs. Reads the DCGM exporter (Kubernetes) or nvidia_gpu_exporter (Compose), whichever is scraped. DCGM series are collapsed to one per GPU first, because with KUBERNETES_VIRTUAL_GPUS on, a time-sliced or MPS-shared GPU is reported once per pod using it.",
       "type": "stat",
       "gridPos": { "h": 6, "w": 6, "x": 18, "y": 24 },
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "thresholds" },
@@ -512,7 +512,7 @@
       },
       "targets": [
         {
-          "expr": "sum(nvidia_smi_power_draw_watts)",
+          "expr": "sum(max by (UUID) (DCGM_FI_DEV_POWER_USAGE)) or sum(nvidia_smi_power_draw_watts)",
           "legendFormat": "Power",
           "refId": "A"
         }
@@ -530,7 +530,11 @@
   ],
   "refresh": "30s",
   "schemaVersion": 39,
-  "templating": { "list": [] },
+  "templating": {
+    "list": [
+      {"current": {"selected": true, "text": "default", "value": "default"}, "description": "Prometheus data source that scrapes OpenRAG. Defaults to the Grafana default data source.", "hide": 0, "includeAll": false, "label": "Data source", "multi": false, "name": "DS_PROMETHEUS", "options": [], "query": "prometheus", "refresh": 1, "regex": "", "skipUrlSync": false, "type": "datasource"}
+    ]
+  },
   "time": { "from": "now-1h", "to": "now" },
   "timepicker": {},
   "version": 1

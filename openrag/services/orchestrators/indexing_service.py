@@ -15,19 +15,21 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator, Callable
+from contextlib import AbstractAsyncContextManager, AsyncExitStack, asynccontextmanager, nullcontext
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from core.config.model_endpoints import embedder_fingerprint
 from core.utils.consts import strip_protected_metadata
-from core.utils.exceptions import AuthError, PartitionNotFoundError, ValidationError
+from core.utils.exceptions import AuthError, ConfigError, PartitionNotFoundError, ValidationError
 from core.utils.filename import extract_temporal_fields
 from core.utils.logging import get_logger
 from core.utils.partition_limits import max_partitions_for_user
 
 if TYPE_CHECKING:
     from core.config.root import Settings
+    from core.embeddings.embedder import Embedder
     from core.indexing.dispatcher import IndexingDispatcher
     from core.ports.document_repo import DocumentRepository
     from core.ports.workspace_repo import WorkspaceRepository
@@ -75,6 +77,7 @@ class IndexingService:
         config: Settings | None = None,
         partition_service: PartitionService | None = None,
         preset_service: PresetService | None = None,
+        embedder_factory: Callable[[str], Embedder] | None = None,
     ) -> None:
         self._document_repo = document_repo
         self._workspace_repo = workspace_repo
@@ -82,6 +85,7 @@ class IndexingService:
         self._config = config
         self._partition_service = partition_service
         self._preset_service = preset_service
+        self._embedder_factory = embedder_factory
 
     # ------------------------------------------------------------------
     # Lookups (used by the thin router for its byte-identical guards)
@@ -350,8 +354,46 @@ class IndexingService:
         metadata["file_id"] = target_file_id
         metadata["partition"] = target_partition
         metadata["content_sha256"] = content_sha256
-        await self._pin_partition_embedder(target_partition)
-        await self._dispatcher.copy_file(source_file_id, metadata, source_partition, user)
+        # Admitted like an upload, so a missing target is created and pinned.
+        # The copy itself runs outside the fence, which uploads wait on: it can
+        # re-embed for minutes. It holds the copy lock instead, taken under the
+        # fence, which keeps the target's embedder from changing meanwhile.
+        async with AsyncExitStack() as copying:
+            async with self._partition_admission(target_partition):
+                await self._ensure_partition_exists(target_partition, user)
+                await self._refresh_preset_config_if_stale()
+                await self._pin_partition_embedder(target_partition)
+                destination = self._copy_destination(target_partition)
+                await copying.enter_async_context(self._copy_in_flight(target_partition))
+            await self._dispatcher.copy_file(source_file_id, metadata, source_partition, user, **destination)
+
+    def _copy_in_flight(self, partition: str) -> AbstractAsyncContextManager[None]:
+        copy_in_flight = getattr(self._partition_service, "copy_in_flight", None)
+        return copy_in_flight(partition) if copy_in_flight is not None else nullcontext()
+
+    def _copy_destination(self, partition: str) -> dict[str, Any]:
+        """The vector field and embedder a copy into *partition* must use.
+
+        Raises when they can't be resolved: vectors written to any other field
+        would never be found by the partition's searches.
+        """
+        if self._config is None or self._embedder_factory is None:
+            return {}
+        partition_cfg = self._partition_configs().get(partition)
+        endpoint = self._config.models.embedder.get(partition_cfg.embedder) if partition_cfg else None
+        if endpoint is None or not endpoint.vector_field:
+            raise ConfigError(
+                f"Cannot resolve the embedder of partition '{partition}', so the copy has no vector field to go to.",
+                code="EMBEDDER_ROUTING_UNRESOLVED",
+            )
+        return {
+            "vector_field": endpoint.vector_field,
+            "embedder": self._embedder_factory(partition_cfg.embedder),
+            "embedder_reference": partition_cfg.embedder,
+            # Of the config the embedder above was built from: the catalog write refuses a copy re-embedded
+            # with an endpoint edited meanwhile.
+            "embedder_fingerprint": embedder_fingerprint(endpoint.endpoint, endpoint.model_name, endpoint.extra),
+        }
 
     # ------------------------------------------------------------------
     # Task state
@@ -362,6 +404,9 @@ class IndexingService:
 
     async def get_task_error(self, task_id: str) -> str | None:
         return await self._dispatcher.get_task_error(task_id)
+
+    async def get_task_error_reason(self, task_id: str) -> str | None:
+        return await self._dispatcher.get_task_error_reason(task_id)
 
     async def cancel_task(self, task_id: str) -> bool:
         return await self._dispatcher.cancel_task(task_id)

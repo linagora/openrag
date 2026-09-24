@@ -7,7 +7,8 @@ from core.indexing.contextualize import ChunkContextualizer
 from core.indexing.topic_tags import TopicTagger
 from core.models.chunk import Chunk
 from core.models.document import Document, DocumentType, ImageBlock, ProcessedDocument, TextBlock
-from core.utils.exceptions import InferenceError
+from core.prompts.vlm_prompt_builder import wrap_caption
+from core.utils.exceptions import ConfigError, InferenceError
 from services.workers.pipeline_builder import build_indexing_pipeline
 from services.workers.stages import caption as caption_module
 
@@ -64,7 +65,9 @@ class FakeVectorStore:
         self.calls: list[tuple[list[Chunk], str]] = []
         self.ensure_calls: list[tuple[str, int]] = []
 
-    async def upsert(self, chunks: list[Chunk], collection: str = "default", *, indexed_at=None) -> int:
+    async def upsert(
+        self, chunks: list[Chunk], collection: str = "default", *, indexed_at=None, vector_field=None
+    ) -> int:
         self.calls.append((chunks, collection))
         return len(chunks)
 
@@ -148,6 +151,31 @@ async def test_pipeline_runs_required_stages_in_order_and_keeps_row_object():
     assert row["stored_count"] == 1
     assert row["chunks"][0].embedding == [1.0, 0.0]
     assert "token" not in row
+
+
+@pytest.mark.asyncio
+async def test_a_file_with_no_vector_field_to_index_into_fails_before_it_is_parsed():
+    document = Document(filename="note.txt", text="hello", partition="tenant-a")
+    processed = ProcessedDocument(document_id=document.id, text_blocks=[TextBlock(text="hello")])
+    parser = FakeParser(processed)
+    embedder = FakeEmbedder([[1.0, 0.0]])
+
+    def no_field(name: str) -> str | None:
+        raise ConfigError(f"Embedder '{name}' is not registered")
+
+    pipeline = build_indexing_pipeline(
+        parser=parser,
+        chunker=FakeChunker([Chunk(id="c1", text="hello", partition="tenant-a")]),
+        embedder=embedder,
+        vector_store=FakeVectorStore(),
+        vector_field_resolver=no_field,
+    )
+
+    with pytest.raises(ConfigError, match="'default' is not registered"):
+        await pipeline.run({"document": document, "partition": "tenant-a"})
+
+    assert parser.calls == []
+    assert embedder.calls == []
 
 
 @pytest.mark.asyncio
@@ -842,7 +870,9 @@ class RecordingVectorStore:
             raise self.query_error
         return list(self.existing_ids)
 
-    async def upsert(self, chunks: list[Chunk], collection: str = "default", *, indexed_at=None) -> int:
+    async def upsert(
+        self, chunks: list[Chunk], collection: str = "default", *, indexed_at=None, vector_field=None
+    ) -> int:
         self.events.append("upsert")
         return len(chunks)
 
@@ -1292,3 +1322,267 @@ async def test_enrichment_cancellation_still_aborts_the_pipeline():
         await pipeline.run(row)
 
     assert vector_store.calls == []
+
+
+# ---------------------------------------------------------------------------
+# #846 — the file payload must not outlive the parse
+# ---------------------------------------------------------------------------
+
+
+def _payload_pipeline(parser=None, vector_store=None, **kwargs):
+    document = Document(
+        filename="report.pdf",
+        raw_bytes=b"x" * 4096,
+        content_type=DocumentType.PDF,
+        partition="tenant-a",
+    )
+    processed = ProcessedDocument(document_id=document.id, text_blocks=[TextBlock(text="hello")])
+    pipeline = build_indexing_pipeline(
+        parser=parser or FakeParser(processed),
+        chunker=FakeChunker([Chunk(id="c1", text="hello", partition="tenant-a")]),
+        embedder=FakeEmbedder([[1.0]]),
+        vector_store=vector_store or FakeVectorStore(),
+        **kwargs,
+    )
+    return pipeline, document
+
+
+@pytest.mark.asyncio
+async def test_raw_bytes_are_released_once_parsing_has_consumed_them():
+    """The payload is the whole file. Holding it to the end of ``run()`` kept it
+    resident through embed and store — the slow stages — so up to
+    ``max_tasks_per_worker`` whole files piled up in one worker process."""
+    pipeline, document = _payload_pipeline()
+
+    row = {"document": document, "partition": "tenant-a", "filename": "report.pdf"}
+    await pipeline.run(row)
+
+    assert row["stage"] == "stored", "guard: the pipeline must have run to completion"
+    assert row["document"] is document, "the Document itself stays — only the payload goes"
+    assert document.raw_bytes is None
+
+
+@pytest.mark.asyncio
+async def test_the_parser_still_receives_the_payload():
+    """Guards the test above against passing for the wrong reason: freeing the
+    bytes *before* the parser reads them would also satisfy it."""
+    seen: list[int | None] = []
+
+    class RecordingParser:
+        async def parse(self, document: Document) -> ProcessedDocument:
+            seen.append(len(document.raw_bytes) if document.raw_bytes is not None else None)
+            return ProcessedDocument(document_id=document.id, text_blocks=[TextBlock(text="hello")])
+
+        def supported_types(self) -> list[str]:
+            return [DocumentType.PDF.value]
+
+    pipeline, document = _payload_pipeline(parser=RecordingParser())
+
+    await pipeline.run({"document": document, "partition": "tenant-a", "filename": "report.pdf"})
+
+    assert seen == [4096]
+    assert document.raw_bytes is None
+
+
+@pytest.mark.asyncio
+async def test_a_failed_parse_leaves_the_payload_intact():
+    """``parse_stage`` re-raises, so the release is never reached. The caller
+    still owns the bytes for error reporting or a retry decision."""
+
+    class BrokenParser:
+        async def parse(self, document: Document) -> ProcessedDocument:
+            raise RuntimeError("parser exploded")
+
+        def supported_types(self) -> list[str]:
+            return [DocumentType.PDF.value]
+
+    pipeline, document = _payload_pipeline(parser=BrokenParser())
+
+    with pytest.raises(RuntimeError, match="parser exploded"):
+        await pipeline.run({"document": document, "partition": "tenant-a", "filename": "report.pdf"})
+
+    assert document.raw_bytes is not None
+
+
+@pytest.mark.asyncio
+async def test_reindex_still_resolves_its_delete_target_after_the_release():
+    """The re-index snapshot reads ``row["document"].id`` after the release.
+    Dropping the whole Document instead of its payload would silently skip the
+    snapshot and leave the file's old chunks duplicated (#657)."""
+    vs = RecordingVectorStore(existing_ids=["101", "102"])
+    pipeline, document = _payload_pipeline(vector_store=vs)
+
+    await pipeline.run({"document": document, "partition": "tenant-a", "filename": "report.pdf", "replace": True})
+
+    assert vs.query_filters == [{"partition": "tenant-a", "file_id": document.id}]
+    assert vs.deleted == [["101", "102"]]
+
+
+@pytest.mark.asyncio
+async def test_reindex_falls_back_to_the_documents_own_partition_after_the_release():
+    """``_replace_target`` scopes the delete by ``row["partition"] or
+    document.partition``. The fallback is the branch the release could break
+    without anything noticing: ``indexer_actor`` always sets ``row["partition"]``,
+    so every other test takes the first arm and a cleared ``document.partition``
+    stays invisible.
+
+    An unscoped or wrongly-scoped delete on the re-index path is the dangerous
+    kind, so the defensive arm gets its own coverage rather than being trusted
+    because production does not reach it.
+    """
+    vs = RecordingVectorStore(existing_ids=["201"])
+    pipeline, document = _payload_pipeline(vector_store=vs)
+
+    # No "partition" key: the resolver must read it off the Document.
+    await pipeline.run({"document": document, "filename": "report.pdf", "replace": True})
+
+    assert vs.query_filters == [{"partition": "tenant-a", "file_id": document.id}]
+    assert vs.deleted == [["201"]]
+
+
+# ---------------------------------------------------------------------------
+# #846 — extracted image payloads must not outlive the caption decision
+# ---------------------------------------------------------------------------
+
+
+def _image_pipeline(vlm=None, image_count: int = 6, **kwargs):
+    document = Document(filename="figs.pdf", raw_bytes=b"z" * 512, content_type=DocumentType.PDF, partition="tenant-a")
+    processed = ProcessedDocument(
+        document_id=document.id,
+        text_blocks=[TextBlock(text="body")],
+        images=[ImageBlock(image_bytes=b"\x89PNG" + b"y" * 4096, page_number=i) for i in range(image_count)],
+    )
+    pipeline = build_indexing_pipeline(
+        parser=FakeParser(processed),
+        chunker=FakeChunker([Chunk(id="c1", text="body", partition="tenant-a")]),
+        embedder=FakeEmbedder([[1.0]]),
+        vector_store=FakeVectorStore(),
+        vlm=vlm,
+        **kwargs,
+    )
+    return pipeline, document
+
+
+def _row(document):
+    return {"document": document, "partition": "tenant-a", "filename": "figs.pdf"}
+
+
+@pytest.mark.asyncio
+async def test_image_bytes_are_released_after_captioning():
+    """The only consumer is ``ImageBlock.image_url`` for the VLM request. Held to
+    the end of ``run()`` they survive embed and store — the larger half of the
+    payload ``_release_raw_bytes`` frees."""
+    vlm = FakeVLM()
+    pipeline, document = _image_pipeline(vlm=vlm)
+
+    row = _row(document)
+    await pipeline.run(row)
+
+    assert row["stage"] == "stored", "guard: the pipeline must have run to completion"
+    # ``FakeVLM.calls`` stores the payload, so a count alone would pass against
+    # six empty ones — i.e. against the release running *before* the caption.
+    assert len(vlm.calls) == 6, "guard: the VLM must have been called once per image"
+    assert all(call.startswith(b"\x89PNG") and len(call) > 4096 for call in vlm.calls), (
+        "the VLM received empty payloads — the release ran before captioning"
+    )
+    images = row["processed_document"].images
+    assert len(images) == 6, "guard: the images must survive the release"
+    assert all(image.image_bytes == b"" for image in images)
+
+
+@pytest.mark.asyncio
+async def test_image_bytes_are_released_even_when_captioning_never_runs():
+    """No VLM means nothing was ever going to read them, so holding them is pure
+    waste. This is why the release sits outside the ``vlm is not None`` branch."""
+    pipeline, document = _image_pipeline(vlm=None)
+
+    row = _row(document)
+    await pipeline.run(row)
+
+    assert row["stage"] == "stored"
+    images = row["processed_document"].images
+    # ``all`` is vacuously true over an empty list, so a release that dropped the
+    # ImageBlocks outright would satisfy the payload assertion below.
+    assert len(images) == 6, "guard: the images must survive the release"
+    assert all(image.image_bytes == b"" for image in images)
+
+
+@pytest.mark.asyncio
+async def test_image_bytes_are_released_when_captioning_fails():
+    """``_timed_enrichment`` swallows the failure and indexes the file anyway; a
+    failed caption makes the bytes no more useful than a successful one."""
+    pipeline, document = _image_pipeline(vlm=FailingVLM())
+
+    row = _row(document)
+    await pipeline.run(row)
+
+    assert "caption" in row.get("degraded_stages", {}), "guard: captioning must have failed"
+    images = row["processed_document"].images
+    assert len(images) == 6, "guard: the images must survive the release"
+    assert all(image.image_bytes == b"" for image in images)
+
+
+@pytest.mark.asyncio
+async def test_release_keeps_everything_the_caption_substitution_reads():
+    """Only the payload goes.
+
+    The previous version of this test asserted ``page_number`` and ``caption``
+    and never ran a substitution, so it did not cover the fields
+    ``_release_image_bytes`` actually promises to keep — ``metadata``,
+    ``mime_type`` and ``source_url`` — nor the thing they exist to serve.
+
+    Here each image carries a ``markdown_ref`` that ``_replace_markdown_ref``
+    must find in the text block and swap for the wrapped caption, so the test
+    exercises the substitution its name refers to and fails if the release
+    disturbs ``text_blocks``.
+
+    Note the two halves guard different things. The release runs *after*
+    ``caption_stage``, so clearing ``metadata`` could not un-substitute text
+    that is already written — the text assertions cannot stand in for the field
+    assertions. The per-field checks below are what pin a release that clears
+    more than the payload.
+    """
+    refs = [f"![](figure-{i}.png)" for i in range(3)]
+    document = Document(filename="figs.pdf", raw_bytes=b"z" * 512, content_type=DocumentType.PDF, partition="tenant-a")
+    processed = ProcessedDocument(
+        document_id=document.id,
+        text_blocks=[TextBlock(text=f"intro {refs[0]} middle {refs[1]} tail {refs[2]} end", page_number=1)],
+        images=[
+            ImageBlock(
+                image_bytes=b"\x89PNG" + b"y" * 4096,
+                page_number=i,
+                mime_type="image/jpeg",
+                source_url=f"https://example.com/figure-{i}.png",
+                metadata={"markdown_ref": ref},
+            )
+            for i, ref in enumerate(refs)
+        ],
+    )
+    vlm = FakeVLM()
+    pipeline = build_indexing_pipeline(
+        parser=FakeParser(processed),
+        chunker=FakeChunker([Chunk(id="c1", text="body", partition="tenant-a")]),
+        embedder=FakeEmbedder([[1.0]]),
+        vector_store=FakeVectorStore(),
+        vlm=vlm,
+    )
+
+    row = _row(document)
+    await pipeline.run(row)
+
+    images = row["processed_document"].images
+    assert len(images) == 3, "guard: the images must survive the release"
+    assert all(image.image_bytes == b"" for image in images), "guard: the payload must have been released"
+
+    # The substitution itself — what the surviving metadata is for.
+    text = " ".join(block.text for block in row["processed_document"].text_blocks)
+    assert text.count(wrap_caption("caption")) == 3, "the captions were not substituted into the text"
+    for ref in refs:
+        assert ref not in text, f"{ref} survived unsubstituted"
+
+    # Every field the release docstring promises to keep.
+    assert [image.page_number for image in images] == [0, 1, 2]
+    assert all(image.caption == "caption" for image in images)
+    assert all(image.mime_type == "image/jpeg" for image in images)
+    assert [image.source_url for image in images] == [f"https://example.com/figure-{i}.png" for i in range(3)]
+    assert [image.metadata.get("markdown_ref") for image in images] == refs
