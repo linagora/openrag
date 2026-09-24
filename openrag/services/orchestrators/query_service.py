@@ -228,6 +228,10 @@ _MAP_USER_PROMPT = """Here is a text:
 From this document, identify and comprehensively summarize the information useful for answering the following question:
 {query}"""
 
+# Appended to the contextualizer prompt as a last reminder of the output shape.
+# It must leave every rule-driven field open: an earlier version showed
+# `"temporal_filters": null` as the only form and models copied it literally,
+# so the date rules above it were never applied.
 _QUERY_JSON_HINT = (
     "\n\nClassify the complete latest user message conservatively. Retrieval is the default. "
     "Only a message consisting exclusively of a greeting or salutation, gratitude, farewell, or a question about "
@@ -240,7 +244,8 @@ _QUERY_JSON_HINT = (
     '{"intent": "greeting", "requires_retrieval": false, "query_list": []} for an exclusively casual message '
     "(using gratitude, farewell, or capability instead of greeting when appropriate), or "
     '{"intent": "other", "requires_retrieval": true, '
-    '"query_list": [{"query": "<search query>", "temporal_filters": null}]} for everything else. '
+    '"query_list": [{"query": "<search query>", "temporal_filters": <predicates per the rules above, or null>, '
+    '"date_order": <"newest" | "oldest" | null, per the rules above>}]} for everything else. '
     "If uncertain, use intent other and require retrieval."
 )
 
@@ -628,6 +633,7 @@ class QueryService:
                             TemporalFilterTrace(operator=item.operator, value=item.value)
                             for item in (query.temporal_filters or [])
                         ],
+                        date_order=query.date_order,
                     )
                     for query in queries.query_list
                 ],

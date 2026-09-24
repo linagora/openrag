@@ -682,3 +682,66 @@ def test_persisted_score_in_metadata_never_masquerades_as_this_query_s_score():
 
     unscored = ScoredChunk(id="x", text="t", metadata=dict(stale))
     assert "rerank_score" not in unscored.to_langchain().metadata
+
+
+# --------------------------------------------------------------------------- #
+# date_order — "summarize the last meeting I had"
+# --------------------------------------------------------------------------- #
+
+
+def _dated(cid: str, created_at: str | None) -> Chunk:
+    metadata = {} if created_at is None else {"created_at": created_at}
+    return Chunk(id=cid, text=f"text-{cid}", partition="p1", metadata=metadata)
+
+
+@pytest.mark.asyncio
+async def test_retrieve_docs_newest_order_puts_the_most_recent_document_first():
+    """Relevance picked the candidates (``old`` ranked first); the date decides
+    what the LLM reads first. No Milvus filter is involved."""
+    r = FakeRetriever()
+    r.results_queue = [
+        [_dated("old", "2026-09-04T10:00:00Z"), _dated("new", "2026-09-22T14:51:30Z"), _dated("undated", None)]
+    ]
+    p = RetrieverPipeline(retriever=r)
+    out = await p.retrieve_docs(partition=["p1"], query=Query(query="meeting notes", date_order="newest"))
+    assert [c.id for c in out] == ["new", "old", "undated"]
+    assert r.calls[0]["filter"] is None
+
+
+@pytest.mark.asyncio
+async def test_retrieve_docs_orders_after_reranking_and_before_the_top_k_cut():
+    """A ``top_k`` must keep the newest documents, not the most similar ones —
+    and the reranker's order (reversed by the fake) must not undo the date order."""
+    r = FakeRetriever()
+    r.results_queue = [[_dated("new", "2026-09-22T14:51:30Z"), _dated("old", "2026-09-04T10:00:00Z")]]
+    p = RetrieverPipeline(retriever=r, reranker=FakeReranker())
+    out = await p.retrieve_docs(partition=["p1"], query=Query(query="q", date_order="newest"), top_k=1)
+    assert [c.id for c in out] == ["new"]
+
+
+@pytest.mark.asyncio
+async def test_get_relevant_docs_reapplies_the_order_after_rrf_fusion():
+    """RRF only knows ranks: two sub-queries both ranking ``old`` first would
+    fuse it first. The requested order is re-applied on the fused list."""
+    r = FakeRetriever()
+    r.results_queue = [
+        [_dated("old", "2026-09-04T10:00:00Z"), _dated("new", "2026-09-22T14:51:30Z")],
+        [_dated("old", "2026-09-04T10:00:00Z"), _dated("mid", "2026-09-10T08:00:00Z")],
+    ]
+    p = RetrieverPipeline(retriever=r)
+    sq = SearchQueries(query_list=[Query(query="a", date_order="newest"), Query(query="b", date_order="newest")])
+    out = await p.get_relevant_docs(partition=["p1"], search_queries=sq)
+    assert [c.id for c in out] == ["new", "mid", "old"]
+
+
+@pytest.mark.asyncio
+async def test_get_relevant_docs_without_order_keeps_the_rrf_ranking():
+    r = FakeRetriever()
+    r.results_queue = [
+        [_dated("old", "2026-09-04T10:00:00Z"), _dated("new", "2026-09-22T14:51:30Z")],
+        [_dated("old", "2026-09-04T10:00:00Z")],
+    ]
+    p = RetrieverPipeline(retriever=r)
+    sq = SearchQueries(query_list=[Query(query="a"), Query(query="b")])
+    out = await p.get_relevant_docs(partition=["p1"], search_queries=sq)
+    assert [c.id for c in out] == ["old", "new"]

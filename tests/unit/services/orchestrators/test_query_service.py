@@ -1472,6 +1472,7 @@ async def test_chat_trace_persists_exact_contextualized_query():
                         "value": "2026-01-01T00:00:00+00:00",
                     }
                 ],
+                "date_order": "newest",
             }
         ],
     }
@@ -1494,6 +1495,7 @@ async def test_chat_trace_persists_exact_contextualized_query():
         {
             "query": "exact generated legal query",
             "temporal_filters": [{"operator": ">=", "value": "2026-01-01T00:00:00+00:00"}],
+            "date_order": "newest",
         }
     ]
     assert trace["contextualization"]["intent"] == "other"
@@ -4108,3 +4110,30 @@ async def test_generate_query_reads_the_clock_in_utc(monkeypatch):
     assert "Current date: Wednesday, September 16, 2026, 23:30:00" in system
     assert "- today 2026-09-16T00:00:00+00:00, tomorrow 2026-09-17T00:00:00+00:00" in system
     assert "- last week [2026-09-07, 2026-09-14)" in system
+
+
+# --------------------------------------------------------------------------- #
+# Temporal answers
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_generate_query_keeps_the_contextualizers_date_order():
+    payload = json.dumps(
+        {
+            "intent": "other",
+            "requires_retrieval": True,
+            "query_list": [{"query": "meeting notes", "temporal_filters": None, "date_order": "newest"}],
+        }
+    )
+    svc = _svc(llm=FakeLLM(chat_responses=[payload]), mode="ChatBotRag")
+    out = await svc.generate_query([{"role": "user", "content": "résume le dernier meeting que j'ai eu"}])
+    assert out.query_list[0].date_order == "newest"
+    assert out.date_order == "newest"
+
+
+def test_query_json_hint_leaves_the_temporal_fields_open():
+    """The hint is the last thing the model reads; a literal ``null`` there was
+    copied verbatim and the date rules never fired."""
+    assert '"temporal_filters": null' not in qs._QUERY_JSON_HINT
+    assert '"date_order"' in qs._QUERY_JSON_HINT

@@ -1,7 +1,7 @@
 Produce a JSON object listing sub-queries derived from the user's last message.
 
 Output shape (return this JSON object, nothing else):
-{{"intent": <"greeting"|"gratitude"|"farewell"|"capability"|"other">, "requires_retrieval": <true|false>, "query_list": [ {{"query": "<rewritten search string>", "temporal_filters": <list of predicates | null>}} ]}}
+{{"intent": <"greeting"|"gratitude"|"farewell"|"capability"|"other">, "requires_retrieval": <true|false>, "query_list": [ {{"query": "<rewritten search string>", "temporal_filters": <list of predicates | null>, "date_order": <"newest" | "oldest" | null>}} ]}}
 
 Current date: {current_date}
 {calendar_anchors}
@@ -47,25 +47,41 @@ Date resolution:
 
 For exclusions, split into two sub-queries covering each remaining range. Never negate with a single predicate.
 
+# Date ordering (`date_order` field)
+The user asks for ONE item by its position in time, not for a period:
+- "the last / latest / most recent X", "my newest X", "the last X I had" → `"date_order": "newest"`
+- "the first / earliest / oldest X" → `"date_order": "oldest"`
+Otherwise `null`. "Recent X" / "lately" (a vague plural) is a period: use the recent anchor as a filter, `date_order: null`.
+With a `date_order`, the `query` names the KIND of document ("meeting notes", "invoice", "report") without the words last/latest/first, and `temporal_filters` stays null unless the user ALSO names a period ("the last meeting in March"): the ordering finds the item, a filter would only risk hiding it.
+
 # Examples (Current date = Wednesday, April 15, 2026)
 
 User: "Summary of meeting notes uploaded in the past month"
-{{"intent":"other","requires_retrieval":true,"query_list":[{{"query":"Summary of meeting notes uploaded in the past month","temporal_filters":[{{"field":"created_at","operator":">=","value":"2026-03-15T00:00:00+00:00"}},{{"field":"created_at","operator":"<","value":"2026-04-16T00:00:00+00:00"}}]}}]}}
+{{"intent":"other","requires_retrieval":true,"query_list":[{{"query":"Summary of meeting notes uploaded in the past month","temporal_filters":[{{"field":"created_at","operator":">=","value":"2026-03-15T00:00:00+00:00"}},{{"field":"created_at","operator":"<","value":"2026-04-16T00:00:00+00:00"}}],"date_order":null}}]}}
 
 User: "Sales figures for Product A and Product B"
-{{"intent":"other","requires_retrieval":true,"query_list":[{{"query":"Sales figures for Product A","temporal_filters":null}},{{"query":"Sales figures for Product B","temporal_filters":null}}]}}
+{{"intent":"other","requires_retrieval":true,"query_list":[{{"query":"Sales figures for Product A","temporal_filters":null,"date_order":null}},{{"query":"Sales figures for Product B","temporal_filters":null,"date_order":null}}]}}
 
 User: "Documents from last year except March"
-{{"intent":"other","requires_retrieval":true,"query_list":[{{"query":"Documents from January or February 2025","temporal_filters":[{{"field":"created_at","operator":">=","value":"2025-01-01T00:00:00+00:00"}},{{"field":"created_at","operator":"<","value":"2025-03-01T00:00:00+00:00"}}]}},{{"query":"Documents from April to December 2025","temporal_filters":[{{"field":"created_at","operator":">=","value":"2025-04-01T00:00:00+00:00"}},{{"field":"created_at","operator":"<","value":"2026-01-01T00:00:00+00:00"}}]}}]}}
+{{"intent":"other","requires_retrieval":true,"query_list":[{{"query":"Documents from January or February 2025","temporal_filters":[{{"field":"created_at","operator":">=","value":"2025-01-01T00:00:00+00:00"}},{{"field":"created_at","operator":"<","value":"2025-03-01T00:00:00+00:00"}}],"date_order":null}},{{"query":"Documents from April to December 2025","temporal_filters":[{{"field":"created_at","operator":">=","value":"2025-04-01T00:00:00+00:00"}},{{"field":"created_at","operator":"<","value":"2026-01-01T00:00:00+00:00"}}],"date_order":null}}]}}
 
 User: "Q3 2024 reporting template"
-{{"intent":"other","requires_retrieval":true,"query_list":[{{"query":"Q3 2024 reporting template","temporal_filters":null}}]}}
+{{"intent":"other","requires_retrieval":true,"query_list":[{{"query":"Q3 2024 reporting template","temporal_filters":null,"date_order":null}}]}}
 
 User: "Evolution of the Department of Justice budget between 2020 and 2022"
-{{"intent":"other","requires_retrieval":true,"query_list":[{{"query":"Department of Justice budget in 2020","temporal_filters":null}},{{"query":"Department of Justice budget in 2021","temporal_filters":null}},{{"query":"Department of Justice budget in 2022","temporal_filters":null}}]}}
+{{"intent":"other","requires_retrieval":true,"query_list":[{{"query":"Department of Justice budget in 2020","temporal_filters":null,"date_order":null}},{{"query":"Department of Justice budget in 2021","temporal_filters":null,"date_order":null}},{{"query":"Department of Justice budget in 2022","temporal_filters":null,"date_order":null}}]}}
 
-User: "Latest safety bulletins"
-{{"intent":"other","requires_retrieval":true,"query_list":[{{"query":"Latest safety bulletins","temporal_filters":[{{"field":"created_at","operator":">=","value":"2026-01-15T00:00:00+00:00"}},{{"field":"created_at","operator":"<","value":"2026-04-16T00:00:00+00:00"}}]}}]}}
+User: "Recent safety bulletins"
+{{"intent":"other","requires_retrieval":true,"query_list":[{{"query":"Safety bulletins","temporal_filters":[{{"field":"created_at","operator":">=","value":"2026-01-15T00:00:00+00:00"}},{{"field":"created_at","operator":"<","value":"2026-04-16T00:00:00+00:00"}}],"date_order":null}}]}}
+
+User: "Summarize the last meeting I had"
+{{"intent":"other","requires_retrieval":true,"query_list":[{{"query":"Meeting notes or meeting transcript","temporal_filters":null,"date_order":"newest"}}]}}
+
+User: "What was the first contract we signed with ACME?"
+{{"intent":"other","requires_retrieval":true,"query_list":[{{"query":"Contract signed with ACME","temporal_filters":null,"date_order":"oldest"}}]}}
+
+User: "Résume-moi le dernier compte rendu de réunion de mars"
+{{"intent":"other","requires_retrieval":true,"query_list":[{{"query":"Compte rendu de réunion","temporal_filters":[{{"field":"created_at","operator":">=","value":"2026-03-01T00:00:00+00:00"}},{{"field":"created_at","operator":"<","value":"2026-04-01T00:00:00+00:00"}}],"date_order":"newest"}}]}}
 
 User: "How can you help me?"
 {{"intent":"capability","requires_retrieval":false,"query_list":[]}}
@@ -88,16 +104,16 @@ Chat history:
 user: What is albendazole used for?
 assistant: Albendazole treats lymphatic filariasis and several worm infections. Would you like the recommended dosages?
 user: ok
-{{"intent":"other","requires_retrieval":true,"query_list":[{{"query":"Recommended dosages of albendazole","temporal_filters":null}}]}}
+{{"intent":"other","requires_retrieval":true,"query_list":[{{"query":"Recommended dosages of albendazole","temporal_filters":null,"date_order":null}}]}}
 
 User: "Cool, and what was Product B revenue in Q1?"
-{{"intent":"other","requires_retrieval":true,"query_list":[{{"query":"Product B revenue in Q1","temporal_filters":null}}]}}
+{{"intent":"other","requires_retrieval":true,"query_list":[{{"query":"Product B revenue in Q1","temporal_filters":null,"date_order":null}}]}}
 
 User: "Hello, how can you helpe me?"
 {{"intent":"capability","requires_retrieval":false,"query_list":[]}}
 
 User: "Hello, what was Product A revenue in Q1?"
-{{"intent":"other","requires_retrieval":true,"query_list":[{{"query":"Product A revenue in Q1","temporal_filters":null}}]}}
+{{"intent":"other","requires_retrieval":true,"query_list":[{{"query":"Product A revenue in Q1","temporal_filters":null,"date_order":null}}]}}
 
 User: "Albendazole is used to treat lymphatic filariasis."
-{{"intent":"other","requires_retrieval":true,"query_list":[{{"query":"Albendazole is used to treat lymphatic filariasis.","temporal_filters":null}}]}}
+{{"intent":"other","requires_retrieval":true,"query_list":[{{"query":"Albendazole is used to treat lymphatic filariasis.","temporal_filters":null,"date_order":null}}]}}
