@@ -16,9 +16,10 @@ services:
       retries: 3
 
   minio:
-    # MinIO no longer publishes images (removed from Docker Hub, then quay.io);
-    # linagoraai/minio is an unmodified mirror of the same upstream release.
-    image: linagoraai/minio:RELEASE.2024-12-18T13-15-44Z
+    # SILO, the maintained MinIO fork, pinned by digest. Existing MinIO data
+    # opens in place, but the switch is one-way: see
+    # docs/content/docs/documentation/minio_silo_upgrade.md.
+    image: pgsty/silo:RELEASE.2026-09-16T00-00-00Z@sha256:635197cb9f36d01bee221d34d1c7d7960f6a95c48b0b6c01d99cd13bdae51a46
     environment:
       MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:?Set MINIO_ACCESS_KEY in your .env}
       MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:?Set MINIO_SECRET_KEY in your .env}
