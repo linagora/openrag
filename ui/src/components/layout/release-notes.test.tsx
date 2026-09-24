@@ -35,7 +35,7 @@ describe("ReleaseNotes", () => {
     expect(button.textContent).not.toContain("New");
   });
 
-  it("keeps the migration warning for installations upgrading from before 2.2.1", async () => {
+  it("renders the breaking-change callout from the release data", async () => {
     const user = userEvent.setup();
     const { breakingChange } = releaseNotes;
     expect(breakingChange).toBeTruthy();
@@ -58,6 +58,14 @@ describe("ReleaseNotes", () => {
     render(<ReleaseNotes />);
 
     expect(screen.getByRole("button", { name: triggerLabel }).textContent).not.toContain("New");
+  });
+
+  it("keeps the 2.2.1 notes viewed across the 2.2.2 patch release", () => {
+    localStorage.setItem(LAST_VIEWED_RELEASE_NOTES_KEY, "2.2.1");
+    render(<ReleaseNotes />);
+
+    const button = screen.getByRole("button", { name: "Open Release Notes · v2.2.1" });
+    expect(button.textContent).not.toContain("New");
   });
 
   it("closes with Escape and returns focus to the trigger", async () => {
