@@ -10,7 +10,8 @@ Current results (tests 01 to 10 should pass):
     08 Rejecting an unclosed quote
     09 Allow for an explicit delimiter, ex : CsvParser(delimiter=";")
     10 Error message identifies the malformed record
-    11 ...
+    11 (future tests)
+    ...
 
 The failed tests are not skipped or marked as failed and they describe useful new behaviors.
 Tests call the parser directly, not the upload/dispatcher or chunking pipeline.
@@ -22,7 +23,7 @@ import pytest
 from core.indexing.parsers.tabular.csv_parser import CsvParser
 from core.models.document import Document
 
-# we apply the asyncio marker to every async test in this file
+# we apply the asyncio marker to every async tests (1 to 10) in this file
 pytestmark = pytest.mark.asyncio
 
 
@@ -104,6 +105,5 @@ async def test_10_feature_error_identifies_record():
     # Record 2 spans physical lines 2 and 3 because its quoted cell contains a newline
     # Record 3 has an extra cell and starts on the 4th physical line
     document = Document(text='id,note\n1,"first\nsecond"\n2,extra,cell')
-
     with pytest.raises(ValueError, match=r"(?i)\brecord 3\b"):
         await CsvParser().parse(document)
