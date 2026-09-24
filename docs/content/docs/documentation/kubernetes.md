@@ -103,6 +103,14 @@ counts without exposing partition or preset names.
 
 - Ensure your GPU nodes have the correct NVIDIA drivers and `nvidia` `RuntimeClass` configured.
 
+- The bundled `llm` engine ships at `replicaCount: 0`, so `env.config.BASE_URL` and `MODEL` are
+  empty by default: OpenRAG starts without an LLM and you set one in the admin UI. To use the
+  bundled engine instead, scale it up and set `BASE_URL` to
+  `http://<release>-llm-engine-service/v1/` (the OpenAI-compatible base, ending in `/v1/`). The
+  same applies to any engine you scale to 0: empty its `*_BASE_URL` or point it at the provider
+  you use instead. Otherwise the first boot records a URL with no pods behind it as the default
+  endpoint.
+
 ## Managed PostgreSQL
 
 The chart can run against a database that is provisioned outside OpenRAG, which is the recommended setup on OpenShift or cloud-managed PostgreSQL.

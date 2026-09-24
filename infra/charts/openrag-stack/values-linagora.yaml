@@ -64,7 +64,7 @@ vllm:
     modelSpec:
       - name: "embedder"
         repository: "vllm/vllm-openai"
-        tag: "latest"
+        tag: "v0.30.0"
         modelURL: "Qwen/Qwen3-Embedding-0.6B"
         replicaCount: 1
         requestCPU: 4
@@ -77,7 +77,8 @@ vllm:
           secretKey: HF_TOKEN
         vllmConfig:
           gpuMemoryUtilization: 0.3
-          extraArgs: ["--trust-remote-code", "--task", "embed"]
+          runner: "pooling"
+          extraArgs: ["--trust-remote-code"]
         nodeSelectorTerms:
           - matchExpressions:
               - key: gpu-role
@@ -108,7 +109,7 @@ vllm:
 
       - name: "llm"
         repository: "vllm/vllm-openai"
-        tag: "latest"
+        tag: "v0.30.0"
         modelURL: "RedHatAI/Mistral-Small-3.1-24B-Instruct-2503-quantized.w8a8"
         replicaCount: 0
         requestCPU: 8

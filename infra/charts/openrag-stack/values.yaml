@@ -238,13 +238,26 @@ vllm:
       capabilities:
         drop:
           - ALL
-    # NOTE: the per-model `tag: "latest"` entries below are operator-supplied
-    # serving images — pin each to a specific vLLM release tag (or digest)
-    # before production use for reproducible deploys (see vlm, pinned to v0.11.2).
+    # The tags below are pinned, so a pod restart never changes the engine
+    # version; vllm-stack's default, Always, only re-checks the registry.
+    imagePullPolicy: "IfNotPresent"
+    # Run as uid 10001, the engines get HOME=/, which they cannot write:
+    # FlashInfer's JIT workspace (under HOME) and vLLM's cache (under
+    # XDG_CACHE_HOME, else HOME/.cache) fail at engine start with
+    # "Permission denied: '/.cache'". HF_HOME is vllm-stack's (/tmp, or /data
+    # with pvcStorage).
+    env:
+      - name: HOME
+        value: "/tmp"
+      - name: XDG_CACHE_HOME
+        value: "/tmp/.cache"
+    # The vllm/vllm-openai engines share one pinned version (vllmTag); vlm stays
+    # on the version it was validated with. v0.30.0 rejects `--task`: a pooling
+    # model takes `runner: "pooling"` instead.
     modelSpec:
       - name: "embedder"
         repository: "vllm/vllm-openai"
-        tag: "latest"
+        tag: &vllmTag "v0.30.0"
         modelURL: *embedderModel
         replicaCount: 1
         requestCPU: 4
@@ -257,7 +270,8 @@ vllm:
           secretKey: HF_TOKEN
         vllmConfig:
           gpuMemoryUtilization: 0.3
-          extraArgs: ["--trust-remote-code", "--task", "embed"]
+          runner: "pooling"
+          extraArgs: ["--trust-remote-code"]
         nodeSelectorTerms: []
 
       - name: "whisper"
@@ -280,7 +294,7 @@ vllm:
 
       - name: "llm"
         repository: "vllm/vllm-openai"
-        tag: "latest"
+        tag: *vllmTag
         modelURL: *llmModel
         replicaCount: 0
         requestCPU: 8
@@ -638,8 +652,16 @@ env:
     # TRANSCRIBER_BASE_URL below must stay on .Release.Name. Under ArgoCD, set
     # spec.source.helm.releaseName to match fullnameOverride ("openrag") so
     # these resolve too.
-    BASE_URL: 'http://{{ .Release.Name }}-llm-engine-service/v1/'
-    MODEL: '{{ .Values.vllm.llmModelName }}'
+    #
+    # Empty while the bundled llm engine is at replicaCount 0: a URL would
+    # point at a Service with no pods, and the first boot would seed it as the
+    # default LLM endpoint. Empty, nothing is seeded, and the LLM is set in the
+    # admin UI. When you scale llm up, set:
+    #   BASE_URL: 'http://{{ .Release.Name }}-llm-engine-service/v1/'
+    #   MODEL: '{{ .Values.vllm.llmModelName }}'
+    # Any engine scaled to 0 needs its *_BASE_URL emptied or pointed elsewhere.
+    BASE_URL: ""
+    MODEL: ""
     LLM_SEMAPHORE: "50"
 
     # VLM
