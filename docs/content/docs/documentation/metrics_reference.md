@@ -92,7 +92,7 @@ Supporting metrics:
 | Metric | Type | Labels | Target | Answers |
 |---|---|---|---|---|
 | `openrag_ingest_queue_wait_seconds` | histogram | — | Ray | Admission-to-processing latency |
-| `openrag_ingest_last_parse_completion_timestamp_seconds` | gauge | `pool` | Ray | Progress watchdog — is a parser pool wedged |
+| `openrag_ingest_last_parse_completion_timestamp_seconds` | gauge | `pool` | Ray | Progress watchdog — is a parser pool wedged. Last completed parse, or the pool's first use in the process |
 | `openrag_ingest_clock_skew_events_total` | counter | — | Ray | Queue-wait measurements that came out negative |
 | `openrag_circuit_breaker_state` | gauge | `name` | both | 0 closed, 1 open, 2 half-open, -1 unknown |
 
@@ -153,6 +153,12 @@ evaluation time, and only while work is waiting:
 and on()
 (time() - max(openrag_ingest_last_parse_completion_timestamp_seconds) > 720)
 ```
+
+The stamp is the last completed parse, or the pool's first use in the worker
+process: a pool that fails from its very first parse would otherwise never
+produce the series, and a stall starting at boot would have nothing to age. A
+worker that restarts more often than the threshold re-seeds each time and so
+never ages past it; for a crash-looping worker, pod restarts are the signal.
 
 A "seconds since" gauge would have to be rewritten continuously to stay
 truthful, and would freeze at its last value exactly when a pool wedges — the

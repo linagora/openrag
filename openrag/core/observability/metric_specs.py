@@ -240,7 +240,7 @@ INGEST_QUEUE_WAIT_SECONDS = MetricSpec(
 #: at evaluation, gated on queued work (``metrics_reference.md`` has the query).
 INGEST_LAST_PARSE_TIMESTAMP = MetricSpec(
     name="openrag_ingest_last_parse_completion_timestamp_seconds",
-    description="Unix timestamp of the most recent completed parse, per parser pool",
+    description="Unix timestamp of the most recent completed parse, or of the pool's first use in the process, per parser pool",
     kind="gauge",
     labels=("pool",),
 )
