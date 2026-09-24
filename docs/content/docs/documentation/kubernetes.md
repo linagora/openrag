@@ -496,18 +496,18 @@ up{namespace="<release namespace>", job=~".*(raycluster|postgresql|milvus).*"}
 
 | Dependency | Query | Signal |
 |---|---|---|
-| Ray | `ray_tasks{State="PENDING_NODE_ASSIGNMENT"}` | Tasks no node has the resources to run |
-| Ray | `ray_actors{State="RESTARTING"}` | Actors being restarted. This gauge is sampled, so it catches a crash loop but can miss a single fast restart |
-| Ray | `ray_resources{Name="GPU"}` by `State` (`USED`, `AVAILABLE`) | GPU allocation per node |
-| Ray | `ray_node_mem_used`, `ray_node_cpu_utilization`, `ray_object_store_memory` | Node resources |
+| Ray | `ray_tasks{namespace="<release namespace>", State="PENDING_NODE_ASSIGNMENT"}` | Tasks no node has the resources to run |
+| Ray | `ray_actors{namespace="<release namespace>", State="RESTARTING"}` | Actors being restarted. This gauge is sampled, so it catches a crash loop but can miss a single fast restart |
+| Ray | `ray_resources{namespace="<release namespace>", Name="GPU"}` by `State` (`USED`, `AVAILABLE`) | GPU allocation per node |
+| Ray | `ray_node_mem_used{namespace="<release namespace>"}`, and the same for `ray_node_cpu_utilization` and `ray_object_store_memory` | Node resources |
 | Postgres | `sum by (instance) (pg_stat_activity_count{namespace="<release namespace>"}) / sum by (instance) (pg_settings_max_connections{namespace="<release namespace>"})` | Connections against the server limit, per server |
-| Postgres | `pg_stat_activity_max_tx_duration` | Longest open transaction |
-| Postgres | `pg_database_size_bytes`, `pg_locks_count` | Database size, lock contention |
+| Postgres | `pg_stat_activity_max_tx_duration{namespace="<release namespace>"}` | Longest open transaction |
+| Postgres | `pg_database_size_bytes{namespace="<release namespace>"}`, `pg_locks_count{namespace="<release namespace>"}` | Database size, lock contention |
 | Milvus | `histogram_quantile(0.99, sum by (le, function_name) (rate(milvus_proxy_req_latency_bucket{namespace="<release namespace>"}[5m])))`, and the same over `milvus_proxy_sq_latency_bucket` by `query_type` | p99 latency in milliseconds, per request type and per search/query type |
 | Milvus | `sum(rate(milvus_proxy_insert_vectors_count{namespace="<release namespace>"}[5m]))`, `sum(rate(milvus_proxy_search_vectors_count{namespace="<release namespace>"}[5m]))` | Vectors inserted and searched per second |
-| Milvus | `milvus_querycoord_collection_num` | Loaded collections |
-| Milvus | `milvus_datacoord_segment_num` by `segment_state`, `milvus_datacoord_compaction_task_num` | Segment and compaction backlog |
-| Milvus | `process_resident_memory_bytes` by `component` | Memory per component |
+| Milvus | `milvus_querycoord_collection_num{namespace="<release namespace>"}` | Loaded collections |
+| Milvus | `milvus_datacoord_segment_num{namespace="<release namespace>"}` by `segment_state`, `milvus_datacoord_compaction_task_num{namespace="<release namespace>"}` | Segment and compaction backlog |
+| Milvus | `sum by (component) (process_resident_memory_bytes{namespace="<release namespace>", component!=""})` | Memory per component |
 
 ### Not covered
 
