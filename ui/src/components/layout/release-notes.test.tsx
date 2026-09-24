@@ -35,7 +35,7 @@ describe("ReleaseNotes", () => {
     expect(button.textContent).not.toContain("New");
   });
 
-  it("renders the breaking-change callout from the release data", async () => {
+  it("keeps the migration warning for installations upgrading from before 2.2.1", async () => {
     const user = userEvent.setup();
     const { breakingChange } = releaseNotes;
     expect(breakingChange).toBeTruthy();

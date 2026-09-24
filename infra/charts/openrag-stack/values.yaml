@@ -99,7 +99,7 @@ ray:
     registry: "ghcr.io"
     repository: "linagora/openrag-ray"
     # Pin to a release tag (ideally a digest) for reproducible deploys.
-    tag: "v2.2.1"
+    tag: "v2.2.2"
   resources:
     head:
       requests:
@@ -392,7 +392,7 @@ adminUi:
     repository: "linagoraai/openrag-admin-ui"
     # Pin to a release tag (ideally a digest) for reproducible deploys. Must be a
     # build from infra/docker/ui.Dockerfile (nginx-unprivileged, listens :8080).
-    tag: "v2.2.1"
+    tag: "v2.2.2"
     pullPolicy: IfNotPresent
   replicaCount: 1
   service:
@@ -449,7 +449,7 @@ openrag:
     registry: ""
     repository: "linagoraai/openrag"
     # Pin to a release tag (ideally a digest) for reproducible deploys.
-    tag: "v2.2.1"
+    tag: "v2.2.2"
     pullPolicy: IfNotPresent
   service:
     type: ClusterIP
@@ -616,6 +616,8 @@ env:
 
     # App
     APP_PORT: "8080"
+    # Optional white-label name for casual introductions; empty is neutral.
+    ASSISTANT_NAME: ""
     # Requires ray.enabled=true (a separate RayCluster with its own "serve" port
     # 80 exposed on {{ fullname }}-raycluster-head-svc — see templates/openrag.yaml
     # Ingress). With the default ray.enabled=false, the app is expected to run

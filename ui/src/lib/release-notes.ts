@@ -18,33 +18,22 @@ export interface Release {
  * dialog content are derived from it.
  */
 export const releaseNotes: Release = {
-  version: "2.2.1",
-  date: "2026-09-08",
+  version: "2.2.2",
+  date: "2026-09-24",
   summary:
-    "OpenRAG 2.2.1 expands retrieval, indexing, chunking, and speech-to-text capabilities, while improving administration and release visibility.",
+    "OpenRAG 2.2.2 restores document retrieval for factual chat requests that could previously receive an answer without sources. Casual introductions are neutral by default and can use a deployment-specific assistant name.",
 
   newFeatures: [
-    "Scope chat retrieval to specific indexed files by providing attachment file IDs, so answers can focus only on the selected documents.",
-    "Provide a custom system prompt with chat requests while preserving OpenRAG's core RAG instructions and security rules.",
-    "Receive an optional callback when asynchronous file indexing completes or fails, with support for authenticated callback endpoints.",
-    "Choose the new structured_section chunking strategy from indexation presets to keep document sections, headings, tables, and captions together.",
-    "Register, validate, and choose OpenAI-compatible STT endpoints such as Whisper or MOSS directly from Model Endpoints.",
-    "Create and manage ASR transcription prompts from the prompt library without restarting OpenRAG.",
-    "Set an STT endpoint and transcription prompt per indexation preset, allowing different partitions to use different speech-to-text configurations.",
-    "Normalize MOSS diarized transcription output into cleaner speaker-aware text suitable for indexing and retrieval.",
-    "See active indexing Jobs directly from the sidebar with a live job-count indicator.",
-    "Discover recently introduced capabilities through temporary New badges that automatically expire after their release window.",
-    "Read the highlights and migration requirements for the current OpenRAG release from the new Release Notes dialog in the Admin Console.",
-    "BM25 lexical retrieval is now case-insensitive, improving matches when query and document capitalization differ.",
-    "New STT, transcription prompt, MOSS speaker-aware, preset, and Jobs capabilities are highlighted in the Admin Console for easier discovery.",
+    "Factual and ambiguous chat requests now search indexed documents by default, even when an older stored contextualizer prompt returns no search query. Text completions keep their existing opt-in behavior.",
+    "Greetings can introduce your assistant using ASSISTANT_NAME. Without it, the introduction contains no vendor name.",
   ],
 
   breakingChange: {
-    title: "Milvus 3.0 migration required",
+    title: "Milvus 3.0 migration for older installations",
     description:
-      "OpenRAG 2.2.1 requires Milvus 3.0. Existing Milvus 2.x deployments must be migrated before upgrading. The BM25 analyzer has also changed to support case-insensitive lexical search and requires the corresponding vector database schema migration.",
+      "OpenRAG 2.2.2 adds no new migration. Installations upgrading directly from 2.2.0 or earlier still need the Milvus 3.0 and BM25 schema migration introduced in 2.2.1.",
     action:
-      "Back up your Milvus data and follow the Milvus migration guide, including the required schema migrations, before starting OpenRAG 2.2.1.",
+      "Back up Milvus and complete the 2.2.1 migration guide before starting 2.2.2. No additional migration is needed when upgrading from 2.2.1.",
   },
 };
 
