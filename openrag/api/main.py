@@ -65,7 +65,7 @@ from core.config import load_config
 from core.utils.banner import print_startup_banner
 from core.utils.logging import get_logger
 from di.container import ServiceContainer
-from di.providers import set_container
+from di.providers import get_container, set_container
 from di.workers import ensure_worker_bootstrap
 from dotenv import dotenv_values
 from fastapi import Depends, FastAPI
@@ -287,7 +287,10 @@ app.openapi = custom_openapi
 app.add_middleware(RateLimitMiddleware)
 app.add_middleware(
     AuthMiddleware,
-    get_auth_service=lambda request: request.app.state.container.auth_service,
+    # Resolved through `get_container`, not off `app.state.container` directly:
+    # the boot guard sets that to None on a degraded start, and attribute access
+    # on None raises AttributeError, which no guard below catches (#937).
+    get_auth_service=lambda request: get_container(request).auth_service,
 )
 app.add_middleware(RequestIdMiddleware)
 app.add_middleware(RequestTimeoutMiddleware)
