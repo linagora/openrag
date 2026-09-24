@@ -55,10 +55,30 @@ from core.observability.metric_specs import (
     MetricSpec,
 )
 
-#: Attribute ``make_component_factory`` stamps the endpoint name onto, read back
-#: by ``services/inference/_metrics.resolve_provider``. Shared so the two sides
+#: Attribute ``set_provider_name`` stamps the endpoint name onto, read back by
+#: ``services/inference/_metrics.resolve_provider``. Shared so the two sides
 #: cannot drift apart on a typo.
 PROVIDER_NAME_ATTR = "openrag_provider_name"
+
+#: The name a client built from the static settings blocks (``embedder``,
+#: ``llm``, ``reranker``) is labelled by — the same endpoint the registry
+#: factories resolve ``"default"`` to.
+DEFAULT_PROVIDER = "default"
+
+
+def set_provider_name[C](instance: C, name: str) -> C:
+    """Label ``instance``'s inference metrics with the endpoint's registry name.
+
+    Every place that builds an inference client must call this: a client built
+    without it records under the fixed ``unconfigured`` bucket, which is how the
+    whole indexing side — embed, VLM, contextualization — once reported under a
+    single provider nobody could alert on. Set after construction rather than
+    passed in: every client splats unknown kwargs into the outbound request
+    body, the trap ``batch_size`` fell into (#712).
+    """
+    setattr(instance, PROVIDER_NAME_ATTR, name)
+    return instance
+
 
 #: Fixed bucket for a call that targeted a client-supplied endpoint — a single
 #: constant, never the override's URL.
@@ -242,9 +262,11 @@ def record_usage_from_response(response: object, *, operation: str) -> None:
 
 __all__ = [
     "CLIENT_OVERRIDE_PROVIDER",
+    "DEFAULT_PROVIDER",
     "PROVIDER_NAME_ATTR",
     "record_circuit_breaker_state",
     "record_inference",
     "record_tokens",
     "record_usage_from_response",
+    "set_provider_name",
 ]

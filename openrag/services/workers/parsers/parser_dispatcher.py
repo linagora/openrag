@@ -21,6 +21,7 @@ from typing import Any
 from core.config.model_endpoints import ModelEndpointConfig
 from core.indexing.parsers.document_parser import DocumentParser
 from core.models.document import Document, DocumentType, ProcessedDocument
+from core.observability.inference_metrics import DEFAULT_PROVIDER, set_provider_name
 from core.observability.ray_metrics import record_parse_completion
 from core.utils.logging import get_logger
 
@@ -349,12 +350,15 @@ def build_caption_vlm(config: Any) -> Any | None:
     vlm_cfg = config.vlm
     if not getattr(vlm_cfg, "base_url", ""):
         return None
-    return _build_vlm(
-        vlm_cfg.base_url,
-        vlm_cfg.model,
-        vlm_cfg.api_key,
-        vlm_cfg.timeout,
-        vlm_cfg.enable_thinking,
+    return set_provider_name(
+        _build_vlm(
+            vlm_cfg.base_url,
+            vlm_cfg.model,
+            vlm_cfg.api_key,
+            vlm_cfg.timeout,
+            vlm_cfg.enable_thinking,
+        ),
+        DEFAULT_PROVIDER,
     )
 
 
