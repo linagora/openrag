@@ -824,6 +824,10 @@ def test_a_ceiling_failure_reaches_the_parent_as_memory_error(monkeypatch, conve
     is pinned by ``_as_production_raises_it``.
     """
     monkeypatch.setattr(marker_workers, "PdfConverter", converter)  # inherited by the fork
+    # On a GPU host the forked child cannot touch CUDA, so the cleanup in
+    # _process_pdf's `finally` would raise and replace the MemoryError.
+    # Production starts these children with spawn, where that doesn't happen.
+    monkeypatch.setattr(marker_workers.torch.cuda, "is_available", lambda: False)
     ctx = multiprocessing.get_context("fork")
     with concurrent.futures.ProcessPoolExecutor(max_workers=1, mp_context=ctx) as pool:
         with pytest.raises(MemoryError):
