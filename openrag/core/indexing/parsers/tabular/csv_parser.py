@@ -43,52 +43,53 @@ class CsvParser(DocumentParser):
         return await asyncio.to_thread(self._parse, document) # public method used by my tests, work is given to parse to keep synchronous work off the event loop
 
     def _parse(self, document: Document) -> ProcessedDocument:
-        # Get the text from the document
+        # opening a text stream instead of loading the entire file from disk (handling large files)
         if document.source_path is not None:
-            text = Path(document.source_path).read_bytes().decode("utf-8-sig")
+            stream = Path(document.source_path).open("r", encoding="utf-8-sig", newline="", ) # open the file with utf-8-sig encoding
         elif document.text is not None:
-            text = document.text
+            stream = io.StringIO(document.text.removeprefix("\ufeff"), newline="", ) # remove BOM if present
         else:
-            text = (document.raw_bytes or b"").decode("utf-8-sig")
+            stream = io.TextIOWrapper(io.BytesIO(document.raw_bytes or b""), encoding="utf-8-sig", newline="", )
 
-        text = text.removeprefix("\ufeff") #remove BOM if present using removeprefix
-
-        # Then read CSV records (skipping blanks)
-        with io.StringIO(text, newline="") as stream:
-            rows = []
-            for row in csv.reader(stream, delimiter=self.delimiter, strict=True):
-                if row: # removes empty lists but keeps empty cells
-                    rows.append(row)
         blocks = []
 
-        if rows:
-            # use the first record as the header
-            headers = rows[0]
-            data_rows = rows[1:]
-
-            # check that each record has the expected width
-            for record_number, row in enumerate(data_rows, start=2):
-                if len(row) != len(headers): # in case ofmismatched number of cells, we raise a ValueError
-                    raise ValueError(
-                        f"Record {record_number}: "
-                        f"Expected {len(headers)} cells, got {len(row)}"
-                    )
-
-            # render a Markdown table
-            lines = [
-                markdown_row(headers),
-                markdown_row(["---"] * len(headers)), # markdown requires a separator row after the header
-            ]
-            lines.extend(markdown_row(row) for row in data_rows)
-
-            blocks.append(
-                TextBlock(
-                    text="\n".join(lines),
-                    block_type="table",
-                )
+        with stream:
+            reader = csv.reader(
+                stream,
+                delimiter=self.delimiter,
+                strict=True,
             )
 
-        # finally return OpenRAG standard parser output
+            # the generator skips blank records without storing every record.
+            records = (row for row in reader if row)
+
+            # consuming the first nonblank record as the header.
+            headers = next(records, None)
+
+            if headers is not None:
+                lines = [
+                    markdown_row(headers),
+                    markdown_row(["---"] * len(headers)), # markdown table separator row
+                ]
+
+                # validate and render each record immediately
+                for record_number, row in enumerate(records, start=2):
+                    if len(row) != len(headers):
+                        raise ValueError(
+                            f"Record {record_number}: "
+                            f"Expected {len(headers)} cells, got {len(row)}"
+                        )
+
+                    lines.append(markdown_row(row))
+
+                blocks.append(
+                    TextBlock(
+                        text="\n".join(lines),
+                        block_type="table",
+                        metadata={},
+                    )
+                )
+
         return ProcessedDocument(
             document_id=document.id,
             text_blocks=blocks,
