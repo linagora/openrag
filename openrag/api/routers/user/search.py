@@ -19,6 +19,12 @@ from api.dependencies.auth import (
 )
 from api.dependencies.files import validate_file_id
 from api.dependencies.retrieval_diagnostics import get_retrieval_diagnostics_guard
+from api.routers.user.chat import check_tokens_limit
+from api.schemas.user.chat import OpenAIChatCompletionRequest, OpenAIMessage
+from api.schemas.user.retrieval_diagnostics import (
+    RetrievalDiagnosticRequest,
+    RetrievalDiagnosticResponse,
+)
 from core.retrieval.trace import (
     TRACE_FILE_SCOPE_KIND_KEY,
     RetrievalDiagnosticsContext,
@@ -28,6 +34,8 @@ from core.retrieval.trace import (
 from core.utils.filter_validation import validate_search_filter
 from core.utils.logging import get_logger
 from di.providers import (
+    get_config,
+    get_query_service,
     get_retrieval_service,
     get_retrieval_snapshot_service,
     get_workspace_service,
@@ -191,6 +199,49 @@ async def retrieval_snapshot(
 ):
     await diagnostics_guard.authorize(partition_viewer)
     return await service.snapshot(partition, include_document_ids=include_document_ids)
+
+
+@router.post(
+    "/partition/{partition}/diagnostics",
+    response_model=RetrievalDiagnosticResponse,
+    description="Run administrator-only retrieval diagnostics without answer generation.",
+)
+async def retrieval_diagnostics(
+    request: Request,
+    partition: str,
+    payload: RetrievalDiagnosticRequest,
+    partition_viewer=Depends(require_partition_viewer),
+    service=Depends(get_query_service),
+    config=Depends(get_config),
+    diagnostics_guard=Depends(get_retrieval_diagnostics_guard),
+):
+    await diagnostics_guard.authorize(partition_viewer)
+    token_request = OpenAIChatCompletionRequest(
+        messages=[OpenAIMessage(**message.model_dump()) for message in payload.messages],
+        max_tokens=config.rag.max_contextualized_query_len,
+    )
+    check_tokens_limit(
+        token_request,
+        logger.bind(endpoint="/search/partition/{partition}/diagnostics"),
+        config,
+        partitions=[partition],
+    )
+    request_id = getattr(request.state, "request_id", None) or request.headers.get("X-Request-ID")
+    trace = await service.diagnose_retrieval(
+        partitions=[partition],
+        messages=[message.model_dump() for message in payload.messages],
+        query_mode=payload.query_mode,
+        top_k=payload.top_k,
+        similarity_threshold=payload.similarity_threshold,
+        disable_reranker=payload.disable_reranker,
+        disable_expansion=payload.disable_expansion,
+        request_id=request_id,
+    )
+    return RetrievalDiagnosticResponse(
+        partition=partition,
+        query_mode=payload.query_mode,
+        retrieval_trace=trace,
+    )
 
 
 @router.get(
