@@ -13,14 +13,16 @@
 > ```
 
 ```
-(openrag_ingest_tasks{state="QUEUED"} > 0)
+max by (state) (openrag_ingest_tasks{state="QUEUED"}) > 0
+and on()
+max(min_over_time(openrag_ingest_tasks{state="QUEUED"}[720s])) > 0
 and on()
 (time() - max(openrag_ingest_last_parse_completion_timestamp_seconds) > 720)
 ```
 
 ## What it means
 
-Documents are queued and **no parser pool has completed a parse for 12 minutes**.
+Documents have been queued for 12 minutes and **no parser pool has completed a parse in that time**.
 Uploads are still being accepted and acknowledged; none of them are being indexed. This
 is user-visible as "I uploaded it and it never appeared in search".
 

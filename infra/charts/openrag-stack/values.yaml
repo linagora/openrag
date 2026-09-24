@@ -117,6 +117,7 @@ monitoring:
       ingestVolumeFloor: ""    # 5 — terminal documents in 15m before judging the ratio
       backlogDepth: ""         # 50 — queue depth below which growth is not worth alerting on
       inferenceErrorRatio: ""  # 0.5 — share of a provider's calls erroring or timing out
+      inferenceVolumeFloor: "" # 5 — calls to a provider in 10m before judging its ratio
     # How long a condition must hold before the alert fires, keyed by alert
     # name. Shortening one trades false positives for detection speed; each
     # default was measured against the failure shape it has to tolerate, so

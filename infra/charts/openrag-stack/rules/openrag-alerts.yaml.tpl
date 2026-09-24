@@ -16,7 +16,7 @@ nothing to say so. Prometheus duration literals are allowed because `12m` and
 it renders the default, and the operator believes the override took effect.
 */}}
 {{- $cfg := .Values.monitoring.prometheusRule }}
-{{- $t := dict "ingestIdleSeconds" 720 "ingestFailureRatio" 0.25 "ingestVolumeFloor" 5 "backlogDepth" 50 "inferenceErrorRatio" 0.5 }}
+{{- $t := dict "ingestIdleSeconds" 720 "ingestFailureRatio" 0.25 "ingestVolumeFloor" 5 "backlogDepth" 50 "inferenceErrorRatio" 0.5 "inferenceVolumeFloor" 5 }}
 {{- range $name, $value := ($cfg.thresholds | default dict) }}
 {{- if not (hasKey $t $name) }}
 {{- fail (printf "monitoring.prometheusRule.thresholds.%s is not a threshold in this chart, so setting it would do nothing. Known thresholds: %s" $name (join ", " (keys $t | sortAlpha))) }}
@@ -43,6 +43,12 @@ it renders the default, and the operator believes the override took effect.
 {{- /* The same values in words, for the annotations. A bare number of idle
    seconds reads as minutes when it divides evenly; anything more exotic than a
    single-unit duration is quoted as written. */}}
+{{- /* The idle threshold again, as a range for min_over_time: a bare number of
+   seconds becomes "<n>s", a duration literal is used as written. */}}
+{{- $idleRange := toString $t.ingestIdleSeconds }}
+{{- if regexMatch `^[0-9]+(\.[0-9]+)?$` $idleRange }}
+{{- $idleRange = printf "%ds" (int (float64 $idleRange)) }}
+{{- end }}
 {{- $idle := toString $t.ingestIdleSeconds }}
 {{- if regexMatch `^[0-9]+$` $idle }}
 {{- $n := atoi $idle }}
@@ -109,8 +115,19 @@ groups:
         # uploads today), every pool idle while work is queued is not. If no
         # pool has *ever* completed a parse the gauge is absent and this cannot
         # fire — OpenRagBacklogGrowing covers a queue that rises from zero.
+        #
+        # The queue must have been non-empty for the whole idle window, not just
+        # now. After a quiet night the last parse is hours old, so "queued now"
+        # alone paged two minutes into the next batch, before its first parse
+        # could finish. Waiting the idle window keeps the meaning — work waited
+        # that long and nothing finished — and a real stall still fires then.
+        #
+        # max by (state): every API replica exports the same count, read from
+        # the jobs table, and one series per pod raised one alert per pod.
         expr: |
-          (openrag_ingest_tasks{state="QUEUED"} > 0)
+          max by (state) (openrag_ingest_tasks{state="QUEUED"}) > 0
+          and on()
+          max(min_over_time(openrag_ingest_tasks{state="QUEUED"}[{{ $idleRange }}])) > 0
           and on()
           (time() - max(openrag_ingest_last_parse_completion_timestamp_seconds) > {{ $t.ingestIdleSeconds }})
         for: {{ $for.OpenRagIngestStalled }}
@@ -179,17 +196,20 @@ groups:
         # are the same shape. The signal that separates them is the age of the
         # oldest pending item, which this deployment cannot measure.
         #
-        # END OF LIFE: this rule reads the in-process queue
-        # (TaskStateManager). Once ingestion sits behind a broker the backlog
+        # max by (state): every API replica exports the same count, read from
+        # the jobs table, so per-pod series raised one alert per pod.
+        #
+        # END OF LIFE: this rule reads the backlog the API counts from the
+        # durable jobs table. Once ingestion sits behind a broker the backlog
         # lives there, openrag_ingest_tasks collapses to "work already pulled"
         # — bounded by prefetch, near-constant however deep the real queue is —
         # and this rule stops measuring anything. Retire it then in favour of
         # broker-native signals (queue depth, consumer lag, oldest unacked
         # message age); do not retune it.
         expr: |
-          openrag_ingest_tasks{state="QUEUED"} > {{ $t.backlogDepth }}
+          max by (state) (openrag_ingest_tasks{state="QUEUED"}) > {{ $t.backlogDepth }}
           and
-          deriv(openrag_ingest_tasks{state="QUEUED"}[5m]) > 0
+          max by (state) (deriv(openrag_ingest_tasks{state="QUEUED"}[5m])) > 0
         for: {{ $for.OpenRagBacklogGrowing }}
         labels:
           severity: warning
@@ -247,12 +267,19 @@ groups:
         # breaker's `name`, which is a code-defined kind; the two were once
         # projected onto one label and that made the annotation resolve to a
         # value that did not exist in the registry.
+        #
+        # The volume floor stops a single failed call on a quiet instance from
+        # reading as 100% and paging: 1 timeout in 10 minutes is not "down".
+        # A provider hard down under low traffic still fires once it has seen
+        # the floor's worth of calls; the breaker needs 50 failures to open.
         expr: |
           (
             sum by (provider) (rate(openrag_inference_requests_total{outcome=~"error|timeout"}[10m]))
             /
             sum by (provider) (rate(openrag_inference_requests_total[10m]))
           ) > {{ $t.inferenceErrorRatio }}
+          and
+          sum by (provider) (increase(openrag_inference_requests_total[10m])) >= {{ $t.inferenceVolumeFloor }}
         for: {{ $for.OpenRagInferenceProviderDown }}
         labels:
           severity: critical

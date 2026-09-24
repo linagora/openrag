@@ -427,3 +427,118 @@ tests:
       - eval_time: 10m
         alertname: OpenRagTargetDown
         exp_alerts: []
+
+  # ── Found by audit, 24 Sep ───────────────────────────────────────────────
+
+  - name: "the first batch after a quiet night is not a stall while its first parse runs"
+    # Last parse at t=0, nothing for two hours, 20 documents arrive at 120m and
+    # the first parse finishes at 124m. "Queued now" alone paged at 123m.
+    interval: 1m
+    input_series:
+      - series: 'openrag_ingest_tasks{state="QUEUED"}'
+        values: "0x119 20x4 19x10"
+      - series: 'openrag_ingest_last_parse_completion_timestamp_seconds{pool="marker"}'
+        values: "0x123 7440x10"
+    alert_rule_test:
+      - eval_time: 123m
+        alertname: OpenRagIngestStalled
+        exp_alerts: []
+      - eval_time: 133m
+        alertname: OpenRagIngestStalled
+        exp_alerts: []
+
+  - name: "a batch after a quiet night that never completes a parse still fires"
+    # Same arrival, no parse ever finishes: work has waited the whole idle
+    # window with nothing done, so it fires 12m after arrival plus `for`.
+    interval: 1m
+    input_series:
+      - series: 'openrag_ingest_tasks{state="QUEUED"}'
+        values: "0x119 20x30"
+      - series: 'openrag_ingest_last_parse_completion_timestamp_seconds{pool="marker"}'
+        values: "0x150"
+    alert_rule_test:
+      - eval_time: 130m
+        alertname: OpenRagIngestStalled
+        exp_alerts: []
+      - eval_time: 135m
+        alertname: OpenRagIngestStalled
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              state: QUEUED
+            exp_annotations:
+              summary: "Ingestion is stalled — documents are queued and nothing is completing"
+              description: "20 task(s) are QUEUED and no parser pool has completed a parse for over 12 minutes. Uploads are being accepted and never indexed."
+              runbook_url: "https://github.com/linagora/openrag/blob/main/docs/deployment/runbooks/OpenRagIngestStalled.md"
+
+  - name: "one failed call on a quiet instance is not a provider outage"
+    interval: 1m
+    input_series:
+      - series: 'openrag_inference_requests_total{provider="embedder-main",operation="embed",outcome="timeout"}'
+        values: "0 0 1x20"
+      - series: 'openrag_inference_requests_total{provider="embedder-main",operation="embed",outcome="success"}'
+        values: "0x22"
+    alert_rule_test:
+      - eval_time: 9m
+        alertname: OpenRagInferenceProviderDown
+        exp_alerts: []
+
+  - name: "a provider down under low traffic still fires once the floor is met"
+    # One call a minute, every one failing: ~10 in the window, above the floor
+    # of 5, and far below the breaker's 50 consecutive failures.
+    interval: 1m
+    input_series:
+      - series: 'openrag_inference_requests_total{provider="llm-main",operation="chat",outcome="error"}'
+        values: "0+1x30"
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: OpenRagInferenceProviderDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              provider: llm-main
+            exp_annotations:
+              summary: "Inference provider llm-main is failing more than 50% of its calls"
+              description: "More than 50% of the calls to registry endpoint llm-main are returning errors or timing out. Chat and any indexing stage that depends on it will fail."
+              runbook_url: "https://github.com/linagora/openrag/blob/main/docs/deployment/runbooks/OpenRagInferenceProviderDown.md"
+
+  - name: "two API replicas raise one backlog alert, not one each"
+    # Every replica exports the same count, read from the jobs table.
+    interval: 1m
+    input_series:
+      - series: 'openrag_ingest_tasks{state="QUEUED",pod="openrag-a"}'
+        values: "0+5x60"
+      - series: 'openrag_ingest_tasks{state="QUEUED",pod="openrag-b"}'
+        values: "0+5x60"
+    alert_rule_test:
+      - eval_time: 45m
+        alertname: OpenRagBacklogGrowing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              state: QUEUED
+            exp_annotations:
+              summary: "Indexing backlog is growing faster than it drains"
+              description: "The QUEUED task count has risen continuously for 25 minutes and now stands at 225. Ingestion capacity is below the arrival rate."
+              runbook_url: "https://github.com/linagora/openrag/blob/main/docs/deployment/runbooks/OpenRagBacklogGrowing.md"
+
+  - name: "two API replicas raise one stall alert, not one each"
+    interval: 1m
+    input_series:
+      - series: 'openrag_ingest_tasks{state="QUEUED",pod="openrag-a"}'
+        values: "3+0x40"
+      - series: 'openrag_ingest_tasks{state="QUEUED",pod="openrag-b"}'
+        values: "3+0x40"
+      - series: 'openrag_ingest_last_parse_completion_timestamp_seconds{pool="marker"}'
+        values: "0+0x40"
+    alert_rule_test:
+      - eval_time: 16m
+        alertname: OpenRagIngestStalled
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              state: QUEUED
+            exp_annotations:
+              summary: "Ingestion is stalled — documents are queued and nothing is completing"
+              description: "3 task(s) are QUEUED and no parser pool has completed a parse for over 12 minutes. Uploads are being accepted and never indexed."
+              runbook_url: "https://github.com/linagora/openrag/blob/main/docs/deployment/runbooks/OpenRagIngestStalled.md"

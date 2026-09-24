@@ -300,9 +300,11 @@ def test_a_zero_threshold_is_honoured_not_replaced_by_the_default() -> None:
     rules = _render(
         "monitoring.prometheusRule.thresholds.backlogDepth=0",
         "monitoring.prometheusRule.thresholds.ingestVolumeFloor=0",
+        "monitoring.prometheusRule.thresholds.inferenceVolumeFloor=0",
     )
-    assert 'openrag_ingest_tasks{state="QUEUED"} > 0\n' in rules["OpenRagBacklogGrowing"]["expr"]
+    assert 'max by (state) (openrag_ingest_tasks{state="QUEUED"}) > 0\n' in rules["OpenRagBacklogGrowing"]["expr"]
     assert rules["OpenRagIngestFailureRate"]["expr"].rstrip().endswith(">= 0")
+    assert rules["OpenRagInferenceProviderDown"]["expr"].rstrip().endswith(">= 0")
 
 
 def test_an_unknown_threshold_key_is_refused() -> None:

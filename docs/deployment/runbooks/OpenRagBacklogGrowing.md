@@ -13,8 +13,8 @@
 > ```
 
 ```
-openrag_ingest_tasks{state="QUEUED"} > 50
-and deriv(openrag_ingest_tasks{state="QUEUED"}[5m]) > 0
+max by (state) (openrag_ingest_tasks{state="QUEUED"}) > 50
+and max by (state) (deriv(openrag_ingest_tasks{state="QUEUED"}[5m])) > 0
 ```
 
 ## What it means

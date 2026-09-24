@@ -4,7 +4,7 @@
 
 > **The numbers on this page are defaults; your deployment may differ.** Alert
 > thresholds and `for` durations are chart values, because they depend on the SLO,
-> the corpus size and the query volume of the deployment they run in — here `thresholds.inferenceErrorRatio` (default 0.5) and `for.OpenRagInferenceProviderDown` (default 5m).
+> the corpus size and the query volume of the deployment they run in — here `thresholds.inferenceErrorRatio` (default 0.5), `thresholds.inferenceVolumeFloor` (default 5) and `for.OpenRagInferenceProviderDown` (default 5m).
 > If the behaviour here does not match what you are seeing, read the rule that is
 > actually loaded:
 >
@@ -15,12 +15,14 @@
 ```
 sum by (provider) (rate(openrag_inference_requests_total{outcome=~"error|timeout"}[10m]))
 / sum by (provider) (rate(openrag_inference_requests_total[10m])) > 0.5
+and sum by (provider) (increase(openrag_inference_requests_total[10m])) >= 5
 ```
 
 ## What it means
 
 More than half of the calls to one registry endpoint are returning errors or timing
-out — half being the default threshold.
+out — half being the default threshold — over at least 5 calls in 10 minutes, so a single
+failed call on a quiet instance does not page.
 Chat answers and any indexing stage depending on it will fail.
 
 `circuit_open` is deliberately **not** counted in the ratio: it is a consequence of the
