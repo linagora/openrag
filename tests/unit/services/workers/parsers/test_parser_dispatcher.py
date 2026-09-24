@@ -325,16 +325,21 @@ async def test_successful_parse_stamps_the_watchdog(monkeypatch: pytest.MonkeyPa
 
 
 @pytest.mark.asyncio
-async def test_failed_parse_does_not_stamp_the_watchdog(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Stamped on success only — a pool whose workers are wedged must stop
-    updating it, which is what lets the watchdog's ``time() - <stamp>`` climb.
-    Also guards the test above against passing for the wrong reason: a stamp
-    placed before the parse would satisfy it too.
+async def test_failed_parse_stamps_only_the_first_use_seed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failed parse must not stamp a completion — a pool whose workers are
+    wedged must stop updating it, which is what lets the watchdog's
+    ``time() - <stamp>`` climb. The one stamp it leaves is the first-use seed.
+    Also guards the success test above against passing for the wrong reason: a
+    completion stamp placed before the parse would satisfy it too.
     """
+    import core.observability.ray_metrics as rm
     import services.workers.parsers.parser_dispatcher as module
 
     stamped: list[str] = []
+    seeded: list[str] = []
     monkeypatch.setattr(module, "record_parse_completion", lambda pool: stamped.append(pool))
+    monkeypatch.setattr(rm, "_WATCHDOG_SEEDED", set())
+    monkeypatch.setattr(rm, "record_parse_completion", lambda pool, **_: seeded.append(pool))
 
     disp = ParserDispatcher(_config())
     monkeypatch.setattr(disp, "_get", lambda _name: _StubParser(error=RuntimeError("backend wedged")))
@@ -343,6 +348,7 @@ async def test_failed_parse_does_not_stamp_the_watchdog(monkeypatch: pytest.Monk
         await disp.parse(_text_document())
 
     assert stamped == []
+    assert seeded == ["text"]
 
 
 @pytest.mark.asyncio
