@@ -249,7 +249,7 @@ Our embedder is **OpenAI-compatible** and runs on a **VLLM** instance configured
 
 | Variable | Type | Default | Description  |
 |----------|------|---------|--------------|
-| `EMBEDDER_MODEL_NAME` | `str` | jinaai/jina-embeddings-v3 | HuggingFace Embedding model served by VLLM .i.e `Qwen/Qwen3-Embedding-0.6B` or `jinaai/jina-embeddings-v3`|
+| `EMBEDDER_MODEL_NAME` | `str` | Qwen/Qwen3-Embedding-0.6B | HuggingFace Embedding model served by VLLM .i.e `Qwen/Qwen3-Embedding-0.6B` or `jinaai/jina-embeddings-v3`. The default was `jinaai/jina-embeddings-v3` up to 2.2.x: an install indexed with it keeps it by setting this variable, since changing the model needs a reindex.|
 | `EMBEDDER_BASE_URL` | `str` | http://vllm:8000/v1 | Base URL of the embedder (OpenAI-style).|
 | `EMBEDDER_API_KEY`  | `str` | EMPTY | API key for authenticating embedder calls.|
 | `MAX_MODEL_LEN` | `int` | 2047 | Maximum context length (in tokens) supported by the embedding model. Chunks exceeding this limit are truncated (`truncate_prompt_tokens` = this value − 1). Keep it below the model's real context boundary. |

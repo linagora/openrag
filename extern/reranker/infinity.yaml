@@ -11,7 +11,7 @@ x-reranker: &reranker_template
 services:
   reranker:
     <<: *reranker_template
-    image: michaelf34/infinity
+    image: michaelf34/infinity:0.0.75 # same tag as the chart's reranker.image.tag
     runtime: nvidia
     deploy:
       resources:
@@ -30,7 +30,7 @@ services:
 
   reranker-cpu:
     <<: *reranker_template
-    image: michaelf34/infinity:latest-cpu
+    image: michaelf34/infinity:0.0.75-cpu
     deploy: {}
     command: >
       v2
