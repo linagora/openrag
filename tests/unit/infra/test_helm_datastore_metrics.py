@@ -12,6 +12,7 @@ import re
 import textwrap
 from pathlib import Path
 
+import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -39,9 +40,11 @@ def test_ray_metrics_port_is_not_a_public_port() -> None:
     assert _ray_metrics_port() not in _values()["networkPolicy"]["externalPorts"]
 
 
-def test_postgres_subchart_policy_does_not_open_the_exporter_to_every_source() -> None:
-    """bitnami's own policy, with its allowExternal default, admits any source on 5432 and 9187."""
-    policy = _values()["postgresql"]["primary"]["networkPolicy"]
+@pytest.mark.parametrize("role", ["primary", "readReplicas"])
+def test_postgres_subchart_policy_does_not_open_the_exporter_to_every_source(role: str) -> None:
+    """bitnami's own policy, with its allowExternal default, admits any source on 5432 and 9187.
+    The read replicas carry a second copy, rendered with architecture: replication."""
+    policy = _values()["postgresql"][role]["networkPolicy"]
     assert policy.get("enabled") is False or policy.get("allowExternal") is False
 
 

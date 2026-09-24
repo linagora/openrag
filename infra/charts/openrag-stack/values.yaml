@@ -371,6 +371,10 @@ postgresql:
     # could not narrow it. Off, Postgres gets the same rules as every other pod.
     networkPolicy:
       enabled: false
+  # The same policy on the read replicas, rendered with architecture: replication.
+  readReplicas:
+    networkPolicy:
+      enabled: false
   service:
     port: &pgPort 5432
   # postgres_exporter sidecar (port 9187) and its Service. Turning it on changes
