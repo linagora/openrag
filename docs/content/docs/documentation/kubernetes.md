@@ -420,7 +420,11 @@ Three things can go wrong without failing the install:
 - **NetworkPolicy.** The default-deny policy admits only same-namespace traffic.
   Until Prometheus's namespace is listed in `networkPolicy.metricsFrom`, its
   targets report `up == 0`. Each entry opens only the metrics port, and only on
-  the pods that export it.
+  the pods that export it. The chart turns off the Postgres sub-chart's own
+  NetworkPolicy for this: it admitted any source on every port it listed,
+  5432 included. With `networkPolicy.enabled` set, Postgres is now reachable
+  only from the release namespace, so a client in another namespace needs its
+  own NetworkPolicy to reach 5432.
 - **Ray pods created before this change.** KubeRay does not recreate Ray pods
   when the `RayCluster` changes, so after upgrading an existing release the
   workers keep exporting on 8080, which `networkPolicy.externalPorts` opens to
