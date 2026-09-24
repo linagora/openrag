@@ -6,10 +6,9 @@ the per-status counts, the ``?task_status=`` filter) is business logic
 and lives here; ``request.url_for`` link building stays in the thin
 router (HTTP transport).
 
-This is the one orchestrator that legitimately keeps Ray remote calls
-during the shim — 8H verification explicitly excepts JobService
-wrapping ``TaskStateManager``. Phase 9 swaps the actor for a DB-backed
-job repository (this service is the hook point for that P0 feature).
+The PostgreSQL job repository supplies history after the actor evicts a task;
+while both sources still have it, state reconciliation prevents a stale active
+row from hiding a terminal result in the live actor.
 """
 
 from __future__ import annotations
@@ -24,6 +23,7 @@ from core.models.catalog import (
     TASK_FINISHED_AT_METADATA_KEY,
     TERMINAL_TASK_STATES,
     normalize_degraded_stages,
+    reconcile_task_state,
 )
 from core.utils.error_summary import summarize_task_error
 from core.utils.logging import get_logger
@@ -36,7 +36,7 @@ _TERMINAL_STATES = frozenset(state.value for state in TERMINAL_TASK_STATES)
 
 
 class JobService:
-    """Queue/worker introspection over the TaskStateManager actor."""
+    """Queue/worker introspection over durable history and live actor state."""
 
     def __init__(self, task_state_manager: Any, timeout: float = 60.0, *, job_repo: Any = None) -> None:
         self._tsm = task_state_manager
@@ -69,8 +69,27 @@ class JobService:
         }
 
     async def get_queue_info(self) -> dict:
-        all_states: dict = await self._call(lambda: self._tsm.get_all_states.remote(), "get_all_states")
-        status_counts = Counter(all_states.values())
+        status_counts = await self._durable_status_counts()
+        if not status_counts:
+            all_states: dict[str, str | None] = await self._call(
+                lambda: self._tsm.get_all_states.remote(), "get_all_states"
+            )
+            status_counts = Counter(all_states.values())
+        else:
+            all_states = await self._call(lambda: self._tsm.get_all_states.remote(), "get_all_states")
+            durable_actor_states = await self._durable_task_states_for_ids(all_states)
+            if durable_actor_states is None:
+                status_counts = Counter(all_states.values())
+            else:
+                for task_id, actor_state in all_states.items():
+                    durable_state = durable_actor_states.get(task_id)
+                    if durable_state is None:
+                        status_counts[actor_state] += 1
+                        continue
+                    effective_state = reconcile_task_state(actor_state, durable_state)
+                    if effective_state != durable_state:
+                        status_counts[durable_state] -= 1
+                        status_counts[effective_state] += 1
 
         active = {s: status_counts.get(s, 0) for s in _ACTIVE_STATES}
         task_summary = {
@@ -110,10 +129,19 @@ class JobService:
 
         # The actor only remembers live and recent tasks. Durable rows fill in
         # history it has evicted, and everything dispatched before a restart.
-        all_info = {
-            **await self._durable_task_info(is_admin=is_admin, user_id=user_id, task_status=task_status),
-            **all_info,
-        }
+        # A second ID-scoped read is required for authority: a status-filtered
+        # durable query can omit a row whose actor state is stale but whose
+        # durable status is different.
+        durable_info = await self._durable_task_info(
+            is_admin=is_admin,
+            user_id=user_id,
+            task_status=task_status,
+        )
+        durable_actor_info = await self._durable_task_info_for_ids(all_info)
+        all_info = {**durable_info, **all_info}
+        if durable_actor_info is not None:
+            for task_id, durable_info_for_actor in durable_actor_info.items():
+                all_info[task_id] = _merge_durable_task_info(all_info[task_id], durable_info_for_actor)
         all_info = {task_id: {**info, "state": _public_task_state(info["state"])} for task_id, info in all_info.items()}
 
         if task_status is None:
@@ -178,13 +206,34 @@ class JobService:
 
     async def get_task_details(self, task_id: str) -> dict | None:
         """Return task details for ownership checks and status routes."""
-        details = await self._call(
-            lambda: self._tsm.get_details.remote(task_id),
-            f"get_details({task_id})",
-        )
-        if details is None:
-            job = await self._durable_job(task_id)
-            details = _job_to_info(job)["details"] if job is not None else None
+        job = await self._durable_job(task_id)
+        if job is not None:
+            durable_info = _job_to_info(job)
+            try:
+                actor_state = await self._call(
+                    lambda: self._tsm.get_state.remote(task_id),
+                    f"get_state({task_id})",
+                )
+            except Exception as exc:
+                logger.warning("Failed to read live task state", task_id=task_id, error=str(exc))
+                actor_state = None
+            try:
+                actor_details = await self._call(
+                    lambda: self._tsm.get_details.remote(task_id),
+                    f"get_details({task_id})",
+                )
+            except Exception as exc:
+                logger.warning("Failed to read live task details", task_id=task_id, error=str(exc))
+                actor_details = None
+            details = _merge_durable_task_info(
+                {"state": actor_state, "details": actor_details or {}},
+                durable_info,
+            )["details"]
+        else:
+            details = await self._call(
+                lambda: self._tsm.get_details.remote(task_id),
+                f"get_details({task_id})",
+            )
         if details is None:
             return None
         public_details, _, _ = _task_details(details)
@@ -219,6 +268,36 @@ class JobService:
             return {}
         return {job.id: _job_to_info(job) for job in jobs}
 
+    async def _durable_task_info_for_ids(self, actor_info: dict[str, dict]) -> dict[str, dict] | None:
+        if self._job_repo is None or not actor_info:
+            return {}
+        try:
+            jobs = await self._job_repo.get_jobs(list(actor_info))
+        except Exception as exc:
+            logger.warning("Failed to read durable jobs for live task IDs", error=str(exc))
+            return None
+        return {job.id: _job_to_info(job) for job in jobs}
+
+    async def _durable_task_states_for_ids(self, actor_states: dict[str, str | None]) -> dict[str, str] | None:
+        if self._job_repo is None or not actor_states:
+            return {}
+        try:
+            jobs = await self._job_repo.get_jobs(list(actor_states))
+        except Exception as exc:
+            logger.warning("Failed to read durable job states for live task IDs", error=str(exc))
+            return None
+        return {job.id: job.status.value for job in jobs}
+
+    async def _durable_status_counts(self) -> Counter[str] | None:
+        if self._job_repo is None:
+            return None
+        try:
+            counts = await self._job_repo.count_jobs()
+        except Exception as exc:
+            logger.warning("Failed to count durable jobs", error=str(exc))
+            return None
+        return Counter(counts)
+
 
 def _durable_statuses(task_status: str | None) -> list[str] | None:
     """The statuses the durable query should return, or ``None`` for all.
@@ -245,13 +324,47 @@ def _job_to_info(job: Any) -> dict[str, Any]:
         "details": {
             "file_id": job.file_id,
             "partition": job.partition,
-            "metadata": {},
+            "metadata": {"filename": job.filename} if job.filename else {},
             "user_id": job.user_id,
             "degraded_stages": job.degraded_stages,
         },
         "created_at": created_at,
         "duration_ms": _duration_ms(created_at, completed_at, state=state, now=datetime.now(UTC)),
     }
+
+
+def _merge_durable_task_info(actor_info: dict[str, Any], durable_info: dict[str, Any]) -> dict[str, Any]:
+    """Merge durable history without hiding a newer terminal actor state."""
+    merged = {**actor_info, **durable_info}
+    effective_state = reconcile_task_state(actor_info.get("state"), durable_info.get("state"))
+    if effective_state is not None:
+        merged["state"] = effective_state
+    actor_terminal_wins = (
+        actor_info.get("state") in _TERMINAL_STATES and durable_info.get("state") not in _TERMINAL_STATES
+    )
+    if actor_terminal_wins:
+        merged["error"] = actor_info.get("error")
+        merged["error_reason"] = actor_info.get("error_reason")
+        merged.pop("duration_ms", None)
+        if actor_info.get("duration_ms") is not None:
+            merged["duration_ms"] = actor_info["duration_ms"]
+    actor_details = actor_info.get("details")
+    durable_details = durable_info.get("details")
+    if not isinstance(actor_details, dict) or not isinstance(durable_details, dict):
+        return merged
+
+    details = {**actor_details, **durable_details}
+    if actor_terminal_wins and "degraded_stages" in actor_details:
+        details["degraded_stages"] = actor_details["degraded_stages"]
+    actor_metadata = actor_details.get("metadata")
+    durable_metadata = durable_details.get("metadata")
+    if isinstance(actor_metadata, dict) or isinstance(durable_metadata, dict):
+        details["metadata"] = {
+            **(actor_metadata if isinstance(actor_metadata, dict) else {}),
+            **(durable_metadata if isinstance(durable_metadata, dict) else {}),
+        }
+    merged["details"] = details
+    return merged
 
 
 def _duration_ms(
