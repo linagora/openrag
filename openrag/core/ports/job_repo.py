@@ -37,6 +37,19 @@ class JobRepository(ABC):
         """Return durable task counts grouped by status."""
 
     @abstractmethod
+    async def get_job_states(
+        self,
+        *,
+        statuses: list[str] | None = None,
+        job_ids: list[str] | None = None,
+    ) -> dict[str, str]:
+        """Return ``{task_id: status}`` for rows matching every given filter.
+
+        At least one filter is required: an unfiltered read would scan the
+        whole retention window, which is what this narrow read exists to avoid.
+        """
+
+    @abstractmethod
     async def fail_orphaned_jobs(self, *, active_ids: list[str], error: str, before: datetime) -> int:
         """Fail unfinished records no live task owns, e.g. after a restart."""
 

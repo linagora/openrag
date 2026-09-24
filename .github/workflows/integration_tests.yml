@@ -51,6 +51,26 @@ jobs:
           tests/integration/repos/test_workspace_deletion.py
           tests/integration/repos/test_document_repo.py -v --tb=short
 
+  ray-metrics-export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install uv
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+      - run: uv sync
+      # Its own pytest process, so the test starts Ray itself instead of
+      # inheriting a session another test began.
+      - name: Verify worker metrics reach Ray's metrics endpoint
+        run: uv run pytest tests/integration/test_ray_metrics_export.py -v --tb=short
+
   milvus-integration:
     runs-on: ubuntu-latest
     timeout-minutes: 20

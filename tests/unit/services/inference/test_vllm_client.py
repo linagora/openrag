@@ -1245,3 +1245,40 @@ class TestSuspectIndexIsDocumentGlobal:
             await embedder.embed(texts)
 
         assert [f["index"] for f in excinfo.value.extra["suspect_texts"]] == [97]
+
+
+@pytest.mark.asyncio
+async def test_generate_is_counted_as_a_completion_not_a_chat(monkeypatch):
+    from services.inference import _metrics
+
+    calls: list[dict] = []
+    monkeypatch.setattr(_metrics, "record_inference", lambda **kw: calls.append(kw))
+    client = TestVLLMClient()._make_client(lambda req: _completions_response("done"))
+    await client.generate("say something")
+    assert [c["operation"] for c in calls] == ["completion"]
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        'data: {"choices":[],"usage":{"prompt_tokens":7,"completion_tokens":3}}',
+        'data:{"choices":[],"usage":{"prompt_tokens":7,"completion_tokens":3}}',
+    ],
+)
+def test_stream_usage_is_counted_with_or_without_the_space(monkeypatch, line):
+    """SSE allows `data:` followed by one optional space; both carry the usage."""
+    from services.inference import vllm_client
+
+    seen: list[dict] = []
+    monkeypatch.setattr(vllm_client, "record_usage_from_response", lambda payload, operation: seen.append(payload))
+    vllm_client._record_stream_usage(line)
+    assert seen and seen[0]["usage"] == {"prompt_tokens": 7, "completion_tokens": 3}
+
+
+def test_a_content_delta_without_usage_is_not_parsed(monkeypatch):
+    from services.inference import vllm_client
+
+    seen: list[dict] = []
+    monkeypatch.setattr(vllm_client, "record_usage_from_response", lambda payload, operation: seen.append(payload))
+    vllm_client._record_stream_usage('data:{"choices":[{"delta":{"content":"hi"}}]}')
+    assert seen == []
