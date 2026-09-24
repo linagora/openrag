@@ -230,6 +230,40 @@ class TestOllamaClient:
         assert bodies[0]["stream_options"] == {"include_usage": True}
         assert tokens == [{"operation": "chat", "prompt": 7, "completion": 3}]
 
+    _USAGE_CHUNK = 'data: {"choices":[],"usage":{"prompt_tokens":7,"completion_tokens":3}}'
+    _USAGE_STREAM = f'data: {{"choices":[{{"delta":{{"content":"hi"}}}}]}}\n{_USAGE_CHUNK}\ndata: [DONE]\n'
+
+    @pytest.mark.asyncio
+    async def test_the_usage_chunk_is_withheld_from_a_caller_that_did_not_ask(self):
+        """Requested for the token metric only: a client that never asked gets
+        no ``"choices": []`` chunk to index into, and no prompt size."""
+        client = self._make_client(lambda req: httpx.Response(200, text=self._USAGE_STREAM))
+
+        lines = [line async for line in client.stream_chat([{"role": "user", "content": "hi"}])]
+
+        assert self._USAGE_CHUNK not in lines
+        assert "data: [DONE]" in lines
+
+    @pytest.mark.asyncio
+    async def test_a_caller_that_asked_for_usage_still_receives_it(self):
+        bodies: list[dict] = []
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            bodies.append(json.loads(req.content))
+            return httpx.Response(200, text=self._USAGE_STREAM)
+
+        client = self._make_client(handler)
+        lines = [
+            line
+            async for line in client.stream_chat(
+                [{"role": "user", "content": "hi"}],
+                stream_options={"include_usage": True, "continuous_usage_stats": True},
+            )
+        ]
+
+        assert self._USAGE_CHUNK in lines
+        assert bodies[0]["stream_options"] == {"include_usage": True, "continuous_usage_stats": True}
+
     @pytest.mark.asyncio
     async def test_stream_chat_error_raises(self):
         client = self._make_client(lambda req: httpx.Response(503, text="unavailable"))

@@ -27,7 +27,13 @@ from core.utils.exceptions import (
     InferenceTimeoutError,
 )
 from core.utils.logging import get_logger
-from services.inference.vllm_client import _STREAM_DONE, _parse_response, _record_stream_usage, _strip_falsy_logprobs
+from services.inference.vllm_client import (
+    _STREAM_DONE,
+    _parse_response,
+    _record_stream_usage,
+    _request_stream_usage,
+    _strip_falsy_logprobs,
+)
 
 from ._call_log import log_llm_call
 from ._circuit_breaker import with_circuit_breaker
@@ -133,10 +139,8 @@ class OllamaClient(LLM):
             "model": self._model,
             "messages": messages,
             "stream": True,
-            # Same as the vLLM path: without it the stream carries no usage block
-            # and Ollama chat contributes nothing to the token metric.
-            "stream_options": {"include_usage": True},
         }
+        forward_usage = _request_stream_usage(payload, add_for_metrics=True)
         payload.pop("metadata", None)
         _strip_falsy_logprobs(payload)
         log_llm_call(
@@ -164,7 +168,8 @@ class OllamaClient(LLM):
                     outcome = outcome_for(error)
                     raise error
                 async for line in resp.aiter_lines():
-                    _record_stream_usage(line)
+                    if _record_stream_usage(line) and not forward_usage:
+                        continue
                     if line.strip() == _STREAM_DONE:
                         outcome = "success"
                     yield line

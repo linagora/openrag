@@ -272,17 +272,55 @@ def test_missing_or_malformed_usage_is_ignored(recorded, response: Any) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_stream_chat_requests_usage() -> None:
+_USAGE_CHUNK = 'data: {"choices":[],"usage":{"prompt_tokens":7,"completion_tokens":3}}'
+_USAGE_STREAM = ['data: {"choices":[{"delta":{"content":"hi"}}]}', _USAGE_CHUNK, "data: [DONE]"]
+
+
+@pytest.mark.asyncio
+async def test_stream_chat_requests_usage_and_withholds_it_from_the_caller(
+    monkeypatch: pytest.MonkeyPatch, recorded
+) -> None:
     """Without ``stream_options.include_usage`` a streamed answer carries no
     usage block at all, so every chat — the primary user-facing path —
-    contributes zero to the cost metric while looking instrumented.
-    """
-    import inspect
+    contributes zero to the cost metric while looking instrumented. Asked for
+    the metric only, the usage chunk must not reach a client that never
+    requested it."""
+    client = _streaming_client(_USAGE_STREAM, monkeypatch, [])
 
-    import services.inference.vllm_client as vc
+    lines = [line async for line in client.stream_chat([{"role": "user", "content": "q"}])]
 
-    source = inspect.getsource(vc.VLLMClient.stream_chat)
-    assert '"stream_options": {"include_usage": True}' in source
+    assert client._client.bodies[0]["stream_options"] == {"include_usage": True}
+    assert _USAGE_CHUNK not in lines
+    assert recorded["tokens"] == [{"operation": "chat", "prompt": 7, "completion": 3}]
+
+
+@pytest.mark.asyncio
+async def test_stream_chat_keeps_the_callers_own_stream_options(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _streaming_client(_USAGE_STREAM, monkeypatch, [])
+
+    lines = [
+        line
+        async for line in client.stream_chat(
+            [{"role": "user", "content": "q"}],
+            stream_options={"include_usage": True, "continuous_usage_stats": True},
+        )
+    ]
+
+    assert client._client.bodies[0]["stream_options"] == {"include_usage": True, "continuous_usage_stats": True}
+    assert _USAGE_CHUNK in lines
+
+
+@pytest.mark.asyncio
+async def test_stream_chat_adds_nothing_for_a_client_supplied_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Another provider may reject the unknown field, and override traffic is
+    labelled ``client_override`` anyway."""
+    client = _streaming_client(["data: [DONE]"], monkeypatch, [])
+    client._allow_custom_endpoint = True  # LLM_OVERRIDE_ALLOW_CUSTOM_ENDPOINT; ignored otherwise
+    metadata = {"llm_override": {"base_url": "https://other.example/v1", "model": "m", "api_key": "k"}}
+
+    [line async for line in client.stream_chat([{"role": "user", "content": "q"}], metadata=metadata)]
+
+    assert "stream_options" not in client._client.bodies[0]
 
 
 def test_stream_usage_chunk_is_counted(recorded) -> None:
@@ -379,8 +417,10 @@ class _FakeHttpClient:
     def __init__(self, lines: list[str], status_code: int = 200) -> None:
         self._lines = lines
         self._status_code = status_code
+        self.bodies: list[dict] = []
 
-    def stream(self, *_args: Any, **_kwargs: Any) -> _FakeStreamContext:
+    def stream(self, *_args: Any, **kwargs: Any) -> _FakeStreamContext:
+        self.bodies.append(kwargs.get("json") or {})
         return _FakeStreamContext(_FakeStreamResponse(self._lines, self._status_code))
 
 

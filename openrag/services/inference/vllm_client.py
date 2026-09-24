@@ -56,8 +56,32 @@ logger = get_logger()
 _STREAM_DONE = "data: [DONE]"
 
 
-def _record_stream_usage(line: str) -> None:
+def _request_stream_usage(payload: dict, *, add_for_metrics: bool) -> bool:
+    """Ask the provider for a usage block; return whether the caller asked too.
+
+    Without ``include_usage`` a streamed response carries no usage at all, so
+    every chat answer would contribute nothing to the token metric. The caller's
+    own ``stream_options`` are kept, not replaced. A client-supplied endpoint
+    gets nothing added: another provider may reject the unknown field, and its
+    traffic is labelled ``client_override`` anyway.
+
+    The return value decides whether the usage-only chunk is forwarded: a
+    client that did not ask for one must not receive a ``"choices": []`` chunk
+    it may index into, nor the prompt size it reveals.
+    """
+    caller_options = payload.get("stream_options")
+    caller_options = caller_options if isinstance(caller_options, dict) else {}
+    caller_wants_usage = bool(caller_options.get("include_usage"))
+    if add_for_metrics:
+        payload["stream_options"] = {**caller_options, "include_usage": True}
+    return caller_wants_usage or not add_for_metrics
+
+
+def _record_stream_usage(line: str) -> bool:
     """Count tokens from the usage-only chunk of a streamed completion.
+
+    Returns whether ``line`` *is* that chunk (``"choices": []``), so the caller
+    can withhold it from a client that never asked for usage.
 
     Called for every SSE line — hundreds per answer — so the substring test
     comes first. Content deltas also begin with ``data: ``, and parsing each of
@@ -69,14 +93,15 @@ def _record_stream_usage(line: str) -> None:
     to be a top-level object.
     """
     if '"usage"' not in line or not line.startswith("data:"):
-        return
+        return False
     # SSE allows `data:` with or without one space after the colon.
     body = line[len("data:") :]
     try:
         payload = json.loads(body[1:] if body.startswith(" ") else body)
     except ValueError:
-        return
+        return False
     record_usage_from_response(payload, operation="chat")
+    return isinstance(payload, dict) and payload.get("choices") == [] and isinstance(payload.get("usage"), dict)
 
 
 def _parse_response(resp: httpx.Response) -> dict:
@@ -438,12 +463,8 @@ class VLLMClient(LLM):
             "model": model,
             "messages": messages,
             "stream": True,
-            # Without this a streamed response carries no usage block at all,
-            # so every chat answer would contribute nothing to the token metric.
-            # The extra trailing chunk it produces is already handled by
-            # ``core/utils/source_filtering``.
-            "stream_options": {"include_usage": True},
         }
+        forward_usage = _request_stream_usage(payload, add_for_metrics=not overridden)
         log_llm_call(caller="VLLMClient.stream_chat", model=model, endpoint=base_url, messages=messages, stream=True)
         provider = resolve_provider(self, {"metadata": metadata})
         started = time.perf_counter()
@@ -466,7 +487,8 @@ class VLLMClient(LLM):
                     outcome = outcome_for(error)
                     raise error
                 async for line in resp.aiter_lines():
-                    _record_stream_usage(line)
+                    if _record_stream_usage(line) and not forward_usage:
+                        continue
                     if line.strip() == _STREAM_DONE:
                         outcome = "success"
                     yield line
