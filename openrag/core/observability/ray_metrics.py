@@ -49,6 +49,7 @@ from __future__ import annotations
 import time
 from datetime import UTC, datetime
 
+from core.observability._ray_counters import start_counter_at_zero
 from core.observability._reporting import report_once
 from core.observability.metric_specs import (
     INGEST_CLOCK_SKEW_TOTAL,
@@ -56,6 +57,7 @@ from core.observability.metric_specs import (
     INGEST_LAST_PARSE_TIMESTAMP,
     INGEST_QUEUE_WAIT_SECONDS,
     INGEST_STAGE_DURATION_SECONDS,
+    INGEST_STATUS_VALUES,
     MetricSpec,
 )
 from ray.util.metrics import Counter, Gauge, Histogram
@@ -80,6 +82,22 @@ _STAGE_DURATION = _histogram(INGEST_STAGE_DURATION_SECONDS)
 _QUEUE_WAIT = _histogram(INGEST_QUEUE_WAIT_SECONDS)
 _CLOCK_SKEW_TOTAL = _counter(INGEST_CLOCK_SKEW_TOTAL)
 _LAST_PARSE_TIMESTAMP = _gauge(INGEST_LAST_PARSE_TIMESTAMP)
+
+
+def initialize_ingest_counters() -> None:
+    """Start the ingest counters at 0 in the process that will record them.
+
+    Called when the TaskStateManager starts. Without it each status series
+    first appears at 1, which ``increase()`` does not count: the first failure
+    after every restart was missing from the failure ratio
+    ``OpenRagIngestFailureRate`` reads.
+    """
+    try:
+        for status in INGEST_STATUS_VALUES:
+            start_counter_at_zero(_DOCUMENTS_TOTAL, {"status": status})
+        start_counter_at_zero(_CLOCK_SKEW_TOTAL)
+    except Exception as exc:  # noqa: BLE001 - metrics must never stop the actor starting
+        report_once(INGEST_DOCUMENTS_TOTAL.name, exc)
 
 
 def record_document_terminal(status: str) -> None:

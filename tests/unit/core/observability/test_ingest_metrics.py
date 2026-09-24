@@ -441,3 +441,35 @@ async def test_failing_stage_is_still_measured(monkeypatch: pytest.MonkeyPatch) 
         await _run_real_pipeline(monkeypatch, _Parser(error=RuntimeError("parser blew up")), recorded)
 
     assert [stage for stage, _ in recorded] == ["parse"]
+
+
+# ---------------------------------------------------------------------------
+# Ingest counters start at 0, so each first event is a visible 0 -> 1
+# ---------------------------------------------------------------------------
+
+
+def test_ingest_counters_start_every_status_and_the_skew_counter_at_zero(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``increase()`` does not count a series that first appears at 1: the first
+    failure after every restart was missing from ``OpenRagIngestFailureRate``."""
+    from core.observability.metric_specs import INGEST_STATUS_VALUES
+
+    started: list[tuple[object, dict | None]] = []
+    monkeypatch.setattr(
+        ray_metrics, "start_counter_at_zero", lambda counter, tags=None: started.append((counter, tags))
+    )
+
+    ray_metrics.initialize_ingest_counters()
+
+    assert [tags for counter, tags in started if counter is ray_metrics._DOCUMENTS_TOTAL] == [
+        {"status": status} for status in INGEST_STATUS_VALUES
+    ]
+    assert (ray_metrics._CLOCK_SKEW_TOTAL, None) in started
+
+
+def test_a_failed_zero_start_never_stops_the_actor(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _boom(counter: object, tags: dict | None = None) -> None:
+        raise RuntimeError("private Ray API changed")
+
+    monkeypatch.setattr(ray_metrics, "start_counter_at_zero", _boom)
+
+    ray_metrics.initialize_ingest_counters()

@@ -593,3 +593,65 @@ def test_a_client_that_cannot_be_labelled_is_still_built() -> None:
         pass
 
     assert resolve_provider(set_provider_name(_Plain(), "embedder-a"), {}) == "embedder-a"
+
+
+# ---------------------------------------------------------------------------
+# Series start at 0, so the first event is a visible 0 -> 1
+# ---------------------------------------------------------------------------
+
+
+def test_a_labelled_client_starts_every_outcome_of_its_operations_at_zero(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``increase()`` does not count a series that first appears at 1, and every
+    Ray worker has its own series: without a zero start, each worker's first
+    error is invisible to ``OpenRagInferenceProviderDown``."""
+    from types import SimpleNamespace
+
+    from core.observability import inference_metrics as im
+    from core.observability.metric_specs import INFERENCE_OUTCOME_VALUES
+
+    started: list[dict[str, str]] = []
+    monkeypatch.setattr(
+        im, "_instruments", lambda: SimpleNamespace(requests=SimpleNamespace(start_at_zero=started.append))
+    )
+
+    class _Client:
+        @with_inference_metrics("embed")
+        async def embed(self) -> None: ...
+
+        async def helper(self) -> None: ...
+
+    im.set_provider_name(_Client(), "embedder-a")
+
+    assert {(t["provider"], t["operation"], t["outcome"]) for t in started} == {
+        ("embedder-a", "embed", outcome) for outcome in INFERENCE_OUTCOME_VALUES
+    }
+
+
+def test_a_client_with_no_instrumented_method_starts_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    from types import SimpleNamespace
+
+    from core.observability import inference_metrics as im
+
+    started: list[dict[str, str]] = []
+    monkeypatch.setattr(
+        im, "_instruments", lambda: SimpleNamespace(requests=SimpleNamespace(start_at_zero=started.append))
+    )
+
+    class _Plain:
+        async def embed(self) -> None: ...
+
+    im.set_provider_name(_Plain(), "embedder-a")
+
+    assert started == []
+
+
+def test_the_prometheus_backend_exports_a_zero_started_series() -> None:
+    import prometheus_client
+    from core.observability.inference_metrics import _PrometheusInstrument
+
+    registry = prometheus_client.CollectorRegistry()
+    counter = prometheus_client.Counter("zero_probe_total", "probe", ["outcome"], registry=registry)
+
+    _PrometheusInstrument(counter).start_at_zero({"outcome": "error"})
+
+    assert registry.get_sample_value("zero_probe_total", {"outcome": "error"}) == 0.0

@@ -34,6 +34,7 @@ from typing import Any
 import httpx
 from core.observability.inference_metrics import (
     CLIENT_OVERRIDE_PROVIDER,
+    INFERENCE_OPERATION_ATTR,
     PROVIDER_NAME_ATTR,
     record_inference,
     record_usage_from_response,
@@ -156,6 +157,8 @@ def with_inference_metrics(operation: str, *, capture_usage: bool = False) -> Ca
                 record_usage_from_response(result, operation=operation)
             return result
 
+        # Read by ``set_provider_name`` to start this client's series at 0.
+        setattr(wrapper, INFERENCE_OPERATION_ATTR, operation)
         return wrapper
 
     return decorator
