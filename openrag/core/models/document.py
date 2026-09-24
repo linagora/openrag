@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import functools
 import os
 import tempfile
 import uuid
@@ -117,9 +118,22 @@ class Document(BaseModel):
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
     @staticmethod
-    def detect_content_type(filename: str) -> DocumentType:
-        """Detect DocumentType from filename extension."""
-        ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    def type_extension(filename: str, mimetype: str | None = None) -> str:
+        """The extension that decides how a file is parsed, lowercased, without the dot.
+
+        A *mimetype* listed in ``loader.mimetypes`` wins, through the extension
+        that config maps it to; the filename's own extension is the fallback when
+        the mimetype is absent or unknown.
+        """
+        mapped = _configured_mimetypes().get(mimetype, "") if mimetype else ""
+        if mapped:
+            return mapped.lstrip(".").lower()
+        return filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+
+    @staticmethod
+    def detect_content_type(filename: str, mimetype: str | None = None) -> DocumentType:
+        """Detect DocumentType from *mimetype*, else the filename extension (see ``type_extension``)."""
+        ext = Document.type_extension(filename, mimetype)
         mapping = {
             "pdf": DocumentType.PDF,
             "txt": DocumentType.TEXT,
@@ -204,7 +218,12 @@ class Document(BaseModel):
         requested suffix.
         """
         if suffix is None:
-            suffix = Path(self.filename).suffix or _DEFAULT_TEMPFILE_SUFFIX.get(self.content_type, "")
+            # The filename's own extension only when it agrees with the type:
+            # a type resolved from the mimetype (``report`` sent as a PDF)
+            # needs the suffix the sync libraries expect for that type.
+            suffix = Path(self.filename).suffix
+            if not suffix or Document.detect_content_type(self.filename) is not self.content_type:
+                suffix = _DEFAULT_TEMPFILE_SUFFIX.get(self.content_type, suffix)
 
         if self.source_path is not None and Path(self.source_path).suffix == suffix:
             # Never unlinked: this is the caller's file, not ours. The upload is
@@ -241,6 +260,14 @@ def _safe_unlink(path: str) -> None:
         os.unlink(path)
     except FileNotFoundError:
         pass
+
+
+@functools.cache
+def _configured_mimetypes() -> dict[str, str]:
+    """``loader.mimetypes`` as ``{mimetype: extension}``, read once per process."""
+    from core.config import load_config
+
+    return load_config().loader.mimetypes.to_dict()
 
 
 _DEFAULT_TEMPFILE_SUFFIX: dict[DocumentType, str] = {

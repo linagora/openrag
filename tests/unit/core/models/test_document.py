@@ -134,3 +134,28 @@ class TestSuffixMismatchFallsBack:
             assert path.read_bytes() == b"in-memory"
 
         assert src.exists(), "the fallback deleted the source file"
+
+
+class TestMimetypePicksTheType:
+    @pytest.mark.parametrize(
+        ("filename", "mimetype", "expected"),
+        [
+            ("minutes.cozy-note", "text/markdown", DocumentType.MARKDOWN),
+            ("report", "application/pdf", DocumentType.PDF),
+            ("notes.md", "text/plain", DocumentType.TEXT),
+            ("report.pdf", None, DocumentType.PDF),
+            ("report.pdf", "application/x-unknown", DocumentType.PDF),
+            ("report", None, DocumentType.TEXT),
+        ],
+    )
+    def test_a_known_mimetype_wins_over_the_extension(self, filename, mimetype, expected):
+        assert Document.detect_content_type(filename, mimetype) is expected
+
+    @pytest.mark.asyncio
+    async def test_temp_file_takes_the_type_suffix_when_the_filename_disagrees(self):
+        """The sync libraries dispatch on the suffix, so a PDF sent as
+        ``report.bin`` must not be written out as ``.bin``."""
+        doc = Document(filename="report.bin", content_type=DocumentType.PDF, raw_bytes=b"%PDF-1.4")
+
+        async with doc.as_temporary_file() as path:
+            assert path.suffix == ".pdf"

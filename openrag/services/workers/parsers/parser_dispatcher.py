@@ -97,7 +97,8 @@ class ParserDispatcher(DocumentParser):
         return [doc_type.value for doc_type in DocumentType]
 
     async def parse(self, document: Document) -> ProcessedDocument:
-        backend = self._resolve_backend(document.content_type, _suffix(document.filename))
+        ext = Document.type_extension(document.filename, document.metadata.get("mimetype"))
+        backend = self._resolve_backend(document.content_type, ext)
         parser = self._get(backend)
         return await parser.parse(document)
 
@@ -269,23 +270,18 @@ _BUILDERS: dict[str, Any] = {
 }
 
 
-def _suffix(filename: str) -> str:
-    """Lowercased extension without the dot (``"report.PDF"`` → ``"pdf"``)."""
-    return filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
-
-
 def _configured_audio_loader(config: Any, ext: str) -> str | None:
     """Return the loader class name the dispatcher will use for an audio suffix."""
     file_loaders = config.loader.file_loaders
     return getattr(file_loaders, ext, None) or getattr(file_loaders, "mp3", None) or getattr(file_loaders, "wav", None)
 
 
-def routes_to_openai_audio_loader(config: Any, filename: str) -> bool:
+def routes_to_openai_audio_loader(config: Any, filename: str, mimetype: str | None = None) -> bool:
     """Whether indexing ``filename`` can invoke the managed STT resolver."""
-    content_type = Document.detect_content_type(filename)
+    content_type = Document.detect_content_type(filename, mimetype)
     if content_type not in {DocumentType.AUDIO, DocumentType.VIDEO}:
         return False
-    return _configured_audio_loader(config, _suffix(filename)) == "OpenAIAudioLoader"
+    return _configured_audio_loader(config, Document.type_extension(filename, mimetype)) == "OpenAIAudioLoader"
 
 
 def _build_vlm(base_url: str, model: str, api_key: str, timeout: float, enable_thinking: bool | None = None) -> Any:

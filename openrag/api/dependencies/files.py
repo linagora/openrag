@@ -7,6 +7,7 @@ from typing import Any
 
 import aiofiles
 from core.indexing import validators as core_validators
+from core.models.document import Document
 from core.utils import consts
 from core.utils.exceptions import ValidationError
 from core.utils.filename import make_unique_filename
@@ -53,15 +54,16 @@ async def validate_file_format(
 ):
     accepted_file_formats = config.loader.file_loaders.model_dump().keys()
     mimetypes = config.loader.mimetypes.to_dict()
-    extension = core_validators.validate_file_format(
+    core_validators.validate_file_format(
         filename=file.filename,
         accepted_formats=accepted_file_formats,
         accepted_mimetypes=mimetypes.keys(),
         mimetype=metadata.get("mimetype"),
     )
-    # The extension alone selects the parser, so check the bytes agree with it
-    # before the body is written to disk or a task is queued. Reads only the
-    # head and rewinds, leaving the streamed save below unaffected.
+    # The mimetype, else the extension, selects the parser, so check the bytes
+    # agree with it before the body is written to disk or a task is queued.
+    # Reads only the head and rewinds, leaving the streamed save below unaffected.
+    extension = Document.type_extension(file.filename, metadata.get("mimetype"))
     head = await file.read(core_validators.CONTENT_SNIFF_BYTES)
     await file.seek(0)
     core_validators.validate_content_matches_extension(extension, head)
