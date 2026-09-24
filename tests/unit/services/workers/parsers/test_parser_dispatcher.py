@@ -343,3 +343,23 @@ async def test_failed_parse_does_not_stamp_the_watchdog(monkeypatch: pytest.Monk
         await disp.parse(_text_document())
 
     assert stamped == []
+
+
+@pytest.mark.asyncio
+async def test_a_preset_pdf_strategy_stamps_the_pool_that_parsed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``_PdfStrategyParser`` picks the backend itself, bypassing ``parse``. A
+    PDF indexed under a preset's ``parsing_strategy`` must still stamp its
+    pool, or the watchdog goes blind for the GPU parsers it exists for."""
+    import services.workers.parsers.parser_dispatcher as module
+
+    stamped: list[str] = []
+    monkeypatch.setattr(module, "record_parse_completion", lambda pool: stamped.append(pool))
+
+    disp = ParserDispatcher(_config(pdf="MarkerLoader"))
+    disp._by_name.update({"marker": _FakeParser(), "pymupdf": _FakeParser()})
+    pdf = Document(filename="a.pdf", content_type=DocumentType.PDF, raw_bytes=b"%PDF-1.4")
+
+    await disp.for_pdf_strategy("pymupdf").parse(pdf)
+    await disp.parse(pdf)
+
+    assert stamped == ["pymupdf", "marker"]

@@ -344,41 +344,90 @@ async def test_queue_wait_not_observed_twice_on_retry(monkeypatch: pytest.Monkey
 # ---------------------------------------------------------------------------
 
 
+class _Parser:
+    """Parses after ``delay`` seconds, or raises ``error``."""
+
+    def __init__(self, *, delay: float = 0.0, error: Exception | None = None) -> None:
+        self._delay = delay
+        self._error = error
+
+    async def parse(self, document: Any) -> Any:
+        import asyncio
+
+        from core.models.document import ProcessedDocument, TextBlock
+
+        await asyncio.sleep(self._delay)
+        if self._error is not None:
+            raise self._error
+        return ProcessedDocument(document_id=document.id, text_blocks=[TextBlock(text="hello")])
+
+    def supported_types(self) -> list[str]:
+        return ["text"]
+
+
+class _Chunker:
+    def chunk(self, document: Any, partition: str = "default") -> list[Any]:
+        from core.models.chunk import Chunk
+
+        return [Chunk(id="c1", text="hello", partition=partition)]
+
+
+class _Embedder:
+    dimension = 1
+
+    async def embed(self, texts: list[str]) -> list[list[float]]:
+        return [[0.5] for _ in texts]
+
+    async def embed_single(self, text: str) -> list[float]:
+        return [0.5]
+
+
+class _VectorStore:
+    async def ensure_collection(self, name: str, dimension: int, **kwargs: Any) -> None:
+        return None
+
+    async def upsert(self, chunks: list[Any], collection: str = "default", **kwargs: Any) -> int:
+        return len(chunks)
+
+
+async def _run_real_pipeline(
+    monkeypatch: pytest.MonkeyPatch, parser: _Parser, recorded: list[tuple[str, float]]
+) -> None:
+    """Run the production ``IndexingPipeline``, capturing what it observes."""
+    import services.workers.pipeline_builder as pb
+    from core.models.document import Document
+
+    monkeypatch.setattr(pb, "observe_stage_duration", lambda stage, secs: recorded.append((stage, secs)))
+    pipeline = pb.build_indexing_pipeline(
+        parser=parser, chunker=_Chunker(), embedder=_Embedder(), vector_store=_VectorStore()
+    )
+    document = Document(filename="note.txt", text="hello", partition="tenant-a")
+    row = {
+        "document": document,
+        "partition": "tenant-a",
+        "filename": "note.txt",
+        "indexation_config": {
+            "enable_image_captioning": False,
+            "enable_contextualization": False,
+            "enable_topic_tagging": False,
+        },
+    }
+    await pipeline.run(row)
+
+
 @pytest.mark.asyncio
 async def test_stage_duration_is_recorded_in_seconds(monkeypatch: pytest.MonkeyPatch) -> None:
     """``pipeline_builder`` keeps ``timings`` in milliseconds for its log line.
-    The metric is named ``_seconds`` and must actually be seconds — this pins
-    the conversion at the one place it is easy to get wrong.
-    """
-    import services.workers.pipeline_builder as pb
-
+    The metric is named ``_seconds`` and must actually be seconds — run through
+    the real pipeline, so the conversion is checked where it happens."""
     recorded: list[tuple[str, float]] = []
-    monkeypatch.setattr(pb, "observe_stage_duration", lambda stage, secs: recorded.append((stage, secs)))
+    await _run_real_pipeline(monkeypatch, _Parser(delay=0.05), recorded)
 
-    timings: dict[str, float] = {}
-
-    # Reproduces the helper defined inside IndexingPipeline.run.
-    async def _timed(name: str, coro: Any) -> None:
-        import time
-
-        start = time.perf_counter()
-        try:
-            await coro
-        finally:
-            elapsed = time.perf_counter() - start
-            timings[name] = elapsed * 1000.0
-            pb.observe_stage_duration(name, elapsed)
-
-    async def _work() -> None:
-        return None
-
-    await _timed("parse", _work())
-
-    assert len(recorded) == 1
-    stage, seconds = recorded[0]
-    assert stage == "parse"
-    # Milliseconds would be ~1000x larger; this is the check that catches the unit slip.
-    assert seconds == pytest.approx(timings["parse"] / 1000.0)
+    parse = [seconds for stage, seconds in recorded if stage == "parse"]
+    assert len(parse) == 1
+    # 50 ms of parsing: ~0.05 in seconds, ~50 if milliseconds slipped through.
+    assert 0.04 <= parse[0] < 1.0
+    assert {"parse", "chunk", "embed"} <= {stage for stage, _ in recorded}
 
 
 @pytest.mark.asyncio
@@ -386,35 +435,9 @@ async def test_failing_stage_is_still_measured(monkeypatch: pytest.MonkeyPatch) 
     """A stage that hangs to its timeout is precisely what the histogram exists
     to show, so the observation lives in ``finally`` — and the original
     exception must still be the one that propagates."""
-    import services.workers.pipeline_builder as pb
+    recorded: list[tuple[str, float]] = []
 
-    recorded: list[str] = []
-    monkeypatch.setattr(pb, "observe_stage_duration", lambda stage, secs: recorded.append(stage))
+    with pytest.raises(RuntimeError, match="parser blew up"):
+        await _run_real_pipeline(monkeypatch, _Parser(error=RuntimeError("parser blew up")), recorded)
 
-    async def _timed(name: str, coro: Any) -> None:
-        import time
-
-        start = time.perf_counter()
-        try:
-            await coro
-        finally:
-            pb.observe_stage_duration(name, time.perf_counter() - start)
-
-    async def _boom() -> None:
-        raise TimeoutError("parse timed out")
-
-    with pytest.raises(TimeoutError, match="parse timed out"):
-        await _timed("parse", _boom())
-
-    assert recorded == ["parse"]
-
-
-def test_pipeline_builder_still_calls_the_recorder() -> None:
-    """Guards the wiring itself: the monkeypatched tests above would keep passing
-    if the call were deleted from ``IndexingPipeline.run``."""
-    import inspect
-
-    import services.workers.pipeline_builder as pb
-
-    source = inspect.getsource(pb.IndexingPipeline.run)
-    assert "observe_stage_duration(name, elapsed)" in source
+    assert [stage for stage, _ in recorded] == ["parse"]
