@@ -40,7 +40,11 @@ from core.retrieval.retriever import (
     _expand_with_related_chunks,
 )
 from core.retrieval.rrf import rrf_reranking
-from core.retrieval.trace import RetrievalTraceBuilder, canonical_fingerprint
+from core.retrieval.trace import (
+    RetrievalTraceBuilder,
+    canonical_fingerprint,
+    merge_child_traces,
+)
 from core.utils.exceptions import PartitionNotFoundError
 from core.utils.logging import get_logger
 
@@ -361,10 +365,14 @@ class RetrievalService:
             "model": getattr(getattr(self._config, "embedder", None), "model_name", None),
             "vector_field": getattr(default_embedder, "vector_field", None),
         }
-        public_partitions = [
-            {"name": partition_name, "embedder": raw_search_embedder}
-            for partition_name in sorted(set(selected_partitions))
-        ]
+        public_partitions = []
+        for partition_name in sorted(set(selected_partitions)):
+            public_partitions.append(
+                {
+                    "name": partition_name,
+                    "embedder": raw_search_embedder,
+                }
+            )
         hybrid_enabled = getattr(getattr(self._config, "vectordb", None), "hybrid_search", None)
         return {
             "operation": "raw_search",
@@ -828,7 +836,9 @@ class RetrievalService:
         parts = [partitions] if isinstance(partitions, str) else list(partitions)
         if trace is not None:
             trace.record_stage("original_query", status="complete", candidates=[])
-        trace_kwargs = {"trace": trace} if trace is not None else {}
+        trace_kwargs = {}
+        if trace is not None:
+            trace_kwargs["trace"] = trace
         chunks = await self._searcher.search(
             query=text,
             partition=parts,
@@ -922,6 +932,26 @@ class RetrievalService:
             raise first_error
         return ranked_lists
 
+    @staticmethod
+    def _record_degraded_final(
+        trace: RetrievalTraceBuilder | None,
+        chunks: list[Chunk],
+    ) -> None:
+        if trace is None:
+            return
+        try:
+            trace.record_stage(
+                "final",
+                status="complete",
+                candidates=trace.project_chunks("final", chunks),
+                candidate_count=len(chunks),
+            )
+        except Exception as error:
+            try:
+                trace.record_error("final", error)
+            except Exception:
+                pass
+
     async def retrieve(
         self,
         *,
@@ -930,6 +960,7 @@ class RetrievalService:
         top_k: int | None = None,
         retrieval_top_k: int | None = None,
         filter_params: dict | None = None,
+        trace: RetrievalTraceBuilder | None = None,
         similarity_threshold: float | None = None,
         disable_reranker: bool = False,
         disable_expansion: bool = False,
@@ -946,6 +977,19 @@ class RetrievalService:
             )
         else:
             groups = [(list(group.partitions), group.pipeline, group.default_top_k) for group in resolved_plan.groups]
+        child_traces = (
+            [
+                RetrievalTraceBuilder(
+                    f"{trace.request_id}:partition:{index}",
+                    query.query,
+                    partition=partition_group[0] if len(partition_group) == 1 else None,
+                    diagnostics=trace.diagnostics,
+                )
+                for index, (partition_group, _pipeline, _default_top_k) in enumerate(groups)
+            ]
+            if trace is not None and len(groups) > 1
+            else None
+        )
         ranked_lists = await self._gather_partition_groups(
             [
                 (
@@ -955,12 +999,20 @@ class RetrievalService:
                         query=query,
                         top_k=top_k if top_k is not None else default_top_k,
                         filter_params=filter_params,
+                        trace=child_traces[index] if child_traces is not None else trace,
                     ),
                 )
-                for partition_group, pipeline, default_top_k in groups
+                for index, (partition_group, pipeline, default_top_k) in enumerate(groups)
             ]
         )
-        return ranked_lists[0] if len(ranked_lists) == 1 else self.fuse(ranked_lists, top_k=top_k)
+        if trace is not None and child_traces is not None:
+            merge_child_traces(trace, child_traces)
+        if len(ranked_lists) == 1:
+            result = ranked_lists[0]
+            if len(groups) > 1:
+                self._record_degraded_final(trace, result)
+            return result
+        return self.fuse(ranked_lists, top_k=top_k, trace=trace)
 
     async def retrieve_multi(
         self,
@@ -970,6 +1022,7 @@ class RetrievalService:
         top_k: int | None = None,
         retrieval_top_k: int | None = None,
         filter_params: dict | None = None,
+        trace: RetrievalTraceBuilder | None = None,
         similarity_threshold: float | None = None,
         disable_reranker: bool = False,
         disable_expansion: bool = False,
@@ -986,6 +1039,19 @@ class RetrievalService:
             )
         else:
             groups = [(list(group.partitions), group.pipeline, group.default_top_k) for group in resolved_plan.groups]
+        child_traces = (
+            [
+                RetrievalTraceBuilder(
+                    f"{trace.request_id}:partition:{index}",
+                    search_queries.query_list[0].query if len(search_queries.query_list) == 1 else None,
+                    partition=partition_group[0] if len(partition_group) == 1 else None,
+                    diagnostics=trace.diagnostics,
+                )
+                for index, (partition_group, _pipeline, _default_top_k) in enumerate(groups)
+            ]
+            if trace is not None and len(groups) > 1
+            else None
+        )
         ranked_lists = await self._gather_partition_groups(
             [
                 (
@@ -995,12 +1061,20 @@ class RetrievalService:
                         search_queries=search_queries,
                         top_k=top_k if top_k is not None else default_top_k,
                         filter_params=filter_params,
+                        trace=child_traces[index] if child_traces is not None else trace,
                     ),
                 )
-                for partition_group, pipeline, default_top_k in groups
+                for index, (partition_group, pipeline, default_top_k) in enumerate(groups)
             ]
         )
-        return ranked_lists[0] if len(ranked_lists) == 1 else self.fuse(ranked_lists, top_k=top_k)
+        if trace is not None and child_traces is not None:
+            merge_child_traces(trace, child_traces)
+        if len(ranked_lists) == 1:
+            result = ranked_lists[0]
+            if len(groups) > 1:
+                self._record_degraded_final(trace, result)
+            return result
+        return self.fuse(ranked_lists, top_k=top_k, trace=trace)
 
     async def retrieve_per_query(
         self,
@@ -1010,6 +1084,7 @@ class RetrievalService:
         top_k: int | None = None,
         retrieval_top_k: int | None = None,
         filter_params: dict | None = None,
+        trace: RetrievalTraceBuilder | None = None,
         similarity_threshold: float | None = None,
         disable_reranker: bool = False,
         disable_expansion: bool = False,
@@ -1021,6 +1096,7 @@ class RetrievalService:
         searches concurrently, then fuses; exposing the un-fused lists
         lets it run one ``asyncio.gather`` over both.
         """
+        query_trace = trace if len(queries) == 1 else None
         return await asyncio.gather(
             *[
                 self.retrieve(
@@ -1029,6 +1105,7 @@ class RetrievalService:
                     top_k=top_k,
                     retrieval_top_k=retrieval_top_k,
                     filter_params=filter_params,
+                    trace=query_trace,
                     similarity_threshold=similarity_threshold,
                     disable_reranker=disable_reranker,
                     disable_expansion=disable_expansion,
@@ -1042,6 +1119,7 @@ class RetrievalService:
     def fuse(
         doc_lists: list[list[Chunk]],
         top_k: int | None = None,
+        trace: RetrievalTraceBuilder | None = None,
     ) -> list[Chunk]:
         """RRF-fuse ranked lists across partitions (and doc+web).
 
@@ -1050,8 +1128,27 @@ class RetrievalService:
         single partition's ``rrf_k`` applies. Per-partition ``rrf_k`` is honoured
         one layer down, in ``RetrieverPipeline.get_relevant_docs`` (#707).
         """
-        fused = rrf_reranking(doc_lists, key_fn=_chunk_key)
-        return fused[:top_k] if top_k is not None else fused
+        fused = rrf_reranking(
+            doc_lists,
+            key_fn=_chunk_key,
+            top_k=top_k,
+            trace=trace,
+            trace_stage="partition_fused",
+        )
+        if trace is not None:
+            try:
+                trace.record_stage(
+                    "final",
+                    status="complete",
+                    candidates=trace.project_chunks("final", fused),
+                    candidate_count=len(fused),
+                )
+            except Exception as error:
+                try:
+                    trace.record_error("final", error)
+                except Exception:
+                    pass
+        return fused
 
 
 __all__ = ["ResolvedRetrievalGroup", "ResolvedRetrievalPlan", "RetrievalService"]
