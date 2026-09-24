@@ -14,16 +14,16 @@ _INTENT_INSTRUCTIONS = {
     ),
     "gratitude": (
         "Acknowledge the user's gratitude warmly and offer further help. Do not repeat the introduction "
-        "or list its capabilities."
+        "or list your capabilities."
     ),
     "capability": (
         "Briefly explain that you can answer questions using indexed documents and media, or general knowledge when "
         "no relevant indexed content is available. Do not provide the full introduction."
     ),
-    "farewell": ("Say goodbye warmly and briefly. Do not repeat the introduction or list its capabilities."),
+    "farewell": ("Say goodbye warmly and briefly. Do not repeat the introduction or list your capabilities."),
     "empty": (
         "Give a brief, welcoming response inviting the user to ask a question. Do not provide the full "
-        "introduction or list its capabilities."
+        "introduction or list your capabilities."
     ),
 }
 
@@ -48,7 +48,7 @@ def build_casual_response_prompt(intent: str, language: str, assistant_name: str
     response_language = _LANGUAGE_NAMES.get(language)
     if response_language is None:
         response_language = f'language identified by ISO 639-1 language code "{language}"' if language else "English"
-    name = assistant_name.strip()
+    name = assistant_name.strip().replace("{", "{{").replace("}", "}}")
     identity = name or "a helpful assistant"
     identity_line = f"You are {name}, a helpful assistant." if name else "You are a helpful assistant."
     intent_instruction = _INTENT_INSTRUCTIONS.get(intent, _INTENT_INSTRUCTIONS["empty"]).format(identity=identity)

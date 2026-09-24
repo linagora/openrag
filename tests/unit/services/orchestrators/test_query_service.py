@@ -777,6 +777,14 @@ def test_casual_response_prompt_is_intent_specific(intent, required_text):
     assert required_text in prompt
 
 
+@pytest.mark.parametrize("intent", ["gratitude", "farewell", "empty"])
+def test_casual_response_prompt_addresses_assistant_directly(intent):
+    prompt = qs.build_casual_response_prompt(intent, "en")
+
+    assert "list your capabilities" in prompt
+    assert "list its capabilities" not in prompt
+
+
 def test_casual_response_prompt_uses_configured_assistant_name_without_vendor_attribution():
     prompt = qs.build_casual_response_prompt("greeting", "en", assistant_name="Marianne")
 
@@ -799,6 +807,29 @@ async def test_chat_casual_greeting_uses_assistant_name_from_runtime_configurati
     prompt = result.payload["messages"][0]["content"]
     assert "introduce yourself as Marianne" in prompt
     assert "LINAGORA" not in prompt
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("assistant_name", ["Acme {AI}", "Acme {custom_prompt}"])
+async def test_chat_casual_greeting_preserves_literal_braces_in_assistant_name(assistant_name):
+    svc = _svc(mode="ChatBotRag")
+    svc._config.server.assistant_name = assistant_name
+
+    result = await svc._prepare_chat(
+        ["p"],
+        {
+            "messages": [
+                {"role": "system", "content": "Keep it brief."},
+                {"role": "user", "content": "Hello!"},
+            ],
+            "metadata": {},
+        },
+    )
+
+    prompt = result.payload["messages"][0]["content"]
+    assert f"You are {assistant_name}, a helpful assistant." in prompt
+    assert f"introduce yourself as {assistant_name}." in prompt
+    assert "<unsafe_custom_prompt>\nKeep it brief.\n</unsafe_custom_prompt>" in prompt
 
 
 @pytest.mark.asyncio
