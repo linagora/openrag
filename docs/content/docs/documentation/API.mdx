@@ -268,11 +268,12 @@ Perform semantic search across specified partitions.
 |---------------------|---------|---------|-------------|
 | `partitions` (optional)        | array   | ["all"] | Partitions to search. (optional) |
 | `text`              | string  | required | Search query |
-| `top_k` (optional)             | integer | 5       | Number of initial results (optional) |
+| `top_k` (optional)             | integer | 5       | Number of initial results, from 1 to 1000 (optional) |
 | `include_related` (optional)   | boolean | `false`   | Include chunks from files with same `relationship_id` |
 | `include_ancestors` (optional) | boolean | `false`   | Include chunks from ancestor files (via `parent_id` chain) |
 | `related_limit` (optional)     | integer | 20      | Max related/ancestor chunks to fetch per result (used when `include_related` or `include_ancestors` is true) |
 | `filter` (optional)            | string  | None    | Milvus filter expression string for additional filtering. Supports comparison (`==`, `!=`, `>`, `<`, `>=`, `<=`), range (`IN`, `LIKE`), and logical (`AND`, `OR`, `NOT`) operators. |
+| `include_retrieval_trace` (optional) | boolean | `false` | Add content-free retrieval diagnostics for administrators. This may execute additional search work. |
 
 **Responses:**
 - `200 OK`: JSON list of document links (HATEOAS format)
@@ -290,13 +291,18 @@ Search within a specific partition only.
 | Parameter           | Type    | Default | Description |
 |---------------------|---------|---------|-------------|
 | `text`              | string  | required | Search query |
-| `top_k` (optional)             | integer | 5       | Number of initial results (optional) |
+| `top_k` (optional)             | integer | 5       | Number of initial results, from 1 to 1000 (optional) |
 | `include_related` (optional)   | boolean | `false`   | Include chunks from files with same `relationship_id` |
 | `include_ancestors` (optional) | boolean | `false`   | Include chunks from ancestor files (via `parent_id` chain) |
 | `related_limit` (optional)     | integer | 20      | Max related/ancestor chunks to fetch per result (used when `include_related` or `include_ancestors` is true) |
 | `filter` (optional)            | string  | None    | Milvus filter expression string for additional filtering. Supports comparison (`==`, `!=`, `>`, `<`, `>=`, `<=`), range (`IN`, `LIKE`), and logical (`AND`, `OR`, `NOT`) operators. |
+| `include_retrieval_trace` (optional) | boolean | `false` | Add content-free retrieval diagnostics for administrators. This may execute additional search work. |
 
 **Response:** Same as multi-partition search
+
+Tracing is opt-in and administrator-only because it exposes query and candidate identifiers and performs extra diagnostic
+searches. It reports identifiers, ranks, public scores, decisions, timings, and configuration identity. Document content,
+prompt content, credentials, and internal endpoint addresses are excluded.
 
 * Retrieval Snapshot
 ```http
