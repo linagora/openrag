@@ -229,8 +229,8 @@ The system uses token-based authentication with role-based access control (RBAC)
 - `files` - File records with `file_id`, `partition_name`, `file_metadata`, `created_by` (FK to users), `relationship_id`, `parent_id`
 - `partition_memberships` - Join table linking users to partitions with roles (`owner`, `editor`, `viewer`)
 - `partitions` - Document collections with cascade delete to files and memberships
-- `workspaces` - Named file subsets within a partition for scoped search/chat
-- `workspace_files` - Join table linking workspaces to files
+- `workspaces` - Named file subsets within a partition for scoped search/chat. `workspace_id` is unique per partition only (`(partition_name, workspace_id)`), so every lookup is keyed on both; a workspace-scoped multi-partition search whose id matches several searchable partitions fails with `AmbiguousWorkspaceError` (422) instead of picking one
+- `workspace_files` - Join table linking workspaces to files by their integer PKs (`workspaces.id`, `files.id`), never by the per-partition string ids
 
 **Authentication Flow** (`AuthMiddleware` from `openrag/api/middleware/auth.py`, registered in `openrag/api/main.py`):
 1. Token extracted from `Authorization: Bearer <token>` header (or `?token=` query param for `/static` routes)
