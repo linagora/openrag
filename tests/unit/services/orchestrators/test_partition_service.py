@@ -405,6 +405,32 @@ async def test_create_partition_rejects_reserved_name(name):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("name", ["openrag-canary", "OpenRag-Canary", " openrag-canary "])
+async def test_create_partition_reserves_the_canary_partition_for_users(name):
+    # A user owning the canary's partition would have the canary index into,
+    # and clean up, a partition that is theirs.
+    prepo = FakePartitionRepo()
+    with pytest.raises(ValidationError) as ei:
+        await _svc(prepo=prepo).create_partition(name, 1)
+    assert ei.value.code == "RESERVED_PARTITION_NAME"
+    assert prepo.created == []
+
+
+@pytest.mark.asyncio
+async def test_system_create_reaches_only_the_canary_partition():
+    prepo = FakePartitionRepo()
+    svc = _svc(prepo=prepo)
+
+    await svc.create_partition("openrag-canary", 42, system=True)
+    assert prepo.created == [("openrag-canary", 42)]
+
+    # The system flag is not a general bypass of the reserved names.
+    with pytest.raises(ValidationError) as ei:
+        await svc.create_partition("all", 42, system=True)
+    assert ei.value.code == "RESERVED_PARTITION_NAME"
+
+
+@pytest.mark.asyncio
 async def test_delete_partition_missing_raises_404():
     with pytest.raises(PartitionNotFoundError):
         await _svc(prepo=FakePartitionRepo(existing=set())).delete_partition("ghost")

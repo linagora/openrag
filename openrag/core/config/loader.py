@@ -104,6 +104,12 @@ _ENV_OVERRIDES: list[tuple[str, str, type]] = [
     ("CONTENT_DEDUPLICATION_ENABLED", "loader.content_deduplication_enabled", bool),
     # Indexing callback
     ("INDEXING_CALLBACK_ALLOW_PRIVATE_URLS", "indexing_callback.allow_private_urls", bool),
+    # Synthetic canary
+    ("CANARY_ENABLED", "canary.enabled", bool),
+    ("CANARY_INTERVAL_SECONDS", "canary.interval_seconds", int),
+    ("CANARY_INITIAL_DELAY_SECONDS", "canary.initial_delay_seconds", int),
+    ("CANARY_INDEX_TIMEOUT_SECONDS", "canary.index_timeout_seconds", int),
+    ("CANARY_REQUEST_TIMEOUT_SECONDS", "canary.request_timeout_seconds", int),
     ("PDFLOADER", "loader.file_loaders.pdf", str),
     ("AUDIOLOADER", "loader.file_loaders.wav", str),
     ("MARKER_MAX_TASKS_PER_CHILD", "loader.marker_max_tasks_per_child", int),

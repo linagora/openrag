@@ -292,6 +292,18 @@ indexing_callback:
   # caller-supplied URL.
   allow_private_urls: false
 
+# --- Synthetic canary ---
+# Env: CANARY_ENABLED, CANARY_INTERVAL_SECONDS, CANARY_INITIAL_DELAY_SECONDS,
+#      CANARY_INDEX_TIMEOUT_SECONDS, CANARY_REQUEST_TIMEOUT_SECONDS
+# Indexes, retrieves and deletes a known document on a fixed cadence, in its own
+# partition as its own system user. Pair it with the OpenRagCanaryFailing alert.
+canary:
+  enabled: false
+  interval_seconds: 900
+  initial_delay_seconds: 60
+  index_timeout_seconds: 600
+  request_timeout_seconds: 60
+
 # --- Ray ---
 ray:
   indexer:

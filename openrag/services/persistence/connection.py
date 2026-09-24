@@ -162,6 +162,19 @@ class ConnectionManager:
             create_database(url)
             logger.info(f"Created Postgres database `{self._conn_kwargs['database']}`.")
 
+    async def connect(self, *, server_settings: dict[str, str] | None = None) -> asyncpg.Connection:
+        """Open a connection outside the pool; the caller closes it.
+
+        For session-scoped state held far longer than a request, such as an
+        advisory lock that lives as long as the process: holding it on a
+        pooled connection would take that connection away from every request.
+        """
+        return await asyncpg.connect(
+            **self._conn_kwargs,
+            command_timeout=self._command_timeout,
+            server_settings=server_settings,
+        )
+
     async def shutdown(self) -> None:
         if self._pool is None:
             return

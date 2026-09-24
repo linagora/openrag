@@ -513,6 +513,17 @@ openrag:
       # Read METRICS_TOKEN from the chart env Secret (or env.existingSecret)
       # and send it as the scrape bearer. Enable together with the token.
       bearerTokenFromSecret: false
+    # PrometheusRule carrying OpenRag's alert rules (rules/*.yaml in this
+    # chart; today OpenRagCanaryFailing, which needs env.config.CANARY_ENABLED).
+    # Alerts only fire where the API is scraped, so enable it together with
+    # serviceMonitor or the pod annotations above.
+    prometheusRule:
+      enabled: false
+      # Labels the operator's ruleSelector expects, e.g.
+      # release: kube-prometheus-stack
+      labels: {}
+      # Added to every alert, for Alertmanager routing, e.g. team: openrag
+      ruleLabels: {}
   resources:
     requests:
       cpu: "4"
@@ -663,6 +674,11 @@ env:
     # (the Ingress port) without env.secrets.METRICS_TOKEN — only for clusters
     # that block /metrics at the Ingress and scrape the Service in-cluster.
     METRICS_ALLOW_UNAUTHENTICATED: "false"
+    # Synthetic canary: every 15 minutes the API indexes, retrieves and deletes
+    # a known document in the reserved "openrag-canary" partition, as a system
+    # user with no token and no quota. Its alert is OpenRagCanaryFailing
+    # (openrag.metrics.prometheusRule). See docs/documentation/synthetic_canary.md.
+    CANARY_ENABLED: "true"
 
     # One flat JSON object per log line on stderr, for the platform's log
     # collector. PREREQUISITE: this chart ships no collector and no longer

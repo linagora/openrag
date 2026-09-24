@@ -6,6 +6,7 @@ from core.models.preset import PartitionConfig
 from pydantic import Field
 
 from .base import ConfigMixin
+from .canary import CanaryConfig
 from .chunking import ChunkerConfig
 from .endpoints import (
     EmbedderConfig,
@@ -61,6 +62,7 @@ class Settings(ConfigMixin):
     prompts: PromptsConfig = Field(default_factory=PromptsConfig)
     loader: LoaderConfig = Field(default_factory=LoaderConfig)
     indexing_callback: IndexingCallbackConfig = Field(default_factory=IndexingCallbackConfig)
+    canary: CanaryConfig = Field(default_factory=CanaryConfig)
     ray: RayConfig = Field(default_factory=RayConfig)
     chunker: ChunkerConfig = Field(default_factory=ChunkerConfig)
     retriever: RetrieverConfig = Field(default_factory=SingleRetrieverConfig)

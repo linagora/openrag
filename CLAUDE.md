@@ -381,6 +381,29 @@ Both fields travel the same chain as the rest of an indexing job: `api/routers/a
 `services/orchestrators/indexing_service.py` → `core/indexing/dispatcher.py` (port) →
 `services/workers/dispatcher.py` → `indexer_pool.py` → `indexer_actor.py` → `indexing_callback.py`.
 
+### Synthetic Canary
+
+`CANARY_ENABLED=true` (off by default, on in the Helm chart) makes the API index, retrieve and delete a
+known document every `CANARY_INTERVAL_SECONDS` (900), through the same `IndexingService` /
+`RetrievalService.retrieve` / delete path as real traffic, and export the outcome as `openrag_canary_*`.
+
+- **Isolation:** reserved partition `openrag-canary` (`_SYSTEM_PARTITION_NAMES` in `partition_service.py`;
+  only `create_partition(..., system=True)` may create it) and a system user found by email
+  `canary@openrag.invalid`: no token, not admin, `file_quota=-1`. It deletes only `canary-<unix>-<nonce>` file
+  ids, and only once they are older than a run can last, so a leftover from a crashed run is swept without
+  racing one in flight. It refuses a pre-existing partition of that name owned by someone else.
+- **One runner:** `AdvisoryLease` (`services/persistence/advisory_lease.py`) holds a session-level
+  `pg_try_advisory_lock` on a dedicated (non-pooled) connection with tight TCP keepalives; the others retry
+  each interval. Not a Ray actor: a multi-pod uvicorn deployment has one Ray cluster per pod.
+- **Alert:** `OpenRagCanaryFailing` in `infra/charts/openrag-stack/rules/` — rendered as a `PrometheusRule`
+  (`openrag.metrics.prometheusRule`) and mounted by the Compose monitoring overlay; promtool tests in
+  `tests/unit/infra/prometheus/`. Metric names in rule expressions are checked against `CanaryMetrics`.
+- **Metrics that must exclude canary traffic** (anything recorded below the API) test `is_canary_partition()`
+  (`core/observability/canary.py`); HTTP metrics never see it.
+
+**Key files:** `services/orchestrators/canary_service.py` (`CanaryService.run_once`, `CanaryScheduler`),
+`di/canary.py` (`start_canary`, called last in the lifespan), `core/config/canary.py`.
+
 ### File Quota System
 
 Per-user file quota enforcement tracked via the `file_count` and `file_quota` columns on `users`, and `created_by` on `files`.

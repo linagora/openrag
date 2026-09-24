@@ -64,6 +64,7 @@ from api.runtime_ui import get_grafana_url
 from core.config import load_config
 from core.utils.banner import print_startup_banner
 from core.utils.logging import get_logger
+from di.canary import start_canary
 from di.container import ServiceContainer
 from di.providers import set_container
 from di.workers import ensure_worker_bootstrap
@@ -155,6 +156,8 @@ async def lifespan(app: FastAPI):
     5. ``set_container`` — registers the resolved container as the
        process-level singleton for callers that resolve it without a
        request; cleared on shutdown.
+    6. The synthetic canary, when enabled — started last so its first run
+       finds the container it drives, stopped first on shutdown.
     """
     if not ray.is_initialized():
         logger.info("Startup: initializing Ray")
@@ -230,12 +233,22 @@ async def lifespan(app: FastAPI):
     metrics_notice = describe_metrics_access(settings.server)
     if metrics_notice:
         logger.warning(metrics_notice)
+    try:
+        canary = start_canary(settings, getattr(app.state, "container", None))
+    except Exception:  # pragma: no cover - defensive boot guard
+        logger.exception("Synthetic canary not started")
+        canary = None
     logger.info("Startup: complete")
     print_startup_banner(app_version)
 
     try:
         yield
     finally:
+        if canary is not None:
+            try:
+                await canary.stop()
+            except Exception:  # pragma: no cover - defensive shutdown guard
+                logger.exception("Synthetic canary shutdown skipped")
         live = getattr(app.state, "container", None)
         if live is not None:
             try:

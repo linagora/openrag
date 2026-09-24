@@ -36,6 +36,7 @@ from core.config.model_endpoints import DEFAULT_ENDPOINT_ALIAS
 from core.config.retrieval_pipeline import RetrievalPipelineConfig
 from core.indexing.validators import validate_partition_name
 from core.models.preset import PartitionConfig
+from core.observability.canary import CANARY_PARTITION
 from core.utils.consts import is_internal_metadata_key
 from core.utils.exceptions import (
     ConfigError,
@@ -63,7 +64,12 @@ logger = get_logger()
 # ``?partitions=all``). A real partition named ``all`` collides with the sentinel
 # and the admin partition-list route would expand it to *every* partition — see
 # ``list_existant_partitions``. Matched case-insensitively.
-_RESERVED_PARTITION_NAMES = frozenset({"all"})
+#
+# The canary's partition is reserved too, but for the opposite reason: OpenRag
+# creates it itself (``create_partition(..., system=True)``), and reserving it
+# keeps any user from owning the partition the canary indexes into and cleans.
+_SYSTEM_PARTITION_NAMES = frozenset({CANARY_PARTITION})
+_RESERVED_PARTITION_NAMES = frozenset({"all"}) | _SYSTEM_PARTITION_NAMES
 _MAX_MEMBER_CANDIDATE_PAGE_SIZE = 100
 _MAX_POSTGRES_INTEGER = 2_147_483_647
 _MIN_MEMBER_CANDIDATE_SEARCH_LENGTH = 3
@@ -356,8 +362,12 @@ class PartitionService:
         retrieval_preset: str = "default",
         chat_history_depth: int = 4,
         chat_llm: str | None = None,
+        system: bool = False,
     ) -> None:
         """Create a partition owned by ``user_id`` with preset references.
+
+        ``system=True`` lets OpenRag create one of its own reserved partitions
+        (the canary's). Only internal callers pass it; no request reaches it.
 
         The 409-on-exists check lives in the thin router (it returns a
         non-bracketed ``{"detail": ...}`` body that must stay identical);
@@ -372,7 +382,8 @@ class PartitionService:
         # Reserved-name check first so a name that normalises to a reserved
         # sentinel (e.g. "  all  ") returns the specific RESERVED_PARTITION_NAME
         # error rather than the generic identifier-allowlist rejection.
-        if partition.strip().lower() in _RESERVED_PARTITION_NAMES:
+        reserved = partition.strip().lower() in _RESERVED_PARTITION_NAMES
+        if reserved and not (system and partition in _SYSTEM_PARTITION_NAMES):
             raise ValidationError(
                 f"Partition name '{partition}' is reserved.",
                 status_code=400,
