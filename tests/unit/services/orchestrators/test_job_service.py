@@ -311,6 +311,7 @@ class FakeJobRepo:
         self._broken = broken
         self._fail_get_jobs = fail_get_jobs
         self.listed_statuses = []
+        self.calls: list[str] = []
 
     async def list_jobs(self, *, statuses=None, user_id=None, offset=0, limit=50):
         if self._broken:
@@ -328,11 +329,23 @@ class FakeJobRepo:
         return self._jobs.get(job_id)
 
     async def get_jobs(self, job_ids):
+        self.calls.append("get_jobs")
         if self._broken or self._fail_get_jobs:
             raise RuntimeError("jobs table is missing")
         return [self._jobs[task_id] for task_id in job_ids if task_id in self._jobs]
 
+    async def get_job_states(self, *, statuses=None, job_ids=None):
+        self.calls.append("get_job_states")
+        if self._broken:
+            raise RuntimeError("jobs table is missing")
+        return {
+            job.id: job.status.value
+            for job in self._jobs.values()
+            if (statuses is None or job.status.value in statuses) and (job_ids is None or job.id in job_ids)
+        }
+
     async def count_jobs(self):
+        self.calls.append("count_jobs")
         if self._broken:
             raise RuntimeError("jobs table is missing")
         if self._counts is not None:
@@ -543,9 +556,13 @@ async def test_get_task_details_prefers_the_durable_row():
 
 @pytest.mark.asyncio
 async def test_get_queue_info_merges_actor_only_tasks_without_overriding_durable_rows():
+    from core.models.catalog import DocumentStatus
+
     tsm = FakeTSM(states={"live": "QUEUED", "stale": "SERIALIZING"})
+    in_flight = [_job(id=f"q{i}", status=DocumentStatus.QUEUED, completed_at=None) for i in range(2)]
+    in_flight += [_job(id=f"s{i}", status=DocumentStatus.SERIALIZING, completed_at=None) for i in range(3)]
     repo = FakeJobRepo(
-        [_job(id="stale")],
+        [_job(id="stale"), *in_flight],
         counts={"QUEUED": 2, "SERIALIZING": 3, "COMPLETED": 4, "FAILED": 5, "CANCELLED": 6},
     )
 
@@ -636,6 +653,73 @@ async def test_active_task_counts_reconcile_like_get_queue_info():
     assert counts == (await service.get_queue_info())["tasks"]["active_statuses"]
 
 
+class _RowWrittenBetweenReads(FakeJobRepo):
+    """Task ``x`` is committed after the status read and before the ID read.
+
+    ``count_jobs`` is the snapshot taken before ``x`` existed; ``get_jobs`` and
+    the ID read already see it, still QUEUED, while the actor has moved on.
+    """
+
+    async def get_job_states(self, *, statuses=None, job_ids=None):
+        self.calls.append("get_job_states")
+        if statuses is not None:
+            return {}
+        return {"x": "QUEUED"} if "x" in job_ids else {}
+
+
+def _row_written_between_reads():
+    from core.models.catalog import DocumentStatus
+
+    tsm = FakeTSM(states={"x": "SERIALIZING"})
+    repo = _RowWrittenBetweenReads(
+        [_job(id="x", status=DocumentStatus.QUEUED, completed_at=None)], counts={"COMPLETED": 5}
+    )
+    return JobService(tsm, job_repo=repo)
+
+
+@pytest.mark.asyncio
+async def test_active_task_counts_never_subtract_a_row_the_first_read_missed():
+    counts = await _row_written_between_reads().get_active_task_counts()
+
+    assert counts == {"QUEUED": 0, "SERIALIZING": 1}
+
+
+@pytest.mark.asyncio
+async def test_queue_info_active_counts_never_go_negative():
+    tasks = (await _row_written_between_reads().get_queue_info())["tasks"]
+
+    assert tasks["active_statuses"] == {"QUEUED": 0, "SERIALIZING": 1}
+    assert tasks["active"] == 1
+    assert tasks["total_completed"] == 5
+
+
+@pytest.mark.asyncio
+async def test_active_task_counts_read_only_in_flight_rows():
+    """The scrape runs this every interval: no whole-table count, no full rows."""
+    from core.models.catalog import DocumentStatus
+
+    tsm = FakeTSM(states={"live": "QUEUED", "done": "COMPLETED"})
+    repo = FakeJobRepo([_job(id="waiting", status=DocumentStatus.QUEUED, completed_at=None), _job(id="done")])
+
+    counts = await JobService(tsm, job_repo=repo).get_active_task_counts()
+
+    assert counts == {"QUEUED": 2, "SERIALIZING": 0}
+    assert repo.calls == ["get_job_states", "get_job_states"]
+
+
+@pytest.mark.asyncio
+async def test_active_task_counts_ignore_a_live_task_already_settled_durably():
+    """An actor row that trails a durable terminal write is not in flight."""
+    from core.models.catalog import DocumentStatus
+
+    tsm = FakeTSM(states={"late": "SERIALIZING"})
+    repo = FakeJobRepo([_job(id="late", status=DocumentStatus.COMPLETED)])
+
+    counts = await JobService(tsm, job_repo=repo).get_active_task_counts()
+
+    assert counts == {"QUEUED": 0, "SERIALIZING": 0}
+
+
 @pytest.mark.asyncio
 async def test_active_task_counts_fall_back_to_actor_when_durable_counts_fail():
     tsm = FakeTSM(states={"live": "SERIALIZING", "done": "COMPLETED"})
@@ -647,9 +731,11 @@ async def test_active_task_counts_fall_back_to_actor_when_durable_counts_fail():
 
 @pytest.mark.asyncio
 async def test_get_queue_info_falls_back_when_durable_actor_lookup_fails():
+    from core.models.catalog import DocumentStatus
+
     tsm = FakeTSM(states={"live": "SERIALIZING", "done": "COMPLETED"})
     repo = FakeJobRepo(
-        [_job(id="live")],
+        [_job(id="live", status=DocumentStatus.SERIALIZING, completed_at=None)],
         counts={"SERIALIZING": 1, "COMPLETED": 4},
         fail_get_jobs=True,
     )
