@@ -185,10 +185,14 @@ milvus:
   minio:
     mode: distributed
     replicas: 3
-    # MinIO pulled minio/minio from Docker Hub; pull the same pinned tag from
-    # quay.io instead (mirrors the compose stacks' fix for the same issue).
+    # MinIO no longer publishes images (removed from Docker Hub, then quay.io);
+    # linagoraai/minio is an unmodified mirror of the same upstream release,
+    # matching the compose stacks. The tag is pinned here, not left to the
+    # Milvus chart's default, so a chart bump can't select a tag the mirror
+    # doesn't have.
     image:
-      repository: quay.io/minio/minio
+      repository: linagoraai/minio
+      tag: RELEASE.2024-12-18T13-15-44Z
     persistence:
       enabled: true
       size: 20Gi
