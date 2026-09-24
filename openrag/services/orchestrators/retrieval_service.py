@@ -40,7 +40,7 @@ from core.retrieval.retriever import (
     _expand_with_related_chunks,
 )
 from core.retrieval.rrf import rrf_reranking
-from core.retrieval.trace import canonical_fingerprint
+from core.retrieval.trace import RetrievalTraceBuilder, canonical_fingerprint
 from core.utils.exceptions import PartitionNotFoundError
 from core.utils.logging import get_logger
 
@@ -344,6 +344,45 @@ class RetrievalService:
     def configuration_fingerprint(self, partitions: Sequence[str]) -> str:
         """Fingerprint only allowlisted public settings for the authorized scope."""
         return canonical_fingerprint(self.public_retrieval_configuration(partitions))
+
+    def public_search_configuration(
+        self,
+        partitions: Sequence[str],
+        effective_options: Mapping[str, object],
+    ) -> dict[str, object]:
+        """Return only settings that can affect the raw search endpoint."""
+        configured_partitions = self._partition_configs()
+        selected_partitions = (
+            list(configured_partitions) if "all" in partitions and configured_partitions else partitions
+        )
+        default_embedder = (getattr(getattr(self._config, "models", None), "embedder", {}) or {}).get("default")
+        raw_search_embedder = {
+            "name": "default",
+            "model": getattr(getattr(self._config, "embedder", None), "model_name", None),
+            "vector_field": getattr(default_embedder, "vector_field", None),
+        }
+        public_partitions = [
+            {"name": partition_name, "embedder": raw_search_embedder}
+            for partition_name in sorted(set(selected_partitions))
+        ]
+        hybrid_enabled = getattr(getattr(self._config, "vectordb", None), "hybrid_search", None)
+        return {
+            "operation": "raw_search",
+            "hybrid": {
+                "enabled": hybrid_enabled,
+                "fusion": "rrf" if hybrid_enabled else None,
+            },
+            "partitions": public_partitions,
+            "request": dict(effective_options),
+        }
+
+    def search_configuration_fingerprint(
+        self,
+        partitions: Sequence[str],
+        effective_options: Mapping[str, object],
+    ) -> str:
+        """Fingerprint the effective raw-search path without chat-only settings."""
+        return canonical_fingerprint(self.public_search_configuration(partitions, effective_options))
 
     def _contextualizer_prompt_name(self, partitions: Sequence[str]) -> str | None:
         selected = list(dict.fromkeys(partitions))
@@ -778,6 +817,7 @@ class RetrievalService:
         include_ancestors: bool = False,
         related_limit: int = 20,
         max_ancestor_depth: int | None = None,
+        trace: RetrievalTraceBuilder | None = None,
     ) -> list[Chunk]:
         """One similarity search, then optional related/ancestor expansion.
 
@@ -786,6 +826,9 @@ class RetrievalService:
         query generation / reranking / RRF — those belong to QueryService).
         """
         parts = [partitions] if isinstance(partitions, str) else list(partitions)
+        if trace is not None:
+            trace.record_stage("original_query", status="complete", candidates=[])
+        trace_kwargs = {"trace": trace} if trace is not None else {}
         chunks = await self._searcher.search(
             query=text,
             partition=parts,
@@ -794,6 +837,7 @@ class RetrievalService:
             filter_params=filter_params,
             similarity_threshold=similarity_threshold,
             with_surrounding_chunks=True,
+            **trace_kwargs,
         )
         if include_related or include_ancestors:
             chunks = await _expand_with_related_chunks(
@@ -805,6 +849,16 @@ class RetrievalService:
                 max_ancestor_depth=max_ancestor_depth,
                 filter_params=filter_params,
             )
+        if trace is not None:
+            try:
+                trace.record_stage(
+                    "final",
+                    status="complete",
+                    candidates=trace.project_chunks("final", chunks),
+                    candidate_count=len(chunks),
+                )
+            except Exception as error:
+                trace.record_error("final", error)
         return chunks
 
     # ------------------------------------------------------------------

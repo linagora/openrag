@@ -3,6 +3,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from core.models.chunk import Chunk
+from core.retrieval.trace import RetrievalTraceBuilder
 from loguru import logger
 from prometheus_client import REGISTRY
 from services.storage import catalog_searcher
@@ -82,6 +83,16 @@ async def test_empty_results_skip_catalog():
     repo = AsyncMock()
     assert await CatalogSearcher(inner, repo).search("q", ["a"], 5) == []
     repo.get_indexed_documents.assert_not_awaited()
+
+
+async def test_search_forwards_request_local_trace_to_inner_searcher():
+    inner = AsyncMock()
+    inner.search.return_value = []
+    trace = RetrievalTraceBuilder("req-1", "q")
+
+    await CatalogSearcher(inner, AsyncMock()).search("q", ["a"], 5, trace=trace)
+
+    assert inner.search.call_args.kwargs["trace"] is trace
 
 
 @pytest.mark.parametrize("multi", [False, True])
