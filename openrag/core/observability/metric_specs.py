@@ -2,13 +2,15 @@
 
 **Why specs rather than metric objects.** S3-2's metrics are produced on two
 sides of a process boundary. The HTTP and chat-path metrics live in the API
-process and use ``prometheus_client``; every ``ingest_*`` metric is produced
-inside a Ray actor (``services/workers/indexer_actor.py``, driven by
-``indexer_pool.py``) and must use ``ray.util.metrics``, because a
+process and use ``prometheus_client``; the per-document ``ingest_*`` metrics
+are produced inside a Ray actor (``services/workers/indexer_actor.py``, driven
+by ``indexer_pool.py``) and must use ``ray.util.metrics``, because a
 ``prometheus_client`` counter incremented in a Ray worker is invisible to
 ``/metrics`` in the API process — there is no shared registry, and under
 ``ENABLE_RAY_SERVE=true`` (``values-linagora.yaml``) even the API runs as Serve
-replicas that HTTP cannot address individually.
+replicas that HTTP cannot address individually. The exception is
+``openrag_ingest_tasks``: a gauge the API process samples from the task state
+at scrape time, so it is served on the API's ``/metrics`` like the HTTP metrics.
 
 ``openrag_circuit_breaker_state`` (``services/inference/_circuit_breaker.py``)
 is the existing instance of that bug: it is a ``prometheus_client`` Gauge set
@@ -189,7 +191,7 @@ PARSER_POOL_VALUES: tuple[str, ...] = (
 #: What kind of call was made, not which model served it. ``provider`` carries
 #: the registry *name*, which is admin-created and therefore bounded — the same
 #: reasoning S3-1 applies to its per-endpoint readiness metric.
-INFERENCE_OPERATION_VALUES: tuple[str, ...] = ("embed", "chat", "rerank", "vlm")
+INFERENCE_OPERATION_VALUES: tuple[str, ...] = ("embed", "chat", "completion", "rerank", "vlm")
 
 #: Bounded outcome enum. Never an exception message: that is the one place this
 #: design could blow up cardinality from the value side rather than the key side.

@@ -68,10 +68,12 @@ def _record_stream_usage(line: str) -> None:
     then discarded by ``record_usage_from_response``, which requires ``usage``
     to be a top-level object.
     """
-    if '"usage"' not in line or not line.startswith("data: "):
+    if '"usage"' not in line or not line.startswith("data:"):
         return
+    # SSE allows `data:` with or without one space after the colon.
+    body = line[len("data:") :]
     try:
-        payload = json.loads(line[len("data: ") :])
+        payload = json.loads(body[1:] if body.startswith(" ") else body)
     except ValueError:
         return
     record_usage_from_response(payload, operation="chat")
@@ -376,7 +378,7 @@ class VLLMClient(LLM):
         payload_kwargs = _strip_falsy_logprobs(payload_kwargs)
         return payload_kwargs
 
-    @with_inference_metrics("chat", capture_usage=True)
+    @with_inference_metrics("completion", capture_usage=True)
     @with_circuit_breaker("llm", skip_if=_targets_client_endpoint)
     @with_retry(max_attempts=3)
     async def generate(self, prompt: str, **kwargs) -> dict:

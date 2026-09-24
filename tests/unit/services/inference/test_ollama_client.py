@@ -582,3 +582,12 @@ class TestRegistryIntegration:
         from core.embeddings import embedder_registry
 
         assert "ollama" in embedder_registry
+
+
+@pytest.mark.asyncio
+async def test_generate_is_counted_as_a_completion_not_a_chat(recorded_inference):
+    """`generate` calls /v1/completions: counting it under `chat` merged two
+    different call shapes into one series."""
+    client = TestOllamaClient()._make_client(lambda req: _completions_response("done"))
+    await client.generate("say something")
+    assert [c["operation"] for c in recorded_inference] == ["completion"]

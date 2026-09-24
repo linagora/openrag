@@ -81,7 +81,7 @@ class OllamaClient(LLM):
         )
         logger.bind(model=self._model, endpoint=self._endpoint, timeout=timeout).debug("OllamaClient ready")
 
-    @with_inference_metrics("chat", capture_usage=True)
+    @with_inference_metrics("completion", capture_usage=True)
     @with_circuit_breaker("llm")
     @with_retry(max_attempts=3)
     async def generate(self, prompt: str, **kwargs) -> dict:
