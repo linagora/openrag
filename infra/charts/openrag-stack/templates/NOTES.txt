@@ -87,3 +87,39 @@ Datastore metrics
 {{- end }}
 Check the targets are up: docs/documentation/kubernetes.md#monitoring-ray-postgres-and-milvus
 {{- end }}
+{{- if .Values.monitoring.bundled }}
+{{- $stack := .Values.kubePrometheusStack | toYaml | fromYaml }}
+{{- $grafana := dig "grafana" dict $stack }}
+
+Monitoring (bundled kube-prometheus-stack)
+------------------------------------------
+{{- if dig "enabled" true $grafana }}
+{{- $service := dig "fullnameOverride" (printf "%s-grafana" .Release.Name) $grafana }}
+{{- /* Grafana reads its admin from admin.existingSecret when one is set, else
+   from the Secret it generates, under admin.userKey and passwordKey either way. */}}
+{{- $secret := dig "admin" "existingSecret" "" $grafana | default $service }}
+{{- $userKey := dig "admin" "userKey" "" $grafana | default "admin-user" }}
+{{- $passwordKey := dig "admin" "passwordKey" "" $grafana | default "admin-password" }}
+Grafana, with the OpenRAG dashboards in the "{{ .Values.monitoring.dashboards.folder }}" folder:
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ $service }} 3000:80
+  user and password:
+  kubectl -n {{ .Release.Namespace }} get secret {{ $secret }} -o jsonpath='{.data.{{ $userKey }}}' | base64 -d
+  kubectl -n {{ .Release.Namespace }} get secret {{ $secret }} -o jsonpath='{.data.{{ $passwordKey }}}' | base64 -d
+Grafana listens on 3000, which networkPolicy.externalPorts does not open: an
+Ingress in front of it needs that port added there.
+{{- else }}
+The bundled Grafana is off. The OpenRAG dashboards are ConfigMaps labelled
+{{ .Values.monitoring.dashboards.label }}={{ .Values.monitoring.dashboards.labelValue | toString | quote }}, for the sidecar of the Grafana that loads them.
+{{- end }}
+{{- if dig "alertmanager" "enabled" true $stack }}
+
+Alertmanager ships with no receiver: alerts fire in Prometheus and Alertmanager
+but notify no one until kubePrometheusStack.alertmanager.config routes them.
+{{- end }}
+{{- if eq (include "openrag-stack.rayServeApi" .) "true" }}
+
+⚠  The API is served by Ray Serve, so no ServiceMonitor was rendered for it
+(each replica keeps its own registry behind one proxy): the OpenRAG HTTP
+dashboard stays empty. See docs/documentation/prometheus_metrics.md, Limitations.
+{{- end }}
+{{- end }}

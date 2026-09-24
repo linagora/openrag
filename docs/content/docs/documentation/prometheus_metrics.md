@@ -23,7 +23,21 @@ Everything below applies to both.
 | `openrag_http_requests_total` | counter | `method`, `endpoint`, `status_code` | Requests served, per route template. |
 | `openrag_http_request_failures_total` | counter | `method`, `endpoint`, `status_code` | Subset with a status of 400 or above. |
 | `openrag_http_request_duration_seconds` | histogram | `method`, `endpoint` | Full request duration, including the streamed body for chat completions. |
-| `openrag_circuit_breaker_state` | gauge | `name` | Inference circuit breaker: 0 closed, 1 open, 2 half-open. |
+| `openrag_circuit_breaker_state` | gauge | `name` | Inference circuit breaker, as seen by the API process: 0 closed, 1 open, 2 half-open, -1 unknown. |
+| `openrag_ingest_tasks` | gauge | `state` | Indexing tasks in flight (`QUEUED`, `SERIALIZING`), sampled at scrape time. The same cluster-wide number on every replica: aggregate with `max`, not `sum`. |
+| `openrag_inference_requests_total` | counter | `provider`, `operation`, `outcome` | Calls to inference endpoints made by the API process. |
+| `openrag_inference_duration_seconds` | histogram | `provider`, `operation` | Latency of those calls. |
+| `openrag_llm_tokens_total` | counter | `operation`, `kind` | Tokens reported by the LLM for those calls. |
+
+The inference metrics and breaker states here cover only the calls the API
+process makes — embedding each query, answering it with the LLM, reranking.
+The indexing workers make their own calls to the same endpoints (embedding,
+captioning, contextualization, topic tagging); those, and every other metric
+produced inside a Ray actor, are exported by Ray's metrics agent, not by this
+endpoint. Under `ENABLE_RAY_SERVE=true` the API is itself a Ray actor, and only
+the HTTP metrics and `openrag_ingest_tasks` remain here. The
+[metrics reference](/openrag/documentation/metrics_reference/) lists every
+metric, which target exports it, and how to query both together.
 
 `endpoint` is the FastAPI route template (`/v1/chat/completions`,
 `/indexer/partition/{partition}/file/{file_id}`), never the raw URL, so label
@@ -108,7 +122,9 @@ variable is missing from `.env`.
 ## Scraping in Kubernetes
 
 The Helm chart (`infra/charts/openrag-stack`) offers both discovery
-mechanisms; pick the one your Prometheus uses.
+mechanisms; pick the one your Prometheus uses. On a cluster without a
+Prometheus, `monitoring.bundled` installs one with Grafana and configures the
+scrape below itself; see [Kubernetes monitoring](/openrag/documentation/kubernetes/#monitoring).
 
 **Prometheus Operator / kube-prometheus-stack.** Enable the `ServiceMonitor`
 and label it so the operator's `serviceMonitorSelector` picks it up:
@@ -177,8 +193,10 @@ Point a Prometheus data source at the server that scrapes OpenRAG and query
 `openrag_http_requests_total` in Explore. A working setup returns series with
 `method`, `endpoint` and `status_code` labels.
 
-The dashboards under `infra/compose/grafana/dashboards/` load unchanged into
-any Grafana:
+The dashboards under `infra/charts/openrag-stack/dashboards/` load unchanged into
+any Grafana. It is their only copy: the Compose overlay provisions them from
+there, and the Helm chart renders them as ConfigMaps for a Grafana dashboard
+sidecar ([Kubernetes monitoring](/openrag/documentation/kubernetes/#monitoring)).
 
 | Dashboard | UID | Shows |
 | --- | --- | --- |
@@ -193,7 +211,8 @@ Compose, the ServiceMonitor's Service name on Kubernetes), so no job name is
 written in either.
 
 To load them into your own Grafana, import each file through **Dashboards → New
-→ Import**, or provision them from disk. Keep the files as they are in the
+→ Import**, provision them from disk, or on Kubernetes enable
+`monitoring.dashboards`. Keep the files as they are in the
 repository rather than re-exporting them with **Export for sharing externally**:
 that option adds an `__inputs` section, which only the import dialog resolves.
 File provisioning and a ConfigMap sidecar load the JSON as-is and would leave
@@ -203,8 +222,9 @@ it unresolved, so a unit test rejects such an export.
 
 - Metrics are per process. With `ENABLE_RAY_SERVE=true` and several replicas,
   each replica answers `/metrics` with its own counters behind one
-  load-balancing proxy, so a scrape returns a random replica. Keep the default
-  single uvicorn worker, or scrape each replica individually.
+  load-balancing proxy, so a scrape returns a random replica, and replicas
+  cannot be addressed individually over HTTP. Keep the default single uvicorn
+  worker.
 - The Helm discovery (`openrag.metrics.*`) covers the uvicorn topology only.
   With `ray.enabled=true` and `ENABLE_RAY_SERVE=true` the API is served by the
   RayCluster head Service, not by the `openrag` Service on port 8080: the
@@ -214,5 +234,7 @@ it unresolved, so a unit test rejects such an export.
   a dedicated metrics port) and is not implemented yet.
 - Counters reset when the API restarts; use `rate()` and `increase()` rather
   than raw values.
-- Indexing, inference and vector-store metrics are not exposed yet; only the
-  HTTP layer and the circuit breakers are instrumented.
+- Vector-store metrics are not exposed yet. Indexing and worker-side
+  inference metrics are exported on Ray's metrics agent, which neither the
+  chart nor the compose overlay scrapes yet (see the
+  [metrics reference](/openrag/documentation/metrics_reference/)).

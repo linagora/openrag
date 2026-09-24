@@ -12,6 +12,7 @@ import ray
 from core.config.model_endpoints import CONTROL_EXTRA_KEYS, DEFAULT_ENDPOINT_ALIAS, embedder_fingerprint
 from core.config.root import Settings
 from core.models.catalog import CONTENT_CLAIM_TOKEN_METADATA_KEY
+from core.observability.inference_metrics import DEFAULT_PROVIDER, set_provider_name
 from core.utils.error_summary import failure_reason_from_exception
 from core.utils.exceptions import ConfigError, NotFoundError
 from services.workers.failure_reporting import submit_task_failure
@@ -147,15 +148,18 @@ class IndexerWorkerActor:
         topic_tagger_factory = _build_topic_tagger_factory(cfg)
 
         embed_cfg = cfg.embedder
-        embedder = embedder_registry.create(
-            "vllm",
-            endpoint=embed_cfg.base_url,
-            model_name=embed_cfg.model_name,
-            api_key=embed_cfg.api_key,
-            max_model_len=embed_cfg.max_model_len,
-            timeout=embed_cfg.timeout,
-            batch_size=embed_cfg.batch_size,
-            embed_concurrency=embed_cfg.embed_concurrency,
+        embedder = set_provider_name(
+            embedder_registry.create(
+                "vllm",
+                endpoint=embed_cfg.base_url,
+                model_name=embed_cfg.model_name,
+                api_key=embed_cfg.api_key,
+                max_model_len=embed_cfg.max_model_len,
+                timeout=embed_cfg.timeout,
+                batch_size=embed_cfg.batch_size,
+                embed_concurrency=embed_cfg.embed_concurrency,
+            ),
+            DEFAULT_PROVIDER,
         )
         self._vector_store = MilvusVectorStore(cfg.vectordb)
         task_state_manager = ray.get_actor("TaskStateManager", namespace=self._namespace)
@@ -1190,13 +1194,16 @@ def _build_embedder_factory(cfg: Settings) -> Any:
                 default = getattr(embed_defaults, default_key, None)
                 if default is not None:
                     impl_kwargs.setdefault(default_key, default)
-            instance = embedder_registry.create(
-                impl,
-                endpoint=model_cfg.endpoint,
-                model_name=model_cfg.model_name,
-                batch_size=model_cfg.batch_size,
-                timeout=model_cfg.timeout,
-                **impl_kwargs,
+            instance = set_provider_name(
+                embedder_registry.create(
+                    impl,
+                    endpoint=model_cfg.endpoint,
+                    model_name=model_cfg.model_name,
+                    batch_size=model_cfg.batch_size,
+                    timeout=model_cfg.timeout,
+                    **impl_kwargs,
+                ),
+                name,
             )
             # From the config this client was built with, not the registry at
             # catalog-write time: a background reload can land mid-file.
@@ -1237,12 +1244,15 @@ def _build_vlm_factory(cfg: Settings) -> Any:
                 return entry[1]
             impl_kwargs = {key: value for key, value in model_cfg.extra.items() if key not in CONTROL_EXTRA_KEYS}
             impl = model_cfg.extra.get("implementation", "vllm")
-            instance = vlm_registry.create(
-                impl,
-                endpoint=model_cfg.endpoint,
-                model_name=model_cfg.model_name,
-                timeout=model_cfg.timeout,
-                **impl_kwargs,
+            instance = set_provider_name(
+                vlm_registry.create(
+                    impl,
+                    endpoint=model_cfg.endpoint,
+                    model_name=model_cfg.model_name,
+                    timeout=model_cfg.timeout,
+                    **impl_kwargs,
+                ),
+                name,
             )
             cache[name] = (identity, instance)
             return instance
@@ -1316,12 +1326,15 @@ def _build_contextualizer_factory(cfg: Settings) -> Any:
                 shared["llm_semaphore"] = llm_semaphore
             impl_kwargs = {key: value for key, value in model_cfg.extra.items() if key not in CONTROL_EXTRA_KEYS}
             impl = model_cfg.extra.get("implementation", "vllm")
-            llm = llm_registry.create(
-                impl,
-                endpoint=model_cfg.endpoint,
-                model_name=model_cfg.model_name,
-                timeout=model_cfg.timeout,
-                **impl_kwargs,
+            llm = set_provider_name(
+                llm_registry.create(
+                    impl,
+                    endpoint=model_cfg.endpoint,
+                    model_name=model_cfg.model_name,
+                    timeout=model_cfg.timeout,
+                    **impl_kwargs,
+                ),
+                name,
             )
             contextualizer = ChunkContextualizer(
                 llm,
@@ -1378,12 +1391,15 @@ def _build_topic_tagger_factory(cfg: Settings) -> Any:
                 shared["system_prompt"] = load_template_by_key(cfg.paths.prompts_dir, cfg.prompts, "topic_tagger")
             impl_kwargs = {key: value for key, value in model_cfg.extra.items() if key not in CONTROL_EXTRA_KEYS}
             impl = model_cfg.extra.get("implementation", "vllm")
-            llm = llm_registry.create(
-                impl,
-                endpoint=model_cfg.endpoint,
-                model_name=model_cfg.model_name,
-                timeout=model_cfg.timeout,
-                **impl_kwargs,
+            llm = set_provider_name(
+                llm_registry.create(
+                    impl,
+                    endpoint=model_cfg.endpoint,
+                    model_name=model_cfg.model_name,
+                    timeout=model_cfg.timeout,
+                    **impl_kwargs,
+                ),
+                name,
             )
             tagger = TopicTagger(llm, shared["system_prompt"], timeout_seconds=model_cfg.timeout)
             cache[name] = (identity, tagger)

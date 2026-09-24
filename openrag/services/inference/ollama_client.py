@@ -10,6 +10,8 @@ and without vLLM-only fields (``truncate_prompt_tokens``).
 
 from __future__ import annotations
 
+import asyncio
+import time
 from collections.abc import AsyncIterator
 
 import httpx
@@ -25,10 +27,17 @@ from core.utils.exceptions import (
     InferenceTimeoutError,
 )
 from core.utils.logging import get_logger
-from services.inference.vllm_client import _parse_response, _strip_falsy_logprobs
+from services.inference.vllm_client import (
+    _STREAM_DONE,
+    _parse_response,
+    _record_stream_usage,
+    _request_stream_usage,
+    _strip_falsy_logprobs,
+)
 
 from ._call_log import log_llm_call
 from ._circuit_breaker import with_circuit_breaker
+from ._metrics import outcome_for, record_inference, resolve_provider, with_inference_metrics
 from ._retry import with_retry
 
 logger = get_logger()
@@ -79,6 +88,7 @@ class OllamaClient(LLM):
         )
         logger.bind(model=self._model, endpoint=self._endpoint, timeout=timeout).debug("OllamaClient ready")
 
+    @with_inference_metrics("completion", capture_usage=True)
     @with_circuit_breaker("llm")
     @with_retry(max_attempts=3)
     async def generate(self, prompt: str, **kwargs) -> dict:
@@ -100,6 +110,7 @@ class OllamaClient(LLM):
             ) from exc
         return _parse_response(resp)
 
+    @with_inference_metrics("chat", capture_usage=True)
     @with_circuit_breaker("llm")
     @with_retry(max_attempts=3)
     async def chat(self, messages: list[dict[str, str]], **kwargs) -> dict:
@@ -122,7 +133,14 @@ class OllamaClient(LLM):
         return _parse_response(resp)
 
     async def stream_chat(self, messages: list[dict[str, str]], **kwargs) -> AsyncIterator[str]:
-        payload = {**self._defaults, **kwargs, "model": self._model, "messages": messages, "stream": True}
+        payload = {
+            **self._defaults,
+            **kwargs,
+            "model": self._model,
+            "messages": messages,
+            "stream": True,
+        }
+        forward_usage = _request_stream_usage(payload, add_for_metrics=True)
         payload.pop("metadata", None)
         _strip_falsy_logprobs(payload)
         log_llm_call(
@@ -132,20 +150,49 @@ class OllamaClient(LLM):
             messages=messages,
             stream=True,
         )
+        provider = resolve_provider(self, kwargs)
+        started = time.perf_counter()
+        # Pessimistic until `[DONE]` proves the answer complete. The consumer
+        # breaks on `[DONE]` and closes this generator, so the loop below never
+        # runs to its end on a real chat; a stream that does end without it was
+        # truncated. Mirrors the vLLM streaming path.
+        outcome = "error"
         try:
             async with self._client.stream("POST", f"{self._endpoint}/chat/completions", json=payload) as resp:
                 if resp.status_code >= 400:
                     await resp.aread()
-                    raise InferenceError(
+                    error = InferenceError(
                         f"Ollama streaming error ({resp.status_code}): {resp.text[:500]}",
                         status_code=resp.status_code,
                     )
+                    outcome = outcome_for(error)
+                    raise error
                 async for line in resp.aiter_lines():
+                    if _record_stream_usage(line) and not forward_usage:
+                        continue
+                    if line.strip() == _STREAM_DONE:
+                        outcome = "success"
                     yield line
         except httpx.ConnectError as exc:
             raise InferenceConnectionError(f"Cannot reach Ollama at {self._endpoint}") from exc
         except httpx.TimeoutException as exc:
+            outcome = "timeout"
             raise InferenceTimeoutError(f"Ollama streaming request timed out at {self._endpoint}") from exc
+        except (GeneratorExit, asyncio.CancelledError):
+            # Closed or cancelled by the consumer. After `[DONE]` that is the
+            # normal end; before it, the client gave up — not a provider error.
+            if outcome != "success":
+                outcome = "cancelled"
+            raise
+        finally:
+            # Hand-instrumented: @with_inference_metrics would time only the
+            # creation of this async generator, not the transfer.
+            record_inference(
+                provider=provider,
+                operation="chat",
+                outcome=outcome,
+                duration_seconds=time.perf_counter() - started,
+            )
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -176,6 +223,7 @@ class OllamaEmbedder(Embedder):
         self._dimension: int | None = dimension
         self._client = httpx.AsyncClient(timeout=timeout)
 
+    @with_inference_metrics("embed")
     @with_circuit_breaker("embedder")
     @with_retry(max_attempts=3)
     async def embed(self, texts: list[str]) -> list[list[float]]:

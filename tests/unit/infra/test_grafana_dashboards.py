@@ -1,9 +1,10 @@
 """The bundled Grafana dashboards must work in any Grafana, not only the Compose one.
 
-The same JSON is provisioned from disk by the Compose overlay and is meant to be
-loaded by a platform's own Grafana on Kubernetes. Nothing in it may therefore
-assume the Compose stack's names: a data source UID or a scrape job name that
-only Compose defines leaves every panel blank anywhere else, with no error.
+The same JSON is provisioned from disk by the Compose overlay and shipped as
+ConfigMaps by the chart, for a platform's own Grafana or the bundled one on
+Kubernetes. Nothing in it may therefore assume the Compose stack's names: a data
+source UID or a scrape job name that only Compose defines leaves every panel
+blank anywhere else, with no error.
 
 The query rules below carry the metric design into the dashboards: no unbounded
 label, counters rated before they are aggregated, and no metric that nothing in
@@ -25,7 +26,7 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).resolve().parents[3]
-DASHBOARDS = REPO / "infra/compose/grafana/dashboards"
+DASHBOARDS = REPO / "infra/charts/openrag-stack/dashboards"
 
 DS_VARIABLE = "DS_PROMETHEUS"
 DS_REF = {"type": "prometheus", "uid": "${" + DS_VARIABLE + "}"}

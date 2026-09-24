@@ -4,27 +4,28 @@ from functools import wraps
 
 import httpx
 from aiobreaker import CircuitBreaker, CircuitBreakerError, CircuitBreakerListener
-from core.utils.exceptions import InferenceConnectionError, LLMParsingError, OpenRAGError
+from aiobreaker.state import CircuitBreakerState
+from core.observability.inference_metrics import record_circuit_breaker_state
+from core.utils.exceptions import CircuitBreakerOpenError, LLMParsingError, OpenRAGError
 from core.utils.logging import get_logger
-from prometheus_client import Gauge
 
 logger = get_logger()
 
 _breakers: dict[str, CircuitBreaker] = {}
 _breaker_config: dict[str, tuple[int, float]] = {}
 
-try:
-    CIRCUIT_BREAKER_STATE = Gauge(
-        "openrag_circuit_breaker_state",
-        "Circuit breaker state (0=closed, 1=open, 2=half-open)",
-        ["name"],
-    )
-except ValueError:
-    from prometheus_client import REGISTRY
-
-    CIRCUIT_BREAKER_STATE = REGISTRY._names_to_collectors["openrag_circuit_breaker_state"]
-
-_STATE_VALUES = {"ClosedState": 0, "OpenState": 1, "HalfOpenState": 2}
+#: Keyed on aiobreaker's own enum, not on ``type(state).__name__``. The class
+#: names are ``CircuitOpenState``/``CircuitClosedState``/``CircuitHalfOpenState``;
+#: keying on ``"OpenState"`` matched none of them, so every transition recorded
+#: ``_UNKNOWN_STATE`` and ``openrag_circuit_breaker_state`` was permanently -1 —
+#: which makes ``OpenRagCircuitBreakerOpen`` (``== 1``) unable to fire. Using the
+#: enum means a library rename breaks the import loudly instead.
+_STATE_VALUES = {
+    CircuitBreakerState.CLOSED: 0,
+    CircuitBreakerState.OPEN: 1,
+    CircuitBreakerState.HALF_OPEN: 2,
+}
+_UNKNOWN_STATE = -1
 
 
 def _is_client_error(exc: Exception) -> bool:
@@ -52,7 +53,7 @@ class _LoggingListener(CircuitBreakerListener):
             old=type(old).__name__,
             new=state_name,
         )
-        CIRCUIT_BREAKER_STATE.labels(name=breaker.name).set(_STATE_VALUES.get(state_name, -1))
+        record_circuit_breaker_state(breaker.name, _STATE_VALUES.get(new.state, _UNKNOWN_STATE))
 
 
 def get_breaker(name: str, fail_max: int = 50, timeout_duration: float = 60.0) -> CircuitBreaker:
@@ -94,8 +95,19 @@ def with_circuit_breaker(
             breaker = get_breaker(name, fail_max, timeout_duration)
             try:
                 return await breaker.call_async(fn, *args, **kwargs)
-            except CircuitBreakerError:
-                raise InferenceConnectionError(f"Circuit open for '{name}'")
+            except CircuitBreakerError as exc:
+                # A dedicated type so the metrics decorator wrapping this one can
+                # tell an open circuit from a connection failure: it sat outside
+                # this decorator and only ever saw the converted error, which made
+                # outcome="circuit_open" unreachable and counted open-circuit calls
+                # as errors — holding a provider's error ratio high for as long as
+                # the breaker protected the endpoint.
+                #
+                # This is a 503 where the old InferenceConnectionError was not.
+                # Nothing in the repository catches that type, and "we stopped
+                # calling the endpoint" is service-unavailable rather than a
+                # connection fault, so the status is the more accurate one.
+                raise CircuitBreakerOpenError(name) from exc
 
         return wrapper
 
