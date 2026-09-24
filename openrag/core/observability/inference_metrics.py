@@ -1,10 +1,11 @@
 """Inference metrics — the one Tier-1 set produced on both sides of Ray.
 
 ``ingest_*`` metrics only ever happen in a worker and ``http_*`` only ever in
-the API process, so each has a single backend. Inference does not: ``chat`` and
-``rerank`` are called from the API process while ``embed`` and ``vlm`` are called
-from inside the indexing pipeline, and both must land under the same metric name
-so one PromQL query covers the whole system.
+the API process, so each has a single backend. Inference does not: the API
+process embeds queries and calls the LLM and reranker, while the indexing
+workers embed, caption, contextualize and topic-tag with the same clients. Both
+record under the same metric name — Ray adds a ``ray_`` prefix on export, which
+the scrape config renames away — so one PromQL query covers the whole system.
 
 **Exactly one backend per process, chosen once.** Recording to both would
 double-count every call: the API process initialises Ray, so ``ray.util.metrics``
@@ -224,11 +225,12 @@ def record_circuit_breaker_state(name: str, state: int) -> None:
     """Publish a breaker's state.
 
     Routed through this module rather than a module-level ``prometheus_client``
-    Gauge because the breakers trip on both sides of Ray: the ``llm`` breaker in
-    the API process serving chat, the ``embedder`` and ``vlm`` breakers inside
-    indexing workers. The previous Gauge was only ever visible for the former,
-    so a tripped embedder — the failure most worth alerting on, because it stops
-    ingestion entirely — was invisible to every scrape.
+    Gauge because the breakers trip on both sides of Ray: each process has its
+    own breakers, and the indexing workers trip ``embedder``, ``vlm`` and ``llm``
+    (contextualization) just as the API process does. The previous Gauge was
+    only ever visible for the API process, so a tripped embedder in a worker —
+    the failure most worth alerting on, because it stops ingestion entirely —
+    was invisible to every scrape.
     """
     try:
         _instruments().circuit_breaker.set(state, {"name": name})

@@ -13,9 +13,10 @@ replicas that HTTP cannot address individually. The exception is
 at scrape time, so it is served on the API's ``/metrics`` like the HTTP metrics.
 
 ``openrag_circuit_breaker_state`` (``services/inference/_circuit_breaker.py``)
-is the existing instance of that bug: it is a ``prometheus_client`` Gauge set
-from inside workers, so it never reaches a scrape. Declaring both backends from
-one spec set is what stops the next six metrics repeating it.
+was the existing instance of that bug: a ``prometheus_client`` Gauge set from
+inside workers, so the ``embedder`` and ``vlm`` breakers never reached a scrape.
+It now records through the same dual backend. Declaring both backends from one
+spec set is what stops the next metric repeating it.
 
 **Why the labels are the important part.** A metric declared with an unbounded
 label is not a monitoring bug, it is an availability bug — for the *platform's*
@@ -236,7 +237,7 @@ INGEST_QUEUE_WAIT_SECONDS = MetricSpec(
 #: be rewritten continuously to stay truthful and reads as 0 whenever nothing
 #: updates it — which is precisely the wedged-pool condition it exists to
 #: detect. Exporting the completion time instead lets the alert compute the age
-#: at evaluation: ``time() - max without(...)(...) > 5 * baseline``.
+#: at evaluation, gated on queued work (``metrics_reference.md`` has the query).
 INGEST_LAST_PARSE_TIMESTAMP = MetricSpec(
     name="openrag_ingest_last_parse_completion_timestamp_seconds",
     description="Unix timestamp of the most recent completed parse, per parser pool",
@@ -278,9 +279,11 @@ INGEST_TASKS = MetricSpec(
 # ---------------------------------------------------------------------------
 # Tier 1 — produced on BOTH sides
 # ---------------------------------------------------------------------------
-# Chat and rerank are called from the API process; embed and vlm are called from
-# inside the indexing pipeline. The same spec is instantiated against each
-# backend, so a query sums one metric name across both scrape targets.
+# Every operation can happen on either side: the API process embeds queries and
+# calls the LLM and reranker, and the indexing workers embed, caption,
+# contextualize and topic-tag. The same spec is instantiated against each
+# backend; once the Ray target's ``ray_`` prefix is renamed away at scrape time,
+# one query covers both targets.
 
 INFERENCE_REQUESTS_TOTAL = MetricSpec(
     name="openrag_inference_requests_total",

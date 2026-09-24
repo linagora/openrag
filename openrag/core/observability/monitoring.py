@@ -94,10 +94,10 @@ def record_request(method: str, path: str, status_code: int, duration: float) ->
 
 
 # -- Ingestion backlog ------------------------------------------------------
-# Sampled at scrape time rather than maintained by hand: the authoritative
-# count lives in the TaskStateManager actor, and a gauge incremented on each
-# transition would drift from it on every actor restart, cancellation or fenced
-# task. Built from the shared spec so it cannot diverge from the worker-side
+# Sampled at scrape time rather than maintained by hand: a gauge incremented on
+# each transition would drift on every actor restart, cancellation or fenced
+# task. The count comes from the durable ``jobs`` table reconciled with the
+# TaskStateManager (``JobService.get_active_task_counts``). Built from the shared spec so it cannot diverge from the worker-side
 # metrics in name or labels.
 
 INGEST_TASKS = Gauge(
