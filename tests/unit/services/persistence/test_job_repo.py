@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from core.models.catalog import DocumentStatus, IndexationJob
+from core.utils.error_summary import failure_reason_from_exception
 from services.persistence.job_repo import PgJobRepository
 
 _NOW = datetime(2026, 9, 1, tzinfo=UTC)
@@ -16,9 +17,11 @@ def _row(**kwargs):
         "id": "task-1",
         "partition": "tenant-a",
         "file_id": "file-1",
+        "filename": "report.pdf",
         "user_id": 7,
         "status": "QUEUED",
         "error": None,
+        "error_reason": None,
         "degraded_stages": [],
         "created_at": _NOW,
         "updated_at": _NOW,
@@ -64,14 +67,18 @@ async def test_upsert_job_writes_the_task_row_and_maps_it_back():
             status=DocumentStatus.SERIALIZING,
             partition="tenant-a",
             file_id="file-1",
+            filename="report.pdf",
             user_id=7,
         )
     )
 
     query, params = pool.calls[0]
     assert params[:6] == ("task-1", "tenant-a", "file-1", 7, "SERIALIZING", None)
+    assert params[10] == "report.pdf"
+    assert "filename" in query
     assert job.status is DocumentStatus.SERIALIZING
     assert job.file_id == "file-1"
+    assert job.filename == "report.pdf"
 
 
 @pytest.mark.asyncio
@@ -89,7 +96,7 @@ async def test_upsert_job_persists_degraded_stages() -> None:
     )
 
     query, params = pool.calls[0]
-    assert params[8] == ["caption", "topic_tag"]
+    assert params[9] == ["caption", "topic_tag"]
     assert "degraded_stages" in query
     assert job.degraded_stages == ["caption", "topic_tag"]
 
@@ -105,9 +112,33 @@ async def test_upsert_job_keeps_settled_states_and_bounds_the_error():
 
     query, params = pool.calls[0]
     # A settled row never reopens, mirroring the TaskStateManager guard.
-    assert "WHEN jobs.status = ANY($10::text[]) THEN jobs.status" in query
-    assert sorted(params[9]) == ["CANCELLED", "COMPLETED", "FAILED"]
+    assert "WHEN jobs.status = ANY($12::text[]) THEN jobs.status" in query
+    assert sorted(params[11]) == ["CANCELLED", "COMPLETED", "FAILED"]
     assert len(params[5]) == 8_000
+
+
+@pytest.mark.asyncio
+async def test_upsert_job_persists_the_capped_failure_reason() -> None:
+    reason = failure_reason_from_exception(RuntimeError("x" * 10_000))
+    pool = _FakePool(fetchrow=_row(status="FAILED", error="traceback", error_reason=reason))
+    repo = _repo(pool)
+
+    job = await repo.upsert_job(
+        IndexationJob(
+            id="task-1",
+            status=DocumentStatus.FAILED,
+            partition="tenant-a",
+            error="traceback",
+            error_reason=reason,
+        )
+    )
+
+    query, params = pool.calls[0]
+    assert len(reason) == 8_000
+    assert reason.endswith("...")
+    assert params[6] == reason
+    assert "THEN jobs.error_reason" in " ".join(query.split())
+    assert job.error_reason == reason
 
 
 @pytest.mark.asyncio
@@ -132,10 +163,11 @@ async def test_upsert_job_freezes_the_outcome_fields_together_on_a_settled_row()
 
     query, _params = pool.calls[0]
     compact = " ".join(query.split())
-    settled = "jobs.status = ANY($10::text[])"
+    settled = "jobs.status = ANY($12::text[])"
     for field, frozen in (
         ("status", "jobs.status"),
         ("error", "jobs.error"),
+        ("error_reason", "jobs.error_reason"),
         ("completed_at", "jobs.completed_at"),
         ("degraded_stages", "jobs.degraded_stages"),
     ):
@@ -159,7 +191,7 @@ async def test_upsert_job_keeps_the_first_started_at():
 
     query, params = pool.calls[0]
     assert "started_at = COALESCE(jobs.started_at, EXCLUDED.started_at)" in query
-    assert params[6] == _NOW
+    assert params[7] == _NOW
     assert job.started_at == _NOW
 
 
@@ -201,6 +233,81 @@ async def test_list_jobs_filters_by_status_and_user():
     assert "status = ANY($1::text[])" in query
     assert params == (["QUEUED", "SERIALIZING"], 7, 0, 1)
     assert [job.id for job in jobs] == ["task-1", "task-2"]
+
+
+@pytest.mark.asyncio
+async def test_get_jobs_returns_rows_for_known_task_ids():
+    pool = _FakePool(fetch=[_row(), _row(id="task-2")])
+    repo = _repo(pool)
+
+    jobs = await repo.get_jobs(["task-1", "task-2"])
+
+    query, params = pool.calls[0]
+    assert "id = ANY($1::text[])" in query
+    assert params == (["task-1", "task-2"],)
+    assert [job.id for job in jobs] == ["task-1", "task-2"]
+
+
+@pytest.mark.asyncio
+async def test_count_jobs_returns_counts_by_status():
+    pool = _FakePool(
+        fetch=[
+            {"status": "QUEUED", "count": 2},
+            {"status": "COMPLETED", "count": 4},
+        ]
+    )
+    repo = _repo(pool)
+
+    counts = await repo.count_jobs()
+
+    query, params = pool.calls[0]
+    assert "COUNT(*)::int" in query
+    assert "GROUP BY status" in query
+    assert params == ()
+    assert counts == {"QUEUED": 2, "COMPLETED": 4}
+
+
+@pytest.mark.asyncio
+async def test_get_job_states_reads_only_ids_and_statuses():
+    pool = _FakePool(fetch=[{"id": "task-1", "status": "QUEUED"}, {"id": "task-2", "status": "SERIALIZING"}])
+    repo = _repo(pool)
+
+    states = await repo.get_job_states(statuses=["QUEUED", "SERIALIZING"])
+
+    query, params = pool.calls[0]
+    assert "SELECT id, status FROM jobs" in query
+    assert "status = ANY($1::text[])" in query
+    assert "id = ANY($2::text[])" in query
+    assert params == (["QUEUED", "SERIALIZING"], None)
+    assert states == {"task-1": "QUEUED", "task-2": "SERIALIZING"}
+
+
+@pytest.mark.asyncio
+async def test_get_job_states_filters_by_task_id():
+    pool = _FakePool(fetch=[{"id": "task-1", "status": "COMPLETED"}])
+
+    states = await _repo(pool).get_job_states(job_ids=["task-1", "gone"])
+
+    assert pool.calls[0][1] == (None, ["task-1", "gone"])
+    assert states == {"task-1": "COMPLETED"}
+
+
+@pytest.mark.asyncio
+async def test_get_job_states_refuses_an_unfiltered_read():
+    pool = _FakePool()
+
+    with pytest.raises(ValueError):
+        await _repo(pool).get_job_states()
+    assert pool.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kwargs", [{"statuses": []}, {"job_ids": []}])
+async def test_get_job_states_skips_the_query_for_an_empty_filter(kwargs):
+    pool = _FakePool(fetch=[{"id": "task-1", "status": "QUEUED"}])
+
+    assert await _repo(pool).get_job_states(**kwargs) == {}
+    assert pool.calls == []
 
 
 @pytest.mark.asyncio

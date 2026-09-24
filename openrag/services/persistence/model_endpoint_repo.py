@@ -15,6 +15,7 @@ from core.models.readiness import ConfigurationReferenceFinding, ModelEndpointDi
 from core.ports.model_endpoint_repo import EndpointEditGuard, ModelEndpointRepository
 from core.utils.exceptions import ConflictError, NotFoundError, ValidationError
 from core.utils.logging import get_logger
+from core.vector_stores.vector_field import allocate_vector_field_name
 
 logger = get_logger()
 
@@ -26,6 +27,7 @@ logger = get_logger()
 # on a non-default endpoint yielded two defaults for the type.) Promotion must go
 # through set_default / delete_and_promote_default, which clear-then-set inside one
 # transaction; ModelEndpointService.update_model_endpoint routes is_default there.
+# ``vector_field`` is absent too: an endpoint keeps its vectors' field for life.
 _ALLOWED_UPDATE_FIELDS = frozenset({"endpoint", "model_name", "batch_size", "timeout", "extra"})
 
 # Endpoint names are referenced by value elsewhere, and nothing updates those
@@ -140,6 +142,7 @@ class PgModelEndpointRepository(ModelEndpointRepository):
             timeout=row["timeout"],
             extra=row["extra"] or {},
             is_default=row["is_default"],
+            vector_field=row["vector_field"],
             created_at=row["created_at"],
             updated_at=row["updated_at"],
         )
@@ -170,11 +173,13 @@ class PgModelEndpointRepository(ModelEndpointRepository):
                             "UPDATE model_endpoints SET is_default = false, updated_at = now() WHERE model_type = $1",
                             row.model_type,
                         )
+                    vector_field = await self._allocate_vector_field(conn, row)
                     rec = await conn.fetchrow(
                         """
                         INSERT INTO model_endpoints
-                            (name, model_type, endpoint, model_name, batch_size, timeout, extra, is_default)
-                        VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8)
+                            (name, model_type, endpoint, model_name, batch_size, timeout, extra,
+                             is_default, vector_field)
+                        VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9)
                         RETURNING *
                         """,
                         row.name,
@@ -185,6 +190,7 @@ class PgModelEndpointRepository(ModelEndpointRepository):
                         row.timeout,
                         row.extra,
                         row.is_default,
+                        vector_field,
                     )
         except asyncpg.UniqueViolationError as exc:
             # The service's preflight check cannot make a concurrent create
@@ -196,6 +202,20 @@ class PgModelEndpointRepository(ModelEndpointRepository):
                 code="ENDPOINT_EXISTS",
             ) from exc
         return self._to_model(rec)
+
+    @staticmethod
+    async def _allocate_vector_field(conn: asyncpg.Connection, row: ModelEndpointRow) -> str | None:
+        """The dense field a new embedder will own; ``None`` for other endpoint types.
+
+        Allocated inside the insert's transaction, under a lock that keeps two
+        creates from picking the same name. Any ``vector_field`` on ``row`` is
+        ignored: the server owns the column.
+        """
+        if row.model_type != "embedder":
+            return None
+        await conn.execute("SELECT pg_advisory_xact_lock(hashtext('model_endpoints.vector_field'))")
+        taken = await conn.fetch("SELECT vector_field FROM model_endpoints WHERE vector_field IS NOT NULL")
+        return allocate_vector_field_name(row.name, {rec["vector_field"] for rec in taken})
 
     async def get(self, name: str, model_type: str) -> ModelEndpointRow | None:
         rec = await self.pool.fetchrow(
@@ -728,16 +748,17 @@ class PgModelEndpointRepository(ModelEndpointRepository):
         rows = await conn.fetch(_EMBEDDER_INDEXED_USAGE_SQL, name, model_type, DEFAULT_ENDPOINT_ALIAS)
         return [{"partition": r["partition"], "file_count": r["file_count"]} for r in rows]
 
-    async def delete_and_promote_default(self, name: str, model_type: str) -> tuple[str, str | None]:
+    async def delete_and_promote_default(self, name: str, model_type: str) -> tuple[str, str | None, str | None]:
         """Delete an endpoint and, if it was the default, promote a survivor to
         default — all atomically and decided under a row lock.
 
         Locking and deciding inside one transaction means concurrent deletes of the
         same model type can't both pass a stale last-endpoint check or promote an
         already-deleted survivor, so the type is never left with no endpoint or no
-        default. Returns ``(status, promoted_name)`` where ``status`` is
-        ``"not_found" | "last" | "ok"`` and ``promoted_name`` is set only when a
-        deleted default was replaced.
+        default. Returns ``(status, promoted_name, vector_field)`` where
+        ``status`` is ``"not_found" | "last" | "ok"``, ``promoted_name`` is set
+        only when a deleted default was replaced, and ``vector_field`` is the
+        deleted row's own, so a concurrent rename cannot swap it for another's.
 
         Partition references are settled here too, differently per column (#762):
         an ``embedder`` still referenced refuses the delete with
@@ -775,14 +796,14 @@ class PgModelEndpointRepository(ModelEndpointRepository):
                 )
                 names = [r["name"] for r in rows]
                 if name not in names:
-                    return ("not_found", None)
+                    return ("not_found", None, None)
                 if len(names) <= 1:
-                    return ("last", None)
+                    return ("last", None, None)
                 was_default = next(r["is_default"] for r in rows if r["name"] == name)
                 await self._settle_partition_references(conn, name, model_type, was_default=was_default)
                 await self._clear_preset_references(conn, name, model_type)
-                await conn.execute(
-                    "DELETE FROM model_endpoints WHERE name = $1 AND model_type = $2",
+                vector_field = await conn.fetchval(
+                    "DELETE FROM model_endpoints WHERE name = $1 AND model_type = $2 RETURNING vector_field",
                     name,
                     model_type,
                 )
@@ -799,7 +820,7 @@ class PgModelEndpointRepository(ModelEndpointRepository):
                         promoted,
                         model_type,
                     )
-                return ("ok", promoted)
+                return ("ok", promoted, vector_field)
 
 
 def _embedder_in_use_message(name: str, direct: int, via_default: int) -> str:

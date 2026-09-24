@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
+from contextlib import AsyncExitStack
+
 import pytest
+from core.utils.exceptions import ServiceUnavailableError
+from services.persistence.partition_repo import _PARTITION_COPY_LOCK_NAMESPACE
 from services.storage.postgres_store import PostgresStore
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio(loop_scope="session")]
@@ -109,3 +114,62 @@ class TestGenerationPromptNames:
         await repo.update_partition("genp", generation_prompt_names={"sys_prompt": "legal"})
         row = await repo.get_partition_row("genp")
         assert row["generation_prompt_names"] == {"sys_prompt": "legal"}
+
+
+class TestCopyLock:
+    async def test_a_copy_in_flight_is_seen_without_waiting(self, postgres_store: PostgresStore):
+        repo = postgres_store.partition_repo
+        assert await repo.copy_in_progress("p1") is False
+
+        # Concurrent copies into one partition don't wait on each other.
+        async with repo.copy_lock("p1"), repo.copy_lock("p1"):
+            assert await repo.copy_in_progress("p1") is True
+            assert await repo.copy_in_progress("p2") is False
+
+        assert await repo.copy_in_progress("p1") is False
+
+    async def test_copies_leave_the_request_pool_alone(self, test_rdb_config):
+        # A copy can run for minutes: a pool connection per copy would let a
+        # few large ones starve every request.
+        config = test_rdb_config.model_copy(update={"pool_min_size": 1, "pool_max_size": 2})
+        store = PostgresStore(config, run_migrations=False)
+        await store.initialize()
+        try:
+            async with asyncio.timeout(10), AsyncExitStack() as copies:
+                for _ in range(5):
+                    await copies.enter_async_context(store.partition_repo.copy_lock("p1"))
+                async with store.pool.acquire() as first, store.pool.acquire() as second:
+                    assert [await first.fetchval("SELECT 1"), await second.fetchval("SELECT 1")] == [1, 1]
+                assert await store.partition_repo.copy_in_progress("p1") is True
+            assert await store.partition_repo.copy_in_progress("p1") is False
+        finally:
+            await store.shutdown()
+
+    async def test_a_copy_that_loses_its_lock_is_stopped(self, postgres_store: PostgresStore):
+        # Its lock went with the session: finishing the copy would let an
+        # embedder change slip in meanwhile.
+        repo = postgres_store.partition_repo
+        locked = asyncio.Event()
+
+        async def copy() -> None:
+            async with repo.copy_lock("p1"):
+                locked.set()
+                await asyncio.Event().wait()
+
+        running = asyncio.create_task(copy())
+        await locked.wait()
+        pid = await postgres_store.pool.fetchval(
+            "SELECT pid FROM pg_locks WHERE locktype = 'advisory' AND mode = 'ShareLock' AND classid::bigint = $1",
+            _PARTITION_COPY_LOCK_NAMESPACE,
+        )
+        await postgres_store.pool.execute("SELECT pg_terminate_backend($1)", pid)
+
+        with pytest.raises(ServiceUnavailableError, match="Retry the copy"):
+            async with asyncio.timeout(10):
+                await running
+        assert await repo.copy_in_progress("p1") is False
+
+        # The next copy locks on a new session.
+        async with repo.copy_lock("p1"):
+            assert await repo.copy_in_progress("p1") is True
+        assert await repo.copy_in_progress("p1") is False

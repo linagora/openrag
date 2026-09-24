@@ -12,7 +12,10 @@ import ray
 from core.config.model_endpoints import CONTROL_EXTRA_KEYS, DEFAULT_ENDPOINT_ALIAS, embedder_fingerprint
 from core.config.root import Settings
 from core.models.catalog import CONTENT_CLAIM_TOKEN_METADATA_KEY
-from core.utils.exceptions import NotFoundError
+from core.observability.inference_metrics import DEFAULT_PROVIDER, set_provider_name
+from core.utils.error_summary import failure_reason_from_exception
+from core.utils.exceptions import ConfigError, NotFoundError
+from services.workers.failure_reporting import submit_task_failure
 from services.workers.indexer_actor import IndexerWorker, _display_filename, delete_uploaded_file
 from services.workers.indexing_callback import send_indexing_callback
 from services.workers.ray_utils import retry_idempotent_ray_actor_method
@@ -52,7 +55,9 @@ _MISSING_WORKER_REF_ERROR = "Indexer worker did not receive a registered task re
 # state method; prior workers can silently settle degraded jobs as clean.
 # v11: atomic completion reports cancellation, missing state, and conflicts
 # separately; v10 workers interpret all three as the same indexing failure.
-_INDEXER_ACTOR_PROTOCOL_VERSION = "v11"
+# v12: workers write each embedder's own vector field; v11 workers still write
+# the shared `vector` field, which the schema-v3 migration drops.
+_INDEXER_ACTOR_PROTOCOL_VERSION = "v12"
 _INDEXER_POOL_DISPATCHER_ACTOR_NAME = f"IndexerPoolDispatcher-{_INDEXER_ACTOR_PROTOCOL_VERSION}"
 
 # Detached actors default to max_restarts=0, so one that dies — an OOM on a
@@ -143,15 +148,18 @@ class IndexerWorkerActor:
         topic_tagger_factory = _build_topic_tagger_factory(cfg)
 
         embed_cfg = cfg.embedder
-        embedder = embedder_registry.create(
-            "vllm",
-            endpoint=embed_cfg.base_url,
-            model_name=embed_cfg.model_name,
-            api_key=embed_cfg.api_key,
-            max_model_len=embed_cfg.max_model_len,
-            timeout=embed_cfg.timeout,
-            batch_size=embed_cfg.batch_size,
-            embed_concurrency=embed_cfg.embed_concurrency,
+        embedder = set_provider_name(
+            embedder_registry.create(
+                "vllm",
+                endpoint=embed_cfg.base_url,
+                model_name=embed_cfg.model_name,
+                api_key=embed_cfg.api_key,
+                max_model_len=embed_cfg.max_model_len,
+                timeout=embed_cfg.timeout,
+                batch_size=embed_cfg.batch_size,
+                embed_concurrency=embed_cfg.embed_concurrency,
+            ),
+            DEFAULT_PROVIDER,
         )
         self._vector_store = MilvusVectorStore(cfg.vectordb)
         task_state_manager = ray.get_actor("TaskStateManager", namespace=self._namespace)
@@ -166,6 +174,7 @@ class IndexerWorkerActor:
             timeouts=_build_pipeline_timeouts(cfg),
             chunker_factory=_build_chunker_from_config,
             embedder_window_resolver=_build_embedder_window_resolver(cfg),
+            vector_field_resolver=_build_vector_field_resolver(cfg),
             parser_factory=parser_factory,
             embedder_factory=embedder_factory,
             vlm_factory=vlm_factory,
@@ -202,13 +211,7 @@ class IndexerWorkerActor:
         # Whether "default" resolves via global env/config fallbacks. This keeps
         # reload-on-miss from looping forever when no is_default row exists for a
         # type but the legacy config block can still serve the default endpoint.
-        transcriber_cfg = getattr(getattr(cfg, "loader", None), "transcriber", None)
-        self._has_default_fallbacks = {
-            "embedder": _global_embedder_endpoint_config(cfg) is not None,
-            "llm": _global_llm_endpoint_config(cfg) is not None,
-            "vlm": _global_vlm_endpoint_config(cfg) is not None,
-            "stt": bool(getattr(transcriber_cfg, "base_url", "") and getattr(transcriber_cfg, "model_name", "")),
-        }
+        self._has_default_fallbacks = _default_fallbacks(cfg)
         self._has_default_fallback = self._has_default_fallbacks["llm"]
         self._model_endpoint_service: Any = None
         self._prompt_service: Any = None
@@ -510,13 +513,19 @@ class IndexerWorkerActor:
                 # boundary, so per-chunk work reuses one resolved string instead of
                 # hitting the DB per chunk.
                 resolved_prompts = await self._resolve_ingest_prompts(partition, indexation_config or {})
-            except Exception:
+            except Exception as exc:
                 # Not BaseException: a cancellation here must not notify or be
                 # reported as failed (same rule as set_failed_if_not_cancelled).
                 tb = traceback.format_exc()
+                error_reason = failure_reason_from_exception(exc)
                 try:
                     was_failed = await retry_idempotent_ray_actor_method(
-                        lambda: self._tsm.set_failed_if_not_cancelled.remote(task_id, tb),
+                        lambda: submit_task_failure(
+                            self._tsm,
+                            task_id,
+                            tb,
+                            error_reason,
+                        ),
                         task_description=f"set_failed_if_not_cancelled({task_id})",
                     )
                 except Exception:
@@ -623,7 +632,12 @@ class IndexerWorkerActor:
             await asyncio.sleep(min(_WORKER_REF_REGISTRATION_POLL_SECONDS, remaining))
 
         await retry_idempotent_ray_actor_method(
-            lambda: self._task_state_manager.set_failed_if_not_cancelled.remote(task_id, _MISSING_WORKER_REF_ERROR),
+            lambda: submit_task_failure(
+                self._task_state_manager,
+                task_id,
+                _MISSING_WORKER_REF_ERROR,
+                _MISSING_WORKER_REF_ERROR,
+            ),
             task_description=f"set_failed_if_not_cancelled({task_id}) after missing worker ref",
         )
         raise RuntimeError(_MISSING_WORKER_REF_ERROR)
@@ -814,7 +828,12 @@ class IndexerPool:
         remote = getattr(set_failed, "remote", None)
         if remote is not None:
             await retry_idempotent_ray_actor_method(
-                lambda: remote(task_id, _REJECTED_SUBMISSION_ERROR),
+                lambda: submit_task_failure(
+                    task_state_manager,
+                    task_id,
+                    _REJECTED_SUBMISSION_ERROR,
+                    _REJECTED_SUBMISSION_ERROR,
+                ),
                 task_description=f"set_failed_if_not_cancelled({task_id}) from indexer pool",
             )
 
@@ -988,6 +1007,19 @@ def _required_model_names_key(required: dict[str, list[str]] | list[str]) -> tup
     return tuple((model_type, tuple(sorted(set(names)))) for model_type, names in sorted(normalised.items()) if names)
 
 
+def _default_fallbacks(cfg: Any) -> dict[str, bool]:
+    """Per model type, whether the global config can serve the ``default`` endpoint."""
+    transcriber_cfg = getattr(getattr(cfg, "loader", None), "transcriber", None)
+    return {
+        # Never the embedder: the global config has no vector field to index
+        # into, so a missing default embedder reloads the registry instead.
+        "embedder": False,
+        "llm": _global_llm_endpoint_config(cfg) is not None,
+        "vlm": _global_vlm_endpoint_config(cfg) is not None,
+        "stt": bool(getattr(transcriber_cfg, "base_url", "") and getattr(transcriber_cfg, "model_name", "")),
+    }
+
+
 def _has_default_fallback(pool: Any, model_type: str) -> bool:
     fallbacks = getattr(pool, "_has_default_fallbacks", None)
     if fallbacks is not None:
@@ -1068,6 +1100,31 @@ def _build_embedder_window_resolver(cfg: Settings) -> Any:
     return resolve
 
 
+def _build_vector_field_resolver(cfg: Settings) -> Any:
+    """The dense field an embedder endpoint writes its vectors into.
+
+    Only a registered endpoint has one, so unlike the other resolvers there is
+    no fallback to the global embedder config: an embedder missing from the
+    registry raises :class:`ConfigError`. ``None`` for a registered endpoint
+    without a field, which the store refuses to write.
+    """
+    models = getattr(cfg, "models", None)
+    named_embedders = models.embedder if models is not None else {}
+
+    def resolve(name: str = DEFAULT_ENDPOINT_ALIAS) -> str | None:
+        model_cfg = named_embedders.get(name)
+        if model_cfg is not None:
+            return model_cfg.vector_field
+        if name == DEFAULT_ENDPOINT_ALIAS:
+            raise ConfigError(
+                "No embedder endpoint is marked as the default, so a partition on the default "
+                "embedder has no vector field to index into. Mark one embedder endpoint as the default."
+            )
+        raise ConfigError(f"Embedder '{name}' is not registered, so it has no vector field to index into.")
+
+    return resolve
+
+
 def _build_parser_factory(parser: Any) -> Any:
     """Factory honoring a preset's ``parsing_strategy`` for PDFs.
 
@@ -1137,13 +1194,16 @@ def _build_embedder_factory(cfg: Settings) -> Any:
                 default = getattr(embed_defaults, default_key, None)
                 if default is not None:
                     impl_kwargs.setdefault(default_key, default)
-            instance = embedder_registry.create(
-                impl,
-                endpoint=model_cfg.endpoint,
-                model_name=model_cfg.model_name,
-                batch_size=model_cfg.batch_size,
-                timeout=model_cfg.timeout,
-                **impl_kwargs,
+            instance = set_provider_name(
+                embedder_registry.create(
+                    impl,
+                    endpoint=model_cfg.endpoint,
+                    model_name=model_cfg.model_name,
+                    batch_size=model_cfg.batch_size,
+                    timeout=model_cfg.timeout,
+                    **impl_kwargs,
+                ),
+                name,
             )
             # From the config this client was built with, not the registry at
             # catalog-write time: a background reload can land mid-file.
@@ -1184,12 +1244,15 @@ def _build_vlm_factory(cfg: Settings) -> Any:
                 return entry[1]
             impl_kwargs = {key: value for key, value in model_cfg.extra.items() if key not in CONTROL_EXTRA_KEYS}
             impl = model_cfg.extra.get("implementation", "vllm")
-            instance = vlm_registry.create(
-                impl,
-                endpoint=model_cfg.endpoint,
-                model_name=model_cfg.model_name,
-                timeout=model_cfg.timeout,
-                **impl_kwargs,
+            instance = set_provider_name(
+                vlm_registry.create(
+                    impl,
+                    endpoint=model_cfg.endpoint,
+                    model_name=model_cfg.model_name,
+                    timeout=model_cfg.timeout,
+                    **impl_kwargs,
+                ),
+                name,
             )
             cache[name] = (identity, instance)
             return instance
@@ -1263,12 +1326,15 @@ def _build_contextualizer_factory(cfg: Settings) -> Any:
                 shared["llm_semaphore"] = llm_semaphore
             impl_kwargs = {key: value for key, value in model_cfg.extra.items() if key not in CONTROL_EXTRA_KEYS}
             impl = model_cfg.extra.get("implementation", "vllm")
-            llm = llm_registry.create(
-                impl,
-                endpoint=model_cfg.endpoint,
-                model_name=model_cfg.model_name,
-                timeout=model_cfg.timeout,
-                **impl_kwargs,
+            llm = set_provider_name(
+                llm_registry.create(
+                    impl,
+                    endpoint=model_cfg.endpoint,
+                    model_name=model_cfg.model_name,
+                    timeout=model_cfg.timeout,
+                    **impl_kwargs,
+                ),
+                name,
             )
             contextualizer = ChunkContextualizer(
                 llm,
@@ -1325,12 +1391,15 @@ def _build_topic_tagger_factory(cfg: Settings) -> Any:
                 shared["system_prompt"] = load_template_by_key(cfg.paths.prompts_dir, cfg.prompts, "topic_tagger")
             impl_kwargs = {key: value for key, value in model_cfg.extra.items() if key not in CONTROL_EXTRA_KEYS}
             impl = model_cfg.extra.get("implementation", "vllm")
-            llm = llm_registry.create(
-                impl,
-                endpoint=model_cfg.endpoint,
-                model_name=model_cfg.model_name,
-                timeout=model_cfg.timeout,
-                **impl_kwargs,
+            llm = set_provider_name(
+                llm_registry.create(
+                    impl,
+                    endpoint=model_cfg.endpoint,
+                    model_name=model_cfg.model_name,
+                    timeout=model_cfg.timeout,
+                    **impl_kwargs,
+                ),
+                name,
             )
             tagger = TopicTagger(llm, shared["system_prompt"], timeout_seconds=model_cfg.timeout)
             cache[name] = (identity, tagger)

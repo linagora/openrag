@@ -20,6 +20,12 @@ plain dicts and strings.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+
+    from core.embeddings.embedder import Embedder
 
 
 class IndexingDispatcher(ABC):
@@ -68,8 +74,19 @@ class IndexingDispatcher(ABC):
         metadata: dict,
         partition: str,
         user: dict | None,
+        *,
+        vector_field: str | None = None,
+        embedder: Embedder | None = None,
+        embedder_reference: str | None = None,
+        embedder_fingerprint: Mapping[str, str | None] | None = None,
     ) -> None:
-        """Copy a file's chunks into another partition / file id."""
+        """Copy a file's chunks into another partition / file id.
+
+        With ``vector_field``, the copy's vectors end up in that field only,
+        re-embedded with ``embedder`` where the source has none there. A copy
+        that re-embeds records ``embedder_reference`` as its embedder, and is
+        refused if that endpoint no longer matches ``embedder_fingerprint``.
+        """
         ...
 
     @abstractmethod
@@ -80,6 +97,11 @@ class IndexingDispatcher(ABC):
     @abstractmethod
     async def get_task_error(self, task_id: str) -> str | None:
         """Stored traceback for a failed task, or ``None``."""
+        ...
+
+    @abstractmethod
+    async def get_task_error_reason(self, task_id: str) -> str | None:
+        """Canonical failure reason for a failed task, or ``None``."""
         ...
 
     @abstractmethod

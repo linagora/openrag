@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
@@ -2167,3 +2168,53 @@ async def test_require_retrieval_keeps_generated_filters_and_allows_no_matches(h
         assert generated.to_milvus_filter()
     assert result.docs == []
     assert result.retrieved_docs == []
+
+
+@pytest.mark.asyncio
+async def test_generate_query_hands_the_contextualizer_precomputed_calendar_anchors():
+    """ "Last week" must reach Milvus as Monday-to-Monday. Mistral Small resolved
+    it to the past seven days when left to do the arithmetic, so the system
+    prompt now carries the boundaries pre-computed through the template's
+    ``{calendar_anchors}`` placeholder.
+    """
+    payload = json.dumps({"requires_retrieval": True, "query_list": [{"query": "q", "temporal_filters": None}]})
+    llm = FakeLLM(chat_responses=[payload])
+    svc = _svc(llm=llm, mode="ChatBotRag")
+
+    await svc.generate_query([{"role": "user", "content": "résume mes échanges de la semaine dernière"}])
+
+    system = llm.chat_calls[0][0][0]
+    assert system["role"] == "system"
+    assert "Calendar anchors (use verbatim, do not recompute)" in system["content"]
+    assert "- last week [" in system["content"]
+    # The bundled template points its resolution rules at those anchors.
+    assert "copy the matching anchor under Current date verbatim" in system["content"]
+
+
+@pytest.mark.asyncio
+async def test_generate_query_reads_the_clock_in_utc(monkeypatch):
+    """23:30 UTC on the 16th is already the 17th in Paris. The anchors are
+    compared against UTC ``created_at`` timestamps, so the day must come from
+    the UTC clock, not the host's local one, and the boundaries the model
+    copies must already carry the ``+00:00`` the Milvus filter requires.
+    """
+    instant = datetime(2026, 9, 16, 23, 30, tzinfo=UTC)
+
+    class FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            if tz is not UTC:
+                raise AssertionError("generate_query must read the UTC clock")
+            return instant
+
+    monkeypatch.setattr(qs, "datetime", FrozenDatetime)
+    payload = json.dumps({"requires_retrieval": True, "query_list": [{"query": "q", "temporal_filters": None}]})
+    llm = FakeLLM(chat_responses=[payload])
+    svc = _svc(llm=llm, mode="ChatBotRag")
+
+    await svc.generate_query([{"role": "user", "content": "what did I receive today?"}])
+
+    system = llm.chat_calls[0][0][0]["content"]
+    assert "Current date: Wednesday, September 16, 2026, 23:30:00" in system
+    assert "- today 2026-09-16T00:00:00+00:00, tomorrow 2026-09-17T00:00:00+00:00" in system
+    assert "- last week [2026-09-07, 2026-09-14)" in system

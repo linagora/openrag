@@ -103,6 +103,219 @@ counts without exposing partition or preset names.
 
 - Ensure your GPU nodes have the correct NVIDIA drivers and `nvidia` `RuntimeClass` configured.
 
+## Monitoring
+
+The chart ships OpenRAG's Grafana dashboards and a `ServiceMonitor` for the
+API's `GET /metrics`. The dashboards exist once, in
+`infra/charts/openrag-stack/dashboards/`, and the Docker Compose monitoring
+overlay loads the same files. They reach a Grafana in one of three ways:
+
+| Deployment | Prometheus and Grafana | What the chart renders |
+| --- | --- | --- |
+| Kubernetes, next to a platform's monitoring | the platform's | a ConfigMap per dashboard for its Grafana sidecar, and the API `ServiceMonitor` |
+| Kubernetes, standalone | kube-prometheus-stack, bundled by `monitoring.bundled` | the same objects, plus that stack |
+| Docker Compose | the overlay's containers | nothing: the overlay mounts `dashboards/` and Grafana provisions it from disk |
+
+Every dashboard reads its data source through a variable that starts on
+Grafana's default Prometheus, so the files load unchanged in any of them (see
+[Prometheus metrics](/openrag/documentation/prometheus_metrics/#grafana)).
+
+### Next to an existing Prometheus and Grafana
+
+Leave `monitoring.bundled` off and turn on the objects, labelled the way the
+platform selects them:
+
+```yaml
+monitoring:
+  dashboards:
+    enabled: true
+openrag:
+  metrics:
+    serviceMonitor:
+      enabled: true
+      bearerTokenFromSecret: true
+      labels:
+        release: kube-prometheus-stack   # what the platform's Prometheus selects
+env:
+  secrets:
+    METRICS_TOKEN: "<openssl rand -hex 16>"
+```
+
+Ask whoever runs the platform's monitoring, and set:
+
+| Question | Value |
+| --- | --- |
+| Which label does your Prometheus select `ServiceMonitor` objects on, and does it watch this namespace? | `openrag.metrics.serviceMonitor.labels`. The monitor is created in the release namespace. |
+| Does your Grafana run the dashboard sidecar, and which label does it watch? | `monitoring.dashboards.label` and `labelValue`, by default `grafana_dashboard: "1"` (kube-prometheus-stack's default). |
+| Which namespaces does the sidecar search? | Nothing to set if it searches all of them (kube-prometheus-stack's default). If it only watches its own, set `monitoring.dashboards.namespace` to the Grafana namespace. |
+| Which Grafana folder? | `monitoring.dashboards.folder` (default `OpenRAG`), written into the annotation named by `monitoring.dashboards.folderAnnotation` (default `grafana_folder`). It must match the sidecar's `folderAnnotation`, which also needs `provider.foldersFromFilesStructure`. A sidecar without one uses its default folder. |
+
+A ConfigMap or monitor with the wrong label is created and then ignored, which
+looks exactly like one that works. After installing, check that the dashboards
+appear in Grafana and that the target is up in Prometheus (**Status → Targets**).
+Without the Prometheus Operator, the API pod's `prometheus.io/*` annotations
+serve annotation-based discovery instead; see
+[Scraping in Kubernetes](/openrag/documentation/prometheus_metrics/#scraping-in-kubernetes).
+
+### Standalone: the bundled stack
+
+On a cluster with no monitoring of its own, `monitoring.bundled: true` installs
+kube-prometheus-stack in the release: Prometheus Operator, Prometheus,
+Alertmanager, Grafana, node-exporter and kube-state-metrics. It also turns on the
+dashboard ConfigMaps and the API `ServiceMonitor`:
+
+```yaml
+monitoring:
+  bundled: true
+env:
+  secrets:
+    METRICS_TOKEN: "<openssl rand -hex 16>"
+```
+
+- **`METRICS_TOKEN` is required.** The bundled Prometheus always sends it as the
+  bearer on `GET /metrics`, like the Compose overlay, and the chart refuses to
+  render without it. With `env.existingSecret` or an external secrets provider,
+  that Secret must carry the key, since the chart cannot check it.
+- **Every monitor is scraped.** The bundled Prometheus selects all
+  `ServiceMonitor`, `PodMonitor` and `PrometheusRule` objects in the cluster, not
+  only those labelled with its release. A third-party monitor, such as the GPU
+  Operator's DCGM exporter, needs no `release` label.
+- **The control plane is not scraped.** On a managed cluster (EKS, GKE, AKS and
+  the like) the controller manager, scheduler and etcd run out of reach, and
+  some clusters replace kube-proxy. kube-prometheus-stack would still look for
+  them, and its `KubeControllerManagerDown`, `KubeSchedulerDown` and
+  `KubeProxyDown` alerts would fire forever, so the chart turns the four off,
+  with their rules and dashboards. On a self-managed control plane, turn them
+  back on:
+
+  ```yaml
+  kubePrometheusStack:
+    kubeControllerManager: { enabled: true }
+    kubeScheduler: { enabled: true }
+    kubeEtcd: { enabled: true }
+    kubeProxy: { enabled: true }
+  ```
+
+  Each component must also serve its metrics on an address Prometheus can
+  reach. kubeadm binds all four to `127.0.0.1`, where the scrape is refused and
+  the same alerts fire.
+- **History survives a restart.** Prometheus keeps 30 days, capped at 18 GB, on a
+  20 Gi `ReadWriteOnce` volume from the default StorageClass. Tune it under
+  `kubePrometheusStack.prometheus.prometheusSpec`.
+- **Every workload has requests and a memory limit.** Upstream sets none, which
+  would leave them BestEffort: nothing reserved, and evicted first under memory
+  pressure. The values come from a one-node kind cluster under the queries of
+  every bundled dashboard, with room above what each used there. Prometheus is
+  the one that grows, with the number of series rather than the retention: its
+  1 Gi request holds about 190k series, and `values.yaml` shows how to estimate
+  yours from the node, pod and API server counts. Watch
+  `prometheus_tsdb_head_series` and raise
+  `kubePrometheusStack.prometheus.prometheusSpec.resources` with it.
+- **Upstream values go under `kubePrometheusStack`.** The sub-chart is aliased,
+  so an upstream `kube-prometheus-stack.x.y` key is `kubePrometheusStack.x.y`
+  here.
+- **The operator's admission webhook is let through the NetworkPolicy.** It
+  validates `PrometheusRule` and `AlertmanagerConfig` objects before they are
+  stored, and its caller is the API server — not a pod, and on a managed
+  control plane not on the cluster network at all, so no selector can name it.
+  The chart opens that one port, to any source, on the webhook's own pod: it
+  runs in a separate deployment
+  (`kubePrometheusStack.prometheusOperator.admissionWebhooks.deployment`),
+  which serves the webhook, `/metrics` and `/healthz` only, because the
+  operator's listener would also expose `/debug/pprof/` on the same port. Give
+  `networkPolicy.webhookFrom` a peer to narrow it where the control plane's
+  address is known, and do narrow it if you turn that deployment off. Without
+  the opening the call is dropped wherever the API server is off-node, and
+  kube-prometheus-stack's default `failurePolicy` (`Ignore`) then skips
+  validation silently.
+- **The dashboard label and folder must match the bundled Grafana.** Its
+  sidecar is configured under `kubePrometheusStack.grafana.sidecar.dashboards`,
+  which cannot follow `monitoring.dashboards`, so the chart refuses to render
+  when the label, label value or folder annotation differ. Change them on
+  both sides together.
+- **No API scrape under Ray Serve.** With `ray.enabled=true` and
+  `ENABLE_RAY_SERVE=true`, no `ServiceMonitor` is rendered for the API, and the
+  HTTP dashboard stays empty (see the Limitations in
+  [Prometheus metrics](/openrag/documentation/prometheus_metrics/#limitations)).
+
+The install notes print how to reach Grafana:
+
+```bash
+kubectl -n <namespace> port-forward svc/openrag-grafana 3000:80
+# user and password:
+kubectl -n <namespace> get secret openrag-grafana -o jsonpath='{.data.admin-user}' | base64 -d
+kubectl -n <namespace> get secret openrag-grafana -o jsonpath='{.data.admin-password}' | base64 -d
+```
+
+With `kubePrometheusStack.grafana.admin.existingSecret` set, as under Argo CD
+below, Grafana reads them from that Secret instead, under the keys named by
+`admin.userKey` and `admin.passwordKey` (`admin-user` and `admin-password` by
+default). The notes print those.
+
+The OpenRAG dashboards are in the **OpenRAG** folder, next to
+kube-prometheus-stack's own Kubernetes dashboards. To publish Grafana through an
+Ingress, enable `kubePrometheusStack.grafana.ingress` and add `3000` to
+`networkPolicy.externalPorts`: the default-deny policy admits only `8080` from
+outside the namespace.
+
+Alertmanager starts with no receiver. Alerts show as firing in Prometheus and
+Alertmanager but notify nobody until `kubePrometheusStack.alertmanager.config`
+routes them.
+
+Before turning it on:
+
+- **Not next to another Prometheus Operator.** A second operator competes with
+  the first over the same CRDs and objects. If the cluster already runs one, use
+  the setup in the previous section.
+- **It needs cluster-wide rights, and one release per cluster.** Besides the
+  operator's CRDs, it creates cluster-scoped objects (ClusterRoles and their
+  bindings, the admission webhook configurations) and Services in `kube-system`
+  (CoreDNS's, and the kubelet's, which the operator maintains), so rights over
+  the release namespace alone are not enough to install it. Their names are
+  fixed (`openrag-monitoring-*`, `openrag-grafana-*`), so a second release with
+  `bundled` in the same cluster fails at install: point it at the first one's
+  Prometheus and Grafana instead, as in the previous section.
+- **node-exporter needs host access.** It runs on every node with `hostNetwork`,
+  `hostPID` and the node's `/`, `/proc` and `/sys` mounted. A namespace that
+  enforces the Pod Security `baseline` or `restricted` level rejects its pods.
+  On a node that already runs a node-exporter, the two need the same host port,
+  9100, and the second one stays `Pending`. In either case set
+  `kubePrometheusStack.nodeExporter.enabled: false`. The host panels of the
+  Infrastructure Overview dashboard (CPU, memory, disk, network and load) then
+  stay empty, unless this Prometheus scrapes the existing node-exporter, for
+  example through its `ServiceMonitor`.
+- **An existing release needs the CRDs first.** Helm installs CRDs on the first
+  install only, so an upgrade that turns `bundled` on fails with
+  `no matches for kind "Alertmanager" in version "monitoring.coreos.com/v1"`.
+  Helm never upgrades CRDs either, so
+  repeat this after a chart upgrade that moves kube-prometheus-stack:
+
+  ```bash
+  helm show crds oci://ghcr.io/prometheus-community/charts/kube-prometheus-stack \
+    --version 91.4.1 | kubectl apply --server-side -f -
+  ```
+
+  `--server-side` is required: the Prometheus CRD is over 1 MB, past the 256 KiB
+  a client-side apply can record.
+- **Argo CD needs two settings.** Sync with `ServerSideApply=true`, for the same
+  reason. Argo CD also renders without cluster lookups, so the generated Grafana
+  password would change on every sync. Point
+  `kubePrometheusStack.grafana.admin.existingSecret` at a Secret you manage
+  instead.
+- **Under Argo CD, rule validation starts once the whole Application is
+  Healthy.** The admission webhook's certificate comes from two Helm-hook Jobs,
+  which Argo CD runs as sync hooks: `openrag-monitoring-admission-create` before
+  the sync, and `openrag-monitoring-admission-patch`, which gives the webhook
+  configurations their CA, after it. Argo CD runs that second hook only once
+  every resource in the Application is Healthy, OpenRAG's included. Until then
+  the API server cannot verify the webhook, and under the default
+  `failurePolicy` (`Ignore`) it stores `PrometheusRule` and `AlertmanagerConfig`
+  objects unvalidated. Later syncs keep the certificate and the CA. Where
+  cert-manager runs, set
+  `kubePrometheusStack.prometheusOperator.admissionWebhooks.certManager.enabled: true`:
+  cert-manager issues the certificate instead of the hooks, and validation
+  works from the first sync.
+
 ## Managed PostgreSQL
 
 The chart can run against a database that is provisioned outside OpenRAG, which is the recommended setup on OpenShift or cloud-managed PostgreSQL.
@@ -114,6 +327,49 @@ In `values.yaml`, disable the bundled PostgreSQL chart, set `postgresProvisionin
 The migration Job (`templates/postgres-migration-job.yaml`) is a Helm hook, annotated with `helm.sh/hook: pre-install,pre-upgrade`. You never invoke it directly: Helm runs it automatically as part of each `helm install` and `helm upgrade`, before it creates or updates the OpenRAG Deployment, and waits for it to finish. It applies the Alembic migrations against the pre-created database (it migrates the schema but does not create the database). The OpenRAG API then starts against an already-migrated schema.
 
 When `postgresProvisioning.migrationJob` is disabled (the default), the Job is not rendered at all and the application runs migrations itself at startup instead.
+
+## GPU metrics
+
+The chart deploys no GPU exporter. GPU metrics come from the DCGM exporter that
+the NVIDIA GPU Operator — a prerequisite above — runs on every GPU node
+(`dcgmExporter.enabled`, on by default). What is left is getting Prometheus to
+scrape it and Grafana to show it.
+
+1. **Scrape the exporter.** With the Prometheus Operator (e.g.
+   kube-prometheus-stack), have the GPU Operator create its ServiceMonitor. That
+   is the default from GPU Operator v26.7.0; earlier releases ship it disabled:
+
+   ```bash
+   # Pin the version you already run: --reuse-values without --version also
+   # upgrades the GPU Operator to the latest chart.
+   helm upgrade gpu-operator nvidia/gpu-operator -n gpu-operator \
+     --version <installed version> --reuse-values \
+     --set dcgmExporter.serviceMonitor.enabled=true \
+     --set dcgmExporter.serviceMonitor.additionalLabels.release=kube-prometheus-stack
+   ```
+
+   The `release` label must be whatever your Prometheus `serviceMonitorSelector`
+   matches (kube-prometheus-stack selects its own release name). An unmatched
+   ServiceMonitor is created but never scraped. Without the Prometheus Operator,
+   the exporter's `nvidia-dcgm-exporter` Service (port 9400) carries the
+   `prometheus.io/scrape: "true"` annotation for annotation-based discovery.
+
+2. **Check it arrived.** `DCGM_FI_DEV_GPU_UTIL` should return series in
+   Prometheus. Expect one series per GPU — or, when the exporter runs with
+   `KUBERNETES_VIRTUAL_GPUS=true` for time-sliced or MPS-shared GPUs, one per pod
+   using each GPU. The dashboard counts each GPU once either way.
+
+3. **Get the dashboard in front of you.** The GPU panels of the Infrastructure
+   Overview dashboard (`infra/charts/openrag-stack/dashboards/system-overview.json`)
+   read the DCGM exporter here and `nvidia_gpu_exporter` under Docker Compose —
+   whichever is scraped — so the same file serves both. The chart ships it to
+   Grafana for you: see [Monitoring](#monitoring) above. Imported by hand
+   instead, it needs no editing — every panel reads a data source variable that
+   starts on Grafana's default Prometheus.
+
+The GPU panels aggregate every GPU that Prometheus scrapes, not only the nodes
+running OpenRAG, and the host panels likewise need node-exporter
+(kube-prometheus-stack ships it) and aggregate every node.
 
 ## Monitoring Ray, Postgres and Milvus
 
@@ -198,8 +454,8 @@ up{namespace="<release namespace>", job=~".*(raycluster|postgresql|milvus).*"}
 | Postgres | `sum by (instance) (pg_stat_activity_count{namespace="<release namespace>"}) / sum by (instance) (pg_settings_max_connections{namespace="<release namespace>"})` | Connections against the server limit, per server |
 | Postgres | `pg_stat_activity_max_tx_duration` | Longest open transaction |
 | Postgres | `pg_database_size_bytes`, `pg_locks_count` | Database size, lock contention |
-| Milvus | `milvus_proxy_req_latency`, `milvus_proxy_sq_latency` | Request and search/query latency |
-| Milvus | `milvus_proxy_insert_vectors_count`, `milvus_proxy_search_vectors_count` | Insert and search throughput |
+| Milvus | `histogram_quantile(0.99, sum by (le, function_name) (rate(milvus_proxy_req_latency_bucket{namespace="<release namespace>"}[5m])))`, and the same over `milvus_proxy_sq_latency_bucket` by `query_type` | p99 latency in milliseconds, per request type and per search/query type |
+| Milvus | `sum(rate(milvus_proxy_insert_vectors_count{namespace="<release namespace>"}[5m]))`, `sum(rate(milvus_proxy_search_vectors_count{namespace="<release namespace>"}[5m]))` | Vectors inserted and searched per second |
 | Milvus | `milvus_querycoord_collection_num` | Loaded collections |
 | Milvus | `milvus_datacoord_segment_num` by `segment_state`, `milvus_datacoord_compaction_task_num` | Segment and compaction backlog |
 | Milvus | `process_resident_memory_bytes` by `component` | Memory per component |

@@ -357,6 +357,14 @@ class PgDocumentRepository(DocumentRepository):
         )
         return dict(metadata) if isinstance(metadata, dict) else None
 
+    async def get_indexation_config(self, file_id: str, partition: str) -> dict[str, Any] | None:
+        config = await self.pool.fetchval(
+            "SELECT indexation_config FROM files WHERE file_id = $1 AND partition_name = $2",
+            file_id,
+            partition,
+        )
+        return dict(config) if isinstance(config, dict) else None
+
     async def get_content_sha256(self, file_id: str, partition: str) -> str | None:
         return await self.pool.fetchval(
             "SELECT content_sha256 FROM files WHERE file_id = $1 AND partition_name = $2",

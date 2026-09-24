@@ -111,15 +111,27 @@ class FakeVectorStore(VectorStore):
         self.error = error
         self.calls: list[tuple[list[Chunk], str]] = []
         self.ensure_calls: list[tuple[str, int]] = []
+        self.vector_field_calls: list[tuple[str, int]] = []
+        self.upsert_vector_fields: list[str | None] = []
 
-    async def upsert(self, chunks: list[Chunk], collection: str = "default", *, indexed_at=None) -> int:
+    async def upsert(
+        self, chunks: list[Chunk], collection: str = "default", *, indexed_at=None, vector_field=None
+    ) -> int:
         self.calls.append((chunks, collection))
+        self.upsert_vector_fields.append(vector_field)
         if self.error is not None:
             raise self.error
         return self.count
 
     async def search(
-        self, embedding, query_text=None, top_k=10, collection="default", filters=None, similarity_threshold=None
+        self,
+        embedding,
+        query_text=None,
+        top_k=10,
+        collection="default",
+        filters=None,
+        similarity_threshold=None,
+        vector_field=None,
     ):
         return []
 
@@ -133,14 +145,21 @@ class FakeVectorStore(VectorStore):
         self.ensure_calls.append((name, dimension))
         return None
 
+    async def ensure_vector_field(self, field: str, dimension: int) -> bool:
+        self.vector_field_calls.append((field, dimension))
+        return True
+
+    async def drop_vector_field(self, field: str) -> bool:
+        return False
+
     async def drop_collection(self, name: str) -> None:
         return None
 
     async def collection_exists(self, name: str) -> bool:
         return True
 
-    async def vector_dimension(self) -> int | None:
-        return 1024
+    async def vector_dimension(self, vector_field: str | None = None) -> int | None:
+        return 1024 if vector_field else None
 
     async def query_ids_by_filter(self, collection: str, filters: dict) -> list[str]:
         return []
@@ -493,3 +512,28 @@ async def test_caption_stage_fan_out_is_unbounded_without_a_limit():
     await caption_stage(row, vlm)
 
     assert vlm.peak > 3
+
+
+@pytest.mark.asyncio
+async def test_store_stage_provisions_the_partitions_field_then_writes_to_it():
+    # Sized from the embedding actually produced.
+    chunks = [Chunk(id="c1", text="alpha", embedding=[1.0, 0.0, 1.0])]
+    store = FakeVectorStore(count=1)
+    calls: list[str] = []
+    ensure, upsert = store.ensure_vector_field, store.upsert
+
+    async def recording_ensure(*args, **kwargs):
+        calls.append("ensure")
+        return await ensure(*args, **kwargs)
+
+    async def recording_upsert(*args, **kwargs):
+        calls.append("upsert")
+        return await upsert(*args, **kwargs)
+
+    store.ensure_vector_field, store.upsert = recording_ensure, recording_upsert  # type: ignore[method-assign]
+
+    await store_stage({"chunks": chunks}, store, vector_field="vector_bge_m3")
+
+    assert calls == ["ensure", "upsert"]
+    assert store.vector_field_calls == [("vector_bge_m3", 3)]
+    assert store.upsert_vector_fields == ["vector_bge_m3"]

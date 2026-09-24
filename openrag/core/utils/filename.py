@@ -53,13 +53,21 @@ def make_unique_filename(filename: str) -> str:
 
 
 def extract_temporal_fields(metadata: dict, temporal_fields: list) -> dict:
-    """Extract and validate ISO-8601 temporal metadata fields."""
+    """Extract and validate ISO-8601 temporal metadata fields.
+
+    An empty (or blank) string means the caller has no value: it is
+    normalized to ``None`` so the typed vector-store field receives a null
+    instead of an unparsable string, and the upload is not rejected.
+    """
     result = {}
     for field in temporal_fields:
         if field not in metadata or metadata[field] is None:
             continue
 
         datetime_str = metadata[field]
+        if isinstance(datetime_str, str) and not datetime_str.strip():
+            result[field] = None
+            continue
         try:
             parsed = datetime.fromisoformat(datetime_str)
             if parsed.tzinfo is None:

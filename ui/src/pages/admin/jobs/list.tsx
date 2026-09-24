@@ -163,6 +163,16 @@ const columns: ColumnDef<TaskListItem, unknown>[] = [
   },
 ];
 
+const failureReasonColumn: ColumnDef<TaskListItem, unknown> = {
+  accessorKey: "error_summary",
+  header: "Failure reason",
+  cell: ({ row }) => (
+    <TruncatedValue value={row.original.error_summary ?? ""} className="max-w-[240px] lg:max-w-[320px]" />
+  ),
+};
+
+const adminColumns = [columns[0], columns[1], failureReasonColumn, ...columns.slice(2)];
+
 export default function JobListPage() {
   const { isAdmin } = usePermissions();
   const { user } = useAuth();
@@ -205,13 +215,13 @@ export default function JobListPage() {
       const partition = str(task.details?.partition);
       const matchesSearch =
         !q ||
-        [task.task_id, task.state, filename, fileId, partition].some((value) =>
+        [task.task_id, task.state, filename, fileId, partition, isAdmin ? task.error_summary : ""].some((value) =>
           str(value).toLowerCase().includes(q),
         );
       const matchesPartition = partitionFilter === ALL_PARTITIONS_FILTER || partition === partitionFilter;
       return matchesSearch && matchesPartition;
     });
-  }, [tasks, debouncedSearch, partitionFilter]);
+  }, [tasks, debouncedSearch, partitionFilter, isAdmin]);
   const selectedActiveTasks = useMemo(
     () => filteredTasks.filter((task) => rowSelection[task.task_id] && isActiveState(task.state)),
     [filteredTasks, rowSelection],
@@ -252,6 +262,9 @@ export default function JobListPage() {
           { header: "partition", value: (task) => str(task.details?.partition) },
           { header: "created_at", value: (task) => task.created_at },
           { header: "duration_ms", value: (task) => task.duration_ms },
+          ...(isAdmin
+            ? [{ header: "failure_reason", value: (task: TaskListItem) => task.error_summary }]
+            : []),
         ],
         filteredTasks,
       );
@@ -381,7 +394,7 @@ export default function JobListPage() {
               // Remounting resets pagination for a new tab/search context; sort state resets with it.
               <DataTable
                 key={`${statusTab}:${debouncedSearch}:${partitionFilter}`}
-                columns={columns}
+                columns={isAdmin ? adminColumns : columns}
                 data={filteredTasks}
                 enableSelection
                 canSelectRow={(task) => isActiveState(task.state)}

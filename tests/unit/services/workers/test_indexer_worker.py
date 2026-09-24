@@ -84,7 +84,9 @@ class FakeVectorStore:
         self.deleted_filters: list[dict[str, Any]] = []
         self.deleted_ids: list[tuple[list[str], str]] = []
 
-    async def upsert(self, chunks: list[Chunk], collection: str = "default", *, indexed_at=None) -> int:
+    async def upsert(
+        self, chunks: list[Chunk], collection: str = "default", *, indexed_at=None, vector_field=None
+    ) -> int:
         self.calls.append((chunks, collection, indexed_at))
         return len(chunks)
 
@@ -176,6 +178,25 @@ async def test_load_document_reads_bytes_and_detects_type_from_original_filename
     # Document.id must be the file_id (not a random uuid): the chunker derives
     # Chunk.document_id / file_id from ProcessedDocument.document_id == document.id.
     assert doc.id == "fid-1"
+
+
+@pytest.mark.asyncio
+async def test_load_document_carries_the_uploads_own_path(tmp_path: Path) -> None:
+    """#911: path-based parsers hand this across the actor boundary, so it must
+    be the shared-volume upload rather than a node-local temp copy."""
+    p = tmp_path / "1713700000000_a1b2_report.pdf"
+    p.write_bytes(b"%PDF-1.4")
+
+    doc = await _load_document(
+        str(p),
+        {"file_id": "fid-1", "filename": "report.pdf", "original_filename": "report.pdf"},
+        "tenant-a",
+    )
+
+    assert doc.source_path == str(p)
+    # The extension has to survive, or as_temporary_file rejects the path as a
+    # suffix mismatch and silently falls back to writing the bytes out again.
+    assert Path(doc.source_path).suffix == ".pdf"
 
 
 @pytest.mark.asyncio
@@ -353,6 +374,48 @@ async def test_process_file_pipeline_failure_sets_failed_and_reraises(tmp_path: 
     call_args = tsm.set_failed_if_not_cancelled.remote.call_args
     assert call_args.args[0] == "t2"
     assert "parser exploded" in call_args.args[1]
+
+
+@pytest.mark.asyncio
+async def test_process_file_captures_reason_when_task_state_actor_supports_it(tmp_path: Path) -> None:
+    path = tmp_path / "bad.txt"
+    path.write_bytes(b"x")
+
+    class BrokenParser:
+        async def parse(self, document: Document) -> ProcessedDocument:
+            raise RuntimeError("parser exploded\n<html>\n</html>")
+
+        def supported_types(self) -> list[str]:
+            return [DocumentType.TEXT.value]
+
+    pipeline = build_indexing_pipeline(
+        parser=BrokenParser(),
+        chunker=FakeChunker([]),
+        embedder=FakeEmbedder(),
+        vector_store=FakeVectorStore(),
+    )
+    tsm = _fake_tsm()
+    tsm._ray_actor_method_names = {
+        "set_failed_if_not_cancelled",
+        "set_failed_with_reason_if_not_cancelled",
+    }
+    tsm.set_failed_with_reason_if_not_cancelled = MagicMock()
+    tsm.set_failed_with_reason_if_not_cancelled.remote = AsyncMock(return_value=True)
+    worker = IndexerWorker(pipeline=pipeline, task_state_manager=tsm)
+
+    with pytest.raises(RuntimeError, match="parser exploded"):
+        await worker.process_file(
+            task_id="t2",
+            path=str(path),
+            metadata={"file_id": "f1"},
+            partition="p",
+        )
+
+    failure = tsm.set_failed_with_reason_if_not_cancelled.remote.await_args.args
+    assert failure[0] == "t2"
+    assert "parser exploded" in failure[1]
+    assert failure[2] == "RuntimeError: parser exploded"
+    tsm.set_failed_if_not_cancelled.remote.assert_not_awaited()
 
 
 @pytest.mark.asyncio

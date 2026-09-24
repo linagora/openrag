@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from core.config.model_endpoints import ModelEndpointConfig
 from core.models.catalog import CONTENT_CLAIM_TOKEN_METADATA_KEY
-from core.utils.exceptions import NotFoundError
+from core.utils.exceptions import ConfigError, NotFoundError
 
 
 class _NativeChunker:
@@ -157,7 +157,7 @@ def test_build_indexer_pool_uses_current_protocol_dispatcher_name(
     opts = options_calls[0]
     # A protocol-specific name prevents a rolling deployment from attaching to
     # a detached actor that still runs the previous claim implementation.
-    assert opts["name"] == "IndexerPoolDispatcher-v11"
+    assert opts["name"] == "IndexerPoolDispatcher-v12"
     assert opts["namespace"] == "openrag"
     assert opts["get_if_exists"] is True
     assert opts["lifetime"] == "detached"
@@ -198,9 +198,9 @@ def test_indexer_pool_actor_spawns_pool_size_detached_workers(
     # One detached worker actor per pool_size slot, each capped at max_tasks_per_worker.
     assert len(pool._workers) == 3
     assert {c["name"] for c in calls} == {
-        "IndexerWorker-v11-0",
-        "IndexerWorker-v11-1",
-        "IndexerWorker-v11-2",
+        "IndexerWorker-v12-0",
+        "IndexerWorker-v12-1",
+        "IndexerWorker-v12-2",
     }
     for c in calls:
         assert c["lifetime"] == "detached"
@@ -1316,7 +1316,7 @@ async def test_pool_drain_rejects_new_work_and_reports_accepted_work(monkeypatch
     await pool.submit(task_id="accepted-before-drain")
 
     assert await pool.begin_drain() == {
-        "protocol_version": "v11",
+        "protocol_version": "v12",
         "accepting_tasks": False,
         "inflight_jobs": 1,
         "worker_names": ["test-worker-0"],
@@ -1349,7 +1349,7 @@ async def test_pool_drain_rejects_new_work_and_reports_accepted_work(monkeypatch
 
     await _settle_pool_release_tasks(pool, worker.futures[0])
     assert await pool.status() == {
-        "protocol_version": "v11",
+        "protocol_version": "v12",
         "accepting_tasks": False,
         "inflight_jobs": 0,
         "worker_names": ["test-worker-0"],
@@ -1384,7 +1384,7 @@ async def test_pool_abort_drain_restores_acceptance() -> None:
         await pool.submit(task_id="rejected-while-draining")
 
     assert await pool.abort_drain() == {
-        "protocol_version": "v11",
+        "protocol_version": "v12",
         "accepting_tasks": True,
         "inflight_jobs": 0,
         "worker_names": ["test-worker-0"],
@@ -1399,7 +1399,7 @@ async def test_pool_abort_drain_restores_acceptance() -> None:
 async def test_pool_reports_current_protocol_version() -> None:
     pool = _bare_pool([_FakeWorker()])
 
-    assert await pool.protocol_version() == "v11"
+    assert await pool.protocol_version() == "v12"
 
 
 @pytest.mark.asyncio
@@ -2198,6 +2198,32 @@ async def test_actor_does_not_start_without_registered_worker_ref(
 
 
 @pytest.mark.asyncio
+async def test_missing_worker_reference_records_a_canonical_reason(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    import services.workers.indexer_pool as module
+
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"x")
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=_RecordingWorker())
+    actor._task_state_manager.get_object_ref.remote.return_value = None
+    set_failed = AsyncMock(return_value=True)
+    actor._task_state_manager._ray_actor_method_names = {
+        "set_failed_if_not_cancelled",
+        "set_failed_with_reason_if_not_cancelled",
+    }
+    actor._task_state_manager.set_failed_with_reason_if_not_cancelled = SimpleNamespace(remote=set_failed)
+    monkeypatch.setattr(module, "_WORKER_REF_REGISTRATION_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(module, "_WORKER_REF_REGISTRATION_POLL_SECONDS", 0.001)
+
+    with pytest.raises(RuntimeError, match="registered task reference"):
+        await actor.process_file(task_id="t", path=str(path), metadata={"file_id": "f"}, partition="p")
+
+    assert set_failed.await_args.args == ("t", module._MISSING_WORKER_REF_ERROR, module._MISSING_WORKER_REF_ERROR)
+
+
+@pytest.mark.asyncio
 async def test_actor_keeps_upload_by_default(tmp_path) -> None:
     path = tmp_path / "doc.txt"
     path.write_bytes(b"x")
@@ -2345,6 +2371,36 @@ async def test_preflight_failure_sends_the_error_callback_and_sets_failed(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_preflight_failure_captures_reason_with_new_task_state_actor(tmp_path) -> None:
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"x")
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=_RecordingWorker())
+
+    async def _boom(*_args, **_kwargs):
+        raise RuntimeError("postgres down\n<html>\n</html>")
+
+    actor._ensure_catalog = _boom
+    actor._await_worker_ref_registration = AsyncMock(return_value=None)
+    set_failed = AsyncMock(return_value=True)
+    actor._tsm = SimpleNamespace(
+        _ray_actor_method_names={
+            "set_failed_if_not_cancelled",
+            "set_failed_with_reason_if_not_cancelled",
+        },
+        set_failed_if_not_cancelled=SimpleNamespace(remote=AsyncMock(return_value=True)),
+        set_failed_with_reason_if_not_cancelled=SimpleNamespace(remote=set_failed),
+    )
+
+    with pytest.raises(RuntimeError, match="postgres down"):
+        await actor.process_file(task_id="t", path=str(path), metadata={"file_id": "f"}, partition="p")
+
+    failure = set_failed.await_args.args
+    assert failure[0] == "t"
+    assert "postgres down" in failure[1]
+    assert failure[2] == "RuntimeError: postgres down"
+
+
+@pytest.mark.asyncio
 async def test_preflight_failure_without_callback_url_still_sets_failed(tmp_path, monkeypatch) -> None:
     import services.workers.indexer_pool as module
 
@@ -2429,3 +2485,56 @@ async def test_cancelled_preflight_sends_no_callback(tmp_path, monkeypatch) -> N
         )
 
     callback.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# _build_vector_field_resolver
+# ---------------------------------------------------------------------------
+
+
+def _vector_field_resolver():
+    from services.workers.indexer_pool import _build_vector_field_resolver
+
+    embedders = {
+        # Renamed since creation: the field is read from the registry, not derived from the name.
+        "renamed": ModelEndpointConfig(name="renamed", endpoint="http://x/v1", vector_field="vector_original"),
+        "unmigrated": ModelEndpointConfig(name="unmigrated", endpoint="http://x/v1"),
+    }
+    # No endpoint is the default, but the global config names an embedder.
+    global_embedder = SimpleNamespace(base_url="http://embedder/v1", model_name="embed-model")
+    return _build_vector_field_resolver(
+        SimpleNamespace(models=SimpleNamespace(embedder=embedders), embedder=global_embedder)
+    )
+
+
+@pytest.mark.parametrize(("embedder", "field"), [("renamed", "vector_original"), ("unmigrated", None)])
+def test_a_registered_embedder_resolves_to_its_own_field_or_to_nothing(embedder, field) -> None:
+    assert _vector_field_resolver()(embedder) == field
+
+
+@pytest.mark.parametrize(
+    ("embedder", "error"),
+    [("default", "Mark one embedder endpoint as the default"), ("never-registered", "'never-registered' is not")],
+)
+def test_an_unregistered_embedder_has_no_field_to_index_into(embedder, error) -> None:
+    # The global config was never given a field: any field its vectors went to would hide them from search.
+    with pytest.raises(ConfigError, match=error):
+        _vector_field_resolver()(embedder)
+
+
+def test_a_missing_default_embedder_reloads_the_registry_despite_a_global_embedder_config() -> None:
+    import time as _time
+
+    from services.workers.indexer_pool import IndexerWorkerActor, _default_fallbacks
+
+    actor_class = IndexerWorkerActor.__ray_metadata__.modified_class
+    pool = actor_class.__new__(actor_class)
+    pool._cfg = SimpleNamespace(
+        models=SimpleNamespace(embedder={}),  # the registry lacks "default"
+        embedder=SimpleNamespace(base_url="http://embedder/v1", model_name="embed-model"),
+    )
+    pool._has_default_fallbacks = _default_fallbacks(pool._cfg)
+    pool._registry_loaded_at = _time.monotonic()  # fresh, not stale
+    pool._last_miss_reload_at = None
+
+    assert pool._reload_decision({"embedder": ["default"]}) == "miss"

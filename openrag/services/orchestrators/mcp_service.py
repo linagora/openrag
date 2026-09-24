@@ -42,6 +42,7 @@ from core.utils.exceptions import ValidationError
 from core.utils.logging import get_logger
 from core.utils.partition_limits import max_partitions_for_user
 from core.utils.url_safety import is_blocked_address, is_safe_url
+from core.vector_stores.vector_field import is_vector_field_key
 
 if TYPE_CHECKING:
     from core.vector_stores import VectorStore
@@ -288,7 +289,7 @@ class MCPService:
             {"partition": partition, "file_id": file_id},
             output_fields=["*"],
         )
-        metadata = _public_chunk_metadata(rows[0], exclude=("_id", "text", "vector")) if rows else {}
+        metadata = _public_chunk_metadata(rows[0], exclude=("_id", "text")) if rows else {}
         return {
             "partition": partition,
             "file_id": file_id,
@@ -336,7 +337,7 @@ class MCPService:
                 {
                     "chunk_id": row.get("_id"),
                     "content": row.get("text"),
-                    "metadata": _public_chunk_metadata(row, exclude=("text", "_id", "vector")),
+                    "metadata": _public_chunk_metadata(row, exclude=("text", "_id")),
                 }
                 for row in page
             ],
@@ -694,4 +695,8 @@ __all__ = ["MCPService"]
 
 
 def _public_chunk_metadata(row: dict[str, Any], *, exclude: tuple[str, ...]) -> dict[str, Any]:
-    return {key: value for key, value in row.items() if key not in exclude and not is_internal_metadata_key(key)}
+    return {
+        key: value
+        for key, value in row.items()
+        if key not in exclude and not is_vector_field_key(key) and not is_internal_metadata_key(key)
+    }

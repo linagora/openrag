@@ -8,8 +8,10 @@ from typing import Any
 
 from core.models.catalog import DocumentStatus, IndexationJob, normalize_degraded_stages
 from core.models.document import Document
+from core.utils.error_summary import failure_reason_from_exception
 from core.utils.exceptions import NoIndexableContentError
 from core.utils.logging import get_logger
+from services.workers.failure_reporting import submit_task_failure
 from services.workers.indexing_callback import send_indexing_callback
 from services.workers.pipeline_builder import (
     REPLACE_OLD_CHUNK_COLLECTION_ROW_KEY,
@@ -250,7 +252,7 @@ class IndexerWorker:
             # The TSM already told us this task is fenced/cancelled — no need to
             # ask it again, and a cancellation must not fire an error callback.
             raise RuntimeError(f"Task {task_id} was cancelled before indexing started") from None
-        except Exception:
+        except Exception as exc:
             should_cleanup_vectors = row is not None and (
                 row.get("stored_count", 0) > 0 or row.get("stage") == "store_failed"
             )
@@ -263,9 +265,15 @@ class IndexerWorker:
                     task_id=task_id,
                 )
             tb = traceback.format_exc()
+            error_reason = failure_reason_from_exception(exc)
             try:
                 was_failed = await retry_idempotent_ray_actor_method(
-                    lambda: self._tsm.set_failed_if_not_cancelled.remote(task_id, tb),
+                    lambda: submit_task_failure(
+                        self._tsm,
+                        task_id,
+                        tb,
+                        error_reason,
+                    ),
                     task_description=f"set_failed_if_not_cancelled({task_id})",
                 )
             except Exception:
@@ -481,6 +489,21 @@ async def _load_document(
         id=file_id,
         filename=filename,
         raw_bytes=raw_bytes,
+        # The file the caller supplied, so path-based parsers can hand it
+        # across the actor boundary instead of writing a node-local temp
+        # (#911). It outlives the pipeline: ``indexer_pool`` purges the upload
+        # only after indexing settles, and only when ``save_uploaded_files``
+        # is off.
+        #
+        # Placeable only when that file is on shared storage, which is a
+        # property of the caller, not of this function. The upload routes save
+        # under ``config.paths.data_dir`` (Helm RWX volume, Compose bind
+        # mount), so they are. ``MCPService.index_url`` downloads to a
+        # ``NamedTemporaryFile`` in the node's own temp dir, so it is not — on
+        # a multi-node cluster a worker elsewhere cannot open it. That is the
+        # pre-existing #911 behaviour for that route rather than a regression,
+        # and closing it means downloading into ``data_dir``.
+        source_path=str(p),
         content_type=Document.detect_content_type(filename),
         partition=partition,
         metadata=dict(metadata),
