@@ -76,8 +76,15 @@ def set_provider_name[C](instance: C, name: str) -> C:
     single provider nobody could alert on. Set after construction rather than
     passed in: every client splats unknown kwargs into the outbound request
     body, the trap ``batch_size`` fell into (#712).
+
+    A client that cannot take the attribute (``__slots__``) is returned as is
+    and reports as ``unconfigured``: a metrics label must never stop a client
+    from being built.
     """
-    setattr(instance, PROVIDER_NAME_ATTR, name)
+    try:
+        setattr(instance, PROVIDER_NAME_ATTR, name)
+    except (AttributeError, TypeError) as exc:
+        report_once("inference provider label", exc)
     return instance
 
 

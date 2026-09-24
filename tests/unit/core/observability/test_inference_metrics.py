@@ -574,3 +574,22 @@ def test_token_kinds_are_declared_values(recorded) -> None:
 
     emitted = {k for call in recorded["tokens"] for k in ("prompt", "completion") if call.get(k)}
     assert emitted <= set(TOKEN_KIND_VALUES)
+
+
+def test_a_client_that_cannot_be_labelled_is_still_built() -> None:
+    """A metrics label must never stop a client from being built: one that
+    cannot take the attribute reports as ``unconfigured`` instead."""
+    from core.observability.inference_metrics import set_provider_name
+    from services.inference._metrics import resolve_provider
+
+    class _Slotted:
+        __slots__ = ()
+
+    slotted = _Slotted()
+    assert set_provider_name(slotted, "embedder-a") is slotted
+    assert resolve_provider(slotted, {}) == "unconfigured"
+
+    class _Plain:
+        pass
+
+    assert resolve_provider(set_provider_name(_Plain(), "embedder-a"), {}) == "embedder-a"
