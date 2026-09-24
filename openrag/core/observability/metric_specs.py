@@ -195,7 +195,11 @@ INFERENCE_OPERATION_VALUES: tuple[str, ...] = ("embed", "chat", "completion", "r
 
 #: Bounded outcome enum. Never an exception message: that is the one place this
 #: design could blow up cardinality from the value side rather than the key side.
-INFERENCE_OUTCOME_VALUES: tuple[str, ...] = ("success", "error", "timeout", "circuit_open")
+#: ``cancelled`` is the caller giving up — a client closing a stream, a caller's
+#: own deadline (``asyncio.wait_for``), sibling batches cancelled after one
+#: failed. The provider did nothing wrong, so it must stay out of the error
+#: ratio the provider alerts threshold on.
+INFERENCE_OUTCOME_VALUES: tuple[str, ...] = ("success", "error", "timeout", "circuit_open", "cancelled")
 
 #: Token direction.
 TOKEN_KIND_VALUES: tuple[str, ...] = ("prompt", "completion")

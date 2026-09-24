@@ -160,6 +160,18 @@ class TestOllamaClient:
         assert [c["outcome"] for c in recorded_inference] == ["error"]
 
     @pytest.mark.asyncio
+    async def test_stream_closed_before_done_is_cancelled_not_an_error(self, recorded_inference):
+        sse_body = 'data: {"choices":[{"delta":{"content":"hi"}}]}\ndata: [DONE]\n'
+        client = self._make_client(lambda req: httpx.Response(200, text=sse_body))
+
+        stream = client.stream_chat([{"role": "user", "content": "hi"}])
+        async for _line in stream:
+            break
+        await stream.aclose()
+
+        assert [c["outcome"] for c in recorded_inference] == ["cancelled"]
+
+    @pytest.mark.asyncio
     async def test_stream_chat_counts_the_usage_chunk(self, monkeypatch):
         """Ollama's OpenAI-compatible endpoint only sends usage on a stream when
         asked, and the final usage chunk must reach the token counter."""

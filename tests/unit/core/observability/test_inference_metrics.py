@@ -199,10 +199,10 @@ async def test_embedding_timeouts_are_counted_as_timeouts(recorded) -> None:
 
 
 @pytest.mark.asyncio
-async def test_cancelled_request_is_not_recorded_as_success(recorded) -> None:
-    """A client disconnecting mid-answer has not received a completion.
-    Recording it as success would understate the error rate exactly when users
-    are giving up."""
+async def test_cancelled_request_is_neither_a_success_nor_a_provider_error(recorded) -> None:
+    """A client disconnecting mid-answer has not received a completion, so it
+    is not a success — but the provider did nothing wrong, so it must stay out
+    of the error ratio the provider alerts threshold on."""
     import asyncio
 
     class Svc(_Client):
@@ -213,7 +213,24 @@ async def test_cancelled_request_is_not_recorded_as_success(recorded) -> None:
     with pytest.raises(asyncio.CancelledError):
         await Svc().call()
 
-    assert recorded["inference"][0]["outcome"] == "error"
+    assert recorded["inference"][0]["outcome"] == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_a_callers_deadline_is_recorded_as_cancelled(recorded) -> None:
+    """The indexing stages bound calls with ``asyncio.wait_for``, which
+    cancels the call itself — the production path a slow provider takes."""
+    import asyncio
+
+    class Svc(_Client):
+        @with_inference_metrics("embed")
+        async def call(self) -> None:
+            await asyncio.sleep(10)
+
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(Svc().call(), timeout=0.01)
+
+    assert [c["outcome"] for c in recorded["inference"]] == ["cancelled"]
 
 
 # ---------------------------------------------------------------------------
@@ -396,9 +413,9 @@ async def test_stream_closed_after_done_is_a_success(monkeypatch: pytest.MonkeyP
 
 
 @pytest.mark.asyncio
-async def test_stream_abandoned_before_done_is_not_a_success(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A client that gives up mid-answer did not get a completion, and the
-    error rate must show it."""
+async def test_stream_abandoned_before_done_is_cancelled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A client that gives up mid-answer did not get a completion, but the
+    provider did not fail either: neither a success nor an error."""
     calls: list = []
     client = _streaming_client(
         [f'data: {{"choices":[{{"delta":{{"content":"{i}"}}}}]}}' for i in range(5)] + ["data: [DONE]"],
@@ -411,7 +428,7 @@ async def test_stream_abandoned_before_done_is_not_a_success(monkeypatch: pytest
         break
     await stream.aclose()
 
-    assert [c["outcome"] for c in calls] == ["error"]
+    assert [c["outcome"] for c in calls] == ["cancelled"]
 
 
 @pytest.mark.asyncio

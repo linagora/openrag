@@ -10,6 +10,7 @@ and without vLLM-only fields (``truncate_prompt_tokens``).
 
 from __future__ import annotations
 
+import asyncio
 import time
 from collections.abc import AsyncIterator
 
@@ -170,6 +171,12 @@ class OllamaClient(LLM):
         except httpx.TimeoutException as exc:
             outcome = "timeout"
             raise InferenceTimeoutError(f"Ollama streaming request timed out at {self._endpoint}") from exc
+        except (GeneratorExit, asyncio.CancelledError):
+            # Closed or cancelled by the consumer. After `[DONE]` that is the
+            # normal end; before it, the client gave up — not a provider error.
+            if outcome != "success":
+                outcome = "cancelled"
+            raise
         finally:
             # Hand-instrumented: @with_inference_metrics would time only the
             # creation of this async generator, not the transfer.

@@ -89,7 +89,9 @@ Label values:
 - `stage` — `parse`, `caption`, `chunk`, `contextualize`, `topic_tag`, `embed`, `store`
 - `state` — `QUEUED`, `SERIALIZING`
 - `operation` — `embed`, `chat`, `completion` (text completions), `rerank`, `vlm`
-- `outcome` — `success`, `error`, `timeout`, `circuit_open`
+- `outcome` — `success`, `error`, `timeout`, `circuit_open`, `cancelled` (the caller gave
+  up: a closed stream, its own deadline, or siblings cancelled after one failed; not a
+  provider failure, so keep it out of error ratios)
 - `kind` — `prompt`, `completion`
 - `pool` — `marker`, `docling`, `pymupdf`, `pdf_client`, `local_whisper`, `audio_client` for PDF and audio; any other format is labelled by its document type (`text`, `docx`, `eml`, `image`, ...)
 - `name` — `llm`, `embedder`, `vlm`, `reranker`

@@ -25,6 +25,7 @@ returned an error", both for the dashboard and for the S3-4 alert.
 
 from __future__ import annotations
 
+import asyncio
 import time
 from collections.abc import Callable
 from functools import wraps
@@ -75,7 +76,14 @@ def _outcome_for(exc: BaseException) -> str:
     ``EmbeddingError`` and not from ``InferenceTimeoutError`` — so a vLLM
     embedding timeout landed in the generic bucket and left the timeout ratio
     reading low exactly where embedding capacity was the problem.
+
+    Cancellation is the caller giving up, not the provider failing: a client
+    stopping a stream, a caller's ``asyncio.wait_for`` deadline, or the sibling
+    batches cancelled after one failed. Counting it as ``error`` let one real
+    failure — or users pressing stop — raise a healthy provider's error ratio.
     """
+    if isinstance(exc, (asyncio.CancelledError, GeneratorExit)):
+        return "cancelled"
     if isinstance(exc, CircuitBreakerOpenError):
         return "circuit_open"
     if isinstance(exc, (InferenceTimeoutError, EmbeddingTimeoutError)):
@@ -105,7 +113,7 @@ def with_inference_metrics(operation: str, *, capture_usage: bool = False) -> Ca
                 result = await func(self, *args, **kwargs)
             except BaseException as exc:
                 # BaseException so a cancelled request is not silently recorded
-                # as a success; CancelledError falls through to "error" and is
+                # as a success; CancelledError is recorded as "cancelled" and
                 # re-raised untouched.
                 outcome = _outcome_for(exc)
                 raise
