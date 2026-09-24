@@ -22,7 +22,7 @@ from core.config.model_endpoints import ModelEndpointConfig
 from core.indexing.parsers.document_parser import DocumentParser
 from core.models.document import Document, DocumentType, ProcessedDocument
 from core.observability.inference_metrics import DEFAULT_PROVIDER, set_provider_name
-from core.observability.ray_metrics import record_parse_completion
+from core.observability.ray_metrics import record_parse_completion, seed_parse_watchdog
 from core.utils.logging import get_logger
 
 logger = get_logger()
@@ -112,8 +112,11 @@ class ParserDispatcher(DocumentParser):
         Stamped on success only: a pool whose workers are wedged stops updating
         it, which is what lets the watchdog alert's ``time() - <stamp>`` climb.
         A pool that fails promptly is a different condition, covered by
-        ``openrag_ingest_documents_total{status="failed"}``.
+        ``openrag_ingest_documents_total{status="failed"}``. The backend's first
+        use in this process is seeded once beforehand, so a pool that never
+        completes a parse still has a stamp to age from.
         """
+        seed_parse_watchdog(backend)
         processed = await self._get(backend).parse(document)
         record_parse_completion(backend)
         return processed

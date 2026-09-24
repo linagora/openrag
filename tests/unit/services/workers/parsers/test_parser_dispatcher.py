@@ -363,3 +363,25 @@ async def test_a_preset_pdf_strategy_stamps_the_pool_that_parsed(monkeypatch: py
     await disp.parse(pdf)
 
     assert stamped == ["pymupdf", "marker"]
+
+
+@pytest.mark.asyncio
+async def test_a_pool_that_never_completes_still_seeds_the_watchdog_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stamped on success only, a pool that fails from its first parse never
+    produced the series, and ``time() - max(<stamp>)`` had nothing to age: the
+    stall that starts at boot was invisible. Its first use is seeded, once per
+    backend per process."""
+    import core.observability.ray_metrics as rm
+
+    stamped: list[str] = []
+    monkeypatch.setattr(rm, "_WATCHDOG_SEEDED", set())
+    monkeypatch.setattr(rm, "record_parse_completion", lambda pool, **_: stamped.append(pool))
+
+    disp = ParserDispatcher(_config())
+    monkeypatch.setattr(disp, "_get", lambda _name: _StubParser(error=RuntimeError("backend wedged")))
+
+    for _ in range(3):
+        with pytest.raises(RuntimeError, match="backend wedged"):
+            await disp.parse(_text_document())
+
+    assert stamped == ["text"]

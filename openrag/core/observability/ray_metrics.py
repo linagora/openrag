@@ -192,9 +192,28 @@ def record_parse_completion(pool: str, *, at: float | None = None) -> None:
         report_once(INGEST_LAST_PARSE_TIMESTAMP.name, exc)
 
 
+_WATCHDOG_SEEDED: set[str] = set()
+
+
+def seed_parse_watchdog(pool: str) -> None:
+    """Stamp a pool's first use in this process, once.
+
+    ``record_parse_completion`` stamps successes only, so a pool that fails from
+    its very first parse never produces the series, and an alert computing
+    ``time() - max(<stamp>)`` has nothing to evaluate: the stall that starts at
+    boot is the one it cannot see. Seeding at first use gives the stamp a start,
+    and a pool that then completes nothing ages from there like any other.
+    """
+    if pool in _WATCHDOG_SEEDED:
+        return
+    _WATCHDOG_SEEDED.add(pool)
+    record_parse_completion(pool)
+
+
 __all__ = [
     "observe_queue_wait_from",
     "observe_stage_duration",
     "record_document_terminal",
     "record_parse_completion",
+    "seed_parse_watchdog",
 ]
