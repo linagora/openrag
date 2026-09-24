@@ -25,6 +25,7 @@ from api.dependencies.llm import (
     get_partition_name,
     truncate,
 )
+from api.dependencies.retrieval_diagnostics import get_retrieval_diagnostics_guard
 from api.routers.user.source_links import build_document_source_link
 from api.schemas.user.chat import OpenAIChatCompletionRequest, OpenAICompletionRequest
 from core.config import load_config
@@ -489,6 +490,7 @@ async def openai_chat_completion(
     service=Depends(get_query_service),
     partition_service=Depends(get_partition_service),
     config=Depends(get_config),
+    diagnostics_guard=Depends(get_retrieval_diagnostics_guard),
 ):
     model_name = request.model or config.llm.model
     log = logger.bind(model=model_name, endpoint="/chat/completions")
@@ -499,6 +501,14 @@ async def openai_chat_completion(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="The last message must be a non-empty user message",
         )
+
+    metadata = request.metadata or {}
+    if (
+        metadata.get("include_retrieval_trace") is True
+        or metadata.get("compare_original_query") is True
+        or metadata.get("bypass_query_contextualization") is True
+    ):
+        await diagnostics_guard.authorize(user)
 
     log.debug("Received chat completion request with messages: {}", truncate(str(request.messages)))
 
@@ -536,6 +546,7 @@ async def openai_chat_completion(
                     payload=request.model_dump(exclude_none=True),
                     prepare_sources=prep,
                     model_name=model_name,
+                    request_id=getattr(request2.state, "request_id", None),
                 ):
                     yield sse_line
             except asyncio.CancelledError:
@@ -558,6 +569,7 @@ async def openai_chat_completion(
         payload=request.model_dump(exclude_none=True),
         prepare_sources=prep,
         model_name=model_name,
+        request_id=getattr(request2.state, "request_id", None),
     )
     log.debug("Returning non-streaming completion chunk.")
     return JSONResponse(content=chunk)
@@ -626,6 +638,17 @@ async def openai_completion(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Streaming is not supported for this endpoint",
+        )
+
+    metadata = request.metadata or {}
+    if (
+        metadata.get("include_retrieval_trace") is True
+        or metadata.get("compare_original_query") is True
+        or metadata.get("bypass_query_contextualization") is True
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Retrieval diagnostics are supported only by chat completions",
         )
 
     if is_direct_llm_model(request, config):

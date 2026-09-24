@@ -791,6 +791,17 @@ ambiguous, mixed, and factual messages retrieve. Text completions retain their c
 | `use_map_reduce` | Chat only | `bool` | `false` | Uses a map-reduce strategy to aggregate information from multiple documents. See [map-reduce configuration](/openrag/documentation/env_vars/#map--reduce-configuration). |
 | `llm_override` | Chat and text completions | `object` | `null` | Overrides the downstream LLM for this request. Accepts `model` (string), always honored. Also accepts `base_url` and `api_key`, which are honored **only** when the deployment sets `LLM_OVERRIDE_ALLOW_CUSTOM_ENDPOINT` — otherwise they are ignored and the request goes to the server's configured endpoint. See [custom LLM endpoints](/openrag/documentation/env_vars/#client-supplied-llm-endpoints). |
 | `attachments` | Chat only | `list[{"id": string}]` | `null` | Scopes RAG retrieval to a specific list of file IDs within the target partition, instead of searching the whole partition. Unknown or unindexed IDs are silently dropped; duplicates are deduplicated. The response's `extra.attachments` reports which IDs were actually used. |
+| `include_retrieval_trace` | Chat only | `bool` | `false` | For administrators, adds trace schema version 1 to `extra.retrieval_trace`. Streaming responses emit it only in terminal metadata. |
+| `compare_original_query` | Chat only | `bool` | `false` | Runs an isolated retrieval for the original message without changing the documents used for the answer. Requires tracing. |
+| `bypass_query_contextualization` | Chat only | `bool` | `false` | Uses the latest user message as the exact retrieval query. Requires tracing and forced retrieval, and cannot be combined with original-query comparison. |
+| `retrieval_similarity_threshold` | Chat only | `number` | `null` | Per-request diagnostic threshold from `0` to `1`. Requires tracing and forced retrieval. |
+| `retrieval_top_k` | Chat only | `integer` | `null` | Per-request diagnostic retrieval depth from `1` to `1000`. Requires tracing and forced retrieval. |
+| `retrieval_disable_reranker` | Chat only | `bool` | `false` | Disables reranking for this diagnostic request. Requires tracing and forced retrieval. |
+| `retrieval_disable_expansion` | Chat only | `bool` | `false` | Disables related and ancestor expansion for this diagnostic request. Requires tracing and forced retrieval. |
+
+Chat tracing persists the exact contextualized query, retrieval decision, fallback state, prompt identity, and retrieval
+stages. It is never regenerated when a run is inspected. Tracing and original-query comparison add work and are intended
+for evaluation and diagnostics.
 
 Common English and French casual messages are recognized directly; other phrasing is checked conservatively by the
 contextualizer. Casual replies use a dedicated instruction in the detected language. Only greetings introduce

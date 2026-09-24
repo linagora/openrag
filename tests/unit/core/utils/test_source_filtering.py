@@ -750,6 +750,41 @@ class TestStreamExtraShape:
         assert [p for p in payloads if not p["extra"]], "no mid-stream chunk carried the empty sentinel"
         assert payloads[-1]["extra"]["sources"] == self.SOURCES
 
+    @pytest.mark.asyncio
+    async def test_terminal_telemetry_failure_does_not_break_the_stream(self):
+        def broken_telemetry():
+            raise RuntimeError("internal telemetry failure")
+
+        lines = [_make_chunk("Complete answer."), _make_finish(), DONE_LINE]
+
+        result = await _collect(
+            stream_with_source_filtering(
+                _fake_stream(lines),
+                self.SOURCES,
+                "test-model",
+                terminal_extra_fields=broken_telemetry,
+            )
+        )
+
+        assert result[-1].strip() == DONE_LINE
+        finish = json.loads(result[-2][len("data: ") :])
+        assert finish["choices"][0]["finish_reason"] == "stop"
+        assert "retrieval_trace" not in finish["extra"]
+
+    @pytest.mark.asyncio
+    async def test_terminal_telemetry_is_emitted_when_upstream_only_sends_done(self):
+        result = await _collect(
+            stream_with_source_filtering(
+                _fake_stream([DONE_LINE]),
+                self.SOURCES,
+                "test-model",
+                terminal_extra_fields={"retrieval_trace": {"request_id": "req-1"}},
+            )
+        )
+
+        assert result[-1].strip() == DONE_LINE
+        assert _parse_finish_extra(result)["retrieval_trace"] == {"request_id": "req-1"}
+
 
 class TestStreamWithManySources:
     @pytest.mark.asyncio
