@@ -313,6 +313,15 @@ Returns the public retrieval, model, and index identity needed to reproduce a be
 administrator-only. Document identifiers are optional, bounded, and excluded from the snapshot fingerprint so compact
 and expanded snapshots remain comparable.
 
+* Retrieval Diagnostics
+```http
+POST /search/partition/{partition}/diagnostics
+```
+
+Runs contextualization, retrieval, and reranking without generating an answer. This experimental administrator-only
+endpoint is intended for reproducible evaluations that should not pay for an unused answer. It supports contextualized,
+original, and paired comparison modes with bounded retrieval overrides. Responses contain only the sanitized trace.
+
 * Search Within Specific File
 ```http
 GET /search/partition/{partition}/file/{file_id}
