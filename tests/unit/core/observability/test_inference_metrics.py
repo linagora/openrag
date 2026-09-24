@@ -394,6 +394,24 @@ def _streaming_client(lines: list[str], monkeypatch: pytest.MonkeyPatch, calls: 
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(("status", "outcome"), [(400, "rejected"), (429, "error"), (503, "error")])
+async def test_a_refused_stream_is_classified_by_status(
+    monkeypatch: pytest.MonkeyPatch, status: int, outcome: str
+) -> None:
+    from core.utils.exceptions import InferenceError
+
+    calls: list = []
+    client = _streaming_client([], monkeypatch, calls)
+    client._client = _FakeHttpClient([], status_code=status)
+
+    with pytest.raises(InferenceError):
+        async for _ in client.stream_chat([{"role": "user", "content": "q"}]):
+            pass
+
+    assert [c["outcome"] for c in calls] == [outcome]
+
+
+@pytest.mark.asyncio
 async def test_stream_closed_after_done_is_a_success(monkeypatch: pytest.MonkeyPatch) -> None:
     """Reproduces the real consumer: break on ``[DONE]``, then close."""
     calls: list = []
