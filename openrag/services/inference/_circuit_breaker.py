@@ -67,6 +67,9 @@ def get_breaker(name: str, fail_max: int = 50, timeout_duration: float = 60.0) -
             listeners=[_LoggingListener()],
         )
         _breaker_config[name] = requested
+        # State is otherwise written only on a transition, so a breaker that
+        # never tripped had no series: "Unknown" on a healthy system.
+        record_circuit_breaker_state(name, _STATE_VALUES[CircuitBreakerState.CLOSED])
     elif _breaker_config.get(name) != requested:
         raise ValueError(f"Breaker '{name}' already exists with config={_breaker_config[name]}, requested={requested}")
     return _breakers[name]

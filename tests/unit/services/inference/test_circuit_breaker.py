@@ -163,3 +163,17 @@ class TestStateIsExported:
         states = [s for n, s in recorded if n == "test-state-recovery"]
         assert 1 in states, f"open not exported: {recorded}"
         assert 0 in states, f"closed not exported: {recorded}"
+
+
+def test_a_new_breaker_publishes_closed_before_any_transition(monkeypatch):
+    """State is otherwise written only on a transition, so a breaker that never
+    tripped had no series and the dashboard read "Unknown" on a healthy system."""
+    import services.inference._circuit_breaker as module
+
+    recorded: list[tuple[str, int]] = []
+    monkeypatch.setattr(module, "record_circuit_breaker_state", lambda n, s: recorded.append((n, s)))
+
+    module.get_breaker("fresh-breaker")
+    module.get_breaker("fresh-breaker")
+
+    assert recorded == [("fresh-breaker", 0)]
