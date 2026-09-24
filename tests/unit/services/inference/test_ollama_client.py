@@ -135,6 +135,58 @@ class TestOllamaClient:
         assert [c["outcome"] for c in recorded_inference] == ["error"]
 
     @pytest.mark.asyncio
+    async def test_stream_closed_after_done_is_a_success(self, recorded_inference):
+        """``stream_with_source_filtering`` breaks on ``[DONE]`` and closes the
+        generator, so the loop never runs to completion on a real chat. Success
+        has to be proven by ``[DONE]``, not by the loop ending."""
+        sse_body = 'data: {"choices":[{"delta":{"content":"hi"}}]}\ndata: [DONE]\n'
+        client = self._make_client(lambda req: httpx.Response(200, text=sse_body))
+
+        stream = client.stream_chat([{"role": "user", "content": "hi"}])
+        async for line in stream:
+            if line.strip() == "data: [DONE]":
+                break
+        await stream.aclose()
+
+        assert [c["outcome"] for c in recorded_inference] == ["success"]
+
+    @pytest.mark.asyncio
+    async def test_stream_truncated_without_done_is_not_a_success(self, recorded_inference):
+        sse_body = 'data: {"choices":[{"delta":{"content":"hi"}}]}\n'
+        client = self._make_client(lambda req: httpx.Response(200, text=sse_body))
+
+        [line async for line in client.stream_chat([{"role": "user", "content": "hi"}])]
+
+        assert [c["outcome"] for c in recorded_inference] == ["error"]
+
+    @pytest.mark.asyncio
+    async def test_stream_chat_counts_the_usage_chunk(self, monkeypatch):
+        """Ollama's OpenAI-compatible endpoint only sends usage on a stream when
+        asked, and the final usage chunk must reach the token counter."""
+        from core.observability import inference_metrics
+
+        tokens: list[dict] = []
+        monkeypatch.setattr(inference_metrics, "record_tokens", lambda **kw: tokens.append(kw))
+        bodies: list[dict] = []
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            bodies.append(json.loads(req.content))
+            return httpx.Response(
+                200,
+                text=(
+                    'data: {"choices":[{"delta":{"content":"hi"}}]}\n'
+                    'data: {"choices":[],"usage":{"prompt_tokens":7,"completion_tokens":3}}\n'
+                    "data: [DONE]\n"
+                ),
+            )
+
+        client = self._make_client(handler)
+        [line async for line in client.stream_chat([{"role": "user", "content": "hi"}])]
+
+        assert bodies[0]["stream_options"] == {"include_usage": True}
+        assert tokens == [{"operation": "chat", "prompt": 7, "completion": 3}]
+
+    @pytest.mark.asyncio
     async def test_stream_chat_error_raises(self):
         client = self._make_client(lambda req: httpx.Response(503, text="unavailable"))
         with pytest.raises(InferenceError):

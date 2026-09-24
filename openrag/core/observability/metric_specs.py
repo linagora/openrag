@@ -174,7 +174,9 @@ INGEST_STATUS_VALUES: tuple[str, ...] = ("completed", "failed", "cancelled")
 INGEST_TASK_STATE_VALUES: tuple[str, ...] = ("QUEUED", "SERIALIZING")
 
 #: Parser backend names from ``parsers/parser_dispatcher._PDF_BACKENDS`` and
-#: ``_AUDIO_BACKENDS``. Configuration-bounded, not traffic-bounded.
+#: ``_AUDIO_BACKENDS``. Configuration-bounded, not traffic-bounded. Every other
+#: format is stamped under its ``DocumentType`` value (``text``, ``docx``, ...),
+#: which is bounded by the enum.
 PARSER_POOL_VALUES: tuple[str, ...] = (
     "marker",
     "docling",

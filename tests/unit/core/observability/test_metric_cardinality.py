@@ -184,6 +184,39 @@ def test_parser_pool_values_match_the_dispatcher_backends() -> None:
     )
 
 
+def test_the_pool_label_domain_is_closed() -> None:
+    """The other half of what ``PARSER_POOL_VALUES`` documents.
+
+    The check above pins the constant to the PDF and audio backends, but
+    ``_resolve_backend`` also returns ``content_type.value`` for every other
+    type, so ``pool`` carries ``text``, ``docx``, ``eml`` too. Those values were
+    bounded only by the comment saying so. They are safe because
+    ``DocumentType`` is an enum — a closed set fixed at import — which is the
+    premise this asserts rather than restates. A ``DocumentType`` that stopped
+    being an enum would make the label traffic-bounded and the cardinality
+    argument for this metric false. That ``_resolve_backend`` draws its non-PDF
+    and non-audio values from the enum is pinned by the dispatcher tests, not here.
+    """
+    from enum import Enum
+
+    from core.models.document import DocumentType
+
+    assert issubclass(DocumentType, Enum), (
+        "DocumentType is no longer an enum, so the `pool` label's non-PDF/audio "
+        "values are unbounded and the cardinality guarantee no longer holds."
+    )
+
+    from_types = {t.value for t in DocumentType} - {
+        DocumentType.PDF.value,
+        DocumentType.AUDIO.value,
+        DocumentType.VIDEO.value,
+    }
+    domain = set(PARSER_POOL_VALUES) | from_types
+    assert all(isinstance(v, str) and v.islower() and v.isidentifier() for v in domain), (
+        f"every `pool` value must be a bounded identifier; got {sorted(domain)}"
+    )
+
+
 def test_inference_operation_values_are_bounded_and_lowercase() -> None:
     """``operation`` describes the kind of call, never the model name — a model
     name is client-controllable through ``metadata.llm_override``."""

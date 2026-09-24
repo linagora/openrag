@@ -649,10 +649,12 @@ class TaskStateManager:
             if info is not None and info.state == "CANCELLED":
                 return False
             if info is not None:
+                previous = info.state
                 info.state = "FAILED"
                 info.error = _truncate_error(tb_str)
                 info.error_reason = error_reason
                 self._settle_task_locked(task_id, info)
+                self._count_terminal(previous, "FAILED")
             return True
 
     @ray.method(concurrency_group="set")
@@ -754,8 +756,10 @@ class TaskStateManager:
             if info.state not in CANCELLABLE_INDEXING_STATES:
                 return "conflict"
             info.details["degraded_stages"] = normalized
+            previous = info.state
             info.state = "COMPLETED"
             self._settle_task_locked(task_id, info)
+            self._count_terminal(previous, "COMPLETED")
             return "completed"
 
     @ray.method(concurrency_group="set")

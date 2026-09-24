@@ -132,62 +132,154 @@ def test_every_declared_spec_is_in_all_specs() -> None:
     )
 
 
-def _spec_to_instrument_vars() -> dict[str, set[str]]:
-    """Module-level ``_X = _counter(SPEC)`` bindings, per spec.
+#: Methods that put a value into an instrument, on either backend. Selectors
+#: (``labels``) and withdrawals (``clear``, ``remove``) are deliberately absent:
+#: they reach an instrument without ever writing one, so counting them would let
+#: a spec be satisfied by the very shape this guard exists to reject.
+_WRITE_METHODS = frozenset({"inc", "dec", "observe", "set"})
 
-    ``ray_metrics`` names its instruments; ``inference_metrics`` builds them
-    inside a factory and ``monitoring`` declares some without a spec at all, so
-    this is one of two ways a function is linked to a spec — the other is the
-    call graph below.
+
+def _spec_aliases(module: ast.Module, specs: set[str]) -> dict[str, str]:
+    """Local name -> spec, from ``from ...metric_specs import X [as Y]``."""
+    aliases: dict[str, str] = {}
+    for node in module.body:
+        if isinstance(node, ast.ImportFrom) and (node.module or "").endswith("metric_specs"):
+            for alias in node.names:
+                if alias.name in specs:
+                    aliases[alias.asname or alias.name] = alias.name
+    return aliases
+
+
+def _spec_in(node: ast.AST, aliases: dict[str, str]) -> str | None:
+    """The spec an instrument-building expression is built from, if exactly one."""
+    found = {aliases[n.id] for n in ast.walk(node) if isinstance(n, ast.Name) and n.id in aliases}
+    return found.pop() if len(found) == 1 else None
+
+
+def _writes_in(fn: ast.AST, bound: dict[str, str], fields: dict[str, str]) -> set[str]:
+    """Specs *fn* writes: a write method called on an instrument built from them.
+
+    The receiver resolves through a module-level binding (``_X.inc()``), a
+    factory field (``_instruments().requests.inc()``), one local assignment
+    of either (``tokens = _instruments().tokens; tokens.inc()``), or a
+    ``.labels(...)`` selector in front of any of those. Calling the factory
+    alone writes nothing, so it links a function to no spec.
     """
-    out: dict[str, set[str]] = {}
-    for path in _python_files(_OBSERVABILITY_DIR):
-        if path.name == "metric_specs.py":
-            continue
-        for node in _parse(path).body:
-            if not (isinstance(node, ast.Assign) and isinstance(node.value, ast.Call)):
-                continue
-            referenced = {n.id for n in ast.walk(node.value) if isinstance(n, ast.Name)}
-            for target in node.targets:
-                if isinstance(target, ast.Name):
-                    for spec in referenced:
-                        out.setdefault(spec, set()).add(target.id)
-    return out
+
+    def resolve(expr: ast.AST, local: dict[str, str]) -> str | None:
+        if isinstance(expr, ast.Name):
+            return local.get(expr.id) or bound.get(expr.id)
+        if isinstance(expr, ast.Attribute):
+            return fields.get(expr.attr)
+        # ``GAUGE.labels(**tags).set(v)``: the selector is not the write, so look
+        # through it to the instrument it came from. Without this the chain
+        # resolves to nothing and the write goes unattributed.
+        if isinstance(expr, ast.Call) and isinstance(expr.func, ast.Attribute) and expr.func.attr == "labels":
+            return resolve(expr.func.value, local)
+        return None
+
+    local: dict[str, str] = {}
+    for node in ast.walk(fn):
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            spec = resolve(node.value, {})
+            if spec:
+                local[node.targets[0].id] = spec
+
+    written: set[str] = set()
+    for node in ast.walk(fn):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr in _WRITE_METHODS:
+            spec = resolve(node.func.value, local)
+            if spec:
+                written.add(spec)
+    return written
 
 
 def _functions_touching_each_spec() -> dict[str, set[str]]:
-    """Spec name -> observability functions that reach it, directly or by call."""
-    spec_vars = _spec_to_instrument_vars()
-    bodies: dict[str, ast.AST] = {}
+    """Spec name -> observability functions that write an instrument built from it."""
+    specs = set(_spec_variable_names())
+    by_spec: dict[str, set[str]] = {s: set() for s in specs}
     for path in _python_files(_OBSERVABILITY_DIR):
-        for node in ast.walk(_parse(path)):
+        if path.name == "metric_specs.py":
+            continue
+        module = _parse(path)
+        aliases = _spec_aliases(module, specs)
+        # ``_X = _counter(SPEC)`` at module level, as in ray_metrics and monitoring.
+        bound = {
+            target.id: spec
+            for node in module.body
+            if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call)
+            for spec in [_spec_in(node.value, aliases)]
+            if spec
+            for target in node.targets
+            if isinstance(target, ast.Name)
+        }
+        # ``_Instruments(requests=counter(SPEC), ...)`` inside a factory, as in
+        # inference_metrics: the keyword is the field recorders write through.
+        fields = {
+            kw.arg: spec
+            for node in ast.walk(module)
+            if isinstance(node, ast.Call)
+            for kw in node.keywords
+            if kw.arg and isinstance(kw.value, ast.Call)
+            for spec in [_spec_in(kw.value, aliases)]
+            if spec
+        }
+        for node in ast.walk(module):
             if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
-                bodies.setdefault(node.name, node)
-
-    touches: dict[str, set[str]] = {}
-    for fn_name, fn in bodies.items():
-        names = {n.id for n in ast.walk(fn) if isinstance(n, ast.Name)}
-        for spec in _spec_variable_names():
-            if spec in names or (spec_vars.get(spec, set()) & names):
-                touches.setdefault(fn_name, set()).add(spec)
-
-    # Propagate along calls: a recorder that calls the factory touches what the
-    # factory touches. inference_metrics reaches its specs only this way.
-    changed = True
-    while changed:
-        changed = False
-        for fn_name, fn in bodies.items():
-            called = _called_names(fn) & bodies.keys()
-            inherited = set().union(*(touches.get(c, set()) for c in called)) if called else set()
-            if inherited - touches.get(fn_name, set()):
-                touches.setdefault(fn_name, set()).update(inherited)
-                changed = True
-
-    by_spec: dict[str, set[str]] = {s: set() for s in _spec_variable_names()}
-    for fn_name, specs in touches.items():
-        for spec in specs:
-            by_spec.setdefault(spec, set()).add(fn_name)
+                for spec in _writes_in(node, bound, fields):
+                    by_spec[spec].add(node.name)
     return by_spec
+
+
+#: ``(source, expected specs)`` for the resolver. ``_SPEC`` is a module-level
+#: binding, ``field`` a factory field; both stand in for the real ones.
+_RESOLUTION_CASES = [
+    ("_SPEC.inc()", {"SPEC"}),
+    ("_instruments().field.observe(1.0)", {"SPEC"}),
+    ("local = _instruments().field\nlocal.inc()", {"SPEC"}),
+    ("_SPEC.labels(state=s).set(2)", {"SPEC"}),
+    ("_instruments().field.labels(state=s).inc()", {"SPEC"}),
+    # Selecting a series is not writing one: the cases below are the shapes the
+    # guard must keep rejecting, or a metric passes while never being written.
+    ("_SPEC.labels(state=s)", set()),
+    ("_SPEC.clear()", set()),
+    ("_SPEC.remove(s)", set()),
+    ("_instruments()", set()),
+]
+
+
+@pytest.mark.parametrize("source, expected", _RESOLUTION_CASES)
+def test_only_a_value_write_links_a_function_to_a_spec(source: str, expected: set[str]) -> None:
+    """Pins the resolver that decides whether a spec is written at all.
+
+    ``INGEST_TASKS`` is written as ``GAUGE.labels(...).set(...)``, whose receiver
+    is itself a call. When the resolver stopped at that call the ``.set()`` was
+    attributed to nothing, and the spec stayed green only because ``labels`` and
+    ``clear`` were counted as writes — so deleting the ``.set(...)`` left the
+    whole suite passing on a gauge that production never wrote.
+
+    Asserting on the resolver rather than on the tree it walks: the failure was a
+    silent pass, which only a case with a known-empty answer can catch.
+    """
+    body = "\n".join(f"    {line}" for line in source.splitlines())
+    fn = ast.parse(f"def f():\n{body}")
+    written = _writes_in(fn, bound={"_SPEC": "SPEC"}, fields={"field": "SPEC"})
+    assert written == expected, f"{source!r} resolved to {written or 'no spec'}, expected {expected or 'no spec'}"
+
+
+def test_recorder_names_are_unique() -> None:
+    """Reachability is resolved by function name, which is only sound while no
+    other function in the package shares a recorder's name. Otherwise a call to
+    an unrelated ``other_module.record_x()`` would mark the recorder as reached.
+    """
+    recorders = set(_recorders())
+    seen: dict[str, list[str]] = {}
+    for path in _python_files(_PACKAGE_ROOT):
+        for node in ast.walk(_parse(path)):
+            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and node.name in recorders:
+                seen.setdefault(node.name, []).append(str(path.relative_to(_PACKAGE_ROOT)))
+    shared = {name: paths for name, paths in seen.items() if len(paths) > 1}
+    assert not shared, f"recorder name(s) defined more than once, so reachability is ambiguous: {shared}"
 
 
 @pytest.mark.parametrize("spec_name", _spec_variable_names())
