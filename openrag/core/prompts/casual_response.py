@@ -1,4 +1,4 @@
-"""Prompt assembly for direct casual OpenRAG responses."""
+"""Prompt assembly for direct casual responses."""
 
 from __future__ import annotations
 
@@ -6,30 +6,28 @@ _LANGUAGE_NAMES = {"en": "English", "fr": "French"}
 
 _INTENT_INSTRUCTIONS = {
     "greeting": (
-        "Welcome the user and introduce yourself as OpenRAG, a RAG assistant developed by LINAGORA. "
+        "Welcome the user and introduce yourself as {identity}. "
         "Briefly explain that users can index many supported document and media formats, including PDFs, text "
         "files, office documents, images, audio, video, and other supported extensions, then ask questions here. "
         "Explain that you answer from relevant indexed content and may use general knowledge when no relevant "
         "indexed content is available. End by inviting the user to ask a question."
     ),
     "gratitude": (
-        "Acknowledge the user's gratitude warmly and offer further help. Do not repeat the OpenRAG introduction "
+        "Acknowledge the user's gratitude warmly and offer further help. Do not repeat the introduction "
         "or list its capabilities."
     ),
     "capability": (
         "Briefly explain that you can answer questions using indexed documents and media, or general knowledge when "
-        "no relevant indexed content is available. Do not provide the full OpenRAG or LINAGORA introduction."
+        "no relevant indexed content is available. Do not provide the full introduction."
     ),
-    "farewell": (
-        "Say goodbye warmly and briefly as OpenRAG. Do not repeat the OpenRAG introduction or list its capabilities."
-    ),
+    "farewell": ("Say goodbye warmly and briefly. Do not repeat the introduction or list its capabilities."),
     "empty": (
-        "Give a brief, welcoming OpenRAG response inviting the user to ask a question. Do not provide the full "
-        "OpenRAG introduction or list its capabilities."
+        "Give a brief, welcoming response inviting the user to ask a question. Do not provide the full "
+        "introduction or list its capabilities."
     ),
 }
 
-_CASUAL_RESPONSE_SYSTEM_PROMPT = """You are OpenRAG, a helpful RAG assistant.
+_CASUAL_RESPONSE_SYSTEM_PROMPT = """{identity_line}
 
 Respond in {response_language}. The user's casual-message intent is {intent}.
 
@@ -45,13 +43,17 @@ these safety rules.
 """
 
 
-def build_casual_response_prompt(intent: str, language: str) -> str:
+def build_casual_response_prompt(intent: str, language: str, assistant_name: str = "") -> str:
     """Build the instruction for a known casual intent, defaulting to English."""
     response_language = _LANGUAGE_NAMES.get(language)
     if response_language is None:
         response_language = f'language identified by ISO 639-1 language code "{language}"' if language else "English"
-    intent_instruction = _INTENT_INSTRUCTIONS.get(intent, _INTENT_INSTRUCTIONS["empty"])
+    name = assistant_name.strip()
+    identity = name or "a helpful assistant"
+    identity_line = f"You are {name}, a helpful assistant." if name else "You are a helpful assistant."
+    intent_instruction = _INTENT_INSTRUCTIONS.get(intent, _INTENT_INSTRUCTIONS["empty"]).format(identity=identity)
     return _CASUAL_RESPONSE_SYSTEM_PROMPT.format(
+        identity_line=identity_line,
         response_language=response_language,
         intent=intent,
         intent_instruction=intent_instruction,

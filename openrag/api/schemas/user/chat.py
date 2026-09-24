@@ -60,7 +60,7 @@ class OpenAIChatCompletionRequest(BaseModel):
             "directly; the contextualizer may conservatively recognize additional messages whose complete intent "
             "is only a greeting, gratitude, farewell, or a capability question. Ambiguous, mixed, and factual "
             "messages retrieve, and an empty generated query falls back to the latest user message. Casual messages "
-            "that are not forced use a direct OpenRAG response. Search scope and "
+            "that are not forced use a direct response. Search scope and "
             "filters remain in effect; matching sources are not guaranteed. Has no effect in direct LLM mode. "
             "Supports an 'llm_override' object with an optional 'model' "
             "to override the downstream model name; its 'base_url' and 'api_key' are honored only "

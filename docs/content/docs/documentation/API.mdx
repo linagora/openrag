@@ -763,8 +763,8 @@ ambiguous, mixed, and factual messages retrieve. Text completions retain their c
 | `attachments` | Chat only | `list[{"id": string}]` | `null` | Scopes RAG retrieval to a specific list of file IDs within the target partition, instead of searching the whole partition. Unknown or unindexed IDs are silently dropped; duplicates are deduplicated. The response's `extra.attachments` reports which IDs were actually used. |
 
 Common English and French casual messages are recognized directly; other phrasing is checked conservatively by the
-contextualizer. Casual replies use a dedicated instruction in the detected language. Only greetings introduce
-OpenRAG, and ambiguous or normalized-empty input defaults to English.
+contextualizer. Casual replies use a dedicated instruction in the detected language. Only greetings include an
+introduction; set `ASSISTANT_NAME` to use your deployment's name. Ambiguous or normalized-empty input defaults to English.
 
 Examples:
 

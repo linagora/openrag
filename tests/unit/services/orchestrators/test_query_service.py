@@ -145,6 +145,7 @@ def _config(mode="SimpleRag"):
         prompts=_PROMPT_CFG.prompts,
         partitions={},
         models=SimpleNamespace(llm={}),
+        server=SimpleNamespace(assistant_name=""),
     )
 
 
@@ -682,7 +683,7 @@ async def test_chat_recovers_context_markers_as_citations():
 
 @pytest.mark.asyncio
 async def test_chat_casual_greeting_uses_the_dedicated_openrag_prompt_without_retrieval():
-    llm = FakeLLM(chat_responses=["Bonjour ! Je suis OpenRAG."])
+    llm = FakeLLM(chat_responses=["Bonjour ! Je peux vous aider."])
     retrieval = FakeRetrieval()
     svc = _svc(mode="ChatBotRag", llm=llm, retrieval=retrieval)
 
@@ -695,14 +696,15 @@ async def test_chat_casual_greeting_uses_the_dedicated_openrag_prompt_without_re
 
     assert retrieval.retrieve_multi_calls == []
     assert len(llm.chat_calls) == 1
-    assert out["choices"][0]["message"]["content"] == "Bonjour ! Je suis OpenRAG."
+    assert out["choices"][0]["message"]["content"] == "Bonjour ! Je peux vous aider."
     assert json.loads(out["extra"])["sources"] == []
     answer_messages = llm.chat_calls[0][0]
     assert answer_messages[0]["role"] == "system"
     casual_prompt = answer_messages[0]["content"]
     assert "Respond in French" in casual_prompt
-    assert "OpenRAG" in casual_prompt
-    assert "LINAGORA" in casual_prompt
+    assert "introduce yourself as a helpful assistant" in casual_prompt
+    assert "OpenRAG" not in casual_prompt
+    assert "LINAGORA" not in casual_prompt
     assert "PDF" in casual_prompt
     assert "office documents" in casual_prompt
     assert "images" in casual_prompt
@@ -731,7 +733,7 @@ async def test_chat_casual_response_prompt_takes_priority_over_spoken_style():
     answer_system_prompt = llm.chat_calls[0][0][0]["content"]
     assert "Respond in English" in answer_system_prompt
     assert "gratitude" in answer_system_prompt
-    assert "Do not repeat the OpenRAG introduction" in answer_system_prompt
+    assert "Do not repeat the introduction" in answer_system_prompt
     assert "office documents" not in answer_system_prompt
 
 
@@ -756,22 +758,47 @@ async def test_chat_casual_response_preserves_the_safely_wrapped_client_system_p
 
 
 @pytest.mark.parametrize(
-    ("intent", "includes_introduction", "required_text"),
+    ("intent", "required_text"),
     [
-        ("greeting", True, "office documents"),
-        ("gratitude", False, "offer further help"),
-        ("farewell", False, "Say goodbye"),
-        ("capability", False, "indexed documents and media"),
-        ("empty", False, "inviting the user to ask a question"),
+        ("greeting", "office documents"),
+        ("gratitude", "offer further help"),
+        ("farewell", "Say goodbye"),
+        ("capability", "indexed documents and media"),
+        ("empty", "inviting the user to ask a question"),
     ],
 )
-def test_casual_response_prompt_is_intent_specific(intent, includes_introduction, required_text):
+def test_casual_response_prompt_is_intent_specific(intent, required_text):
     prompt = qs.build_casual_response_prompt(intent, "en")
 
     assert "Respond in English" in prompt
     assert f"intent is {intent}" in prompt
-    assert ("developed by LINAGORA" in prompt) is includes_introduction
+    assert "OpenRAG" not in prompt
+    assert "LINAGORA" not in prompt
     assert required_text in prompt
+
+
+def test_casual_response_prompt_uses_configured_assistant_name_without_vendor_attribution():
+    prompt = qs.build_casual_response_prompt("greeting", "en", assistant_name="Marianne")
+
+    assert "You are Marianne, a helpful assistant" in prompt
+    assert "introduce yourself as Marianne" in prompt
+    assert "OpenRAG" not in prompt
+    assert "LINAGORA" not in prompt
+
+
+@pytest.mark.asyncio
+async def test_chat_casual_greeting_uses_assistant_name_from_runtime_configuration():
+    svc = _svc(mode="ChatBotRag")
+    svc._config.server.assistant_name = "Marianne"
+
+    result = await svc._prepare_chat(
+        ["p"],
+        {"messages": [{"role": "user", "content": "Bonjour"}], "metadata": {}},
+    )
+
+    prompt = result.payload["messages"][0]["content"]
+    assert "introduce yourself as Marianne" in prompt
+    assert "LINAGORA" not in prompt
 
 
 @pytest.mark.asyncio
@@ -830,6 +857,10 @@ async def test_contextualized_casual_response_defaults_to_english_for_ambiguous_
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    "message",
+    ["Product A revenue was ten million dollars.", "Puis-je saisir l'administration par voie électronique ?"],
+)
+@pytest.mark.parametrize(
     "contextualizer_result",
     [
         {"requires_retrieval": False, "query_list": []},
@@ -849,8 +880,8 @@ async def test_contextualized_casual_response_defaults_to_english_for_ambiguous_
 )
 async def test_chat_fails_closed_to_retrieval_for_incomplete_or_inconsistent_casual_results(
     contextualizer_result,
+    message,
 ):
-    message = "Product A revenue was ten million dollars."
     llm = FakeLLM(chat_responses=[json.dumps(contextualizer_result)])
     retrieval = FakeRetrieval()
     svc = _svc(mode="ChatBotRag", llm=llm, retrieval=retrieval)

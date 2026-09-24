@@ -569,7 +569,9 @@ class QueryService:
                 queries = queries.model_copy(update={"query_list": usable_queries})
 
         if casual_policy is not None and not retrieval_forced:
-            casual_prompt = build_casual_response_prompt(casual_policy.intent, casual_policy.language)
+            casual_prompt = build_casual_response_prompt(
+                casual_policy.intent, casual_policy.language, assistant_name=self._config.server.assistant_name
+            )
             payload["messages"] = prepend_system_prompt(
                 messages,
                 casual_prompt,
