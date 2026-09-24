@@ -58,6 +58,7 @@ from core.prompts import (
     SOURCE_SEPARATOR,
     build_casual_response_prompt,
     calendar_anchors,
+    describe_source,
     format_context,
     format_web_context,
     message_tokens,
@@ -358,8 +359,11 @@ class QueryService:
                 return max(top_ns)
         return default
 
-    def _fit_sources(self, texts: list[str], partition: list[str] | None, headroom: int | None) -> list[int]:
-        """Positions of up to ``top_n`` of *texts*, within the *headroom* the answering model's window leaves.
+    def _fit_sources(self, docs: list, partition: list[str] | None, headroom: int | None) -> list[int]:
+        """Positions of up to ``top_n`` of *docs*, within the *headroom* the answering model's window leaves.
+
+        Sizes the blocks exactly as ``_documents_context`` renders them, provenance
+        line included.
 
         *headroom* is ``None`` when the window is unknown: only ``top_n`` applies.
         The window comes from the LLM endpoint's context size (admin-set, else
@@ -369,9 +373,13 @@ class QueryService:
         """
         top_n = self._resolve_top_n(partition)
         _, included = format_context(
-            texts, max_context_tokens=headroom, length_function=get_num_tokens(), max_sources=top_n
+            [doc.page_content for doc in docs],
+            max_context_tokens=headroom,
+            length_function=get_num_tokens(),
+            max_sources=top_n,
+            headers=[describe_source(doc.metadata) for doc in docs],
         )
-        if len(included) < min(len(texts), top_n):
+        if len(included) < min(len(docs), top_n):
             logger.bind(partition=partition, top_n=top_n, presented=len(included), headroom=headroom).info(
                 "Sources left out: they don't fit in the answering model's context window"
             )
@@ -1010,7 +1018,7 @@ class QueryService:
             )
         headroom = None if room is None else room - web_tokens
         candidates = docs
-        docs = [docs[i] for i in self._fit_sources([doc.page_content for doc in docs], partition, headroom)]
+        docs = [docs[i] for i in self._fit_sources(docs, partition, headroom)]
 
         def assemble(docs: list, web_candidates: list) -> tuple[list[dict], list]:
             """The answer messages with *docs*, then the *web_candidates* that fit after them."""
@@ -1291,7 +1299,7 @@ class QueryService:
             # Full retrieval set before the token-budget selection below, kept
             # separately for `all_retrieved_sources` (#847).
             retrieved_docs = docs
-            docs = [docs[i] for i in self._fit_sources([doc.page_content for doc in docs], partition, room)]
+            docs = [docs[i] for i in self._fit_sources(docs, partition, room)]
             context = _documents_context(docs, any_retrieved=bool(retrieved_docs))
             # Sized part by part: measure what is sent and drop documents until
             # it fits. With none left, the no-document message can still overflow.
@@ -1919,8 +1927,12 @@ def _documents_context(docs: list, *, any_retrieved: bool) -> str:
     """
     if not docs and any_retrieved:
         return ""
-    texts = [doc.page_content for doc in docs]
-    return format_context(texts, max_context_tokens=None, length_function=get_num_tokens())[0]
+    return format_context(
+        [doc.page_content for doc in docs],
+        max_context_tokens=None,
+        length_function=get_num_tokens(),
+        headers=[describe_source(doc.metadata) for doc in docs],
+    )[0]
 
 
 def _messages_tokens(messages: list[dict]) -> int:

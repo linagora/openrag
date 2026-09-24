@@ -4113,8 +4113,34 @@ async def test_generate_query_reads_the_clock_in_utc(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-# Temporal answers
+# Temporal answers: the model sees each source's creation date
 # --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_chat_context_carries_each_sources_file_and_creation_date():
+    """ "Summarize the last meeting I had" is only answerable if the model can
+    tell yesterday's notes from last year's: every dated source gets a
+    provenance line under its ``[Source N]`` marker; an undated one gets none."""
+    chunks = [
+        Chunk(
+            id="new",
+            text="notes of the 22nd",
+            metadata={"_id": "new", "filename": "Résumé.md", "created_at": "2026-09-22T14:51:30Z"},
+        ),
+        Chunk(id="bare", text="undated text", metadata={"_id": "bare"}),
+    ]
+    llm = FakeLLM(chat_responses=["answer [Sources: 1]"])
+    svc = _svc(retrieval=FakeRetrieval(chunks=chunks), llm=llm)
+    await svc.chat(
+        partitions=["p"],
+        payload={"messages": [{"role": "user", "content": "summarize the last meeting"}]},
+        prepare_sources=lambda d, w: [],
+        model_name="m",
+    )
+    system = llm.chat_calls[-1][0][0]["content"]
+    assert "[Source 1]\nFile: Résumé.md | Created: 2026-09-22 14:51 UTC\nnotes of the 22nd" in system
+    assert "[Source 2]\nundated text" in system
 
 
 @pytest.mark.asyncio
