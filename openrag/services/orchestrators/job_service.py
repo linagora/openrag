@@ -210,6 +210,14 @@ class JobService:
         if job is not None:
             durable_info = _job_to_info(job)
             try:
+                actor_state = await self._call(
+                    lambda: self._tsm.get_state.remote(task_id),
+                    f"get_state({task_id})",
+                )
+            except Exception as exc:
+                logger.warning("Failed to read live task state", task_id=task_id, error=str(exc))
+                actor_state = None
+            try:
                 actor_details = await self._call(
                     lambda: self._tsm.get_details.remote(task_id),
                     f"get_details({task_id})",
@@ -218,7 +226,7 @@ class JobService:
                 logger.warning("Failed to read live task details", task_id=task_id, error=str(exc))
                 actor_details = None
             details = _merge_durable_task_info(
-                {"details": actor_details or {}},
+                {"state": actor_state, "details": actor_details or {}},
                 durable_info,
             )["details"]
         else:
@@ -331,15 +339,23 @@ def _merge_durable_task_info(actor_info: dict[str, Any], durable_info: dict[str,
     effective_state = reconcile_task_state(actor_info.get("state"), durable_info.get("state"))
     if effective_state is not None:
         merged["state"] = effective_state
-    if actor_info.get("state") in _TERMINAL_STATES and durable_info.get("state") not in _TERMINAL_STATES:
+    actor_terminal_wins = (
+        actor_info.get("state") in _TERMINAL_STATES and durable_info.get("state") not in _TERMINAL_STATES
+    )
+    if actor_terminal_wins:
         merged["error"] = actor_info.get("error")
         merged["error_reason"] = actor_info.get("error_reason")
+        merged.pop("duration_ms", None)
+        if actor_info.get("duration_ms") is not None:
+            merged["duration_ms"] = actor_info["duration_ms"]
     actor_details = actor_info.get("details")
     durable_details = durable_info.get("details")
     if not isinstance(actor_details, dict) or not isinstance(durable_details, dict):
         return merged
 
     details = {**actor_details, **durable_details}
+    if actor_terminal_wins and "degraded_stages" in actor_details:
+        details["degraded_stages"] = actor_details["degraded_stages"]
     actor_metadata = actor_details.get("metadata")
     durable_metadata = durable_details.get("metadata")
     if isinstance(actor_metadata, dict) or isinstance(durable_metadata, dict):

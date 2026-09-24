@@ -475,6 +475,36 @@ async def test_live_terminal_state_wins_over_stale_durable_active_row(actor_stat
 
 
 @pytest.mark.asyncio
+async def test_list_tasks_preserves_live_terminal_timing_and_degradation():
+    from core.models.catalog import DocumentStatus
+
+    info = {
+        "t1": {
+            "state": "COMPLETED",
+            "details": {
+                "degraded_stages": ["caption"],
+                "metadata": {
+                    "_openrag_job_created_at": "2026-07-20T08:00:00+00:00",
+                    "_openrag_job_finished_at": "2026-07-20T08:01:05+00:00",
+                },
+            },
+            "user": 7,
+            "duration_ms": 65_000,
+        }
+    }
+    service = JobService(
+        FakeTSM(info=info),
+        job_repo=FakeJobRepo([_job(id="t1", status=DocumentStatus.SERIALIZING, completed_at=None)]),
+    )
+
+    rows = await service.list_tasks(is_admin=True, user_id=7)
+
+    assert rows[0]["outcome"] == "completed_degraded"
+    assert rows[0]["duration_ms"] == 65_000
+    assert rows[0]["details"]["degraded_stages"] == ["caption"]
+
+
+@pytest.mark.asyncio
 async def test_durable_state_wins_even_when_the_status_filter_excludes_it():
     info = {"t1": {"state": "SERIALIZING", "details": {}, "user": 7}}
     service = JobService(FakeTSM(info=info), job_repo=FakeJobRepo([_job(id="t1")]))
@@ -616,6 +646,50 @@ async def test_get_task_details_falls_back_to_the_durable_row():
         "user_id": 7,
         "degraded_stages": [],
     }
+
+
+@pytest.mark.asyncio
+async def test_get_task_details_preserves_live_terminal_degradation():
+    from core.models.catalog import DocumentStatus
+
+    info = {
+        "t1": {
+            "state": "COMPLETED",
+            "details": {"degraded_stages": ["caption"], "metadata": {"filename": "report.pdf"}},
+            "user": 7,
+        }
+    }
+    tsm = FakeTSM(info=info)
+    tsm.get_state = _Remote(lambda _task_id: "COMPLETED")
+    service = JobService(
+        tsm,
+        job_repo=FakeJobRepo([_job(id="t1", status=DocumentStatus.SERIALIZING, completed_at=None)]),
+    )
+
+    details = await service.get_task_details("t1")
+
+    assert details["degraded_stages"] == ["caption"]
+    assert details["metadata"] == {"filename": "report.pdf"}
+
+
+@pytest.mark.asyncio
+async def test_get_task_details_keeps_actor_details_when_state_lookup_fails():
+    from core.models.catalog import DocumentStatus
+
+    info = {
+        "t1": {
+            "details": {"degraded_stages": ["caption"], "metadata": {"filename": "report.pdf"}},
+            "user": 7,
+        }
+    }
+    service = JobService(
+        FakeTSM(info=info),
+        job_repo=FakeJobRepo([_job(id="t1", status=DocumentStatus.SERIALIZING, completed_at=None, filename=None)]),
+    )
+
+    details = await service.get_task_details("t1")
+
+    assert details["metadata"] == {"filename": "report.pdf"}
 
 
 @pytest.mark.asyncio
