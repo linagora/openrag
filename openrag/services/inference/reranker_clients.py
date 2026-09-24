@@ -17,6 +17,7 @@ from core.utils.exceptions import InferenceConnectionError, InferenceTimeoutErro
 from core.utils.logging import get_logger
 
 from ._circuit_breaker import with_circuit_breaker
+from ._metrics import with_inference_metrics
 from ._retry import with_retry
 
 logger = get_logger()
@@ -71,6 +72,7 @@ class InfinityReranker(Reranker):
             headers["Authorization"] = f"Bearer {api_key}"
         self._client = httpx.AsyncClient(timeout=timeout, headers=headers)
 
+    @with_inference_metrics("rerank")
     @with_circuit_breaker("reranker")
     @with_retry(max_attempts=2)
     async def rerank(self, query: str, documents: list[str], top_k: int | None = None) -> list[tuple[int, float]]:
@@ -145,6 +147,7 @@ class TEIReranker(Reranker):
             headers["Authorization"] = f"Bearer {api_key}"
         self._client = httpx.AsyncClient(timeout=timeout, headers=headers)
 
+    @with_inference_metrics("rerank")
     @with_circuit_breaker("reranker")
     @with_retry(max_attempts=2)
     async def rerank(self, query: str, documents: list[str], top_k: int | None = None) -> list[tuple[int, float]]:
@@ -199,6 +202,7 @@ class OpenAIReranker(Reranker):
             headers["Authorization"] = f"Bearer {api_key}"
         self._client = httpx.AsyncClient(timeout=timeout, headers=headers)
 
+    @with_inference_metrics("rerank")
     @with_circuit_breaker("reranker")
     @with_retry(max_attempts=2)
     async def rerank(self, query: str, documents: list[str], top_k: int | None = None) -> list[tuple[int, float]]:

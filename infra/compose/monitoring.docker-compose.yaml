@@ -43,7 +43,9 @@ services:
       - GF_SERVER_SERVE_FROM_SUB_PATH=${GF_SERVER_SERVE_FROM_SUB_PATH:-false}
     volumes:
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
-      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      # The chart's copy is the only one: Helm's .Files.Glob reads only inside
+      # the chart directory, and the Kubernetes ConfigMaps are rendered from it.
+      - ../charts/openrag-stack/dashboards:/var/lib/grafana/dashboards:ro
       - grafana_data:/var/lib/grafana
     depends_on:
       - prometheus

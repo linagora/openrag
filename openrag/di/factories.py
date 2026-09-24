@@ -32,6 +32,7 @@ from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Any, Protocol, TypeVar
 
 from core.config.model_endpoints import CONTROL_EXTRA_KEYS
+from core.observability.inference_metrics import set_provider_name
 
 if TYPE_CHECKING:
     from core.utils.registry import Registry
@@ -111,7 +112,7 @@ def make_component_factory(
             }
             if extra_kwargs_fn is not None:
                 kwargs.update(extra_kwargs_fn(model_cfg))
-            instance = registry.create(impl, **kwargs)
+            instance = set_provider_name(registry.create(impl, **kwargs), name)
             cache[name] = instance
             return instance
 

@@ -382,6 +382,8 @@ describe("DocumentListPage", () => {
 describe("DocumentsPage embedder drift (#762 E)", () => {
   beforeEach(() => {
     permissions.isAdmin = true;
+    // Already acknowledged, so the one-time notice does not cover the table.
+    localStorage.setItem("openrag:embedder-drift-acknowledged:docs", "2026-01-01T00:00:00Z");
   });
 
   const file = (extra: Record<string, unknown>) => ({
@@ -445,6 +447,40 @@ describe("DocumentsPage embedder drift (#762 E)", () => {
     await screen.findByText("a.pdf");
     expect(screen.getByText("\u2014")).toBeTruthy();
     expect(driftMarkers()).toHaveLength(0);
+  });
+
+  it("warns once about files indexed with another embedder, until acknowledged", async () => {
+    localStorage.clear();
+    withPartitionEmbedder("default");
+    listPartitionFilesMock.mockResolvedValue({
+      files: [file({ embedder: "bge-m3", embedder_model_name: "bge-m3" })],
+    } as never);
+
+    const view = renderDocuments(["/documents?partition=docs"]);
+
+    const dialog = await screen.findByRole("alertdialog");
+    expect(dialog.textContent).toContain("now embeds with Qwen3-Embedding-0.6B");
+    expect(dialog.textContent).toContain("1 of its file(s) were indexed with bge-m3");
+    await userEvent.click(screen.getByRole("button", { name: "I understand" }));
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull());
+
+    view.unmount();
+    renderDocuments(["/documents?partition=docs"]);
+    await screen.findByText("a.pdf");
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+  });
+
+  it("does not warn when every file matches the partition's embedder", async () => {
+    localStorage.clear();
+    withPartitionEmbedder("default");
+    listPartitionFilesMock.mockResolvedValue({
+      files: [file({ embedder: "Qwen3-Embedding-0.6B", embedder_model_name: "Qwen3-Embedding-0.6B" })],
+    } as never);
+
+    renderDocuments(["/documents?partition=docs"]);
+
+    await screen.findByText("a.pdf");
+    expect(screen.queryByRole("alertdialog")).toBeNull();
   });
 
   it("flags a file recorded against a different embedder", async () => {

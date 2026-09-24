@@ -93,6 +93,17 @@ async def cancel_active_indexing_tasks(
         await asyncio.sleep(_REF_WAIT_INTERVAL)
 
 
+async def count_active_indexing_tasks(task_state_manager: Any, *, partition: str, timeout: float = 60.0) -> int:
+    """How many indexing tasks are queued or running for *partition*."""
+    matches = await _get_matching_active_task_refs(
+        task_state_manager,
+        deadline=monotonic() + timeout,
+        partition=partition,
+        file_id=None,
+    )
+    return len(matches)
+
+
 async def _get_matching_active_task_refs(
     task_state_manager: Any,
     *,
