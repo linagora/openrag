@@ -20,6 +20,11 @@ operator). Disabled by default, like the ServiceMonitor.
 */}}
 {{- /* Overrides are validated inside the rule template itself, next to the
    defaults they override, so the Compose generator gets the same checks. */}}
+{{- /* A copy of the chart without rules/ would otherwise render a PrometheusRule
+   holding no rules: created, accepted, and alerting on nothing. */}}
+{{- if not (.Files.Get "rules/openrag-alerts.yaml.tpl") }}
+{{- fail "monitoring.prometheusRule: the chart holds no rules/openrag-alerts.yaml.tpl. It ships inside the chart package; check that .helmignore does not exclude it." }}
+{{- end }}
 {{- $rules := tpl (.Files.Get "rules/openrag-alerts.yaml.tpl") . }}
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
