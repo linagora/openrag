@@ -25,9 +25,12 @@ built ``searcher`` / ``reranker`` / ``llm`` plus ``config``.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+import hashlib
+from collections.abc import Awaitable, Callable, Mapping, Sequence
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from core.models.preset import resolve_partition_chat_llm
 from core.prompts import load_template_by_key
 from core.retrieval.pipeline import RetrieverPipeline
 from core.retrieval.retriever import (
@@ -37,6 +40,7 @@ from core.retrieval.retriever import (
     _expand_with_related_chunks,
 )
 from core.retrieval.rrf import rrf_reranking
+from core.retrieval.trace import canonical_fingerprint
 from core.utils.exceptions import PartitionNotFoundError
 from core.utils.logging import get_logger
 
@@ -53,6 +57,20 @@ logger = get_logger()
 
 def _chunk_key(c: Chunk):
     return c.id or id(c)
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedRetrievalGroup:
+    partitions: tuple[str, ...]
+    pipeline: RetrieverPipeline
+    default_top_k: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedRetrievalPlan:
+    groups: tuple[ResolvedRetrievalGroup, ...]
+    public_configuration: dict[str, object]
+    configuration_fingerprint: str
 
 
 class RetrievalService:
@@ -90,16 +108,27 @@ class RetrievalService:
             partition_configs=len(getattr(config, "partitions", {}) or {}),
         )
 
-    def _build_legacy_pipeline(self, *, reranker: Reranker | None, llm: LLM | None) -> RetrieverPipeline:
+    def _build_legacy_pipeline(
+        self,
+        *,
+        reranker: Reranker | None,
+        llm: LLM | None,
+        top_k: int | None = None,
+        similarity_threshold: float | None = None,
+        disable_reranker: bool = False,
+        disable_expansion: bool = False,
+    ) -> RetrieverPipeline:
         config = self._config
         rcfg = config.retriever
         common = {
             "searcher": self._searcher,
-            "top_k": rcfg.top_k,
-            "similarity_threshold": rcfg.similarity_threshold,
+            "top_k": top_k if top_k is not None else rcfg.top_k,
+            "similarity_threshold": (
+                similarity_threshold if similarity_threshold is not None else rcfg.similarity_threshold
+            ),
             "with_surrounding_chunks": rcfg.with_surrounding_chunks,
-            "include_related": rcfg.include_related,
-            "include_ancestors": rcfg.include_ancestors,
+            "include_related": False if disable_expansion else rcfg.include_related,
+            "include_ancestors": False if disable_expansion else rcfg.include_ancestors,
             "related_limit": rcfg.related_limit,
             "max_ancestor_depth": rcfg.max_ancestor_depth,
         }
@@ -123,7 +152,7 @@ class RetrievalService:
 
         return RetrieverPipeline(
             retriever=retriever,
-            reranker=reranker if config.reranker.enabled else None,
+            reranker=reranker if config.reranker.enabled and not disable_reranker else None,
             reranker_top_k=config.reranker.top_k,
             allow_filterless_fallback=rcfg.allow_filterless_fallback,
         )
@@ -156,19 +185,253 @@ class RetrievalService:
             )
         return SingleRetriever(**common)
 
-    async def _resolve_query_template(self, prompt_type: str, name: str | None, disk_key: str) -> str:
-        """Resolve a query-side prompt (hyde / multi_query) to its text.
+    async def _resolve_query_prompt(
+        self,
+        prompt_type: str,
+        name: str | None,
+        disk_key: str,
+    ) -> tuple[str, dict[str, str | None]]:
+        """Resolve a query-side prompt to its text and content-free identity.
 
         Prefers the library (named preset prompt -> type default) via
         PromptService; falls back to the on-disk seed when no PromptService is
         wired (unit tests / DB-less runs), so behaviour matches the pre-DB path.
         """
+        resolve_with_identity = getattr(self._prompt_service, "resolve_prompt_with_identity", None)
+        if resolve_with_identity is not None:
+            resolved = await resolve_with_identity(prompt_type, names=[name])
+            return resolved.content, self._public_prompt_identity(resolved)
         if self._prompt_service is not None:
-            return await self._prompt_service.resolve_prompt(prompt_type, names=[name])
-        return load_template_by_key(self._config.paths.prompts_dir, self._config.prompts, disk_key)
+            content = await self._prompt_service.resolve_prompt(prompt_type, names=[name])
+            name = None
+            source = None
+        else:
+            content = load_template_by_key(self._config.paths.prompts_dir, self._config.prompts, disk_key)
+            source = "disk-seed"
+            name = None
+        return content, {
+            "name": name,
+            "source": source,
+            "content_hash": hashlib.sha256(content.encode()).hexdigest(),
+        }
+
+    async def _resolve_query_template(self, prompt_type: str, name: str | None, disk_key: str) -> str:
+        content, _identity = await self._resolve_query_prompt(prompt_type, name, disk_key)
+        return content
 
     def _partition_configs(self) -> dict[str, Any]:
         return getattr(self._config, "partitions", {}) or {}
+
+    def _effective_contextualizer_name(self, partitions: Sequence[str]) -> str:
+        """Mirror QueryService's partition LLM resolution for public metadata."""
+        if self._llm_factory is None:
+            return "default"
+        name = resolve_partition_chat_llm(list(partitions), self._partition_configs())
+        registered = getattr(getattr(self._config, "models", None), "llm", {}) or {}
+        return name if name is not None and name in registered else "default"
+
+    @staticmethod
+    def _public_endpoint(config: Settings, endpoint_type: str, name: str | None) -> dict[str, object]:
+        """Return endpoint identity only, excluding URLs, keys, and arbitrary extras."""
+        registry = getattr(getattr(config, "models", None), endpoint_type, {}) or {}
+        endpoint = registry.get(name) if name is not None else None
+        return {
+            "name": name,
+            "model": getattr(endpoint, "model_name", None),
+        }
+
+    def public_retrieval_configuration(self, partitions: Sequence[str]) -> dict[str, object]:
+        """Build the stable public retrieval-setting subset used for fingerprints."""
+        configured_partitions = self._partition_configs()
+        public_partitions: list[dict[str, object]] = []
+        selected_partitions = (
+            list(configured_partitions) if "all" in partitions and configured_partitions else partitions
+        )
+        contextualizer_name = self._effective_contextualizer_name(partitions)
+        llm_registry = getattr(getattr(self._config, "models", None), "llm", {}) or {}
+        contextualizer_endpoint = (
+            {
+                "name": "default",
+                "model": getattr(getattr(self._config, "llm", None), "model", None),
+            }
+            if self._llm_factory is None or (contextualizer_name == "default" and "default" not in llm_registry)
+            else self._public_endpoint(self._config, "llm", contextualizer_name)
+        )
+        for partition_name in sorted(set(selected_partitions)):
+            partition = configured_partitions.get(partition_name)
+            retrieval = partition.retrieval if partition is not None else self._config.retriever
+            embedder_name = partition.embedder if partition is not None else "default"
+            query_expansion_llm = None
+            if getattr(retrieval, "type", None) in {"multiQuery", "hyde"}:
+                if self._llm_factory is None:
+                    query_expansion_llm = {
+                        "name": "default",
+                        "model": getattr(getattr(self._config, "llm", None), "model", None),
+                    }
+                else:
+                    query_expansion_llm = self._public_endpoint(
+                        self._config,
+                        "llm",
+                        getattr(retrieval, "llm", None)
+                        or (getattr(partition, "chat_llm", None) if partition is not None else None)
+                        or "default",
+                    )
+            reranker_enabled = bool(
+                getattr(
+                    retrieval,
+                    "enable_reranker",
+                    getattr(getattr(self._config, "reranker", None), "enabled", False),
+                )
+            )
+            reranker_name = getattr(retrieval, "reranker", None) or ("default" if reranker_enabled else None)
+            related_limit = getattr(
+                retrieval,
+                "related_limit",
+                self._legacy_retriever_value("related_limit", 10),
+            )
+            max_ancestor_depth = getattr(
+                retrieval,
+                "max_ancestor_depth",
+                self._legacy_retriever_value("max_ancestor_depth", None),
+            )
+            public_partitions.append(
+                {
+                    "name": partition_name,
+                    "embedder": self._public_endpoint(self._config, "embedder", embedder_name),
+                    "retrieval": {
+                        "type": getattr(retrieval, "type", None),
+                        "top_k": getattr(retrieval, "top_k", None),
+                        "similarity_threshold": getattr(retrieval, "similarity_threshold", None),
+                        "rrf_k": getattr(retrieval, "rrf_k", 60),
+                        "k_queries": self._legacy_retriever_value("k_queries", 3),
+                        "combine": self._legacy_retriever_value("combine", False),
+                        "with_surrounding_chunks": self._legacy_retriever_value("with_surrounding_chunks", False),
+                        "allow_filterless_fallback": self._legacy_retriever_value("allow_filterless_fallback", True),
+                        "hyde_prompt_name": getattr(retrieval, "hyde_prompt_name", None),
+                        "multi_query_prompt_name": getattr(retrieval, "multi_query_prompt_name", None),
+                        "query_expansion_llm": query_expansion_llm,
+                    },
+                    "reranker": {
+                        **self._public_endpoint(self._config, "reranker", reranker_name),
+                        "enabled": reranker_enabled,
+                        "top_n": getattr(
+                            retrieval,
+                            "top_n",
+                            getattr(getattr(self._config, "reranker", None), "top_k", None),
+                        ),
+                    },
+                    "contextualizer": {
+                        **contextualizer_endpoint,
+                        "prompt_name": getattr(retrieval, "query_contextualizer_prompt_name", None),
+                    },
+                    "expansion": {
+                        "include_related": getattr(retrieval, "include_related", False),
+                        "include_ancestors": getattr(retrieval, "include_ancestors", False),
+                        "related_limit": related_limit,
+                        "max_ancestor_depth": max_ancestor_depth,
+                    },
+                }
+            )
+        hybrid_enabled = getattr(getattr(self._config, "vectordb", None), "hybrid_search", None)
+        return {
+            "hybrid": {
+                "enabled": hybrid_enabled,
+                "fusion": "rrf" if hybrid_enabled else None,
+            },
+            "partitions": public_partitions,
+        }
+
+    def configuration_fingerprint(self, partitions: Sequence[str]) -> str:
+        """Fingerprint only allowlisted public settings for the authorized scope."""
+        return canonical_fingerprint(self.public_retrieval_configuration(partitions))
+
+    def _contextualizer_prompt_name(self, partitions: Sequence[str]) -> str | None:
+        selected = list(dict.fromkeys(partitions))
+        if len(selected) != 1 or "all" in selected:
+            return None
+        partition = self._partition_configs().get(selected[0])
+        return getattr(getattr(partition, "retrieval", None), "query_contextualizer_prompt_name", None)
+
+    async def _contextualizer_prompt_identity(self, partitions: Sequence[str]) -> dict[str, str | None]:
+        prompt_name = self._contextualizer_prompt_name(partitions)
+        resolve_with_identity = getattr(self._prompt_service, "resolve_prompt_with_identity", None)
+        if resolve_with_identity is not None:
+            resolved = await resolve_with_identity("query_contextualizer", names=[prompt_name])
+            return {
+                "name": resolved.name,
+                "source": resolved.source,
+                "content_hash": resolved.content_hash,
+            }
+
+        if self._prompt_service is not None:
+            content = await self._prompt_service.resolve_prompt("query_contextualizer", names=[prompt_name])
+            prompt_name = None
+            source = None
+        else:
+            content = load_template_by_key(
+                self._config.paths.prompts_dir,
+                self._config.prompts,
+                "query_contextualizer",
+            )
+            source = "disk-seed"
+            prompt_name = None
+        return {
+            "name": prompt_name,
+            "source": source,
+            "content_hash": hashlib.sha256(content.encode()).hexdigest(),
+        }
+
+    @staticmethod
+    def _public_prompt_identity(prompt: object) -> dict[str, str | None]:
+        def field(key: str) -> str | None:
+            return prompt.get(key) if isinstance(prompt, Mapping) else getattr(prompt, key, None)
+
+        return {
+            "name": field("name"),
+            "source": field("source"),
+            "content_hash": field("content_hash"),
+        }
+
+    async def _query_expansion_prompt_identity(self, retrieval: object) -> dict[str, str | None] | None:
+        retrieval_type = getattr(retrieval, "type", None)
+        if retrieval_type == "hyde":
+            prompt_type = "hyde"
+            prompt_name = getattr(retrieval, "hyde_prompt_name", None)
+        elif retrieval_type == "multiQuery":
+            prompt_type = "multi_query"
+            prompt_name = getattr(retrieval, "multi_query_prompt_name", None)
+        else:
+            return None
+        _content, identity = await self._resolve_query_prompt(prompt_type, prompt_name, prompt_type)
+        return {"type": prompt_type, **identity}
+
+    async def resolved_public_retrieval_configuration(
+        self,
+        partitions: Sequence[str],
+        *,
+        contextualizer_prompt: object | None = None,
+    ) -> dict[str, object]:
+        """Return the same resolved public settings used to build execution."""
+        plan = await self.resolve_retrieval_plan(
+            partitions,
+            contextualizer_prompt=contextualizer_prompt,
+            build_execution=False,
+        )
+        return plan.public_configuration
+
+    async def resolved_configuration_fingerprint(
+        self,
+        partitions: Sequence[str],
+        *,
+        contextualizer_prompt: object | None = None,
+    ) -> str:
+        """Fingerprint public retrieval settings and the resolved prompt identity."""
+        plan = await self.resolve_retrieval_plan(
+            partitions,
+            contextualizer_prompt=contextualizer_prompt,
+            build_execution=False,
+        )
+        return plan.configuration_fingerprint
 
     def _require_partition_config(self, partition: str):
         partitions = self._partition_configs()
@@ -179,7 +442,11 @@ class RetrievalService:
     def _legacy_retriever_value(self, name: str, default: Any) -> Any:
         return getattr(self._config.retriever, name, default)
 
-    def _resolve_reranker(self, reranker_name: str | None, partition: str) -> Reranker | None:
+    def _resolve_reranker_with_identity(
+        self,
+        reranker_name: str | None,
+        partition: str,
+    ) -> tuple[Reranker | None, dict[str, object]]:
         """Effective reranker for one partition's retrieval pipeline.
 
         Resolution order — mirrors ``QueryService._resolve_llm``:
@@ -200,7 +467,10 @@ class RetrievalService:
         the default, so "which reranker ran?" is answerable from the logs.
         """
         if self._reranker_factory is None:
-            return self._legacy_reranker
+            return self._legacy_reranker, {
+                **self._public_endpoint(self._config, "reranker", "default"),
+                "name": "default" if self._legacy_reranker is not None else None,
+            }
         if reranker_name:
             try:
                 reranker = self._reranker_factory(reranker_name)
@@ -213,7 +483,7 @@ class RetrievalService:
                 logger.bind(reranker=reranker_name, partition=partition).debug(
                     "Reranking with the partition's reranker preset"
                 )
-                return reranker
+                return reranker, self._public_endpoint(self._config, "reranker", reranker_name)
         try:
             reranker = self._reranker_factory("default")
         except KeyError:
@@ -222,11 +492,18 @@ class RetrievalService:
             logger.bind(reranker=self._default_reranker_name(), partition=partition).debug(
                 "Reranking with the default reranker preset"
             )
-            return reranker
+            return reranker, self._public_endpoint(self._config, "reranker", "default")
         logger.bind(partition=partition).debug(
             "Reranking with the static default reranker (no catalog default endpoint)"
         )
-        return self._legacy_reranker
+        return self._legacy_reranker, {
+            **self._public_endpoint(self._config, "reranker", "default"),
+            "name": "default" if self._legacy_reranker is not None else None,
+        }
+
+    def _resolve_reranker(self, reranker_name: str | None, partition: str) -> Reranker | None:
+        reranker, _identity = self._resolve_reranker_with_identity(reranker_name, partition)
+        return reranker
 
     def _default_reranker_name(self) -> str:
         """Real endpoint name behind the catalog reranker ``"default"`` alias, for logging.
@@ -244,12 +521,20 @@ class RetrievalService:
                     return name
         return "default"
 
-    async def _pipeline_for_partition(self, partition: str) -> tuple[RetrieverPipeline, int | None]:
+    async def _resolved_pipeline_for_partition(
+        self,
+        partition: str,
+        *,
+        top_k: int | None = None,
+        similarity_threshold: float | None = None,
+        disable_reranker: bool = False,
+        disable_expansion: bool = False,
+    ) -> tuple[RetrieverPipeline, int | None, dict[str, str | None] | None, dict[str, object] | None]:
         # Callers only ever pass a concrete partition name — the "all" sentinel is
         # expanded to concrete keys by _pipeline_groups_for_partitions before this
         # runs. With no per-partition configs at all, fall back to the legacy pipeline.
         if not self._partition_configs():
-            return self._pipeline, None
+            return self._pipeline, None, self._legacy_query_expansion_prompt_identity(self._pipeline), None
 
         partition_cfg = self._require_partition_config(partition)
         pipeline_cfg = partition_cfg.retrieval
@@ -265,25 +550,33 @@ class RetrievalService:
         # Only the expansion strategies need a prompt; type="single" (the common
         # case) resolves nothing, so the DB is never touched on that path.
         template = None
+        prompt_identity = None
         if rtype == "multiQuery":
-            template = await self._resolve_query_template(
+            template, prompt_identity = await self._resolve_query_prompt(
                 "multi_query", pipeline_cfg.multi_query_prompt_name, "multi_query"
             )
+            prompt_identity = {"type": "multi_query", **prompt_identity}
         elif rtype == "hyde":
-            template = await self._resolve_query_template("hyde", pipeline_cfg.hyde_prompt_name, "hyde")
+            template, prompt_identity = await self._resolve_query_prompt("hyde", pipeline_cfg.hyde_prompt_name, "hyde")
+            prompt_identity = {"type": "hyde", **prompt_identity}
 
-        reranker = self._resolve_reranker(pipeline_cfg.reranker, partition) if pipeline_cfg.enable_reranker else None
+        reranker = None
+        reranker_identity = None
+        if pipeline_cfg.enable_reranker and not disable_reranker:
+            reranker, reranker_identity = self._resolve_reranker_with_identity(pipeline_cfg.reranker, partition)
 
         retriever = self._build_retriever(
             rtype=rtype,
             template=template,
             common={
                 "searcher": searcher,
-                "top_k": pipeline_cfg.top_k,
-                "similarity_threshold": pipeline_cfg.similarity_threshold,
+                "top_k": top_k if top_k is not None else pipeline_cfg.top_k,
+                "similarity_threshold": (
+                    similarity_threshold if similarity_threshold is not None else pipeline_cfg.similarity_threshold
+                ),
                 "with_surrounding_chunks": self._legacy_retriever_value("with_surrounding_chunks", False),
-                "include_related": pipeline_cfg.include_related,
-                "include_ancestors": pipeline_cfg.include_ancestors,
+                "include_related": False if disable_expansion else pipeline_cfg.include_related,
+                "include_ancestors": False if disable_expansion else pipeline_cfg.include_ancestors,
                 "related_limit": self._legacy_retriever_value("related_limit", 10),
                 "max_ancestor_depth": self._legacy_retriever_value("max_ancestor_depth", None),
             },
@@ -298,30 +591,173 @@ class RetrievalService:
             allow_filterless_fallback=self._legacy_retriever_value("allow_filterless_fallback", True),
             rrf_k=pipeline_cfg.rrf_k,
         )
-        return pipeline, pipeline_cfg.top_n
+        return pipeline, pipeline_cfg.top_n, prompt_identity, reranker_identity
+
+    @staticmethod
+    def _legacy_query_expansion_prompt_identity(pipeline: RetrieverPipeline) -> dict[str, str | None] | None:
+        retriever = pipeline.retriever
+        if isinstance(retriever, MultiQueryRetriever):
+            prompt_type = "multi_query"
+            content = retriever.multi_query_template
+        elif isinstance(retriever, HyDeRetriever):
+            prompt_type = "hyde"
+            content = retriever.hyde_template
+        else:
+            return None
+        return {
+            "type": prompt_type,
+            "name": None,
+            "source": "disk-seed",
+            "content_hash": hashlib.sha256(content.encode()).hexdigest(),
+        }
+
+    async def _pipeline_for_partition(
+        self,
+        partition: str,
+        *,
+        top_k: int | None = None,
+        similarity_threshold: float | None = None,
+        disable_reranker: bool = False,
+        disable_expansion: bool = False,
+    ) -> tuple[RetrieverPipeline, int | None]:
+        pipeline, default_top_k, _prompt_identity, _reranker_identity = await self._resolved_pipeline_for_partition(
+            partition,
+            top_k=top_k,
+            similarity_threshold=similarity_threshold,
+            disable_reranker=disable_reranker,
+            disable_expansion=disable_expansion,
+        )
+        return pipeline, default_top_k
+
+    async def resolve_retrieval_plan(
+        self,
+        partitions: Sequence[str],
+        *,
+        top_k: int | None = None,
+        similarity_threshold: float | None = None,
+        disable_reranker: bool = False,
+        disable_expansion: bool = False,
+        contextualizer_prompt: object | None = None,
+        build_execution: bool = True,
+    ) -> ResolvedRetrievalPlan:
+        """Resolve executable pipelines and their public identity once."""
+        requested = list(partitions)
+        configs = self._partition_configs()
+        selected = list(configs) if "all" in requested and configs else list(dict.fromkeys(requested))
+        prompt_identities: dict[str, dict[str, str | None] | None] = {}
+        reranker_identities: dict[str, dict[str, object]] = {}
+        groups: list[ResolvedRetrievalGroup] = []
+
+        if not build_execution:
+            for partition_name in selected:
+                partition = configs.get(partition_name)
+                retrieval = partition.retrieval if partition is not None else self._config.retriever
+                prompt_identities[partition_name] = (
+                    await self._query_expansion_prompt_identity(retrieval)
+                    if configs
+                    else self._legacy_query_expansion_prompt_identity(self._pipeline)
+                )
+                if getattr(retrieval, "enable_reranker", False) and not disable_reranker:
+                    _reranker, identity = self._resolve_reranker_with_identity(
+                        getattr(retrieval, "reranker", None),
+                        partition_name,
+                    )
+                    reranker_identities[partition_name] = identity
+        elif not selected or not configs:
+            pipeline = self._pipeline
+            if any((top_k is not None, similarity_threshold is not None, disable_reranker, disable_expansion)):
+                pipeline = self._build_legacy_pipeline(
+                    reranker=self._legacy_reranker,
+                    llm=self._legacy_llm,
+                    top_k=top_k,
+                    similarity_threshold=similarity_threshold,
+                    disable_reranker=disable_reranker,
+                    disable_expansion=disable_expansion,
+                )
+            group_partitions = tuple(["all"] if "all" in requested else selected)
+            groups.append(ResolvedRetrievalGroup(group_partitions, pipeline, None))
+            legacy_identity = self._legacy_query_expansion_prompt_identity(pipeline)
+            for partition_name in selected:
+                prompt_identities[partition_name] = legacy_identity
+        else:
+            for partition_name in selected:
+                (
+                    pipeline,
+                    default_top_k,
+                    prompt_identity,
+                    reranker_identity,
+                ) = await self._resolved_pipeline_for_partition(
+                    partition_name,
+                    top_k=top_k,
+                    similarity_threshold=similarity_threshold,
+                    disable_reranker=disable_reranker,
+                    disable_expansion=disable_expansion,
+                )
+                groups.append(ResolvedRetrievalGroup((partition_name,), pipeline, default_top_k))
+                prompt_identities[partition_name] = prompt_identity
+                if reranker_identity is not None:
+                    reranker_identities[partition_name] = reranker_identity
+
+        public = self.public_retrieval_configuration(requested)
+        for public_partition in public["partitions"]:
+            public_retrieval = public_partition["retrieval"]
+            partition_name = public_partition["name"]
+            public_retrieval["query_expansion_prompt"] = prompt_identities.get(partition_name)
+            if partition_name in reranker_identities:
+                public_partition["reranker"].update(reranker_identities[partition_name])
+            if top_k is not None:
+                public_retrieval["top_k"] = top_k
+            if similarity_threshold is not None:
+                public_retrieval["similarity_threshold"] = similarity_threshold
+            if disable_reranker:
+                public_partition["reranker"]["enabled"] = False
+            if disable_expansion:
+                public_partition["expansion"]["include_related"] = False
+                public_partition["expansion"]["include_ancestors"] = False
+        public["contextualizer_prompt"] = (
+            self._public_prompt_identity(contextualizer_prompt)
+            if contextualizer_prompt is not None
+            else await self._contextualizer_prompt_identity(requested)
+        )
+        return ResolvedRetrievalPlan(
+            groups=tuple(groups),
+            public_configuration=public,
+            configuration_fingerprint=canonical_fingerprint(public),
+        )
 
     async def _pipeline_groups_for_partitions(
-        self, partitions: list[str]
+        self,
+        partitions: list[str],
+        *,
+        top_k: int | None = None,
+        similarity_threshold: float | None = None,
+        disable_reranker: bool = False,
+        disable_expansion: bool = False,
     ) -> list[tuple[list[str], RetrieverPipeline, int | None]]:
         configs = self._partition_configs()
-        # Expand the "all" sentinel to concrete partitions so each is retrieved
-        # with its own embedder and top_n, via the same per-partition fan-out the
-        # named-partition path already uses (#708). Collapsing to self._pipeline
-        # embedded the query with the deployment-default embedder — near-random
-        # recall for any partition indexed with a different one — and dropped the
-        # reranker top_n (its default_top_k was None). "all" only reaches this
-        # layer post-authorization (a SUPER_ADMIN_MODE admin; regular users are
-        # already expanded to their memberships upstream), so every hydrated
-        # partition is in scope.
         if "all" in partitions and configs:
             partitions = list(configs.keys())
         elif not partitions or not configs:
-            # Nothing to expand (no partitions exist yet) — keep the single
-            # legacy pipeline; there is no per-partition config to honour.
-            return [(["all"] if "all" in partitions else partitions, self._pipeline, None)]
+            pipeline = self._pipeline
+            if any((top_k is not None, similarity_threshold is not None, disable_reranker, disable_expansion)):
+                pipeline = self._build_legacy_pipeline(
+                    reranker=self._legacy_reranker,
+                    llm=self._legacy_llm,
+                    top_k=top_k,
+                    similarity_threshold=similarity_threshold,
+                    disable_reranker=disable_reranker,
+                    disable_expansion=disable_expansion,
+                )
+            return [(["all"] if "all" in partitions else partitions, pipeline, None)]
         groups: list[tuple[list[str], RetrieverPipeline, int | None]] = []
         for partition in partitions:
-            pipeline, default_top_k = await self._pipeline_for_partition(partition)
+            pipeline, default_top_k = await self._pipeline_for_partition(
+                partition,
+                top_k=top_k,
+                similarity_threshold=similarity_threshold,
+                disable_reranker=disable_reranker,
+                disable_expansion=disable_expansion,
+            )
             groups.append(([partition], pipeline, default_top_k))
         return groups
 
@@ -438,10 +874,24 @@ class RetrievalService:
         partitions: list[str],
         query: Query,
         top_k: int | None = None,
+        retrieval_top_k: int | None = None,
         filter_params: dict | None = None,
+        similarity_threshold: float | None = None,
+        disable_reranker: bool = False,
+        disable_expansion: bool = False,
+        resolved_plan: ResolvedRetrievalPlan | None = None,
     ) -> list[Chunk]:
         """Single ``Query`` through retrieve → expand → rerank."""
-        groups = await self._pipeline_groups_for_partitions(partitions)
+        if resolved_plan is None:
+            groups = await self._pipeline_groups_for_partitions(
+                partitions,
+                top_k=retrieval_top_k,
+                similarity_threshold=similarity_threshold,
+                disable_reranker=disable_reranker,
+                disable_expansion=disable_expansion,
+            )
+        else:
+            groups = [(list(group.partitions), group.pipeline, group.default_top_k) for group in resolved_plan.groups]
         ranked_lists = await self._gather_partition_groups(
             [
                 (
@@ -464,10 +914,24 @@ class RetrievalService:
         partitions: list[str],
         search_queries: SearchQueries,
         top_k: int | None = None,
+        retrieval_top_k: int | None = None,
         filter_params: dict | None = None,
+        similarity_threshold: float | None = None,
+        disable_reranker: bool = False,
+        disable_expansion: bool = False,
+        resolved_plan: ResolvedRetrievalPlan | None = None,
     ) -> list[Chunk]:
         """Every sub-query in parallel, fused with RRF."""
-        groups = await self._pipeline_groups_for_partitions(partitions)
+        if resolved_plan is None:
+            groups = await self._pipeline_groups_for_partitions(
+                partitions,
+                top_k=retrieval_top_k,
+                similarity_threshold=similarity_threshold,
+                disable_reranker=disable_reranker,
+                disable_expansion=disable_expansion,
+            )
+        else:
+            groups = [(list(group.partitions), group.pipeline, group.default_top_k) for group in resolved_plan.groups]
         ranked_lists = await self._gather_partition_groups(
             [
                 (
@@ -490,7 +954,12 @@ class RetrievalService:
         partitions: list[str],
         queries: list[Query],
         top_k: int | None = None,
+        retrieval_top_k: int | None = None,
         filter_params: dict | None = None,
+        similarity_threshold: float | None = None,
+        disable_reranker: bool = False,
+        disable_expansion: bool = False,
+        resolved_plan: ResolvedRetrievalPlan | None = None,
     ) -> list[list[Chunk]]:
         """Per-sub-query ranked lists (NOT fused).
 
@@ -499,11 +968,27 @@ class RetrievalService:
         lets it run one ``asyncio.gather`` over both.
         """
         return await asyncio.gather(
-            *[self.retrieve(partitions=partitions, query=q, top_k=top_k, filter_params=filter_params) for q in queries]
+            *[
+                self.retrieve(
+                    partitions=partitions,
+                    query=q,
+                    top_k=top_k,
+                    retrieval_top_k=retrieval_top_k,
+                    filter_params=filter_params,
+                    similarity_threshold=similarity_threshold,
+                    disable_reranker=disable_reranker,
+                    disable_expansion=disable_expansion,
+                    resolved_plan=resolved_plan,
+                )
+                for q in queries
+            ]
         )
 
     @staticmethod
-    def fuse(doc_lists: list[list[Chunk]], top_k: int | None = None) -> list[Chunk]:
+    def fuse(
+        doc_lists: list[list[Chunk]],
+        top_k: int | None = None,
+    ) -> list[Chunk]:
         """RRF-fuse ranked lists across partitions (and doc+web).
 
         Uses the canonical RRF constant (60) rather than a preset's ``rrf_k``:
@@ -515,4 +1000,4 @@ class RetrievalService:
         return fused[:top_k] if top_k is not None else fused
 
 
-__all__ = ["RetrievalService"]
+__all__ = ["ResolvedRetrievalGroup", "ResolvedRetrievalPlan", "RetrievalService"]
