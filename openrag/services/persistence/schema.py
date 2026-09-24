@@ -304,6 +304,7 @@ jobs = Table(
     Column("id", String, primary_key=True),
     Column("partition", String, nullable=False),
     Column("file_id", String, nullable=True),
+    Column("filename", String, nullable=True),
     # ``users.id`` is Integer, so the FK target fixes this type.
     Column("user_id", Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True),
     Column("status", String, nullable=False),
