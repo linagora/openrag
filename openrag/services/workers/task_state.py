@@ -31,6 +31,12 @@ CANCELLABLE_INDEXING_STATES = ACTIVE_INDEXING_STATES | LEGACY_ACTIVE_INDEXING_ST
 RECOVERABLE_TASK_STATES = CANCELLABLE_INDEXING_STATES | {"CANCELLED"}
 TERMINAL_INDEXING_STATES = frozenset({"COMPLETED", "FAILED"})
 PENDING_TASK_DETAILS = "__openrag_pending_task_details__"
+# Reasons ``set_queued_details_v2`` can turn a submission away. Shared with
+# the dispatcher, which maps FILE_INDEXING to a 409 and the rest to the
+# pre-existing "rejected before it queued" error.
+QUEUE_REFUSED_CANCELLED = "cancelled"
+QUEUE_REFUSED_FILE_DELETING = "file_deleting"
+QUEUE_REFUSED_FILE_INDEXING = "file_indexing"
 SUBMITTED_TASK_WITHOUT_REF = "__openrag_submitted_task_without_ref__"
 _FENCE_KV_KEY = b"file-delete-fences-v1"
 _TASK_STATE_KV_NAMESPACE = "openrag-task-state-manager"
@@ -227,6 +233,10 @@ def _delete_recoverable_task(task_id: str) -> None:
     if not _task_state_storage_available():
         return
     _internal_kv_del(_recoverable_task_key(task_id), namespace=_task_state_kv_namespace())
+
+
+def _queue_refused(reason: str, *, existing_task_id: str | None = None) -> dict[str, Any]:
+    return {"accepted": False, "reason": reason, "existing_task_id": existing_task_id}
 
 
 def _truncate_error(tb_str: str | None) -> str | None:
@@ -709,23 +719,114 @@ class TaskStateManager:
         user_id: int | None,
     ) -> bool:
         with self.lock:
-            info = self._ensure_task(task_id)
-            if info.state == DocumentStatus.CANCELLED:
-                return False
-            self._record_details(
+            return self._queue_task_locked(
                 task_id,
-                info,
                 file_id=file_id,
                 partition=partition,
                 metadata=metadata,
                 user_id=user_id,
+                reject_if_file_active=False,
+            )["accepted"]
+
+    @ray.method(concurrency_group="set")
+    async def set_queued_details_v2(
+        self,
+        task_id: str,
+        *,
+        file_id: str | None,
+        partition: str,
+        metadata: dict[str, Any],
+        user_id: int | None,
+        reject_if_file_active: bool = False,
+    ) -> dict[str, Any]:
+        """Queue a task, optionally refusing one whose file is already indexing.
+
+        Returns ``{"accepted", "reason", "existing_task_id"}`` instead of the
+        bare boolean ``set_queued_details`` returns, because a caller that is
+        turned away needs to know *which* task holds the file to tell its own
+        client where to look. Both methods stay on the actor: a dispatcher from
+        an earlier release keeps calling the boolean one, and a dispatcher from
+        this one falls back to it against an actor that predates this method —
+        in which case admission simply is not fenced, exactly as before.
+
+        ``reject_if_file_active`` is the admission fence (#693). It is opt-in
+        rather than always-on because only a first-time upload can say that a
+        second task for the same file is unambiguously redundant; a replace
+        legitimately re-indexes a file that already exists.
+        """
+        with self.lock:
+            return self._queue_task_locked(
+                task_id,
+                file_id=file_id,
+                partition=partition,
+                metadata=metadata,
+                user_id=user_id,
+                reject_if_file_active=reject_if_file_active,
             )
-            if self._file_delete_fenced(partition=partition, file_id=file_id):
-                self._set_cancelled_locked(task_id, info)
-                return False
-            info.state = "QUEUED"
-            self._persist_task_locked(task_id, info)
-            return True
+
+    def _queue_task_locked(
+        self,
+        task_id: str,
+        *,
+        file_id: str | None,
+        partition: str,
+        metadata: dict[str, Any],
+        user_id: int | None,
+        reject_if_file_active: bool,
+    ) -> dict[str, Any]:
+        info = self._ensure_task(task_id)
+        if info.state == DocumentStatus.CANCELLED:
+            return _queue_refused(QUEUE_REFUSED_CANCELLED)
+        if reject_if_file_active and file_id is not None:
+            busy_task_id = self._active_indexing_task_for_file_locked(
+                partition=partition, file_id=file_id, excluding=task_id
+            )
+            if busy_task_id is not None:
+                # Leave the record untouched: _ensure_task gave the id a receipt
+                # deadline, so a refused submission ages out on its own instead
+                # of occupying the file it was just denied.
+                return _queue_refused(QUEUE_REFUSED_FILE_INDEXING, existing_task_id=busy_task_id)
+        self._record_details(
+            task_id,
+            info,
+            file_id=file_id,
+            partition=partition,
+            metadata=metadata,
+            user_id=user_id,
+        )
+        if self._file_delete_fenced(partition=partition, file_id=file_id):
+            self._set_cancelled_locked(task_id, info)
+            return _queue_refused(QUEUE_REFUSED_FILE_DELETING)
+        info.state = "QUEUED"
+        self._persist_task_locked(task_id, info)
+        return {"accepted": True, "reason": None, "existing_task_id": None}
+
+    def _active_indexing_task_for_file_locked(
+        self,
+        *,
+        partition: str,
+        file_id: str,
+        excluding: str,
+    ) -> str | None:
+        """Return a task already indexing ``file_id``, or ``None``.
+
+        Deliberately narrower than :meth:`_matching_active_task_refs_locked`,
+        which over-matches on purpose so cleanup never misses a worker. Refusing
+        work has the opposite failure cost, so this skips what that one keeps: a
+        task that has not registered its file yet (it may well be for another
+        file), and a cancelled task whose worker has not settled (that file is
+        on its way out, not being indexed).
+        """
+        for candidate_id, info in self.tasks.items():
+            if candidate_id == excluding or info.state not in CANCELLABLE_INDEXING_STATES:
+                continue
+            if self._expire_refless_task_if_stale_locked(candidate_id, info):
+                continue
+            details = info.details or {}
+            if details.get("partition") != partition or details.get("file_id") != file_id:
+                continue
+            return candidate_id
+        return None
 
     @ray.method(concurrency_group="set")
     async def begin_worker_submission(self, task_id: str) -> bool:

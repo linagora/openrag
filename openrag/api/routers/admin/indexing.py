@@ -33,7 +33,7 @@ from api.dependencies.files import (
 )
 from core.models.catalog import TERMINAL_TASK_STATES
 from core.utils.error_summary import summarize_task_error
-from core.utils.exceptions import OpenRAGError, indexing_worker_may_be_running
+from core.utils.exceptions import ConflictError, OpenRAGError, indexing_worker_may_be_running
 from core.utils.filename import sanitize_filename
 from core.utils.logging import get_logger
 from core.utils.url_safety import is_safe_url
@@ -83,6 +83,27 @@ def build_url(request: Request, route_name: str, *, preferred_url_scheme: str | 
     if preferred_url_scheme:
         url = url.replace(scheme=preferred_url_scheme)
     return str(url)
+
+
+def _point_conflict_at_running_task(exc: BaseException, request: Request, config) -> None:
+    """Tell a caller turned away by the admission fence where to look.
+
+    The fence lives in the dispatcher, which has no ``Request`` and so cannot
+    build the link itself. Left as an extra field on the 409 body: a client that
+    retried after a timeout can poll the task it already started instead of
+    treating the refusal as a lost upload.
+    """
+    if not isinstance(exc, ConflictError) or exc.code != "DOCUMENT_INDEXING_IN_PROGRESS":
+        return
+    existing_task_id = exc.extra.get("existing_task_id")
+    if not existing_task_id:
+        return
+    exc.extra["task_status_url"] = build_url(
+        request,
+        "get_task_status",
+        preferred_url_scheme=config.server.preferred_url_scheme,
+        task_id=existing_task_id,
+    )
 
 
 router = APIRouter()
@@ -145,6 +166,15 @@ JSON string containing file metadata. Example:
 
 **Response:**
 Returns 201 Created with a task status URL for tracking indexing progress.
+
+**Conflicts (409):**
+- The file is already in the partition's catalog.
+- `DOCUMENT_INDEXING_IN_PROGRESS` — another task is still indexing this
+  `file_id`. `extra.existing_task_id` / `extra.task_status_url` point at it, so
+  a client that re-sent after a timeout can poll the first task instead of
+  re-uploading.
+- `DOCUMENT_CONTENT_EXISTS` — content deduplication matched an existing file
+  (`extra.existing_file_id`).
 """,
 )
 async def add_file(
@@ -241,6 +271,7 @@ async def add_file(
         # run that could still succeed. The worker cleans up its own input.
         if not indexing_worker_may_be_running(exc):
             file_path.unlink(missing_ok=True)
+        _point_conflict_at_running_task(exc, request, config)
         raise
 
     return JSONResponse(

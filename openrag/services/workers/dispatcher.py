@@ -30,6 +30,7 @@ from services.workers.failure_reporting import submit_task_failure
 from services.workers.ray_utils import call_ray_actor_with_timeout, retry_idempotent_ray_actor_method
 from services.workers.stages.store import INDEXING_TASK_ID_METADATA_KEY
 from services.workers.task_cancellation import cancel_active_indexing_tasks
+from services.workers.task_state import QUEUE_REFUSED_FILE_INDEXING
 
 logger = get_logger()
 
@@ -95,7 +96,34 @@ class WorkerDispatcher(IndexingDispatcher):
         partition: str,
         metadata: dict[str, Any],
         user_id: int | None,
-    ) -> bool:
+        reject_if_file_active: bool = False,
+    ) -> dict[str, Any]:
+        """Register the task as QUEUED and report whether the actor took it.
+
+        Returns the ``{"accepted", "reason", "existing_task_id"}`` shape of
+        ``set_queued_details_v2``. Against an actor left by an earlier release
+        this degrades to the boolean method, which has no admission fence — the
+        submission is then accepted exactly as it was before this fence existed,
+        never refused on a guess.
+        """
+        remote_v2 = _remote_actor_method(self._tsm, "set_queued_details_v2")
+        if remote_v2 is not None:
+            outcome = await retry_idempotent_ray_actor_method(
+                submit=lambda: remote_v2(
+                    task_id,
+                    file_id=file_id,
+                    partition=partition,
+                    metadata=metadata,
+                    user_id=user_id,
+                    reject_if_file_active=reject_if_file_active,
+                ),
+                recovery_timeout=self._timeout,
+                task_description=f"set_queued_details_v2({task_id})",
+            )
+            if isinstance(outcome, dict):
+                return outcome
+            return _queue_admitted(outcome is not False)
+
         remote = _remote_actor_method(self._tsm, "set_queued_details")
         if remote is not None:
             accepted = await retry_idempotent_ray_actor_method(
@@ -109,7 +137,7 @@ class WorkerDispatcher(IndexingDispatcher):
                 recovery_timeout=self._timeout,
                 task_description=f"set_queued_details({task_id})",
             )
-            return accepted is not False
+            return _queue_admitted(accepted is not False)
 
         await self._call_method(
             lambda: self._tsm.set_state.remote(task_id, "QUEUED"),
@@ -125,7 +153,7 @@ class WorkerDispatcher(IndexingDispatcher):
             ),
             task_description=f"set_details({task_id})",
         )
-        return True
+        return _queue_admitted(True)
 
     async def _active_content_claim_tokens(self, partition: str) -> set[str] | None:
         """Return task tokens whose content reservations must be preserved.
@@ -282,9 +310,8 @@ class WorkerDispatcher(IndexingDispatcher):
             "metadata": user_metadata,
             "user_id": user.get("id") if user else None,
         }
-        try:
-            accepted = await self._set_queued_details(task_id, **task_details)
-        except BaseException:
+
+        async def release_claim() -> None:
             if claimed_content:
                 await self._document_repo.release_content_sha256_claim(
                     file_id=file_id,
@@ -292,14 +319,25 @@ class WorkerDispatcher(IndexingDispatcher):
                     content_sha256=content_sha256,
                     claim_token=content_claim_token,
                 )
+
+        try:
+            # A first-time upload is fenced against a task already indexing the
+            # same file: the second one can only redo the first one's work and
+            # then fail on the catalog insert, after a full parse and embed. A
+            # replace is not fenced — re-indexing a file that already exists is
+            # what it is for.
+            admission = await self._set_queued_details(task_id, reject_if_file_active=not replace, **task_details)
+        except BaseException:
+            await release_claim()
             raise
-        if not accepted:
-            if claimed_content:
-                await self._document_repo.release_content_sha256_claim(
-                    file_id=file_id,
-                    partition=partition,
-                    content_sha256=content_sha256,
-                    claim_token=content_claim_token,
+        if not admission["accepted"]:
+            await release_claim()
+            busy_task_id = admission.get("existing_task_id")
+            if admission.get("reason") == QUEUE_REFUSED_FILE_INDEXING and busy_task_id:
+                raise ConflictError(
+                    f"File '{file_id}' is already being indexed in partition '{partition}'.",
+                    code="DOCUMENT_INDEXING_IN_PROGRESS",
+                    existing_task_id=busy_task_id,
                 )
             raise RuntimeError(
                 f"Task {task_id} was rejected because file {file_id!r} in partition {partition!r} is being deleted"
@@ -925,6 +963,11 @@ def _exception_chain(exc: BaseException):
         seen.add(id(current))
         yield current
         current = current.__cause__ or current.__context__
+
+
+def _queue_admitted(accepted: bool) -> dict[str, Any]:
+    """Wrap a boolean queue registration in the v2 result shape."""
+    return {"accepted": accepted, "reason": None, "existing_task_id": None}
 
 
 def _remote_actor_method(actor: Any, name: str) -> Any | None:

@@ -1412,3 +1412,173 @@ async def test_complete_with_degraded_stages_does_not_recreate_unknown_task() ->
 
     assert await manager.complete_with_degraded_stages("expired-task", ["caption"]) == "missing"
     assert manager.tasks == {}
+
+
+@pytest.mark.asyncio
+async def test_admission_fence_refuses_a_second_task_for_a_file_already_indexing() -> None:
+    manager = _task_state_manager()
+    assert await manager.set_queued_details(
+        "task-1",
+        file_id="file-1",
+        partition="tenant-a",
+        metadata={},
+        user_id=42,
+    )
+
+    refused = await manager.set_queued_details_v2(
+        "task-2",
+        file_id="file-1",
+        partition="tenant-a",
+        metadata={},
+        user_id=42,
+        reject_if_file_active=True,
+    )
+
+    assert refused == {"accepted": False, "reason": "file_indexing", "existing_task_id": "task-1"}
+    assert await manager.get_state("task-2") is None
+    assert await manager.get_state("task-1") == "QUEUED"
+
+
+@pytest.mark.asyncio
+async def test_admission_fence_is_scoped_to_the_same_file_and_partition() -> None:
+    manager = _task_state_manager()
+    await manager.set_queued_details(
+        "task-1",
+        file_id="file-1",
+        partition="tenant-a",
+        metadata={},
+        user_id=42,
+    )
+
+    for task_id, file_id, partition in (
+        ("task-other-file", "file-2", "tenant-a"),
+        ("task-other-partition", "file-1", "tenant-b"),
+    ):
+        admitted = await manager.set_queued_details_v2(
+            task_id,
+            file_id=file_id,
+            partition=partition,
+            metadata={},
+            user_id=42,
+            reject_if_file_active=True,
+        )
+        assert admitted["accepted"] is True, task_id
+        assert await manager.get_state(task_id) == "QUEUED"
+
+
+@pytest.mark.asyncio
+async def test_admission_fence_is_opt_in_so_a_replace_still_queues() -> None:
+    manager = _task_state_manager()
+    await manager.set_queued_details(
+        "task-1",
+        file_id="file-1",
+        partition="tenant-a",
+        metadata={},
+        user_id=42,
+    )
+
+    admitted = await manager.set_queued_details_v2(
+        "task-2",
+        file_id="file-1",
+        partition="tenant-a",
+        metadata={},
+        user_id=42,
+    )
+
+    assert admitted["accepted"] is True
+    assert await manager.get_state("task-2") == "QUEUED"
+
+
+@pytest.mark.asyncio
+async def test_admission_fence_releases_the_file_once_the_first_task_settles() -> None:
+    manager = _task_state_manager()
+    await manager.set_queued_details(
+        "task-1",
+        file_id="file-1",
+        partition="tenant-a",
+        metadata={},
+        user_id=42,
+    )
+    await manager.set_state("task-1", "COMPLETED")
+
+    admitted = await manager.set_queued_details_v2(
+        "task-2",
+        file_id="file-1",
+        partition="tenant-a",
+        metadata={},
+        user_id=42,
+        reject_if_file_active=True,
+    )
+
+    assert admitted["accepted"] is True
+
+
+@pytest.mark.asyncio
+async def test_admission_fence_ignores_a_task_that_has_not_registered_its_file() -> None:
+    """Refusing work has to under-match: a detail-less task names no file yet."""
+    manager = _task_state_manager()
+    await manager.set_state("task-1", "QUEUED")
+
+    admitted = await manager.set_queued_details_v2(
+        "task-2",
+        file_id="file-1",
+        partition="tenant-a",
+        metadata={},
+        user_id=42,
+        reject_if_file_active=True,
+    )
+
+    assert admitted["accepted"] is True
+
+
+@pytest.mark.asyncio
+async def test_admission_fence_ignores_a_cancelled_task_whose_worker_has_not_settled() -> None:
+    manager = _task_state_manager()
+    await manager.set_queued_details(
+        "task-1",
+        file_id="file-1",
+        partition="tenant-a",
+        metadata={},
+        user_id=42,
+    )
+    assert await manager.set_object_ref("task-1", {"ref": object()}) is True
+    assert await manager.set_cancelled_if_active("task-1") is True
+
+    admitted = await manager.set_queued_details_v2(
+        "task-2",
+        file_id="file-1",
+        partition="tenant-a",
+        metadata={},
+        user_id=42,
+        reject_if_file_active=True,
+    )
+
+    assert admitted["accepted"] is True
+
+
+@pytest.mark.asyncio
+async def test_admission_fence_still_reports_the_delete_fence_and_cancellation() -> None:
+    manager = _task_state_manager()
+    await manager.begin_file_delete(partition="tenant-a", file_id="file-1")
+
+    deleting = await manager.set_queued_details_v2(
+        "task-1",
+        file_id="file-1",
+        partition="tenant-a",
+        metadata={},
+        user_id=42,
+        reject_if_file_active=True,
+    )
+    assert deleting == {"accepted": False, "reason": "file_deleting", "existing_task_id": None}
+
+    await manager.set_state("task-2", "QUEUED")
+    assert await manager.set_cancelled_if_active("task-2") is True
+    cancelled = await manager.set_queued_details_v2(
+        "task-2",
+        file_id="file-2",
+        partition="tenant-b",
+        metadata={},
+        user_id=42,
+        reject_if_file_active=True,
+    )
+    assert cancelled == {"accepted": False, "reason": "cancelled", "existing_task_id": None}

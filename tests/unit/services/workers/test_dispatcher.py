@@ -17,6 +17,14 @@ def _remote_mock(return_value: Any = None) -> MagicMock:
     return method
 
 
+def _queue_admitted() -> dict[str, Any]:
+    return {"accepted": True, "reason": None, "existing_task_id": None}
+
+
+def _queue_refused(reason: str, existing_task_id: str | None = None) -> dict[str, Any]:
+    return {"accepted": False, "reason": reason, "existing_task_id": existing_task_id}
+
+
 def _pool_with_ref(ref: object) -> MagicMock:
     pool = MagicMock()
     # IndexerPool is a Ray actor; submit.remote() picks the least-loaded worker
@@ -102,6 +110,7 @@ def _task_state_manager() -> MagicMock:
     tsm.get_content_claim_task_ids = _remote_mock(set())
     tsm.get_all_info = None
     tsm.set_queued_details = _remote_mock(True)
+    tsm.set_queued_details_v2 = _remote_mock(_queue_admitted())
     tsm.begin_worker_submission = _remote_mock(True)
     tsm.begin_file_delete = _remote_mock()
     tsm.renew_file_delete = _remote_mock(True)
@@ -175,7 +184,7 @@ async def test_dispatch_maps_queued_details_submission_failure_to_unavailability
 
     pool = _pool_with_ref(object())
     tsm = _task_state_manager()
-    tsm.set_queued_details.remote = MagicMock(
+    tsm.set_queued_details_v2.remote = MagicMock(
         side_effect=ActorUnavailableError("actor is restarting", actor_id=None),
     )
     dispatcher = WorkerDispatcher(
@@ -209,8 +218,8 @@ async def test_queue_registration_retries_actor_reconstruction() -> None:
     from services.workers.dispatcher import WorkerDispatcher
 
     tsm = _task_state_manager()
-    tsm.set_queued_details.remote = AsyncMock(
-        side_effect=[ActorUnavailableError("actor is restarting", actor_id=None), True]
+    tsm.set_queued_details_v2.remote = AsyncMock(
+        side_effect=[ActorUnavailableError("actor is restarting", actor_id=None), _queue_admitted()]
     )
     dispatcher = WorkerDispatcher(
         pool=_pool_with_ref(object()),
@@ -223,14 +232,15 @@ async def test_queue_registration_retries_actor_reconstruction() -> None:
         timeout=1,
     )
 
-    assert await dispatcher._set_queued_details(
+    admission = await dispatcher._set_queued_details(
         "task-1",
         file_id="file-1",
         partition="tenant-a",
         metadata={},
         user_id=42,
     )
-    assert tsm.set_queued_details.remote.await_count == 2
+    assert admission["accepted"] is True
+    assert tsm.set_queued_details_v2.remote.await_count == 2
 
 
 @pytest.mark.asyncio
@@ -276,7 +286,7 @@ async def test_dispatch_indexing_relies_on_pool_worker_registration() -> None:
         )
 
     assert task_id == "task-1"
-    tsm.set_queued_details.remote.assert_called_once_with(
+    tsm.set_queued_details_v2.remote.assert_called_once_with(
         "task-1",
         file_id="file-1",
         partition="tenant-a",
@@ -285,6 +295,8 @@ async def test_dispatch_indexing_relies_on_pool_worker_registration() -> None:
             "_openrag_job_created_at": "2026-07-20T08:00:00+00:00",
         },
         user_id=42,
+        # replace=True: re-indexing an existing file is not a duplicate submission.
+        reject_if_file_active=False,
     )
     tsm.set_state.remote.assert_not_called()
     tsm.set_details.remote.assert_not_called()
@@ -696,7 +708,7 @@ async def test_dispatch_indexing_releases_claim_when_queueing_fails() -> None:
 
     repo = _document_repo()
     tsm = _task_state_manager()
-    tsm.set_queued_details.remote.side_effect = RuntimeError("queue unavailable")
+    tsm.set_queued_details_v2.remote.side_effect = RuntimeError("queue unavailable")
     dispatcher = WorkerDispatcher(
         pool=_pool_with_ref(object()),
         task_state_manager=tsm,
@@ -773,7 +785,7 @@ async def test_dispatch_indexing_rejects_task_when_file_delete_fence_is_active()
 
     pool = _pool_with_ref(object())
     tsm = _task_state_manager()
-    tsm.set_queued_details.remote = AsyncMock(return_value=False)
+    tsm.set_queued_details_v2.remote = AsyncMock(return_value=_queue_refused("file_deleting"))
     dispatcher = WorkerDispatcher(
         pool=pool,
         task_state_manager=tsm,
@@ -802,6 +814,77 @@ async def test_dispatch_indexing_rejects_task_when_file_delete_fence_is_active()
     pool.submit.remote.assert_not_called()
     tsm.set_object_ref.remote.assert_not_called()
     tsm.set_failed_if_not_cancelled.remote.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_indexing_refuses_a_duplicate_submission_for_a_file_being_indexed() -> None:
+    """A retried POST must be turned away before the parse, not after it (#693)."""
+    from core.utils.exceptions import ConflictError
+    from services.workers.dispatcher import WorkerDispatcher
+
+    pool = _pool_with_ref(object())
+    repo = _document_repo()
+    tsm = _task_state_manager()
+    tsm.set_queued_details_v2.remote = AsyncMock(return_value=_queue_refused("file_indexing", "task-running"))
+    dispatcher = WorkerDispatcher(
+        pool=pool,
+        task_state_manager=tsm,
+        completion_tracker=_completion_tracker(),
+        vector_store=_vector_store(),
+        document_repo=repo,
+        workspace_repo=_workspace_repo(),
+        collection="default",
+    )
+
+    with pytest.raises(ConflictError) as caught:
+        await dispatcher.dispatch_indexing(
+            path="/data/report.txt",
+            metadata={"file_id": "file-1", "filename": "report.txt", "content_sha256": "abc123"},
+            partition="tenant-a",
+            user={"id": 42},
+            workspace_ids=None,
+            replace=False,
+        )
+
+    assert caught.value.status_code == 409
+    assert caught.value.code == "DOCUMENT_INDEXING_IN_PROGRESS"
+    assert caught.value.extra == {"existing_task_id": "task-running"}
+    pool.submit.remote.assert_not_called()
+    # The refused submission must not strand the content reservation it took.
+    repo.release_content_sha256_claim.assert_awaited_once_with(
+        file_id="file-1",
+        partition="tenant-a",
+        content_sha256="abc123",
+        claim_token=repo.claim_content_sha256.await_args.kwargs["claim_token"],
+    )
+
+
+@pytest.mark.asyncio
+async def test_dispatch_indexing_fences_a_first_upload_but_not_a_replace() -> None:
+    from services.workers.dispatcher import WorkerDispatcher
+
+    tsm = _task_state_manager()
+    dispatcher = WorkerDispatcher(
+        pool=_pool_with_ref(object()),
+        task_state_manager=tsm,
+        completion_tracker=_completion_tracker(),
+        vector_store=_vector_store(),
+        document_repo=_document_repo(),
+        workspace_repo=_workspace_repo(),
+        collection="default",
+    )
+
+    for replace, expected in ((False, True), (True, False)):
+        tsm.set_queued_details_v2.remote.reset_mock()
+        await dispatcher.dispatch_indexing(
+            path="/data/report.txt",
+            metadata={"file_id": "file-1", "filename": "report.txt"},
+            partition="tenant-a",
+            user={"id": 42},
+            workspace_ids=None,
+            replace=replace,
+        )
+        assert tsm.set_queued_details_v2.remote.await_args.kwargs["reject_if_file_active"] is expected
 
 
 @pytest.mark.asyncio
@@ -1007,7 +1090,7 @@ async def test_dispatch_indexing_preserves_task_when_submit_outcome_is_unknown()
                 replace=False,
             )
 
-    tsm.set_queued_details.remote.assert_called_once()
+    tsm.set_queued_details_v2.remote.assert_called_once()
     tsm.set_state.remote.assert_not_called()
     tsm.set_details.remote.assert_not_awaited()
     tsm.set_failed_if_not_cancelled.remote.assert_not_called()
@@ -2526,7 +2609,7 @@ async def test_dispatch_records_the_job_before_the_worker_runs() -> None:
 
     repo = _JobRepoSpy()
     tsm = _task_state_manager()
-    tsm.set_queued_details = _remote_mock(True)
+    tsm.set_queued_details_v2 = _remote_mock(_queue_admitted())
     dispatcher = _dispatcher_with_job_repo(tsm, repo)
 
     await dispatcher.dispatch_indexing(
