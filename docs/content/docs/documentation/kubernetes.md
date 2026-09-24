@@ -71,6 +71,43 @@ one before upgrading:
 - **Migrate to the new names.** Copy the data across (e.g. a Job mounting both
   PVCs), then delete the old ones once the release is healthy.
 
+## Upgrading to chart 0.6.7
+
+Two changes apply to every release, whether or not it scrapes anything:
+
+- **Ray workers move their metrics off port 8080.** Workers exported on
+  KubeRay's default 8080, which `networkPolicy.externalPorts` opens to every
+  source, so their unauthenticated metrics were public. They now export on 8090,
+  like the head. KubeRay does not recreate Ray pods when the `RayCluster`
+  changes, so existing workers stay on 8080 until they are recreated. Delete
+  them once after the upgrade, at a time when no indexing is running, since
+  anything running on them is interrupted:
+
+  ```bash
+  kubectl delete pod -n <release namespace> \
+    -l ray.io/cluster=<RayCluster name>,ray.io/node-type=worker
+  ```
+
+  The name is `<fullname>-raycluster`, which is `openrag-raycluster` with the
+  default `fullnameOverride`. If you have set another `fullnameOverride`, or
+  left it empty so that Helm derives the name from the release,
+  `kubectl get raycluster -n <release namespace>` prints it. The upgrade notes
+  print the whole command with the name filled in. A wrong name selects no pods,
+  and the workers stay on 8080.
+
+  Leave the head out. The chart configures no GCS fault tolerance, so deleting
+  the head restarts the whole Ray cluster, and every actor on it is lost. The
+  head already exported on 8090, so recreating the workers closes the exposure.
+  The head needs recreating only to bring up its own scrape target (see
+  [Monitoring Ray, Postgres and Milvus](#monitoring-ray-postgres-and-milvus)).
+- **Postgres no longer accepts connections from other namespaces.** The bitnami
+  sub-chart rendered its own NetworkPolicy, which admitted any source on 5432.
+  The chart now turns it off, along with the read replicas' policy under
+  `postgresql.architecture: replication`, so Postgres gets the same rules as
+  every other pod. With `networkPolicy.enabled` (the default), only the release
+  namespace reaches it, and a client in another namespace needs its own
+  NetworkPolicy.
+
 ## Notes
 
 For the default direct-API deployment, startup and liveness probes use
@@ -437,20 +474,16 @@ Three things can go wrong without failing the install:
   Until Prometheus's namespace is listed in `networkPolicy.metricsFrom`, its
   targets report `up == 0`. Each entry opens only the metrics port, and only on
   the pods that export it. The chart turns off the Postgres sub-chart's own
-  NetworkPolicy for this: it admitted any source on every port it listed,
-  5432 included. With `networkPolicy.enabled` set, Postgres is now reachable
-  only from the release namespace, so a client in another namespace needs its
-  own NetworkPolicy to reach 5432.
-- **Ray pods created before this change.** KubeRay does not recreate Ray pods
-  when the `RayCluster` changes, so after upgrading an existing release the
-  workers keep exporting on 8080, which `networkPolicy.externalPorts` opens to
-  every source, and the head target is down. Recreate them once:
-  `kubectl delete pod -n <release namespace> -l ray.io/cluster=<RayCluster name>`.
-  The selector must name your own `RayCluster`, or it matches no pods and
-  nothing is recreated. The name is `<fullname>-raycluster`, which is
-  `openrag-raycluster` with the default `fullnameOverride`; if you have set
-  another `fullnameOverride`, or left it empty so that Helm derives the name
-  from the release, `kubectl get raycluster -n <release namespace>` prints it.
+  NetworkPolicy for this: it admitted any source on every port it listed, the
+  exporter's 9187 included (see [Upgrading to chart 0.6.7](#upgrading-to-chart-067)).
+- **Ray pods created by chart 0.6.6 or earlier.** KubeRay does not recreate Ray
+  pods when the `RayCluster` changes. Old workers still export on 8080 and need
+  recreating anyway ([Upgrading to chart 0.6.7](#upgrading-to-chart-067)). The
+  old head exports on 8090, but it also carries the `metrics: 8080` port that
+  KubeRay adds to a container without a port of that name. Its target therefore
+  stays down until the head is recreated too. Recreating the head restarts the
+  whole Ray cluster, so leave it for a maintenance window:
+  `kubectl delete pod -n <release namespace> -l ray.io/cluster=<RayCluster name>,ray.io/node-type=head`.
 
 Once enabled, this should return 1 for every Ray node, the Postgres pod and the
 five Milvus pods:

@@ -91,6 +91,23 @@ Datastore metrics
 {{- end }}
 Check the targets are up: docs/documentation/kubernetes.md#monitoring-ray-postgres-and-milvus
 {{- end }}
+{{- $postgresIsolated := and .Values.postgresql.enabled .Values.networkPolicy.enabled }}
+{{- if and .Release.IsUpgrade (or .Values.ray.enabled $postgresIsolated) }}
+
+Upgrading from chart 0.6.6 or earlier
+-------------------------------------
+{{- if .Values.ray.enabled }}
+⚠  Ray workers created by an earlier chart still export metrics on 8080, which
+   networkPolicy.externalPorts opens to every source: KubeRay does not recreate
+   Ray pods on upgrade. Recreate the workers once (this leaves the head running):
+   kubectl delete pod -n {{ .Release.Namespace }} -l ray.io/cluster={{ include "openrag-stack.fullname" . }}-raycluster,ray.io/node-type=worker
+{{- end }}
+{{- if $postgresIsolated }}
+Postgres now accepts connections only from namespace "{{ .Release.Namespace }}":
+a client in another namespace needs its own NetworkPolicy.
+{{- end }}
+See docs/documentation/kubernetes.md#upgrading-to-chart-067
+{{- end }}
 {{- if .Values.monitoring.bundled }}
 {{- $stack := .Values.kubePrometheusStack | toYaml | fromYaml }}
 {{- $grafana := dig "grafana" dict $stack }}
