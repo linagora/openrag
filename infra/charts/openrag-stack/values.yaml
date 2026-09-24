@@ -59,7 +59,7 @@ monitoring:
   # configured under `kubePrometheusStack:` below. Off by default: next to a
   # Prometheus Operator the cluster already runs, a second one fights it over
   # the same CRDs and objects.
-  # When on, it also turns on the dashboard ConfigMaps and the API
+  # When on, it also turns on the dashboard ConfigMaps, the alert rules and the API
   # ServiceMonitor, which then sends env.secrets.METRICS_TOKEN as its bearer
   # (required, like the Compose overlay). Helm installs the operator's CRDs on
   # the first install only: to turn this on for an existing release, apply
@@ -93,7 +93,8 @@ monitoring:
   prometheusRule:
     # Needs the monitoring.coreos.com CRDs (kube-prometheus-stack or a
     # standalone Prometheus Operator). Off by default: creating the CRD object
-    # without the operator present fails the install.
+    # without the operator present fails the install. monitoring.bundled turns
+    # it on as well.
     enabled: false
     # Labels the operator's ruleSelector matches on, e.g.
     # release: kube-prometheus-stack. An unmatched PrometheusRule is created

@@ -361,3 +361,49 @@ def test_an_unknown_breaker_state_does_not_fire() -> None:
 
     assert ">= 1" in expr, f"breaker alert no longer excludes the unknown (-1) state: {expr}"
     assert "!= 0" not in expr
+
+
+# ---------------------------------------------------------------------------
+# The bundled stack (monitoring.bundled)
+# ---------------------------------------------------------------------------
+
+
+def test_bundled_turns_the_rules_on() -> None:
+    """Like the dashboards and the API monitor: a standalone stack with no alert
+    rules looks exactly like a healthy one."""
+    rules = _render("monitoring.prometheusRule.enabled=false", "monitoring.bundled=true")
+
+    assert "OpenRagTargetDown" in rules
+
+
+def _paged(expr: str, job: str) -> bool:
+    """Whether OpenRagTargetDown's selector matches ``job``. PromQL anchors its
+    regexes, which `re.fullmatch` reproduces."""
+    include = re.search(r'job=~"([^"]+)"', expr).group(1)
+    exclude = re.search(r'job!~"([^"]+)"', expr)
+    return bool(re.fullmatch(include, job)) and not (exclude and re.fullmatch(exclude.group(1), job))
+
+
+def test_target_down_leaves_the_bundled_stacks_own_jobs_out() -> None:
+    """The bundled Grafana, Alertmanager, operator and Prometheus all have
+    `openrag` in their job, and their being down does not make an OpenRAG alert
+    inert, which is what this alert's runbook tells the reader."""
+    expr = _render("monitoring.bundled=true")["OpenRagTargetDown"]["expr"]
+
+    for job in ("openrag-openrag", "ns/openrag-raycluster"):
+        assert _paged(expr, job), f"{job} is OpenRAG's and must still page: {expr}"
+    for job in (
+        "openrag-grafana",
+        "openrag-monitoring-alertmanager",
+        "openrag-monitoring-operator",
+        "openrag-monitoring-prometheus",
+    ):
+        assert not _paged(expr, job), f"{job} is the bundled stack's, not OpenRAG's: {expr}"
+
+
+def test_target_down_excludes_nothing_without_the_bundled_stack() -> None:
+    """The Compose copy is generated without `bundled`, so it must not change."""
+    expr = _render()["OpenRagTargetDown"]["expr"]
+
+    assert "job!~" not in expr
+    assert _paged(expr, "openrag")

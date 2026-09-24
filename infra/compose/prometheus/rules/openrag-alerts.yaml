@@ -255,6 +255,13 @@ groups:
         # degraded (it reads process config, not the service container) — so a
         # degraded instance is up==1 and not ready at the same time. Readiness
         # needs a gauge exported from readiness_service; see S3-1b.
+        #
+        # With monitoring.bundled the release also runs kube-prometheus-stack, and
+        # its own jobs (openrag-grafana, openrag-monitoring-*) match the default
+        # matcher. They are the stack's, not OpenRAG's, and paging for them here
+        # would claim every OpenRAG alert is inert when none is: upstream's own
+        # TargetDown covers them. The Compose copy renders without `bundled`, so
+        # its expression is unchanged.
         expr: up{job=~".*openrag.*"} == 0
         for: 5m
         labels:

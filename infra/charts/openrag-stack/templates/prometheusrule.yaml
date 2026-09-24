@@ -1,4 +1,7 @@
-{{- if .Values.monitoring.prometheusRule.enabled }}
+{{- /* monitoring.bundled turns the rules on too, like the dashboards and the API
+   ServiceMonitor: a standalone stack with no alerts would look healthy. Its
+   Prometheus selects every PrometheusRule, so no labels are needed there. */}}
+{{- if or .Values.monitoring.prometheusRule.enabled .Values.monitoring.bundled }}
 {{- /*
 Alert rules for the Prometheus Operator.
 

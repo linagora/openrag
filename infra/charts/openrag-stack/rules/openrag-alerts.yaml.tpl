@@ -311,7 +311,20 @@ groups:
         # degraded (it reads process config, not the service container) — so a
         # degraded instance is up==1 and not ready at the same time. Readiness
         # needs a gauge exported from readiness_service; see S3-1b.
-        expr: up{job=~"{{ $cfg.jobMatcher | default ".*openrag.*" }}"} == 0
+        #
+        # With monitoring.bundled the release also runs kube-prometheus-stack, and
+        # its own jobs (openrag-grafana, openrag-monitoring-*) match the default
+        # matcher. They are the stack's, not OpenRAG's, and paging for them here
+        # would claim every OpenRAG alert is inert when none is: upstream's own
+        # TargetDown covers them. The Compose copy renders without `bundled`, so
+        # its expression is unchanged.
+        {{- $jobExclude := list }}
+        {{- if .Values.monitoring.bundled }}
+        {{- $stack := .Values.kubePrometheusStack | toYaml | fromYaml }}
+        {{- with dig "fullnameOverride" "" $stack }}{{ $jobExclude = append $jobExclude (printf "%s-.*" (regexQuoteMeta .)) }}{{ end }}
+        {{- with dig "grafana" "fullnameOverride" "" $stack }}{{ $jobExclude = append $jobExclude (regexQuoteMeta .) }}{{ end }}
+        {{- end }}
+        expr: up{job=~"{{ $cfg.jobMatcher | default ".*openrag.*" }}"{{ with $jobExclude }}, job!~"{{ join "|" . }}"{{ end }}} == 0
         for: {{ $for.OpenRagTargetDown }}
         labels:
           severity: critical
