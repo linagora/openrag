@@ -373,9 +373,13 @@ running OpenRAG, and the host panels likewise need node-exporter
 
 ## Monitoring Ray, Postgres and Milvus
 
-The chart does not deploy Prometheus. It wires the stack's three dependencies
-into one that already runs with the Prometheus Operator (kube-prometheus-stack
-or a standalone operator), and every part of it is off by default:
+The chart wires the stack's three dependencies into a Prometheus that runs the
+Prometheus Operator. Every part of it is off by default, and
+`monitoring.bundled` does not turn it on. With the bundled stack, set only the
+`enabled` switches below and the Postgres password: the bundled Prometheus runs
+in the release namespace and selects every monitor, so it needs neither
+selector labels nor `networkPolicy.metricsFrom`. Next to an existing Prometheus
+(kube-prometheus-stack or a standalone operator), set all of it:
 
 ```yaml
 networkPolicy:
