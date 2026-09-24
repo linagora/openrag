@@ -17,6 +17,7 @@ def _row(**kwargs):
         "id": "task-1",
         "partition": "tenant-a",
         "file_id": "file-1",
+        "filename": "report.pdf",
         "user_id": 7,
         "status": "QUEUED",
         "error": None,
@@ -66,14 +67,18 @@ async def test_upsert_job_writes_the_task_row_and_maps_it_back():
             status=DocumentStatus.SERIALIZING,
             partition="tenant-a",
             file_id="file-1",
+            filename="report.pdf",
             user_id=7,
         )
     )
 
     query, params = pool.calls[0]
     assert params[:6] == ("task-1", "tenant-a", "file-1", 7, "SERIALIZING", None)
+    assert params[10] == "report.pdf"
+    assert "filename" in query
     assert job.status is DocumentStatus.SERIALIZING
     assert job.file_id == "file-1"
+    assert job.filename == "report.pdf"
 
 
 @pytest.mark.asyncio
@@ -107,8 +112,8 @@ async def test_upsert_job_keeps_settled_states_and_bounds_the_error():
 
     query, params = pool.calls[0]
     # A settled row never reopens, mirroring the TaskStateManager guard.
-    assert "WHEN jobs.status = ANY($11::text[]) THEN jobs.status" in query
-    assert sorted(params[10]) == ["CANCELLED", "COMPLETED", "FAILED"]
+    assert "WHEN jobs.status = ANY($12::text[]) THEN jobs.status" in query
+    assert sorted(params[11]) == ["CANCELLED", "COMPLETED", "FAILED"]
     assert len(params[5]) == 8_000
 
 
@@ -158,7 +163,7 @@ async def test_upsert_job_freezes_the_outcome_fields_together_on_a_settled_row()
 
     query, _params = pool.calls[0]
     compact = " ".join(query.split())
-    settled = "jobs.status = ANY($11::text[])"
+    settled = "jobs.status = ANY($12::text[])"
     for field, frozen in (
         ("status", "jobs.status"),
         ("error", "jobs.error"),
@@ -228,6 +233,38 @@ async def test_list_jobs_filters_by_status_and_user():
     assert "status = ANY($1::text[])" in query
     assert params == (["QUEUED", "SERIALIZING"], 7, 0, 1)
     assert [job.id for job in jobs] == ["task-1", "task-2"]
+
+
+@pytest.mark.asyncio
+async def test_get_jobs_returns_rows_for_known_task_ids():
+    pool = _FakePool(fetch=[_row(), _row(id="task-2")])
+    repo = _repo(pool)
+
+    jobs = await repo.get_jobs(["task-1", "task-2"])
+
+    query, params = pool.calls[0]
+    assert "id = ANY($1::text[])" in query
+    assert params == (["task-1", "task-2"],)
+    assert [job.id for job in jobs] == ["task-1", "task-2"]
+
+
+@pytest.mark.asyncio
+async def test_count_jobs_returns_counts_by_status():
+    pool = _FakePool(
+        fetch=[
+            {"status": "QUEUED", "count": 2},
+            {"status": "COMPLETED", "count": 4},
+        ]
+    )
+    repo = _repo(pool)
+
+    counts = await repo.count_jobs()
+
+    query, params = pool.calls[0]
+    assert "COUNT(*)::int" in query
+    assert "GROUP BY status" in query
+    assert params == ()
+    assert counts == {"QUEUED": 2, "COMPLETED": 4}
 
 
 @pytest.mark.asyncio

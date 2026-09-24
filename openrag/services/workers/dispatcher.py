@@ -14,8 +14,10 @@ from core.models.catalog import (
     INDEXING_CONTENT_CLAIM_TOKEN_PREFIX,
     TASK_CREATED_AT_METADATA_KEY,
     TASK_FINISHED_AT_METADATA_KEY,
+    TERMINAL_TASK_STATES,
     DocumentStatus,
     IndexationJob,
+    reconcile_task_state,
 )
 from core.utils.consts import is_internal_metadata_key, strip_internal_metadata
 from core.utils.error_summary import extract_task_error_reason, failure_reason_from_exception
@@ -308,6 +310,7 @@ class WorkerDispatcher(IndexingDispatcher):
             status=DocumentStatus.QUEUED,
             partition=partition,
             file_id=file_id,
+            filename=task_details["metadata"].get("filename"),
             user_id=task_details["user_id"],
         )
 
@@ -376,6 +379,7 @@ class WorkerDispatcher(IndexingDispatcher):
                             status=DocumentStatus.FAILED,
                             partition=partition,
                             file_id=file_id,
+                            filename=task_details["metadata"].get("filename"),
                             user_id=task_details["user_id"],
                             error=tb,
                             error_reason=error_reason,
@@ -747,6 +751,7 @@ class WorkerDispatcher(IndexingDispatcher):
         status: DocumentStatus,
         partition: str,
         file_id: str | None = None,
+        filename: str | None = None,
         user_id: int | None = None,
         error: str | None = None,
         error_reason: str | None = None,
@@ -763,6 +768,7 @@ class WorkerDispatcher(IndexingDispatcher):
                     status=status,
                     partition=partition,
                     file_id=file_id,
+                    filename=filename,
                     user_id=user_id,
                     error=error,
                     error_reason=error_reason,
@@ -790,43 +796,59 @@ class WorkerDispatcher(IndexingDispatcher):
             return None
 
     async def get_task_state(self, task_id: str) -> str | None:
-        state = await self._call_method(
-            lambda: self._tsm.get_state.remote(task_id),
-            task_description=f"get_state({task_id})",
-        )
-        if state is not None:
-            return state
-        # The actor forgets settled tasks; the durable record outlives it.
         job = await self._durable_job(task_id)
-        return job.status.value if job is not None else None
+        actor_state = None
+        if job is None or job.status not in TERMINAL_TASK_STATES:
+            try:
+                actor_state = await self._call_method(
+                    lambda: self._tsm.get_state.remote(task_id),
+                    task_description=f"get_state({task_id})",
+                )
+            except Exception:
+                if job is None:
+                    raise
+                logger.warning("Failed to read live task state", task_id=task_id)
+        return reconcile_task_state(actor_state, job.status.value if job is not None else None)
 
     async def get_task_error(self, task_id: str) -> str | None:
-        error = await self._call_method(
-            lambda: self._tsm.get_error.remote(task_id),
-            task_description=f"get_error({task_id})",
-        )
-        if error is not None:
-            return error
         job = await self._durable_job(task_id)
-        return job.error if job is not None else None
+        if job is not None and job.status in TERMINAL_TASK_STATES and job.error is not None:
+            return job.error
+        try:
+            error = await self._call_method(
+                lambda: self._tsm.get_error.remote(task_id),
+                task_description=f"get_error({task_id})",
+            )
+        except Exception:
+            if job is None:
+                raise
+            logger.warning("Failed to read live task error", task_id=task_id)
+            error = None
+        return error if error is not None else (job.error if job is not None else None)
 
     async def get_task_error_reason(self, task_id: str) -> str | None:
+        job = await self._durable_job(task_id)
+        if job is not None and job.status in TERMINAL_TASK_STATES and job.error_reason is not None:
+            return job.error_reason
         method_names = getattr(self._tsm, "_ray_actor_method_names", None)
         supports_reason = isinstance(method_names, (frozenset, list, set, tuple)) and (
             "get_error_reason" in method_names
         )
         if supports_reason:
-            reason = await self._call_method(
-                lambda: self._tsm.get_error_reason.remote(task_id),
-                task_description=f"get_error_reason({task_id})",
-            )
+            try:
+                reason = await self._call_method(
+                    lambda: self._tsm.get_error_reason.remote(task_id),
+                    task_description=f"get_error_reason({task_id})",
+                )
+            except Exception:
+                if job is None:
+                    raise
+                logger.warning("Failed to read live task error reason", task_id=task_id)
+                reason = None
             if reason is not None:
                 return reason
-        job = await self._durable_job(task_id)
-        if job is not None and job.error_reason is not None:
-            return job.error_reason
         error = await self.get_task_error(task_id)
-        return extract_task_error_reason(error)
+        return extract_task_error_reason(error) or (job.error_reason if job is not None else None)
 
     async def cancel_task(self, task_id: str) -> bool:
         import ray
@@ -848,7 +870,13 @@ class WorkerDispatcher(IndexingDispatcher):
             task_description=f"set_cancelled_if_active({task_id})",
         )
         if not cancelled:
-            state = await self.get_task_state(task_id)
+            state = await self._call_method(
+                lambda: self._tsm.get_state.remote(task_id),
+                task_description=f"get_state({task_id}) after cancellation claim",
+            )
+            if state is None:
+                job = await self._durable_job(task_id)
+                state = reconcile_task_state(None, job.status.value if job is not None else None)
             if state != "CANCELLED":
                 return False
 
