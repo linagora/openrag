@@ -177,3 +177,21 @@ def test_a_new_breaker_publishes_closed_before_any_transition(monkeypatch):
     module.get_breaker("fresh-breaker")
 
     assert recorded == [("fresh-breaker", 0)]
+
+
+@pytest.mark.parametrize(
+    ("status", "excluded"),
+    [(400, True), (404, True), (408, True), (429, True), (401, False), (403, False), (500, False)],
+)
+def test_a_refused_credential_counts_toward_the_breaker(status: int, excluded: bool) -> None:
+    """A revoked or wrong key fails every call alike. Excluded like any 4xx, it
+    could never open the breaker, and the error-ratio alert ignored it too. Both
+    shapes the breaker sees are checked: the raw httpx error and the wrapped one."""
+    from core.utils.exceptions import InferenceError
+    from services.inference import _circuit_breaker as cb
+
+    request = httpx.Request("POST", "http://provider.invalid/v1/embeddings")
+    raw = httpx.HTTPStatusError("refused", request=request, response=httpx.Response(status, request=request))
+
+    assert cb._is_excluded(raw) is excluded
+    assert cb._is_excluded(InferenceError("refused", status_code=status)) is excluded

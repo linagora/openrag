@@ -28,12 +28,21 @@ _STATE_VALUES = {
 _UNKNOWN_STATE = -1
 
 
+#: 4xx statuses that say the provider will not serve *us* — a revoked, expired
+#: or wrong credential — rather than that one request was bad. They count as
+#: failures: every call fails the same way until an operator fixes the key, and
+#: excluding them left both the breaker and the error-ratio alert silent.
+PROVIDER_AUTH_4XX = frozenset({401, 403})
+
+
 def _is_client_error(exc: Exception) -> bool:
     if isinstance(exc, httpx.HTTPStatusError):
-        return 400 <= exc.response.status_code < 500
-    if isinstance(exc, OpenRAGError):
-        return 400 <= exc.status_code < 500
-    return False
+        status = exc.response.status_code
+    elif isinstance(exc, OpenRAGError):
+        status = exc.status_code
+    else:
+        return False
+    return 400 <= status < 500 and status not in PROVIDER_AUTH_4XX
 
 
 def _is_excluded(exc: Exception) -> bool:

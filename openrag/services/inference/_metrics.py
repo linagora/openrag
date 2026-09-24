@@ -45,6 +45,7 @@ from core.utils.exceptions import (
     InferenceTimeoutError,
     OpenRAGError,
 )
+from services.inference._circuit_breaker import PROVIDER_AUTH_4XX
 
 #: Fallback for a client built outside the factory (tests, scripts): it still
 #: records, and lands in a fixed bucket instead of minting a label value.
@@ -93,7 +94,9 @@ def outcome_for(exc: BaseException) -> str:
     ``metadata.llm_override``, a prompt over the context length — so any user
     could otherwise drive a healthy provider's error ratio up at will. Throttling
     (429) and a provider-side request timeout (408) are the provider struggling,
-    and stay ``error``. The circuit breaker draws the same line (``_is_excluded``).
+    and stay ``error``; so do 401 and 403, a credential the provider refuses,
+    which fails every call alike (``PROVIDER_AUTH_4XX``). The circuit breaker
+    counts 401/403 too, but still excludes 408 and 429 (``_is_excluded``).
     """
     if isinstance(exc, (asyncio.CancelledError, GeneratorExit)):
         return "cancelled"
@@ -107,7 +110,7 @@ def outcome_for(exc: BaseException) -> str:
 
 
 #: 4xx statuses that describe the provider's state, not the request's.
-_PROVIDER_SIDE_4XX = frozenset({408, 429})
+_PROVIDER_SIDE_4XX = frozenset({408, 429}) | PROVIDER_AUTH_4XX
 
 
 def _is_rejected_request(exc: BaseException) -> bool:

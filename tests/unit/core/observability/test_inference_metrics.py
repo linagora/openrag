@@ -434,7 +434,9 @@ def _streaming_client(lines: list[str], monkeypatch: pytest.MonkeyPatch, calls: 
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("status", "outcome"), [(400, "rejected"), (429, "error"), (503, "error")])
+@pytest.mark.parametrize(
+    ("status", "outcome"), [(400, "rejected"), (401, "error"), (403, "error"), (429, "error"), (503, "error")]
+)
 async def test_a_refused_stream_is_classified_by_status(
     monkeypatch: pytest.MonkeyPatch, status: int, outcome: str
 ) -> None:
