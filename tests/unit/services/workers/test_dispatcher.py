@@ -942,6 +942,50 @@ async def test_dispatch_indexing_keeps_the_dedup_error_when_no_task_is_indexing_
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "lookup_failure",
+    [
+        MagicMock(side_effect=ActorUnavailableError("actor is restarting", actor_id=None)),
+        AsyncMock(side_effect=TimeoutError()),
+    ],
+    ids=["actor-unavailable", "timeout"],
+)
+async def test_dispatch_indexing_keeps_the_dedup_error_when_the_task_lookup_fails(lookup_failure: Any) -> None:
+    """The lookup only picks the 409's label; its failure must not turn it into a 503 or a 500."""
+    from core.utils.exceptions import ConflictError
+    from services.workers.dispatcher import WorkerDispatcher
+
+    repo = _document_repo()
+    repo.claim_content_sha256.return_value = "file-1"
+    tsm = _task_state_manager()
+    tsm.get_active_indexing_task_for_file.remote = lookup_failure
+    dispatcher = WorkerDispatcher(
+        pool=_pool_with_ref(object()),
+        task_state_manager=tsm,
+        completion_tracker=_completion_tracker(),
+        vector_store=_vector_store(),
+        document_repo=repo,
+        workspace_repo=_workspace_repo(),
+        collection="default",
+        timeout=1,
+    )
+
+    with pytest.raises(ConflictError) as caught:
+        await dispatcher.dispatch_indexing(
+            path="/data/report.txt",
+            metadata={"file_id": "file-1", "content_sha256": "abc123"},
+            partition="tenant-a",
+            user={"id": 42},
+            workspace_ids=None,
+            replace=False,
+        )
+
+    assert caught.value.code == "DOCUMENT_CONTENT_EXISTS"
+    assert caught.value.extra["existing_file_id"] == "file-1"
+    lookup_failure.assert_called_once_with(partition="tenant-a", file_id="file-1")
+
+
+@pytest.mark.asyncio
 async def test_dispatch_indexing_reports_a_cancelled_refusal_as_such() -> None:
     from services.workers.dispatcher import WorkerDispatcher
 

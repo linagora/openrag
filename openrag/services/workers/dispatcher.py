@@ -198,16 +198,25 @@ class WorkerDispatcher(IndexingDispatcher):
     async def _active_indexing_task_for_file(self, *, partition: str, file_id: str) -> str | None:
         """Return the task indexing ``file_id`` right now, or ``None``.
 
-        ``None`` also covers an older TaskStateManager without the lookup: the
-        caller then keeps the label it already had.
+        ``None`` also covers an older TaskStateManager without the lookup, and a
+        lookup that failed: the caller then keeps the label it already had. The
+        submission is refused either way, so an unavailable or slow actor must
+        not turn that 409 into a 503 or a 500.
         """
         remote = _remote_actor_method(self._tsm, "get_active_indexing_task_for_file")
         if remote is None:
             return None
-        task_id = await self._call_method(
-            lambda: remote(partition=partition, file_id=file_id),
-            task_description=f"get_active_indexing_task_for_file({partition}, {file_id})",
-        )
+        try:
+            task_id = await self._call_method(
+                lambda: remote(partition=partition, file_id=file_id),
+                task_description=f"get_active_indexing_task_for_file({partition}, {file_id})",
+            )
+        except Exception as exc:
+            logger.bind(partition=partition, file_id=file_id).warning(
+                "Could not look up the task indexing this file; keeping the content conflict",
+                error=str(exc),
+            )
+            return None
         return task_id if isinstance(task_id, str) and task_id else None
 
     async def _begin_worker_submission(self, task_id: str) -> bool:
