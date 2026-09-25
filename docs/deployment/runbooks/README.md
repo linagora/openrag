@@ -51,13 +51,35 @@ assumed:
 | `OpenRagGpuSaturated` | A GPU exporter on Kubernetes, and a query that spans both metric namespaces. |
 | `OpenRagCanaryFailing` | The synthetic canary. A canary nobody alerts on manufactures confidence instead of providing it, so the canary is not finished until this rule exists. |
 
-## Limitation: Ray Serve multi-replica
+## Topologies where alerts cannot fire
 
-Every rule reads per-process counters. With `ENABLE_RAY_SERVE=true` and
-`num_replicas > 1`, a scrape reaches one replica at random, so rates and gauges are a
-random 1/N sample that appears to reset between scrapes — these alerts will both miss real
-conditions and fire on phantom ones. Run `num_replicas=1`, or treat them as advisory,
-until per-replica scraping exists.
+The rules read two scrape targets, and each series lives on exactly one of them:
+
+- **API `/metrics`** (`prometheus_client`): `openrag_ingest_tasks`, the HTTP metrics,
+  `openrag_retrieval_orphan_chunks_dropped_total`, and — on the plain uvicorn API only —
+  the API's own inference calls and breaker states.
+- **Ray's metrics agent** (`ray.util.metrics`, `core/observability/ray_metrics.py`):
+  `openrag_ingest_documents_total`, `openrag_ingest_last_parse_completion_timestamp_seconds`,
+  and every inference call and breaker state recorded inside a Ray actor — the indexing
+  workers, and under Ray Serve the API replicas too (`core/observability/inference_metrics.py`).
+
+A series nobody scrapes is absent, and an absent series never breaches a threshold, so
+the alerts that depend on it stay silent **without anything saying so** —
+`OpenRagTargetDown` only covers targets that are configured and failing, not targets
+that were never configured.
+
+| Topology | Not scraped | Alerts that cannot fire |
+| --- | --- | --- |
+| **Helm, `ray.enabled=false`** (default: Ray embedded in the API pod) | Everything on the Ray agent. It listens on no fixed port and the chart renders no monitor for it (`ray.metrics.podMonitor.enabled` is refused without `ray.enabled`). | `OpenRagIngestStalled`, `OpenRagIngestFailureRate`. `OpenRagInferenceProviderDown` and `OpenRagCircuitBreakerOpen` see only the API's calls (chat, query embedding), never indexing's. |
+| **Helm, `ray.enabled=true`, uvicorn API** | The Ray agent, unless `ray.metrics.podMonitor.enabled=true` (default `false`). | Without the PodMonitor, as the row above. |
+| **Helm, Ray Serve** (`ray.enabled=true` + `ENABLE_RAY_SERVE=true`, e.g. `values-linagora.yaml`) | The API's `/metrics`: the chart renders no API `ServiceMonitor` under Ray Serve (`monitoring.bundled` skips it; enabling it explicitly fails the render), since each replica keeps its own registry behind one proxy. The Ray agent too, unless `ray.metrics.podMonitor.enabled=true`. | `OpenRagBacklogGrowing` and `OpenRagIngestStalled` (both read `openrag_ingest_tasks`), `OpenRagCatalogDriftDetected`, and `OpenRagTargetDown` for the API (there is no API target to be down). Without the PodMonitor, also `OpenRagIngestFailureRate`, `OpenRagInferenceProviderDown` and `OpenRagCircuitBreakerOpen` — nothing is scraped at all. |
+| **Compose** | The Ray agent, unless the monitoring overlay (`monitoring.docker-compose.yaml`) is used: it pins `RAY_METRICS_EXPORT_PORT` so the `ray` scrape job can reach it. Ray otherwise picks a random port. | Without the overlay's pinned port, as the first row. |
+
+Wherever a Ray-side series *is* scraped from more than one process, it is summed across
+them, which is correct for counters. Scraping a Ray Serve API through its proxy would not
+be: a scrape reaches one replica at random, so rates and gauges become a random 1/N
+sample that appears to reset between scrapes. That is why the chart refuses to render
+that target rather than render a misleading one.
 
 ## Adding an alert
 

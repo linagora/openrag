@@ -30,13 +30,13 @@
 # and a recording rule or alert that groups by one reintroduces the cardinality
 # the metric design excluded. tests/unit/infra/test_alert_rules.py enforces it.
 #
-# KNOWN LIMITATION — Ray Serve multi-replica. Every expression below reads
-# per-process counters. With ENABLE_RAY_SERVE=true and num_replicas > 1
-# (api/main.py), a scrape reaches one replica at random, so rates and gauges are
-# a random 1/N sample that appears to reset between scrapes. These rules will
-# both miss real conditions and fire on phantom ones under that topology. Run
-# num_replicas=1, or treat the alerts as advisory, until per-replica scraping
-# exists.
+# KNOWN LIMITATION — topologies that scrape only half the series. Every
+# series lives either on the API's /metrics or on Ray's metrics agent, and a
+# deployment that does not scrape one of them leaves the alerts reading it
+# silently inert: Helm with the default embedded Ray scrapes no Ray-side series
+# (IngestStalled, IngestFailureRate cannot fire); Helm under Ray Serve scrapes
+# no API /metrics (BacklogGrowing, IngestStalled, CatalogDriftDetected cannot
+# fire). docs/deployment/runbooks/README.md has the table per topology.
 
 groups:
   # ── Ingestion ────────────────────────────────────────────────────────────
