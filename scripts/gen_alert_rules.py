@@ -50,7 +50,9 @@ HEADER = """# GENERATED FILE — DO NOT EDIT.
 #: The chart links runbooks at the release it deploys (v<appVersion>). A Compose
 #: install runs from a git checkout, so its copy links main, and a version bump
 #: does not rewrite this file.
-COMPOSE_OVERRIDES = ("monitoring.prometheusRule.runbookBaseUrl=https://github.com/linagora/openrag/blob/main/docs/deployment/runbooks",)
+COMPOSE_OVERRIDES = (
+    "monitoring.prometheusRule.runbookBaseUrl=https://github.com/linagora/openrag/blob/main/docs/deployment/runbooks",
+)
 
 
 def render(overrides: Sequence[str] = ()) -> str:
