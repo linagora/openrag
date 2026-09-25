@@ -400,7 +400,7 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "max((sum by (provider) (increase({__name__=~\"(ray_)?openrag_inference_requests_total\", outcome=~\"error|timeout\"}[10m])) or 0 * sum by (provider) (increase({__name__=~\"(ray_)?openrag_inference_requests_total\"}[10m]))) / (sum by (provider) (increase({__name__=~\"(ray_)?openrag_inference_requests_total\"}[10m])) > 0))",
+          "expr": "max((sum by (provider) (increase({__name__=~\"(ray_)?openrag_inference_requests_total\", outcome=~\"error|timeout\"}[10m])) or 0 * sum by (provider) (increase({__name__=~\"(ray_)?openrag_inference_requests_total\", outcome=~\"success|error|timeout\"}[10m]))) / (sum by (provider) (increase({__name__=~\"(ray_)?openrag_inference_requests_total\", outcome=~\"success|error|timeout\"}[10m])) > 0))",
           "legendFormat": "Worst endpoint",
           "refId": "A",
           "range": true
@@ -1447,7 +1447,7 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "(sum by (provider) (rate({__name__=~\"(ray_)?openrag_inference_requests_total\", outcome=~\"error|timeout\"}[$__rate_interval])) or 0 * sum by (provider) (rate({__name__=~\"(ray_)?openrag_inference_requests_total\"}[$__rate_interval]))) / (sum by (provider) (rate({__name__=~\"(ray_)?openrag_inference_requests_total\"}[$__rate_interval])) > 0)",
+          "expr": "(sum by (provider) (rate({__name__=~\"(ray_)?openrag_inference_requests_total\", outcome=~\"error|timeout\"}[$__rate_interval])) or 0 * sum by (provider) (rate({__name__=~\"(ray_)?openrag_inference_requests_total\", outcome=~\"success|error|timeout\"}[$__rate_interval]))) / (sum by (provider) (rate({__name__=~\"(ray_)?openrag_inference_requests_total\", outcome=~\"success|error|timeout\"}[$__rate_interval])) > 0)",
           "legendFormat": "{{provider}}",
           "refId": "A",
           "range": true
