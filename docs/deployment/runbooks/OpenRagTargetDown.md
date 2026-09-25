@@ -11,7 +11,7 @@
 > actually loaded:
 >
 > ```
-> kubectl -n <namespace> get prometheusrule <release>-alerts -o yaml
+> kubectl -n <namespace> get prometheusrule openrag-alerts -o yaml
 > ```
 
 ```

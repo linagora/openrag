@@ -101,9 +101,9 @@ monitoring:
     # Helm does not create it, and installs into a namespace it does not own
     # need the rights to write there.
     namespace: ""
-  # Alert rules, as a PrometheusRule. They come from rules/openrag-alerts.yaml,
-  # the same file the Compose stack loads, so both deployments alert on one
-  # definition.
+  # Alert rules, as a PrometheusRule. They come from rules/openrag-alerts.yaml.tpl,
+  # the template the Compose stack's copy is generated from
+  # (scripts/gen_alert_rules.py), so both deployments alert on one definition.
   prometheusRule:
     # Needs the monitoring.coreos.com CRDs (kube-prometheus-stack or a
     # standalone Prometheus Operator). Off by default: creating the CRD object

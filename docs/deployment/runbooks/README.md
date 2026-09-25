@@ -1,7 +1,7 @@
 # Alert runbooks
 
 One page per alert, addressed by the `runbook_url` annotation on the rule itself. The
-rules are defined once in `infra/charts/openrag-stack/rules/openrag-alerts.yaml` and
+rules are defined once in `infra/charts/openrag-stack/rules/openrag-alerts.yaml.tpl` and
 delivered two ways — wrapped in a `PrometheusRule` by the chart, loaded via `rule_files`
 by the Compose monitoring overlay.
 
@@ -83,8 +83,13 @@ that target rather than render a misleading one.
 
 ## Adding an alert
 
-1. Add the rule to `infra/charts/openrag-stack/rules/openrag-alerts.yaml`, with
+1. Add the rule to `infra/charts/openrag-stack/rules/openrag-alerts.yaml.tpl`, with
    `severity`, `summary`, `description` and `runbook_url` annotations.
-2. Add the page here, named exactly after the alert.
-3. `tests/unit/infra/test_alert_rules.py` enforces both, plus that the expression uses
-   only known metric names and no caller-controlled label.
+2. Regenerate the Compose copy with `uv run python scripts/gen_alert_rules.py` (needs
+   `helm`). `infra/compose/prometheus/rules/openrag-alerts.yaml` is its output and must
+   never be edited by hand; CI runs `gen_alert_rules.py --check` and fails on any drift.
+3. Add the page here, named exactly after the alert.
+4. Add its scenarios to `tests/unit/infra/alert_rules.promtool.yaml`, which replays
+   synthetic series through the generated rules.
+5. `tests/unit/infra/test_alert_rules.py` enforces the annotations and the page, plus
+   that the expression uses only known metric names and no caller-controlled label.
