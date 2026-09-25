@@ -208,7 +208,7 @@ serve annotation-based discovery instead; see
 On a cluster with no monitoring of its own, `monitoring.bundled: true` installs
 kube-prometheus-stack in the release: Prometheus Operator, Prometheus,
 Alertmanager, Grafana, node-exporter and kube-state-metrics. It also turns on the
-dashboard ConfigMaps, the API `ServiceMonitor` and the Ray `PodMonitor`:
+dashboard ConfigMaps, OpenRAG's alert rules, the API `ServiceMonitor` and the Ray `PodMonitor`:
 
 ```yaml
 monitoring:

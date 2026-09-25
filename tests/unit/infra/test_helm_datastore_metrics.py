@@ -166,6 +166,8 @@ def _chart(tmp_path: Path, *subcharts: str) -> Path:
     chart = tmp_path / "openrag-stack"
     shutil.copytree(TEMPLATES, chart / "templates")
     shutil.copytree(CHART_DIR / "dashboards", chart / "dashboards")
+    # monitoring.bundled also renders the alert rules, read from rules/.
+    shutil.copytree(CHART_DIR / "rules", chart / "rules")
     shutil.copy(CHART_DIR / "values.yaml", chart / "values.yaml")
     meta = yaml.safe_load((CHART_DIR / "Chart.yaml").read_text(encoding="utf-8"))
     meta["dependencies"] = [d for d in meta["dependencies"] if d["name"] in subcharts]

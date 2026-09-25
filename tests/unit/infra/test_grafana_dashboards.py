@@ -282,3 +282,42 @@ def test_query_reads_only_declared_metrics(where: str, expr: str):
     for name in set(METRIC_NAME.findall(expr)):
         base = HISTOGRAM_SERIES.sub("", name)
         assert name in declared or base in declared, f"{where} reads {name}, which nothing in openrag/ declares"
+
+
+INFERENCE_SELECTOR = re.compile(r"openrag_inference_requests_total\"?\s*(?:,\s*)?([^}]*)\}")
+OUTCOME_MATCHER = re.compile(r'outcome=~"([^"]+)"')
+
+
+def _provider_down_outcomes() -> tuple[str, str]:
+    """The numerator and denominator outcome sets ``OpenRagInferenceProviderDown`` pages on."""
+    import yaml
+
+    rules = yaml.safe_load((REPO / "infra/compose/prometheus/rules/openrag-alerts.yaml").read_text(encoding="utf-8"))
+    (expr,) = [
+        rule["expr"]
+        for group in rules["groups"]
+        for rule in group["rules"]
+        if rule.get("alert") == "OpenRagInferenceProviderDown"
+    ]
+    numerator, denominator, *_ = OUTCOME_MATCHER.findall(expr)
+    return numerator, denominator
+
+
+@pytest.mark.parametrize(
+    ("where", "expr"),
+    [(w, e) for w, e in QUERIES if "openrag_inference_requests_total" in e and "/" in e],
+)
+def test_inference_ratios_judge_the_outcomes_the_alert_judges(where: str, expr: str):
+    """A ratio over every outcome counts ``cancelled``, ``rejected`` and
+    ``circuit_open`` calls, which say nothing about the provider: a provider
+    failing every call it served reads below ``OpenRagInferenceProviderDown``'s
+    threshold on the dashboard while the alert fires. Every selector in a
+    ratio, the zero fallback included, carries one of the alert's two sets."""
+    numerator, denominator = _provider_down_outcomes()
+    selectors = INFERENCE_SELECTOR.findall(expr)
+    assert selectors, f"{where}: no inference selector parsed from {expr}"
+    for selector in selectors:
+        outcomes = OUTCOME_MATCHER.findall(selector)
+        assert outcomes in ([numerator], [denominator]), (
+            f"{where}: selector {{{selector}}} should filter outcome on {numerator!r} or {denominator!r}"
+        )
