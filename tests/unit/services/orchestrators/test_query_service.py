@@ -1399,6 +1399,7 @@ async def test_chat_attachments_outside_workspace_scope_to_zero_files():
         model_name="m",
     )
     calls = retrieval.retrieve_multi_calls
+    assert calls
     assert all(call["filter_params"] == {"file_id": []} for call in calls)
     assert res["extra"]["attachments"] == []
 
