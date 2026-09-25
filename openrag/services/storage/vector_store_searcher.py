@@ -159,6 +159,13 @@ class VectorStoreSearcher(RetrievalSearcher):
             chunks.extend(c for c in surrounding if c.id not in seen_ids)
         return chunks
 
+    async def get_surrounding_chunks(
+        self,
+        chunks: list[Chunk],
+        allowed_file_ids: list[str] | None = None,
+    ) -> list[Chunk]:
+        return await self._fetch_surrounding(chunks, allowed_file_ids=allowed_file_ids)
+
     async def get_related_chunks(
         self,
         partition: str,
