@@ -103,6 +103,48 @@ class TestExtractAndStripSourcesBlock:
         assert clean == "Answer text"
         assert citations == set()
 
+    @pytest.mark.parametrize(
+        "tag",
+        [
+            "`[Sources: none]`",
+            "**[Sources: none]**",
+            "*[Sources: none]*.",
+            "_[Sources: none]_",
+            "**Sources:** none",
+        ],
+    )
+    @pytest.mark.parametrize("separator", [" ", "\n", "\n\n"])
+    def test_sources_none_wrapped_in_markdown(self, tag, separator):
+        clean, citations = extract_and_strip_sources_block(f"Test test.{separator}{tag}")
+        assert clean == "Test test."
+        assert citations == set()
+
+    @pytest.mark.parametrize(
+        "tag",
+        [
+            "`[Sources: 1, 3]`",
+            "**[Sources: 1, 3]**",
+            "*[Sources: 1, 3]*",
+            "**Sources:** 1, 3",
+        ],
+    )
+    def test_sources_numbers_wrapped_in_markdown(self, tag):
+        clean, citations = extract_and_strip_sources_block(f"Answer text\n{tag}")
+        assert clean == "Answer text"
+        assert citations == {1, 3}
+
+    def test_markdown_in_answer_body_untouched_by_tag_stripping(self):
+        text = "**Important**: run `make`\n[Sources: 2]"
+        clean, citations = extract_and_strip_sources_block(text)
+        assert clean == "**Important**: run `make`"
+        assert citations == {2}
+
+    def test_code_span_tag_inline_in_prose_preserved(self):
+        text = "Use the format `[Sources: 1, 3]` at the very end of your response."
+        clean, citations = extract_and_strip_sources_block(text)
+        assert clean == text
+        assert citations is None
+
     def test_sources_numbers_case_insensitive(self):
         text = "Answer text\n[sources: 1, 3]"
         clean, citations = extract_and_strip_sources_block(text)
@@ -432,6 +474,21 @@ class TestStreamWithSourceFiltering:
         assert _parse_finish_sources(result) == []
         # Explicit "[Sources: none]" is a reported (empty) citation set, not a
         # missing tag — distinguishable from case 3 below via citations_reported.
+        assert _parse_finish_extra(result)["citations_reported"] is True
+
+    @pytest.mark.asyncio
+    async def test_backticked_sources_none_split_across_chunks_is_stripped(self):
+        lines = [
+            _make_chunk("Test test. `"),
+            _make_chunk("[Sources"),
+            _make_chunk(": none]"),
+            _make_chunk("`"),
+            _make_finish(),
+            DONE_LINE,
+        ]
+        result = await _collect(stream_with_source_filtering(_fake_stream(lines), self.SOURCES, "test-model"))
+        assert _collect_content(result) == "Test test."
+        assert _parse_finish_sources(result) == []
         assert _parse_finish_extra(result)["citations_reported"] is True
 
     @pytest.mark.asyncio
