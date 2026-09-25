@@ -53,9 +53,7 @@ def test_chart_inference_images_have_an_explicit_version(path: Path):
 def test_chart_vllm_engines_share_one_version(path: Path):
     """vlm is left out: it stays on the version it was validated with."""
     tags = {
-        spec["tag"]
-        for spec in _engines(path)
-        if spec["repository"] == "vllm/vllm-openai" and spec["name"] != "vlm"
+        spec["tag"] for spec in _engines(path) if spec["repository"] == "vllm/vllm-openai" and spec["name"] != "vlm"
     }
     assert len(tags) <= 1, f"{path.name}: {sorted(tags)}"
 
@@ -95,3 +93,14 @@ def test_every_install_mode_defaults_to_the_same_embedder():
 
     assert len(compose_defaults) == 2, "expected the vllm-gpu and vllm-cpu defaults"
     assert {name: value for name, value in defaults.items() if value != expected} == {}
+
+
+def test_the_quick_start_env_file_is_the_compose_template():
+    """The Quick Start page renders ``docs/assets/env_example.env`` as
+    ``infra/compose/.env``. It is a copy, so it drifts: a new install that
+    follows the docs got the previous default embedder while every other
+    default had moved to Qwen."""
+    docs_copy = ROOT / "docs" / "assets" / "env_example.env"
+    assert docs_copy.read_bytes() == ENV_EXAMPLE.read_bytes(), (
+        "run: cp infra/compose/.env.example docs/assets/env_example.env"
+    )
