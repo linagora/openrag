@@ -520,6 +520,8 @@ def test_target_down_pages_for_openrags_targets_only(job: str, pages: bool, bund
 _CHART_SETS = (
     "env.secrets.AUTH_TOKEN=or-unit-test-token-0123",
     "postgresql.auth.password=unit-test-password-0123",
+    "minioCredentials.accessKey=unit-test-minio",
+    "minioCredentials.secretKey=unit-test-minio-secret-0123",
     "monitoring.prometheusRule.enabled=true",
     "ray.enabled=true",
     "env.config.RAY_ADDRESS=ray://openrag-raycluster-head-svc:10001",
