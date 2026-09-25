@@ -13,13 +13,16 @@ logger = get_logger()
 
 _EMAIL_RE = re.compile(r"(?<![\w.+-])[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}(?![\w.-])")
 # Models copy the prompt's markdown literally (`[Sources: none]` in backticks,
-# **Sources:** in bold), so emphasis/code marks around the tag are part of it.
+# **Sources:** in bold) and also emphasize the value inside the brackets
+# ([Sources: **none**], [Sources: **1, 3**], [Sources: **1**, **3**]), so
+# emphasis/code marks around the tag and around its value are part of it.
+_MD_MARKS = "*_`"
 _SOURCES_NONE_RE = re.compile(
-    r"\n?[ \t]*[*_`]*\[?Sources?\]?[*_]*\s*:\s*[*_]*\[?\s*none\s*\]?[.\s*_`]*?(?=\n|$)",
+    r"\n?[ \t]*[*_`]*\[?Sources?\]?[*_]*\s*:\s*[*_`]*+\[?\s*[*_`]*none[*_`]*\s*\]?[.\s*_`]*?(?=\n|$)",
     re.IGNORECASE,
 )
 _SOURCES_NUMS_RE = re.compile(
-    r"\n?[ \t]*[*_`]*\[?Sources?\]?[*_]*\s*:\s*[*_]*\[?([\d,\s]+)\]?[.\s*_`]*?(?=\n|$)",
+    r"\n?[ \t]*[*_`]*\[?Sources?\]?[*_]*\s*:\s*[*_`]*+\[?([,\s*_`]*\d[\d,\s*_`]*)\]?[.\s*_`]*?(?=\n|$)",
     re.IGNORECASE,
 )
 _INLINE_SOURCE_NUMS_RE = re.compile(
@@ -48,7 +51,8 @@ def _strip_sources_tags(text: str, *, include_inline_markers: bool = True) -> tu
         patterns.extend((_INLINE_SOURCE_NUMS_RE, _UNCLOSED_SOURCE_NUMS_RE))
     for pattern in patterns:
         for match in pattern.finditer(text):
-            cited.update(int(n.strip()) for n in match.group(1).split(",") if n.strip().isdigit())
+            numbers = (n.strip().strip(_MD_MARKS).strip() for n in match.group(1).split(","))
+            cited.update(int(n) for n in numbers if n.isdigit())
     saw_none = bool(_SOURCES_NONE_RE.search(text))
     cleaned = _SOURCES_NUMS_RE.sub("", text)
     cleaned = _SOURCES_NONE_RE.sub("", cleaned)
