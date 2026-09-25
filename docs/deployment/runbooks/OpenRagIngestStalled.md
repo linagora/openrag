@@ -65,6 +65,20 @@ curl -s -H "Authorization: Bearer $ADMIN_TOKEN" "$OPENRAG/queue/tasks?task_statu
 `openrag_ingest_last_parse_completion_timestamp_seconds` starts advancing again and the
 `QUEUED` gauge drains. The alert resolves on its own once a parse completes.
 
+## Tuning: the idle window must exceed your longest normal parse
+
+The rule sees parse *completions*, not parses in progress. One document that
+legitimately takes longer than the idle window — a long scanned PDF on a single GPU
+worker, where Marker's own timeout is an hour — with anything queued behind it reads
+exactly like a wedged pool, and pages at the default 12 minutes while the parse is
+healthy. It clears as soon as that parse lands.
+
+Set `monitoring.prometheusRule.thresholds.ingestIdleSeconds` above the longest parse
+that is normal on the deployment. On a single-GPU Marker deployment that ingests long
+scans, that is well above 12 minutes. If this fired and the Ray dashboard shows a parse
+still making progress, this is the cause: raise the threshold rather than restarting
+anything.
+
 ## Known blind spot
 
 If **no** pool has ever completed a parse, the gauge is absent and this alert cannot

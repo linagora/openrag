@@ -126,7 +126,13 @@ monitoring:
     # synthetic traffic, not yours — expect to move them in the first weeks.
     # `for` durations are the other half of each decision; see below.
     thresholds:
-      ingestIdleSeconds: ""    # 720 — no parse completed for this long = stalled
+      # 720 — no parse completed for this long, with work queued = stalled.
+      # Must exceed the longest NORMAL parse on this deployment: the rule sees
+      # completions only, so one legitimately long parse (a large scanned PDF on
+      # a single-GPU Marker worker; Marker's timeout is 3600s) pages while it
+      # runs. Single-GPU Marker deployments: set it above the expected longest
+      # parse.
+      ingestIdleSeconds: ""
       ingestFailureRatio: ""   # 0.25 — share of terminal documents that failed
       ingestVolumeFloor: ""    # 5 — terminal documents in 15m before judging the ratio
       backlogDepth: ""         # 50 — queue depth below which growth is not worth alerting on

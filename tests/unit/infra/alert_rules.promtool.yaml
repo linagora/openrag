@@ -540,6 +540,34 @@ tests:
               description: "20 task(s) are QUEUED and no parser pool has completed a parse for over 12 minutes. Uploads are being accepted and never indexed."
               runbook_url: "https://github.com/linagora/openrag/blob/main/docs/deployment/runbooks/OpenRagIngestStalled.md"
 
+  - name: "documented limitation: one parse longer than the idle window pages while it runs"
+    # A single GPU worker, one 20-minute scanned PDF in progress, three documents
+    # queued behind it. Nothing is wrong — Marker's own timeout is an hour — but
+    # no parse *completes* for 20 minutes, and completion is all this rule can
+    # see. At the default 12m window it fires at 14m and clears when the parse
+    # lands. Not a bug to fix in the rule: the idle window must exceed the
+    # longest normal parse on the deployment (thresholds.ingestIdleSeconds).
+    interval: 1m
+    input_series:
+      - series: 'openrag_ingest_tasks{state="QUEUED"}'
+        values: "3x30"
+      - series: 'openrag_ingest_last_parse_completion_timestamp_seconds{pool="marker"}'
+        values: "0x19 1200x11"
+    alert_rule_test:
+      - eval_time: 16m
+        alertname: OpenRagIngestStalled
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              state: QUEUED
+            exp_annotations:
+              summary: "Ingestion is stalled — documents are queued and nothing is completing"
+              description: "3 task(s) are QUEUED and no parser pool has completed a parse for over 12 minutes. Uploads are being accepted and never indexed."
+              runbook_url: "https://github.com/linagora/openrag/blob/main/docs/deployment/runbooks/OpenRagIngestStalled.md"
+      - eval_time: 21m
+        alertname: OpenRagIngestStalled
+        exp_alerts: []
+
   - name: "one failed call on a quiet instance is not a provider outage"
     interval: 1m
     input_series:

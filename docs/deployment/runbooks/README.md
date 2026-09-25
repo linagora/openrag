@@ -28,6 +28,17 @@ Start with `OpenRagTargetDown` whenever several alerts look wrong at once, and w
 `OpenRagIngestStalled` before `OpenRagBacklogGrowing`: "nothing is completing" and
 "completing too slowly" have different fixes and the first masks the second.
 
+## Tuning before go-live
+
+The thresholds are chart values (`monitoring.prometheusRule.thresholds`); the defaults
+were measured on synthetic traffic. One must be checked against the deployment before
+alerts are routed to anyone: **`ingestIdleSeconds` (default 720) must exceed the longest
+normal parse.** `OpenRagIngestStalled` sees parse completions only, so a single parse
+longer than the window — a long scanned PDF on a single-GPU Marker worker, whose timeout
+is 3600s — pages while it runs, whenever anything is queued behind it. On single-GPU
+Marker deployments set it above the expected longest parse. See
+[OpenRagIngestStalled](OpenRagIngestStalled.md#tuning-the-idle-window-must-exceed-your-longest-normal-parse).
+
 ## Not yet written
 
 Three alerts named in the observability plan have no rule yet, because nothing exports
