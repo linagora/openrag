@@ -175,6 +175,8 @@ def _isolated_chart(tmp_path: Path) -> Path:
     chart = tmp_path / "openrag-stack"
     shutil.copytree(CHART_DIR / "templates", chart / "templates")
     shutil.copytree(DASHBOARDS, chart / "dashboards")
+    # monitoring.bundled also renders the alert rules, read from rules/.
+    shutil.copytree(CHART_DIR / "rules", chart / "rules")
     shutil.copy(CHART_DIR / "values.yaml", chart / "values.yaml")
     meta = yaml.safe_load((CHART_DIR / "Chart.yaml").read_text(encoding="utf-8"))
     meta.pop("dependencies", None)
@@ -207,6 +209,25 @@ def test_nothing_is_rendered_by_default(tmp_path: Path):
     assert result.returncode == 0, result.stderr
     assert not _dashboard_configmaps(result.stdout)
     assert not _objects(result.stdout, "ServiceMonitor")
+
+
+@requires_helm
+def test_bundled_renders_the_alert_rules_and_refuses_a_chart_without_them(tmp_path: Path):
+    """monitoring.bundled loads OpenRAG's alert rules. A chart copied without
+    rules/ must fail, not render a PrometheusRule holding no rules."""
+    chart = _isolated_chart(tmp_path)
+    result = _render(chart, "--set", "monitoring.bundled=true", *METRICS_TOKEN)
+
+    assert result.returncode == 0, result.stderr
+    rules = _objects(result.stdout, "PrometheusRule")
+    assert len(rules) == 1
+    assert rules[0]["spec"]["groups"], "the PrometheusRule holds no rule groups"
+
+    shutil.rmtree(chart / "rules")
+    result = _render(chart, "--set", "monitoring.bundled=true", *METRICS_TOKEN)
+
+    assert result.returncode != 0
+    assert "rules/openrag-alerts.yaml.tpl" in result.stderr
 
 
 @requires_helm
