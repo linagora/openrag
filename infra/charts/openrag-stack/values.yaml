@@ -409,6 +409,21 @@ postgresProvisioning:
     backoffLimit: 3
     hookDeletePolicy: before-hook-creation,hook-succeeded
 
+# === MinIO credentials ===
+# Root credentials of the bundled MinIO. The chart writes them to the Secret
+# named by milvus.minio.existingSecret, which MinIO and every Milvus component
+# read, so they stay out of the Milvus ConfigMap. Required while the bundled
+# MinIO is enabled: no value published by this project (such as "minioadmin"),
+# and a secret key of at least 12 characters (templates/secrets-env.yaml).
+# Pass them from a values file kept out of git.
+minioCredentials:
+  # false: create that Secret yourself, with the keys `accesskey` and
+  # `secretkey` (External Secrets, Vault, sealed-secrets...). The chart then
+  # renders none and can't check the values.
+  create: true
+  accessKey: ""
+  secretKey: ""
+
 # === Milvus ===
 milvus:
   enabled: true
@@ -427,7 +442,6 @@ milvus:
   pulsarv3: { enabled: false }
   woodpecker: { enabled: true }
   streaming: { enabled: true }
-  indexNode: { enabled: false }
   minio:
     mode: distributed
     replicas: 3
@@ -441,6 +455,16 @@ milvus:
     image:
       repository: pgsty/silo
       tag: RELEASE.2026-09-16T00-00-00Z@sha256:635197cb9f36d01bee221d34d1c7d7960f6a95c48b0b6c01d99cd13bdae51a46
+    # MinIO reads its credentials from this Secret, rendered from
+    # minioCredentials above. Spelled out rather than derived because
+    # sub-chart values can't be templated. The extraEnv entries below reuse it
+    # through a YAML anchor, which an override in another values file doesn't
+    # follow: rename it there too, or the install fails.
+    existingSecret: &minioCredentialsSecret openrag-minio-credentials
+    # Leave both empty: the Milvus chart copies them into its ConfigMap in
+    # plain text, so the install fails when they are set. Use minioCredentials.
+    accessKey: ""
+    secretKey: ""
     persistence:
       enabled: true
       size: 20Gi
@@ -451,10 +475,34 @@ milvus:
       enabled: true
       size: 10Gi
       storageClass: *storageClass
+  # Every component that runs Milvus reads the MinIO credentials from the same
+  # Secret. Environment variables override Milvus's config file
+  # (MINIO_ACCESS_KEY_ID is minio.accessKeyID), as in the compose stack.
+  # `optional` lets the pods start without the Secret, for external S3.
+  # Overriding a component's extraEnv replaces this list: keep both entries,
+  # or the install fails (templates/secrets-env.yaml).
+  standalone:
+    extraEnv: &minioCredentialsEnv
+      - name: MINIO_ACCESS_KEY_ID
+        valueFrom:
+          secretKeyRef: { name: *minioCredentialsSecret, key: accesskey, optional: true }
+      - name: MINIO_SECRET_ACCESS_KEY
+        valueFrom:
+          secretKeyRef: { name: *minioCredentialsSecret, key: secretkey, optional: true }
   proxy:
+    extraEnv: *minioCredentialsEnv
     service:
       type: ClusterIP
       port: 19530
+  mixCoordinator: { extraEnv: *minioCredentialsEnv }
+  rootCoordinator: { extraEnv: *minioCredentialsEnv }
+  queryCoordinator: { extraEnv: *minioCredentialsEnv }
+  dataCoordinator: { extraEnv: *minioCredentialsEnv }
+  indexCoordinator: { extraEnv: *minioCredentialsEnv }
+  queryNode: { extraEnv: *minioCredentialsEnv }
+  dataNode: { extraEnv: *minioCredentialsEnv }
+  indexNode: { enabled: false, extraEnv: *minioCredentialsEnv }
+  streamingNode: { extraEnv: *minioCredentialsEnv }
   # Every Milvus component already serves /metrics on 9091 (the sub-chart's
   # metrics.enabled defaults to true); only the Operator object is off.
   metrics:
