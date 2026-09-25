@@ -28,6 +28,20 @@ networkPolicy:
   externalPorts:
     - 8080  # openrag API/UI & admin-ui
     # - 8265  # ray dashboard - Security issue, the ray dashboard is not protected by any auth, so it should not be exposed to the public internet.
+  # Peers allowed to scrape the datastore exporters: Ray (8090), Postgres (9187)
+  # and Milvus (9091). Pods in this namespace already can; a Prometheus in
+  # another one cannot until it is listed here, and its targets report
+  # `up == 0`. Each port opens only on the pods that export it, and only to
+  # these peers — never through externalPorts: none of the three
+  # authenticates, and Milvus's 9091 also serves /debug/pprof. Standard
+  # NetworkPolicyPeer entries, e.g.
+  #   - namespaceSelector:
+  #       matchLabels:
+  #         kubernetes.io/metadata.name: monitoring
+  #     podSelector:
+  #       matchLabels:
+  #         app.kubernetes.io/name: prometheus
+  metricsFrom: []
   # Sources allowed to reach the bundled Prometheus Operator's admission
   # webhook (monitoring.bundled only — see templates/networkpolicy.yaml). Its
   # caller is the API server, which is not a pod and on a managed control plane
@@ -367,6 +381,19 @@ ray:
     tls: []
     path: /
     pathType: Prefix
+  # Every Ray node, head and workers, exports unauthenticated metrics on 8090
+  # (ray_tasks, ray_actors, ray_resources, ray_node_*).
+  metrics:
+    # Prometheus Operator discovery. Needs the monitoring.coreos.com CRDs, and
+    # ray.enabled=true: the embedded Ray has no fixed port to scrape.
+    podMonitor:
+      enabled: false
+      # Labels the operator's podMonitorSelector matches, e.g.
+      # release: kube-prometheus-stack. Unmatched, the PodMonitor is created
+      # and never scraped — which looks exactly like one that works.
+      labels: {}
+      interval: 30s
+      scrapeTimeout: 10s
 
 # === PostgreSQL (bitnami) ===
 postgresql:
@@ -385,8 +412,35 @@ postgresql:
       enabled: true
       size: 10Gi
       storageClass: *storageClass
+    # The sub-chart's own policy defaults to allowExternal: true, which opens
+    # every port it lists to any source: 5432, and the exporter's 9187 once
+    # metrics.enabled is on. NetworkPolicies add up, so the default-deny above
+    # could not narrow it. Off, Postgres gets the same rules as every other pod.
+    networkPolicy:
+      enabled: false
+  # The same policy on the read replicas, rendered with architecture: replication.
+  readReplicas:
+    networkPolicy:
+      enabled: false
   service:
     port: &pgPort 5432
+  # postgres_exporter sidecar (port 9187) and its Service. Turning it on changes
+  # the StatefulSet's pod template, so the upgrade restarts Postgres.
+  # The exporter signs in as the `postgres` superuser, whose password the
+  # sub-chart regenerates on every render that cannot read the live Secret
+  # (helm template, Argo CD) while the server keeps the first one. So turning
+  # it on requires auth.postgresPassword or auth.existingSecret; on a running
+  # release, set the password Postgres already has:
+  #   kubectl get secret openrag-postgresql -o jsonpath='{.data.postgres-password}' | base64 -d
+  metrics:
+    enabled: false
+    # Prometheus Operator discovery; requires metrics.enabled above. The
+    # sub-chart's key is `labels` (Milvus's below is `additionalLabels`).
+    serviceMonitor:
+      enabled: false
+      # e.g. release: kube-prometheus-stack — see ray.metrics.podMonitor.labels.
+      labels: {}
+      interval: 30s
 
 # === PostgreSQL provisioning & migrations ===
 postgresProvisioning:
@@ -446,6 +500,16 @@ milvus:
     service:
       type: ClusterIP
       port: 19530
+  # Every Milvus component already serves /metrics on 9091 (the sub-chart's
+  # metrics.enabled defaults to true); only the Operator object is off.
+  metrics:
+    enabled: true
+    # One ServiceMonitor over all component Services: proxy, mixcoord,
+    # datanode, querynode, streamingnode.
+    serviceMonitor:
+      enabled: false
+      # e.g. release: kube-prometheus-stack — see ray.metrics.podMonitor.labels.
+      additionalLabels: {}
 
 # === vLLM (embedder + whisper + llm + vlm) ===
 vllm:

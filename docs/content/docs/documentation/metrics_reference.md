@@ -24,15 +24,17 @@ replicas are not individually addressable over HTTP — a scrape reaches whichev
 replica the proxy picks, so per-replica counters in the API process are
 unreliable too.
 
-Neither the Helm chart nor the compose monitoring overlay scrapes the Ray
-target yet: the chart opens port `8090` on the Ray pods but ships no
-`PodMonitor`, and the overlay's Prometheus has no job for it. Until that is
-added, the Ray-exported series below exist but are not collected.
+The Helm chart scrapes the Ray target with a `PodMonitor` on port `8090`,
+off by default (`ray.metrics.podMonitor`, which needs `ray.enabled=true`; see
+[Monitoring Ray, Postgres and Milvus](/openrag/documentation/kubernetes/#monitoring-ray-postgres-and-milvus)).
+The compose monitoring overlay's Prometheus has no job for it yet: there, the
+Ray-exported series below exist but are not collected.
 
 Ray prefixes every metric it exports with `ray_`: on the wire,
 `openrag_ingest_documents_total` is `ray_openrag_ingest_documents_total`. The
-scrape job for the Ray target should rename OpenRAG's series back, so that both
-targets store one name and one query covers the API and the workers:
+chart's `PodMonitor` renames OpenRAG's series back, so that both targets store
+one name and one query covers the API and the workers. A scrape job written by
+hand needs the same rule:
 
 ```yaml
 metric_relabel_configs:   # metricRelabelings on a PodMonitor

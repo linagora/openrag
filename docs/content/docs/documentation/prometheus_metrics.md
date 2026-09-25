@@ -201,6 +201,7 @@ sidecar ([Kubernetes monitoring](/openrag/documentation/kubernetes/#monitoring))
 | Dashboard | UID | Shows |
 | --- | --- | --- |
 | OpenRAG HTTP Metrics | `openrag-http` | Request rate, errors and latency per route ([guide](/openrag/documentation/grafana_http_dashboard/)) |
+| OpenRAG Service | `openrag-service` | Indexing, inference and catalog drift ([guide](/openrag/documentation/grafana_service_dashboard/)) |
 | Infrastructure Overview | `system-overview` | Host CPU, memory, disk and GPU; needs node-exporter and a GPU exporter |
 
 Every panel reads the **Data source** variable (`DS_PROMETHEUS`), which defaults
@@ -235,6 +236,7 @@ it unresolved, so a unit test rejects such an export.
 - Counters reset when the API restarts; use `rate()` and `increase()` rather
   than raw values.
 - Vector-store metrics are not exposed yet. Indexing and worker-side
-  inference metrics are exported on Ray's metrics agent, which neither the
-  chart nor the compose overlay scrapes yet (see the
+  inference metrics are exported on Ray's metrics agent, which the chart
+  scrapes through `ray.metrics.podMonitor` and the compose overlay does not
+  scrape yet (see the
   [metrics reference](/openrag/documentation/metrics_reference/)).

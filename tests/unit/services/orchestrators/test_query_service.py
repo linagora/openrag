@@ -117,7 +117,7 @@ class FakeWorkspace:
         # dict {partition: set(file_ids)} => partition-scoped existence.
         self._existing = existing
 
-    async def get_workspace(self, wid):
+    async def get_workspace(self, partition, wid):
         return None
 
     async def resolve_scope(self, workspace_id, allowed_partitions):
