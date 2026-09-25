@@ -810,20 +810,32 @@ class TaskStateManager:
     ) -> str | None:
         """Return a task already indexing ``file_id``, or ``None``.
 
-        Deliberately narrower than :meth:`_matching_active_task_refs_locked`,
-        which over-matches on purpose so cleanup never misses a worker. Refusing
-        work has the opposite failure cost, so this skips what that one keeps: a
-        task that has not registered its file yet (it may well be for another
-        file), and a cancelled task whose worker has not settled (that file is
-        on its way out, not being indexed).
+        Narrower than :meth:`_matching_active_task_refs_locked`, which
+        over-matches on purpose so cleanup never misses a worker. Refusing work
+        has the opposite failure cost, so this skips a task that has not
+        registered its file yet: it may well be for another file.
+
+        A cancelled task whose worker has not settled still counts. Cancellation
+        does not fence the worker's catalog commit: ``process_file`` writes the
+        row and only then learns from ``complete_with_degraded_stages`` that it
+        was cancelled. A second task admitted meanwhile would race that commit
+        for the same file, which is exactly what this fence exists to prevent.
+        Settled means what ``finish_cancellation`` means by it: the worker's
+        object ref is ready. Readiness is only probed for a cancelled candidate
+        that names this very file, so the fence costs no ``ray.wait`` otherwise.
         """
         for candidate_id, info in self.tasks.items():
-            if candidate_id == excluding or info.state not in CANCELLABLE_INDEXING_STATES:
+            if candidate_id == excluding:
+                continue
+            cancelled_with_worker = _cancelled_task_has_worker_fence(info)
+            if info.state not in CANCELLABLE_INDEXING_STATES and not cancelled_with_worker:
                 continue
             if self._expire_refless_task_if_stale_locked(candidate_id, info):
                 continue
             details = info.details or {}
             if details.get("partition") != partition or details.get("file_id") != file_id:
+                continue
+            if cancelled_with_worker and _object_ref_is_ready(info.object_ref):
                 continue
             return candidate_id
         return None

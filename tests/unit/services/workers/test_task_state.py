@@ -1532,7 +1532,8 @@ async def test_admission_fence_ignores_a_task_that_has_not_registered_its_file()
 
 
 @pytest.mark.asyncio
-async def test_admission_fence_ignores_a_cancelled_task_whose_worker_has_not_settled() -> None:
+async def test_admission_fence_keeps_a_cancelled_task_whose_worker_has_not_settled() -> None:
+    """Cancellation does not fence the worker's catalog commit, so its file stays busy."""
     manager = _task_state_manager()
     await manager.set_queued_details(
         "task-1",
@@ -1542,6 +1543,57 @@ async def test_admission_fence_ignores_a_cancelled_task_whose_worker_has_not_set
         user_id=42,
     )
     assert await manager.set_object_ref("task-1", {"ref": object()}) is True
+    assert await manager.set_cancelled_if_active("task-1") is True
+
+    refused = await manager.set_queued_details_v2(
+        "task-2",
+        file_id="file-1",
+        partition="tenant-a",
+        metadata={},
+        user_id=42,
+        reject_if_file_active=True,
+    )
+
+    assert refused == {"accepted": False, "reason": "file_indexing", "existing_task_id": "task-1"}
+
+
+@pytest.mark.asyncio
+async def test_admission_fence_releases_the_file_once_a_cancelled_worker_settles(monkeypatch) -> None:
+    manager = _task_state_manager()
+    await manager.set_queued_details(
+        "task-1",
+        file_id="file-1",
+        partition="tenant-a",
+        metadata={},
+        user_id=42,
+    )
+    worker_ref = object()
+    assert await manager.set_object_ref("task-1", {"ref": worker_ref}) is True
+    assert await manager.set_cancelled_if_active("task-1") is True
+    monkeypatch.setattr(task_state_module.ray, "wait", lambda *_args, **_kwargs: ([worker_ref], []))
+
+    admitted = await manager.set_queued_details_v2(
+        "task-2",
+        file_id="file-1",
+        partition="tenant-a",
+        metadata={},
+        user_id=42,
+        reject_if_file_active=True,
+    )
+
+    assert admitted["accepted"] is True
+
+
+@pytest.mark.asyncio
+async def test_admission_fence_releases_the_file_of_a_cancelled_task_without_a_worker() -> None:
+    manager = _task_state_manager()
+    await manager.set_queued_details(
+        "task-1",
+        file_id="file-1",
+        partition="tenant-a",
+        metadata={},
+        user_id=42,
+    )
     assert await manager.set_cancelled_if_active("task-1") is True
 
     admitted = await manager.set_queued_details_v2(
