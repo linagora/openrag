@@ -582,3 +582,84 @@ def test_values_lists_every_alerts_default_for(tmp_path: Path) -> None:
     rendered = {rule["alert"]: rule["for"] for group in rule_object["spec"]["groups"] for rule in group["rules"]}
 
     assert listed == rendered, "values.yaml's `for` list and the template's `$for` defaults disagree"
+
+
+def _runbook_texts() -> dict[str, str]:
+    return {page.name: page.read_text(encoding="utf-8") for page in sorted(RUNBOOK_DIR.glob("*.md"))}
+
+
+def test_runbooks_name_the_prometheusrule_the_chart_renders(tmp_path: Path) -> None:
+    """Every page tells the reader to `kubectl get prometheusrule <name>`. A
+    name the chart does not render answers "NotFound" at exactly the moment
+    someone needs the loaded thresholds."""
+    cited = {
+        (page, name)
+        for page, text in _runbook_texts().items()
+        for name in re.findall(r"get prometheusrule (\S+)", text)
+    }
+    rendered = _one(_render_chart(tmp_path), "PrometheusRule")["metadata"]["name"]
+
+    assert cited, "no runbook cites the PrometheusRule any more; this test is checking nothing"
+    wrong = sorted(page for page, name in cited if name != rendered)
+    assert not wrong, f"these pages cite a PrometheusRule other than {rendered!r}: {wrong}"
+
+
+#: A pod lookup in a runbook, with the target it is for on the comment line
+#: above: `# The API (job openrag-openrag).` then `kubectl ... get pods -l k=v,...`.
+_POD_LOOKUP_RE = re.compile(r"^# .*?\(job (?P<job>[^)\s]+)\).*\n.*get pods -l (?P<selector>\S+)$", re.MULTILINE)
+
+
+def _selector(text: str) -> dict[str, str]:
+    return dict(pair.split("=", 1) for pair in text.split(","))
+
+
+def _selects(selector: dict[str, str], labels: dict[str, str]) -> bool:
+    return selector.items() <= labels.items()
+
+
+def test_runbook_pod_selectors_select_the_pods_behind_their_job(tmp_path: Path) -> None:
+    """The pod lookups in the runbooks, paired against the chart as rendered.
+
+    The API's: the pods the runbook selects are exactly those behind the
+    Service its job is named after (the Operator's job label is the Service
+    name). The RayCluster's: the job is `<ns>/<PodMonitor>`, and the selector
+    names the same RayCluster the PodMonitor scrapes — whose pods get that
+    `ray.io/cluster` label from the KubeRay operator, not from this chart.
+    """
+    objects = _render_chart(tmp_path)
+    deployments = [obj for obj in objects if obj["kind"] == "Deployment"]
+    lookups = [
+        (page, match["job"], _selector(match["selector"]))
+        for page, text in _runbook_texts().items()
+        for match in _POD_LOOKUP_RE.finditer(text)
+    ]
+    assert {job for _, job, _ in lookups} >= {"openrag-openrag", "<ns>/openrag-raycluster"}, (
+        f"the API and Ray pod lookups are no longer where this test reads them: {lookups}"
+    )
+
+    for page, job, selector in lookups:
+        if "/" in job:
+            monitor = next(
+                (o for o in objects if o["kind"] == "PodMonitor" and o["metadata"]["name"] == job.split("/")[-1]),
+                None,
+            )
+            assert monitor, f"{page}: job {job} names no PodMonitor the chart renders"
+            cluster = _one(objects, "RayCluster")["metadata"]["name"]
+            assert monitor["spec"]["selector"]["matchLabels"]["ray.io/cluster"] == cluster
+            assert selector == {"ray.io/cluster": cluster}, f"{page}: {selector} does not select RayCluster {cluster}"
+        else:
+            service = next((o for o in objects if o["kind"] == "Service" and o["metadata"]["name"] == job), None)
+            assert service, f"{page}: job {job} names no Service the chart renders"
+
+            def backing(match: dict[str, str]) -> list[str]:
+                return sorted(
+                    d["metadata"]["name"]
+                    for d in deployments
+                    if _selects(match, d["spec"]["template"]["metadata"]["labels"])
+                )
+
+            behind_service = backing(service["spec"]["selector"])
+            assert behind_service, f"Service {job} selects no rendered Deployment"
+            assert backing(selector) == behind_service, (
+                f"{page}: `-l {selector}` selects {backing(selector)}, but job {job} scrapes {behind_service}"
+            )
