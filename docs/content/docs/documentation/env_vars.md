@@ -318,7 +318,7 @@ The PostgreSQL database is configured using the following environment variables:
 
 * **`Object Storage (MinIO)`**
 
-Milvus stores its data in a MinIO object store, whose credentials are **required (no default)** — the compose stack refuses to start if they are unset. Generate strong random values (e.g. `openssl rand -hex 16`). The same values are shared between the `minio` service and Milvus, so both sides must match.
+Milvus stores its data in an S3-compatible object store, [SILO](/openrag/documentation/minio_silo_upgrade/) (the maintained MinIO fork; the service is still called `minio`), whose credentials are **required (no default)** — the compose stack refuses to start if they are unset. Generate strong random values (e.g. `openssl rand -hex 16`). The same values are shared between the `minio` service and Milvus, so both sides must match. On Helm, set them as `minioCredentials.accessKey` / `minioCredentials.secretKey` instead.
 
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|

@@ -29,6 +29,7 @@ This guide explains how to deploy the **OpenRAG** stack on a Kubernetes cluster 
    - Edit the `env.config` and `env.secrets` sections in your `values.yaml`.
    - Secrets (API keys, tokens, Hugging Face credentials, etc.) will be mounted into the cluster as Kubernetes secrets.
    - For managed PostgreSQL, point the `POSTGRES_*` values at the external database and disable database auto-creation.
+   - Set `minioCredentials.accessKey` and `minioCredentials.secretKey` for the bundled object store. They are required: the install fails without them, with a published value such as `minioadmin`, or with a secret key shorter than 12 characters. The chart stores them in the Secret `openrag-minio-credentials`, which MinIO and Milvus read. To manage that Secret yourself, for example with External Secrets or Vault, create it with the keys `accesskey` and `secretkey` and set `minioCredentials.create: false`. `env.existingSecret` and the secrets providers don't cover it. Existing releases: read [Object storage upgrade](/openrag/documentation/minio_silo_upgrade/) first.
 
 3. **Install or upgrade the release from GHCR**:
 
