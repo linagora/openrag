@@ -150,6 +150,27 @@ class PgJobRepository(JobRepository):
         rows = await self.pool.fetch("SELECT status, COUNT(*)::int AS count FROM jobs GROUP BY status")
         return {row["status"]: int(row["count"]) for row in rows}
 
+    async def get_job_states(
+        self,
+        *,
+        statuses: list[str] | None = None,
+        job_ids: list[str] | None = None,
+    ) -> dict[str, str]:
+        if statuses is None and job_ids is None:
+            raise ValueError("get_job_states needs a status or task-ID filter")
+        if (statuses is not None and not statuses) or (job_ids is not None and not job_ids):
+            return {}
+        rows = await self.pool.fetch(
+            """
+            SELECT id, status FROM jobs
+            WHERE ($1::text[] IS NULL OR status = ANY($1::text[]))
+              AND ($2::text[] IS NULL OR id = ANY($2::text[]))
+            """,
+            statuses,
+            job_ids,
+        )
+        return {row["id"]: row["status"] for row in rows}
+
     async def fail_orphaned_jobs(self, *, active_ids: list[str], error: str, before: datetime) -> int:
         return await self.pool.fetchval(
             """

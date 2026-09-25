@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING, Any
 from core.config.model_endpoints import DEFAULT_MODEL_IMPLEMENTATIONS
 from core.embeddings import embedder_registry
 from core.llm import llm_registry
+from core.observability.inference_metrics import DEFAULT_PROVIDER, set_provider_name
 from core.rerankers import reranker_registry
 from core.utils.logging import get_logger
 from core.vlm import vlm_registry
@@ -516,15 +517,18 @@ class ServiceContainer:
 
             settings = self._require_settings()
             embed_cfg = settings.embedder
-            embedder = self.create_embedder(
-                "vllm",
-                endpoint=embed_cfg.base_url,
-                model_name=embed_cfg.model_name,
-                api_key=embed_cfg.api_key,
-                max_model_len=embed_cfg.max_model_len,
-                timeout=embed_cfg.timeout,
-                batch_size=embed_cfg.batch_size,
-                embed_concurrency=embed_cfg.embed_concurrency,
+            embedder = set_provider_name(
+                self.create_embedder(
+                    "vllm",
+                    endpoint=embed_cfg.base_url,
+                    model_name=embed_cfg.model_name,
+                    api_key=embed_cfg.api_key,
+                    max_model_len=embed_cfg.max_model_len,
+                    timeout=embed_cfg.timeout,
+                    batch_size=embed_cfg.batch_size,
+                    embed_concurrency=embed_cfg.embed_concurrency,
+                ),
+                DEFAULT_PROVIDER,
             )
 
             def _vector_field_for(embedder_name: str) -> str | None:
@@ -553,22 +557,28 @@ class ServiceContainer:
                 )
 
             llm_cfg = settings.llm.model_dump()
-            llm = self.create_llm(
-                "vllm",
-                endpoint=llm_cfg["base_url"],
-                model_name=llm_cfg["model"],
-                api_key=llm_cfg.get("api_key", ""),
-                **{k: v for k, v in llm_cfg.items() if k not in ("base_url", "model", "api_key")},
+            llm = set_provider_name(
+                self.create_llm(
+                    "vllm",
+                    endpoint=llm_cfg["base_url"],
+                    model_name=llm_cfg["model"],
+                    api_key=llm_cfg.get("api_key", ""),
+                    **{k: v for k, v in llm_cfg.items() if k not in ("base_url", "model", "api_key")},
+                ),
+                DEFAULT_PROVIDER,
             )
             reranker = None
             rcfg = settings.reranker
             if rcfg.enabled:
-                reranker = self.create_reranker(
-                    rcfg.provider,
-                    endpoint=rcfg.base_url,
-                    model_name=rcfg.model_name,
-                    api_key=rcfg.api_key,
-                    timeout=rcfg.timeout,
+                reranker = set_provider_name(
+                    self.create_reranker(
+                        rcfg.provider,
+                        endpoint=rcfg.base_url,
+                        model_name=rcfg.model_name,
+                        api_key=rcfg.api_key,
+                        timeout=rcfg.timeout,
+                    ),
+                    DEFAULT_PROVIDER,
                 )
             self._retrieval_service = RetrievalService(
                 searcher=searcher,
@@ -600,12 +610,15 @@ class ServiceContainer:
 
             settings = self._require_settings()
             llm_cfg = settings.llm.model_dump()
-            llm = self.create_llm(
-                "vllm",
-                endpoint=llm_cfg["base_url"],
-                model_name=llm_cfg["model"],
-                api_key=llm_cfg.get("api_key", ""),
-                **{k: v for k, v in llm_cfg.items() if k not in ("base_url", "model", "api_key")},
+            llm = set_provider_name(
+                self.create_llm(
+                    "vllm",
+                    endpoint=llm_cfg["base_url"],
+                    model_name=llm_cfg["model"],
+                    api_key=llm_cfg.get("api_key", ""),
+                    **{k: v for k, v in llm_cfg.items() if k not in ("base_url", "model", "api_key")},
+                ),
+                DEFAULT_PROVIDER,
             )
             self._query_service = QueryService(
                 retrieval_service=self.retrieval_service,

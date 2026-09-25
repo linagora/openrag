@@ -65,11 +65,8 @@ spec:
               - "--head"
               - "--dashboard-host={{ .Values.ray.dashboardHost }}"
               - "--dashboard-agent-listen-port=52365"
-              # Kept off networkPolicy.externalPorts' 8080 (openrag/admin-ui's
-              # public port) on purpose — that NetworkPolicy rule matches by
-              # port number across every pod in the namespace, so reusing 8080
-              # here would expose these unauthenticated Ray metrics publicly.
-              - "--metrics-export-port=8090"
+              # See openrag-stack.rayMetricsPort for why this is not 8080.
+              - "--metrics-export-port={{ include "openrag-stack.rayMetricsPort" . }}"
               - "--block"
             ports:
               - containerPort: 80
@@ -80,8 +77,11 @@ spec:
                 name: ray-client
               - containerPort: 6379
                 name: ray-gcs
-              - containerPort: 8090
-                name: ray-metrics
+              # Named `metrics` because that is the name KubeRay looks for:
+              # absent it, KubeRay appends its own `metrics: 8080` port, which
+              # nothing listens on, and the head Service carries it too.
+              - containerPort: {{ include "openrag-stack.rayMetricsPort" . }}
+                name: metrics
             volumeMounts:
               - name: model-weights
                 mountPath: /app/model_weights
@@ -114,6 +114,12 @@ spec:
       replicas: {{ $.Values.ray.workers.replicas }}
       minReplicas: {{ $.Values.ray.workers.minReplicas }}
       maxReplicas: {{ $.Values.ray.workers.maxReplicas }}
+      # Workers start from $KUBERAY_GEN_RAY_START_CMD, which KubeRay builds from
+      # these params. Without this it passes its default
+      # --metrics-export-port=8080 — the port networkPolicy.externalPorts opens
+      # to every source.
+      rayStartParams:
+        metrics-export-port: "{{ include "openrag-stack.rayMetricsPort" $ }}"
       template:
         spec:
           {{- with $.Values.ray.nodeSelector }}
@@ -133,6 +139,10 @@ spec:
               command: ["/bin/bash", "-lc", "--"]
               args:
                 - uv run $KUBERAY_GEN_RAY_START_CMD
+              ports:
+                # Same name as the head's, so one PodMonitor endpoint covers both.
+                - containerPort: {{ include "openrag-stack.rayMetricsPort" $ }}
+                  name: metrics
               volumeMounts:
                 - name: model-weights
                   mountPath: /app/model_weights

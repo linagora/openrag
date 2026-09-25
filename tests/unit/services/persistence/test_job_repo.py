@@ -268,6 +268,49 @@ async def test_count_jobs_returns_counts_by_status():
 
 
 @pytest.mark.asyncio
+async def test_get_job_states_reads_only_ids_and_statuses():
+    pool = _FakePool(fetch=[{"id": "task-1", "status": "QUEUED"}, {"id": "task-2", "status": "SERIALIZING"}])
+    repo = _repo(pool)
+
+    states = await repo.get_job_states(statuses=["QUEUED", "SERIALIZING"])
+
+    query, params = pool.calls[0]
+    assert "SELECT id, status FROM jobs" in query
+    assert "status = ANY($1::text[])" in query
+    assert "id = ANY($2::text[])" in query
+    assert params == (["QUEUED", "SERIALIZING"], None)
+    assert states == {"task-1": "QUEUED", "task-2": "SERIALIZING"}
+
+
+@pytest.mark.asyncio
+async def test_get_job_states_filters_by_task_id():
+    pool = _FakePool(fetch=[{"id": "task-1", "status": "COMPLETED"}])
+
+    states = await _repo(pool).get_job_states(job_ids=["task-1", "gone"])
+
+    assert pool.calls[0][1] == (None, ["task-1", "gone"])
+    assert states == {"task-1": "COMPLETED"}
+
+
+@pytest.mark.asyncio
+async def test_get_job_states_refuses_an_unfiltered_read():
+    pool = _FakePool()
+
+    with pytest.raises(ValueError):
+        await _repo(pool).get_job_states()
+    assert pool.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kwargs", [{"statuses": []}, {"job_ids": []}])
+async def test_get_job_states_skips_the_query_for_an_empty_filter(kwargs):
+    pool = _FakePool(fetch=[{"id": "task-1", "status": "QUEUED"}])
+
+    assert await _repo(pool).get_job_states(**kwargs) == {}
+    assert pool.calls == []
+
+
+@pytest.mark.asyncio
 async def test_fail_orphaned_jobs_skips_settled_rows_and_live_tasks():
     pool = _FakePool(fetchval=3)
     repo = _repo(pool)

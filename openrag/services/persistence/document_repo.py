@@ -694,7 +694,10 @@ class PgDocumentRepository(DocumentRepository):
                           SELECT 1 FROM unnest($3::text[]) AS requested(workspace_id)
                           WHERE NOT EXISTS (
                               SELECT 1 FROM workspace_files wf
-                              WHERE wf.file_id = f.id AND wf.workspace_id = requested.workspace_id
+                              JOIN workspaces w ON w.id = wf.workspace_id
+                              WHERE wf.file_id = f.id
+                                AND w.workspace_id = requested.workspace_id
+                                AND w.partition_name = f.partition_name
                           )
                       )
                     RETURNING f.id

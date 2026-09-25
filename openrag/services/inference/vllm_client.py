@@ -14,7 +14,9 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import re
+import time
 from collections.abc import AsyncIterator, Mapping
 from urllib.parse import unquote, urlsplit
 
@@ -26,6 +28,7 @@ from core.config.endpoints import (
 )
 from core.embeddings import Embedder, embedder_registry
 from core.llm import LLM, llm_registry
+from core.observability.inference_metrics import record_inference, record_usage_from_response
 from core.utils.exceptions import (
     EmbeddingAPIError,
     EmbeddingConnectionError,
@@ -41,9 +44,64 @@ from tqdm.asyncio import tqdm
 
 from ._call_log import log_llm_call
 from ._circuit_breaker import with_circuit_breaker
+from ._metrics import outcome_for, resolve_provider, with_inference_metrics
 from ._retry import with_retry
 
 logger = get_logger()
+
+
+#: Sentinel line terminating an SSE completion. A stream that ends without it
+#: is a truncated answer, not a finished one — ``core/utils/source_filtering``
+#: reports exactly that to the caller.
+_STREAM_DONE = "data: [DONE]"
+
+
+def _request_stream_usage(payload: dict, *, add_for_metrics: bool) -> bool:
+    """Ask the provider for a usage block; return whether the caller asked too.
+
+    Without ``include_usage`` a streamed response carries no usage at all, so
+    every chat answer would contribute nothing to the token metric. The caller's
+    own ``stream_options`` are kept, not replaced. A client-supplied endpoint
+    gets nothing added: another provider may reject the unknown field, and its
+    traffic is labelled ``client_override`` anyway.
+
+    The return value decides whether the usage-only chunk is forwarded: a
+    client that did not ask for one must not receive a ``"choices": []`` chunk
+    it may index into, nor the prompt size it reveals.
+    """
+    caller_options = payload.get("stream_options")
+    caller_options = caller_options if isinstance(caller_options, dict) else {}
+    caller_wants_usage = bool(caller_options.get("include_usage"))
+    if add_for_metrics:
+        payload["stream_options"] = {**caller_options, "include_usage": True}
+    return caller_wants_usage or not add_for_metrics
+
+
+def _record_stream_usage(line: str) -> bool:
+    """Count tokens from the usage-only chunk of a streamed completion.
+
+    Returns whether ``line`` *is* that chunk (``"choices": []``), so the caller
+    can withhold it from a client that never asked for usage.
+
+    Called for every SSE line — hundreds per answer — so the substring test
+    comes first. Content deltas also begin with ``data: ``, and parsing each of
+    them would duplicate, on the primary user-facing path, work that
+    ``stream_with_source_filtering`` already does downstream.
+
+    A delta whose *content* happens to contain the word "usage" is parsed and
+    then discarded by ``record_usage_from_response``, which requires ``usage``
+    to be a top-level object.
+    """
+    if '"usage"' not in line or not line.startswith("data:"):
+        return False
+    # SSE allows `data:` with or without one space after the colon.
+    body = line[len("data:") :]
+    try:
+        payload = json.loads(body[1:] if body.startswith(" ") else body)
+    except ValueError:
+        return False
+    record_usage_from_response(payload, operation="chat")
+    return isinstance(payload, dict) and payload.get("choices") == [] and isinstance(payload.get("usage"), dict)
 
 
 def _parse_response(resp: httpx.Response) -> dict:
@@ -345,6 +403,7 @@ class VLLMClient(LLM):
         payload_kwargs = _strip_falsy_logprobs(payload_kwargs)
         return payload_kwargs
 
+    @with_inference_metrics("completion", capture_usage=True)
     @with_circuit_breaker("llm", skip_if=_targets_client_endpoint)
     @with_retry(max_attempts=3)
     async def generate(self, prompt: str, **kwargs) -> dict:
@@ -367,6 +426,7 @@ class VLLMClient(LLM):
             ) from exc
         return _parse_response(resp)
 
+    @with_inference_metrics("chat", capture_usage=True)
     @with_circuit_breaker("llm", skip_if=_targets_client_endpoint)
     @with_retry(max_attempts=3)
     async def chat(self, messages: list[dict[str, str]], **kwargs) -> dict:
@@ -395,30 +455,63 @@ class VLLMClient(LLM):
 
     async def stream_chat(self, messages: list[dict[str, str]], **kwargs) -> AsyncIterator[str]:
         base_url, model, headers, overridden = self._resolve_overrides(kwargs)
-        kwargs.pop("metadata", None)
+        # Read before it is stripped: the outbound body must never carry
+        # OpenRAG-internal metadata, but the provider label is derived from it.
+        metadata = kwargs.pop("metadata", None)
         payload = {
             **self._chat_payload_kwargs(kwargs, use_defaults=not overridden),
             "model": model,
             "messages": messages,
             "stream": True,
         }
+        forward_usage = _request_stream_usage(payload, add_for_metrics=not overridden)
         log_llm_call(caller="VLLMClient.stream_chat", model=model, endpoint=base_url, messages=messages, stream=True)
+        provider = resolve_provider(self, {"metadata": metadata})
+        started = time.perf_counter()
+        # Pessimistic until `[DONE]` proves the answer complete. The consumer
+        # breaks on `[DONE]` and closes this generator, which raises
+        # GeneratorExit at the yield below — indistinguishable from a client
+        # that gave up mid-answer unless completion is recorded explicitly.
+        # Assuming success instead would report every finished chat as an error.
+        outcome = "error"
         try:
             async with self._client.stream(
                 "POST", f"{base_url}/chat/completions", json=payload, headers=headers
             ) as resp:
                 if resp.status_code >= 400:
                     await resp.aread()
-                    raise InferenceError(
+                    error = InferenceError(
                         f"LLM streaming error ({resp.status_code}): {resp.text[:500]}",
                         status_code=resp.status_code,
                     )
+                    outcome = outcome_for(error)
+                    raise error
                 async for line in resp.aiter_lines():
+                    if _record_stream_usage(line) and not forward_usage:
+                        continue
+                    if line.strip() == _STREAM_DONE:
+                        outcome = "success"
                     yield line
         except httpx.ConnectError as exc:
             raise InferenceConnectionError(f"Cannot reach LLM at {base_url}") from exc
         except httpx.TimeoutException as exc:
+            outcome = "timeout"
             raise InferenceTimeoutError(f"LLM streaming request timed out at {base_url}") from exc
+        except (GeneratorExit, asyncio.CancelledError):
+            # Closed or cancelled by the consumer. After `[DONE]` that is the
+            # normal end; before it, the client gave up — not a provider error.
+            if outcome != "success":
+                outcome = "cancelled"
+            raise
+        finally:
+            # Hand-instrumented: @with_inference_metrics would time only the
+            # creation of this async generator, not the transfer.
+            record_inference(
+                provider=provider,
+                operation="chat",
+                outcome=outcome,
+                duration_seconds=time.perf_counter() - started,
+            )
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -530,6 +623,7 @@ class VLLMEmbedder(Embedder):
             vectors.extend(batch_vectors)
         return vectors
 
+    @with_inference_metrics("embed")
     @with_circuit_breaker("embedder")
     @with_retry(max_attempts=3)
     async def _embed_batch(self, texts: list[str], *, offset: int = 0) -> list[list[float]]:
@@ -646,6 +740,7 @@ class VLLMVision(VLLMClient, VLM):
         super().__init__(endpoint=endpoint, model_name=model_name, api_key=api_key, timeout=timeout, **kwargs)
         self._max_tokens = max_tokens
 
+    @with_inference_metrics("vlm")
     @with_circuit_breaker("vlm")
     @with_retry(max_attempts=2)
     async def caption_image(self, image_bytes: bytes, prompt: str | None = None) -> str:

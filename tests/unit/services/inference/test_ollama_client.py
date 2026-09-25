@@ -12,6 +12,7 @@ from core.utils.exceptions import (
     InferenceError,
     InferenceTimeoutError,
 )
+from services.inference import _metrics
 from services.inference._circuit_breaker import _breakers
 from services.inference.ollama_client import OllamaClient, OllamaEmbedder
 
@@ -26,6 +27,22 @@ def _clean_breakers():
 
 def _make_transport(handler):
     return httpx.MockTransport(handler)
+
+
+@pytest.fixture
+def recorded_inference(monkeypatch: pytest.MonkeyPatch) -> list[dict]:
+    """Capture what the metric layer was asked to record.
+
+    Patches the symbol the clients call, so a path that is simply not
+    instrumented shows up as an empty list rather than passing silently — which
+    is how stream_chat and OllamaEmbedder.embed stayed invisible.
+    """
+    calls: list[dict] = []
+    monkeypatch.setattr(_metrics, "record_inference", lambda **kw: calls.append(kw))
+    import services.inference.ollama_client as ollama_module
+
+    monkeypatch.setattr(ollama_module, "record_inference", lambda **kw: calls.append(kw), raising=False)
+    return calls
 
 
 def _chat_response(content: str = "hello") -> httpx.Response:
@@ -93,6 +110,159 @@ class TestOllamaClient:
         lines = [line async for line in client.stream_chat([{"role": "user", "content": "hi"}])]
         assert 'data: {"choices":[{"delta":{"content":"Hello"}}]}' in lines
         assert 'data: {"choices":[{"delta":{"content":" world"}}]}' in lines
+
+    @pytest.mark.asyncio
+    async def test_stream_chat_records_a_metric_for_the_whole_transfer(self, recorded_inference):
+        """A supported deployment stayed partly invisible: stream_chat emitted no
+        request or duration metric at all, so Ollama chat traffic never reached
+        the inference counters the alerts read."""
+        sse_body = 'data: {"choices":[{"delta":{"content":"hi"}}]}\ndata: [DONE]\n'
+        client = self._make_client(lambda req: httpx.Response(200, text=sse_body))
+
+        [line async for line in client.stream_chat([{"role": "user", "content": "hi"}])]
+
+        assert [c["outcome"] for c in recorded_inference] == ["success"]
+        assert recorded_inference[0]["operation"] == "chat"
+
+    @pytest.mark.asyncio
+    async def test_stream_chat_failure_is_recorded_as_a_failure(self, recorded_inference):
+        client = self._make_client(lambda req: httpx.Response(503, text="unavailable"))
+
+        with pytest.raises(InferenceError):
+            async for _ in client.stream_chat([{"role": "user", "content": "hi"}]):
+                pass
+
+        assert [c["outcome"] for c in recorded_inference] == ["error"]
+
+    @pytest.mark.asyncio
+    async def test_stream_closed_after_done_is_a_success(self, recorded_inference):
+        """``stream_with_source_filtering`` breaks on ``[DONE]`` and closes the
+        generator, so the loop never runs to completion on a real chat. Success
+        has to be proven by ``[DONE]``, not by the loop ending."""
+        sse_body = 'data: {"choices":[{"delta":{"content":"hi"}}]}\ndata: [DONE]\n'
+        client = self._make_client(lambda req: httpx.Response(200, text=sse_body))
+
+        stream = client.stream_chat([{"role": "user", "content": "hi"}])
+        async for line in stream:
+            if line.strip() == "data: [DONE]":
+                break
+        await stream.aclose()
+
+        assert [c["outcome"] for c in recorded_inference] == ["success"]
+
+    @pytest.mark.asyncio
+    async def test_stream_truncated_without_done_is_not_a_success(self, recorded_inference):
+        sse_body = 'data: {"choices":[{"delta":{"content":"hi"}}]}\n'
+        client = self._make_client(lambda req: httpx.Response(200, text=sse_body))
+
+        [line async for line in client.stream_chat([{"role": "user", "content": "hi"}])]
+
+        assert [c["outcome"] for c in recorded_inference] == ["error"]
+
+    @pytest.mark.asyncio
+    async def test_stream_closed_before_done_is_cancelled_not_an_error(self, recorded_inference):
+        sse_body = 'data: {"choices":[{"delta":{"content":"hi"}}]}\ndata: [DONE]\n'
+        client = self._make_client(lambda req: httpx.Response(200, text=sse_body))
+
+        stream = client.stream_chat([{"role": "user", "content": "hi"}])
+        async for _line in stream:
+            break
+        await stream.aclose()
+
+        assert [c["outcome"] for c in recorded_inference] == ["cancelled"]
+
+    @pytest.mark.asyncio
+    async def test_a_request_the_provider_refuses_is_rejected_not_an_error(self, recorded_inference):
+        """Through the real retry and breaker stack: an unknown model is the
+        request's fault, and any user can send one."""
+        client = self._make_client(lambda req: httpx.Response(404, text="model not found"))
+
+        with pytest.raises(InferenceError):
+            await client.chat([{"role": "user", "content": "hi"}])
+
+        assert [c["outcome"] for c in recorded_inference] == ["rejected"]
+
+    @pytest.mark.asyncio
+    async def test_a_refused_stream_is_rejected_not_an_error(self, recorded_inference):
+        client = self._make_client(lambda req: httpx.Response(400, text="prompt too long"))
+
+        with pytest.raises(InferenceError):
+            async for _ in client.stream_chat([{"role": "user", "content": "hi"}]):
+                pass
+
+        assert [c["outcome"] for c in recorded_inference] == ["rejected"]
+
+    @pytest.mark.asyncio
+    async def test_throttling_stays_a_provider_error(self, recorded_inference):
+        """429 is the provider out of capacity, which the error ratio must show."""
+        client = self._make_client(lambda req: httpx.Response(429, text="slow down"))
+
+        with pytest.raises(InferenceError):
+            async for _ in client.stream_chat([{"role": "user", "content": "hi"}]):
+                pass
+
+        assert [c["outcome"] for c in recorded_inference] == ["error"]
+
+    @pytest.mark.asyncio
+    async def test_stream_chat_counts_the_usage_chunk(self, monkeypatch):
+        """Ollama's OpenAI-compatible endpoint only sends usage on a stream when
+        asked, and the final usage chunk must reach the token counter."""
+        from core.observability import inference_metrics
+
+        tokens: list[dict] = []
+        monkeypatch.setattr(inference_metrics, "record_tokens", lambda **kw: tokens.append(kw))
+        bodies: list[dict] = []
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            bodies.append(json.loads(req.content))
+            return httpx.Response(
+                200,
+                text=(
+                    'data: {"choices":[{"delta":{"content":"hi"}}]}\n'
+                    'data: {"choices":[],"usage":{"prompt_tokens":7,"completion_tokens":3}}\n'
+                    "data: [DONE]\n"
+                ),
+            )
+
+        client = self._make_client(handler)
+        [line async for line in client.stream_chat([{"role": "user", "content": "hi"}])]
+
+        assert bodies[0]["stream_options"] == {"include_usage": True}
+        assert tokens == [{"operation": "chat", "prompt": 7, "completion": 3}]
+
+    _USAGE_CHUNK = 'data: {"choices":[],"usage":{"prompt_tokens":7,"completion_tokens":3}}'
+    _USAGE_STREAM = f'data: {{"choices":[{{"delta":{{"content":"hi"}}}}]}}\n{_USAGE_CHUNK}\ndata: [DONE]\n'
+
+    @pytest.mark.asyncio
+    async def test_the_usage_chunk_is_withheld_from_a_caller_that_did_not_ask(self):
+        """Requested for the token metric only: a client that never asked gets
+        no ``"choices": []`` chunk to index into, and no prompt size."""
+        client = self._make_client(lambda req: httpx.Response(200, text=self._USAGE_STREAM))
+
+        lines = [line async for line in client.stream_chat([{"role": "user", "content": "hi"}])]
+
+        assert self._USAGE_CHUNK not in lines
+        assert "data: [DONE]" in lines
+
+    @pytest.mark.asyncio
+    async def test_a_caller_that_asked_for_usage_still_receives_it(self):
+        bodies: list[dict] = []
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            bodies.append(json.loads(req.content))
+            return httpx.Response(200, text=self._USAGE_STREAM)
+
+        client = self._make_client(handler)
+        lines = [
+            line
+            async for line in client.stream_chat(
+                [{"role": "user", "content": "hi"}],
+                stream_options={"include_usage": True, "continuous_usage_stats": True},
+            )
+        ]
+
+        assert self._USAGE_CHUNK in lines
+        assert bodies[0]["stream_options"] == {"include_usage": True, "continuous_usage_stats": True}
 
     @pytest.mark.asyncio
     async def test_stream_chat_error_raises(self):
@@ -310,6 +480,18 @@ class TestOllamaClient:
 
 
 class TestOllamaEmbedder:
+    @pytest.mark.asyncio
+    async def test_embed_records_a_metric(self, recorded_inference):
+        """OllamaEmbedder.embed carried no metrics decorator, so embedding traffic
+        on a supported backend never reached openrag_inference_requests_total."""
+        embedder = OllamaEmbedder(endpoint="http://ollama:11434/v1", model_name="nomic-embed-text")
+        embedder._client = httpx.AsyncClient(transport=_make_transport(lambda req: _embed_response()))
+
+        await embedder.embed(["hello"])
+
+        assert [c["outcome"] for c in recorded_inference] == ["success"]
+        assert recorded_inference[0]["operation"] == "embed"
+
     def _make_embedder(self, handler, endpoint="http://ollama:11434", **kwargs):
         embedder = OllamaEmbedder(endpoint=endpoint, model_name="nomic-embed-text", **kwargs)
         embedder._client = httpx.AsyncClient(transport=_make_transport(handler))
@@ -478,3 +660,12 @@ class TestRegistryIntegration:
         from core.embeddings import embedder_registry
 
         assert "ollama" in embedder_registry
+
+
+@pytest.mark.asyncio
+async def test_generate_is_counted_as_a_completion_not_a_chat(recorded_inference):
+    """`generate` calls /v1/completions: counting it under `chat` merged two
+    different call shapes into one series."""
+    client = TestOllamaClient()._make_client(lambda req: _completions_response("done"))
+    await client.generate("say something")
+    assert [c["operation"] for c in recorded_inference] == ["completion"]

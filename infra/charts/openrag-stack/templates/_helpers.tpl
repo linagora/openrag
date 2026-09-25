@@ -157,3 +157,14 @@ Usage: {{- if eq (include "openrag-stack.rayServeApi" .) "true" }}
 {{- define "openrag-stack.rayServeApi" -}}
 {{- if and .Values.ray.enabled (eq (toString .Values.env.config.ENABLE_RAY_SERVE) "true") -}}true{{- else -}}false{{- end -}}
 {{- end }}
+
+{{/*
+Port every Ray node exports its metrics on, head and workers alike. Kept off
+networkPolicy.externalPorts' 8080 on purpose: that rule matches by port number
+across every pod in the namespace, and these metrics are unauthenticated.
+KubeRay's own default is exactly 8080, so both halves of raycluster.yaml must
+override it — see the comments there.
+*/}}
+{{- define "openrag-stack.rayMetricsPort" -}}
+8090
+{{- end }}

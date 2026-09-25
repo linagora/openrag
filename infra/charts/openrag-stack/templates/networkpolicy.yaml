@@ -31,3 +31,49 @@ spec:
         {{- end }}
     {{- end }}
 {{- end }}
+{{- if and .Values.networkPolicy.enabled .Values.monitoring.bundled }}
+{{- /* The Prometheus Operator's admission webhook validates PrometheusRule and
+   AlertmanagerConfig objects before they are stored, and its caller is the API
+   server: not a pod, and on a managed control plane not on the cluster network
+   at all, so neither a podSelector nor a namespaceSelector can name it. The
+   default-deny policy above admits this namespace and the public HTTP ports
+   only, which leaves the call dropped wherever the API server is off-node —
+   silently skipping validation under kube-prometheus-stack's default
+   failurePolicy (Ignore), and rejecting every write of those objects under
+   Fail. This opens the webhook port alone, on the one pod that serves it. */}}
+{{- /* Round-tripped because `dig` takes a plain map, and Helm's values are not one. */}}
+{{- $stack := .Values.kubePrometheusStack | toYaml | fromYaml }}
+{{- $operator := dig "prometheusOperator" dict $stack }}
+{{- if and (dig "enabled" true $operator) (dig "admissionWebhooks" "enabled" true $operator) }}
+{{- $kps := dig "nameOverride" "kube-prometheus-stack" $stack }}
+{{- /* The webhook's own deployment (this chart's default) serves the webhook,
+   /metrics and /healthz. Without it the Prometheus Operator serves the webhook
+   on its own listener, which also carries /debug/pprof/: turning the
+   deployment off is an explicit choice, and networkPolicy.webhookFrom is the
+   way to narrow what it opens. */}}
+{{- $separate := dig "admissionWebhooks" "deployment" "enabled" false $operator }}
+{{- $app := ternary (printf "%s-operator-webhook" $kps) (printf "%s-operator" $kps) $separate }}
+{{- $port := ternary (dig "admissionWebhooks" "deployment" "tls" "internalPort" 10250 $operator) (dig "tls" "internalPort" 10250 $operator) $separate }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "openrag-stack.fullname" . }}-monitoring-webhook
+  labels:
+    {{- include "openrag-stack.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app: {{ $app }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - ports:
+        - port: {{ $port }}
+          protocol: TCP
+      {{- with .Values.networkPolicy.webhookFrom }}
+      from:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}
+{{- end }}
