@@ -104,7 +104,17 @@ Upload a new file to a specific partition for indexing.
 **Responses:**
 - `201 Created`: Returns task status URL
 - `400 Bad Request`: `callback_url` is malformed or not a public `http(s)` URL
-- `409 Conflict`: File already exists in partition
+- `409 Conflict`: File already exists in partition. Two more cases name a code,
+  as the `[CODE]` prefix of `detail` (`"[CODE]: message"`):
+  - `DOCUMENT_INDEXING_IN_PROGRESS`: another task is still indexing this `file_id`.
+    `extra.existing_task_id` and `extra.task_status_url` point at it, so a client
+    that re-sent after a timeout can poll the first task instead of re-uploading.
+    Earlier releases answered such a retry with `409 DOCUMENT_CONTENT_EXISTS`
+    naming the retried `file_id` itself when content deduplication is on (the
+    default) and the bytes are the same; with deduplication off, or different
+    bytes, they accepted it with `201` and let it fail at the end of the pipeline.
+  - `DOCUMENT_CONTENT_EXISTS`: content deduplication matched another file
+    (`extra.existing_file_id`).
 
 ##### Indexing status callback
 
@@ -212,7 +222,13 @@ Replace an existing file in the partition. Deletes the current entry and creates
 
 **Parameters:** Same as POST endpoint
 **Request Body:** Same as POST endpoint
-**Response:** `202 Accepted` with task status URL
+**Responses:**
+- `202 Accepted`: Returns task status URL
+- `404 Not Found`: File not found in partition
+- `409 Conflict`: `DOCUMENT_CONTENT_EXISTS`, when content deduplication finds the
+  same bytes held by another file, or by a task still indexing this one
+  (`extra.existing_file_id`). A replace is not refused for a task already
+  indexing the file, so it never returns `DOCUMENT_INDEXING_IN_PROGRESS`.
 
 #### Update File Metadata
 ```http
