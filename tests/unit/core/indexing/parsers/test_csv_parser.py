@@ -10,7 +10,7 @@ Current results (tests 01 to 10 should pass):
     08 Rejecting an unclosed quote
     09 Allow for an explicit delimiter, ex : CsvParser(delimiter=";")
     10 Error message identifies the malformed record
-    11 (future tests)
+    11 Reading many records from a file without never losing or reordering them
     ...
 
 The failed tests are not skipped or marked as failed and they describe useful new behaviors.
@@ -107,3 +107,31 @@ async def test_10_feature_error_identifies_record():
     document = Document(text='id,note\n1,"first\nsecond"\n2,extra,cell')
     with pytest.raises(ValueError, match=r"(?i)\brecord 3\b"):
         await CsvParser().parse(document)
+
+async def test_11_many_records_from_file(tmp_path):
+    """Checking that every record in a larger CSV survives the parsing."""
+    # create a csv on disk by writing records one at a time
+    path = tmp_path / "many_records.csv"
+    row_count = 10_000
+
+    with path.open("w", encoding="utf-8", newline="") as stream:
+        writer = csv.writer(stream)
+        writer.writerow(["id", "name"])
+        for number in range(row_count):
+            writer.writerow([f"{number:06d}", f"Person {number}"])
+
+    # give the parser a file path, and not preloaded text or bytes
+    document = Document(source_path=str(path))
+    result = await CsvParser().parse(document)
+
+    # one complete Markdown table is returned
+    assert len(result.text_blocks) == 1
+    block = result.text_blocks[0]
+    assert block.block_type == "table"
+    lines = block.text.splitlines()
+    assert lines[:2] == ["| id | name |", "| --- | --- |"]
+    assert len(lines) == row_count + 2
+
+    # check all records including their order and leading zeros
+    for number, line in enumerate(lines[2:]):
+        assert line == f"| {number:06d} | Person {number} |"
