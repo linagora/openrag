@@ -1890,6 +1890,9 @@ async def test_actor_transfers_ownership_only_after_all_attachments_succeed(tmp_
         task_id="t", path=str(path), metadata={"file_id": "f"}, partition="p", workspace_ids=["ws1", "ws2"]
     )
     finalize.assert_awaited_once_with("f", "p", ["ws1", "ws2"])
+    # Attachment is keyed on the file's partition: workspace ids are only unique there.
+    attach.assert_any_await("p", "ws1", ["f"])
+    attach.assert_any_await("p", "ws2", ["f"])
     actor._catalog_store.document_repo.mark_file_independently_indexed.assert_not_awaited()
 
 

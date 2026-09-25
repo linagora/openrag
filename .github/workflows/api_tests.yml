@@ -52,9 +52,18 @@ jobs:
 
           # Wait for OpenRAG API
           echo "Waiting for OpenRAG API..."
+          # /ready runs dependency checks, unlike /health_check, so bound each
+          # request and the whole wait: a hung call must not run the job into
+          # its own timeout, which would cancel it before the diagnosis below.
+          ready_curl="curl --connect-timeout 3 --max-time 10"
+          poll_deadline=$((SECONDS + 900))
           for i in {1..180}; do
-            if curl -sf http://localhost:8080/health_check 2>/dev/null; then
+            if $ready_curl -sf http://localhost:8080/ready 2>/dev/null; then
               echo "OpenRAG API ready after $i attempts"
+              break
+            fi
+            if (( SECONDS >= poll_deadline )); then
+              echo "Readiness polling timed out after 15 minutes"
               break
             fi
             echo "Attempt $i/180 - waiting..."
@@ -62,8 +71,13 @@ jobs:
           done
 
           # Final check
-          if ! curl -sf http://localhost:8080/health_check; then
-            echo "OpenRAG API failed to start"
+          if ! $ready_curl -sf http://localhost:8080/ready; then
+            echo "OpenRAG API failed to start. /ready says:"
+            # The body names the failing dependency, or reports
+            # startup=unavailable when the container never initialised — the
+            # diagnosis this gate used to hide behind a 200 from /health_check.
+            $ready_curl -s http://localhost:8080/ready || true
+            echo
             docker compose logs openrag
             exit 1
           fi

@@ -414,6 +414,112 @@ class TestVLLMClientOverrides:
         assert headers == {"Authorization": "Bearer default-key"}
 
 
+class TestCallerShapedRefusalAndTheSharedBreaker:
+    """Callers shape the LLM request: the model through llm_override, which
+    needs no opt-in, and any extra chat-body field, which is forwarded. LiteLLM
+    answers a refused model with 401 through v1.84, and reads credentials from
+    the body. Counting that 401 let any user open the shared "llm" breaker for
+    every tenant with one burst of requests."""
+
+    @staticmethod
+    def _gateway_client() -> VLLMClient:
+        def handler(request: httpx.Request) -> httpx.Response:
+            body = json.loads(request.content)
+            if body["model"] != "default-model":
+                return httpx.Response(401, json={"error": {"type": "key_model_access_denied"}})
+            if "vertex_credentials" in body:
+                return httpx.Response(401, json={"error": {"message": "Invalid credentials"}})
+            return _chat_response()
+
+        client = VLLMClient(endpoint="http://gateway:4000/v1", model_name="default-model", api_key="k")
+        client._client = httpx.AsyncClient(transport=_make_transport(handler))
+        return client
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "shaped",
+        [
+            pytest.param({"metadata": {"llm_override": {"model": "gpt-forbidden"}}}, id="refused-model"),
+            # api_key itself is stripped (TestCredentialBodyFields); any other
+            # forwarded field a proxy reads as a credential does the same.
+            pytest.param({"vertex_credentials": "bogus"}, id="body-credential-on-the-configured-model"),
+        ],
+    )
+    async def test_a_burst_of_caller_shaped_401s_leaves_the_breaker_closed(self, shaped):
+        from aiobreaker.state import CircuitBreakerState
+
+        client = self._gateway_client()
+
+        results = await asyncio.gather(
+            *(client.chat([{"role": "user", "content": "hi"}], **shaped) for _ in range(50)),
+            return_exceptions=True,
+        )
+
+        assert all(type(r) is InferenceError and r.status_code == 401 for r in results)
+        assert _breakers["llm"].current_state == CircuitBreakerState.CLOSED
+        assert _breakers["llm"].fail_counter == 0
+        assert (await client.chat([{"role": "user", "content": "hi"}]))["choices"][0]["message"]["content"] == "hello"
+
+
+class TestCredentialBodyFields:
+    """The chat schema forwards unknown fields, and a LiteLLM proxy takes an
+    ``api_key`` from the body over the deployment's key. None of the fields
+    that pick a credential or an endpoint may leave in the body, top-level or
+    under ``extra_body``, which LiteLLM spreads into the outbound call."""
+
+    _SENT = {
+        "api_key": "bogus",
+        "api_base": "https://attacker.invalid",
+        "base_url": "https://attacker.invalid",
+        "temperature": 0.2,
+        "extra_body": {"api_key": "bogus", "top_k": 5},
+    }
+
+    @staticmethod
+    def _capturing_client(bodies: list[dict], response: httpx.Response) -> VLLMClient:
+        def handler(request: httpx.Request) -> httpx.Response:
+            bodies.append(json.loads(request.content))
+            return response
+
+        client = VLLMClient(endpoint="http://gateway:4000/v1", model_name="default-model", api_key="k")
+        client._client = httpx.AsyncClient(transport=_make_transport(handler))
+        return client
+
+    def _assert_stripped(self, body: dict) -> None:
+        assert not {"api_key", "api_base", "base_url"} & body.keys()
+        assert body["temperature"] == 0.2
+        assert body["extra_body"] == {"top_k": 5}
+
+    @pytest.mark.asyncio
+    async def test_chat_sends_no_credential_field(self):
+        bodies: list[dict] = []
+        sent = json.loads(json.dumps(self._SENT))
+
+        await self._capturing_client(bodies, _chat_response()).chat([{"role": "user", "content": "hi"}], **sent)
+
+        self._assert_stripped(bodies[0])
+        # The caller's own arguments are untouched: a retry sends them again.
+        assert sent == self._SENT
+
+    @pytest.mark.asyncio
+    async def test_generate_sends_no_credential_field(self):
+        bodies: list[dict] = []
+
+        await self._capturing_client(bodies, _completions_response()).generate("hi", **self._SENT)
+
+        self._assert_stripped(bodies[0])
+
+    @pytest.mark.asyncio
+    async def test_stream_chat_sends_no_credential_field(self):
+        bodies: list[dict] = []
+        client = self._capturing_client(bodies, httpx.Response(200, text="data: [DONE]\n\n"))
+
+        async for _ in client.stream_chat([{"role": "user", "content": "hi"}], **self._SENT):
+            pass
+
+        self._assert_stripped(bodies[0])
+
+
 class TestCustomEndpointOverride:
     """LLM_OVERRIDE_ALLOW_CUSTOM_ENDPOINT restores the full llm_override contract.
 
@@ -710,6 +816,19 @@ class TestVLLMEmbedder:
 
         result = await self._make_embedder(handler).embed(["hello", "world"])
         assert result == [[0.1, 0.2], [0.3, 0.4]]
+
+    @pytest.mark.asyncio
+    async def test_a_refused_key_counts_toward_the_embedder_breaker(self):
+        """Callers cannot shape an embedding request, so a 401 there is our key
+        refused: it counts, unlike on the LLM breaker."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(401, json={"error": "invalid key"})
+
+        with pytest.raises(EmbeddingAPIError):
+            await self._make_embedder(handler).embed(["hello"])
+
+        assert _breakers["embedder"].fail_counter == 1
 
     @pytest.mark.asyncio
     async def test_embed_splits_large_input_into_batches(self):
@@ -1245,3 +1364,40 @@ class TestSuspectIndexIsDocumentGlobal:
             await embedder.embed(texts)
 
         assert [f["index"] for f in excinfo.value.extra["suspect_texts"]] == [97]
+
+
+@pytest.mark.asyncio
+async def test_generate_is_counted_as_a_completion_not_a_chat(monkeypatch):
+    from services.inference import _metrics
+
+    calls: list[dict] = []
+    monkeypatch.setattr(_metrics, "record_inference", lambda **kw: calls.append(kw))
+    client = TestVLLMClient()._make_client(lambda req: _completions_response("done"))
+    await client.generate("say something")
+    assert [c["operation"] for c in calls] == ["completion"]
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        'data: {"choices":[],"usage":{"prompt_tokens":7,"completion_tokens":3}}',
+        'data:{"choices":[],"usage":{"prompt_tokens":7,"completion_tokens":3}}',
+    ],
+)
+def test_stream_usage_is_counted_with_or_without_the_space(monkeypatch, line):
+    """SSE allows `data:` followed by one optional space; both carry the usage."""
+    from services.inference import vllm_client
+
+    seen: list[dict] = []
+    monkeypatch.setattr(vllm_client, "record_usage_from_response", lambda payload, operation: seen.append(payload))
+    vllm_client._record_stream_usage(line)
+    assert seen and seen[0]["usage"] == {"prompt_tokens": 7, "completion_tokens": 3}
+
+
+def test_a_content_delta_without_usage_is_not_parsed(monkeypatch):
+    from services.inference import vllm_client
+
+    seen: list[dict] = []
+    monkeypatch.setattr(vllm_client, "record_usage_from_response", lambda payload, operation: seen.append(payload))
+    vllm_client._record_stream_usage('data:{"choices":[{"delta":{"content":"hi"}}]}')
+    assert seen == []

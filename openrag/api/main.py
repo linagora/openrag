@@ -65,7 +65,7 @@ from core.config import load_config
 from core.utils.banner import print_startup_banner
 from core.utils.logging import get_logger
 from di.container import ServiceContainer
-from di.providers import set_container
+from di.providers import get_container, set_container
 from di.workers import ensure_worker_bootstrap
 from dotenv import dotenv_values
 from fastapi import Depends, FastAPI
@@ -131,6 +131,46 @@ class Tags(Enum):
 
 
 # ---------------------------------------------------------------------------
+# Ray runtime
+# ---------------------------------------------------------------------------
+
+
+def _init_ray() -> None:
+    """Start the embedded Ray cluster, or join the one ``RAY_ADDRESS`` names.
+
+    Called by the lifespan, and by the Ray Serve launcher at the bottom of this
+    module before ``serve.start()``. Serve starts Ray itself when it is not
+    running yet, with none of the settings below, and every Serve replica then
+    finds Ray running and skips the lifespan's call: without the launcher's own
+    call, the dashboard host and the metrics port would never apply under Serve.
+    """
+    _ray_address = os.environ.get("RAY_ADDRESS")
+    if _ray_address:
+        # Connect to an external Ray cluster (e.g. a dedicated ray-head
+        # container). No local dashboard is started — the head node owns it.
+        ray.init(address=_ray_address, ignore_reinit_error=True)
+    else:
+        # Embedded mode: start a local Ray cluster inside this process.
+        # Bind the Ray dashboard to localhost by default; the dashboard /
+        # Jobs API is unauthenticated (CVE-2023-48022 "ShadowRay") so it
+        # must never listen on a routable interface. Operators that front it
+        # with an auth proxy can override via RAY_DASHBOARD_HOST.
+        #
+        # Ray also picks a random port for its metrics agent unless given
+        # one, and a scrape config can only name a fixed port: without
+        # RAY_METRICS_EXPORT_PORT the metrics recorded in Ray actors are
+        # exported but never collected. The Compose monitoring overlay
+        # sets it. Like the dashboard it is unauthenticated, so it must
+        # not be published on the host.
+        metrics_port = os.environ.get("RAY_METRICS_EXPORT_PORT", "").strip()
+        ray.init(
+            dashboard_host=os.environ.get("RAY_DASHBOARD_HOST", "127.0.0.1"),
+            ignore_reinit_error=True,
+            _metrics_export_port=int(metrics_port) if metrics_port else None,
+        )
+
+
+# ---------------------------------------------------------------------------
 # Lifespan — owns the ServiceContainer lifecycle
 # ---------------------------------------------------------------------------
 
@@ -142,7 +182,7 @@ async def lifespan(app: FastAPI):
     Replaces the legacy ``@app.on_event("startup"/"shutdown")`` pair
     (deprecated since FastAPI 0.105). Order:
 
-    1. ``ray.init`` (guarded by ``ray.is_initialized``) so test imports
+    1. ``_init_ray`` (guarded by ``ray.is_initialized``) so test imports
        can pre-initialise Ray with a custom ``runtime_env``.
     2. ``services.workers.bootstrap`` — imported here (not at module
        load) so the detached worker actors are created with Ray live.
@@ -158,21 +198,7 @@ async def lifespan(app: FastAPI):
     """
     if not ray.is_initialized():
         logger.info("Startup: initializing Ray")
-        _ray_address = os.environ.get("RAY_ADDRESS")
-        if _ray_address:
-            # Connect to an external Ray cluster (e.g. a dedicated ray-head
-            # container). No local dashboard is started — the head node owns it.
-            ray.init(address=_ray_address, ignore_reinit_error=True)
-        else:
-            # Embedded mode: start a local Ray cluster inside this process.
-            # Bind the Ray dashboard to localhost by default; the dashboard /
-            # Jobs API is unauthenticated (CVE-2023-48022 "ShadowRay") so it
-            # must never listen on a routable interface. Operators that front it
-            # with an auth proxy can override via RAY_DASHBOARD_HOST.
-            ray.init(
-                dashboard_host=os.environ.get("RAY_DASHBOARD_HOST", "127.0.0.1"),
-                ignore_reinit_error=True,
-            )
+        _init_ray()
     logger.info("Startup: Ray is initialized")
 
     # ``ensure_worker_bootstrap`` imports ``services.workers.bootstrap``
@@ -287,7 +313,10 @@ app.openapi = custom_openapi
 app.add_middleware(RateLimitMiddleware)
 app.add_middleware(
     AuthMiddleware,
-    get_auth_service=lambda request: request.app.state.container.auth_service,
+    # Resolved through `get_container`, not off `app.state.container` directly:
+    # the boot guard sets that to None on a degraded start, and attribute access
+    # on None raises AttributeError, which no guard below catches (#937).
+    get_auth_service=lambda request: get_container(request).auth_service,
 )
 app.add_middleware(RequestIdMiddleware)
 app.add_middleware(RequestTimeoutMiddleware)
@@ -418,6 +447,9 @@ if __name__ == "__main__":
 
         get_logger()  # restore this driver's logging now that `app` is serialized
 
+        # Before serve.start(), which would otherwise start Ray with its own
+        # defaults: no pinned metrics port, so nothing could scrape it.
+        _init_ray()
         serve.start(http_options={"host": settings.ray.serve.host, "port": settings.ray.serve.port})
         if WITH_CHAINLIT_UI:
             from chainlit_api import app as chainlit_app

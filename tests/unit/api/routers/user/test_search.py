@@ -114,12 +114,15 @@ class _CapturingRetrieval:
 
 
 class _FakeWorkspaces:
-    def __init__(self, scope=None):
+    def __init__(self, scope=None, *, error=None):
         self._scope = scope
+        self._error = error
         self.resolve_scope_calls: list[tuple] = []
 
     async def resolve_scope(self, workspace_id, allowed_partitions):
         self.resolve_scope_calls.append((workspace_id, list(allowed_partitions)))
+        if self._error is not None:
+            raise self._error
         return self._scope
 
 
@@ -168,6 +171,25 @@ def test_search_multiple_partitions_invalid_workspace_404s_and_skips_search():
     assert resp.status_code == 404
     assert resp.json()["detail"] == "Workspace not found"
     assert retrieval.calls == []  # never falls back to an unscoped search
+
+
+def test_search_multiple_partitions_ambiguous_workspace_is_422_and_skips_search():
+    from core.utils.exceptions import AmbiguousWorkspaceError
+
+    retrieval = _CapturingRetrieval()
+    workspaces = _FakeWorkspaces(error=AmbiguousWorkspaceError("w1", ["mine", "theirs"]))
+    client = _client_with_workspace(
+        user_partitions=[{"partition": "mine"}, {"partition": "theirs"}],
+        workspaces=workspaces,
+        retrieval=retrieval,
+    )
+
+    resp = client.get("/search", params={"text": "hello", "workspace": "w1"})
+
+    assert resp.status_code == 422
+    assert "[WORKSPACE_AMBIGUOUS]" in resp.json()["detail"]
+    assert resp.json()["extra"]["partitions"] == ["mine", "theirs"]
+    assert retrieval.calls == []
 
 
 def test_search_one_partition_valid_workspace_scopes_files():

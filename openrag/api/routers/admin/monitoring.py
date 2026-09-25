@@ -25,11 +25,59 @@ import secrets
 from api.dependencies.auth import require_admin
 from core.config import load_config
 from core.config.infrastructure import ServerConfig
-from core.observability.monitoring import get_metrics
+from core.observability.monitoring import (
+    clear_ingest_task_counts,
+    get_metrics,
+    set_ingest_task_counts,
+)
+from core.utils.logging import get_logger
+from di.providers import get_job_service
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import Response
 
+logger = get_logger()
+
 router = APIRouter()
+
+#: Bound on the actor round-trip taken during a scrape. Prometheus' own scrape
+#: timeout is typically 10s and covers the whole response, so this leaves room
+#: for the rest of the exposition; a TaskStateManager that cannot answer in two
+#: seconds is itself the outage, and waiting longer would only turn a missing
+#: gauge into a failed scrape of everything else.
+_QUEUE_INFO_TIMEOUT_SECONDS = 2.0
+
+
+async def _refresh_ingest_tasks(request: Request) -> None:
+    """Sample the in-flight task counts for ``openrag_ingest_tasks``.
+
+    Resolved here rather than as a route dependency on purpose. ``get_job_service``
+    raises 503 when the container is absent, and a degraded boot is exactly when
+    the remaining metrics are worth having — making it a dependency would take
+    the whole endpoint down with the backlog gauge.
+
+    Any failure withdraws the gauge and serves everything else. A scrape that
+    returns HTTP metrics without the backlog is a small gap; a scrape that fails
+    returns nothing at all.
+    """
+    try:
+        service = get_job_service(request)
+        counts = await asyncio.wait_for(service.get_active_task_counts(), timeout=_QUEUE_INFO_TIMEOUT_SECONDS)
+        set_ingest_task_counts(counts)
+    except Exception as exc:  # noqa: BLE001 - the scrape must survive any of this
+        clear_ingest_task_counts()
+        logger.debug(f"ingest task gauge not sampled for this scrape: {exc}")
+
+
+#: Serialises refresh-then-collect. ``openrag_ingest_tasks`` is a process-global
+#: gauge, so two concurrent scrapes can interleave: one clears or overwrites the
+#: snapshot the other is about to serialise, and a response goes out describing
+#: state that never existed. Prometheus scrapes on a timer, and a second scraper
+#: — an agent, a curious operator, the admin UI polling — is enough to overlap.
+#:
+#: The lock covers the collect as well as the refresh, not just the write: the
+#: race is between one request's sample and another's exposition, so guarding
+#: only the sampling would leave it intact.
+_scrape_lock = asyncio.Lock()
 
 _DISABLED_DETAIL = (
     "Metrics endpoint disabled: set METRICS_TOKEN, or METRICS_ALLOW_UNAUTHENTICATED=true to serve it without a token"
@@ -73,16 +121,21 @@ def require_metrics_token(request: Request, server: ServerConfig = Depends(get_m
 
 
 async def _render_metrics(request: Request) -> Response:
-    container = getattr(request.app.state, "container", None)
-    if container is not None and container.is_initialized:
-        try:
-            await container.readiness_service.snapshot()
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            # A scrape must remain available while readiness dependencies fail.
-            pass
-    content = await asyncio.to_thread(get_metrics)
+    # Both routes render through here, so the lock and the ingest sample belong
+    # here rather than on one of them: the race is between any two scrapes,
+    # whichever door they came in by.
+    async with _scrape_lock:
+        container = getattr(request.app.state, "container", None)
+        if container is not None and container.is_initialized:
+            try:
+                await container.readiness_service.snapshot()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # A scrape must remain available while readiness dependencies fail.
+                pass
+        await _refresh_ingest_tasks(request)
+        content = await asyncio.to_thread(get_metrics)
     return Response(content=content, media_type="text/plain; version=0.0.4; charset=utf-8")
 
 

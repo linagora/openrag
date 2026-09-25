@@ -2,6 +2,17 @@ global:
   scrape_interval: 15s
   evaluation_interval: 15s
 
+# Alert rules, generated from the chart's rule template with default values
+# (scripts/gen_alert_rules.py) and mounted by the monitoring overlay. Kubernetes
+# renders the same template with its own threshold values, so both deployments
+# alert on one definition instead of two that drift.
+#
+# There is no Alertmanager in this overlay: rules evaluate and show as firing in
+# the Prometheus UI (Alerts tab), but nothing routes or notifies. Point
+# `alerting.alertmanagers` at one to receive them.
+rule_files:
+  - /etc/prometheus/rules/*.yaml
+
 scrape_configs:
   - job_name: "prometheus"
     static_configs:
@@ -26,3 +37,26 @@ scrape_configs:
       credentials_file: /etc/prometheus/openrag_token
     static_configs:
       - targets: ["openrag:8080"]
+
+  # Ray's metrics agent inside the API container (embedded Ray), on the port
+  # monitoring.docker-compose.yaml pins with RAY_METRICS_EXPORT_PORT. Metrics
+  # recorded in Ray actors (indexing, and every inference call the indexing
+  # workers make) are exported here, not on /metrics. No credential: the agent
+  # has none, which is why the port stays off the host.
+  #
+  # The name must contain "openrag": OpenRagTargetDown selects the targets it
+  # watches with job=~".*openrag.*", and a Ray scrape nobody watches going
+  # down leaves the ingestion panels reading idle.
+  - job_name: "openrag-ray"
+    static_configs:
+      - targets: ["openrag:8091"]
+    metric_relabel_configs:
+      # Ray prefixes what it exports with ray_. Stripping it from OpenRAG's
+      # series stores them under the names the API exports and the alert rules
+      # query, as the Helm chart's Ray PodMonitor does. Ray's own ray_* metrics
+      # keep their names. Only the name changes: WorkerId must survive, or
+      # concurrent workers' series collide and the whole scrape is rejected.
+      - source_labels: [__name__]
+        regex: ray_(openrag_.+)
+        target_label: __name__
+        replacement: $1

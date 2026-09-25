@@ -6,8 +6,11 @@ via prometheus_client.
 """
 
 import threading
+from collections.abc import Mapping
 
 from core.models.readiness import ReadinessSnapshot
+from core.observability.metric_specs import INGEST_TASK_STATE_VALUES
+from core.observability.metric_specs import INGEST_TASKS as INGEST_TASKS_SPEC
 from prometheus_client import (
     REGISTRY,
     CollectorRegistry,
@@ -88,6 +91,45 @@ def record_request(method: str, path: str, status_code: int, duration: float) ->
     if status_code >= 400:
         REQUEST_FAILURES.labels(method=method, endpoint=path, status_code=sc).inc()
     REQUEST_DURATION.labels(method=method, endpoint=path).observe(duration)
+
+
+# -- Ingestion backlog ------------------------------------------------------
+# Sampled at scrape time rather than maintained by hand: a gauge incremented on
+# each transition would drift on every actor restart, cancellation or fenced
+# task. The count comes from the durable ``jobs`` table reconciled with the
+# TaskStateManager (``JobService.get_active_task_counts``). Built from the shared spec so it cannot diverge from the worker-side
+# metrics in name or labels.
+
+INGEST_TASKS = Gauge(
+    INGEST_TASKS_SPEC.name,
+    INGEST_TASKS_SPEC.description,
+    list(INGEST_TASKS_SPEC.labels),
+)
+
+
+def set_ingest_task_counts(counts: Mapping[str, int]) -> None:
+    """Publish the in-flight task counts.
+
+    Only the declared states are published. ``counts`` originates from the task
+    state machine, so an unexpected key would be a bug rather than an attack —
+    but it would still mint a Prometheus series, and silently dropping it keeps
+    that impossible by construction rather than by review.
+
+    Every declared state is written on every call, including zeros: an absent
+    series and a genuinely empty queue must not look the same on a dashboard.
+    """
+    for state in INGEST_TASK_STATE_VALUES:
+        INGEST_TASKS.labels(state=state).set(counts.get(state, 0))
+
+
+def clear_ingest_task_counts() -> None:
+    """Withdraw the gauge when the count could not be read.
+
+    Leaving the previous values in place would report a stale backlog as the
+    current one, which is worse than reporting nothing: the series simply goes
+    absent and the panel shows no data.
+    """
+    INGEST_TASKS.clear()
 
 
 def get_metrics() -> bytes:

@@ -13,6 +13,7 @@ from core.indexing.contextualize import ChunkContextualizer
 from core.indexing.parsers.document_parser import DocumentParser
 from core.indexing.topic_tags import TopicTagger
 from core.models.document import Document, DocumentType
+from core.observability.ray_metrics import observe_stage_duration
 from core.utils.logging import get_logger
 from core.vector_stores.vector_store import VectorStore
 from core.vlm.vlm import VLM
@@ -147,7 +148,16 @@ class IndexingPipeline:
             try:
                 await coro
             finally:
-                timings[name] = (time.perf_counter() - start) * 1000.0
+                elapsed = time.perf_counter() - start
+                timings[name] = elapsed * 1000.0
+                # Exported in seconds (the Prometheus base unit) while ``timings``
+                # stays in milliseconds for the existing per-file log line.
+                # Recorded in ``finally`` so a failed or timed-out stage is still
+                # measured — a stage that hangs to its timeout is precisely what
+                # the duration histogram exists to show. ``observe_stage_duration``
+                # swallows its own errors; a raise here would replace the
+                # pipeline's real exception with a metrics one.
+                observe_stage_duration(name, elapsed)
 
         async def _timed_enrichment(name: str, coro: Any) -> None:
             """Run an enrichment stage best-effort (#702).

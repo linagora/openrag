@@ -1,9 +1,10 @@
 """The bundled Grafana dashboards must work in any Grafana, not only the Compose one.
 
-The same JSON is provisioned from disk by the Compose overlay and is meant to be
-loaded by a platform's own Grafana on Kubernetes. Nothing in it may therefore
-assume the Compose stack's names: a data source UID or a scrape job name that
-only Compose defines leaves every panel blank anywhere else, with no error.
+The same JSON is provisioned from disk by the Compose overlay and shipped as
+ConfigMaps by the chart, for a platform's own Grafana or the bundled one on
+Kubernetes. Nothing in it may therefore assume the Compose stack's names: a data
+source UID or a scrape job name that only Compose defines leaves every panel
+blank anywhere else, with no error.
 
 The query rules below carry the metric design into the dashboards: no unbounded
 label, counters rated before they are aggregated, and no metric that nothing in
@@ -25,7 +26,7 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).resolve().parents[3]
-DASHBOARDS = REPO / "infra/compose/grafana/dashboards"
+DASHBOARDS = REPO / "infra/charts/openrag-stack/dashboards"
 
 DS_VARIABLE = "DS_PROMETHEUS"
 DS_REF = {"type": "prometheus", "uid": "${" + DS_VARIABLE + "}"}
@@ -44,7 +45,7 @@ METRIC_NAME = re.compile(r"(?<![A-Za-z0-9_])(?:ray_)?(openrag_[a-z0-9_]+)")
 DECLARED_NAME = re.compile(r"""["'](openrag_[a-z0-9_]+)["']""")
 HISTOGRAM_SERIES = re.compile(r"_(?:bucket|sum|count)$")
 UP = re.compile(r"\bup\b")
-UP_ON_API_JOB = re.compile(r'\bup\s*\{[^}]*\bjob\s*=~\s*"\$job"[^}]*\}')
+UP_ON_A_JOB_VARIABLE = re.compile(r'\bup\s*\{[^}]*\bjob\s*=~\s*"\$(?:job|ray_job)"[^}]*\}')
 
 # The series the job variable reads. It must exist before the API serves a
 # request: the HTTP counters are labelled, so they export nothing until the
@@ -54,7 +55,19 @@ UP_ON_API_JOB = re.compile(r'\bup\s*\{[^}]*\bjob\s*=~\s*"\$job"[^}]*\}')
 # only by the API's /metrics, never by Ray's exporter.
 API_JOB_METRIC = "openrag_model_endpoint_discovery_up"
 
-# Grafana's "All" selection, which the hidden job variable keeps.
+# The series the ray_job variable reads: the task state manager's documents
+# counter. It is recorded only inside Ray actors, so it never names the API's
+# job, and the (ray_)? prefix finds it whether or not the scrape strips ray_.
+RAY_JOB_METRIC = "openrag_ingest_documents_total"
+RAY_JOB_SELECTOR = '{__name__=~"(ray_)?' + RAY_JOB_METRIC + '"}'
+
+# Each hidden job variable and the query it must read.
+JOB_VARIABLES = {
+    "job": f"label_values({API_JOB_METRIC}, job)",
+    "ray_job": f"label_values({RAY_JOB_SELECTOR}, job)",
+}
+
+# Grafana's "All" selection, which the hidden job variables keep.
 ALL_VALUE = "$__all"
 
 # Scrapes /metrics twice through the instrumentation middleware, as Prometheus
@@ -178,36 +191,70 @@ def test_every_datasource_reference_goes_through_the_variable(name: str):
 
 @pytest.mark.parametrize(("where", "expr"), QUERIES, ids=[w for w, _ in QUERIES])
 def test_query_does_not_hardcode_a_scrape_job(where: str, expr: str):
-    """The API's job is "openrag" on Compose and the Service name on Kubernetes."""
+    """The API's job is "openrag" on Compose and the Service name on Kubernetes;
+    Ray's is "openrag-ray" on Compose and the PodMonitor's on Kubernetes.
+    """
     for match in re.finditer(r'\bjob\s*(=~|!~|=|!=)\s*"([^"]*)"', expr):
-        assert match.group(2) == "$job", f"{where} pins job to {match.group(2)!r}; use the $job variable"
+        assert match.group(2) in {f"${name}" for name in JOB_VARIABLES}, (
+            f"{where} pins job to {match.group(2)!r}; use the $job or $ray_job variable"
+        )
 
 
-def test_scrape_health_is_scoped_to_the_api_job():
+def test_scrape_health_is_scoped_to_an_openrag_job():
     """`up` has a series for every target Prometheus scrapes. Unscoped, the Service
     status card reports the worst of node-exporter, Ray and everything else rather
     than the API, and that would still pass the hardcoded-job check above.
     """
     ups = [(where, expr) for where, expr in QUERIES if UP.search(expr)]
     assert any(where.startswith("openrag-http.json:") for where, _ in ups), "Service status reads up"
+    # With the Ray target down, the ingestion tiles read Idle: only its own up says why.
+    assert any(where.startswith("openrag-service.json:") and "$ray_job" in expr for where, expr in ups)
     for where, expr in ups:
-        assert len(UP.findall(expr)) == len(UP_ON_API_JOB.findall(expr)), f'{where} reads up without job=~"$job"'
+        assert len(UP.findall(expr)) == len(UP_ON_A_JOB_VARIABLE.findall(expr)), (
+            f'{where} reads up without job=~"$job" or job=~"$ray_job"'
+        )
 
 
-def test_job_variable_reads_a_series_only_the_api_exports():
-    """The job must come from the API's own series, or $job also matches other targets."""
-    using = [name for name in DASHBOARD_FILES if any(w.startswith(f"{name}:") and "$job" in e for w, e in QUERIES)]
+@pytest.mark.parametrize("variable_name", sorted(JOB_VARIABLES))
+def test_job_variable_reads_a_series_only_its_target_exports(variable_name: str):
+    """Each job must come from its own target's series, or it also matches the other target."""
+    using = [
+        name
+        for name in DASHBOARD_FILES
+        if any(w.startswith(f"{name}:") and re.search(rf"\${variable_name}\b", e) for w, e in QUERIES)
+    ]
     assert using
     for name in using:
         variables = {v["name"]: v for v in DASHBOARD_FILES[name].get("templating", {}).get("list", [])}
-        assert "job" in variables, f"{name} reads $job without defining it"
-        query = variables["job"]["query"]
+        assert variable_name in variables, f"{name} reads ${variable_name} without defining it"
+        query = variables[variable_name]["query"]
         query = query.get("query") if isinstance(query, dict) else query
-        assert query == f"label_values({API_JOB_METRIC}, job)", f"{name}: job variable reads {query!r}"
+        assert query == JOB_VARIABLES[variable_name], f"{name}: {variable_name} variable reads {query!r}"
 
 
-def test_the_job_variable_selects_the_api_without_widening_up():
-    """The hidden job selector must resolve per deployment and stay on the API.
+def test_the_ray_job_series_is_recorded_only_in_ray_actors():
+    """$ray_job reads a counter that only Ray's metrics agent exports.
+
+    If the API process recorded it too, $ray_job would also name the API's job,
+    and the Ray scrape tile would report the API's `up` for Ray's. The name is
+    declared once, and its spec is instantiated in one module, through
+    ray.util.metrics.
+    """
+    sources = {
+        path.relative_to(REPO / "openrag").as_posix(): path.read_text(encoding="utf-8")
+        for path in (REPO / "openrag").rglob("*.py")
+    }
+    declaring = {path for path, text in sources.items() if f'"{RAY_JOB_METRIC}"' in text}
+    assert declaring == {"core/observability/metric_specs.py"}, f"{RAY_JOB_METRIC} is declared in {sorted(declaring)}"
+    using = {path for path, text in sources.items() if "INGEST_DOCUMENTS_TOTAL" in text}
+    assert using == {"core/observability/metric_specs.py", "core/observability/ray_metrics.py"}, (
+        f"INGEST_DOCUMENTS_TOTAL is used outside the Ray backend: {sorted(using)}"
+    )
+    assert "from ray.util.metrics import" in sources["core/observability/ray_metrics.py"]
+
+
+def test_the_job_variables_select_their_target_without_widening_up():
+    """The hidden job selectors must resolve per deployment and stay on their target.
 
     A pinned job name would be the Compose one, which no Kubernetes install
     scrapes under, so the selection comes from the query: All, which Grafana
@@ -219,15 +266,33 @@ def test_the_job_variable_selects_the_api_without_widening_up():
     checked = 0
     for name, dashboard in DASHBOARD_FILES.items():
         for variable in dashboard.get("templating", {}).get("list", []):
-            if variable["name"] != "job":
+            if variable["name"] not in JOB_VARIABLES:
                 continue
             checked += 1
+            label = variable["name"]
             all_value = variable.get("allValue")
-            assert not all_value, f"{name}: job sets allValue {all_value!r}, so All stops meaning the API's jobs"
+            assert not all_value, f"{name}: {label} sets allValue {all_value!r}, so All stops meaning its own jobs"
             default = variable.get("current", {}).get("value") or []
             pinned = [v for v in ([default] if isinstance(default, str) else default) if v != ALL_VALUE]
-            assert not pinned, f"{name}: job defaults to {pinned!r}, a name only one deployment scrapes under"
-    assert checked
+            assert not pinned, f"{name}: {label} defaults to {pinned!r}, a name only one deployment scrapes under"
+    assert checked == 3, "openrag-http.json defines job; openrag-service.json defines job and ray_job"
+
+
+def test_service_stat_tiles_read_the_current_value():
+    """A stat tile shows one number: it must be the current one.
+
+    Read as a range query reduced with lastNotNull, a tile keeps the last value
+    from anywhere in the time range once its series disappears: a withdrawn
+    queue gauge still shows the old backlog, and an error ratio stays red after
+    traffic stops. An instant query leaves the tile empty instead, so it shows
+    its no-value text.
+    """
+    tiles = [p for p in _panels(DASHBOARD_FILES["openrag-service.json"]["panels"]) if p.get("type") == "stat"]
+    assert len(tiles) >= 8
+    for tile in tiles:
+        for target in tile["targets"]:
+            assert target.get("instant") is True, f"{tile['title']!r} is not an instant query"
+            assert target.get("range") is False, f"{tile['title']!r} also runs as a range query"
 
 
 def test_an_idle_api_already_exports_the_job_series():
@@ -281,3 +346,42 @@ def test_query_reads_only_declared_metrics(where: str, expr: str):
     for name in set(METRIC_NAME.findall(expr)):
         base = HISTOGRAM_SERIES.sub("", name)
         assert name in declared or base in declared, f"{where} reads {name}, which nothing in openrag/ declares"
+
+
+INFERENCE_SELECTOR = re.compile(r"openrag_inference_requests_total\"?\s*(?:,\s*)?([^}]*)\}")
+OUTCOME_MATCHER = re.compile(r'outcome=~"([^"]+)"')
+
+
+def _provider_down_outcomes() -> tuple[str, str]:
+    """The numerator and denominator outcome sets ``OpenRagInferenceProviderDown`` pages on."""
+    import yaml
+
+    rules = yaml.safe_load((REPO / "infra/compose/prometheus/rules/openrag-alerts.yaml").read_text(encoding="utf-8"))
+    (expr,) = [
+        rule["expr"]
+        for group in rules["groups"]
+        for rule in group["rules"]
+        if rule.get("alert") == "OpenRagInferenceProviderDown"
+    ]
+    numerator, denominator, *_ = OUTCOME_MATCHER.findall(expr)
+    return numerator, denominator
+
+
+@pytest.mark.parametrize(
+    ("where", "expr"),
+    [(w, e) for w, e in QUERIES if "openrag_inference_requests_total" in e and "/" in e],
+)
+def test_inference_ratios_judge_the_outcomes_the_alert_judges(where: str, expr: str):
+    """A ratio over every outcome counts ``cancelled``, ``rejected`` and
+    ``circuit_open`` calls, which say nothing about the provider: a provider
+    failing every call it served reads below ``OpenRagInferenceProviderDown``'s
+    threshold on the dashboard while the alert fires. Every selector in a
+    ratio, the zero fallback included, carries one of the alert's two sets."""
+    numerator, denominator = _provider_down_outcomes()
+    selectors = INFERENCE_SELECTOR.findall(expr)
+    assert selectors, f"{where}: no inference selector parsed from {expr}"
+    for selector in selectors:
+        outcomes = OUTCOME_MATCHER.findall(selector)
+        assert outcomes in ([numerator], [denominator]), (
+            f"{where}: selector {{{selector}}} should filter outcome on {numerator!r} or {denominator!r}"
+        )

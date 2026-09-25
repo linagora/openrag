@@ -268,6 +268,78 @@ async def test_indexing_uses_named_embedder_loaded_from_model_endpoint_registry(
     assert row["chunks"][0].embedding == [0.25]
 
 
+class _RecordingLLM:
+    def __init__(self, **kwargs: Any) -> None:
+        self.kwargs = kwargs
+
+
+@pytest.mark.asyncio
+async def test_worker_clients_are_labelled_with_their_endpoint_name(monkeypatch: pytest.MonkeyPatch):
+    """The indexing actors build their own clients rather than going through
+    the API container's factory. Unlabelled, every embed, caption,
+    contextualization and topic-tag call records as ``unconfigured``, and no
+    per-provider alert can tell which endpoint failed."""
+    import services.inference.distributed_semaphore as semaphore_module
+    import services.workers.indexer_pool as indexer_pool
+    from core.llm import llm_registry
+    from services.inference._metrics import resolve_provider
+
+    llm_registry.register("e2e-recording-llm")(_RecordingLLM)
+    # The contextualizer factory builds a cluster-wide Ray semaphore.
+    monkeypatch.setattr(semaphore_module, "DistributedSemaphore", lambda **_kw: object())
+    try:
+        settings = _settings()
+        await _hydrate(
+            settings,
+            _FakeEndpointRepo(
+                [
+                    _row(
+                        name="admin-embedder",
+                        model_type="embedder",
+                        endpoint="http://e/v1",
+                        model_name="e",
+                        implementation="e2e-recording-embedder",
+                    ),
+                    _row(
+                        name="admin-vlm",
+                        model_type="vlm",
+                        endpoint="http://v/v1",
+                        model_name="v",
+                        implementation="e2e-recording-vlm",
+                    ),
+                    _row(
+                        name="admin-llm",
+                        model_type="llm",
+                        endpoint="http://l/v1",
+                        model_name="l",
+                        implementation="e2e-recording-llm",
+                    ),
+                ]
+            ),
+        )
+
+        embedder = indexer_pool._build_embedder_factory(settings)("admin-embedder")
+        vlm = indexer_pool._build_vlm_factory(settings)("admin-vlm")
+        contextualizer = indexer_pool._build_contextualizer_factory(settings)("admin-llm")
+        tagger = indexer_pool._build_topic_tagger_factory(settings)("admin-llm")
+        default_embedder = indexer_pool._build_embedder_factory(settings)("default")
+    finally:
+        llm_registry._registry.pop("e2e-recording-llm", None)
+
+    assert resolve_provider(embedder, {}) == "admin-embedder"
+    assert resolve_provider(vlm, {}) == "admin-vlm"
+    assert resolve_provider(contextualizer._llm, {}) == "admin-llm"
+    assert resolve_provider(tagger._llm, {}) == "admin-llm"
+    assert resolve_provider(default_embedder, {}) == "default"
+
+
+def test_the_caption_vlm_is_labelled_default():
+    from services.inference._metrics import resolve_provider
+    from services.workers.parsers.parser_dispatcher import build_caption_vlm
+
+    assert resolve_provider(build_caption_vlm(_settings()), {}) == "default"
+
+
 @pytest.mark.asyncio
 async def test_indexing_fails_for_missing_named_embedder_without_default_fallback():
     settings = _settings()
