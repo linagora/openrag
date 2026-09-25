@@ -91,12 +91,21 @@ that target rather than render a misleading one.
 ## Adding an alert
 
 1. Add the rule to `infra/charts/openrag-stack/rules/openrag-alerts.yaml.tpl`, with
-   `severity`, `summary`, `description` and `runbook_url` annotations.
-2. Regenerate the Compose copy with `uv run python scripts/gen_alert_rules.py` (needs
+   `severity`, `summary`, `description` and `runbook_url` annotations, and
+   `for: {{ $for.<AlertName> }}`.
+2. Register the alert's default `for` in the template's `$for` dict, near the top of the
+   same file. Without the key the rule renders a bare `for:` — null, so the alert fires
+   on a single evaluation — and `monitoring.prometheusRule.for.<AlertName>` is refused
+   as "not an alert in this chart".
+3. Add the alert and its default to the `for` list in the comment above
+   `monitoring.prometheusRule.for` in `infra/charts/openrag-stack/values.yaml`.
+4. Regenerate the Compose copy with `uv run python scripts/gen_alert_rules.py` (needs
    `helm`). `infra/compose/prometheus/rules/openrag-alerts.yaml` is its output and must
    never be edited by hand; CI runs `gen_alert_rules.py --check` and fails on any drift.
-3. Add the page here, named exactly after the alert.
-4. Add its scenarios to `tests/unit/infra/alert_rules.promtool.yaml`, which replays
+5. Add the page here, named exactly after the alert.
+6. Add its scenarios to `tests/unit/infra/alert_rules.promtool.yaml`, which replays
    synthetic series through the generated rules.
-5. `tests/unit/infra/test_alert_rules.py` enforces the annotations and the page, plus
-   that the expression uses only known metric names and no caller-controlled label.
+7. `tests/unit/infra/test_alert_rules.py` enforces the annotations and the page, that
+   every rule the chart renders waits a non-empty `for`, that the `values.yaml` list
+   matches the template's defaults, plus that the expression uses only known metric
+   names and no caller-controlled label.
