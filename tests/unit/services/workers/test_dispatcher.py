@@ -861,7 +861,7 @@ async def test_dispatch_indexing_rejects_task_when_file_delete_fence_is_active()
 
 @pytest.mark.asyncio
 async def test_dispatch_indexing_refuses_a_duplicate_submission_for_a_file_being_indexed() -> None:
-    """A retried POST must be turned away before the parse, not after it (#693)."""
+    """A retried POST must be turned away before the parse, not after it (#1046)."""
     from core.utils.exceptions import ConflictError
     from services.workers.dispatcher import WorkerDispatcher
 
