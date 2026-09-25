@@ -474,7 +474,10 @@ Ray gets a `PodMonitor` rather than a `ServiceMonitor` because every Ray node
 exports its own metrics, on port 8090. With `ray.enabled=false` (the default) the
 only Ray node is embedded in the `openrag` pod: the chart pins its metrics port to
 8090 with `RAY_METRICS_EXPORT_PORT`, declares it as `ray-metrics`, and the
-`PodMonitor` selects that pod instead of the RayCluster's. Ray prefixes the metrics OpenRAG records inside its
+`PodMonitor` selects that pod instead of the RayCluster's. With `ray.enabled=false`
+and `RAY_ADDRESS` set, the API attaches to an external Ray cluster and starts no
+Ray of its own: the chart then declares no port and renders no `PodMonitor`, and
+refuses `ray.metrics.podMonitor.enabled`. Scrape that cluster where it runs. Ray prefixes the metrics OpenRAG records inside its
 workers with `ray_`. The `PodMonitor` strips that prefix, so these metrics are
 stored under the same `openrag_*` names the API's `/metrics` uses, and the alert
 rules match them. Ray's own `ray_*` metrics keep their names. Milvus already exports from all five components (proxy,
