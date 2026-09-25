@@ -326,11 +326,23 @@ def test_the_postgres_exporter_renders_with_a_fixed_superuser_password(tmp_path:
     assert result.returncode == 0, result.stderr
 
 
-def _notes(tmp_path: Path, *args: str) -> str:
+DEFAULT_DENY_LOOKUP = (
+    'lookup "networking.k8s.io/v1" "NetworkPolicy" .Release.Namespace '
+    '(printf "%s-default-deny" (include "openrag-stack.fullname" .))'
+)
+
+
+def _notes(tmp_path: Path, *args: str, default_deny_chart: str | None = None) -> str:
     """`helm template` never prints NOTES.txt, so it is rendered under a second
-    name, indented under a block scalar so that Helm parses it as YAML."""
+    name, indented under a block scalar so that Helm parses it as YAML. It looks
+    nothing up either, so `default_deny_chart` stands in for the helm.sh/chart
+    label of the live default-deny policy."""
     chart = _chart(tmp_path)
     notes = (chart / "templates" / "NOTES.txt").read_text(encoding="utf-8")
+    if default_deny_chart is not None:
+        assert notes.count(DEFAULT_DENY_LOOKUP) == 1, "NOTES.txt no longer looks up the default-deny policy"
+        live = f'(dict "metadata" (dict "labels" (dict "helm.sh/chart" "{default_deny_chart}")))'
+        notes = notes.replace(DEFAULT_DENY_LOOKUP, live)
     (chart / "templates" / "notes-under-test.yaml").write_text("notes: |\n" + indent(notes, "  "), encoding="utf-8")
 
     result = _render(chart, *args, "-s", "templates/notes-under-test.yaml")
@@ -378,3 +390,37 @@ def test_an_upgrade_names_the_ray_workers_to_recreate_and_leaves_the_head(tmp_pa
 @requires_helm
 def test_a_first_install_prints_no_upgrade_steps(tmp_path: Path) -> None:
     assert "Upgrading from chart" not in _notes(tmp_path, "--set", "ray.enabled=true")
+
+
+@requires_helm
+@pytest.mark.parametrize(
+    ("upgraded_from", "printed"),
+    [
+        ("openrag-stack-0.6.4", True),
+        ("openrag-stack-0.6.6-dev", True),
+        ("openrag-stack-0.6.7-dev", False),
+        ("openrag-stack-0.6.7", False),
+        ("openrag-stack-0.7.0", False),
+        ("not-a-chart-version", True),
+    ],
+)
+def test_the_upgrade_steps_print_only_when_upgrading_from_0_6_6_or_earlier(
+    tmp_path: Path, upgraded_from: str, printed: bool
+) -> None:
+    """Every release bumps the chart version, so steps scoped to the current
+    version would be gone before a stable release carried them. It is the
+    version upgraded from that decides, and one that cannot be read prints them."""
+    notes = _notes(tmp_path, "--is-upgrade", "--set", "ray.enabled=true", default_deny_chart=upgraded_from)
+
+    assert ("Upgrading from chart 0.6.6 or earlier" in notes) is printed
+
+
+@requires_helm
+def test_the_default_deny_policy_carries_the_chart_version_the_notes_read(tmp_path: Path) -> None:
+    """Renamed or unlabelled, the policy is not found, and every upgrade prints
+    the 0.6.7 steps again."""
+    version = yaml.safe_load((CHART_DIR / "Chart.yaml").read_text(encoding="utf-8"))["version"]
+    objects = _objects(_chart(tmp_path), "--set", "fullnameOverride=rag")
+
+    (policy,) = [o for o in objects if o["kind"] == "NetworkPolicy" and o["metadata"]["name"] == "rag-default-deny"]
+    assert policy["metadata"]["labels"]["helm.sh/chart"] == f"openrag-stack-{version}"
