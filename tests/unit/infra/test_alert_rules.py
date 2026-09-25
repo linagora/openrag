@@ -125,6 +125,35 @@ def _all_rules() -> list[dict]:
     return [rule for group in _rules_document()["groups"] for rule in group["rules"]]
 
 
+#: A metric named inside a selector. The label-matcher strip below would hide it,
+#: so a typo there would pass the known-metrics check; it is read out first.
+_NAME_MATCHER_RE = re.compile(r'__name__\s*=~?\s*"(?:\(ray_\)\?)?([a-zA-Z_:][a-zA-Z0-9_:]*)"')
+#: The one form a Ray-exported metric may take in a rule.
+_RAY_TOLERANT_RE = re.compile(r'__name__=~"\(ray_\)\?([a-zA-Z_:][a-zA-Z0-9_:]*)"')
+
+
+def _ray_exported_metrics() -> frozenset[str]:
+    """Metrics recorded through ``ray.util.metrics``: the specs ``ray_metrics``
+    and ``inference_metrics`` import. Scraped from Ray's agent they are named
+    ``ray_openrag_*`` unless the scrape renames them."""
+    import ast
+    import sys
+
+    sys.path.insert(0, str(ROOT / "openrag"))
+    from core.observability import metric_specs
+
+    names = set()
+    for module in ("ray_metrics.py", "inference_metrics.py"):
+        tree = ast.parse((ROOT / "openrag" / "core" / "observability" / module).read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module == "core.observability.metric_specs":
+                for alias in node.names:
+                    spec = getattr(metric_specs, alias.name, None)
+                    if isinstance(spec, metric_specs.MetricSpec):
+                        names.add(spec.name)
+    return frozenset(names)
+
+
 #: Clauses whose parenthesised argument is a list of *label* names, not metrics.
 _LABEL_LIST_RE = re.compile(r"\b(?:by|without|on|ignoring|group_left|group_right)\s*\([^)]*\)")
 
@@ -138,10 +167,12 @@ def _metric_names(expr: str) -> set[str]:
     ``by (...)`` / ``on (...)`` clauses. All three are removed before matching, so a
     genuine typo in a metric name is what is left.
     """
+    named = set(_NAME_MATCHER_RE.findall(expr))  # {__name__=~"(ray_)?<metric>"}
     cleaned = re.sub(r"\"[^\"]*\"|'[^']*'", "", expr)  # string literals
     cleaned = re.sub(r"\{[^}]*\}", "", cleaned)  # label matchers
     cleaned = _LABEL_LIST_RE.sub("", cleaned)  # by/on/without label lists
-    return {name for name in _METRIC_RE.findall(cleaned) if name not in _PROMQL_KEYWORDS and not name.isdigit()}
+    bare = {name for name in _METRIC_RE.findall(cleaned) if name not in _PROMQL_KEYWORDS and not name.isdigit()}
+    return bare | named
 
 
 # ---------------------------------------------------------------------------
@@ -235,6 +266,24 @@ def test_expressions_reference_only_known_metrics(rule: dict) -> None:
     """A typo'd metric name is valid PromQL that matches nothing, forever."""
     unknown = _metric_names(rule["expr"]) - KNOWN_METRICS
     assert not unknown, f"{rule['alert']} references unknown metric(s): {sorted(unknown)}"
+
+
+def test_the_ray_exported_set_is_found() -> None:
+    """Guards the guard below: an empty set would make it pass vacuously."""
+    assert {"openrag_ingest_documents_total", "openrag_circuit_breaker_state"} <= _ray_exported_metrics()
+
+
+@pytest.mark.parametrize("rule", _all_rules(), ids=lambda r: r["alert"])
+def test_ray_exported_metrics_match_with_or_without_the_ray_prefix(rule: dict) -> None:
+    """Ray's agent exports these as ``ray_openrag_*``. The chart's PodMonitor and
+    the Compose job rename them, but a platform Prometheus that scrapes Ray its
+    own way does not, and a bare name then matches nothing: the alert is inert
+    with no sign of it. ``{__name__=~"(ray_)?<metric>"}`` matches both."""
+    ray_exported = _ray_exported_metrics()
+    tolerant = set(_RAY_TOLERANT_RE.findall(rule["expr"]))
+    bare = _metric_names(_RAY_TOLERANT_RE.sub("", rule["expr"])) & ray_exported
+    assert not bare, f"{rule['alert']} names {sorted(bare)} without (ray_)?"
+    assert tolerant <= KNOWN_METRICS, f"{rule['alert']}: unknown {sorted(tolerant - KNOWN_METRICS)}"
 
 
 @pytest.mark.parametrize("rule", _all_rules(), ids=lambda r: r["alert"])
@@ -483,7 +532,7 @@ def test_target_down_excludes_only_the_datastores_without_the_bundled_stack() ->
         # OpenRAG's own targets: the API, and wherever the Ray-side series
         # (ingest outcomes, parse completions) are scraped from.
         ("openrag", True),
-        ("ray", True),
+        ("openrag-ray", True),
         ("openrag-openrag", True),
         ("rag/openrag-raycluster", True),
         # The datastore exclusion reads the job's own name, not its namespace:
@@ -502,9 +551,10 @@ def test_target_down_excludes_only_the_datastores_without_the_bundled_stack() ->
     ],
 )
 def test_target_down_pages_for_openrags_targets_only(job: str, pages: bool, bundled: bool) -> None:
-    """`.*openrag.*` alone missed the Compose `ray` job — the one carrying the
-    ingest metrics — and caught the datastore exporters, paging "every OpenRag
-    alert is inert" when none was."""
+    """The Compose Ray job carries the ingest metrics; it was `ray`, which
+    `.*openrag.*` missed, until #1086 renamed it `openrag-ray`. The datastore
+    exporters also match `.*openrag.*` by release name and must not page
+    "every OpenRag alert is inert" when none is."""
     overrides = ("monitoring.bundled=true",) if bundled else ()
     expr = _render(*overrides)["OpenRagTargetDown"]["expr"]
 
