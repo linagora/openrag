@@ -571,6 +571,45 @@ tests:
               description: "More than 50% of the calls to registry endpoint llm-main are returning errors or timing out. Chat and any indexing stage that depends on it will fail."
               runbook_url: "https://github.com/linagora/openrag/blob/main/docs/deployment/runbooks/OpenRagInferenceProviderDown.md"
 
+  - name: "cancellations do not dilute a provider failing every call it serves"
+    # One error and one cancellation a minute: every call the provider actually
+    # served failed. Counting `cancelled` in the denominator read 50%, which is
+    # not above the 50% threshold, and the outage never paged.
+    interval: 1m
+    input_series:
+      - series: 'openrag_inference_requests_total{provider="llm-main",operation="chat",outcome="error"}'
+        values: "0+1x30"
+      - series: 'openrag_inference_requests_total{provider="llm-main",operation="chat",outcome="cancelled"}'
+        values: "0+1x30"
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: OpenRagInferenceProviderDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              provider: llm-main
+            exp_annotations:
+              summary: "Inference provider llm-main is failing more than 50% of its calls"
+              description: "More than 50% of the calls to registry endpoint llm-main are returning errors or timing out. Chat and any indexing stage that depends on it will fail."
+              runbook_url: "https://github.com/linagora/openrag/blob/main/docs/deployment/runbooks/OpenRagInferenceProviderDown.md"
+
+  - name: "rejected calls do not make up the volume floor"
+    # Three timeouts and two rejected requests in ten minutes: five calls, but
+    # only three that judge the provider — below the floor of 5.
+    interval: 1m
+    input_series:
+      - series: 'openrag_inference_requests_total{provider="embedder-main",operation="embed",outcome="timeout"}'
+        values: "0 1 2 3x30"
+      - series: 'openrag_inference_requests_total{provider="embedder-main",operation="embed",outcome="rejected"}'
+        values: "0 1 2x30"
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: OpenRagInferenceProviderDown
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: OpenRagInferenceProviderDown
+        exp_alerts: []
+
   - name: "two API replicas raise one backlog alert, not one each"
     # Every replica exports the same count, read from the jobs table.
     interval: 1m

@@ -210,14 +210,22 @@ groups:
         # reading as 100% and paging: 1 timeout in 10 minutes is not "down".
         # A provider hard down under low traffic still fires once it has seen
         # the floor's worth of calls; the breaker needs 50 failures to open.
+        #
+        # The denominator and the floor count only the outcomes that judge the
+        # provider: success, error, timeout. `cancelled` (the caller gave up),
+        # `rejected` (a 4xx refusing that one request, which any user can
+        # provoke) and `circuit_open` (never sent) say nothing about its
+        # health. Counting them diluted a provider failing every call it
+        # served below the ratio, and let calls it never judged make up the
+        # volume floor.
         expr: |
           (
             sum by (provider) (rate(openrag_inference_requests_total{outcome=~"error|timeout"}[10m]))
             /
-            sum by (provider) (rate(openrag_inference_requests_total[10m]))
+            sum by (provider) (rate(openrag_inference_requests_total{outcome=~"success|error|timeout"}[10m]))
           ) > 0.5
           and
-          sum by (provider) (increase(openrag_inference_requests_total[10m])) >= 5
+          sum by (provider) (increase(openrag_inference_requests_total{outcome=~"success|error|timeout"}[10m])) >= 5
         for: 5m
         labels:
           severity: critical

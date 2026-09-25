@@ -14,8 +14,8 @@
 
 ```
 sum by (provider) (rate(openrag_inference_requests_total{outcome=~"error|timeout"}[10m]))
-/ sum by (provider) (rate(openrag_inference_requests_total[10m])) > 0.5
-and sum by (provider) (increase(openrag_inference_requests_total[10m])) >= 5
+/ sum by (provider) (rate(openrag_inference_requests_total{outcome=~"success|error|timeout"}[10m])) > 0.5
+and sum by (provider) (increase(openrag_inference_requests_total{outcome=~"success|error|timeout"}[10m])) >= 5
 ```
 
 ## What it means
@@ -27,6 +27,9 @@ Chat answers and any indexing stage depending on it will fail.
 
 `circuit_open` is deliberately **not** counted in the ratio: it is a consequence of the
 breaker, and counting it in both would keep this firing forever once the breaker tripped.
+Nor are `cancelled` (the caller gave up) and `rejected` (a 4xx refusing that one
+request): the ratio and the 5-call floor count only `success`, `error` and `timeout`, the
+outcomes that say something about the provider.
 
 ## Read the label correctly
 
