@@ -22,16 +22,24 @@ scraped:
 
 | Target | Carries |
 | --- | --- |
-| The API's `GET /metrics` | queue depth, chat and rerank calls, circuit breakers, model endpoint readiness, catalog drift |
-| Ray's metrics agent | document outcomes, stage durations, queue wait, the parse watchdog, embed and VLM calls |
+| The API's `GET /metrics` | queue depth, model endpoint readiness, catalog drift, and the API process's inference calls and circuit breakers |
+| Ray's metrics agent | document outcomes, stage durations, queue wait, the parse watchdog, and the indexing workers' inference calls and circuit breakers |
+
+Neither target is limited to one kind of inference call. The API embeds each query and
+calls the LLM and reranker to answer it. The indexing workers embed, caption images and call
+the LLM to contextualize chunks. Under `ENABLE_RAY_SERVE=true` the API is itself a Ray actor,
+and its calls move to the Ray target too.
 
 How each deployment collects them:
 
 | Deployment | API `/metrics` | Ray's metrics agent |
 | --- | --- | --- |
-| Compose, monitoring overlay | job `openrag` | job `ray`, on the port the overlay pins with `RAY_METRICS_EXPORT_PORT` |
-| Kubernetes, `ray.enabled=true` | `openrag.metrics.serviceMonitor` | a PodMonitor on the Ray pods' `metrics` port |
-| Kubernetes, `ray.enabled=false` | `openrag.metrics.serviceMonitor` | a PodMonitor on the `openrag` pod's `ray-metrics` port, which the chart pins with `RAY_METRICS_EXPORT_PORT` |
+| Compose, monitoring overlay | job `openrag` | job `openrag-ray`, on the port the overlay pins with `RAY_METRICS_EXPORT_PORT` |
+| Kubernetes, `ray.enabled=true` | `openrag.metrics.serviceMonitor` | the Ray PodMonitor on the Ray pods' `metrics` port, once `ray.metrics.podMonitor.enabled=true` or `monitoring.bundled` (off by default; see [Monitoring Ray, Postgres and Milvus](/openrag/documentation/kubernetes/#monitoring-ray-postgres-and-milvus)) |
+| Kubernetes, `ray.enabled=false` | `openrag.metrics.serviceMonitor` | the same PodMonitor, on the `openrag` pod's `ray-metrics` port, which the chart pins with `RAY_METRICS_EXPORT_PORT` |
+
+`OpenRagTargetDown` watches every job whose name contains `openrag`, which is why the Compose
+Ray job is named `openrag-ray`.
 
 Ray prefixes everything it exports with `ray_`. Both scrape paths above strip it from
 OpenRAG's series, so they are stored under the names the API exports and the alert rules
@@ -46,23 +54,40 @@ its labels, and the target that exports it.
 
 ### At a glance
 
-Seven tiles, each mirroring an alert:
+Eight tiles, each mirroring an alert:
 
 | Tile | Turns red when | Alert |
 | --- | --- | --- |
 | API scrape | Prometheus cannot scrape `/metrics` | `OpenRagTargetDown` |
+| Ray scrape | Prometheus cannot scrape Ray's metrics agent | `OpenRagTargetDown` |
 | Queued tasks | yellow at 50 queued | `OpenRagBacklogGrowing` |
 | Since last parse | neutral: only a problem while tasks are queued | `OpenRagIngestStalled` |
-| Failed documents · 15m | 25% of finished documents failed | `OpenRagIngestFailureRate` |
+| Failed documents · 5m | 25% of the documents finished in the last 5 minutes failed | `OpenRagIngestFailureRate` |
 | Inference errors · 10m | the worst endpoint fails half its calls | `OpenRagInferenceProviderDown` |
-| Open breakers | any circuit breaker is open | `OpenRagCircuitBreakerOpen` |
+| Open breakers | any circuit breaker is open or half-open | `OpenRagCircuitBreakerOpen` |
 | Catalog drift · 1h | any retrieval hit dropped for a missing file | `OpenRagCatalogDriftDetected` |
 
-The colours use the alerts' default thresholds. If you tune an alert, the tile does not
-follow it.
+The colours use the alerts' default thresholds, and the two ratio tiles apply the alerts'
+volume floors. *Failed documents* needs 5 documents finished in 15 minutes, and *Inference
+errors* leaves out endpoints with fewer than 5 calls in 10 minutes that succeeded, failed
+or timed out; like the alert, it ignores cancelled, rejected and breaker-refused calls.
+Below the floor they read **Low volume**, because the alert does not judge a ratio that
+small. If you tune an alert, the tile does not follow it.
 
-An empty tile is not a healthy one. **Unknown** on *Queued tasks* means the API could not
-read the task state manager; an idle queue shows `0`.
+Each tile shows the current value. When a series disappears, its tile empties and shows its
+no-value text rather than the last value it had. An empty tile is not a healthy one, so that
+text is neutral, never green:
+
+- **Unknown** on *Queued tasks* means the API could not read the task state manager. An idle
+  queue shows `0`.
+- **Not scraped** on *Ray scrape* means no OpenRAG series from Ray reached Prometheus in the
+  selected range.
+- **Not scraped** on *API scrape* is red: without the API's scrape, most of the dashboard is
+  blind.
+
+While the Ray target is down, the tiles it feeds go quiet: *Since last parse* reads **No parse
+yet**, and *Failed documents* reads **Idle** once its window has passed. *Ray scrape* is the
+tile that says why.
 
 ### Ingestion throughput
 
@@ -83,13 +108,16 @@ non-zero, the queue-wait panel reads low.
 The p95 duration of each stage, on a logarithmic axis because chunking takes milliseconds and
 a large PDF parse takes minutes. Next to it, the average number of documents in each stage:
 seconds of stage work per second of wall clock. The tallest band is where indexing time
-goes.
+goes. A stage's time is recorded when the stage finishes, so a long stage reads 0 while it
+runs, then its whole duration lands in one spike. Read that panel over a range much longer
+than your slowest stage.
 
 ### Inference
 
-Calls by operation, the error ratio per registry endpoint, and failed calls by outcome. Below
-them: p95 latency per endpoint and operation, circuit-breaker state, token throughput, and
-the readiness probe of every model endpoint in use. `client_override` groups requests that
+Calls by operation, summed across both targets, the error ratio per registry endpoint, and
+failed calls by outcome. Below them: p95 latency per endpoint and operation, circuit-breaker
+state (the worst across processes: open, then half-open, then closed), token throughput,
+and the readiness probe of every model endpoint in use. `client_override` groups requests that
 named their own endpoint through `metadata.llm_override`, so their failures never count
 against an endpoint you run.
 
@@ -113,8 +141,8 @@ matters; see [catalog reconciliation](/openrag/documentation/catalog_reconciliat
 ## Limitations
 
 - **Ray is scraped only with its `PodMonitor` on.** `ray.metrics.podMonitor.enabled`, or
-  `monitoring.bundled`. Without it the ingestion rows and the embed and VLM half of the
-  inference row stay empty, whichever Ray topology runs.
+  `monitoring.bundled`, in either Ray topology. Without it the ingestion rows and the
+  inference calls made while indexing stay empty, and *Ray scrape* reads **Not scraped**.
 - **Everything Prometheus scrapes is aggregated.** Two OpenRAG releases scraped by one
   Prometheus show as one.
 - **Ray Serve.** Under `ENABLE_RAY_SERVE=true` the chart does not scrape the API's `/metrics`
