@@ -6,7 +6,8 @@ import asyncio
 import csv
 from pathlib import Path
 from _bootstrap import ensure_openrag_source_path
-ensure_openrag_source_path() # really useful for running this script from the examples directory
+
+ensure_openrag_source_path()  # really useful for running this script from the examples directory
 from core.indexing.parsers.tabular.csv_parser import CsvParser
 from core.models.document import Document
 
@@ -15,14 +16,18 @@ async def main():
     cli = argparse.ArgumentParser(description=__doc__)
     cli.add_argument("file", type=Path, help="CSV file to read (never modified)")
     cli.add_argument("--delimiter", default=",", help="Cell separator; default: comma")
+    cli.add_argument("--batch-size", type=int, default=10_000, help="Maximum data rows per table (default: 10000)")
     args = cli.parse_args()
     if args.file.suffix.lower() != ".csv":
         cli.error("Choose a file ending in .csv")
     if len(args.delimiter) != 1:
         cli.error("The delimiter must be one character")
+    if args.batch_size < 1:
+        cli.error("The batch size must be a positive integer")
     document = Document(source_path=str(args.file), metadata={"source": args.file.name})
     try:
-        result = await CsvParser(delimiter=args.delimiter).parse(document)
+        # This export keeps the full result in memory; use the benchmark for streaming measurements.
+        result = await CsvParser(delimiter=args.delimiter, batch_size=args.batch_size).parse(document)
     except (OSError, ValueError, csv.Error) as error:
         cli.exit(1, f"Parsing failed: {error}\nNo new output was written; any previous output is unchanged.\n")
 
@@ -32,8 +37,8 @@ async def main():
     json_path = args.file.with_suffix(".parsed.json")
     markdown_path.write_text(markdown, encoding="utf-8")
     json_path.write_text(result.model_dump_json(indent=2), encoding="utf-8")
-
     print(markdown or "(Empty CSV: no text blocks)")
+    print(f"\nBatches: {len(result.text_blocks)} (maximum {args.batch_size} data rows each)")
     print(f"\nMarkdown: {markdown_path}")
     print(f"Full parser result: {json_path}")
 
