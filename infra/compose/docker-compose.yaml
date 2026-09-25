@@ -79,7 +79,6 @@ x-openrag: &openrag_template
 
 x-vllm-env: &vllm_env
   HUGGING_FACE_HUB_TOKEN:
-  VLLM_SLEEP_WHEN_IDLE: 1  # Avoid 100% CPU usage when idle
 
 x-vllm: &vllm_template
   networks:
@@ -92,14 +91,22 @@ x-vllm: &vllm_template
   ipc: "host"
   volumes:
     - ${VLLM_CACHE:-/root/.cache/huggingface}:/root/.cache/huggingface # put ./vllm_cache if you want to have the weights on the vllm_cache folder in your project
+  # The image's entrypoint is `vllm serve`, which takes the model positionally
+  # (`--model` is deprecated). `--runner pooling --convert embed` replaces
+  # `--task embed`, which vLLM no longer accepts; `--convert embed` is a no-op for
+  # models that are already embedders (jina-v3) and adapts *ForCausalLM ones
+  # (Qwen3-Embedding).
   command: >
-    --model ${EMBEDDER_MODEL_NAME:-Qwen/Qwen3-Embedding-0.6B}
+    ${EMBEDDER_MODEL_NAME:-Qwen/Qwen3-Embedding-0.6B}
     --trust-remote-code
-    --task embed
+    --runner pooling
+    --convert embed
     --gpu_memory_utilization 0.3
     --max-model-len ${MAX_MODEL_LEN:-8192}
+    ${EMBEDDER_EXTRA_ARGS:-}
   # --max-num-seqs 1
-  # gpu_memory_utilization, max-num-seqs et max-model-len can be tuned depending on your GPU memory
+  # gpu_memory_utilization, max-num-seqs and max-model-len can be tuned for your GPU
+  # through EMBEDDER_EXTRA_ARGS (see .env.example).
 
   healthcheck:
     test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
@@ -188,7 +195,7 @@ services:
 
   vllm-gpu:
     <<: *vllm_template
-    image: vllm/vllm-openai:v0.9.2
+    image: vllm/vllm-openai:v0.30.0
     environment:
       <<: *vllm_env
       NVIDIA_VISIBLE_DEVICES: all
@@ -206,21 +213,22 @@ services:
 
   vllm-cpu:
     <<: *vllm_template
-    build:
-      context: ../../extern/vllm
-      dockerfile: Dockerfile.cpu
-      target: vllm-openai
-    image: openrag-vllm-openai-cpu
+    # Official CPU build; its x86 image carries both AVX2 and AVX512 kernels, so
+    # it also runs on CPUs without AVX512.
+    image: vllm/vllm-openai-cpu:v0.30.0
     deploy: {}
     environment:
       <<: *vllm_env
       VLLM_CPU_KVCACHE_SPACE: 8
     # Default value isn't sufficient for full context length
     command: >
-      --model ${EMBEDDER_MODEL_NAME:-Qwen/Qwen3-Embedding-0.6B}
+      ${EMBEDDER_MODEL_NAME:-Qwen/Qwen3-Embedding-0.6B}
       --trust-remote-code
+      --runner pooling
+      --convert embed
       --dtype float32
       --max-model-len ${MAX_MODEL_LEN:-8192}
+      ${EMBEDDER_EXTRA_ARGS:-}
     #  --max-num-batched-tokens 32768
     # dtype is required for aarch64 (https://github.com/vllm-project/vllm/issues/11327) and improves speed on amd64.
     # max-num-batched-tokens is required for aarch64 because chunked prefill isn't supported by V1 vllm backend

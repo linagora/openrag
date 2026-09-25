@@ -173,6 +173,7 @@ class IndexerWorkerActor:
             caption_prompt=caption_prompt,
             timeouts=_build_pipeline_timeouts(cfg),
             chunker_factory=_build_chunker_from_config,
+            default_chunking=getattr(cfg, "chunker", None),
             embedder_window_resolver=_build_embedder_window_resolver(cfg),
             vector_field_resolver=_build_vector_field_resolver(cfg),
             parser_factory=parser_factory,
