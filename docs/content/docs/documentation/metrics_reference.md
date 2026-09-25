@@ -117,7 +117,8 @@ Label values:
 - `outcome` — `success`, `error`, `timeout`, `circuit_open`, `cancelled` (the caller gave
   up: a closed stream, its own deadline, or siblings cancelled after one failed; not a
   provider failure, so keep it out of error ratios), `rejected` (a 4xx the request caused,
-  such as an unknown model or an over-long prompt; 408 and 429 stay `error`)
+  such as an unknown model or an over-long prompt; 408 and 429 stay `error`, and so
+  does 401 unless the caller chose the model)
 - `kind` — `prompt`, `completion`
 - `pool` — `marker`, `docling`, `pymupdf`, `pdf_client`, `local_whisper`, `audio_client` for PDF and audio; any other format is labelled by its document type (`text`, `docx`, `eml`, `image`, ...)
 - `name` — `llm`, `embedder`, `vlm`, `reranker`
@@ -167,14 +168,15 @@ truthful, and would freeze at its last value exactly when a pool wedges — the
 condition it exists to detect. A timestamp climbs on its own — which is also
 why the age alone is not an alert:
 
-- It is stamped only when a parse succeeds, so an idle system ages exactly like
-  a wedged one. Gate it on queued work.
+- After a pool's first use it is stamped only when a parse succeeds, so an idle
+  system ages exactly like a wedged one. Gate it on queued work.
 - Take `max()` across pools and nodes, not the age per pool: rarely used
   formats go hours without a parse, and a node that simply got no work is not
   stalled while another makes progress.
-- It is absent until some pool has parsed once, and again after every worker
-  restart (Ray drops a dead worker's series after `RAY_WORKER_TIMEOUT_S`), so
-  it cannot fire then. Pair it with an alert on a growing backlog.
+- It is absent until some pool is first used, and again after every worker
+  restart until a pool is used again (Ray drops a dead worker's series after
+  `RAY_WORKER_TIMEOUT_S`), so it cannot fire then. Pair it with an alert on a
+  growing backlog.
 - Set the threshold above your slowest normal parse; large scanned PDFs take
   minutes.
 
