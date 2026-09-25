@@ -479,10 +479,38 @@ tests:
         values: "0+0x20"
       - series: 'up{job="openrag-milvus-querynode",instance="10.0.0.7:9091"}'
         values: "0+0x20"
+      - series: 'up{job="openrag-milvus-datanode",instance="10.0.0.8:9091"}'
+        values: "0+0x20"
+      - series: 'up{job="openrag-milvus-mixcoord",instance="10.0.0.9:9091"}'
+        values: "0+0x20"
+      - series: 'up{job="openrag-milvus-streamingnode",instance="10.0.0.10:9091"}'
+        values: "0+0x20"
     alert_rule_test:
       - eval_time: 10m
         alertname: OpenRagTargetDown
         exp_alerts: []
+
+  - interval: 1m
+    name: "a Ray PodMonitor in a namespace containing -milvus- is OpenRag's and fires"
+    # The datastore exclusion once matched anywhere in the job, and a PodMonitor
+    # job is `<namespace>/<name>`: Ray down in `rag-milvus-poc` paged nobody.
+    input_series:
+      - series: 'up{job="rag-milvus-poc/openrag-raycluster",instance="10.0.0.3:8080"}'
+        values: "0+0x20"
+      - series: 'up{job="openrag-milvus",instance="10.0.0.6:9091"}'
+        values: "0+0x20"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: OpenRagTargetDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: rag-milvus-poc/openrag-raycluster
+              instance: "10.0.0.3:8080"
+            exp_annotations:
+              description: "The target has been unreachable for 5 minutes. Every other OpenRag alert is inert while this is firing, because absent series cannot breach a threshold."
+              runbook_url: "https://github.com/linagora/openrag/blob/main/docs/deployment/runbooks/OpenRagTargetDown.md"
+              summary: "Prometheus cannot scrape OpenRag (10.0.0.3:8080)"
 
   - interval: 1m
     name: "the chart's API and Ray PodMonitor jobs being down fire"
