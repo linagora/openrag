@@ -1357,6 +1357,54 @@ async def test_chat_with_valid_attachments_scopes_search_to_file_ids():
 
 
 @pytest.mark.asyncio
+async def test_chat_attachments_within_workspace_scope_search_to_the_attached_files():
+    # A workspace and attachments together: only the attached files that
+    # belong to the workspace are searched, in attachment order, deduplicated.
+    scope = WorkspaceScope(workspace_id="w1", partition="p1", file_ids=["fa", "fb", "fc"])
+    retrieval = FakeRetrieval()
+    svc = _svc(
+        retrieval=retrieval, llm=FakeLLM(chat_responses=["answer [Sources: none]"]), workspace=FakeWorkspace(scope)
+    )
+    res = await svc.chat(
+        partitions=["p1"],
+        payload={
+            "messages": [{"role": "user", "content": "q"}],
+            "metadata": {"workspace": "w1", "attachments": [{"id": "fc"}, {"id": "zz"}, {"id": "fa"}, {"id": "fc"}]},
+        },
+        prepare_sources=lambda d, w: [],
+        model_name="m",
+    )
+    call = retrieval.retrieve_multi_calls[0]
+    assert call["partitions"] == ["p1"]
+    assert call["filter_params"] == {"file_id": ["fc", "fa"]}
+    assert res["extra"]["attachments"] == ["fc", "fa"]
+
+
+@pytest.mark.asyncio
+async def test_chat_attachments_outside_workspace_scope_to_zero_files():
+    # Fail closed: attachments foreign to the workspace must not widen the
+    # search back to the whole workspace, nor to the partition.
+    scope = WorkspaceScope(workspace_id="w1", partition="p1", file_ids=["fa"])
+    retrieval = FakeRetrieval()
+    svc = _svc(
+        retrieval=retrieval, llm=FakeLLM(chat_responses=["answer [Sources: none]"]), workspace=FakeWorkspace(scope)
+    )
+    res = await svc.chat(
+        partitions=["p1"],
+        payload={
+            "messages": [{"role": "user", "content": "q"}],
+            "metadata": {"workspace": "w1", "attachments": [{"id": "zz"}]},
+        },
+        prepare_sources=lambda d, w: [],
+        model_name="m",
+    )
+    calls = retrieval.retrieve_multi_calls
+    assert calls
+    assert all(call["filter_params"] == {"file_id": []} for call in calls)
+    assert res["extra"]["attachments"] == []
+
+
+@pytest.mark.asyncio
 async def test_chat_attachments_force_retrieval_even_when_classifier_skips():
     # Regression: an attached file must not be silently dropped just because
     # the query-classifier judges the turn conversational.
@@ -1445,9 +1493,9 @@ async def test_chat_empty_attachments_unaffected():
 
 
 @pytest.mark.asyncio
-async def test_chat_workspace_and_attachments_both_present_workspace_wins():
-    # workspace is checked first (elif) — when both are present the workspace
-    # scope wins and the attachments are ignored.
+async def test_chat_workspace_and_attachments_both_present_attachments_narrow_the_workspace():
+    # The workspace stays the authorization boundary; within it, the
+    # attachments say which files the answer is generated from.
     scope = WorkspaceScope(workspace_id="w1", partition="p1", file_ids=["wsa", "wsb"])
     retrieval = FakeRetrieval()
     svc = _svc(
@@ -1457,13 +1505,14 @@ async def test_chat_workspace_and_attachments_both_present_workspace_wins():
         partitions=["p1"],
         payload={
             "messages": [{"role": "user", "content": "q"}],
-            "metadata": {"workspace": "w1", "attachments": [{"id": "att"}]},
+            "metadata": {"workspace": "w1", "attachments": [{"id": "wsb"}]},
         },
         prepare_sources=lambda d, w: [],
         model_name="m",
     )
     call = retrieval.retrieve_multi_calls[0]
-    assert call["filter_params"] == {"file_id": ["wsa", "wsb"]}
+    assert call["partitions"] == ["p1"]
+    assert call["filter_params"] == {"file_id": ["wsb"]}
 
 
 @pytest.mark.asyncio
