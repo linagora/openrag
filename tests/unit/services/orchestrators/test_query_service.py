@@ -947,6 +947,35 @@ async def test_chat_invalid_citation_does_not_fallback_to_unrelated_sources():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tag", "expected_indices"),
+    [
+        ("[Sources: **none**]", []),
+        ("[Sources: **1, 3**]", [0, 2]),
+        ("[Sources: **1**, **3**]", [0, 2]),
+    ],
+)
+async def test_chat_emphasized_value_inside_sources_tag_is_parsed(tag, expected_indices):
+    """Markdown around the tag's value must not turn a reported citation into a missing tag."""
+    svc = _svc(llm=FakeLLM(chat_responses=[f"The answer.\n{tag}"]))
+    sources = [{"source_type": "document", "filename": f"doc{i}.pdf"} for i in range(1, 4)]
+
+    out = await svc.chat(
+        partitions=["p"],
+        payload={"messages": [{"role": "user", "content": "Question"}], "metadata": {}},
+        prepare_sources=lambda d, w: sources,
+        model_name="m",
+    )
+
+    expected = [sources[i] for i in expected_indices]
+    extra = out["extra"]
+    assert out["choices"][0]["message"]["content"] == "The answer."
+    assert extra["citations_reported"] is True
+    assert extra["sources"] == expected
+    assert extra["cited_sources"] == expected
+
+
+@pytest.mark.asyncio
 async def test_chat_structured_output_keeps_retrieved_sources_without_citation_marker():
     structured_answer = '{"answer": "Use [Source 1]", "literal_format": "[Sources: 1]"}'
     svc = _svc(llm=FakeLLM(chat_responses=[structured_answer]))
