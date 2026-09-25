@@ -1,10 +1,11 @@
 """The Compose monitoring overlay must collect what Ray actors record.
 
-Indexing, and the embed and VLM calls made inside it, record their metrics in Ray
-actors. Those reach Prometheus only through Ray's metrics agent, never through the
-API's /metrics. The path spans three files that must agree: api/main.py hands the
-embedded Ray a fixed port, the overlay sets it, and prometheus.yml scrapes it. Any
-one of them drifting leaves the ingestion panels empty with no error anywhere.
+Indexing, and every inference call the indexing workers make, record their
+metrics in Ray actors. Those reach Prometheus only through Ray's metrics agent,
+never through the API's /metrics. The path spans three files that must agree:
+api/main.py hands the embedded Ray a fixed port, the overlay sets it, and
+prometheus.yml scrapes it. Any one of them drifting leaves the ingestion panels
+empty with no error anywhere.
 """
 
 from __future__ import annotations
@@ -23,6 +24,33 @@ BASE = REPO / "infra/compose/docker-compose.yaml"
 
 API_SERVICES = ("openrag", "openrag-cpu")
 PORT_VARIABLE = "RAY_METRICS_EXPORT_PORT"
+
+# The jobs OpenRagTargetDown watches.
+TARGET_DOWN_JOBS = ".*openrag.*"
+
+
+def _embedded_ray_init(tree: ast.Module) -> ast.Call:
+    """The ray.init call that starts the embedded cluster: the one given a dashboard host."""
+    embedded = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "init"
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "ray"
+        and any(kw.arg == "dashboard_host" for kw in node.keywords)
+    ]
+    assert len(embedded) == 1, "expected one embedded ray.init(dashboard_host=...) in api/main.py"
+    return embedded[0]
+
+
+def _calls_to(node: ast.AST, name: str) -> list[ast.Call]:
+    return [
+        call
+        for call in ast.walk(node)
+        if isinstance(call, ast.Call) and isinstance(call.func, ast.Name) and call.func.id == name
+    ]
 
 
 def _overlay_port() -> str:
@@ -43,19 +71,51 @@ def _ray_job() -> dict:
 def test_embedded_ray_is_given_the_configured_metrics_port():
     """Without a port Ray picks a random one, which no scrape config can name."""
     tree = ast.parse(MAIN.read_text(encoding="utf-8"))
-    embedded = [
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Attribute)
-        and node.func.attr == "init"
-        and isinstance(node.func.value, ast.Name)
-        and node.func.value.id == "ray"
-        and any(kw.arg == "dashboard_host" for kw in node.keywords)
-    ]
-    assert len(embedded) == 1, "expected one embedded ray.init(dashboard_host=...) in api/main.py"
-    assert "_metrics_export_port" in {kw.arg for kw in embedded[0].keywords}
+    assert "_metrics_export_port" in {kw.arg for kw in _embedded_ray_init(tree).keywords}
     assert f'"{PORT_VARIABLE}"' in MAIN.read_text(encoding="utf-8")
+
+
+def test_ray_serve_starts_ray_with_the_same_settings():
+    """serve.start() starts Ray itself when nothing has, with none of these
+    settings, and every Serve replica then finds Ray running and skips the
+    lifespan's call. The launcher must run the same initializer first, or
+    ENABLE_RAY_SERVE=true silently drops RAY_METRICS_EXPORT_PORT.
+    """
+    tree = ast.parse(MAIN.read_text(encoding="utf-8"))
+    init = _embedded_ray_init(tree)
+    initializer = next(
+        func
+        for func in ast.walk(tree)
+        if isinstance(func, ast.FunctionDef | ast.AsyncFunctionDef) and init in ast.walk(func)
+    )
+    lifespan = next(f for f in ast.walk(tree) if isinstance(f, ast.AsyncFunctionDef) and f.name == "lifespan")
+    assert _calls_to(lifespan, initializer.name), f"the lifespan does not call {initializer.name}()"
+
+    launcher = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.If) and ast.unparse(node.test).replace("'", '"') == '__name__ == "__main__"'
+    )
+    starts = [
+        call
+        for call in ast.walk(launcher)
+        if isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Attribute)
+        and call.func.attr == "start"
+        and isinstance(call.func.value, ast.Name)
+        and call.func.value.id == "serve"
+    ]
+    assert len(starts) == 1, "expected one serve.start() in the launcher"
+    before = [call for call in _calls_to(launcher, initializer.name) if call.lineno < starts[0].lineno]
+    assert before, f"the Serve launcher calls serve.start() without calling {initializer.name}() first"
+
+
+def test_the_ray_job_is_watched_by_the_target_down_alert():
+    """OpenRagTargetDown watches the jobs matching job=~".*openrag.*". Outside it,
+    the Ray scrape can fail unnoticed: the ingestion tiles then read Idle rather
+    than anything that looks broken.
+    """
+    assert re.fullmatch(TARGET_DOWN_JOBS, _ray_job()["job_name"])
 
 
 def test_overlay_pins_the_port_on_both_api_variants():

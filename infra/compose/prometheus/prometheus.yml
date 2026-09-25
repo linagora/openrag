@@ -40,10 +40,14 @@ scrape_configs:
 
   # Ray's metrics agent inside the API container (embedded Ray), on the port
   # monitoring.docker-compose.yaml pins with RAY_METRICS_EXPORT_PORT. Metrics
-  # recorded in Ray actors (indexing, embed and VLM calls) are exported here,
-  # not on /metrics. No credential: the agent has none, which is why the port
-  # stays off the host.
-  - job_name: "ray"
+  # recorded in Ray actors (indexing, and every inference call the indexing
+  # workers make) are exported here, not on /metrics. No credential: the agent
+  # has none, which is why the port stays off the host.
+  #
+  # The name must contain "openrag": OpenRagTargetDown selects the targets it
+  # watches with job=~".*openrag.*", and a Ray scrape nobody watches going
+  # down leaves the ingestion panels reading idle.
+  - job_name: "openrag-ray"
     static_configs:
       - targets: ["openrag:8091"]
     metric_relabel_configs:
