@@ -53,9 +53,15 @@ curl -s "$OPENRAG/ready" | jq .checks
 ## First checks
 
 ```bash
-kubectl -n <ns> get pods -l app.kubernetes.io/component=openrag
+# The API (job openrag-openrag). The chart's fullname is `openrag` by default.
+kubectl -n <ns> get pods -l app.kubernetes.io/name=openrag,app.kubernetes.io/instance=openrag
+# The RayCluster (job <ns>/openrag-raycluster).
+kubectl -n <ns> get pods -l ray.io/cluster=openrag-raycluster
 kubectl -n <ns> logs <pod> --tail=100
 ```
+
+On Compose, `docker compose ps openrag` — the `ray` job scrapes the same container on
+port 8091.
 
 ## Likely causes, most common first
 
