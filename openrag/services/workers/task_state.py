@@ -20,6 +20,7 @@ from core.models.catalog import (
     normalize_degraded_stages,
 )
 from core.observability.ray_metrics import (
+    initialize_ingest_counters,
     observe_queue_wait_from,
     record_document_terminal,
 )
@@ -332,6 +333,7 @@ class TaskStateManager:
         # Ray runs each concurrency group on a separate event loop. A single
         # asyncio lock cannot safely coordinate methods across those loops.
         self.lock = threading.Lock()
+        initialize_ingest_counters()
 
     def _ensure_task(self, task_id: str) -> TaskInfo:
         # Every path that can add a task goes through here, so admission always

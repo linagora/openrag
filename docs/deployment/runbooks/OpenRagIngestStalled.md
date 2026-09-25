@@ -85,9 +85,8 @@ The rule reads `openrag_ingest_last_parse_completion_timestamp_seconds`, and whi
 gauge is absent the alert cannot fire. It is absent more often than "on a new
 instance": it is exported per worker process (Ray's `WorkerId` label), and Ray drops a
 dead worker's series about two minutes after the process exits. So the alert is blind
-whenever **no pool has completed a parse since the workers last started** — once pools
-seed the gauge on their first use (#1056), whenever no pool has completed *or started*
-one. That covers a brand-new instance wedged from its first upload, and equally a pool
+whenever **no pool has completed or started a parse since the workers last started** —
+a pool seeds the gauge on its first use. That covers a brand-new instance wedged from its first upload, and equally a pool
 that wedges right after a worker restart or a redeploy: the old timestamps disappear
 and nothing replaces them.
 

@@ -94,7 +94,7 @@ Supporting metrics:
 | Metric | Type | Labels | Target | Answers |
 |---|---|---|---|---|
 | `openrag_ingest_queue_wait_seconds` | histogram | — | Ray | Admission-to-processing latency |
-| `openrag_ingest_last_parse_completion_timestamp_seconds` | gauge | `pool` | Ray | Progress watchdog — is a parser pool wedged |
+| `openrag_ingest_last_parse_completion_timestamp_seconds` | gauge | `pool` | Ray | Progress watchdog — is a parser pool wedged. Last completed parse, or the pool's first use in the process |
 | `openrag_ingest_clock_skew_events_total` | counter | — | Ray | Queue-wait measurements that came out negative |
 | `openrag_circuit_breaker_state` | gauge | `name` | both | 0 closed, 1 open, 2 half-open, -1 unknown |
 
@@ -117,7 +117,8 @@ Label values:
 - `outcome` — `success`, `error`, `timeout`, `circuit_open`, `cancelled` (the caller gave
   up: a closed stream, its own deadline, or siblings cancelled after one failed; not a
   provider failure, so keep it out of error ratios), `rejected` (a 4xx the request caused,
-  such as an unknown model or an over-long prompt; 408 and 429 stay `error`)
+  such as an unknown model or an over-long prompt; 408 and 429 stay `error`, and so
+  does 401 except on LLM calls, whose request the caller shapes)
 - `kind` — `prompt`, `completion`
 - `pool` — `marker`, `docling`, `pymupdf`, `pdf_client`, `local_whisper`, `audio_client` for PDF and audio; any other format is labelled by its document type (`text`, `docx`, `eml`, `image`, ...)
 - `name` — `llm`, `embedder`, `vlm`, `reranker`
@@ -156,19 +157,26 @@ and on()
 (time() - max(openrag_ingest_last_parse_completion_timestamp_seconds) > 720)
 ```
 
+The stamp is the last completed parse, or the pool's first use in the worker
+process: a pool that fails from its very first parse would otherwise never
+produce the series, and a stall starting at boot would have nothing to age. A
+worker that restarts more often than the threshold re-seeds each time and so
+never ages past it; for a crash-looping worker, pod restarts are the signal.
+
 A "seconds since" gauge would have to be rewritten continuously to stay
 truthful, and would freeze at its last value exactly when a pool wedges — the
 condition it exists to detect. A timestamp climbs on its own — which is also
 why the age alone is not an alert:
 
-- It is stamped only when a parse succeeds, so an idle system ages exactly like
-  a wedged one. Gate it on queued work.
+- After a pool's first use it is stamped only when a parse succeeds, so an idle
+  system ages exactly like a wedged one. Gate it on queued work.
 - Take `max()` across pools and nodes, not the age per pool: rarely used
   formats go hours without a parse, and a node that simply got no work is not
   stalled while another makes progress.
-- It is absent until some pool has parsed once, and again after every worker
-  restart (Ray drops a dead worker's series after `RAY_WORKER_TIMEOUT_S`), so
-  it cannot fire then. Pair it with an alert on a growing backlog.
+- It is absent until some pool is first used, and again after every worker
+  restart until a pool is used again (Ray drops a dead worker's series after
+  `RAY_WORKER_TIMEOUT_S`), so it cannot fire then. Pair it with an alert on a
+  growing backlog.
 - Set the threshold above your slowest normal parse; large scanned PDFs take
   minutes.
 

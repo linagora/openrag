@@ -19,6 +19,18 @@ def _task_state_manager() -> Any:
     return TaskStateManager.__ray_metadata__.modified_class()
 
 
+def test_the_task_state_manager_starts_the_ingest_counters(monkeypatch) -> None:
+    """The counters it records must exist at 0 before the first document settles."""
+    import services.workers.task_state as module
+
+    calls: list[bool] = []
+    monkeypatch.setattr(module, "initialize_ingest_counters", lambda: calls.append(True))
+
+    _task_state_manager()
+
+    assert calls == [True]
+
+
 def test_lock_is_safe_across_ray_concurrency_group_event_loops() -> None:
     manager = _task_state_manager()
 

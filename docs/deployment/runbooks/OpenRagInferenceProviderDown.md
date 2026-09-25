@@ -49,7 +49,14 @@ at the endpoint itself.
 
 1. **The external endpoint is down or unreachable.** Deployments that use external
    inference have no bundled fallback.
-2. **A credential expired or rotated** — the registry entry's API key.
+2. **A credential expired or rotated** — the registry entry's API key. This alert only
+   sees it for embedder, reranker and VLM endpoints. On an LLM a 401 is recorded as
+   `rejected`, which this alert ignores, because callers shape LLM requests and can
+   provoke one. A revoked LLM key shows as its calls going all `rejected`:
+
+   ```promql
+   sum by (provider, outcome) (rate(openrag_inference_requests_total{operation=~"chat|completion"}[10m]))
+   ```
 3. **The model was unloaded or renamed** at the provider.
 4. **The endpoint is overloaded** — `timeout` dominating rather than `error`.
 

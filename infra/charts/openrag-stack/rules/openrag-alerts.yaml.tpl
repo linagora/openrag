@@ -133,9 +133,9 @@ groups:
         # Blind while the gauge is absent, which is not only "never parsed": it
         # is per worker process (WorkerId), and Ray drops a dead worker's series
         # about two minutes after it exits. So this cannot fire whenever no pool
-        # has completed a parse since the workers last started (once pools seed
-        # the gauge on first use, #1056: completed or started one) — a fresh
-        # install, and equally a pool wedged straight after a worker restart.
+        # has completed or started a parse since the workers last started (a
+        # pool seeds the gauge on its first use) — a fresh install, and equally
+        # a pool wedged straight after a worker restart.
         # No absent() branch: with Helm's embedded Ray the gauge is never
         # scraped at all, and that would page on every long batch.
         # OpenRagBacklogGrowing covers a queue that rises from zero.
