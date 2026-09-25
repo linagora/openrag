@@ -513,7 +513,7 @@ vllm:
         value: "/tmp/.cache"
     # The vllm/vllm-openai engines share one pinned version (vllmTag); vlm stays
     # on the version it was validated with. v0.30.0 rejects `--task`: a pooling
-    # model takes `runner: "pooling"` instead.
+    # model takes `runner: "pooling"` and `--convert embed` instead.
     modelSpec:
       - name: "embedder"
         repository: "vllm/vllm-openai"
@@ -531,7 +531,10 @@ vllm:
         vllmConfig:
           gpuMemoryUtilization: 0.3
           runner: "pooling"
-          extraArgs: ["--trust-remote-code"]
+          # `--convert embed` adapts a *ForCausalLM checkpoint such as
+          # Qwen3-Embedding to embeddings, and changes nothing for a model that
+          # is already one. This is the command started on v0.30.0 (L4, #1087).
+          extraArgs: ["--trust-remote-code", "--convert", "embed"]
         nodeSelectorTerms: []
 
       - name: "whisper"

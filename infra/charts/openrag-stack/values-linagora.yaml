@@ -78,7 +78,10 @@ vllm:
         vllmConfig:
           gpuMemoryUtilization: 0.3
           runner: "pooling"
-          extraArgs: ["--trust-remote-code"]
+          # `--convert embed` adapts a *ForCausalLM checkpoint such as
+          # Qwen3-Embedding to embeddings, and changes nothing for a model that
+          # is already one. This is the command started on v0.30.0 (L4, #1087).
+          extraArgs: ["--trust-remote-code", "--convert", "embed"]
         nodeSelectorTerms:
           - matchExpressions:
               - key: gpu-role

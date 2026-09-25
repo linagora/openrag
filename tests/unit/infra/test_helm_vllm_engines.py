@@ -55,6 +55,18 @@ def test_embedder_runs_the_pooling_runner(path: Path):
         assert spec["vllmConfig"].get("runner") == "pooling", path.name
 
 
+@pytest.mark.parametrize("path", VALUES_FILES, ids=lambda p: p.name)
+def test_embedder_converts_to_embeddings(path: Path):
+    """``--task embed`` used to do both halves; v0.30.0 splits it into
+    ``--runner pooling`` and ``--convert embed``. The pair is the command that
+    was started on v0.30.0; the runner alone never was."""
+    embedders = [spec for spec in _engines(path) if spec["name"] == "embedder"]
+    for spec in embedders:
+        args = spec["vllmConfig"].get("extraArgs", [])
+        pairs = list(zip(args, args[1:]))
+        assert ("--convert", "embed") in pairs, f"{path.name}: embedder passes {args}"
+
+
 def test_engine_images_are_not_pulled_on_every_start():
     assert _load(VALUES)["vllm"]["servingEngineSpec"]["imagePullPolicy"] == "IfNotPresent"
 
