@@ -127,6 +127,8 @@ monitoring:
     # `for` durations are the other half of each decision; see below.
     thresholds:
       # 720 — no parse completed for this long, with work queued = stalled.
+      # Whole seconds only (5400, not 1h30m): a duration literal compared with
+      # time() needs Prometheus 2.54 or newer.
       # Must exceed the longest NORMAL parse on this deployment: the rule sees
       # completions only, so one legitimately long parse (a large scanned PDF on
       # a single-GPU Marker worker; Marker's timeout is 3600s) pages while it

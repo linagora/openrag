@@ -1,6 +1,6 @@
 # OpenRagCatalogDriftDetected
 
-**Severity:** critical · **Fires after:** ~11 min from a single dropped chunk, by default
+**Severity:** critical · **Fires after:** ~5 min from a single dropped chunk, by default
 
 > **The numbers on this page are defaults; your deployment may differ.** Alert
 > thresholds and `for` durations are chart values, because they depend on the SLO,

@@ -38,8 +38,8 @@ Prometheus refuses `30m1h`, again for the whole group.
 {{- fail (printf "monitoring.prometheusRule.thresholds.%s must be a plain number from 0 to 1 (e.g. 0.25), got %q. A duration or a value above 1 is a ratio the expression can never reach, and the alert silently never fires." $name $v) }}
 {{- end }}
 {{- else if eq $name "ingestIdleSeconds" }}
-{{- if not (and (regexMatch `[1-9]` $v) (or (regexMatch `^[0-9]+$` $v) (regexMatch $duration $v))) }}
-{{- fail (printf "monitoring.prometheusRule.thresholds.%s must be a whole number of seconds greater than 0 (e.g. 720) or a Prometheus duration greater than 0 with its units largest first (e.g. 12m, 1h30m), got %q. It is also the rule's range selector, and a zero or malformed range stops the whole rule group loading." $name $v) }}
+{{- if not (and (regexMatch `[1-9]` $v) (regexMatch `^[0-9]+$` $v)) }}
+{{- fail (printf "monitoring.prometheusRule.thresholds.%s must be a whole number of seconds greater than 0 (e.g. 720 for 12 minutes, 5400 for 1h30m), got %q. The rule compares it with time(), where a duration such as 1h30m needs Prometheus 2.54 or newer and any older one refuses the whole rule group; it is also the rule's range selector, and a zero range stops the group loading as well." $name $v) }}
 {{- end }}
 {{- else if not (regexMatch $number $v) }}
 {{- fail (printf "monitoring.prometheusRule.thresholds.%s must be a plain non-negative number (e.g. 50), got %q. It counts documents, calls or tasks, not time." $name $v) }}
@@ -62,12 +62,8 @@ Prometheus refuses `30m1h`, again for the whole group.
 {{- /* The same values in words, for the annotations. A bare number of idle
    seconds reads as minutes when it divides evenly; anything more exotic than a
    single-unit duration is quoted as written. */}}
-{{- /* The idle threshold again, as a range for min_over_time: a bare number of
-   seconds becomes "<n>s", a duration literal is used as written. */}}
-{{- $idleRange := toString $t.ingestIdleSeconds }}
-{{- if regexMatch `^[0-9]+(\.[0-9]+)?$` $idleRange }}
-{{- $idleRange = printf "%ds" (int (float64 $idleRange)) }}
-{{- end }}
+{{- /* The idle threshold again, as a range for min_over_time: "<n>s". */}}
+{{- $idleRange := printf "%ss" (toString $t.ingestIdleSeconds) }}
 {{- $idle := toString $t.ingestIdleSeconds }}
 {{- if regexMatch `^[0-9]+$` $idle }}
 {{- $n := atoi $idle }}

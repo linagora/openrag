@@ -378,6 +378,10 @@ _FOR = "monitoring.prometheusRule.for."
         (f"{_THRESHOLD}ingestIdleSeconds=0m", r"thresholds\.ingestIdleSeconds must be a whole number of seconds"),
         (f"{_THRESHOLD}ingestIdleSeconds=0.5", r"thresholds\.ingestIdleSeconds must be a whole number of seconds"),
         (f"{_THRESHOLD}ingestIdleSeconds=30m1h", r"thresholds\.ingestIdleSeconds must be a whole number of seconds"),
+        # A duration renders `time() - ... > 1h30m`, which Prometheus before
+        # 2.54 cannot parse: the whole `openrag-ingestion` group is refused.
+        (f"{_THRESHOLD}ingestIdleSeconds=20m", r"thresholds\.ingestIdleSeconds must be a whole number of seconds"),
+        (f"{_THRESHOLD}ingestIdleSeconds=1h30m", r"thresholds\.ingestIdleSeconds must be a whole number of seconds"),
         # `for: 0s` fires on one bad evaluation; `30m1h` does not parse.
         (f"{_FOR}OpenRagIngestStalled=0s", r"for\.OpenRagIngestStalled must be a Prometheus duration greater than 0"),
         (f"{_FOR}OpenRagTargetDown=0m", r"for\.OpenRagTargetDown must be a Prometheus duration greater than 0"),
@@ -401,8 +405,7 @@ def test_each_threshold_accepts_only_the_form_its_expression_can_use(override: s
         (f"{_THRESHOLD}ingestVolumeFloor=12.5", "OpenRagIngestFailureRate", ">= 12.5"),
         (f"{_THRESHOLD}backlogDepth=200", "OpenRagBacklogGrowing", "> 200\n"),
         (f"{_THRESHOLD}ingestIdleSeconds=1800", "OpenRagIngestStalled", "[1800s]"),
-        (f"{_THRESHOLD}ingestIdleSeconds=20m", "OpenRagIngestStalled", "[20m]"),
-        (f"{_THRESHOLD}ingestIdleSeconds=1h30m", "OpenRagIngestStalled", "> 1h30m)"),
+        (f"{_THRESHOLD}ingestIdleSeconds=5400", "OpenRagIngestStalled", "> 5400)"),
     ],
 )
 def test_a_threshold_in_its_accepted_form_is_rendered(override: str, alert: str, rendered: str) -> None:
