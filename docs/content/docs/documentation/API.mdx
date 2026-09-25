@@ -104,7 +104,14 @@ Upload a new file to a specific partition for indexing.
 **Responses:**
 - `201 Created`: Returns task status URL
 - `400 Bad Request`: `callback_url` is malformed or not a public `http(s)` URL
-- `409 Conflict`: File already exists in partition
+- `409 Conflict`: File already exists in partition. Two more cases carry a `code`:
+  - `DOCUMENT_INDEXING_IN_PROGRESS`: another task is still indexing this `file_id`.
+    `extra.existing_task_id` and `extra.task_status_url` point at it, so a client
+    that re-sent after a timeout can poll the first task instead of re-uploading.
+    Earlier releases accepted such a retry with `201` and let it fail at the end
+    of the pipeline.
+  - `DOCUMENT_CONTENT_EXISTS`: content deduplication matched another file
+    (`extra.existing_file_id`).
 
 ##### Indexing status callback
 
