@@ -14,6 +14,7 @@ from __future__ import annotations
 import importlib.util
 import re
 import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -497,3 +498,87 @@ def test_target_down_pages_for_openrags_targets_only(job: str, pages: bool, bund
     expr = _render(*overrides)["OpenRagTargetDown"]["expr"]
 
     assert _paged(expr, job) is pages, f"{job}: expected pages={pages} under {expr}"
+
+
+# ---------------------------------------------------------------------------
+# What the chart itself renders (#976 second audit)
+# ---------------------------------------------------------------------------
+
+#: Enough to render every object the runbooks point at: the rules, the API, and
+#: the RayCluster with its PodMonitor.
+_CHART_SETS = (
+    "env.secrets.AUTH_TOKEN=or-unit-test-token-0123",
+    "postgresql.auth.password=unit-test-password-0123",
+    "monitoring.prometheusRule.enabled=true",
+    "ray.enabled=true",
+    "ray.metrics.podMonitor.enabled=true",
+)
+
+
+def _render_chart(tmp_path: Path, *overrides: str) -> list[dict]:
+    """Every object ``helm template`` renders, from a copy of the chart without
+    its subcharts: they are fetched archives, and nothing here comes from them."""
+    if shutil.which("helm") is None:
+        pytest.skip("needs helm to render the chart")
+    chart = tmp_path / "openrag-stack"
+    for directory in ("templates", "rules", "dashboards"):
+        shutil.copytree(CHART_DIR / directory, chart / directory)
+    shutil.copy(CHART_DIR / "values.yaml", chart / "values.yaml")
+    meta = yaml.safe_load((CHART_DIR / "Chart.yaml").read_text(encoding="utf-8"))
+    meta.pop("dependencies", None)
+    (chart / "Chart.yaml").write_text(yaml.safe_dump(meta), encoding="utf-8")
+
+    sets = (arg for value in (*_CHART_SETS, *overrides) for arg in ("--set", value))
+    result = subprocess.run(
+        [shutil.which("helm"), "template", "openrag", str(chart), "--namespace", "rag", *sets],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    return [doc for doc in yaml.safe_load_all(result.stdout) if doc]
+
+
+def _one(objects: list[dict], kind: str) -> dict:
+    found = [obj for obj in objects if obj["kind"] == kind]
+    assert len(found) == 1, f"expected one {kind}, rendered {[obj['metadata']['name'] for obj in found]}"
+    return found[0]
+
+
+#: Alerts allowed to render without a `for`, i.e. to fire on one evaluation.
+#: Empty: every shipped alert must wait.
+_FIRES_INSTANTLY: frozenset[str] = frozenset()
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [(), ("monitoring.prometheusRule.commonLabels.team=platform",)],
+    ids=["rules-as-text", "rules-with-common-labels"],
+)
+def test_every_rule_the_chart_renders_waits_before_firing(tmp_path: Path, overrides: tuple[str, ...]) -> None:
+    """An alert whose key is missing from the template's `$for` dict renders a
+    bare `for:` — null, which Prometheus reads as "fire on one evaluation".
+    Checked on the PrometheusRule itself, under both of its rendering branches,
+    not only on the Compose copy, which is regenerated after the fact."""
+    rule_object = _one(_render_chart(tmp_path, *overrides), "PrometheusRule")
+
+    for group in rule_object["spec"]["groups"]:
+        for rule in group["rules"]:
+            if rule["alert"] in _FIRES_INSTANTLY:
+                continue
+            assert rule.get("for"), f"{rule['alert']} renders `for: {rule.get('for')}` and fires on one evaluation"
+
+
+def test_values_lists_every_alerts_default_for(tmp_path: Path) -> None:
+    """values.yaml leaves `for` empty and lists the defaults in a comment, which
+    is the only place an operator retuning one reads them."""
+    listed = dict(
+        re.findall(
+            r"(OpenRag\w+): (\S+)",
+            (CHART_DIR / "values.yaml").read_text(encoding="utf-8").split("    for: {}")[0].rsplit("thresholds:", 1)[1],
+        )
+    )
+    rule_object = _one(_render_chart(tmp_path), "PrometheusRule")
+    rendered = {rule["alert"]: rule["for"] for group in rule_object["spec"]["groups"] for rule in group["rules"]}
+
+    assert listed == rendered, "values.yaml's `for` list and the template's `$for` defaults disagree"
