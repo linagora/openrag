@@ -56,7 +56,10 @@ _MISSING_WORKER_REF_ERROR = "Indexer worker did not receive a registered task re
 # separately; v10 workers interpret all three as the same indexing failure.
 # v12: workers write each embedder's own vector field; v11 workers still write
 # the shared `vector` field, which the schema-v3 migration drops.
-_INDEXER_ACTOR_PROTOCOL_VERSION = "v12"
+# v13: TaskStateManager fences admission against a task already indexing the
+# same file and is replaced during bootstrap when it lacks that method; the
+# replacement changes the actor id the previous generation's handles point at.
+_INDEXER_ACTOR_PROTOCOL_VERSION = "v13"
 _INDEXER_POOL_DISPATCHER_ACTOR_NAME = f"IndexerPoolDispatcher-{_INDEXER_ACTOR_PROTOCOL_VERSION}"
 
 # Detached actors default to max_restarts=0, so one that dies — an OOM on a

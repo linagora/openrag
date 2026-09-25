@@ -126,6 +126,10 @@ class WorkerDispatcher(IndexingDispatcher):
 
         remote = _remote_actor_method(self._tsm, "set_queued_details")
         if remote is not None:
+            if reject_if_file_active:
+                logger.bind(task_id=task_id, file_id=file_id, partition=partition).warning(
+                    "TaskStateManager predates the file admission fence; a duplicate upload cannot be refused"
+                )
             accepted = await retry_idempotent_ray_actor_method(
                 submit=lambda: remote(
                     task_id,
