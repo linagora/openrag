@@ -47,6 +47,12 @@ HEADER = """# GENERATED FILE — DO NOT EDIT.
 """
 
 
+#: The chart links runbooks at the release it deploys (v<appVersion>). A Compose
+#: install runs from a git checkout, so its copy links main, and a version bump
+#: does not rewrite this file.
+COMPOSE_OVERRIDES = ("monitoring.prometheusRule.runbookBaseUrl=https://github.com/linagora/openrag/blob/main/docs/deployment/runbooks",)
+
+
 def render(overrides: Sequence[str] = ()) -> str:
     """Return the rule groups as Helm renders them.
 
@@ -103,7 +109,7 @@ def main() -> int:
     parser.add_argument("--check", action="store_true", help="fail if the generated file is out of date")
     args = parser.parse_args()
 
-    rendered = render()
+    rendered = render(COMPOSE_OVERRIDES)
     # Parse both sides: a difference that yaml.safe_load cannot see is a
     # difference in comments or formatting, which still matters for a file
     # people read, but should be reported as such rather than as a rule change.

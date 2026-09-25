@@ -118,8 +118,9 @@ monitoring:
     # stack receiving them. A rule's own labels win on conflict.
     # e.g. team: platform / service: openrag
     commonLabels: {}
-    # Override the runbook_url base baked into the rules. Leave empty to keep
-    # the published GitHub location; set it for an air-gapped or mirrored copy.
+    # Override the runbook_url base baked into the rules. Empty links the
+    # runbooks at this chart's release (…/blob/v<appVersion>/docs/deployment/
+    # runbooks); set it for an air-gapped or mirrored copy.
     runbookBaseUrl: ""
     # Alert thresholds. Empty keeps what the rules ship with; set one to retune
     # without cutting a chart release. Every threshold here was chosen against
