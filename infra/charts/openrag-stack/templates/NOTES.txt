@@ -63,7 +63,7 @@ PVC is kept by helm.sh/resource-policy and is no longer used — delete it by ha
 
 {{- if and .Values.monitoring.bundled (not .Values.ray.enabled) (ne (include "openrag-stack.embeddedRay" .) "true") }}
 
-⚠  RAY_ADDRESS points the API at an external Ray cluster, so the bundled
+⚠  The API attaches to an external Ray cluster (RAY_ADDRESS), so the bundled
    Prometheus scrapes no Ray metrics: the ingestion alerts and the worker-side
    inference series need that cluster scraped where it runs.
 {{- end }}

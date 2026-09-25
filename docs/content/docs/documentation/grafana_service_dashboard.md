@@ -36,7 +36,7 @@ How each deployment collects them:
 | --- | --- | --- |
 | Compose, monitoring overlay | job `openrag` | job `openrag-ray`, on the port the overlay pins with `RAY_METRICS_EXPORT_PORT` |
 | Kubernetes, `ray.enabled=true` | `openrag.metrics.serviceMonitor` | the Ray PodMonitor on the Ray pods' `metrics` port, once `ray.metrics.podMonitor.enabled=true` or `monitoring.bundled` (off by default; see [Monitoring Ray, Postgres and Milvus](/openrag/documentation/kubernetes/#monitoring-ray-postgres-and-milvus)) |
-| Kubernetes, `ray.enabled=false` | `openrag.metrics.serviceMonitor` | the same PodMonitor, on the `openrag` pod's `ray-metrics` port, which the chart pins with `RAY_METRICS_EXPORT_PORT` |
+| Kubernetes, `ray.enabled=false` | `openrag.metrics.serviceMonitor` | the same PodMonitor, on the `openrag` pod's `ray-metrics` port, which the chart pins with `RAY_METRICS_EXPORT_PORT`. Not with an external Ray cluster (`RAY_ADDRESS`, or `ray.externalCluster`): the API then runs no Ray, and that cluster is scraped where it runs |
 
 `OpenRagTargetDown` watches every job whose name contains `openrag`, which is why the Compose
 Ray job is named `openrag-ray`.

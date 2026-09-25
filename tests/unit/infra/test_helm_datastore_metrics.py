@@ -334,6 +334,14 @@ def test_the_embedded_ray_metrics_policy_opens_the_port_on_the_api_pod_only(tmp_
 
 
 @requires_helm
+def test_external_cluster_is_ignored_with_the_charts_own_ray_cluster(tmp_path: Path) -> None:
+    """With ray.enabled=true the RayCluster is this release's: its PodMonitor
+    stays, whatever ray.externalCluster says."""
+    objects = _objects(_chart(tmp_path), *RAY_MONITOR, "--set", "ray.externalCluster=true")
+    assert [o["metadata"]["name"] for o in objects if o["kind"] == "PodMonitor"] == ["openrag-raycluster"]
+
+
+@requires_helm
 def test_a_ray_cluster_leaves_the_api_pod_without_a_ray_port(tmp_path: Path) -> None:
     """With ray.enabled=true the API attaches to the RayCluster and starts no Ray
     of its own; a declared port there would be a target that is always down."""
@@ -374,6 +382,9 @@ def test_the_notes_warn_about_an_unlabelled_embedded_ray_monitor(tmp_path: Path)
 EXTERNAL_RAY = {
     "config": ["--set", "env.config.RAY_ADDRESS=ray://external-head:10001"],
     "secrets": ["--set", "env.secrets.RAY_ADDRESS=ray://external-head:10001"],
+    # RAY_ADDRESS from env.existingSecret or an external secrets provider: the
+    # chart cannot read it, so the operator says so.
+    "flag": ["--set", "ray.externalCluster=true"],
 }
 BUNDLED = ["--set", "monitoring.bundled=true", "--set", "env.secrets.METRICS_TOKEN=unit-test-metrics-token"]
 
@@ -399,23 +410,24 @@ def test_an_external_ray_cluster_gets_no_embedded_ray_port_monitor_or_policy(tmp
 
 
 @requires_helm
-def test_a_ray_pod_monitor_over_an_external_cluster_fails_the_render(tmp_path: Path) -> None:
-    result = _render(_chart(tmp_path), *EMBEDDED_RAY_MONITOR, *EXTERNAL_RAY["config"])
+@pytest.mark.parametrize("source", sorted(EXTERNAL_RAY))
+def test_a_ray_pod_monitor_over_an_external_cluster_fails_the_render(tmp_path: Path, source: str) -> None:
+    result = _render(_chart(tmp_path), *EMBEDDED_RAY_MONITOR, *EXTERNAL_RAY[source])
 
     assert result.returncode != 0
-    assert "ray.metrics.podMonitor.enabled with ray.enabled=false and RAY_ADDRESS set" in result.stderr
+    assert "ray.metrics.podMonitor.enabled with ray.enabled=false and an external Ray cluster" in result.stderr
 
 
 @requires_helm
 def test_the_notes_say_the_bundled_stack_does_not_scrape_an_external_ray(tmp_path: Path) -> None:
     notes = _notes(tmp_path, *EXTERNAL_RAY["config"], *BUNDLED)
 
-    assert "RAY_ADDRESS points the API at an external Ray cluster" in notes
+    assert "The API attaches to an external Ray cluster (RAY_ADDRESS)" in notes
 
 
 @requires_helm
 def test_the_notes_stay_quiet_about_ray_address_for_the_embedded_ray(tmp_path: Path) -> None:
-    assert "RAY_ADDRESS points the API" not in _notes(tmp_path, *BUNDLED)
+    assert "attaches to an external Ray cluster" not in _notes(tmp_path, *BUNDLED)
 
 
 @requires_datastore_charts

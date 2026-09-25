@@ -186,9 +186,9 @@ RAY_ADDRESS set, the API attaches to an external cluster (ray.init(address=...))
 and starts no metrics agent, so nothing would listen on the embedded Ray's
 port: a monitor on it is a target that is always down. Only env.config and
 env.secrets are visible here; a RAY_ADDRESS supplied through env.existingSecret
-or an external secrets provider is not.
+or an external secrets provider is not, which is what ray.externalCluster says.
 */}}
 {{- define "openrag-stack.embeddedRay" -}}
 {{- $address := or (dig "RAY_ADDRESS" "" (.Values.env.config | default dict)) (dig "RAY_ADDRESS" "" (.Values.env.secrets | default dict)) -}}
-{{- if and (not .Values.ray.enabled) (not $address) -}}true{{- else -}}false{{- end -}}
+{{- if and (not .Values.ray.enabled) (not $address) (not .Values.ray.externalCluster) -}}true{{- else -}}false{{- end -}}
 {{- end }}

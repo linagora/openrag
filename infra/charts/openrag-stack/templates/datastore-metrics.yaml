@@ -30,7 +30,7 @@ namespace.
 
 {{- $embeddedRay := eq (include "openrag-stack.embeddedRay" .) "true" }}
 {{- if and .Values.ray.metrics.podMonitor.enabled (not .Values.ray.enabled) (not $embeddedRay) }}
-{{- fail "ray.metrics.podMonitor.enabled with ray.enabled=false and RAY_ADDRESS set: the openrag pod attaches to that external Ray cluster and exports no Ray metrics itself, so the PodMonitor would scrape a port nothing listens on. Scrape the external cluster where it runs." }}
+{{- fail "ray.metrics.podMonitor.enabled with ray.enabled=false and an external Ray cluster (RAY_ADDRESS, or ray.externalCluster): the openrag pod attaches to that external Ray cluster and exports no Ray metrics itself, so the PodMonitor would scrape a port nothing listens on. Scrape the external cluster where it runs." }}
 {{- end }}
 {{- if and (eq (include "openrag-stack.rayPodMonitor" .) "true") (or .Values.ray.enabled $embeddedRay) }}
 {{- $component := ternary "raycluster" "openrag-ray" .Values.ray.enabled }}

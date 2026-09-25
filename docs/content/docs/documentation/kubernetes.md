@@ -477,7 +477,10 @@ only Ray node is embedded in the `openrag` pod: the chart pins its metrics port 
 `PodMonitor` selects that pod instead of the RayCluster's. With `ray.enabled=false`
 and `RAY_ADDRESS` set, the API attaches to an external Ray cluster and starts no
 Ray of its own: the chart then declares no port and renders no `PodMonitor`, and
-refuses `ray.metrics.podMonitor.enabled`. Scrape that cluster where it runs. Ray prefixes the metrics OpenRAG records inside its
+refuses `ray.metrics.podMonitor.enabled`. Scrape that cluster where it runs. The
+chart reads `RAY_ADDRESS` from `env.config` and `env.secrets` only: when it comes
+from `env.existingSecret` or an external secrets provider, set
+`ray.externalCluster: true` as well. Ray prefixes the metrics OpenRAG records inside its
 workers with `ray_`. The `PodMonitor` strips that prefix, so these metrics are
 stored under the same `openrag_*` names the API's `/metrics` uses, and the alert
 rules match them. Ray's own `ray_*` metrics keep their names. Milvus already exports from all five components (proxy,

@@ -333,6 +333,13 @@ kuberay:
 
 ray:
   enabled: false
+  # The API attaches to a Ray cluster outside this release (RAY_ADDRESS). The
+  # chart detects that from env.config.RAY_ADDRESS or env.secrets.RAY_ADDRESS;
+  # set this when RAY_ADDRESS comes from env.existingSecret or an external
+  # secrets provider, which the chart cannot read. The openrag pod then starts
+  # no Ray, so the chart renders no embedded-Ray metrics port or PodMonitor
+  # (they would be a target that is always down). Ignored with enabled=true.
+  externalCluster: false
   # 0.0.0.0 would expose the unauthenticated Ray dashboard on every pod
   # interface (ShadowRay / CVE-2023-48022); loopback-only is safe because the
   # dashboard is still reachable through ray.ingress / openrag.rayDashboard.ingress.
