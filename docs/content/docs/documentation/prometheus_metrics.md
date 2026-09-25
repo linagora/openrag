@@ -236,6 +236,7 @@ it unresolved, so a unit test rejects such an export.
 - Counters reset when the API restarts; use `rate()` and `increase()` rather
   than raw values.
 - Vector-store metrics are not exposed yet. Indexing and worker-side
-  inference metrics are exported on Ray's metrics agent, which neither the
-  chart nor the compose overlay scrapes yet (see the
+  inference metrics are exported on Ray's metrics agent, which the chart
+  scrapes through `ray.metrics.podMonitor` and the compose overlay does not
+  scrape yet (see the
   [metrics reference](/openrag/documentation/metrics_reference/)).
