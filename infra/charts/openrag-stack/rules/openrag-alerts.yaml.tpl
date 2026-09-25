@@ -153,7 +153,7 @@ groups:
           and on()
           max(min_over_time(openrag_ingest_tasks{state="QUEUED"}[{{ $idleRange }}])) > 0
           and on()
-          (time() - max(openrag_ingest_last_parse_completion_timestamp_seconds) > {{ $t.ingestIdleSeconds }})
+          (time() - max({__name__=~"(ray_)?openrag_ingest_last_parse_completion_timestamp_seconds"}) > {{ $t.ingestIdleSeconds }})
         for: {{ $for.OpenRagIngestStalled }}
         labels:
           severity: critical
@@ -183,12 +183,12 @@ groups:
         # stability.
         expr: |
           (
-            sum(rate(openrag_ingest_documents_total{status="failed"}[5m]))
+            sum(rate({__name__=~"(ray_)?openrag_ingest_documents_total", status="failed"}[5m]))
             /
-            sum(rate(openrag_ingest_documents_total{status=~"completed|failed"}[5m]))
+            sum(rate({__name__=~"(ray_)?openrag_ingest_documents_total", status=~"completed|failed"}[5m]))
           ) > {{ $t.ingestFailureRatio }}
           and
-          sum(increase(openrag_ingest_documents_total{status=~"completed|failed"}[15m])) >= {{ $t.ingestVolumeFloor }}
+          sum(increase({__name__=~"(ray_)?openrag_ingest_documents_total", status=~"completed|failed"}[15m])) >= {{ $t.ingestVolumeFloor }}
         for: {{ $for.OpenRagIngestFailureRate }}
         labels:
           severity: warning
@@ -306,12 +306,12 @@ groups:
         # volume floor.
         expr: |
           (
-            sum by (provider) (rate(openrag_inference_requests_total{outcome=~"error|timeout"}[10m]))
+            sum by (provider) (rate({__name__=~"(ray_)?openrag_inference_requests_total", outcome=~"error|timeout"}[10m]))
             /
-            sum by (provider) (rate(openrag_inference_requests_total{outcome=~"success|error|timeout"}[10m]))
+            sum by (provider) (rate({__name__=~"(ray_)?openrag_inference_requests_total", outcome=~"success|error|timeout"}[10m]))
           ) > {{ $t.inferenceErrorRatio }}
           and
-          sum by (provider) (increase(openrag_inference_requests_total{outcome=~"success|error|timeout"}[10m])) >= {{ $t.inferenceVolumeFloor }}
+          sum by (provider) (increase({__name__=~"(ray_)?openrag_inference_requests_total", outcome=~"success|error|timeout"}[10m])) >= {{ $t.inferenceVolumeFloor }}
         for: {{ $for.OpenRagInferenceProviderDown }}
         labels:
           severity: critical
@@ -345,7 +345,7 @@ groups:
         # Under `== 1` every such scrape reset the `for` timer, so the alert
         # could stay pending through exactly the outage it exists for.
         # Unknown (-1) stays out.
-        expr: max by (name) (openrag_circuit_breaker_state) >= 1
+        expr: max by (name) ({__name__=~"(ray_)?openrag_circuit_breaker_state"}) >= 1
         for: {{ $for.OpenRagCircuitBreakerOpen }}
         labels:
           severity: critical
@@ -399,7 +399,7 @@ groups:
         {{- with dig "fullnameOverride" "" $stack }}{{ $jobExclude = append $jobExclude (printf "%s-.*" (regexQuoteMeta .)) }}{{ end }}
         {{- with dig "grafana" "fullnameOverride" "" $stack }}{{ $jobExclude = append $jobExclude (regexQuoteMeta .) }}{{ end }}
         {{- end }}
-        expr: up{job=~"{{ $cfg.jobMatcher | default ".*openrag.*|ray" }}"{{ with $jobExclude }}, job!~"{{ join "|" . }}"{{ end }}} == 0
+        expr: up{job=~"{{ $cfg.jobMatcher | default ".*openrag.*" }}"{{ with $jobExclude }}, job!~"{{ join "|" . }}"{{ end }}} == 0
         for: {{ $for.OpenRagTargetDown }}
         labels:
           severity: critical

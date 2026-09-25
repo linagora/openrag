@@ -15,7 +15,7 @@
 > ```
 
 ```
-up{job=~".*openrag.*|ray", job!~"(.*/)?[^/]*-(postgresql|milvus)(-[^/]*)?"} == 0
+up{job=~".*openrag.*", job!~"(.*/)?[^/]*-(postgresql|milvus)(-[^/]*)?"} == 0
 ```
 
 With `monitoring.bundled`, the bundled stack's own jobs (`openrag-monitoring-*`,
@@ -25,7 +25,7 @@ With `monitoring.bundled`, the bundled stack's own jobs (`openrag-monitoring-*`,
 
 Prometheus cannot scrape one of OpenRag's own targets: the API's `/metrics`, or the Ray
 metrics agent that exports the Ray-side series (ingest outcomes, parse completions,
-worker-side inference) — the Compose `ray` job, or the chart's
+worker-side inference) — the Compose `openrag-ray` job, or the chart's
 `<namespace>/<release>-raycluster` PodMonitor. The `job` label says which.
 
 The datastore exporters (`<release>-postgresql-metrics`, `<release>-milvus*`) are
@@ -62,7 +62,7 @@ kubectl -n <ns> get pods -l ray.io/cluster=openrag-raycluster
 kubectl -n <ns> logs <pod> --tail=100
 ```
 
-On Compose, `docker compose ps openrag` — the `ray` job scrapes the same container on
+On Compose, `docker compose ps openrag` — the `openrag-ray` job scrapes the same container on
 port 8091.
 
 ## Likely causes, most common first
