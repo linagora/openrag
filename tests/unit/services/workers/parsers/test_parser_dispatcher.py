@@ -339,7 +339,7 @@ async def test_failed_parse_stamps_only_the_first_use_seed(monkeypatch: pytest.M
     seeded: list[str] = []
     monkeypatch.setattr(module, "record_parse_completion", lambda pool: stamped.append(pool))
     monkeypatch.setattr(rm, "_WATCHDOG_SEEDED", set())
-    monkeypatch.setattr(rm, "record_parse_completion", lambda pool, **_: seeded.append(pool))
+    monkeypatch.setattr(rm, "record_parse_completion", lambda pool, **_: seeded.append(pool) or True)
 
     disp = ParserDispatcher(_config())
     monkeypatch.setattr(disp, "_get", lambda _name: _StubParser(error=RuntimeError("backend wedged")))
@@ -381,7 +381,7 @@ async def test_a_pool_that_never_completes_still_seeds_the_watchdog_once(monkeyp
 
     stamped: list[str] = []
     monkeypatch.setattr(rm, "_WATCHDOG_SEEDED", set())
-    monkeypatch.setattr(rm, "record_parse_completion", lambda pool, **_: stamped.append(pool))
+    monkeypatch.setattr(rm, "record_parse_completion", lambda pool, **_: stamped.append(pool) or True)
 
     disp = ParserDispatcher(_config())
     monkeypatch.setattr(disp, "_get", lambda _name: _StubParser(error=RuntimeError("backend wedged")))

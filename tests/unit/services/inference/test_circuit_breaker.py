@@ -179,6 +179,23 @@ def test_a_new_breaker_publishes_closed_before_any_transition(monkeypatch):
     assert recorded == [("fresh-breaker", 0)]
 
 
+def test_the_closed_state_is_written_before_the_breaker_is_reachable(monkeypatch):
+    """Written after registration, the initial "closed" could land after
+    another caller had already opened the breaker, and overwrite its exported
+    "open": ``OpenRagCircuitBreakerOpen`` would stay silent until the next
+    transition."""
+    import services.inference._circuit_breaker as module
+
+    reachable_at_write: list[bool] = []
+    monkeypatch.setattr(
+        module, "record_circuit_breaker_state", lambda n, s: reachable_at_write.append(n in module._breakers)
+    )
+
+    module.get_breaker("ordered-breaker")
+
+    assert reachable_at_write == [False]
+
+
 @pytest.mark.parametrize(
     ("status", "excluded"),
     [(400, True), (403, True), (404, True), (408, True), (429, True), (401, False), (500, False)],

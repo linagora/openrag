@@ -132,6 +132,37 @@ def test_recording_failure_never_propagates(monkeypatch: pytest.MonkeyPatch) -> 
     ray_metrics.record_parse_completion("marker")
 
 
+def test_a_failed_seed_write_is_retried_on_the_next_use(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The first-use seed is the only stamp a pool that never completes gets.
+    If its write fails and the pool is still marked seeded, no later use writes
+    one, and the watchdog is blind to that pool again. The failure is injected
+    in the gauge, where ``record_parse_completion`` swallows it — the path
+    production takes — and a successful seed must still happen only once."""
+
+    class _FailsOnce:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.written: list[dict[str, str] | None] = []
+
+        def set(self, value: float, tags: dict[str, str] | None = None) -> None:
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("backend down")
+            self.written.append(tags)
+
+    gauge = _FailsOnce()
+    monkeypatch.setattr("core.observability._reporting._reported", set())
+    monkeypatch.setattr(ray_metrics, "_LAST_PARSE_TIMESTAMP", gauge)
+    monkeypatch.setattr(ray_metrics, "_WATCHDOG_SEEDED", set())
+
+    ray_metrics.seed_parse_watchdog("marker")
+    assert gauge.written == []
+
+    ray_metrics.seed_parse_watchdog("marker")
+    ray_metrics.seed_parse_watchdog("marker")
+    assert gauge.written == [{"pool": "marker"}]
+
+
 def test_terminal_status_label_is_lowercased(monkeypatch: pytest.MonkeyPatch) -> None:
     """The state machine stores ``"FAILED"``; the label set is lowercase."""
     docs = _Recorder()

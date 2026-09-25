@@ -73,17 +73,20 @@ class _LoggingListener(CircuitBreakerListener):
 def get_breaker(name: str, fail_max: int = 50, timeout_duration: float = 60.0) -> CircuitBreaker:
     requested = (fail_max, timeout_duration)
     if name not in _breakers:
-        _breakers[name] = CircuitBreaker(
+        breaker = CircuitBreaker(
             fail_max=fail_max,
             timeout_duration=timedelta(seconds=timeout_duration),
             name=name,
             exclude=[_is_excluded],
             listeners=[_LoggingListener()],
         )
-        _breaker_config[name] = requested
         # State is otherwise written only on a transition, so a breaker that
-        # never tripped had no series: "Unknown" on a healthy system.
+        # never tripped had no series: "Unknown" on a healthy system. Written
+        # before the breaker is registered: once a caller can reach it, a
+        # transition may already have exported "open", which this would undo.
         record_circuit_breaker_state(name, _STATE_VALUES[CircuitBreakerState.CLOSED])
+        _breakers[name] = breaker
+        _breaker_config[name] = requested
     elif _breaker_config.get(name) != requested:
         raise ValueError(f"Breaker '{name}' already exists with config={_breaker_config[name]}, requested={requested}")
     return _breakers[name]

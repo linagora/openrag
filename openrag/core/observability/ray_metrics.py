@@ -170,7 +170,7 @@ def observe_queue_wait_from(created_at: str | None, *, now: datetime | None = No
         report_once(INGEST_QUEUE_WAIT_SECONDS.name, exc)
 
 
-def record_parse_completion(pool: str, *, at: float | None = None) -> None:
+def record_parse_completion(pool: str, *, at: float | None = None) -> bool:
     """Stamp the time a parse finished, per parser backend.
 
     Exports a *timestamp*, not an age. An age gauge has to be rewritten
@@ -185,11 +185,15 @@ def record_parse_completion(pool: str, *, at: float | None = None) -> None:
         time() - max without(WorkerId, SessionName, NodeAddress, Component, Version) (
             ray_openrag_ingest_last_parse_completion_timestamp_seconds
         ) > 300
+
+    Returns whether the stamp was written; a failure is reported, never raised.
     """
     try:
         _LAST_PARSE_TIMESTAMP.set(float(at if at is not None else time.time()), tags={"pool": pool})
     except Exception as exc:  # noqa: BLE001
         report_once(INGEST_LAST_PARSE_TIMESTAMP.name, exc)
+        return False
+    return True
 
 
 _WATCHDOG_SEEDED: set[str] = set()
@@ -203,11 +207,15 @@ def seed_parse_watchdog(pool: str) -> None:
     ``time() - max(<stamp>)`` has nothing to evaluate: the stall that starts at
     boot is the one it cannot see. Seeding at first use gives the stamp a start,
     and a pool that then completes nothing ages from there like any other.
+
+    Marked seeded only once the stamp is written: a failed write would
+    otherwise use up the one seed, and a pool that also never completes would
+    be left without a series again.
     """
     if pool in _WATCHDOG_SEEDED:
         return
-    _WATCHDOG_SEEDED.add(pool)
-    record_parse_completion(pool)
+    if record_parse_completion(pool):
+        _WATCHDOG_SEEDED.add(pool)
 
 
 __all__ = [
