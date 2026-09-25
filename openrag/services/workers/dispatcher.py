@@ -323,8 +323,10 @@ class WorkerDispatcher(IndexingDispatcher):
                 # under the same file_id, so it is the first task's own claim
                 # that turns it away here, before the admission fence below
                 # ever sees it. Name that task rather than pointing the client
-                # at a file the catalog does not show yet.
-                if conflicting_file_id == file_id:
+                # at a file the catalog does not show yet. Only for a first-time
+                # upload, the one the fence applies to: a replace keeps the
+                # content conflict it always got.
+                if conflicting_file_id == file_id and not replace:
                     busy_task_id = await self._active_indexing_task_for_file(partition=partition, file_id=file_id)
                     if busy_task_id is not None:
                         raise _indexing_in_progress(file_id, partition, busy_task_id)
