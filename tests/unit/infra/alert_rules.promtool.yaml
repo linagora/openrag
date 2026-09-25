@@ -84,6 +84,23 @@ tests:
         alertname: OpenRagIngestStalled
         exp_alerts: []
 
+  - interval: 1m
+    name: "documented limitation: after a worker restart the gauge is gone and nothing can fire"
+    # The gauge is per worker process (WorkerId). Ray drops a dead worker's
+    # series about two minutes after it exits, so the pre-restart timestamp
+    # disappears and nothing replaces it until a pool parses again. Work sat
+    # QUEUED for the whole hour and this stayed silent — pinned so a change
+    # that closes the gap (or pretends to) has to update this and the runbook.
+    input_series:
+      - series: 'openrag_ingest_tasks{state="QUEUED"}'
+        values: "10+0x60"
+      - series: 'openrag_ingest_last_parse_completion_timestamp_seconds{pool="marker",WorkerId="dead"}'
+        values: "0+0x2 stale"
+    alert_rule_test:
+      - eval_time: 60m
+        alertname: OpenRagIngestStalled
+        exp_alerts: []
+
   # ── OpenRagIngestFailureRate ────────────────────────────────────────────
   - interval: 1m
     name: one failure out of two is above 25% but below the volume floor
