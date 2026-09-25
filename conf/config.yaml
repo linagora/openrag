@@ -122,9 +122,10 @@ verbose:
   level: INFO
 
 # --- Server ---
-# Env: PREFERRED_URL_SCHEME
+# Env: PREFERRED_URL_SCHEME, ASSISTANT_NAME
 server:
   preferred_url_scheme: null
+  assistant_name: ""
 
 # --- LLM Context ---
 # Env: MAX_LLM_CONTEXT_SIZE, MAX_OUTPUT_TOKENS

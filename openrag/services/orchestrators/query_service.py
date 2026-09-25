@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import unicodedata
 from collections.abc import AsyncIterator, Callable
 from datetime import datetime
 from enum import Enum
@@ -45,6 +46,7 @@ from core.models.preset import resolve_partition_chat_llm
 from core.models.query import Query, SearchQueries
 from core.prompts import (
     SOURCE_SEPARATOR,
+    build_casual_response_prompt,
     format_context,
     format_web_context,
     prepend_system_prompt,
@@ -70,6 +72,54 @@ if TYPE_CHECKING:
 logger = get_logger()
 
 PrepareSources = Callable[[list, list], list]
+
+
+class CasualMessagePolicy(NamedTuple):
+    intent: str
+    language: str
+
+
+CASUAL_MESSAGE_INTENTS: dict[str, CasualMessagePolicy] = {
+    "bonjour": CasualMessagePolicy("greeting", "fr"),
+    "salut": CasualMessagePolicy("greeting", "fr"),
+    "hello": CasualMessagePolicy("greeting", "en"),
+    "hey": CasualMessagePolicy("greeting", "en"),
+    "comment allez vous": CasualMessagePolicy("greeting", "fr"),
+    "how are you": CasualMessagePolicy("greeting", "en"),
+    "hey how are you": CasualMessagePolicy("greeting", "en"),
+    "comment pouvez vous m aider": CasualMessagePolicy("capability", "fr"),
+    "how can you help me": CasualMessagePolicy("capability", "en"),
+    "what can you do": CasualMessagePolicy("capability", "en"),
+    "merci": CasualMessagePolicy("gratitude", "fr"),
+    "thank you": CasualMessagePolicy("gratitude", "en"),
+    "thanks": CasualMessagePolicy("gratitude", "en"),
+    "au revoir": CasualMessagePolicy("farewell", "fr"),
+    "bye": CasualMessagePolicy("farewell", "en"),
+}
+CASUAL_MESSAGES = frozenset(CASUAL_MESSAGE_INTENTS)
+_EMPTY_CASUAL_POLICY = CasualMessagePolicy("empty", "en")
+
+
+def normalize_casual_message(message: str) -> str:
+    """Normalize a complete message for strict casual-message matching."""
+    normalized = unicodedata.normalize("NFKC", message).casefold()
+    characters: list[str] = []
+    for character in normalized:
+        category = unicodedata.category(character)
+        codepoint = ord(character)
+        is_variation_selector = 0xFE00 <= codepoint <= 0xFE0F or 0xE0100 <= codepoint <= 0xE01EF
+        if category.startswith("S") or category == "Cf" or is_variation_selector or character == "\u20e3":
+            continue
+        characters.append(" " if category.startswith("P") else character)
+    return " ".join("".join(characters).split())
+
+
+def casual_message_policy(message: str) -> CasualMessagePolicy | None:
+    """Return the exact-match casual policy, including empty-input fallback."""
+    normalized = normalize_casual_message(message)
+    if not normalized:
+        return _EMPTY_CASUAL_POLICY
+    return CASUAL_MESSAGE_INTENTS.get(normalized)
 
 
 class _PrepareChatResult(NamedTuple):
@@ -104,10 +154,19 @@ From this document, identify and comprehensively summarize the information usefu
 {query}"""
 
 _QUERY_JSON_HINT = (
-    "\n\nRespond ONLY with one of these JSON forms: "
-    '{"requires_retrieval": false, "query_list": []} when retrieval is not needed, or '
-    '{"requires_retrieval": true, '
-    '"query_list": [{"query": "<search query>", "temporal_filters": null}]} when it is.'
+    "\n\nClassify the complete latest user message conservatively. Retrieval is the default. "
+    "Only a message consisting exclusively of a greeting or salutation, gratitude, farewell, or a question about "
+    "the assistant's capabilities may skip retrieval. A factual, informational, analytical, ambiguous, or mixed "
+    "message must require retrieval, even when it has no question mark or also contains a social phrase. "
+    "A brief acknowledgement after a social, wellbeing, or feedback question remains gratitude and may skip "
+    "retrieval. It requires retrieval only when it accepts factual, informational, analytical, or document-backed "
+    "continuation from the assistant's previous turn. "
+    "Respond ONLY with one of these JSON forms: "
+    '{"intent": "greeting", "requires_retrieval": false, "query_list": []} for an exclusively casual message '
+    "(using gratitude, farewell, or capability instead of greeting when appropriate), or "
+    '{"intent": "other", "requires_retrieval": true, '
+    '"query_list": [{"query": "<search query>", "temporal_filters": null}]} for everything else. '
+    "If uncertain, use intent other and require retrieval."
 )
 
 
@@ -455,7 +514,6 @@ class QueryService:
         custom_prompt, messages = _split_leading_system_prompt(payload["messages"], messages)
         if not messages:
             raise ValidationError("Request must contain at least one non-system message")
-        queries = await self.generate_query(messages, llm=llm, partition=partition)
 
         metadata = payload.get("metadata") or {}
         use_map_reduce = metadata.get("use_map_reduce", False)
@@ -484,27 +542,37 @@ class QueryService:
             indexed_attachment_ids = await self._existing_file_ids(attachment_ids, partition)
             filter_params = {"file_id": indexed_attachment_ids}
 
-        # An attachment must never be dropped just because the classifier
-        # judged the turn conversational.
-        force_retrieval = use_websearch or use_map_reduce or bool(indexed_attachment_ids)
-        if not queries.query_list:
-            if not queries.requires_retrieval and not force_retrieval:
-                # Resolved per request from the library (named -> default ->
-                # bundled), replacing the __init__-time disk snapshots this
-                # branch removes. The conversational path therefore honours the
-                # partition's selected answer prompt too.
-                prompt_type = "spoken_style_answer" if spoken_style else "sys_prompt"
-                tmpl = await self._prompt_service.resolve_prompt(
-                    prompt_type, names=[self._generation_prompt_name(prompt_type, partition)]
-                )
-                payload["messages"] = prepend_system_prompt(
-                    messages,
-                    tmpl,
-                    context="",
-                    current_date=datetime.now().strftime("%A, %B %d, %Y, %H:%M:%S"),
-                )
-                return _PrepareChatResult(payload, [], [], [], [], True, indexed_attachment_ids)
-            queries = SearchQueries(query_list=[Query(query=messages[-1]["content"])])
+        last_user_message = messages[-1].get("content") or ""
+        casual_policy = casual_message_policy(last_user_message)
+        explicitly_required = metadata.get("require_retrieval") is True
+        existing_force_retrieval = use_websearch or use_map_reduce or bool(indexed_attachment_ids)
+
+        retrieval_forced = explicitly_required or existing_force_retrieval
+        queries: SearchQueries | None = None
+
+        if casual_policy is None or retrieval_forced:
+            queries = await self.generate_query(messages, llm=llm, partition=partition)
+            usable_queries = [query for query in queries.query_list if query.query.strip()]
+            if not usable_queries:
+                queries = SearchQueries(query_list=[Query(query=last_user_message)])
+            elif len(usable_queries) != len(queries.query_list):
+                queries = queries.model_copy(update={"query_list": usable_queries})
+
+        if casual_policy is not None and not retrieval_forced:
+            casual_prompt = build_casual_response_prompt(
+                casual_policy.intent, casual_policy.language, assistant_name=self._config.server.assistant_name
+            )
+            payload["messages"] = prepend_system_prompt(
+                messages,
+                casual_prompt,
+                context="",
+                current_date=datetime.now().strftime("%A, %B %d, %Y, %H:%M:%S"),
+                custom_prompt=custom_prompt,
+            )
+            return _PrepareChatResult(payload, [], [], [], [], True, indexed_attachment_ids)
+
+        if queries is None:  # pragma: no cover - guarded by the casual return above
+            queries = SearchQueries(query_list=[Query(query=last_user_message)])
 
         web_results: list = []
         if partition is not None and use_websearch:
@@ -612,12 +680,13 @@ class QueryService:
 
     async def _prepare_completions(self, partition: list[str], payload: dict, llm: LLM | None = None):
         prompt = payload["prompt"]
+        metadata = payload.get("metadata") or {}
         # partition= is ours: the retrieval preset's query_contextualizer is
         # resolved per partition. The skip below is from #807.
         queries = await self.generate_query([{"role": "user", "content": prompt}], llm=llm, partition=partition)
         retrieved_docs: list = []
         if not queries.query_list:
-            if not queries.requires_retrieval:
+            if not queries.requires_retrieval and metadata.get("require_retrieval") is not True:
                 docs, context = [], ""
             else:
                 queries = SearchQueries(query_list=[Query(query=prompt)])
@@ -634,7 +703,6 @@ class QueryService:
             )
             docs = [docs[i] for i in included]
 
-        metadata = payload.get("metadata") or {}
         prompt_type = "spoken_style_answer" if metadata.get("spoken_style_answer", False) else "sys_prompt"
         tmpl = await self._prompt_service.resolve_prompt(
             prompt_type, names=[self._generation_prompt_name(prompt_type, partition)]

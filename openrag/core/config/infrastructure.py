@@ -98,6 +98,7 @@ class PathsConfig(ConfigMixin):
 
 class ServerConfig(ConfigMixin):
     preferred_url_scheme: str | None = None
+    assistant_name: str = ""
 
 
 # ---------------------------------------------------------------------------

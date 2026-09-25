@@ -51,9 +51,17 @@ class OpenAIChatCompletionRequest(BaseModel):
             "websearch": False,
             "llm_override": None,
             "include_all_retrieved_sources": False,
+            "require_retrieval": False,
         },
         description=(
-            "Extra custom parameters. Supports an 'llm_override' object with an optional 'model' "
+            "Extra custom parameters. 'require_retrieval' (default false; enabled only by JSON true) "
+            "forces retrieval even for a casual or normalized-empty partition-backed chat message. "
+            "Other partition-backed chat messages retrieve by default. Only allowlisted casual messages skip "
+            "retrieval. Ambiguous, mixed, and factual "
+            "messages retrieve, and an empty generated query falls back to the latest user message. Casual messages "
+            "that are not forced use a direct response. Search scope and "
+            "filters remain in effect; matching sources are not guaranteed. Has no effect in direct LLM mode. "
+            "Supports an 'llm_override' object with an optional 'model' "
             "to override the downstream model name; its 'base_url' and 'api_key' are honored only "
             "when the deployment sets LLM_OVERRIDE_ALLOW_CUSTOM_ENDPOINT, and ignored otherwise. "
             "'include_all_retrieved_sources' (default false) adds the full, unfiltered retrieval "
@@ -107,9 +115,15 @@ class OpenAICompletionRequest(BaseModel):
             "spoken_style_answer": False,
             "llm_override": None,
             "include_all_retrieved_sources": False,
+            "require_retrieval": False,
         },
         description=(
-            "Extra custom parameters. Supports an 'llm_override' object with an optional 'model' "
+            "Extra custom parameters. 'require_retrieval' (default false; enabled only by JSON true) "
+            "makes partition-backed text completions retrieve when the contextualizer would otherwise skip, "
+            "using the original prompt as the fallback query. Unlike chat, text completions remain opt-in when "
+            "the contextualizer skips retrieval. Search scope and filters remain in effect; matching sources "
+            "are not guaranteed. Has no effect in direct LLM mode. "
+            "Supports an 'llm_override' object with an optional 'model' "
             "to override the downstream model name; its 'base_url' and 'api_key' are honored only "
             "when the deployment sets LLM_OVERRIDE_ALLOW_CUSTOM_ENDPOINT, and ignored otherwise. "
             "'include_all_retrieved_sources' (default false) adds the full, unfiltered retrieval "
