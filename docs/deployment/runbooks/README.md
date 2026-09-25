@@ -77,9 +77,8 @@ that were never configured.
 
 Even where the Ray agent is scraped, `OpenRagIngestStalled` has one more blind window.
 Its gauge is per worker process and Ray drops a dead worker's series about two minutes
-after it exits, so the alert cannot fire while **no pool has completed a parse since the
-workers last started** (once pools seed the gauge on first use, #1056: completed or
-started one) — a new instance, and equally any worker restart or redeploy. See
+after it exits, so the alert cannot fire while **no pool has completed or started a parse
+since the workers last started** (a pool seeds the gauge on its first use) — a new instance, and equally any worker restart or redeploy. See
 [OpenRagIngestStalled](OpenRagIngestStalled.md#known-blind-spot).
 
 Wherever a Ray-side series *is* scraped from more than one process, it is summed across

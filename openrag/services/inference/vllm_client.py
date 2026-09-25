@@ -204,6 +204,34 @@ def _strip_falsy_logprobs(payload: dict) -> dict:
     return payload
 
 
+#: Body fields that pick the credential or the endpoint rather than sampling.
+#: The chat request schema forwards unknown fields, and a LiteLLM proxy takes
+#: an ``api_key`` from the body over the deployment's key (its own blocklist
+#: bans ``api_base``/``base_url`` but not ``api_key``), so a caller could swap
+#: the key the server calls with. Credentials and endpoints come from
+#: configuration, or from an honoured ``llm_override``, never from the body.
+_CREDENTIAL_BODY_FIELDS = frozenset({"api_key", "api_base", "base_url"})
+
+
+def _strip_credential_fields(payload: dict) -> dict:
+    """Drop ``_CREDENTIAL_BODY_FIELDS`` from *payload*, and from its ``extra_body``.
+
+    ``extra_body`` too: LiteLLM spreads it into the outbound call's arguments,
+    so a field nested there reaches the provider like a top-level one.
+    """
+    dropped = sorted(_CREDENTIAL_BODY_FIELDS & payload.keys())
+    for field in dropped:
+        del payload[field]
+    extra_body = payload.get("extra_body")
+    if isinstance(extra_body, dict) and _CREDENTIAL_BODY_FIELDS & extra_body.keys():
+        nested = sorted(_CREDENTIAL_BODY_FIELDS & extra_body.keys())
+        payload["extra_body"] = {k: v for k, v in extra_body.items() if k not in _CREDENTIAL_BODY_FIELDS}
+        dropped += [f"extra_body.{field}" for field in nested]
+    if dropped:
+        logger.bind(fields=dropped).warning("Dropped credential fields from an LLM request body")
+    return payload
+
+
 def _targets_client_endpoint(client: VLLMClient, *_args, **kwargs) -> bool:
     """Breaker predicate: is this call routed to a client-supplied endpoint?
 
@@ -400,7 +428,7 @@ class VLLMClient(LLM):
             chat_template_kwargs = dict(payload_kwargs.get("chat_template_kwargs") or {})
             chat_template_kwargs.setdefault("enable_thinking", enable_thinking)
             payload_kwargs["chat_template_kwargs"] = chat_template_kwargs
-        payload_kwargs = _strip_falsy_logprobs(payload_kwargs)
+        payload_kwargs = _strip_credential_fields(_strip_falsy_logprobs(payload_kwargs))
         return payload_kwargs
 
     @with_inference_metrics("completion", capture_usage=True)
@@ -410,7 +438,7 @@ class VLLMClient(LLM):
         base_url, model, headers, overridden = self._resolve_overrides(kwargs)
         kwargs.pop("metadata", None)
         payload = {**({} if overridden else self._defaults), **kwargs, "model": model, "prompt": prompt}
-        payload = _strip_falsy_logprobs(payload)
+        payload = _strip_credential_fields(_strip_falsy_logprobs(payload))
         log_llm_call(caller="VLLMClient.generate", model=model, endpoint=base_url, prompt=prompt)
         try:
             resp = await self._client.post(f"{base_url}/completions", json=payload, headers=headers)
@@ -484,7 +512,7 @@ class VLLMClient(LLM):
                         f"LLM streaming error ({resp.status_code}): {resp.text[:500]}",
                         status_code=resp.status_code,
                     )
-                    outcome = outcome_for(error)
+                    outcome = outcome_for(error, operation="chat")
                     raise error
                 async for line in resp.aiter_lines():
                     if _record_stream_usage(line) and not forward_usage:
