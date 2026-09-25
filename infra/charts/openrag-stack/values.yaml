@@ -192,12 +192,11 @@ milvus:
     replicas: 3
     # MinIO no longer publishes images (removed from Docker Hub, then quay.io);
     # linagoraai/minio is an unmodified mirror of the same upstream release,
-    # matching the compose stacks. The tag is pinned here, not left to the
-    # Milvus chart's default, so a chart bump can't select a tag the mirror
-    # doesn't have.
+    # matching the compose stacks. The digest keeps deployments on the
+    # verified image even if the mirror's tag changes.
     image:
       repository: linagoraai/minio
-      tag: RELEASE.2024-12-18T13-15-44Z
+      tag: RELEASE.2024-12-18T13-15-44Z@sha256:34c8e2f52a5984492555427fee07254c80036bdb7079bb91679232abd7a4fa20
     persistence:
       enabled: true
       size: 20Gi

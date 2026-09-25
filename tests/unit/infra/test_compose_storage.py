@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import yaml
@@ -144,3 +145,21 @@ def test_helm_storage_is_pvc_based_without_host_paths() -> None:
     assert values["postgresql"]["primary"]["persistence"]["enabled"] is True
     assert values["milvus"]["minio"]["persistence"]["enabled"] is True
     assert values["milvus"]["etcd"]["persistence"]["enabled"] is True
+
+
+def test_minio_image_is_digest_pinned_in_every_stack() -> None:
+    values = _load_yaml(CHART_DIR / "values.yaml")
+    helm_image = values["milvus"]["minio"]["image"]
+    expected = f"{helm_image['repository']}:{helm_image['tag']}"
+
+    assert re.fullmatch(r".+@sha256:[0-9a-f]{64}", expected), expected
+
+    compose_files = (
+        COMPOSE_DIR / "milvus" / "milvus.yaml",
+        COMPOSE_DIR / "milvus" / "milvus.named-volumes.yaml",
+        ROOT / "tests" / "integration" / "api" / "api_run" / "docker-compose.yaml",
+        ROOT / "tests" / "integration" / "repos" / "docker-compose.yaml",
+        ROOT / "tests" / "load" / "workspace" / "docker-compose.yml",
+    )
+    for path in compose_files:
+        assert _load_yaml(path)["services"]["minio"]["image"] == expected, path

@@ -18,7 +18,7 @@ services:
   minio:
     # MinIO no longer publishes images (removed from Docker Hub, then quay.io);
     # linagoraai/minio is an unmodified mirror of the same upstream release.
-    image: linagoraai/minio:RELEASE.2024-12-18T13-15-44Z
+    image: linagoraai/minio:RELEASE.2024-12-18T13-15-44Z@sha256:34c8e2f52a5984492555427fee07254c80036bdb7079bb91679232abd7a4fa20
     environment:
       MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:?Set MINIO_ACCESS_KEY in your .env}
       MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:?Set MINIO_SECRET_KEY in your .env}

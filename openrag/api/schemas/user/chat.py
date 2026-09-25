@@ -56,9 +56,8 @@ class OpenAIChatCompletionRequest(BaseModel):
         description=(
             "Extra custom parameters. 'require_retrieval' (default false; enabled only by JSON true) "
             "forces retrieval even for a casual or normalized-empty partition-backed chat message. "
-            "Other partition-backed chat messages retrieve by default. Common casual messages are recognized "
-            "directly; the contextualizer may conservatively recognize additional messages whose complete intent "
-            "is only a greeting, gratitude, farewell, or a capability question. Ambiguous, mixed, and factual "
+            "Other partition-backed chat messages retrieve by default. Only allowlisted casual messages skip "
+            "retrieval. Ambiguous, mixed, and factual "
             "messages retrieve, and an empty generated query falls back to the latest user message. Casual messages "
             "that are not forced use a direct response. Search scope and "
             "filters remain in effect; matching sources are not guaranteed. Has no effect in direct LLM mode. "
