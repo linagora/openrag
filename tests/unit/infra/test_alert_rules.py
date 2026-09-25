@@ -296,6 +296,25 @@ def _render(*overrides: str) -> dict[str, dict]:
     return {rule["alert"]: rule for group in doc["groups"] for rule in group["rules"]}
 
 
+def test_the_chart_links_the_runbooks_of_the_release_it_deploys() -> None:
+    """``main`` moves on after every release, so an alert from an older release
+    would open a page written for rules it does not run. The chart pins the link
+    to its appVersion's tag; the Compose copy keeps ``main`` (its file is checked
+    by the other tests here, through ``RUNBOOK_BASE``)."""
+    version = yaml.safe_load((ROOT / "infra/charts/openrag-stack/Chart.yaml").read_text(encoding="utf-8"))["appVersion"]
+    pinned = f"https://github.com/linagora/openrag/blob/v{version}/docs/deployment/runbooks/"
+    for name, rule in _render().items():
+        url = rule["annotations"]["runbook_url"]
+        assert url == f"{pinned}{name}.md", f"{name}: {url}"
+
+
+def test_a_runbook_base_override_still_wins() -> None:
+    rules = _render("monitoring.prometheusRule.runbookBaseUrl=https://mirror.example/runbooks")
+    assert {r["annotations"]["runbook_url"] for r in rules.values()} == {
+        f"https://mirror.example/runbooks/{name}.md" for name in rules
+    }
+
+
 def test_a_zero_threshold_is_honoured_not_replaced_by_the_default() -> None:
     """``default`` treats 0 as empty, so ``backlogDepth: 0`` used to render as 50."""
     rules = _render(
