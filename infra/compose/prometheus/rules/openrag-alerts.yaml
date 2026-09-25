@@ -33,8 +33,9 @@
 # KNOWN LIMITATION — topologies that scrape only half the series. Every
 # series lives either on the API's /metrics or on Ray's metrics agent, and a
 # deployment that does not scrape one of them leaves the alerts reading it
-# silently inert: Helm with the default embedded Ray scrapes no Ray-side series
-# (IngestStalled, IngestFailureRate cannot fire); Helm under Ray Serve scrapes
+# silently inert: Helm without the Ray PodMonitor (ray.metrics.podMonitor or
+# monitoring.bundled) scrapes no Ray-side series (IngestStalled,
+# IngestFailureRate cannot fire); Helm under Ray Serve scrapes
 # no API /metrics (BacklogGrowing, IngestStalled, CatalogDriftDetected cannot
 # fire). docs/deployment/runbooks/README.md has the table per topology.
 
@@ -58,8 +59,9 @@ groups:
         # has completed or started a parse since the workers last started (a
         # pool seeds the gauge on its first use) — a fresh install, and equally
         # a pool wedged straight after a worker restart.
-        # No absent() branch: with Helm's embedded Ray the gauge is never
-        # scraped at all, and that would page on every long batch.
+        # No absent() branch: wherever Ray's agent is not scraped (Helm without
+        # the Ray PodMonitor) the gauge is never there, and that would page on
+        # every long batch.
         # OpenRagBacklogGrowing covers a queue that rises from zero.
         #
         # The queue must have been non-empty for the whole idle window, not just

@@ -90,7 +90,7 @@ a pool seeds the gauge on its first use. That covers a brand-new instance wedged
 that wedges right after a worker restart or a redeploy: the old timestamps disappear
 and nothing replaces them.
 
-There is deliberately no `absent()` branch to close it: with the chart's default
-embedded Ray the gauge is never scraped at all, and such a branch would page on every
-long batch. `OpenRagBacklogGrowing` covers a queue that rises from zero; after a
+There is deliberately no `absent()` branch to close it: wherever Ray's agent is not
+scraped (Helm without the Ray `PodMonitor`) the gauge is never there, and such a branch
+would page on every long batch. `OpenRagBacklogGrowing` covers a queue that rises from zero; after a
 restart with work queued, check the Ray dashboard rather than waiting for this alert.
