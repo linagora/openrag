@@ -483,10 +483,18 @@ def test_target_down_excludes_only_the_datastores_without_the_bundled_stack() ->
         ("ray", True),
         ("openrag-openrag", True),
         ("rag/openrag-raycluster", True),
+        # The datastore exclusion reads the job's own name, not its namespace:
+        # a Ray PodMonitor in `rag-milvus-poc` is still OpenRAG's.
+        ("rag-milvus-poc/openrag-raycluster", True),
+        ("team-postgresql/openrag-raycluster", True),
         # #979's datastore exporters carry the release name but are not OpenRAG.
         ("openrag-postgresql-metrics", False),
         ("openrag-milvus", False),
+        ("openrag-milvus-datanode", False),
+        ("openrag-milvus-mixcoord", False),
         ("openrag-milvus-querynode", False),
+        ("openrag-milvus-streamingnode", False),
+        ("rag/openrag-milvus", False),
         ("node-exporter", False),
     ],
 )

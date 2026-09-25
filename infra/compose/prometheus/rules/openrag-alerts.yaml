@@ -311,7 +311,11 @@ groups:
         # `<release>-milvus*`) match `.*openrag.*` by release name but are not
         # OpenRAG's: their being down makes no OpenRAG alert inert, which is what
         # this alert's description tells the reader. They are always left out.
-        expr: up{job=~".*openrag.*|ray", job!~".*-(postgresql|milvus)(-.*)?"} == 0
+        # The pattern reads only the job's own name, after any `<namespace>/`:
+        # unanchored, it also dropped a Ray PodMonitor job whose *namespace*
+        # held `-milvus-` (`rag-milvus-poc/openrag-raycluster`), so a Ray target
+        # down there paged nobody.
+        expr: up{job=~".*openrag.*|ray", job!~"(.*/)?[^/]*-(postgresql|milvus)(-[^/]*)?"} == 0
         for: 5m
         labels:
           severity: critical

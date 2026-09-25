@@ -15,7 +15,7 @@
 > ```
 
 ```
-up{job=~".*openrag.*|ray", job!~".*-(postgresql|milvus)(-.*)?"} == 0
+up{job=~".*openrag.*|ray", job!~"(.*/)?[^/]*-(postgresql|milvus)(-[^/]*)?"} == 0
 ```
 
 With `monitoring.bundled`, the bundled stack's own jobs (`openrag-monitoring-*`,
@@ -29,7 +29,9 @@ worker-side inference) — the Compose `ray` job, or the chart's
 `<namespace>/<release>-raycluster` PodMonitor. The `job` label says which.
 
 The datastore exporters (`<release>-postgresql-metrics`, `<release>-milvus*`) are
-deliberately not matched: their being down does not blind any OpenRag alert.
+deliberately not matched: their being down does not blind any OpenRag alert. The
+exclusion reads the job's own name only, after any `<namespace>/` prefix, so a Ray
+PodMonitor in a namespace such as `rag-milvus-poc` still pages.
 
 **Every other OpenRag alert is inert while this is firing.** An absent series cannot
 breach a threshold, so a dashboard of green panels and a silent alert list mean nothing

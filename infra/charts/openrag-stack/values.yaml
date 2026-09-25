@@ -149,8 +149,9 @@ monitoring:
     for: {}
     # Regex OpenRagTargetDown matches the `job` label on, default
     # `.*openrag.*|ray` (the API, the chart's Ray PodMonitor, and Compose's
-    # `ray` job). The datastore exporters (`*-postgresql*`, `*-milvus*`) are
-    # always excluded, whatever this is set to: they are not OpenRAG's targets.
+    # `ray` job). The datastore exporters (a job whose own name, after any
+    # `<namespace>/`, is `*-postgresql*` or `*-milvus*`) are always excluded,
+    # whatever this is set to: they are not OpenRAG's targets.
     # The label is assigned by whoever configures the scrape — the Operator
     # derives it from the Service name, Compose sets job_name: "openrag" — so a
     # platform that relabels `job` breaks the match. Set this to whatever `job`
