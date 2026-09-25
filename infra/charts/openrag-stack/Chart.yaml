@@ -35,7 +35,7 @@ dependencies:
     condition: milvus.enabled
   - name: vllm-stack
     alias: vllm
-    version: ">=0.1.7 <1.0.0"
+    version: ">=0.1.12 <1.0.0"
     repository: "https://vllm-project.github.io/production-stack"
     condition: vllm.enabled
   # Standalone monitoring. Off by default so an install next to a platform's

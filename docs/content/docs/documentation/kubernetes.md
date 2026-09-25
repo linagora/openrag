@@ -148,6 +148,21 @@ counts without exposing partition or preset names.
 - If you later configure a hostname + TLS (via cert-manager), just update `ingress.host` and redeploy.
 
 - Ensure your GPU nodes have the correct NVIDIA drivers and `nvidia` `RuntimeClass` configured.
+  The bundled vLLM engines run CUDA 12.9 builds (`v0.30.0-cu129`, and `v0.11.2` for the VLM). The
+  plain `v0.30.0` tag is the CUDA 13 build and needs a driver >= 580: pin the `-cu129` tag unless
+  every GPU node runs one.
+
+- The bundled `llm` engine ships at `replicaCount: 0`, so `env.config.BASE_URL` and `MODEL` are
+  empty by default: OpenRAG starts without an LLM and you set one in the admin UI. To use the
+  bundled engine instead, scale it up and set `BASE_URL` to
+  `http://<release>-llm-engine-service/v1/` (the OpenAI-compatible base, ending in `/v1/`). The
+  same applies to any engine you scale to 0: empty its `*_BASE_URL` or point it at the provider
+  you use instead. Otherwise the first boot records a URL with no pods behind it as the default
+  endpoint.
+
+  **Upgrading a release that already booted with that URL**: the endpoint is saved in the database,
+  and an empty `BASE_URL` does not remove it, even with `MODEL_ENDPOINT_SYNC_ON_BOOT=true`. Chat keeps
+  failing with `Connection error` until you repoint or remove that LLM endpoint in the admin UI.
 
 ## Monitoring
 
