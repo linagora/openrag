@@ -64,7 +64,7 @@ vllm:
     modelSpec:
       - name: "embedder"
         repository: "vllm/vllm-openai"
-        tag: "latest"
+        tag: "v0.30.0"
         modelURL: "Qwen/Qwen3-Embedding-0.6B"
         replicaCount: 1
         requestCPU: 4
@@ -77,7 +77,11 @@ vllm:
           secretKey: HF_TOKEN
         vllmConfig:
           gpuMemoryUtilization: 0.3
-          extraArgs: ["--trust-remote-code", "--task", "embed"]
+          # `--runner pooling --convert embed` replaces `--task embed`, which
+          # vLLM no longer accepts ("unrecognized arguments"). Add any other
+          # `vllm serve` flags to this list (compose: EMBEDDER_EXTRA_ARGS); an
+          # override values file replaces the whole list, so repeat these three.
+          extraArgs: ["--trust-remote-code", "--runner", "pooling", "--convert", "embed"]
         nodeSelectorTerms:
           - matchExpressions:
               - key: gpu-role

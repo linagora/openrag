@@ -252,6 +252,7 @@ Our embedder is **OpenAI-compatible** and runs on a **VLLM** instance configured
 | `EMBEDDER_MODEL_NAME` | `str` | jinaai/jina-embeddings-v3 | HuggingFace Embedding model served by VLLM .i.e `Qwen/Qwen3-Embedding-0.6B` or `jinaai/jina-embeddings-v3`|
 | `EMBEDDER_BASE_URL` | `str` | http://vllm:8000/v1 | Base URL of the embedder (OpenAI-style).|
 | `EMBEDDER_API_KEY`  | `str` | EMPTY | API key for authenticating embedder calls.|
+| `EMBEDDER_EXTRA_ARGS` | `str` | (empty) | Extra `vllm serve` flags appended to the **bundled** vLLM embedder's command (`vllm-gpu` / `vllm-cpu` in `infra/compose/docker-compose.yaml`). They come after the built-in flags, so repeating one overrides it, e.g. `--gpu_memory_utilization 0.1`. |
 | `MAX_MODEL_LEN` | `int` | 2047 | Maximum context length (in tokens) supported by the embedding model. Chunks exceeding this limit are truncated (`truncate_prompt_tokens` = this value − 1). Keep it below the model's real context boundary. |
 | `EMBEDDER_TIMEOUT` | `float` | 120.0 | Per-request HTTP timeout (in seconds) for embedding calls. Raise it for slow remote endpoints. |
 | `EMBEDDER_BATCH_SIZE` | `int` | 32 | Number of chunks sent per embedding request; large documents are split into batches of this size. |
@@ -466,6 +467,7 @@ The reranker enhances search quality by re-scoring and reordering retrieved docu
 | `RERANKER_API_KEY` | `str` | `EMPTY` | API key for the reranker service, sent as a `Bearer` token when set. Whether a key is required depends on your endpoint |
 | `RERANKER_TIMEOUT` | `float` | 60.0 | HTTP timeout in seconds for reranker requests |
 | `RERANKER_SEMAPHORE` | `int` | 5 | Maximum number of concurrent reranking requests. Adjust based on your server capacity |
+| `RERANKER_EXTRA_ARGS` | `str` | (empty) | Extra `vllm serve` flags appended to the **bundled** vLLM reranker's command (`extern/reranker/openai.yaml`, `RERANKER_PROVIDER=openai`). `Alibaba-NLP/gte-multilingual-reranker-base` needs `--hf-overrides '{"architectures": ["GteNewForSequenceClassification"]}'`: vLLM doesn't recognise its `NewForSequenceClassification` architecture on its own. |
 | `RERANKER_PORT` | `int` | `7997` (infinity) / `8000` (openai) | Host port the **bundled** reranker service is published on. Only read by the compose includes (`extern/reranker/*.yaml`), and only once you uncomment their `ports:` mapping — by default the service is reachable over the Docker network only, so publishing it is just for host-side debugging or direct calls. |
 
 #### Reranker Providers
