@@ -12,11 +12,16 @@ from core.utils.logging import get_logger
 logger = get_logger()
 
 _EMAIL_RE = re.compile(r"(?<![\w.+-])[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}(?![\w.-])")
+# Models copy the prompt's markdown literally (`[Sources: none]` in backticks,
+# **Sources:** in bold), so emphasis/code marks around the tag are part of it.
 _SOURCES_NONE_RE = re.compile(
-    r"\n?[ \t]*\[?Sources?\]?\s*:\s*\[?\s*none\s*\]?[.\s]*?(?=\n|$)",
+    r"\n?[ \t]*[*_`]*\[?Sources?\]?[*_]*\s*:\s*[*_]*\[?\s*none\s*\]?[.\s*_`]*?(?=\n|$)",
     re.IGNORECASE,
 )
-_SOURCES_NUMS_RE = re.compile(r"\n?[ \t]*\[?Sources?\]?\s*:\s*\[?([\d,\s]+)\]?[.\s]*?(?=\n|$)", re.IGNORECASE)
+_SOURCES_NUMS_RE = re.compile(
+    r"\n?[ \t]*[*_`]*\[?Sources?\]?[*_]*\s*:\s*[*_]*\[?([\d,\s]+)\]?[.\s*_`]*?(?=\n|$)",
+    re.IGNORECASE,
+)
 _INLINE_SOURCE_NUMS_RE = re.compile(
     r"[ \t]*\[\s*Sources?\s+(\d+(?:\s*,\s*\d+)*)\s*\]",
     re.IGNORECASE,
