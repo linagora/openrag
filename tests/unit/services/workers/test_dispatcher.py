@@ -108,6 +108,7 @@ def _task_state_manager() -> MagicMock:
     tsm.get_matching_active_task_refs_v2 = _remote_mock({})
     tsm.get_matching_active_task_refs = _remote_mock({})
     tsm.get_content_claim_task_ids = _remote_mock(set())
+    tsm.get_active_indexing_task_for_file = _remote_mock(None)
     tsm.get_all_info = None
     tsm.set_queued_details = _remote_mock(True)
     tsm.set_queued_details_v2 = _remote_mock(_queue_admitted())
@@ -857,6 +858,114 @@ async def test_dispatch_indexing_refuses_a_duplicate_submission_for_a_file_being
         content_sha256="abc123",
         claim_token=repo.claim_content_sha256.await_args.kwargs["claim_token"],
     )
+
+
+@pytest.mark.asyncio
+async def test_dispatch_indexing_names_the_running_task_when_the_claim_refuses_a_same_bytes_retry() -> None:
+    """A retry sends the same bytes under the same file_id, so the first task's
+    own content claim turns it away before the admission fence runs."""
+    from core.utils.exceptions import ConflictError
+    from services.workers.dispatcher import WorkerDispatcher
+
+    pool = _pool_with_ref(object())
+    repo = _document_repo()
+    repo.claim_content_sha256.return_value = "file-1"
+    tsm = _task_state_manager()
+    tsm.get_active_indexing_task_for_file = _remote_mock("task-running")
+    dispatcher = WorkerDispatcher(
+        pool=pool,
+        task_state_manager=tsm,
+        completion_tracker=_completion_tracker(),
+        vector_store=_vector_store(),
+        document_repo=repo,
+        workspace_repo=_workspace_repo(),
+        collection="default",
+    )
+
+    with pytest.raises(ConflictError) as caught:
+        await dispatcher.dispatch_indexing(
+            path="/data/report.txt",
+            metadata={"file_id": "file-1", "filename": "report.txt", "content_sha256": "abc123"},
+            partition="tenant-a",
+            user={"id": 42},
+            workspace_ids=None,
+            replace=False,
+        )
+
+    assert caught.value.code == "DOCUMENT_INDEXING_IN_PROGRESS"
+    assert caught.value.extra == {"existing_task_id": "task-running"}
+    tsm.get_active_indexing_task_for_file.remote.assert_awaited_once_with(partition="tenant-a", file_id="file-1")
+    tsm.set_queued_details_v2.remote.assert_not_called()
+    pool.submit.remote.assert_not_called()
+    # The claim was never taken, so there is nothing to release.
+    repo.release_content_sha256_claim.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("legacy_task_state_manager", [False, True])
+async def test_dispatch_indexing_keeps_the_dedup_error_when_no_task_is_indexing_the_claimed_file(
+    legacy_task_state_manager: bool,
+) -> None:
+    from core.utils.exceptions import ConflictError
+    from services.workers.dispatcher import WorkerDispatcher
+
+    repo = _document_repo()
+    repo.claim_content_sha256.return_value = "file-1"
+    tsm = _task_state_manager()
+    if legacy_task_state_manager:
+        tsm._ray_actor_method_names = {"set_queued_details_v2", "get_content_claim_task_ids"}
+        tsm.get_active_indexing_task_for_file = _remote_mock("task-running")
+    dispatcher = WorkerDispatcher(
+        pool=_pool_with_ref(object()),
+        task_state_manager=tsm,
+        completion_tracker=_completion_tracker(),
+        vector_store=_vector_store(),
+        document_repo=repo,
+        workspace_repo=_workspace_repo(),
+        collection="default",
+    )
+
+    with pytest.raises(ConflictError) as caught:
+        await dispatcher.dispatch_indexing(
+            path="/data/report.txt",
+            metadata={"file_id": "file-1", "content_sha256": "abc123"},
+            partition="tenant-a",
+            user={"id": 42},
+            workspace_ids=None,
+            replace=False,
+        )
+
+    assert caught.value.code == "DOCUMENT_CONTENT_EXISTS"
+    assert caught.value.extra["existing_file_id"] == "file-1"
+    if legacy_task_state_manager:
+        tsm.get_active_indexing_task_for_file.remote.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_indexing_reports_a_cancelled_refusal_as_such() -> None:
+    from services.workers.dispatcher import WorkerDispatcher
+
+    tsm = _task_state_manager()
+    tsm.set_queued_details_v2.remote = AsyncMock(return_value=_queue_refused("cancelled"))
+    dispatcher = WorkerDispatcher(
+        pool=_pool_with_ref(object()),
+        task_state_manager=tsm,
+        completion_tracker=_completion_tracker(),
+        vector_store=_vector_store(),
+        document_repo=_document_repo(),
+        workspace_repo=_workspace_repo(),
+        collection="default",
+    )
+
+    with pytest.raises(RuntimeError, match="cancelled before it queued"):
+        await dispatcher.dispatch_indexing(
+            path="/data/report.txt",
+            metadata={"file_id": "file-1", "filename": "report.txt"},
+            partition="tenant-a",
+            user={"id": 42},
+            workspace_ids=None,
+            replace=False,
+        )
 
 
 @pytest.mark.asyncio

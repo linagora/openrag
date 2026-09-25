@@ -30,7 +30,7 @@ from services.workers.failure_reporting import submit_task_failure
 from services.workers.ray_utils import call_ray_actor_with_timeout, retry_idempotent_ray_actor_method
 from services.workers.stages.store import INDEXING_TASK_ID_METADATA_KEY
 from services.workers.task_cancellation import cancel_active_indexing_tasks
-from services.workers.task_state import QUEUE_REFUSED_FILE_INDEXING
+from services.workers.task_state import QUEUE_REFUSED_CANCELLED, QUEUE_REFUSED_FILE_INDEXING
 
 logger = get_logger()
 
@@ -191,6 +191,21 @@ class WorkerDispatcher(IndexingDispatcher):
         # conditional delete fails instead of reclaiming a live reservation.
         return bool(await release_lease(lease))
 
+    async def _active_indexing_task_for_file(self, *, partition: str, file_id: str) -> str | None:
+        """Return the task indexing ``file_id`` right now, or ``None``.
+
+        ``None`` also covers an older TaskStateManager without the lookup: the
+        caller then keeps the label it already had.
+        """
+        remote = _remote_actor_method(self._tsm, "get_active_indexing_task_for_file")
+        if remote is None:
+            return None
+        task_id = await self._call_method(
+            lambda: remote(partition=partition, file_id=file_id),
+            task_description=f"get_active_indexing_task_for_file({partition}, {file_id})",
+        )
+        return task_id if isinstance(task_id, str) and task_id else None
+
     async def _begin_worker_submission(self, task_id: str) -> bool:
         remote = _remote_actor_method(self._tsm, "begin_worker_submission")
         if remote is None:
@@ -291,6 +306,15 @@ class WorkerDispatcher(IndexingDispatcher):
             ):
                 conflicting_file_id = await self._document_repo.claim_content_sha256(**claim_kwargs)
             if conflicting_file_id is not None:
+                # A retry of an upload still being indexed sends the same bytes
+                # under the same file_id, so it is the first task's own claim
+                # that turns it away here, before the admission fence below
+                # ever sees it. Name that task rather than pointing the client
+                # at a file the catalog does not show yet.
+                if conflicting_file_id == file_id:
+                    busy_task_id = await self._active_indexing_task_for_file(partition=partition, file_id=file_id)
+                    if busy_task_id is not None:
+                        raise _indexing_in_progress(file_id, partition, busy_task_id)
                 raise ConflictError(
                     f"This document already exists in partition '{partition}'.",
                     code="DOCUMENT_CONTENT_EXISTS",
@@ -333,12 +357,11 @@ class WorkerDispatcher(IndexingDispatcher):
         if not admission["accepted"]:
             await release_claim()
             busy_task_id = admission.get("existing_task_id")
-            if admission.get("reason") == QUEUE_REFUSED_FILE_INDEXING and busy_task_id:
-                raise ConflictError(
-                    f"File '{file_id}' is already being indexed in partition '{partition}'.",
-                    code="DOCUMENT_INDEXING_IN_PROGRESS",
-                    existing_task_id=busy_task_id,
-                )
+            reason = admission.get("reason")
+            if reason == QUEUE_REFUSED_FILE_INDEXING and busy_task_id:
+                raise _indexing_in_progress(file_id, partition, busy_task_id)
+            if reason == QUEUE_REFUSED_CANCELLED:
+                raise RuntimeError(f"Task {task_id} was cancelled before it queued")
             raise RuntimeError(
                 f"Task {task_id} was rejected because file {file_id!r} in partition {partition!r} is being deleted"
             )
@@ -968,6 +991,14 @@ def _exception_chain(exc: BaseException):
 def _queue_admitted(accepted: bool) -> dict[str, Any]:
     """Wrap a boolean queue registration in the v2 result shape."""
     return {"accepted": accepted, "reason": None, "existing_task_id": None}
+
+
+def _indexing_in_progress(file_id: str, partition: str, task_id: str) -> ConflictError:
+    return ConflictError(
+        f"File '{file_id}' is already being indexed in partition '{partition}'.",
+        code="DOCUMENT_INDEXING_IN_PROGRESS",
+        existing_task_id=task_id,
+    )
 
 
 def _remote_actor_method(actor: Any, name: str) -> Any | None:

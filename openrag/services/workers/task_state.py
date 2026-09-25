@@ -928,6 +928,20 @@ class TaskStateManager:
             return self._matching_active_task_refs_locked(partition=partition, file_id=file_id)
 
     @ray.method(concurrency_group="get")
+    async def get_active_indexing_task_for_file(self, *, partition: str, file_id: str) -> str | None:
+        """Read-only view of the admission fence, for labelling a refusal.
+
+        The dispatcher asks this when the content claim already turned a
+        submission away holding the same ``file_id``: that claim belongs to a
+        task indexing this very file, and the caller deserves its id rather
+        than a deduplication error pointing at itself. It is not an admission
+        check — ``set_queued_details_v2`` stays the only gate, atomic with the
+        QUEUED registration.
+        """
+        with self.lock:
+            return self._active_indexing_task_for_file_locked(partition=partition, file_id=file_id, excluding="")
+
+    @ray.method(concurrency_group="get")
     async def get_content_claim_task_ids(self, *, partition: str) -> set[str]:
         """Return active tasks and cancellations whose workers have not settled."""
         with self.lock:

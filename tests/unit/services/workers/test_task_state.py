@@ -1634,3 +1634,23 @@ async def test_admission_fence_still_reports_the_delete_fence_and_cancellation()
         reject_if_file_active=True,
     )
     assert cancelled == {"accepted": False, "reason": "cancelled", "existing_task_id": None}
+
+
+@pytest.mark.asyncio
+async def test_get_active_indexing_task_for_file_reads_the_fence_without_queueing() -> None:
+    manager = _task_state_manager()
+    await manager.set_queued_details(
+        "task-1",
+        file_id="file-1",
+        partition="tenant-a",
+        metadata={},
+        user_id=42,
+    )
+
+    assert await manager.get_active_indexing_task_for_file(partition="tenant-a", file_id="file-1") == "task-1"
+    assert await manager.get_active_indexing_task_for_file(partition="tenant-a", file_id="file-2") is None
+    assert await manager.get_active_indexing_task_for_file(partition="tenant-b", file_id="file-1") is None
+    assert await manager.get_all_states() == {"task-1": "QUEUED"}
+
+    await manager.set_state("task-1", "COMPLETED")
+    assert await manager.get_active_indexing_task_for_file(partition="tenant-a", file_id="file-1") is None
