@@ -11,19 +11,38 @@ Bad overrides are refused rather than shipped. A threshold is substituted into a
 PromQL comparison, so a value that is not a number is not an error: `>
 twelve_minutes` parses as a comparison against a metric that does not exist,
 `promtool check rules` reports SUCCESS, and the alert never fires again with
-nothing to say so. Prometheus duration literals are allowed because `12m` and
-`720` are genuinely equivalent there. A key that matches nothing is refused too:
-it renders the default, and the operator believes the override took effect.
+nothing to say so. A key that matches nothing is refused too: it renders the
+default, and the operator believes the override took effect.
+
+Each key is checked against the form its expression can use, not one pattern
+for all. A ratio is a plain number from 0 to 1: `> 5m` is valid PromQL (300),
+and a ratio above 1 can never be reached, so either is an alert that never
+fires. A floor or a depth is a plain non-negative number. The idle threshold is
+a whole number of seconds or a Prometheus duration, and never zero: it is also
+the range of a `min_over_time`, and `[0s]` is a parse error that stops the whole
+rule group loading. Durations must list their units largest first (`1h30m`) —
+Prometheus refuses `30m1h`, again for the whole group.
 */}}
 {{- $cfg := .Values.monitoring.prometheusRule }}
+{{- $number := `^[0-9]+(\.[0-9]+)?$` }}
+{{- $duration := `^([0-9]+y)?([0-9]+w)?([0-9]+d)?([0-9]+h)?([0-9]+m)?([0-9]+s)?([0-9]+ms)?$` }}
 {{- $t := dict "ingestIdleSeconds" 720 "ingestFailureRatio" 0.25 "ingestVolumeFloor" 5 "backlogDepth" 50 "inferenceErrorRatio" 0.5 "inferenceVolumeFloor" 5 }}
 {{- range $name, $value := ($cfg.thresholds | default dict) }}
 {{- if not (hasKey $t $name) }}
 {{- fail (printf "monitoring.prometheusRule.thresholds.%s is not a threshold in this chart, so setting it would do nothing. Known thresholds: %s" $name (join ", " (keys $t | sortAlpha))) }}
 {{- end }}
 {{- if not (or (kindIs "invalid" $value) (eq (toString $value) "")) }}
-{{- if not (regexMatch `^([0-9]+(\.[0-9]+)?|([0-9]+(ms|[smhdwy]))+)$` (toString $value)) }}
-{{- fail (printf "monitoring.prometheusRule.thresholds.%s must be a number (e.g. 720, 0.25) or a Prometheus duration (e.g. 12m), got %q. Anything else becomes a metric name in the comparison, and the alert silently never fires." $name (toString $value)) }}
+{{- $v := toString $value }}
+{{- if has $name (list "ingestFailureRatio" "inferenceErrorRatio") }}
+{{- if not (and (regexMatch $number $v) (le (float64 $v) 1.0)) }}
+{{- fail (printf "monitoring.prometheusRule.thresholds.%s must be a plain number from 0 to 1 (e.g. 0.25), got %q. A duration or a value above 1 is a ratio the expression can never reach, and the alert silently never fires." $name $v) }}
+{{- end }}
+{{- else if eq $name "ingestIdleSeconds" }}
+{{- if not (and (regexMatch `[1-9]` $v) (or (regexMatch `^[0-9]+$` $v) (regexMatch $duration $v))) }}
+{{- fail (printf "monitoring.prometheusRule.thresholds.%s must be a whole number of seconds greater than 0 (e.g. 720) or a Prometheus duration greater than 0 with its units largest first (e.g. 12m, 1h30m), got %q. It is also the rule's range selector, and a zero or malformed range stops the whole rule group loading." $name $v) }}
+{{- end }}
+{{- else if not (regexMatch $number $v) }}
+{{- fail (printf "monitoring.prometheusRule.thresholds.%s must be a plain non-negative number (e.g. 50), got %q. It counts documents, calls or tasks, not time." $name $v) }}
 {{- end }}
 {{- $_ := set $t $name $value }}
 {{- end }}
@@ -34,8 +53,8 @@ it renders the default, and the operator believes the override took effect.
 {{- fail (printf "monitoring.prometheusRule.for.%s is not an alert in this chart, so setting it would do nothing. Known alerts: %s" $name (join ", " (keys $for | sortAlpha))) }}
 {{- end }}
 {{- if not (or (kindIs "invalid" $value) (eq (toString $value) "")) }}
-{{- if not (regexMatch `^([0-9]+(ms|[smhdwy]))+$` (toString $value)) }}
-{{- fail (printf "monitoring.prometheusRule.for.%s must be a Prometheus duration such as \"5m\", got %q." $name (toString $value)) }}
+{{- if not (and (regexMatch `[1-9]` (toString $value)) (regexMatch $duration (toString $value))) }}
+{{- fail (printf "monitoring.prometheusRule.for.%s must be a Prometheus duration greater than 0 with its units largest first, such as \"5m\" or \"1h30m\", got %q. Zero fires on a single bad evaluation; a malformed duration stops the whole rule group loading." $name (toString $value)) }}
 {{- end }}
 {{- $_ := set $for $name (toString $value) }}
 {{- end }}

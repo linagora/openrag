@@ -337,7 +337,7 @@ def test_annotations_follow_overridden_values() -> None:
 @pytest.mark.parametrize(
     ("override", "message"),
     [
-        ("monitoring.prometheusRule.thresholds.ingestIdleSeconds=twelve_minutes", "must be a number"),
+        ("monitoring.prometheusRule.thresholds.ingestIdleSeconds=twelve_minutes", "must be a whole number"),
         ("monitoring.prometheusRule.for.OpenRagIngestStalled=soon", "must be a Prometheus duration"),
         ("monitoring.prometheusRule.for.NoSuchAlert=5m", "is not an alert"),
     ],
@@ -351,6 +351,66 @@ def test_a_bad_override_is_refused_not_rendered(override: str, message: str) -> 
     """
     with pytest.raises(SystemExit, match=message):
         _render(override)
+
+
+_THRESHOLD = "monitoring.prometheusRule.thresholds."
+_FOR = "monitoring.prometheusRule.for."
+
+
+@pytest.mark.parametrize(
+    ("override", "message"),
+    [
+        # A ratio compared against a duration (`> 5m` is 300) or above 1 can
+        # never be reached.
+        (f"{_THRESHOLD}ingestFailureRatio=5m", r"thresholds\.ingestFailureRatio must be a plain number from 0 to 1"),
+        (f"{_THRESHOLD}ingestFailureRatio=1.5", r"thresholds\.ingestFailureRatio must be a plain number from 0 to 1"),
+        (f"{_THRESHOLD}inferenceErrorRatio=2", r"thresholds\.inferenceErrorRatio must be a plain number from 0 to 1"),
+        (f"{_THRESHOLD}inferenceErrorRatio=10s", r"thresholds\.inferenceErrorRatio must be a plain number from 0 to 1"),
+        # Floors and depth count things, not time.
+        (f"{_THRESHOLD}ingestVolumeFloor=5m", r"thresholds\.ingestVolumeFloor must be a plain non-negative number"),
+        (f"{_THRESHOLD}inferenceVolumeFloor=1h", r"thresholds\.inferenceVolumeFloor must be a plain non-negative"),
+        (f"{_THRESHOLD}backlogDepth=50s", r"thresholds\.backlogDepth must be a plain non-negative number"),
+        # The idle threshold is also a range selector: `[0s]` does not parse,
+        # and the rule group containing it does not load at all.
+        (f"{_THRESHOLD}ingestIdleSeconds=0", r"thresholds\.ingestIdleSeconds must be a whole number of seconds"),
+        (f"{_THRESHOLD}ingestIdleSeconds=0s", r"thresholds\.ingestIdleSeconds must be a whole number of seconds"),
+        (f"{_THRESHOLD}ingestIdleSeconds=0m", r"thresholds\.ingestIdleSeconds must be a whole number of seconds"),
+        (f"{_THRESHOLD}ingestIdleSeconds=0.5", r"thresholds\.ingestIdleSeconds must be a whole number of seconds"),
+        (f"{_THRESHOLD}ingestIdleSeconds=30m1h", r"thresholds\.ingestIdleSeconds must be a whole number of seconds"),
+        # `for: 0s` fires on one bad evaluation; `30m1h` does not parse.
+        (f"{_FOR}OpenRagIngestStalled=0s", r"for\.OpenRagIngestStalled must be a Prometheus duration greater than 0"),
+        (f"{_FOR}OpenRagTargetDown=0m", r"for\.OpenRagTargetDown must be a Prometheus duration greater than 0"),
+        (f"{_FOR}OpenRagBacklogGrowing=30m1h", r"for\.OpenRagBacklogGrowing must be a Prometheus duration greater"),
+    ],
+)
+def test_each_threshold_accepts_only_the_form_its_expression_can_use(override: str, message: str) -> None:
+    """One pattern for every key accepted `ingestFailureRatio=5m` — valid
+    PromQL, a ratio compared against 300, an alert that can never fire — and
+    `ingestIdleSeconds=0`, which renders `[0s]` and fails the whole group."""
+    with pytest.raises(SystemExit, match=message):
+        _render(override)
+
+
+@pytest.mark.parametrize(
+    ("override", "alert", "rendered"),
+    [
+        (f"{_THRESHOLD}ingestFailureRatio=0", "OpenRagIngestFailureRate", ") > 0\n"),
+        (f"{_THRESHOLD}ingestFailureRatio=1", "OpenRagIngestFailureRate", ") > 1\n"),
+        (f"{_THRESHOLD}inferenceErrorRatio=0.05", "OpenRagInferenceProviderDown", ") > 0.05\n"),
+        (f"{_THRESHOLD}ingestVolumeFloor=12.5", "OpenRagIngestFailureRate", ">= 12.5"),
+        (f"{_THRESHOLD}backlogDepth=200", "OpenRagBacklogGrowing", "> 200\n"),
+        (f"{_THRESHOLD}ingestIdleSeconds=1800", "OpenRagIngestStalled", "[1800s]"),
+        (f"{_THRESHOLD}ingestIdleSeconds=20m", "OpenRagIngestStalled", "[20m]"),
+        (f"{_THRESHOLD}ingestIdleSeconds=1h30m", "OpenRagIngestStalled", "> 1h30m)"),
+    ],
+)
+def test_a_threshold_in_its_accepted_form_is_rendered(override: str, alert: str, rendered: str) -> None:
+    assert rendered in _render(override)[alert]["expr"]
+
+
+@pytest.mark.parametrize("duration", ["30s", "1h30m", "0m5s"])
+def test_a_positive_for_duration_is_rendered(duration: str) -> None:
+    assert _render(f"{_FOR}OpenRagTargetDown={duration}")["OpenRagTargetDown"]["for"] == duration
 
 
 def test_an_unknown_breaker_state_does_not_fire() -> None:
