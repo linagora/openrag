@@ -52,7 +52,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "Whether Prometheus can scrape the API's /metrics. While this is down every other panel goes quiet, which is not the same as healthy.",
+      "description": "Whether Prometheus can scrape the API's /metrics. While this is down the panels it feeds go quiet, which is not the same as healthy.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -125,10 +125,106 @@
           "expr": "min(up{job=~\"$job\"})",
           "legendFormat": "API",
           "refId": "A",
-          "range": true
+          "instant": true,
+          "range": false
         }
       ],
       "title": "API scrape",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "description": "Whether Prometheus can scrape Ray's metrics agent, which exports indexing and the inference calls the indexing workers make. While it is down the tiles it feeds go quiet, which is not the same as healthy: Since last parse reads No parse yet, and Failed documents reads Idle once its window has passed. Not scraped: no OpenRAG series from Ray reached Prometheus in the selected range. On Kubernetes, collecting them takes ray.enabled=true and ray.metrics.podMonitor.enabled=true.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "Down",
+                  "color": "red",
+                  "index": 0
+                },
+                "1": {
+                  "text": "Up",
+                  "color": "green",
+                  "index": 1
+                }
+              }
+            },
+            {
+              "type": "special",
+              "options": {
+                "match": "null",
+                "result": {
+                  "color": "transparent",
+                  "index": 2
+                }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          },
+          "unit": "none",
+          "noValue": "Not scraped"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 3,
+        "x": 3,
+        "y": 1
+      },
+      "id": 8,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "editorMode": "code",
+          "expr": "min(up{job=~\"$ray_job\"})",
+          "legendFormat": "Ray",
+          "refId": "A",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "title": "Ray scrape",
       "type": "stat"
     },
     {
@@ -142,7 +238,18 @@
           "color": {
             "mode": "thresholds"
           },
-          "mappings": [],
+          "mappings": [
+            {
+              "type": "special",
+              "options": {
+                "match": "null",
+                "result": {
+                  "color": "transparent",
+                  "index": 0
+                }
+              }
+            }
+          ],
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -164,7 +271,7 @@
       "gridPos": {
         "h": 4,
         "w": 3,
-        "x": 3,
+        "x": 6,
         "y": 1
       },
       "id": 3,
@@ -193,7 +300,8 @@
           "expr": "max(openrag_ingest_tasks{state=\"QUEUED\"})",
           "legendFormat": "Queued",
           "refId": "A",
-          "range": true
+          "instant": true,
+          "range": false
         }
       ],
       "title": "Queued tasks",
@@ -227,8 +335,8 @@
       },
       "gridPos": {
         "h": 4,
-        "w": 4,
-        "x": 6,
+        "w": 3,
+        "x": 9,
         "y": 1
       },
       "id": 4,
@@ -257,7 +365,8 @@
           "expr": "time() - max({__name__=~\"(ray_)?openrag_ingest_last_parse_completion_timestamp_seconds\"})",
           "legendFormat": "Since last parse",
           "refId": "A",
-          "range": true
+          "instant": true,
+          "range": false
         }
       ],
       "title": "Since last parse",
@@ -268,13 +377,34 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "Share of documents that failed among those that finished in the last 15 minutes. Cancelled uploads are left out: a user cancelling is not a failure.",
+      "description": "Share of documents that failed among those that finished in the last 5 minutes, the ratio OpenRagIngestFailureRate compares with 25%. Like the alert, it needs 5 documents finished in 15 minutes, and reads Low volume below that. Cancelled uploads are left out: a user cancelling is not a failure.",
       "fieldConfig": {
         "defaults": {
           "color": {
             "mode": "thresholds"
           },
-          "mappings": [],
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "-1": {
+                  "text": "Low volume",
+                  "color": "transparent",
+                  "index": 0
+                }
+              }
+            },
+            {
+              "type": "special",
+              "options": {
+                "match": "null",
+                "result": {
+                  "color": "transparent",
+                  "index": 1
+                }
+              }
+            }
+          ],
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -300,8 +430,8 @@
       },
       "gridPos": {
         "h": 4,
-        "w": 4,
-        "x": 10,
+        "w": 3,
+        "x": 12,
         "y": 1
       },
       "id": 5,
@@ -327,13 +457,14 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "(sum(increase({__name__=~\"(ray_)?openrag_ingest_documents_total\", status=\"failed\"}[15m])) or vector(0)) / (sum(increase({__name__=~\"(ray_)?openrag_ingest_documents_total\", status=~\"completed|failed\"}[15m])) > 0)",
+          "expr": "(sum(rate({__name__=~\"(ray_)?openrag_ingest_documents_total\", status=\"failed\"}[5m])) or vector(0)) / (sum(rate({__name__=~\"(ray_)?openrag_ingest_documents_total\", status=~\"completed|failed\"}[5m])) > 0) and on() sum(increase({__name__=~\"(ray_)?openrag_ingest_documents_total\", status=~\"completed|failed\"}[15m])) >= 5 or (sum(increase({__name__=~\"(ray_)?openrag_ingest_documents_total\", status=~\"completed|failed\"}[15m])) > 0 < 5) * 0 - 1",
           "legendFormat": "Failed",
           "refId": "A",
-          "range": true
+          "instant": true,
+          "range": false
         }
       ],
-      "title": "Failed documents \u00b7 15m",
+      "title": "Failed documents \u00b7 5m",
       "type": "stat"
     },
     {
@@ -341,13 +472,34 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "Error and timeout share of the worst inference endpoint over the last 10 minutes. Calls refused by an open circuit breaker are not counted here; see Open breakers.",
+      "description": "Error and timeout share of the worst inference endpoint over the last 10 minutes, the ratio OpenRagInferenceProviderDown compares with 50%. Like the alert, it leaves out endpoints with fewer than 5 calls in 10 minutes, and reads Low volume when none has that many. Calls refused by an open circuit breaker are not counted here; see Open breakers.",
       "fieldConfig": {
         "defaults": {
           "color": {
             "mode": "thresholds"
           },
-          "mappings": [],
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "-1": {
+                  "text": "Low volume",
+                  "color": "transparent",
+                  "index": 0
+                }
+              }
+            },
+            {
+              "type": "special",
+              "options": {
+                "match": "null",
+                "result": {
+                  "color": "transparent",
+                  "index": 1
+                }
+              }
+            }
+          ],
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -373,8 +525,8 @@
       },
       "gridPos": {
         "h": 4,
-        "w": 4,
-        "x": 14,
+        "w": 3,
+        "x": 15,
         "y": 1
       },
       "id": 6,
@@ -400,10 +552,11 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "max((sum by (provider) (increase({__name__=~\"(ray_)?openrag_inference_requests_total\", outcome=~\"error|timeout\"}[10m])) or 0 * sum by (provider) (increase({__name__=~\"(ray_)?openrag_inference_requests_total\", outcome=~\"success|error|timeout\"}[10m]))) / (sum by (provider) (increase({__name__=~\"(ray_)?openrag_inference_requests_total\", outcome=~\"success|error|timeout\"}[10m])) > 0))",
+          "expr": "max((sum by (provider) (rate({__name__=~\"(ray_)?openrag_inference_requests_total\", outcome=~\"error|timeout\"}[10m])) or 0 * sum by (provider) (rate({__name__=~\"(ray_)?openrag_inference_requests_total\", outcome=~\"success|error|timeout\"}[10m]))) / (sum by (provider) (rate({__name__=~\"(ray_)?openrag_inference_requests_total\", outcome=~\"success|error|timeout\"}[10m])) > 0) and sum by (provider) (increase({__name__=~\"(ray_)?openrag_inference_requests_total\", outcome=~\"success|error|timeout\"}[10m])) >= 5) or (max(sum by (provider) (increase({__name__=~\"(ray_)?openrag_inference_requests_total\", outcome=~\"success|error|timeout\"}[10m]))) > 0 < 5) * 0 - 1",
           "legendFormat": "Worst endpoint",
           "refId": "A",
-          "range": true
+          "instant": true,
+          "range": false
         }
       ],
       "title": "Inference errors \u00b7 10m",
@@ -414,13 +567,24 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "Circuit breakers currently open (llm, embedder, vlm, reranker). An open breaker means OpenRag has stopped calling that endpoint and fails fast instead.",
+      "description": "Circuit breakers open or half-open in any process (llm, embedder, vlm, reranker), the states OpenRagCircuitBreakerOpen pages on. Open means OpenRag has stopped calling that endpoint and fails fast instead; half-open means it is letting a trial call through.",
       "fieldConfig": {
         "defaults": {
           "color": {
             "mode": "thresholds"
           },
-          "mappings": [],
+          "mappings": [
+            {
+              "type": "special",
+              "options": {
+                "match": "null",
+                "result": {
+                  "color": "transparent",
+                  "index": 0
+                }
+              }
+            }
+          ],
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -468,10 +632,11 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "count(max by (name) ({__name__=~\"(ray_)?openrag_circuit_breaker_state\"}) == 1) or 0 * count({__name__=~\"(ray_)?openrag_circuit_breaker_state\"})",
+          "expr": "count(max by (name) ({__name__=~\"(ray_)?openrag_circuit_breaker_state\"}) >= 1) or 0 * count({__name__=~\"(ray_)?openrag_circuit_breaker_state\"})",
           "legendFormat": "Open",
           "refId": "A",
-          "range": true
+          "instant": true,
+          "range": false
         }
       ],
       "title": "Open breakers",
@@ -488,7 +653,18 @@
           "color": {
             "mode": "thresholds"
           },
-          "mappings": [],
+          "mappings": [
+            {
+              "type": "special",
+              "options": {
+                "match": "null",
+                "result": {
+                  "color": "transparent",
+                  "index": 0
+                }
+              }
+            }
+          ],
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -540,7 +716,8 @@
           "expr": "sum(increase(openrag_retrieval_orphan_chunks_dropped_total[1h]))",
           "legendFormat": "Dropped",
           "refId": "A",
-          "range": true
+          "instant": true,
+          "range": false
         }
       ],
       "title": "Catalog drift \u00b7 1h",
@@ -1232,7 +1409,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "Average number of documents inside each stage: seconds of stage work per second of wall clock. The tallest band is where indexing time goes.",
+      "description": "Average number of documents inside each stage: seconds of stage work per second of wall clock. The tallest band is where indexing time goes. A stage's time is recorded when it finishes, so a long stage reads 0 while it runs, then its whole duration lands in one spike.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -1312,7 +1489,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "Calls to external inference endpoints. Chat and rerank run in the API, embed and vlm inside indexing workers; both are summed here.",
+      "description": "Calls to external inference endpoints, summed across both scrape targets. Neither is limited to one kind of call: the API embeds queries and calls the LLM and reranker, and the indexing workers embed, caption and call the LLM to contextualize.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -1593,7 +1770,7 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "State of each circuit breaker, worst across processes. Open means calls fail fast without reaching the endpoint; half-open means a probe call is being let through.",
+      "description": "State of each circuit breaker, worst across processes: open, then half-open, then closed. Open means calls fail fast without reaching the endpoint; half-open means a trial call is being let through.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -1664,7 +1841,7 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "editorMode": "code",
-          "expr": "max by (name) ({__name__=~\"(ray_)?openrag_circuit_breaker_state\"})",
+          "expr": "max by (name) ({__name__=~\"(ray_)?openrag_circuit_breaker_state\"} == 1) or max by (name) ({__name__=~\"(ray_)?openrag_circuit_breaker_state\"})",
           "legendFormat": "{{name}}",
           "refId": "A",
           "range": true
@@ -1990,6 +2167,38 @@
         "options": [],
         "query": {
           "query": "label_values(openrag_model_endpoint_discovery_up, job)",
+          "refId": "PrometheusVariableQueryEditor-VariableQuery"
+        },
+        "refresh": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "current": {
+          "selected": true,
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${DS_PROMETHEUS}"
+        },
+        "definition": "label_values({__name__=~\"(ray_)?openrag_ingest_documents_total\"}, job)",
+        "description": "Scrape job of Ray's metrics agent, read from a counter only OpenRAG's Ray actors export: openrag-ray on Compose, the Ray PodMonitor's job on Kubernetes. Like the API scrape job, it carries no All value, so All is the jobs this query returns.",
+        "hide": 2,
+        "includeAll": true,
+        "label": "Ray scrape job",
+        "multi": true,
+        "name": "ray_job",
+        "options": [],
+        "query": {
+          "query": "label_values({__name__=~\"(ray_)?openrag_ingest_documents_total\"}, job)",
           "refId": "PrometheusVariableQueryEditor-VariableQuery"
         },
         "refresh": 2,
