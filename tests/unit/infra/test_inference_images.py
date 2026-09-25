@@ -24,9 +24,6 @@ ENV_EXAMPLE = ROOT / "infra" / "compose" / ".env.example"
 COMPOSE_INFINITY = ROOT / "extern" / "reranker" / "infinity.yaml"
 CONFIG = ROOT / "conf" / "config.yaml"
 
-# Not built by any workflow yet, so there is no version to pin it to (#1031).
-UNPINNED_UNTIL_BUILT = {"ghcr.io/linagora/vllm-whisper"}
-
 
 def _load(path: Path) -> dict:
     return yaml.safe_load(path.read_text(encoding="utf-8"))
@@ -44,9 +41,10 @@ def test_chart_inference_images_have_an_explicit_version(path: Path):
         images.append((reranker["repository"], reranker.get("tag")))
 
     for repository, tag in images:
-        if repository in UNPINNED_UNTIL_BUILT:
-            continue
-        assert tag and not str(tag).startswith("latest"), f"{path.name}: {repository}:{tag}"
+        # A digest pins the image even under a moving tag name: the shared
+        # IfNotPresent pull policy would otherwise keep whatever a node cached.
+        pinned = bool(tag) and ("@sha256:" in str(tag) or not str(tag).startswith("latest"))
+        assert pinned, f"{path.name}: {repository}:{tag}"
 
 
 @pytest.mark.parametrize("path", VALUES_FILES, ids=lambda p: p.name)

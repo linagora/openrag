@@ -601,7 +601,11 @@ vllm:
 
       - name: "whisper"
         repository: "ghcr.io/linagora/vllm-whisper"
-        tag: "latest"
+        # No workflow builds this image yet (#1031), so it has no version tag;
+        # the digest pins the build `latest` pointed to on 25 Sep 2026 (built
+        # 2 Dec 2025). The shared imagePullPolicy (IfNotPresent) would otherwise
+        # keep whatever build a node happened to cache.
+        tag: "latest@sha256:d0c25f4aea64814171df29f51923be4e1e7fab529d141cb440f33a838e72e364"
         modelURL: *whisperModel
         replicaCount: 1
         requestCPU: 4
