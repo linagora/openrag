@@ -7,6 +7,7 @@ from typing import Any
 
 import pytest
 import services.workers.task_state as task_state_module
+from core.models.catalog import TASK_FINISHED_AT_METADATA_KEY
 from services.workers.task_state import (
     PENDING_TASK_DETAILS,
     SUBMITTED_TASK_WITHOUT_REF,
@@ -1666,3 +1667,79 @@ async def test_get_active_indexing_task_for_file_reads_the_fence_without_queuein
 
     await manager.set_state("task-1", "COMPLETED")
     assert await manager.get_active_indexing_task_for_file(partition="tenant-a", file_id="file-1") is None
+
+
+async def _serializing_task_for_file_1(manager: Any, worker_ref: object) -> None:
+    await manager.set_queued_details(
+        "task-1",
+        file_id="file-1",
+        partition="tenant-a",
+        metadata={},
+        user_id=42,
+    )
+    assert await manager.set_object_ref("task-1", {"ref": worker_ref}) is True
+    assert await manager.set_state("task-1", "SERIALIZING") is True
+
+
+@pytest.mark.asyncio
+async def test_admission_fence_releases_the_file_of_a_task_whose_worker_crashed(monkeypatch) -> None:
+    """A dead worker leaves the record SERIALIZING; its ready ref must not hold the file forever."""
+    manager = _task_state_manager()
+    worker_ref = object()
+    await _serializing_task_for_file_1(manager, worker_ref)
+    monkeypatch.setattr(task_state_module.ray, "wait", lambda *_args, **_kwargs: ([worker_ref], []))
+
+    admitted = await manager.set_queued_details_v2(
+        "task-2",
+        file_id="file-1",
+        partition="tenant-a",
+        metadata={},
+        user_id=42,
+        reject_if_file_active=True,
+    )
+
+    assert admitted["accepted"] is True
+    assert await manager.get_state("task-1") == "SERIALIZING"
+    assert await manager.get_active_indexing_task_for_file(partition="tenant-a", file_id="file-1") == "task-2"
+
+
+@pytest.mark.asyncio
+async def test_admission_fence_releases_the_file_of_a_task_stamped_finished() -> None:
+    """A rollout can reload a SERIALIZING record whose worker already finished elsewhere."""
+    manager = _task_state_manager()
+    await _serializing_task_for_file_1(manager, object())
+    await manager.set_details(
+        "task-1",
+        file_id="file-1",
+        partition="tenant-a",
+        metadata={TASK_FINISHED_AT_METADATA_KEY: "2026-09-25T00:00:00+00:00"},
+        user_id=42,
+    )
+
+    admitted = await manager.set_queued_details_v2(
+        "task-2",
+        file_id="file-1",
+        partition="tenant-a",
+        metadata={},
+        user_id=42,
+        reject_if_file_active=True,
+    )
+
+    assert admitted["accepted"] is True
+
+
+@pytest.mark.asyncio
+async def test_admission_fence_keeps_a_serializing_task_whose_worker_is_running() -> None:
+    manager = _task_state_manager()
+    await _serializing_task_for_file_1(manager, object())
+
+    refused = await manager.set_queued_details_v2(
+        "task-2",
+        file_id="file-1",
+        partition="tenant-a",
+        metadata={},
+        user_id=42,
+        reject_if_file_active=True,
+    )
+
+    assert refused == {"accepted": False, "reason": "file_indexing", "existing_task_id": "task-1"}

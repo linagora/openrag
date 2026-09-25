@@ -297,6 +297,18 @@ def _object_ref_is_ready(object_ref: Any) -> bool:
     return bool(ready)
 
 
+def _worker_has_settled(info: TaskInfo) -> bool:
+    """Whether the task's worker can no longer write, whatever the record says.
+
+    The completion tracker stamps ``TASK_FINISHED_AT`` once the worker ref
+    resolves, success or error; a ready ref says the same before the stamp.
+    """
+    metadata = (info.details or {}).get("metadata")
+    if isinstance(metadata, dict) and TASK_FINISHED_AT_METADATA_KEY in metadata:
+        return True
+    return _object_ref_is_ready(info.object_ref)
+
+
 def _task_created_at(details: dict[str, Any] | None) -> str | None:
     """The dispatcher's admission timestamp for a task, if it recorded one.
 
@@ -886,22 +898,27 @@ class TaskStateManager:
         row and only then learns from ``complete_with_degraded_stages`` that it
         was cancelled. A second task admitted meanwhile would race that commit
         for the same file, which is exactly what this fence exists to prevent.
-        Settled means what ``finish_cancellation`` means by it: the worker's
-        object ref is ready. Readiness is only probed for a cancelled candidate
-        that names this very file, so the fence costs no ``ray.wait`` otherwise.
+
+        Any candidate whose worker has settled is released, whatever its state:
+        a worker that crashed mid-``process_file``, or one from a previous
+        generation whose terminal write went to a replaced actor, leaves the
+        record QUEUED or SERIALIZING with nothing left to write. Settled is the
+        rule ``get_content_claim_task_ids`` applies (:func:`_worker_has_settled`),
+        so the file fence and the content claim agree on when a task is done.
+        Readiness is only probed for a candidate that names this very file, so
+        the fence costs no ``ray.wait`` otherwise.
         """
         for candidate_id, info in self.tasks.items():
             if candidate_id == excluding:
                 continue
-            cancelled_with_worker = _cancelled_task_has_worker_fence(info)
-            if info.state not in CANCELLABLE_INDEXING_STATES and not cancelled_with_worker:
+            if info.state not in CANCELLABLE_INDEXING_STATES and not _cancelled_task_has_worker_fence(info):
                 continue
             if self._expire_refless_task_if_stale_locked(candidate_id, info):
                 continue
             details = info.details or {}
             if details.get("partition") != partition or details.get("file_id") != file_id:
                 continue
-            if cancelled_with_worker and _object_ref_is_ready(info.object_ref):
+            if _worker_has_settled(info):
                 continue
             return candidate_id
         return None
@@ -1018,9 +1035,7 @@ class TaskStateManager:
                 owns_claim = info.state in CANCELLABLE_INDEXING_STATES or _cancelled_task_has_worker_fence(info)
                 if not owns_claim:
                     continue
-                metadata = (info.details or {}).get("metadata")
-                has_finished = isinstance(metadata, dict) and TASK_FINISHED_AT_METADATA_KEY in metadata
-                if has_finished or _object_ref_is_ready(info.object_ref):
+                if _worker_has_settled(info):
                     continue
                 details = info.details or {}
                 if details and details.get("partition") != partition:
