@@ -428,6 +428,75 @@ tests:
         alertname: OpenRagTargetDown
         exp_alerts: []
 
+  - interval: 1m
+    name: "the Compose ray job carries the ingest metrics — its being down fires"
+    # Every Ray-side series (ingest outcomes, parse completions) comes from this
+    # job. Unmatched, IngestStalled and IngestFailureRate went inert silently.
+    input_series:
+      - series: 'up{job="ray",instance="openrag:8091"}'
+        values: "0+0x20"
+      - series: 'up{job="openrag",instance="openrag:8080"}'
+        values: "1+0x20"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: OpenRagTargetDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: ray
+              instance: openrag:8091
+            exp_annotations:
+              description: "The target has been unreachable for 5 minutes. Every other OpenRag alert is inert while this is firing, because absent series cannot breach a threshold."
+              runbook_url: "https://github.com/linagora/openrag/blob/main/docs/deployment/runbooks/OpenRagTargetDown.md"
+              summary: "Prometheus cannot scrape OpenRag (openrag:8091)"
+
+  - interval: 1m
+    name: "a datastore exporter named after the release is not OpenRag being down"
+    # #979's exporters: `openrag-postgresql-metrics`, `openrag-milvus*`. They
+    # match `.*openrag.*` by release name, and paging "every OpenRag alert is
+    # inert" for them is false.
+    input_series:
+      - series: 'up{job="openrag-postgresql-metrics",instance="10.0.0.5:9187"}'
+        values: "0+0x20"
+      - series: 'up{job="openrag-milvus",instance="10.0.0.6:9091"}'
+        values: "0+0x20"
+      - series: 'up{job="openrag-milvus-querynode",instance="10.0.0.7:9091"}'
+        values: "0+0x20"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: OpenRagTargetDown
+        exp_alerts: []
+
+  - interval: 1m
+    name: "the chart's API and Ray PodMonitor jobs being down fire"
+    input_series:
+      - series: 'up{job="openrag-openrag",instance="10.0.0.2:8080"}'
+        values: "0+0x20"
+      - series: 'up{job="rag/openrag-raycluster",instance="10.0.0.3:8080"}'
+        values: "0+0x20"
+      - series: 'up{job="openrag-postgresql-metrics",instance="10.0.0.5:9187"}'
+        values: "0+0x20"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: OpenRagTargetDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: openrag-openrag
+              instance: 10.0.0.2:8080
+            exp_annotations:
+              description: "The target has been unreachable for 5 minutes. Every other OpenRag alert is inert while this is firing, because absent series cannot breach a threshold."
+              runbook_url: "https://github.com/linagora/openrag/blob/main/docs/deployment/runbooks/OpenRagTargetDown.md"
+              summary: "Prometheus cannot scrape OpenRag (10.0.0.2:8080)"
+          - exp_labels:
+              severity: critical
+              job: rag/openrag-raycluster
+              instance: 10.0.0.3:8080
+            exp_annotations:
+              description: "The target has been unreachable for 5 minutes. Every other OpenRag alert is inert while this is firing, because absent series cannot breach a threshold."
+              runbook_url: "https://github.com/linagora/openrag/blob/main/docs/deployment/runbooks/OpenRagTargetDown.md"
+              summary: "Prometheus cannot scrape OpenRag (10.0.0.3:8080)"
+
   # ── Found by audit, 24 Sep ───────────────────────────────────────────────
 
   - name: "the first batch after a quiet night is not a stall while its first parse runs"

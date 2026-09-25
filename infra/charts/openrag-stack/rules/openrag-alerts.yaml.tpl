@@ -345,13 +345,25 @@ groups:
         # would claim every OpenRAG alert is inert when none is: upstream's own
         # TargetDown covers them. The Compose copy renders without `bundled`, so
         # its expression is unchanged.
-        {{- $jobExclude := list }}
+        #
+        # What counts as OpenRAG's own target, by default:
+        #   * `.*openrag.*` — the API (Compose `openrag`, chart `<release>-openrag`)
+        #     and the chart's Ray PodMonitor (`<namespace>/<release>-raycluster`);
+        #   * `ray` — the Compose job scraping Ray's metrics agent, which carries
+        #     every Ray-side series (ingest outcomes, parse completions,
+        #     worker-side inference). Missing it left IngestStalled and
+        #     IngestFailureRate inert with nothing paging for it.
+        # The datastore exporters (`<release>-postgresql-metrics`,
+        # `<release>-milvus*`) match `.*openrag.*` by release name but are not
+        # OpenRAG's: their being down makes no OpenRAG alert inert, which is what
+        # this alert's description tells the reader. They are always left out.
+        {{- $jobExclude := list ".*-(postgresql|milvus)(-.*)?" }}
         {{- if .Values.monitoring.bundled }}
         {{- $stack := .Values.kubePrometheusStack | toYaml | fromYaml }}
         {{- with dig "fullnameOverride" "" $stack }}{{ $jobExclude = append $jobExclude (printf "%s-.*" (regexQuoteMeta .)) }}{{ end }}
         {{- with dig "grafana" "fullnameOverride" "" $stack }}{{ $jobExclude = append $jobExclude (regexQuoteMeta .) }}{{ end }}
         {{- end }}
-        expr: up{job=~"{{ $cfg.jobMatcher | default ".*openrag.*" }}"{{ with $jobExclude }}, job!~"{{ join "|" . }}"{{ end }}} == 0
+        expr: up{job=~"{{ $cfg.jobMatcher | default ".*openrag.*|ray" }}"{{ with $jobExclude }}, job!~"{{ join "|" . }}"{{ end }}} == 0
         for: {{ $for.OpenRagTargetDown }}
         labels:
           severity: critical

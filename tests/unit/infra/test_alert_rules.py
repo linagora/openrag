@@ -403,9 +403,37 @@ def test_target_down_leaves_the_bundled_stacks_own_jobs_out() -> None:
         assert not _paged(expr, job), f"{job} is the bundled stack's, not OpenRAG's: {expr}"
 
 
-def test_target_down_excludes_nothing_without_the_bundled_stack() -> None:
-    """The Compose copy is generated without `bundled`, so it must not change."""
+def test_target_down_excludes_only_the_datastores_without_the_bundled_stack() -> None:
+    """The Compose copy is generated without `bundled`: nothing of the stack's
+    is excluded there, only the datastore exporters, which are never OpenRAG's."""
     expr = _render()["OpenRagTargetDown"]["expr"]
 
-    assert "job!~" not in expr
+    assert "monitoring" not in expr and "grafana" not in expr
     assert _paged(expr, "openrag")
+
+
+@pytest.mark.parametrize("bundled", [False, True])
+@pytest.mark.parametrize(
+    ("job", "pages"),
+    [
+        # OpenRAG's own targets: the API, and wherever the Ray-side series
+        # (ingest outcomes, parse completions) are scraped from.
+        ("openrag", True),
+        ("ray", True),
+        ("openrag-openrag", True),
+        ("rag/openrag-raycluster", True),
+        # #979's datastore exporters carry the release name but are not OpenRAG.
+        ("openrag-postgresql-metrics", False),
+        ("openrag-milvus", False),
+        ("openrag-milvus-querynode", False),
+        ("node-exporter", False),
+    ],
+)
+def test_target_down_pages_for_openrags_targets_only(job: str, pages: bool, bundled: bool) -> None:
+    """`.*openrag.*` alone missed the Compose `ray` job — the one carrying the
+    ingest metrics — and caught the datastore exporters, paging "every OpenRag
+    alert is inert" when none was."""
+    overrides = ("monitoring.bundled=true",) if bundled else ()
+    expr = _render(*overrides)["OpenRagTargetDown"]["expr"]
+
+    assert _paged(expr, job) is pages, f"{job}: expected pages={pages} under {expr}"

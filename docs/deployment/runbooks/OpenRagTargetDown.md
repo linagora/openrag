@@ -15,12 +15,21 @@
 > ```
 
 ```
-up{job=~".*openrag.*"} == 0
+up{job=~".*openrag.*|ray", job!~".*-(postgresql|milvus)(-.*)?"} == 0
 ```
+
+With `monitoring.bundled`, the bundled stack's own jobs (`openrag-monitoring-*`,
+`openrag-grafana`) are excluded as well.
 
 ## What it means
 
-Prometheus cannot scrape OpenRag.
+Prometheus cannot scrape one of OpenRag's own targets: the API's `/metrics`, or the Ray
+metrics agent that exports the Ray-side series (ingest outcomes, parse completions,
+worker-side inference) — the Compose `ray` job, or the chart's
+`<namespace>/<release>-raycluster` PodMonitor. The `job` label says which.
+
+The datastore exporters (`<release>-postgresql-metrics`, `<release>-milvus*`) are
+deliberately not matched: their being down does not blind any OpenRag alert.
 
 **Every other OpenRag alert is inert while this is firing.** An absent series cannot
 breach a threshold, so a dashboard of green panels and a silent alert list mean nothing

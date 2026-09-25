@@ -283,7 +283,19 @@ groups:
         # would claim every OpenRAG alert is inert when none is: upstream's own
         # TargetDown covers them. The Compose copy renders without `bundled`, so
         # its expression is unchanged.
-        expr: up{job=~".*openrag.*"} == 0
+        #
+        # What counts as OpenRAG's own target, by default:
+        #   * `.*openrag.*` — the API (Compose `openrag`, chart `<release>-openrag`)
+        #     and the chart's Ray PodMonitor (`<namespace>/<release>-raycluster`);
+        #   * `ray` — the Compose job scraping Ray's metrics agent, which carries
+        #     every Ray-side series (ingest outcomes, parse completions,
+        #     worker-side inference). Missing it left IngestStalled and
+        #     IngestFailureRate inert with nothing paging for it.
+        # The datastore exporters (`<release>-postgresql-metrics`,
+        # `<release>-milvus*`) match `.*openrag.*` by release name but are not
+        # OpenRAG's: their being down makes no OpenRAG alert inert, which is what
+        # this alert's description tells the reader. They are always left out.
+        expr: up{job=~".*openrag.*|ray", job!~".*-(postgresql|milvus)(-.*)?"} == 0
         for: 5m
         labels:
           severity: critical
