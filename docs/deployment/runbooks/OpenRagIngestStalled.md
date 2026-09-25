@@ -81,6 +81,17 @@ anything.
 
 ## Known blind spot
 
-If **no** pool has ever completed a parse, the gauge is absent and this alert cannot
-fire — a brand-new instance that is wedged from the very first upload stays silent here.
-`OpenRagBacklogGrowing` covers a queue that rises from zero.
+The rule reads `openrag_ingest_last_parse_completion_timestamp_seconds`, and while that
+gauge is absent the alert cannot fire. It is absent more often than "on a new
+instance": it is exported per worker process (Ray's `WorkerId` label), and Ray drops a
+dead worker's series about two minutes after the process exits. So the alert is blind
+whenever **no pool has completed a parse since the workers last started** — once pools
+seed the gauge on their first use (#1056), whenever no pool has completed *or started*
+one. That covers a brand-new instance wedged from its first upload, and equally a pool
+that wedges right after a worker restart or a redeploy: the old timestamps disappear
+and nothing replaces them.
+
+There is deliberately no `absent()` branch to close it: with the chart's default
+embedded Ray the gauge is never scraped at all, and such a branch would page on every
+long batch. `OpenRagBacklogGrowing` covers a queue that rises from zero; after a
+restart with work queued, check the Ray dashboard rather than waiting for this alert.

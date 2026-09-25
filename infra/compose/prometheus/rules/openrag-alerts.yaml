@@ -50,9 +50,17 @@ groups:
         # condition this detects.
         #
         # max() over pools, not per pool: one idle pool is normal (no audio
-        # uploads today), every pool idle while work is queued is not. If no
-        # pool has *ever* completed a parse the gauge is absent and this cannot
-        # fire — OpenRagBacklogGrowing covers a queue that rises from zero.
+        # uploads today), every pool idle while work is queued is not.
+        #
+        # Blind while the gauge is absent, which is not only "never parsed": it
+        # is per worker process (WorkerId), and Ray drops a dead worker's series
+        # about two minutes after it exits. So this cannot fire whenever no pool
+        # has completed a parse since the workers last started (once pools seed
+        # the gauge on first use, #1056: completed or started one) — a fresh
+        # install, and equally a pool wedged straight after a worker restart.
+        # No absent() branch: with Helm's embedded Ray the gauge is never
+        # scraped at all, and that would page on every long batch.
+        # OpenRagBacklogGrowing covers a queue that rises from zero.
         #
         # The queue must have been non-empty for the whole idle window, not just
         # now. After a quiet night the last parse is hours old, so "queued now"
