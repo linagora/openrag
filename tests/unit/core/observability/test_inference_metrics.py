@@ -454,6 +454,30 @@ async def test_a_refused_stream_is_classified_by_status(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(("model", "outcome"), [("gpt-forbidden", "rejected"), ("test-model", "error")])
+async def test_a_401_on_a_caller_chosen_model_is_rejected(
+    monkeypatch: pytest.MonkeyPatch, model: str, outcome: str
+) -> None:
+    """LiteLLM answers "this key may not use that model" with 401 through v1.84.
+    A model named in llm_override is the caller's choice, so its 401 is the
+    request's fault; counted as ``error`` it let any user raise the configured
+    provider's error ratio. The same 401 on the configured model is our key."""
+    from core.utils.exceptions import InferenceError
+
+    calls: list = []
+    client = _streaming_client([], monkeypatch, calls)
+    client._client = _FakeHttpClient([], status_code=401)
+
+    with pytest.raises(InferenceError):
+        async for _ in client.stream_chat(
+            [{"role": "user", "content": "q"}], metadata={"llm_override": {"model": model}}
+        ):
+            pass
+
+    assert [c["outcome"] for c in calls] == [outcome]
+
+
+@pytest.mark.asyncio
 async def test_stream_closed_after_done_is_a_success(monkeypatch: pytest.MonkeyPatch) -> None:
     """Reproduces the real consumer: break on ``[DONE]``, then close."""
     calls: list = []

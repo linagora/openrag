@@ -45,7 +45,7 @@ from core.utils.exceptions import (
     InferenceTimeoutError,
     OpenRAGError,
 )
-from services.inference._circuit_breaker import PROVIDER_AUTH_4XX
+from services.inference._circuit_breaker import refuses_our_credential
 
 #: Fallback for a client built outside the factory (tests, scripts): it still
 #: records, and lands in a fixed bucket instead of minting a label value.
@@ -95,9 +95,10 @@ def outcome_for(exc: BaseException) -> str:
     could otherwise drive a healthy provider's error ratio up at will. Throttling
     (429) and a provider-side request timeout (408) are the provider struggling,
     and stay ``error``; so does 401, a credential the provider refuses, which
-    fails every call alike (``PROVIDER_AUTH_4XX``). 403 stays ``rejected``: it can
-    be one request's model the key may not use. The circuit breaker counts 401
-    too, but still excludes 408 and 429 (``_is_excluded``).
+    fails every call alike — unless the caller chose the model or endpoint, when
+    it can be that model refused (``refuses_our_credential``). 403 stays
+    ``rejected``: it can be one request's model the key may not use. The circuit
+    breaker counts 401 alike, but still excludes 408 and 429 (``_is_excluded``).
     """
     if isinstance(exc, (asyncio.CancelledError, GeneratorExit)):
         return "cancelled"
@@ -111,7 +112,7 @@ def outcome_for(exc: BaseException) -> str:
 
 
 #: 4xx statuses that describe the provider's state, not the request's.
-_PROVIDER_SIDE_4XX = frozenset({408, 429}) | PROVIDER_AUTH_4XX
+_PROVIDER_SIDE_4XX = frozenset({408, 429})
 
 
 def _is_rejected_request(exc: BaseException) -> bool:
@@ -121,7 +122,7 @@ def _is_rejected_request(exc: BaseException) -> bool:
         status = exc.status_code
     else:
         return False
-    return 400 <= status < 500 and status not in _PROVIDER_SIDE_4XX
+    return 400 <= status < 500 and status not in _PROVIDER_SIDE_4XX and not refuses_our_credential(exc, status)
 
 
 def with_inference_metrics(operation: str, *, capture_usage: bool = False) -> Callable:

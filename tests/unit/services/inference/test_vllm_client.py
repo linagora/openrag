@@ -414,6 +414,56 @@ class TestVLLMClientOverrides:
         assert headers == {"Authorization": "Bearer default-key"}
 
 
+class TestModelOverrideRefusalAndTheSharedBreaker:
+    """LiteLLM answers "this key may not use that model" with 401 through v1.84.
+    A model-only llm_override needs no opt-in and reaches the configured
+    endpoint through the shared "llm" breaker, so counting that 401 let any
+    user open the breaker for every tenant with one burst of requests."""
+
+    @staticmethod
+    def _gateway_client() -> VLLMClient:
+        def handler(request: httpx.Request) -> httpx.Response:
+            if json.loads(request.content)["model"] != "default-model":
+                return httpx.Response(401, json={"error": {"type": "key_model_access_denied"}})
+            return _chat_response()
+
+        client = VLLMClient(endpoint="http://gateway:4000/v1", model_name="default-model", api_key="k")
+        client._client = httpx.AsyncClient(transport=_make_transport(handler))
+        return client
+
+    @pytest.mark.asyncio
+    async def test_a_burst_of_refused_model_overrides_leaves_the_breaker_closed(self):
+        from aiobreaker.state import CircuitBreakerState
+
+        client = self._gateway_client()
+        override = {"metadata": {"llm_override": {"model": "gpt-forbidden"}}}
+
+        results = await asyncio.gather(
+            *(client.chat([{"role": "user", "content": "hi"}], **override) for _ in range(50)),
+            return_exceptions=True,
+        )
+
+        assert all(type(r) is InferenceError and r.status_code == 401 for r in results)
+        assert _breakers["llm"].current_state == CircuitBreakerState.CLOSED
+        assert _breakers["llm"].fail_counter == 0
+        assert (await client.chat([{"role": "user", "content": "hi"}]))["choices"][0]["message"]["content"] == "hello"
+
+    @pytest.mark.asyncio
+    async def test_a_401_on_the_configured_model_still_counts(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(401, json={"error": "invalid key"})
+
+        client = VLLMClient(endpoint="http://gateway:4000/v1", model_name="default-model", api_key="revoked")
+        client._client = httpx.AsyncClient(transport=_make_transport(handler))
+
+        with pytest.raises(InferenceError):
+            await client.chat([{"role": "user", "content": "hi"}])
+        with pytest.raises(InferenceError):
+            await client.generate("hi", metadata={"llm_override": {"model": "default-model"}})
+
+        assert _breakers["llm"].fail_counter == 2
+
+
 class TestCustomEndpointOverride:
     """LLM_OVERRIDE_ALLOW_CUSTOM_ENDPOINT restores the full llm_override contract.
 

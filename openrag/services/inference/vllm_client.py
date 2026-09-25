@@ -423,6 +423,7 @@ class VLLMClient(LLM):
             raise InferenceError(
                 f"LLM error ({exc.response.status_code}): {exc.response.text[:500]}",
                 status_code=exc.response.status_code,
+                client_override=overridden or model != self._model,
             ) from exc
         return _parse_response(resp)
 
@@ -450,6 +451,7 @@ class VLLMClient(LLM):
             raise InferenceError(
                 f"LLM error ({exc.response.status_code}): {exc.response.text[:500]}",
                 status_code=exc.response.status_code,
+                client_override=overridden or model != self._model,
             ) from exc
         return _parse_response(resp)
 
@@ -483,6 +485,7 @@ class VLLMClient(LLM):
                     error = InferenceError(
                         f"LLM streaming error ({resp.status_code}): {resp.text[:500]}",
                         status_code=resp.status_code,
+                        client_override=overridden or model != self._model,
                     )
                     outcome = outcome_for(error)
                     raise error

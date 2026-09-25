@@ -37,7 +37,21 @@ _UNKNOWN_STATE = -1
 #: model-only llm_override reaches the configured provider through the shared
 #: breaker: counting it would let any user open the breaker for every tenant
 #: by repeating such a request. OpenAI-compatible APIs answer a bad key with 401.
+#: ``refuses_our_credential`` names the one 401 that is not counted.
 PROVIDER_AUTH_4XX = frozenset({401})
+
+
+def refuses_our_credential(exc: BaseException, status: int) -> bool:
+    """Does *status* say the provider refuses our key, not just this request?
+
+    A 401 on a call whose model or endpoint the caller chose (``llm_override``)
+    can be the provider refusing *that* model for our key: LiteLLM answers
+    model-access denial with 401 through v1.84, 403 from v1.85. That call is the
+    request's fault, and counting it would let any user open the shared breaker
+    and raise the provider's error ratio, so only a 401 on the configured model
+    and endpoint counts.
+    """
+    return status in PROVIDER_AUTH_4XX and not getattr(exc, "client_override", False)
 
 
 def _is_client_error(exc: Exception) -> bool:
@@ -47,7 +61,7 @@ def _is_client_error(exc: Exception) -> bool:
         status = exc.status_code
     else:
         return False
-    return 400 <= status < 500 and status not in PROVIDER_AUTH_4XX
+    return 400 <= status < 500 and not refuses_our_credential(exc, status)
 
 
 def _is_excluded(exc: Exception) -> bool:
