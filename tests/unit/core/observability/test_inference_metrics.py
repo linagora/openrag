@@ -671,6 +671,29 @@ def test_a_client_with_no_instrumented_method_starts_nothing(monkeypatch: pytest
     assert started == []
 
 
+def test_a_class_attribute_that_raises_does_not_stop_the_client(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Finding the operations walks the class's attributes, and ``getattr(...,
+    None)`` only swallows ``AttributeError``. Read outside the guard, anything
+    else escaped ``set_provider_name`` and stopped the client being built."""
+    from core.observability import inference_metrics as im
+
+    reported: list[str] = []
+    monkeypatch.setattr(im, "report_once", lambda what, exc: reported.append(what))
+
+    class _Raises:
+        def __getattr__(self, name: str) -> None:
+            raise RuntimeError(name)
+
+    class _Client:
+        odd = _Raises()
+
+    client = _Client()
+
+    assert im.set_provider_name(client, "embedder-a") is client
+    assert getattr(client, im.PROVIDER_NAME_ATTR) == "embedder-a"
+    assert reported
+
+
 def test_the_prometheus_backend_exports_a_zero_started_series() -> None:
     import prometheus_client
     from core.observability.inference_metrics import _PrometheusInstrument

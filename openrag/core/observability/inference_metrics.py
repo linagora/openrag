@@ -88,7 +88,7 @@ def set_provider_name[C](instance: C, name: str) -> C:
     except (AttributeError, TypeError) as exc:
         report_once("inference provider label", exc)
         return instance
-    _start_request_series(name, _operations_of(instance))
+    _start_request_series(name, instance)
     return instance
 
 
@@ -108,7 +108,7 @@ def _operations_of(instance: object) -> set[str]:
     return operations
 
 
-def _start_request_series(provider: str, operations: set[str]) -> None:
+def _start_request_series(provider: str, instance: object) -> None:
     """Create this client's request series at 0 before its first call.
 
     ``rate()``/``increase()`` count the change between samples, so a series
@@ -117,8 +117,12 @@ def _start_request_series(provider: str, operations: set[str]) -> None:
     worker's first failure went uncounted — a provider's first errors after a
     restart read as 0%. Starting every outcome at 0 when the client is built
     makes the first event a visible 0 → 1.
+
+    Takes the client, not its operations: reading them walks the class's
+    attributes, which can raise, and belongs inside the guard too.
     """
     try:
+        operations = _operations_of(instance)
         requests = _instruments().requests
         for operation in operations:
             for outcome in INFERENCE_OUTCOME_VALUES:
