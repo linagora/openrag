@@ -209,7 +209,8 @@ to Grafana's default Prometheus data source and can be switched from the top of
 the dashboard; no data source UID is written into the JSON. Panels that need
 the API's scrape job find it from the series the API exports (`openrag` on
 Compose, the ServiceMonitor's Service name on Kubernetes), so no job name is
-written in either.
+written in either. The Service dashboard finds Ray's job the same way, from a
+counter only the Ray actors export.
 
 To load them into your own Grafana, import each file through **Dashboards → New
 → Import**, provision them from disk, or on Kubernetes enable
@@ -237,6 +238,6 @@ it unresolved, so a unit test rejects such an export.
   than raw values.
 - Vector-store metrics are not exposed yet. Indexing and worker-side
   inference metrics are exported on Ray's metrics agent, which the chart
-  scrapes through `ray.metrics.podMonitor` and the compose overlay does not
-  scrape yet (see the
+  scrapes through `ray.metrics.podMonitor` (off by default) and the Compose
+  overlay through its `openrag-ray` job (see the
   [metrics reference](/openrag/documentation/metrics_reference/)).

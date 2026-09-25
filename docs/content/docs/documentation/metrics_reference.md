@@ -14,8 +14,8 @@ indicate it.
 
 | Target | Produced by | How to scrape |
 |---|---|---|
-| The API's `/metrics` | The API process | `ServiceMonitor` on the API Service |
-| Ray's metrics agent, on every Ray node | Every Ray actor — indexing workers, and the API itself under `ENABLE_RAY_SERVE=true` | `PodMonitor` on the Ray pods |
+| The API's `/metrics` | The API process | `ServiceMonitor` on the API Service; the `openrag` job on Compose |
+| Ray's metrics agent, on every Ray node | Every Ray actor — indexing workers, and the API itself under `ENABLE_RAY_SERVE=true` | `PodMonitor` on the Ray pods; the `openrag-ray` job on Compose |
 
 Indexing runs in Ray actors, which are separate processes and often separate
 nodes; a `prometheus_client` counter incremented there is written to a registry
@@ -27,14 +27,14 @@ unreliable too.
 The Helm chart scrapes the Ray target with a `PodMonitor` on port `8090`,
 off by default (`ray.metrics.podMonitor`, which needs `ray.enabled=true`; see
 [Monitoring Ray, Postgres and Milvus](/openrag/documentation/kubernetes/#monitoring-ray-postgres-and-milvus)).
-The compose monitoring overlay's Prometheus has no job for it yet: there, the
-Ray-exported series below exist but are not collected.
+The Compose monitoring overlay scrapes it as the `openrag-ray` job, on the port
+it pins for the embedded Ray with `RAY_METRICS_EXPORT_PORT` (`8091`).
 
 Ray prefixes every metric it exports with `ray_`: on the wire,
 `openrag_ingest_documents_total` is `ray_openrag_ingest_documents_total`. The
-chart's `PodMonitor` renames OpenRAG's series back, so that both targets store
-one name and one query covers the API and the workers. A scrape job written by
-hand needs the same rule:
+chart's `PodMonitor` and the Compose `openrag-ray` job rename OpenRAG's series
+back, so that both targets store one name and one query covers the API and the
+workers. A scrape job written by hand needs the same rule:
 
 ```yaml
 metric_relabel_configs:   # metricRelabelings on a PodMonitor
