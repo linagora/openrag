@@ -14,6 +14,7 @@ from core.indexing.parsers.document_parser import DocumentParser
 from core.indexing.topic_tags import TopicTagger
 from core.models.document import Document, DocumentType
 from core.observability.ray_metrics import observe_stage_duration
+from core.utils.exceptions import PipelineError
 from core.utils.logging import get_logger
 from core.vector_stores.vector_store import VectorStore
 from core.vlm.vlm import VLM
@@ -96,6 +97,9 @@ class IndexingPipeline:
     indexation_config: IndexationPipelineConfig | None = None
     parser_factory: Callable[[str], DocumentParser] | None = None
     chunker_factory: Callable[..., ChunkingStrategy] | None = None
+    # The chunking settings ``chunker`` was built from, so it can be rebuilt for
+    # an embedder that serves a smaller window than the one configured.
+    default_chunking: Any = None
     embedder_factory: Callable[[str], Embedder] | None = None
     # Resolves an embedder endpoint name to its context window, so the chunker
     # can derive a hard safety bound from the embedder this partition actually
@@ -133,9 +137,12 @@ class IndexingPipeline:
         config = self._effective_indexation_config(row)
         parser = self._select_parser(config)
         embedder_name = str(row.get("embedder_name") or "default")
-        embedder_window = self.embedder_window_resolver(embedder_name) if self.embedder_window_resolver else None
-        chunker = self._select_chunker(config, embedder_name, embedder_window)
         embedder = self._select_embedder(row)
+        configured_window = self.embedder_window_resolver(embedder_name) if self.embedder_window_resolver else None
+        embedder_window = await self._embedded_window(embedder, configured_window)
+        chunker = self._select_chunker(
+            config, embedder_name, embedder_window, window_lowered=embedder_window != configured_window
+        )
         # Resolved up front, so a file with nowhere to store its vectors fails before it is parsed and embedded.
         vector_field = self.vector_field_resolver(embedder_name) if self.vector_field_resolver else None
         contextualizer, contextualization_llm = self._select_contextualizer(config)
@@ -265,6 +272,25 @@ class IndexingPipeline:
                     per_chunk_timeout=self.timeouts.embed_per_chunk,
                 ),
             )
+            # The server can report a smaller window only now, having refused the
+            # configured truncation during the embed: it was unreachable when
+            # this file was chunked, or was redeployed with a smaller window
+            # after this client read it. Chunks sized for the larger window would
+            # be stored with only their head embedded, apparently indexed but
+            # partly unsearchable. Fail before the store instead, so a retry
+            # chunks the file for the window the server now serves.
+            served_after_embed = await self._embedded_window(embedder, configured_window)
+            if served_after_embed != embedder_window:
+                cut = self._chunks_over_window(row, served_after_embed, getattr(chunker, "length_function", None))
+                if cut:
+                    raise PipelineError(
+                        f"Nothing stored: the embedder now serves {served_after_embed} tokens, less than the "
+                        f"{embedder_window} this file was chunked for, so {len(cut)} chunk(s) would be embedded "
+                        f"from their first {served_after_embed - 1} tokens only. Retry the file: it will be "
+                        f"chunked for {served_after_embed}.",
+                        code="EMBEDDER_WINDOW_SHRANK",
+                        status_code=503,
+                    )
             # After the embed: the dimension is measured, not configured.
             row["embedder_provenance"] = embedder_provenance(embedder, row.get("embedder_name"))
             # What the catalog write checks the partition's embedder against (#958).
@@ -422,24 +448,11 @@ class IndexingPipeline:
         file's continuation. The adjacent chunk stage goes out of its way to
         avoid exactly this, running the chunker under ``asyncio.to_thread``.
         """
-        if not window or window <= 0:
+        offenders = IndexingPipeline._chunks_over_window(row, window, length_function)
+        if not offenders:
             return
         limit = window - 1  # truncate_prompt_tokens
         chunks = row.get("chunks") or []
-
-        def tokens(chunk: Any) -> int:
-            stored = getattr(chunk, "token_count", 0) or 0
-            if length_function is None or not getattr(chunk, "text", None):
-                return stored
-            # Conclusive on the stored count alone: already over, or too far
-            # under for any envelope to close the gap.
-            if stored > limit or stored <= limit - _ENVELOPE_HEADROOM_TOKENS:
-                return stored
-            return length_function(chunk.text)
-
-        offenders = [(chunk, count) for chunk in chunks if (count := tokens(chunk)) > limit]
-        if not offenders:
-            return
         worst, worst_tokens = max(offenders, key=lambda pair: pair[1])
         logger.bind(
             task_id=row.get("task_id"),
@@ -458,11 +471,55 @@ class IndexingPipeline:
             f"their tail will not be retrievable"
         )
 
+    @staticmethod
+    def _chunks_over_window(
+        row: MutableMapping[str, Any],
+        window: int | None,
+        length_function: Callable[[str], int] | None = None,
+    ) -> list[tuple[Any, int]]:
+        """The row's chunks longer than what *window* embeds, with their token
+        counts. How they are measured is explained in _warn_on_embedder_overflow."""
+        if not window or window <= 0:
+            return []
+        limit = window - 1  # truncate_prompt_tokens
+        chunks = row.get("chunks") or []
+
+        def tokens(chunk: Any) -> int:
+            stored = getattr(chunk, "token_count", 0) or 0
+            if length_function is None or not getattr(chunk, "text", None):
+                return stored
+            # Conclusive on the stored count alone: already over, or too far
+            # under for any envelope to close the gap.
+            if stored > limit or stored <= limit - _ENVELOPE_HEADROOM_TOKENS:
+                return stored
+            return length_function(chunk.text)
+
+        return [(chunk, count) for chunk in chunks if (count := tokens(chunk)) > limit]
+
+    @staticmethod
+    async def _embedded_window(embedder: Any, configured: int | None) -> int | None:
+        """The window *embedder* really embeds: the configured one, or the
+        endpoint's own when that is smaller (``Embedder.served_window``).
+
+        Chunk sizing and the overflow warning both follow it. Chunks sized for a
+        window the server no longer accepts are embedded from their head only,
+        and their tail is never retrievable.
+        """
+        if not configured:
+            return configured
+        served_window = getattr(embedder, "served_window", None)
+        served = await served_window() if served_window is not None else None
+        if isinstance(served, int) and 0 < served < configured:
+            return served
+        return configured
+
     def _select_chunker(
         self,
         config: IndexationPipelineConfig | None,
         embedder_name: str = "default",
         window: int | None = None,
+        *,
+        window_lowered: bool = False,
     ) -> ChunkingStrategy:
         if config is not None and self.chunker_factory is not None:
             # Decided from the signature, never by calling and catching
@@ -475,6 +532,15 @@ class IndexingPipeline:
             # A factory predating the window argument still works; it just falls
             # back to the chunker's own default bound.
             return self.chunker_factory(config.chunking)
+        # self.chunker was built at startup for the configured window; the
+        # embedder serving less needs the same chunking bounded by what it serves.
+        if (
+            window_lowered
+            and self.default_chunking is not None
+            and self.chunker_factory is not None
+            and _accepts_embedder_window(self.chunker_factory)
+        ):
+            return self.chunker_factory(self.default_chunking, window)
         return self.chunker
 
     def _select_embedder(self, row: MutableMapping[str, Any]) -> Embedder:
@@ -573,6 +639,7 @@ def build_indexing_pipeline(
     indexation_config: IndexationPipelineConfig | None = None,
     parser_factory: Callable[[str], DocumentParser] | None = None,
     chunker_factory: Callable[..., ChunkingStrategy] | None = None,
+    default_chunking: Any = None,
     embedder_window_resolver: Callable[[str], int | None] | None = None,
     vector_field_resolver: Callable[[str], str | None] | None = None,
     embedder_factory: Callable[[str], Embedder] | None = None,
@@ -597,6 +664,7 @@ def build_indexing_pipeline(
         indexation_config=indexation_config,
         parser_factory=parser_factory,
         chunker_factory=chunker_factory,
+        default_chunking=default_chunking,
         embedder_window_resolver=embedder_window_resolver,
         vector_field_resolver=vector_field_resolver,
         embedder_factory=embedder_factory,

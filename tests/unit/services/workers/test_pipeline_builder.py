@@ -1586,3 +1586,135 @@ async def test_release_keeps_everything_the_caption_substitution_reads():
     assert all(image.mime_type == "image/jpeg" for image in images)
     assert [image.source_url for image in images] == [f"https://example.com/figure-{i}.png" for i in range(3)]
     assert [image.metadata.get("markdown_ref") for image in images] == refs
+
+
+class ServingEmbedder(FakeEmbedder):
+    """An embedder whose endpoint reports its own window; the last value repeats."""
+
+    def __init__(self, vectors: list[list[float]], *served: int | None) -> None:
+        super().__init__(vectors)
+        self._served = list(served)
+
+    async def served_window(self) -> int | None:
+        return self._served.pop(0) if len(self._served) > 1 else self._served[0]
+
+
+def _served_window_pipeline(embedder, *, configured: int, chunks: list[Chunk] | None = None):
+    document = Document(filename="note.txt", text="hello", partition="p")
+    processed = ProcessedDocument(document_id=document.id, text_blocks=[TextBlock(text="hello")])
+    chunks = chunks or [Chunk(id="c1", text="hello", partition="p")]
+    startup_chunker = FakeChunker(chunks)
+    rebuilt_chunker = FakeChunker(chunks)
+    factory_calls: list[tuple[object, int | None]] = []
+
+    def chunker_factory(chunking, window=None):
+        factory_calls.append((chunking, window))
+        return rebuilt_chunker
+
+    default_chunking = object()
+    pipeline = build_indexing_pipeline(
+        parser=FakeParser(processed),
+        chunker=startup_chunker,
+        embedder=embedder,
+        vector_store=FakeVectorStore(),
+        chunker_factory=chunker_factory,
+        default_chunking=default_chunking,
+        embedder_window_resolver=lambda name: configured,
+    )
+    return pipeline, {"document": document, "partition": "p"}, factory_calls, default_chunking, startup_chunker
+
+
+@pytest.mark.asyncio
+async def test_chunks_are_sized_for_a_served_window_below_the_configured_one():
+    """An endpoint configured for 8192 against a server started with
+    --max-model-len 2048: sized for 8192, a chunk's tail past 2047 tokens would
+    never be embedded, so the default chunking is rebuilt for 2048."""
+    pipeline, row, factory_calls, default_chunking, startup_chunker = _served_window_pipeline(
+        ServingEmbedder([[1.0]], 2048), configured=8192
+    )
+
+    await pipeline.run(row)
+
+    assert factory_calls == [(default_chunking, 2048)]
+    assert startup_chunker.calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_preset_chunks_for_the_served_window_too():
+    pipeline, row, factory_calls, _, _ = _served_window_pipeline(ServingEmbedder([[1.0]], 2048), configured=8192)
+    config = IndexationPipelineConfig()
+    row["indexation_config"] = config
+
+    await pipeline.run(row)
+
+    assert factory_calls == [(config.chunking, 2048)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("served", [None, 2048, 32768])
+async def test_the_configured_window_stands_unless_the_server_serves_less(served):
+    pipeline, row, factory_calls, _, startup_chunker = _served_window_pipeline(
+        ServingEmbedder([[1.0]], served), configured=2047
+    )
+
+    await pipeline.run(row)
+
+    assert factory_calls == []
+    assert len(startup_chunker.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_overflow_warning_measures_against_the_served_window():
+    from loguru import logger as _logger
+
+    chunk = Chunk(id="c1", text="hello", partition="p", token_count=3000)
+    pipeline, row, _, _, _ = _served_window_pipeline(ServingEmbedder([[1.0]], 2048), configured=8192, chunks=[chunk])
+    messages, sink_id = _capture_warnings()
+    try:
+        await pipeline.run(row)
+    finally:
+        _logger.remove(sink_id)
+
+    assert any("2047-token limit" in m for m in messages)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "served",
+    [
+        pytest.param((None, 2048), id="unreachable-when-chunked"),
+        pytest.param((32768, 2048), id="redeployed-smaller-after-it-was-read"),
+    ],
+)
+async def test_a_window_that_shrinks_during_the_embed_fails_the_file_before_the_store(served):
+    """The server reports 2048 only after refusing the configured truncation
+    mid-embed, so the chunks were sized for 8192. Stored, a 3000-token chunk
+    would be searchable on its first 2047 tokens only: fail the file instead,
+    so a retry chunks it for 2048."""
+    from core.utils.exceptions import PipelineError
+
+    chunk = Chunk(id="c1", text="hello", partition="p", token_count=3000)
+    pipeline, row, factory_calls, _, _ = _served_window_pipeline(
+        ServingEmbedder([[1.0]], *served), configured=8192, chunks=[chunk]
+    )
+
+    with pytest.raises(PipelineError, match="Retry the file") as exc_info:
+        await pipeline.run(row)
+
+    assert exc_info.value.code == "EMBEDDER_WINDOW_SHRANK"
+    assert factory_calls == []
+    assert pipeline.vector_store.calls == []
+    assert "stored_count" not in row
+
+
+@pytest.mark.asyncio
+async def test_a_window_that_shrinks_during_the_embed_keeps_a_file_whose_chunks_all_fit():
+    pipeline, row, _, _, _ = _served_window_pipeline(
+        ServingEmbedder([[1.0]], None, 2048),
+        configured=8192,
+        chunks=[Chunk(id="c1", text="hello", partition="p", token_count=500)],
+    )
+
+    await pipeline.run(row)
+
+    assert row["stored_count"] == 1

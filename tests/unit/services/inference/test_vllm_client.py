@@ -937,6 +937,121 @@ class TestVLLMEmbedder:
 
         await self._make_embedder(handler).embed(["test"])
 
+    @staticmethod
+    def _served_window_handler(served: int | None, sent: list[int], *, rejection: str | None = None):
+        """A vLLM that serves *served* tokens and rejects any truncation above it."""
+        rejection = rejection or "truncate_prompt_tokens value is greater than max_model_len."
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.method == "GET":
+                assert request.url.path == "/v1/models"
+                entry = {"id": "bge-m3", "object": "model"}
+                if served is not None:
+                    entry["max_model_len"] = served
+                return httpx.Response(200, json={"object": "list", "data": [entry]})
+            body = json.loads(request.content)
+            sent.append(body["truncate_prompt_tokens"])
+            if served is None or body["truncate_prompt_tokens"] > served:
+                return httpx.Response(400, json={"error": {"message": rejection, "code": 400}})
+            return httpx.Response(
+                200, json={"data": [{"index": i, "embedding": [0.1]} for i in range(len(body["input"]))]}
+            )
+
+        return handler
+
+    @pytest.mark.asyncio
+    async def test_truncation_drops_below_the_served_max_model_len(self):
+        """An endpoint configured for 8192 against a server started with
+        --max-model-len 2048 embeds at 2047 instead of failing every call,
+        and later calls go straight to 2047."""
+        sent: list[int] = []
+        embedder = self._make_embedder(self._served_window_handler(2048, sent), max_model_len=8192)
+
+        assert await embedder.embed(["a"]) == [[0.1]]
+        assert await embedder.embed(["b"]) == [[0.1]]
+        assert sent == [8191, 2047, 2047]
+
+    @pytest.mark.asyncio
+    async def test_concurrently_rejected_batches_all_resend(self):
+        sent: list[int] = []
+        embedder = self._make_embedder(
+            self._served_window_handler(2048, sent), max_model_len=8192, batch_size=1, embed_concurrency=3
+        )
+
+        assert await embedder.embed(["a", "b", "c"]) == [[0.1]] * 3
+        assert sent.count(2047) == 3
+
+    @pytest.mark.asyncio
+    async def test_truncation_rejection_is_raised_when_the_server_does_not_report_its_window(self):
+        sent: list[int] = []
+        embedder = self._make_embedder(self._served_window_handler(None, sent), max_model_len=8192)
+
+        with pytest.raises(EmbeddingAPIError) as exc_info:
+            await embedder.embed(["a"])
+        assert exc_info.value.status_code == 400
+        assert sent == [8191]
+
+    @pytest.mark.asyncio
+    async def test_served_window_reads_models_once_and_bounds_the_truncation(self):
+        sent: list[int] = []
+        gets: list[httpx.Request] = []
+        serve = self._served_window_handler(2048, sent)
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.method == "GET":
+                gets.append(request)
+            return serve(request)
+
+        embedder = self._make_embedder(handler, max_model_len=8192)
+
+        assert await asyncio.gather(*(embedder.served_window() for _ in range(3))) == [2048] * 3
+        assert await embedder.served_window() == 2048
+        assert len(gets) == 1
+        # Short deadline: the probe runs before chunking, so a blackholed
+        # embedder must not hold the file for the 120 s embed timeout.
+        assert gets[0].extensions["timeout"]["read"] == 10.0
+        await embedder.embed(["a"])
+        assert sent == [2047], "known before the first embed, so no rejection first"
+
+    @pytest.mark.asyncio
+    async def test_served_window_asks_again_after_the_server_was_unreachable(self):
+        attempts: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            attempts.append(request)
+            if len(attempts) == 1:
+                raise httpx.ConnectError("refused")
+            return httpx.Response(200, json={"data": [{"id": "bge-m3", "max_model_len": 2048}]})
+
+        embedder = self._make_embedder(handler, max_model_len=8192)
+
+        assert await embedder.served_window() is None
+        assert await embedder.served_window() == 2048
+        assert len(attempts) == 2
+
+    @pytest.mark.asyncio
+    async def test_served_window_is_not_asked_again_when_the_server_does_not_report_it(self):
+        gets: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            gets.append(request)
+            return httpx.Response(200, json={"data": [{"id": "bge-m3"}]})
+
+        embedder = self._make_embedder(handler, max_model_len=8192)
+
+        assert await embedder.served_window() is None
+        assert await embedder.served_window() is None
+        assert len(gets) == 1
+
+    @pytest.mark.asyncio
+    async def test_other_bad_requests_are_raised_without_probing(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.method == "POST", "a 400 unrelated to truncation must not probe /models"
+            return httpx.Response(400, json={"error": {"message": "input is empty"}})
+
+        with pytest.raises(EmbeddingAPIError):
+            await self._make_embedder(handler, max_model_len=8192).embed(["a"])
+
     @pytest.mark.asyncio
     async def test_embed_connection_error(self):
         async def fail(*a, **kw):

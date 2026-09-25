@@ -86,10 +86,11 @@ vllm:
           # Weights are 1.1 GiB; the rest is KV cache, sized by maxModelLen.
           # vLLM pre-allocates this fraction whatever the model's size, and the
           # card is shared with Marker and the reranker, so keep it tight.
-          # maxModelLen must stay >= every OpenRag embedder max_model_len: the
+          # Keep maxModelLen >= every OpenRag embedder max_model_len: the
           # MAX_MODEL_LEN env (default 2047) *and* any per-endpoint
-          # extra.max_model_len set in the admin UI. vLLM rejects every request
-          # whose truncate_prompt_tokens (max_model_len - 1) exceeds it.
+          # extra.max_model_len set in the admin UI. vLLM rejects a request whose
+          # truncate_prompt_tokens (max_model_len - 1) exceeds it; OpenRag then
+          # embeds and sizes new chunks for this value instead.
           # Re-measure when the embedder model or the GPU changes.
           gpuMemoryUtilization: 0.1
           maxModelLen: 2048
