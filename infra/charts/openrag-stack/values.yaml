@@ -28,6 +28,212 @@ networkPolicy:
   externalPorts:
     - 8080  # openrag API/UI & admin-ui
     # - 8265  # ray dashboard - Security issue, the ray dashboard is not protected by any auth, so it should not be exposed to the public internet.
+  # Peers allowed to scrape the datastore exporters: Ray (8090), Postgres (9187)
+  # and Milvus (9091). Pods in this namespace already can; a Prometheus in
+  # another one cannot until it is listed here, and its targets report
+  # `up == 0`. Each port opens only on the pods that export it, and only to
+  # these peers — never through externalPorts: none of the three
+  # authenticates, and Milvus's 9091 also serves /debug/pprof. Standard
+  # NetworkPolicyPeer entries, e.g.
+  #   - namespaceSelector:
+  #       matchLabels:
+  #         kubernetes.io/metadata.name: monitoring
+  #     podSelector:
+  #       matchLabels:
+  #         app.kubernetes.io/name: prometheus
+  metricsFrom: []
+  # Sources allowed to reach the bundled Prometheus Operator's admission
+  # webhook (monitoring.bundled only — see templates/networkpolicy.yaml). Its
+  # caller is the API server, which is not a pod and on a managed control plane
+  # is not on the cluster network at all, so no selector can name it: empty
+  # therefore means any source, which is what makes the webhook work on a
+  # cluster whose control plane is off-node. Unlike the ports above, this opens
+  # one port on the pod that serves the webhook, and nothing else: by default
+  # that is its own admission-webhook pod (see kubePrometheusStack below),
+  # which serves the webhook, /metrics and /healthz only. Turn that deployment
+  # off and the operator serves the webhook on its own listener, which also
+  # carries /debug/pprof/ — narrow this list then. Narrow it anyway where the
+  # control plane's address is known, with standard NetworkPolicyPeers:
+  #   - ipBlock:
+  #       cidr: 10.0.0.0/24
+  webhookFrom: []
+
+# === Monitoring artifacts ===
+# One set of dashboards, dashboards/ in this chart — the directory the Compose
+# overlay mounts too — delivered to whichever Grafana is running:
+#   - integrated: the platform's Prometheus, Grafana and Alertmanager. Leave
+#     `bundled` off, enable `dashboards` and openrag.metrics.serviceMonitor,
+#     and give them the labels the platform selects on.
+#   - standalone: `bundled: true` installs kube-prometheus-stack in this
+#     release and points the same objects at it.
+# See docs/documentation/kubernetes.md, Monitoring.
+monitoring:
+  # Install kube-prometheus-stack (Prometheus Operator, Prometheus,
+  # Alertmanager, Grafana, node-exporter, kube-state-metrics) as a sub-chart,
+  # configured under `kubePrometheusStack:` below. Off by default: next to a
+  # Prometheus Operator the cluster already runs, a second one fights it over
+  # the same CRDs and objects.
+  # When on, it also turns on the dashboard ConfigMaps and the API
+  # ServiceMonitor, which then sends env.secrets.METRICS_TOKEN as its bearer
+  # (required, like the Compose overlay). Helm installs the operator's CRDs on
+  # the first install only: to turn this on for an existing release, apply
+  # them first (the docs give the command).
+  bundled: false
+  # One ConfigMap per dashboard, for a Grafana dashboard sidecar (the one
+  # kube-prometheus-stack's Grafana runs, or any k8s-sidecar).
+  dashboards:
+    enabled: false
+    # The label the sidecar watches (its sidecar.dashboards.label and
+    # labelValue). kube-prometheus-stack's default is grafana_dashboard: "1".
+    # A ConfigMap without the right one is created and never loaded.
+    label: grafana_dashboard
+    labelValue: "1"
+    labels: {}
+    # Grafana folder, written into the annotation the sidecar reads as its
+    # folderAnnotation (which also needs provider.foldersFromFilesStructure).
+    # A sidecar without one ignores it and uses its default folder. Same
+    # folder as the Compose provisioning.
+    folder: OpenRAG
+    folderAnnotation: grafana_folder
+    # Namespace for the ConfigMaps. Empty = the release namespace, which is
+    # enough for a sidecar searching every namespace (kube-prometheus-stack's
+    # default); set the Grafana namespace when the sidecar only watches its own.
+    # Helm does not create it, and installs into a namespace it does not own
+    # need the rights to write there.
+    namespace: ""
+
+# === Bundled monitoring stack (kube-prometheus-stack) ===
+# Sub-chart values, used only with monitoring.bundled=true. The chart is
+# aliased (see Chart.yaml), so an upstream key `kube-prometheus-stack.x.y` is
+# `kubePrometheusStack.x.y` here. The keys below are what OpenRAG relies on.
+#
+# Every workload gets requests and a memory limit: upstream sets none, which
+# leaves them BestEffort — nothing reserved, and evicted first under memory
+# pressure, so monitoring goes when a node is in trouble. Sized from a one-node
+# kind cluster (45k series, 249 rules) under the queries of every bundled
+# dashboard: each request is above what it used there, each limit leaves room
+# for a restart and heavier queries. No CPU limits: throttling delays scrapes
+# and rule evaluation, and protects nothing a request does not.
+kubePrometheusStack:
+  # The alias would otherwise become the chart name in every label, and the
+  # upstream dashboards and rules select on the real one.
+  nameOverride: "kube-prometheus-stack"
+  # Resource names (openrag-monitoring-prometheus, -alertmanager, -operator)
+  # would otherwise derive from the release name, truncated to 26 characters.
+  # Kept in sync with fullnameOverride by hand, like postgresql's.
+  fullnameOverride: "openrag-monitoring"
+  # Control-plane components a managed cluster (EKS, GKE, AKS...) runs out of
+  # reach. Each would render a Service in kube-system selecting pods that do
+  # not exist there, and its absent(up) alert (KubeControllerManagerDown,
+  # KubeSchedulerDown, and KubeProxyDown wherever kube-proxy is replaced)
+  # would fire forever. Turning one off also drops its rules and dashboard.
+  # On a self-managed control plane, turn them back on (kubernetes.md).
+  kubeControllerManager: { enabled: false }
+  kubeScheduler: { enabled: false }
+  kubeEtcd: { enabled: false }
+  kubeProxy: { enabled: false }
+  prometheusOperator:
+    # 28 Mi on kind; it caches the objects it watches, so it grows with
+    # the cluster.
+    resources:
+      requests: { cpu: 50m, memory: 128Mi }
+      limits: { memory: 512Mi }
+    admissionWebhooks:
+      deployment:
+        # Serve the admission webhook from its own pod, running the standalone
+        # admission-webhook binary. The API server must reach it through
+        # networkPolicy.webhookFrom, which is any source by default, and the
+        # operator's listener would expose /debug/pprof/ on the same port.
+        enabled: true
+        resources:
+          requests: { cpu: 10m, memory: 32Mi }
+          limits: { memory: 128Mi }
+      # The two hook Jobs that issue the webhook's certificate
+      # (admission-create) and hand its CA to the webhook configurations
+      # (admission-patch). 25 Mi peak on kind. A namespace whose ResourceQuota
+      # requires requests would refuse them, and the install with them.
+      patch:
+        resources:
+          requests: { cpu: 10m, memory: 32Mi }
+          limits: { memory: 128Mi }
+    # The config-reloader sidecar of Prometheus and of Alertmanager (15 Mi).
+    prometheusConfigReloader:
+      resources:
+        requests: { cpu: 10m, memory: 32Mi }
+        limits: { memory: 128Mi }
+  prometheus:
+    prometheusSpec:
+      # Select every ServiceMonitor, PodMonitor and PrometheusRule instead of
+      # only those labelled release: <this release>. On a standalone cluster
+      # this Prometheus is the only one, so this chart's objects and
+      # third-party ones (the GPU Operator's DCGM exporter) are picked up
+      # without anyone having to know the label.
+      serviceMonitorSelectorNilUsesHelmValues: false
+      podMonitorSelectorNilUsesHelmValues: false
+      ruleSelectorNilUsesHelmValues: false
+      # The Compose overlay's retention, on a volume rather than upstream's
+      # emptyDir, so a restart keeps the history. retentionSize stays under
+      # the volume: a full disk stops ingestion instead of dropping old blocks.
+      retention: 30d
+      retentionSize: 18GB
+      storageSpec:
+        volumeClaimTemplate:
+          spec:
+            accessModes: ["ReadWriteOnce"]
+            resources:
+              requests:
+                storage: 20Gi
+      # Memory follows the number of series, not the retention: 5.4 Ki per
+      # series on kind, where one node made 45k. Most of those were the API
+      # server's own (27k per replica); each pod adds about 270 (kubelet and
+      # kube-state-metrics), each node 1.7k (node-exporter). Three API servers,
+      # five nodes and 150 pods come to about 140k series, some 740 Mi. Watch
+      # prometheus_tsdb_head_series and raise both past about 190k.
+      resources:
+        requests: { cpu: 200m, memory: 1Gi }
+        limits: { memory: 3Gi }
+  alertmanager:
+    alertmanagerSpec:
+      # 21 Mi on kind. Replaces the operator's default request of 200 Mi.
+      resources:
+        requests: { cpu: 10m, memory: 64Mi }
+        limits: { memory: 256Mi }
+  kube-state-metrics:
+    # 20 Mi on kind; grows with the number of objects in the cluster.
+    resources:
+      requests: { cpu: 10m, memory: 64Mi }
+      limits: { memory: 256Mi }
+  prometheus-node-exporter:
+    # 9 Mi on kind, on every node.
+    resources:
+      requests: { cpu: 10m, memory: 32Mi }
+      limits: { memory: 128Mi }
+  grafana:
+    # Pinned for the same reason as fullnameOverride; NOTES.txt reads it.
+    fullnameOverride: "openrag-grafana"
+    # The admin password is generated into the openrag-grafana Secret (key
+    # admin-password). Argo CD renders without cluster lookups, so it would
+    # regenerate on every sync: there, set admin.existingSecret instead.
+
+    # 270 Mi on kind; queries over long ranges pass through it.
+    resources:
+      requests: { cpu: 100m, memory: 384Mi }
+      limits: { memory: 1Gi }
+    sidecar:
+      # Each of its two sidecars (dashboards and data sources): 74 Mi on kind.
+      resources:
+        requests: { cpu: 20m, memory: 96Mi }
+        limits: { memory: 256Mi }
+      dashboards:
+        # Upstream's defaults, written out because monitoring.dashboards must
+        # match them: the chart refuses to render when the two differ, since a
+        # sub-chart's values cannot be derived from this chart's.
+        label: grafana_dashboard
+        labelValue: "1"
+        # Honour monitoring.dashboards.folder, as the Compose provisioning does.
+        folderAnnotation: grafana_folder
+        provider:
+          foldersFromFilesStructure: true
 
 # === Global shared persistence ===
 persistence:
@@ -128,6 +334,19 @@ ray:
     tls: []
     path: /
     pathType: Prefix
+  # Every Ray node, head and workers, exports unauthenticated metrics on 8090
+  # (ray_tasks, ray_actors, ray_resources, ray_node_*).
+  metrics:
+    # Prometheus Operator discovery. Needs the monitoring.coreos.com CRDs, and
+    # ray.enabled=true: the embedded Ray has no fixed port to scrape.
+    podMonitor:
+      enabled: false
+      # Labels the operator's podMonitorSelector matches, e.g.
+      # release: kube-prometheus-stack. Unmatched, the PodMonitor is created
+      # and never scraped — which looks exactly like one that works.
+      labels: {}
+      interval: 30s
+      scrapeTimeout: 10s
 
 # === PostgreSQL (bitnami) ===
 postgresql:
@@ -146,8 +365,35 @@ postgresql:
       enabled: true
       size: 10Gi
       storageClass: *storageClass
+    # The sub-chart's own policy defaults to allowExternal: true, which opens
+    # every port it lists to any source: 5432, and the exporter's 9187 once
+    # metrics.enabled is on. NetworkPolicies add up, so the default-deny above
+    # could not narrow it. Off, Postgres gets the same rules as every other pod.
+    networkPolicy:
+      enabled: false
+  # The same policy on the read replicas, rendered with architecture: replication.
+  readReplicas:
+    networkPolicy:
+      enabled: false
   service:
     port: &pgPort 5432
+  # postgres_exporter sidecar (port 9187) and its Service. Turning it on changes
+  # the StatefulSet's pod template, so the upgrade restarts Postgres.
+  # The exporter signs in as the `postgres` superuser, whose password the
+  # sub-chart regenerates on every render that cannot read the live Secret
+  # (helm template, Argo CD) while the server keeps the first one. So turning
+  # it on requires auth.postgresPassword or auth.existingSecret; on a running
+  # release, set the password Postgres already has:
+  #   kubectl get secret openrag-postgresql -o jsonpath='{.data.postgres-password}' | base64 -d
+  metrics:
+    enabled: false
+    # Prometheus Operator discovery; requires metrics.enabled above. The
+    # sub-chart's key is `labels` (Milvus's below is `additionalLabels`).
+    serviceMonitor:
+      enabled: false
+      # e.g. release: kube-prometheus-stack — see ray.metrics.podMonitor.labels.
+      labels: {}
+      interval: 30s
 
 # === PostgreSQL provisioning & migrations ===
 postgresProvisioning:
@@ -185,10 +431,14 @@ milvus:
   minio:
     mode: distributed
     replicas: 3
-    # MinIO pulled minio/minio from Docker Hub; pull the same pinned tag from
-    # quay.io instead (mirrors the compose stacks' fix for the same issue).
+    # MinIO no longer publishes images (removed from Docker Hub, then quay.io);
+    # linagoraai/minio is an unmodified mirror of the same upstream release,
+    # matching the compose stacks. The tag is pinned here, not left to the
+    # Milvus chart's default, so a chart bump can't select a tag the mirror
+    # doesn't have.
     image:
-      repository: quay.io/minio/minio
+      repository: linagoraai/minio
+      tag: RELEASE.2024-12-18T13-15-44Z
     persistence:
       enabled: true
       size: 20Gi
@@ -203,6 +453,16 @@ milvus:
     service:
       type: ClusterIP
       port: 19530
+  # Every Milvus component already serves /metrics on 9091 (the sub-chart's
+  # metrics.enabled defaults to true); only the Operator object is off.
+  metrics:
+    enabled: true
+    # One ServiceMonitor over all component Services: proxy, mixcoord,
+    # datanode, querynode, streamingnode.
+    serviceMonitor:
+      enabled: false
+      # e.g. release: kube-prometheus-stack — see ray.metrics.podMonitor.labels.
+      additionalLabels: {}
 
 # === vLLM (embedder + whisper + llm + vlm) ===
 vllm:

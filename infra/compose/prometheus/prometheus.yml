@@ -26,3 +26,22 @@ scrape_configs:
       credentials_file: /etc/prometheus/openrag_token
     static_configs:
       - targets: ["openrag:8080"]
+
+  # Ray's metrics agent inside the API container (embedded Ray), on the port
+  # monitoring.docker-compose.yaml pins with RAY_METRICS_EXPORT_PORT. Metrics
+  # recorded in Ray actors (indexing, embed and VLM calls) are exported here,
+  # not on /metrics. No credential: the agent has none, which is why the port
+  # stays off the host.
+  - job_name: "ray"
+    static_configs:
+      - targets: ["openrag:8091"]
+    metric_relabel_configs:
+      # Ray prefixes what it exports with ray_. Stripping it from OpenRAG's
+      # series stores them under the names the API exports and the alert rules
+      # query, as the Helm chart's Ray PodMonitor does. Ray's own ray_* metrics
+      # keep their names. Only the name changes: WorkerId must survive, or
+      # concurrent workers' series collide and the whole scrape is rejected.
+      - source_labels: [__name__]
+        regex: ray_(openrag_.+)
+        target_label: __name__
+        replacement: $1

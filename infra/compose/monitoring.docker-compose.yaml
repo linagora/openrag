@@ -35,7 +35,9 @@ services:
       - GF_SERVER_SERVE_FROM_SUB_PATH=${GF_SERVER_SERVE_FROM_SUB_PATH:-false}
     volumes:
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
-      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      # The chart's copy is the only one: Helm's .Files.Glob reads only inside
+      # the chart directory, and the Kubernetes ConfigMaps are rendered from it.
+      - ../charts/openrag-stack/dashboards:/var/lib/grafana/dashboards:ro
       - grafana_data:/var/lib/grafana
     depends_on:
       - prometheus
@@ -76,6 +78,20 @@ services:
               count: all
               capabilities: [gpu]
     restart: unless-stopped
+
+  # The API runs Ray embedded, and Ray picks a random port for its metrics
+  # agent unless told otherwise. Pin it so the "ray" scrape job can name it:
+  # indexing and the embed/VLM calls are recorded in Ray actors and only ever
+  # reach Prometheus through that agent. Unauthenticated, so it is reachable on
+  # the compose network only and deliberately absent from `ports:`. Both API
+  # variants share the `openrag` alias the job targets.
+  openrag:
+    environment:
+      RAY_METRICS_EXPORT_PORT: "8091"
+
+  openrag-cpu:
+    environment:
+      RAY_METRICS_EXPORT_PORT: "8091"
 
 configs:
   # Inline `content` needs Docker Compose >= 2.23.1. GET /metrics fails closed

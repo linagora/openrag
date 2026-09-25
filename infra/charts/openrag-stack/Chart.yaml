@@ -3,7 +3,7 @@ name: openrag-stack
 description: A Helm chart for Kubernetes
 type: application
 
-version: 0.6.5
+version: 0.6.7
 appVersion: "2.2.1"
 
 maintainers:
@@ -38,3 +38,12 @@ dependencies:
     version: ">=0.1.7 <1.0.0"
     repository: "https://vllm-project.github.io/production-stack"
     condition: vllm.enabled
+  # Standalone monitoring. Off by default so an install next to a platform's
+  # own Prometheus Operator never plants a second one. Aliased because
+  # vllm-stack carries its own (disabled) kube-prometheus-stack, and two
+  # sub-charts of one name make Helm coalesce one's defaults into the other.
+  - name: kube-prometheus-stack
+    alias: kubePrometheusStack
+    version: "91.4.1"
+    repository: "https://prometheus-community.github.io/helm-charts"
+    condition: monitoring.bundled

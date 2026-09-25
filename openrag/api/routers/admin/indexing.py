@@ -186,8 +186,7 @@ async def add_file(
                 detail="workspace_ids must be a JSON array of strings",
             )
         for ws_id in parsed_workspace_ids:
-            ws = await service.get_workspace(ws_id)
-            if not ws or ws["partition_name"] != partition:
+            if not await service.get_workspace(partition, ws_id):
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail=f"Workspace '{ws_id}' not found in partition '{partition}'",

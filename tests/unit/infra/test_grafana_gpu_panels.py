@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-DASHBOARDS = Path(__file__).resolve().parents[3] / "infra/compose/grafana/dashboards"
+DASHBOARDS = Path(__file__).resolve().parents[3] / "infra/charts/openrag-stack/dashboards"
 
 # Scraped from the real exporters on an NVIDIA L4 (driver 580.95.05):
 # dcgm-exporter 4.6.0-4.8.3 with the GPU Operator's collector list

@@ -122,7 +122,9 @@ variable is missing from `.env`.
 ## Scraping in Kubernetes
 
 The Helm chart (`infra/charts/openrag-stack`) offers both discovery
-mechanisms; pick the one your Prometheus uses.
+mechanisms; pick the one your Prometheus uses. On a cluster without a
+Prometheus, `monitoring.bundled` installs one with Grafana and configures the
+scrape below itself; see [Kubernetes monitoring](/openrag/documentation/kubernetes/#monitoring).
 
 **Prometheus Operator / kube-prometheus-stack.** Enable the `ServiceMonitor`
 and label it so the operator's `serviceMonitorSelector` picks it up:
@@ -191,12 +193,15 @@ Point a Prometheus data source at the server that scrapes OpenRAG and query
 `openrag_http_requests_total` in Explore. A working setup returns series with
 `method`, `endpoint` and `status_code` labels.
 
-The dashboards under `infra/compose/grafana/dashboards/` load unchanged into
-any Grafana:
+The dashboards under `infra/charts/openrag-stack/dashboards/` load unchanged into
+any Grafana. It is their only copy: the Compose overlay provisions them from
+there, and the Helm chart renders them as ConfigMaps for a Grafana dashboard
+sidecar ([Kubernetes monitoring](/openrag/documentation/kubernetes/#monitoring)).
 
 | Dashboard | UID | Shows |
 | --- | --- | --- |
 | OpenRAG HTTP Metrics | `openrag-http` | Request rate, errors and latency per route ([guide](/openrag/documentation/grafana_http_dashboard/)) |
+| OpenRAG Service | `openrag-service` | Indexing, inference and catalog drift ([guide](/openrag/documentation/grafana_service_dashboard/)) |
 | Infrastructure Overview | `system-overview` | Host CPU, memory, disk and GPU; needs node-exporter and a GPU exporter |
 
 Every panel reads the **Data source** variable (`DS_PROMETHEUS`), which defaults
@@ -207,7 +212,8 @@ Compose, the ServiceMonitor's Service name on Kubernetes), so no job name is
 written in either.
 
 To load them into your own Grafana, import each file through **Dashboards → New
-→ Import**, or provision them from disk. Keep the files as they are in the
+→ Import**, provision them from disk, or on Kubernetes enable
+`monitoring.dashboards`. Keep the files as they are in the
 repository rather than re-exporting them with **Export for sharing externally**:
 that option adds an `__inputs` section, which only the import dialog resolves.
 File provisioning and a ConfigMap sidecar load the JSON as-is and would leave
@@ -230,6 +236,7 @@ it unresolved, so a unit test rejects such an export.
 - Counters reset when the API restarts; use `rate()` and `increase()` rather
   than raw values.
 - Vector-store metrics are not exposed yet. Indexing and worker-side
-  inference metrics are exported on Ray's metrics agent, which neither the
-  chart nor the compose overlay scrapes yet (see the
+  inference metrics are exported on Ray's metrics agent, which the chart
+  scrapes through `ray.metrics.podMonitor` and the compose overlay does not
+  scrape yet (see the
   [metrics reference](/openrag/documentation/metrics_reference/)).
