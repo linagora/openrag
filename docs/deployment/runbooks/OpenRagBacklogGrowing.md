@@ -19,7 +19,7 @@ and max by (state) (deriv(openrag_ingest_tasks{state="QUEUED"}[5m])) > 0
 
 ## What it means
 
-The queue has trended upward for half an hour **and** is over the depth floor, 50
+The queue has trended upward for 25 minutes **and** is over the depth floor, 50
 tasks by default. Both conditions
 matter: a burst upload rises steeply and drains fine, and a steady small queue is a
 healthy pipeline. This is arrival rate exceeding capacity.

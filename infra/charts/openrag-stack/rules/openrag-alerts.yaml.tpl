@@ -18,10 +18,12 @@ Each key is checked against the form its expression can use, not one pattern
 for all. A ratio is a plain number from 0 to 1: `> 5m` is valid PromQL (300),
 and a ratio above 1 can never be reached, so either is an alert that never
 fires. A floor or a depth is a plain non-negative number. The idle threshold is
-a whole number of seconds or a Prometheus duration, and never zero: it is also
-the range of a `min_over_time`, and `[0s]` is a parse error that stops the whole
-rule group loading. Durations must list their units largest first (`1h30m`) —
-Prometheus refuses `30m1h`, again for the whole group.
+a whole number of seconds greater than zero, never a duration: it is compared
+with time(), where a duration literal such as `1h30m` needs Prometheus 2.54 or
+newer, and older ones refuse the whole rule group; it is also the range of a
+`min_over_time`, where `[0s]` is a parse error with the same effect. A `for`
+duration must list its units largest first (`1h30m`) — Prometheus refuses
+`30m1h`, again for the whole group.
 */}}
 {{- $cfg := .Values.monitoring.prometheusRule }}
 {{- $number := `^[0-9]+(\.[0-9]+)?$` }}
@@ -59,9 +61,8 @@ Prometheus refuses `30m1h`, again for the whole group.
 {{- $_ := set $for $name (toString $value) }}
 {{- end }}
 {{- end }}
-{{- /* The same values in words, for the annotations. A bare number of idle
-   seconds reads as minutes when it divides evenly; anything more exotic than a
-   single-unit duration is quoted as written. */}}
+{{- /* The same values in words, for the annotations. The idle seconds read as
+   minutes when they divide evenly, as seconds otherwise. */}}
 {{- /* The idle threshold again, as a range for min_over_time: "<n>s". */}}
 {{- $idleRange := printf "%ss" (toString $t.ingestIdleSeconds) }}
 {{- $idle := toString $t.ingestIdleSeconds }}
