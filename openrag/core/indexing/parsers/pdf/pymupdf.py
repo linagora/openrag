@@ -2,7 +2,15 @@
 
 The lightweight, no-VLM, no-GPU PDF backend. Uses ``pymupdf`` (a.k.a.
 ``fitz``) for plain-text extraction and ``pymupdf4llm`` for Markdown
-extraction. Operates on ``Document.raw_bytes`` — file I/O is upstream.
+extraction.
+
+Opens the document's ``source_path`` when it has one, and falls back to
+``Document.raw_bytes`` when it does not. Opening a path lets MuPDF read the
+file itself instead of requiring the whole document resident in this process
+first, which is what #846 is about: this is the shipped default PDF backend,
+so every deployment that has not switched ``PDFLOADER`` is on this path. Bytes
+remain supported because not every document has a file behind it — an EML
+attachment is bytes and nothing else.
 
 In ``mode="markdown"``, embedded images are surfaced as ``ImageBlock``s
 via ``pymupdf4llm``'s ``embed_images=True`` (each image becomes a
@@ -43,9 +51,23 @@ logger = get_logger()
 _PYMUPDF_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="pymupdf")
 
 
-def _extract_text(raw: bytes, filename: str) -> tuple[list[str], list[ImageBlock]]:
+def _open(source: str | bytes) -> pymupdf.Document:
+    """Open ``source`` as a PDF, whether it is a path or a byte string.
+
+    No ``filetype`` on the path branch: MuPDF identifies the format from the
+    content, and was measured ignoring the hint entirely — passing ``"pdf"``,
+    ``"txt"`` or ``"png"`` for the same PDF all parse identically. An argument
+    that changes nothing reads as a guard and is not one, so it is left out.
+    The stream branch keeps it because there is no filename to fall back on.
+    """
+    if isinstance(source, str):
+        return pymupdf.open(source)
+    return pymupdf.open(stream=source, filetype="pdf")
+
+
+def _extract_text(source: str | bytes, filename: str) -> tuple[list[str], list[ImageBlock]]:
     """Return one stripped plain-text string per page; no images."""
-    with pymupdf.open(stream=raw, filetype="pdf") as doc:
+    with _open(source) as doc:
         return [page.get_text().strip() for page in doc], []
 
 
@@ -53,7 +75,7 @@ def _to_markdown(doc: pymupdf.Document) -> list[dict]:
     return pymupdf4llm.to_markdown(doc, page_chunks=True, embed_images=False, write_images=False)
 
 
-def _extract_markdown(raw: bytes, filename: str) -> tuple[list[str], list[ImageBlock]]:
+def _extract_markdown(source: str | bytes, filename: str) -> tuple[list[str], list[ImageBlock]]:
     """Return structured Markdown per page (no images).
 
     pymupdf is the lightweight, no-VLM backend. ``pymupdf4llm`` preserves
@@ -64,7 +86,7 @@ def _extract_markdown(raw: bytes, filename: str) -> tuple[list[str], list[ImageB
     (fast). Image-aware parsing is marker/docling's job, so no ``ImageBlock``s
     are produced here.
     """
-    with pymupdf.open(stream=raw, filetype="pdf") as doc:
+    with _open(source) as doc:
         try:
             chunks = _to_markdown(doc)
             pages = [(chunk.get("text") or "").strip() for chunk in chunks]
@@ -83,8 +105,13 @@ def _extract_markdown(raw: bytes, filename: str) -> tuple[list[str], list[ImageB
             cleaned = doc.tobytes(garbage=4, clean=True)
     # Outside the `with`: the failed document is closed before the cleaned copy
     # is opened, so MuPDF's parsed structures for the first are released rather
-    # than held alongside the second. ``raw`` itself belongs to the caller's
-    # Document and stays live either way (#846).
+    # than held alongside the second.
+    #
+    # The recovery path allocates one full copy whatever ``source`` was:
+    # ``tobytes`` produces bytes by construction, so a path-opened document
+    # still materializes here. Inherent to rewriting the file — and note the
+    # caller's ``raw_bytes`` is normally still resident too, so this is a
+    # second copy in practice, not the only one (#846, #1001).
     with pymupdf.open(stream=cleaned, filetype="pdf") as clean_doc:
         chunks = _to_markdown(clean_doc)
     pages = [(chunk.get("text") or "").strip() for chunk in chunks]
@@ -111,14 +138,23 @@ class PyMuPDFParser(DocumentParser):
         return [DocumentType.PDF.value]
 
     async def parse(self, document: Document) -> ProcessedDocument:
-        if not document.raw_bytes:
+        # Prefer the path so MuPDF reads the file itself. This does *not* on its
+        # own keep the document out of memory: ``fz_open_memory`` never copied
+        # the buffer, and every production ``Document`` still carries
+        # ``raw_bytes`` until ``_release_raw_bytes`` runs after ``parse_stage``.
+        # Measured, stream-open and path-open peak the same; the file-sized
+        # saving arrives only when the eager read in ``_load_document`` goes
+        # (#1001), which needs this preference to already be here. Bytes are the
+        # fallback for documents with no file behind them (EML attachments).
+        source: str | bytes | None = document.source_path or document.raw_bytes
+        if not source:
             return ProcessedDocument(
                 document_id=document.id,
                 metadata=dict(document.metadata),
             )
 
         pages, images = await asyncio.get_running_loop().run_in_executor(
-            _PYMUPDF_EXECUTOR, self._extract, document.raw_bytes, document.filename
+            _PYMUPDF_EXECUTOR, self._extract, source, document.filename
         )
         # Keep one TextBlock per source page (including empties) so callers
         # can preserve a 1-to-1 mapping with the original PDF's pagination.
