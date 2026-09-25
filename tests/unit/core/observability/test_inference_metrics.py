@@ -435,7 +435,7 @@ def _streaming_client(lines: list[str], monkeypatch: pytest.MonkeyPatch, calls: 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("status", "outcome"), [(400, "rejected"), (401, "error"), (403, "rejected"), (429, "error"), (503, "error")]
+    ("status", "outcome"), [(400, "rejected"), (401, "rejected"), (403, "rejected"), (429, "error"), (503, "error")]
 )
 async def test_a_refused_stream_is_classified_by_status(
     monkeypatch: pytest.MonkeyPatch, status: int, outcome: str
@@ -453,28 +453,18 @@ async def test_a_refused_stream_is_classified_by_status(
     assert [c["outcome"] for c in calls] == [outcome]
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize(("model", "outcome"), [("gpt-forbidden", "rejected"), ("test-model", "error")])
-async def test_a_401_on_a_caller_chosen_model_is_rejected(
-    monkeypatch: pytest.MonkeyPatch, model: str, outcome: str
-) -> None:
-    """LiteLLM answers "this key may not use that model" with 401 through v1.84.
-    A model named in llm_override is the caller's choice, so its 401 is the
-    request's fault; counted as ``error`` it let any user raise the configured
-    provider's error ratio. The same 401 on the configured model is our key."""
-    from core.utils.exceptions import InferenceError
+@pytest.mark.parametrize(
+    ("operation", "outcome"),
+    [("chat", "rejected"), ("completion", "rejected"), ("embed", "error"), ("rerank", "error"), ("vlm", "error")],
+)
+def test_a_401_is_an_error_only_where_callers_cannot_shape_the_request(operation: str, outcome: str) -> None:
+    """Callers shape an LLM request: the model through llm_override, and any
+    extra chat-body field, which is forwarded. LiteLLM answers a refused model,
+    or an ``api_key`` sent in the body, with 401, so counting it as ``error`` let
+    any user raise the provider's error ratio. Elsewhere a 401 is our key."""
+    from services.inference._metrics import outcome_for
 
-    calls: list = []
-    client = _streaming_client([], monkeypatch, calls)
-    client._client = _FakeHttpClient([], status_code=401)
-
-    with pytest.raises(InferenceError):
-        async for _ in client.stream_chat(
-            [{"role": "user", "content": "q"}], metadata={"llm_override": {"model": model}}
-        ):
-            pass
-
-    assert [c["outcome"] for c in calls] == [outcome]
+    assert outcome_for(InferenceError("refused", status_code=401), operation=operation) == outcome
 
 
 @pytest.mark.asyncio
@@ -577,10 +567,11 @@ def test_content_mentioning_usage_records_nothing(recorded) -> None:
     ],
 )
 def test_every_outcome_is_a_declared_value(exc: BaseException) -> None:
-    from core.observability.metric_specs import INFERENCE_OUTCOME_VALUES
+    from core.observability.metric_specs import INFERENCE_OPERATION_VALUES, INFERENCE_OUTCOME_VALUES
     from services.inference._metrics import outcome_for
 
-    assert outcome_for(exc) in INFERENCE_OUTCOME_VALUES
+    for operation in INFERENCE_OPERATION_VALUES:
+        assert outcome_for(exc, operation=operation) in INFERENCE_OUTCOME_VALUES
 
 
 def test_success_is_a_declared_outcome() -> None:

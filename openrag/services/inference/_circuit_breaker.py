@@ -1,6 +1,6 @@
 from collections.abc import Callable
 from datetime import timedelta
-from functools import wraps
+from functools import partial, wraps
 
 import httpx
 from aiobreaker import CircuitBreaker, CircuitBreakerError, CircuitBreakerListener
@@ -33,39 +33,38 @@ _UNKNOWN_STATE = -1
 #: failures: every call fails the same way until an operator fixes the key, and
 #: excluding them left both the breaker and the error-ratio alert silent.
 #:
-#: 401 only. 403 can also mean "this key may not use *that* model", and a
-#: model-only llm_override reaches the configured provider through the shared
-#: breaker: counting it would let any user open the breaker for every tenant
-#: by repeating such a request. OpenAI-compatible APIs answer a bad key with 401.
-#: ``refuses_our_credential`` names the one 401 that is not counted.
+#: 401 only. 403 can also mean "this key may not use *that* model", and
+#: counting it would let a user open a shared breaker for every tenant by
+#: repeating such a request. OpenAI-compatible APIs answer a bad key with 401.
 PROVIDER_AUTH_4XX = frozenset({401})
 
-
-def refuses_our_credential(exc: BaseException, status: int) -> bool:
-    """Does *status* say the provider refuses our key, not just this request?
-
-    A 401 on a call whose model or endpoint the caller chose (``llm_override``)
-    can be the provider refusing *that* model for our key: LiteLLM answers
-    model-access denial with 401 through v1.84, 403 from v1.85. That call is the
-    request's fault, and counting it would let any user open the shared breaker
-    and raise the provider's error ratio, so only a 401 on the configured model
-    and endpoint counts.
-    """
-    return status in PROVIDER_AUTH_4XX and not getattr(exc, "client_override", False)
+#: Breakers whose requests callers shape. The LLM takes its model from
+#: ``llm_override`` and forwards unknown chat-body fields (the request schema is
+#: ``extra="allow"``), so a 401 there can be the caller's doing: LiteLLM answers
+#: model-access denial with 401 through v1.84, and prefers an ``api_key`` sent
+#: in the body over the deployment's. Counting it let any user open the shared
+#: breaker, so on these a 401 is excluded like any 4xx. A revoked LLM key then
+#: shows as every LLM call ``rejected``, not as an open breaker.
+CALLER_SHAPED_BREAKERS = frozenset({"llm"})
 
 
-def _is_client_error(exc: Exception) -> bool:
+def counts_refused_credential(status: int, *, caller_shaped: bool) -> bool:
+    """Is *status* our credential being refused, rather than this request?"""
+    return status in PROVIDER_AUTH_4XX and not caller_shaped
+
+
+def _is_client_error(exc: Exception, *, caller_shaped: bool) -> bool:
     if isinstance(exc, httpx.HTTPStatusError):
         status = exc.response.status_code
     elif isinstance(exc, OpenRAGError):
         status = exc.status_code
     else:
         return False
-    return 400 <= status < 500 and not refuses_our_credential(exc, status)
+    return 400 <= status < 500 and not counts_refused_credential(status, caller_shaped=caller_shaped)
 
 
-def _is_excluded(exc: Exception) -> bool:
-    if _is_client_error(exc):
+def _is_excluded(exc: Exception, *, breaker: str) -> bool:
+    if _is_client_error(exc, caller_shaped=breaker in CALLER_SHAPED_BREAKERS):
         return True
     if isinstance(exc, LLMParsingError):
         return True
@@ -91,7 +90,7 @@ def get_breaker(name: str, fail_max: int = 50, timeout_duration: float = 60.0) -
             fail_max=fail_max,
             timeout_duration=timedelta(seconds=timeout_duration),
             name=name,
-            exclude=[_is_excluded],
+            exclude=[partial(_is_excluded, breaker=name)],
             listeners=[_LoggingListener()],
         )
         # State is otherwise written only on a transition, so a breaker that

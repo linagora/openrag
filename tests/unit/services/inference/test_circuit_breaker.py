@@ -196,11 +196,12 @@ def test_the_closed_state_is_written_before_the_breaker_is_reachable(monkeypatch
     assert reachable_at_write == [False]
 
 
+@pytest.mark.parametrize("breaker", ["embedder", "reranker", "vlm"])
 @pytest.mark.parametrize(
     ("status", "excluded"),
     [(400, True), (403, True), (404, True), (408, True), (429, True), (401, False), (500, False)],
 )
-def test_a_refused_credential_counts_toward_the_breaker(status: int, excluded: bool) -> None:
+def test_a_refused_credential_counts_toward_the_breaker(breaker: str, status: int, excluded: bool) -> None:
     """A revoked or wrong key (401) fails every call alike. Excluded like any
     4xx, it could never open the breaker, and the error-ratio alert ignored it
     too. 403 stays excluded: it can be one request's model the key may not use,
@@ -212,17 +213,31 @@ def test_a_refused_credential_counts_toward_the_breaker(status: int, excluded: b
     request = httpx.Request("POST", "http://provider.invalid/v1/embeddings")
     raw = httpx.HTTPStatusError("refused", request=request, response=httpx.Response(status, request=request))
 
-    assert cb._is_excluded(raw) is excluded
-    assert cb._is_excluded(InferenceError("refused", status_code=status)) is excluded
+    assert cb._is_excluded(raw, breaker=breaker) is excluded
+    assert cb._is_excluded(InferenceError("refused", status_code=status), breaker=breaker) is excluded
 
 
-@pytest.mark.parametrize("status", [401, 403, 404])
-def test_a_refusal_of_a_caller_chosen_model_never_counts(status: int) -> None:
-    """LiteLLM answers "this key may not use that model" with 401 through v1.84.
-    On a request whose model the caller chose through llm_override, a 401 is
-    that request refused, so it is excluded like any 4xx: counted, one burst of
-    such requests opened the shared breaker for every tenant."""
+@pytest.mark.parametrize(
+    ("status", "excluded"),
+    [(400, True), (401, True), (403, True), (408, True), (429, True), (500, False)],
+)
+def test_the_llm_breaker_excludes_every_4xx(status: int, excluded: bool) -> None:
+    """Callers shape the LLM's request: the model through llm_override, and any
+    extra chat-body field is forwarded. LiteLLM answers a refused model, or an
+    ``api_key`` sent in the body, with 401, so a counted 401 let one burst of
+    such requests open the shared breaker for every tenant."""
     from core.utils.exceptions import InferenceError
     from services.inference import _circuit_breaker as cb
 
-    assert cb._is_excluded(InferenceError("refused", status_code=status, client_override=True)) is True
+    assert cb._is_excluded(InferenceError("refused", status_code=status), breaker="llm") is excluded
+
+
+def test_each_breaker_applies_its_own_401_rule() -> None:
+    """The rule is bound when the breaker is built, from its name."""
+    from core.utils.exceptions import InferenceError
+    from services.inference import _circuit_breaker as cb
+
+    refused = InferenceError("refused", status_code=401)
+
+    assert cb.get_breaker("llm").is_system_error(refused) is False
+    assert cb.get_breaker("embedder").is_system_error(refused) is True

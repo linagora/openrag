@@ -270,20 +270,8 @@ class CircuitBreakerOpenError(ServiceUnavailableError):
 class InferenceError(OpenRAGError):
     """Base for all inference service failures. Maps to HTTP 503."""
 
-    def __init__(
-        self,
-        message: str,
-        *,
-        code: str = "INFERENCE_ERROR",
-        status_code: int = 503,
-        client_override: bool = False,
-        **kwargs,
-    ):
+    def __init__(self, message: str, *, code: str = "INFERENCE_ERROR", status_code: int = 503, **kwargs):
         super().__init__(message, code=code, status_code=status_code, **kwargs)
-        #: The failed request named a model or endpoint the caller chose
-        #: (``metadata.llm_override``). An attribute, not ``extra``: it steers
-        #: health accounting and must never reach the response body.
-        self.client_override = client_override
 
 
 class LLMParsingError(InferenceError):

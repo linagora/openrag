@@ -45,7 +45,7 @@ from core.utils.exceptions import (
     InferenceTimeoutError,
     OpenRAGError,
 )
-from services.inference._circuit_breaker import refuses_our_credential
+from services.inference._circuit_breaker import counts_refused_credential
 
 #: Fallback for a client built outside the factory (tests, scripts): it still
 #: records, and lands in a fixed bucket instead of minting a label value.
@@ -71,7 +71,7 @@ def resolve_provider(instance: Any, kwargs: dict[str, Any]) -> str:
     return name if isinstance(name, str) and name else _UNKNOWN_PROVIDER
 
 
-def outcome_for(exc: BaseException) -> str:
+def outcome_for(exc: BaseException, *, operation: str) -> str:
     """Classify a failed call into one of ``INFERENCE_OUTCOME_VALUES``.
 
     Both checks are on *families*, deliberately.
@@ -95,10 +95,11 @@ def outcome_for(exc: BaseException) -> str:
     could otherwise drive a healthy provider's error ratio up at will. Throttling
     (429) and a provider-side request timeout (408) are the provider struggling,
     and stay ``error``; so does 401, a credential the provider refuses, which
-    fails every call alike — unless the caller chose the model or endpoint, when
-    it can be that model refused (``refuses_our_credential``). 403 stays
-    ``rejected``: it can be one request's model the key may not use. The circuit
-    breaker counts 401 alike, but still excludes 408 and 429 (``_is_excluded``).
+    fails every call alike — except on an LLM operation, whose request callers
+    shape and can make the provider answer 401 (``CALLER_SHAPED_BREAKERS``).
+    403 stays ``rejected``: it can be one request's model the key may not use.
+    The circuit breaker draws the same 401 line, but still excludes 408 and 429
+    (``_is_excluded``).
     """
     if isinstance(exc, (asyncio.CancelledError, GeneratorExit)):
         return "cancelled"
@@ -106,7 +107,7 @@ def outcome_for(exc: BaseException) -> str:
         return "circuit_open"
     if isinstance(exc, (InferenceTimeoutError, EmbeddingTimeoutError)):
         return "timeout"
-    if _is_rejected_request(exc):
+    if _is_rejected_request(exc, caller_shaped=operation in _CALLER_SHAPED_OPERATIONS):
         return "rejected"
     return "error"
 
@@ -114,15 +115,20 @@ def outcome_for(exc: BaseException) -> str:
 #: 4xx statuses that describe the provider's state, not the request's.
 _PROVIDER_SIDE_4XX = frozenset({408, 429})
 
+#: The LLM's operations: the metrics side of ``CALLER_SHAPED_BREAKERS``.
+_CALLER_SHAPED_OPERATIONS = frozenset({"chat", "completion"})
 
-def _is_rejected_request(exc: BaseException) -> bool:
+
+def _is_rejected_request(exc: BaseException, *, caller_shaped: bool) -> bool:
     if isinstance(exc, httpx.HTTPStatusError):
         status = exc.response.status_code
     elif isinstance(exc, OpenRAGError):
         status = exc.status_code
     else:
         return False
-    return 400 <= status < 500 and status not in _PROVIDER_SIDE_4XX and not refuses_our_credential(exc, status)
+    if status in _PROVIDER_SIDE_4XX or counts_refused_credential(status, caller_shaped=caller_shaped):
+        return False
+    return 400 <= status < 500
 
 
 def with_inference_metrics(operation: str, *, capture_usage: bool = False) -> Callable:
@@ -149,7 +155,7 @@ def with_inference_metrics(operation: str, *, capture_usage: bool = False) -> Ca
                 # BaseException so a cancelled request is not silently recorded
                 # as a success; CancelledError is recorded as "cancelled" and
                 # re-raised untouched.
-                outcome = outcome_for(exc)
+                outcome = outcome_for(exc, operation=operation)
                 raise
             finally:
                 record_inference(

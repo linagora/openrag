@@ -118,7 +118,7 @@ Label values:
   up: a closed stream, its own deadline, or siblings cancelled after one failed; not a
   provider failure, so keep it out of error ratios), `rejected` (a 4xx the request caused,
   such as an unknown model or an over-long prompt; 408 and 429 stay `error`, and so
-  does 401 unless the caller chose the model)
+  does 401 except on LLM calls, whose request the caller shapes)
 - `kind` — `prompt`, `completion`
 - `pool` — `marker`, `docling`, `pymupdf`, `pdf_client`, `local_whisper`, `audio_client` for PDF and audio; any other format is labelled by its document type (`text`, `docx`, `eml`, `image`, ...)
 - `name` — `llm`, `embedder`, `vlm`, `reranker`
