@@ -222,7 +222,9 @@ loader:
 
   # Env: MARKER_MAX_TASKS_PER_CHILD, MARKER_POOL_SIZE, MARKER_MAX_PROCESSES,
   #      MARKER_NUM_GPUS, MARKER_TIMEOUT, MARKER_CHILD_TIMEOUT_RATIO,
-  #      MARKER_PDFTEXT_WORKERS, MARKER_CHUNK_SIZE
+  #      MARKER_PDFTEXT_WORKERS, MARKER_CHUNK_SIZE,
+  #      MARKER_PARSE_MEMORY_LIMIT_MB (0 = off; per-child RLIMIT_DATA ceiling,
+  #      must sit well above the child's baseline — see env_vars.md)
   marker_max_tasks_per_child: 20
   marker_pool_size: 1
   marker_max_processes: 2
