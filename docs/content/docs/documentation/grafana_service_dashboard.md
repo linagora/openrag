@@ -31,7 +31,7 @@ How each deployment collects them:
 | --- | --- | --- |
 | Compose, monitoring overlay | job `openrag` | job `ray`, on the port the overlay pins with `RAY_METRICS_EXPORT_PORT` |
 | Kubernetes, `ray.enabled=true` | `openrag.metrics.serviceMonitor` | a PodMonitor on the Ray pods' `metrics` port |
-| Kubernetes, `ray.enabled=false` | `openrag.metrics.serviceMonitor` | not collected (see Limitations) |
+| Kubernetes, `ray.enabled=false` | `openrag.metrics.serviceMonitor` | a PodMonitor on the `openrag` pod's `ray-metrics` port, which the chart pins with `RAY_METRICS_EXPORT_PORT` |
 
 Ray prefixes everything it exports with `ray_`. Both scrape paths above strip it from
 OpenRAG's series, so they are stored under the names the API exports and the alert rules
@@ -112,9 +112,9 @@ matters; see [catalog reconciliation](/openrag/documentation/catalog_reconciliat
 
 ## Limitations
 
-- **Embedded Ray on Kubernetes is not collected.** With `ray.enabled=false` (the chart
-  default) Ray runs inside the API pod on a random metrics port, and the chart scrapes nothing
-  there. The ingestion rows and the embed and VLM half of the inference row stay empty.
+- **Ray is scraped only with its `PodMonitor` on.** `ray.metrics.podMonitor.enabled`, or
+  `monitoring.bundled`. Without it the ingestion rows and the embed and VLM half of the
+  inference row stay empty, whichever Ray topology runs.
 - **Everything Prometheus scrapes is aggregated.** Two OpenRAG releases scraped by one
   Prometheus show as one.
 - **Ray Serve.** Under `ENABLE_RAY_SERVE=true` the chart does not scrape the API's `/metrics`

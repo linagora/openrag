@@ -208,7 +208,7 @@ serve annotation-based discovery instead; see
 On a cluster with no monitoring of its own, `monitoring.bundled: true` installs
 kube-prometheus-stack in the release: Prometheus Operator, Prometheus,
 Alertmanager, Grafana, node-exporter and kube-state-metrics. It also turns on the
-dashboard ConfigMaps and the API `ServiceMonitor`:
+dashboard ConfigMaps, the API `ServiceMonitor` and the Ray `PodMonitor`:
 
 ```yaml
 monitoring:
@@ -420,9 +420,11 @@ running OpenRAG, and the host panels likewise need node-exporter
 ## Monitoring Ray, Postgres and Milvus
 
 The chart wires the stack's three dependencies into a Prometheus that runs the
-Prometheus Operator. Every part of it is off by default, and
-`monitoring.bundled` does not turn it on. With the bundled stack, set only the
-`enabled` switches below and the Postgres password: the bundled Prometheus runs
+Prometheus Operator. Every part of it is off by default. `monitoring.bundled`
+turns on the Ray `PodMonitor` and nothing else here: OpenRAG's ingestion series
+and the worker side of its inference series exist on Ray's endpoint only, and the
+alerts built on them cannot fire without it. With the bundled stack, set only the
+Postgres and Milvus `enabled` switches and the Postgres password: the bundled Prometheus runs
 in the release namespace and selects every monitor, so it needs neither
 selector labels nor `networkPolicy.metricsFrom`. Next to an existing Prometheus
 (kube-prometheus-stack or a standalone operator), set all of it:
@@ -436,7 +438,7 @@ networkPolicy:
 ray:
   metrics:
     podMonitor:
-      enabled: true                                  # requires ray.enabled=true
+      enabled: true                                  # the RayCluster, or the embedded Ray
       labels: { release: <Prometheus release name> }
 postgresql:
   auth:
@@ -454,7 +456,10 @@ milvus:
 ```
 
 Ray gets a `PodMonitor` rather than a `ServiceMonitor` because every Ray node
-exports its own metrics. Ray prefixes the metrics OpenRAG records inside its
+exports its own metrics, on port 8090. With `ray.enabled=false` (the default) the
+only Ray node is embedded in the `openrag` pod: the chart pins its metrics port to
+8090 with `RAY_METRICS_EXPORT_PORT`, declares it as `ray-metrics`, and the
+`PodMonitor` selects that pod instead of the RayCluster's. Ray prefixes the metrics OpenRAG records inside its
 workers with `ray_`. The `PodMonitor` strips that prefix, so these metrics are
 stored under the same `openrag_*` names the API's `/metrics` uses, and the alert
 rules match them. Ray's own `ray_*` metrics keep their names. Milvus already exports from all five components (proxy,
@@ -529,7 +534,6 @@ up{namespace="<release namespace>", job=~".*(raycluster|postgresql|milvus).*"}
   still shows long-running transactions.
 - **Volume fill.** `pg_database_size_bytes` is the database size, not how full
   its PVC is; use the kubelet's `kubelet_volume_stats_*` series for that.
-- **Embedded Ray** (`ray.enabled=false`), which exports on no fixed port.
 - **MinIO and etcd**, Milvus's own dependencies.
 
 ### Series volume

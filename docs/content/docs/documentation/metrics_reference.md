@@ -25,10 +25,10 @@ replica the proxy picks, so per-replica counters in the API process are
 unreliable too.
 
 The Helm chart scrapes the Ray target with a `PodMonitor` on port `8090`,
-off by default (`ray.metrics.podMonitor`, which needs `ray.enabled=true`; see
+off by default (`ray.metrics.podMonitor`, for the RayCluster or the Ray embedded in the `openrag` pod; `monitoring.bundled` turns it on; see
 [Monitoring Ray, Postgres and Milvus](/openrag/documentation/kubernetes/#monitoring-ray-postgres-and-milvus)).
-The compose monitoring overlay's Prometheus has no job for it yet: there, the
-Ray-exported series below exist but are not collected.
+The Compose monitoring overlay scrapes it as job `ray`, on the port it pins with
+`RAY_METRICS_EXPORT_PORT` (8091).
 
 Ray prefixes every metric it exports with `ray_`: on the wire,
 `openrag_ingest_documents_total` is `ray_openrag_ingest_documents_total`. The
