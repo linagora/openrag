@@ -7,6 +7,14 @@ services:
       - "127.0.0.1:9090:9090"
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      # Generated from the chart's rule template with default values by
+      # scripts/gen_alert_rules.py, so Compose and Kubernetes alert on one
+      # definition. Regenerate rather than editing; CI checks for drift.
+      - ./prometheus/rules:/etc/prometheus/rules:ro
+      # The token is no longer bind-mounted here: develop supplies it through
+      # the ``configs:`` entry below, written straight from METRICS_TOKEN. Two
+      # sources for one target would collide, and the config is the one that
+      # fails closed when the variable is unset.
       - prometheus_data:/prometheus
     configs:
       # The scrape bearer, read by prometheus.yml (credentials_file). Written
