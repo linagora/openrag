@@ -21,6 +21,7 @@ import pytest
 from api.error_handlers import register_error_handlers
 from core.config.infrastructure import VectorDBConfig
 from core.models.chunk import Chunk, ChunkType
+from core.retrieval.trace import RetrievalTraceBuilder
 from core.utils.exceptions import (
     VDBConnectionError,
     VDBCreateOrLoadCollectionError,
@@ -585,6 +586,21 @@ class TestSafeBatchSize:
         assert page == (32 * 1024 * 1024) // (4096 * 4 + 6_144)  # 1489
         assert page < 3_276  # bigger vectors → fewer rows per page
 
+    def test_bounded_query_stops_iterator_at_requested_limit(self, store: MilvusVectorStore) -> None:
+        iterator = MagicMock()
+        iterator.next.side_effect = [
+            [{"_id": 1}, {"_id": 2}],
+            [{"_id": 3}],
+        ]
+        store._client.query_iterator.return_value = iterator
+
+        rows = store._iter_query("partition == 'p1'", ["_id"], limit=2)
+
+        assert rows == [{"_id": 1}, {"_id": 2}]
+        assert iterator.next.call_count == 1
+        assert store._client.query_iterator.call_args.kwargs["batch_size"] == 2
+        iterator.close.assert_called_once()
+
     def test_schema_dim_preferred_over_initialize_value(self, store: MilvusVectorStore) -> None:
         # The edge case: initialize() recorded 1024, but the existing collection
         # is really 4096 (initialize's value is ignored for an existing
@@ -784,6 +800,19 @@ class TestCollectionArgDiscipline:
 
 
 class TestHybridDispatch:
+    @staticmethod
+    def _hit(id_: int, score: float, *, file_id: str = "doc") -> dict[str, Any]:
+        return {
+            "_id": id_,
+            "distance": score,
+            "entity": {
+                "_id": id_,
+                "text": f"chunk-{id_}",
+                "file_id": file_id,
+                "partition": "allowed",
+            },
+        }
+
     @pytest.mark.asyncio
     async def test_hybrid_disabled_store_routes_to_dense(
         self,
@@ -818,6 +847,191 @@ class TestHybridDispatch:
         """
         with pytest.raises(VDBSearchError, match="query_text"):
             await store.search([0.1, 0.2], collection="default", vector_field=FIELD)
+
+    @pytest.mark.asyncio
+    async def test_untraced_hybrid_search_runs_no_diagnostic_legs(self, store: MilvusVectorStore) -> None:
+        production = [[self._hit(30, 0.9), self._hit(10, 0.8)]]
+        store._async_client.hybrid_search = AsyncMock(return_value=production)  # type: ignore[attr-defined]
+        store._async_client.search = AsyncMock()  # type: ignore[attr-defined]
+
+        result = await store.search(
+            [0.1, 0.2],
+            query_text="query",
+            filters={"partition": ["allowed"], "file_id": ["scoped"]},
+            similarity_threshold=0.7,
+            vector_field=FIELD,
+        )
+
+        assert [row["id"] for row in result] == ["30", "10"]
+        store._async_client.hybrid_search.assert_awaited_once()  # type: ignore[attr-defined]
+        store._async_client.search.assert_not_awaited()  # type: ignore[attr-defined]
+
+    @pytest.mark.asyncio
+    async def test_traced_hybrid_search_records_diagnostic_legs_without_replacing_production_order(
+        self, store: MilvusVectorStore
+    ) -> None:
+        production = [[self._hit(30, 0.09), self._hit(10, 0.08)]]
+        store._async_client.hybrid_search = AsyncMock(return_value=production)  # type: ignore[attr-defined]
+        store._async_client.search = AsyncMock(  # type: ignore[attr-defined]
+            side_effect=[
+                [[self._hit(10, 0.95, file_id="scoped"), self._hit(20, 0.9, file_id="outside")]],
+                [[self._hit(10, 0.95, file_id="scoped")]],
+                [[self._hit(20, 4.2), self._hit(30, 3.1)]],
+            ]
+        )
+        trace = RetrievalTraceBuilder("req-1", "query")
+
+        result = await store.search(
+            [0.1, 0.2],
+            query_text="query",
+            filters={"partition": ["allowed"], "file_id": ["scoped"]},
+            top_k=3,
+            similarity_threshold=0.7,
+            trace=trace,
+            vector_field=FIELD,
+        )
+
+        assert [row["id"] for row in result] == ["30", "10"]
+        finished = trace.finish(configuration_fingerprint="fingerprint")
+        stages = {stage["name"]: stage for stage in finished["stages"]}
+        assert [
+            stages[name]["status"]
+            for name in (
+                "dense_before_threshold",
+                "dense_after_threshold",
+                "sparse",
+                "hybrid_fused",
+            )
+        ] == ["complete", "complete", "complete", "complete"]
+        assert [candidate["id"] for candidate in stages["dense_before_threshold"]["candidates"]] == ["10", "20"]
+        assert [candidate["id"] for candidate in stages["dense_after_threshold"]["candidates"]] == ["10"]
+        assert [candidate["id"] for candidate in stages["sparse"]["candidates"]] == ["20", "30"]
+        assert [candidate["id"] for candidate in stages["hybrid_fused"]["candidates"]] == ["30", "10"]
+        assert stages["dense_before_threshold"]["candidates"][1]["removal_reason"]["code"] == "workspace_filter"
+        assert set(finished["timings"]) >= {"dense_search", "sparse_search"}
+        assert store._async_client.search.await_count == 3  # type: ignore[attr-defined]
+        diagnostic_calls = store._async_client.search.await_args_list  # type: ignore[attr-defined]
+        assert "file_id" not in diagnostic_calls[0].kwargs["filter"]
+        assert "file_id" in diagnostic_calls[1].kwargs["filter"]
+        assert "file_id" in diagnostic_calls[2].kwargs["filter"]
+        for call in diagnostic_calls:
+            assert 'partition in ["allowed"]' in call.kwargs["filter"]
+            assert "forbidden" not in call.kwargs["filter"]
+
+    @pytest.mark.asyncio
+    async def test_traced_hybrid_diagnostic_legs_run_concurrently(self, store: MilvusVectorStore) -> None:
+        store._async_client.hybrid_search = AsyncMock(return_value=[[self._hit(10, 0.08)]])  # type: ignore[attr-defined]
+        all_started = asyncio.Event()
+        started = 0
+
+        async def diagnostic_search(**_kwargs):
+            nonlocal started
+            started += 1
+            if started == 3:
+                all_started.set()
+            await asyncio.wait_for(all_started.wait(), timeout=0.1)
+            return [[]]
+
+        store._async_client.search = AsyncMock(side_effect=diagnostic_search)  # type: ignore[attr-defined]
+        trace = RetrievalTraceBuilder("req-1", "query")
+
+        await store.search(
+            [0.1, 0.2],
+            query_text="query",
+            filters={"partition": ["allowed"]},
+            similarity_threshold=0.7,
+            trace=trace,
+            vector_field=FIELD,
+        )
+
+        stages = {stage["name"]: stage for stage in trace.finish(configuration_fingerprint="fingerprint")["stages"]}
+        assert [stages[name]["status"] for name in ("dense_before_threshold", "dense_after_threshold", "sparse")] == [
+            "complete",
+            "complete",
+            "complete",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_mixed_temporal_filter_is_not_relaxed_or_misattributed(self, store: MilvusVectorStore) -> None:
+        mixed_filter = 'created_at >= ISO "2026-01-01T00:00:00+00:00" AND page > 5'
+        store._async_client.hybrid_search = AsyncMock(return_value=[[self._hit(10, 0.08)]])  # type: ignore[attr-defined]
+        store._async_client.search = AsyncMock(  # type: ignore[attr-defined]
+            side_effect=[
+                [[self._hit(40, 0.95)]],
+                [[]],
+                [[]],
+            ]
+        )
+        trace = RetrievalTraceBuilder("req-1", "query")
+
+        await store.search(
+            [0.1, 0.2],
+            query_text="query",
+            filters={"partition": ["allowed"], "expr": mixed_filter},
+            similarity_threshold=0.7,
+            trace=trace,
+            vector_field=FIELD,
+        )
+
+        before_filter = store._async_client.search.await_args_list[0].kwargs["filter"]  # type: ignore[attr-defined]
+        assert mixed_filter in before_filter
+        finished = trace.finish(configuration_fingerprint="fingerprint")
+        before_stage = next(stage for stage in finished["stages"] if stage["name"] == "dense_before_threshold")
+        assert before_stage["candidates"][0]["removal_reason"] is None
+
+    @pytest.mark.asyncio
+    async def test_hybrid_aggregate_duration_is_not_reported_as_fusion_timing(self, store: MilvusVectorStore) -> None:
+        store._async_client.hybrid_search = AsyncMock(return_value=[[self._hit(10, 0.08)]])  # type: ignore[attr-defined]
+        store._async_client.search = AsyncMock(  # type: ignore[attr-defined]
+            side_effect=[[[self._hit(10, 0.95)]], [[self._hit(10, 0.95)]], [[]]]
+        )
+        trace = RetrievalTraceBuilder("req-1", "query")
+
+        await store.search(
+            [0.1, 0.2],
+            query_text="query",
+            filters={"partition": ["allowed"]},
+            similarity_threshold=0.7,
+            trace=trace,
+            vector_field=FIELD,
+        )
+
+        finished = trace.finish(configuration_fingerprint="fingerprint")
+        fused_stage = next(stage for stage in finished["stages"] if stage["name"] == "hybrid_fused")
+        assert "fusion" not in finished["timings"]
+        assert fused_stage["status"] == "complete"
+        assert fused_stage["duration_seconds"] is None
+
+    @pytest.mark.asyncio
+    async def test_diagnostic_failure_records_partial_error_and_returns_production_results(
+        self, store: MilvusVectorStore
+    ) -> None:
+        production = [[self._hit(30, 0.09), self._hit(10, 0.08)]]
+        store._async_client.hybrid_search = AsyncMock(return_value=production)  # type: ignore[attr-defined]
+        store._async_client.search = AsyncMock(  # type: ignore[attr-defined]
+            side_effect=[RuntimeError("secret diagnostic failure"), [[self._hit(10, 0.95)]], [[self._hit(30, 3.1)]]]
+        )
+        trace = RetrievalTraceBuilder("req-1", "query")
+
+        result = await store.search(
+            [0.1, 0.2],
+            query_text="query",
+            filters={"partition": ["allowed"]},
+            similarity_threshold=0.7,
+            trace=trace,
+            vector_field=FIELD,
+        )
+
+        assert [row["id"] for row in result] == ["30", "10"]
+        finished = trace.finish(configuration_fingerprint="fingerprint")
+        stages = {stage["name"]: stage for stage in finished["stages"]}
+        assert stages["dense_before_threshold"]["status"] == "error"
+        assert stages["dense_after_threshold"]["status"] == "complete"
+        assert stages["sparse"]["status"] == "complete"
+        assert finished["errors"] == [
+            {"stage": "dense_before_threshold", "message": "redacted", "kind": "RuntimeError"}
+        ]
+        assert "secret diagnostic failure" not in str(finished)
 
     @pytest.mark.asyncio
     async def test_empty_filtered_hybrid_search_returns_no_results(
@@ -990,6 +1204,11 @@ class TestParseSearchResponse:
 
     def test_empty_response_is_empty_list(self, store: MilvusVectorStore) -> None:
         assert store._parse_search_response([]) == []
+
+    def test_trace_candidates_omit_non_finite_diagnostic_scores(self, store: MilvusVectorStore) -> None:
+        candidates = store._trace_candidates([{"id": "1", "file_id": "doc", "score": float("nan")}], "dense")
+
+        assert candidates[0].scores == {}
 
 
 # ---------------------------------------------------------------------------

@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 
 from api.dependencies.auth import (
@@ -7,7 +8,15 @@ from api.dependencies.auth import (
 )
 from api.error_handlers import register_error_handlers
 from api.routers.user.search import router as search_router
-from di.providers import get_auth_service, get_partition_service, get_retrieval_service, get_workspace_service
+from core.models.chunk import Chunk
+from core.retrieval.trace import candidates_from_chunks, canonical_fingerprint
+from di.providers import (
+    get_auth_service,
+    get_partition_service,
+    get_retrieval_service,
+    get_retrieval_snapshot_service,
+    get_workspace_service,
+)
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -97,6 +106,219 @@ def test_search_file_binds_file_id_via_filter_params():
     assert resp.status_code == 200
     assert captured["filter"] == "page > 5 OR page < 2"
     assert captured["filter_params"] == {"file_id": "abc123"}
+
+
+def _trace_client():
+    from api.dependencies.auth import require_partition_viewer
+
+    class _TraceRetrieval:
+        def __init__(self):
+            self.calls: list[dict] = []
+            self.resolved_fingerprint_calls = 0
+
+        async def search(self, **kwargs):
+            self.calls.append(kwargs)
+            chunk = Chunk(
+                id="chunk-1",
+                document_id="doc-1",
+                text="private document body",
+                metadata={"api_key": "secret-token"},
+                partition="mine",
+            )
+            trace = kwargs.get("trace")
+            if trace is not None:
+                trace.record_stage("final", status="complete", candidates=candidates_from_chunks([chunk]))
+            return [chunk]
+
+        def configuration_fingerprint(self, partitions):
+            assert list(partitions) == ["mine"]
+            return "legacy-fingerprint"
+
+        async def resolved_configuration_fingerprint(self, partitions):
+            assert list(partitions) == ["mine"]
+            self.resolved_fingerprint_calls += 1
+            return "prompt-aware-fingerprint"
+
+    retrieval = _TraceRetrieval()
+    app = FastAPI()
+    register_error_handlers(app)
+
+    @app.get("/extract/{extract_id}", name="get_extract")
+    async def get_extract(extract_id: str):
+        return {"id": extract_id}
+
+    app.include_router(search_router, prefix="/search")
+    app.dependency_overrides[require_partition_viewer] = lambda: {"id": 1, "is_admin": True}
+    app.dependency_overrides[get_retrieval_service] = lambda: retrieval
+    app.dependency_overrides[get_workspace_service] = lambda: _FakeWorkspaces()
+    return TestClient(app), retrieval
+
+
+def test_search_without_trace_preserves_response_shape_and_does_not_create_collector():
+    client, retrieval = _trace_client()
+
+    payload = client.get("/search/partition/mine", params={"text": "q"}).json()
+
+    assert set(payload) == {"documents"}
+    assert retrieval.calls[0].get("trace") is None
+    assert retrieval.resolved_fingerprint_calls == 0
+
+
+def test_search_with_trace_returns_same_documents_without_sensitive_trace_payload():
+    client, retrieval = _trace_client()
+    plain = client.get("/search/partition/mine", params={"text": "q"}).json()["documents"]
+
+    response = client.get(
+        "/search/partition/mine",
+        params={"text": "q", "include_retrieval_trace": True},
+        headers={"X-Request-ID": "trace-request"},
+    )
+    payload = response.json()
+
+    assert response.status_code == 200
+    assert payload["documents"] == plain
+    assert payload["retrieval_trace"]["schema_version"] == 1
+    assert payload["retrieval_trace"]["request_id"] == "trace-request"
+    assert payload["retrieval_trace"]["configuration_fingerprint"] == canonical_fingerprint(
+        {
+            "stored_configuration_fingerprint": "prompt-aware-fingerprint",
+            "effective_request_overrides": {
+                "top_k": 5,
+                "similarity_threshold": 0.75,
+                "include_related": False,
+                "include_ancestors": False,
+                "related_limit": 20,
+                "max_ancestor_depth": None,
+            },
+        }
+    )
+    assert retrieval.resolved_fingerprint_calls == 1
+    assert retrieval.calls[-1]["trace"] is not None
+    serialized_trace = json.dumps(payload["retrieval_trace"])
+    assert "private document body" not in serialized_trace
+    assert "secret-token" not in serialized_trace
+
+
+def test_search_trace_fingerprint_includes_effective_request_options():
+    client, _retrieval = _trace_client()
+
+    response = client.get(
+        "/search/partition/mine",
+        params={
+            "text": "q",
+            "top_k": 17,
+            "similarity_threshold": 0.35,
+            "include_related": True,
+            "include_ancestors": True,
+            "related_limit": 8,
+            "max_ancestor_depth": 4,
+            "include_retrieval_trace": True,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["retrieval_trace"]["configuration_fingerprint"] == canonical_fingerprint(
+        {
+            "stored_configuration_fingerprint": "prompt-aware-fingerprint",
+            "effective_request_overrides": {
+                "top_k": 17,
+                "similarity_threshold": 0.35,
+                "include_related": True,
+                "include_ancestors": True,
+                "related_limit": 8,
+                "max_ancestor_depth": 4,
+            },
+        }
+    )
+
+
+def test_snapshot_route_forwards_opt_in_document_ids():
+    from api.dependencies.auth import require_partition_viewer
+
+    class _Snapshots:
+        def __init__(self):
+            self.calls = []
+
+        async def snapshot(self, partition, *, include_document_ids=False):
+            self.calls.append((partition, include_document_ids))
+            return {"configuration": {}, "index": {"partition": partition}, "fingerprint": "fp"}
+
+    snapshots = _Snapshots()
+    app = FastAPI()
+    register_error_handlers(app)
+    app.include_router(search_router, prefix="/search")
+    app.dependency_overrides[require_partition_viewer] = lambda: {"id": 1, "is_admin": True}
+    app.dependency_overrides[get_retrieval_snapshot_service] = lambda: snapshots
+
+    response = TestClient(app).get(
+        "/search/partition/legal/snapshot",
+        params={"include_document_ids": True},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["fingerprint"] == "fp"
+    assert snapshots.calls == [("legal", True)]
+
+
+def test_search_rejects_top_k_above_resource_limit():
+    response = _client(user_partitions=[{"partition": "mine", "role": "viewer"}]).get(
+        "/search", params={"text": "hello", "top_k": 1001}
+    )
+
+    assert response.status_code == 422
+
+
+def test_search_preserves_existing_expansion_parameter_ranges():
+    client, _ = _trace_client()
+
+    response = client.get(
+        "/search/partition/mine",
+        params={
+            "text": "q",
+            "include_related": True,
+            "related_limit": 101,
+            "include_ancestors": True,
+            "max_ancestor_depth": 51,
+        },
+    )
+
+    assert response.status_code == 200
+
+
+def test_search_trace_requires_admin_privileges():
+    from api.dependencies.auth import require_partition_viewer
+
+    app = FastAPI()
+    register_error_handlers(app)
+    app.include_router(search_router, prefix="/search")
+    app.dependency_overrides[require_partition_viewer] = lambda: {"id": 7, "is_admin": False}
+    app.dependency_overrides[get_retrieval_service] = lambda: _RetrievalService()
+    app.dependency_overrides[get_workspace_service] = lambda: object()
+
+    response = TestClient(app).get(
+        "/search/partition/mine",
+        params={"text": "q", "include_retrieval_trace": True},
+    )
+
+    assert response.status_code == 403
+
+
+def test_snapshot_requires_admin_privileges_even_without_document_ids():
+    from api.dependencies.auth import require_partition_viewer
+
+    class _Snapshots:
+        async def snapshot(self, partition, *, include_document_ids=False):
+            return {"index": {"partition": partition}}
+
+    app = FastAPI()
+    register_error_handlers(app)
+    app.include_router(search_router, prefix="/search")
+    app.dependency_overrides[require_partition_viewer] = lambda: {"id": 7, "is_admin": False}
+    app.dependency_overrides[get_retrieval_snapshot_service] = lambda: _Snapshots()
+
+    response = TestClient(app).get("/search/partition/legal/snapshot")
+
+    assert response.status_code == 403
 
 
 # --------------------------------------------------------------------------- #

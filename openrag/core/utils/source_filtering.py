@@ -6,6 +6,7 @@ import asyncio
 import copy
 import json
 import re
+from collections.abc import Callable
 
 from core.utils.logging import get_logger
 
@@ -116,6 +117,7 @@ async def stream_with_source_filtering(
     all_sources: list | None = None,
     include_all_retrieved: bool = False,
     extra_fields: dict | None = None,
+    terminal_extra_fields: dict | Callable[[], dict] | None = None,
 ):
     """Process an LLM SSE stream and, when active, strip source tags.
 
@@ -321,7 +323,11 @@ async def stream_with_source_filtering(
         finish_chunk = copy.deepcopy(template)
         finish_chunk["choices"][0]["delta"] = {}
         finish_chunk["choices"][0]["finish_reason"] = last_finish_reason or "stop"
-        finish_chunk["extra"] = extra_payload
+        finish_extra = dict(extra_payload)
+        if terminal_extra_fields:
+            finalized_fields = terminal_extra_fields() if callable(terminal_extra_fields) else terminal_extra_fields
+            finish_extra.update(finalized_fields)
+        finish_chunk["extra"] = finish_extra
         yield f"data: {json.dumps(finish_chunk)}\n\n"
 
     yield "data: [DONE]\n\n"

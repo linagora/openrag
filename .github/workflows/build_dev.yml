@@ -64,6 +64,8 @@ jobs:
         with:
           context: .
           file: infra/docker/api.Dockerfile
+          build-args: |
+            OPENRAG_COMMIT=${{ github.sha }}
           platforms: linux/amd64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
