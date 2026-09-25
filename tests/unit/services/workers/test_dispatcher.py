@@ -215,6 +215,48 @@ async def test_dispatch_maps_queued_details_submission_failure_to_unavailability
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("reject_if_file_active", [True, False])
+async def test_queue_registration_warns_when_the_actor_predates_the_admission_fence(
+    reject_if_file_active: bool,
+) -> None:
+    """Against a v1-only actor, admission is unfenced: accepted, and said out loud when it mattered."""
+    from services.workers.dispatcher import WorkerDispatcher
+
+    tsm = _task_state_manager()
+    tsm._ray_actor_method_names = {"set_queued_details"}
+    dispatcher = WorkerDispatcher(
+        pool=_pool_with_ref(object()),
+        task_state_manager=tsm,
+        completion_tracker=_completion_tracker(),
+        vector_store=_vector_store(),
+        document_repo=_document_repo(),
+        workspace_repo=_workspace_repo(),
+        collection="default",
+        timeout=1,
+    )
+
+    with patch("services.workers.dispatcher.logger") as mock_logger:
+        admission = await dispatcher._set_queued_details(
+            "task-1",
+            file_id="file-1",
+            partition="tenant-a",
+            metadata={},
+            user_id=42,
+            reject_if_file_active=reject_if_file_active,
+        )
+
+    assert admission == _queue_admitted()
+    tsm.set_queued_details.remote.assert_called_once()
+    tsm.set_queued_details_v2.remote.assert_not_called()
+    warning = mock_logger.bind.return_value.warning
+    if reject_if_file_active:
+        mock_logger.bind.assert_called_once_with(task_id="task-1", file_id="file-1", partition="tenant-a")
+        assert "admission fence" in warning.call_args.args[0]
+    else:
+        warning.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_queue_registration_retries_actor_reconstruction() -> None:
     from services.workers.dispatcher import WorkerDispatcher
 
