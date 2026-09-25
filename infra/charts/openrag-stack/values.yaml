@@ -402,7 +402,9 @@ ray:
     # ray.enabled=true, the embedded Ray in the openrag pod otherwise (both on
     # port 8090). The ingestion series and the worker-side inference series
     # exist there only, so without it their alerts cannot fire.
-    # monitoring.bundled turns it on.
+    # monitoring.bundled turns it on. With ray.enabled=false and RAY_ADDRESS
+    # set (an external cluster) the openrag pod exports no Ray metrics: scrape
+    # that cluster where it runs.
     podMonitor:
       enabled: false
       # Labels the operator's podMonitorSelector matches, e.g.

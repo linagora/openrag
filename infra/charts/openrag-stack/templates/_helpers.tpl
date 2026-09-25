@@ -179,3 +179,16 @@ built on them unable to fire.
 {{- define "openrag-stack.rayPodMonitor" -}}
 {{- if or .Values.ray.metrics.podMonitor.enabled .Values.monitoring.bundled -}}true{{- else -}}false{{- end -}}
 {{- end }}
+
+{{/*
+Whether the openrag pod starts Ray itself. With ray.enabled=false and
+RAY_ADDRESS set, the API attaches to an external cluster (ray.init(address=...))
+and starts no metrics agent, so nothing would listen on the embedded Ray's
+port: a monitor on it is a target that is always down. Only env.config and
+env.secrets are visible here; a RAY_ADDRESS supplied through env.existingSecret
+or an external secrets provider is not.
+*/}}
+{{- define "openrag-stack.embeddedRay" -}}
+{{- $address := or (dig "RAY_ADDRESS" "" (.Values.env.config | default dict)) (dig "RAY_ADDRESS" "" (.Values.env.secrets | default dict)) -}}
+{{- if and (not .Values.ray.enabled) (not $address) -}}true{{- else -}}false{{- end -}}
+{{- end }}

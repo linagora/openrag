@@ -70,7 +70,7 @@ spec:
             - containerPort: 8265
               name: ray-dashboard
             {{- end }}
-            {{- if not .Values.ray.enabled }}
+            {{- if eq (include "openrag-stack.embeddedRay" .) "true" }}
             {{- /* The embedded Ray's metrics agent. Unpinned it takes a random
                port, and nothing can scrape the indexing and worker-side
                inference series recorded in Ray actors. */}}
@@ -91,7 +91,7 @@ spec:
           livenessProbe:
             {{- include "openrag-stack.openragProbe" (dict "probe" .Values.openrag.probes.liveness "rayServe" $rayServeEnabled "path" "/health_check" "context" $) | nindent 12 }}
           {{- end }}
-          {{- if not .Values.ray.enabled }}
+          {{- if eq (include "openrag-stack.embeddedRay" .) "true" }}
           env:
             - name: RAY_METRICS_EXPORT_PORT
               value: {{ include "openrag-stack.rayMetricsPort" . | quote }}

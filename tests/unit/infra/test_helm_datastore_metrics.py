@@ -371,6 +371,53 @@ def test_the_notes_warn_about_an_unlabelled_embedded_ray_monitor(tmp_path: Path)
     assert "⚠  ray.metrics.podMonitor.labels is empty" in _notes(tmp_path, *EMBEDDED_RAY_MONITOR)
 
 
+EXTERNAL_RAY = {
+    "config": ["--set", "env.config.RAY_ADDRESS=ray://external-head:10001"],
+    "secrets": ["--set", "env.secrets.RAY_ADDRESS=ray://external-head:10001"],
+}
+BUNDLED = ["--set", "monitoring.bundled=true", "--set", "env.secrets.METRICS_TOKEN=unit-test-metrics-token"]
+
+
+@requires_helm
+@pytest.mark.parametrize("source", sorted(EXTERNAL_RAY))
+def test_an_external_ray_cluster_gets_no_embedded_ray_port_monitor_or_policy(tmp_path: Path, source: str) -> None:
+    """With RAY_ADDRESS set the API attaches to that cluster and starts no metrics
+    agent: a port, monitor or policy for the embedded Ray would be a target that is
+    always down, and OpenRagTargetDown would page for it."""
+    objects = _objects(
+        _chart(tmp_path),
+        *EXTERNAL_RAY[source],
+        *BUNDLED,
+        "--set-json",
+        f"networkPolicy.metricsFrom={json.dumps(METRICS_FROM)}",
+    )
+    container = _openrag_container(objects)
+    assert "ray-metrics" not in [p.get("name") for p in container["ports"]]
+    assert "RAY_METRICS_EXPORT_PORT" not in [item["name"] for item in container.get("env", [])]
+    assert not [o for o in objects if o["kind"] == "PodMonitor"]
+    assert "openrag-openrag-ray-metrics" not in [o["metadata"]["name"] for o in objects if o["kind"] == "NetworkPolicy"]
+
+
+@requires_helm
+def test_a_ray_pod_monitor_over_an_external_cluster_fails_the_render(tmp_path: Path) -> None:
+    result = _render(_chart(tmp_path), *EMBEDDED_RAY_MONITOR, *EXTERNAL_RAY["config"])
+
+    assert result.returncode != 0
+    assert "ray.metrics.podMonitor.enabled with ray.enabled=false and RAY_ADDRESS set" in result.stderr
+
+
+@requires_helm
+def test_the_notes_say_the_bundled_stack_does_not_scrape_an_external_ray(tmp_path: Path) -> None:
+    notes = _notes(tmp_path, *EXTERNAL_RAY["config"], *BUNDLED)
+
+    assert "RAY_ADDRESS points the API at an external Ray cluster" in notes
+
+
+@requires_helm
+def test_the_notes_stay_quiet_about_ray_address_for_the_embedded_ray(tmp_path: Path) -> None:
+    assert "RAY_ADDRESS points the API" not in _notes(tmp_path, *BUNDLED)
+
+
 @requires_datastore_charts
 def test_no_postgres_policy_of_the_subchart_is_rendered(tmp_path: Path) -> None:
     """Under replication the read replicas get their own copy of bitnami's

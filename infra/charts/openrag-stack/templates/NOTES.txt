@@ -61,6 +61,12 @@ Upgrading from a release that mounted /app/logs: the old "{{ include "openrag-st
 PVC is kept by helm.sh/resource-policy and is no longer used — delete it by hand.
 {{- end }}
 
+{{- if and .Values.monitoring.bundled (not .Values.ray.enabled) (ne (include "openrag-stack.embeddedRay" .) "true") }}
+
+⚠  RAY_ADDRESS points the API at an external Ray cluster, so the bundled
+   Prometheus scrapes no Ray metrics: the ingestion alerts and the worker-side
+   inference series need that cluster scraped where it runs.
+{{- end }}
 {{- $monitors := dict }}
 {{- if .Values.ray.metrics.podMonitor.enabled }}
 {{- $_ := set $monitors "ray.metrics.podMonitor.labels" .Values.ray.metrics.podMonitor.labels }}
