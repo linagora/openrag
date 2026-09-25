@@ -111,6 +111,10 @@ class TestExtractAndStripSourcesBlock:
             "*[Sources: none]*.",
             "_[Sources: none]_",
             "**Sources:** none",
+            "[Sources: **none**]",
+            "[Sources: _none_]",
+            "[Sources: `none`]",
+            "**[Sources: **none**]**",
         ],
     )
     @pytest.mark.parametrize("separator", [" ", "\n", "\n\n"])
@@ -126,6 +130,10 @@ class TestExtractAndStripSourcesBlock:
             "**[Sources: 1, 3]**",
             "*[Sources: 1, 3]*",
             "**Sources:** 1, 3",
+            "[Sources: **1, 3**]",
+            "[Sources: `1, 3`]",
+            "[Sources: **1**, **3**]",
+            "**Sources:** **1**, _3_",
         ],
     )
     def test_sources_numbers_wrapped_in_markdown(self, tag):
@@ -490,6 +498,29 @@ class TestStreamWithSourceFiltering:
         assert _collect_content(result) == "Test test."
         assert _parse_finish_sources(result) == []
         assert _parse_finish_extra(result)["citations_reported"] is True
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("tag_chunks", "expected_sources"),
+        [
+            (["\n[Sources: **", "none**]"], []),
+            (["\n[Sources: **1", ", 3**]"], [{"file": "a.pdf"}, {"file": "c.pdf"}]),
+            (["\n[Sources: **1**", ", **3**]"], [{"file": "a.pdf"}, {"file": "c.pdf"}]),
+        ],
+    )
+    async def test_emphasized_value_inside_tag_split_across_chunks_is_stripped(self, tag_chunks, expected_sources):
+        lines = [
+            _make_chunk("Here is the answer."),
+            *(_make_chunk(part) for part in tag_chunks),
+            _make_finish(),
+            DONE_LINE,
+        ]
+        result = await _collect(stream_with_source_filtering(_fake_stream(lines), self.SOURCES, "test-model"))
+        assert _collect_content(result) == "Here is the answer."
+        extra = _parse_finish_extra(result)
+        assert extra["sources"] == expected_sources
+        assert extra["cited_sources"] == expected_sources
+        assert extra["citations_reported"] is True
 
     @pytest.mark.asyncio
     async def test_case3_llm_no_tag_returns_all_sources(self):
