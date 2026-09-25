@@ -986,6 +986,41 @@ async def test_dispatch_indexing_keeps_the_dedup_error_when_the_task_lookup_fail
 
 
 @pytest.mark.asyncio
+async def test_dispatch_indexing_keeps_the_dedup_error_for_a_replace_with_the_same_bytes() -> None:
+    """A replace is not fenced, so the claim conflict is not relabelled for it either."""
+    from core.utils.exceptions import ConflictError
+    from services.workers.dispatcher import WorkerDispatcher
+
+    repo = _document_repo()
+    repo.claim_content_sha256.return_value = "file-1"
+    tsm = _task_state_manager()
+    tsm.get_active_indexing_task_for_file = _remote_mock("task-running")
+    dispatcher = WorkerDispatcher(
+        pool=_pool_with_ref(object()),
+        task_state_manager=tsm,
+        completion_tracker=_completion_tracker(),
+        vector_store=_vector_store(),
+        document_repo=repo,
+        workspace_repo=_workspace_repo(),
+        collection="default",
+    )
+
+    with pytest.raises(ConflictError) as caught:
+        await dispatcher.dispatch_indexing(
+            path="/data/report.txt",
+            metadata={"file_id": "file-1", "content_sha256": "abc123"},
+            partition="tenant-a",
+            user={"id": 42},
+            workspace_ids=None,
+            replace=True,
+        )
+
+    assert caught.value.code == "DOCUMENT_CONTENT_EXISTS"
+    assert caught.value.extra["existing_file_id"] == "file-1"
+    tsm.get_active_indexing_task_for_file.remote.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_dispatch_indexing_reports_a_cancelled_refusal_as_such() -> None:
     from services.workers.dispatcher import WorkerDispatcher
 
