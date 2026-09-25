@@ -1743,3 +1743,21 @@ async def test_admission_fence_keeps_a_serializing_task_whose_worker_is_running(
     )
 
     assert refused == {"accepted": False, "reason": "file_indexing", "existing_task_id": "task-1"}
+
+
+@pytest.mark.asyncio
+async def test_admission_fence_does_not_refuse_a_retried_registration_of_the_same_task() -> None:
+    """The dispatcher retries set_queued_details_v2 across actor reconstruction."""
+    manager = _task_state_manager()
+    for _attempt in range(2):
+        admitted = await manager.set_queued_details_v2(
+            "task-1",
+            file_id="file-1",
+            partition="tenant-a",
+            metadata={},
+            user_id=42,
+            reject_if_file_active=True,
+        )
+        assert admitted == {"accepted": True, "reason": None, "existing_task_id": None}
+
+    assert await manager.get_state("task-1") == "QUEUED"
