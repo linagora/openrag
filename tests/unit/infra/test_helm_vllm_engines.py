@@ -39,6 +39,18 @@ def test_vllm_openai_engines_are_pinned(path: Path):
 
 
 @pytest.mark.parametrize("path", VALUES_FILES, ids=lambda p: p.name)
+def test_vllm_openai_engines_run_the_cuda_12_build(path: Path):
+    """``vllm/vllm-openai:v0.30.0`` is the CUDA 13 build and needs an NVIDIA
+    driver >= 580: on an older one the embedder fails CUDA init, and indexing and
+    search go down, while vlm (CUDA 12.9) starts. ``-cu129`` keeps every engine on
+    the CUDA vlm already needs."""
+    engines = [spec for spec in _engines(path) if spec["repository"] == "vllm/vllm-openai"]
+    for spec in engines:
+        if str(spec["tag"]).startswith("v0.30"):
+            assert str(spec["tag"]).endswith("-cu129"), f"{path.name}: {spec['name']} runs {spec['tag']}"
+
+
+@pytest.mark.parametrize("path", VALUES_FILES, ids=lambda p: p.name)
 def test_no_engine_passes_task(path: Path):
     """vLLM v0.30.0 exits on ``--task`` (``unrecognized arguments``)."""
     for spec in _engines(path):
@@ -89,3 +101,14 @@ def test_llm_endpoint_is_empty_while_the_bundled_llm_is_scaled_to_zero():
     if _engine("llm")["replicaCount"] == 0:
         assert config["BASE_URL"] == ""
         assert config["MODEL"] == ""
+
+
+def test_vllm_stack_minimum_renders_the_engine_wide_env():
+    """vllm-stack 0.1.7 appends ``modelSpec.env`` only and ignores
+    ``servingEngineSpec.env``, so the writable HOME above (#1036) would silently
+    disappear if dependencies ever resolved that low. 0.1.12 is the version
+    checked to render it."""
+    chart = yaml.safe_load((VALUES.parent / "Chart.yaml").read_text(encoding="utf-8"))
+    (dep,) = [d for d in chart["dependencies"] if d["name"] == "vllm-stack"]
+    minimum = dep["version"].split()[0].removeprefix(">=")
+    assert tuple(int(x) for x in minimum.split(".")) >= (0, 1, 12), dep["version"]
