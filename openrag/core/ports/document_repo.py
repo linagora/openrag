@@ -22,6 +22,16 @@ class ContentClaimLease:
     expires_at: datetime
 
 
+@dataclass(frozen=True, slots=True)
+class IndexedCorpusState:
+    """Catalog identity and optional bounded IDs from one consistent snapshot."""
+
+    count: int
+    digest: str
+    document_ids: tuple[str, ...] = ()
+    document_ids_truncated: bool = False
+
+
 class DocumentRepository(ABC):
     """CRUD operations for documents."""
 
@@ -38,6 +48,16 @@ class DocumentRepository(ABC):
         self, partition: str, *, before: datetime, after: str | None = None, limit: int = 500
     ) -> list[str]:
         """Keyset page of file IDs indexed before a cutoff, ordered by file ID."""
+        raise NotImplementedError
+
+    @abstractmethod
+    async def get_indexed_corpus_state(
+        self,
+        partition: str,
+        *,
+        document_ids_limit: int = 0,
+    ) -> IndexedCorpusState:
+        """Return corpus identity and optional bounded IDs from one snapshot."""
         raise NotImplementedError
 
     @abstractmethod
