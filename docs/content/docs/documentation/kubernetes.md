@@ -108,6 +108,15 @@ Two changes apply to every release, whether or not it scrapes anything:
   namespace reaches it, and a client in another namespace needs its own
   NetworkPolicy.
 
+The upgrade notes print each step that applies (the Ray one with `ray.enabled`,
+the Postgres one with `postgresql.enabled` and `networkPolicy.enabled`) on the
+upgrade from chart 0.6.6 or earlier, whichever version it moves to, and on no
+later upgrade: if you skip the worker delete then, nothing reminds you. The
+notes find that version in the `helm.sh/chart` label of the
+`<fullname>-default-deny` NetworkPolicy. When they cannot, with
+`networkPolicy.enabled: false` or under `--dry-run=client`, they print the steps
+that apply on every upgrade.
+
 ## Notes
 
 For the default direct-API deployment, startup and liveness probes use

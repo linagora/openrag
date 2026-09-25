@@ -46,6 +46,26 @@ jobs:
         run: |
           uv sync
 
+      # The rendered chart tests need the sub-chart archives, which are
+      # git-ignored; without them those tests skip instead of running.
+      - name: Cache chart dependencies
+        id: chart-dependencies
+        uses: actions/cache@v4
+        with:
+          path: infra/charts/openrag-stack/charts/*.tgz
+          key: chart-dependencies-${{ hashFiles('infra/charts/openrag-stack/Chart.lock') }}
+
+      # `helm dependency build` fetches the versions pinned in Chart.lock, but
+      # only from repositories that have been added.
+      - name: Fetch chart dependencies
+        if: steps.chart-dependencies.outputs.cache-hit != 'true'
+        run: |
+          set -eo pipefail
+          chart=infra/charts/openrag-stack
+          sed -n 's/^ *repository: *//p' "$chart/Chart.lock" | grep '^https\?://' | sort -u | nl -w1 -s' ' |
+            while read -r n url; do helm repo add "dependency-$n" "$url"; done
+          helm dependency build --skip-refresh "$chart"
+
       - name: Run tests
         run: |
           uv run pytest tests/unit/
