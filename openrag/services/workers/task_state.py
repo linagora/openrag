@@ -827,7 +827,7 @@ class TaskStateManager:
         this one falls back to it against an actor that predates this method —
         in which case admission simply is not fenced, exactly as before.
 
-        ``reject_if_file_active`` is the admission fence (#693). It is opt-in
+        ``reject_if_file_active`` is the admission fence (#1046). It is opt-in
         rather than always-on because only a first-time upload can say that a
         second task for the same file is unambiguously redundant; a replace
         legitimately re-indexes a file that already exists.
@@ -1012,7 +1012,7 @@ class TaskStateManager:
 
     @ray.method(concurrency_group="get")
     async def get_active_indexing_task_for_file(self, *, partition: str, file_id: str) -> str | None:
-        """Read-only view of the admission fence, for labelling a refusal.
+        """The admission fence's answer for a file, for labelling a refusal.
 
         The dispatcher asks this when the content claim already turned a
         submission away holding the same ``file_id``: that claim belongs to a
@@ -1020,6 +1020,10 @@ class TaskStateManager:
         than a deduplication error pointing at itself. It is not an admission
         check — ``set_queued_details_v2`` stays the only gate, atomic with the
         QUEUED registration.
+
+        It queues nothing, but it is not side-effect free: like
+        ``get_content_claim_task_ids``, it expires any stale ref-less task it
+        walks past, whatever file that task is for, and persists it as FAILED.
         """
         with self.lock:
             return self._active_indexing_task_for_file_locked(partition=partition, file_id=file_id, excluding="")
