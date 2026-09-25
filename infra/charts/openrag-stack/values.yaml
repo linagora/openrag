@@ -339,6 +339,11 @@ ray:
   metrics:
     # Prometheus Operator discovery. Needs the monitoring.coreos.com CRDs, and
     # ray.enabled=true: the embedded Ray has no fixed port to scrape.
+    # Scrapes Ray's metrics endpoint: the RayCluster's nodes with
+    # ray.enabled=true, the embedded Ray in the openrag pod otherwise (both on
+    # port 8090). The ingestion series and the worker-side inference series
+    # exist there only, so without it their alerts cannot fire.
+    # monitoring.bundled turns it on.
     podMonitor:
       enabled: false
       # Labels the operator's podMonitorSelector matches, e.g.

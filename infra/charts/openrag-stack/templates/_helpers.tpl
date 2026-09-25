@@ -159,7 +159,8 @@ Usage: {{- if eq (include "openrag-stack.rayServeApi" .) "true" }}
 {{- end }}
 
 {{/*
-Port every Ray node exports its metrics on, head and workers alike. Kept off
+Port every Ray node exports its metrics on, head and workers alike, and the
+embedded Ray inside the openrag pod when ray.enabled=false. Kept off
 networkPolicy.externalPorts' 8080 on purpose: that rule matches by port number
 across every pod in the namespace, and these metrics are unauthenticated.
 KubeRay's own default is exactly 8080, so both halves of raycluster.yaml must
@@ -167,4 +168,14 @@ override it — see the comments there.
 */}}
 {{- define "openrag-stack.rayMetricsPort" -}}
 8090
+{{- end }}
+
+{{/*
+Whether Ray's metrics get a PodMonitor. monitoring.bundled turns it on like the
+API's ServiceMonitor: the ingestion and worker-side inference series exist on
+Ray's endpoint only, so a stack that scrapes the API alone leaves the alerts
+built on them unable to fire.
+*/}}
+{{- define "openrag-stack.rayPodMonitor" -}}
+{{- if or .Values.ray.metrics.podMonitor.enabled .Values.monitoring.bundled -}}true{{- else -}}false{{- end -}}
 {{- end }}

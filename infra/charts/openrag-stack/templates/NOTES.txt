@@ -62,7 +62,7 @@ PVC is kept by helm.sh/resource-policy and is no longer used — delete it by ha
 {{- end }}
 
 {{- $monitors := dict }}
-{{- if and .Values.ray.enabled .Values.ray.metrics.podMonitor.enabled }}
+{{- if .Values.ray.metrics.podMonitor.enabled }}
 {{- $_ := set $monitors "ray.metrics.podMonitor.labels" .Values.ray.metrics.podMonitor.labels }}
 {{- end }}
 {{- if and .Values.postgresql.enabled .Values.postgresql.metrics.serviceMonitor.enabled }}
