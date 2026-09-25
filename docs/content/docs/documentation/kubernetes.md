@@ -71,6 +71,43 @@ one before upgrading:
 - **Migrate to the new names.** Copy the data across (e.g. a Job mounting both
   PVCs), then delete the old ones once the release is healthy.
 
+## Upgrading to chart 0.6.7
+
+Two changes apply to every release, whether or not it scrapes anything:
+
+- **Ray workers move their metrics off port 8080.** Workers exported on
+  KubeRay's default 8080, which `networkPolicy.externalPorts` opens to every
+  source, so their unauthenticated metrics were public. They now export on 8090,
+  like the head. KubeRay does not recreate Ray pods when the `RayCluster`
+  changes, so existing workers stay on 8080 until they are recreated. Delete
+  them once after the upgrade, at a time when no indexing is running, since
+  anything running on them is interrupted:
+
+  ```bash
+  kubectl delete pod -n <release namespace> \
+    -l ray.io/cluster=<RayCluster name>,ray.io/node-type=worker
+  ```
+
+  The name is `<fullname>-raycluster`, which is `openrag-raycluster` with the
+  default `fullnameOverride`. If you have set another `fullnameOverride`, or
+  left it empty so that Helm derives the name from the release,
+  `kubectl get raycluster -n <release namespace>` prints it. The upgrade notes
+  print the whole command with the name filled in. A wrong name selects no pods,
+  and the workers stay on 8080.
+
+  Leave the head out. The chart configures no GCS fault tolerance, so deleting
+  the head restarts the whole Ray cluster, and every actor on it is lost. The
+  head already exported on 8090, so recreating the workers closes the exposure.
+  The head needs recreating only to bring up its own scrape target (see
+  [Monitoring Ray, Postgres and Milvus](#monitoring-ray-postgres-and-milvus)).
+- **Postgres no longer accepts connections from other namespaces.** The bitnami
+  sub-chart rendered its own NetworkPolicy, which admitted any source on 5432.
+  The chart now turns it off, along with the read replicas' policy under
+  `postgresql.architecture: replication`, so Postgres gets the same rules as
+  every other pod. With `networkPolicy.enabled` (the default), only the release
+  namespace reaches it, and a client in another namespace needs its own
+  NetworkPolicy.
+
 ## Notes
 
 For the default direct-API deployment, startup and liveness probes use
@@ -370,3 +407,132 @@ scrape it and Grafana to show it.
 The GPU panels aggregate every GPU that Prometheus scrapes, not only the nodes
 running OpenRAG, and the host panels likewise need node-exporter
 (kube-prometheus-stack ships it) and aggregate every node.
+
+## Monitoring Ray, Postgres and Milvus
+
+The chart wires the stack's three dependencies into a Prometheus that runs the
+Prometheus Operator. Every part of it is off by default, and
+`monitoring.bundled` does not turn it on. With the bundled stack, set only the
+`enabled` switches below and the Postgres password: the bundled Prometheus runs
+in the release namespace and selects every monitor, so it needs neither
+selector labels nor `networkPolicy.metricsFrom`. Next to an existing Prometheus
+(kube-prometheus-stack or a standalone operator), set all of it:
+
+```yaml
+networkPolicy:
+  metricsFrom:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: monitoring   # the namespace Prometheus runs in
+ray:
+  metrics:
+    podMonitor:
+      enabled: true                                  # requires ray.enabled=true
+      labels: { release: <Prometheus release name> }
+postgresql:
+  auth:
+    postgresPassword: <password>                     # required by metrics.enabled, see below
+  metrics:
+    enabled: true                                    # adds the exporter sidecar: restarts Postgres
+    serviceMonitor:
+      enabled: true
+      labels: { release: <Prometheus release name> }
+milvus:
+  metrics:
+    serviceMonitor:
+      enabled: true
+      additionalLabels: { release: <Prometheus release name> }
+```
+
+Ray gets a `PodMonitor` rather than a `ServiceMonitor` because every Ray node
+exports its own metrics. Ray prefixes the metrics OpenRAG records inside its
+workers with `ray_`. The `PodMonitor` strips that prefix, so these metrics are
+stored under the same `openrag_*` names the API's `/metrics` uses, and the alert
+rules match them. Ray's own `ray_*` metrics keep their names. Milvus already exports from all five components (proxy,
+mixcoord, datanode, querynode, streamingnode); only its `ServiceMonitor` is new.
+None of the three endpoints authenticates, so none is routed through the Ingress.
+
+The Postgres exporter signs in as the `postgres` superuser, with the password in
+the sub-chart's Secret. Unless `postgresql.auth.postgresPassword` or
+`postgresql.auth.existingSecret` sets that password, the sub-chart generates it
+again on every render that cannot read the live Secret (`helm template`,
+Argo CD), while the server keeps the first one, and the exporter's login fails
+after a later sync. The chart therefore refuses `postgresql.metrics.enabled`
+without one of the two. On a new release, any password works. On a running
+release, set the one the server already has:
+`kubectl get secret -n <release namespace> openrag-postgresql -o jsonpath='{.data.postgres-password}' | base64 -d`.
+
+Three things can go wrong without failing the install:
+
+- **Selector labels.** A monitor without the label its Prometheus selects on is
+  created and never scraped. The example assumes kube-prometheus-stack, which
+  selects on `release: <its Helm release name>` by default; other setups may
+  use another label. Read the selectors with
+  `kubectl get prometheus -A -o jsonpath='{..podMonitorSelector}{..serviceMonitorSelector}'`.
+  The Postgres sub-chart calls the key `labels`; the Milvus one calls it `additionalLabels`.
+- **NetworkPolicy.** The default-deny policy admits only same-namespace traffic.
+  Until Prometheus's namespace is listed in `networkPolicy.metricsFrom`, its
+  targets report `up == 0`. Each entry opens only the metrics port, and only on
+  the pods that export it. The chart turns off the Postgres sub-chart's own
+  NetworkPolicy for this: it admitted any source on every port it listed, the
+  exporter's 9187 included (see [Upgrading to chart 0.6.7](#upgrading-to-chart-067)).
+- **Ray pods created by chart 0.6.6 or earlier.** KubeRay does not recreate Ray
+  pods when the `RayCluster` changes. Old workers still export on 8080 and need
+  recreating anyway ([Upgrading to chart 0.6.7](#upgrading-to-chart-067)). The
+  old head exports on 8090, but it also carries the `metrics: 8080` port that
+  KubeRay adds to a container without a port of that name. Its target therefore
+  stays down until the head is recreated too. Recreating the head restarts the
+  whole Ray cluster, so leave it for a maintenance window:
+  `kubectl delete pod -n <release namespace> -l ray.io/cluster=<RayCluster name>,ray.io/node-type=head`.
+
+Once enabled, this should return 1 for every Ray node, the Postgres pod and the
+five Milvus pods:
+
+```promql
+up{namespace="<release namespace>", job=~".*(raycluster|postgresql|milvus).*"}
+```
+
+### What to watch
+
+| Dependency | Query | Signal |
+|---|---|---|
+| Ray | `ray_tasks{namespace="<release namespace>", State="PENDING_NODE_ASSIGNMENT"}` | Tasks no node has the resources to run |
+| Ray | `ray_actors{namespace="<release namespace>", State="RESTARTING"}` | Actors being restarted. This gauge is sampled, so it catches a crash loop but can miss a single fast restart |
+| Ray | `ray_resources{namespace="<release namespace>", Name="GPU"}` by `State` (`USED`, `AVAILABLE`) | GPU allocation per node |
+| Ray | `ray_node_mem_used{namespace="<release namespace>"}`, and the same for `ray_node_cpu_utilization` and `ray_object_store_memory` | Node resources |
+| Postgres | `sum by (instance) (pg_stat_activity_count{namespace="<release namespace>"}) / sum by (instance) (pg_settings_max_connections{namespace="<release namespace>"})` | Connections against the server limit, per server |
+| Postgres | `pg_stat_activity_max_tx_duration{namespace="<release namespace>"}` | Longest open transaction |
+| Postgres | `pg_database_size_bytes{namespace="<release namespace>"}`, `pg_locks_count{namespace="<release namespace>"}` | Database size, lock contention |
+| Milvus | `histogram_quantile(0.99, sum by (le, function_name) (rate(milvus_proxy_req_latency_bucket{namespace="<release namespace>"}[5m])))`, and the same over `milvus_proxy_sq_latency_bucket` by `query_type` | p99 latency in milliseconds, per request type and per search/query type |
+| Milvus | `sum(rate(milvus_proxy_insert_vectors_count{namespace="<release namespace>"}[5m]))`, `sum(rate(milvus_proxy_search_vectors_count{namespace="<release namespace>"}[5m]))` | Vectors inserted and searched per second |
+| Milvus | `milvus_querycoord_collection_num{namespace="<release namespace>"}` | Loaded collections |
+| Milvus | `milvus_datacoord_segment_num{namespace="<release namespace>"}` by `segment_state`, `milvus_datacoord_compaction_task_num{namespace="<release namespace>"}` | Segment and compaction backlog |
+| Milvus | `sum by (component) (process_resident_memory_bytes{namespace="<release namespace>", component!=""})` | Memory per component |
+
+### Not covered
+
+- **The API's connection-pool wait.** The pool lives in the OpenRAG process, so
+  Postgres cannot see a request queued for a connection. That needs an
+  application metric.
+- **Slow queries.** These need `pg_stat_statements`, which means a
+  `shared_preload_libraries` change on the server plus the exporter's
+  `--collector.stat_statements`. Without it, `pg_stat_activity_max_tx_duration`
+  still shows long-running transactions.
+- **Volume fill.** `pg_database_size_bytes` is the database size, not how full
+  its PVC is; use the kubelet's `kubelet_volume_stats_*` series for that.
+- **Embedded Ray** (`ray.enabled=false`), which exports on no fixed port.
+- **MinIO and etcd**, Milvus's own dependencies.
+
+### Series volume
+
+Milvus and Ray are chatty. Samples per scrape on a single-node install holding
+one 5 000-row collection:
+
+| Target | Samples per scrape |
+|---|---|
+| Milvus, all five components | ~45 000 (the streaming node alone ~20 000) |
+| Ray, head and one worker, lightly loaded | ~1 150 |
+| Postgres | ~550 |
+
+Where the Prometheus belongs to a platform team, agree on that volume before
+enabling Milvus's monitor.

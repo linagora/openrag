@@ -11,16 +11,18 @@ backends cannot drift in name, label set or bucket layout.
 **How these reach Prometheus.** Ray's per-node metrics agent collects from every
 local actor and exposes them on the node's ``MetricsExportPort``
 (``--metrics-export-port=8090``, see ``infra/charts/openrag-stack/templates/raycluster.yaml``),
-scraped by a ``PodMonitor``. Ray prefixes every name with ``ray_``: a spec named
-``openrag_ingest_documents_total`` is queried as
-``ray_openrag_ingest_documents_total``.
+scraped by the chart's ``PodMonitor``. Ray prefixes every name with ``ray_``, and
+that ``PodMonitor`` strips it again: a spec named
+``openrag_ingest_documents_total`` is exported as
+``ray_openrag_ingest_documents_total`` and queried under its spec name, like the
+API's own series.
 
 **Querying them.** Ray attaches ``WorkerId``, ``SessionName``, ``NodeAddress``,
 ``Component`` and ``Version``. Always aggregate those away and always rate
 before summing::
 
     sum without(WorkerId, SessionName, NodeAddress, Component, Version) (
-        rate(ray_openrag_ingest_documents_total[5m])
+        rate(openrag_ingest_documents_total[5m])
     )
 
 Per-worker counters reset when an actor dies, and ``rate()`` only detects a
@@ -183,7 +185,7 @@ def record_parse_completion(pool: str, *, at: float | None = None) -> bool:
     evaluation, which climbs on its own while the pool is stuck::
 
         time() - max without(WorkerId, SessionName, NodeAddress, Component, Version) (
-            ray_openrag_ingest_last_parse_completion_timestamp_seconds
+            openrag_ingest_last_parse_completion_timestamp_seconds
         ) > 300
 
     Returns whether the stamp was written; a failure is reported, never raised.
