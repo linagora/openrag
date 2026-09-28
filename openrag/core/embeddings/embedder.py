@@ -43,3 +43,12 @@ class Embedder(ABC):
     def endpoint(self) -> str | None:
         """Base URL this client embeds against, if known."""
         return getattr(self, "_endpoint", None)
+
+    async def served_window(self) -> int | None:
+        """Context window the endpoint itself serves, in tokens, if it reports one.
+
+        It can be smaller than the configured window, and then it is what
+        bounds the embedded text, so indexing sizes chunks for the smaller of
+        the two. ``None`` means unknown: the configured window stands.
+        """
+        return None

@@ -591,7 +591,24 @@ vllm:
           secretName: *vllmHfTokenSecretName
           secretKey: HF_TOKEN
         vllmConfig:
-          gpuMemoryUtilization: 0.3
+          # Measured on an L4 (24 GB) with vLLM v0.17.1 under an indexing-shaped
+          # load (batch 32, 16 in flight, inputs up to 2046 tokens):
+          #   0.3, default max-model-len (32768) -> 7.0 GiB reserved
+          #   0.1, maxModelLen 2048              -> 2.6 GiB peak, same throughput
+          # On v0.30.0, 0.1 / 2048 takes 2.1 GiB and leaves a 0.39 GiB KV cache
+          # (1.8x the longest request, was 3.4x): vLLM now counts CUDA graph
+          # memory inside the fraction.
+          # Weights are 1.1 GiB; the rest is KV cache, sized by maxModelLen.
+          # vLLM pre-allocates this fraction whatever the model's size, and the
+          # card is shared with Marker and the reranker, so keep it tight.
+          # Keep maxModelLen >= every OpenRag embedder max_model_len: the
+          # MAX_MODEL_LEN env (default 2047) *and* any per-endpoint
+          # extra.max_model_len set in the admin UI. vLLM rejects a request whose
+          # truncate_prompt_tokens (max_model_len - 1) exceeds it; OpenRag then
+          # embeds and sizes new chunks for this value instead.
+          # Re-measure when the embedder model or the GPU changes.
+          gpuMemoryUtilization: 0.1
+          maxModelLen: 2048
           runner: "pooling"
           # `--convert embed` adapts a *ForCausalLM checkpoint such as
           # Qwen3-Embedding to embeddings, and changes nothing for a model that
