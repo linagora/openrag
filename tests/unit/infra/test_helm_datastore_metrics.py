@@ -338,7 +338,10 @@ def test_a_ray_address_that_renders_empty_is_still_embedded_ray(tmp_path: Path) 
     """configmap-env renders env values through tpl, so what the API receives is
     the rendered value: an expression that renders empty means embedded Ray."""
     objects = _objects(
-        _chart(tmp_path), *EMBEDDED_RAY_MONITOR, "--set", "env.config.RAY_ADDRESS={{ if false }}ray://x:10001{{ end }}"
+        _chart(tmp_path),
+        *EMBEDDED_RAY_MONITOR,
+        "--set-json",
+        'env.config.RAY_ADDRESS="{{ if false }}ray://x:10001{{ end }}"',
     )
     assert "ray-metrics" in [p.get("name") for p in _openrag_container(objects)["ports"]]
     assert [o["metadata"]["name"] for o in objects if o["kind"] == "PodMonitor"] == ["openrag-openrag-ray"]
@@ -357,10 +360,14 @@ def test_a_ray_address_rendered_from_an_expression_is_external(tmp_path: Path) -
 def test_the_notes_warn_when_the_ray_cluster_is_given_to_no_api(tmp_path: Path) -> None:
     """ray.enabled=true without RAY_ADDRESS (and without Ray Serve): the API starts
     its own Ray and the RayCluster does nothing, so its PodMonitor sees no work."""
-    notes = _notes(tmp_path, "--set", "ray.enabled=true")
+    notes = _notes(tmp_path / "bare", "--set", "ray.enabled=true")
     assert "the API is given no RAY_ADDRESS" in notes
     addressed = _notes(
-        tmp_path, "--set", "ray.enabled=true", "--set", "env.config.RAY_ADDRESS=ray://openrag-raycluster-head-svc:10001"
+        tmp_path / "addressed",
+        "--set",
+        "ray.enabled=true",
+        "--set",
+        "env.config.RAY_ADDRESS=ray://openrag-raycluster-head-svc:10001",
     )
     assert "the API is given no RAY_ADDRESS" not in addressed
 
