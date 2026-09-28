@@ -405,6 +405,38 @@ def test_a_ray_cluster_is_still_refused_without_an_address_the_api_sees(tmp_path
 
 
 @requires_helm
+@pytest.mark.parametrize(
+    ("sources", "refused"),
+    [
+        # The pod reads the Secret after the ConfigMap: a key in both takes the
+        # Secret's value, so an empty one there gives the API no address.
+        (["--set", "env.config.RAY_ADDRESS=ray://head:10001", "--set", "env.secrets.RAY_ADDRESS="], True),
+        (["--set", "env.config.RAY_ADDRESS=", "--set", "env.secrets.RAY_ADDRESS=ray://head:10001"], False),
+        # With env.existingSecret the chart renders no Secret of its own, so
+        # env.secrets never reaches the pod: only env.config counts.
+        (["--set", "env.existingSecret=mine", "--set", "env.secrets.RAY_ADDRESS=ray://head:10001"], True),
+        (
+            [
+                "--set",
+                "env.existingSecret=mine",
+                "--set",
+                "env.config.RAY_ADDRESS=ray://head:10001",
+                "--set",
+                "env.secrets.RAY_ADDRESS=",
+            ],
+            False,
+        ),
+    ],
+    ids=["secret-empty-wins", "secret-address-wins", "existing-secret-ignores-values", "existing-secret-reads-config"],
+)
+def test_the_address_is_read_where_the_api_reads_it(tmp_path: Path, sources: list[str], refused: bool) -> None:
+    result = _render(_chart(tmp_path), "--set", "ray.enabled=true", *sources)
+    assert (result.returncode != 0) is refused, result.stderr
+    if refused:
+        assert "neither ENABLE_RAY_SERVE=true nor a RAY_ADDRESS" in result.stderr
+
+
+@requires_helm
 def test_the_production_values_are_not_refused(tmp_path: Path) -> None:
     """values-linagora.yaml runs the RayCluster with Ray Serve and no RAY_ADDRESS:
     the refusal above must not catch it."""

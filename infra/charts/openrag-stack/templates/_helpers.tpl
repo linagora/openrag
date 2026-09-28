@@ -197,8 +197,18 @@ or an external secrets provider is not, which is what ray.externalCluster says.
 The RAY_ADDRESS the API will see, as configmap-env.yaml and secrets-env.yaml
 render it: both pass values through tpl, so a raw value can be an expression
 that renders empty. Empty when the chart sees none.
+
+The pod reads the ConfigMap, then the Secret (envFrom), so a key in both takes
+the Secret's value, even an empty one. env.secrets only reaches that Secret
+when the chart renders it: no env.existingSecret and the "values" provider.
+Otherwise the Secret is opaque here and env.config is all the chart can read.
 */}}
 {{- define "openrag-stack.rayAddress" -}}
-{{- $raw := or (dig "RAY_ADDRESS" "" (.Values.env.config | default dict)) (dig "RAY_ADDRESS" "" (.Values.env.secrets | default dict)) -}}
+{{- $secrets := .Values.env.secrets | default dict -}}
+{{- $chartSecret := and (not .Values.env.existingSecret) (eq (.Values.env.secretsProvider.type | default "values") "values") -}}
+{{- $raw := dig "RAY_ADDRESS" "" (.Values.env.config | default dict) -}}
+{{- if and $chartSecret (hasKey $secrets "RAY_ADDRESS") -}}
+{{- $raw = get $secrets "RAY_ADDRESS" -}}
+{{- end -}}
 {{- tpl (printf "%v" $raw) . | trim -}}
 {{- end }}

@@ -126,7 +126,9 @@ Ray head because the Ray Serve HTTP proxy does not run on the API pod. Ray
 Serve requires `ray.enabled=true`; Helm rejects that invalid combination. The
 reverse is rejected too: with `ray.enabled=true` the API must either run on Ray
 Serve (`ENABLE_RAY_SERVE=true`) or be pointed at the cluster with
-`env.config.RAY_ADDRESS: ray://<release>-raycluster-head-svc:10001`. Without
+`env.config.RAY_ADDRESS: ray://<fullname>-raycluster-head-svc:10001`, where
+`<fullname>` is `fullnameOverride` (`openrag` by default) and the render error
+prints the exact address. Without
 either, it would start its own Ray inside its pod, the RayCluster would do no
 work, and the Ray PodMonitor would scrape none of the indexing metrics. Put
 `RAY_ADDRESS` in `env.config` even when `env.existingSecret` also carries it:
