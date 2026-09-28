@@ -3,6 +3,7 @@ title: Deploying OpenRAG on Kubernetes
 ---
 
 This guide explains how to deploy the **OpenRAG** stack on a Kubernetes cluster using Helm.
+To upgrade a running release to 2.3.0, follow [Upgrading OpenRAG — 2.2.x to 2.3.0 on Kubernetes](/openrag/documentation/upgrading/#22x-to-230-on-kubernetes).
 
 ---
 
