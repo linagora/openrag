@@ -257,8 +257,24 @@ This is the last rebuild. Once `enable_match` is gone, a later analyzer change i
 - **Stop OpenRAG first**, as the banner above says — the copy reads a snapshot, so a row written while it runs would be missing from the rebuild. The migration re-counts the source afterwards and aborts, leaving the original untouched, if the count moved.
 - **`hybrid_search: false`** deployments have no BM25 leg and are only re-stamped — no rebuild, and no backup collection, in either direction.
 - A failed copy leaves the original untouched; drop the partial `<collection>_v2_rebuild` and retry.
-- The version check runs on the indexing path only. An un-migrated deployment still boots and still answers searches — with the old analyzer — and fails the first upload with `Collection ... is at schema version 1 but the application requires version 2`.
+- An un-migrated deployment still boots and reports ready, but the application checks the schema version on both the search and the indexing path: searches answer `503` (`VDB_SCHEMA_MIGRATION_REQUIRED`) and uploads fail until the migration runs.
 :::
+
+### Version 3 — one vector field per embedder
+
+Schema version 3 moves every chunk's vector out of the shared `vector` field into a field owned by the embedder its partition uses, then drops `vector`. Chunk IDs, text, metadata and the BM25 `sparse` vector stay in place: the collection is not rebuilt.
+
+It reads PostgreSQL as well as Milvus, to know which embedder each partition uses and which field that embedder owns. That field is allocated by a PostgreSQL migration of the same release, so **start the new OpenRAG version once** before running it, and keep both databases up while it runs (`docker compose up -d rdb milvus` under Compose). Anything it cannot route stops it before it changes anything.
+
+:::caution[Plan for version 3]
+- **Stop OpenRAG first.** The migration aborts, without changing anything, if the row count moves while it copies.
+- **It is safe to run again after a failure.** Only its last step, dropping `vector`, cannot be undone. `--downgrade --target 2` copies the vectors back into `vector`, and is possible only while every embedder field in use has the same dimension.
+- **Rows of a partition PostgreSQL does not know** are already unreachable from OpenRAG, and lose their vector.
+- **Integers above 2^53** in a chunk's metadata come back rounded: the copy rewrites the metadata as floating-point numbers. PostgreSQL keeps each file's original upload metadata.
+- **Development builds from 21 to 28 September 2026** ran a copy that rounded chunk section IDs. The migration does not repair a collection they already migrated; re-index the files indexed before it.
+:::
+
+On Kubernetes, follow [Upgrading OpenRAG — 2.2.x to 2.3.0 on Kubernetes](/openrag/documentation/upgrading/#22x-to-230-on-kubernetes), which runs the migration from the upgraded OpenRAG pod.
 
 Once validated, drop the backup:
 
@@ -422,7 +438,8 @@ Files must follow the pattern `N.short_description.py`, where `N` is the **targe
 openrag/services/persistence/migrations/milvus/
   1.add_created_at_temporal_fields.py  ← brings the schema to version 1
   2.rebuild_text_analyzer.py           ← brings the schema to version 2
-  3.your_new_migration.py              ← brings the schema to version 3
+  3.split_vector_per_embedder.py       ← brings the schema to version 3
+  4.your_new_migration.py              ← brings the schema to version 4
   migrate.py                           ← generic runner (do not rename)
 ```
 
