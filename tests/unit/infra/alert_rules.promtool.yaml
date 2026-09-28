@@ -446,11 +446,11 @@ tests:
         exp_alerts: []
 
   - interval: 1m
-    name: "the Compose ray job carries the ingest metrics — its being down fires"
+    name: "the Compose openrag-ray job carries the ingest metrics — its being down fires"
     # Every Ray-side series (ingest outcomes, parse completions) comes from this
     # job. Unmatched, IngestStalled and IngestFailureRate went inert silently.
     input_series:
-      - series: 'up{job="ray",instance="openrag:8091"}'
+      - series: 'up{job="openrag-ray",instance="openrag:8091"}'
         values: "0+0x20"
       - series: 'up{job="openrag",instance="openrag:8080"}'
         values: "1+0x20"
@@ -460,7 +460,7 @@ tests:
         exp_alerts:
           - exp_labels:
               severity: critical
-              job: ray
+              job: openrag-ray
               instance: openrag:8091
             exp_annotations:
               description: "The target has been unreachable for 5 minutes. Every other OpenRag alert is inert while this is firing, because absent series cannot breach a threshold."
@@ -723,3 +723,86 @@ tests:
               summary: "Ingestion is stalled — documents are queued and nothing is completing"
               description: "3 task(s) are QUEUED and no parser pool has completed a parse for over 12 minutes. Uploads are being accepted and never indexed."
               runbook_url: "https://github.com/linagora/openrag/blob/main/docs/deployment/runbooks/OpenRagIngestStalled.md"
+
+  # ── A Prometheus that scrapes Ray without renaming ray_openrag_* ──────
+  # The chart's PodMonitor and the Compose job strip the prefix; a platform's
+  # own scrape may not. Each case replays a firing case above with the
+  # Ray-side series under their exported names: it must fire the same way.
+  - interval: 1m
+    name: 'OpenRagIngestFailureRate: fires on Ray''s unrenamed ray_openrag_* series too'
+    input_series:
+    - series: ray_openrag_ingest_documents_total{status="failed"}
+      values: 0+1x40
+    - series: ray_openrag_ingest_documents_total{status="completed"}
+      values: 0+1x40
+    alert_rule_test:
+    - eval_time: 35m
+      alertname: OpenRagIngestFailureRate
+      exp_alerts:
+      - exp_labels:
+          severity: warning
+        exp_annotations:
+          description: 50% of documents reaching a terminal state over the last 5 minutes failed.
+          runbook_url: https://github.com/linagora/openrag/blob/main/docs/deployment/runbooks/OpenRagIngestFailureRate.md
+          summary: More than 25% of documents are failing to index
+  - interval: 1m
+    name: 'OpenRagCircuitBreakerOpen: fires on Ray''s unrenamed ray_openrag_* series too'
+    input_series:
+    - series: ray_openrag_circuit_breaker_state{name="llm"}
+      values: 1+0x40
+    alert_rule_test:
+    - eval_time: 30m
+      alertname: OpenRagCircuitBreakerOpen
+      exp_alerts:
+      - exp_labels:
+          severity: critical
+          name: llm
+        exp_annotations:
+          description: OpenRag has stopped calling its llm endpoint after repeated failures. Calls return immediately without reaching it, so chat and indexing that depend on it fail fast.
+          runbook_url: https://github.com/linagora/openrag/blob/main/docs/deployment/runbooks/OpenRagCircuitBreakerOpen.md
+          summary: The llm circuit breaker is open
+    - eval_time: 30m
+      alertname: OpenRagInferenceProviderDown
+      exp_alerts: []
+  - interval: 1m
+    name: 'OpenRagInferenceProviderDown: fires on Ray''s unrenamed ray_openrag_* series too'
+    input_series:
+    - series: ray_openrag_inference_requests_total{provider="embedder-main",operation="embed",outcome="error"}
+      values: 0+8x40
+    - series: ray_openrag_inference_requests_total{provider="embedder-main",operation="embed",outcome="success"}
+      values: 0+2x40
+    alert_rule_test:
+    - eval_time: 30m
+      alertname: OpenRagInferenceProviderDown
+      exp_alerts:
+      - exp_labels:
+          severity: critical
+          provider: embedder-main
+        exp_annotations:
+          description: More than 50% of the calls to registry endpoint embedder-main are returning errors or timing out. Chat and any indexing stage that depends on it will fail.
+          runbook_url: https://github.com/linagora/openrag/blob/main/docs/deployment/runbooks/OpenRagInferenceProviderDown.md
+          summary: Inference provider embedder-main is failing more than 50% of its calls
+  - interval: 1m
+    name: 'OpenRagIngestStalled: fires on Ray''s unrenamed ray_openrag_* series too'
+    input_series:
+    - series: openrag_ingest_tasks{state="QUEUED"}
+      values: 3+0x40
+    - series: ray_openrag_ingest_last_parse_completion_timestamp_seconds{pool="marker"}
+      values: 0+0x40
+    alert_rule_test:
+    - eval_time: 10m
+      alertname: OpenRagIngestStalled
+      exp_alerts: []
+    - eval_time: 14m
+      alertname: OpenRagIngestStalled
+      exp_alerts: []
+    - eval_time: 16m
+      alertname: OpenRagIngestStalled
+      exp_alerts:
+      - exp_labels:
+          severity: critical
+          state: QUEUED
+        exp_annotations:
+          description: 3 task(s) are QUEUED and no parser pool has completed a parse for over 12 minutes. Uploads are being accepted and never indexed.
+          runbook_url: https://github.com/linagora/openrag/blob/main/docs/deployment/runbooks/OpenRagIngestStalled.md
+          summary: Ingestion is stalled — documents are queued and nothing is completing
