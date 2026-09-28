@@ -180,11 +180,21 @@ def _with_sampling_params(extra: dict[str, Any], llm_cfg: Any) -> dict[str, Any]
     return {**extra, **_sampling_params(llm_cfg)}
 
 
+_API_REPOINT_REMEDY = (
+    "Resend with acknowledge_indexed_data=true to apply it anyway, or create a new endpoint and move partitions to it."
+)
+_BOOT_REPOINT_REMEDY = (
+    "Pin EMBEDDER_MODEL_NAME (or the legacy EMBEDDING_MODEL, when set) to the model the data was indexed with, "
+    "or change the model through the admin API with acknowledge_indexed_data=true."
+)
+
+
 async def _refuse_unacknowledged_repoint(
     locked: ModelEndpointRow,
     indexed_file_usage: Callable[[], Awaitable[list[dict]]],
     *,
     fields: Mapping[str, object],
+    remedy: str = _API_REPOINT_REMEDY,
 ) -> None:
     """Raise unless this embedder edit leaves every indexed file's vectors valid.
 
@@ -192,7 +202,8 @@ async def _refuse_unacknowledged_repoint(
     reads cannot go stale before the edit commits: a file being indexed against
     this endpoint is either counted here or refused when the indexer records it
     (#958). What counts as a change is ``material_embedder_changes``, the same
-    fingerprint the indexer compares.
+    fingerprint the indexer compares. *remedy* ends the message: the way out
+    differs for an admin-API caller and an operator reading the boot log.
     """
     changed = material_embedder_changes(locked, fields)
     if not changed:
@@ -206,9 +217,7 @@ async def _refuse_unacknowledged_repoint(
         shown += f" and {len(usage) - 5} more"
     raise ConflictError(
         f"Changing {', '.join(changed)} on embedder '{locked.name}' leaves {total} indexed file(s) in "
-        f"{len(usage)} partition(s) ({shown}) with vectors a different configuration no longer matches. "
-        "Resend with acknowledge_indexed_data=true to apply it anyway, or create a new endpoint and move "
-        "partitions to it.",
+        f"{len(usage)} partition(s) ({shown}) with vectors a different configuration no longer matches. {remedy}",
         code="EMBEDDER_EDIT_AFFECTS_INDEXED_DATA",
     )
 
@@ -393,23 +402,31 @@ class ModelEndpointService:
             if os.getenv(env_var) is not None and field in data:
                 fields[field] = data[field]
 
-        # An embedder holding indexed files is re-pointed only through the guard
+        # An embedder holding indexed files changes model only through the guard
         # the admin API enforces: env changing under it (a new default model
         # after an upgrade, #1099) would otherwise write vectors from another
         # model into the field every indexed file was embedded with, and search
-        # would compare the two. Refused, the row keeps the model its data was
-        # indexed with and boot goes on; readiness reports the embedder.
-        guard = functools.partial(_refuse_unacknowledged_repoint, fields=fields) if model_type == "embedder" else None
+        # would compare the two. Only the model is guarded. A new URL is how an
+        # operator moves the same model to another server, and if that server
+        # serves another model the readiness probe reports the embedder
+        # unavailable. Refused, the row keeps its model and takes the rest.
+        guard = None
+        if model_type == "embedder":
+            guard = functools.partial(
+                _refuse_unacknowledged_repoint,
+                fields={"model_name": fields["model_name"]},
+                remedy=_BOOT_REPOINT_REMEDY,
+            )
         try:
             await self._repo.update(row.name, model_type, guard=guard, **fields)
         except ConflictError as exc:
             logger.bind(endpoint=row.name, model_type=model_type).error(
-                "Not syncing embedder '{name}' from env: {reason} To keep the indexed data, set "
-                "EMBEDDER_MODEL_NAME and EMBEDDER_BASE_URL to the model it was indexed with; to move to the "
-                "new model, create a new embedder endpoint and move the partitions to it.",
-                name=row.name,
-                reason=exc.message,
+                f"Not syncing the model of embedder '{row.name}' from env (MODEL_ENDPOINT_SYNC_ON_BOOT=true): "
+                f"it keeps '{row.model_name}', env asks for '{fields['model_name']}'. {exc.message}"
             )
+            del fields["model_name"]
+            await self._repo.update(row.name, model_type, **fields)
+            logger.info(f"Synced {model_type} endpoint '{row.name}' from env, except its model.")
             return
         logger.info(f"Synced {model_type} endpoint '{row.name}' from env (MODEL_ENDPOINT_SYNC_ON_BOOT=true).")
 

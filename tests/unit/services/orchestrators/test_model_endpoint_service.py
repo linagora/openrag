@@ -653,37 +653,103 @@ async def test_seed_defaults_sync_on_boot_follows_a_changed_model_slug(monkeypat
     assert synced.endpoint == "http://embedder:8000/v1"
 
 
+def _indexed_env_managed_embedder(**overrides):
+    """The env-seeded default embedder of an install that has indexed files."""
+    from core.config.model_endpoints import ENV_MANAGED_KEY, ENV_MANAGED_VALUE
+
+    fields = {
+        "name": "indexed-model",
+        "model_type": "embedder",
+        "model_name": "indexed-model",
+        "endpoint": "http://embedder:8000/v1",
+        "batch_size": 512,
+        "extra": {"implementation": "vllm", "api_key": "old-key", ENV_MANAGED_KEY: ENV_MANAGED_VALUE},
+        "is_default": True,
+    }
+    fields.update(overrides)
+    row = _make_row(**fields)
+    return row, _FakeEndpointRepo(rows=[row], indexed_usage=[{"partition": "docs", "file_count": 3}])
+
+
+async def _seed_capturing_errors(svc) -> list[str]:
+    from loguru import logger
+
+    errors: list[str] = []
+    sink = logger.add(lambda message: errors.append(message.record["message"]), level="ERROR")
+    try:
+        await svc.seed_defaults()
+    finally:
+        logger.remove(sink)
+    return errors
+
+
+def _sync_settings(**embedder):
+    from core.config.root import Settings
+
+    return Settings(
+        embedder={"base_url": "http://embedder:8000/v1", "model_name": "indexed-model", **embedder},
+        models={"sync_on_boot": True},
+    )
+
+
 @pytest.mark.asyncio
-async def test_seed_defaults_sync_on_boot_does_not_repoint_an_embedder_with_indexed_files(monkeypatch):
+async def test_seed_defaults_sync_on_boot_keeps_the_model_of_an_embedder_with_indexed_files(monkeypatch):
     """#1099: after an upgrade that moved the default embedder, an .env without
     EMBEDDER_MODEL_NAME made the boot sync rewrite the indexed embedder's model,
     so new uploads wrote another model's vectors into the field search compares.
-    The sync now runs the guard the admin API enforces: refused, the row keeps
-    the model its data was indexed with, and boot goes on."""
-    from core.config.model_endpoints import ENV_MANAGED_KEY, ENV_MANAGED_VALUE
-    from core.config.root import Settings
+    The model now changes only through the admin API's guard. The rest of the
+    row still follows env: a refused model must not also block a rotated key or
+    a tunable the operator set in the same rollout."""
 
-    existing = _make_row(
-        name="old-model",
-        model_type="embedder",
-        model_name="old-model",
-        endpoint="http://old-embedder:8000/v1",
-        batch_size=512,
-        extra={"implementation": "vllm", ENV_MANAGED_KEY: ENV_MANAGED_VALUE},
-        is_default=True,
-    )
-    repo = _FakeEndpointRepo(rows=[existing], indexed_usage=[{"partition": "docs", "file_count": 3}])
-    settings = Settings(
-        embedder={"base_url": "http://embedder:8000/v1", "model_name": "new-model", "batch_size": 64},
-        models={"sync_on_boot": True},
+    monkeypatch.setenv("EMBEDDER_BATCH_SIZE", "64")
+    _, repo = _indexed_env_managed_embedder()
+    settings = _sync_settings(
+        base_url="http://new-embedder:8000/v1", model_name="new-model", api_key="rotated-key", batch_size=64
     )
     svc = _make_service(repo, settings=settings)
 
-    await svc.seed_defaults()
+    errors = await _seed_capturing_errors(svc)
 
-    kept = repo._store[("old-model", "embedder")]
-    assert kept.model_name == "old-model"
-    assert kept.endpoint == "http://old-embedder:8000/v1"
+    synced = repo._store[("indexed-model", "embedder")]
+    assert synced.model_name == "indexed-model"
+    assert synced.extra["api_key"] == "rotated-key"
+    assert synced.batch_size == 64
+    assert synced.endpoint == "http://new-embedder:8000/v1"
+    # The boot log is read by an operator, not an admin-API client: it names
+    # the variable to pin, not the API's "Resend ..." instruction.
+    [error] = errors
+    assert "EMBEDDER_MODEL_NAME" in error
+    assert "'indexed-model'" in error and "'new-model'" in error
+    assert "Resend" not in error
+
+
+@pytest.mark.asyncio
+async def test_seed_defaults_sync_on_boot_rotates_the_key_of_an_embedder_with_indexed_files(monkeypatch):
+    """An API key cannot change a vector, so indexed files do not hold it back."""
+    _, repo = _indexed_env_managed_embedder()
+    svc = _make_service(repo, settings=_sync_settings(api_key="rotated-key"))
+
+    errors = await _seed_capturing_errors(svc)
+
+    assert repo._store[("indexed-model", "embedder")].extra["api_key"] == "rotated-key"
+    # Not refused and then applied by the fallback: nothing is reported.
+    assert errors == []
+
+
+@pytest.mark.asyncio
+async def test_seed_defaults_sync_on_boot_moves_an_embedder_with_indexed_files_to_a_new_url(monkeypatch):
+    """A new URL is how an operator moves the same model to another server. If
+    that server serves another model, readiness reports the embedder unavailable;
+    the sync does not refuse the move."""
+    _, repo = _indexed_env_managed_embedder()
+    svc = _make_service(repo, settings=_sync_settings(base_url="http://embedder.gpu-pool:8000/v1"))
+
+    errors = await _seed_capturing_errors(svc)
+
+    synced = repo._store[("indexed-model", "embedder")]
+    assert synced.endpoint == "http://embedder.gpu-pool:8000/v1"
+    assert synced.model_name == "indexed-model"
+    assert errors == []
 
 
 @pytest.mark.asyncio
@@ -1317,6 +1383,8 @@ async def test_update_refuses_a_material_embedder_edit_over_indexed_files(fields
 
     assert exc.value.code == "EMBEDDER_EDIT_AFFECTS_INDEXED_DATA"
     assert "35 indexed file(s) in 2 partition(s) (docs, hr)" in exc.value.message
+    # An API client's way out, not the boot sync's (which names env vars).
+    assert "Resend with acknowledge_indexed_data=true" in exc.value.message
     assert not any(c[0] == "update" for c in repo.calls)
 
 
