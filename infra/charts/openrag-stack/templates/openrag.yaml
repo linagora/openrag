@@ -2,6 +2,16 @@
 {{- if and $rayServeEnabled (not .Values.ray.enabled) -}}
 {{- fail "ENABLE_RAY_SERVE=true requires ray.enabled=true" -}}
 {{- end -}}
+{{- /* The reverse half of the same contract. With a RayCluster but neither Ray
+   Serve nor a RAY_ADDRESS, the API starts its own Ray inside the openrag pod:
+   the RayCluster does no work, and the Ray PodMonitor scrapes a cluster that
+   holds none of the indexing metrics, so their alerts stay silent. A
+   RAY_ADDRESS the chart cannot read (env.existingSecret, an external secrets
+   provider) belongs in env.config as well: envFrom reads the ConfigMap first,
+   so the Secret's copy still wins at runtime. */ -}}
+{{- if and .Values.ray.enabled (not $rayServeEnabled) (not (include "openrag-stack.rayAddress" .)) -}}
+{{- fail (printf "ray.enabled=true with neither ENABLE_RAY_SERVE=true nor a RAY_ADDRESS: the API would start its own Ray inside the openrag pod, the RayCluster would do no work, and the Ray PodMonitor would scrape a cluster holding none of the indexing metrics. Point the API at the cluster with env.config.RAY_ADDRESS: ray://%s-raycluster-head-svc:10001 (in env.config even when env.existingSecret also carries it), or set env.config.ENABLE_RAY_SERVE=true." (include "openrag-stack.fullname" .)) -}}
+{{- end -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:

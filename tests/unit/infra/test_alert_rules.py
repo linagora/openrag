@@ -522,6 +522,7 @@ _CHART_SETS = (
     "postgresql.auth.password=unit-test-password-0123",
     "monitoring.prometheusRule.enabled=true",
     "ray.enabled=true",
+    "env.config.RAY_ADDRESS=ray://openrag-raycluster-head-svc:10001",
     "ray.metrics.podMonitor.enabled=true",
 )
 

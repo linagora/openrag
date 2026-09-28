@@ -123,7 +123,14 @@ For the default direct-API deployment, startup and liveness probes use
 `/health_check`, while the readiness probe uses `/ready`. When
 `ENABLE_RAY_SERVE=true`, the chart automatically uses exec probes against the
 Ray head because the Ray Serve HTTP proxy does not run on the API pod. Ray
-Serve requires `ray.enabled=true`; Helm rejects that invalid combination.
+Serve requires `ray.enabled=true`; Helm rejects that invalid combination. The
+reverse is rejected too: with `ray.enabled=true` the API must either run on Ray
+Serve (`ENABLE_RAY_SERVE=true`) or be pointed at the cluster with
+`env.config.RAY_ADDRESS: ray://<release>-raycluster-head-svc:10001`. Without
+either, it would start its own Ray inside its pod, the RayCluster would do no
+work, and the Ray PodMonitor would scrape none of the indexing metrics. Put
+`RAY_ADDRESS` in `env.config` even when `env.existingSecret` also carries it:
+the chart cannot read that Secret, and the Secret's copy still wins at runtime.
 Readiness returns 503 when startup is incomplete or PostgreSQL, Milvus, or Ray is
 unavailable. Model checks are reported in the response but do not gate the whole
 API, so optional VLM/STT and partition-specific model endpoints do not remove

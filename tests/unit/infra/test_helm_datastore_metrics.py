@@ -138,7 +138,10 @@ REQUIRED_SECRETS = [
 ]
 POSTGRES_SUPERUSER = ["--set", "postgresql.auth.postgresPassword=unit-test-superuser-0123"]
 METRICS_FROM = [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "monitoring"}}}]
-RAY_MONITOR = ["--set", "ray.enabled=true", "--set", "ray.metrics.podMonitor.enabled=true"]
+#: This release's RayCluster, with the API pointed at it: the chart refuses
+#: ray.enabled=true when the API has neither Ray Serve nor a RAY_ADDRESS.
+RAY_CLUSTER = ["--set", "ray.enabled=true", "--set", "env.config.RAY_ADDRESS=ray://openrag-raycluster-head-svc:10001"]
+RAY_MONITOR = [*RAY_CLUSTER, "--set", "ray.metrics.podMonitor.enabled=true"]
 POSTGRES_MONITOR = [
     "--set",
     "postgresql.metrics.enabled=true",
@@ -357,19 +360,56 @@ def test_a_ray_address_rendered_from_an_expression_is_external(tmp_path: Path) -
 
 
 @requires_helm
-def test_the_notes_warn_when_the_ray_cluster_is_given_to_no_api(tmp_path: Path) -> None:
-    """ray.enabled=true without RAY_ADDRESS (and without Ray Serve): the API starts
-    its own Ray and the RayCluster does nothing, so its PodMonitor sees no work."""
-    notes = _notes(tmp_path / "bare", "--set", "ray.enabled=true")
-    assert "the API is given no RAY_ADDRESS" in notes
-    addressed = _notes(
-        tmp_path / "addressed",
-        "--set",
-        "ray.enabled=true",
-        "--set",
-        "env.config.RAY_ADDRESS=ray://openrag-raycluster-head-svc:10001",
-    )
-    assert "the API is given no RAY_ADDRESS" not in addressed
+def test_a_ray_cluster_given_to_no_api_is_refused(tmp_path: Path) -> None:
+    """ray.enabled=true with neither Ray Serve nor a RAY_ADDRESS: the API starts
+    its own Ray inside its pod, the RayCluster does no work, and the Ray PodMonitor
+    scrapes a cluster holding none of the indexing metrics. Refused, naming the fix."""
+    result = _render(_chart(tmp_path), "--set", "ray.enabled=true")
+    assert result.returncode != 0
+    assert "neither ENABLE_RAY_SERVE=true nor a RAY_ADDRESS" in result.stderr
+    assert "env.config.RAY_ADDRESS: ray://openrag-raycluster-head-svc:10001" in result.stderr
+
+
+@requires_helm
+@pytest.mark.parametrize(
+    "api",
+    [
+        ["--set", "env.config.RAY_ADDRESS=ray://openrag-raycluster-head-svc:10001"],
+        ["--set", "env.secrets.RAY_ADDRESS=ray://openrag-raycluster-head-svc:10001"],
+        ["--set-string", "env.config.ENABLE_RAY_SERVE=true"],
+    ],
+    ids=["address-in-config", "address-in-secrets", "ray-serve"],
+)
+def test_a_ray_cluster_the_api_uses_renders(tmp_path: Path, api: list[str]) -> None:
+    result = _render(_chart(tmp_path), "--set", "ray.enabled=true", *api)
+    assert result.returncode == 0, result.stderr
+
+
+@requires_helm
+@pytest.mark.parametrize(
+    "api",
+    [
+        # The address the API would see, not the raw value: an expression that
+        # renders empty gives it none.
+        ["--set-json", 'env.config.RAY_ADDRESS="{{ if false }}ray://x:10001{{ end }}"'],
+        # ray.externalCluster says the cluster is outside this release; with
+        # ray.enabled=true the cluster is this release's, so it does not count.
+        ["--set", "ray.externalCluster=true"],
+    ],
+    ids=["address-renders-empty", "external-cluster-flag"],
+)
+def test_a_ray_cluster_is_still_refused_without_an_address_the_api_sees(tmp_path: Path, api: list[str]) -> None:
+    result = _render(_chart(tmp_path), "--set", "ray.enabled=true", *api)
+    assert result.returncode != 0
+    assert "neither ENABLE_RAY_SERVE=true nor a RAY_ADDRESS" in result.stderr
+
+
+@requires_helm
+def test_the_production_values_are_not_refused(tmp_path: Path) -> None:
+    """values-linagora.yaml runs the RayCluster with Ray Serve and no RAY_ADDRESS:
+    the refusal above must not catch it."""
+    result = _render(_chart(tmp_path), "-f", str(CHART_DIR / "values-linagora.yaml"))
+    assert result.returncode == 0, result.stderr
 
 
 @requires_helm
@@ -382,8 +422,8 @@ def test_external_cluster_is_ignored_with_the_charts_own_ray_cluster(tmp_path: P
 
 @requires_helm
 def test_a_ray_cluster_leaves_the_api_pod_without_a_ray_port(tmp_path: Path) -> None:
-    """With ray.enabled=true the API attaches to the RayCluster and starts no Ray
-    of its own; a declared port there would be a target that is always down."""
+    """With ray.enabled=true (and the API pointed at the RayCluster) the API starts
+    no Ray of its own; a declared port there would be a target that is always down."""
     container = _openrag_container(_objects(_chart(tmp_path), *RAY_MONITOR))
     assert "ray-metrics" not in [p.get("name") for p in container["ports"]]
     assert "RAY_METRICS_EXPORT_PORT" not in [item["name"] for item in container.get("env", [])]
@@ -396,8 +436,7 @@ def test_the_bundled_stack_scrapes_ray(tmp_path: Path, ray: str) -> None:
     scrapes the API alone leaves the ingestion alerts unable to fire."""
     objects = _objects(
         _chart(tmp_path),
-        "--set",
-        f"ray.enabled={ray}",
+        *(RAY_CLUSTER if ray == "true" else ["--set", "ray.enabled=false"]),
         "--set",
         "monitoring.bundled=true",
         "--set",
@@ -576,7 +615,7 @@ def test_the_notes_do_not_warn_under_the_bundled_prometheus(tmp_path: Path) -> N
 @requires_helm
 def test_an_upgrade_names_the_ray_workers_to_recreate_and_leaves_the_head(tmp_path: Path) -> None:
     """Every Ray install is affected, whether or not it scrapes anything."""
-    notes = _notes(tmp_path, "--is-upgrade", "--set", "ray.enabled=true", "--set", "fullnameOverride=rag")
+    notes = _notes(tmp_path, "--is-upgrade", *RAY_CLUSTER, "--set", "fullnameOverride=rag")
 
     assert "kubectl delete pod -n rag -l ray.io/cluster=rag-raycluster,ray.io/node-type=worker" in notes
     assert 'Postgres now accepts connections only from namespace "rag"' in notes
@@ -584,7 +623,7 @@ def test_an_upgrade_names_the_ray_workers_to_recreate_and_leaves_the_head(tmp_pa
 
 @requires_helm
 def test_a_first_install_prints_no_upgrade_steps(tmp_path: Path) -> None:
-    assert "Upgrading from chart" not in _notes(tmp_path, "--set", "ray.enabled=true")
+    assert "Upgrading from chart" not in _notes(tmp_path, *RAY_CLUSTER)
 
 
 @requires_helm
@@ -605,7 +644,7 @@ def test_the_upgrade_steps_print_only_when_upgrading_from_0_6_6_or_earlier(
     """Every release bumps the chart version, so steps scoped to the current
     version would be gone before a stable release carried them. It is the
     version upgraded from that decides, and one that cannot be read prints them."""
-    notes = _notes(tmp_path, "--is-upgrade", "--set", "ray.enabled=true", default_deny_chart=upgraded_from)
+    notes = _notes(tmp_path, "--is-upgrade", *RAY_CLUSTER, default_deny_chart=upgraded_from)
 
     assert ("Upgrading from chart 0.6.6 or earlier" in notes) is printed
 
