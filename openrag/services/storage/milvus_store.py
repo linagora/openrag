@@ -34,6 +34,8 @@ Hybrid BM25:
 from __future__ import annotations
 
 import asyncio
+import math
+import re
 import secrets
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -42,6 +44,8 @@ from typing import Any
 
 from core.config.infrastructure import VectorDBConfig
 from core.models.chunk import Chunk
+from core.models.retrieval_trace import RemovalReasonCode, TraceCandidate, TraceRemovalReason
+from core.retrieval.trace import RetrievalTraceBuilder, candidates_from_chunks
 from core.utils.exceptions import (
     UnexpectedVDBError,
     VDBConnectionError,
@@ -829,18 +833,23 @@ class MilvusVectorStore(VectorStore):
         expr: str,
         output_fields: list[str],
         batch_size: int | None = None,
+        limit: int | None = None,
     ) -> list[dict[str, Any]]:
         """Drain a Milvus 3.0 ``query_iterator`` into a list.
 
         ``batch_size`` defaults to :meth:`_safe_batch_size`, which shrinks the
         page for vector-inclusive projections so one page stays under Milvus's
-        result-size limit. Total result-set size is unaffected — the iterator
-        paginates until the filter is drained.
+        result-size limit. Without ``limit`` the iterator drains the filter;
+        with it, iteration stops as soon as the requested number of rows exists.
 
         Synchronous; call via :func:`asyncio.to_thread` from async methods.
         """
         if batch_size is None:
             batch_size = self._safe_batch_size(output_fields)
+        if limit is not None:
+            if limit <= 0:
+                return []
+            batch_size = min(batch_size, limit)
         iterator = self._client.query_iterator(
             collection_name=self._collection_name,
             filter=expr,
@@ -854,9 +863,11 @@ class MilvusVectorStore(VectorStore):
                 if not batch:
                     break
                 out.extend(batch)
+                if limit is not None and len(out) >= limit:
+                    break
         finally:
             iterator.close()
-        return out
+        return out if limit is None else out[:limit]
 
     # ------------------------------------------------------------------
     # ID round-trip (Chunk.id: str  <-->  Milvus _id: INT64 auto_id PK)
@@ -1035,6 +1046,287 @@ class MilvusVectorStore(VectorStore):
             out.append(record)
         return out
 
+    @staticmethod
+    def _trace_candidates(rows: list[dict[str, Any]], score_name: str | None) -> list[TraceCandidate]:
+        """Project store rows through Task 1's content-free candidate serializer."""
+        chunks: list[Chunk] = []
+        scores: list[float | None] = []
+        for row in rows:
+            raw_id = row.get("id")
+            if raw_id is None:
+                continue
+            raw_document_id = row.get("file_id")
+            chunks.append(
+                Chunk(
+                    id=str(raw_id),
+                    document_id=str(raw_document_id) if raw_document_id is not None else "",
+                )
+            )
+            raw_score = row.get("score")
+            score = float(raw_score) if isinstance(raw_score, (int, float)) else None
+            scores.append(score if score is not None and math.isfinite(score) else None)
+
+        candidates = candidates_from_chunks(chunks)
+        if score_name is None:
+            return candidates
+        return [
+            candidate.model_copy(update={"scores": {score_name: score}}) if score is not None else candidate
+            for candidate, score in zip(candidates, scores, strict=True)
+        ]
+
+    @staticmethod
+    def _mark_removed_candidates(
+        candidates: list[TraceCandidate],
+        advanced: list[TraceCandidate],
+        code: RemovalReasonCode,
+        explanation: str,
+    ) -> list[TraceCandidate]:
+        advanced_ids = {candidate.id for candidate in advanced}
+        reason = TraceRemovalReason(code=code, explanation=explanation)
+        return [
+            candidate if candidate.id in advanced_ids else candidate.model_copy(update={"removal_reason": reason})
+            for candidate in candidates
+        ]
+
+    @staticmethod
+    def _relaxed_diagnostic_filters(
+        filters: dict[str, Any] | None,
+    ) -> tuple[dict[str, Any], object | None, bool]:
+        """Relax explainable filters while retaining the authorized partition scope."""
+        relaxed = dict(filters or {})
+        file_scope = relaxed.pop("file_id", None)
+        raw_expr = relaxed.get("expr")
+        temporal_relaxed = isinstance(raw_expr, str) and re.fullmatch(
+            r'\s*(?:created_at|indexed_at)\s*(?:==|!=|>=|<=|>|<)\s*(?:ISO\s+)?(?:"[^"\r\n]*"|\'[^\'\r\n]*\')\s*',
+            raw_expr,
+            re.I,
+        )
+        if temporal_relaxed:
+            relaxed.pop("expr", None)
+        return relaxed, file_scope, bool(temporal_relaxed)
+
+    @staticmethod
+    def _mark_dense_filter_removals(
+        candidates: list[TraceCandidate],
+        advanced: list[TraceCandidate],
+        *,
+        file_scope: object | None,
+        temporal_relaxed: bool,
+        similarity_threshold: float | None,
+    ) -> list[TraceCandidate]:
+        advanced_ids = {candidate.id for candidate in advanced}
+        if isinstance(file_scope, (list, tuple, set)):
+            allowed_file_ids = {str(value) for value in file_scope}
+            file_reason: RemovalReasonCode = "workspace_filter"
+            file_explanation = "Candidate was outside the authorized workspace file scope."
+        elif file_scope is not None:
+            allowed_file_ids = {str(file_scope)}
+            file_reason = "attachment_filter"
+            file_explanation = "Candidate was outside the requested attachment scope."
+        else:
+            allowed_file_ids = None
+            file_reason = "attachment_filter"
+            file_explanation = "Candidate was outside the requested attachment scope."
+
+        marked: list[TraceCandidate] = []
+        for candidate in candidates:
+            if candidate.id in advanced_ids:
+                marked.append(candidate)
+                continue
+            if allowed_file_ids is not None and candidate.document_id not in allowed_file_ids:
+                reason = TraceRemovalReason(code=file_reason, explanation=file_explanation)
+            elif (
+                similarity_threshold is not None
+                and candidate.scores.get("dense") is not None
+                and candidate.scores["dense"] <= similarity_threshold
+            ):
+                reason = TraceRemovalReason(
+                    code="dense_threshold",
+                    explanation="Candidate did not pass the configured dense similarity threshold.",
+                )
+            elif temporal_relaxed:
+                reason = TraceRemovalReason(
+                    code="temporal_filter",
+                    explanation="Candidate did not pass the request's temporal filter.",
+                )
+            else:
+                marked.append(candidate)
+                continue
+            marked.append(candidate.model_copy(update={"removal_reason": reason}))
+        return marked
+
+    async def _diagnostic_search(
+        self,
+        *,
+        data: list[Any],
+        anns_field: str,
+        search_params: dict[str, Any],
+        top_k: int,
+        expr: str,
+        score_name: str,
+    ) -> tuple[list[TraceCandidate], float, Exception | None]:
+        started = time.perf_counter()
+        try:
+            response = await self._async_client.search(
+                collection_name=self._collection_name,
+                data=data,
+                anns_field=anns_field,
+                search_params=search_params,
+                limit=top_k,
+                filter=expr,
+                output_fields=["*"],
+            )
+            rows = self._parse_search_response(response)
+            return self._trace_candidates(rows, score_name), time.perf_counter() - started, None
+        except Exception as error:
+            return [], time.perf_counter() - started, error
+
+    @staticmethod
+    def _record_diagnostic_stage(
+        trace: RetrievalTraceBuilder,
+        name: str,
+        candidates: list[TraceCandidate],
+        duration: float,
+        error: Exception | None,
+    ) -> None:
+        if error is None:
+            trace.record_stage(name, status="complete", candidates=candidates, duration_seconds=duration)
+            return
+        trace.record_stage(name, status="error", candidates=[], duration_seconds=duration, error=str(error))
+        trace.record_error(name, error)
+
+    async def _record_hybrid_diagnostics(
+        self,
+        *,
+        trace: RetrievalTraceBuilder,
+        embedding: list[float],
+        query_text: str,
+        top_k: int,
+        filters: dict[str, Any] | None,
+        similarity_threshold: float | None,
+        fused_rows: list[dict[str, Any]],
+        vector_field: str,
+    ) -> None:
+        """Run opt-in ANN legs after production ordering is already fixed."""
+        relaxed_filters, file_scope, temporal_relaxed = self._relaxed_diagnostic_filters(filters)
+        relaxed_expr = self._build_filter_expr(relaxed_filters)
+        expr = self._build_filter_expr(filters)
+        before_result, after_result, sparse_result = await asyncio.gather(
+            self._diagnostic_search(
+                data=[embedding],
+                anns_field=vector_field,
+                search_params=self._dense_search_params(0.0),
+                top_k=top_k,
+                expr=relaxed_expr,
+                score_name="dense",
+            ),
+            self._diagnostic_search(
+                data=[embedding],
+                anns_field=vector_field,
+                search_params=self._dense_search_params(similarity_threshold),
+                top_k=top_k,
+                expr=expr,
+                score_name="dense",
+            ),
+            self._diagnostic_search(
+                data=[query_text],
+                anns_field="sparse",
+                search_params=DEFAULT_BM25_SEARCH_PARAMS,
+                top_k=top_k,
+                expr=expr,
+                score_name="sparse",
+            ),
+        )
+        before, before_duration, before_error = before_result
+        after, after_duration, after_error = after_result
+        sparse, sparse_duration, sparse_error = sparse_result
+        fused = self._trace_candidates(fused_rows, "fused")
+
+        if before_error is None and after_error is None:
+            before = self._mark_dense_filter_removals(
+                before,
+                after,
+                file_scope=file_scope,
+                temporal_relaxed=temporal_relaxed,
+                similarity_threshold=similarity_threshold,
+            )
+        if after_error is None:
+            after = self._mark_removed_candidates(
+                after,
+                fused,
+                "hybrid_top_k",
+                "Candidate did not advance into the production hybrid top-k.",
+            )
+        if sparse_error is None:
+            sparse = self._mark_removed_candidates(
+                sparse,
+                fused,
+                "hybrid_top_k",
+                "Candidate did not advance into the production hybrid top-k.",
+            )
+
+        trace.timings["dense_search"] = before_duration + after_duration
+        trace.timings["sparse_search"] = sparse_duration
+        self._record_diagnostic_stage(trace, "dense_before_threshold", before, before_duration, before_error)
+        self._record_diagnostic_stage(trace, "dense_after_threshold", after, after_duration, after_error)
+        self._record_diagnostic_stage(trace, "sparse", sparse, sparse_duration, sparse_error)
+        trace.record_stage(
+            "hybrid_fused",
+            status="complete",
+            candidates=fused,
+        )
+
+    async def _record_dense_diagnostics(
+        self,
+        *,
+        trace: RetrievalTraceBuilder,
+        embedding: list[float],
+        top_k: int,
+        filters: dict[str, Any] | None,
+        similarity_threshold: float | None,
+        dense_rows: list[dict[str, Any]],
+        production_duration: float,
+        vector_field: str,
+    ) -> None:
+        after = self._trace_candidates(dense_rows, "dense")
+        if similarity_threshold is None:
+            before = list(after)
+            before_duration = production_duration
+            before_error = None
+            dense_duration = production_duration
+        else:
+            relaxed_filters, file_scope, temporal_relaxed = self._relaxed_diagnostic_filters(filters)
+            before, before_duration, before_error = await self._diagnostic_search(
+                data=[embedding],
+                anns_field=vector_field,
+                search_params=self._dense_search_params(0.0),
+                top_k=top_k,
+                expr=self._build_filter_expr(relaxed_filters),
+                score_name="dense",
+            )
+            dense_duration = production_duration + before_duration
+        if before_error is None:
+            if similarity_threshold is None:
+                file_scope = None
+                temporal_relaxed = False
+            before = self._mark_dense_filter_removals(
+                before,
+                after,
+                file_scope=file_scope,
+                temporal_relaxed=temporal_relaxed,
+                similarity_threshold=similarity_threshold,
+            )
+        trace.timings["dense_search"] = dense_duration
+        self._record_diagnostic_stage(trace, "dense_before_threshold", before, before_duration, before_error)
+        trace.record_stage(
+            "dense_after_threshold",
+            status="complete",
+            candidates=after,
+            duration_seconds=production_duration,
+        )
+        trace.record_stage("sparse", status="unavailable", candidates=[])
+        trace.record_stage("hybrid_fused", status="unavailable", candidates=[])
+
     def _dense_search_params(self, similarity_threshold: float | None) -> dict[str, Any]:
         """Build the dense COSINE search params, optionally range-filtered.
 
@@ -1128,6 +1420,7 @@ class MilvusVectorStore(VectorStore):
         collection: str = "default",
         filters: dict[str, Any] | None = None,
         similarity_threshold: float | None = None,
+        trace: RetrievalTraceBuilder | None = None,
         vector_field: str | None = None,
     ) -> list[dict[str, Any]]:
         """Similarity search — single entry point for dense and hybrid.
@@ -1152,10 +1445,49 @@ class MilvusVectorStore(VectorStore):
             # Nothing was indexed with this embedder yet.
             return []
         if self._hybrid:
-            return await self._hybrid_search(
-                embedding, query_text, top_k, collection, filters, similarity_threshold, field
+            result = await self._hybrid_search(
+                embedding,
+                query_text,
+                top_k,
+                collection,
+                filters,
+                similarity_threshold,
+                field,
             )
-        return await self._dense_search(embedding, top_k, collection, filters, similarity_threshold, field)
+            if trace is not None and query_text is not None:
+                try:
+                    await self._record_hybrid_diagnostics(
+                        trace=trace,
+                        embedding=embedding,
+                        query_text=query_text,
+                        top_k=top_k,
+                        filters=filters,
+                        similarity_threshold=similarity_threshold,
+                        fused_rows=result,
+                        vector_field=field,
+                    )
+                except Exception as error:
+                    trace.record_error("hybrid_diagnostics", error)
+            return result
+
+        production_started = time.perf_counter() if trace is not None else None
+        result = await self._dense_search(embedding, top_k, collection, filters, similarity_threshold, field)
+        if trace is not None and production_started is not None:
+            production_duration = time.perf_counter() - production_started
+            try:
+                await self._record_dense_diagnostics(
+                    trace=trace,
+                    embedding=embedding,
+                    top_k=top_k,
+                    filters=filters,
+                    similarity_threshold=similarity_threshold,
+                    dense_rows=result,
+                    production_duration=production_duration,
+                    vector_field=field,
+                )
+            except Exception as error:
+                trace.record_error("dense_diagnostics", error)
+        return result
 
     async def _has_dense_field(self, field: str) -> bool:
         """Whether ``field`` is on the live schema.
@@ -1747,8 +2079,9 @@ class MilvusVectorStore(VectorStore):
         collection: str,
         filters: dict[str, Any],
         output_fields: list[str] | None = None,
+        limit: int | None = None,
     ) -> list[dict[str, Any]]:
-        """Return full row data for every chunk matching ``filters``.
+        """Return full row data for chunks matching ``filters``, optionally bounded.
 
         ``output_fields`` defaults to ``["*"]``, which in Milvus 3.0 includes
         every dense vector field (unlike :meth:`search`, which strips them).
@@ -1756,6 +2089,8 @@ class MilvusVectorStore(VectorStore):
         projection instead of ``["*"]``.
         """
         self._resolve_collection(collection)
+        if limit is not None and limit <= 0:
+            return []
         expr = self._build_filter_expr(filters)
         fields = output_fields or ["*"]
-        return await asyncio.to_thread(self._iter_query, expr, fields)
+        return await asyncio.to_thread(self._iter_query, expr, fields, limit=limit)

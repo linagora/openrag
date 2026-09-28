@@ -15,8 +15,10 @@ user's prompt name ahead of the partition's without changing this signature.
 
 from __future__ import annotations
 
+import hashlib
 import string
-from typing import TYPE_CHECKING
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Literal
 
 from core.models.prompt import Prompt, PromptType
 from core.prompts.template_loader import load_template_by_key
@@ -32,6 +34,32 @@ if TYPE_CHECKING:
     from services.orchestrators.preset_service import PresetService
 
 logger = get_logger()
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedPrompt:
+    """Prompt text plus stable, content-free provenance for diagnostics."""
+
+    content: str
+    name: str | None
+    source: Literal["named", "default", "disk-seed", "native"]
+    content_hash: str
+
+    @classmethod
+    def create(
+        cls,
+        content: str,
+        *,
+        name: str | None,
+        source: Literal["named", "default", "disk-seed", "native"],
+    ) -> ResolvedPrompt:
+        return cls(
+            content=content,
+            name=name,
+            source=source,
+            content_hash=hashlib.sha256(content.encode()).hexdigest(),
+        )
+
 
 _VALID_TYPES = frozenset(t.value for t in PromptType)
 
@@ -288,6 +316,22 @@ class PromptService:
         never fail (the ingest path) catch it and fall back to their own
         disk-loaded prompt.
         """
+        return (
+            await self.resolve_prompt_with_identity(
+                prompt_type,
+                names=names,
+                strict_names=strict_names,
+            )
+        ).content
+
+    async def resolve_prompt_with_identity(
+        self,
+        prompt_type: str,
+        names: Sequence[str | None] | None = None,
+        *,
+        strict_names: bool = False,
+    ) -> ResolvedPrompt:
+        """Resolve a prompt while retaining its stable public identity."""
         candidates = [n for n in (names or ()) if n]
         missing_strict_selection = False
         try:
@@ -295,19 +339,19 @@ class PromptService:
                 prompt = await self._repo.get_by_name(prompt_type, name)
                 if prompt is not None:
                     self._log_resolution(prompt_type, candidates, "named", name, prompt.content)
-                    return prompt.content
+                    return ResolvedPrompt.create(prompt.content, name=name, source="named")
             if strict_names and candidates:
                 missing_strict_selection = True
             else:
                 default = await self._repo.get_default(prompt_type)
                 if default is not None:
                     self._log_resolution(prompt_type, candidates, "default", default.name, default.content)
-                    return default.content
+                    return ResolvedPrompt.create(default.content, name=default.name, source="default")
         except Exception as exc:  # noqa: BLE001 - a DB blip must not fail the request
             if prompt_type == PromptType.ASR_TRANSCRIPTION.value:
                 logger.warning(f"Prompt lookup failed for '{prompt_type}'; using the provider's native prompt: {exc}")
                 self._log_resolution(prompt_type, candidates, "native", None, "")
-                return ""
+                return ResolvedPrompt.create("", name=None, source="native")
             logger.warning(f"Prompt lookup failed for '{prompt_type}'; falling back to the bundled template: {exc}")
         if missing_strict_selection:
             raise NotFoundError(f"Selected prompt '{candidates[0]}' for type '{prompt_type}' no longer exists.")
@@ -320,7 +364,10 @@ class PromptService:
                 code="PROMPT_UNAVAILABLE",
             ) from exc
         self._log_resolution(prompt_type, candidates, "disk-seed", None, content)
-        return content
+        source: Literal["disk-seed", "native"] = (
+            "native" if prompt_type == PromptType.ASR_TRANSCRIPTION.value and not content else "disk-seed"
+        )
+        return ResolvedPrompt.create(content, name=None, source=source)
 
     @staticmethod
     def _log_resolution(prompt_type: str, candidates: list[str], source: str, name: str | None, content: str) -> None:
