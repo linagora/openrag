@@ -135,12 +135,13 @@ work, and the Ray PodMonitor would scrape none of the indexing metrics. Put
 `RAY_ADDRESS` in `env.config` even when `env.existingSecret` also carries it:
 the chart cannot read that Secret, and the Secret's copy still wins at runtime.
 Readiness returns 503 when startup is incomplete or PostgreSQL, Milvus, or Ray is
-unavailable, or when the default embedder is `unavailable` or `unresolvable`
-(uploads and retrieval both need it). An embedder probe that times out, and a
-model-discovery failure, do not gate: model probes share one short deadline, and a
-slow round must not pull every replica at once. Other model checks are reported in
-the response but do not gate the whole API, so optional VLM/STT and
-partition-specific model endpoints do not remove healthy replicas from service. Checks use short timeouts and results are cached
+unavailable. Model checks are reported in the response but do not gate the whole
+API, so optional VLM/STT and partition-specific model endpoints do not remove
+healthy replicas from service. `READINESS_REQUIRE_EMBEDDER=true` also gates on
+the default embedder being `unavailable` or `unresolvable` (not on a probe
+timeout). Every replica shares that embedder, so its outage, or a restart while
+vLLM loads the model, then takes all of them out of the Service at once: the
+admin API and admin UI too, which leaves `kubectl port-forward` as the only way in. Checks use short timeouts and results are cached
 for two seconds. Model probes check availability without running inference; they
 do not guarantee every request will succeed. Use an application image that
 includes `/ready` with these probes.

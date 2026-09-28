@@ -50,7 +50,8 @@ async def test_readiness_reports_dependency_status(async_client_factory, depende
     app = FastAPI()
     app.include_router(router)
     app.state.container = SimpleNamespace(
-        is_initialized=True, readiness_service=SimpleNamespace(snapshot=AsyncMock(return_value=snapshot))
+        is_initialized=True,
+        readiness_service=SimpleNamespace(snapshot=AsyncMock(return_value=snapshot), requires_embedder=False),
     )
     async with async_client_factory(app) as client:
         response = await client.get("/ready")
@@ -73,7 +74,8 @@ async def test_model_failure_is_reported_without_gating_core_readiness(async_cli
     app = FastAPI()
     app.include_router(router)
     app.state.container = SimpleNamespace(
-        is_initialized=True, readiness_service=SimpleNamespace(snapshot=AsyncMock(return_value=snapshot))
+        is_initialized=True,
+        readiness_service=SimpleNamespace(snapshot=AsyncMock(return_value=snapshot), requires_embedder=False),
     )
     async with async_client_factory(app) as client:
         response = await client.get("/ready")
@@ -95,14 +97,17 @@ def _target(provider, kind, *, url="https://models.test/v1", model="served", is_
     )
 
 
-async def _ready_with_discovery(async_client_factory, discover):
+async def _ready_with_discovery(async_client_factory, discover, *, requires_embedder=True):
     """/ready over a real ReadinessService with healthy core checks and the
     summary kinds production wires, so the embedder's status is derived the
-    way it is in production rather than written into a snapshot by hand."""
+    way it is in production rather than written into a snapshot by hand.
+    Opted in to the embedder gate unless told otherwise: most tests here are
+    about what the gate does once enabled."""
     service = ReadinessService(
         {"postgres": AsyncMock(), "milvus": AsyncMock(), "ray": AsyncMock()},
         discover_model_endpoints=discover,
         summary_model_kinds=("embedder", "llm"),
+        requires_embedder=requires_embedder,
     )
     app = FastAPI()
     app.include_router(router)
@@ -125,8 +130,8 @@ async def _ready_with_discovery(async_client_factory, discover):
 async def test_an_unusable_default_embedder_gates_readiness(
     async_client_factory, respx_mock, embedder_url, embedder_targets, expected_embedder
 ):
-    """Uploads and retrieval both need the default embedder (#1099): reporting
-    ready without it kept broken pods in service."""
+    """With READINESS_REQUIRE_EMBEDDER=true: uploads and retrieval both need
+    the default embedder (#1099), so a pod without it is not ready."""
     respx_mock.get("https://models.test/v1/models").respond(200, json={"data": [{"id": "served"}]})
     respx_mock.get("https://embedder.test/v1/models").respond(200, json={"data": [{"id": "another-model"}]})
     respx_mock.get("https://broken.test/v1/models").respond(503)
@@ -140,6 +145,27 @@ async def test_an_unusable_default_embedder_gates_readiness(
     assert response.json()["checks"]["embedder"] == expected_embedder
     assert response.status_code == 503
     assert response.json()["status"] == "not_ready"
+
+
+async def test_an_unusable_default_embedder_does_not_gate_readiness_by_default(async_client_factory, respx_mock):
+    """Off by default: every replica shares the embedder, so gating on it would
+    take all of them, admin API and UI included, out of the Service at once
+    during an embedder outage or restart. The verdict is still reported."""
+    respx_mock.get("https://models.test/v1/models").respond(200, json={"data": [{"id": "served"}]})
+    respx_mock.get("https://embedder.test/v1/models").respond(200, json={"data": [{"id": "another-model"}]})
+    discover = AsyncMock(
+        return_value=ModelEndpointDiscovery(
+            targets=(
+                _target("chat", "llm", is_default=True),
+                _target("embed", "embedder", url="https://embedder.test/v1", model="indexed-model", is_default=True),
+            )
+        )
+    )
+
+    response = await _ready_with_discovery(async_client_factory, discover, requires_embedder=False)
+
+    assert response.json()["checks"]["embedder"] == "unavailable"
+    assert response.status_code == 200
 
 
 async def test_a_served_default_embedder_does_not_gate_readiness(async_client_factory, respx_mock):
@@ -214,7 +240,9 @@ async def test_a_non_default_embedder_outage_does_not_gate_readiness(async_clien
 
 
 async def test_readiness_without_model_discovery_does_not_gate_on_the_embedder(async_client_factory):
-    service = ReadinessService({"postgres": AsyncMock(), "milvus": AsyncMock(), "ray": AsyncMock()})
+    service = ReadinessService(
+        {"postgres": AsyncMock(), "milvus": AsyncMock(), "ray": AsyncMock()}, requires_embedder=True
+    )
     app = FastAPI()
     app.include_router(router)
     app.state.container = SimpleNamespace(is_initialized=True, readiness_service=service)

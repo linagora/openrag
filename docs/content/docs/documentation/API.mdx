@@ -54,13 +54,13 @@ Use readiness when deciding whether the API should receive traffic:
 GET /ready
 ```
 
-Readiness returns 503 when PostgreSQL, Milvus, or Ray is unavailable, or when the
-default embedder is unavailable or unresolvable: uploads and retrieval both need
-it. It also reports the health of the other default and partition-referenced
-inference endpoints, plus broken preset references. Those findings are
-informational because one tenant's configuration must not remove a healthy
-shared API replica from service; so is an embedder probe that times out, and a
-model-discovery failure.
+Readiness returns 503 when PostgreSQL, Milvus, or Ray is unavailable. It also
+reports the health of default and partition-referenced inference endpoints, plus
+broken preset references. Those model findings are informational because one
+tenant's configuration must not remove a healthy shared API replica from
+service. `checks.embedder` shows whether the default embedder, which uploads and
+retrieval both need, is usable; with `READINESS_REQUIRE_EMBEDDER=true` readiness
+also returns 503 while it is `unavailable` or `unresolvable`.
 
 ### ℹ️ openRAG version
 
