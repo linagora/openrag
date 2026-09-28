@@ -671,16 +671,19 @@ def _indexed_env_managed_embedder(**overrides):
     return row, _FakeEndpointRepo(rows=[row], indexed_usage=[{"partition": "docs", "file_count": 3}])
 
 
-async def _seed_capturing_errors(svc) -> list[str]:
+async def _seed_capturing_warnings(svc) -> list[tuple[str, str]]:
+    """Run the seed; return the (level, message) of every warning or worse."""
     from loguru import logger
 
-    errors: list[str] = []
-    sink = logger.add(lambda message: errors.append(message.record["message"]), level="ERROR")
+    records: list[tuple[str, str]] = []
+    sink = logger.add(
+        lambda message: records.append((message.record["level"].name, message.record["message"])), level="WARNING"
+    )
     try:
         await svc.seed_defaults()
     finally:
         logger.remove(sink)
-    return errors
+    return records
 
 
 def _sync_settings(**embedder):
@@ -708,7 +711,7 @@ async def test_seed_defaults_sync_on_boot_keeps_the_model_of_an_embedder_with_in
     )
     svc = _make_service(repo, settings=settings)
 
-    errors = await _seed_capturing_errors(svc)
+    warnings = await _seed_capturing_warnings(svc)
 
     synced = repo._store[("indexed-model", "embedder")]
     assert synced.model_name == "indexed-model"
@@ -716,12 +719,16 @@ async def test_seed_defaults_sync_on_boot_keeps_the_model_of_an_embedder_with_in
     assert synced.batch_size == 64
     assert synced.endpoint == "http://new-embedder:8000/v1"
     # The boot log is read by an operator, not an admin-API client: it names
-    # the variable to pin, not the API's "Resend ..." instruction.
-    [error] = errors
-    assert "EMBEDDER_MODEL_NAME" in error
-    assert "vllm.embedderModelName" in error
-    assert "'indexed-model'" in error and "'new-model'" in error
-    assert "Resend" not in error
+    # the variable to set, not the API's "Resend ..." instruction. A warning,
+    # worded as a disagreement: the database's model may be an admin's
+    # deliberate change that env was never updated for.
+    [(level, warning)] = warnings
+    assert level == "WARNING"
+    assert "env asks for 'new-model', the database keeps 'indexed-model'" in warning
+    assert "EMBEDDER_MODEL_NAME" in warning
+    assert "vllm.embedderModelName" in warning
+    assert "acknowledge_indexed_data=true" in warning
+    assert "Resend" not in warning
 
 
 @pytest.mark.asyncio
@@ -730,11 +737,11 @@ async def test_seed_defaults_sync_on_boot_rotates_the_key_of_an_embedder_with_in
     _, repo = _indexed_env_managed_embedder()
     svc = _make_service(repo, settings=_sync_settings(api_key="rotated-key"))
 
-    errors = await _seed_capturing_errors(svc)
+    warnings = await _seed_capturing_warnings(svc)
 
     assert repo._store[("indexed-model", "embedder")].extra["api_key"] == "rotated-key"
     # Not refused and then applied by the fallback: nothing is reported.
-    assert errors == []
+    assert warnings == []
 
 
 @pytest.mark.asyncio
@@ -745,12 +752,12 @@ async def test_seed_defaults_sync_on_boot_moves_an_embedder_with_indexed_files_t
     _, repo = _indexed_env_managed_embedder()
     svc = _make_service(repo, settings=_sync_settings(base_url="http://embedder.gpu-pool:8000/v1"))
 
-    errors = await _seed_capturing_errors(svc)
+    warnings = await _seed_capturing_warnings(svc)
 
     synced = repo._store[("indexed-model", "embedder")]
     assert synced.endpoint == "http://embedder.gpu-pool:8000/v1"
     assert synced.model_name == "indexed-model"
-    assert errors == []
+    assert warnings == []
 
 
 @pytest.mark.asyncio

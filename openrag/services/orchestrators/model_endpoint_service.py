@@ -184,8 +184,8 @@ _API_REPOINT_REMEDY = (
     "Resend with acknowledge_indexed_data=true to apply it anyway, or create a new endpoint and move partitions to it."
 )
 _BOOT_REPOINT_REMEDY = (
-    "Pin EMBEDDER_MODEL_NAME (or the legacy EMBEDDING_MODEL, when set; vllm.embedderModelName in the Helm chart) "
-    "to the model the data was indexed with, or change the model through the admin API with "
+    "To keep the database's model, set EMBEDDER_MODEL_NAME (or the legacy EMBEDDING_MODEL, when set; "
+    "vllm.embedderModelName in the Helm chart) to it. To switch models, change it through the admin API with "
     "acknowledge_indexed_data=true."
 )
 
@@ -422,9 +422,12 @@ class ModelEndpointService:
         try:
             await self._repo.update(row.name, model_type, guard=guard, **fields)
         except ConflictError as exc:
-            logger.bind(endpoint=row.name, model_type=model_type).error(
+            # A warning, and worded as a disagreement: the database's model may
+            # be the stale one (#1099) or an admin's deliberate, acknowledged
+            # change that env was never updated for; this cannot tell which.
+            logger.bind(endpoint=row.name, model_type=model_type).warning(
                 f"Not syncing the model of embedder '{row.name}' from env (MODEL_ENDPOINT_SYNC_ON_BOOT=true): "
-                f"it keeps '{row.model_name}', env asks for '{fields['model_name']}'. {exc.message}"
+                f"env asks for '{fields['model_name']}', the database keeps '{row.model_name}'. {exc.message}"
             )
             del fields["model_name"]
             await self._repo.update(row.name, model_type, **fields)
