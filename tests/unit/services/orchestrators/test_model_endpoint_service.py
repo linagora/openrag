@@ -654,6 +654,39 @@ async def test_seed_defaults_sync_on_boot_follows_a_changed_model_slug(monkeypat
 
 
 @pytest.mark.asyncio
+async def test_seed_defaults_sync_on_boot_does_not_repoint_an_embedder_with_indexed_files(monkeypatch):
+    """#1099: after an upgrade that moved the default embedder, an .env without
+    EMBEDDER_MODEL_NAME made the boot sync rewrite the indexed embedder's model,
+    so new uploads wrote another model's vectors into the field search compares.
+    The sync now runs the guard the admin API enforces: refused, the row keeps
+    the model its data was indexed with, and boot goes on."""
+    from core.config.model_endpoints import ENV_MANAGED_KEY, ENV_MANAGED_VALUE
+    from core.config.root import Settings
+
+    existing = _make_row(
+        name="old-model",
+        model_type="embedder",
+        model_name="old-model",
+        endpoint="http://old-embedder:8000/v1",
+        batch_size=512,
+        extra={"implementation": "vllm", ENV_MANAGED_KEY: ENV_MANAGED_VALUE},
+        is_default=True,
+    )
+    repo = _FakeEndpointRepo(rows=[existing], indexed_usage=[{"partition": "docs", "file_count": 3}])
+    settings = Settings(
+        embedder={"base_url": "http://embedder:8000/v1", "model_name": "new-model", "batch_size": 64},
+        models={"sync_on_boot": True},
+    )
+    svc = _make_service(repo, settings=settings)
+
+    await svc.seed_defaults()
+
+    kept = repo._store[("old-model", "embedder")]
+    assert kept.model_name == "old-model"
+    assert kept.endpoint == "http://old-embedder:8000/v1"
+
+
+@pytest.mark.asyncio
 async def test_seed_defaults_sync_on_boot_rotates_the_api_key(monkeypatch):
     """A rotated *_API_KEY must reach the row it owns.
 

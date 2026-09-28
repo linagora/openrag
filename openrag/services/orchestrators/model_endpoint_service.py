@@ -393,7 +393,24 @@ class ModelEndpointService:
             if os.getenv(env_var) is not None and field in data:
                 fields[field] = data[field]
 
-        await self._repo.update(row.name, model_type, **fields)
+        # An embedder holding indexed files is re-pointed only through the guard
+        # the admin API enforces: env changing under it (a new default model
+        # after an upgrade, #1099) would otherwise write vectors from another
+        # model into the field every indexed file was embedded with, and search
+        # would compare the two. Refused, the row keeps the model its data was
+        # indexed with and boot goes on; readiness reports the embedder.
+        guard = functools.partial(_refuse_unacknowledged_repoint, fields=fields) if model_type == "embedder" else None
+        try:
+            await self._repo.update(row.name, model_type, guard=guard, **fields)
+        except ConflictError as exc:
+            logger.bind(endpoint=row.name, model_type=model_type).error(
+                "Not syncing embedder '{name}' from env: {reason} To keep the indexed data, set "
+                "EMBEDDER_MODEL_NAME and EMBEDDER_BASE_URL to the model it was indexed with; to move to the "
+                "new model, create a new embedder endpoint and move the partitions to it.",
+                name=row.name,
+                reason=exc.message,
+            )
+            return
         logger.info(f"Synced {model_type} endpoint '{row.name}' from env (MODEL_ENDPOINT_SYNC_ON_BOOT=true).")
 
     def _build_default_seeds(self) -> dict[str, dict[str, Any]]:
