@@ -75,3 +75,33 @@ async def test_model_failure_is_reported_without_gating_core_readiness(async_cli
         "model_endpoints": [{"provider": "configured", "kind": "llm", "status": "unavailable"}],
         "configuration_references": [{"kind": "indexation_preset", "count": 2, "status": "unresolvable"}],
     }
+
+
+@pytest.mark.parametrize("embedder_status", ["unavailable", "timeout", "unresolvable"])
+async def test_an_unusable_default_embedder_gates_readiness(async_client_factory, embedder_status):
+    """Uploads and retrieval both need the default embedder (#1099): reporting
+    ready without it kept broken pods in service."""
+    checks = {"postgres": "ok", "milvus": "ok", "ray": "ok", "embedder": embedder_status, "llm": "ok"}
+    app = FastAPI()
+    app.include_router(router)
+    app.state.container = SimpleNamespace(
+        is_initialized=True,
+        readiness_service=SimpleNamespace(snapshot=AsyncMock(return_value=ReadinessSnapshot(checks=checks))),
+    )
+    async with async_client_factory(app) as client:
+        response = await client.get("/ready")
+    assert response.status_code == 503
+    assert response.json()["status"] == "not_ready"
+
+
+async def test_readiness_without_model_discovery_does_not_gate_on_the_embedder(async_client_factory):
+    checks = {"postgres": "ok", "milvus": "ok", "ray": "ok"}
+    app = FastAPI()
+    app.include_router(router)
+    app.state.container = SimpleNamespace(
+        is_initialized=True,
+        readiness_service=SimpleNamespace(snapshot=AsyncMock(return_value=ReadinessSnapshot(checks=checks))),
+    )
+    async with async_client_factory(app) as client:
+        response = await client.get("/ready")
+    assert response.status_code == 200

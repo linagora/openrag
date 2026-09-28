@@ -6,7 +6,13 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 router = APIRouter()
-_CORE_READINESS_CHECKS = frozenset({"postgres", "milvus", "ray"})
+#: Checks that gate readiness. The default embedder is one: without it uploads
+#: fail and retrieval returns nothing or the wrong vectors, so a pod reporting
+#: ready would serve broken answers (#1099). Other model kinds (LLM, VLM, STT,
+#: per-partition endpoints) stay report-only, so an optional model's outage does
+#: not take the API out of service. A check absent from the snapshot (model
+#: discovery not configured) does not gate.
+_CORE_READINESS_CHECKS = frozenset({"postgres", "milvus", "ray", "embedder"})
 _PUBLIC_MODEL_ENDPOINT_CATEGORY = "configured"
 
 
