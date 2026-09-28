@@ -141,7 +141,11 @@ healthy replicas from service. `READINESS_REQUIRE_EMBEDDER=true` also gates on
 the default embedder being `unavailable` or `unresolvable` (not on a probe
 timeout). Every replica shares that embedder, so its outage, or a restart while
 vLLM loads the model, then takes all of them out of the Service at once: the
-admin API and admin UI too, which leaves `kubectl port-forward` as the only way in. Checks use short timeouts and results are cached
+admin API and admin UI too, which leaves `kubectl port-forward` as the only way in.
+Before enabling it, check that `/ready` reports `checks.embedder: ok`: the probe
+needs the configured model name verbatim in the endpoint's `GET /models` list, so
+an Ollama model configured without its `:tag`, or an endpoint without a `/models`
+route, reads `unavailable` although it works. Checks use short timeouts and results are cached
 for two seconds. Model probes check availability without running inference; they
 do not guarantee every request will succeed. Use an application image that
 includes `/ready` with these probes.
