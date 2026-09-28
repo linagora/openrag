@@ -89,6 +89,7 @@ _ENV_OVERRIDES: list[tuple[str, str, type]] = [
     ("PREFERRED_URL_SCHEME", "server.preferred_url_scheme", str),
     ("METRICS_TOKEN", "server.metrics_token", str),
     ("METRICS_ALLOW_UNAUTHENTICATED", "server.metrics_allow_unauthenticated", bool),
+    ("ASSISTANT_NAME", "server.assistant_name", str),
     # LLM Context
     ("MAX_LLM_CONTEXT_SIZE", "llm_context.max_llm_context_size", int),
     ("MAX_OUTPUT_TOKENS", "llm_context.max_output_tokens", int),
