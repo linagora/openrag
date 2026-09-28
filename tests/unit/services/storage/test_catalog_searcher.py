@@ -87,8 +87,13 @@ async def test_empty_results_skip_catalog():
 @pytest.mark.parametrize("multi", [False, True])
 async def test_surrounding_orphan_is_removed_after_real_search_expansion(multi):
     vectors = AsyncMock()
-    vectors.search.return_value = [{"id": "1", "file_id": "live", "partition": "a", "next_section_id": 2}]
-    vectors.query_chunks_by_filter.return_value = [{"_id": 2, "file_id": "deleted", "partition": "a"}]
+    # Neighbours come from the hit's own file: the orphan here is the neighbour
+    # of a hit whose file was deleted, which expansion adds after the search.
+    vectors.search.return_value = [
+        {"id": "1", "file_id": "live", "partition": "a"},
+        {"id": "5", "file_id": "deleted", "partition": "a", "next_section_id": 6},
+    ]
+    vectors.query_chunks_by_filter.return_value = [{"_id": 6, "file_id": "deleted", "partition": "a", "section_id": 6}]
     embedder = AsyncMock()
     embedder.embed.return_value = [[0.1]]
     repo = AsyncMock()
