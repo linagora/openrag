@@ -327,16 +327,17 @@ to collect them.
 
 ### Rolling back a Kubernetes upgrade
 
-Restore the backup set from step 2, then roll the release back:
+Rolling back the images alone is not enough: 2.2.x starts, but every call fails,
+because it does not know the newer PostgreSQL schema and its searches expect the
+`vector` field that step 5 dropped. Restore the backup set from step 2 instead:
 
 1. Scale OpenRAG to zero.
 2. Restore PostgreSQL from the dump, and Milvus's etcd and object storage from their snapshots.
-3. `helm rollback "$RELEASE" <previous revision> -n "$NS"`, and with `ray.enabled`,
+3. Delete the `<FULLNAME>-venv` PVC, which holds the Python packages 2.3.0
+   installed. The rollback recreates it empty, and 2.2.x installs its own at
+   startup.
+4. `helm rollback "$RELEASE" <previous revision> -n "$NS"`, and with `ray.enabled`,
    delete the Ray pods again so they come back on the old image.
-
-Rolling back the images alone is not enough: a 2.2.x image does not know the
-newer PostgreSQL migrations and fails to start against them, and its searches
-expect the `vector` field that step 5 dropped.
 
 ## 2.2.x to 2.3.0 with Docker Compose
 
@@ -383,10 +384,11 @@ Your `.env` is not tracked, so checking out 2.3.0 keeps it. Compare it with the
   - `MINIO_ACCESS_KEY` and `MINIO_SECRET_KEY`: MinIO and Milvus both read them
     from `.env`, and MinIO takes the new pair at its next start. Change them in
     `.env` only, and restart both together, which the upgrade does.
-- **`EMBEDDER_MODEL_NAME`.** If your `.env` does not set it, the embedder switches
-  to `Qwen/Qwen3-Embedding-0.6B`, and the documents you indexed no longer match:
-  set it to the model your data was indexed with, `jinaai/jina-embeddings-v3`
-  unless you chose another. See the
+- **`EMBEDDER_MODEL_NAME`.** If your `.env` sets neither it nor the legacy
+  `EMBEDDING_MODEL`, the embedder switches to `Qwen/Qwen3-Embedding-0.6B`, and the
+  documents you indexed no longer match: set it to the model your data was
+  indexed with, `jinaai/jina-embeddings-v3` unless you chose another. When
+  `EMBEDDING_MODEL` is set, it takes precedence. See the
   [`EMBEDDER_MODEL_NAME` row](/openrag/documentation/env_vars/).
 - **`METRICS_TOKEN`**, if you scrape `GET /metrics` or run the monitoring overlay,
   which refuses to start without it.
@@ -504,11 +506,36 @@ Then let traffic back in.
 
 ### Rolling back a Compose upgrade
 
+Rolling back the checkout alone is not enough: 2.2.x starts, but every call fails,
+because it does not know the newer PostgreSQL schema and its searches expect the
+`vector` field that step 5 dropped. Either way below also removes the
+`openrag_venv` volume, which holds the Python packages 2.3.0 installed; 2.2.x
+installs its own at startup. Its name is `<project>_openrag_venv`, where the
+project is `compose` unless you set one (`docker volume ls` lists it).
+
+**From the backups of step 2:**
+
 1. `docker compose down`.
-2. Restore the directories copied in step 2.
+2. Restore the directories copied in step 2, and remove the `openrag_venv` volume.
 3. `git checkout` the version you ran before, restore its `.env` if you changed
    it, and `docker compose up -d`.
 
-Rolling back the checkout alone is not enough: 2.2.x does not know the newer
-PostgreSQL migrations and fails to start against them, and its searches expect
-the `vector` field that step 5 dropped.
+**Without the backups**, by undoing the migrations with 2.3.0 still checked out,
+in this order (the Milvus downgrade reads the PostgreSQL schema that the second
+command removes):
+
+```bash
+docker compose stop openrag
+docker compose run --no-deps --rm --entrypoint "" openrag \
+  uv run python services/persistence/migrations/milvus/migrate.py --downgrade --target 2
+docker compose run --no-deps --rm --entrypoint "" openrag \
+  uv run alembic -c /app/openrag/services/persistence/migrations/alembic/alembic.ini downgrade b9c0d1e2f3a4
+docker compose down
+docker volume rm <project>_openrag_venv
+```
+
+Then `git checkout` the version you ran before and `docker compose up -d`.
+`b9c0d1e2f3a4` is the last PostgreSQL revision of 2.2.1 and 2.2.2. The Milvus
+downgrade is possible only while every embedder field in use has the same
+dimension, and the PostgreSQL one refuses if a workspace ID is shared by two
+partitions, which 2.3.0 allows. Files indexed after the upgrade are kept.
