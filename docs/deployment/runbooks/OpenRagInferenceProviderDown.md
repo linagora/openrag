@@ -57,7 +57,13 @@ at the endpoint itself.
    ```promql
    sum by (provider, outcome) (rate(openrag_inference_requests_total{operation=~"chat|completion"}[10m]))
    ```
-3. **The model was unloaded or renamed** at the provider.
+3. **The model was unloaded or renamed** at the provider, when it answers with a 5xx. Most
+   answer an unknown model with a 4xx (vLLM: 404), recorded as `rejected`, which this alert
+   ignores. That endpoint's calls then go all `rejected`:
+
+   ```promql
+   sum by (provider, operation) (rate(openrag_inference_requests_total{outcome="rejected"}[10m]))
+   ```
 4. **The endpoint is overloaded** — `timeout` dominating rather than `error`.
 
 ## A trap worth knowing

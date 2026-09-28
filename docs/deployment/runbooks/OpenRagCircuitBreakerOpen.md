@@ -58,7 +58,9 @@ capacity or the network, `error` at the endpoint itself.
    every endpoint of its kind, so one endpoint's revoked key would stop all of them. A
    revoked embedder, reranker or VLM key fires
    [OpenRagInferenceProviderDown](OpenRagInferenceProviderDown.md) for that endpoint instead.
-3. **The model was unloaded or renamed** at the provider.
+3. **Rarely a renamed model.** A provider answering an unknown model with a 4xx (vLLM: 404)
+   cannot open a breaker; only one answering with a 5xx can. See
+   [OpenRagInferenceProviderDown](OpenRagInferenceProviderDown.md) for the 4xx case.
 4. **Sustained overload** — enough timeouts in a row to trip it.
 
 ## Recovery
