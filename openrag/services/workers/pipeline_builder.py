@@ -4,6 +4,7 @@ import inspect
 import time
 from collections.abc import Callable, MutableMapping
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 from core.chunking.chunking_strategy import ChunkingStrategy
@@ -11,13 +12,15 @@ from core.config.indexation_pipeline import IndexationPipelineConfig
 from core.embeddings.embedder import Embedder
 from core.indexing.contextualize import ChunkContextualizer
 from core.indexing.parsers.document_parser import DocumentParser
+from core.indexing.parsers.tabular.csv_parser import CsvParser
 from core.indexing.topic_tags import TopicTagger
-from core.models.document import Document, DocumentType
+from core.models.document import Document, DocumentType, ProcessedDocument
 from core.observability.ray_metrics import observe_stage_duration
 from core.utils.exceptions import PipelineError
 from core.utils.logging import get_logger
 from core.vector_stores.vector_store import VectorStore
 from core.vlm.vlm import VLM
+from services.workers.csv_pipeline import run_csv_batches
 from services.workers.embedder_provenance import embedder_provenance
 from services.workers.stages._common import run_with_optional_timeout
 from services.workers.stages.caption import caption_stage
@@ -115,7 +118,14 @@ class IndexingPipeline:
     # once. ``None`` leaves the fan-out unbounded (one caller per image).
     caption_concurrency: int | None = None
 
-    async def run(self, row: MutableMapping[str, Any]) -> MutableMapping[str, Any]:
+    async def run(
+        self,
+        row: MutableMapping[str, Any],
+        *,
+        _processed: ProcessedDocument | None = None,
+        _chunk_offset: int = 0,
+        _indexed_at: datetime | None = None,
+    ) -> MutableMapping[str, Any]:
         """Run a single row through parse, optional enrichments, embed, and store.
 
         Each stage is timed and a single structured line is logged per file
@@ -147,6 +157,20 @@ class IndexingPipeline:
         vector_field = self.vector_field_resolver(embedder_name) if self.vector_field_resolver else None
         contextualizer, contextualization_llm = self._select_contextualizer(config)
         topic_tagger, topic_tagging_llm = self._select_topic_tagger(config)
+
+        document = row.get("document")
+        if _processed is None and isinstance(document, Document) and document.content_type is DocumentType.CSV:
+            # These enrichments currently expect document-wide context.
+            # Do not silently change their meaning to per-batch enrichment.
+            if contextualizer is not None or topic_tagger is not None:
+                raise ValueError(
+                    "CSV streaming currently requires contextualization "
+                    "and topic tagging to be disabled in the indexing preset"
+                )
+            concrete_parser = parser.resolve(document) if hasattr(parser, "resolve") else parser
+            if not isinstance(concrete_parser, CsvParser):
+                raise TypeError("CSV indexing requires a configured CsvParser")
+            return await run_csv_batches(self, row, concrete_parser)
 
         timings: dict[str, float] = {}
 
@@ -197,7 +221,12 @@ class IndexingPipeline:
                 ).warning(f"{name} stage failed; indexing the file without it: {exc}")
 
         try:
-            await _timed("parse", parse_stage(row, parser, timeout=self.timeouts.parse))
+            if _processed is None:
+                await _timed("parse", parse_stage(row, parser, timeout=self.timeouts.parse))
+            else:
+                row["processed_document"] = _processed
+                row["stage"] = "parsed"
+                row.pop("error", None)
             _release_raw_bytes(row)
             # The caption decision needs the parsed document (standalone images
             # always caption), so the VLM is resolved after parse.
@@ -238,6 +267,8 @@ class IndexingPipeline:
             # was skipped, the bytes were never going to be read at all.
             _release_image_bytes(row)
             await _timed("chunk", chunk_stage(row, chunker, timeout=self.timeouts.chunk))
+            for chunk in row["chunks"]:
+                chunk.chunk_index += _chunk_offset
             if contextualizer is not None:
                 await _timed_enrichment(
                     "contextualize",
@@ -326,6 +357,7 @@ class IndexingPipeline:
                 store_stage(
                     row,
                     self.vector_store,
+                    indexed_at=_indexed_at,
                     timeout=self.timeouts.store,
                     per_chunk_timeout=self.timeouts.store_per_chunk,
                     vector_field=vector_field,
