@@ -254,7 +254,7 @@ class PromptService:
             return
         try:
             content = _validate_and_normalize_content(prompt_type, self._disk_seed(prompt_type))
-        except (FileNotFoundError, ValueError, ValidationError) as exc:
+        except (OSError, ValueError, ValidationError) as exc:
             logger.warning(f"Could not refresh default prompt for '{prompt_type}': {exc}")
             return
         if sha256(content.encode("utf-8")).hexdigest() != _CURRENT_SEED_HASHES[prompt_type]:

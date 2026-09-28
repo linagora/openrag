@@ -24,8 +24,11 @@ jobs:
               pull_number: context.issue.number,
               per_page: 100,
             });
-            const changesPrompt = files.some(({ filename }) =>
-              filename.startsWith('openrag/prompts/templates/') && filename.endsWith('.txt')
+            const isBundledTemplate = (path) =>
+              typeof path === 'string' &&
+              path.startsWith('openrag/prompts/templates/') && path.endsWith('.txt');
+            const changesPrompt = files.some(({ filename, previous_filename }) =>
+              [filename, previous_filename].some(isBundledTemplate)
             );
             const labels = new Set(context.payload.pull_request.labels.map(({ name }) => name));
             const hasLabel = labels.has('prompt');

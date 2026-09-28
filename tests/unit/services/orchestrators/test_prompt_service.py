@@ -293,6 +293,31 @@ class TestSeeding:
         assert old.content == "old"
         assert len(repo.prompts) == len(PROMPT_TYPE_KEYS)
 
+    async def test_refresh_read_failure_keeps_old_default_and_other_types_seed(self, monkeypatch):
+        old_text = (Path(__file__).parent / "fixtures/query_contextualizer_before_calendar_anchors.txt").read_text()
+        repo = FakePromptRepo()
+        old = await repo.create(
+            Prompt(
+                prompt_type="query_contextualizer",
+                name="default_query_contextualizer",
+                content=old_text,
+                is_default=True,
+            )
+        )
+        svc = _service(repo)
+        disk_seed = svc._disk_seed
+
+        def unreadable_seed(prompt_type):
+            if prompt_type == "query_contextualizer":
+                raise PermissionError("permission denied")
+            return disk_seed(prompt_type)
+
+        monkeypatch.setattr(svc, "_disk_seed", unreadable_seed)
+        await svc.seed_defaults()
+
+        assert old.content == old_text
+        assert len(repo.prompts) == len(PROMPT_TYPE_KEYS)
+
     async def test_custom_prompt_directory_disables_automatic_refresh(self, monkeypatch, tmp_path):
         repo = FakePromptRepo()
         old = await repo.create(
