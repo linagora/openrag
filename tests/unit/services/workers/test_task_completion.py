@@ -479,7 +479,7 @@ async def test_settled_task_is_written_to_the_job_history() -> None:
     tsm.get_details.remote.return_value = {
         "file_id": "file-1",
         "partition": "tenant-a",
-        "metadata": {},
+        "metadata": {"filename": "report.pdf"},
         "user_id": 42,
         "degraded_stages": ["caption"],
     }
@@ -499,6 +499,7 @@ async def test_settled_task_is_written_to_the_job_history() -> None:
     )
     assert job.completed_at is not None
     assert job.degraded_stages == ["caption"]
+    assert job.filename == "report.pdf"
 
 
 @pytest.mark.asyncio

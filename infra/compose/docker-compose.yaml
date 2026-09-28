@@ -93,7 +93,7 @@ x-vllm: &vllm_template
   volumes:
     - ${VLLM_CACHE:-/root/.cache/huggingface}:/root/.cache/huggingface # put ./vllm_cache if you want to have the weights on the vllm_cache folder in your project
   command: >
-    --model ${EMBEDDER_MODEL_NAME:-jinaai/jina-embeddings-v3}
+    --model ${EMBEDDER_MODEL_NAME:-Qwen/Qwen3-Embedding-0.6B}
     --trust-remote-code
     --task embed
     --gpu_memory_utilization 0.3
@@ -217,7 +217,7 @@ services:
       VLLM_CPU_KVCACHE_SPACE: 8
     # Default value isn't sufficient for full context length
     command: >
-      --model ${EMBEDDER_MODEL_NAME:-jinaai/jina-embeddings-v3}
+      --model ${EMBEDDER_MODEL_NAME:-Qwen/Qwen3-Embedding-0.6B}
       --trust-remote-code
       --dtype float32
       --max-model-len ${MAX_MODEL_LEN:-8192}

@@ -64,7 +64,7 @@ vllm:
     modelSpec:
       - name: "embedder"
         repository: "vllm/vllm-openai"
-        tag: "latest"
+        tag: "v0.30.0-cu129"
         modelURL: "Qwen/Qwen3-Embedding-0.6B"
         replicaCount: 1
         requestCPU: 4
@@ -77,7 +77,11 @@ vllm:
           secretKey: HF_TOKEN
         vllmConfig:
           gpuMemoryUtilization: 0.3
-          extraArgs: ["--trust-remote-code", "--task", "embed"]
+          runner: "pooling"
+          # `--convert embed` adapts a *ForCausalLM checkpoint such as
+          # Qwen3-Embedding to embeddings, and changes nothing for a model that
+          # is already one. This is the command started on v0.30.0 (L4, #1087).
+          extraArgs: ["--trust-remote-code", "--convert", "embed"]
         nodeSelectorTerms:
           - matchExpressions:
               - key: gpu-role
@@ -86,7 +90,11 @@ vllm:
 
       - name: "whisper"
         repository: "ghcr.io/linagora/vllm-whisper"
-        tag: "latest"
+        # No workflow builds this image yet (#1031), so it has no version tag;
+        # the digest pins the build `latest` pointed to on 25 Sep 2026 (built
+        # 2 Dec 2025). The shared imagePullPolicy (IfNotPresent) would otherwise
+        # keep whatever build a node happened to cache.
+        tag: "latest@sha256:d0c25f4aea64814171df29f51923be4e1e7fab529d141cb440f33a838e72e364"
         modelURL: "openai/whisper-large-v3-turbo"
         replicaCount: 1
         requestCPU: 4
@@ -108,7 +116,7 @@ vllm:
 
       - name: "llm"
         repository: "vllm/vllm-openai"
-        tag: "latest"
+        tag: "v0.30.0-cu129"
         modelURL: "RedHatAI/Mistral-Small-3.1-24B-Instruct-2503-quantized.w8a8"
         replicaCount: 0
         requestCPU: 8

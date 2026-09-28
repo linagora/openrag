@@ -337,11 +337,14 @@ class TaskCompletionTracker:
                 )
             if error_reason is None:
                 error_reason = extract_task_error_reason(error)
+            metadata = details.get("metadata")
+            filename = metadata.get("filename") if isinstance(metadata, dict) else None
             job = IndexationJob(
                 id=task_id,
                 status=DocumentStatus(state),
                 partition=details.get("partition") or "default",
                 file_id=details.get("file_id"),
+                filename=filename,
                 user_id=details.get("user_id"),
                 error=error,
                 error_reason=error_reason,
