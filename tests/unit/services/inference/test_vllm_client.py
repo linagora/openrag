@@ -818,9 +818,10 @@ class TestVLLMEmbedder:
         assert result == [[0.1, 0.2], [0.3, 0.4]]
 
     @pytest.mark.asyncio
-    async def test_a_refused_key_counts_toward_the_embedder_breaker(self):
-        """Callers cannot shape an embedding request, so a 401 there is our key
-        refused: it counts, unlike on the LLM breaker."""
+    async def test_a_refused_key_does_not_count_toward_the_embedder_breaker(self):
+        """The ``embedder`` breaker is shared by every embedder endpoint: one
+        endpoint's 401 counted here opened it for every partition (#1100). The
+        metrics still record it against that endpoint."""
 
         def handler(request: httpx.Request) -> httpx.Response:
             return httpx.Response(401, json={"error": "invalid key"})
@@ -828,7 +829,7 @@ class TestVLLMEmbedder:
         with pytest.raises(EmbeddingAPIError):
             await self._make_embedder(handler).embed(["hello"])
 
-        assert _breakers["embedder"].fail_counter == 1
+        assert _breakers["embedder"].fail_counter == 0
 
     @pytest.mark.asyncio
     async def test_embed_splits_large_input_into_batches(self):

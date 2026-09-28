@@ -96,7 +96,7 @@ def outcome_for(exc: BaseException, *, operation: str) -> str:
     (429) and a provider-side request timeout (408) are the provider struggling,
     and stay ``error``; so does 401, a credential the provider refuses, which
     fails every call alike — except on an LLM operation, whose request callers
-    shape and can make the provider answer 401 (``CALLER_SHAPED_BREAKERS``).
+    shape and can make the provider answer 401 (``_CALLER_SHAPED_OPERATIONS``).
     403 stays ``rejected``: it can be one request's model the key may not use.
     The circuit breaker draws the same 401 line, but still excludes 408 and 429
     (``_is_excluded``).
@@ -115,7 +115,7 @@ def outcome_for(exc: BaseException, *, operation: str) -> str:
 #: 4xx statuses that describe the provider's state, not the request's.
 _PROVIDER_SIDE_4XX = frozenset({408, 429})
 
-#: The LLM's operations: the metrics side of ``CALLER_SHAPED_BREAKERS``.
+#: The LLM's operations, whose request callers shape (``counts_refused_credential``).
 _CALLER_SHAPED_OPERATIONS = frozenset({"chat", "completion"})
 
 
