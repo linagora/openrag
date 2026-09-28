@@ -288,23 +288,27 @@ MilvusClient(uri="http://localhost:19530").drop_collection("<collection>_v1_back
 The commands below run from `infra/compose/`. From the repo root, point Compose at the file (and at your project name, if you use one):
 
 ```bash
-docker compose -p <project> -f infra/compose/docker-compose.yaml run --no-deps --rm --build --entrypoint "" openrag \
+docker compose -p <project> -f infra/compose/docker-compose.yaml run --no-deps --rm --entrypoint "" openrag \
     uv run python services/persistence/migrations/milvus/migrate.py --dry-run
 ```
 
-The migration runner is a file, not a package — pass the full path to `migrate.py`, and keep Milvus running.
+The migration runner is a file, not a package — pass the full path to `migrate.py`, and keep PostgreSQL and Milvus running.
+
+The migration scripts ship **inside the image**. If you pull released images, `docker compose pull` fetches the version you are moving to; if you build them from this checkout, add `--build` to the `run` and `up` commands below. Either way, check that the `Discovered N migration(s)` line of the dry run lists the migration you expect: if it does not, the image is stale.
 :::
 
-### Step 1 — Start only the Milvus container
+### Step 1 — Start PostgreSQL and Milvus only
+
+Version 3 reads PostgreSQL as well as Milvus, so start both, without OpenRAG:
 
 ```bash
-docker compose up -d milvus
+docker compose up -d rdb milvus
 ```
 
-Wait until Milvus is healthy:
+Wait until both are healthy:
 
 ```bash
-docker compose ps milvus
+docker compose ps rdb milvus
 ```
 
 ### Step 2 — Dry-run (inspect, no changes)
@@ -312,32 +316,32 @@ docker compose ps milvus
 <Tabs>
   <TabItem label="GPU">
 ```bash
-docker compose run --no-deps --rm --build --entrypoint "" openrag \
+docker compose run --no-deps --rm --entrypoint "" openrag \
     uv run python services/persistence/migrations/milvus/migrate.py --dry-run
 ```
   </TabItem>
   <TabItem label="CPU">
 ```bash
-docker compose --profile cpu run --no-deps --rm --build --entrypoint "" openrag-cpu \
+docker compose --profile cpu run --no-deps --rm --entrypoint "" openrag-cpu \
     uv run python services/persistence/migrations/milvus/migrate.py --dry-run
 ```
   </TabItem>
 </Tabs>
 
-Review the output to confirm which migrations are pending and what changes they would apply. The migration scripts ship **inside the image**, which is why `--build` is there: if the `Discovered N migration(s)` line does not list the migration you expect, the image is stale — and on a shared host another checkout may have rebuilt the same `linagoraai/openrag` tag, so add `--build` to the apply step too.
+Review the output to confirm which migrations are pending and what changes they would apply.
 
 ### Step 3 — Apply all pending migrations
 
 <Tabs>
   <TabItem label="GPU">
 ```bash
-docker compose run --no-deps --rm --build --entrypoint "" openrag \
+docker compose run --no-deps --rm --entrypoint "" openrag \
     uv run python services/persistence/migrations/milvus/migrate.py
 ```
   </TabItem>
   <TabItem label="CPU">
 ```bash
-docker compose --profile cpu run --no-deps --rm --build --entrypoint "" openrag-cpu \
+docker compose --profile cpu run --no-deps --rm --entrypoint "" openrag-cpu \
     uv run python services/persistence/migrations/milvus/migrate.py
 ```
   </TabItem>
@@ -353,12 +357,12 @@ The runner will apply each pending migration in order. For the `add_temporal_fie
 <Tabs>
   <TabItem label="GPU">
 ```bash
-docker compose up --build -d
+docker compose up -d
 ```
   </TabItem>
   <TabItem label="CPU">
 ```bash
-docker compose --profile cpu up --build -d
+docker compose --profile cpu up -d
 ```
   </TabItem>
 </Tabs>
@@ -371,31 +375,36 @@ To upgrade or downgrade to a specific schema version rather than the latest:
   <TabItem label="GPU">
 ```bash
 # Upgrade to version 2 only
-docker compose run --no-deps --rm --build --entrypoint "" openrag \
+docker compose run --no-deps --rm --entrypoint "" openrag \
     uv run python services/persistence/migrations/milvus/migrate.py --target 2
 
-# Downgrade to version 0 (resets version stamp and drops indexes)
-docker compose run --no-deps --rm --build --entrypoint "" openrag \
-    uv run python services/persistence/migrations/milvus/migrate.py --downgrade --target 0
+# Downgrade to version 2 (copies the vectors back into `vector`)
+docker compose run --no-deps --rm --entrypoint "" openrag \
+    uv run python services/persistence/migrations/milvus/migrate.py --downgrade --target 2
 ```
   </TabItem>
   <TabItem label="CPU">
 ```bash
 # Upgrade to version 2 only
-docker compose --profile cpu run --no-deps --rm --build --entrypoint "" openrag-cpu \
+docker compose --profile cpu run --no-deps --rm --entrypoint "" openrag-cpu \
     uv run python services/persistence/migrations/milvus/migrate.py --target 2
 
-# Downgrade to version 0 (resets version stamp and drops indexes)
-docker compose --profile cpu run --no-deps --rm --build --entrypoint "" openrag-cpu \
-    uv run python services/persistence/migrations/milvus/migrate.py --downgrade --target 0
+# Downgrade to version 2 (copies the vectors back into `vector`)
+docker compose --profile cpu run --no-deps --rm --entrypoint "" openrag-cpu \
+    uv run python services/persistence/migrations/milvus/migrate.py --downgrade --target 2
 ```
   </TabItem>
 </Tabs>
 
 ### Rollback
 
+:::danger[Always pass `--target`]
+`--downgrade` without `--target` reverts **every** migration, down to version 0. Pass the version you are going back to: `--target 2` to undo version 3 only, for a return to OpenRAG 2.2.x.
+:::
+
 What a downgrade can undo depends on the migration:
 
+- **Version 3 → 2** copies each partition's vectors from its embedder's field back into `vector`, then drops the per-embedder fields. It is possible only while every field in use has the same dimension. PostgreSQL must be at a revision that still has the embedder fields, so run it before downgrading the PostgreSQL schema.
 - **Version 2 → 1** swaps the `<collection>_v1_backup` collection back into place and sets the version stamp to 1. The version-2 collection is kept aside as `<collection>_v2_rolled_back` rather than dropped, so nothing is lost — but this is a point-in-time rollback: **rows indexed after the upgrade exist only in the collection set aside**.
 
   The rollback needs that backup collection. If it is gone, the downgrade fails rather than reporting a rollback it did not perform, and there are three ways forward:
@@ -410,14 +419,14 @@ What a downgrade can undo depends on the migration:
 <Tabs>
   <TabItem label="GPU">
 ```bash
-docker compose run --no-deps --rm --build --entrypoint "" openrag \
-    uv run python services/persistence/migrations/milvus/migrate.py --downgrade
+docker compose run --no-deps --rm --entrypoint "" openrag \
+    uv run python services/persistence/migrations/milvus/migrate.py --downgrade --target <version>
 ```
   </TabItem>
   <TabItem label="CPU">
 ```bash
-docker compose --profile cpu run --no-deps --rm --build --entrypoint "" openrag-cpu \
-    uv run python services/persistence/migrations/milvus/migrate.py --downgrade
+docker compose --profile cpu run --no-deps --rm --entrypoint "" openrag-cpu \
+    uv run python services/persistence/migrations/milvus/migrate.py --downgrade --target <version>
 ```
   </TabItem>
 </Tabs>
