@@ -1450,6 +1450,37 @@ async def test_admission_fence_refuses_a_second_task_for_a_file_already_indexing
     assert refused == {"accepted": False, "reason": "file_indexing", "existing_task_id": "task-1"}
     assert await manager.get_state("task-2") is None
     assert await manager.get_state("task-1") == "QUEUED"
+    # The refusal leaves no stateless record behind: none to list, none holding
+    # a retention slot.
+    assert "task-2" not in manager.tasks
+    assert "task-2" not in manager.terminal_tasks
+    assert set(await manager.get_all_info()) == {"task-1"}
+
+
+@pytest.mark.asyncio
+async def test_admission_fence_keeps_a_record_the_refused_call_did_not_create() -> None:
+    """Only the record the refused registration made is dropped, never an earlier one."""
+    manager = _task_state_manager()
+    await manager.set_queued_details(
+        "task-1",
+        file_id="file-1",
+        partition="tenant-a",
+        metadata={},
+        user_id=42,
+    )
+    await manager.set_details("task-2", file_id="file-1", partition="tenant-a", metadata={}, user_id=42)
+
+    refused = await manager.set_queued_details_v2(
+        "task-2",
+        file_id="file-1",
+        partition="tenant-a",
+        metadata={},
+        user_id=42,
+        reject_if_file_active=True,
+    )
+
+    assert refused["reason"] == "file_indexing"
+    assert manager.tasks["task-2"].details["file_id"] == "file-1"
 
 
 @pytest.mark.asyncio

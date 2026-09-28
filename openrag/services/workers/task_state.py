@@ -852,6 +852,7 @@ class TaskStateManager:
         user_id: int | None,
         reject_if_file_active: bool,
     ) -> dict[str, Any]:
+        previous = self.tasks.get(task_id)
         info = self._ensure_task(task_id)
         if info.state == DocumentStatus.CANCELLED:
             return _queue_refused(QUEUE_REFUSED_CANCELLED)
@@ -860,9 +861,15 @@ class TaskStateManager:
                 partition=partition, file_id=file_id, excluding=task_id
             )
             if busy_task_id is not None:
-                # Leave the record untouched: _ensure_task gave the id a receipt
-                # deadline, so a refused submission ages out on its own instead
-                # of occupying the file it was just denied.
+                if info is not previous:
+                    # Drop the stateless record _ensure_task just made for this
+                    # id. Kept, it would show in get_all_info with no state,
+                    # which the admin task list cannot render, and hold a slot
+                    # under _MAX_TERMINAL_TASKS for every refused retry. Nothing
+                    # was persisted or indexed for it yet, and a retried
+                    # registration of the same id simply creates it again.
+                    self.tasks.pop(task_id, None)
+                    self.terminal_tasks.pop(task_id, None)
                 return _queue_refused(QUEUE_REFUSED_FILE_INDEXING, existing_task_id=busy_task_id)
         self._record_details(
             task_id,
