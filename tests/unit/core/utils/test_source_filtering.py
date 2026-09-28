@@ -201,6 +201,16 @@ class TestExtractAndStripSourcesBlock:
         assert clean == "Answer text"
         assert citations == {1, 3}
 
+    @pytest.mark.parametrize(
+        "tag",
+        ["[Sources: 1 3]", "[Sources: **1** **3**]", "[Sources: 1\n3]", "**Sources:** `1` `3`"],
+    )
+    def test_numbers_not_separated_by_commas_are_all_cited(self, tag):
+        """A tag that is stripped must have its numbers read, or it would fall back to every source."""
+        clean, citations = extract_and_strip_sources_block(f"Answer text\n{tag}")
+        assert clean == "Answer text"
+        assert citations == {1, 3}
+
     def test_line_after_the_tag_is_kept(self):
         clean, citations = extract_and_strip_sources_block("Answer text\nSources: 1\n2. Next item")
         assert clean == "Answer text\n2. Next item"
@@ -616,6 +626,7 @@ class TestStreamWithSourceFiltering:
             ("**[**Sources:** **1**, **3**]**", [{"file": "a.pdf"}, {"file": "c.pdf"}]),
             ("[`Sources`: none]", []),
             ("[_Sources_]: 1, 3", [{"file": "a.pdf"}, {"file": "c.pdf"}]),
+            ("[Sources: **1** **3**]", [{"file": "a.pdf"}, {"file": "c.pdf"}]),
         ],
     )
     async def test_emphasized_tag_streamed_one_character_per_chunk_is_stripped(self, tag, expected_sources):

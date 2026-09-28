@@ -18,7 +18,7 @@ _EMAIL_RE = re.compile(r"(?<![\w.+-])[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}(?![\w.-])")
 # [**Sources**]: 1, 3), or around the value ([Sources: **1, 3**],
 # [Sources: **1**, **3**]). So emphasis/code marks are accepted at every
 # boundary of the tag, and are part of it when it is stripped.
-_MD_MARKS = "*_`"
+#
 # Every run of marks or whitespace below is possessive, so a failed search never
 # retries the ways of splitting a run between neighbours (a long run of marks or
 # spaces after the value made it quadratic). That loses no match: what follows a
@@ -82,8 +82,11 @@ def _strip_sources_tags(text: str, *, include_inline_markers: bool = True) -> tu
         patterns.extend((_INLINE_SOURCE_NUMS_RE, _UNCLOSED_SOURCE_NUMS_RE))
     for pattern in patterns:
         for match in pattern.finditer(text):
-            numbers = (n.strip().strip(_MD_MARKS).strip() for n in match.group(1).split(","))
-            cited.update(int(n) for n in numbers if n.isdigit())
+            # Every number the tag holds is a citation, whatever separates them:
+            # the regexes accept spaces, newlines and marks as well as commas
+            # ([Sources: **1** **3**]), and a tag stripped with its numbers
+            # unread would fall back to citing every source.
+            cited.update(int(n) for n in re.findall(r"\d+", match.group(1)))
     saw_none = bool(_SOURCES_NONE_RE.search(text))
     cleaned = _SOURCES_NUMS_RE.sub("", text)
     cleaned = _SOURCES_NONE_RE.sub("", cleaned)
