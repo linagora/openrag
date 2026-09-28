@@ -134,10 +134,12 @@ work, and the Ray PodMonitor would scrape none of the indexing metrics. Put
 `RAY_ADDRESS` in `env.config` even when `env.existingSecret` also carries it:
 the chart cannot read that Secret, and the Secret's copy still wins at runtime.
 Readiness returns 503 when startup is incomplete or PostgreSQL, Milvus, or Ray is
-unavailable, or when the default embedder is (uploads and retrieval both need it).
-Other model checks are reported in the response but do not gate the whole API, so
-optional VLM/STT and partition-specific model endpoints do not remove healthy
-replicas from service. Checks use short timeouts and results are cached
+unavailable, or when the default embedder is `unavailable` or `unresolvable`
+(uploads and retrieval both need it). An embedder probe that times out, and a
+model-discovery failure, do not gate: model probes share one short deadline, and a
+slow round must not pull every replica at once. Other model checks are reported in
+the response but do not gate the whole API, so optional VLM/STT and
+partition-specific model endpoints do not remove healthy replicas from service. Checks use short timeouts and results are cached
 for two seconds. Model probes check availability without running inference; they
 do not guarantee every request will succeed. Use an application image that
 includes `/ready` with these probes.
