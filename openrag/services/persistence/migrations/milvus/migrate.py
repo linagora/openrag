@@ -8,7 +8,7 @@ in order based on the current schema version stored in the collection.
 Usage (from repo root, inside the container):
 
     # Dry-run — inspect what would change, no writes:
-    docker compose run --no-deps --rm --build --entrypoint "" openrag \\
+    docker compose run --no-deps --rm --entrypoint "" openrag \\
         uv run python services/persistence/migrations/milvus/migrate.py --dry-run
 
     # Upgrade to latest:
@@ -19,9 +19,9 @@ Usage (from repo root, inside the container):
     docker compose run --no-deps --rm --entrypoint "" openrag \\
         uv run python services/persistence/migrations/milvus/migrate.py --target 2
 
-    # Downgrade to version 0 (resets version property, drops indexes):
+    # Downgrade to version 2 (a downgrade always needs --target):
     docker compose run --no-deps --rm --entrypoint "" openrag \\
-        uv run python services/persistence/migrations/milvus/migrate.py --downgrade --target 0
+        uv run python services/persistence/migrations/milvus/migrate.py --downgrade --target 2
 
 Convention — each migration module must expose:
     TARGET_VERSION: int          # the version this script brings the DB to
@@ -174,15 +174,16 @@ def main() -> None:
         "--target",
         type=int,
         default=None,
-        help=f"Target schema version (default: {latest_version} for upgrade, 0 for downgrade)",
+        help=f"Target schema version (default: {latest_version} for an upgrade; required with --downgrade)",
     )
     args = parser.parse_args()
 
-    # Resolve default target
-    if args.target is None:
-        target_version = 0 if args.downgrade else latest_version
-    else:
-        target_version = args.target
+    # A downgrade has no safe default. Going down to version 0 reverts every
+    # migration, and reverting version 2 swaps its pre-upgrade backup back in,
+    # taking every file indexed since then out of search.
+    if args.downgrade and args.target is None:
+        parser.error("--downgrade needs --target, the schema version to go back to (e.g. --target 2).")
+    target_version = latest_version if args.target is None else args.target
 
     if not migrations:
         logger.warning("No migration files found in this directory.")
