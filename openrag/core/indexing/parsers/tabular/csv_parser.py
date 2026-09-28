@@ -69,9 +69,9 @@ class CsvParser(DocumentParser):
     def iter_batches(self, document: Document) -> Iterator[TextBlock]:
         """Yield tables with at most batch_size data rows by repeating their header.
 
-        Consume and release each table before requesting the next one to save memory.
-        Close this iterator if stopping early. Later records can still raise errors
-        after earlier batches have been yielded. Blank records are ignored.
+        Consuming and releasing each table before requesting the next one to save memory.
+        Close this iterator if stopped early because later records can still raise errors
+        after earlier batches have been yielded. (blank records are just ignored).
         """
         # opening a text stream instead of loading the entire file from disk (handling large files)
         with self._open_stream(document) as stream:
