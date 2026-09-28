@@ -544,7 +544,13 @@ class QueryService:
             # file_id-only filtering could match a same-named file in another
             # partition the caller also has access to (#706).
             partition = [scope.partition]
-            filter_params = {"file_id": scope.file_ids}
+            if attachment_ids:
+                # Attachments narrow the workspace, never widen it: only the
+                # attached files that belong to it are searched.
+                indexed_attachment_ids = _within_workspace(attachment_ids, scope.file_ids)
+                filter_params = {"file_id": indexed_attachment_ids}
+            else:
+                filter_params = {"file_id": scope.file_ids}
         elif attachment_ids and partition:
             # No ownership check needed: file_id is ANDed with the server-fixed
             # partition (or, for the "all" wildcard, SUPER_ADMIN_MODE-only).
@@ -971,6 +977,12 @@ def _extract_attachment_ids(metadata: dict) -> list[str]:
     if not isinstance(raw, list):
         return []
     return [a["id"] for a in raw if isinstance(a, dict) and isinstance(a.get("id"), str) and a["id"]]
+
+
+def _within_workspace(attachment_ids: list[str], workspace_file_ids: list[str]) -> list[str]:
+    """Order-preserving, deduplicated subset of ``attachment_ids`` allowed by the workspace."""
+    allowed = set(workspace_file_ids)
+    return list(dict.fromkeys(fid for fid in attachment_ids if fid in allowed))
 
 
 def _dedupe_web(web_lists: list[list]) -> list:
