@@ -26,6 +26,16 @@ duration must list its units largest first (`1h30m`) — Prometheus refuses
 `30m1h`, again for the whole group.
 */}}
 {{- $cfg := .Values.monitoring.prometheusRule }}
+{{- /* Runbooks at the release this chart deploys, so an alert opens the page
+   written for the rules that fired it; main moves on after every release.
+   Pinned only from 2.3.0, the first release whose tag carries
+   docs/deployment/runbooks: an older appVersion's tag has none, so it links
+   develop, the one ref that has them until 2.3.0 is tagged. The Compose copy
+   is generated with main instead (scripts/gen_alert_rules.py): a Compose
+   install is a git checkout, not a versioned package. */}}
+{{- $runbookRef := "develop" }}
+{{- if semverCompare ">=2.3.0-0" .Chart.AppVersion }}{{ $runbookRef = printf "v%s" .Chart.AppVersion }}{{ end }}
+{{- $runbookBase := $cfg.runbookBaseUrl | default (printf "https://github.com/linagora/openrag/blob/%s/docs/deployment/runbooks" $runbookRef) }}
 {{- $number := `^[0-9]+(\.[0-9]+)?$` }}
 {{- $duration := `^([0-9]+y)?([0-9]+w)?([0-9]+d)?([0-9]+h)?([0-9]+m)?([0-9]+s)?([0-9]+ms)?$` }}
 {{- $t := dict "ingestIdleSeconds" 720 "ingestFailureRatio" 0.25 "ingestVolumeFloor" 5 "backlogDepth" 50 "inferenceErrorRatio" 0.5 "inferenceVolumeFloor" 5 }}
@@ -164,7 +174,7 @@ groups:
           description: >-
             {{ "{{ $value }}" }} task(s) are QUEUED and no parser pool has completed a parse
             for over {{ $words.idle }}. Uploads are being accepted and never indexed.
-          runbook_url: "{{ $cfg.runbookBaseUrl | default "https://github.com/linagora/openrag/blob/main/docs/deployment/runbooks" }}/OpenRagIngestStalled.md"
+          runbook_url: "{{ $runbookBase }}/OpenRagIngestStalled.md"
 
       - alert: OpenRagIngestFailureRate
         # Ratio over terminal outcomes only. `cancelled` is excluded from both
@@ -199,7 +209,7 @@ groups:
           description: >-
             {{ "{{ $value | humanizePercentage }}" }} of documents reaching a terminal state
             over the last 5 minutes failed.
-          runbook_url: "{{ $cfg.runbookBaseUrl | default "https://github.com/linagora/openrag/blob/main/docs/deployment/runbooks" }}/OpenRagIngestFailureRate.md"
+          runbook_url: "{{ $runbookBase }}/OpenRagIngestFailureRate.md"
 
       - alert: OpenRagBacklogGrowing
         # Both conditions required: either alone is noisy — a burst upload
@@ -244,7 +254,7 @@ groups:
           description: >-
             The QUEUED task count has risen continuously for {{ $words.OpenRagBacklogGrowing }} and now stands at
             {{ "{{ $value }}" }}. Ingestion capacity is below the arrival rate.
-          runbook_url: "{{ $cfg.runbookBaseUrl | default "https://github.com/linagora/openrag/blob/main/docs/deployment/runbooks" }}/OpenRagBacklogGrowing.md"
+          runbook_url: "{{ $runbookBase }}/OpenRagBacklogGrowing.md"
 
       - alert: OpenRagCatalogDriftDetected
         # openrag_retrieval_orphan_chunks_dropped_total counts retrieval hits
@@ -277,7 +287,7 @@ groups:
           description: >-
             Retrieval dropped chunks in the last hour for files the catalog does not know
             about. Answers are quietly missing content, with no error to show for it.
-          runbook_url: "{{ $cfg.runbookBaseUrl | default "https://github.com/linagora/openrag/blob/main/docs/deployment/runbooks" }}/OpenRagCatalogDriftDetected.md"
+          runbook_url: "{{ $runbookBase }}/OpenRagCatalogDriftDetected.md"
 
   # ── Inference ────────────────────────────────────────────────────────────
   - name: openrag-inference
@@ -323,7 +333,7 @@ groups:
             More than {{ $pct.inferenceErrorRatio }} of the calls to registry endpoint {{ "{{ $labels.provider }}" }} are
             returning errors or timing out. Chat and any indexing stage that depends on it
             will fail.
-          runbook_url: "{{ $cfg.runbookBaseUrl | default "https://github.com/linagora/openrag/blob/main/docs/deployment/runbooks" }}/OpenRagInferenceProviderDown.md"
+          runbook_url: "{{ $runbookBase }}/OpenRagInferenceProviderDown.md"
 
       - alert: OpenRagCircuitBreakerOpen
         # Separate from the error-rate alert on purpose. The two need different
@@ -357,7 +367,7 @@ groups:
             OpenRag has stopped calling its {{ "{{ $labels.name }}" }} endpoint after repeated
             failures. Calls return immediately without reaching it, so chat and indexing
             that depend on it fail fast.
-          runbook_url: "{{ $cfg.runbookBaseUrl | default "https://github.com/linagora/openrag/blob/main/docs/deployment/runbooks" }}/OpenRagCircuitBreakerOpen.md"
+          runbook_url: "{{ $runbookBase }}/OpenRagCircuitBreakerOpen.md"
 
   # ── Meta ─────────────────────────────────────────────────────────────────
   - name: openrag-meta
@@ -414,4 +424,4 @@ groups:
           description: >-
             The target has been unreachable for {{ $words.OpenRagTargetDown }}. Every other OpenRag alert is
             inert while this is firing, because absent series cannot breach a threshold.
-          runbook_url: "{{ $cfg.runbookBaseUrl | default "https://github.com/linagora/openrag/blob/main/docs/deployment/runbooks" }}/OpenRagTargetDown.md"
+          runbook_url: "{{ $runbookBase }}/OpenRagTargetDown.md"

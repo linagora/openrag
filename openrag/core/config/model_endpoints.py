@@ -149,6 +149,12 @@ class ModelsConfig(ConfigMixin):
     # truth after first boot" behavior.
     sync_on_boot: bool = False
 
+    # When True, /ready fails while the default embedder is unavailable or
+    # unresolvable. Off by default: every replica shares the embedder, so under
+    # Kubernetes its outage or restart takes all of them out of the Service at
+    # once, admin API and UI included, and no healthy replica is left (#1106).
+    readiness_requires_embedder: bool = False
+
     def llm_extra(self, name: str = "default") -> dict[str, Any]:
         """``extra`` payload of the named LLM endpoint (``{}`` if unregistered).
 

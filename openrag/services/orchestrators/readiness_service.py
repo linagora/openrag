@@ -75,6 +75,7 @@ class ReadinessService:
         *,
         discover_model_endpoints: Callable[[], Awaitable[ModelEndpointDiscovery]] | None = None,
         summary_model_kinds: tuple[ModelEndpointType, ...] = (),
+        requires_embedder: bool = False,
         publish: Callable[[ReadinessSnapshot], None] | None = None,
         timeout: float = 2.0,
         cache_ttl: float = 2.0,
@@ -82,6 +83,8 @@ class ReadinessService:
         self._checks = checks
         self._discover_model_endpoints = discover_model_endpoints
         self._summary_model_kinds = summary_model_kinds
+        #: Whether an unusable default embedder fails readiness; the router applies it.
+        self.requires_embedder = requires_embedder
         self._publish = publish
         self._timeout = timeout
         self._cache_ttl = cache_ttl

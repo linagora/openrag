@@ -122,7 +122,8 @@ that apply on every upgrade.
 For the default direct-API deployment, startup and liveness probes use
 `/health_check`, while the readiness probe uses `/ready`. When
 `ENABLE_RAY_SERVE=true`, the chart automatically uses exec probes against the
-Ray head because the Ray Serve HTTP proxy does not run on the API pod. Ray
+Ray head because the Ray Serve HTTP proxy does not run on the API pod, on the
+same paths. Ray
 Serve requires `ray.enabled=true`; Helm rejects that invalid combination. The
 reverse is rejected too: with `ray.enabled=true` the API must either run on Ray
 Serve (`ENABLE_RAY_SERVE=true`) or be pointed at the cluster with
@@ -136,7 +137,15 @@ the chart cannot read that Secret, and the Secret's copy still wins at runtime.
 Readiness returns 503 when startup is incomplete or PostgreSQL, Milvus, or Ray is
 unavailable. Model checks are reported in the response but do not gate the whole
 API, so optional VLM/STT and partition-specific model endpoints do not remove
-healthy replicas from service. Checks use short timeouts and results are cached
+healthy replicas from service. `READINESS_REQUIRE_EMBEDDER=true` also gates on
+the default embedder being `unavailable` or `unresolvable` (not on a probe
+timeout). Every replica shares that embedder, so its outage, or a restart while
+vLLM loads the model, then takes all of them out of the Service at once: the
+admin API and admin UI too, which leaves `kubectl port-forward` as the only way in.
+Before enabling it, check that `/ready` reports `checks.embedder: ok`: the probe
+needs the configured model name verbatim in the endpoint's `GET /models` list, so
+an Ollama model configured without its `:tag`, or an endpoint without a `/models`
+route, reads `unavailable` although it works. Checks use short timeouts and results are cached
 for two seconds. Model probes check availability without running inference; they
 do not guarantee every request will succeed. Use an application image that
 includes `/ready` with these probes.

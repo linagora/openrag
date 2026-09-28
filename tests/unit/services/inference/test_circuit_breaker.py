@@ -196,48 +196,57 @@ def test_the_closed_state_is_written_before_the_breaker_is_reachable(monkeypatch
     assert reachable_at_write == [False]
 
 
-@pytest.mark.parametrize("breaker", ["embedder", "reranker", "vlm"])
+@pytest.mark.parametrize("breaker", ["llm", "embedder", "reranker", "vlm"])
 @pytest.mark.parametrize(
     ("status", "excluded"),
-    [(400, True), (403, True), (404, True), (408, True), (429, True), (401, False), (500, False)],
+    [(400, True), (401, True), (403, True), (404, True), (408, True), (429, True), (500, False)],
 )
-def test_a_refused_credential_counts_toward_the_breaker(breaker: str, status: int, excluded: bool) -> None:
-    """A revoked or wrong key (401) fails every call alike. Excluded like any
-    4xx, it could never open the breaker, and the error-ratio alert ignored it
-    too. 403 stays excluded: it can be one request's model the key may not use,
-    and counting it would let a user open the shared breaker for everyone. Both
-    shapes the breaker sees are checked: the raw httpx error and the wrapped one."""
+def test_no_4xx_opens_a_breaker(breaker: str, status: int, excluded: bool) -> None:
+    """A breaker is shared by every endpoint of its kind. A 401 counted here let
+    one endpoint's bad key open the ``embedder`` breaker for every partition
+    (#1100); the metrics count it against that endpoint instead. Both shapes the
+    breaker sees are checked: the raw httpx error and the wrapped one."""
     from core.utils.exceptions import InferenceError
     from services.inference import _circuit_breaker as cb
 
     request = httpx.Request("POST", "http://provider.invalid/v1/embeddings")
     raw = httpx.HTTPStatusError("refused", request=request, response=httpx.Response(status, request=request))
 
-    assert cb._is_excluded(raw, breaker=breaker) is excluded
-    assert cb._is_excluded(InferenceError("refused", status_code=status), breaker=breaker) is excluded
+    assert cb._is_excluded(raw) is excluded
+    assert cb._is_excluded(InferenceError("refused", status_code=status)) is excluded
+    assert cb.get_breaker(breaker).is_system_error(InferenceError("refused", status_code=status)) is not excluded
 
 
-@pytest.mark.parametrize(
-    ("status", "excluded"),
-    [(400, True), (401, True), (403, True), (408, True), (429, True), (500, False)],
-)
-def test_the_llm_breaker_excludes_every_4xx(status: int, excluded: bool) -> None:
-    """Callers shape the LLM's request: the model through llm_override, and any
-    extra chat-body field is forwarded. LiteLLM answers a refused model, or an
-    ``api_key`` sent in the body, with 401, so a counted 401 let one burst of
-    such requests open the shared breaker for every tenant."""
+@pytest.mark.asyncio
+async def test_one_endpoints_bad_key_does_not_stop_the_others() -> None:
+    """#1100: one embedder endpoint answering 401 must not open the breaker its
+    kind shares, or a healthy endpoint behind it gets CircuitBreakerOpenError."""
     from core.utils.exceptions import InferenceError
-    from services.inference import _circuit_breaker as cb
 
-    assert cb._is_excluded(InferenceError("refused", status_code=status), breaker="llm") is excluded
+    @with_circuit_breaker("test-1100", fail_max=3, timeout_duration=60.0)
+    async def call(endpoint: str) -> str:
+        if endpoint == "revoked":
+            raise InferenceError("refused", status_code=401)
+        return "ok"
+
+    for _ in range(10):
+        with pytest.raises(InferenceError):
+            await call("revoked")
+
+    assert await call("healthy") == "ok"
 
 
-def test_each_breaker_applies_its_own_401_rule() -> None:
-    """The rule is bound when the breaker is built, from its name."""
+@pytest.mark.asyncio
+async def test_provider_failures_still_open_the_breaker() -> None:
+    """Control for the test above: a 5xx is the provider failing, and trips it."""
     from core.utils.exceptions import InferenceError
-    from services.inference import _circuit_breaker as cb
 
-    refused = InferenceError("refused", status_code=401)
+    @with_circuit_breaker("test-1100-control", fail_max=3, timeout_duration=60.0)
+    async def call() -> str:
+        raise InferenceError("down", status_code=503)
 
-    assert cb.get_breaker("llm").is_system_error(refused) is False
-    assert cb.get_breaker("embedder").is_system_error(refused) is True
+    for _ in range(2):
+        with pytest.raises(InferenceError):
+            await call()
+    with pytest.raises(CircuitBreakerOpenError):
+        await call()

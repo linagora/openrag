@@ -345,6 +345,80 @@ def _render(*overrides: str) -> dict[str, dict]:
     return {rule["alert"]: rule for group in doc["groups"] for rule in group["rules"]}
 
 
+#: The first release whose tag carries ``docs/deployment/runbooks``. The chart
+#: pins its runbook links to ``v<appVersion>`` only from here: an older tag has
+#: no runbooks, so a pinned link there would be a 404.
+FIRST_RELEASE_WITH_RUNBOOKS = "2.3.0"
+
+
+def _render_at_app_version(tmp_path: Path, app_version: str) -> dict[str, dict]:
+    """Render the chart's rules as a chart whose ``appVersion`` is ``app_version``."""
+    if shutil.which("helm") is None:
+        pytest.skip("needs helm to render the chart's rule template")
+    spec = importlib.util.spec_from_file_location("gen_alert_rules", ROOT / "scripts" / "gen_alert_rules.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    chart = tmp_path / "chart"
+    (chart / "templates").mkdir(parents=True)
+    meta = yaml.safe_load((CHART_DIR / "Chart.yaml").read_text(encoding="utf-8"))
+    meta["appVersion"] = app_version
+    (chart / "Chart.yaml").write_text(yaml.safe_dump(meta), encoding="utf-8")
+    shutil.copy(CHART_DIR / "values.yaml", chart / "values.yaml")
+    for name in ("_helpers.tpl", "prometheusrule.yaml"):
+        shutil.copy(CHART_DIR / "templates" / name, chart / "templates" / name)
+    module.CHART = chart
+    doc = yaml.safe_load(module.render())
+    return {rule["alert"]: rule for group in doc["groups"] for rule in group["rules"]}
+
+
+@pytest.mark.parametrize(
+    ("app_version", "ref"),
+    [
+        # Released before the runbooks existed: their tags have none.
+        ("2.2.1", "develop"),
+        ("2.2.9", "develop"),
+        # From the first release that ships them, the tag of the release itself,
+        # a release candidate included.
+        ("2.3.0-rc.1", "v2.3.0-rc.1"),
+        (FIRST_RELEASE_WITH_RUNBOOKS, f"v{FIRST_RELEASE_WITH_RUNBOOKS}"),
+        ("2.4.1", "v2.4.1"),
+    ],
+)
+def test_the_chart_links_runbooks_at_a_ref_that_has_them(tmp_path: Path, app_version: str, ref: str) -> None:
+    """``main`` moves on after every release, so an alert from an older release
+    would open a page written for rules it does not run: the chart pins the link
+    to its release's tag. A tag cut before the runbooks existed has none, so
+    below ``FIRST_RELEASE_WITH_RUNBOOKS`` the chart links ``develop`` instead of
+    a 404. Every page linked must exist in this tree, which is the tree a
+    release is tagged from."""
+    base = f"https://github.com/linagora/openrag/blob/{ref}/docs/deployment/runbooks/"
+    for name, rule in _render_at_app_version(tmp_path, app_version).items():
+        url = rule["annotations"]["runbook_url"]
+        assert url == f"{base}{name}.md", f"{name}: {url}"
+        assert (RUNBOOK_DIR / f"{name}.md").is_file(), f"{name} links a runbook this tree does not have"
+
+
+def test_the_charts_own_app_version_links_a_ref_with_runbooks() -> None:
+    """The same rule, on the appVersion the chart actually ships with. A
+    pre-release of the first release counts as it, as ``>=2.3.0-0`` does."""
+
+    def release(version: str) -> tuple[int, ...]:
+        return tuple(int(part) for part in version.split("-", 1)[0].split("."))
+
+    version = yaml.safe_load((CHART_DIR / "Chart.yaml").read_text(encoding="utf-8"))["appVersion"]
+    ref = f"v{version}" if release(version) >= release(FIRST_RELEASE_WITH_RUNBOOKS) else "develop"
+    base = f"https://github.com/linagora/openrag/blob/{ref}/docs/deployment/runbooks/"
+    for name, rule in _render().items():
+        assert rule["annotations"]["runbook_url"] == f"{base}{name}.md", name
+
+
+def test_a_runbook_base_override_still_wins() -> None:
+    rules = _render("monitoring.prometheusRule.runbookBaseUrl=https://mirror.example/runbooks")
+    assert {r["annotations"]["runbook_url"] for r in rules.values()} == {
+        f"https://mirror.example/runbooks/{name}.md" for name in rules
+    }
+
+
 def test_a_zero_threshold_is_honoured_not_replaced_by_the_default() -> None:
     """``default`` treats 0 as empty, so ``backlogDepth: 0`` used to render as 50."""
     rules = _render(
