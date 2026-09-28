@@ -233,3 +233,94 @@ def test_status_map_lists_specific_classes_first() -> None:
     )
     auth_base = keys.index(__import__("core.utils.exceptions", fromlist=["AuthError"]).AuthError)
     assert auth_specific < auth_base
+
+
+# ---------------------------------------------------------------------------
+# A provider's 401/403 reaches the caller as 502
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def provider_app() -> FastAPI:
+    """Routes that call the real reranker and embedder clients against a
+    provider answering with the status in the path, so the exception is the
+    one production raises, not a hand-built one."""
+    import httpx
+    from services.inference.reranker_clients import InfinityReranker
+    from services.inference.vllm_client import VLLMEmbedder
+
+    def transport(status: int) -> httpx.AsyncClient:
+        return httpx.AsyncClient(transport=httpx.MockTransport(lambda req: httpx.Response(status, json={})))
+
+    app = FastAPI()
+    register_error_handlers(app)
+
+    @app.get("/rerank/{status}")
+    async def _rerank(status: int) -> None:
+        reranker = InfinityReranker(endpoint="http://reranker:7997", model_name="m")
+        reranker._client = transport(status)
+        await reranker.rerank("query", ["doc"])
+
+    @app.get("/embed/{status}")
+    async def _embed(status: int) -> None:
+        embedder = VLLMEmbedder(endpoint="http://vllm:8000/v1", model_name="m", api_key="k")
+        embedder._client = transport(status)
+        await embedder.embed(["text"])
+
+    @app.get("/auth/{status}")
+    async def _auth(status: int) -> None:
+        from core.utils.exceptions import AuthenticationError, AuthError
+
+        raise AuthenticationError("bad token") if status == 401 else AuthError("forbidden")
+
+    return app
+
+
+@pytest.fixture()
+def provider_client(provider_app: FastAPI):
+    from services.inference._circuit_breaker import _breakers
+
+    yield TestClient(provider_app, raise_server_exceptions=False)
+    for breaker in _breakers.values():
+        breaker.close()
+    _breakers.clear()
+
+
+@pytest.mark.parametrize("kind", ["rerank", "embed"])
+@pytest.mark.parametrize("status", [401, 403])
+def test_a_providers_credential_refusal_is_a_502(provider_client: TestClient, kind: str, status: int) -> None:
+    """A provider refusing OpenRag's key is not the caller's token failing. A
+    401 passed through told a valid caller it was unauthenticated, and the
+    admin UI drops its stored token on any 401."""
+    resp = provider_client.get(f"/{kind}/{status}")
+
+    assert resp.status_code == 502
+    expected = {"rerank": f"returned HTTP {status}", "embed": f"Embedder API error ({status})"}[kind]
+    assert expected in resp.json()["detail"]
+
+
+@pytest.mark.parametrize("kind", ["rerank", "embed"])
+def test_other_provider_4xx_still_pass_through(provider_client: TestClient, kind: str) -> None:
+    """Control: only the credential statuses are remapped."""
+    assert provider_client.get(f"/{kind}/400").status_code == 400
+
+
+@pytest.mark.parametrize("status", [401, 403])
+def test_openrags_own_auth_errors_keep_their_status(provider_client: TestClient, status: int) -> None:
+    """Control: the caller's own token failing is still a 401/403."""
+    assert provider_client.get(f"/auth/{status}").status_code == status
+
+
+def test_the_exception_keeps_the_providers_status() -> None:
+    """Only the response is remapped: the breaker, the retry and the metrics
+    read the exception, and must still see the 401."""
+    import httpx
+    from services.inference.reranker_clients import _raise_reranker_http_error
+
+    request = httpx.Request("POST", "http://reranker/rerank")
+    error = httpx.HTTPStatusError("x", request=request, response=httpx.Response(401, request=request))
+    with pytest.raises(InferenceConnectionError) as info:
+        _raise_reranker_http_error("http://reranker", error)
+
+    assert info.value.status_code == 401
+    assert _status_for(info.value) == 502

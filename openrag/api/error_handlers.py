@@ -30,6 +30,7 @@ from core.utils.exceptions import (
     AuthenticationError,
     AuthError,
     ConflictError,
+    EmbeddingError,
     InferenceError,
     InferenceTimeoutError,
     LLMParsingError,
@@ -68,6 +69,15 @@ _STATUS_MAP: dict[type[BaseException], int] = {
 }
 
 
+#: A provider's 401 or 403 is a key the provider refused, never the caller's
+#: OpenRag token. The inference clients keep it on the exception (the breaker,
+#: the retry and the metrics read it), but passed through it told a caller
+#: whose token is valid that it was not, and the admin UI drops its stored
+#: token on any 401. The caller gets a 502: an upstream failed.
+_PROVIDER_CREDENTIAL_STATUSES = frozenset({401, 403})
+_PROVIDER_ERRORS = (InferenceError, EmbeddingError)
+
+
 def _status_for(exc: BaseException) -> int:
     """Return the HTTP status code for ``exc``.
 
@@ -78,6 +88,8 @@ def _status_for(exc: BaseException) -> int:
     """
     explicit = getattr(exc, "status_code", None)
     if isinstance(explicit, int):
+        if explicit in _PROVIDER_CREDENTIAL_STATUSES and isinstance(exc, _PROVIDER_ERRORS):
+            return 502
         return explicit
     for cls in type(exc).__mro__:
         if cls in _STATUS_MAP:
