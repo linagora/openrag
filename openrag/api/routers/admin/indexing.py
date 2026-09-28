@@ -38,7 +38,13 @@ from core.utils.filename import sanitize_filename
 from core.utils.log_tail import app_log_file
 from core.utils.logging import get_logger
 from core.utils.url_safety import is_safe_url
-from di.providers import get_auth_service, get_config, get_indexing_service, get_partition_service
+from di.providers import (
+    get_auth_service,
+    get_config,
+    get_indexing_service,
+    get_partition_service,
+    get_workspace_service,
+)
 from fastapi import (
     APIRouter,
     Depends,
@@ -161,6 +167,7 @@ async def add_file(
     _quota_check=Depends(check_user_file_quota),
     config=Depends(get_config),
     service=Depends(get_indexing_service),
+    workspaces=Depends(get_workspace_service),
 ):
     _validate_callback_url(callback_url, config)
 
@@ -181,13 +188,17 @@ async def add_file(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="workspace_ids must be a JSON array of strings",
             )
+        # The indexer attaches the file by stored key, not by public id.
+        workspace_keys = []
         for ws_id in parsed_workspace_ids:
-            ws = await service.get_workspace(ws_id)
-            if not ws or ws["partition_name"] != partition:
+            key = await workspaces.find_workspace_key(partition, ws_id)
+            if key is None:
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail=f"Workspace '{ws_id}' not found in partition '{partition}'",
                 )
+            workspace_keys.append(key)
+        parsed_workspace_ids = workspace_keys
 
     original_filename = file.filename
     file.filename = sanitize_filename(file.filename)

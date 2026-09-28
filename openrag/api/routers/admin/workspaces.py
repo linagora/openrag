@@ -24,12 +24,15 @@ async def require_workspace_in_partition(
     partition: str,
     workspace_id: str,
     service=Depends(get_workspace_service),
-) -> dict:
-    """Validate that a workspace exists and belongs to the given partition."""
-    ws = await service.get_workspace(workspace_id)
-    if not ws or ws["partition_name"] != partition:
+) -> str:
+    """Validate that a workspace exists and belongs to the given partition.
+
+    Returns the key the workspace is stored under (see ``workspace_key``).
+    """
+    key = await service.find_workspace_key(partition, workspace_id)
+    if key is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Workspace not found")
-    return ws
+    return key
 
 
 @router.post(
@@ -42,7 +45,7 @@ async def create_workspace(
     user=Depends(require_partition_editor),
     service=Depends(get_workspace_service),
 ):
-    if await service.get_workspace(body.workspace_id):
+    if await service.find_workspace_key(partition, body.workspace_id):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=f"Workspace '{body.workspace_id}' already exists.",
@@ -71,8 +74,11 @@ async def list_workspaces(
     "/partition/{partition}/workspaces/{workspace_id}",
     dependencies=[Depends(require_partition_viewer)],
 )
-async def get_workspace(ws=Depends(require_workspace_in_partition)):
-    return ws
+async def get_workspace(
+    key=Depends(require_workspace_in_partition),
+    service=Depends(get_workspace_service),
+):
+    return await service.get_workspace(key)
 
 
 @router.delete(
@@ -81,11 +87,10 @@ async def get_workspace(ws=Depends(require_workspace_in_partition)):
 )
 async def delete_workspace(
     partition: str,
-    workspace_id: str,
-    _ws=Depends(require_workspace_in_partition),
+    key=Depends(require_workspace_in_partition),
     service=Depends(get_workspace_service),
 ):
-    result = await service.delete_workspace(partition, workspace_id)
+    result = await service.delete_workspace(partition, key)
     return {"status": "deleted", **result}
 
 
@@ -95,9 +100,8 @@ async def delete_workspace(
 )
 async def add_files_to_workspace(
     partition: str,
-    workspace_id: str,
     body: AddFilesRequest,
-    _ws=Depends(require_workspace_in_partition),
+    key=Depends(require_workspace_in_partition),
     service=Depends(get_workspace_service),
 ):
     existing_ids = await service.get_existing_file_ids(partition, body.file_ids)
@@ -107,7 +111,7 @@ async def add_files_to_workspace(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"File IDs not found in partition '{partition}': {unknown_ids}",
         )
-    missing = await service.add_files(workspace_id, body.file_ids)
+    missing = await service.add_files(key, body.file_ids)
     if missing:
         # TOCTOU: files were deleted between the pre-check and the insert.
         raise HTTPException(
@@ -122,11 +126,10 @@ async def add_files_to_workspace(
     dependencies=[Depends(require_partition_viewer)],
 )
 async def list_workspace_files(
-    workspace_id: str,
-    _ws=Depends(require_workspace_in_partition),
+    key=Depends(require_workspace_in_partition),
     service=Depends(get_workspace_service),
 ):
-    return {"file_ids": await service.list_files(workspace_id)}
+    return {"file_ids": await service.list_files(key)}
 
 
 @router.get(
@@ -147,12 +150,11 @@ async def list_file_workspaces(
     dependencies=[Depends(require_partition_editor)],
 )
 async def remove_file_from_workspace(
-    workspace_id: str,
     file_id: str,
-    _ws=Depends(require_workspace_in_partition),
+    key=Depends(require_workspace_in_partition),
     service=Depends(get_workspace_service),
 ):
-    removed = await service.remove_file(workspace_id, file_id)
+    removed = await service.remove_file(key, file_id)
     if not removed:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found in workspace")
     return {"status": "removed"}

@@ -16,7 +16,7 @@ from api.dependencies.files import validate_file_format, validate_file_id, valid
 from api.error_handlers import register_error_handlers
 from api.routers.admin.indexing import router as indexer_router
 from core.utils.exceptions import ConflictError, mark_indexing_worker_may_be_running
-from di.providers import get_config, get_indexing_service
+from di.providers import get_config, get_indexing_service, get_workspace_service
 from fastapi import FastAPI, UploadFile
 
 
@@ -31,7 +31,9 @@ class _FakeIndexingService:
             existing_file_id="existing-file",
         )
 
-    async def get_workspace(self, _workspace_id: str):
+
+class _FakeWorkspaceService:
+    async def find_workspace_key(self, _partition: str, _workspace_id: str):
         return None
 
 
@@ -78,6 +80,7 @@ def _build_app(tmp_path, monkeypatch, content: bytes, *, service=None, deduplica
     app.dependency_overrides[check_user_file_quota] = lambda: None
     app.dependency_overrides[get_config] = lambda: cfg
     app.dependency_overrides[get_indexing_service] = lambda: service or _FakeIndexingService()
+    app.dependency_overrides[get_workspace_service] = _FakeWorkspaceService
     return app
 
 

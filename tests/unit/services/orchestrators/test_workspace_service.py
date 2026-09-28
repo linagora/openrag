@@ -94,7 +94,7 @@ def _svc(*, wrepo=None, drepo=None, vstore=None, collection="vdb") -> WorkspaceS
 async def test_create_workspace_delegates():
     wrepo = FakeWorkspaceRepo()
     await _svc(wrepo=wrepo).create_workspace("w1", "p", 5, "Disp")
-    assert wrepo.created == [("w1", "p", 5, "Disp")]
+    assert wrepo.created == [("p/w1", "p", 5, "Disp")]
 
 
 @pytest.mark.asyncio
@@ -200,3 +200,68 @@ async def test_resolve_scope_empty_workspace_returns_empty_file_ids():
     scope = await _svc(wrepo=wrepo).resolve_scope("w1", ["p1"])
     assert scope is not None
     assert scope.file_ids == []
+
+
+# --------------------------------------------------------------------------- #
+# partition-scoped keys (temporary, until linagora/openrag#1019)
+# --------------------------------------------------------------------------- #
+
+
+class KeyedWorkspaceRepo(FakeWorkspaceRepo):
+    """Workspaces by stored key, like the workspaces table."""
+
+    def __init__(self, workspaces: dict[str, str], files: dict[str, list[str]] | None = None):
+        super().__init__()
+        self._by_key = {key: {"workspace_id": key, "partition_name": p} for key, p in workspaces.items()}
+        self._files_by_key = files or {}
+
+    async def get_workspace_dict(self, workspace_id: str):
+        return self._by_key.get(workspace_id)
+
+    async def list_workspaces_dict(self, partition: str) -> list[dict]:
+        return [ws for ws in self._by_key.values() if ws["partition_name"] == partition]
+
+    async def list_workspace_files(self, workspace_id: str) -> list[str]:
+        return list(self._files_by_key.get(workspace_id, []))
+
+    async def get_file_workspaces(self, file_id: str, partition: str) -> list[str]:
+        return [key for key, ws in self._by_key.items() if ws["partition_name"] == partition]
+
+
+@pytest.mark.asyncio
+async def test_find_workspace_key_prefers_the_partition_scoped_key():
+    wrepo = KeyedWorkspaceRepo({"p1/root": "p1", "root": "p1"})
+    assert await _svc(wrepo=wrepo).find_workspace_key("p1", "root") == "p1/root"
+
+
+@pytest.mark.asyncio
+async def test_find_workspace_key_falls_back_to_a_legacy_bare_key():
+    wrepo = KeyedWorkspaceRepo({"root": "p1"})
+    assert await _svc(wrepo=wrepo).find_workspace_key("p1", "root") == "root"
+
+
+@pytest.mark.asyncio
+async def test_find_workspace_key_ignores_a_bare_key_of_another_partition():
+    # The bug being worked around: p1 holds the bare id, p2 must still be
+    # able to create and use its own workspace of the same id.
+    wrepo = KeyedWorkspaceRepo({"root": "p1"})
+    assert await _svc(wrepo=wrepo).find_workspace_key("p2", "root") is None
+
+
+@pytest.mark.asyncio
+async def test_listings_expose_public_ids():
+    wrepo = KeyedWorkspaceRepo({"root": "p1", "p1/docs": "p1", "p2/docs": "p2"})
+    svc = _svc(wrepo=wrepo)
+    assert [ws["workspace_id"] for ws in await svc.list_workspaces("p1")] == ["root", "docs"]
+    assert await svc.get_file_workspaces("f1", "p2") == ["docs"]
+    assert (await svc.get_workspace("p2/docs"))["workspace_id"] == "docs"
+
+
+@pytest.mark.asyncio
+async def test_resolve_scope_finds_a_partition_scoped_workspace():
+    wrepo = KeyedWorkspaceRepo({"root": "p1", "p2/root": "p2"}, files={"root": ["a"], "p2/root": ["b"]})
+    scope = await _svc(wrepo=wrepo).resolve_scope("root", ["p2"])
+    assert scope is not None
+    assert scope.workspace_id == "root"
+    assert scope.partition == "p2"
+    assert scope.file_ids == ["b"]
