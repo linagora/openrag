@@ -120,7 +120,8 @@ monitoring:
     commonLabels: {}
     # Override the runbook_url base baked into the rules. Empty links the
     # runbooks at this chart's release (…/blob/v<appVersion>/docs/deployment/
-    # runbooks); set it for an air-gapped or mirrored copy.
+    # runbooks) from appVersion 2.3.0, the first release that ships them, and
+    # at develop before that; set it for an air-gapped or mirrored copy.
     runbookBaseUrl: ""
     # Alert thresholds. Empty keeps what the rules ship with; set one to retune
     # without cutting a chart release. Every threshold here was chosen against

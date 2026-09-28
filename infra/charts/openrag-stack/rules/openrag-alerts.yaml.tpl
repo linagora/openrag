@@ -27,10 +27,15 @@ duration must list its units largest first (`1h30m`) — Prometheus refuses
 */}}
 {{- $cfg := .Values.monitoring.prometheusRule }}
 {{- /* Runbooks at the release this chart deploys, so an alert opens the page
-   written for the rules that fired it; main moves on after every release. The
-   Compose copy is generated with main instead (scripts/gen_alert_rules.py):
-   a Compose install is a git checkout, not a versioned package. */}}
-{{- $runbookBase := $cfg.runbookBaseUrl | default (printf "https://github.com/linagora/openrag/blob/v%s/docs/deployment/runbooks" .Chart.AppVersion) }}
+   written for the rules that fired it; main moves on after every release.
+   Pinned only from 2.3.0, the first release whose tag carries
+   docs/deployment/runbooks: an older appVersion's tag has none, so it links
+   develop, the one ref that has them until 2.3.0 is tagged. The Compose copy
+   is generated with main instead (scripts/gen_alert_rules.py): a Compose
+   install is a git checkout, not a versioned package. */}}
+{{- $runbookRef := "develop" }}
+{{- if semverCompare ">=2.3.0-0" .Chart.AppVersion }}{{ $runbookRef = printf "v%s" .Chart.AppVersion }}{{ end }}
+{{- $runbookBase := $cfg.runbookBaseUrl | default (printf "https://github.com/linagora/openrag/blob/%s/docs/deployment/runbooks" $runbookRef) }}
 {{- $number := `^[0-9]+(\.[0-9]+)?$` }}
 {{- $duration := `^([0-9]+y)?([0-9]+w)?([0-9]+d)?([0-9]+h)?([0-9]+m)?([0-9]+s)?([0-9]+ms)?$` }}
 {{- $t := dict "ingestIdleSeconds" 720 "ingestFailureRatio" 0.25 "ingestVolumeFloor" 5 "backlogDepth" 50 "inferenceErrorRatio" 0.5 "inferenceVolumeFloor" 5 }}
