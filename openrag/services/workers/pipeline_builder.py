@@ -281,7 +281,9 @@ class IndexingPipeline:
             # chunks the file for the window the server now serves.
             served_after_embed = await self._embedded_window(embedder, configured_window)
             if served_after_embed != embedder_window:
-                cut = self._chunks_over_window(row, served_after_embed, getattr(chunker, "length_function", None))
+                cut = self._chunks_over_window(
+                    row, served_after_embed, getattr(chunker, "length_function", None), unmeasured_is_over=True
+                )
                 if cut:
                     raise PipelineError(
                         f"Nothing stored: the embedder now serves {served_after_embed} tokens, less than the "
@@ -438,7 +440,8 @@ class IndexingPipeline:
         ``model_copy`` without refreshing the count, and the envelope only adds.
         So the stored count settles almost every chunk on its own — over the
         limit is already conclusive, and far enough under it cannot be pushed
-        over by an envelope. Only the band in between is re-tokenised.
+        over by an envelope. Only the band in between is re-tokenised. Every
+        registered chunker stores the count; a chunk without one is measured.
 
         That matters because this runs synchronously on the actor's event loop,
         unconditionally, for every file — including partitions on
@@ -476,25 +479,43 @@ class IndexingPipeline:
         row: MutableMapping[str, Any],
         window: int | None,
         length_function: Callable[[str], int] | None = None,
-    ) -> list[tuple[Any, int]]:
+        *,
+        unmeasured_is_over: bool = False,
+    ) -> list[tuple[Any, int | None]]:
         """The row's chunks longer than what *window* embeds, with their token
-        counts. How they are measured is explained in _warn_on_embedder_overflow."""
+        counts. How they are measured is explained in _warn_on_embedder_overflow.
+
+        A chunk with no stored count is measured. Without a counter it cannot
+        be, and it is left out, or listed with a None count when
+        *unmeasured_is_over*: a check that must not store a cut chunk has to
+        assume the worst."""
         if not window or window <= 0:
             return []
         limit = window - 1  # truncate_prompt_tokens
         chunks = row.get("chunks") or []
 
-        def tokens(chunk: Any) -> int:
-            stored = getattr(chunk, "token_count", 0) or 0
-            if length_function is None or not getattr(chunk, "text", None):
+        def tokens(chunk: Any) -> int | None:
+            stored = getattr(chunk, "token_count", None)
+            text = getattr(chunk, "text", None)
+            if not text:
+                return stored or 0
+            if length_function is None:
                 return stored
             # Conclusive on the stored count alone: already over, or too far
             # under for any envelope to close the gap.
-            if stored > limit or stored <= limit - _ENVELOPE_HEADROOM_TOKENS:
+            if stored is not None and (stored > limit or stored <= limit - _ENVELOPE_HEADROOM_TOKENS):
                 return stored
-            return length_function(chunk.text)
+            return length_function(text)
 
-        return [(chunk, count) for chunk in chunks if (count := tokens(chunk)) > limit]
+        offenders: list[tuple[Any, int | None]] = []
+        for chunk in chunks:
+            count = tokens(chunk)
+            if count is None:
+                if unmeasured_is_over:
+                    offenders.append((chunk, None))
+            elif count > limit:
+                offenders.append((chunk, count))
+        return offenders
 
     @staticmethod
     async def _embedded_window(embedder: Any, configured: int | None) -> int | None:

@@ -1599,11 +1599,13 @@ class ServingEmbedder(FakeEmbedder):
         return self._served.pop(0) if len(self._served) > 1 else self._served[0]
 
 
-def _served_window_pipeline(embedder, *, configured: int, chunks: list[Chunk] | None = None):
-    document = Document(filename="note.txt", text="hello", partition="p")
-    processed = ProcessedDocument(document_id=document.id, text_blocks=[TextBlock(text="hello")])
+def _served_window_pipeline(
+    embedder, *, configured: int, chunks: list[Chunk] | None = None, chunker=None, text: str = "hello"
+):
+    document = Document(filename="note.txt", text=text, partition="p")
+    processed = ProcessedDocument(document_id=document.id, text_blocks=[TextBlock(text=text)])
     chunks = chunks or [Chunk(id="c1", text="hello", partition="p")]
-    startup_chunker = FakeChunker(chunks)
+    startup_chunker = chunker or FakeChunker(chunks)
     rebuilt_chunker = FakeChunker(chunks)
     factory_calls: list[tuple[object, int | None]] = []
 
@@ -1718,3 +1720,53 @@ async def test_a_window_that_shrinks_during_the_embed_keeps_a_file_whose_chunks_
     await pipeline.run(row)
 
     assert row["stored_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_a_window_that_shrinks_during_the_embed_fails_a_recursive_splitter_file_before_the_store():
+    """The real recursive_splitter: its 3000-token chunk is caught like any
+    other, because the chunker stores each chunk's token count."""
+    from core.chunking.recursive import RecursiveSplitter
+    from core.utils.exceptions import PipelineError
+
+    chunker = RecursiveSplitter(chunk_size=4000, chunk_overlap_rate=0.0, length_function=lambda s: len(s.split()))
+    pipeline, row, _, _, _ = _served_window_pipeline(
+        ServingEmbedder([[1.0]], None, 2048), configured=8192, chunker=chunker, text=" ".join(["w"] * 3000)
+    )
+
+    with pytest.raises(PipelineError, match="Retry the file") as exc_info:
+        await pipeline.run(row)
+
+    assert exc_info.value.code == "EMBEDDER_WINDOW_SHRANK"
+    assert pipeline.vector_store.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("words", "has_counter", "stored"),
+    [
+        pytest.param(3000, True, False, id="measured-over-the-window"),
+        pytest.param(5, True, True, id="measured-within-the-window"),
+        pytest.param(5, False, False, id="cannot-be-measured"),
+    ],
+)
+async def test_a_window_that_shrinks_during_the_embed_measures_chunks_with_no_stored_count(words, has_counter, stored):
+    """A chunk with no stored token count is measured. With no counter to
+    measure it, the file fails rather than risk storing a cut chunk."""
+    from core.utils.exceptions import PipelineError
+
+    chunk = Chunk(id="c1", text=" ".join(["w"] * words), partition="p")
+    pipeline, row, _, _, startup_chunker = _served_window_pipeline(
+        ServingEmbedder([[1.0]], None, 2048), configured=8192, chunks=[chunk]
+    )
+    if has_counter:
+        startup_chunker.length_function = lambda s: len(s.split())
+
+    if stored:
+        await pipeline.run(row)
+        assert row["stored_count"] == 1
+    else:
+        with pytest.raises(PipelineError, match="Retry the file") as exc_info:
+            await pipeline.run(row)
+        assert exc_info.value.code == "EMBEDDER_WINDOW_SHRANK"
+        assert pipeline.vector_store.calls == []
