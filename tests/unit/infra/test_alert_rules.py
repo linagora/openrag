@@ -533,6 +533,13 @@ def test_target_down_excludes_only_the_datastores_without_the_bundled_stack() ->
         # (ingest outcomes, parse completions) are scraped from.
         ("openrag", True),
         ("openrag-ray", True),
+        # The Compose Ray job's name in every release up to 2.2.x: a Prometheus
+        # config from before the rename must keep paging. Anchored, so a job
+        # that only contains "ray" is not taken for it.
+        ("ray", True),
+        ("xray", False),
+        ("gray", False),
+        ("ray-exporter", False),
         ("openrag-openrag", True),
         ("rag/openrag-raycluster", True),
         # The datastore exclusion reads the job's own name, not its namespace:
@@ -551,8 +558,9 @@ def test_target_down_excludes_only_the_datastores_without_the_bundled_stack() ->
     ],
 )
 def test_target_down_pages_for_openrags_targets_only(job: str, pages: bool, bundled: bool) -> None:
-    """The Compose Ray job carries the ingest metrics; it was `ray`, which
-    `.*openrag.*` missed, until #1086 renamed it `openrag-ray`. The datastore
+    """The Compose Ray job carries the ingest metrics. #1086 renamed it from
+    `ray` to `openrag-ray`; both still page, since a deployment may keep a
+    Prometheus config from before the rename. The datastore
     exporters also match `.*openrag.*` by release name and must not page
     "every OpenRag alert is inert" when none is."""
     overrides = ("monitoring.bundled=true",) if bundled else ()

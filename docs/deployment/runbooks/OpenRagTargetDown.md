@@ -15,7 +15,7 @@
 > ```
 
 ```
-up{job=~".*openrag.*", job!~"(.*/)?[^/]*-(postgresql|milvus)(-[^/]*)?"} == 0
+up{job=~".*openrag.*|ray", job!~"(.*/)?[^/]*-(postgresql|milvus)(-[^/]*)?"} == 0
 ```
 
 With `monitoring.bundled`, the bundled stack's own jobs (`openrag-monitoring-*`,
@@ -25,7 +25,8 @@ With `monitoring.bundled`, the bundled stack's own jobs (`openrag-monitoring-*`,
 
 Prometheus cannot scrape one of OpenRag's own targets: the API's `/metrics`, or the Ray
 metrics agent that exports the Ray-side series (ingest outcomes, parse completions,
-worker-side inference) — the Compose `openrag-ray` job, or the chart's
+worker-side inference) — the Compose `openrag-ray` job (`ray` in a Prometheus config
+from 2.2.x or earlier), or the chart's
 `<namespace>/<release>-raycluster` PodMonitor. The `job` label says which.
 
 The datastore exporters (`<release>-postgresql-metrics`, `<release>-milvus*`) are
