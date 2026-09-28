@@ -63,7 +63,7 @@ kubectl -n <ns> get pods -l app.kubernetes.io/name=openrag,app.kubernetes.io/ins
 kubectl -n <ns> get pods -l ray.io/cluster=openrag-raycluster
 # The embedded Ray (job <ns>/openrag-openrag-ray) runs inside the API pods above; its
 # port is ray-metrics (8090). Does the API attach to another cluster instead?
-kubectl -n <ns> exec deploy/openrag -- printenv RAY_ADDRESS
+kubectl -n <ns> exec deploy/openrag-openrag -- printenv RAY_ADDRESS
 kubectl -n <ns> logs <pod> --tail=100
 ```
 
