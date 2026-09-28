@@ -1,12 +1,11 @@
 changelog:
   categories:
-    # Prompt notices also apply when a change is labelled breaking-change.
+    - title: 🚨 BREAKING CHANGE — if prompts change, review customized defaults after upgrading
+      labels:
+        - breaking-change
     - title: 📝 Prompt updates — review customized defaults after upgrading
       labels:
         - prompt
-    - title: 🚨 BREAKING CHANGE
-      labels:
-        - breaking-change
     - title: 🚀 Features
       labels:
         - feat
