@@ -25,8 +25,11 @@ With `monitoring.bundled`, the bundled stack's own jobs (`openrag-monitoring-*`,
 
 Prometheus cannot scrape one of OpenRag's own targets: the API's `/metrics`, or the Ray
 metrics agent that exports the Ray-side series (ingest outcomes, parse completions,
-worker-side inference) — the Compose `ray` job, or the chart's
-`<namespace>/<release>-raycluster` PodMonitor. The `job` label says which.
+worker-side inference) — the Compose `openrag-ray` job (`ray` in a Prometheus config
+from 2.2.x or earlier), or one of the chart's two Ray PodMonitors:
+`<namespace>/<fullname>-raycluster` with `ray.enabled=true`, or
+`<namespace>/<fullname>-openrag-ray` for the Ray embedded in the openrag pod otherwise.
+The `job` label says which.
 
 The datastore exporters (`<release>-postgresql-metrics`, `<release>-milvus*`) are
 deliberately not matched: their being down does not blind any OpenRag alert. The
@@ -59,10 +62,13 @@ curl -s "$OPENRAG/ready" | jq .checks
 kubectl -n <ns> get pods -l app.kubernetes.io/name=openrag,app.kubernetes.io/instance=openrag
 # The RayCluster (job <ns>/openrag-raycluster).
 kubectl -n <ns> get pods -l ray.io/cluster=openrag-raycluster
+# The embedded Ray (job <ns>/openrag-openrag-ray) runs inside the API pods above; its
+# port is ray-metrics (8090). Does the API attach to another cluster instead?
+kubectl -n <ns> exec deploy/openrag-openrag -- printenv RAY_ADDRESS
 kubectl -n <ns> logs <pod> --tail=100
 ```
 
-On Compose, `docker compose ps openrag` — the `ray` job scrapes the same container on
+On Compose, `docker compose ps openrag` — the `openrag-ray` job scrapes the same container on
 port 8091.
 
 ## Likely causes, most common first
@@ -75,7 +81,12 @@ port 8091.
 4. **NetworkPolicy.** Only the ports in `networkPolicy.externalPorts` are reachable from
    outside the namespace; a Prometheus in another namespace scraping a different port is
    blocked.
-5. **The whole node or namespace is gone** — in which case other alerts are firing too.
+5. **The embedded-Ray target is down while the API is up** (job
+   `<namespace>/<fullname>-openrag-ray`). The API has most likely attached to an external
+   Ray cluster through a `RAY_ADDRESS` the chart cannot read (`env.existingSecret` or an
+   external secrets provider), so nothing listens on 8090. Set `ray.externalCluster: true`,
+   or copy `RAY_ADDRESS` into `env.config`.
+6. **The whole node or namespace is gone** — in which case other alerts are firing too.
 
 ## Verify recovery
 

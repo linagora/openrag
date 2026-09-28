@@ -11,7 +11,9 @@ text, metadata and the BM25 ``sparse`` vector are untouched.
    ``c4e8f2a6b913``, which must have run first). Anything that cannot be
    routed aborts the migration before it changes anything.
 2. **Add and index each field**, with ``vector``'s dimension.
-3. **Copy** each partition's vectors with a partial upsert of ``{_id, <field>}``.
+3. **Copy** each partition's vectors with a partial upsert of ``{_id, <field>}``,
+   plus the chunk's section IDs folded below 2**53 (see :data:`SECTION_ID_MASK`).
+   A partial upsert keeps ``_id``, which a full-row upsert would reassign.
 4. **Verify** by reading every copied partition back (Milvus rejects
    ``IS NULL`` on vector fields).
 5. **Drop ``vector``** and stamp version 3.
@@ -19,6 +21,10 @@ text, metadata and the BM25 ``sparse`` vector are untouched.
 Safe to re-run after a failure; only the final drop is irreversible. Rows whose
 partition is not in Postgres are already unreachable and lose their vector.
 OpenRAG must be stopped: the migration aborts if the row count moves.
+
+The partial upsert rewrites every number in a chunk's dynamic field as a
+float64, so any other integer above 2**53 in its metadata comes back rounded.
+Postgres keeps the exact upload metadata of each file.
 
 Usage — prefer the generic runner (from repo root, inside the container). It
 reads Postgres as well as Milvus, so both must be up (``docker compose up -d rdb
@@ -70,6 +76,16 @@ INDEX_WAIT_SECONDS = 300.0
 #: Upper bound on rows per copy page, further capped by the vector payload.
 MAX_COPY_BATCH = 1_000
 _COPY_PAGE_BUDGET_BYTES = 32 * 1024 * 1024
+
+#: Dynamic keys that link a chunk to its neighbours in the same file.
+SECTION_ID_KEYS = ("section_id", "prev_section_id", "next_section_id")
+
+#: A partial upsert rewrites every number in the dynamic field as a float64,
+#: which rounds integers above 2**53. Section IDs used to be about 1.8e18, where
+#: that rounding makes a few hundred neighbouring chunks share one ID, so the
+#: copy keeps only their low 53 bits. Applied to all three keys, the links still
+#: match, and a file's consecutive IDs stay distinct.
+SECTION_ID_MASK = 2**53 - 1
 
 logger = get_logger()
 
@@ -334,12 +350,12 @@ def _wait_for_indexes(client: MilvusClient, collection_name: str, plan: Plan, ti
             time.sleep(2)
 
 
-def _iter_pages(client: MilvusClient, collection_name: str, filter_expr: str, output_field: str, dim: int):
+def _iter_pages(client: MilvusClient, collection_name: str, filter_expr: str, output_fields: list[str], dim: int):
     iterator = client.query_iterator(
         collection_name=collection_name,
         filter=filter_expr,
         batch_size=_batch_size(dim),
-        output_fields=[output_field],
+        output_fields=output_fields,
     )
     try:
         while True:
@@ -351,12 +367,22 @@ def _iter_pages(client: MilvusClient, collection_name: str, filter_expr: str, ou
         iterator.close()
 
 
+def _folded_section_ids(row: dict[str, Any]) -> dict[str, int]:
+    """The row's section IDs as the copy writes them back — see :data:`SECTION_ID_MASK`."""
+    return {key: row[key] & SECTION_ID_MASK for key in SECTION_ID_KEYS if isinstance(row.get(key), int)}
+
+
 def _copy_partition(
     client: MilvusClient, collection_name: str, partition: str, source: str, target: str, dim: int
 ) -> int:
     copied = 0
-    for page in _iter_pages(client, collection_name, f"partition == {_literal(partition)}", source, dim):
-        rows = [{"_id": row["_id"], target: row[source]} for row in page if row.get(source) is not None]
+    filter_expr = f"partition == {_literal(partition)}"
+    for page in _iter_pages(client, collection_name, filter_expr, [source, *SECTION_ID_KEYS], dim):
+        rows = [
+            {"_id": row["_id"], target: row[source], **_folded_section_ids(row)}
+            for row in page
+            if row.get(source) is not None
+        ]
         if rows:
             client.upsert(collection_name=collection_name, data=rows, partial_update=True)
         copied += len(rows)
@@ -367,7 +393,7 @@ def _non_null(client: MilvusClient, collection_name: str, partitions: Iterable[s
     names = ", ".join(_literal(p) for p in partitions)
     return sum(
         1
-        for page in _iter_pages(client, collection_name, f"partition in [{names}]", field_name, dim)
+        for page in _iter_pages(client, collection_name, f"partition in [{names}]", [field_name], dim)
         for row in page
         if row.get(field_name) is not None
     )

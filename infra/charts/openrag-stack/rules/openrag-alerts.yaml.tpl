@@ -121,8 +121,9 @@ duration must list its units largest first (`1h30m`) — Prometheus refuses
 # KNOWN LIMITATION — topologies that scrape only half the series. Every
 # series lives either on the API's /metrics or on Ray's metrics agent, and a
 # deployment that does not scrape one of them leaves the alerts reading it
-# silently inert: Helm with the default embedded Ray scrapes no Ray-side series
-# (IngestStalled, IngestFailureRate cannot fire); Helm under Ray Serve scrapes
+# silently inert: Helm without the Ray PodMonitor (ray.metrics.podMonitor or
+# monitoring.bundled) scrapes no Ray-side series (IngestStalled,
+# IngestFailureRate cannot fire); Helm under Ray Serve scrapes
 # no API /metrics (BacklogGrowing, IngestStalled, CatalogDriftDetected cannot
 # fire). docs/deployment/runbooks/README.md has the table per topology.
 
@@ -146,8 +147,9 @@ groups:
         # has completed or started a parse since the workers last started (a
         # pool seeds the gauge on its first use) — a fresh install, and equally
         # a pool wedged straight after a worker restart.
-        # No absent() branch: with Helm's embedded Ray the gauge is never
-        # scraped at all, and that would page on every long batch.
+        # No absent() branch: wherever Ray's agent is not scraped (Helm without
+        # the Ray PodMonitor) the gauge is never there, and that would page on
+        # every long batch.
         # OpenRagBacklogGrowing covers a queue that rises from zero.
         #
         # The queue must have been non-empty for the whole idle window, not just
@@ -163,7 +165,7 @@ groups:
           and on()
           max(min_over_time(openrag_ingest_tasks{state="QUEUED"}[{{ $idleRange }}])) > 0
           and on()
-          (time() - max(openrag_ingest_last_parse_completion_timestamp_seconds) > {{ $t.ingestIdleSeconds }})
+          (time() - max({__name__=~"(ray_)?openrag_ingest_last_parse_completion_timestamp_seconds"}) > {{ $t.ingestIdleSeconds }})
         for: {{ $for.OpenRagIngestStalled }}
         labels:
           severity: critical
@@ -193,12 +195,12 @@ groups:
         # stability.
         expr: |
           (
-            sum(rate(openrag_ingest_documents_total{status="failed"}[5m]))
+            sum(rate({__name__=~"(ray_)?openrag_ingest_documents_total", status="failed"}[5m]))
             /
-            sum(rate(openrag_ingest_documents_total{status=~"completed|failed"}[5m]))
+            sum(rate({__name__=~"(ray_)?openrag_ingest_documents_total", status=~"completed|failed"}[5m]))
           ) > {{ $t.ingestFailureRatio }}
           and
-          sum(increase(openrag_ingest_documents_total{status=~"completed|failed"}[15m])) >= {{ $t.ingestVolumeFloor }}
+          sum(increase({__name__=~"(ray_)?openrag_ingest_documents_total", status=~"completed|failed"}[15m])) >= {{ $t.ingestVolumeFloor }}
         for: {{ $for.OpenRagIngestFailureRate }}
         labels:
           severity: warning
@@ -316,12 +318,12 @@ groups:
         # volume floor.
         expr: |
           (
-            sum by (provider) (rate(openrag_inference_requests_total{outcome=~"error|timeout"}[10m]))
+            sum by (provider) (rate({__name__=~"(ray_)?openrag_inference_requests_total", outcome=~"error|timeout"}[10m]))
             /
-            sum by (provider) (rate(openrag_inference_requests_total{outcome=~"success|error|timeout"}[10m]))
+            sum by (provider) (rate({__name__=~"(ray_)?openrag_inference_requests_total", outcome=~"success|error|timeout"}[10m]))
           ) > {{ $t.inferenceErrorRatio }}
           and
-          sum by (provider) (increase(openrag_inference_requests_total{outcome=~"success|error|timeout"}[10m])) >= {{ $t.inferenceVolumeFloor }}
+          sum by (provider) (increase({__name__=~"(ray_)?openrag_inference_requests_total", outcome=~"success|error|timeout"}[10m])) >= {{ $t.inferenceVolumeFloor }}
         for: {{ $for.OpenRagInferenceProviderDown }}
         labels:
           severity: critical
@@ -355,7 +357,7 @@ groups:
         # Under `== 1` every such scrape reset the `for` timer, so the alert
         # could stay pending through exactly the outage it exists for.
         # Unknown (-1) stays out.
-        expr: max by (name) (openrag_circuit_breaker_state) >= 1
+        expr: max by (name) ({__name__=~"(ray_)?openrag_circuit_breaker_state"}) >= 1
         for: {{ $for.OpenRagCircuitBreakerOpen }}
         labels:
           severity: critical
@@ -390,11 +392,15 @@ groups:
         #
         # What counts as OpenRAG's own target, by default:
         #   * `.*openrag.*` — the API (Compose `openrag`, chart `<release>-openrag`)
-        #     and the chart's Ray PodMonitor (`<namespace>/<release>-raycluster`);
-        #   * `ray` — the Compose job scraping Ray's metrics agent, which carries
-        #     every Ray-side series (ingest outcomes, parse completions,
-        #     worker-side inference). Missing it left IngestStalled and
-        #     IngestFailureRate inert with nothing paging for it.
+        #     and the chart's Ray PodMonitors (`<namespace>/<fullname>-raycluster`
+        #     with ray.enabled=true, `<namespace>/<fullname>-openrag-ray` for the
+        #     Ray embedded in the openrag pod otherwise);
+        #   * the Compose job scraping Ray's metrics agent, which carries every
+        #     Ray-side series (ingest outcomes, parse completions, worker-side
+        #     inference). It is `openrag-ray` since #1086, which `.*openrag.*`
+        #     covers, and was `ray` in every release up to 2.2.x: `ray` stays in
+        #     the default so a deployment still running a Prometheus config from
+        #     before the rename keeps paging when that target goes down.
         # The datastore exporters (`<release>-postgresql-metrics`,
         # `<release>-milvus*`) match `.*openrag.*` by release name but are not
         # OpenRAG's: their being down makes no OpenRAG alert inert, which is what
