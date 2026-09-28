@@ -6,13 +6,15 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 router = APIRouter()
-#: Checks that gate readiness. The default embedder is one: without it uploads
-#: fail and retrieval returns nothing or the wrong vectors, so a pod reporting
-#: ready would serve broken answers (#1099). Other model kinds (LLM, VLM, STT,
-#: per-partition endpoints) stay report-only, so an optional model's outage does
-#: not take the API out of service. A check absent from the snapshot (model
-#: discovery not configured) does not gate.
-_CORE_READINESS_CHECKS = frozenset({"postgres", "milvus", "ray", "embedder"})
+_CORE_READINESS_CHECKS = frozenset({"postgres", "milvus", "ray"})
+#: The default embedder gates readiness too: without it uploads fail and
+#: retrieval returns nothing or the wrong vectors, so a pod reporting ready would
+#: serve broken answers (#1099). Only on a verdict about the embedder itself,
+#: not on a timeout: model probes share one short deadline with discovery, so a
+#: slow round would pull every replica at once. Not when discovery failed either:
+#: the embedder then carries discovery's status, which says nothing about it.
+#: Other model kinds (LLM, VLM, STT, per-partition endpoints) stay report-only.
+_EMBEDDER_GATING_STATUSES = frozenset({"unavailable", "unresolvable"})
 _PUBLIC_MODEL_ENDPOINT_CATEGORY = "configured"
 
 
@@ -38,6 +40,8 @@ async def ready(request: Request) -> JSONResponse:
     checks = dict(snapshot.checks)
     required_checks = _CORE_READINESS_CHECKS.intersection(checks)
     is_ready = bool(required_checks) and all(checks[name] == "ok" for name in required_checks)
+    if checks.get("model_endpoint_discovery") == "ok" and checks.get("embedder") in _EMBEDDER_GATING_STATUSES:
+        is_ready = False
     return JSONResponse(
         {
             "status": "ready" if is_ready else "not_ready",
