@@ -274,7 +274,7 @@ It reads PostgreSQL as well as Milvus, to know which embedder each partition use
 - **Development builds from 21 to 28 September 2026** ran a copy that rounded chunk section IDs. The migration does not repair a collection they already migrated; re-index the files indexed before it.
 :::
 
-On Kubernetes, follow [Upgrading OpenRAG — 2.2.x to 2.3.0 on Kubernetes](/openrag/documentation/upgrading/#22x-to-230-on-kubernetes), which runs the migration from the upgraded OpenRAG pod.
+For an upgrade to 2.3.0, follow [Upgrading OpenRAG](/openrag/documentation/upgrading/): the [Kubernetes](/openrag/documentation/upgrading/#22x-to-230-on-kubernetes) procedure runs the migration from the upgraded OpenRAG pod, the [Docker Compose](/openrag/documentation/upgrading/#22x-to-230-with-docker-compose) one with `docker compose run`.
 
 Once validated, drop the backup:
 
