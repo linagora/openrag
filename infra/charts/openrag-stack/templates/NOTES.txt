@@ -61,6 +61,13 @@ Upgrading from a release that mounted /app/logs: the old "{{ include "openrag-st
 PVC is kept by helm.sh/resource-policy and is no longer used — delete it by hand.
 {{- end }}
 
+{{- if and .Values.ray.enabled (ne (include "openrag-stack.rayServeApi" .) "true") (not (include "openrag-stack.rayAddress" .)) }}
+
+⚠  ray.enabled=true, but the API is given no RAY_ADDRESS: it starts its own Ray
+   inside the openrag pod, and the RayCluster does no work. The Ray PodMonitor
+   scrapes the RayCluster, so indexing metrics go unscraped. Point the API at it:
+   env.config.RAY_ADDRESS: 'ray://{{ include "openrag-stack.fullname" . }}-raycluster-head-svc:10001'
+{{- end }}
 {{- if and .Values.monitoring.bundled (not .Values.ray.enabled) (ne (include "openrag-stack.embeddedRay" .) "true") }}
 
 ⚠  The API attaches to an external Ray cluster (RAY_ADDRESS), so the bundled

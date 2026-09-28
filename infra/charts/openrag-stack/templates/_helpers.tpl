@@ -189,6 +189,16 @@ env.secrets are visible here; a RAY_ADDRESS supplied through env.existingSecret
 or an external secrets provider is not, which is what ray.externalCluster says.
 */}}
 {{- define "openrag-stack.embeddedRay" -}}
-{{- $address := or (dig "RAY_ADDRESS" "" (.Values.env.config | default dict)) (dig "RAY_ADDRESS" "" (.Values.env.secrets | default dict)) -}}
+{{- $address := include "openrag-stack.rayAddress" . -}}
 {{- if and (not .Values.ray.enabled) (not $address) (not .Values.ray.externalCluster) -}}true{{- else -}}false{{- end -}}
+{{- end }}
+
+{{/*
+The RAY_ADDRESS the API will see, as configmap-env.yaml and secrets-env.yaml
+render it: both pass values through tpl, so a raw value can be an expression
+that renders empty. Empty when the chart sees none.
+*/}}
+{{- define "openrag-stack.rayAddress" -}}
+{{- $raw := or (dig "RAY_ADDRESS" "" (.Values.env.config | default dict)) (dig "RAY_ADDRESS" "" (.Values.env.secrets | default dict)) -}}
+{{- tpl (printf "%v" $raw) . | trim -}}
 {{- end }}
