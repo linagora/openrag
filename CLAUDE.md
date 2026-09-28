@@ -137,7 +137,7 @@ The RAG pipeline filters out false-positive sources by having the LLM self-repor
 5. For streaming, the OpenAI router buffers the last 100 chars to catch the sources tag before it reaches the client
 
 The `extra` field in API responses is a JSON object with these keys. It was a
-JSON-encoded *string* up to and including v2.2.0 — a breaking change for readers
+JSON-encoded *string* up to and including v2.2.2 — a breaking change for readers
 written against the old shape, which must stop calling `json.loads` on it:
 
 - `sources` — legacy field, kept as-is for existing clients (e.g. Twake): cited sources, or every presented source as a fallback when no `[Sources: ...]` tag was found.
