@@ -73,7 +73,7 @@ def test_head_and_workers_declare_the_port_name_kuberay_and_the_podmonitor_use()
         raycluster,
     )
     assert declared == ["metrics", "metrics"], f"head and worker metrics ports: {declared}"
-    assert "- port: metrics" in _template("datastore-metrics.yaml")
+    assert '- port: {{ ternary "metrics" "ray-metrics" .Values.ray.enabled }}' in _template("datastore-metrics.yaml")
 
 
 def _pod_monitor_metric_relabelings() -> list[dict]:
@@ -138,7 +138,10 @@ REQUIRED_SECRETS = [
 ]
 POSTGRES_SUPERUSER = ["--set", "postgresql.auth.postgresPassword=unit-test-superuser-0123"]
 METRICS_FROM = [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "monitoring"}}}]
-RAY_MONITOR = ["--set", "ray.enabled=true", "--set", "ray.metrics.podMonitor.enabled=true"]
+#: This release's RayCluster, with the API pointed at it: the chart refuses
+#: ray.enabled=true when the API has neither Ray Serve nor a RAY_ADDRESS.
+RAY_CLUSTER = ["--set", "ray.enabled=true", "--set", "env.config.RAY_ADDRESS=ray://openrag-raycluster-head-svc:10001"]
+RAY_MONITOR = [*RAY_CLUSTER, "--set", "ray.metrics.podMonitor.enabled=true"]
 POSTGRES_MONITOR = [
     "--set",
     "postgresql.metrics.enabled=true",
@@ -273,6 +276,293 @@ def test_the_ray_pod_monitor_scrapes_head_and_workers_where_they_export(tmp_path
         assert named == [exported[labels["ray.io/node-type"]]], pod_name
 
 
+EMBEDDED_RAY_MONITOR = ["--set", "ray.metrics.podMonitor.enabled=true"]
+
+
+def _openrag_container(objects: list[dict]) -> dict:
+    (deployment,) = [o for o in objects if o["kind"] == "Deployment" and o["metadata"]["name"] == "openrag-openrag"]
+    (container,) = [c for c in deployment["spec"]["template"]["spec"]["containers"] if c["name"] == "openrag"]
+    return container
+
+
+def test_the_api_reads_the_port_variable_the_chart_sets() -> None:
+    """The chart pins the embedded Ray's port through this variable; renamed on
+    either side, Ray falls back to a random port and the PodMonitor scrapes a
+    port nothing listens on."""
+    main = (ROOT / "openrag" / "api" / "main.py").read_text(encoding="utf-8")
+    assert 'os.environ.get("RAY_METRICS_EXPORT_PORT"' in main
+    assert "name: RAY_METRICS_EXPORT_PORT" in _template("openrag.yaml")
+
+
+@requires_helm
+def test_the_embedded_ray_pod_monitor_scrapes_the_port_the_api_pod_pins(tmp_path: Path) -> None:
+    """With ray.enabled=false the only Ray node runs inside the openrag pod. The
+    PodMonitor must select that pod alone, name a port it declares, and that
+    port must be the one Ray is told to export on."""
+    objects = _objects(_chart(tmp_path), *EMBEDDED_RAY_MONITOR)
+    (monitor,) = [obj for obj in objects if obj["kind"] == "PodMonitor"]
+    (endpoint,) = monitor["spec"]["podMetricsEndpoints"]
+
+    selected = _selected(_pods(objects), monitor["spec"]["selector"]["matchLabels"])
+    assert [name for name, _, _ in selected] == ["Deployment/openrag-openrag"]
+    container = _openrag_container(objects)
+    named = [p["containerPort"] for p in container["ports"] if p.get("name") == endpoint["port"]]
+    env = {item["name"]: item["value"] for item in container.get("env", [])}
+    assert named == [_ray_metrics_port()]
+    assert env["RAY_METRICS_EXPORT_PORT"] == str(_ray_metrics_port())
+    assert {
+        "sourceLabels": ["__name__"],
+        "regex": "ray_(openrag_.+)",
+        "targetLabel": "__name__",
+        "replacement": "$1",
+    } in (endpoint["metricRelabelings"])
+
+
+@requires_helm
+def test_the_embedded_ray_metrics_policy_opens_the_port_on_the_api_pod_only(tmp_path: Path) -> None:
+    objects = _objects(
+        _chart(tmp_path),
+        *EMBEDDED_RAY_MONITOR,
+        "--set-json",
+        f"networkPolicy.metricsFrom={json.dumps(METRICS_FROM)}",
+    )
+    (policy,) = [
+        p for p in objects if p["kind"] == "NetworkPolicy" and p["metadata"]["name"] == "openrag-openrag-ray-metrics"
+    ]
+    (rule,) = policy["spec"]["ingress"]
+    assert rule["from"] == METRICS_FROM
+    assert [entry["port"] for entry in rule["ports"]] == [_ray_metrics_port()]
+    selected = _selected(_pods(objects), policy["spec"]["podSelector"]["matchLabels"])
+    assert [name for name, _, _ in selected] == ["Deployment/openrag-openrag"]
+
+
+@requires_helm
+def test_a_ray_address_that_renders_empty_is_still_embedded_ray(tmp_path: Path) -> None:
+    """configmap-env renders env values through tpl, so what the API receives is
+    the rendered value: an expression that renders empty means embedded Ray."""
+    objects = _objects(
+        _chart(tmp_path),
+        *EMBEDDED_RAY_MONITOR,
+        "--set-json",
+        'env.config.RAY_ADDRESS="{{ if false }}ray://x:10001{{ end }}"',
+    )
+    assert "ray-metrics" in [p.get("name") for p in _openrag_container(objects)["ports"]]
+    assert [o["metadata"]["name"] for o in objects if o["kind"] == "PodMonitor"] == ["openrag-openrag-ray"]
+
+
+@requires_helm
+def test_a_ray_address_rendered_from_an_expression_is_external(tmp_path: Path) -> None:
+    objects = _objects(
+        _chart(tmp_path), *BUNDLED, "--set", "env.config.RAY_ADDRESS=ray://{{ .Release.Name }}-head:10001"
+    )
+    assert "ray-metrics" not in [p.get("name") for p in _openrag_container(objects)["ports"]]
+    assert not [o for o in objects if o["kind"] == "PodMonitor"]
+
+
+@requires_helm
+def test_a_ray_cluster_given_to_no_api_is_refused(tmp_path: Path) -> None:
+    """ray.enabled=true with neither Ray Serve nor a RAY_ADDRESS: the API starts
+    its own Ray inside its pod, the RayCluster does no work, and the Ray PodMonitor
+    scrapes a cluster holding none of the indexing metrics. Refused, naming the fix."""
+    result = _render(_chart(tmp_path), "--set", "ray.enabled=true")
+    assert result.returncode != 0
+    assert "neither ENABLE_RAY_SERVE=true nor a RAY_ADDRESS" in result.stderr
+    assert "env.config.RAY_ADDRESS: ray://openrag-raycluster-head-svc:10001" in result.stderr
+
+
+@requires_helm
+@pytest.mark.parametrize(
+    "api",
+    [
+        ["--set", "env.config.RAY_ADDRESS=ray://openrag-raycluster-head-svc:10001"],
+        ["--set", "env.secrets.RAY_ADDRESS=ray://openrag-raycluster-head-svc:10001"],
+        ["--set-string", "env.config.ENABLE_RAY_SERVE=true"],
+    ],
+    ids=["address-in-config", "address-in-secrets", "ray-serve"],
+)
+def test_a_ray_cluster_the_api_uses_renders(tmp_path: Path, api: list[str]) -> None:
+    result = _render(_chart(tmp_path), "--set", "ray.enabled=true", *api)
+    assert result.returncode == 0, result.stderr
+
+
+@requires_helm
+@pytest.mark.parametrize(
+    "api",
+    [
+        # The address the API would see, not the raw value: an expression that
+        # renders empty gives it none.
+        ["--set-json", 'env.config.RAY_ADDRESS="{{ if false }}ray://x:10001{{ end }}"'],
+        # ray.externalCluster says the cluster is outside this release; with
+        # ray.enabled=true the cluster is this release's, so it does not count.
+        ["--set", "ray.externalCluster=true"],
+    ],
+    ids=["address-renders-empty", "external-cluster-flag"],
+)
+def test_a_ray_cluster_is_still_refused_without_an_address_the_api_sees(tmp_path: Path, api: list[str]) -> None:
+    result = _render(_chart(tmp_path), "--set", "ray.enabled=true", *api)
+    assert result.returncode != 0
+    assert "neither ENABLE_RAY_SERVE=true nor a RAY_ADDRESS" in result.stderr
+
+
+@requires_helm
+@pytest.mark.parametrize(
+    ("sources", "refused"),
+    [
+        # The pod reads the Secret after the ConfigMap: a key in both takes the
+        # Secret's value, so an empty one there gives the API no address.
+        (["--set", "env.config.RAY_ADDRESS=ray://head:10001", "--set", "env.secrets.RAY_ADDRESS="], True),
+        (["--set", "env.config.RAY_ADDRESS=", "--set", "env.secrets.RAY_ADDRESS=ray://head:10001"], False),
+        # With env.existingSecret the chart renders no Secret of its own, so
+        # env.secrets never reaches the pod: only env.config counts.
+        (["--set", "env.existingSecret=mine", "--set", "env.secrets.RAY_ADDRESS=ray://head:10001"], True),
+        (
+            [
+                "--set",
+                "env.existingSecret=mine",
+                "--set",
+                "env.config.RAY_ADDRESS=ray://head:10001",
+                "--set",
+                "env.secrets.RAY_ADDRESS=",
+            ],
+            False,
+        ),
+    ],
+    ids=["secret-empty-wins", "secret-address-wins", "existing-secret-ignores-values", "existing-secret-reads-config"],
+)
+def test_the_address_is_read_where_the_api_reads_it(tmp_path: Path, sources: list[str], refused: bool) -> None:
+    result = _render(_chart(tmp_path), "--set", "ray.enabled=true", *sources)
+    assert (result.returncode != 0) is refused, result.stderr
+    if refused:
+        assert "neither ENABLE_RAY_SERVE=true nor a RAY_ADDRESS" in result.stderr
+
+
+@requires_helm
+def test_the_production_values_are_not_refused(tmp_path: Path) -> None:
+    """values-linagora.yaml runs the RayCluster with Ray Serve and no RAY_ADDRESS:
+    the refusal above must not catch it."""
+    result = _render(_chart(tmp_path), "-f", str(CHART_DIR / "values-linagora.yaml"))
+    assert result.returncode == 0, result.stderr
+
+
+@requires_helm
+def test_external_cluster_is_ignored_with_the_charts_own_ray_cluster(tmp_path: Path) -> None:
+    """With ray.enabled=true the RayCluster is this release's: its PodMonitor
+    stays, whatever ray.externalCluster says."""
+    objects = _objects(_chart(tmp_path), *RAY_MONITOR, "--set", "ray.externalCluster=true")
+    assert [o["metadata"]["name"] for o in objects if o["kind"] == "PodMonitor"] == ["openrag-raycluster"]
+
+
+@requires_helm
+def test_a_ray_cluster_leaves_the_api_pod_without_a_ray_port(tmp_path: Path) -> None:
+    """With ray.enabled=true (and the API pointed at the RayCluster) the API starts
+    no Ray of its own; a declared port there would be a target that is always down."""
+    container = _openrag_container(_objects(_chart(tmp_path), *RAY_MONITOR))
+    assert "ray-metrics" not in [p.get("name") for p in container["ports"]]
+    assert "RAY_METRICS_EXPORT_PORT" not in [item["name"] for item in container.get("env", [])]
+
+
+@requires_helm
+@pytest.mark.parametrize("ray", ["false", "true"], ids=["embedded", "raycluster"])
+def test_the_bundled_stack_scrapes_ray(tmp_path: Path, ray: str) -> None:
+    """The ingestion series exist on Ray's endpoint only: a bundled stack that
+    scrapes the API alone leaves the ingestion alerts unable to fire."""
+    objects = _objects(
+        _chart(tmp_path),
+        *(RAY_CLUSTER if ray == "true" else ["--set", "ray.enabled=false"]),
+        "--set",
+        "monitoring.bundled=true",
+        "--set",
+        "env.secrets.METRICS_TOKEN=unit-test-metrics-token",
+    )
+    assert [o["metadata"]["name"] for o in objects if o["kind"] == "PodMonitor"] == [
+        "openrag-raycluster" if ray == "true" else "openrag-openrag-ray"
+    ]
+
+
+@requires_helm
+def test_no_ray_pod_monitor_by_default(tmp_path: Path) -> None:
+    assert not [o for o in _objects(_chart(tmp_path)) if o["kind"] == "PodMonitor"]
+
+
+@requires_helm
+def test_the_notes_warn_about_an_unlabelled_embedded_ray_monitor(tmp_path: Path) -> None:
+    assert "⚠  ray.metrics.podMonitor.labels is empty" in _notes(tmp_path, *EMBEDDED_RAY_MONITOR)
+
+
+EXTERNAL_RAY = {
+    "config": ["--set", "env.config.RAY_ADDRESS=ray://external-head:10001"],
+    "secrets": ["--set", "env.secrets.RAY_ADDRESS=ray://external-head:10001"],
+    # RAY_ADDRESS from env.existingSecret or an external secrets provider: the
+    # chart cannot read it, so the operator says so.
+    "flag": ["--set", "ray.externalCluster=true"],
+}
+BUNDLED = ["--set", "monitoring.bundled=true", "--set", "env.secrets.METRICS_TOKEN=unit-test-metrics-token"]
+
+
+@requires_helm
+@pytest.mark.parametrize("source", sorted(EXTERNAL_RAY))
+def test_an_external_ray_cluster_gets_no_embedded_ray_port_monitor_or_policy(tmp_path: Path, source: str) -> None:
+    """With RAY_ADDRESS set the API attaches to that cluster and starts no metrics
+    agent: a port, monitor or policy for the embedded Ray would be a target that is
+    always down, and OpenRagTargetDown would page for it."""
+    objects = _objects(
+        _chart(tmp_path),
+        *EXTERNAL_RAY[source],
+        *BUNDLED,
+        "--set-json",
+        f"networkPolicy.metricsFrom={json.dumps(METRICS_FROM)}",
+    )
+    container = _openrag_container(objects)
+    assert "ray-metrics" not in [p.get("name") for p in container["ports"]]
+    assert "RAY_METRICS_EXPORT_PORT" not in [item["name"] for item in container.get("env", [])]
+    assert not [o for o in objects if o["kind"] == "PodMonitor"]
+    assert "openrag-openrag-ray-metrics" not in [o["metadata"]["name"] for o in objects if o["kind"] == "NetworkPolicy"]
+
+
+@requires_helm
+@pytest.mark.parametrize("source", sorted(EXTERNAL_RAY))
+def test_a_ray_pod_monitor_over_an_external_cluster_fails_the_render(tmp_path: Path, source: str) -> None:
+    result = _render(_chart(tmp_path), *EMBEDDED_RAY_MONITOR, *EXTERNAL_RAY[source])
+
+    assert result.returncode != 0
+    assert "ray.metrics.podMonitor.enabled with ray.enabled=false and an external Ray cluster" in result.stderr
+
+
+@requires_helm
+def test_the_notes_say_the_bundled_stack_does_not_scrape_an_external_ray(tmp_path: Path) -> None:
+    notes = _notes(tmp_path, *EXTERNAL_RAY["config"], *BUNDLED)
+
+    assert "The API attaches to an external Ray cluster (RAY_ADDRESS)" in notes
+
+
+UNREADABLE_SECRET_HINT = "the API's environment comes from a Secret the chart cannot read"
+
+
+@requires_helm
+@pytest.mark.parametrize(
+    ("extra", "hinted"),
+    [
+        # The chart pins 8090 and scrapes the embedded Ray, but a RAY_ADDRESS in
+        # that Secret would attach the API elsewhere: OpenRagTargetDown would fire.
+        (["--set", "env.existingSecret=mine"], True),
+        # The chart renders the Secret itself and reads RAY_ADDRESS from it.
+        ([], False),
+        # The operator already said the cluster is external: nothing is scraped.
+        (["--set", "env.existingSecret=mine", "--set", "ray.externalCluster=true"], False),
+    ],
+    ids=["existing-secret", "chart-secret", "external-cluster-flag"],
+)
+def test_the_notes_warn_when_the_embedded_ray_address_is_unreadable(
+    tmp_path: Path, extra: list[str], hinted: bool
+) -> None:
+    assert (UNREADABLE_SECRET_HINT in _notes(tmp_path, *BUNDLED, *extra)) is hinted
+
+
+@requires_helm
+def test_the_notes_stay_quiet_about_ray_address_for_the_embedded_ray(tmp_path: Path) -> None:
+    assert "attaches to an external Ray cluster" not in _notes(tmp_path, *BUNDLED)
+
+
 @requires_datastore_charts
 def test_no_postgres_policy_of_the_subchart_is_rendered(tmp_path: Path) -> None:
     """Under replication the read replicas get their own copy of bitnami's
@@ -290,7 +580,6 @@ def test_no_postgres_policy_of_the_subchart_is_rendered(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("args", "error"),
     [
-        (["--set", "ray.metrics.podMonitor.enabled=true"], "ray.metrics.podMonitor.enabled requires ray.enabled=true"),
         (
             ["--set", "postgresql.metrics.serviceMonitor.enabled=true"],
             "postgresql.metrics.serviceMonitor.enabled requires postgresql.metrics.enabled=true",
@@ -304,7 +593,7 @@ def test_no_postgres_policy_of_the_subchart_is_rendered(tmp_path: Path) -> None:
             "postgresql.metrics.enabled requires postgresql.auth.postgresPassword or postgresql.auth.existingSecret",
         ),
     ],
-    ids=["ray", "postgres-monitor", "milvus-monitor", "postgres-password"],
+    ids=["postgres-monitor", "milvus-monitor", "postgres-password"],
 )
 def test_settings_that_would_scrape_nothing_fail_the_render(tmp_path: Path, args: list[str], error: str) -> None:
     result = _render(_chart(tmp_path), *args)
@@ -381,7 +670,7 @@ def test_the_notes_do_not_warn_under_the_bundled_prometheus(tmp_path: Path) -> N
 @requires_helm
 def test_an_upgrade_names_the_ray_workers_to_recreate_and_leaves_the_head(tmp_path: Path) -> None:
     """Every Ray install is affected, whether or not it scrapes anything."""
-    notes = _notes(tmp_path, "--is-upgrade", "--set", "ray.enabled=true", "--set", "fullnameOverride=rag")
+    notes = _notes(tmp_path, "--is-upgrade", *RAY_CLUSTER, "--set", "fullnameOverride=rag")
 
     assert "kubectl delete pod -n rag -l ray.io/cluster=rag-raycluster,ray.io/node-type=worker" in notes
     assert 'Postgres now accepts connections only from namespace "rag"' in notes
@@ -389,7 +678,7 @@ def test_an_upgrade_names_the_ray_workers_to_recreate_and_leaves_the_head(tmp_pa
 
 @requires_helm
 def test_a_first_install_prints_no_upgrade_steps(tmp_path: Path) -> None:
-    assert "Upgrading from chart" not in _notes(tmp_path, "--set", "ray.enabled=true")
+    assert "Upgrading from chart" not in _notes(tmp_path, *RAY_CLUSTER)
 
 
 @requires_helm
@@ -410,7 +699,7 @@ def test_the_upgrade_steps_print_only_when_upgrading_from_0_6_6_or_earlier(
     """Every release bumps the chart version, so steps scoped to the current
     version would be gone before a stable release carried them. It is the
     version upgraded from that decides, and one that cannot be read prints them."""
-    notes = _notes(tmp_path, "--is-upgrade", "--set", "ray.enabled=true", default_deny_chart=upgraded_from)
+    notes = _notes(tmp_path, "--is-upgrade", *RAY_CLUSTER, default_deny_chart=upgraded_from)
 
     assert ("Upgrading from chart 0.6.6 or earlier" in notes) is printed
 
