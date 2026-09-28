@@ -16,6 +16,7 @@ CSV parser checks:
     14 Input stream closes after completion, an error or an early stop
     15 Reject invalid batch sizes
     16 The async parse interface collects batches and preserves document metadata
+    ...
 
 Tests call the parser directly, not the upload/dispatcher or chunking pipeline.
 """
