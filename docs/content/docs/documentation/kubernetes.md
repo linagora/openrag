@@ -122,7 +122,8 @@ that apply on every upgrade.
 For the default direct-API deployment, startup and liveness probes use
 `/health_check`, while the readiness probe uses `/ready`. When
 `ENABLE_RAY_SERVE=true`, the chart automatically uses exec probes against the
-Ray head because the Ray Serve HTTP proxy does not run on the API pod. Ray
+Ray head because the Ray Serve HTTP proxy does not run on the API pod, on the
+same paths. Ray
 Serve requires `ray.enabled=true`; Helm rejects that invalid combination. The
 reverse is rejected too: with `ray.enabled=true` the API must either run on Ray
 Serve (`ENABLE_RAY_SERVE=true`) or be pointed at the cluster with

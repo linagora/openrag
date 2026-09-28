@@ -90,8 +90,11 @@ spec:
           resources:
             {{- toYaml .Values.openrag.resources | nindent 12 }}
           {{- if .Values.openrag.probes.startup }}
+          {{- /* /health_check, like the HTTP probe in values: a startup probe that
+             fails restarts the container, and /ready also fails while the default
+             embedder is down (#1099), which a restart cannot fix. */}}
           startupProbe:
-            {{- include "openrag-stack.openragProbe" (dict "probe" .Values.openrag.probes.startup "rayServe" $rayServeEnabled "path" "/ready" "context" $) | nindent 12 }}
+            {{- include "openrag-stack.openragProbe" (dict "probe" .Values.openrag.probes.startup "rayServe" $rayServeEnabled "path" "/health_check" "context" $) | nindent 12 }}
           {{- end }}
           {{- if .Values.openrag.probes.readiness }}
           readinessProbe:
