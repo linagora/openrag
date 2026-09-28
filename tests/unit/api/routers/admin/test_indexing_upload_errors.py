@@ -35,6 +35,15 @@ class _FakeIndexingService:
         return None
 
 
+class _FileIndexingService(_FakeIndexingService):
+    async def add_file(self, **_kwargs):
+        raise ConflictError(
+            "File 'f1' is already being indexed in partition 'p1'.",
+            code="DOCUMENT_INDEXING_IN_PROGRESS",
+            existing_task_id="task-running",
+        )
+
+
 class _DispatchFailureService(_FakeIndexingService):
     async def add_file(self, **_kwargs):
         raise RuntimeError("dispatcher unavailable")
@@ -117,6 +126,22 @@ async def test_add_file_duplicate_content_returns_409_and_removes_upload(tmp_pat
 
     assert resp.status_code == 409
     assert resp.json()["extra"]["existing_file_id"] == "existing-file"
+    assert list((tmp_path / "data").iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_add_file_already_indexing_returns_409_pointing_at_the_running_task(tmp_path, monkeypatch):
+    """A client that retried after a timeout gets told where its first task is."""
+    app = _build_app(tmp_path, monkeypatch, content=b"same", service=_FileIndexingService())
+    transport = httpx.ASGITransport(app=app)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        resp = await client.post("/indexer/partition/p1/file/f1", data={"_": "1"})
+
+    assert resp.status_code == 409
+    extra = resp.json()["extra"]
+    assert extra["existing_task_id"] == "task-running"
+    assert extra["task_status_url"].endswith("/task/task-running")
     assert list((tmp_path / "data").iterdir()) == []
 
 
