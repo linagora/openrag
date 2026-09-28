@@ -414,6 +414,22 @@ class TestVLLMClientOverrides:
         assert headers == {"Authorization": "Bearer default-key"}
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("override", "caller_shaped"), [({}, False), ({"model": "another-model"}, True)])
+async def test_a_refused_stream_says_whether_the_caller_chose_the_model(override: dict, caller_shaped: bool) -> None:
+    """The streaming path marks its provider errors like chat and generate do
+    (``InferenceError.caller_shaped``, read by the API's error handler)."""
+    client = VLLMClient(endpoint="http://vllm:8000/v1", model_name="test-model", api_key="k")
+    client._client = httpx.AsyncClient(transport=_make_transport(lambda req: httpx.Response(401, json={})))
+
+    with pytest.raises(InferenceError) as info:
+        async for _ in client.stream_chat([{"role": "user", "content": "hi"}], metadata={"llm_override": override}):
+            pass
+
+    assert info.value.status_code == 401
+    assert info.value.caller_shaped is caller_shaped
+
+
 class TestCallerShapedRefusalAndTheSharedBreaker:
     """Callers shape the LLM request: the model through llm_override, which
     needs no opt-in, and any extra chat-body field, which is forwarded. LiteLLM

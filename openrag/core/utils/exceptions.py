@@ -268,10 +268,25 @@ class CircuitBreakerOpenError(ServiceUnavailableError):
 
 
 class InferenceError(OpenRAGError):
-    """Base for all inference service failures. Maps to HTTP 503."""
+    """Base for all inference service failures. Maps to HTTP 503.
 
-    def __init__(self, message: str, *, code: str = "INFERENCE_ERROR", status_code: int = 503, **kwargs):
+    ``caller_shaped`` marks a provider refusal the caller's request chose: an
+    overridden model, or an overridden endpoint and key. The API answers such a
+    401 or 403 as the caller's error rather than an upstream failure. Kept off
+    ``extra``, which is serialised into the response body.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "INFERENCE_ERROR",
+        status_code: int = 503,
+        caller_shaped: bool = False,
+        **kwargs,
+    ):
         super().__init__(message, code=code, status_code=status_code, **kwargs)
+        self.caller_shaped = caller_shaped
 
 
 class LLMParsingError(InferenceError):

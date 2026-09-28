@@ -241,13 +241,20 @@ def test_status_map_lists_specific_classes_first() -> None:
 
 
 @pytest.fixture()
-def provider_app() -> FastAPI:
+def provider_app(monkeypatch: pytest.MonkeyPatch) -> FastAPI:
     """Routes that call the real reranker and embedder clients against a
     provider answering with the status in the path, so the exception is the
     one production raises, not a hand-built one."""
     import httpx
     from services.inference.reranker_clients import InfinityReranker
-    from services.inference.vllm_client import VLLMEmbedder
+    from services.inference.vllm_client import VLLMClient, VLLMEmbedder
+
+    monkeypatch.setenv("LLM_OVERRIDE_ALLOW_CUSTOM_ENDPOINT", "true")
+    overrides = {
+        "none": {},
+        "model": {"model": "another-model"},
+        "endpoint": {"base_url": "https://caller-llm.example/v1", "api_key": "caller-key"},
+    }
 
     def transport(status: int) -> httpx.AsyncClient:
         return httpx.AsyncClient(transport=httpx.MockTransport(lambda req: httpx.Response(status, json={})))
@@ -266,6 +273,16 @@ def provider_app() -> FastAPI:
         embedder = VLLMEmbedder(endpoint="http://vllm:8000/v1", model_name="m", api_key="k")
         embedder._client = transport(status)
         await embedder.embed(["text"])
+
+    @app.get("/llm/{status}")
+    async def _llm(status: int, override: str = "none", op: str = "chat") -> None:
+        llm = VLLMClient(endpoint="http://vllm:8000/v1", model_name="m", api_key="k")
+        llm._client = transport(status)
+        metadata = {"llm_override": overrides[override]}
+        if op == "generate":
+            await llm.generate("hi", metadata=metadata)
+        else:
+            await llm.chat([{"role": "user", "content": "hi"}], metadata=metadata)
 
     @app.get("/auth/{status}")
     async def _auth(status: int) -> None:
@@ -286,7 +303,7 @@ def provider_client(provider_app: FastAPI):
     _breakers.clear()
 
 
-@pytest.mark.parametrize("kind", ["rerank", "embed"])
+@pytest.mark.parametrize("kind", ["rerank", "embed", "llm"])
 @pytest.mark.parametrize("status", [401, 403])
 def test_a_providers_credential_refusal_is_a_502(provider_client: TestClient, kind: str, status: int) -> None:
     """A provider refusing OpenRag's key is not the caller's token failing. A
@@ -295,8 +312,27 @@ def test_a_providers_credential_refusal_is_a_502(provider_client: TestClient, ki
     resp = provider_client.get(f"/{kind}/{status}")
 
     assert resp.status_code == 502
-    expected = {"rerank": f"returned HTTP {status}", "embed": f"Embedder API error ({status})"}[kind]
+    expected = {
+        "rerank": f"returned HTTP {status}",
+        "embed": f"Embedder API error ({status})",
+        "llm": f"LLM error ({status})",
+    }[kind]
     assert expected in resp.json()["detail"]
+
+
+@pytest.mark.parametrize("op", ["chat", "generate"])
+@pytest.mark.parametrize("override", ["model", "endpoint"])
+@pytest.mark.parametrize("status", [401, 403])
+def test_a_refusal_the_caller_chose_is_their_400(
+    provider_client: TestClient, override: str, status: int, op: str
+) -> None:
+    """``llm_override`` picks the model, or the endpoint and its key: a provider
+    refusing either is the caller's request failing, not an upstream fault.
+    Still not a 401, which would read as their OpenRag token."""
+    resp = provider_client.get(f"/llm/{status}?override={override}&op={op}")
+
+    assert resp.status_code == 400
+    assert f"LLM error ({status})" in resp.json()["detail"]
 
 
 @pytest.mark.parametrize("kind", ["rerank", "embed"])
