@@ -13,16 +13,47 @@ logger = get_logger()
 
 _EMAIL_RE = re.compile(r"(?<![\w.+-])[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}(?![\w.-])")
 # Models copy the prompt's markdown literally (`[Sources: none]` in backticks,
-# **Sources:** in bold) and also emphasize the value inside the brackets
-# ([Sources: **none**], [Sources: **1, 3**], [Sources: **1**, **3**]), so
-# emphasis/code marks around the tag and around its value are part of it.
+# **Sources:** in bold) and move the emphasis around freely: outside the
+# brackets, inside them around the label ([**Sources:** none],
+# [**Sources**]: 1, 3), or around the value ([Sources: **1, 3**],
+# [Sources: **1**, **3**]). So emphasis/code marks are accepted at every
+# boundary of the tag, and are part of it when it is stripped.
 _MD_MARKS = "*_`"
+# Every run of marks or whitespace below is possessive, so a failed search never
+# retries the ways of splitting a run between neighbours (a long run of marks or
+# spaces after the value made it quadratic). That loses no match: what follows a
+# run either cannot start with one of its characters or is another run that
+# would take the same ones, so giving any back could not help. The lookbehinds
+# enter the leading whitespace and mark runs only at their first character, for
+# the same reason: a match starting mid-run is never needed, starting at the run
+# covers it. After the value, whitespace stays on the tag's line unless a
+# closing bracket follows, which is what the end-of-line lookahead needs anyway.
+#
+# The label up to its colon, with marks allowed before and after each bracket
+# and around "Sources".
+_SOURCES_LABEL = r"\n?(?<![ \t])[ \t]*+(?<![*_`])[*_`]*+\[?[*_`]*+Sources?[*_`]*+\]?[*_`]*+\s*+:\s*+[*_`]*+\[?[ \t]*+"
+_SOURCES_TAG_TAIL = r"[.*_` \t\r]*+(?=\n|$)"
+# The closing bracket may sit on the next line ([Sources: 1, 3,\n]); without
+# one, the tag ends on its own line.
+_SOURCES_TAG_CLOSE = r"[,\s*_`]*+\]"
+_SOURCES_TAG_END = r"(?:" + _SOURCES_TAG_CLOSE + r"|[,*_` \t]*+)" + _SOURCES_TAG_TAIL
 _SOURCES_NONE_RE = re.compile(
-    r"\n?[ \t]*[*_`]*\[?Sources?\]?[*_]*\s*:\s*[*_`]*+\[?\s*[*_`]*none[*_`]*\s*\]?[.\s*_`]*?(?=\n|$)",
+    _SOURCES_LABEL + r"[*_`]*+none" + _SOURCES_TAG_END,
     re.IGNORECASE,
 )
+# Each number may carry its own marks and separators ([Sources: **1**, **3**]),
+# and a long list may wrap onto the next line. The repetition itself is not
+# possessive: when what follows the last number is not the end of the tag
+# ("Sources: 1\n2. Next item"), it gives numbers back one at a time, which
+# costs one short scan each since every separator run stops at the next digit.
 _SOURCES_NUMS_RE = re.compile(
-    r"\n?[ \t]*[*_`]*\[?Sources?\]?[*_]*\s*:\s*[*_`]*+\[?([,\s*_`]*\d[\d,\s*_`]*)\]?[.\s*_`]*?(?=\n|$)",
+    _SOURCES_LABEL + r"((?:[,\s*_`]*+\d++)+)" + _SOURCES_TAG_END,
+    re.IGNORECASE,
+)
+# An empty tag ([Sources: ]) cites nothing but is still stripped. It needs its
+# closing bracket: a bare "Sources:" at the end of a line may just be prose.
+_SOURCES_EMPTY_RE = re.compile(
+    _SOURCES_LABEL + _SOURCES_TAG_CLOSE + _SOURCES_TAG_TAIL,
     re.IGNORECASE,
 )
 _INLINE_SOURCE_NUMS_RE = re.compile(
@@ -56,6 +87,7 @@ def _strip_sources_tags(text: str, *, include_inline_markers: bool = True) -> tu
     saw_none = bool(_SOURCES_NONE_RE.search(text))
     cleaned = _SOURCES_NUMS_RE.sub("", text)
     cleaned = _SOURCES_NONE_RE.sub("", cleaned)
+    cleaned = _SOURCES_EMPTY_RE.sub("", cleaned)
     if include_inline_markers:
         cleaned = _INLINE_SOURCE_NUMS_RE.sub("", cleaned)
         cleaned = _UNCLOSED_SOURCE_NUMS_RE.sub("", cleaned)

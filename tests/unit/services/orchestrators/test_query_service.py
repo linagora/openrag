@@ -953,6 +953,8 @@ async def test_chat_invalid_citation_does_not_fallback_to_unrelated_sources():
         ("[Sources: **none**]", []),
         ("[Sources: **1, 3**]", [0, 2]),
         ("[Sources: **1**, **3**]", [0, 2]),
+        ("[**Sources:** none]", []),
+        ("[**Sources:** 1, 3]", [0, 2]),
     ],
 )
 async def test_chat_emphasized_value_inside_sources_tag_is_parsed(tag, expected_indices):
