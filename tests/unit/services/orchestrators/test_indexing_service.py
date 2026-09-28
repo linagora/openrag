@@ -32,7 +32,8 @@ class FakeWorkspaceRepo:
     def __init__(self, *, workspace=None):
         self._workspace = workspace
 
-    async def get_workspace_dict(self, workspace_id: str):
+    async def get_workspace_dict(self, partition: str, workspace_id: str):
+        self.lookups = getattr(self, "lookups", []) + [(partition, workspace_id)]
         return self._workspace
 
 
@@ -260,8 +261,10 @@ async def test_file_exists_swallows_errors():
 @pytest.mark.asyncio
 async def test_get_workspace_passthrough():
     ws = {"workspace_id": "w1", "partition_name": "p1"}
-    svc = _service(ws=FakeWorkspaceRepo(workspace=ws))
-    assert await svc.get_workspace("w1") == ws
+    repo = FakeWorkspaceRepo(workspace=ws)
+    svc = _service(ws=repo)
+    assert await svc.get_workspace("p1", "w1") == ws
+    assert repo.lookups == [("p1", "w1")]
 
 
 @pytest.mark.asyncio

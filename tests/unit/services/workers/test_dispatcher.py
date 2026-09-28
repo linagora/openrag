@@ -1464,6 +1464,34 @@ async def test_cancel_task_retries_recovered_cancellation_without_finishing_it()
 
 
 @pytest.mark.asyncio
+async def test_cancel_task_retries_live_cancellation_when_durable_state_is_stale() -> None:
+    from core.models.catalog import DocumentStatus, IndexationJob
+    from services.workers.dispatcher import WorkerDispatcher
+
+    ref = object()
+    tsm = _task_state_manager()
+    tsm.get_object_ref.remote = AsyncMock(return_value={"ref": ref})
+    tsm.set_cancelled_if_active.remote = AsyncMock(return_value=False)
+    tsm.get_state.remote = AsyncMock(return_value="CANCELLED")
+    job = IndexationJob(id="task-1", status=DocumentStatus.SERIALIZING, partition="tenant-a")
+    dispatcher = WorkerDispatcher(
+        pool=_pool_with_ref(object()),
+        task_state_manager=tsm,
+        completion_tracker=_completion_tracker(),
+        vector_store=_vector_store(),
+        document_repo=_document_repo(),
+        workspace_repo=_workspace_repo(),
+        collection="default",
+        job_repo=_JobRepoSpy(job),
+    )
+
+    with patch("ray.cancel") as cancel:
+        assert await dispatcher.cancel_task("task-1") is True
+
+    cancel.assert_called_once_with(ref, recursive=True)
+
+
+@pytest.mark.asyncio
 async def test_delete_file_cleans_vector_store_before_database() -> None:
     from services.workers.dispatcher import WorkerDispatcher
 
@@ -2364,6 +2392,30 @@ async def test_task_state_falls_back_to_the_durable_job() -> None:
 
 
 @pytest.mark.asyncio
+async def test_task_state_prefers_live_terminal_state_over_stale_durable_active_job() -> None:
+    from core.models.catalog import DocumentStatus, IndexationJob
+
+    tsm = _task_state_manager()
+    tsm.get_state = _remote_mock("COMPLETED")
+    job = IndexationJob(id="task-1", status=DocumentStatus.SERIALIZING, partition="tenant-a")
+    dispatcher = _dispatcher_with_job_repo(tsm, _JobRepoSpy(job))
+
+    assert await dispatcher.get_task_state("task-1") == "COMPLETED"
+
+
+@pytest.mark.asyncio
+async def test_task_error_falls_back_to_live_actor_while_durable_job_is_active() -> None:
+    from core.models.catalog import DocumentStatus, IndexationJob
+
+    tsm = _task_state_manager()
+    tsm.get_error = _remote_mock("actor traceback")
+    job = IndexationJob(id="task-1", status=DocumentStatus.SERIALIZING, partition="tenant-a")
+    dispatcher = _dispatcher_with_job_repo(tsm, _JobRepoSpy(job))
+
+    assert await dispatcher.get_task_error("task-1") == "actor traceback"
+
+
+@pytest.mark.asyncio
 async def test_task_error_reason_falls_back_to_the_durable_job() -> None:
     from core.models.catalog import DocumentStatus, IndexationJob
 
@@ -2379,6 +2431,19 @@ async def test_task_error_reason_falls_back_to_the_durable_job() -> None:
     dispatcher = _dispatcher_with_job_repo(tsm, _JobRepoSpy(job))
 
     assert await dispatcher.get_task_error_reason("task-1") == "RuntimeError: durable failure"
+
+
+@pytest.mark.asyncio
+async def test_task_error_reason_falls_back_to_live_actor_while_durable_job_is_active() -> None:
+    from core.models.catalog import DocumentStatus, IndexationJob
+
+    tsm = _task_state_manager()
+    tsm._ray_actor_method_names = {"get_error_reason"}
+    tsm.get_error_reason = _remote_mock("RuntimeError: actor failure")
+    job = IndexationJob(id="task-1", status=DocumentStatus.SERIALIZING, partition="tenant-a")
+    dispatcher = _dispatcher_with_job_repo(tsm, _JobRepoSpy(job))
+
+    assert await dispatcher.get_task_error_reason("task-1") == "RuntimeError: actor failure"
 
 
 @pytest.mark.asyncio
@@ -2408,14 +2473,14 @@ async def test_submit_failure_captures_reason_with_new_task_state_actor() -> Non
 
 
 @pytest.mark.asyncio
-async def test_live_actor_state_is_not_overridden_by_the_durable_job() -> None:
+async def test_durable_job_state_overrides_live_actor_state() -> None:
     from core.models.catalog import DocumentStatus, IndexationJob
 
     tsm = _task_state_manager()
     job = IndexationJob(id="task-1", status=DocumentStatus.COMPLETED, partition="tenant-a")
     dispatcher = _dispatcher_with_job_repo(tsm, _JobRepoSpy(job))
 
-    assert await dispatcher.get_task_state("task-1") == "SERIALIZING"
+    assert await dispatcher.get_task_state("task-1") == "COMPLETED"
 
 
 @pytest.mark.asyncio
@@ -2481,6 +2546,7 @@ async def test_dispatch_records_the_job_before_the_worker_runs() -> None:
         "file-1",
         42,
     )
+    assert job.filename == "report.txt"
 
 
 @pytest.mark.asyncio

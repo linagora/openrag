@@ -23,6 +23,29 @@ class DocumentStatus(str, Enum):
 # TaskStateManager — keep those in sync via this constant rather than
 # re-declaring the set.
 TERMINAL_TASK_STATES = frozenset({DocumentStatus.COMPLETED, DocumentStatus.FAILED, DocumentStatus.CANCELLED})
+_ACTIVE_TASK_STATE_ORDER = {"QUEUED": 0, "CHUNKING": 1, "INSERTING": 1, "SERIALIZING": 1}
+
+
+def reconcile_task_state(actor_state: str | None, durable_state: str | None) -> str | None:
+    """Choose the newest observable state without hiding a live terminal result.
+
+    Durable rows survive actor eviction and restart, but their best-effort writes
+    can trail the actor. A terminal actor state therefore beats a stale active
+    row; when both sources are active, the later lifecycle state wins.
+    """
+    if actor_state is None:
+        return durable_state
+    if durable_state is None:
+        return actor_state
+    if actor_state in TERMINAL_TASK_STATES and durable_state not in TERMINAL_TASK_STATES:
+        return actor_state
+    if durable_state in TERMINAL_TASK_STATES:
+        return durable_state
+
+    if _ACTIVE_TASK_STATE_ORDER.get(actor_state, 0) >= _ACTIVE_TASK_STATE_ORDER.get(durable_state, 0):
+        return actor_state
+    return durable_state
+
 
 # Detached pre-#721 actors may still emit these internal states during a
 # rolling deployment. Keep the compatibility set shared without importing Ray.
@@ -93,6 +116,7 @@ class IndexationJob(BaseModel):
     status: DocumentStatus = DocumentStatus.QUEUED
     partition: str = "default"
     file_id: str | None = None
+    filename: str | None = None
     user_id: int | None = None
     error: str | None = None
     error_reason: str | None = None

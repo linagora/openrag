@@ -123,9 +123,10 @@ CONTENT_SNIFF_BYTES = 8192
 #:
 #: * ``txt``/``md``/``html``/``htm``/``eml``/``svg`` are text formats with no
 #:   signature to check.
-#: * ``doc`` (OLE2) and ``wma`` were verified empirically against the bundled
-#:   matchers and are not reliably detected, so enforcing them would reject
-#:   legitimate uploads.
+#: * ``wma`` was verified empirically against the bundled matchers and is not
+#:   reliably detected, so enforcing it would reject legitimate uploads.
+#: * ``doc`` is **not** here either: its parser accepts several formats, so it
+#:   is checked against :data:`_TOLERANT_SIGNATURES` instead.
 #: * Audio and video containers other than those above are left out until the
 #:   accepted brand variants can be checked against real samples; guessing at
 #:   them risks refusing valid media.
@@ -142,6 +143,54 @@ _VERIFIABLE_SIGNATURES: dict[str, frozenset[str]] = {
     "webp": frozenset({"webp"}),
 }
 
+#: Extensions whose parser legitimately consumes several formats, so the check
+#: refuses what ``filetype`` recognises as *something else* rather than
+#: requiring a signature of its own. The value is what stays acceptable beyond
+#: "no signature at all".
+#:
+#: ``doc`` is the only one, and it is the exception to the allowlist above for a
+#: reason that is a property of the format, not a shortcut. Spire.Doc loads
+#: OLE2, RTF, HTML and plain text under a ``.doc`` name — all four were verified
+#: loading — and Word has historically written all of them that way. OLE2 and
+#: HTML/text are indistinguishable to ``filetype`` (it reports ``None`` for
+#: each), so requiring a known-good signature would refuse legitimate uploads.
+#: That is exactly why ``.doc`` was excluded from #957 and became the only
+#: accepted format with no check at all (#964).
+#:
+#: What this does close: a renamed PDF, ZIP/OOXML, image, archive or executable
+#: reaching Spire. Those are the parser-bomb vectors, and ``filetype`` names
+#: every one of them.
+#:
+#: What it deliberately does not: arbitrary *unsignatured* bytes still reach
+#: Spire, where they fail the load and fall back to ``GetText()`` — the path
+#: ``DocParser`` already has. Nor does it stop a crafted ``.doc``, which carries
+#: a real document's signature; bounding that is #997's job. Narrowing this to
+#: an allowlist (OLE2 + RTF only) is possible once someone confirms no legacy
+#: HTML/text ``.doc`` files exist in the corpora — a corpus question, not a code
+#: one.
+_TOLERANT_SIGNATURES: dict[str, frozenset[str]] = {
+    # ``zip`` is here for the same reason as ``docx``, and it is not the loose
+    # end it looks like: ``filetype``'s OOXML matcher keys on an entry named
+    # ``word/`` near the head, so a document a real producer wrote — its
+    # ``customXml``/``docProps`` parts first — is reported as a plain zip. Both
+    # classifications are sent to the package check below, which is what
+    # separates a document from an archive; an ordinary zip is refused there.
+    #
+    # ``docx`` is here because Spire loads an OOXML package under a ``.doc``
+    # name and extracts it — a .docx saved or renamed as .doc indexes today, and
+    # refusing it would be the regression this rule exists to avoid. It does not
+    # escape the package check: ``validate_ooxml_package`` settles a tolerant
+    # extension by content, so such a file is checked as the docx it is.
+    #
+    # ``doc`` is here as well as ``rtf``: ``filetype`` *does* recognise a real
+    # Word 97-2003 document — the FIB marker at offset 512, or the
+    # ``Word.Document.8`` string at 2075-2142 — and omitting it would 415 the
+    # one file this extension exists for. It stays unreliable in the other
+    # direction: an OLE2 document without either marker reports ``None``, which
+    # is why the rule cannot simply require ``doc``.
+    "doc": frozenset({"doc", "docx", "rtf", "zip"}),
+}
+
 #: The part whose presence makes an OPC package a document of that kind, per
 #: ECMA-376.
 _OOXML_MAIN_PARTS: dict[str, str] = {
@@ -155,14 +204,42 @@ _OOXML_MAIN_PARTS: dict[str, str] = {
 _OOXML_PACKAGE_PARTS = frozenset({"[Content_Types].xml", "_rels/.rels"})
 
 
+def _ooxml_main_part_by_content(extension: str, stream: IO[bytes]) -> str | None:
+    """The OOXML main part implied by a tolerant extension's *content*, if any.
+
+    Only the tolerant extensions reach here: everything else is settled by the
+    name, and an extension that is not tolerant never accepted foreign content
+    in the first place. The stream position is restored either way, since the
+    caller goes on to read the same handle.
+    """
+    if extension not in _TOLERANT_SIGNATURES:
+        return None
+    position = stream.tell()
+    try:
+        kind = filetype.guess(stream.read(CONTENT_SNIFF_BYTES))
+    finally:
+        stream.seek(position)
+    if kind is None:
+        return None
+    # ``filetype`` cannot tell a deep OOXML package from an ordinary archive, so
+    # both arrive as ``zip``. Check them as the document they claim to be; the
+    # central directory settles which one it actually is.
+    if kind.extension == "zip":
+        return _OOXML_MAIN_PARTS.get("docx") if extension == "doc" else None
+    return _OOXML_MAIN_PARTS.get(kind.extension)
+
+
 def validate_content_matches_extension(extension: str, head: bytes) -> None:
     """Reject an upload whose bytes contradict the extension it was named with.
 
     The extension alone decides which parser a document reaches, so a file
     renamed to ``.pdf`` is handed to the PDF backend whatever it actually
     contains. For the formats in :data:`_VERIFIABLE_SIGNATURES` the signature
-    must match; an unrecognised signature is a failure too, because arbitrary
-    content is exactly what this rejects.
+    ``filetype`` reports must match; an unrecognised signature is a failure too,
+    because arbitrary content is exactly what this rejects. The formats in
+    :data:`_TOLERANT_SIGNATURES` invert that: their parser accepts several
+    formats, so anything ``filetype`` recognises as *something else* is refused
+    and everything it cannot place is allowed.
 
     Extensions outside that map pass through untouched — there is nothing to
     check, and refusing them would be a guess.
@@ -170,6 +247,18 @@ def validate_content_matches_extension(extension: str, head: bytes) -> None:
     Raises:
         ValidationError: HTTP 415, when the content contradicts the extension.
     """
+    tolerated = _TOLERANT_SIGNATURES.get(extension)
+    if tolerated is not None:
+        kind = filetype.guess(head)
+        # ``None`` covers OLE2, HTML and plain text alike — all three load.
+        if kind is None or kind.extension in tolerated:
+            return
+        raise ValidationError(
+            f"Uploaded file does not match its .{extension} extension: it looks like a "
+            f"{kind.extension} file. Upload it with the extension matching its actual format.",
+            status_code=415,
+        )
+
     expected = _VERIFIABLE_SIGNATURES.get(extension)
     if expected is None:
         return
@@ -218,7 +307,13 @@ def validate_ooxml_package(extension: str, stream: IO[bytes]) -> None:
     """
     main_part = _OOXML_MAIN_PARTS.get(extension)
     if main_part is None:
-        return
+        # A tolerant extension can still carry an OOXML package: a .docx saved as
+        # .doc is accepted by the head check, because Spire reads it. Settle this
+        # one by content so it meets the same package check a .docx upload does —
+        # otherwise the extension is a way around it.
+        main_part = _ooxml_main_part_by_content(extension, stream)
+        if main_part is None:
+            return
 
     position = stream.tell()
     try:

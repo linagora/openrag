@@ -34,7 +34,7 @@ Open Grafana through the URL configured in `GRAFANA_URL` and sign in with `GRAFA
 
 ## Check the Prometheus data source
 
-Open **Connections → Data sources → Prometheus**. The bundled data source uses `http://prometheus:9090` and the UID `prometheus`.
+Open **Connections → Data sources → Prometheus**. The bundled data source uses `http://prometheus:9090` and is Grafana's default. The dashboard does not depend on its name or UID: every panel reads the **Data source** selector at the top of the dashboard, which starts on the default Prometheus data source.
 
 The bundled Prometheus scrapes `GET /metrics` on the API with the
 `METRICS_TOKEN` from the OpenRAG `.env`: the overlay writes it into the
@@ -104,7 +104,13 @@ The final row uses the **Endpoint** and **Method** selectors at the top of the d
 
 ## Dashboard variables
 
-Variables are configured under **Dashboard settings → Variables**. Both variables use Prometheus, allow multiple values, include an **All** option, and use `.*` as the custom All value.
+Variables are configured under **Dashboard settings → Variables**.
+
+**Data source** (`DS_PROMETHEUS`) selects the Prometheus data source every panel and variable queries. Keep panels bound to `${DS_PROMETHEUS}` rather than to a data source picked from the list: a picked data source is saved by UID, and that UID exists only in the Grafana it was picked in.
+
+**API scrape job** (`job`, hidden) holds the scrape job of the API's `/metrics`, read with `label_values(openrag_model_endpoint_discovery_up, job)`. That gauge is exported from startup, while the HTTP counters have no series until the API serves its first request, so the card works on an idle deployment. It is `openrag` on Compose and the ServiceMonitor's Service name on Kubernetes, and the Service status card reads `up{job=~"$job"}`. It is left on All, which keeps the card on the jobs that query returns — every OpenRAG API this Prometheus scrapes, and nothing else. Unlike **Endpoint** and **Method**, it defines no All value, so All never widens into `.*`.
+
+**Endpoint** and **Method** use Prometheus, allow multiple values, include an **All** option, and use `.*` as the custom All value.
 
 The Endpoint variable reads:
 
@@ -126,14 +132,14 @@ Filtered queries match the selections with regular expressions:
 
 ## Persist changes in the repository
 
-The bundled dashboard is provisioned from `infra/compose/grafana/dashboards/openrag-http.json`. A change saved only in Grafana can be lost when the container is recreated.
+The bundled dashboard is provisioned from `infra/charts/openrag-stack/dashboards/openrag-http.json`, the one copy that both the Compose overlay and the Helm chart deliver. A change saved only in Grafana can be lost when the container is recreated.
 
 After testing a dashboard copy, open **Dashboard settings → JSON model** or **Share → Export**, export the JSON without the external-sharing option, and replace the provisioned file. Preserve the UID `openrag-http`; the Admin UI link depends on it.
 
 Validate the file before restarting Grafana:
 
 ```bash
-jq empty infra/compose/grafana/dashboards/openrag-http.json
+jq empty ../charts/openrag-stack/dashboards/openrag-http.json
 docker restart openrag-grafana
 docker logs --tail 50 openrag-grafana
 ```
@@ -146,6 +152,6 @@ After Grafana restarts, refresh the dashboard and confirm that both selectors an
 
 **A panel shows No data.** Confirm the selected time range, generate OpenRAG traffic, check the Endpoint and Method selectors, and run the query in Explore.
 
-**Service status shows Unknown.** Run `up` in Explore and inspect the `job` label. If it is not `openrag`, update the Service status query with the actual job name.
+**Service status shows Unknown.** The card finds the API's scrape job from `openrag_model_endpoint_discovery_up`, so it stays Unknown until Prometheus has scraped the API at least once in the selected time range. Run `openrag_model_endpoint_discovery_up` in Explore: no series means the scrape itself is failing; check `up` and the target's last error in Prometheus.
 
 **Dashboard edits disappear.** Export the tested dashboard and update the provisioned JSON file instead of relying on Grafana's internal database.

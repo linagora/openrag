@@ -1,0 +1,93 @@
+# OpenRagTargetDown
+
+**Severity:** critical · **Fires after:** 5 min by default
+
+> **The numbers on this page are defaults; your deployment may differ.** Alert
+> thresholds and `for` durations are chart values, because they depend on the SLO,
+> the corpus size and the query volume of the deployment they run in — here
+> `for.OpenRagTargetDown` (default 5m) and `jobMatcher`, the regex this alert
+> matches the `job` label on.
+> If the behaviour here does not match what you are seeing, read the rule that is
+> actually loaded:
+>
+> ```
+> kubectl -n <namespace> get prometheusrule openrag-alerts -o yaml
+> ```
+
+```
+up{job=~".*openrag.*|ray", job!~"(.*/)?[^/]*-(postgresql|milvus)(-[^/]*)?"} == 0
+```
+
+With `monitoring.bundled`, the bundled stack's own jobs (`openrag-monitoring-*`,
+`openrag-grafana`) are excluded as well.
+
+## What it means
+
+Prometheus cannot scrape one of OpenRag's own targets: the API's `/metrics`, or the Ray
+metrics agent that exports the Ray-side series (ingest outcomes, parse completions,
+worker-side inference) — the Compose `openrag-ray` job, or one of the chart's two Ray
+PodMonitors: `<namespace>/<fullname>-raycluster` with `ray.enabled=true`, or
+`<namespace>/<fullname>-openrag-ray` for the Ray embedded in the openrag pod otherwise.
+The `job` label says which.
+
+The datastore exporters (`<release>-postgresql-metrics`, `<release>-milvus*`) are
+deliberately not matched: their being down does not blind any OpenRag alert. The
+exclusion reads the job's own name only, after any `<namespace>/` prefix, so a Ray
+PodMonitor in a namespace such as `rag-milvus-poc` still pages.
+
+**Every other OpenRag alert is inert while this is firing.** An absent series cannot
+breach a threshold, so a dashboard of green panels and a silent alert list mean nothing
+until this is resolved. That is the whole reason this rule exists.
+
+## What it is NOT
+
+This is **not** a readiness alert. `up` reports whether `/metrics` answered — and
+`/metrics` is designed to keep answering while the service container is degraded, because
+that is exactly when the metrics are wanted. A degraded instance is `up == 1` and not
+ready at the same time.
+
+A true `OpenRagNotReady` needs a readiness gauge exported from the readiness service; it
+does not exist yet. Until it does, check `/ready` by hand:
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' "$OPENRAG/ready"   # 503 = degraded
+curl -s "$OPENRAG/ready" | jq .checks
+```
+
+## First checks
+
+```bash
+# The API (job openrag-openrag). The chart's fullname is `openrag` by default.
+kubectl -n <ns> get pods -l app.kubernetes.io/name=openrag,app.kubernetes.io/instance=openrag
+# The RayCluster (job <ns>/openrag-raycluster).
+kubectl -n <ns> get pods -l ray.io/cluster=openrag-raycluster
+# The embedded Ray (job <ns>/openrag-openrag-ray) runs inside the API pods above; its
+# port is ray-metrics (8090). Does the API attach to another cluster instead?
+kubectl -n <ns> exec deploy/openrag-openrag -- printenv RAY_ADDRESS
+kubectl -n <ns> logs <pod> --tail=100
+```
+
+On Compose, `docker compose ps openrag` — the `openrag-ray` job scrapes the same container on
+port 8091.
+
+## Likely causes, most common first
+
+1. **The pod is down, crash-looping, or failing its startup probe.**
+2. **The scrape credential is wrong.** Where `METRICS_TOKEN` is set, a scraper sending the
+   wrong bearer gets 403 and the target reads as down.
+3. **`ServiceMonitor` selector mismatch.** The operator's `serviceMonitorSelector` did not
+   match the labels, so nothing is discovered. Check the operator's targets page.
+4. **NetworkPolicy.** Only the ports in `networkPolicy.externalPorts` are reachable from
+   outside the namespace; a Prometheus in another namespace scraping a different port is
+   blocked.
+5. **The embedded-Ray target is down while the API is up** (job
+   `<namespace>/<fullname>-openrag-ray`). The API has most likely attached to an external
+   Ray cluster through a `RAY_ADDRESS` the chart cannot read (`env.existingSecret` or an
+   external secrets provider), so nothing listens on 8090. Set `ray.externalCluster: true`,
+   or copy `RAY_ADDRESS` into `env.config`.
+6. **The whole node or namespace is gone** — in which case other alerts are firing too.
+
+## Verify recovery
+
+The target returns to `up == 1` on the operator's targets page, and the other OpenRag
+alerts become meaningful again — check that none of them fire immediately afterwards.

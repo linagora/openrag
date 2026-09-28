@@ -31,7 +31,7 @@ class _FakeIndexingService:
             existing_file_id="existing-file",
         )
 
-    async def get_workspace(self, _workspace_id: str):
+    async def get_workspace(self, _partition: str, _workspace_id: str):
         return None
 
 

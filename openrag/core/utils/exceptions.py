@@ -13,6 +13,7 @@ The hierarchy is organised by concern:
     +-- AuthError
     |   +-- AuthenticationError          (401)
     +-- ValidationError                  (422)
+    |   +-- AmbiguousWorkspaceError
     +-- NotFoundError                    (404)
     |   +-- DocumentNotFoundError
     |   +-- PartitionNotFoundError
@@ -154,6 +155,24 @@ class ValidationError(OpenRAGError):
 
     def __init__(self, message: str, *, status_code: int = 422, code: str = "VALIDATION_ERROR", **kwargs):
         super().__init__(message, code=code, status_code=status_code, **kwargs)
+
+
+class AmbiguousWorkspaceError(ValidationError):
+    """A workspace id matched several partitions the caller may search.
+
+    ``workspace_id`` is only unique per partition, so a multi-partition
+    request must be narrowed to one partition before it can be scoped.
+    """
+
+    def __init__(self, workspace_id: str, partitions: list[str], **kwargs):
+        super().__init__(
+            f"Workspace '{workspace_id}' exists in several partitions ({', '.join(partitions)}); "
+            "target a single partition.",
+            code="WORKSPACE_AMBIGUOUS",
+            workspace_id=workspace_id,
+            partitions=list(partitions),
+            **kwargs,
+        )
 
 
 # ---------------------------------------------------------------------------

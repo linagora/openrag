@@ -16,7 +16,9 @@ services:
       retries: 3
 
   minio:
-    image: quay.io/minio/minio:RELEASE.2024-12-18T13-15-44Z
+    # MinIO no longer publishes images (removed from Docker Hub, then quay.io);
+    # linagoraai/minio is an unmodified mirror of the same upstream release.
+    image: linagoraai/minio:RELEASE.2024-12-18T13-15-44Z
     environment:
       MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:?Set MINIO_ACCESS_KEY in your .env}
       MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:?Set MINIO_SECRET_KEY in your .env}

@@ -17,6 +17,7 @@ import filetype
 import pytest
 from core.indexing.validators import (
     CONTENT_SNIFF_BYTES,
+    _ooxml_main_part_by_content,
     validate_content_matches_extension,
     validate_ooxml_package,
 )
@@ -28,6 +29,7 @@ PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
 JPG = b"\xff\xd8\xff\xe0\x00\x10JFIF" + b"\x00" * 64
 GIF = b"GIF89a" + b"\x00" * 64
 ELF = b"\x7fELF\x02\x01\x01\x00" + b"\x00" * 64
+OLE2 = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + b"\x00" * 64  # compound file: .doc, and .xls/.ppt/.msi too
 TEXT = b"just some words, no signature at all\n"
 
 
@@ -87,10 +89,13 @@ def test_unrecognised_content_is_refused_not_waved_through():
         validate_content_matches_extension("pdf", ELF)
 
 
-@pytest.mark.parametrize("extension", ["txt", "md", "html", "htm", "eml", "svg", "doc", "wma", "mp3", ""])
+@pytest.mark.parametrize("extension", ["txt", "md", "html", "htm", "eml", "svg", "wma", "mp3", ""])
 def test_unverifiable_extensions_pass_through(extension):
-    """Text formats have no signature, and .doc/.wma are not reliably detected
-    by the bundled matchers. Enforcing them would refuse valid uploads."""
+    """Text formats have no signature, and .wma is not reliably detected by the
+    bundled matchers. Enforcing them would refuse valid uploads.
+
+    ``.doc`` used to be on this list — it is checked by its container signature
+    now (#964), so it has its own tests below."""
     validate_content_matches_extension(extension, ELF)
     validate_content_matches_extension(extension, TEXT)
 
@@ -319,3 +324,167 @@ async def test_genuine_image_attachment_without_a_parser_still_becomes_an_image(
     )
 
     assert len(images) == 1
+
+
+# ---------------------------------------------------------------------------
+# .doc — the one accepted format that had no check at all (#964, audit A2)
+# ---------------------------------------------------------------------------
+#
+# Spire.Doc loads OLE2, RTF, HTML and plain text under a .doc name — verified
+# against the real library — and Word has written all four that way. So .doc
+# cannot use the allowlist the other formats use: requiring a known-good
+# signature would refuse uploads that index today, which is why .doc was left
+# unchecked in #957. It refuses what `filetype` recognises as something else
+# instead.
+
+RTF = rb"{\rtf1\ansi\deff0 {\fonttbl{\f0 Times;}}\f0\fs24 hello\par}"
+HTML_DOC = b"<html><body><p>a .doc that is really html</p></body></html>"
+
+
+def _word_doc(marker: str) -> bytes:
+    """A Word 97-2003 document in one of the two shapes ``filetype`` recognises.
+
+    The short OLE2 stub above is *not* enough: ``filetype.guess`` returns None
+    for it, so a test built only on that never reaches the branch a real
+    document takes — which is how a 415 on genuine .doc files got this far.
+    """
+    buf = bytearray(b"\x00" * 4096)
+    buf[0:8] = OLE2[:8]
+    if marker == "fib":
+        buf[512:516] = b"\xec\xa5\xc1\x00"
+    else:
+        word8 = b"\x00\x0a\x00\x00\x00MSWordDoc\x00\x10\x00\x00\x00Word.Document.8\x00\xf49\xb2q"
+        buf[2075 : 2075 + len(word8)] = word8
+    return bytes(buf)
+
+
+@pytest.mark.parametrize(
+    ("head", "why"),
+    [
+        (OLE2, "a compound-file document filetype cannot place"),
+        (_word_doc("fib"), "a real Word 97-2003 doc — filetype reports 'doc'"),
+        (_word_doc("word8"), "the Word.Document.8 shape, likewise"),
+        (RTF, "RTF, which Word wrote under .doc for years"),
+        (HTML_DOC, "HTML, likewise"),
+        (TEXT, "plain text, which has no signature by definition"),
+        (b"", "an empty upload, which Spire rejects on its own"),
+    ],
+)
+def test_everything_spire_can_load_is_still_accepted(head, why):
+    """Guard against re-introducing the gap: a stricter rule here refuses
+    uploads that index today, which is what kept .doc unchecked until now."""
+    validate_content_matches_extension("doc", head)
+    assert why
+
+
+@pytest.mark.parametrize(
+    ("head", "detected"),
+    [
+        (PDF, "pdf"),
+        # Archives are not here: .doc tolerates both ``docx`` and ``zip``, because
+        # ``filetype`` reports either for a real document depending on entry
+        # order. Whether one is a document or an ordinary archive is settled by
+        # ``validate_ooxml_package`` — see the tests below.
+        (ELF, "elf"),
+        (PNG, "png"),
+        (b"\x1f\x8b\x08" + b"\x00" * 64, "gz"),
+    ],
+)
+def test_a_recognised_foreign_format_no_longer_reaches_the_doc_parser(head, detected):
+    """The gap this closes. Every parser-bomb vector worth the name is a
+    structured format, and ``filetype`` names each one."""
+    with pytest.raises(ValidationError, match=detected):
+        validate_content_matches_extension("doc", head)
+
+
+def test_unsignatured_content_still_reaches_the_parser_and_that_is_deliberate():
+    """Records the trade rather than leaving it implicit: .doc is a blocklist
+    where every other format is an allowlist. Arbitrary bytes with no signature
+    reach Spire, fail its load, and fall back to ``GetText()``. Narrowing this
+    to OLE2+RTF is possible once the corpora are known to hold no HTML/text
+    .doc files — a corpus question, not a code one."""
+    validate_content_matches_extension("doc", b"\x01\x02\x03 arbitrary, unrecognised")
+
+
+def test_the_doc_rule_does_not_leak_to_other_extensions():
+    """Only .doc is tolerant; .pdf must still require its own signature."""
+    with pytest.raises(ValidationError):
+        validate_content_matches_extension("pdf", TEXT)
+
+
+def test_filetype_recognising_a_real_word_document_is_not_a_rejection():
+    """Regression guard. ``filetype`` reports ``doc`` for a genuine Word 97-2003
+    file, and an earlier version of this rule tolerated only ``rtf`` — so the
+    one format the extension exists for got a 415. Caught in review on #1006."""
+    real = _word_doc("fib")
+    assert filetype.guess(real).extension == "doc", "guard: the fixture must be recognisable"
+    validate_content_matches_extension("doc", real)
+
+
+def test_a_real_docx_saved_as_doc_is_accepted():
+    """Spire reads an OOXML package under a .doc name and extracts it, so such a
+    file indexes today. Refusing it would be the regression this rule exists to
+    avoid — and `filetype` reports `docx`, so it needs tolerating explicitly."""
+    validate_content_matches_extension("doc", _real_docx()[:CONTENT_SNIFF_BYTES])
+
+
+def test_a_docx_named_doc_still_meets_the_package_check():
+    """The tolerance must not become a way around `validate_ooxml_package`.
+
+    An archive that merely borrows a document's entry names passes the head
+    check — `filetype` calls it a docx — and is caught only by reading the
+    central directory, exactly as it would be under a .docx name.
+    """
+    validate_ooxml_package("doc", io.BytesIO(_real_docx()))
+
+    borrowed = io.BytesIO(_zip("word/document.xml"))
+    with pytest.raises(ValidationError):
+        validate_ooxml_package("doc", borrowed)
+    assert borrowed.tell() == 0, "the stream must be rewound for the caller that streams it on"
+
+
+def test_the_content_route_does_not_open_a_path_for_untolerant_extensions():
+    """Only tolerant extensions are settled by content. A .pdf carrying a zip is
+    refused by the head check and never reaches the package logic."""
+    assert _ooxml_main_part_by_content("pdf", io.BytesIO(_real_docx())) is None
+    assert _ooxml_main_part_by_content("doc", io.BytesIO(PDF)) is None
+
+
+def _deep_docx() -> bytes:
+    """A document as a real producer writes it: ``customXml`` parts first, so
+    ``word/document.xml`` sits past the head ``filetype`` inspects."""
+    import zipfile
+
+    src = zipfile.ZipFile(io.BytesIO(_real_docx()))
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w") as z:
+        for i in range(60):
+            z.writestr(f"customXml/item{i}.xml", "<x/>" * 200)
+        for name in src.namelist():
+            z.writestr(name, src.read(name))
+    return out.getvalue()
+
+
+def test_a_deep_package_docx_saved_as_doc_is_accepted():
+    """``filetype`` calls this one a plain ``zip`` — its matcher keys on an entry
+    named ``word/`` near the head, and a real producer writes ``customXml``
+    first. Refusing it would reject documents Word itself produces."""
+    assert filetype.guess(_deep_docx()).extension == "zip", "guard: the fixture must classify as zip"
+    validate_content_matches_extension("doc", _deep_docx()[:CONTENT_SNIFF_BYTES])
+    validate_ooxml_package("doc", io.BytesIO(_deep_docx()))
+
+
+def test_an_ordinary_archive_named_doc_is_still_refused():
+    """Tolerating ``zip`` is not a hole: the central directory is what separates
+    a document from an archive, and an archive has none of the required parts."""
+    archive = io.BytesIO(_zip("payload.bin"))
+    with pytest.raises(ValidationError):
+        validate_ooxml_package("doc", archive)
+    assert archive.tell() == 0, "the stream must be rewound for the caller that streams it on"
+
+
+def test_a_zip_named_pdf_is_still_refused_at_the_head():
+    """The zip tolerance belongs to .doc alone; it must not leak to formats that
+    have a signature of their own."""
+    with pytest.raises(ValidationError):
+        validate_content_matches_extension("pdf", _zip("payload.bin"))

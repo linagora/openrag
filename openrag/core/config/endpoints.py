@@ -77,7 +77,7 @@ class EmbedderConfig(ConfigMixin):
     """Embedding model endpoint configuration."""
 
     provider: str = "openai"
-    model_name: str = "jinaai/jina-embeddings-v3"
+    model_name: str = "Qwen/Qwen3-Embedding-0.6B"
     base_url: str = "http://vllm:8000/v1"
     api_key: str = Field(default="EMPTY", repr=False)
     # 2047 (just below the 2048 boundary): the embedder sends
