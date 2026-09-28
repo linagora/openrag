@@ -50,12 +50,14 @@ at the endpoint itself.
 1. **The external endpoint is down or unreachable.** Deployments that use external
    inference have no bundled fallback.
 2. **A credential expired or rotated** — the registry entry's API key. This alert only
-   sees it for embedder, reranker and VLM endpoints. On an LLM a 401 is recorded as
-   `rejected`, which this alert ignores, because callers shape LLM requests and can
-   provoke one. A revoked LLM key shows as its calls going all `rejected`:
+   sees it for embedder, reranker and VLM endpoints, and only when the provider answers
+   401. A 403, which some providers answer a disabled key with, is recorded as
+   `rejected`, and so is a 401 on an LLM, because callers shape LLM requests and can
+   provoke one; this alert ignores both. Either shows as the endpoint's calls going all
+   `rejected`:
 
    ```promql
-   sum by (provider, outcome) (rate(openrag_inference_requests_total{operation=~"chat|completion"}[10m]))
+   sum by (provider, operation) (rate(openrag_inference_requests_total{outcome="rejected"}[10m]))
    ```
 3. **The model was unloaded or renamed** at the provider, when it answers with a 5xx. Most
    answer an unknown model with a 4xx (vLLM: 404), recorded as `rejected`, which this alert
