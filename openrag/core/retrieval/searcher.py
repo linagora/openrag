@@ -77,6 +77,19 @@ class RetrievalSearcher(ABC):
         ...
 
     @abstractmethod
+    async def get_surrounding_chunks(
+        self,
+        chunks: list[Chunk],
+        allowed_file_ids: list[str] | None = None,
+    ) -> list[Chunk]:
+        """The chunks on either side of each given chunk, what ``with_surrounding_chunks`` appends.
+
+        ``allowed_file_ids``, when not ``None``, restricts results to that
+        file-id set, as for related and ancestor chunks.
+        """
+        ...
+
+    @abstractmethod
     async def get_related_chunks(
         self,
         partition: str,
