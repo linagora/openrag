@@ -25,8 +25,9 @@ With `monitoring.bundled`, the bundled stack's own jobs (`openrag-monitoring-*`,
 
 Prometheus cannot scrape one of OpenRag's own targets: the API's `/metrics`, or the Ray
 metrics agent that exports the Ray-side series (ingest outcomes, parse completions,
-worker-side inference) — the Compose `openrag-ray` job, or one of the chart's two Ray
-PodMonitors: `<namespace>/<fullname>-raycluster` with `ray.enabled=true`, or
+worker-side inference) — the Compose `openrag-ray` job (`ray` in a Prometheus config
+from 2.2.x or earlier), or one of the chart's two Ray PodMonitors:
+`<namespace>/<fullname>-raycluster` with `ray.enabled=true`, or
 `<namespace>/<fullname>-openrag-ray` for the Ray embedded in the openrag pod otherwise.
 The `job` label says which.
 
