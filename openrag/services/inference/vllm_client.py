@@ -55,6 +55,12 @@ logger = get_logger()
 #: reports exactly that to the caller.
 _STREAM_DONE = "data: [DONE]"
 
+#: ``/models`` answers from memory. The embed timeout (120 s by default) would
+#: let a blackholed embedder stall a file before it is even chunked.
+_SERVED_WINDOW_TIMEOUT_SECONDS = 10.0
+#: The server answered, but not with a readable ``max_model_len``.
+_SERVED_WINDOW_ERRORS = (httpx.HTTPStatusError, ValueError, TypeError, AttributeError)
+
 
 def _request_stream_usage(payload: dict, *, add_for_metrics: bool) -> bool:
     """Ask the provider for a usage block; return whether the caller asked too.
@@ -573,6 +579,12 @@ class VLLMEmbedder(Embedder):
         self._endpoint = endpoint.rstrip("/")
         self._model = model_name
         self._max_model_len = max_model_len
+        # The server's own max_model_len, read from /models by served_window()
+        # or once the server refuses our truncation (see
+        # _lower_truncation_to_served). None while unknown.
+        self._served_max_model_len: int | None = None
+        self._served_probed = False
+        self._served_probe_lock = asyncio.Lock()
         self._dimension: int | None = dimension
         # Big documents produce thousands of chunks; sending them in one request
         # overruns the endpoint's time budget. Split into `batch_size` slices and
@@ -651,21 +663,125 @@ class VLLMEmbedder(Embedder):
             vectors.extend(batch_vectors)
         return vectors
 
-    @with_inference_metrics("embed")
-    @with_circuit_breaker("embedder")
-    @with_retry(max_attempts=3)
-    async def _embed_batch(self, texts: list[str], *, offset: int = 0) -> list[list[float]]:
+    def _request_body(self, texts: list[str]) -> dict:
         body: dict = {"model": self._model, "input": texts}
-        if self._max_model_len is not None:
+        window = self._max_model_len
+        if window is not None and self._served_max_model_len is not None:
+            window = min(window, self._served_max_model_len)
+        if window is not None:
             # Truncate one token *below* max_model_len. vLLM pooling models
             # (e.g. Qwen3-Embedding) hang indefinitely on a request whose input
             # is exactly max_model_len tokens long (vllm-project/vllm#29496).
             # Any chunk >= max_model_len would otherwise be truncated straight
             # onto that boundary, wedging the batch forever while other batches
             # and files keep embedding.
-            body["truncate_prompt_tokens"] = max(1, self._max_model_len - 1)
+            body["truncate_prompt_tokens"] = max(1, window - 1)
+        return body
+
+    async def served_window(self) -> int | None:
+        """The ``max_model_len`` the server serves, read from ``/models`` once.
+
+        Indexing sizes chunks for the smaller of this and the configured
+        window, so a server started with a lower ``--max-model-len`` than an
+        endpoint's ``extra.max_model_len`` gets chunks it embeds whole instead
+        of truncating their tail. An unreachable server is asked again on the
+        next call; one that doesn't report the value is not.
+        """
+        if self._served_probed:
+            return self._served_max_model_len
+        async with self._served_probe_lock:
+            if self._served_probed:
+                return self._served_max_model_len
+            try:
+                served = await self._fetch_served_max_model_len()
+            except httpx.TransportError as exc:
+                logger.bind(model=self._model, base_url=self._endpoint, error=repr(exc)).warning(
+                    "Could not reach /models for the served max_model_len; asking again on the next file"
+                )
+                return self._served_max_model_len
+            except _SERVED_WINDOW_ERRORS as exc:
+                logger.bind(model=self._model, base_url=self._endpoint, error=repr(exc)).warning(
+                    "Could not read the served max_model_len from /models"
+                )
+                served = None
+            self._served_probed = True
+            if served is not None:
+                self._adopt_served_max_model_len(served)
+            return self._served_max_model_len
+
+    async def _lower_truncation_to_served(self, rejection: httpx.Response, sent: int | None) -> bool:
+        """After a 400, adopt the server's max_model_len if ours was too high.
+
+        vLLM rejects every request whose ``truncate_prompt_tokens`` exceeds the
+        served ``max_model_len``, whatever the input's length. The configured
+        value can outgrow it: an endpoint's ``extra.max_model_len`` set for a
+        bigger server, or a server redeployed with a lower ``--max-model-len``.
+        Every embedding call would then fail, indexing and search alike, so read
+        the served value from ``/models`` and truncate below it instead.
+
+        True when the request is worth resending: the rejection was about
+        truncation and the served value lowers what *sent* asked for. Batches
+        rejected concurrently each get True, the warning is logged once.
+        """
+        if sent is None or "truncate_prompt_tokens" not in rejection.text:
+            return False
         try:
-            resp = await self._client.post(f"{self._endpoint}/embeddings", json=body)
+            served = await self._fetch_served_max_model_len()
+        except (httpx.TransportError, *_SERVED_WINDOW_ERRORS) as exc:
+            logger.bind(model=self._model, base_url=self._endpoint, error=repr(exc)).warning(
+                "Could not read the served max_model_len from /models"
+            )
+            return False
+        if served is None or max(1, served - 1) >= sent:
+            return False
+        self._adopt_served_max_model_len(served)
+        return True
+
+    def _adopt_served_max_model_len(self, served: int) -> None:
+        lowered = self._served_max_model_len is None or served < self._served_max_model_len
+        self._served_max_model_len = served if lowered else self._served_max_model_len
+        if lowered and self._max_model_len is not None and served < self._max_model_len:
+            logger.bind(
+                model=self._model,
+                base_url=self._endpoint,
+                configured_max_model_len=self._max_model_len,
+                served_max_model_len=served,
+            ).warning(
+                "Embedder serves max_model_len={served}, below the configured {configured}: "
+                "embedding at {truncate} tokens and sizing new chunks for it. Set MAX_MODEL_LEN "
+                "or the endpoint's extra.max_model_len to at most {served}.",
+                served=served,
+                configured=self._max_model_len,
+                truncate=max(1, served - 1),
+            )
+
+    async def _fetch_served_max_model_len(self) -> int | None:
+        """The served model's ``max_model_len`` from ``/models``, or None.
+
+        ``max_model_len`` is a vendor extension vLLM adds to each model entry,
+        so None also covers a server that doesn't report it. Raises the
+        transport, status and parsing errors; each caller decides what an
+        unreadable answer means.
+        """
+        resp = await self._client.get(f"{self._endpoint}/models", timeout=_SERVED_WINDOW_TIMEOUT_SECONDS)
+        resp.raise_for_status()
+        for entry in resp.json().get("data") or []:
+            if entry.get("id") == self._model and entry.get("max_model_len"):
+                return int(entry["max_model_len"])
+        return None
+
+    @with_inference_metrics("embed")
+    @with_circuit_breaker("embedder")
+    @with_retry(max_attempts=3)
+    async def _embed_batch(self, texts: list[str], *, offset: int = 0) -> list[list[float]]:
+        url = f"{self._endpoint}/embeddings"
+        try:
+            body = self._request_body(texts)
+            resp = await self._client.post(url, json=body)
+            if resp.status_code == 400 and await self._lower_truncation_to_served(
+                resp, body.get("truncate_prompt_tokens")
+            ):
+                resp = await self._client.post(url, json=self._request_body(texts))
             resp.raise_for_status()
         # Transport failures must carry a retryable status so @with_retry above
         # actually fires (#704) — the translation happens inside the retried
