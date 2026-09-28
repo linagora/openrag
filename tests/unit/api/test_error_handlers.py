@@ -321,17 +321,25 @@ def test_a_providers_credential_refusal_is_a_502(provider_client: TestClient, ki
 
 
 @pytest.mark.parametrize("op", ["chat", "generate"])
-@pytest.mark.parametrize("override", ["model", "endpoint"])
 @pytest.mark.parametrize("status", [401, 403])
-def test_a_refusal_the_caller_chose_is_their_400(
-    provider_client: TestClient, override: str, status: int, op: str
-) -> None:
-    """``llm_override`` picks the model, or the endpoint and its key: a provider
-    refusing either is the caller's request failing, not an upstream fault.
-    Still not a 401, which would read as their OpenRag token."""
-    resp = provider_client.get(f"/llm/{status}?override={override}&op={op}")
+def test_a_refusal_of_the_callers_own_key_is_their_400(provider_client: TestClient, status: int, op: str) -> None:
+    """An honoured ``llm_override`` endpoint carries the caller's key: a provider
+    refusing it is the caller's request failing, not an upstream fault. Still
+    not a 401, which would read as their OpenRag token."""
+    resp = provider_client.get(f"/llm/{status}?override=endpoint&op={op}")
 
     assert resp.status_code == 400
+    assert f"LLM error ({status})" in resp.json()["detail"]
+
+
+@pytest.mark.parametrize("op", ["chat", "generate"])
+@pytest.mark.parametrize("status", [401, 403])
+def test_a_model_only_override_refused_is_still_a_502(provider_client: TestClient, status: int, op: str) -> None:
+    """A model-only override still sends OpenRag's key. Its 401 cannot be told
+    from that key being revoked, and blaming the caller would hide the outage."""
+    resp = provider_client.get(f"/llm/{status}?override=model&op={op}")
+
+    assert resp.status_code == 502
     assert f"LLM error ({status})" in resp.json()["detail"]
 
 

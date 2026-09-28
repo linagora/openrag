@@ -270,10 +270,12 @@ class CircuitBreakerOpenError(ServiceUnavailableError):
 class InferenceError(OpenRAGError):
     """Base for all inference service failures. Maps to HTTP 503.
 
-    ``caller_shaped`` marks a provider refusal the caller's request chose: an
-    overridden model, or an overridden endpoint and key. The API answers such a
-    401 or 403 as the caller's error rather than an upstream failure. Kept off
-    ``extra``, which is serialised into the response body.
+    ``caller_shaped`` marks a call sent with the caller's own endpoint and key
+    (an honoured ``llm_override.base_url``): the API answers its 401 or 403 as
+    the caller's error rather than an upstream failure. A model-only override
+    still sends OpenRag's key, and a 401 there cannot be told from that key
+    being revoked, so it is not caller-shaped. Kept off ``extra``, which is
+    serialised into the response body.
     """
 
     def __init__(

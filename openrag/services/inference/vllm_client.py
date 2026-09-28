@@ -409,11 +409,6 @@ class VLLMClient(LLM):
         )
         return candidate, headers
 
-    def _caller_shaped(self, model: str, overridden: bool) -> bool:
-        """Did the caller choose what the provider refused: the model, or the
-        endpoint and its key (``_resolve_overrides``)?"""
-        return overridden or model != self._model
-
     def _has_endpoint_override(self, kwargs: dict) -> bool:
         """Is this request routed to a client-supplied endpoint?
 
@@ -462,7 +457,7 @@ class VLLMClient(LLM):
             raise InferenceError(
                 f"LLM error ({exc.response.status_code}): {exc.response.text[:500]}",
                 status_code=exc.response.status_code,
-                caller_shaped=self._caller_shaped(model, overridden),
+                caller_shaped=overridden,
             ) from exc
         return _parse_response(resp)
 
@@ -490,7 +485,7 @@ class VLLMClient(LLM):
             raise InferenceError(
                 f"LLM error ({exc.response.status_code}): {exc.response.text[:500]}",
                 status_code=exc.response.status_code,
-                caller_shaped=self._caller_shaped(model, overridden),
+                caller_shaped=overridden,
             ) from exc
         return _parse_response(resp)
 
@@ -524,7 +519,7 @@ class VLLMClient(LLM):
                     error = InferenceError(
                         f"LLM streaming error ({resp.status_code}): {resp.text[:500]}",
                         status_code=resp.status_code,
-                        caller_shaped=self._caller_shaped(model, overridden),
+                        caller_shaped=overridden,
                     )
                     outcome = outcome_for(error, operation="chat")
                     raise error

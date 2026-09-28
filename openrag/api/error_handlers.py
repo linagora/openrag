@@ -74,8 +74,8 @@ _STATUS_MAP: dict[type[BaseException], int] = {
 #: the retry and the metrics read it), but passed through it told a caller
 #: whose token is valid that it was not, and the admin UI drops its stored
 #: token on any 401. The caller gets a 502: an upstream failed. Unless the
-#: caller chose what was refused (``InferenceError.caller_shaped``, an
-#: ``llm_override`` model or endpoint): then it is their request, a 400.
+#: key was the caller's own (``InferenceError.caller_shaped``, an honoured
+#: ``llm_override`` endpoint): then it is their request, a 400.
 _PROVIDER_CREDENTIAL_STATUSES = frozenset({401, 403})
 _PROVIDER_ERRORS = (InferenceError, EmbeddingError)
 

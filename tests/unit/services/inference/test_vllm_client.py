@@ -415,10 +415,21 @@ class TestVLLMClientOverrides:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("override", "caller_shaped"), [({}, False), ({"model": "another-model"}, True)])
-async def test_a_refused_stream_says_whether_the_caller_chose_the_model(override: dict, caller_shaped: bool) -> None:
+@pytest.mark.parametrize(
+    ("override", "caller_shaped"),
+    [
+        ({}, False),
+        ({"model": "another-model"}, False),
+        ({"base_url": "https://caller-llm.example/v1", "api_key": "caller-key"}, True),
+    ],
+)
+async def test_a_refused_stream_says_whether_the_key_was_the_callers(
+    monkeypatch: pytest.MonkeyPatch, override: dict, caller_shaped: bool
+) -> None:
     """The streaming path marks its provider errors like chat and generate do
-    (``InferenceError.caller_shaped``, read by the API's error handler)."""
+    (``InferenceError.caller_shaped``, read by the API's error handler): only
+    an honoured endpoint override sends the caller's own key."""
+    monkeypatch.setenv("LLM_OVERRIDE_ALLOW_CUSTOM_ENDPOINT", "true")
     client = VLLMClient(endpoint="http://vllm:8000/v1", model_name="test-model", api_key="k")
     client._client = httpx.AsyncClient(transport=_make_transport(lambda req: httpx.Response(401, json={})))
 
