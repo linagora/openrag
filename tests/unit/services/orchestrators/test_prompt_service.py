@@ -154,7 +154,28 @@ class TestSeeding:
         await _service(repo).seed_defaults()
 
         assert old.content == _service(repo)._disk_seed("query_contextualizer")
-        assert "{calendar_anchors}" in old.content
+        assert "{calendar_anchors}" not in old.content
+
+    async def test_refresh_can_be_disabled_without_hiding_stale_defaults(self, monkeypatch):
+        old_text = (Path(__file__).parent / "fixtures/query_contextualizer_before_calendar_anchors.txt").read_text()
+        repo = FakePromptRepo()
+        old = await repo.create(
+            Prompt(
+                prompt_type="query_contextualizer",
+                name="default_query_contextualizer",
+                content=old_text,
+                is_default=True,
+            )
+        )
+        warnings = []
+        monkeypatch.setattr(prompt_module.logger, "warning", warnings.append)
+        svc = _service(repo)
+        svc._config.prompts = PromptsConfig(refresh_defaults=False)
+
+        await svc.seed_defaults()
+
+        assert old.content == old_text
+        assert any("query_contextualizer" in warning and "outdated" in warning for warning in warnings)
 
     async def test_seeds_all_prompt_types_from_disk(self):
         repo = FakePromptRepo()

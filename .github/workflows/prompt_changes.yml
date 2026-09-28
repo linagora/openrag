@@ -8,6 +8,7 @@ on:
     types: [opened, synchronize, reopened, edited, labeled, unlabeled]
 
 permissions:
+  contents: read
   pull-requests: read
 
 jobs:
@@ -15,6 +16,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check whether bundled prompt changes are marked for release notes
+        id: prompt_files
         uses: actions/github-script@v7
         with:
           script: |
@@ -30,6 +32,7 @@ jobs:
             const changesPrompt = files.some(({ filename, previous_filename }) =>
               [filename, previous_filename].some(isBundledTemplate)
             );
+            core.setOutput('changed', changesPrompt);
             const labels = new Set(context.payload.pull_request.labels.map(({ name }) => name));
             const hasLabel = labels.has('prompt');
             if (changesPrompt && !hasLabel) {
@@ -38,3 +41,10 @@ jobs:
             if (changesPrompt && labels.has('skip-changelog')) {
               core.setFailed('Bundled prompt changes must appear in release notes; remove the skip-changelog label.');
             }
+      - uses: actions/checkout@v4
+        if: steps.prompt_files.outputs.changed == 'true'
+        with:
+          fetch-depth: 0
+      - name: Check that previous bundled defaults remain refreshable
+        if: steps.prompt_files.outputs.changed == 'true'
+        run: python3 scripts/check_prompt_seed_history.py "${{ github.event.pull_request.base.sha }}"

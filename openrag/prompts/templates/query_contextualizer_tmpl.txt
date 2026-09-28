@@ -4,7 +4,6 @@ Output shape (return this JSON object, nothing else):
 {{"intent": <"greeting"|"gratitude"|"farewell"|"capability"|"other">, "requires_retrieval": <true|false>, "query_list": [ {{"query": "<rewritten search string>", "temporal_filters": <list of predicates | null>}} ]}}
 
 Current date: {current_date}
-{calendar_anchors}
 Language for `query` field: {query_language}
 Timestamps: UTC (`+00:00`). Week starts Monday.
 

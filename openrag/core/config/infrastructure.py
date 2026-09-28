@@ -141,6 +141,7 @@ class VerboseConfig(ConfigMixin):
 
 
 class PromptsConfig(ConfigMixin):
+    refresh_defaults: bool = True
     sys_prompt: str = "sys_prompt_tmpl.txt"
     query_contextualizer: str = "query_contextualizer_tmpl.txt"
     chunk_contextualizer: str = "chunk_contextualizer_tmpl.txt"

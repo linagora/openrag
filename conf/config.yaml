@@ -47,7 +47,7 @@ semaphore:
 #      EMBEDDER_TIMEOUT, EMBEDDER_BATCH_SIZE, EMBEDDER_CONCURRENCY
 embedder:
   provider: openai
-  model_name: Qwen/Qwen3-Embedding-0.6B
+  model_name: jinaai/jina-embeddings-v3
   base_url: http://vllm:8000/v1
   api_key: EMPTY
   max_model_len: 2047 # truncate_prompt_tokens = this - 1; keep below the model's context boundary (vllm#29496)
@@ -145,6 +145,8 @@ paths:
 
 # --- Prompt template filenames ---
 prompts:
+  # Refresh saved defaults only when they still match an older bundled version.
+  refresh_defaults: true
   sys_prompt: sys_prompt_tmpl.txt
   query_contextualizer: query_contextualizer_tmpl.txt
   chunk_contextualizer: chunk_contextualizer_tmpl.txt

@@ -252,6 +252,9 @@ class PromptService:
         old_hash = sha256(existing.content.encode("utf-8")).hexdigest()
         if old_hash not in _SUPERSEDED_SEED_HASHES.get(prompt_type, ()):
             return
+        if not self._config.prompts.refresh_defaults:
+            logger.warning(f"Default prompt for '{prompt_type}' is outdated; automatic refresh is disabled.")
+            return
         try:
             content = _validate_and_normalize_content(prompt_type, self._disk_seed(prompt_type))
         except (OSError, ValueError, ValidationError) as exc:
@@ -270,7 +273,7 @@ class PromptService:
             logger.warning(f"Could not refresh default prompt for '{prompt_type}': {exc}")
             return
         if updated:
-            logger.info(f"Refreshed unchanged default prompt for '{prompt_type}'.")
+            logger.info(f"Refreshed unchanged default prompt for '{prompt_type}' from hash {old_hash}.")
 
     def _disk_seed(self, prompt_type: str) -> str:
         """Read a prompt type's bundled template from disk (honours PROMPTS_DIR)."""
