@@ -1,0 +1,40 @@
+name: Prompt change visibility
+
+on:
+  pull_request:
+    branches:
+      - main
+      - develop
+    types: [opened, synchronize, reopened, edited, labeled, unlabeled]
+
+permissions:
+  pull-requests: read
+
+jobs:
+  require-prompt-label:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check whether bundled prompt changes are marked for release notes
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const files = await github.paginate(github.rest.pulls.listFiles, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number,
+              per_page: 100,
+            });
+            const isBundledTemplate = (path) =>
+              typeof path === 'string' &&
+              path.startsWith('openrag/prompts/templates/') && path.endsWith('.txt');
+            const changesPrompt = files.some(({ filename, previous_filename }) =>
+              [filename, previous_filename].some(isBundledTemplate)
+            );
+            const labels = new Set(context.payload.pull_request.labels.map(({ name }) => name));
+            const hasLabel = labels.has('prompt');
+            if (changesPrompt && !hasLabel) {
+              core.setFailed('Bundled prompts changed. Add the prompt label so the release notes flag customized defaults for review.');
+            }
+            if (changesPrompt && labels.has('skip-changelog')) {
+              core.setFailed('Bundled prompt changes must appear in release notes; remove the skip-changelog label.');
+            }

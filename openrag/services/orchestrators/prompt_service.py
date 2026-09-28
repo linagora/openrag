@@ -16,12 +16,16 @@ user's prompt name ahead of the partition's without changing this signature.
 from __future__ import annotations
 
 import string
+from hashlib import sha256
+from pathlib import Path
 from typing import TYPE_CHECKING
 
+from core.config.infrastructure import _DEFAULT_PROMPTS_DIR
 from core.models.prompt import Prompt, PromptType
 from core.prompts.template_loader import load_template_by_key
 from core.utils.exceptions import ConfigError, NotFoundError, ValidationError
 from core.utils.logging import get_logger
+from services.orchestrators.prompt_seed_hashes import _CURRENT_SEED_HASHES, _SUPERSEDED_SEED_HASHES
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -189,14 +193,19 @@ class PromptService:
     # ------------------------------------------------------------------
 
     async def seed_defaults(self) -> None:
-        """Create one default library prompt per type from its disk template.
+        """Create defaults and refresh unchanged copies of older bundled seeds.
 
-        Idempotent per type: if a default already exists for a type it is left
-        untouched, so an admin's edits survive restarts. A type whose disk
-        template is missing is skipped with a warning rather than aborting boot.
+        An admin's edits and custom prompt directories survive restarts. A type
+        whose disk template is missing is skipped rather than aborting boot.
         """
         for prompt_type in _TYPE_TO_CONFIG_KEY:
-            if await self._repo.get_default(prompt_type) is not None:
+            try:
+                existing = await self._repo.get_default(prompt_type)
+            except Exception as exc:
+                logger.warning(f"Could not inspect default prompt for '{prompt_type}': {exc}")
+                continue
+            if existing is not None:
+                await self._refresh_default_if_pristine(prompt_type, existing)
                 continue
             try:
                 content = self._disk_seed(prompt_type)
@@ -233,6 +242,35 @@ class PromptService:
                 logger.info(f"Default prompt for '{prompt_type}' was seeded concurrently; skipping.")
                 continue
             logger.info(f"Seeded default prompt for '{prompt_type}'.")
+
+    async def _refresh_default_if_pristine(self, prompt_type: str, existing: Prompt) -> None:
+        if Path(self._config.paths.prompts_dir).resolve() != _DEFAULT_PROMPTS_DIR.resolve():
+            return
+        expected_name = f"default_{prompt_type}"
+        if existing.name != expected_name:
+            return
+        old_hash = sha256(existing.content.encode("utf-8")).hexdigest()
+        if old_hash not in _SUPERSEDED_SEED_HASHES.get(prompt_type, ()):
+            return
+        try:
+            content = _validate_and_normalize_content(prompt_type, self._disk_seed(prompt_type))
+        except (OSError, ValueError, ValidationError) as exc:
+            logger.warning(f"Could not refresh default prompt for '{prompt_type}': {exc}")
+            return
+        if sha256(content.encode("utf-8")).hexdigest() != _CURRENT_SEED_HASHES[prompt_type]:
+            logger.warning(
+                f"Bundled template for '{prompt_type}' differs from its recorded hash; leaving old default in place."
+            )
+            return
+        try:
+            updated = await self._repo.update_default_content_if_unchanged(
+                existing.id, expected_name, existing.content, content
+            )
+        except Exception as exc:
+            logger.warning(f"Could not refresh default prompt for '{prompt_type}': {exc}")
+            return
+        if updated:
+            logger.info(f"Refreshed unchanged default prompt for '{prompt_type}'.")
 
     def _disk_seed(self, prompt_type: str) -> str:
         """Read a prompt type's bundled template from disk (honours PROMPTS_DIR)."""

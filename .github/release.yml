@@ -1,8 +1,11 @@
 changelog:
   categories:
-    - title: 🚨 BREAKING CHANGE
+    - title: 🚨 BREAKING CHANGE — if prompts change, review customized defaults after upgrading
       labels:
         - breaking-change
+    - title: 📝 Prompt updates — review customized defaults after upgrading
+      labels:
+        - prompt
     - title: 🚀 Features
       labels:
         - feat
@@ -35,4 +38,3 @@ changelog:
 
     ### Contributors
     $CONTRIBUTORS
-
