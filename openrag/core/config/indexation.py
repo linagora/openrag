@@ -82,6 +82,7 @@ class LocalWhisperConfig(ConfigMixin):
 
 
 class FileLoadersConfig(ConfigMixin):
+    csv: str = "CsvParser"
     txt: str = "TextLoader"
     pdf: str = "PyMuPDFLoader"
     eml: str = "EmlLoader"
@@ -115,6 +116,7 @@ class MimetypesConfig(ConfigMixin):
     """
 
     text_plain: str = Field(default=".txt", alias="text/plain")
+    text_csv: str = Field(default=".csv", alias="text/csv")
     text_markdown: str = Field(default=".md", alias="text/markdown")
     application_pdf: str = Field(default=".pdf", alias="application/pdf")
     message_rfc822: str = Field(default=".eml", alias="message/rfc822")
@@ -157,6 +159,8 @@ class MimetypesConfig(ConfigMixin):
 
 
 class LoaderConfig(ConfigMixin):
+    csv_batch_size: int = Field(default=10_000, gt=0, strict=True)
+    csv_delimiter: str = Field(default=",", min_length=1, max_length=1)
     image_captioning: bool = True
     image_captioning_url: bool = True
     save_markdown: bool = False
