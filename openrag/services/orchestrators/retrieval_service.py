@@ -403,9 +403,19 @@ class RetrievalService:
                 top_k=top_k,
             )
             # Neighbouring chunks are read by section id, whatever the embedder.
-            surrounding = await searcher.get_surrounding_chunks(
-                chunks=hits, allowed_file_ids=file_id_restriction(filter_params)
-            )
+            # They are context only: a failed lookup must not discard the hits
+            # the gather above already kept.
+            try:
+                surrounding = await searcher.get_surrounding_chunks(
+                    chunks=hits, allowed_file_ids=file_id_restriction(filter_params)
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.bind(partitions=parts).warning(
+                    f"Retrieval degraded: surrounding chunks skipped — {type(exc).__name__}: {exc}"
+                )
+                surrounding = []
             seen = {c.id for c in hits}
             chunks = hits + [c for c in surrounding if c.id not in seen]
         if include_related or include_ancestors:

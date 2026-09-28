@@ -290,6 +290,27 @@ async def test_search_across_embedders_drops_a_failing_one():
     assert [c.id for c in out] == ["a1"]
 
 
+@pytest.mark.asyncio
+async def test_search_across_embedders_keeps_hits_when_surrounding_lookup_fails():
+    svc, _, searchers = _embedder_svc(
+        {"p1": "embed-a", "p2": "embed-b"}, {"embed-a": "vector_embed_a", "embed-b": "vector_embed_b"}
+    )
+    # The first group's searcher also reads the neighbours; its backend is down.
+    searchers["embed-a"] = FakeSearcher()
+    searchers["embed-a"].search_error = RuntimeError("milvus down")
+
+    async def _fail(**kwargs):
+        raise RuntimeError("milvus down")
+
+    searchers["embed-a"].get_surrounding_chunks = _fail
+    searchers["embed-b"] = FakeSearcher()
+    searchers["embed-b"].search_result = [_chunk("b1")]
+
+    out = await svc.search(text="q", partitions=["p1", "p2"], top_k=5, similarity_threshold=0.5)
+
+    assert [c.id for c in out] == ["b1"]
+
+
 # --------------------------------------------------------------------------- #
 # retrieve / retrieve_multi / fuse — powers QueryService (8C.2)
 # --------------------------------------------------------------------------- #
