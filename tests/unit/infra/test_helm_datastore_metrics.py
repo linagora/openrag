@@ -535,6 +535,29 @@ def test_the_notes_say_the_bundled_stack_does_not_scrape_an_external_ray(tmp_pat
     assert "The API attaches to an external Ray cluster (RAY_ADDRESS)" in notes
 
 
+UNREADABLE_SECRET_HINT = "the API's environment comes from a Secret the chart cannot read"
+
+
+@requires_helm
+@pytest.mark.parametrize(
+    ("extra", "hinted"),
+    [
+        # The chart pins 8090 and scrapes the embedded Ray, but a RAY_ADDRESS in
+        # that Secret would attach the API elsewhere: OpenRagTargetDown would fire.
+        (["--set", "env.existingSecret=mine"], True),
+        # The chart renders the Secret itself and reads RAY_ADDRESS from it.
+        ([], False),
+        # The operator already said the cluster is external: nothing is scraped.
+        (["--set", "env.existingSecret=mine", "--set", "ray.externalCluster=true"], False),
+    ],
+    ids=["existing-secret", "chart-secret", "external-cluster-flag"],
+)
+def test_the_notes_warn_when_the_embedded_ray_address_is_unreadable(
+    tmp_path: Path, extra: list[str], hinted: bool
+) -> None:
+    assert (UNREADABLE_SECRET_HINT in _notes(tmp_path, *BUNDLED, *extra)) is hinted
+
+
 @requires_helm
 def test_the_notes_stay_quiet_about_ray_address_for_the_embedded_ray(tmp_path: Path) -> None:
     assert "attaches to an external Ray cluster" not in _notes(tmp_path, *BUNDLED)

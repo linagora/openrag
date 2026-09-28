@@ -382,7 +382,9 @@ groups:
         #
         # What counts as OpenRAG's own target, by default:
         #   * `.*openrag.*` — the API (Compose `openrag`, chart `<release>-openrag`)
-        #     and the chart's Ray PodMonitor (`<namespace>/<release>-raycluster`);
+        #     and the chart's Ray PodMonitors (`<namespace>/<fullname>-raycluster`
+        #     with ray.enabled=true, `<namespace>/<fullname>-openrag-ray` for the
+        #     Ray embedded in the openrag pod otherwise);
         #   * `ray` — the Compose job scraping Ray's metrics agent, which carries
         #     every Ray-side series (ingest outcomes, parse completions,
         #     worker-side inference). Missing it left IngestStalled and

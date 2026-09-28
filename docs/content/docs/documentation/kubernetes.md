@@ -232,7 +232,8 @@ serve annotation-based discovery instead; see
 On a cluster with no monitoring of its own, `monitoring.bundled: true` installs
 kube-prometheus-stack in the release: Prometheus Operator, Prometheus,
 Alertmanager, Grafana, node-exporter and kube-state-metrics. It also turns on the
-dashboard ConfigMaps, OpenRAG's alert rules, the API `ServiceMonitor` and the Ray `PodMonitor`:
+dashboard ConfigMaps, OpenRAG's alert rules, the API `ServiceMonitor` and, unless the API
+attaches to an external Ray cluster, the Ray `PodMonitor`:
 
 ```yaml
 monitoring:
@@ -445,7 +446,8 @@ running OpenRAG, and the host panels likewise need node-exporter
 
 The chart wires the stack's three dependencies into a Prometheus that runs the
 Prometheus Operator. Every part of it is off by default. `monitoring.bundled`
-turns on the Ray `PodMonitor` and nothing else here: OpenRAG's ingestion series
+turns on the Ray `PodMonitor` (for the RayCluster or the embedded Ray; an external
+cluster is scraped where it runs) and nothing else here: OpenRAG's ingestion series
 and the worker side of its inference series exist on Ray's endpoint only, and the
 alerts built on them cannot fire without it. With the bundled stack, set only the
 Postgres and Milvus `enabled` switches and the Postgres password: the bundled Prometheus runs
@@ -533,7 +535,7 @@ Once enabled, this should return 1 for every Ray node, the Postgres pod and the
 five Milvus pods:
 
 ```promql
-up{namespace="<release namespace>", job=~".*(raycluster|postgresql|milvus).*"}
+up{namespace="<release namespace>", job=~".*(raycluster|openrag-ray|postgresql|milvus).*"}
 ```
 
 ### What to watch

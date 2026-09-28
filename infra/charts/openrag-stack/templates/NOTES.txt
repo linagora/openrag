@@ -67,6 +67,14 @@ PVC is kept by helm.sh/resource-policy and is no longer used — delete it by ha
    Prometheus scrapes no Ray metrics: the ingestion alerts and the worker-side
    inference series need that cluster scraped where it runs.
 {{- end }}
+{{- if and (eq (include "openrag-stack.rayPodMonitor" .) "true") (not .Values.ray.enabled) (eq (include "openrag-stack.embeddedRay" .) "true") (or .Values.env.existingSecret (ne (.Values.env.secretsProvider.type | default "values") "values")) }}
+
+⚠  Ray metrics are scraped from the Ray embedded in the openrag pod (port 8090),
+   but the API's environment comes from a Secret the chart cannot read. If that
+   Secret sets RAY_ADDRESS, the API attaches to that cluster instead, nothing
+   listens on 8090, and OpenRagTargetDown fires. Set ray.externalCluster: true,
+   or copy RAY_ADDRESS into env.config.
+{{- end }}
 {{- $monitors := dict }}
 {{- if .Values.ray.metrics.podMonitor.enabled }}
 {{- $_ := set $monitors "ray.metrics.podMonitor.labels" .Values.ray.metrics.podMonitor.labels }}
