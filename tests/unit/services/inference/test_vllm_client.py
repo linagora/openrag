@@ -414,6 +414,33 @@ class TestVLLMClientOverrides:
         assert headers == {"Authorization": "Bearer default-key"}
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("override", "caller_shaped"),
+    [
+        ({}, False),
+        ({"model": "another-model"}, False),
+        ({"base_url": "https://caller-llm.example/v1", "api_key": "caller-key"}, True),
+    ],
+)
+async def test_a_refused_stream_says_whether_the_key_was_the_callers(
+    monkeypatch: pytest.MonkeyPatch, override: dict, caller_shaped: bool
+) -> None:
+    """The streaming path marks its provider errors like chat and generate do
+    (``InferenceError.caller_shaped``, read by the API's error handler): only
+    an honoured endpoint override sends the caller's own key."""
+    monkeypatch.setenv("LLM_OVERRIDE_ALLOW_CUSTOM_ENDPOINT", "true")
+    client = VLLMClient(endpoint="http://vllm:8000/v1", model_name="test-model", api_key="k")
+    client._client = httpx.AsyncClient(transport=_make_transport(lambda req: httpx.Response(401, json={})))
+
+    with pytest.raises(InferenceError) as info:
+        async for _ in client.stream_chat([{"role": "user", "content": "hi"}], metadata={"llm_override": override}):
+            pass
+
+    assert info.value.status_code == 401
+    assert info.value.caller_shaped is caller_shaped
+
+
 class TestCallerShapedRefusalAndTheSharedBreaker:
     """Callers shape the LLM request: the model through llm_override, which
     needs no opt-in, and any extra chat-body field, which is forwarded. LiteLLM
@@ -818,9 +845,10 @@ class TestVLLMEmbedder:
         assert result == [[0.1, 0.2], [0.3, 0.4]]
 
     @pytest.mark.asyncio
-    async def test_a_refused_key_counts_toward_the_embedder_breaker(self):
-        """Callers cannot shape an embedding request, so a 401 there is our key
-        refused: it counts, unlike on the LLM breaker."""
+    async def test_a_refused_key_does_not_count_toward_the_embedder_breaker(self):
+        """The ``embedder`` breaker is shared by every embedder endpoint: one
+        endpoint's 401 counted here opened it for every partition (#1100). The
+        metrics still record it against that endpoint."""
 
         def handler(request: httpx.Request) -> httpx.Response:
             return httpx.Response(401, json={"error": "invalid key"})
@@ -828,7 +856,7 @@ class TestVLLMEmbedder:
         with pytest.raises(EmbeddingAPIError):
             await self._make_embedder(handler).embed(["hello"])
 
-        assert _breakers["embedder"].fail_counter == 1
+        assert _breakers["embedder"].fail_counter == 0
 
     @pytest.mark.asyncio
     async def test_embed_splits_large_input_into_batches(self):
