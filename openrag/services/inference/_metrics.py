@@ -98,8 +98,10 @@ def outcome_for(exc: BaseException, *, operation: str) -> str:
     fails every call alike — except on an LLM operation, whose request callers
     shape and can make the provider answer 401 (``_CALLER_SHAPED_OPERATIONS``).
     403 stays ``rejected``: it can be one request's model the key may not use.
-    The circuit breaker draws the same 401 line, but still excludes 408 and 429
-    (``_is_excluded``).
+    The circuit breaker draws its own line (``_is_excluded``): it excludes every
+    4xx, 401, 408 and 429 included. It is shared by every endpoint of a kind, so
+    one endpoint's refused key must not stop the others (#1100); here the 401 is
+    labelled by endpoint and stops nothing.
     """
     if isinstance(exc, (asyncio.CancelledError, GeneratorExit)):
         return "cancelled"
