@@ -100,6 +100,15 @@ class CatalogSearcher(RetrievalSearcher):
             )
         )
 
+    async def get_surrounding_chunks(
+        self,
+        chunks: list[Chunk],
+        allowed_file_ids: list[str] | None = None,
+    ) -> list[Chunk]:
+        return await self._filter(
+            await self._searcher.get_surrounding_chunks(chunks=chunks, allowed_file_ids=allowed_file_ids)
+        )
+
     async def get_related_chunks(
         self,
         partition: str,
