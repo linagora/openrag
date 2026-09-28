@@ -719,6 +719,7 @@ async def test_seed_defaults_sync_on_boot_keeps_the_model_of_an_embedder_with_in
     # the variable to pin, not the API's "Resend ..." instruction.
     [error] = errors
     assert "EMBEDDER_MODEL_NAME" in error
+    assert "vllm.embedderModelName" in error
     assert "'indexed-model'" in error and "'new-model'" in error
     assert "Resend" not in error
 

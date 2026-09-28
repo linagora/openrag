@@ -184,8 +184,9 @@ _API_REPOINT_REMEDY = (
     "Resend with acknowledge_indexed_data=true to apply it anyway, or create a new endpoint and move partitions to it."
 )
 _BOOT_REPOINT_REMEDY = (
-    "Pin EMBEDDER_MODEL_NAME (or the legacy EMBEDDING_MODEL, when set) to the model the data was indexed with, "
-    "or change the model through the admin API with acknowledge_indexed_data=true."
+    "Pin EMBEDDER_MODEL_NAME (or the legacy EMBEDDING_MODEL, when set; vllm.embedderModelName in the Helm chart) "
+    "to the model the data was indexed with, or change the model through the admin API with "
+    "acknowledge_indexed_data=true."
 )
 
 
@@ -409,7 +410,8 @@ class ModelEndpointService:
         # would compare the two. Only the model is guarded. A new URL is how an
         # operator moves the same model to another server, and if that server
         # serves another model the readiness probe reports the embedder
-        # unavailable. Refused, the row keeps its model and takes the rest.
+        # unavailable (not for infinity/tei: their probe checks only /health).
+        # Refused, the row keeps its model and takes the rest.
         guard = None
         if model_type == "embedder":
             guard = functools.partial(
