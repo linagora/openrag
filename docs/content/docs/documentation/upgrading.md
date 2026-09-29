@@ -346,7 +346,9 @@ to collect them.
 
 Rolling back the images alone is not enough: 2.2.x starts, but every call fails,
 because it does not know the newer PostgreSQL schema and its searches expect the
-`vector` field that step 5 dropped. Restore the backup set from step 2 instead:
+`vector` field that step 5 dropped. Restore the backup set from step 2 instead,
+which is also the only way to recover the chunk metadata step 5 rewrote (rounded
+integers, folded section IDs):
 
 1. Scale OpenRAG to zero. With `ray.enabled: true`, also delete the Ray cluster,
    whose pods mount the same Python-packages volume as OpenRAG:
@@ -579,4 +581,6 @@ docker volume rm <project>_openrag_venv
 
 Then `git checkout` the version you ran before, restore the `.env` you copied
 aside, and `$DC up -d`. `b9c0d1e2f3a4` is the last PostgreSQL revision of 2.2.1 and
-2.2.2. Files indexed after the upgrade are kept.
+2.2.2. Files indexed after the upgrade are kept. The chunk metadata the upgrade
+rewrote is not restored: integers above 2^53 stay rounded and section IDs stay
+folded. To recover it, roll back from the backups instead.
