@@ -305,11 +305,26 @@ Version 3 reads PostgreSQL as well as Milvus, so start both, without OpenRAG. Fo
 docker compose up -d rdb milvus
 ```
 
-Wait until Milvus is healthy and PostgreSQL is running (`rdb` has no health check):
+If OpenRAG is running, as it is after that first start, stop it, so that nothing
+writes to the collection while the migration runs:
 
+<Tabs>
+  <TabItem label="GPU">
 ```bash
-docker compose ps rdb milvus
+docker compose stop openrag
+docker compose ps
 ```
+  </TabItem>
+  <TabItem label="CPU">
+```bash
+docker compose --profile cpu stop openrag-cpu
+docker compose --profile cpu ps
+```
+  </TabItem>
+</Tabs>
+
+Before the next step, `ps` must show Milvus healthy and PostgreSQL running (`rdb`
+has no health check), and no OpenRAG container.
 
 ### Step 2 — Dry-run (inspect, no changes)
 
