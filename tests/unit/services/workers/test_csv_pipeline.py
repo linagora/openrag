@@ -4,11 +4,13 @@ import asyncio
 import threading
 from dataclasses import replace
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from core.chunking.structured_section import StructuredSectionChunker
 from core.config.indexation import LoaderConfig
 from core.indexing.parsers.tabular.csv_parser import CsvParser
+from core.indexing.topic_tags import TopicTagger
 from core.models.document import Document, DocumentType
 from services.workers.indexer_actor import _load_document
 from services.workers.parsers.parser_dispatcher import ParserDispatcher
@@ -233,13 +235,108 @@ async def test_worker_keeps_csv_on_disk(tmp_path, monkeypatch):
     assert LoaderConfig().mimetypes.to_dict()["text/csv"] == ".csv"
 
 
-@pytest.mark.parametrize("enrichment", ["contextualizer", "topic_tagger"])
-async def test_document_wide_enrichment_is_rejected_before_any_write(setup_pipeline, enrichment):
+async def test_contextualization_is_rejected_before_any_write(setup_pipeline):
     pipeline, row, events = setup_pipeline
-    pipeline = replace(pipeline, **{enrichment: object()})
+    pipeline = replace(pipeline, contextualizer=object())
     with pytest.raises(ValueError, match="disabled"):
         await pipeline.run(row)
     assert events == []
+
+
+async def test_csv_tags_once_after_all_batches_with_preset_and_prompt(setup_pipeline):
+    pipeline, row, events = setup_pipeline
+
+    async def tag_after_storing(messages):
+        assert len(pipeline.vector_store.calls) == 3
+        return '["Customers", "Contacts", "Other"]'
+
+    llm = SimpleNamespace(chat=AsyncMock(side_effect=tag_after_storing))
+    tagger = TopicTagger(llm, "default prompt")
+    pipeline = replace(pipeline, topic_tagger=tagger)
+    row.update(
+        filename="people.csv",
+        language="fr",
+        topic_tagger_prompt="custom prompt",
+        indexation_config={"enable_topic_tagging": True, "max_topic_tags": 2},
+    )
+    await pipeline.run(row)
+    llm.chat.assert_awaited_once()
+    messages = llm.chat.call_args.args[0]
+    assert messages[0]["content"] == "custom prompt"
+    assert "Language: fr" in messages[1]["content"]
+    assert "people.csv" in messages[1]["content"]
+    assert "Alice" in messages[1]["content"] and "Eve" in messages[1]["content"]
+    assert row["topic_tags"] == ["Customers", "Contacts"]
+    assert events == ["parse", "embed", "store"] * 3
+    assert row["stage"] == "stored"
+    assert "chunks" not in row
+
+
+@pytest.mark.parametrize("bad_csv", [True, False])
+async def test_csv_does_not_tag_failed_or_empty_file(setup_pipeline, bad_csv):
+    pipeline, row, _ = setup_pipeline
+    tagger = SimpleNamespace(tag=AsyncMock(return_value=[]))
+    pipeline = replace(pipeline, topic_tagger=tagger)
+    if bad_csv:
+        row["document"].text = "id,name\n1,Alice\n2,Bob\n3,extra,cell"
+        with pytest.raises(ValueError, match="Record 4"):
+            await pipeline.run(row)
+        tagger.tag.assert_not_awaited()
+    else:
+        # The real tagger returns immediately without calling the LLM for no chunks.
+        llm = SimpleNamespace(chat=AsyncMock())
+        pipeline = replace(pipeline, topic_tagger=TopicTagger(llm, "topics"))
+        row["document"].text = ""
+        await pipeline.run(row)
+        llm.chat.assert_not_awaited()
+        assert row["topic_tags"] == []
+
+
+@pytest.mark.parametrize("failure", ["bad_response", "stage_error", "timeout"])
+async def test_csv_tag_failure_preserves_successful_indexing(setup_pipeline, failure):
+    pipeline, row, _ = setup_pipeline
+    if failure == "bad_response":
+        llm = SimpleNamespace(chat=AsyncMock(return_value="not JSON"))
+        tagger = TopicTagger(llm, "topics")
+    else:
+        tagger = SimpleNamespace(tag=AsyncMock(side_effect=RuntimeError("LLM unavailable")))
+    pipeline = replace(pipeline, topic_tagger=tagger)
+    if failure == "timeout":
+        pipeline = replace(pipeline, timeouts=PipelineTimeouts(topic_tag=0))
+    await pipeline.run(row)
+    assert row["stage"] == "stored"
+    assert row["stored_count"] > 0
+    assert row["topic_tags"] == []
+    assert "topic_tag" in row["degraded_stages"]
+    assert pipeline.vector_store.deleted_filters == []
+
+
+async def test_disabled_csv_tagging_never_calls_tagger(setup_pipeline):
+    pipeline, row, _ = setup_pipeline
+    tagger = SimpleNamespace(tag=AsyncMock())
+    pipeline = replace(pipeline, topic_tagger=tagger)
+    row["indexation_config"] = {"enable_topic_tagging": False}
+    await pipeline.run(row)
+    tagger.tag.assert_not_awaited()
+
+
+async def test_cancellation_during_tagging_cleans_stored_batches(setup_pipeline):
+    pipeline, row, _ = setup_pipeline
+    started = asyncio.Event()
+
+    async def wait_forever(*args, **kwargs):
+        started.set()
+        await asyncio.Event().wait()
+
+    pipeline = replace(pipeline, topic_tagger=SimpleNamespace(tag=wait_forever))
+    task = asyncio.create_task(pipeline.run(row))
+    await asyncio.wait_for(started.wait(), 5)
+    assert len(pipeline.vector_store.calls) == 3
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert len(pipeline.vector_store.deleted_filters) == 1
+    assert "topic_tags" not in row and "chunks" not in row
 
 
 async def test_cancel_during_read_waits_for_thread_and_closes_generator(setup_pipeline):
