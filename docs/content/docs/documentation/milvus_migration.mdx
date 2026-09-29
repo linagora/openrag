@@ -358,9 +358,9 @@ To upgrade or downgrade to a specific schema version rather than the latest:
 docker compose run --no-deps --rm --build --entrypoint "" openrag \
     uv run python services/persistence/migrations/milvus/migrate.py --target 2
 
-# Downgrade to version 0 (reverts every migration, version 2's backup swap included)
+# Downgrade to version 2 (reverts version 3 only)
 docker compose run --no-deps --rm --build --entrypoint "" openrag \
-    uv run python services/persistence/migrations/milvus/migrate.py --downgrade --target 0
+    uv run python services/persistence/migrations/milvus/migrate.py --downgrade --target 2
 ```
   </TabItem>
   <TabItem label="CPU">
@@ -369,9 +369,9 @@ docker compose run --no-deps --rm --build --entrypoint "" openrag \
 docker compose --profile cpu run --no-deps --rm --build --entrypoint "" openrag-cpu \
     uv run python services/persistence/migrations/milvus/migrate.py --target 2
 
-# Downgrade to version 0 (reverts every migration, version 2's backup swap included)
+# Downgrade to version 2 (reverts version 3 only)
 docker compose --profile cpu run --no-deps --rm --build --entrypoint "" openrag-cpu \
-    uv run python services/persistence/migrations/milvus/migrate.py --downgrade --target 0
+    uv run python services/persistence/migrations/milvus/migrate.py --downgrade --target 2
 ```
   </TabItem>
 </Tabs>
