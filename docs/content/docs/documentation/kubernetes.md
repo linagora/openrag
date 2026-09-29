@@ -407,7 +407,7 @@ In `values.yaml`, disable the bundled PostgreSQL chart, set `postgresProvisionin
 
 The migration Job (`templates/postgres-migration-job.yaml`) is a Helm hook, annotated with `helm.sh/hook: pre-install,pre-upgrade`. You never invoke it directly: Helm runs it automatically as part of each `helm install` and `helm upgrade`, before it creates or updates the OpenRAG Deployment, and waits for it to finish. It applies the Alembic migrations against the pre-created database (it migrates the schema but does not create the database). The OpenRAG API then starts against an already-migrated schema.
 
-When `postgresProvisioning.migrationJob` is disabled (the default), the Job is not rendered at all and the application runs migrations itself at startup instead.
+When `postgresProvisioning.migrationJob` is disabled (the default), the Job is not rendered at all, and the application runs the migrations itself at startup while `postgresProvisioning.runMigrationsInApp` is on (the default). With both off, nothing applies them.
 
 ## GPU metrics
 
