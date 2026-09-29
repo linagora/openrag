@@ -84,7 +84,7 @@ Changing a secret of a deployment that already holds data needs care:
 A PostgreSQL migration pins the partitions that hold files and follow the
 `default` embedder to the endpoint marked as default. If such partitions exist and
 there is not exactly one default embedder, it stops: OpenRAG answers `503`, or,
-with the Helm migration Job, `helm upgrade` fails. Run this query in OpenRAG's database before the window (the
+when the Helm migration Job applies the migrations, `helm upgrade` fails. Run this query in OpenRAG's database before the window (the
 commands for each deployment are below):
 
 ```sql
@@ -277,9 +277,10 @@ kubectl rollout restart -n "$NS" deploy/"$FULLNAME-openrag"
 `fullnameOverride`. A wrong name selects no pods, and Ray stays on 2.2.x.
 
 The new OpenRAG pod applies the PostgreSQL migrations when it starts. With
-`postgresProvisioning.runMigrationsInApp: false`, the `pre-upgrade` migration Job
-(`postgresProvisioning.migrationJob`) runs them before the pods roll instead, and
-a failing migration fails `helm upgrade`. It then becomes Ready, but
+`postgresProvisioning.runMigrationsInApp: false` and
+`postgresProvisioning.migrationJob.enabled: true`, the `pre-upgrade` migration Job
+runs them before the pods roll instead, and a failing migration fails
+`helm upgrade`. With both off, nothing applies them. It then becomes Ready, but
 searches answer `503` with `VDB_SCHEMA_MIGRATION_REQUIRED` and uploads fail until
 step 5: readiness does not check the Milvus schema version.
 
@@ -294,7 +295,9 @@ kubectl exec -n "$NS" deploy/"$FULLNAME-openrag" -- \
   uv run --no-dev --no-sync python services/persistence/migrations/milvus/migrate.py --dry-run
 ```
 
-Check that the plan routes every partition to an embedder field, then apply it:
+Check that the plan routes every partition to an embedder field, and review any
+`row(s) belong to partitions that do not exist in Postgres` warning: those rows
+lose their vector. Then apply it:
 
 ```bash
 kubectl exec -n "$NS" deploy/"$FULLNAME-openrag" -- \
@@ -501,7 +504,9 @@ $DC run --no-deps --rm --entrypoint "" "$SVC" \
   uv run --no-dev python services/persistence/migrations/milvus/migrate.py --dry-run
 ```
 
-Check that the plan routes every partition to an embedder field, then apply it:
+Check that the plan routes every partition to an embedder field, and review any
+`row(s) belong to partitions that do not exist in Postgres` warning: those rows
+lose their vector. Then apply it:
 
 ```bash
 $DC run --no-deps --rm --entrypoint "" "$SVC" \
