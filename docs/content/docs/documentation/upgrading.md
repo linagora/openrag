@@ -76,11 +76,11 @@ Changing a secret of a deployment that already holds data needs care:
   initialises an empty data directory, so a new value in the configuration also
   needs an `ALTER ROLE` in the database; changing the configuration alone leaves
   OpenRAG unable to log in. If your current password passes the rules, keep it.
-  Otherwise change it during the window, after the backup and before 2.3.0
-  starts, where the steps below say: 2.2.x cannot open a connection once it has
-  changed. The rollback sections below account for it. Pick a value without quotes
-  or `$`, such as the output of `openssl rand -hex 16`: the commands below pass it
-  inside quotes.
+  Otherwise change it in the database during the window, after the backup and
+  before 2.3.0 starts, and in the configuration where the steps below say: 2.2.x
+  cannot open a connection once the database has the new value. The rollback
+  sections below account for it. Pick a value without quotes or `$`, such as the
+  output of `openssl rand -hex 16`: the commands below pass it inside quotes.
 - **`AUTH_TOKEN`** is the admin user's token: clients using it need the new value.
 - **`CHAINLIT_AUTH_SECRET`**: changing it signs out every chat session.
 
@@ -164,6 +164,9 @@ an existing release can hit:
 
 - **Secrets** that break the [rules above](#secrets). With the bundled
   PostgreSQL, the chart reads `POSTGRES_PASSWORD` from `postgresql.auth.password`.
+  If you change the PostgreSQL password, render with the new value
+  (`postgresql.auth.password`, or `env.secrets.POSTGRES_PASSWORD` with an external
+  PostgreSQL), and keep the old one: step 4 needs it.
 - **`ray.enabled: true` without Ray Serve.** The API must be pointed at the
   cluster with `env.config.RAY_ADDRESS`, even when `env.existingSecret` already
   carries it: the chart cannot read that Secret. The error prints the address.
@@ -270,7 +273,7 @@ If you change the PostgreSQL password (see [Secrets](#secrets)), do it now, befo
 
    ```bash
    echo "ALTER ROLE CURRENT_USER WITH PASSWORD '<new password>'" | kubectl exec -i -n "$NS" "$PG_POD" -- \
-     env PGPASSWORD='<old password>' psql -U <postgresql.auth.username, root by default> -d postgres
+     env PGPASSWORD='<old password>' psql -v ON_ERROR_STOP=1 -U <postgresql.auth.username, root by default> -d postgres
    ```
 
    With an external PostgreSQL, run the same `ALTER ROLE` with your client.
@@ -285,9 +288,10 @@ If you change the PostgreSQL password (see [Secrets](#secrets)), do it now, befo
    ```
 
    With `env.existingSecret`, update that Secret; with an external secrets
-   provider, update the source and wait until the Secret has synced.
-3. Set the new value in your values: `postgresql.auth.password` with the bundled
-   PostgreSQL, `env.secrets.POSTGRES_PASSWORD` with an external one.
+   provider, update the source and wait until the Secret has synced. Your values
+   already carry the new value, from
+   [Render the new chart offline](#render-the-new-chart-offline); with
+   `postgresql.auth.existingSecret`, update that Secret's password too.
 
 Then upgrade the release:
 
@@ -298,6 +302,12 @@ helm upgrade "$RELEASE" oci://ghcr.io/linagora/openrag-stack \
 
 If `kubectl get deploy -n "$NS" "$FULLNAME-openrag"` still shows zero replicas
 afterwards, scale it back to your usual count.
+
+If `helm upgrade` fails after you changed the password, do not run a bare
+`helm rollback`: it puts the old password back in the Secret the chart renders
+from your values, and the database no longer accepts it. Fix the cause and run
+`helm upgrade` again, or follow
+[Rolling back a Kubernetes upgrade](#rolling-back-a-kubernetes-upgrade).
 
 With `ray.enabled: true`, once `helm upgrade` has returned, delete every Ray pod
 so KubeRay recreates them from the 2.3.0 template (deleting them earlier would
@@ -401,12 +411,13 @@ integers, folded section IDs):
 
    ```bash
    echo "ALTER ROLE CURRENT_USER WITH PASSWORD '<old password>'" | kubectl exec -i -n "$NS" "$PG_POD" -- \
-     env PGPASSWORD='<new password>' psql -U <postgresql.auth.username, root by default> -d postgres
+     env PGPASSWORD='<new password>' psql -v ON_ERROR_STOP=1 -U <postgresql.auth.username, root by default> -d postgres
    ```
 
    With an external PostgreSQL, use your client. `helm rollback` puts the old
    value back in the Secret the chart renders from your values; in an
-   `env.existingSecret` or at your secrets provider, put it back yourself.
+   `env.existingSecret`, a `postgresql.auth.existingSecret` or at your secrets
+   provider, put it back yourself.
 4. Delete the `<FULLNAME>-venv` PVC, which holds the Python packages 2.3.0
    installed, and wait until `kubectl get pvc -n "$NS"` no longer lists it. The
    rollback recreates it empty, and 2.2.x installs its own at startup.
@@ -533,7 +544,7 @@ password first:
 
 ```bash
 $DC up -d rdb
-until $DC exec rdb pg_isready -q; do sleep 1; done
+until $DC exec rdb pg_isready -q; do sleep 1; done   # if it keeps waiting, check `$DC ps rdb`
 $DC exec rdb psql -U <POSTGRES_USER, root by default> -d postgres \
   -c "ALTER ROLE CURRENT_USER WITH PASSWORD '<new password>'"
 ```
