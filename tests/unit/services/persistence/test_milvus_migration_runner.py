@@ -78,9 +78,10 @@ def test_a_downgrade_without_a_target_is_refused_before_touching_milvus(runner, 
 
 
 def test_a_dry_run_downgrade_without_a_target_is_refused_too(runner, monkeypatch):
-    with pytest.raises(SystemExit):
+    with pytest.raises(SystemExit) as exc:
         _run(runner, monkeypatch, "--downgrade", "--dry-run")
 
+    assert exc.value.code == 2
     assert runner.calls == []
 
 
