@@ -26,11 +26,11 @@ The partial upsert rewrites every number in a chunk's dynamic field as a
 float64, so any other integer above 2**53 in its metadata comes back rounded.
 Postgres keeps the exact upload metadata of each file.
 
-Usage — prefer the generic runner (from repo root, inside the container). It
+Usage — prefer the generic runner (from infra/compose). It
 reads Postgres as well as Milvus, so both must be up (``docker compose up -d rdb
 milvus``) even though ``--no-deps`` does not start them:
     docker compose run --no-deps --rm --entrypoint "" openrag \\
-        uv run python services/persistence/migrations/milvus/migrate.py [--dry-run]
+        uv run --no-dev python services/persistence/migrations/milvus/migrate.py [--dry-run]
 """
 
 import argparse
@@ -564,6 +564,22 @@ def downgrade(client: MilvusClient, collection_name: str, dry_run: bool = False)
     logger.info("Downgrade complete.")
 
 
+def _refuse_downgrade_from_another_version(client: MilvusClient, collection_name: str) -> None:
+    """Refuse a standalone ``--downgrade`` unless the collection is at this script's version.
+
+    Run on its own, this script's downgrade reverts only its own step, whatever
+    version the collection is at. On a newer collection that undoes a step out of
+    order; ``migrate.py --downgrade --target N`` walks the steps in turn instead.
+    """
+    stored = _get_stored_version(client, collection_name)
+    if stored != TARGET_VERSION:
+        logger.error(
+            f"'{collection_name}' is at schema version {stored}; this script's --downgrade only reverts version "
+            f"{TARGET_VERSION}. Use migrate.py --downgrade --target <version> instead."
+        )
+        sys.exit(2)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Milvus migration: one dense field per embedder (v2 → v3)")
     parser.add_argument("--dry-run", action="store_true", help="Inspect only, make no changes")
@@ -579,6 +595,7 @@ def main() -> None:
         logger.error(f"Collection '{collection_name}' does not exist. Aborting.")
         sys.exit(1)
     if args.downgrade:
+        _refuse_downgrade_from_another_version(client, collection_name)
         downgrade(client, collection_name, dry_run=args.dry_run)
     else:
         upgrade(client, collection_name, dry_run=args.dry_run)

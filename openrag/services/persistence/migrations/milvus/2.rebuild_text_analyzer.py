@@ -33,11 +33,12 @@ OpenRAG must be stopped: rows written to the source while the copy runs are not
 picked up, so the migration re-counts the source afterwards and aborts if it
 moved.
 
-Usage — prefer the generic runner (from repo root, inside the container):
+Usage — prefer the generic runner (from infra/compose):
     docker compose run --no-deps --rm --entrypoint "" openrag \\
-        uv run python services/persistence/migrations/milvus/migrate.py [--dry-run]
+        uv run --no-dev python services/persistence/migrations/milvus/migrate.py [--dry-run]
 
-This script also runs standalone with ``--dry-run`` / ``--downgrade``.
+This script also runs standalone with ``--dry-run`` / ``--downgrade``; its ``--downgrade`` refuses
+unless the collection is at version 2.
 """
 
 import argparse
@@ -578,6 +579,22 @@ def downgrade(client: MilvusClient, collection_name: str, dry_run: bool = False)
     )
 
 
+def _refuse_downgrade_from_another_version(client: MilvusClient, collection_name: str) -> None:
+    """Refuse a standalone ``--downgrade`` unless the collection is at this script's version.
+
+    Run on its own, this script's downgrade reverts only its own step, whatever
+    version the collection is at. On a newer collection that undoes a step out of
+    order; ``migrate.py --downgrade --target N`` walks the steps in turn instead.
+    """
+    stored = _get_stored_version(client, collection_name)
+    if stored != TARGET_VERSION:
+        logger.error(
+            f"'{collection_name}' is at schema version {stored}; this script's --downgrade only reverts version "
+            f"{TARGET_VERSION}. Use migrate.py --downgrade --target <version> instead."
+        )
+        sys.exit(2)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Milvus migration: rebuild the `text` field — lowercase BM25 analyzer, no text match (v1 → v2)"
@@ -604,6 +621,7 @@ def main() -> None:
         sys.exit(1)
 
     if args.downgrade:
+        _refuse_downgrade_from_another_version(client, collection_name)
         downgrade(client, collection_name, dry_run=args.dry_run)
     else:
         upgrade(client, collection_name, dry_run=args.dry_run)

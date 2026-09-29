@@ -5,23 +5,23 @@ Discovers all migration scripts in this directory (files matching ``N.*.py``),
 sorts them by their numeric prefix, and runs ``upgrade()`` / ``downgrade()``
 in order based on the current schema version stored in the collection.
 
-Usage (from repo root, inside the container):
+Usage (from infra/compose):
 
     # Dry-run — inspect what would change, no writes:
     docker compose run --no-deps --rm --entrypoint "" openrag \\
-        uv run python services/persistence/migrations/milvus/migrate.py --dry-run
+        uv run --no-dev python services/persistence/migrations/milvus/migrate.py --dry-run
 
     # Upgrade to latest:
     docker compose run --no-deps --rm --entrypoint "" openrag \\
-        uv run python services/persistence/migrations/milvus/migrate.py
+        uv run --no-dev python services/persistence/migrations/milvus/migrate.py
 
     # Upgrade to a specific version:
     docker compose run --no-deps --rm --entrypoint "" openrag \\
-        uv run python services/persistence/migrations/milvus/migrate.py --target 2
+        uv run --no-dev python services/persistence/migrations/milvus/migrate.py --target 2
 
     # Downgrade to version 2 (a downgrade always needs --target):
     docker compose run --no-deps --rm --entrypoint "" openrag \\
-        uv run python services/persistence/migrations/milvus/migrate.py --downgrade --target 2
+        uv run --no-dev python services/persistence/migrations/milvus/migrate.py --downgrade --target 2
 
 Convention — each migration module must expose:
     TARGET_VERSION: int          # the version this script brings the DB to

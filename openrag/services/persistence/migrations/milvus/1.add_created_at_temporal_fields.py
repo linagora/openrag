@@ -11,22 +11,23 @@ no longer raises VDBSchemaMigrationRequiredError on startup.
 Existing documents will retain null for these fields; new documents will have
 them populated at index time by the application code.
 
-Usage — prefer the generic runner (from repo root, inside the container):
+Usage — prefer the generic runner (from infra/compose):
     docker compose run --no-deps --rm --entrypoint "" openrag \\
-        uv run python services/persistence/migrations/milvus/migrate.py [--dry-run] [--downgrade] [--target N]
+        uv run --no-dev python services/persistence/migrations/milvus/migrate.py [--dry-run] [--downgrade --target N]
 
 Or run this script directly:
     # Dry-run first (inspect only, no changes):
-    docker compose run --no-deps --rm --build --entrypoint "" openrag \\
-        uv run python services/persistence/migrations/milvus/1.add_created_at_temporal_fields.py --dry-run
+    docker compose run --no-deps --rm --entrypoint "" openrag \\
+        uv run --no-dev python services/persistence/migrations/milvus/1.add_created_at_temporal_fields.py --dry-run
 
     # Apply:
-    docker compose run --no-deps --rm --build --entrypoint "" openrag \\
-        uv run python services/persistence/migrations/milvus/1.add_created_at_temporal_fields.py
-
-    # Roll back indexes and reset version (fields cannot be dropped in Milvus):
     docker compose run --no-deps --rm --entrypoint "" openrag \\
-        uv run python services/persistence/migrations/milvus/1.add_created_at_temporal_fields.py --downgrade
+        uv run --no-dev python services/persistence/migrations/milvus/1.add_created_at_temporal_fields.py
+
+    # Roll back indexes and reset version (fields cannot be dropped in Milvus). Refused
+    # unless the collection is at version 1; use migrate.py --downgrade --target 0 otherwise:
+    docker compose run --no-deps --rm --entrypoint "" openrag \\
+        uv run --no-dev python services/persistence/migrations/milvus/1.add_created_at_temporal_fields.py --downgrade
 """
 
 import argparse
@@ -198,6 +199,22 @@ def downgrade(client: MilvusClient, collection_name: str, dry_run: bool = False)
     _print_state(client, collection_name, required_version=0)
 
 
+def _refuse_downgrade_from_another_version(client: MilvusClient, collection_name: str) -> None:
+    """Refuse a standalone ``--downgrade`` unless the collection is at this script's version.
+
+    Run on its own, this script's downgrade reverts only its own step, whatever
+    version the collection is at. On a newer collection that undoes a step out of
+    order; ``migrate.py --downgrade --target N`` walks the steps in turn instead.
+    """
+    stored = _get_stored_version(client, collection_name)
+    if stored != TARGET_VERSION:
+        logger.error(
+            f"'{collection_name}' is at schema version {stored}; this script's --downgrade only reverts version "
+            f"{TARGET_VERSION}. Use migrate.py --downgrade --target <version> instead."
+        )
+        sys.exit(2)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Milvus migration: add temporal fields (v0 → v1)")
     parser.add_argument("--dry-run", action="store_true", help="Inspect only, make no changes")
@@ -222,6 +239,7 @@ def main() -> None:
         sys.exit(1)
 
     if args.downgrade:
+        _refuse_downgrade_from_another_version(client, collection_name)
         downgrade(client, collection_name, dry_run=args.dry_run)
     else:
         upgrade(client, collection_name, dry_run=args.dry_run)

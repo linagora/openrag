@@ -97,3 +97,80 @@ def test_an_upgrade_still_defaults_to_the_latest_version(runner, monkeypatch):
     _run(runner, monkeypatch)
 
     assert runner.calls == [("upgrade", latest)]
+
+
+# ---------------------------------------------------------------------------
+# Each migration script's own --downgrade, run standalone
+# ---------------------------------------------------------------------------
+
+_SCRIPTS = {
+    1: "1.add_created_at_temporal_fields.py",
+    2: "2.rebuild_text_analyzer.py",
+    3: "3.split_vector_per_embedder.py",
+}
+
+
+def _load_script(monkeypatch, filename: str, stored_version: int):
+    spec = importlib.util.spec_from_file_location(f"milvus_script_{filename[0]}", _RUNNER_PATH.parent / filename)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    calls: list[str] = []
+    module.calls = calls
+
+    class FakeClient:
+        def __init__(self, uri: str) -> None:
+            pass
+
+        def has_collection(self, name: str) -> bool:
+            return True
+
+        def describe_collection(self, name: str) -> dict:
+            return {"properties": {module.SCHEMA_VERSION_PROPERTY_KEY: str(stored_version)}}
+
+    monkeypatch.setattr(module, "MilvusClient", FakeClient)
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda: SimpleNamespace(vectordb=SimpleNamespace(host="milvus", port=19530, collection_name="vdb_test")),
+    )
+    monkeypatch.setattr(module, "downgrade", lambda client, name, dry_run=False: calls.append("downgrade"))
+    monkeypatch.setattr(module, "upgrade", lambda client, name, dry_run=False: calls.append("upgrade"))
+    return module
+
+
+@pytest.mark.parametrize("version", sorted(_SCRIPTS))
+@pytest.mark.parametrize("extra_args", [[], ["--dry-run"]])
+def test_a_standalone_downgrade_of_another_version_is_refused(monkeypatch, version, extra_args):
+    """Run on its own, a script's --downgrade reverts its step whatever the
+    collection's version: version 2's, on a version 3 collection, swaps the
+    pre-upgrade backup back in. It now runs only on its own version."""
+    script = _load_script(monkeypatch, _SCRIPTS[version], stored_version=version + 1)
+    monkeypatch.setattr("sys.argv", [_SCRIPTS[version], "--downgrade", *extra_args])
+
+    with pytest.raises(SystemExit) as exc:
+        script.main()
+
+    assert exc.value.code == 2
+    assert script.calls == []
+
+
+@pytest.mark.parametrize("version", sorted(_SCRIPTS))
+def test_a_standalone_downgrade_of_its_own_version_runs(monkeypatch, version):
+    script = _load_script(monkeypatch, _SCRIPTS[version], stored_version=version)
+    monkeypatch.setattr("sys.argv", [_SCRIPTS[version], "--downgrade"])
+
+    script.main()
+
+    assert script.calls == ["downgrade"]
+
+
+@pytest.mark.parametrize("version", sorted(_SCRIPTS))
+def test_a_standalone_upgrade_is_not_gated_on_the_stored_version(monkeypatch, version):
+    script = _load_script(monkeypatch, _SCRIPTS[version], stored_version=version - 1)
+    monkeypatch.setattr("sys.argv", [_SCRIPTS[version]])
+
+    script.main()
+
+    assert script.calls == ["upgrade"]
