@@ -190,11 +190,11 @@ def test_an_upgrade_below_the_collections_version_is_refused(runner, monkeypatch
     """The mirror of a downgrade above it: a missing --downgrade used to
     report "already up to date" and exit 0."""
     with pytest.raises(SystemExit) as exc:
-        _run(runner, monkeypatch, "--target", "1")
+        _run(runner, monkeypatch, "--target", "2")
 
     assert exc.value.code == 2
     assert runner.errors == [
-        "Cannot upgrade to version 1: the collection is already at version 3. To go back, pass --downgrade. "
+        "Cannot upgrade to version 2: the collection is already at version 3. To go back, pass --downgrade. "
         "Nothing was changed."
     ]
     assert runner.calls == []
