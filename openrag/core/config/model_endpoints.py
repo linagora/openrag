@@ -29,7 +29,13 @@ DEFAULT_ENDPOINT_ALIAS = "default"
 
 
 def is_placeholder_api_key(value: object) -> bool:
-    """Return whether a configured API key represents anonymous access."""
+    """Return whether a configured API key is unset or the config default ``EMPTY``.
+
+    This decides whether a key may overwrite a stored one, not whether to send
+    it: the bundled reranker is started with ``--api-key EMPTY`` and answers 401
+    without ``Bearer EMPTY`` (#1113). STT is the exception, see
+    ``_build_default_seeds``.
+    """
     return value is None or (isinstance(value, str) and value.strip() in PLACEHOLDER_API_KEYS)
 
 

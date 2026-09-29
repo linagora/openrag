@@ -145,8 +145,11 @@ def _slug(model_name: str) -> str:
 
 
 def _with_api_key(extra: dict[str, Any], api_key: str | None) -> dict[str, Any]:
-    """Add ``api_key`` to endpoint extras when configured."""
-    if not is_placeholder_api_key(api_key):
+    """Add ``api_key`` to endpoint extras when configured.
+
+    ``EMPTY`` is kept: it is a key the bundled reranker enforces (#1113).
+    """
+    if api_key and api_key.strip():
         return {**extra, "api_key": api_key}
     return extra
 
@@ -496,9 +499,12 @@ class ModelEndpointService:
                 # OpenAIAudioClient.
                 "batch_size": s.loader.transcriber.max_concurrent_chunks,
                 "timeout": s.loader.transcriber.timeout,
+                # Unlike the other types, STT drops ``EMPTY``: some transcription
+                # endpoints reject any Authorization header (``_ANONYMOUS_API_KEY``
+                # in openai_audio.py), and the audio client sends a stored key as is.
                 "extra": _with_api_key(
                     {},
-                    s.loader.transcriber.api_key,
+                    None if is_placeholder_api_key(s.loader.transcriber.api_key) else s.loader.transcriber.api_key,
                 ),
             },
         }

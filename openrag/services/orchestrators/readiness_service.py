@@ -13,7 +13,6 @@ from core.config.model_endpoints import (
     DEFAULT_MODEL_IMPLEMENTATIONS,
     ModelEndpointConfig,
     ModelEndpointType,
-    is_placeholder_api_key,
 )
 from core.models.readiness import (
     ConfigurationReferenceReadiness,
@@ -257,8 +256,10 @@ def _model_probe_request(config: ModelEndpointConfig, model_type: str | None = N
     if implementation == "ollama" and not base.endswith("/v1"):
         base += "/v1"
     health_only = implementation in {"infinity", "tei"}
+    # Send the stored key as the inference client does, ``EMPTY`` included: an
+    # endpoint started with ``--api-key EMPTY`` requires it (#1113).
     configured_api_key = config.extra.get("api_key")
-    api_key = None if is_placeholder_api_key(configured_api_key) else configured_api_key
+    api_key = configured_api_key.strip() if isinstance(configured_api_key, str) else None
     authorization = f"Bearer {api_key}" if api_key else None
     return _ModelProbeRequest(
         url=_canonical_probe_url(base + ("/health" if health_only else "/models")),

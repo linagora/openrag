@@ -513,8 +513,24 @@ async def test_model_probe_sends_api_key_over_http(respx_mock):
     assert probe.calls[0].request.headers["Authorization"] == "Bearer test-key"
 
 
-@pytest.mark.parametrize("api_key", ["EMPTY", "  EMPTY  ", "   "])
-async def test_model_probe_treats_placeholder_api_keys_as_credential_free(respx_mock, api_key):
+@pytest.mark.parametrize("api_key", ["EMPTY", "  EMPTY  "])
+async def test_model_probe_sends_the_empty_api_key(respx_mock, api_key):
+    """#1113: ``EMPTY`` is a key a server can enforce (``--api-key EMPTY``), so
+    the probe sends it like the inference client does."""
+    probe = respx_mock.get("http://model.test/v1/models").respond(200, json={"data": [{"id": "model"}]})
+    config = ModelEndpointConfig(
+        endpoint="http://model.test/v1",
+        model_name="model",
+        extra={"api_key": api_key},
+    )
+
+    await check_model_endpoint(config)
+
+    assert probe.calls[0].request.headers["Authorization"] == "Bearer EMPTY"
+
+
+@pytest.mark.parametrize("api_key", ["", "   "])
+async def test_model_probe_treats_blank_api_keys_as_credential_free(respx_mock, api_key):
     probe = respx_mock.get("http://model.test/v1/models").respond(200, json={"data": [{"id": "model"}]})
     config = ModelEndpointConfig(
         endpoint="http://model.test/v1",
