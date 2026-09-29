@@ -35,7 +35,10 @@ def runner(monkeypatch):
     module.calls = calls
     connected: list[str] = []
     module.connected = connected
-    module.stored_version = 3
+    module.stored_version = "3"
+    errors: list[str] = []
+    module.errors = errors
+    module.real_run_downgrade = module.run_downgrade
 
     class FakeClient:
         def __init__(self, uri: str) -> None:
@@ -45,9 +48,22 @@ def runner(monkeypatch):
             return True
 
         def describe_collection(self, name: str) -> dict:
-            return {"properties": {module.SCHEMA_VERSION_PROPERTY_KEY: str(module.stored_version)}}
+            if module.stored_version is None:
+                return {"properties": {}}
+            return {"properties": {module.SCHEMA_VERSION_PROPERTY_KEY: module.stored_version}}
+
+    class FakeLogger:
+        def info(self, message: str) -> None:
+            pass
+
+        def warning(self, message: str) -> None:
+            pass
+
+        def error(self, message: str) -> None:
+            errors.append(message)
 
     monkeypatch.setattr(module, "MilvusClient", FakeClient)
+    monkeypatch.setattr(module, "logger", FakeLogger())
     monkeypatch.setattr(
         module,
         "load_config",
@@ -125,23 +141,112 @@ def test_a_target_outside_the_migrations_is_refused_before_touching_milvus(
 
 @pytest.mark.parametrize("extra_args", [[], ["--dry-run"]])
 def test_a_downgrade_above_the_collections_version_is_refused(runner, monkeypatch, extra_args):
-    runner.stored_version = 2
+    runner.stored_version = "2"
 
     with pytest.raises(SystemExit) as exc:
         _run(runner, monkeypatch, "--downgrade", *extra_args, "--target", "3")
 
     assert exc.value.code == 2
+    assert runner.errors == ["Cannot downgrade to version 3: the collection is at version 2. Nothing was changed."]
     assert runner.calls == []
 
 
 def test_a_downgrade_to_the_collections_own_version_is_allowed(runner, monkeypatch):
     """Control for the refusal above: the boundary itself is a no-op downgrade,
     left to the runner, which reports that there is nothing to do."""
-    runner.stored_version = 2
+    runner.stored_version = "2"
 
     _run(runner, monkeypatch, "--downgrade", "--target", "2")
 
     assert runner.calls == [("downgrade", 2)]
+
+
+def test_a_downgrade_to_version_0_is_still_allowed(runner, monkeypatch):
+    """0 is the version before any migration, a documented rollback target."""
+    _run(runner, monkeypatch, "--downgrade", "--target", "0")
+
+    assert runner.calls == [("downgrade", 0)]
+    assert runner.errors == []
+
+
+def test_an_upgrade_to_version_0_is_allowed_on_an_unstamped_collection(runner, monkeypatch):
+    runner.stored_version = None
+
+    _run(runner, monkeypatch, "--target", "0")
+
+    assert runner.calls == [("upgrade", 0)]
+
+
+def test_an_unstamped_collection_is_upgraded_from_version_0(runner, monkeypatch):
+    latest = runner._discover_migrations()[-1][0]
+    runner.stored_version = None
+
+    _run(runner, monkeypatch)
+
+    assert runner.calls == [("upgrade", latest)]
+
+
+def test_an_upgrade_below_the_collections_version_is_refused(runner, monkeypatch):
+    """The mirror of a downgrade above it: a missing --downgrade used to
+    report "already up to date" and exit 0."""
+    with pytest.raises(SystemExit) as exc:
+        _run(runner, monkeypatch, "--target", "1")
+
+    assert exc.value.code == 2
+    assert runner.errors == [
+        "Cannot upgrade to version 1: the collection is already at version 3. To go back, pass --downgrade. "
+        "Nothing was changed."
+    ]
+    assert runner.calls == []
+
+
+@pytest.mark.parametrize("stamp", ["abc", "-1"])
+@pytest.mark.parametrize("mode", [["--target", "3"], ["--downgrade", "--target", "2"]], ids=["upgrade", "downgrade"])
+def test_a_collection_with_an_unknown_version_is_refused(runner, monkeypatch, stamp, mode):
+    """Read as 0, a corrupt stamp made an upgrade replay every migration."""
+    runner.stored_version = stamp
+
+    with pytest.raises(SystemExit) as exc:
+        _run(runner, monkeypatch, *mode)
+
+    assert exc.value.code == 2
+    assert runner.errors == [f"'vdb_test' has schema version '{stamp}', which is not a version. Nothing was changed."]
+    assert runner.calls == []
+
+
+@pytest.mark.parametrize("mode", [[], ["--downgrade", "--target", "2"]], ids=["upgrade", "downgrade"])
+def test_a_collection_newer_than_the_runner_is_refused(runner, monkeypatch, mode):
+    """At a version this runner has no script for, a downgrade to 2 reverted
+    version 3 under it, and version 3's downgrade then stamped it 2."""
+    latest = runner._discover_migrations()[-1][0]
+    runner.stored_version = str(latest + 1)
+
+    with pytest.raises(SystemExit) as exc:
+        _run(runner, monkeypatch, *mode)
+
+    assert exc.value.code == 2
+    assert f"newer than this runner's latest ({latest})" in runner.errors[0]
+    assert runner.calls == []
+
+
+def test_a_downgrade_reverts_the_steps_above_the_target_newest_first(runner, monkeypatch):
+    """Through the real run_downgrade: the step selection the refusals above protect."""
+    reverted: list[int] = []
+
+    def load(path: Path) -> SimpleNamespace:
+        version = int(path.name.split(".")[0])
+        return SimpleNamespace(
+            TARGET_VERSION=version,
+            upgrade=lambda client, name, dry_run=False: None,
+            downgrade=lambda client, name, dry_run=False: reverted.append(version),
+        )
+
+    monkeypatch.setattr(runner, "run_downgrade", runner.real_run_downgrade)
+    monkeypatch.setattr(runner, "_load_module", load)
+
+    _run(runner, monkeypatch, "--downgrade", "--target", "1")
+
+    assert reverted == [3, 2]
 
 
 # ---------------------------------------------------------------------------

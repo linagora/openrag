@@ -209,7 +209,13 @@ def _refuse_downgrade_from_another_version(client: MilvusClient, collection_name
     order; ``migrate.py --downgrade --target N`` walks the steps in turn instead.
     """
     stored = _get_stored_version(client, collection_name)
-    if stored != TARGET_VERSION:
+    if stored < TARGET_VERSION:
+        logger.error(
+            f"'{collection_name}' is at schema version {stored}, below this script's version {TARGET_VERSION}: "
+            "there is nothing for it to revert."
+        )
+        sys.exit(2)
+    if stored > TARGET_VERSION:
         logger.error(
             f"'{collection_name}' is at schema version {stored}; this script's --downgrade only reverts version "
             f"{TARGET_VERSION}. Use migrate.py --downgrade --target <version> instead."

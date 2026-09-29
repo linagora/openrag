@@ -88,14 +88,23 @@ def _validate_module(module: ModuleType, path: Path) -> None:
 
 
 def _get_stored_version(client: MilvusClient, collection_name: str) -> int:
+    """The collection's schema version: 0 when it was never stamped.
+
+    Raises ValueError on a stamp that is not a non-negative integer, rather than
+    reading it as 0 and migrating a collection whose version is unknown.
+    """
     desc = client.describe_collection(collection_name)
     raw = desc.get("properties", {}).get(SCHEMA_VERSION_PROPERTY_KEY)
     if raw is None:
         return 0
+    unknown = f"'{collection_name}' has schema version {raw!r}, which is not a version. Nothing was changed."
     try:
-        return int(raw)
+        version = int(raw)
     except ValueError:
-        return 0
+        raise ValueError(unknown) from None
+    if version < 0:
+        raise ValueError(unknown)
+    return version
 
 
 # ---------------------------------------------------------------------------
@@ -210,13 +219,32 @@ def main() -> None:
         logger.error(f"Collection '{collection_name}' does not exist. Aborting.")
         sys.exit(1)
 
-    if args.downgrade:
+    try:
         current = _get_stored_version(client, collection_name)
-        if target_version > current:
-            logger.error(
-                f"Cannot downgrade to version {target_version}: the collection is at version {current}. Nothing was changed."
-            )
-            sys.exit(2)
+    except ValueError as exc:
+        logger.error(str(exc))
+        sys.exit(2)
+    # A newer release migrated it: this runner has no script for its version, so
+    # a downgrade would revert older steps under it, out of order.
+    if current > latest_version:
+        logger.error(
+            f"'{collection_name}' is at schema version {current}, newer than this runner's latest "
+            f"({latest_version}). Run the migration runner of the release that migrated it. Nothing was changed."
+        )
+        sys.exit(2)
+    if args.downgrade and target_version > current:
+        logger.error(
+            f"Cannot downgrade to version {target_version}: the collection is at version {current}. Nothing was changed."
+        )
+        sys.exit(2)
+    if not args.downgrade and target_version < current:
+        logger.error(
+            f"Cannot upgrade to version {target_version}: the collection is already at version {current}. "
+            "To go back, pass --downgrade. Nothing was changed."
+        )
+        sys.exit(2)
+
+    if args.downgrade:
         run_downgrade(client, collection_name, migrations, target_version, dry_run=args.dry_run)
     else:
         run_upgrade(client, collection_name, migrations, target_version, dry_run=args.dry_run)
