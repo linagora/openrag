@@ -288,9 +288,10 @@ kubectl exec -n "$NS" deploy/"$FULLNAME-openrag" -- \
 
 The pod can stay up while this runs: until the collection reaches version 3, the
 application cannot index into it. Deleting a file still reaches Milvus, though,
-and the migration aborts, without changing anything, if the number of rows moves
-while it copies, so keep traffic stopped. It is safe to run again after a failure.
-Only its last step, dropping the old `vector` field, cannot be undone.
+so keep traffic stopped: after copying, the migration counts the rows again and,
+if the count moved, stops before dropping the old `vector` field. A failed run can
+be run again. Until that last step, the original vectors stay in place, but the
+copy has already rewritten each chunk's metadata, as described below.
 
 What the migration does to the data:
 
@@ -479,8 +480,8 @@ docker compose run --no-deps --rm --entrypoint "" openrag \
   uv run python services/persistence/migrations/milvus/migrate.py
 ```
 
-It is safe to run again after a failure; only its last step, dropping the old
-`vector` field, cannot be undone. What it does to the data is described in
+A failed run can be run again: until its last step drops the old `vector` field,
+the original vectors stay in place. What it does to the data is described in
 [Milvus migrations — Version 3](/openrag/documentation/milvus_migration/#version-3--one-vector-field-per-embedder).
 
 #### 6. Start OpenRAG and verify

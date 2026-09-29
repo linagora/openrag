@@ -267,8 +267,8 @@ Schema version 3 moves every chunk's vector out of the shared `vector` field int
 It reads PostgreSQL as well as Milvus, to know which embedder each partition uses and which field that embedder owns. That field is allocated by a PostgreSQL migration of the same release, so **start the new OpenRAG version once** before running it, and keep both databases up while it runs (`docker compose up -d rdb milvus` under Compose). Anything it cannot route stops it before it changes anything.
 
 :::caution[Plan for version 3]
-- **Stop OpenRAG first.** The migration aborts, without changing anything, if the row count moves while it copies.
-- **It is safe to run again after a failure.** Only its last step, dropping `vector`, cannot be undone. `--downgrade --target 2` copies the vectors back into `vector`, and is possible only while every embedder field in use has the same dimension.
+- **Stop OpenRAG first.** After copying, the migration counts the rows again. If the count moved, something was writing: it stops before dropping `vector`, and you run it again once the writes have stopped.
+- **A failed run can be run again.** Until its last step drops `vector`, the original vectors stay in place. By then it has already added the per-embedder fields and rewritten each chunk's metadata, with the rounding described below. Once `vector` is dropped, `--downgrade --target 2` copies the vectors back into it, and is possible only while every embedder field in use has the same dimension.
 - **Rows of a partition PostgreSQL does not know** are already unreachable from OpenRAG, and lose their vector.
 - **Integers above 2^53** in a chunk's metadata come back rounded: the copy rewrites the metadata as floating-point numbers. PostgreSQL keeps each file's original upload metadata.
 - **Development builds from 21 to 28 September 2026** ran a copy that rounded chunk section IDs. The migration does not repair a collection they already migrated; re-index the files indexed before it.
