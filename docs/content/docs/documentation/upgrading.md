@@ -63,7 +63,7 @@ A client that read `sources[i].filename` reads `sources[i].chunk.filename` now.
 
 `GET /metrics` no longer accepts the admin token. Set `METRICS_TOKEN` and give the
 same value to your scraper as a bearer token, or, on a network only your scraper
-reaches, set `METRICS_ALLOW_UNAUTHENTICATED=true`. See
+reaches, leave `METRICS_TOKEN` unset and set `METRICS_ALLOW_UNAUTHENTICATED=true`. See
 [Prometheus metrics](/openrag/documentation/prometheus_metrics/).
 
 ### Secrets
@@ -112,12 +112,15 @@ indexed with: the migration pins them to it for good, and the Milvus migration
 moves their vectors into its field.
 
 If the migration has already stopped 2.3.0, whose admin UI is then unavailable,
-mark it in the database, then restart OpenRAG, which applies the migrations again
-(on Kubernetes with the migration Job, run `helm upgrade` again instead):
+mark it in the database and check that the query above returns that one row:
 
 ```sql
 UPDATE model_endpoints SET is_default = (name = '<endpoint name>') WHERE model_type = 'embedder';
 ```
+
+Then apply the migrations again: restart OpenRAG where it applies them itself; on
+Kubernetes with the migration Job, run `helm upgrade` again; with both off, run
+them by hand as in [step 4](#4-upgrade-the-release), then restart OpenRAG.
 
 Rolling back from the backups undoes the pinning; the Compose rollback without
 backups keeps it.
@@ -125,14 +128,15 @@ backups keeps it.
 ### If you ran a development build
 
 A collection migrated to version 3 by a build of the development branch from 22
-September 2026 (#994) until #1096 merged on 28 September went through a copy that rounded chunk section IDs, which
-breaks neighbour-chunk expansion. The migration does not repair them: after
+September 2026 (#994) until #1096 merged on 28 September went through a copy that
+rounded chunk section IDs, which breaks neighbour-chunk expansion. The migration does not repair them: after
 upgrading, re-index the files that were indexed before that migration. The
 migration's dry run prints the collection's current version, normally `2` for
 2.2.1 and 2.2.2; a `3` means a development build already migrated it, and whether
 that copy rounded the IDs depends on the date it ran. A `1` means version 2 was
-never applied (2.2.x only enforced it on uploads): the upgrade then runs it too,
-which rebuilds the collection and keeps a backup copy of it; see
+never applied (2.2.x only enforced it on uploads), and `0` that no migration was:
+the upgrade then runs the missing versions too. Version 2 rebuilds the collection
+and keeps a backup copy of it, unless `hybrid_search` is off; see
 [Milvus migrations — Version 2](/openrag/documentation/milvus_migration/#version-2--case-insensitive-bm25-analyzer).
 
 ## 2.2.x to 2.3.0 on Kubernetes
@@ -171,9 +175,10 @@ the chart changes:
 - **vLLM engines.** The embedder and LLM engines are pinned to `v0.30.0-cu129`.
 - **Embedder engine.** It now runs with `maxModelLen: 2048` and
   `gpuMemoryUtilization: 0.1`, instead of the model's own maximum length and 0.3.
-  vLLM rejects requests from an embedder configured for longer inputs: if you
-  raised `MAX_MODEL_LEN` or an endpoint's `extra.max_model_len` above 2047, raise
-  `maxModelLen` with it.
+  If you raised `MAX_MODEL_LEN` or an endpoint's `extra.max_model_len` above
+  2048, raise `maxModelLen` with it: otherwise vLLM refuses the longer requests,
+  and OpenRAG falls back to the served length, with a warning, embedding shorter
+  inputs and sizing new chunks for them.
 - **Bundled PostgreSQL.** Its own network policy, which let any source reach port
   5432, is off. With `networkPolicy.enabled` (the default), PostgreSQL gets the
   chart's default-deny rules, and clients outside the release's namespace no
@@ -234,7 +239,7 @@ override from the 2.3.0 chart's `values.yaml`.
 
 The bundled engines run CUDA 12.9 builds: check that the NVIDIA driver on your
 GPU nodes supports CUDA 12.9, in NVIDIA's
-[CUDA compatibility table](https://docs.nvidia.com/deploy/cuda-compatibility/). Rolling a
+[CUDA compatibility documentation](https://docs.nvidia.com/deploy/cuda-compatibility/). Rolling a
 vLLM engine starts its new pod before stopping the old one, so it needs a free GPU
 while it rolls.
 
@@ -279,7 +284,9 @@ Take the backups as one set, after step 1:
   first, so that the snapshots are one point in time: note the replica counts
   that `kubectl get deploy,statefulset -n "$NS"` shows for Milvus, etcd and
   MinIO, scale those to zero, snapshot their volumes (or copy your bucket) with
-  your storage's snapshot mechanism, then scale them back to those counts.
+  your storage's snapshot mechanism, then scale them back to those counts and
+  wait until their pods are Ready. OpenRAG 2.2.x keeps running meanwhile; with
+  traffic stopped, it does nothing with Milvus.
 - Uploaded files: snapshot the `<FULLNAME>-data` volume.
 
 This set is your rollback. Step 5 drops the old vector field, and the new
@@ -344,10 +351,16 @@ helm upgrade "$RELEASE" oci://ghcr.io/linagora/openrag-stack \
   --version "$CHART_VERSION" -n "$NS" -f "$VALUES"
 ```
 
-With `ray.enabled: true`, add `--set openrag.replicas=0`: `helm upgrade` would
-otherwise start OpenRAG right away, against the 2.2.x Ray pods. Without Ray, if
-`kubectl get deploy -n "$NS" "$FULLNAME-openrag"` still shows zero replicas
-afterwards, scale it back to your usual count.
+With `ray.enabled: true`, add `--set openrag.replicas=0`, which keeps OpenRAG from
+starting against the 2.2.x Ray pods:
+
+```bash
+helm upgrade "$RELEASE" oci://ghcr.io/linagora/openrag-stack \
+  --version "$CHART_VERSION" -n "$NS" -f "$VALUES" --set openrag.replicas=0
+```
+
+Without Ray, if `kubectl get deploy -n "$NS" "$FULLNAME-openrag"` still shows zero
+replicas afterwards, scale it back to your usual count.
 
 If `helm upgrade` fails after you changed the password, do not run a bare
 `helm rollback`: it puts the old password back in the Secret the chart renders
@@ -355,9 +368,11 @@ from your values, and the database no longer accepts it. Fix the cause and run
 `helm upgrade` again, or follow
 [Rolling back a Kubernetes upgrade](#rolling-back-a-kubernetes-upgrade).
 
-With `ray.enabled: true`, once `helm upgrade` has returned, delete every Ray pod
-so KubeRay recreates them from the 2.3.0 template (deleting them earlier would
-bring them back on 2.2.x). Once they are Ready, scale OpenRAG up. A later
+With `ray.enabled: true`, once `helm upgrade` has returned, delete every Ray pod,
+head included, so KubeRay recreates them from the 2.3.0 template (deleting them
+earlier would bring them back on 2.2.x). The notes `helm upgrade` prints
+recreate only the workers, for their metrics port; this upgrade needs the head
+recreated too. Once they are Ready, scale OpenRAG up. A later
 `helm upgrade` without the flag sets the count from your values again:
 
 ```bash
@@ -429,10 +444,11 @@ Searches and uploads recover on their own once it finishes; no restart is needed
 
 #### 6. Verify
 
-- `GET /ready` returns `200` with `"status": "ready"`, and `postgres`, `milvus`,
-  `ray` and `embedder` are `ok` under `checks`. An `llm` or `reranker` check that
-  is not `ok` means that endpoint is unreachable or not configured; it does not
-  block readiness.
+- `GET /ready` returns `200` with `"status": "ready"`, and `embedder` is `ok`
+  under `checks` (only `postgres`, `milvus` and `ray` decide the `200`, unless
+  `READINESS_REQUIRE_EMBEDDER` is on). An `llm` or `reranker` check that is not
+  `ok` means that endpoint is unreachable (`unavailable`, `timeout`) or not
+  configured (`unresolvable`); it does not block readiness.
 - A search on an existing partition returns results, not `503`.
 - A chat completion returns sources in the new shape.
 - Uploading a small file completes (`GET /queue/tasks?task_status=active` empties again).
@@ -473,14 +489,15 @@ integers, folded section IDs):
      the dump from being dropped. With the bundled PostgreSQL:
 
      ```bash
-     echo "DROP SCHEMA public CASCADE; CREATE SCHEMA public;" | kubectl exec -i -n "$NS" "$PG_POD" -- \
+     echo "DROP SCHEMA public CASCADE; CREATE SCHEMA public; GRANT USAGE ON SCHEMA public TO PUBLIC;" | kubectl exec -i -n "$NS" "$PG_POD" -- \
        env PGPASSWORD='<password>' psql -v ON_ERROR_STOP=1 -U <postgresql.auth.username, root by default> -d <database>
      kubectl exec -i -n "$NS" "$PG_POD" -- \
        env PGPASSWORD='<password>' pg_restore --no-owner --exit-on-error -U <postgresql.auth.username, root by default> -d <database> < openrag.dump
      ```
 
      `<password>` is the one the database has now: the new one if you changed it
-     in upgrade step 4. With an external PostgreSQL, do the same with your client.
+     in upgrade step 4. With an external PostgreSQL, do the same with your client,
+     as the database's owner.
    - Milvus: scale Milvus, etcd and MinIO to zero, restore their volumes (or your
      bucket) from the snapshots, then scale them back.
    - Uploaded files: restore the `<FULLNAME>-data` volume.
@@ -674,10 +691,11 @@ the original vectors stay in place. What it does to the data is described in
 $DC up -d
 ```
 
-- `GET /ready` returns `200` with `"status": "ready"`, and `postgres`, `milvus`,
-  `ray` and `embedder` are `ok` under `checks`. An `llm` or `reranker` check that
-  is not `ok` means that endpoint is unreachable or not configured; it does not
-  block readiness.
+- `GET /ready` returns `200` with `"status": "ready"`, and `embedder` is `ok`
+  under `checks` (only `postgres`, `milvus` and `ray` decide the `200`, unless
+  `READINESS_REQUIRE_EMBEDDER` is on). An `llm` or `reranker` check that is not
+  `ok` means that endpoint is unreachable (`unavailable`, `timeout`) or not
+  configured (`unresolvable`); it does not block readiness.
 - A search on an existing partition returns results, not `503`.
 - A chat completion returns sources in the new shape.
 - Uploading a small file completes.
@@ -736,7 +754,7 @@ still at 2.3.0, which neither version runs on:
 
 A dry run of the Milvus downgrade checks the dimensions, the routing and the
 number of vector fields without changing anything; the workspace check is yours. Then, in this order (the Milvus
-downgrade reads the PostgreSQL schema that the third command removes):
+downgrade reads the PostgreSQL schema that `alembic downgrade` removes):
 
 ```bash
 $DC stop "$SVC"
