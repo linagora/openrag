@@ -11,22 +11,24 @@ no longer raises VDBSchemaMigrationRequiredError on startup.
 Existing documents will retain null for these fields; new documents will have
 them populated at index time by the application code.
 
-Usage — prefer the generic runner (from infra/compose; on a CPU host, `docker compose --profile cpu` and the `openrag-cpu` service):
-    docker compose run --no-deps --rm --entrypoint "" openrag \\
+Usage — prefer the generic runner (from infra/compose, with DC and SVC set as in the upgrade guide:
+``DC="docker compose"; SVC=openrag`` on a GPU host,
+``DC="docker compose --profile cpu"; SVC=openrag-cpu`` on a CPU host):
+    $DC run --no-deps --rm --entrypoint "" "$SVC" \\
         uv run --no-dev python services/persistence/migrations/milvus/migrate.py [--dry-run] [--downgrade --target N]
 
 Or run this script directly:
     # Dry-run first (inspect only, no changes):
-    docker compose run --no-deps --rm --entrypoint "" openrag \\
+    $DC run --no-deps --rm --entrypoint "" "$SVC" \\
         uv run --no-dev python services/persistence/migrations/milvus/1.add_created_at_temporal_fields.py --dry-run
 
     # Apply:
-    docker compose run --no-deps --rm --entrypoint "" openrag \\
+    $DC run --no-deps --rm --entrypoint "" "$SVC" \\
         uv run --no-dev python services/persistence/migrations/milvus/1.add_created_at_temporal_fields.py
 
     # Roll back indexes and reset version (fields cannot be dropped in Milvus). Refused
     # unless the collection is at version 1; use migrate.py --downgrade --target <version> otherwise:
-    docker compose run --no-deps --rm --entrypoint "" openrag \\
+    $DC run --no-deps --rm --entrypoint "" "$SVC" \\
         uv run --no-dev python services/persistence/migrations/milvus/1.add_created_at_temporal_fields.py --downgrade
 """
 

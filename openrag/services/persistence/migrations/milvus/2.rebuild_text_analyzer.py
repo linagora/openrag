@@ -33,8 +33,10 @@ OpenRAG must be stopped: rows written to the source while the copy runs are not
 picked up, so the migration re-counts the source afterwards and aborts if it
 moved.
 
-Usage — prefer the generic runner (from infra/compose; on a CPU host, `docker compose --profile cpu` and the `openrag-cpu` service):
-    docker compose run --no-deps --rm --entrypoint "" openrag \\
+Usage — prefer the generic runner (from infra/compose, with DC and SVC set as in the upgrade guide:
+``DC="docker compose"; SVC=openrag`` on a GPU host,
+``DC="docker compose --profile cpu"; SVC=openrag-cpu`` on a CPU host):
+    $DC run --no-deps --rm --entrypoint "" "$SVC" \\
         uv run --no-dev python services/persistence/migrations/milvus/migrate.py [--dry-run]
 
 This script also runs standalone with ``--dry-run`` / ``--downgrade``; its ``--downgrade`` refuses

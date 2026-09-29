@@ -5,22 +5,24 @@ Discovers all migration scripts in this directory (files matching ``N.*.py``),
 sorts them by their numeric prefix, and runs ``upgrade()`` / ``downgrade()``
 in order based on the current schema version stored in the collection.
 
-Usage (from infra/compose; on a CPU host, `docker compose --profile cpu` and the `openrag-cpu` service):
+Usage (from infra/compose, with DC and SVC set as in the upgrade guide:
+``DC="docker compose"; SVC=openrag`` on a GPU host,
+``DC="docker compose --profile cpu"; SVC=openrag-cpu`` on a CPU host):
 
     # Dry-run — inspect what would change, no writes:
-    docker compose run --no-deps --rm --entrypoint "" openrag \\
+    $DC run --no-deps --rm --entrypoint "" "$SVC" \\
         uv run --no-dev python services/persistence/migrations/milvus/migrate.py --dry-run
 
     # Upgrade to latest:
-    docker compose run --no-deps --rm --entrypoint "" openrag \\
+    $DC run --no-deps --rm --entrypoint "" "$SVC" \\
         uv run --no-dev python services/persistence/migrations/milvus/migrate.py
 
     # Upgrade to a specific version:
-    docker compose run --no-deps --rm --entrypoint "" openrag \\
+    $DC run --no-deps --rm --entrypoint "" "$SVC" \\
         uv run --no-dev python services/persistence/migrations/milvus/migrate.py --target 2
 
     # Downgrade to version 2 (a downgrade always needs --target):
-    docker compose run --no-deps --rm --entrypoint "" openrag \\
+    $DC run --no-deps --rm --entrypoint "" "$SVC" \\
         uv run --no-dev python services/persistence/migrations/milvus/migrate.py --downgrade --target 2
 
 Convention — each migration module must expose:
