@@ -782,9 +782,9 @@ final chunks, which carry the whole object.
 
 | Key | Content |
 |---|---|
-| `sources` | The sources the model cited, or every presented source when it reported no citations. Kept for existing clients. |
+| `sources` | The sources the model cited, or every presented source when the answer has no `[Sources: …]` tag at all. An explicit `[Sources: none]` gives an empty list. Kept for existing clients. |
 | `presented_sources` | Every source shown to the model, whether cited or not. |
-| `cited_sources` | Only the sources the model cited; empty when it reported no citations. |
+| `cited_sources` | Only the sources the model cited; empty when it cited none or gave no `[Sources: …]` tag. |
 | `citations_reported` | `true` when the model reported its citations, even none; `false` when `sources` fell back to every presented source. |
 | `all_retrieved_sources` | Every source retrieval returned, including those that did not fit in the prompt. Only when the request sets `metadata.include_all_retrieved_sources: true`. |
 | `attachments` | The attached file IDs actually used, when the request sets `metadata.attachments`. |

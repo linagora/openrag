@@ -298,8 +298,9 @@ What the migration does to the data:
 - Each chunk's vector moves to the field of the embedder its partition uses.
   Rows of a partition that PostgreSQL does not know are already unreachable,
   and lose their vector.
-- Integers above 2^53 in a chunk's metadata come back rounded. PostgreSQL keeps
-  each file's original upload metadata.
+- Integers above 2^53 in a chunk's metadata come back rounded, except section
+  IDs, which the copy folds below 2^53 so that each chunk stays linked to its
+  neighbours. PostgreSQL keeps each file's original upload metadata.
 
 Searches and uploads recover on their own once it finishes; no restart is needed.
 
@@ -343,10 +344,13 @@ because it does not know the newer PostgreSQL schema and its searches expect the
 ## 2.2.x to 2.3.0 with Docker Compose
 
 This section upgrades a deployment started from `infra/compose` in a checkout of
-this repository. Run every `docker compose` command from `infra/compose`, with the
-same options you use to start the stack (`--profile cpu` and the `openrag-cpu`
-service on a CPU host, `-p <project>` if you set a project name, the overlays you
-add with `-f`).
+this repository. Run the commands from `infra/compose`, after setting these two
+variables to match how you start the stack:
+
+```bash
+DC="docker compose"   # add -p <project>, your -f overlays, and --profile cpu on a CPU host
+SVC=openrag           # openrag-cpu on a CPU host
+```
 
 Besides the [changes for every deployment](#changes-in-230-for-every-deployment),
 the Compose files change:
@@ -380,7 +384,7 @@ Your `.env` is not tracked, so checking out 2.3.0 keeps it. Compare it with the
   `MINIO_SECRET_KEY` and `CHAINLIT_AUTH_SECRET`; OpenRAG 2.3.0 refuses them.
   - `POSTGRES_PASSWORD`: change the role's password in the database first,
     while 2.2.x still runs:
-    `docker compose exec rdb psql -U <POSTGRES_USER, root by default> -d postgres -c "ALTER ROLE <user> WITH PASSWORD '<new password>'"`,
+    `$DC exec rdb psql -U <POSTGRES_USER, root by default> -d postgres -c "ALTER ROLE <user> WITH PASSWORD '<new password>'"`,
     then put the new value in `.env`.
   - `MINIO_ACCESS_KEY` and `MINIO_SECRET_KEY`: MinIO and Milvus both read them
     from `.env`, and MinIO takes the new pair at its next start. Change them in
@@ -397,7 +401,7 @@ Your `.env` is not tracked, so checking out 2.3.0 keeps it. Compare it with the
 #### Run the default-embedder check
 
 ```bash
-docker compose exec rdb psql -U <POSTGRES_USER, root by default> -d <database> -c \
+$DC exec rdb psql -U <POSTGRES_USER, root by default> -d <database> -c \
   "SELECT name FROM model_endpoints WHERE model_type = 'embedder' AND is_default"
 ```
 
@@ -422,7 +426,7 @@ lost.
 #### 2. Stop the stack and back up
 
 ```bash
-docker compose down
+$DC down
 ```
 
 `down` keeps the data, which lives in bind-mounted directories. Copy them as one
@@ -441,7 +445,7 @@ also exports individual partitions.
 ```bash
 git fetch --tags
 git checkout v2.3.0
-docker compose pull
+$DC pull
 ```
 
 `pull` fetches the released images. If you build them yourself, add `--build` to
@@ -453,15 +457,15 @@ Start the stack, so that OpenRAG applies the PostgreSQL migrations, which the
 Milvus migration needs:
 
 ```bash
-docker compose up -d
-docker compose logs -f openrag   # until the API reports it is serving
+$DC up -d
+$DC logs -f "$SVC"   # until the API reports it is serving
 ```
 
 Searches answer `503` with `VDB_SCHEMA_MIGRATION_REQUIRED` until the next step. Then
 stop OpenRAG, leaving PostgreSQL and Milvus running:
 
 ```bash
-docker compose stop openrag
+$DC stop "$SVC"
 ```
 
 #### 5. Run the Milvus migration
@@ -469,14 +473,14 @@ docker compose stop openrag
 A dry run first, which changes nothing and lists the pending migrations:
 
 ```bash
-docker compose run --no-deps --rm --entrypoint "" openrag \
+$DC run --no-deps --rm --entrypoint "" "$SVC" \
   uv run python services/persistence/migrations/milvus/migrate.py --dry-run
 ```
 
 Check that the plan routes every partition to an embedder field, then apply it:
 
 ```bash
-docker compose run --no-deps --rm --entrypoint "" openrag \
+$DC run --no-deps --rm --entrypoint "" "$SVC" \
   uv run python services/persistence/migrations/milvus/migrate.py
 ```
 
@@ -487,7 +491,7 @@ the original vectors stay in place. What it does to the data is described in
 #### 6. Start OpenRAG and verify
 
 ```bash
-docker compose up -d
+$DC up -d
 ```
 
 - `GET /ready` returns `200`, with every check `ok`.
@@ -516,26 +520,26 @@ project is `compose` unless you set one (`docker volume ls` lists it).
 
 **From the backups of step 2:**
 
-1. `docker compose down`.
+1. `$DC down`.
 2. Restore the directories copied in step 2, and remove the `openrag_venv` volume.
 3. `git checkout` the version you ran before, restore its `.env` if you changed
-   it, and `docker compose up -d`.
+   it, and `$DC up -d`.
 
 **Without the backups**, by undoing the migrations with 2.3.0 still checked out,
 in this order (the Milvus downgrade reads the PostgreSQL schema that the second
 command removes):
 
 ```bash
-docker compose stop openrag
-docker compose run --no-deps --rm --entrypoint "" openrag \
+$DC stop "$SVC"
+$DC run --no-deps --rm --entrypoint "" "$SVC" \
   uv run python services/persistence/migrations/milvus/migrate.py --downgrade --target 2
-docker compose run --no-deps --rm --entrypoint "" openrag \
+$DC run --no-deps --rm --entrypoint "" "$SVC" \
   uv run alembic -c /app/openrag/services/persistence/migrations/alembic/alembic.ini downgrade b9c0d1e2f3a4
-docker compose down
+$DC down
 docker volume rm <project>_openrag_venv
 ```
 
-Then `git checkout` the version you ran before and `docker compose up -d`.
+Then `git checkout` the version you ran before and `$DC up -d`.
 `b9c0d1e2f3a4` is the last PostgreSQL revision of 2.2.1 and 2.2.2. The Milvus
 downgrade is possible only while every embedder field in use has the same
 dimension, and the PostgreSQL one refuses if a workspace ID is shared by two

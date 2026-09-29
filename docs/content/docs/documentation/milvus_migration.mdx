@@ -270,7 +270,7 @@ It reads PostgreSQL as well as Milvus, to know which embedder each partition use
 - **Stop OpenRAG first.** After copying, the migration counts the rows again. If the count moved, something was writing: it stops before dropping `vector`, and you run it again once the writes have stopped.
 - **A failed run can be run again.** Until its last step drops `vector`, the original vectors stay in place. By then it has already added the per-embedder fields and rewritten each chunk's metadata, with the rounding described below. Once `vector` is dropped, `--downgrade --target 2` copies the vectors back into it, and is possible only while every embedder field in use has the same dimension.
 - **Rows of a partition PostgreSQL does not know** are already unreachable from OpenRAG, and lose their vector.
-- **Integers above 2^53** in a chunk's metadata come back rounded: the copy rewrites the metadata as floating-point numbers. PostgreSQL keeps each file's original upload metadata.
+- **Integers above 2^53** in a chunk's metadata come back rounded: the copy rewrites the metadata as floating-point numbers. Section IDs (`section_id`, `prev_section_id`, `next_section_id`) are the exception: the copy folds them below 2^53 first, which keeps each chunk linked to its neighbours. PostgreSQL keeps each file's original upload metadata.
 - **Development builds from 21 to 28 September 2026** ran a copy that rounded chunk section IDs. The migration does not repair a collection they already migrated; re-index the files indexed before it.
 :::
 
@@ -294,7 +294,7 @@ docker compose -p <project> -f infra/compose/docker-compose.yaml run --no-deps -
 
 The migration runner is a file, not a package — pass the full path to `migrate.py`, and keep PostgreSQL and Milvus running.
 
-The migration scripts ship **inside the image**. If you pull released images, `docker compose pull` fetches the version you are moving to; if you build them from this checkout, add `--build` to the `run` and `up` commands below. Either way, check that the `Discovered N migration(s)` line of the dry run lists the migration you expect: if it does not, the image is stale.
+The migration scripts ship **inside the image**. If you pull released images, check out the release you are moving to first: its Compose file names that release's images, which `docker compose pull` then fetches; if you build them from this checkout, add `--build` to the `run` and `up` commands below. Either way, check that the `Discovered N migration(s)` line of the dry run lists the migration you expect: if it does not, the image is stale.
 :::
 
 ### Step 1 — Start PostgreSQL and Milvus only
