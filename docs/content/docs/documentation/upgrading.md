@@ -644,15 +644,24 @@ project is `compose` unless you set one (`docker volume ls` lists it).
 **From the backups of step 2:**
 
 1. `$DC down`.
-2. Restore the directories copied in step 2, and remove the `openrag_venv` volume.
+2. Restore the directories copied in step 2: remove each current directory first,
+   then copy the backup back with `sudo cp -a`. Copying over a directory that
+   still exists merges the two, which corrupts PostgreSQL and etcd. Then remove
+   the `openrag_venv` volume: `docker volume rm <project>_openrag_venv`.
 3. `git checkout` the version you ran before, restore the `.env` you copied aside,
    and `$DC up -d`.
 
 **Without the backups**, by undoing the migrations with 2.3.0 still checked out.
-This way works only when `POSTGRES_DATABASE` is unset: the Alembic command always
-targets `partitions_for_collection_<VDB_COLLECTION_NAME>`. It also needs every
-check below to pass **before** you start, since a refusal halfway leaves Milvus
-back at version 2 and PostgreSQL still at 2.3.0, which neither version runs on:
+This way works only when `POSTGRES_DATABASE` is unset or equal to
+`partitions_for_collection_<VDB_COLLECTION_NAME>`: the Alembic command always
+targets that database. It also needs every check below to pass **before** you
+start, since a refusal halfway leaves Milvus back at version 2 and PostgreSQL
+still at 2.3.0, which neither version runs on:
+
+- the Milvus migration of step 5 completed: its dry run says the collection is up
+  to date. A run that failed stops at version 2 with the new fields already added
+  and the metadata rewritten, and the downgrade to version 2 then does nothing.
+  Run the migration again to completion first, or roll back from the backups;
 
 - no workspace ID shared by two partitions, which 2.3.0 allows and the PostgreSQL
   downgrade refuses:
@@ -664,11 +673,14 @@ back at version 2 and PostgreSQL still at 2.3.0, which neither version runs on:
 - the collection has fewer than 10 vector fields, since the downgrade adds
   `vector` back.
 
-Then, in this order (the Milvus downgrade reads the PostgreSQL schema that the
-second command removes):
+A dry run of the Milvus downgrade checks the dimensions and the routing without
+changing anything; the other checks are yours. Then, in this order (the Milvus
+downgrade reads the PostgreSQL schema that the third command removes):
 
 ```bash
 $DC stop "$SVC"
+$DC run --no-deps --rm --entrypoint "" "$SVC" \
+  uv run --no-dev python services/persistence/migrations/milvus/migrate.py --downgrade --target 2 --dry-run
 $DC run --no-deps --rm --entrypoint "" "$SVC" \
   uv run --no-dev python services/persistence/migrations/milvus/migrate.py --downgrade --target 2
 $DC run --no-deps --rm --entrypoint "" "$SVC" \
