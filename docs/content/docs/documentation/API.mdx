@@ -782,13 +782,13 @@ until the final chunks, which carry the whole object; an error chunk carries non
 
 | Key | Content |
 |---|---|
-| `sources` | The sources the model cited, or every presented source when it reported no citations: the answer has no `[Sources: …]` tag, or the request asked for structured output, which skips citation reporting. An explicit `[Sources: none]` gives an empty list. Kept for existing clients. |
+| `sources` | The sources the model cited, or every presented source when it reported no citations: the answer has neither a `[Sources: …]` tag nor an inline `[Source N]` marker, or the request skipped citation reporting (structured output, direct LLM or web search without results). An explicit `[Sources: none]` gives an empty list. Kept for existing clients. |
 | `presented_sources` | Every source shown to the model, whether cited or not. |
-| `cited_sources` | Only the sources the model cited; empty when it cited none or gave no `[Sources: …]` tag. |
+| `cited_sources` | Only the sources the model cited, in a `[Sources: …]` tag or inline `[Source N]` markers; empty when it cited none. |
 | `citations_reported` | `true` when the model reported its citations, including `[Sources: none]`; `false` when `sources` fell back to every presented source. An empty `[Sources: ]` counts as no tag. |
 | `all_retrieved_sources` | Every source retrieval returned, including those that did not fit in the prompt. Only when the request sets `metadata.include_all_retrieved_sources: true`. |
-| `attachments` | The attached file IDs actually used, when the request sets `metadata.attachments`. |
-| `truncated` | `true` on a streamed response whose upstream stream ended without `[DONE]`: the answer may be cut short. Absent otherwise. |
+| `attachments` | Chat completions only: the attached file IDs actually used, when the request sets `metadata.attachments`. |
+| `truncated` | Streamed chat completions only: `true` when the upstream stream ended without `[DONE]`, so the answer may be cut short. Absent otherwise. |
 
 A document source nests the chunk's metadata under `chunk` (since 2.3.0); the keys
 beside it are computed by the server:
