@@ -279,7 +279,7 @@ It reads PostgreSQL as well as Milvus, to know which embedder each partition use
 - **A failed run can be run again.** Until its last step drops `vector`, the original vectors stay in place. By then it has already added the per-embedder fields and rewritten each chunk's metadata, with the rounding described below. Once `vector` is dropped, `--downgrade --target 2` copies the vectors back into it; see [Rollback](#rollback) for when that is possible.
 - **Rows of a partition PostgreSQL does not know** are already unreachable from OpenRAG, and lose their vector.
 - **Integers above 2^53** in a chunk's metadata come back rounded: the copy rewrites the metadata as floating-point numbers. Section IDs (`section_id`, `prev_section_id`, `next_section_id`) are the exception: the copy folds them below 2^53 first, which keeps each chunk linked to its neighbours. PostgreSQL keeps each file's original upload metadata.
-- **Development builds from 21 to 28 September 2026** ran a copy that rounded chunk section IDs. The migration does not repair a collection they already migrated; re-index the files indexed before it.
+- **Development builds from 22 to 28 September 2026** ran a copy that rounded chunk section IDs. The migration does not repair a collection they already migrated; re-index the files indexed before it.
 :::
 
 For an upgrade to 2.3.0, follow [Upgrading OpenRAG](/openrag/documentation/upgrading/): the [Kubernetes](/openrag/documentation/upgrading/#22x-to-230-on-kubernetes) procedure runs the migration from the upgraded OpenRAG pod, the [Docker Compose](/openrag/documentation/upgrading/#22x-to-230-with-docker-compose) one with `docker compose run`.
@@ -299,13 +299,13 @@ The migration scripts ship **inside the image**. If you pull released images, ch
 
 ### Step 1 — Start PostgreSQL and Milvus only
 
-Version 3 reads PostgreSQL as well as Milvus, so start both, without OpenRAG:
+Version 3 reads PostgreSQL as well as Milvus, so start both, without OpenRAG. For version 3, start the new OpenRAG version once before this step, as [Version 3](#version-3--one-vector-field-per-embedder) explains: the PostgreSQL migration it applies allocates the fields the Milvus migration fills.
 
 ```bash
 docker compose up -d rdb milvus
 ```
 
-Wait until both are healthy:
+Wait until Milvus is healthy and PostgreSQL is running (`rdb` has no health check):
 
 ```bash
 docker compose ps rdb milvus

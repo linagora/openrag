@@ -83,7 +83,8 @@ Changing a secret of a deployment that already holds data needs care:
 
 A PostgreSQL migration pins the partitions that hold files and follow the
 `default` embedder to the endpoint marked as default. If such partitions exist and
-there is not exactly one default embedder, it stops, and OpenRAG answers `503`. Run this query in OpenRAG's database before the window (the
+there is not exactly one default embedder, it stops: OpenRAG answers `503`, or,
+with the Helm migration Job, `helm upgrade` fails. Run this query in OpenRAG's database before the window (the
 commands for each deployment are below):
 
 ```sql
@@ -200,8 +201,10 @@ kubectl exec -n "$NS" "$PG_POD" -- sh -c \
 ```
 
 `<database>` is your `POSTGRES_DATABASE`, or `partitions_for_collection_<VDB_COLLECTION_NAME>`
-when it is unset (`partitions_for_collection_vdb_test` with the defaults). With an
-external PostgreSQL, run the query with your usual client.
+when it is unset (`partitions_for_collection_vdb_test` with the defaults). The
+password file is the bundled chart's default; with `postgresql.auth.existingSecret`
+and a custom key, adjust its name. With an external PostgreSQL, run the query
+with your usual client.
 
 ### During the maintenance window
 
@@ -273,9 +276,10 @@ kubectl rollout restart -n "$NS" deploy/"$FULLNAME-openrag"
 `kubectl get raycluster -n "$NS"` prints the cluster's name if you changed
 `fullnameOverride`. A wrong name selects no pods, and Ray stays on 2.2.x.
 
-The new OpenRAG pod applies the PostgreSQL migrations when it starts, unless
-`postgresProvisioning.runMigrationsInApp` is `false`; the
-`postgresProvisioning.migrationJob` hook then runs them, if it is enabled. It then becomes Ready, but
+The new OpenRAG pod applies the PostgreSQL migrations when it starts. With
+`postgresProvisioning.runMigrationsInApp: false`, the `pre-upgrade` migration Job
+(`postgresProvisioning.migrationJob`) runs them before the pods roll instead, and
+a failing migration fails `helm upgrade`. It then becomes Ready, but
 searches answer `503` with `VDB_SCHEMA_MIGRATION_REQUIRED` and uploads fail until
 step 5: readiness does not check the Milvus schema version.
 
@@ -361,6 +365,7 @@ this repository. Run the commands from `infra/compose`, after setting these two
 variables to match how you start the stack:
 
 ```bash
+# bash; in zsh, run `setopt sh_word_split` first so that $DC splits into words
 DC="docker compose"   # add -p <project>, your -f overlays, and --profile cpu on a CPU host
 SVC=openrag           # openrag-cpu on a CPU host
 ```
