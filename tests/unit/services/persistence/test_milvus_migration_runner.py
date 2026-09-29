@@ -35,6 +35,7 @@ def runner(monkeypatch):
     module.calls = calls
     connected: list[str] = []
     module.connected = connected
+    module.stored_version = 3
 
     class FakeClient:
         def __init__(self, uri: str) -> None:
@@ -42,6 +43,9 @@ def runner(monkeypatch):
 
         def has_collection(self, name: str) -> bool:
             return True
+
+        def describe_collection(self, name: str) -> dict:
+            return {"properties": {module.SCHEMA_VERSION_PROPERTY_KEY: str(module.stored_version)}}
 
     monkeypatch.setattr(module, "MilvusClient", FakeClient)
     monkeypatch.setattr(
@@ -97,6 +101,47 @@ def test_an_upgrade_still_defaults_to_the_latest_version(runner, monkeypatch):
     _run(runner, monkeypatch)
 
     assert runner.calls == [("upgrade", latest)]
+
+
+@pytest.mark.parametrize("mode", [[], ["--downgrade"]], ids=["upgrade", "downgrade"])
+@pytest.mark.parametrize("extra_args", [[], ["--dry-run"]])
+@pytest.mark.parametrize("target", ["-1", "latest+1"])
+def test_a_target_outside_the_migrations_is_refused_before_touching_milvus(
+    runner, monkeypatch, capsys, mode, extra_args, target
+):
+    """--downgrade --target -1 selected every migration, as --target 0 does, so
+    on a version 3 collection it reached version 2's backup swap."""
+    latest = runner._discover_migrations()[-1][0]
+    value = str(latest + 1) if target == "latest+1" else target
+
+    with pytest.raises(SystemExit) as exc:
+        _run(runner, monkeypatch, *mode, *extra_args, "--target", value)
+
+    assert exc.value.code == 2
+    assert f"--target must be between 0 and {latest}" in capsys.readouterr().err
+    assert runner.calls == []
+    assert runner.connected == []
+
+
+@pytest.mark.parametrize("extra_args", [[], ["--dry-run"]])
+def test_a_downgrade_above_the_collections_version_is_refused(runner, monkeypatch, extra_args):
+    runner.stored_version = 2
+
+    with pytest.raises(SystemExit) as exc:
+        _run(runner, monkeypatch, "--downgrade", *extra_args, "--target", "3")
+
+    assert exc.value.code == 2
+    assert runner.calls == []
+
+
+def test_a_downgrade_to_the_collections_own_version_is_allowed(runner, monkeypatch):
+    """Control for the refusal above: the boundary itself is a no-op downgrade,
+    left to the runner, which reports that there is nothing to do."""
+    runner.stored_version = 2
+
+    _run(runner, monkeypatch, "--downgrade", "--target", "2")
+
+    assert runner.calls == [("downgrade", 2)]
 
 
 # ---------------------------------------------------------------------------

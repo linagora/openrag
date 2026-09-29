@@ -184,6 +184,10 @@ def main() -> None:
     if args.downgrade and args.target is None:
         parser.error("--downgrade needs --target, the schema version to go back to (e.g. --target 2).")
     target_version = latest_version if args.target is None else args.target
+    # A version outside the migrations' range is a typo, never a plan: a
+    # downgrade to -1 reverts every migration, version 2's backup swap included.
+    if not 0 <= target_version <= latest_version:
+        parser.error(f"--target must be between 0 and {latest_version}, got {target_version}.")
 
     if not migrations:
         logger.warning("No migration files found in this directory.")
@@ -205,6 +209,12 @@ def main() -> None:
         sys.exit(1)
 
     if args.downgrade:
+        current = _get_stored_version(client, collection_name)
+        if target_version > current:
+            logger.error(
+                f"Cannot downgrade to version {target_version}: the collection is at version {current}. Nothing was changed."
+            )
+            sys.exit(2)
         run_downgrade(client, collection_name, migrations, target_version, dry_run=args.dry_run)
     else:
         run_upgrade(client, collection_name, migrations, target_version, dry_run=args.dry_run)
