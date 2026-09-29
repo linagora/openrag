@@ -27,10 +27,10 @@ while nothing writes to it, and searches fail until it is.
 | Change | Impact on an existing deployment |
 |---|---|
 | Milvus schema version 3: one vector field per embedder | Manual migration, run once. Until it runs, every search answers `503` while OpenRAG reports ready, and uploads fail. The old `vector` field is dropped. |
-| New PostgreSQL migrations | Applied automatically when OpenRAG 2.3.0 starts. |
+| New PostgreSQL migrations | Applied when OpenRAG 2.3.0 starts, or on Kubernetes by the migration Job when you enabled it. |
 | Chat and text completion responses: `extra` and its source entries | `extra` is a JSON object instead of a JSON-encoded string, and each document source puts the chunk's metadata under `chunk`. Clients must be updated. |
 | `GET /metrics` | The admin token is refused (`403`); scrapers need `METRICS_TOKEN`. |
-| Secret checks | Secrets shorter than 12 characters, or values the project publishes as examples, stop OpenRAG at startup. |
+| Secret checks | Five credentials shorter than 12 characters, or any secret set to a value the project publishes as an example, stop OpenRAG at startup. |
 | Ray | Indexer actors change protocol: tasks running when the old version stops are lost. |
 | Readiness | `GET /ready` is new: it fails while PostgreSQL, Milvus or Ray is unreachable, and reports the model endpoints. |
 | vLLM embedder | Runs on vLLM `v0.30.0` with `--runner pooling --convert embed`. |
@@ -38,8 +38,8 @@ while nothing writes to it, and searches fail until it is.
 
 ### Update API clients
 
-In chat and text completion responses, streamed or not, `extra` is now a JSON
-object. Up to 2.2.2 it was a JSON-encoded string that clients had to parse with
+In chat completion responses, streamed or not, and in text completion responses,
+`extra` is now a JSON object. Up to 2.2.2 it was a JSON-encoded string that clients had to parse with
 `json.loads`. Its keys are unchanged; they are listed in
 [API — Response: the `extra` field](/openrag/documentation/api/#response-the-extra-field).
 
@@ -87,6 +87,10 @@ Changing a secret of a deployment that already holds data needs care:
   output of `openssl rand -hex 16`: the commands below pass it inside quotes.
 - **`AUTH_TOKEN`** is the admin user's token: clients using it need the new value.
 - **`CHAINLIT_AUTH_SECRET`**: changing it signs out every chat session.
+- **`GRAFANA_ADMIN_PASSWORD`** (Compose monitoring overlay): like PostgreSQL,
+  Grafana sets the admin password only when it creates its database. Change it
+  in Grafana too, once the overlay runs:
+  `$DC exec grafana grafana cli admin reset-admin-password '<new password>'`.
 
 ### Check the default embedder
 
@@ -147,7 +151,19 @@ the chart changes:
   images serve: upgrade the chart and the images together.
 - **KubeRay.** A KubeRay cluster keeps its old pods until they are deleted.
 - **vLLM engines.** The embedder and LLM engines are pinned to `v0.30.0-cu129`.
-- **Logs.** The `<FULLNAME>-logs` volume is no longer mounted.
+- **Embedder engine.** It now runs with `maxModelLen: 2048` and
+  `gpuMemoryUtilization: 0.1`, instead of the model's own maximum length and 0.3.
+  vLLM rejects requests from an embedder configured for longer inputs: if you
+  raised `MAX_MODEL_LEN` or an endpoint's `extra.max_model_len` above 2047, raise
+  `maxModelLen` with it.
+- **Bundled PostgreSQL.** Its own network policy, which let any source reach port
+  5432, is off: PostgreSQL gets the chart's default-deny rules, and clients outside
+  the release's namespace no longer reach it.
+- **Metrics.** `openrag.metrics.prometheusAnnotations` is on by default. A
+  Prometheus that discovers pods by annotation starts scraping `GET /metrics`, and
+  gets `403` until its scrape job sends `METRICS_TOKEN`.
+- **Logs.** The `<FULLNAME>-logs` volume is no longer mounted, and `LOG_FORMAT`
+  defaults to `json`; set `env.config.LOG_FORMAT: text` for the previous format.
 
 ### Before the maintenance window
 
@@ -174,7 +190,7 @@ an existing release can hit:
 - **`ray.enabled: true` without Ray Serve.** The API must be pointed at the
   cluster with `env.config.RAY_ADDRESS`, even when `env.existingSecret` already
   carries it: the chart cannot read that Secret. The error prints the address.
-- **`monitoring.bundled: true`** needs `env.secrets.METRICS_TOKEN` when the chart
+- **`monitoring.bundled: true`**, new in this chart, needs `env.secrets.METRICS_TOKEN` when the chart
   renders the Secret itself; with `env.existingSecret` or an external provider,
   that Secret must carry it.
 
@@ -403,9 +419,9 @@ Then let traffic back in.
 
 #### 7. Clean up
 
-The `<FULLNAME>-logs` volume is no longer mounted. The chart keeps it
-(`helm.sh/resource-policy: keep`), so delete it once you have kept what you need
-from it:
+The `<FULLNAME>-logs` volume is no longer mounted. With the default
+`persistence.annotations`, the chart keeps it (`helm.sh/resource-policy: keep`),
+so delete it once you have kept what you need from it:
 
 ```bash
 kubectl delete pvc -n "$NS" "$FULLNAME-logs"
