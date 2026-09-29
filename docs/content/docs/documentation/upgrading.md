@@ -6,7 +6,8 @@ tableOfContents:
 
 Each upgrade has a section for what changes in every deployment, followed by the
 procedure for Kubernetes and for Docker Compose. Read all of it for the version you
-are moving to before you start, and skip none of the versions in between.
+are moving to before you start. The 2.3.0 sections start from 2.2.1 or 2.2.2; from
+an earlier release, upgrade to 2.2.2 first.
 
 ## Changes in 2.3.0 for every deployment
 
@@ -23,19 +24,20 @@ while nothing writes to it, and searches fail until it is.
 |---|---|
 | Milvus schema version 3: one vector field per embedder | Manual migration, run once. Until it runs, every search answers `503` while OpenRAG reports ready, and uploads fail. The old `vector` field is dropped. |
 | New PostgreSQL migrations | Applied automatically when OpenRAG 2.3.0 starts. |
-| Chat completion response: `extra` and its source entries | `extra` is a JSON object instead of a JSON-encoded string, and each document source puts the chunk's metadata under `chunk`. Clients must be updated. |
+| Chat and text completion responses: `extra` and its source entries | `extra` is a JSON object instead of a JSON-encoded string, and each document source puts the chunk's metadata under `chunk`. Clients must be updated. |
 | `GET /metrics` | The admin token is refused (`403`); scrapers need `METRICS_TOKEN`. |
 | Secret checks | Secrets shorter than 12 characters, or values the project publishes as examples, stop OpenRAG at startup. |
 | Ray | Indexer actors change protocol: tasks running when the old version stops are lost. |
-| Readiness | `GET /ready` also fails while PostgreSQL, Milvus or Ray is unreachable. |
+| Readiness | `GET /ready` is new: it fails while PostgreSQL, Milvus or Ray is unreachable, and reports the model endpoints. |
 | vLLM embedder | Runs on vLLM `v0.30.0` with `--runner pooling --convert embed`. |
 | Logs | Written to stderr only; the `logs` volume is no longer mounted. |
 
 ### Update API clients
 
-In a chat completion response, `extra` is now a JSON object. Up to 2.2.2 it was a
-JSON-encoded string that clients had to parse with `json.loads`. Its keys are
-unchanged (`sources`, `presented_sources`, `cited_sources`, `citations_reported`).
+In chat and text completion responses, streamed or not, `extra` is now a JSON
+object. Up to 2.2.2 it was a JSON-encoded string that clients had to parse with
+`json.loads`. Its keys are unchanged; they are listed in
+[API — Response: the `extra` field](/openrag/documentation/api/#response-the-extra-field).
 
 Each document entry in those lists now nests the chunk's metadata:
 
@@ -79,9 +81,9 @@ Changing a secret of a deployment that already holds data needs care:
 
 ### Check the default embedder
 
-A PostgreSQL migration pins partitions that follow the `default` embedder to the
-endpoint marked as default. It stops, and OpenRAG answers `503`, if there is not
-exactly one. Run this query in OpenRAG's database before the window (the
+A PostgreSQL migration pins the partitions that hold files and follow the
+`default` embedder to the endpoint marked as default. If such partitions exist and
+there is not exactly one default embedder, it stops, and OpenRAG answers `503`. Run this query in OpenRAG's database before the window (the
 commands for each deployment are below):
 
 ```sql
@@ -89,16 +91,17 @@ SELECT name FROM model_endpoints WHERE model_type = 'embedder' AND is_default;
 ```
 
 One row is expected; otherwise mark one embedder endpoint as the default, in the
-admin UI or through the admin API, first.
+admin UI or through the admin API, first. The pinning is kept if you roll back.
 
 ### If you ran a development build
 
-A deployment of the development branch between 21 and 28 September 2026 may
-already have migrated its collection to version 3 with a copy that rounded chunk
-section IDs, which breaks neighbour-chunk expansion. The migration does not repair
-them. After upgrading, re-index the files that were indexed before that migration.
-The migration's dry run prints the collection's current version
-(`Current schema version: 3` for such a deployment, `2` for 2.2.1 and 2.2.2).
+A collection migrated to version 3 by a build of the development branch from 22
+to 28 September 2026 went through a copy that rounded chunk section IDs, which
+breaks neighbour-chunk expansion. The migration does not repair them: after
+upgrading, re-index the files that were indexed before that migration. The
+migration's dry run prints the collection's current version, `2` for 2.2.1 and
+2.2.2; a `3` means a development build already migrated it, and whether that copy
+rounded the IDs depends on the date it ran.
 
 ## 2.2.x to 2.3.0 on Kubernetes
 
@@ -123,6 +126,7 @@ FULLNAME=openrag           # fullnameOverride; `kubectl get deploy -n $NS` shows
 CHART_VERSION=<2.3.0 chart version, from the release notes>
 VALUES=my-values.yaml      # the values file your release uses
 ADMIN_TOKEN=<an admin API token, e.g. AUTH_TOKEN>
+PG_POD=openrag-postgresql-0   # the bundled PostgreSQL pod: <postgresql.fullnameOverride>-0
 ```
 
 Besides the [changes for every deployment](#changes-in-230-for-every-deployment),
@@ -131,7 +135,7 @@ the chart changes:
 - **Probes.** Readiness moves from `/health_check` to `/ready`, which only 2.3.0
   images serve: upgrade the chart and the images together.
 - **KubeRay.** A KubeRay cluster keeps its old pods until they are deleted.
-- **vLLM engines** are pinned to `v0.30.0-cu129`.
+- **vLLM engines.** The embedder and LLM engines are pinned to `v0.30.0-cu129`.
 - **Logs.** The `<FULLNAME>-logs` volume is no longer mounted.
 
 ### Before the maintenance window
@@ -145,14 +149,20 @@ helm template "$RELEASE" oci://ghcr.io/linagora/openrag-stack \
   --version "$CHART_VERSION" -n "$NS" -f "$VALUES" > /dev/null
 ```
 
-A failure here would also fail `helm upgrade`. The ones an existing release can hit:
+Pass the same `--set` flags or secret values your install used: `-f "$VALUES"`
+alone does not carry a `--set postgresql.auth.password=…` given at install time,
+and the render then fails on the missing secret. The same applies to the
+`helm upgrade` in step 4. A failure here would also fail `helm upgrade`. The ones
+an existing release can hit:
 
 - **Secrets** that break the [rules above](#secrets). With the bundled
   PostgreSQL, the chart reads `POSTGRES_PASSWORD` from `postgresql.auth.password`.
 - **`ray.enabled: true` without Ray Serve.** The API must be pointed at the
   cluster with `env.config.RAY_ADDRESS`, even when `env.existingSecret` already
   carries it: the chart cannot read that Secret. The error prints the address.
-- **`monitoring.bundled: true`** needs `env.secrets.METRICS_TOKEN`.
+- **`monitoring.bundled: true`** needs `env.secrets.METRICS_TOKEN` when the chart
+  renders the Secret itself; with `env.existingSecret` or an external provider,
+  that Secret must carry it.
 
 If your secrets come from `env.existingSecret` or an external secrets provider, the
 chart cannot check them, and OpenRAG does instead, at startup. Check those values
@@ -184,7 +194,7 @@ With the bundled PostgreSQL (`root` is the chart's default
 `postgresql.auth.username`):
 
 ```bash
-kubectl exec -n "$NS" "$FULLNAME-postgresql-0" -- sh -c \
+kubectl exec -n "$NS" "$PG_POD" -- sh -c \
   'PGPASSWORD="$(cat /opt/bitnami/postgresql/secrets/password)" psql -U root -d <database> -c \
    "SELECT name FROM model_endpoints WHERE model_type = '"'"'embedder'"'"' AND is_default"'
 ```
@@ -212,7 +222,7 @@ Tasks still running when the pods restart are lost.
 Take the backups as one set, after step 1:
 
 - PostgreSQL, for example
-  `kubectl exec -n "$NS" "$FULLNAME-postgresql-0" -- sh -c 'PGPASSWORD="$(cat /opt/bitnami/postgresql/secrets/password)" pg_dump -U root -Fc <database>' > openrag.dump`
+  `kubectl exec -n "$NS" "$PG_POD" -- sh -c 'PGPASSWORD="$(cat /opt/bitnami/postgresql/secrets/password)" pg_dump -U root -Fc <database>' > openrag.dump`
 - Milvus: snapshot the volumes of its etcd and its object storage (MinIO or your
   S3 bucket) with your storage's snapshot mechanism.
 
@@ -263,8 +273,9 @@ kubectl rollout restart -n "$NS" deploy/"$FULLNAME-openrag"
 `kubectl get raycluster -n "$NS"` prints the cluster's name if you changed
 `fullnameOverride`. A wrong name selects no pods, and Ray stays on 2.2.x.
 
-The new OpenRAG pod applies the PostgreSQL migrations when it starts, unless you
-run them through `postgresProvisioning.migrationJob`. It then becomes Ready, but
+The new OpenRAG pod applies the PostgreSQL migrations when it starts, unless
+`postgresProvisioning.runMigrationsInApp` is `false`; the
+`postgresProvisioning.migrationJob` hook then runs them, if it is enabled. It then becomes Ready, but
 searches answer `503` with `VDB_SCHEMA_MIGRATION_REQUIRED` and uploads fail until
 step 5: readiness does not check the Milvus schema version.
 
@@ -333,13 +344,15 @@ Rolling back the images alone is not enough: 2.2.x starts, but every call fails,
 because it does not know the newer PostgreSQL schema and its searches expect the
 `vector` field that step 5 dropped. Restore the backup set from step 2 instead:
 
-1. Scale OpenRAG to zero.
+1. Scale OpenRAG to zero. With `ray.enabled: true`, also delete the Ray cluster,
+   whose pods mount the same Python-packages volume as OpenRAG:
+   `kubectl delete raycluster -n "$NS" "$FULLNAME-raycluster"` (the rollback
+   recreates it).
 2. Restore PostgreSQL from the dump, and Milvus's etcd and object storage from their snapshots.
 3. Delete the `<FULLNAME>-venv` PVC, which holds the Python packages 2.3.0
-   installed. The rollback recreates it empty, and 2.2.x installs its own at
-   startup.
-4. `helm rollback "$RELEASE" <previous revision> -n "$NS"`, and with `ray.enabled`,
-   delete the Ray pods again so they come back on the old image.
+   installed, and wait until `kubectl get pvc -n "$NS"` no longer lists it. The
+   rollback recreates it empty, and 2.2.x installs its own at startup.
+4. `helm rollback "$RELEASE" <previous revision> -n "$NS"`.
 
 ## 2.2.x to 2.3.0 with Docker Compose
 
@@ -371,13 +384,14 @@ the Compose files change:
 nvidia-smi --query-gpu=driver_version --format=csv,noheader
 ```
 
-Below 580, update the driver before upgrading: the bundled vLLM containers would
-not start.
+This applies to GPU hosts that run the bundled vLLM. Below 580, update the driver
+before upgrading: the bundled vLLM containers would not start.
 
 #### Update `.env`
 
-Your `.env` is not tracked, so checking out 2.3.0 keeps it. Compare it with the
-2.3.0 `infra/compose/.env.example` and change:
+Your `.env` is not tracked, so checking out 2.3.0 keeps it. Copy it aside first
+(`cp .env .env.2.2.x`), which the rollback needs, then compare it with the 2.3.0
+`infra/compose/.env.example` and change:
 
 - **Secrets** that break the [rules above](#secrets). The 2.2.x `.env.example`
   shipped example values for `AUTH_TOKEN`, `POSTGRES_PASSWORD`, `MINIO_ACCESS_KEY`,
@@ -389,11 +403,13 @@ Your `.env` is not tracked, so checking out 2.3.0 keeps it. Compare it with the
   - `MINIO_ACCESS_KEY` and `MINIO_SECRET_KEY`: MinIO and Milvus both read them
     from `.env`, and MinIO takes the new pair at its next start. Change them in
     `.env` only, and restart both together, which the upgrade does.
-- **`EMBEDDER_MODEL_NAME`.** If your `.env` sets neither it nor the legacy
-  `EMBEDDING_MODEL`, the embedder switches to `Qwen/Qwen3-Embedding-0.6B`, and the
-  documents you indexed no longer match: set it to the model your data was
-  indexed with, `jinaai/jina-embeddings-v3` unless you chose another. When
-  `EMBEDDING_MODEL` is set, it takes precedence. See the
+- **`EMBEDDER_MODEL_NAME`.** The bundled vLLM reads only this variable, and its
+  default is now `Qwen/Qwen3-Embedding-0.6B`. If your `.env` does not set it, set
+  it to the model your data was indexed with, `jinaai/jina-embeddings-v3` unless
+  you chose another; if you also set the legacy `EMBEDDING_MODEL`, give both the
+  same value. Otherwise vLLM serves Qwen while OpenRAG's saved endpoint still asks
+  for the model you indexed with: every embedding call fails, and `/ready` reports
+  `checks.embedder: unavailable`. See the
   [`EMBEDDER_MODEL_NAME` row](/openrag/documentation/env_vars/).
 - **`METRICS_TOKEN`**, if you scrape `GET /metrics` or run the monitoring overlay,
   which refuses to start without it.
@@ -433,7 +449,8 @@ $DC down
 set, preserving ownership (for example with `sudo cp -a`):
 
 - PostgreSQL: `DB_VOLUME` (`db/` at the repository root by default);
-- Milvus, etcd and MinIO: `MILVUS_VOLUME_DIRECTORY` (`infra/compose/volumes/` by default);
+- Milvus, etcd and MinIO: `MILVUS_VOLUME_DIRECTORY` (`infra/compose/milvus/volumes/`
+  by default; a relative value is resolved from `infra/compose/milvus/`);
 - uploaded files: `DATA_VOLUME` (`data/` at the repository root by default).
 
 If you run Milvus with named volumes (`MILVUS_COMPOSE=milvus/milvus.named-volumes.yaml`),
@@ -474,14 +491,14 @@ A dry run first, which changes nothing and lists the pending migrations:
 
 ```bash
 $DC run --no-deps --rm --entrypoint "" "$SVC" \
-  uv run python services/persistence/migrations/milvus/migrate.py --dry-run
+  uv run --no-dev python services/persistence/migrations/milvus/migrate.py --dry-run
 ```
 
 Check that the plan routes every partition to an embedder field, then apply it:
 
 ```bash
 $DC run --no-deps --rm --entrypoint "" "$SVC" \
-  uv run python services/persistence/migrations/milvus/migrate.py
+  uv run --no-dev python services/persistence/migrations/milvus/migrate.py
 ```
 
 A failed run can be run again: until its last step drops the old `vector` field,
@@ -506,8 +523,9 @@ Then let traffic back in.
 
 - The `logs/` directory at the repository root (`LOG_VOLUME`), once you have kept
   what you need from it.
-- On a CPU host, the locally built `openrag-vllm-openai-cpu` image:
-  `docker image rm openrag-vllm-openai-cpu`.
+- On a CPU host, once you no longer need to roll back, the locally built
+  `openrag-vllm-openai-cpu` image: `docker image rm openrag-vllm-openai-cpu`. A
+  rollback to 2.2.x would otherwise rebuild it from `extern/vllm`.
 
 ### Rolling back a Compose upgrade
 
@@ -522,25 +540,38 @@ project is `compose` unless you set one (`docker volume ls` lists it).
 
 1. `$DC down`.
 2. Restore the directories copied in step 2, and remove the `openrag_venv` volume.
-3. `git checkout` the version you ran before, restore its `.env` if you changed
-   it, and `$DC up -d`.
+3. `git checkout` the version you ran before, restore the `.env` you copied aside,
+   and `$DC up -d`.
 
-**Without the backups**, by undoing the migrations with 2.3.0 still checked out,
-in this order (the Milvus downgrade reads the PostgreSQL schema that the second
-command removes):
+**Without the backups**, by undoing the migrations with 2.3.0 still checked out.
+This way works only when `POSTGRES_DATABASE` is unset: the Alembic command always
+targets `partitions_for_collection_<VDB_COLLECTION_NAME>`. It also needs every
+check below to pass **before** you start, since a refusal halfway leaves Milvus
+back at version 2 and PostgreSQL still at 2.3.0, which neither version runs on:
+
+- no workspace ID shared by two partitions, which 2.3.0 allows and the PostgreSQL
+  downgrade refuses:
+  `$DC exec rdb psql -U <POSTGRES_USER> -d <database> -c "SELECT workspace_id FROM workspaces GROUP BY workspace_id HAVING COUNT(*) > 1"`
+  returns no row;
+- every embedder field in use has the same dimension;
+- every partition holding files still resolves, through PostgreSQL, to an
+  embedder field: no embedder deleted and no default changed since the upgrade;
+- the collection has fewer than 10 vector fields, since the downgrade adds
+  `vector` back.
+
+Then, in this order (the Milvus downgrade reads the PostgreSQL schema that the
+second command removes):
 
 ```bash
 $DC stop "$SVC"
 $DC run --no-deps --rm --entrypoint "" "$SVC" \
-  uv run python services/persistence/migrations/milvus/migrate.py --downgrade --target 2
+  uv run --no-dev python services/persistence/migrations/milvus/migrate.py --downgrade --target 2
 $DC run --no-deps --rm --entrypoint "" "$SVC" \
-  uv run alembic -c /app/openrag/services/persistence/migrations/alembic/alembic.ini downgrade b9c0d1e2f3a4
+  uv run --no-dev alembic -c /app/openrag/services/persistence/migrations/alembic/alembic.ini downgrade b9c0d1e2f3a4
 $DC down
 docker volume rm <project>_openrag_venv
 ```
 
-Then `git checkout` the version you ran before and `$DC up -d`.
-`b9c0d1e2f3a4` is the last PostgreSQL revision of 2.2.1 and 2.2.2. The Milvus
-downgrade is possible only while every embedder field in use has the same
-dimension, and the PostgreSQL one refuses if a workspace ID is shared by two
-partitions, which 2.3.0 allows. Files indexed after the upgrade are kept.
+Then `git checkout` the version you ran before, restore the `.env` you copied
+aside, and `$DC up -d`. `b9c0d1e2f3a4` is the last PostgreSQL revision of 2.2.1 and
+2.2.2. Files indexed after the upgrade are kept.

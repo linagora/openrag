@@ -260,22 +260,6 @@ This is the last rebuild. Once `enable_match` is gone, a later analyzer change i
 - An un-migrated deployment still boots and reports ready, but the application checks the schema version on both the search and the indexing path: searches answer `503` (`VDB_SCHEMA_MIGRATION_REQUIRED`) and uploads fail until the migration runs.
 :::
 
-### Version 3 — one vector field per embedder
-
-Schema version 3 moves every chunk's vector out of the shared `vector` field into a field owned by the embedder its partition uses, then drops `vector`. Chunk IDs, text, metadata and the BM25 `sparse` vector stay in place: the collection is not rebuilt.
-
-It reads PostgreSQL as well as Milvus, to know which embedder each partition uses and which field that embedder owns. That field is allocated by a PostgreSQL migration of the same release, so **start the new OpenRAG version once** before running it, and keep both databases up while it runs (`docker compose up -d rdb milvus` under Compose). Anything it cannot route stops it before it changes anything.
-
-:::caution[Plan for version 3]
-- **Stop OpenRAG first.** After copying, the migration counts the rows again. If the count moved, something was writing: it stops before dropping `vector`, and you run it again once the writes have stopped.
-- **A failed run can be run again.** Until its last step drops `vector`, the original vectors stay in place. By then it has already added the per-embedder fields and rewritten each chunk's metadata, with the rounding described below. Once `vector` is dropped, `--downgrade --target 2` copies the vectors back into it, and is possible only while every embedder field in use has the same dimension.
-- **Rows of a partition PostgreSQL does not know** are already unreachable from OpenRAG, and lose their vector.
-- **Integers above 2^53** in a chunk's metadata come back rounded: the copy rewrites the metadata as floating-point numbers. Section IDs (`section_id`, `prev_section_id`, `next_section_id`) are the exception: the copy folds them below 2^53 first, which keeps each chunk linked to its neighbours. PostgreSQL keeps each file's original upload metadata.
-- **Development builds from 21 to 28 September 2026** ran a copy that rounded chunk section IDs. The migration does not repair a collection they already migrated; re-index the files indexed before it.
-:::
-
-For an upgrade to 2.3.0, follow [Upgrading OpenRAG](/openrag/documentation/upgrading/): the [Kubernetes](/openrag/documentation/upgrading/#22x-to-230-on-kubernetes) procedure runs the migration from the upgraded OpenRAG pod, the [Docker Compose](/openrag/documentation/upgrading/#22x-to-230-with-docker-compose) one with `docker compose run`.
-
 Once validated, drop the backup:
 
 ```python
@@ -284,12 +268,28 @@ from pymilvus import MilvusClient
 MilvusClient(uri="http://localhost:19530").drop_collection("<collection>_v1_backup")
 ```
 
+### Version 3 — one vector field per embedder
+
+Schema version 3 moves every chunk's vector out of the shared `vector` field into a field owned by the embedder its partition uses, then drops `vector`. Chunk IDs, text and the BM25 `sparse` vector stay in place, and the metadata is rewritten as described below: the collection is not rebuilt.
+
+It reads PostgreSQL as well as Milvus, to know which embedder each partition uses and which field that embedder owns. That field is allocated by a PostgreSQL migration of the same release, so **start the new OpenRAG version once** before running it, and keep both databases up while it runs (`docker compose up -d rdb milvus` under Compose). A partition PostgreSQL knows but cannot route (no single default embedder, a missing embedder, no field allocated) stops it before it changes anything; rows of a partition PostgreSQL does not know do not stop it (see below).
+
+:::caution[Plan for version 3]
+- **Stop OpenRAG first**, or at least all traffic to it, as the [Kubernetes upgrade](/openrag/documentation/upgrading/#5-migrate-the-milvus-collection) does: until the collection reaches version 3, OpenRAG cannot index into it, but deleting a file still reaches Milvus. After copying, the migration counts the rows again. If the count moved, something was writing: it stops before dropping `vector`, and you run it again once the writes have stopped.
+- **A failed run can be run again.** Until its last step drops `vector`, the original vectors stay in place. By then it has already added the per-embedder fields and rewritten each chunk's metadata, with the rounding described below. Once `vector` is dropped, `--downgrade --target 2` copies the vectors back into it; see [Rollback](#rollback) for when that is possible.
+- **Rows of a partition PostgreSQL does not know** are already unreachable from OpenRAG, and lose their vector.
+- **Integers above 2^53** in a chunk's metadata come back rounded: the copy rewrites the metadata as floating-point numbers. Section IDs (`section_id`, `prev_section_id`, `next_section_id`) are the exception: the copy folds them below 2^53 first, which keeps each chunk linked to its neighbours. PostgreSQL keeps each file's original upload metadata.
+- **Development builds from 21 to 28 September 2026** ran a copy that rounded chunk section IDs. The migration does not repair a collection they already migrated; re-index the files indexed before it.
+:::
+
+For an upgrade to 2.3.0, follow [Upgrading OpenRAG](/openrag/documentation/upgrading/): the [Kubernetes](/openrag/documentation/upgrading/#22x-to-230-on-kubernetes) procedure runs the migration from the upgraded OpenRAG pod, the [Docker Compose](/openrag/documentation/upgrading/#22x-to-230-with-docker-compose) one with `docker compose run`.
+
 :::note[Where to run these]
 The commands below run from `infra/compose/`. From the repo root, point Compose at the file (and at your project name, if you use one):
 
 ```bash
 docker compose -p <project> -f infra/compose/docker-compose.yaml run --no-deps --rm --entrypoint "" openrag \
-    uv run python services/persistence/migrations/milvus/migrate.py --dry-run
+    uv run --no-dev python services/persistence/migrations/milvus/migrate.py --dry-run
 ```
 
 The migration runner is a file, not a package — pass the full path to `migrate.py`, and keep PostgreSQL and Milvus running.
@@ -317,13 +317,13 @@ docker compose ps rdb milvus
   <TabItem label="GPU">
 ```bash
 docker compose run --no-deps --rm --entrypoint "" openrag \
-    uv run python services/persistence/migrations/milvus/migrate.py --dry-run
+    uv run --no-dev python services/persistence/migrations/milvus/migrate.py --dry-run
 ```
   </TabItem>
   <TabItem label="CPU">
 ```bash
 docker compose --profile cpu run --no-deps --rm --entrypoint "" openrag-cpu \
-    uv run python services/persistence/migrations/milvus/migrate.py --dry-run
+    uv run --no-dev python services/persistence/migrations/milvus/migrate.py --dry-run
 ```
   </TabItem>
 </Tabs>
@@ -336,13 +336,13 @@ Review the output to confirm which migrations are pending and what changes they 
   <TabItem label="GPU">
 ```bash
 docker compose run --no-deps --rm --entrypoint "" openrag \
-    uv run python services/persistence/migrations/milvus/migrate.py
+    uv run --no-dev python services/persistence/migrations/milvus/migrate.py
 ```
   </TabItem>
   <TabItem label="CPU">
 ```bash
 docker compose --profile cpu run --no-deps --rm --entrypoint "" openrag-cpu \
-    uv run python services/persistence/migrations/milvus/migrate.py
+    uv run --no-dev python services/persistence/migrations/milvus/migrate.py
 ```
   </TabItem>
 </Tabs>
@@ -376,22 +376,22 @@ To upgrade or downgrade to a specific schema version rather than the latest:
 ```bash
 # Upgrade to version 2 only
 docker compose run --no-deps --rm --entrypoint "" openrag \
-    uv run python services/persistence/migrations/milvus/migrate.py --target 2
+    uv run --no-dev python services/persistence/migrations/milvus/migrate.py --target 2
 
 # Downgrade to version 2 (copies the vectors back into `vector`)
 docker compose run --no-deps --rm --entrypoint "" openrag \
-    uv run python services/persistence/migrations/milvus/migrate.py --downgrade --target 2
+    uv run --no-dev python services/persistence/migrations/milvus/migrate.py --downgrade --target 2
 ```
   </TabItem>
   <TabItem label="CPU">
 ```bash
 # Upgrade to version 2 only
 docker compose --profile cpu run --no-deps --rm --entrypoint "" openrag-cpu \
-    uv run python services/persistence/migrations/milvus/migrate.py --target 2
+    uv run --no-dev python services/persistence/migrations/milvus/migrate.py --target 2
 
 # Downgrade to version 2 (copies the vectors back into `vector`)
 docker compose --profile cpu run --no-deps --rm --entrypoint "" openrag-cpu \
-    uv run python services/persistence/migrations/milvus/migrate.py --downgrade --target 2
+    uv run --no-dev python services/persistence/migrations/milvus/migrate.py --downgrade --target 2
 ```
   </TabItem>
 </Tabs>
@@ -399,12 +399,12 @@ docker compose --profile cpu run --no-deps --rm --entrypoint "" openrag-cpu \
 ### Rollback
 
 :::danger[Always pass `--target`]
-`--downgrade` without `--target` reverts **every** migration, down to version 0. Pass the version you are going back to: `--target 2` to undo version 3 only, for a return to OpenRAG 2.2.x.
+Pass the version you are going back to: `--target 2` undoes version 3 only, for a return to OpenRAG 2.2.x. From 2.3.0 the runner refuses a downgrade without `--target`, and each migration script refuses its own `--downgrade` unless the collection is at its version. Earlier runners treated a bare `--downgrade` as `--target 0` and reverted every migration, including version 2, which swaps its pre-upgrade backup back into place.
 :::
 
 What a downgrade can undo depends on the migration:
 
-- **Version 3 → 2** copies each partition's vectors from its embedder's field back into `vector`, then drops the per-embedder fields. It is possible only while every field in use has the same dimension. PostgreSQL must be at a revision that still has the embedder fields, so run it before downgrading the PostgreSQL schema.
+- **Version 3 → 2** copies each partition's vectors from its embedder's field back into `vector`, then drops the per-embedder fields. It is possible only while every field in use has the same dimension, every partition holding files still resolves through PostgreSQL to an embedder field (no embedder deleted, no default changed since the upgrade), and the collection has fewer than 10 vector fields, since `vector` is added back. PostgreSQL must be at a revision that still has the embedder fields, so run it before downgrading the PostgreSQL schema.
 - **Version 2 → 1** swaps the `<collection>_v1_backup` collection back into place and sets the version stamp to 1. The version-2 collection is kept aside as `<collection>_v2_rolled_back` rather than dropped, so nothing is lost — but this is a point-in-time rollback: **rows indexed after the upgrade exist only in the collection set aside**.
 
   The rollback needs that backup collection. If it is gone, the downgrade fails rather than reporting a rollback it did not perform, and there are three ways forward:
@@ -420,13 +420,13 @@ What a downgrade can undo depends on the migration:
   <TabItem label="GPU">
 ```bash
 docker compose run --no-deps --rm --entrypoint "" openrag \
-    uv run python services/persistence/migrations/milvus/migrate.py --downgrade --target <version>
+    uv run --no-dev python services/persistence/migrations/milvus/migrate.py --downgrade --target <version>
 ```
   </TabItem>
   <TabItem label="CPU">
 ```bash
 docker compose --profile cpu run --no-deps --rm --entrypoint "" openrag-cpu \
-    uv run python services/persistence/migrations/milvus/migrate.py --downgrade --target <version>
+    uv run --no-dev python services/persistence/migrations/milvus/migrate.py --downgrade --target <version>
 ```
   </TabItem>
 </Tabs>
