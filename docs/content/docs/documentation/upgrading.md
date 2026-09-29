@@ -74,8 +74,11 @@ Changing a secret of a deployment that already holds data needs care:
 
 - **PostgreSQL password.** The bundled PostgreSQL sets its password only when it
   initialises an empty data directory. Change the role's password in the database
-  first (`ALTER ROLE <user> WITH PASSWORD '…'`), then the configuration; changing
-  the configuration alone leaves OpenRAG unable to log in.
+  too (`ALTER ROLE <user> WITH PASSWORD '…'`); changing the configuration alone
+  leaves OpenRAG unable to log in. Do it during the window, after the backup and
+  before 2.3.0 starts, as the steps below show: 2.2.x cannot open a connection
+  once the password has changed, and the backup then holds the password your
+  2.2.x configuration expects.
 - **`AUTH_TOKEN`** is the admin user's token: clients using it need the new value.
 - **`CHAINLIT_AUTH_SECRET`**: changing it signs out every chat session.
 
@@ -255,6 +258,19 @@ they stay idle.
 
 ```bash
 kubectl scale -n "$NS" deploy/"$FULLNAME-openrag" --replicas=0
+```
+
+If your new values change the PostgreSQL password, change it in the database now,
+before `helm upgrade` hands the new value to OpenRAG. With the bundled PostgreSQL:
+
+```bash
+echo "ALTER ROLE root WITH PASSWORD '<new password>'" | kubectl exec -i -n "$NS" "$PG_POD" -- \
+  sh -c 'PGPASSWORD="$(cat /opt/bitnami/postgresql/secrets/password)" psql -U root -d postgres'
+```
+
+Then upgrade the release:
+
+```bash
 helm upgrade "$RELEASE" oci://ghcr.io/linagora/openrag-stack \
   --version "$CHART_VERSION" -n "$NS" -f "$VALUES"
 ```
@@ -358,10 +374,14 @@ integers, folded section IDs):
    `kubectl delete raycluster -n "$NS" "$FULLNAME-raycluster"` (the rollback
    recreates it).
 2. Restore PostgreSQL from the dump, and Milvus's etcd and object storage from their snapshots.
-3. Delete the `<FULLNAME>-venv` PVC, which holds the Python packages 2.3.0
+3. If you changed the PostgreSQL password in step 4, set the old one back: a
+   `pg_dump` of one database does not hold role passwords, so the restore keeps
+   the new one, while `helm rollback` gives 2.2.x the old one. Use the command
+   from upgrade step 4, with `<old password>`.
+4. Delete the `<FULLNAME>-venv` PVC, which holds the Python packages 2.3.0
    installed, and wait until `kubectl get pvc -n "$NS"` no longer lists it. The
    rollback recreates it empty, and 2.2.x installs its own at startup.
-4. `helm rollback "$RELEASE" <previous revision> -n "$NS"`.
+5. `helm rollback "$RELEASE" <previous revision> -n "$NS"`.
 
 ## 2.2.x to 2.3.0 with Docker Compose
 
@@ -406,10 +426,8 @@ Your `.env` is not tracked, so checking out 2.3.0 keeps it. Copy it aside first
 - **Secrets** that break the [rules above](#secrets). The 2.2.x `.env.example`
   shipped example values for `AUTH_TOKEN`, `POSTGRES_PASSWORD`, `MINIO_ACCESS_KEY`,
   `MINIO_SECRET_KEY` and `CHAINLIT_AUTH_SECRET`; OpenRAG 2.3.0 refuses them.
-  - `POSTGRES_PASSWORD`: change the role's password in the database first,
-    while 2.2.x still runs:
-    `$DC exec rdb psql -U <POSTGRES_USER, root by default> -d postgres -c "ALTER ROLE <user> WITH PASSWORD '<new password>'"`,
-    then put the new value in `.env`.
+  - `POSTGRES_PASSWORD`: put the new value in `.env`; step 4 changes it in the
+    database. 2.2.x keeps running with the old value until step 2 stops it.
   - `MINIO_ACCESS_KEY` and `MINIO_SECRET_KEY`: MinIO and Milvus both read them
     from `.env`, and MinIO takes the new pair at its next start. Change them in
     `.env` only, and restart both together, which the upgrade does.
@@ -479,6 +497,15 @@ $DC pull
 the `up` and `run` commands below instead.
 
 #### 4. Start 2.3.0 once
+
+If you changed `POSTGRES_PASSWORD`, start PostgreSQL alone and change the role's
+password first:
+
+```bash
+$DC up -d rdb
+$DC exec rdb psql -U <POSTGRES_USER, root by default> -d postgres \
+  -c "ALTER ROLE <POSTGRES_USER> WITH PASSWORD '<new password>'"
+```
 
 Start the stack, so that OpenRAG applies the PostgreSQL migrations, which the
 Milvus migration needs:
@@ -585,7 +612,9 @@ docker volume rm <project>_openrag_venv
 ```
 
 Then `git checkout` the version you ran before, restore the `.env` you copied
-aside, and `$DC up -d`. `b9c0d1e2f3a4` is the last PostgreSQL revision of 2.2.1 and
+aside, and `$DC up -d`. If you changed `POSTGRES_PASSWORD` in step 4, keep the new
+value in the restored `.env`: this way does not restore the database's copy of it.
+`b9c0d1e2f3a4` is the last PostgreSQL revision of 2.2.1 and
 2.2.2. Files indexed after the upgrade are kept. The chunk metadata the upgrade
 rewrote is not restored: integers above 2^53 stay rounded and section IDs stay
 folded. To recover it, roll back from the backups instead.
