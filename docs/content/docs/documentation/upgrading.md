@@ -105,7 +105,14 @@ SELECT name FROM model_endpoints WHERE model_type = 'embedder' AND is_default;
 ```
 
 One row is expected; otherwise mark one embedder endpoint as the default, in the
-admin UI or through the admin API, first. Rolling back from the backups undoes the
+admin UI or through the admin API, first. If the migration has already stopped
+2.3.0, whose admin UI is then unavailable, mark it in the database and restart
+OpenRAG, which applies the migrations again:
+
+```sql
+UPDATE model_endpoints SET is_default = (name = '<endpoint name>') WHERE model_type = 'embedder';
+```
+ Rolling back from the backups undoes the
 pinning; the Compose rollback without backups keeps it.
 
 ### If you ran a development build
@@ -220,7 +227,7 @@ while it rolls.
 
 #### Run the default-embedder check
 
-With the bundled PostgreSQL (`root` is the chart's default
+With the bundled PostgreSQL (replace `root` if you changed
 `postgresql.auth.username`):
 
 ```bash

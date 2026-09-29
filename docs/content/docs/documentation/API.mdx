@@ -777,12 +777,12 @@ curl -X POST http://localhost:8080/v1/chat/completions \
 
 Besides the OpenAI fields, the response carries `extra`, a JSON object with the
 sources of the answer. Up to 2.2.2 it was a JSON-encoded string that clients had
-to parse. In a streamed response every chunk carries `extra`, empty until the
-final chunks, which carry the whole object.
+to parse. In a streamed response every content chunk carries `extra`, empty
+until the final chunks, which carry the whole object; an error chunk carries none.
 
 | Key | Content |
 |---|---|
-| `sources` | The sources the model cited, or every presented source when the answer has no `[Sources: …]` tag at all. An explicit `[Sources: none]` gives an empty list. Kept for existing clients. |
+| `sources` | The sources the model cited, or every presented source when it reported no citations: the answer has no `[Sources: …]` tag, or the request asked for structured output, which skips citation reporting. An explicit `[Sources: none]` gives an empty list. Kept for existing clients. |
 | `presented_sources` | Every source shown to the model, whether cited or not. |
 | `cited_sources` | Only the sources the model cited; empty when it cited none or gave no `[Sources: …]` tag. |
 | `citations_reported` | `true` when the model reported its citations, including `[Sources: none]`; `false` when `sources` fell back to every presented source. An empty `[Sources: ]` counts as no tag. |
