@@ -613,11 +613,19 @@ class MilvusVectorStore(VectorStore):
                 "Run, with OpenRAG stopped: uv run python "
                 "services/persistence/migrations/milvus/migrate.py --dry-run (then without --dry-run)."
             )
-        return (
+        warning = (
             f"Collection `{self._collection_name}` is at schema version {stored_version}, ahead of the "
             f"{expected_version} this build expects. It was migrated by a newer OpenRAG: run that version, "
-            "or downgrade the collection with the migration runner."
+            f"or downgrade the collection with that version's migration runner (--downgrade --target {expected_version})."
         )
+        if expected_version < 2 <= stored_version:
+            # Reverting version 2 swaps its pre-upgrade backup back in: say so
+            # before the operator copies the command, not after the swap.
+            warning += (
+                " That downgrade reverts version 2, which puts the pre-upgrade backup back in place: "
+                "rows indexed since that upgrade leave the live collection."
+            )
+        return warning
 
     def warn_if_migration_pending(self) -> None:
         """Log a warning when the collection is not at the configured version.
