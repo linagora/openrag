@@ -8,11 +8,13 @@ import uuid
 from contextlib import closing
 from datetime import UTC, datetime
 
+from core.indexing.topic_tags import TopicTagSample
 from core.models.document import ProcessedDocument
 from core.observability.ray_metrics import observe_stage_duration, record_parse_completion, seed_parse_watchdog
 from core.utils.logging import get_logger
 from services.workers.stages._common import run_with_optional_timeout, scrub_credentials
 from services.workers.stages.store import INDEXING_TASK_ID_METADATA_KEY
+from services.workers.stages.topic_tag import topic_tag_stage
 
 logger = get_logger()
 
@@ -29,7 +31,7 @@ async def _next_batch(batches):
         raise
 
 
-async def run_csv_batches(pipeline, row, parser):
+async def run_csv_batches(pipeline, row, parser, *, topic_tagger=None, max_topic_tags=7):
     document = row["document"]
     # A task-specific marker lets failure cleanup delete only this attempt.
     if not row.get("task_id"):
@@ -43,6 +45,9 @@ async def run_csv_batches(pipeline, row, parser):
     remaining_parse_time = pipeline.timeouts.parse
     store_attempted = False
     child = None
+    topic_sample = TopicTagSample() if topic_tagger is not None else None
+    if topic_sample is not None:
+        row.pop("topic_tags", None)
 
     row.pop("_replace_old_chunk_ids", None)
     row.pop("_replace_old_chunk_collection", None)
@@ -90,7 +95,10 @@ async def run_csv_batches(pipeline, row, parser):
                     _processed=processed,
                     _chunk_offset=chunk_offset,
                     _indexed_at=indexed_at,
+                    _skip_topic_tagging=True,
                 )
+                if topic_sample is not None:
+                    topic_sample.add(child.get("chunks") or [])
                 chunk_offset += len(child.get("chunks") or [])
                 stored_total += child["stored_count"]
                 row["stored_count"] = stored_total
@@ -109,6 +117,29 @@ async def run_csv_batches(pipeline, row, parser):
                 child = None
                 del processed, batch
 
+        if topic_sample is not None:
+            # The stage expects chunks, but only bounded text copies survive
+            # here. Never retain the batches or their embedding vectors.
+            row["chunks"] = topic_sample.chunks
+            row["stage"] = "topic_tagging"
+            start = time.perf_counter()
+            try:
+                await topic_tag_stage(
+                    row,
+                    topic_tagger,
+                    max_tags=max_topic_tags,
+                    timeout=pipeline.timeouts.topic_tag,
+                )
+            except Exception as exc:
+                # Match the existing optional-enrichment behavior. Cancellation
+                # still propagates and triggers this attempt's vector cleanup.
+                row["topic_tags"] = []
+                row.setdefault("degraded_stages", {})["topic_tag"] = str(exc)
+                logger.warning(f"CSV topic tagging failed; indexing the file without tags: {exc}")
+            finally:
+                row.pop("chunks", None)
+                observe_stage_duration("topic_tag", time.perf_counter() - start)
+
         # Replacement cleanup happens once, after every new batch succeeds.
         # Workers defer deletion until the catalog write also succeeds.
         if old_ids and stored_total:
@@ -123,7 +154,10 @@ async def run_csv_batches(pipeline, row, parser):
         row.pop("error", None)
         return row
     except BaseException as exc:
-        row["stage"] = child.get("stage", "csv_failed") if child else "parse_failed"
+        if child:
+            row["stage"] = child.get("stage", "csv_failed")
+        else:
+            row["stage"] = "topic_tag_failed" if row.get("stage") == "topic_tagging" else "parse_failed"
         row["error"] = str(exc)
         # Milvus has no cross-batch transaction: cleanup is best-effort and
         # cannot make partial writes invisible while indexing is in progress.

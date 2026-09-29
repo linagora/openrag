@@ -681,6 +681,40 @@ async def test_chat_all_retrieved_sources_survives_context_budget_truncation():
 
 
 @pytest.mark.asyncio
+async def test_chat_reserves_room_for_prompt_and_answer_in_small_model_context(monkeypatch):
+    """Sources must not fill a model context window by themselves.
+
+    This matters especially for local Ollama models: providers may silently
+    truncate an oversized request, dropping an early source that OpenRAG had
+    selected as the best match.
+    """
+    chunks = [Chunk(id=f"c{i}", text="row " * 400, metadata={"_id": f"c{i}"}) for i in range(5)]
+    monkeypatch.setattr(qs, "get_num_tokens", lambda: lambda text: len(text.split()))
+    svc = _svc(retrieval=FakeRetrieval(chunks=chunks))
+    svc._config.llm_context = SimpleNamespace(max_llm_context_size=4096, max_output_tokens=1024)
+    svc._config.models = SimpleNamespace(
+        llm={"default": object()},
+        llm_context_size=lambda _name: 4096,
+        llm_output_tokens=lambda _name: 1024,
+    )
+
+    result = await svc._prepare_chat(
+        ["p"],
+        {
+            "messages": [
+                {"role": "assistant", "content": "Earlier discussion " * 300},
+                {"role": "user", "content": "Which row matches this customer?"},
+            ],
+            "metadata": {},
+        },
+    )
+
+    assert result.docs
+    assert len(result.docs) < len(chunks)
+    assert result.docs[0].metadata["_id"] == "c0"
+
+
+@pytest.mark.asyncio
 async def test_chat_stream_all_retrieved_sources_survives_context_budget_truncation():
     chunks = [
         Chunk(id="c1", text="short", metadata={"_id": "c1"}),

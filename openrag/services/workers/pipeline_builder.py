@@ -125,6 +125,7 @@ class IndexingPipeline:
         _processed: ProcessedDocument | None = None,
         _chunk_offset: int = 0,
         _indexed_at: datetime | None = None,
+        _skip_topic_tagging: bool = False,
     ) -> MutableMapping[str, Any]:
         """Run a single row through parse, optional enrichments, embed, and store.
 
@@ -156,21 +157,26 @@ class IndexingPipeline:
         # Resolved up front, so a file with nowhere to store its vectors fails before it is parsed and embedded.
         vector_field = self.vector_field_resolver(embedder_name) if self.vector_field_resolver else None
         contextualizer, contextualization_llm = self._select_contextualizer(config)
-        topic_tagger, topic_tagging_llm = self._select_topic_tagger(config)
+        topic_tagger, topic_tagging_llm = (None, None) if _skip_topic_tagging else self._select_topic_tagger(config)
 
         document = row.get("document")
         if _processed is None and isinstance(document, Document) and document.content_type is DocumentType.CSV:
-            # These enrichments currently expect document-wide context.
-            # Do not silently change their meaning to per-batch enrichment.
-            if contextualizer is not None or topic_tagger is not None:
+            # Contextualization still needs a separate streaming design.
+            # Topic tagging runs once on a bounded sample of the file's chunks.
+            if contextualizer is not None:
                 raise ValueError(
-                    "CSV streaming currently requires contextualization "
-                    "and topic tagging to be disabled in the indexing preset"
+                    "CSV streaming currently requires contextualization to be disabled in the indexing preset"
                 )
             concrete_parser = parser.resolve(document) if hasattr(parser, "resolve") else parser
             if not isinstance(concrete_parser, CsvParser):
                 raise TypeError("CSV indexing requires a configured CsvParser")
-            return await run_csv_batches(self, row, concrete_parser)
+            return await run_csv_batches(
+                self,
+                row,
+                concrete_parser,
+                topic_tagger=topic_tagger,
+                max_topic_tags=config.max_topic_tags if config is not None else 7,
+            )
 
         timings: dict[str, float] = {}
 
