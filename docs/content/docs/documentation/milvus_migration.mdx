@@ -399,7 +399,7 @@ docker compose --profile cpu run --no-deps --rm --entrypoint "" openrag-cpu \
 ### Rollback
 
 :::danger[Always pass `--target`]
-Pass the version you are going back to: `--target 2` undoes version 3 only, for a return to OpenRAG 2.2.x. From 2.3.0 the runner refuses a downgrade without `--target`, and each migration script refuses its own `--downgrade` unless the collection is at its version. Earlier runners treated a bare `--downgrade` as `--target 0` and reverted every migration, including version 2, which swaps its pre-upgrade backup back into place.
+Pass the version you are going back to: `--target 2` undoes version 3 only, for a return to OpenRAG 2.2.x. From 2.3.0 the runner refuses a downgrade without `--target`, a target outside the known versions or above the collection's own, and each migration script refuses its own `--downgrade` unless the collection is at its version. Earlier runners treated a bare `--downgrade` as `--target 0` and reverted every migration, including version 2, which swaps its pre-upgrade backup back into place.
 :::
 
 What a downgrade can undo depends on the migration:
