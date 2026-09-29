@@ -28,7 +28,8 @@ Postgres keeps the exact upload metadata of each file.
 
 Usage — prefer the generic runner (from infra/compose, with DC and SVC set as in the upgrade guide:
 ``DC="docker compose"; SVC=openrag`` on a GPU host,
-``DC="docker compose --profile cpu"; SVC=openrag-cpu`` on a CPU host). It
+``DC="docker compose --profile cpu"; SVC=openrag-cpu`` on a CPU host; add ``-p <project>`` and
+your ``-f`` overlays to DC if you start the stack with them). It
 reads Postgres as well as Milvus, so both must be up (``$DC up -d rdb milvus``) even though
 ``--no-deps`` does not start them:
     $DC run --no-deps --rm --entrypoint "" "$SVC" \\

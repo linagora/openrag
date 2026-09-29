@@ -7,7 +7,8 @@ in order based on the current schema version stored in the collection.
 
 Usage (from infra/compose, with DC and SVC set as in the upgrade guide:
 ``DC="docker compose"; SVC=openrag`` on a GPU host,
-``DC="docker compose --profile cpu"; SVC=openrag-cpu`` on a CPU host):
+``DC="docker compose --profile cpu"; SVC=openrag-cpu`` on a CPU host; add ``-p <project>`` and
+your ``-f`` overlays to DC if you start the stack with them):
 
     # Dry-run — inspect what would change, no writes:
     $DC run --no-deps --rm --entrypoint "" "$SVC" \\

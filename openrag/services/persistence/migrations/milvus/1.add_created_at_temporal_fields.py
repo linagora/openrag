@@ -13,7 +13,8 @@ them populated at index time by the application code.
 
 Usage — prefer the generic runner (from infra/compose, with DC and SVC set as in the upgrade guide:
 ``DC="docker compose"; SVC=openrag`` on a GPU host,
-``DC="docker compose --profile cpu"; SVC=openrag-cpu`` on a CPU host):
+``DC="docker compose --profile cpu"; SVC=openrag-cpu`` on a CPU host; add ``-p <project>`` and
+your ``-f`` overlays to DC if you start the stack with them):
     $DC run --no-deps --rm --entrypoint "" "$SVC" \\
         uv run --no-dev python services/persistence/migrations/milvus/migrate.py [--dry-run] [--downgrade --target N]
 
