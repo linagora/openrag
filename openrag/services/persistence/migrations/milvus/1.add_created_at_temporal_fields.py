@@ -11,7 +11,7 @@ no longer raises VDBSchemaMigrationRequiredError on startup.
 Existing documents will retain null for these fields; new documents will have
 them populated at index time by the application code.
 
-Usage — prefer the generic runner (from infra/compose):
+Usage — prefer the generic runner (from infra/compose; on a CPU host, `docker compose --profile cpu` and the `openrag-cpu` service):
     docker compose run --no-deps --rm --entrypoint "" openrag \\
         uv run --no-dev python services/persistence/migrations/milvus/migrate.py [--dry-run] [--downgrade --target N]
 
@@ -25,7 +25,7 @@ Or run this script directly:
         uv run --no-dev python services/persistence/migrations/milvus/1.add_created_at_temporal_fields.py
 
     # Roll back indexes and reset version (fields cannot be dropped in Milvus). Refused
-    # unless the collection is at version 1; use migrate.py --downgrade --target 0 otherwise:
+    # unless the collection is at version 1; use migrate.py --downgrade --target <version> otherwise:
     docker compose run --no-deps --rm --entrypoint "" openrag \\
         uv run --no-dev python services/persistence/migrations/milvus/1.add_created_at_temporal_fields.py --downgrade
 """

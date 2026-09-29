@@ -141,12 +141,13 @@ def _load_script(monkeypatch, filename: str, stored_version: int):
 
 
 @pytest.mark.parametrize("version", sorted(_SCRIPTS))
+@pytest.mark.parametrize("offset", [1, -1], ids=["newer", "older"])
 @pytest.mark.parametrize("extra_args", [[], ["--dry-run"]])
-def test_a_standalone_downgrade_of_another_version_is_refused(monkeypatch, version, extra_args):
+def test_a_standalone_downgrade_of_another_version_is_refused(monkeypatch, version, offset, extra_args):
     """Run on its own, a script's --downgrade reverts its step whatever the
     collection's version: version 2's, on a version 3 collection, swaps the
     pre-upgrade backup back in. It now runs only on its own version."""
-    script = _load_script(monkeypatch, _SCRIPTS[version], stored_version=version + 1)
+    script = _load_script(monkeypatch, _SCRIPTS[version], stored_version=version + offset)
     monkeypatch.setattr("sys.argv", [_SCRIPTS[version], "--downgrade", *extra_args])
 
     with pytest.raises(SystemExit) as exc:

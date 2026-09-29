@@ -5,7 +5,7 @@ Discovers all migration scripts in this directory (files matching ``N.*.py``),
 sorts them by their numeric prefix, and runs ``upgrade()`` / ``downgrade()``
 in order based on the current schema version stored in the collection.
 
-Usage (from infra/compose):
+Usage (from infra/compose; on a CPU host, `docker compose --profile cpu` and the `openrag-cpu` service):
 
     # Dry-run — inspect what would change, no writes:
     docker compose run --no-deps --rm --entrypoint "" openrag \\

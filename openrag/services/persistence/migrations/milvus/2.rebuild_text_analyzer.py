@@ -33,7 +33,7 @@ OpenRAG must be stopped: rows written to the source while the copy runs are not
 picked up, so the migration re-counts the source afterwards and aborts if it
 moved.
 
-Usage — prefer the generic runner (from infra/compose):
+Usage — prefer the generic runner (from infra/compose; on a CPU host, `docker compose --profile cpu` and the `openrag-cpu` service):
     docker compose run --no-deps --rm --entrypoint "" openrag \\
         uv run --no-dev python services/persistence/migrations/milvus/migrate.py [--dry-run]
 

@@ -26,7 +26,7 @@ The partial upsert rewrites every number in a chunk's dynamic field as a
 float64, so any other integer above 2**53 in its metadata comes back rounded.
 Postgres keeps the exact upload metadata of each file.
 
-Usage — prefer the generic runner (from infra/compose). It
+Usage — prefer the generic runner (from infra/compose; on a CPU host, `docker compose --profile cpu` and the `openrag-cpu` service). It
 reads Postgres as well as Milvus, so both must be up (``docker compose up -d rdb
 milvus``) even though ``--no-deps`` does not start them:
     docker compose run --no-deps --rm --entrypoint "" openrag \\
