@@ -257,7 +257,7 @@ This is the last rebuild. Once `enable_match` is gone, a later analyzer change i
 - **Stop OpenRAG first**, as the banner above says — the copy reads a snapshot, so a row written while it runs would be missing from the rebuild. The migration re-counts the source afterwards and aborts, leaving the original untouched, if the count moved.
 - **`hybrid_search: false`** deployments have no BM25 leg and are only re-stamped — no rebuild, and no backup collection, in either direction.
 - A failed copy leaves the original untouched; drop the partial `<collection>_v2_rebuild` and retry.
-- An un-migrated deployment still boots and reports ready, but the application checks the schema version on both the search and the indexing path: searches answer `503` (`VDB_SCHEMA_MIGRATION_REQUIRED`) and uploads fail until the migration runs.
+- What an un-migrated collection does depends on the release. On 2.2.x the version check runs on the indexing path only: searches still answer, with the old analyzer, and the first upload fails with `Collection ... is at schema version 1 but the application requires version 2`. From 2.3.0 it runs on the search path too, and searches answer `503` (`VDB_SCHEMA_MIGRATION_REQUIRED`) until the migrations run.
 :::
 
 Once validated, drop the backup:
@@ -399,7 +399,7 @@ docker compose --profile cpu run --no-deps --rm --entrypoint "" openrag-cpu \
 ### Rollback
 
 :::danger[Always pass `--target`]
-Pass the version you are going back to: `--target 2` undoes version 3 only, for a return to OpenRAG 2.2.x. From 2.3.0 the runner refuses a downgrade without `--target`, a target outside the known versions or above the collection's own, and each migration script refuses its own `--downgrade` unless the collection is at its version. Earlier runners treated a bare `--downgrade` as `--target 0` and reverted every migration, including version 2, which swaps its pre-upgrade backup back into place.
+Pass the version you are going back to: `--target 2` undoes version 3 only, for a return to OpenRAG 2.2.x. From 2.3.0 the runner refuses a downgrade without `--target`, a target outside the known versions or in the wrong direction (a downgrade above the collection's version, an upgrade below it), and a collection whose version it does not know or is newer than its migrations; each migration script refuses its own `--downgrade` unless the collection is at its version. Earlier runners treated a bare `--downgrade` as `--target 0` and reverted every migration, including version 2, which swaps its pre-upgrade backup back into place.
 :::
 
 What a downgrade can undo depends on the migration:
