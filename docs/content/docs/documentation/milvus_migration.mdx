@@ -358,7 +358,7 @@ To upgrade or downgrade to a specific schema version rather than the latest:
 docker compose run --no-deps --rm --build --entrypoint "" openrag \
     uv run python services/persistence/migrations/milvus/migrate.py --target 2
 
-# Downgrade to version 0 (resets version stamp and drops indexes)
+# Downgrade to version 0 (reverts every migration, version 2's backup swap included)
 docker compose run --no-deps --rm --build --entrypoint "" openrag \
     uv run python services/persistence/migrations/milvus/migrate.py --downgrade --target 0
 ```
@@ -369,7 +369,7 @@ docker compose run --no-deps --rm --build --entrypoint "" openrag \
 docker compose --profile cpu run --no-deps --rm --build --entrypoint "" openrag-cpu \
     uv run python services/persistence/migrations/milvus/migrate.py --target 2
 
-# Downgrade to version 0 (resets version stamp and drops indexes)
+# Downgrade to version 0 (reverts every migration, version 2's backup swap included)
 docker compose --profile cpu run --no-deps --rm --build --entrypoint "" openrag-cpu \
     uv run python services/persistence/migrations/milvus/migrate.py --downgrade --target 0
 ```
@@ -395,13 +395,13 @@ What a downgrade can undo depends on the migration:
   <TabItem label="GPU">
 ```bash
 docker compose run --no-deps --rm --build --entrypoint "" openrag \
-    uv run python services/persistence/migrations/milvus/migrate.py --downgrade
+    uv run python services/persistence/migrations/milvus/migrate.py --downgrade --target <version>
 ```
   </TabItem>
   <TabItem label="CPU">
 ```bash
 docker compose --profile cpu run --no-deps --rm --build --entrypoint "" openrag-cpu \
-    uv run python services/persistence/migrations/milvus/migrate.py --downgrade
+    uv run python services/persistence/migrations/milvus/migrate.py --downgrade --target <version>
 ```
   </TabItem>
 </Tabs>
