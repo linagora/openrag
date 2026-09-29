@@ -317,15 +317,16 @@ from your values, and the database no longer accepts it. Fix the cause and run
 `helm upgrade` again, or follow
 [Rolling back a Kubernetes upgrade](#rolling-back-a-kubernetes-upgrade).
 
-With `ray.enabled: true`, once `helm upgrade` has returned, delete every Ray pod
-so KubeRay recreates them from the 2.3.0 template (deleting them earlier would
-bring them back on 2.2.x), wait for them to be Ready, then restart OpenRAG so it
-attaches to the new cluster:
+With `ray.enabled: true`, once `helm upgrade` has returned, keep OpenRAG at zero
+replicas, so that it does not attach to the 2.2.x Ray pods, and delete every Ray
+pod so KubeRay recreates them from the 2.3.0 template (deleting them earlier would
+bring them back on 2.2.x). Once they are Ready, scale OpenRAG back up:
 
 ```bash
+kubectl scale -n "$NS" deploy/"$FULLNAME-openrag" --replicas=0
 kubectl delete pod -n "$NS" -l ray.io/cluster="$FULLNAME-raycluster"
 kubectl get pod -n "$NS" -l ray.io/cluster="$FULLNAME-raycluster" -w   # until the new pods are Running and Ready
-kubectl rollout restart -n "$NS" deploy/"$FULLNAME-openrag"
+kubectl scale -n "$NS" deploy/"$FULLNAME-openrag" --replicas=<your usual count>
 ```
 
 `kubectl get raycluster -n "$NS"` prints the cluster's name if you changed
@@ -335,9 +336,17 @@ The new OpenRAG pod applies the PostgreSQL migrations when it starts. With
 `postgresProvisioning.runMigrationsInApp: false` and
 `postgresProvisioning.migrationJob.enabled: true`, the `pre-upgrade` migration Job
 runs them before the pods roll instead, and a failing migration fails
-`helm upgrade`. With both off, nothing applies them. It then becomes Ready, but
-searches answer `503` with `VDB_SCHEMA_MIGRATION_REQUIRED` and uploads fail until
-step 5: readiness does not check the Milvus schema version.
+`helm upgrade`. With both off, nothing applies them: run them from the new pod
+before step 5, which needs them:
+
+```bash
+kubectl exec -n "$NS" deploy/"$FULLNAME-openrag" -- \
+  uv run --no-dev --no-sync python -m services.persistence.migrations.run
+```
+
+The pod becomes Ready, but searches answer `503` with
+`VDB_SCHEMA_MIGRATION_REQUIRED` and uploads fail until step 5: readiness does not
+check the Milvus schema version.
 
 #### 5. Migrate the Milvus collection
 
@@ -364,7 +373,9 @@ application cannot index into it. Deleting a file still reaches Milvus, though,
 so keep traffic stopped: after copying, the migration counts the rows again and,
 if the count moved, stops before dropping the old `vector` field. A failed run can
 be run again. Until that last step, the original vectors stay in place, but the
-copy has already rewritten each chunk's metadata, as described below.
+copy has already rewritten each chunk's metadata, as described below. The
+migration runs inside `kubectl exec`, and stops if that session drops (an idle
+timeout on the API server or a load balancer in between): run it again.
 
 What the migration does to the data:
 
@@ -379,7 +390,10 @@ Searches and uploads recover on their own once it finishes; no restart is needed
 
 #### 6. Verify
 
-- `GET /ready` returns `200`, with every check `ok`.
+- `GET /ready` returns `200` with `"status": "ready"`, and `postgres`, `milvus`,
+  `ray` and `embedder` are `ok` under `checks`. An `llm` or `reranker` check that
+  is not `ok` means that endpoint is unreachable or not configured; it does not
+  block readiness.
 - A search on an existing partition returns results, not `503`.
 - A chat completion returns sources in the new shape.
 - Uploading a small file completes (`GET /queue/tasks?task_status=active` empties again).
@@ -616,7 +630,10 @@ the original vectors stay in place. What it does to the data is described in
 $DC up -d
 ```
 
-- `GET /ready` returns `200`, with every check `ok`.
+- `GET /ready` returns `200` with `"status": "ready"`, and `postgres`, `milvus`,
+  `ray` and `embedder` are `ok` under `checks`. An `llm` or `reranker` check that
+  is not `ok` means that endpoint is unreachable or not configured; it does not
+  block readiness.
 - A search on an existing partition returns results, not `503`.
 - A chat completion returns sources in the new shape.
 - Uploading a small file completes.
