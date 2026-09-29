@@ -69,12 +69,18 @@ def runner(monkeypatch):
         "load_config",
         lambda: SimpleNamespace(vectordb=SimpleNamespace(host="milvus", port=19530, collection_name="vdb_test")),
     )
-    monkeypatch.setattr(
-        module, "run_upgrade", lambda client, name, migrations, target, dry_run: calls.append(("upgrade", target))
-    )
-    monkeypatch.setattr(
-        module, "run_downgrade", lambda client, name, migrations, target, dry_run: calls.append(("downgrade", target))
-    )
+    dry_runs: list[bool] = []
+    module.dry_runs = dry_runs
+
+    def record(mode: str):
+        def run(client, name, migrations, target, dry_run):
+            calls.append((mode, target))
+            dry_runs.append(dry_run)
+
+        return run
+
+    monkeypatch.setattr(module, "run_upgrade", record("upgrade"))
+    monkeypatch.setattr(module, "run_downgrade", record("downgrade"))
     return module
 
 
@@ -109,6 +115,30 @@ def test_a_downgrade_goes_to_the_target_it_is_given(runner, monkeypatch):
     _run(runner, monkeypatch, "--downgrade", "--target", "2")
 
     assert runner.calls == [("downgrade", 2)]
+
+
+@pytest.mark.parametrize(
+    ("args", "expected"),
+    [
+        (["--dry-run"], [("upgrade", 3)]),
+        (["--downgrade", "--target", "2", "--dry-run"], [("downgrade", 2)]),
+    ],
+    ids=["upgrade", "downgrade"],
+)
+def test_a_dry_run_reaches_the_migrations_as_a_dry_run(runner, monkeypatch, args, expected):
+    """Dropped on the way, a documented dry run would migrate the collection."""
+    _run(runner, monkeypatch, *args)
+
+    assert runner.calls == expected
+    assert runner.dry_runs == [True]
+
+
+def test_without_dry_run_the_migrations_run_for_real(runner, monkeypatch):
+    runner.stored_version = "2"
+
+    _run(runner, monkeypatch)
+
+    assert runner.dry_runs == [False]
 
 
 def test_an_upgrade_still_defaults_to_the_latest_version(runner, monkeypatch):
@@ -200,7 +230,7 @@ def test_an_upgrade_below_the_collections_version_is_refused(runner, monkeypatch
     assert runner.calls == []
 
 
-@pytest.mark.parametrize("stamp", ["abc", "-1"])
+@pytest.mark.parametrize("stamp", ["abc", "-1", "", "2.0"])
 @pytest.mark.parametrize("mode", [["--target", "3"], ["--downgrade", "--target", "2"]], ids=["upgrade", "downgrade"])
 def test_a_collection_with_an_unknown_version_is_refused(runner, monkeypatch, stamp, mode):
     """Read as 0, a corrupt stamp made an upgrade replay every migration."""
@@ -210,7 +240,10 @@ def test_a_collection_with_an_unknown_version_is_refused(runner, monkeypatch, st
         _run(runner, monkeypatch, *mode)
 
     assert exc.value.code == 2
-    assert runner.errors == [f"'vdb_test' has schema version '{stamp}', which is not a version. Nothing was changed."]
+    assert runner.errors == [
+        f"'vdb_test' has schema version '{stamp}', which is not a version. Set its `openrag.schema_version` "
+        "property to the collection's real version first. Nothing was changed."
+    ]
     assert runner.calls == []
 
 
@@ -260,7 +293,7 @@ _SCRIPTS = {
 }
 
 
-def _load_script(monkeypatch, filename: str, stored_version: int):
+def _load_script(monkeypatch, filename: str, stored_version: int | str):
     spec = importlib.util.spec_from_file_location(f"milvus_script_{filename[0]}", _RUNNER_PATH.parent / filename)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -285,8 +318,26 @@ def _load_script(monkeypatch, filename: str, stored_version: int):
         "load_config",
         lambda: SimpleNamespace(vectordb=SimpleNamespace(host="milvus", port=19530, collection_name="vdb_test")),
     )
-    monkeypatch.setattr(module, "downgrade", lambda client, name, dry_run=False: calls.append("downgrade"))
-    monkeypatch.setattr(module, "upgrade", lambda client, name, dry_run=False: calls.append("upgrade"))
+    errors: list[str] = []
+    module.errors = errors
+
+    class FakeLogger:
+        def info(self, message: str) -> None:
+            pass
+
+        def warning(self, message: str) -> None:
+            pass
+
+        def error(self, message: str) -> None:
+            errors.append(message)
+
+    monkeypatch.setattr(module, "logger", FakeLogger())
+    monkeypatch.setattr(
+        module, "downgrade", lambda client, name, dry_run=False: calls.append("downgrade" + (" dry" if dry_run else ""))
+    )
+    monkeypatch.setattr(
+        module, "upgrade", lambda client, name, dry_run=False: calls.append("upgrade" + (" dry" if dry_run else ""))
+    )
     return module
 
 
@@ -304,24 +355,68 @@ def test_a_standalone_downgrade_of_another_version_is_refused(monkeypatch, versi
         script.main()
 
     assert exc.value.code == 2
+    assert script.errors == [
+        f"'vdb_test' is at schema version {version + offset}; this script's --downgrade only reverts a collection "
+        f"at version {version}. Use migrate.py --downgrade --target N, from the release that migrated it."
+    ]
     assert script.calls == []
 
 
 @pytest.mark.parametrize("version", sorted(_SCRIPTS))
-def test_a_standalone_downgrade_of_its_own_version_runs(monkeypatch, version):
+@pytest.mark.parametrize("extra_args", [[], ["--dry-run"]], ids=["apply", "dry-run"])
+def test_a_standalone_downgrade_of_its_own_version_runs(monkeypatch, version, extra_args):
     script = _load_script(monkeypatch, _SCRIPTS[version], stored_version=version)
-    monkeypatch.setattr("sys.argv", [_SCRIPTS[version], "--downgrade"])
+    monkeypatch.setattr("sys.argv", [_SCRIPTS[version], "--downgrade", *extra_args])
 
     script.main()
 
-    assert script.calls == ["downgrade"]
+    assert script.calls == ["downgrade dry" if extra_args else "downgrade"]
 
 
 @pytest.mark.parametrize("version", sorted(_SCRIPTS))
-def test_a_standalone_upgrade_is_not_gated_on_the_stored_version(monkeypatch, version):
-    script = _load_script(monkeypatch, _SCRIPTS[version], stored_version=version - 1)
-    monkeypatch.setattr("sys.argv", [_SCRIPTS[version]])
+@pytest.mark.parametrize("offset", [-1, 0, 1], ids=["previous", "own", "newer"])
+@pytest.mark.parametrize("extra_args", [[], ["--dry-run"]], ids=["apply", "dry-run"])
+def test_a_standalone_upgrade_runs_from_the_previous_version_on(monkeypatch, version, offset, extra_args):
+    """From its own version on, the script's upgrade reports there is nothing to do."""
+    script = _load_script(monkeypatch, _SCRIPTS[version], stored_version=version + offset)
+    monkeypatch.setattr("sys.argv", [_SCRIPTS[version], *extra_args])
 
     script.main()
 
-    assert script.calls == ["upgrade"]
+    assert script.calls == ["upgrade dry" if extra_args else "upgrade"]
+
+
+@pytest.mark.parametrize("version", [v for v in sorted(_SCRIPTS) if v >= 2])
+def test_a_standalone_upgrade_that_would_skip_a_step_is_refused(monkeypatch, version):
+    """Version 3's upgrade, run on a version 1 collection, stamped it 3 without
+    ever rebuilding the analyzer of version 2."""
+    script = _load_script(monkeypatch, _SCRIPTS[version], stored_version=version - 2)
+    monkeypatch.setattr("sys.argv", [_SCRIPTS[version]])
+
+    with pytest.raises(SystemExit) as exc:
+        script.main()
+
+    assert exc.value.code == 2
+    assert script.errors == [
+        f"'vdb_test' is at schema version {version - 2}; this script only upgrades a collection at version "
+        f"{version - 1}. Use migrate.py, which applies the steps in turn."
+    ]
+    assert script.calls == []
+
+
+@pytest.mark.parametrize("version", sorted(_SCRIPTS))
+@pytest.mark.parametrize("stamp", ["abc", "-1", ""])
+@pytest.mark.parametrize("mode", [[], ["--downgrade"]], ids=["upgrade", "downgrade"])
+def test_a_standalone_run_on_an_unknown_version_is_refused(monkeypatch, version, stamp, mode):
+    script = _load_script(monkeypatch, _SCRIPTS[version], stored_version=stamp)
+    monkeypatch.setattr("sys.argv", [_SCRIPTS[version], *mode])
+
+    with pytest.raises(SystemExit) as exc:
+        script.main()
+
+    assert exc.value.code == 2
+    assert script.errors == [
+        f"'vdb_test' has schema version '{stamp}', which is not a version. Set its `openrag.schema_version` "
+        "property to the collection's real version first. Nothing was changed."
+    ]
+    assert script.calls == []

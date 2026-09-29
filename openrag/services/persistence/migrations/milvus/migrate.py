@@ -26,6 +26,9 @@ your ``-f`` overlays to DC if you start the stack with them):
     $DC run --no-deps --rm --entrypoint "" "$SVC" \\
         uv run --no-dev python services/persistence/migrations/milvus/migrate.py --downgrade --target 2
 
+The image must carry this checkout's migrations: the "Discovered N migration(s)" line
+it prints lists them. With a locally built image, add --build to the run command.
+
 Convention — each migration module must expose:
     TARGET_VERSION: int          # the version this script brings the DB to
     upgrade(client, collection_name, dry_run=False)
@@ -91,14 +94,17 @@ def _validate_module(module: ModuleType, path: Path) -> None:
 def _get_stored_version(client: MilvusClient, collection_name: str) -> int:
     """The collection's schema version: 0 when it was never stamped.
 
-    Raises ValueError on a stamp that is not a non-negative integer, rather than
-    reading it as 0 and migrating a collection whose version is unknown.
+    Raises ValueError when ``int()`` rejects the stamp or it is negative, rather
+    than reading it as 0 and migrating a collection whose version is unknown.
     """
     desc = client.describe_collection(collection_name)
     raw = desc.get("properties", {}).get(SCHEMA_VERSION_PROPERTY_KEY)
     if raw is None:
         return 0
-    unknown = f"'{collection_name}' has schema version {raw!r}, which is not a version. Nothing was changed."
+    unknown = (
+        f"'{collection_name}' has schema version {raw!r}, which is not a version. Set its "
+        f"`{SCHEMA_VERSION_PROPERTY_KEY}` property to the collection's real version first. Nothing was changed."
+    )
     try:
         version = int(raw)
     except ValueError:

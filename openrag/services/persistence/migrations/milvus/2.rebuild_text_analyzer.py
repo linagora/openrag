@@ -122,14 +122,25 @@ logger = get_logger()
 
 
 def _get_stored_version(client: MilvusClient, collection_name: str) -> int:
-    desc = client.describe_collection(collection_name)
-    raw = desc.get("properties", {}).get(SCHEMA_VERSION_PROPERTY_KEY)
+    """The collection's schema version: 0 when it was never stamped.
+
+    Raises ValueError when ``int()`` rejects the stamp or it is negative, rather
+    than reading it as 0 and migrating a collection whose version is unknown.
+    """
+    raw = client.describe_collection(collection_name).get("properties", {}).get(SCHEMA_VERSION_PROPERTY_KEY)
     if raw is None:
         return 0
+    unknown = (
+        f"'{collection_name}' has schema version {raw!r}, which is not a version. Set its "
+        f"`{SCHEMA_VERSION_PROPERTY_KEY}` property to the collection's real version first. Nothing was changed."
+    )
     try:
-        return int(raw)
+        version = int(raw)
     except ValueError:
-        return 0
+        raise ValueError(unknown) from None
+    if version < 0:
+        raise ValueError(unknown)
+    return version
 
 
 def _field_map(desc: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -582,24 +593,28 @@ def downgrade(client: MilvusClient, collection_name: str, dry_run: bool = False)
     )
 
 
-def _refuse_downgrade_from_another_version(client: MilvusClient, collection_name: str) -> None:
-    """Refuse a standalone ``--downgrade`` unless the collection is at this script's version.
+def _refuse_out_of_order(client: MilvusClient, collection_name: str, downgrade: bool) -> None:
+    """Refuse a standalone run that would apply or revert this step out of order.
 
-    Run on its own, this script's downgrade reverts only its own step, whatever
-    version the collection is at. On a newer collection that undoes a step out of
-    order; ``migrate.py --downgrade --target N`` walks the steps in turn instead.
+    Run on its own, this script applies or reverts only its own step, whatever
+    version the collection is at: out of order, that skips the steps before it or
+    undoes an older step under a newer one. ``migrate.py`` walks the steps in turn.
     """
-    stored = _get_stored_version(client, collection_name)
-    if stored < TARGET_VERSION:
+    try:
+        stored = _get_stored_version(client, collection_name)
+    except ValueError as exc:
+        logger.error(str(exc))
+        sys.exit(2)
+    if downgrade and stored != TARGET_VERSION:
         logger.error(
-            f"'{collection_name}' is at schema version {stored}, below this script's version {TARGET_VERSION}: "
-            "there is nothing for it to revert."
+            f"'{collection_name}' is at schema version {stored}; this script's --downgrade only reverts a collection "
+            f"at version {TARGET_VERSION}. Use migrate.py --downgrade --target N, from the release that migrated it."
         )
         sys.exit(2)
-    if stored > TARGET_VERSION:
+    if not downgrade and stored < TARGET_VERSION - 1:
         logger.error(
-            f"'{collection_name}' is at schema version {stored}; this script's --downgrade only reverts version "
-            f"{TARGET_VERSION}. Use migrate.py --downgrade --target <version> instead."
+            f"'{collection_name}' is at schema version {stored}; this script only upgrades a collection at version "
+            f"{TARGET_VERSION - 1}. Use migrate.py, which applies the steps in turn."
         )
         sys.exit(2)
 
@@ -629,8 +644,8 @@ def main() -> None:
         logger.error(f"Collection '{collection_name}' does not exist. Aborting.")
         sys.exit(1)
 
+    _refuse_out_of_order(client, collection_name, args.downgrade)
     if args.downgrade:
-        _refuse_downgrade_from_another_version(client, collection_name)
         downgrade(client, collection_name, dry_run=args.dry_run)
     else:
         upgrade(client, collection_name, dry_run=args.dry_run)

@@ -616,7 +616,7 @@ class MilvusVectorStore(VectorStore):
         return (
             f"Collection `{self._collection_name}` is at schema version {stored_version}, ahead of the "
             f"{expected_version} this build expects. It was migrated by a newer OpenRAG: run that version, "
-            "or downgrade the collection with the migration runner."
+            f"or downgrade the collection with that version's migration runner (--downgrade --target {expected_version})."
         )
 
     def warn_if_migration_pending(self) -> None:
