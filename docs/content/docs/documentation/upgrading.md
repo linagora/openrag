@@ -9,6 +9,10 @@ procedure for Kubernetes and for Docker Compose. Read all of it for the version 
 are moving to before you start. The 2.3.0 sections start from 2.2.1 or 2.2.2; from
 an earlier release, upgrade to 2.2.2 first.
 
+The commands are written for bash. In zsh, run `setopt interactive_comments sh_word_split`
+first: without it, the comments after the commands are read as arguments and the
+variables below are not set.
+
 ## Changes in 2.3.0 for every deployment
 
 These apply to an upgrade from OpenRAG 2.2.1 or 2.2.2, whichever way it is
@@ -430,7 +434,7 @@ this repository. Run the commands from `infra/compose`, after setting these two
 variables to match how you start the stack:
 
 ```bash
-# bash; in zsh, run `setopt sh_word_split` first so that $DC splits into words
+# bash; in zsh, see the note at the top of this page
 DC="docker compose"   # add -p <project>, your -f overlays, and --profile cpu on a CPU host
 SVC=openrag           # openrag-cpu on a CPU host
 ```
