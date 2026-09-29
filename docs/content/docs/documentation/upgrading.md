@@ -73,12 +73,14 @@ variable. The rules are in
 Changing a secret of a deployment that already holds data needs care:
 
 - **PostgreSQL password.** The bundled PostgreSQL sets its password only when it
-  initialises an empty data directory. Change the role's password in the database
-  too (`ALTER ROLE <user> WITH PASSWORD '…'`); changing the configuration alone
-  leaves OpenRAG unable to log in. Do it during the window, after the backup and
-  before 2.3.0 starts, as the steps below show: 2.2.x cannot open a connection
-  once the password has changed, and the backup then holds the password your
-  2.2.x configuration expects.
+  initialises an empty data directory, so a new value in the configuration also
+  needs an `ALTER ROLE` in the database; changing the configuration alone leaves
+  OpenRAG unable to log in. If your current password passes the rules, keep it.
+  Otherwise change it during the window, after the backup and before 2.3.0
+  starts, where the steps below say: 2.2.x cannot open a connection once it has
+  changed. The rollback sections below account for it. Pick a value without quotes
+  or `$`, such as the output of `openssl rand -hex 16`: the commands below pass it
+  inside quotes.
 - **`AUTH_TOKEN`** is the admin user's token: clients using it need the new value.
 - **`CHAINLIT_AUTH_SECRET`**: changing it signs out every chat session.
 
@@ -95,7 +97,8 @@ SELECT name FROM model_endpoints WHERE model_type = 'embedder' AND is_default;
 ```
 
 One row is expected; otherwise mark one embedder endpoint as the default, in the
-admin UI or through the admin API, first. The pinning is kept if you roll back.
+admin UI or through the admin API, first. Rolling back from the backups undoes the
+pinning; the Compose rollback without backups keeps it.
 
 ### If you ran a development build
 
@@ -260,13 +263,31 @@ they stay idle.
 kubectl scale -n "$NS" deploy/"$FULLNAME-openrag" --replicas=0
 ```
 
-If your new values change the PostgreSQL password, change it in the database now,
-before `helm upgrade` hands the new value to OpenRAG. With the bundled PostgreSQL:
+If you change the PostgreSQL password (see [Secrets](#secrets)), do it now, before
+`helm upgrade`:
 
-```bash
-echo "ALTER ROLE root WITH PASSWORD '<new password>'" | kubectl exec -i -n "$NS" "$PG_POD" -- \
-  sh -c 'PGPASSWORD="$(cat /opt/bitnami/postgresql/secrets/password)" psql -U root -d postgres'
-```
+1. Change it in the database. With the bundled PostgreSQL:
+
+   ```bash
+   echo "ALTER ROLE CURRENT_USER WITH PASSWORD '<new password>'" | kubectl exec -i -n "$NS" "$PG_POD" -- \
+     env PGPASSWORD='<old password>' psql -U <postgresql.auth.username, root by default> -d postgres
+   ```
+
+   With an external PostgreSQL, run the same `ALTER ROLE` with your client.
+2. Put the new value in the Secret OpenRAG reads. With
+   `postgresProvisioning.migrationJob.enabled`, the migration Job runs before
+   `helm upgrade` updates that Secret, and would otherwise fail to log in. For the
+   Secret the chart renders from your values:
+
+   ```bash
+   kubectl patch secret -n "$NS" "$FULLNAME-env-secrets" \
+     -p '{"stringData":{"POSTGRES_PASSWORD":"<new password>"}}'
+   ```
+
+   With `env.existingSecret`, update that Secret; with an external secrets
+   provider, update the source and wait until the Secret has synced.
+3. Set the new value in your values: `postgresql.auth.password` with the bundled
+   PostgreSQL, `env.secrets.POSTGRES_PASSWORD` with an external one.
 
 Then upgrade the release:
 
@@ -374,10 +395,18 @@ integers, folded section IDs):
    `kubectl delete raycluster -n "$NS" "$FULLNAME-raycluster"` (the rollback
    recreates it).
 2. Restore PostgreSQL from the dump, and Milvus's etcd and object storage from their snapshots.
-3. If you changed the PostgreSQL password in step 4, set the old one back: a
-   `pg_dump` of one database does not hold role passwords, so the restore keeps
-   the new one, while `helm rollback` gives 2.2.x the old one. Use the command
-   from upgrade step 4, with `<old password>`.
+3. If you changed the PostgreSQL password in [upgrade step 4](#4-upgrade-the-release),
+   set the old one back: a `pg_dump` of one database holds no role passwords, so
+   the restore keeps the new one. With the bundled PostgreSQL:
+
+   ```bash
+   echo "ALTER ROLE CURRENT_USER WITH PASSWORD '<old password>'" | kubectl exec -i -n "$NS" "$PG_POD" -- \
+     env PGPASSWORD='<new password>' psql -U <postgresql.auth.username, root by default> -d postgres
+   ```
+
+   With an external PostgreSQL, use your client. `helm rollback` puts the old
+   value back in the Secret the chart renders from your values; in an
+   `env.existingSecret` or at your secrets provider, put it back yourself.
 4. Delete the `<FULLNAME>-venv` PVC, which holds the Python packages 2.3.0
    installed, and wait until `kubectl get pvc -n "$NS"` no longer lists it. The
    rollback recreates it empty, and 2.2.x installs its own at startup.
@@ -427,7 +456,8 @@ Your `.env` is not tracked, so checking out 2.3.0 keeps it. Copy it aside first
   shipped example values for `AUTH_TOKEN`, `POSTGRES_PASSWORD`, `MINIO_ACCESS_KEY`,
   `MINIO_SECRET_KEY` and `CHAINLIT_AUTH_SECRET`; OpenRAG 2.3.0 refuses them.
   - `POSTGRES_PASSWORD`: put the new value in `.env`; step 4 changes it in the
-    database. 2.2.x keeps running with the old value until step 2 stops it.
+    database. 2.2.x keeps running with the old value until step 2 stops it; do not
+    run `$DC up` before then, which would restart OpenRAG with the new value.
   - `MINIO_ACCESS_KEY` and `MINIO_SECRET_KEY`: MinIO and Milvus both read them
     from `.env`, and MinIO takes the new pair at its next start. Change them in
     `.env` only, and restart both together, which the upgrade does.
@@ -503,8 +533,9 @@ password first:
 
 ```bash
 $DC up -d rdb
+until $DC exec rdb pg_isready -q; do sleep 1; done
 $DC exec rdb psql -U <POSTGRES_USER, root by default> -d postgres \
-  -c "ALTER ROLE <POSTGRES_USER> WITH PASSWORD '<new password>'"
+  -c "ALTER ROLE CURRENT_USER WITH PASSWORD '<new password>'"
 ```
 
 Start the stack, so that OpenRAG applies the PostgreSQL migrations, which the
