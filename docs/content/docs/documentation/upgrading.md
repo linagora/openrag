@@ -30,7 +30,7 @@ while nothing writes to it, and searches fail until it is.
 | New PostgreSQL migrations | Applied when OpenRAG 2.3.0 starts, or on Kubernetes by the migration Job when you enabled it. |
 | Chat and text completion responses: `extra` and its source entries | `extra` is a JSON object instead of a JSON-encoded string, and each document source puts the chunk's metadata under `chunk`. Clients must be updated. |
 | `GET /metrics` | The admin token is refused (`403`); scrapers need `METRICS_TOKEN`. |
-| Secret checks | Five credentials shorter than 12 characters, or any secret set to a value the project publishes as an example, stop OpenRAG at startup. |
+| Secret checks | Five credentials shorter than 12 characters, or a checked secret set to a value the project publishes as an example, stop OpenRAG at startup. |
 | Ray | Indexer actors change protocol: tasks running when the old version stops are lost. |
 | Readiness | `GET /ready` is new: it fails while PostgreSQL, Milvus or Ray is unreachable, and reports the model endpoints. |
 | vLLM embedder | Runs on vLLM `v0.30.0` with `--runner pooling --convert embed`. |
@@ -56,19 +56,20 @@ Each document entry in those lists now nests the chunk's metadata:
 ```
 
 A client that read `sources[i].filename` reads `sources[i].chunk.filename` now.
-`rerank_score` is present only when a reranker ran. Web entries
+`rerank_score`, new in 2.3.0, is present only when a reranker ran. Web entries
 (`source_type: "web"`) are unchanged.
 
 ### Metrics scraping
 
 `GET /metrics` no longer accepts the admin token. Set `METRICS_TOKEN` and give the
-same value to your scraper as a bearer token. See
+same value to your scraper as a bearer token, or, on a network only your scraper
+reaches, set `METRICS_ALLOW_UNAUTHENTICATED=true`. See
 [Prometheus metrics](/openrag/documentation/prometheus_metrics/).
 
 ### Secrets
 
 `AUTH_TOKEN`, `POSTGRES_PASSWORD`, `CHAINLIT_AUTH_SECRET`, `MINIO_SECRET_KEY` and
-`GRAFANA_ADMIN_PASSWORD` need at least 12 characters, and no secret may be a value
+`GRAFANA_ADMIN_PASSWORD` need at least 12 characters, and none of the checked secrets may be a value
 the project publishes as an example, such as the defaults of the 2.2.x
 `.env.example`. OpenRAG refuses to start otherwise, with an error naming the
 variable. The rules are in
@@ -91,6 +92,7 @@ Changing a secret of a deployment that already holds data needs care:
   Grafana sets the admin password only when it creates its database. Change it
   in Grafana too, once the overlay runs:
   `$DC exec grafana grafana cli admin reset-admin-password '<new password>'`.
+  Grafana keeps it through a rollback: set the old one back the same way.
 
 ### Check the default embedder
 
@@ -105,25 +107,33 @@ SELECT name FROM model_endpoints WHERE model_type = 'embedder' AND is_default;
 ```
 
 One row is expected; otherwise mark one embedder endpoint as the default, in the
-admin UI or through the admin API, first. If the migration has already stopped
-2.3.0, whose admin UI is then unavailable, mark it in the database and restart
-OpenRAG, which applies the migrations again:
+admin UI or through the admin API, first. Mark the embedder those partitions were
+indexed with: the migration pins them to it for good, and the Milvus migration
+moves their vectors into its field.
+
+If the migration has already stopped 2.3.0, whose admin UI is then unavailable,
+mark it in the database, then restart OpenRAG, which applies the migrations again
+(on Kubernetes with the migration Job, run `helm upgrade` again instead):
 
 ```sql
 UPDATE model_endpoints SET is_default = (name = '<endpoint name>') WHERE model_type = 'embedder';
 ```
- Rolling back from the backups undoes the
-pinning; the Compose rollback without backups keeps it.
+
+Rolling back from the backups undoes the pinning; the Compose rollback without
+backups keeps it.
 
 ### If you ran a development build
 
 A collection migrated to version 3 by a build of the development branch from 22
-to 28 September 2026 went through a copy that rounded chunk section IDs, which
+September 2026 (#994) until #1096 merged on 28 September went through a copy that rounded chunk section IDs, which
 breaks neighbour-chunk expansion. The migration does not repair them: after
 upgrading, re-index the files that were indexed before that migration. The
-migration's dry run prints the collection's current version, `2` for 2.2.1 and
-2.2.2; a `3` means a development build already migrated it, and whether that copy
-rounded the IDs depends on the date it ran.
+migration's dry run prints the collection's current version, normally `2` for
+2.2.1 and 2.2.2; a `3` means a development build already migrated it, and whether
+that copy rounded the IDs depends on the date it ran. A `1` means version 2 was
+never applied (2.2.x only enforced it on uploads): the upgrade then runs it too,
+which rebuilds the collection and keeps a backup copy of it; see
+[Milvus migrations — Version 2](/openrag/documentation/milvus_migration/#version-2--case-insensitive-bm25-analyzer).
 
 ## 2.2.x to 2.3.0 on Kubernetes
 
@@ -155,7 +165,8 @@ Besides the [changes for every deployment](#changes-in-230-for-every-deployment)
 the chart changes:
 
 - **Probes.** Readiness moves from `/health_check` to `/ready`, which only 2.3.0
-  images serve: upgrade the chart and the images together.
+  images serve: upgrade the chart and the images together. Values that set
+  `openrag.probes` keep their own paths.
 - **KubeRay.** A KubeRay cluster keeps its old pods until they are deleted.
 - **vLLM engines.** The embedder and LLM engines are pinned to `v0.30.0-cu129`.
 - **Embedder engine.** It now runs with `maxModelLen: 2048` and
@@ -164,8 +175,9 @@ the chart changes:
   raised `MAX_MODEL_LEN` or an endpoint's `extra.max_model_len` above 2047, raise
   `maxModelLen` with it.
 - **Bundled PostgreSQL.** Its own network policy, which let any source reach port
-  5432, is off: PostgreSQL gets the chart's default-deny rules, and clients outside
-  the release's namespace no longer reach it.
+  5432, is off. With `networkPolicy.enabled` (the default), PostgreSQL gets the
+  chart's default-deny rules, and clients outside the release's namespace no
+  longer reach it.
 - **Metrics.** `openrag.metrics.prometheusAnnotations` is on by default. A
   Prometheus that discovers pods by annotation starts scraping `GET /metrics`, and
   gets `403` until its scrape job sends `METRICS_TOKEN`.
@@ -220,8 +232,9 @@ release. In particular an embedder entry copied from an older chart keeps
 `tag: latest` and `--task embed`, which current vLLM releases reject. Rebuild your
 override from the 2.3.0 chart's `values.yaml`.
 
-The bundled engines run CUDA 12.9 builds: check the NVIDIA driver on your GPU
-nodes (see [GPU prerequisites](/openrag/documentation/kubernetes/)). Rolling a
+The bundled engines run CUDA 12.9 builds: check that the NVIDIA driver on your
+GPU nodes supports CUDA 12.9, in NVIDIA's
+[CUDA compatibility table](https://docs.nvidia.com/deploy/cuda-compatibility/). Rolling a
 vLLM engine starts its new pod before stopping the old one, so it needs a free GPU
 while it rolls.
 
@@ -331,7 +344,9 @@ helm upgrade "$RELEASE" oci://ghcr.io/linagora/openrag-stack \
   --version "$CHART_VERSION" -n "$NS" -f "$VALUES"
 ```
 
-If `kubectl get deploy -n "$NS" "$FULLNAME-openrag"` still shows zero replicas
+With `ray.enabled: true`, add `--set openrag.replicas=0`: `helm upgrade` would
+otherwise start OpenRAG right away, against the 2.2.x Ray pods. Without Ray, if
+`kubectl get deploy -n "$NS" "$FULLNAME-openrag"` still shows zero replicas
 afterwards, scale it back to your usual count.
 
 If `helm upgrade` fails after you changed the password, do not run a bare
@@ -340,13 +355,12 @@ from your values, and the database no longer accepts it. Fix the cause and run
 `helm upgrade` again, or follow
 [Rolling back a Kubernetes upgrade](#rolling-back-a-kubernetes-upgrade).
 
-With `ray.enabled: true`, once `helm upgrade` has returned, keep OpenRAG at zero
-replicas, so that it does not attach to the 2.2.x Ray pods, and delete every Ray
-pod so KubeRay recreates them from the 2.3.0 template (deleting them earlier would
-bring them back on 2.2.x). Once they are Ready, scale OpenRAG back up:
+With `ray.enabled: true`, once `helm upgrade` has returned, delete every Ray pod
+so KubeRay recreates them from the 2.3.0 template (deleting them earlier would
+bring them back on 2.2.x). Once they are Ready, scale OpenRAG up. A later
+`helm upgrade` without the flag sets the count from your values again:
 
 ```bash
-kubectl scale -n "$NS" deploy/"$FULLNAME-openrag" --replicas=0
 kubectl delete pod -n "$NS" -l ray.io/cluster="$FULLNAME-raycluster"
 kubectl get pod -n "$NS" -l ray.io/cluster="$FULLNAME-raycluster" -w   # until the new pods are Running and Ready
 kubectl scale -n "$NS" deploy/"$FULLNAME-openrag" --replicas=<your usual count>
@@ -359,17 +373,19 @@ The new OpenRAG pod applies the PostgreSQL migrations when it starts. With
 `postgresProvisioning.runMigrationsInApp: false` and
 `postgresProvisioning.migrationJob.enabled: true`, the `pre-upgrade` migration Job
 runs them before the pods roll instead, and a failing migration fails
-`helm upgrade`. With both off, nothing applies them: run them from the new pod
-before step 5, which needs them:
+`helm upgrade`. With both off, nothing applies them: the new pod starts without
+its services and stays unready until they are applied and it restarts. Run them
+from it, then restart it:
 
 ```bash
 kubectl exec -n "$NS" deploy/"$FULLNAME-openrag" -- \
   uv run --no-dev --no-sync python -m services.persistence.migrations.run
+kubectl rollout restart -n "$NS" deploy/"$FULLNAME-openrag"
 ```
 
-The pod becomes Ready, but searches answer `503` with
-`VDB_SCHEMA_MIGRATION_REQUIRED` and uploads fail until step 5: readiness does not
-check the Milvus schema version.
+Once the PostgreSQL migrations are applied, the pod becomes Ready, but searches
+answer `503` with `VDB_SCHEMA_MIGRATION_REQUIRED` and uploads fail until step 5:
+readiness does not check the Milvus schema version.
 
 #### 5. Migrate the Milvus collection
 
@@ -448,11 +464,13 @@ integers, folded section IDs):
 1. Scale OpenRAG to zero. With `ray.enabled: true`, also delete the Ray cluster,
    whose pods mount the same Python-packages volume as OpenRAG:
    `kubectl delete raycluster -n "$NS" "$FULLNAME-raycluster"` (the rollback
-   recreates it).
+   recreates it). With an external Ray cluster, retire the 2.3.0 indexer
+   generation, as in
+   [Retire an old indexer actor generation](/openrag/documentation/deploy_ray_cluster/#retire-an-old-indexer-actor-generation).
 2. Restore the backup set from step 2:
    - PostgreSQL: empty its schema, then restore the dump. `pg_restore --clean`
-     alone fails here: the tables 2.3.0 added reference the older ones and stop
-     them from being dropped. With the bundled PostgreSQL:
+     alone fails here: the constraints 2.3.0 added and changed stop the tables in
+     the dump from being dropped. With the bundled PostgreSQL:
 
      ```bash
      echo "DROP SCHEMA public CASCADE; CREATE SCHEMA public;" | kubectl exec -i -n "$NS" "$PG_POD" -- \
@@ -542,7 +560,10 @@ Your `.env` is not tracked, so checking out 2.3.0 keeps it. Copy it aside first
   `checks.embedder: unavailable`. See the
   [`EMBEDDER_MODEL_NAME` row](/openrag/documentation/env_vars/).
 - **`METRICS_TOKEN`**, if you scrape `GET /metrics` or run the monitoring overlay,
-  which refuses to start without it.
+  which refuses to start without it. With the overlay in `$DC`, every `$DC`
+  command, `down` included, fails until `.env` sets both `METRICS_TOKEN` and
+  `GRAFANA_ADMIN_PASSWORD`; the 2.3.0 overlay also needs Docker Compose 2.23.1 or
+  newer.
 
 #### Run the default-embedder check
 
@@ -713,8 +734,8 @@ still at 2.3.0, which neither version runs on:
 - the collection has fewer than 10 vector fields, since the downgrade adds
   `vector` back.
 
-A dry run of the Milvus downgrade checks the dimensions and the routing without
-changing anything; the other checks are yours. Then, in this order (the Milvus
+A dry run of the Milvus downgrade checks the dimensions, the routing and the
+number of vector fields without changing anything; the workspace check is yours. Then, in this order (the Milvus
 downgrade reads the PostgreSQL schema that the third command removes):
 
 ```bash
