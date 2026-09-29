@@ -179,8 +179,9 @@ def _get_stored_version(client: MilvusClient, collection_name: str) -> int:
     if raw is None:
         return 0
     unknown = (
-        f"'{collection_name}' has schema version {raw!r}, which is not a version. Set its "
-        f"`{SCHEMA_VERSION_PROPERTY_KEY}` property to the collection's real version first. Nothing was changed."
+        f"'{collection_name}' has schema version {raw!r}, which is not a version. Set the collection's real "
+        f"version first: MilvusClient(uri).alter_collection_properties('{collection_name}', "
+        f"properties={{'{SCHEMA_VERSION_PROPERTY_KEY}': '<version>'}}). Nothing was changed."
     )
     try:
         version = int(raw)
@@ -593,7 +594,13 @@ def _refuse_out_of_order(client: MilvusClient, collection_name: str, downgrade: 
     except ValueError as exc:
         logger.error(str(exc))
         sys.exit(2)
-    if downgrade and stored != TARGET_VERSION:
+    if downgrade and stored < TARGET_VERSION:
+        logger.error(
+            f"'{collection_name}' is at schema version {stored}, below this script's version {TARGET_VERSION}: "
+            "there is nothing for it to revert."
+        )
+        sys.exit(2)
+    if downgrade and stored > TARGET_VERSION:
         logger.error(
             f"'{collection_name}' is at schema version {stored}; this script's --downgrade only reverts a collection "
             f"at version {TARGET_VERSION}. Use migrate.py --downgrade --target N, from the release that migrated it."
@@ -602,7 +609,7 @@ def _refuse_out_of_order(client: MilvusClient, collection_name: str, downgrade: 
     if not downgrade and stored < TARGET_VERSION - 1:
         logger.error(
             f"'{collection_name}' is at schema version {stored}; this script only upgrades a collection at version "
-            f"{TARGET_VERSION - 1}. Use migrate.py, which applies the steps in turn."
+            f"{TARGET_VERSION - 1} or later. Use migrate.py, which applies the steps in turn."
         )
         sys.exit(2)
 

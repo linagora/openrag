@@ -1153,6 +1153,7 @@ class TestWarnIfMigrationPending:
 
         (warning,) = logs.warnings
         assert "ahead of the 1" in warning
+        assert "that version's migration runner (--downgrade --target 1)" in warning
 
     def test_absent_collection_is_not_a_mismatch(self, store: MilvusVectorStore, logs: _LogRecorder) -> None:
         store._client.has_collection.return_value = False

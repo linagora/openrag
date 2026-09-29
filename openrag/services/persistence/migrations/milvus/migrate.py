@@ -102,8 +102,9 @@ def _get_stored_version(client: MilvusClient, collection_name: str) -> int:
     if raw is None:
         return 0
     unknown = (
-        f"'{collection_name}' has schema version {raw!r}, which is not a version. Set its "
-        f"`{SCHEMA_VERSION_PROPERTY_KEY}` property to the collection's real version first. Nothing was changed."
+        f"'{collection_name}' has schema version {raw!r}, which is not a version. Set the collection's real "
+        f"version first: MilvusClient(uri).alter_collection_properties('{collection_name}', "
+        f"properties={{'{SCHEMA_VERSION_PROPERTY_KEY}': '<version>'}}). Nothing was changed."
     )
     try:
         version = int(raw)

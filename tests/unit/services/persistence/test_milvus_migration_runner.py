@@ -39,6 +39,7 @@ def runner(monkeypatch):
     errors: list[str] = []
     module.errors = errors
     module.real_run_downgrade = module.run_downgrade
+    module.real_run_upgrade = module.run_upgrade
 
     class FakeClient:
         def __init__(self, uri: str) -> None:
@@ -241,8 +242,9 @@ def test_a_collection_with_an_unknown_version_is_refused(runner, monkeypatch, st
 
     assert exc.value.code == 2
     assert runner.errors == [
-        f"'vdb_test' has schema version '{stamp}', which is not a version. Set its `openrag.schema_version` "
-        "property to the collection's real version first. Nothing was changed."
+        f"'vdb_test' has schema version '{stamp}', which is not a version. "
+        "Set the collection's real version first: MilvusClient(uri).alter_collection_properties('vdb_test', "
+        "properties={'openrag.schema_version': '<version>'}). Nothing was changed."
     ]
     assert runner.calls == []
 
@@ -282,6 +284,38 @@ def test_a_downgrade_reverts_the_steps_above_the_target_newest_first(runner, mon
     assert reverted == [3, 2]
 
 
+@pytest.mark.parametrize(
+    ("stored", "args", "expected"),
+    [
+        ("2", ["--dry-run"], [("upgrade", 3, True)]),
+        ("2", [], [("upgrade", 3, False)]),
+        ("3", ["--downgrade", "--target", "2", "--dry-run"], [("downgrade", 3, True)]),
+        ("3", ["--downgrade", "--target", "2"], [("downgrade", 3, False)]),
+    ],
+    ids=["upgrade dry-run", "upgrade", "downgrade dry-run", "downgrade"],
+)
+def test_each_step_gets_the_dry_run_flag(runner, monkeypatch, stored, args, expected):
+    """Through the real run_upgrade and run_downgrade, down to the step modules."""
+    ran: list[tuple[str, int, bool]] = []
+
+    def load(path: Path) -> SimpleNamespace:
+        version = int(path.name.split(".")[0])
+        return SimpleNamespace(
+            TARGET_VERSION=version,
+            upgrade=lambda client, name, dry_run=False: ran.append(("upgrade", version, dry_run)),
+            downgrade=lambda client, name, dry_run=False: ran.append(("downgrade", version, dry_run)),
+        )
+
+    monkeypatch.setattr(runner, "run_upgrade", runner.real_run_upgrade)
+    monkeypatch.setattr(runner, "run_downgrade", runner.real_run_downgrade)
+    monkeypatch.setattr(runner, "_load_module", load)
+    runner.stored_version = stored
+
+    _run(runner, monkeypatch, *args)
+
+    assert ran == expected
+
+
 # ---------------------------------------------------------------------------
 # Each migration script's own --downgrade, run standalone
 # ---------------------------------------------------------------------------
@@ -293,7 +327,7 @@ _SCRIPTS = {
 }
 
 
-def _load_script(monkeypatch, filename: str, stored_version: int | str):
+def _load_script(monkeypatch, filename: str, stored_version: int | str | None):
     spec = importlib.util.spec_from_file_location(f"milvus_script_{filename[0]}", _RUNNER_PATH.parent / filename)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -310,6 +344,8 @@ def _load_script(monkeypatch, filename: str, stored_version: int | str):
             return True
 
         def describe_collection(self, name: str) -> dict:
+            if stored_version is None:
+                return {"properties": {}}
             return {"properties": {module.SCHEMA_VERSION_PROPERTY_KEY: str(stored_version)}}
 
     monkeypatch.setattr(module, "MilvusClient", FakeClient)
@@ -355,10 +391,18 @@ def test_a_standalone_downgrade_of_another_version_is_refused(monkeypatch, versi
         script.main()
 
     assert exc.value.code == 2
-    assert script.errors == [
-        f"'vdb_test' is at schema version {version + offset}; this script's --downgrade only reverts a collection "
-        f"at version {version}. Use migrate.py --downgrade --target N, from the release that migrated it."
-    ]
+    if offset < 0:
+        expected = (
+            f"'vdb_test' is at schema version {version + offset}, below this script's version {version}: "
+            "there is nothing for it to revert."
+        )
+    else:
+        expected = (
+            f"'vdb_test' is at schema version {version + offset}; this script's --downgrade only reverts a "
+            f"collection at version {version}. Use migrate.py --downgrade --target N, from the release that "
+            "migrated it."
+        )
+    assert script.errors == [expected]
     assert script.calls == []
 
 
@@ -399,13 +443,13 @@ def test_a_standalone_upgrade_that_would_skip_a_step_is_refused(monkeypatch, ver
     assert exc.value.code == 2
     assert script.errors == [
         f"'vdb_test' is at schema version {version - 2}; this script only upgrades a collection at version "
-        f"{version - 1}. Use migrate.py, which applies the steps in turn."
+        f"{version - 1} or later. Use migrate.py, which applies the steps in turn."
     ]
     assert script.calls == []
 
 
 @pytest.mark.parametrize("version", sorted(_SCRIPTS))
-@pytest.mark.parametrize("stamp", ["abc", "-1", ""])
+@pytest.mark.parametrize("stamp", ["abc", "-1", "", "2.0"])
 @pytest.mark.parametrize("mode", [[], ["--downgrade"]], ids=["upgrade", "downgrade"])
 def test_a_standalone_run_on_an_unknown_version_is_refused(monkeypatch, version, stamp, mode):
     script = _load_script(monkeypatch, _SCRIPTS[version], stored_version=stamp)
@@ -416,7 +460,30 @@ def test_a_standalone_run_on_an_unknown_version_is_refused(monkeypatch, version,
 
     assert exc.value.code == 2
     assert script.errors == [
-        f"'vdb_test' has schema version '{stamp}', which is not a version. Set its `openrag.schema_version` "
-        "property to the collection's real version first. Nothing was changed."
+        f"'vdb_test' has schema version '{stamp}', which is not a version. "
+        "Set the collection's real version first: MilvusClient(uri).alter_collection_properties('vdb_test', "
+        "properties={'openrag.schema_version': '<version>'}). Nothing was changed."
     ]
+    assert script.calls == []
+
+
+def test_a_never_stamped_collection_is_at_version_0_for_the_first_script(monkeypatch):
+    script = _load_script(monkeypatch, _SCRIPTS[1], stored_version=None)
+    monkeypatch.setattr("sys.argv", [_SCRIPTS[1]])
+
+    script.main()
+
+    assert script.calls == ["upgrade"]
+
+
+@pytest.mark.parametrize("version", [v for v in sorted(_SCRIPTS) if v >= 2])
+def test_a_never_stamped_collection_is_refused_by_the_later_scripts(monkeypatch, version):
+    script = _load_script(monkeypatch, _SCRIPTS[version], stored_version=None)
+    monkeypatch.setattr("sys.argv", [_SCRIPTS[version]])
+
+    with pytest.raises(SystemExit) as exc:
+        script.main()
+
+    assert exc.value.code == 2
+    assert script.errors[0].startswith("'vdb_test' is at schema version 0;")
     assert script.calls == []
