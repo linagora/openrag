@@ -82,10 +82,10 @@ class RetrieverPipeline:
         self.reranker = reranker
         self.reranker_top_k = reranker_top_k
         self.allow_filterless_fallback = allow_filterless_fallback
-        # RRF dampening for fusing this partition's multiQuery sub-query rankings
+        # RRF dampening for fusing this pipeline's multiQuery sub-query rankings
         # (see get_relevant_docs). 60 is canonical; a preset can tune it via
-        # RetrievalPipelineConfig.rrf_k. Cross-partition fusion happens a layer
-        # up in RetrievalService.fuse, which is not partition-scoped.
+        # RetrievalPipelineConfig.rrf_k. Fusion across partition groups happens a
+        # layer up in RetrievalService.fuse, which is not preset-scoped.
         self.rrf_k = rrf_k
 
     @property

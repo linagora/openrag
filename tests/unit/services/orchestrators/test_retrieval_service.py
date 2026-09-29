@@ -83,12 +83,14 @@ def _partition(
     name: str = "tenant-a",
     embedder: str = "embed-a",
     retrieval: RetrievalPipelineConfig | None = None,
+    chat_llm: str | None = None,
 ) -> PartitionConfig:
     return PartitionConfig(
         name=name,
         embedder=embedder,
         indexation=IndexationPipelineConfig(),
         retrieval=retrieval or RetrievalPipelineConfig(),
+        chat_llm=chat_llm,
     )
 
 
@@ -548,7 +550,7 @@ async def test_retrieve_all_expands_to_per_partition_embedders():
 @pytest.mark.asyncio
 async def test_retrieve_all_applies_partition_top_n():
     """The reranker top_n was dropped on the `all` path (default_top_k was None).
-    With expansion, each partition's top_n truncates its results."""
+    With expansion, each group's top_n truncates its results."""
     s = FakeSearcher()
     s.search_result = [_chunk("a"), _chunk("b"), _chunk("c")]
     reranker = FakeReranker()
@@ -571,7 +573,8 @@ async def test_retrieve_all_applies_partition_top_n():
     out = await svc.retrieve(partitions=["all"], query=Query(query="hello"))
 
     assert [c.id for c in out] == ["a", "b"]  # truncated to top_n=2, not the full 3
-    assert s.search_calls[0]["partition"] == ["solo"]
+    # One group: "all" is kept, so the search stays unscoped.
+    assert s.search_calls[0]["partition"] == ["all"]
 
 
 @pytest.mark.asyncio
@@ -594,6 +597,150 @@ async def test_retrieve_all_falls_back_to_legacy_when_no_partitions_exist():
 
     assert [c.id for c in out] == ["x"]
     assert default_searcher.search_calls[0]["partition"] == ["all"]
+
+
+# --- partitions on one embedder and one retrieval preset share a pipeline ---
+
+
+def _grouping_svc(partitions: list[PartitionConfig], fields: dict[str, str], **kwargs):
+    """A service over these partitions, with the embedders' vector fields.
+
+    Returns the service and one searcher per embedder name.
+    """
+    cfg = _config()
+    cfg.partitions = {p.name: p for p in partitions}
+    cfg.models = SimpleNamespace(
+        reranker={}, embedder={name: SimpleNamespace(vector_field=field) for name, field in fields.items()}
+    )
+    searchers: dict[str, FakeSearcher] = {}
+    svc = RetrievalService(
+        searcher=FakeSearcher(),
+        reranker=None,
+        llm=None,
+        config=cfg,
+        searcher_factory=lambda name: searchers.setdefault(name, FakeSearcher()),
+        **kwargs,
+    )
+    return svc, searchers
+
+
+@pytest.mark.asyncio
+async def test_retrieve_shares_one_pipeline_across_partitions_on_one_embedder_and_preset():
+    reranker = FakeReranker()
+    preset = RetrievalPipelineConfig(enable_reranker=True, reranker="r")
+    svc, searchers = _grouping_svc(
+        [_partition(name="p1", retrieval=preset), _partition(name="p2", retrieval=preset)],
+        {"embed-a": "vector_embed_a"},
+        reranker_factory=lambda name: reranker,
+    )
+    searchers["embed-a"] = FakeSearcher()
+    searchers["embed-a"].search_result = [
+        Chunk(id="a", text="from p1", partition="p1"),
+        Chunk(id="b", text="from p2", partition="p2"),
+    ]
+
+    out = await svc.retrieve(partitions=["p1", "p2"], query=Query(query="hello"))
+
+    # One embedding and one search over both partitions, one rerank pass over
+    # their pooled candidates: no per-partition lists to fuse by rank.
+    (call,) = searchers["embed-a"].search_calls
+    assert call["partition"] == ["p1", "p2"]
+    (rerank_call,) = reranker.calls
+    assert rerank_call["documents"] == ["from p1", "from p2"]
+    assert [c.id for c in out] == ["a", "b"]
+
+
+@pytest.mark.asyncio
+async def test_retrieve_all_on_one_embedder_and_preset_stays_unscoped():
+    svc, searchers = _grouping_svc(
+        [_partition(name="p1"), _partition(name="p2")],
+        {"embed-a": "vector_embed_a"},
+    )
+
+    await svc.retrieve(partitions=["all"], query=Query(query="hello"))
+
+    (call,) = searchers["embed-a"].search_calls
+    assert call["partition"] == ["all"]
+
+
+@pytest.mark.asyncio
+async def test_retrieve_all_groups_partitions_per_embedder():
+    svc, searchers = _grouping_svc(
+        [
+            _partition(name="p1", embedder="embed-a"),
+            _partition(name="p2", embedder="embed-b"),
+            _partition(name="p3", embedder="embed-a"),
+        ],
+        {"embed-a": "vector_embed_a", "embed-b": "vector_embed_b"},
+    )
+
+    await svc.retrieve_multi(partitions=["all"], search_queries=SearchQueries(query_list=[Query(query="hello")]))
+
+    assert [c["partition"] for c in searchers["embed-a"].search_calls] == [["p1", "p3"]]
+    assert [c["partition"] for c in searchers["embed-b"].search_calls] == [["p2"]]
+
+
+@pytest.mark.asyncio
+async def test_retrieve_keeps_the_default_alias_and_its_embedder_in_one_pipeline():
+    # "default" points at embed-a: both write the same field.
+    svc, searchers = _grouping_svc(
+        [_partition(name="p1", embedder="default"), _partition(name="p2", embedder="embed-a")],
+        {"default": "vector_embed_a", "embed-a": "vector_embed_a"},
+    )
+
+    await svc.retrieve(partitions=["p1", "p2"], query=Query(query="hello"))
+
+    assert list(searchers) == ["default"]
+    (call,) = searchers["default"].search_calls
+    assert call["partition"] == ["p1", "p2"]
+
+
+@pytest.mark.asyncio
+async def test_retrieve_splits_one_embedder_by_retrieval_preset():
+    # Same embedder, but p2 keeps fewer results: each needs its own pipeline.
+    svc, searchers = _grouping_svc(
+        [
+            _partition(name="p1"),
+            _partition(name="p2", retrieval=RetrievalPipelineConfig(top_n=3)),
+            _partition(name="p3"),
+        ],
+        {"embed-a": "vector_embed_a"},
+    )
+
+    groups = await svc._pipeline_groups_for_partitions(["p1", "p2", "p3"])
+
+    assert [(names, top_n) for names, _, top_n in groups] == [(["p1", "p3"], 10), (["p2"], 3)]
+    await svc.retrieve(partitions=["p1", "p2", "p3"], query=Query(query="hello"))
+    assert [c["partition"] for c in searchers["embed-a"].search_calls] == [["p1", "p3"], ["p2"]]
+
+
+@pytest.mark.asyncio
+async def test_expansion_presets_split_by_the_llm_that_rewrites_the_query():
+    """A hyde or multiQuery preset without its own ``llm`` rewrites the query
+    with the partition's chat LLM, so partitions on different chat LLMs cannot
+    share a pipeline. A single-query preset uses no LLM, so its chat LLM does
+    not matter."""
+    hyde = RetrievalPipelineConfig(type="hyde")
+    llm_names: list[str] = []
+    svc, _ = _grouping_svc(
+        [
+            _partition(name="h1", retrieval=hyde, chat_llm="llm-1"),
+            _partition(name="h2", retrieval=hyde, chat_llm="llm-1"),
+            _partition(name="h3", retrieval=hyde, chat_llm="llm-2"),
+            _partition(name="s1", chat_llm="llm-2"),
+            _partition(name="s2"),
+        ],
+        {"embed-a": "vector_embed_a"},
+        llm_factory=lambda name: llm_names.append(name) or object(),
+        prompt_service=_RecordingPromptService("HYDE {question}"),
+    )
+
+    hyde_groups = await svc._pipeline_groups_for_partitions(["h1", "h2", "h3"])
+    single_groups = await svc._pipeline_groups_for_partitions(["s1", "s2"])
+
+    assert [names for names, _, _ in hyde_groups] == [["h1", "h2"], ["h3"]]
+    assert llm_names == ["llm-1", "llm-2"]
+    assert [names for names, _, _ in single_groups] == [["s1", "s2"]]
 
 
 # --- #708: the "all" fan-out must be concurrency-bounded (production safety) ---
