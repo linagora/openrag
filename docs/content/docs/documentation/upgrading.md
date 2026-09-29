@@ -238,9 +238,13 @@ Tasks still running when the pods restart are lost.
 Take the backups as one set, after step 1:
 
 - PostgreSQL, for example
-  `kubectl exec -n "$NS" "$PG_POD" -- sh -c 'PGPASSWORD="$(cat /opt/bitnami/postgresql/secrets/password)" pg_dump -U root -Fc <database>' > openrag.dump`
-- Milvus: snapshot the volumes of its etcd and its object storage (MinIO or your
-  S3 bucket) with your storage's snapshot mechanism.
+  `kubectl exec -n "$NS" "$PG_POD" -- sh -c 'PGPASSWORD="$(cat /opt/bitnami/postgresql/secrets/password)" pg_dump -U <postgresql.auth.username, root by default> -Fc <database>' > openrag.dump`
+- Milvus: its etcd and its object storage (MinIO or your S3 bucket). Stop them
+  first, so that the snapshots are one point in time: note the replica counts
+  that `kubectl get deploy,statefulset -n "$NS"` shows for Milvus, etcd and
+  MinIO, scale those to zero, snapshot their volumes (or copy your bucket) with
+  your storage's snapshot mechanism, then scale them back to those counts.
+- Uploaded files: snapshot the `<FULLNAME>-data` volume.
 
 This set is your rollback. Step 5 drops the old vector field, and the new
 PostgreSQL migrations cannot be undone by an older image.
@@ -408,7 +412,23 @@ integers, folded section IDs):
    whose pods mount the same Python-packages volume as OpenRAG:
    `kubectl delete raycluster -n "$NS" "$FULLNAME-raycluster"` (the rollback
    recreates it).
-2. Restore PostgreSQL from the dump, and Milvus's etcd and object storage from their snapshots.
+2. Restore the backup set from step 2:
+   - PostgreSQL: empty its schema, then restore the dump. `pg_restore --clean`
+     alone fails here: the tables 2.3.0 added reference the older ones and stop
+     them from being dropped. With the bundled PostgreSQL:
+
+     ```bash
+     echo "DROP SCHEMA public CASCADE; CREATE SCHEMA public;" | kubectl exec -i -n "$NS" "$PG_POD" -- \
+       env PGPASSWORD='<password>' psql -v ON_ERROR_STOP=1 -U <postgresql.auth.username, root by default> -d <database>
+     kubectl exec -i -n "$NS" "$PG_POD" -- \
+       env PGPASSWORD='<password>' pg_restore --no-owner --exit-on-error -U <postgresql.auth.username, root by default> -d <database> < openrag.dump
+     ```
+
+     `<password>` is the one the database has now: the new one if you changed it
+     in upgrade step 4. With an external PostgreSQL, do the same with your client.
+   - Milvus: scale Milvus, etcd and MinIO to zero, restore their volumes (or your
+     bucket) from the snapshots, then scale them back.
+   - Uploaded files: restore the `<FULLNAME>-data` volume.
 3. If you changed the PostgreSQL password in [upgrade step 4](#4-upgrade-the-release),
    set the old one back: a `pg_dump` of one database holds no role passwords, so
    the restore keeps the new one. With the bundled PostgreSQL:
