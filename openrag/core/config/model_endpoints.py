@@ -29,7 +29,11 @@ DEFAULT_ENDPOINT_ALIAS = "default"
 
 
 def is_placeholder_api_key(value: object) -> bool:
-    """Return whether a configured API key represents anonymous access."""
+    """Return whether a configured API key is unset or the config default ``EMPTY``.
+
+    Boot sync uses this to avoid overwriting stored credentials with a placeholder.
+    Default STT seeding also uses it to omit unset and placeholder keys.
+    """
     return value is None or (isinstance(value, str) and value.strip() in PLACEHOLDER_API_KEYS)
 
 

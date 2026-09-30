@@ -30,7 +30,7 @@ def _assert_milvus_initializer(services: dict) -> None:
     initializer = services["milvus-init"]
     milvus = services["milvus"]
 
-    assert initializer["image"] == milvus["image"] == "milvusdb/milvus:v3.0.1"
+    assert initializer["image"] == milvus["image"] == "milvusdb/milvus:v3.0.2"
     assert initializer["user"] == "0:0"
     assert initializer["environment"]["LD_PRELOAD"] == ""
     assert initializer["entrypoint"] == ["/bin/sh", "-ec"]
@@ -102,7 +102,7 @@ def test_named_volume_profile_is_opt_in() -> None:
     assert named_milvus["services"]["etcd"]["volumes"] == ["${ETCD_VOLUME:-etcd}:/etcd"]
     assert named_milvus["services"]["minio"]["volumes"] == ["${MINIO_VOLUME:-minio}:/minio_data"]
     assert named_milvus["services"]["milvus"]["volumes"] == ["${MILVUS_VOLUME:-milvus}:/var/lib/milvus"]
-    assert named_milvus["services"]["milvus"]["image"] == "milvusdb/milvus:v3.0.1"
+    assert named_milvus["services"]["milvus"]["image"] == "milvusdb/milvus:v3.0.2"
     assert named_milvus["services"]["milvus"]["environment"]["ETCD_AUTH_ENABLED"] == "false"
     assert named_milvus["services"]["milvus"]["environment"]["MQ_TYPE"] == "${MILVUS_MQ_TYPE:-default}"
     assert {"etcd", "minio", "milvus"} <= set(named_milvus["volumes"])
@@ -164,3 +164,21 @@ def test_minio_image_is_digest_pinned_in_every_stack() -> None:
     )
     for path in compose_files:
         assert _load_yaml(path)["services"]["minio"]["image"] == expected, path
+
+
+def test_milvus_image_matches_helm_version_in_every_stack() -> None:
+    values = _load_yaml(CHART_DIR / "values.yaml")
+    expected = f"milvusdb/milvus:{values['milvus']['image']['all']['tag']}"
+
+    compose_files = (
+        COMPOSE_DIR / "milvus" / "milvus.yaml",
+        COMPOSE_DIR / "milvus" / "milvus.named-volumes.yaml",
+        ROOT / "tests" / "integration" / "api" / "api_run" / "docker-compose.yaml",
+        ROOT / "tests" / "integration" / "repos" / "docker-compose.yaml",
+        ROOT / "tests" / "load" / "workspace" / "docker-compose.yml",
+    )
+    for path in compose_files:
+        services = _load_yaml(path)["services"]
+        assert services["milvus"]["image"] == expected, path
+        if "milvus-init" in services:
+            assert services["milvus-init"]["image"] == expected, path

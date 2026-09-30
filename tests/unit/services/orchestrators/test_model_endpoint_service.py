@@ -268,14 +268,49 @@ async def test_seed_defaults_preserves_endpoint_api_keys(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_seed_defaults_omits_placeholder_api_keys(monkeypatch):
+async def test_seed_defaults_keeps_the_empty_api_key_except_for_stt(monkeypatch):
+    """#1113: the bundled reranker runs with ``--api-key EMPTY`` and answers 401
+    without ``Bearer EMPTY``, so ``EMPTY`` is seeded as a key. STT alone drops
+    it: some transcription endpoints reject any Authorization header."""
+    from core.config.root import Settings
+
     monkeypatch.delenv("LLM_ENDPOINT", raising=False)
     monkeypatch.delenv("LLM_MODEL", raising=False)
 
+    settings = Settings(
+        embedder={"api_key": "EMPTY"},
+        llm={"base_url": "http://llm:8000/v1", "model": "mistral", "api_key": "EMPTY"},
+        vlm={"base_url": "http://vlm:8000/v1", "model": "pixtral", "api_key": "EMPTY"},
+        reranker={"provider": "infinity", "api_key": "EMPTY"},
+        loader={"transcriber": {"base_url": "http://stt:8000/v1", "model_name": "whisper", "api_key": "EMPTY"}},
+    )
     repo = _FakeEndpointRepo()
-    await _make_service(repo).seed_defaults()
+    await _make_service(repo, settings=settings).seed_defaults()
 
-    assert all("api_key" not in row.extra for row in repo._store.values())
+    assert {row.model_type: row.extra.get("api_key") for row in repo._store.values()} == {
+        "embedder": "EMPTY",
+        "llm": "EMPTY",
+        "vlm": "EMPTY",
+        "reranker": "EMPTY",
+        "stt": None,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("api_key", ["", "   "])
+async def test_seed_defaults_omits_blank_api_keys(monkeypatch, api_key):
+    from core.config.root import Settings
+
+    monkeypatch.delenv("LLM_ENDPOINT", raising=False)
+    monkeypatch.delenv("LLM_MODEL", raising=False)
+
+    settings = Settings(embedder={"api_key": api_key}, reranker={"provider": "infinity", "api_key": api_key})
+    repo = _FakeEndpointRepo()
+    await _make_service(repo, settings=settings).seed_defaults()
+
+    rows = {row.model_type: row for row in repo._store.values()}
+    assert "api_key" not in rows["embedder"].extra
+    assert "api_key" not in rows["reranker"].extra
 
 
 @pytest.mark.asyncio
