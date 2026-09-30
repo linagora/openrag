@@ -281,8 +281,11 @@ def _split_to_budget(text: str, budget: int, length_function: Callable[[str], in
                 else:
                     high = middle - 1
             cut = best or 1
-        pieces.append(remaining[:cut].rstrip())
-        remaining = remaining[cut:].lstrip()
+        # Keep the separator at the beginning of the following part.  Stripping
+        # it would silently change the original CSV cell when all continuation
+        # parts are joined again.
+        pieces.append(remaining[:cut])
+        remaining = remaining[cut:]
     if remaining or not pieces:
         pieces.append(remaining)
     return pieces
@@ -370,12 +373,14 @@ def _chunk_csv_table(
         cell_index = max(range(len(cells)), key=lambda index: length_function(cells[index]))
         column_name = columns[cell_index]
         base_cells = list(cells)
-        base_cells[cell_index] = f"[{column_name} continuation 999/999]"
+        base_cells[cell_index] = f"[CSV row {row_number}; {column_name} continuation 999/999]"
         label_reserve = length_function(_markdown_row(base_cells))
         parts = _split_to_budget(cells[cell_index], max(1, body_budget - label_reserve), length_function)
         for part_number, part in enumerate(parts, start=1):
             continuation_cells = list(cells)
-            continuation_cells[cell_index] = f"[{column_name} continuation {part_number}/{len(parts)}] {part}"
+            continuation_cells[cell_index] = (
+                f"[CSV row {row_number}; {column_name} continuation {part_number}/{len(parts)}] {part}"
+            )
             continuation_row = _markdown_row(continuation_cells)
             chunks.append(
                 MDElement(
