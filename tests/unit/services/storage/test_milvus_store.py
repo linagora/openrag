@@ -1153,6 +1153,31 @@ class TestWarnIfMigrationPending:
 
         (warning,) = logs.warnings
         assert "ahead of the 1" in warning
+        assert "that version's migration runner (--downgrade --target 1)" in warning
+
+    def test_a_downgrade_across_version_2_is_announced_before_the_command(
+        self, store: MilvusVectorStore, logs: _LogRecorder
+    ) -> None:
+        # The fixture's build expects version 1; version 2's rollback restores a
+        # point-in-time backup, which the command in the warning would run.
+        _describes(store, "3")
+
+        store.warn_if_migration_pending()
+
+        (warning,) = logs.warnings
+        assert "rows indexed since that upgrade leave the live collection" in warning
+
+    def test_a_downgrade_that_stays_above_version_2_has_no_backup_warning(
+        self, store: MilvusVectorStore, logs: _LogRecorder
+    ) -> None:
+        store._config = store._config.model_copy(update={"schema_version": 2})
+        _describes(store, "3")
+
+        store.warn_if_migration_pending()
+
+        (warning,) = logs.warnings
+        assert "--downgrade --target 2" in warning
+        assert "pre-upgrade backup" not in warning
 
     def test_absent_collection_is_not_a_mismatch(self, store: MilvusVectorStore, logs: _LogRecorder) -> None:
         store._client.has_collection.return_value = False

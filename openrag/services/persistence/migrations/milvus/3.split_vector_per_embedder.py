@@ -26,11 +26,14 @@ The partial upsert rewrites every number in a chunk's dynamic field as a
 float64, so any other integer above 2**53 in its metadata comes back rounded.
 Postgres keeps the exact upload metadata of each file.
 
-Usage — prefer the generic runner (from repo root, inside the container). It
-reads Postgres as well as Milvus, so both must be up (``docker compose up -d rdb
-milvus``) even though ``--no-deps`` does not start them:
-    docker compose run --no-deps --rm --entrypoint "" openrag \\
-        uv run python services/persistence/migrations/milvus/migrate.py [--dry-run]
+Usage — prefer the generic runner (from infra/compose, with DC and SVC set as in the upgrade guide:
+``DC="docker compose"; SVC=openrag`` on a GPU host,
+``DC="docker compose --profile cpu"; SVC=openrag-cpu`` on a CPU host; add ``-p <project>`` and
+your ``-f`` overlays to DC if you start the stack with them). It
+reads Postgres as well as Milvus, so both must be up (``$DC up -d rdb milvus``) even though
+``--no-deps`` does not start them:
+    $DC run --no-deps --rm --entrypoint "" "$SVC" \\
+        uv run --no-dev python services/persistence/migrations/milvus/migrate.py [--dry-run]
 """
 
 import argparse
@@ -167,11 +170,26 @@ def _field_for_partition(catalog: Catalog, partition: str) -> tuple[str | None, 
 
 
 def _get_stored_version(client: MilvusClient, collection_name: str) -> int:
+    """The collection's schema version: 0 when it was never stamped.
+
+    Raises ValueError when ``int()`` rejects the stamp or it is negative, rather
+    than reading it as 0 and migrating a collection whose version is unknown.
+    """
     raw = client.describe_collection(collection_name).get("properties", {}).get(SCHEMA_VERSION_PROPERTY_KEY)
-    try:
-        return int(raw) if raw is not None else 0
-    except ValueError:
+    if raw is None:
         return 0
+    unknown = (
+        f"'{collection_name}' has schema version {raw!r}, which is not a version. Set the collection's real "
+        f"version first: MilvusClient(uri).alter_collection_properties('{collection_name}', "
+        f"properties={{'{SCHEMA_VERSION_PROPERTY_KEY}': '<version>'}}). Nothing was changed."
+    )
+    try:
+        version = int(raw)
+    except ValueError:
+        raise ValueError(unknown) from None
+    if version < 0:
+        raise ValueError(unknown)
+    return version
 
 
 def _fields(desc: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -564,6 +582,38 @@ def downgrade(client: MilvusClient, collection_name: str, dry_run: bool = False)
     logger.info("Downgrade complete.")
 
 
+def _refuse_out_of_order(client: MilvusClient, collection_name: str, downgrade: bool) -> None:
+    """Refuse a standalone run that would apply or revert this step out of order.
+
+    Run on its own, this script applies or reverts only its own step, whatever
+    version the collection is at: out of order, that skips the steps before it or
+    undoes an older step under a newer one. ``migrate.py`` walks the steps in turn.
+    """
+    try:
+        stored = _get_stored_version(client, collection_name)
+    except ValueError as exc:
+        logger.error(str(exc))
+        sys.exit(2)
+    if downgrade and stored < TARGET_VERSION:
+        logger.error(
+            f"'{collection_name}' is at schema version {stored}, below this script's version {TARGET_VERSION}: "
+            "there is nothing for it to revert."
+        )
+        sys.exit(2)
+    if downgrade and stored > TARGET_VERSION:
+        logger.error(
+            f"'{collection_name}' is at schema version {stored}; this script's --downgrade only reverts a collection "
+            f"at version {TARGET_VERSION}. Use migrate.py --downgrade --target N, from the release that migrated it."
+        )
+        sys.exit(2)
+    if not downgrade and stored < TARGET_VERSION - 1:
+        logger.error(
+            f"'{collection_name}' is at schema version {stored}; this script only upgrades a collection at version "
+            f"{TARGET_VERSION - 1} or later. Use migrate.py, which applies the steps in turn."
+        )
+        sys.exit(2)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Milvus migration: one dense field per embedder (v2 → v3)")
     parser.add_argument("--dry-run", action="store_true", help="Inspect only, make no changes")
@@ -578,6 +628,7 @@ def main() -> None:
     if not client.has_collection(collection_name):
         logger.error(f"Collection '{collection_name}' does not exist. Aborting.")
         sys.exit(1)
+    _refuse_out_of_order(client, collection_name, args.downgrade)
     if args.downgrade:
         downgrade(client, collection_name, dry_run=args.dry_run)
     else:
