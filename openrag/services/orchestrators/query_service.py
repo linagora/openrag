@@ -115,6 +115,39 @@ def normalize_casual_message(message: str) -> str:
     return " ".join("".join(characters).split())
 
 
+CASUAL_ACKNOWLEDGEMENTS = frozenset(
+    normalize_casual_message(phrase)
+    for phrase in (
+        "ok",
+        "okay",
+        "yes",
+        "yep",
+        "yeah",
+        "sure",
+        "cool",
+        "great",
+        "nice",
+        "perfect",
+        "sounds good",
+        "got it",
+        "ok thanks",
+        "ok thank you",
+        "okay thanks",
+        "okay thank you",
+        "ok merci",
+        "okay merci",
+        "oui",
+        "oui merci",
+        "d'accord",
+        "d'accord merci",
+        "super",
+        "super merci",
+        "parfait",
+        "parfait merci",
+    )
+)
+
+
 def casual_message_policy(message: str) -> CasualMessagePolicy | None:
     """Return the exact-match casual policy, including empty-input fallback."""
     normalized = normalize_casual_message(message)
@@ -123,10 +156,21 @@ def casual_message_policy(message: str) -> CasualMessagePolicy | None:
     return CASUAL_MESSAGE_INTENTS.get(normalized)
 
 
+def _acknowledgement_language(messages: list[dict], latest_message: str) -> str:
+    """Prefer the last assistant turn's language for very short replies."""
+    for message in reversed(messages[:-1]):
+        if message.get("role") != "assistant":
+            continue
+        content = message.get("content")
+        if isinstance(content, str) and content.strip():
+            language = detect_language(content)
+            if language:
+                return language
+    return detect_language(latest_message) or "en"
+
+
 class _PrepareChatResult(NamedTuple):
-    """A named tuple stays positionally unpackable, so existing
-    ``a, b, c, ... = await self._prepare_chat(...)`` call sites still work.
-    """
+    """Prepared chat data passed from orchestration to the response methods."""
 
     payload: dict
     docs: list
@@ -135,6 +179,7 @@ class _PrepareChatResult(NamedTuple):
     retrieved_web_results: list
     citation_protocol_active: bool
     indexed_attachment_ids: list[str]
+    retry_empty_casual_response: bool = False
 
 
 _MAP_SYSTEM_PROMPT = """You are an AI assistant specialized in extracting and synthesizing relevant information from text.
@@ -561,6 +606,13 @@ class QueryService:
 
         last_user_message = messages[-1].get("content") or ""
         casual_policy = casual_message_policy(last_user_message)
+        normalized_last_user = normalize_casual_message(last_user_message)
+        acknowledgement_reaction = last_user_message.strip() == "👍"
+        acknowledgement_candidate = normalized_last_user in CASUAL_ACKNOWLEDGEMENTS or acknowledgement_reaction
+        if acknowledgement_candidate:
+            # Short acknowledgements need the full history: they can be thanks
+            # after a social question or acceptance of a factual offer.
+            casual_policy = None
         explicitly_required = metadata.get("require_retrieval") is True
         existing_force_retrieval = use_websearch or use_map_reduce or bool(indexed_attachment_ids)
 
@@ -570,10 +622,19 @@ class QueryService:
         if casual_policy is None or retrieval_forced:
             queries = await self.generate_query(messages, llm=llm, partition=partition)
             usable_queries = [query for query in queries.query_list if query.query.strip()]
-            if not usable_queries:
-                queries = SearchQueries(query_list=[Query(query=last_user_message)])
-            elif len(usable_queries) != len(queries.query_list):
-                queries = queries.model_copy(update={"query_list": usable_queries})
+            if (
+                acknowledgement_candidate
+                and not retrieval_forced
+                and queries.intent == "gratitude"
+                and not queries.requires_retrieval
+                and not usable_queries
+            ):
+                casual_policy = CasualMessagePolicy("gratitude", _acknowledgement_language(messages, last_user_message))
+            else:
+                if not usable_queries:
+                    queries = SearchQueries(query_list=[Query(query=last_user_message)])
+                elif len(usable_queries) != len(queries.query_list):
+                    queries = queries.model_copy(update={"query_list": usable_queries})
 
         if casual_policy is not None and not retrieval_forced:
             casual_prompt = build_casual_response_prompt(
@@ -586,7 +647,16 @@ class QueryService:
                 current_date=datetime.now().strftime("%A, %B %d, %Y, %H:%M:%S"),
                 custom_prompt=custom_prompt,
             )
-            return _PrepareChatResult(payload, [], [], [], [], True, indexed_attachment_ids)
+            return _PrepareChatResult(
+                payload,
+                [],
+                [],
+                [],
+                [],
+                True,
+                indexed_attachment_ids,
+                True,
+            )
 
         if queries is None:  # pragma: no cover - guarded by the casual return above
             queries = SearchQueries(query_list=[Query(query=last_user_message)])
@@ -798,6 +868,7 @@ class QueryService:
         include_all_retrieved = metadata.get("include_all_retrieved_sources") is True
         llm = self._resolve_llm(partitions)
         citation_protocol_active = False
+        retry_empty_casual_response = False
         if partitions is None and not metadata.get("websearch", False):
             docs, web_results, retrieved_docs, retrieved_web_results = [], [], [], []
             attachments: list[str] = []
@@ -810,6 +881,7 @@ class QueryService:
             retrieved_web_results = result.retrieved_web_results
             citation_protocol_active = result.citation_protocol_active
             attachments = result.indexed_attachment_ids
+            retry_empty_casual_response = result.retry_empty_casual_response
         sources = prepare_sources(docs, web_results)
         # `all_retrieved_sources` is debug/eval telemetry, not needed by most
         # callers — skip building it (and calling prepare_sources on the full,
@@ -828,7 +900,28 @@ class QueryService:
             )
         else:
             clean, citations = content, None
-        chunk["choices"][0]["message"]["content"] = clean
+        response_message = chunk["choices"][0]["message"]
+        if (
+            retry_empty_casual_response
+            and not structured_output
+            and chunk["choices"][0].get("finish_reason") in (None, "stop")
+            and not clean.strip()
+            and not response_message.get("tool_calls")
+            and not response_message.get("refusal")
+        ):
+            retry_chunk = await llm.chat(_casual_retry_messages(payload["messages"]), **_sampling(payload))
+            retry_chunk["model"] = model_name
+            retry_content = retry_chunk.get("choices", [{}])[0].get("message", {}).get("content", "") or ""
+            if citation_protocol_active:
+                clean, citations = extract_and_strip_sources_block(
+                    retry_content,
+                    include_inline_markers=bool(sources),
+                )
+            else:
+                clean, citations = retry_content, None
+            chunk = retry_chunk
+            response_message = chunk["choices"][0]["message"]
+        response_message["content"] = clean
         extra = _build_extra_payload(sources, citations, all_sources, include_all_retrieved=include_all_retrieved)
         if metadata.get("attachments"):
             # Indicate which attachments were actually searched to generate the answer.
@@ -849,6 +942,7 @@ class QueryService:
         include_all_retrieved = metadata.get("include_all_retrieved_sources") is True
         llm = self._resolve_llm(partitions)
         citation_protocol_active = False
+        retry_empty_casual_response = False
         if partitions is None and not metadata.get("websearch", False):
             docs, web_results, retrieved_docs, retrieved_web_results = [], [], [], []
             attachments: list[str] = []
@@ -861,6 +955,7 @@ class QueryService:
             retrieved_web_results = result.retrieved_web_results
             citation_protocol_active = result.citation_protocol_active
             attachments = result.indexed_attachment_ids
+            retry_empty_casual_response = result.retry_empty_casual_response
         sources = prepare_sources(docs, web_results)
         all_sources = prepare_sources(retrieved_docs, retrieved_web_results) if include_all_retrieved else None
         structured_output = _is_structured_output(payload)
@@ -869,6 +964,12 @@ class QueryService:
 
         payload["messages"] = self._sanitize_messages(payload["messages"])
         llm_stream = llm.stream_chat(payload["messages"], **_sampling(payload))
+        if retry_empty_casual_response and not structured_output:
+            retry_messages = _casual_retry_messages(payload["messages"])
+            llm_stream = _retry_empty_casual_stream(
+                llm_stream,
+                lambda: llm.stream_chat(retry_messages, **_sampling(payload)),
+            )
         async for sse_line in stream_with_source_filtering(
             llm_stream,
             sources,
@@ -919,6 +1020,96 @@ class QueryService:
 # --------------------------------------------------------------------------- #
 # Helpers
 # --------------------------------------------------------------------------- #
+
+
+_CASUAL_RETRY_SYSTEM_INSTRUCTION = (
+    "The previous completion was empty. Try once more with a concise, natural response in the response language "
+    "already specified above. Do not return an empty message."
+)
+
+
+def _casual_retry_messages(messages: list[dict]) -> list[dict]:
+    """Add one retry instruction while preserving the existing response prompt."""
+    retry_instruction = {"role": "system", "content": _CASUAL_RETRY_SYSTEM_INSTRUCTION}
+    insertion_index = 1 if messages and messages[0].get("role") == "system" else 0
+    return [*messages[:insertion_index], retry_instruction, *messages[insertion_index:]]
+
+
+async def _retry_empty_casual_stream(llm_stream, retry_stream_factory):
+    """Retry a clean empty casual stream once without buffering real answers."""
+    buffered: list[str] = []
+    answer_started = False
+    saw_done = False
+    saw_non_text_output = False
+    last_finish_reason = None
+    upstream_closed = False
+
+    async def close_stream(stream):
+        aclose = getattr(stream, "aclose", None)
+        if aclose is not None:
+            await aclose()
+
+    try:
+        async for line in llm_stream:
+            if answer_started:
+                yield line
+                continue
+
+            buffered.append(line)
+            if not line.startswith("data:"):
+                continue
+            if line.strip() == "data: [DONE]":
+                saw_done = True
+                break
+
+            try:
+                data = json.loads(line[len("data:") :].strip())
+            except json.JSONDecodeError:
+                # Let the normal stream processor surface the malformed event.
+                answer_started = True
+                for buffered_line in buffered:
+                    yield buffered_line
+                buffered.clear()
+                continue
+
+            choices = data.get("choices") or []
+            if not choices:
+                continue
+            choice = choices[0]
+            delta = choice.get("delta", {}) or {}
+            content = delta.get("content", "") or ""
+            if choice.get("finish_reason") is not None:
+                last_finish_reason = choice["finish_reason"]
+            if delta.get("tool_calls") or delta.get("function_call") or delta.get("refusal"):
+                saw_non_text_output = True
+            has_visible_text = isinstance(content, str) and bool(content.strip())
+            if has_visible_text or saw_non_text_output:
+                answer_started = True
+                for buffered_line in buffered:
+                    yield buffered_line
+                buffered.clear()
+
+        if not answer_started and saw_done and last_finish_reason in (None, "stop") and not saw_non_text_output:
+            await close_stream(llm_stream)
+            upstream_closed = True
+            retry_stream = retry_stream_factory()
+            try:
+                async for line in retry_stream:
+                    yield line
+            finally:
+                await close_stream(retry_stream)
+            return
+
+        for buffered_line in buffered:
+            yield buffered_line
+    except Exception:
+        if not answer_started:
+            for buffered_line in buffered:
+                yield buffered_line
+        raise
+    finally:
+        if not upstream_closed:
+            await close_stream(llm_stream)
 
 
 def _json_slice(text: str) -> str:

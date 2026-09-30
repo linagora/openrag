@@ -55,12 +55,14 @@ def _patch_infra(monkeypatch):
 
 
 class FakeLLM:
-    def __init__(self, *, chat_responses=None, gen_text="answer", stream_lines=None):
+    def __init__(self, *, chat_responses=None, gen_text="answer", stream_lines=None, stream_sequences=None):
         self._chat_responses = list(chat_responses or [])
         self._gen_text = gen_text
         self._stream_lines = stream_lines or ['data: {"choices":[{"delta":{"content":"hi"}}]}\n\n', "data: [DONE]\n\n"]
+        self._stream_sequences = [list(sequence) for sequence in (stream_sequences or [])]
         self.chat_calls: list = []
         self.generate_calls: list = []
+        self.stream_calls: list = []
 
     async def chat(self, messages, **kwargs):
         self.chat_calls.append((messages, kwargs))
@@ -75,7 +77,9 @@ class FakeLLM:
         return {"choices": [{"text": self._gen_text}]}
 
     async def stream_chat(self, messages, **kwargs):
-        for line in self._stream_lines:
+        self.stream_calls.append((messages, kwargs))
+        lines = self._stream_sequences.pop(0) if self._stream_sequences else self._stream_lines
+        for line in lines:
             yield line
 
 
@@ -949,7 +953,32 @@ async def test_non_allowlisted_social_messages_retrieve_despite_contextualizer_c
 
 
 @pytest.mark.asyncio
-async def test_ok_after_social_history_still_retrieves_when_contextualizer_calls_it_gratitude():
+async def test_ok_after_social_history_uses_contextualizer_gratitude_decision():
+    llm = FakeLLM(chat_responses=[json.dumps({"intent": "gratitude", "requires_retrieval": False, "query_list": []})])
+    retrieval = FakeRetrieval()
+    svc = _svc(mode="ChatBotRag", llm=llm, retrieval=retrieval)
+
+    result = await svc._prepare_chat(
+        ["p"],
+        {
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": "D'après le document, la réponse est X. [Sources: 1] Cela vous aide ?",
+                },
+                {"role": "user", "content": "ok, merci"},
+            ],
+            "metadata": {},
+        },
+    )
+
+    assert retrieval.retrieve_multi_calls == []
+    assert result.retrieved_docs == []
+    assert "intent is gratitude" in result.payload["messages"][0]["content"]
+
+
+@pytest.mark.asyncio
+async def test_explicit_retrieval_metadata_still_forces_retrieval_for_acknowledgement():
     llm = FakeLLM(chat_responses=[json.dumps({"intent": "gratitude", "requires_retrieval": False, "query_list": []})])
     retrieval = FakeRetrieval()
     svc = _svc(mode="ChatBotRag", llm=llm, retrieval=retrieval)
@@ -958,15 +987,132 @@ async def test_ok_after_social_history_still_retrieves_when_contextualizer_calls
         ["p"],
         {
             "messages": [
-                {"role": "assistant", "content": "Was that helpful?"},
+                {"role": "assistant", "content": "Would you like more detail?"},
                 {"role": "user", "content": "ok"},
+            ],
+            "metadata": {"require_retrieval": True},
+        },
+    )
+
+    assert len(retrieval.retrieve_multi_calls) == 1
+    assert retrieval.retrieve_multi_calls[0]["search_queries"].query_list[0].query == "ok"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("acknowledgement", ["ok", "👍"])
+async def test_ack_after_factual_offer_still_retrieves_the_accepted_request(acknowledgement):
+    accepted_query = "Recommended dosages of albendazole"
+    llm = FakeLLM(
+        chat_responses=[
+            json.dumps(
+                {
+                    "intent": "other",
+                    "requires_retrieval": True,
+                    "query_list": [{"query": accepted_query, "temporal_filters": None}],
+                }
+            )
+        ]
+    )
+    retrieval = FakeRetrieval()
+    svc = _svc(mode="ChatBotRag", llm=llm, retrieval=retrieval)
+
+    await svc._prepare_chat(
+        ["p"],
+        {
+            "messages": [
+                {"role": "user", "content": "What is albendazole used for?"},
+                {
+                    "role": "assistant",
+                    "content": "It treats several worm infections. Would you like the recommended dosages?",
+                },
+                {"role": "user", "content": acknowledgement},
             ],
             "metadata": {},
         },
     )
 
     assert len(retrieval.retrieve_multi_calls) == 1
-    assert retrieval.retrieve_multi_calls[0]["search_queries"].query_list[0].query == "ok"
+    assert retrieval.retrieve_multi_calls[0]["search_queries"].query_list[0].query == accepted_query
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["chat", "chat_stream"])
+async def test_empty_contextualized_casual_answer_retries_in_the_same_language(operation, monkeypatch):
+    contextualizer_result = json.dumps({"intent": "gratitude", "requires_retrieval": False, "query_list": []})
+    llm = FakeLLM(
+        chat_responses=[contextualizer_result, "", "Avec plaisir !"],
+        stream_sequences=[
+            ['data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n', "data: [DONE]\n\n"],
+            [
+                'data: {"choices":[{"delta":{"content":"Avec plaisir !"}}]}\n\n',
+                'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n',
+                "data: [DONE]\n\n",
+            ],
+        ],
+    )
+    retrieval = FakeRetrieval()
+    svc = _svc(mode="ChatBotRag", llm=llm, retrieval=retrieval)
+    monkeypatch.setattr(qs, "detect_language", lambda _text, **_kwargs: "fr")
+    kwargs = {
+        "partitions": ["p"],
+        "payload": {
+            "messages": [
+                {"role": "assistant", "content": "Voici les sources exactes. Cela vous aide ?"},
+                {"role": "user", "content": "ok, merci"},
+            ],
+            "metadata": {},
+        },
+        "prepare_sources": lambda docs, web: [],
+        "model_name": "m",
+    }
+
+    if operation == "chat":
+        response = await svc.chat(**kwargs)
+        answer = response["choices"][0]["message"]["content"]
+    else:
+        events = [
+            json.loads(line[6:])
+            async for line in svc.chat_stream(**kwargs)
+            if line.startswith("data: ") and line.strip() != "data: [DONE]"
+        ]
+        answer = "".join(
+            event["choices"][0].get("delta", {}).get("content", "") for event in events if event.get("choices")
+        )
+
+    assert "Avec plaisir" in answer
+    assert retrieval.retrieve_multi_calls == []
+    if operation == "chat":
+        assert "response language already specified above" in llm.chat_calls[2][0][1]["content"]
+    else:
+        assert "response language already specified above" in llm.stream_calls[1][0][1]["content"]
+
+
+@pytest.mark.asyncio
+async def test_truncated_empty_contextualized_casual_stream_does_not_retry():
+    llm = FakeLLM(
+        chat_responses=[json.dumps({"intent": "gratitude", "requires_retrieval": False, "query_list": []})],
+        stream_lines=['data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n'],
+    )
+    svc = _svc(mode="ChatBotRag", llm=llm)
+
+    events = [
+        json.loads(line[6:])
+        async for line in svc.chat_stream(
+            partitions=["p"],
+            payload={"messages": [{"role": "user", "content": "ok"}], "metadata": {}},
+            prepare_sources=lambda docs, web: [],
+            model_name="m",
+        )
+        if line.startswith("data: ") and line.strip() != "data: [DONE]"
+    ]
+    answer = "".join(
+        event["choices"][0].get("delta", {}).get("content", "") for event in events if event.get("choices")
+    )
+    final_extra = next(event["extra"] for event in reversed(events) if event.get("extra"))
+
+    assert answer == ""
+    assert final_extra["truncated"] is True
+    assert len(llm.stream_calls) == 1
 
 
 @pytest.mark.asyncio
