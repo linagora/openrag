@@ -18,33 +18,32 @@ export interface Release {
  * dialog content are derived from it.
  */
 export const releaseNotes: Release = {
-  version: "2.2.1",
-  date: "2026-09-08",
+  version: "2.3.0",
+  date: "2026-09-30",
   summary:
-    "OpenRAG 2.2.1 expands retrieval, indexing, chunking, and speech-to-text capabilities, while improving administration and release visibility.",
+    "OpenRAG 2.3.0 makes deployments observable and more robust: durable job history, dependency-aware readiness, metrics, alerts and dashboards, and one vector field per embedder so partitions can use different embedding models.",
 
   newFeatures: [
-    "Scope chat retrieval to specific indexed files by providing attachment file IDs, so answers can focus only on the selected documents.",
-    "Provide a custom system prompt with chat requests while preserving OpenRAG's core RAG instructions and security rules.",
-    "Receive an optional callback when asynchronous file indexing completes or fails, with support for authenticated callback endpoints.",
-    "Choose the new structured_section chunking strategy from indexation presets to keep document sections, headings, tables, and captions together.",
-    "Register, validate, and choose OpenAI-compatible STT endpoints such as Whisper or MOSS directly from Model Endpoints.",
-    "Create and manage ASR transcription prompts from the prompt library without restarting OpenRAG.",
-    "Set an STT endpoint and transcription prompt per indexation preset, allowing different partitions to use different speech-to-text configurations.",
-    "Normalize MOSS diarized transcription output into cleaner speaker-aware text suitable for indexing and retrieval.",
-    "See active indexing Jobs directly from the sidebar with a live job-count indicator.",
-    "Discover recently introduced capabilities through temporary New badges that automatically expire after their release window.",
-    "Read the highlights and migration requirements for the current OpenRAG release from the new Release Notes dialog in the Admin Console.",
-    "BM25 lexical retrieval is now case-insensitive, improving matches when query and document capitalization differ.",
-    "New STT, transcription prompt, MOSS speaker-aware, preset, and Jobs capabilities are highlighted in the Admin Console for easier discovery.",
+    "Indexing job status and history are stored in PostgreSQL and survive restarts.",
+    "Degraded indexing outcomes and failure reasons are shown in the Jobs view.",
+    "Each embedder has its own vector field: partitions can use different embedding models, and each partition is searched with its own.",
+    "A partition's embedder is validated when the partition is created or updated, and editing the URL or model of an embedder that already has indexed files requires explicit acknowledgement.",
+    "New deployments chunk documents with the structure-aware structured_section strategy by default; existing presets keep their chunker.",
+    "Uploaded files are checked against their declared extension, and a second upload of a file that is still indexing is refused.",
+    "Documents that produce no chunks now fail with a clear reason instead of being reported as indexed.",
+    "Workspace deletion can keep the workspace's files, and workspace IDs only need to be unique within a partition.",
+    "Chat sources report the reranker score of each document when a reranker ran.",
+    "A new /ready endpoint reports PostgreSQL, Milvus, Ray and the model endpoints in use.",
+    "Prometheus metrics, alert rules with runbooks and Grafana dashboards ship with the Helm chart and Docker Compose.",
+    "Logs can be written as JSON with a request ID on every line and shipped to Loki.",
   ],
 
   breakingChange: {
-    title: "Milvus 3.0 migration required",
+    title: "Milvus collection migration and configuration changes required",
     description:
-      "OpenRAG 2.2.1 requires Milvus 3.0. Existing Milvus 2.x deployments must be migrated before upgrading. The BM25 analyzer has also changed to support case-insensitive lexical search and requires the corresponding vector database schema migration.",
+      "OpenRAG 2.3.0 migrates its Milvus collection to schema version 3, which moves each embedder's vectors into its own field. Milvus itself moves to v3.0.2, which is required for that migration. Until the migration runs, every search fails. Chat responses now return extra as a JSON object with chunk metadata nested under chunk, JSON requests need a Content-Type: application/json header, GET /metrics needs METRICS_TOKEN, and example credentials are refused at startup.",
     action:
-      "Back up your Milvus data and follow the Milvus migration guide, including the required schema migrations, before starting OpenRAG 2.2.1.",
+      "Plan a maintenance window and follow the Upgrading OpenRAG guide for 2.2.x to 2.3.0, including backups, secrets, the Milvus migration and the API client changes, before starting OpenRAG 2.3.0.",
   },
 };
 
