@@ -98,6 +98,7 @@ class CsvParser(DocumentParser):
             lines = header_lines.copy()
             rows_in_batch = 0
             batches_emitted = 0
+            batch_first_record = 2
 
             # validate and render each record immediately
             for record_number, row in enumerate(records, start=2):
@@ -112,19 +113,28 @@ class CsvParser(DocumentParser):
                     yield TextBlock(
                         text="\n".join(lines),
                         block_type="table",
-                        metadata={},
+                        metadata={
+                            "csv_columns": list(headers),
+                            "csv_row_start": batch_first_record,
+                            "csv_row_end": record_number,
+                        },
                     )
                     batches_emitted += 1
                     # we then start another batch without accumulating previous rows
                     lines = header_lines.copy()
                     rows_in_batch = 0
+                    batch_first_record = record_number + 1
 
             # producing a final but partial batch or just a table containing only a header and we do not add an empty batch after an exactly full final batch
             if rows_in_batch > 0 or batches_emitted == 0:
                 yield TextBlock(
                     text="\n".join(lines),
                     block_type="table",
-                    metadata={},
+                    metadata={
+                        "csv_columns": list(headers),
+                        "csv_row_start": batch_first_record,
+                        "csv_row_end": batch_first_record + rows_in_batch - 1,
+                    },
                 )
 
     def _parse(self, document: Document) -> ProcessedDocument:

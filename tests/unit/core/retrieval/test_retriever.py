@@ -26,10 +26,12 @@ class FakeSearcher(RetrievalSearcher):
         self.multi_calls: list[dict] = []
         self.related_calls: list[dict] = []
         self.ancestor_calls: list[dict] = []
+        self.csv_row_calls: list[dict] = []
         self.search_result: list[Chunk] = []
         self.multi_result: list[Chunk] = []
         self.related_result: list[Chunk] = []
         self.ancestor_result: list[Chunk] = []
+        self.csv_row_result: list[Chunk] = []
 
     async def search(self, **kwargs):
         self.search_calls.append(kwargs)
@@ -41,6 +43,10 @@ class FakeSearcher(RetrievalSearcher):
 
     async def get_surrounding_chunks(self, **kwargs):
         return []
+
+    async def get_csv_row_chunks(self, **kwargs):
+        self.csv_row_calls.append(kwargs)
+        return list(self.csv_row_result)
 
     async def get_related_chunks(self, **kwargs):
         self.related_calls.append(kwargs)
@@ -189,6 +195,42 @@ async def test_expansion_with_ancestors_calls_searcher():
     assert s.ancestor_calls[0]["file_id"] == "f1"
     assert s.ancestor_calls[0]["limit"] == 20
     assert s.ancestor_calls[0]["max_ancestor_depth"] == 2
+
+
+@pytest.mark.asyncio
+async def test_expansion_fetches_and_orders_csv_continuations():
+    s = FakeSearcher()
+    s.csv_row_result = [
+        Chunk(
+            id="part-3",
+            text="three",
+            document_id="file-1",
+            partition="p1",
+            metadata={"csv_row_number": 30, "csv_part": 3, "csv_parts_total": 3},
+        ),
+        Chunk(
+            id="part-1",
+            text="one",
+            document_id="file-1",
+            partition="p1",
+            metadata={"csv_row_number": 30, "csv_part": 1, "csv_parts_total": 3},
+        ),
+        Chunk(
+            id="part-2",
+            text="two",
+            document_id="file-1",
+            partition="p1",
+            metadata={"csv_row_number": 30, "csv_part": 2, "csv_parts_total": 3},
+        ),
+    ]
+    initial = [s.csv_row_result[-1]]
+
+    out = await SingleRetriever(searcher=s).expand_search_results(initial)
+
+    assert [chunk.id for chunk in out] == ["part-1", "part-2", "part-3"]
+    assert s.csv_row_calls == [
+        {"partition": "p1", "file_id": "file-1", "row_number": 30, "allowed_file_ids": None}
+    ]
 
 
 @pytest.mark.asyncio

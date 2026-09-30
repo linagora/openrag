@@ -83,7 +83,9 @@ class BaseRetriever(Retriever):
         self.include_ancestors = include_ancestors
         self.related_limit = related_limit
         self.max_ancestor_depth = max_ancestor_depth
-        self.expansion_enabled = include_related or include_ancestors
+        # CSV continuation expansion is always safe: it only activates when a
+        # retrieved chunk explicitly identifies a multi-part CSV row.
+        self.expansion_enabled = True
 
     async def retrieve(
         self,
@@ -222,7 +224,7 @@ async def _expand_with_related_chunks(
     max_ancestor_depth: int | None = None,
     filter_params: dict | None = None,
 ) -> list[Chunk]:
-    """Append related and/or ancestor chunks to a result set, deduplicated by id.
+    """Expand results with related, ancestor, and CSV continuation chunks.
 
     Failures on individual related/ancestor lookups are logged and treated
     as empty results, matching legacy behavior so retrieval remains
@@ -233,7 +235,10 @@ async def _expand_with_related_chunks(
     related/ancestor expansion cannot surface a chunk outside that scope
     (#706).
     """
-    if not results or (not include_related and not include_ancestors):
+    if not results:
+        return results
+    has_csv_continuation = any(_csv_continuation_ref(chunk) is not None for chunk in results)
+    if not include_related and not include_ancestors and not has_csv_continuation:
         return results
 
     allowed_file_ids = file_id_restriction(filter_params)
@@ -242,6 +247,7 @@ async def _expand_with_related_chunks(
 
     relationship_ids: set[tuple[str, str]] = set()
     file_infos: set[tuple[str, str]] = set()
+    csv_rows: set[tuple[str, str, int]] = set()
 
     for c in results:
         if include_related:
@@ -250,6 +256,9 @@ async def _expand_with_related_chunks(
                 relationship_ids.add((c.partition, rel_id))
         if include_ancestors and c.partition and c.document_id:
             file_infos.add((c.partition, c.document_id))
+        csv_ref = _csv_continuation_ref(c)
+        if csv_ref is not None:
+            csv_rows.add((c.partition, c.document_id, csv_ref))
 
     async def _safe_related(part: str, rel_id: str) -> list[Chunk]:
         try:
@@ -273,11 +282,30 @@ async def _expand_with_related_chunks(
             logger.warning("get_ancestor_chunks failed (partition=%s, file_id=%s)", part, file_id, exc_info=True)
             return []
 
+    async def _safe_csv_row(part: str, file_id: str, row_number: int) -> list[Chunk]:
+        try:
+            return await searcher.get_csv_row_chunks(
+                partition=part,
+                file_id=file_id,
+                row_number=row_number,
+                allowed_file_ids=allowed_file_ids,
+            )
+        except Exception:
+            logger.warning(
+                "get_csv_row_chunks failed (partition=%s, file_id=%s, row_number=%s)",
+                part,
+                file_id,
+                row_number,
+                exc_info=True,
+            )
+            return []
+
     tasks: list[asyncio.Future] = []
     if include_related:
         tasks.extend(_safe_related(part, rid) for part, rid in relationship_ids)
     if include_ancestors:
         tasks.extend(_safe_ancestors(part, fid) for part, fid in file_infos if part and fid)
+    tasks.extend(_safe_csv_row(part, fid, row) for part, fid, row in csv_rows if part and fid)
 
     if tasks:
         all_results = await asyncio.gather(*tasks)
@@ -288,7 +316,45 @@ async def _expand_with_related_chunks(
                 seen_ids.add(chunk.id)
             expanded.append(chunk)
 
-    return expanded
+    return order_csv_continuations(expanded)
+
+
+def _csv_continuation_ref(chunk: Chunk) -> int | None:
+    """Return a logical CSV-row number only for a multi-part continuation."""
+    metadata = chunk.metadata
+    try:
+        if int(metadata.get("csv_parts_total", 0)) < 2:
+            return None
+        int(metadata["csv_part"])
+        return int(metadata["csv_row_number"])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def order_csv_continuations(chunks: list[Chunk]) -> list[Chunk]:
+    """Keep all retrieved parts of a CSV row together in continuation order.
+
+    Retrieval and reranking rank chunks independently. A question that needs
+    the last value of a long cell must instead receive the complete logical
+    row, with part 1 before part 2 and so on.
+    """
+    groups: dict[tuple[str, str, int], list[Chunk]] = {}
+    for chunk in chunks:
+        row_number = _csv_continuation_ref(chunk)
+        if row_number is not None and chunk.partition and chunk.document_id:
+            groups.setdefault((chunk.partition, chunk.document_id, row_number), []).append(chunk)
+
+    ordered: list[Chunk] = []
+    emitted: set[tuple[str, str, int]] = set()
+    for chunk in chunks:
+        row_number = _csv_continuation_ref(chunk)
+        key = (chunk.partition, chunk.document_id, row_number) if row_number is not None else None
+        if key is None:
+            ordered.append(chunk)
+        elif key not in emitted:
+            ordered.extend(sorted(groups[key], key=lambda item: (int(item.metadata["csv_part"]), item.id)))
+            emitted.add(key)
+    return ordered
 
 
 # ---------------------------------------------------------------------------

@@ -126,12 +126,38 @@ async def test_batches_are_stored_before_reading_the_next_batch(setup_pipeline):
             assert chunk.partition == "customers"
             assert chunk.metadata["source"] == "people.csv"
             assert chunk.metadata["csv_batch_index"] == batch_number
+            assert chunk.metadata["csv_columns"] == ["id", "name"]
+            assert chunk.metadata["csv_row_start"] == (batch_number - 1) * 2 + 2
+            assert chunk.metadata["csv_row_end"] == min(batch_number * 2 + 1, 6)
             assert chunk.metadata[INDEXING_TASK_ID_METADATA_KEY] == "current-attempt"
             assert chunk.embedding == [1.0, 0.0]
     for number, name in enumerate(["Alice", "Bob", "Cam", "Dan", "Eve"], 1):
         assert any(f"| {number} | {name} |" in chunk.text for chunk in chunks)
     assert "chunks" not in row and "processed_document" not in row
     assert pipeline.parser.closed
+
+
+async def test_long_csv_cell_is_stored_as_labelled_continuations(setup_pipeline):
+    pipeline, row, _ = setup_pipeline
+    note = " ".join(f"word{number}" for number in range(160))
+    row["document"].text = f"id,name,note\n024,Theo,{note}\n"
+
+    result = await pipeline.run(row)
+
+    chunks = [chunk for group, _ in pipeline.vector_store.calls for chunk in group]
+    assert result["stored_count"] == len(chunks) > 1
+    recovered_parts = []
+    for number, chunk in enumerate(chunks, start=1):
+        assert chunk.metadata["source"] == "people.csv"
+        assert chunk.metadata["csv_row_start"] == chunk.metadata["csv_row_end"] == 2
+        assert chunk.metadata["csv_row_number"] == 2
+        assert chunk.metadata["csv_column"] == "note"
+        assert chunk.metadata["csv_part"] == number
+        assert chunk.metadata["csv_parts_total"] == len(chunks)
+        assert "| id | name | note |" in chunk.text
+        assert "| 024 | Theo |" in chunk.text
+        recovered_parts.append(chunk.text.split("] ", 1)[1].rsplit(" |", 1)[0])
+    assert "".join(recovered_parts) == note
 
 
 @pytest.mark.parametrize("defer", [False, True])

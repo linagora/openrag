@@ -302,6 +302,45 @@ async def test_multi_query_search_deduplicates_across_queries():
 
 
 # ---------------------------------------------------------------------------
+# get_csv_row_chunks()
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_get_csv_row_chunks_scopes_and_orders_continuations():
+    rows = [
+        _make_row("part-3", csv_row_number=30, csv_part=3, csv_parts_total=3),
+        _make_row("part-1", csv_row_number=30, csv_part=1, csv_parts_total=3),
+        _make_row("part-2", csv_row_number=30, csv_part=2, csv_parts_total=3),
+    ]
+    searcher, store, _, _ = _make_searcher(filter_results=rows)
+
+    chunks = await searcher.get_csv_row_chunks(partition="p1", file_id="f1", row_number=30)
+
+    assert [chunk.id for chunk in chunks] == ["part-1", "part-2", "part-3"]
+    assert store.query_chunks_by_filter.call_args.args[1] == {
+        "partition": "p1",
+        "file_id": "f1",
+        "csv_row_number": 30,
+    }
+
+
+@pytest.mark.asyncio
+async def test_get_csv_row_chunks_respects_file_restriction():
+    searcher, store, _, _ = _make_searcher()
+
+    chunks = await searcher.get_csv_row_chunks(
+        partition="p1",
+        file_id="f1",
+        row_number=30,
+        allowed_file_ids=["other-file"],
+    )
+
+    assert chunks == []
+    store.query_chunks_by_filter.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
 # get_related_chunks()
 # ---------------------------------------------------------------------------
 

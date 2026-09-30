@@ -13,7 +13,7 @@ from __future__ import annotations
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 from core.utils.text import clean_markdown_table_spacing
 
@@ -52,6 +52,7 @@ class MDElement:
     type: ElementType
     content: str
     page_number: int | None = None
+    metadata: dict[str, Any] | None = None
 
     def __repr__(self) -> str:
         return f"MDElement(type={self.type}, page_number={self.page_number}, content={self.content[:100]}...)"
@@ -199,14 +200,18 @@ def chunk_table(
     across the boundary.
     """
     txt = clean_markdown_table_spacing(table_element.content)
+    if table_element.metadata and table_element.metadata.get("csv_columns"):
+        return _chunk_csv_table(
+            txt,
+            table_element=table_element,
+            chunk_size=chunk_size,
+            length_function=length_function,
+        )
     header_lines, groups = parse_markdown_table(txt)
-
     header_text = "\n".join(header_lines)
     group_texts = ["\n".join(g) for g in groups]
-
     header_ntoks = length_function(header_text)
     groups_ntoks = [length_function(g) for g in group_texts]
-
     subtables: list[str] = []
     body_rows: list[str] = []  # rows under the current chunk, header excluded
     body_size = 0
@@ -220,7 +225,7 @@ def chunk_table(
             body_rows = []
             body_size = 0
             # Replay only the last row of the previous chunk as overlap
-            # (matches the docstring contract; prev_last_row is the trailing
+            # (matches the docstring contract : prev_last_row is the trailing
             # line of the last admitted group).
             if prev_last_row:
                 body_rows.append(prev_last_row)
@@ -234,3 +239,160 @@ def chunk_table(
         subtables.append("\n".join([header_text, *body_rows]))
 
     return [MDElement(type="table", content=subtable, page_number=table_element.page_number) for subtable in subtables]
+
+
+def _table_cells(row: str) -> list[str]:
+    """Return cells from a canonical Markdown row that was emitted by ``CsvParser``.
+
+    CSV pipe characters are rendered as ``&#124;`` before this point, so a
+    simple split is safe here. This intentionally does not try to parse every
+    variant of hand-written Markdown. The CSV path only receives canonical rows.
+    """
+    return [cell.strip() for cell in row.strip().split("|")[1:-1]]
+
+
+def _markdown_row(cells: list[str]) -> str:
+    return "| " + " | ".join(cells) + " |"
+
+
+def _split_to_budget(text: str, budget: int, length_function: Callable[[str], int]) -> list[str]:
+    """Without loss divide text at whitespace and then characters if it isnecessary."""
+    if not text:
+        return [""]
+    if budget <= 0:
+        return [text]
+
+    pieces: list[str] = []
+    remaining = text
+    while remaining and length_function(remaining) > budget:
+        # prefer the largest whitespace boundary rather than one over the token budget
+        boundaries = [match.end() for match in re.finditer(r"\s+", remaining)]
+        cut = next((end for end in reversed(boundaries) if length_function(remaining[:end]) <= budget), None)
+        if cut is None:
+            #  single long word or a URL can still exceed the budget
+            # so find the largest character prefix that fits without discarding anything.
+            low, high = 1, len(remaining)
+            best = 0
+            while low <= high:
+                middle = (low + high) // 2
+                if length_function(remaining[:middle]) <= budget:
+                    best = middle
+                    low = middle + 1
+                else:
+                    high = middle - 1
+            cut = best or 1
+        pieces.append(remaining[:cut].rstrip())
+        remaining = remaining[cut:].lstrip()
+    if remaining or not pieces:
+        pieces.append(remaining)
+    return pieces
+
+
+def _chunk_csv_table(
+    table: str,
+    *,
+    table_element: MDElement,
+    chunk_size: int,
+    length_function: Callable[[str], int],
+) -> list[MDElement]:
+    """Pack complete CSV rows and split only an oversized cell when required.
+
+    Every emitted piece repeats the two Markdown header rows. Normal CSV rows
+    are never split or overlapped. A cell that cannot fit with its row becomes
+    labelled continuation rows which retain the other row values, making each
+    embedding chunk independently readable.
+    """
+    lines = table.strip().split("\n")
+    if len(lines) <= 2:
+        return [MDElement(type="table", content=table, page_number=table_element.page_number, metadata=table_element.metadata)]
+
+    header_lines = lines[:2]
+    data_rows = lines[2:]
+    header_text = "\n".join(header_lines)
+    header_tokens = length_function(header_text)
+    columns = list(table_element.metadata.get("csv_columns") or _table_cells(header_lines[0]))
+    first_row_number = int(table_element.metadata.get("csv_row_start", 2))
+    body_budget = max(1, chunk_size - header_tokens)
+    chunks: list[MDElement] = []
+    current_rows: list[str] = []
+    current_start: int | None = None
+    current_end: int | None = None
+
+    def emit_current() -> None:
+        nonlocal current_rows, current_start, current_end
+        if not current_rows:
+            return
+        metadata = {
+            **table_element.metadata,
+            "csv_row_start": current_start,
+            "csv_row_end": current_end,
+        }
+        chunks.append(
+            MDElement(
+                type="table",
+                content="\n".join([header_text, *current_rows]),
+                page_number=table_element.page_number,
+                metadata=metadata,
+            )
+        )
+        current_rows = []
+        current_start = None
+        current_end = None
+
+    for offset, row in enumerate(data_rows):
+        row_number = first_row_number + offset
+        row_tokens = length_function(row)
+        if row_tokens <= body_budget:
+            if current_rows and length_function("\n".join([*current_rows, row])) > body_budget:
+                emit_current()
+            current_rows.append(row)
+            current_start = row_number if current_start is None else current_start
+            current_end = row_number
+            continue
+
+        emit_current()
+        cells = _table_cells(row)
+        if len(cells) != len(columns):
+            # canonical CSV output always has matching cell counts
+            # keeping anunexpected row whole is safer than silently corrupting it
+            chunks.append(
+                MDElement(
+                    type="table",
+                    content="\n".join([header_text, row]),
+                    page_number=table_element.page_number,
+                    metadata={**table_element.metadata, "csv_row_start": row_number, "csv_row_end": row_number},
+                )
+            )
+            continue
+
+        # split the largest cell (the label keeps its column name and part
+        # number visible to the LLM) + unchanged cells retain the whole row identity
+        cell_index = max(range(len(cells)), key=lambda index: length_function(cells[index]))
+        column_name = columns[cell_index]
+        base_cells = list(cells)
+        base_cells[cell_index] = f"[{column_name} continuation 999/999]"
+        label_reserve = length_function(_markdown_row(base_cells))
+        parts = _split_to_budget(cells[cell_index], max(1, body_budget - label_reserve), length_function)
+        for part_number, part in enumerate(parts, start=1):
+            continuation_cells = list(cells)
+            continuation_cells[cell_index] = f"[{column_name} continuation {part_number}/{len(parts)}] {part}"
+            continuation_row = _markdown_row(continuation_cells)
+            chunks.append(
+                MDElement(
+                    type="table",
+                    content="\n".join([header_text, continuation_row]),
+                    page_number=table_element.page_number,
+                    metadata={
+                        **table_element.metadata,
+                        "csv_row_start": row_number,
+                        "csv_row_end": row_number,
+                        "csv_row_number": row_number,
+                        "csv_column": column_name,
+                        "csv_part": part_number,
+                        "csv_parts_total": len(parts),
+                    },
+                )
+            )
+
+    emit_current()
+    return chunks

@@ -169,6 +169,27 @@ class VectorStoreSearcher(RetrievalSearcher):
     ) -> list[Chunk]:
         return await self._fetch_surrounding(chunks, allowed_file_ids=allowed_file_ids)
 
+    async def get_csv_row_chunks(
+        self,
+        partition: str,
+        file_id: str,
+        row_number: int,
+        allowed_file_ids: list[str] | None = None,
+    ) -> list[Chunk]:
+        """Return every stored continuation for one CSV row in part order."""
+        if allowed_file_ids is not None and file_id not in allowed_file_ids:
+            return []
+        rows = await self._store.query_chunks_by_filter(
+            self._collection,
+            {
+                "partition": partition,
+                "file_id": file_id,
+                "csv_row_number": row_number,
+            },
+        )
+        chunks = [_dict_to_chunk(row) for row in rows]
+        return sorted(chunks, key=_csv_part_sort_key)
+
     async def get_related_chunks(
         self,
         partition: str,
@@ -260,6 +281,14 @@ class VectorStoreSearcher(RetrievalSearcher):
                 )
             results.extend(_dict_to_chunk(hits[0]) for hits in hits_by_sid.values() if len(hits) == 1)
         return results
+
+
+def _csv_part_sort_key(chunk: Chunk) -> tuple[int, str]:
+    """Order malformed or legacy CSV metadata after valid continuation parts."""
+    try:
+        return int(chunk.metadata.get("csv_part")), chunk.id
+    except (TypeError, ValueError):
+        return 2**31 - 1, chunk.id
 
 
 __all__ = ["VectorStoreSearcher"]

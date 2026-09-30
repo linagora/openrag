@@ -164,6 +164,29 @@ async def test_no_score_at_all_when_reranker_disabled():
 
 
 @pytest.mark.asyncio
+async def test_retrieve_docs_orders_csv_continuations_after_reranking():
+    r = FakeRetriever()
+    r.results_queue = [
+        [
+            Chunk(
+                id=f"part-{part}",
+                text=f"part {part}",
+                document_id="file-1",
+                partition="p1",
+                metadata={"csv_row_number": 30, "csv_part": part, "csv_parts_total": 3},
+            )
+            for part in (1, 2, 3)
+        ]
+    ]
+
+    out = await RetrieverPipeline(retriever=r, reranker=FakeReranker()).retrieve_docs(
+        partition=["p1"], query=Query(query="final value")
+    )
+
+    assert [chunk.id for chunk in out] == ["part-1", "part-2", "part-3"]
+
+
+@pytest.mark.asyncio
 async def test_reranking_does_not_mutate_the_retriever_s_chunks():
     """The score lands on a new object. The same chunk is reranked twice on the
     expansion path and, on the multi-query path, once per sub-query against a

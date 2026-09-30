@@ -79,7 +79,12 @@ async def run_csv_batches(pipeline, row, parser, *, topic_tagger=None, max_topic
                 processed = ProcessedDocument(
                     document_id=document.id,
                     text_blocks=[batch],
-                    metadata={**document.metadata, "csv_batch_index": batch_number},
+                    metadata={
+                        **document.metadata,
+                        **batch.metadata,
+                        "source": document.filename or document.metadata.get("source", ""),
+                        "csv_batch_index": batch_number,
+                    },
                 )
                 child = {
                     **row,
