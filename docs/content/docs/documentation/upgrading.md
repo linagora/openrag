@@ -127,6 +127,11 @@ backups keeps it.
 
 ### If you ran a development build
 
+If that build ran the version 3 Milvus migration on Milvus v3.0.1, upgrade
+Milvus to v3.0.2 before continuing. The old Milvus version cannot compact the
+segments created by that migration; restarting v3.0.1 or rerunning the
+migration will not fix it. The 2.3.0 Compose files and Helm chart use v3.0.2.
+
 A collection migrated to version 3 by a build of the development branch from 22
 September 2026 (#994) until #1096 merged on 28 September went through a copy that
 rounded chunk section IDs, which breaks neighbour-chunk expansion. The migration does not repair them: after
