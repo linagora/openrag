@@ -259,7 +259,7 @@ def _model_probe_request(config: ModelEndpointConfig, model_type: str | None = N
     # Send the stored key as the inference client does, ``EMPTY`` included: an
     # endpoint started with ``--api-key EMPTY`` requires it (#1113).
     configured_api_key = config.extra.get("api_key")
-    api_key = configured_api_key.strip() if isinstance(configured_api_key, str) else None
+    api_key = configured_api_key if isinstance(configured_api_key, str) else None
     authorization = f"Bearer {api_key}" if api_key else None
     return _ModelProbeRequest(
         url=_canonical_probe_url(base + ("/health" if health_only else "/models")),
