@@ -13,7 +13,6 @@ from core.config.model_endpoints import (
     DEFAULT_MODEL_IMPLEMENTATIONS,
     ModelEndpointConfig,
     ModelEndpointType,
-    is_placeholder_api_key,
 )
 from core.models.readiness import (
     ConfigurationReferenceReadiness,
@@ -257,8 +256,14 @@ def _model_probe_request(config: ModelEndpointConfig, model_type: str | None = N
     if implementation == "ollama" and not base.endswith("/v1"):
         base += "/v1"
     health_only = implementation in {"infinity", "tei"}
+    # Keep non-STT keys as configured (``EMPTY`` is real for the bundled
+    # reranker). The audio client trims STT keys and treats whitespace-only as
+    # anonymous, so normalize those probes the same way.
     configured_api_key = config.extra.get("api_key")
-    api_key = None if is_placeholder_api_key(configured_api_key) else configured_api_key
+    if isinstance(configured_api_key, str):
+        api_key = configured_api_key.strip() if model_type == "stt" else configured_api_key
+    else:
+        api_key = None
     authorization = f"Bearer {api_key}" if api_key else None
     return _ModelProbeRequest(
         url=_canonical_probe_url(base + ("/health" if health_only else "/models")),
