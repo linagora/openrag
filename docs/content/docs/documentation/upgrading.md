@@ -93,6 +93,12 @@ Changing a secret of a deployment that already holds data needs care:
   in Grafana too, once the overlay runs:
   `$DC exec grafana grafana cli admin reset-admin-password '<new password>'`.
   Grafana keeps it through a rollback: set the old one back the same way.
+- **Milvus's object storage keys** (`MINIO_ACCESS_KEY` and `MINIO_SECRET_KEY`
+  with Compose). Milvus v3.0.1, which 2.2.1 and 2.2.2 run, writes both to its log
+  on every compaction attempt. The v3.0.2 of 2.3.0 no longer does, but the lines
+  already written stay. If you keep Milvus logs or ship them to a log system,
+  change the keys during the upgrade. MinIO and Milvus must restart together with
+  the new pair; with Compose, [Update `.env`](#update-env) says how.
 
 ### Check the default embedder
 
