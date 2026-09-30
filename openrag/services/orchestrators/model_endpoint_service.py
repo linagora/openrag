@@ -499,9 +499,8 @@ class ModelEndpointService:
                 # OpenAIAudioClient.
                 "batch_size": s.loader.transcriber.max_concurrent_chunks,
                 "timeout": s.loader.transcriber.timeout,
-                # Unlike the other types, STT drops ``EMPTY``: some transcription
-                # endpoints reject any Authorization header (``_ANONYMOUS_API_KEY``
-                # in openai_audio.py), and the audio client sends a stored key as is.
+                # STT omits placeholder keys at seed time. Its audio client trims
+                # stored keys and uses an empty key for anonymous endpoints.
                 "extra": _with_api_key(
                     {},
                     None if is_placeholder_api_key(s.loader.transcriber.api_key) else s.loader.transcriber.api_key,
