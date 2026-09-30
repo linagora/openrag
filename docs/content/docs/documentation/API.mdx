@@ -773,6 +773,49 @@ curl -X POST http://localhost:8080/v1/chat/completions \
 ```
 
 
+#### Response: the `extra` field
+
+Besides the OpenAI fields, the response carries `extra`, a JSON object with the
+sources of the answer. Up to 2.2.2 it was a JSON-encoded string that clients had
+to parse. In a streamed response every chunk carries `extra`, empty until the
+final chunks, which carry the whole object; only an error chunk carries none.
+
+| Key | Content |
+|---|---|
+| `sources` | The sources the model cited, or every presented source when it reported no citations: the answer has neither a `[Sources: …]` tag nor an inline `[Source N]` marker, or the request skipped citation reporting (structured output, direct LLM or web search without results). An explicit `[Sources: none]` gives an empty list. Kept for existing clients. |
+| `presented_sources` | Every source shown to the model, whether cited or not. |
+| `cited_sources` | Only the sources the model cited, in a `[Sources: …]` tag or inline `[Source N]` markers; empty when it cited none or reported no citations. |
+| `citations_reported` | `true` when the model reported its citations, including `[Sources: none]`; `false` when `sources` fell back to every presented source. An empty `[Sources: ]` counts as no tag. |
+| `all_retrieved_sources` | Every source retrieval returned, including those that did not fit in the prompt. Only when the request sets `metadata.include_all_retrieved_sources: true`. |
+| `attachments` | Chat completions only: the attached file IDs actually used, when the request sets `metadata.attachments`. |
+| `truncated` | Streamed chat completions only: `true` when the upstream stream ended without `[DONE]`, so the answer may be cut short. Absent otherwise. |
+
+A document source nests the chunk's metadata under `chunk` (since 2.3.0); the keys
+beside it are computed by the server:
+
+```json
+{
+  "source_type": "document",
+  "chunk": { "filename": "report.pdf", "file_id": "…", "partition": "…", "…": "…" },
+  "rerank_score": 0.646,
+  "chunk_url": "https://<host>/extract/<chunk id>",
+  "file_url": "https://<host>/static/<chunk id>"
+}
+```
+
+`rerank_score` is the score the reranker gave that chunk for this query, present
+only when a reranker ran; compare it within one response only. `file_url` is
+absent when the chunk has no source file. A web source is flat:
+
+```json
+{
+  "source_type": "web",
+  "url": "https://example.org/page",
+  "title": "Page title",
+  "snippet": "The search result's excerpt of the page."
+}
+```
+
 * Text Completions
 ```http
 POST /v1/completions
