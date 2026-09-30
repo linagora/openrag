@@ -228,6 +228,59 @@ class TestChunkTable:
         assert "first" not in second_chunk
         assert "second" not in second_chunk
 
+    def test_csv_rows_are_packed_whole_with_a_header_in_every_chunk(self):
+        table = (
+            "| id | name | note |\n"
+            "| --- | --- | --- |\n"
+            "| 001 | Ali | short note |\n"
+            "| 002 | Bob | another short note |\n"
+            "| 003 | Cam | final short note |"
+        )
+        chunks = chunk_table(
+            MDElement(
+                type="table",
+                content=table,
+                metadata={"csv_columns": ["id", "name", "note"], "csv_row_start": 2},
+            ),
+            chunk_size=24,
+            length_function=lambda text: len(text.split()),
+        )
+
+        assert len(chunks) == 3
+        for row_number, chunk in enumerate(chunks, start=2):
+            assert chunk.content.splitlines()[:2] == table.splitlines()[:2]
+            assert chunk.metadata["csv_row_start"] == row_number
+            assert chunk.metadata["csv_row_end"] == row_number
+        assert "001" in chunks[0].content
+        assert "002" in chunks[1].content
+        assert "003" in chunks[2].content
+
+    def test_csv_long_cell_becomes_labelled_continuation_rows(self):
+        long_note = " ".join(f"word{number}" for number in range(45))
+        table = f"| id | name | note |\n| --- | --- | --- |\n| 024 | Theo | {long_note} |"
+        chunks = chunk_table(
+            MDElement(
+                type="table",
+                content=table,
+                metadata={"csv_columns": ["id", "name", "note"], "csv_row_start": 24},
+            ),
+            chunk_size=40,
+            length_function=lambda text: len(text.split()),
+        )
+
+        assert len(chunks) > 1
+        reconstructed = []
+        for part_number, chunk in enumerate(chunks, start=1):
+            assert "| id | name | note |" in chunk.content
+            assert "| 024 | Theo |" in chunk.content
+            assert f"[CSV row 24; note continuation {part_number}/{len(chunks)}]" in chunk.content
+            assert chunk.metadata["csv_row_number"] == 24
+            assert chunk.metadata["csv_column"] == "note"
+            assert chunk.metadata["csv_part"] == part_number
+            assert chunk.metadata["csv_parts_total"] == len(chunks)
+            reconstructed.append(chunk.content.split("] ", 1)[1].rsplit(" |", 1)[0])
+        assert "".join(reconstructed) == long_note
+
 
 def test_md_element_repr_truncates_content():
     elem = MDElement(type="text", content="x" * 500, page_number=3)

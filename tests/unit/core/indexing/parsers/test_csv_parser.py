@@ -159,6 +159,16 @@ async def test_12_batch_boundaries(row_count, batch_size, expected_sizes):
         assert lines[:2] == ["| id | name |", "| --- | --- |"]
         sizes.append(len(lines) - 2)
         rows.extend(lines[2:])
+    expected_ranges = []
+    for first_row in range(2, row_count + 2, batch_size):
+        expected_ranges.append((first_row, min(first_row + batch_size - 1, row_count + 1)))
+    if row_count == 0:
+        expected_ranges = [(2, 1)]
+    assert [
+        (batch.metadata["csv_row_start"], batch.metadata["csv_row_end"])
+        for batch in batches
+    ] == expected_ranges
+    assert all(batch.metadata["csv_columns"] == ["id", "name"] for batch in batches)
     assert sizes == expected_sizes
     assert rows == [f"| {number:03d} | Person {number} |" for number in range(row_count)]
 

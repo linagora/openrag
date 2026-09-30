@@ -28,7 +28,7 @@ from core.models.query import Query, SearchQueries
 from core.models.retrieval_result import ScoredChunk
 from core.models.retrieval_trace import TraceCandidate, TraceRemovalReason
 from core.rerankers.reranker import Reranker
-from core.retrieval.retriever import Retriever
+from core.retrieval.retriever import Retriever, order_csv_continuations
 from core.retrieval.rrf import rrf_reranking
 from core.retrieval.trace import RetrievalTraceBuilder, merge_child_traces
 
@@ -399,6 +399,7 @@ class RetrieverPipeline:
                     record_final_cutoff,
                 )
             chunks = chunks[:top_k]
+        chunks = order_csv_continuations(chunks)
         _safe_trace(
             trace,
             "final",
@@ -472,6 +473,7 @@ class RetrieverPipeline:
             trace_stage="multi_query_fused",
             **fusion_kwargs,
         )
+        fused = order_csv_continuations(fused)
         _safe_trace(
             trace,
             "final",
