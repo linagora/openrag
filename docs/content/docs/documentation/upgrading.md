@@ -59,6 +59,35 @@ A client that read `sources[i].filename` reads `sources[i].chunk.filename` now.
 `rerank_score`, new in 2.3.0, is present only when a reranker ran. Web entries
 (`source_type: "web"`) are unchanged.
 
+Other requests that 2.2.x accepted, or answered differently:
+
+- **`Content-Type`.** A JSON body sent without `Content-Type: application/json`
+  is answered `422`.
+- **Uploads.** A file whose content does not match its extension (PDF, images,
+  DOCX, PPTX, `.doc`) is refused with `415`. A second `POST` of a file that is
+  still indexing is refused with `409 DOCUMENT_INDEXING_IN_PROGRESS`, which gives
+  the running task's status URL; `PUT` is unchanged. A document that produces no
+  chunks fails with `422 NO_INDEXABLE_CONTENT` instead of being reported as
+  indexed, and its callback reports `"error"`.
+- **Workspaces.** Workspace IDs are unique per partition, so two partitions can
+  use the same ID. A search over several partitions that finds the ID in more
+  than one answers `422 WORKSPACE_AMBIGUOUS`. Deleting a workspace no longer
+  deletes the files indexed before the upgrade; a file uploaded with
+  `workspace_ids` from 2.3.0 on is deleted with its last workspace.
+- **Error statuses.** A model provider that answers `401` or `403` is reported
+  as `502` (`400` when the request overrode the endpoint with its own key). Milvus
+  errors return their own status and `VDB_*` code instead of `500`, and reranker
+  errors keep the reranker's status instead of `503`.
+- **Task logs.** `GET /indexer/task/{task_id}/logs` is removed, and so is the MCP
+  `get_task_logs` tool. `GET /indexer/task/{task_id}/error` still returns a failed
+  task's error.
+- **Embedders (admin API).** A partition's `embedder` must name a registered
+  endpoint (`422`). Changing it once the partition holds files is refused
+  (`409 PARTITION_HAS_INDEXED_FILES`). Editing the URL or model of an embedder
+  endpoint that has indexed files needs `acknowledge_indexed_data: true`
+  (`409` otherwise), and deleting an embedder that a partition uses is refused
+  (`409`).
+
 ### Metrics scraping
 
 `GET /metrics` no longer accepts the admin token. Set `METRICS_TOKEN` and give the
