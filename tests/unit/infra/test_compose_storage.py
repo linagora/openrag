@@ -164,3 +164,21 @@ def test_minio_image_is_digest_pinned_in_every_stack() -> None:
     )
     for path in compose_files:
         assert _load_yaml(path)["services"]["minio"]["image"] == expected, path
+
+
+def test_milvus_image_matches_helm_version_in_every_stack() -> None:
+    values = _load_yaml(CHART_DIR / "values.yaml")
+    expected = f"milvusdb/milvus:{values['milvus']['image']['all']['tag']}"
+
+    compose_files = (
+        COMPOSE_DIR / "milvus" / "milvus.yaml",
+        COMPOSE_DIR / "milvus" / "milvus.named-volumes.yaml",
+        ROOT / "tests" / "integration" / "api" / "api_run" / "docker-compose.yaml",
+        ROOT / "tests" / "integration" / "repos" / "docker-compose.yaml",
+        ROOT / "tests" / "load" / "workspace" / "docker-compose.yml",
+    )
+    for path in compose_files:
+        services = _load_yaml(path)["services"]
+        assert services["milvus"]["image"] == expected, path
+        if "milvus-init" in services:
+            assert services["milvus-init"]["image"] == expected, path

@@ -488,6 +488,9 @@ postgresProvisioning:
 # === Milvus ===
 milvus:
   enabled: true
+  # The 5.0.27 milvus-helm chart defaults to v3.0.1, which cannot compact
+  # segments written by OpenRAG's version 3 migration. Remove this pin once a
+  # milvus-helm release defaults to v3.0.2 or later.
   image:
     all:
       tag: v3.0.2

@@ -234,6 +234,11 @@ all three to `v2.3.0`, or remove them to take the chart's default. The 2.3.0
 chart's readiness probe calls `/ready`, which 2.2.x images do not serve: a 2.2.x
 image under the new chart never becomes Ready, and the rollout stops.
 
+If your values pin `milvus.image.all.tag`, set it to `v3.0.2` or remove the
+override. Charts 0.6.4 and 0.6.5 pinned this value to `v3.0.1`; carrying that
+setting forward makes Helm keep the old Milvus version for the migration,
+despite the newer chart default.
+
 #### vLLM engine overrides
 
 If your values set `vllm.servingEngineSpec.modelSpec`, that list replaces the
@@ -448,6 +453,12 @@ What the migration does to the data:
 Searches and uploads recover on their own once it finishes; no restart is needed.
 
 #### 6. Verify
+
+The index for a new `vector_<embedder>` field can remain `InProgress` while
+superseded 2.2.x copies are pending; Milvus does not index those rows. Attu
+shows the index state, and `describe_index` reports `indexed_rows`,
+`total_rows` and `pending_index_rows`. For example, the tested collection
+reported 13,805 indexed rows out of 27,610, with 13,805 pending.
 
 - `GET /ready` returns `200` with `"status": "ready"`, and `embedder` is `ok`
   under `checks` (only `postgres`, `milvus` and `ray` decide the `200`, unless
@@ -695,6 +706,12 @@ the original vectors stay in place. What it does to the data is described in
 ```bash
 $DC up -d
 ```
+
+The index for a new `vector_<embedder>` field can remain `InProgress` while
+superseded 2.2.x copies are pending; Milvus does not index those rows. Attu
+shows the index state, and `describe_index` reports `indexed_rows`,
+`total_rows` and `pending_index_rows`. For example, the tested collection
+reported 13,805 indexed rows out of 27,610, with 13,805 pending.
 
 - `GET /ready` returns `200` with `"status": "ready"`, and `embedder` is `ok`
   under `checks` (only `postgres`, `milvus` and `ray` decide the `200`, unless
