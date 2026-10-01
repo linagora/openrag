@@ -373,7 +373,7 @@ ray:
     registry: "ghcr.io"
     repository: "linagora/openrag-ray"
     # Pin to a release tag (ideally a digest) for reproducible deploys.
-    tag: "v2.2.2"
+    tag: "v2.3.0"
   resources:
     head:
       requests:
@@ -773,7 +773,7 @@ adminUi:
     repository: "linagoraai/openrag-admin-ui"
     # Pin to a release tag (ideally a digest) for reproducible deploys. Must be a
     # build from infra/docker/ui.Dockerfile (nginx-unprivileged, listens :8080).
-    tag: "v2.2.2"
+    tag: "v2.3.0"
     pullPolicy: IfNotPresent
   replicaCount: 1
   service:
@@ -830,7 +830,7 @@ openrag:
     registry: ""
     repository: "linagoraai/openrag"
     # Pin to a release tag (ideally a digest) for reproducible deploys.
-    tag: "v2.2.2"
+    tag: "v2.3.0"
     pullPolicy: IfNotPresent
   service:
     type: ClusterIP
