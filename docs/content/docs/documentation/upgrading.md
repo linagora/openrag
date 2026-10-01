@@ -38,7 +38,7 @@ finishes. Each procedure has three parts:
 | Milvus schema version 3: one vector field per embedder | Manual migration, run once. Until it runs, every search answers `503` while OpenRAG reports ready, and uploads fail. The old `vector` field is dropped. |
 | New PostgreSQL migrations | Applied when OpenRAG 2.3.0 starts, or on Kubernetes by the migration Job if you enabled it. |
 | Chat and text completion responses: `extra` and its source entries | `extra` is a JSON object instead of a JSON-encoded string, and each document source puts the chunk's metadata under `chunk`. Clients must be updated. |
-| `GET /metrics` | The admin token is refused (`403`); scrapers need `METRICS_TOKEN`. |
+| `GET /metrics` | The admin token is refused (`403`); scrapers need `METRICS_TOKEN`, unless unauthenticated scrapes are enabled (see [Metrics scraping](#metrics-scraping)). |
 | Secret checks | OpenRAG refuses to start if a secret is too short or still set to a published example value; see [Secrets](#secrets). |
 | Ray | Indexer actors change protocol: tasks running when the old version stops are lost. |
 | Readiness | `GET /ready` is new: it fails while PostgreSQL, Milvus or Ray is unreachable, and reports the model endpoints. |
