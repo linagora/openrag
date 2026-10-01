@@ -20,7 +20,15 @@ deployed. The [Kubernetes](#22x-to-230-on-kubernetes) and
 [Docker Compose](#22x-to-230-with-docker-compose) procedures below include them.
 
 The upgrade needs a **maintenance window**: the Milvus collection must be migrated
-while nothing writes to it, and searches fail until it is.
+while nothing writes to it, and searches fail until it is. Each procedure has three
+parts:
+
+1. **Before the maintenance window**, with no downtime: check the new chart or
+   `.env`, the secrets and the default embedder.
+2. **During the maintenance window**: stop traffic, back up, upgrade, migrate the
+   Milvus collection, verify.
+3. **Rolling back**, if something goes wrong: restore the backups. Compose can
+   also undo the migrations without them, under conditions.
 
 ### What changes
 
@@ -119,7 +127,8 @@ Changing a secret of a deployment that already holds data needs care:
 - **`CHAINLIT_AUTH_SECRET`**: changing it signs out every chat session.
 - **`GRAFANA_ADMIN_PASSWORD`** (Compose monitoring overlay): like PostgreSQL,
   Grafana sets the admin password only when it creates its database. Change it
-  in Grafana too, once the overlay runs:
+  in Grafana too, once the overlay runs, with `$DC` set as in the
+  [Compose procedure](#22x-to-230-with-docker-compose):
   `$DC exec grafana grafana cli admin reset-admin-password '<new password>'`.
   Grafana keeps it through a rollback: set the old one back the same way.
 - **Milvus's object storage keys** (`MINIO_ACCESS_KEY` and `MINIO_SECRET_KEY`
@@ -170,14 +179,9 @@ migration will not fix it. The 2.3.0 Compose files and Helm chart use v3.0.2.
 A collection migrated to version 3 by a build of the development branch from 22
 September 2026 (#994) until #1096 merged on 28 September went through a copy that
 rounded chunk section IDs, which breaks neighbour-chunk expansion. The migration does not repair them: after
-upgrading, re-index the files that were indexed before that migration. The
-migration's dry run prints the collection's current version, normally `2` for
-2.2.1 and 2.2.2; a `3` means a development build already migrated it, and whether
-that copy rounded the IDs depends on the date it ran. A `1` means version 2 was
-never applied (2.2.x only enforced it on uploads), and `0` that no migration was:
-the upgrade then runs the missing versions too. Version 2 rebuilds the collection
-and keeps a backup copy of it, unless `hybrid_search` is off; see
-[Milvus migrations — Version 2](/openrag/documentation/milvus_migration/#version-2--case-insensitive-bm25-analyzer).
+upgrading, re-index the files that were indexed before that migration. A Milvus
+dry run that prints version `3` means a development build already migrated the
+collection; whether that copy rounded the IDs depends on the date it ran.
 
 ## 2.2.x to 2.3.0 on Kubernetes
 
@@ -203,6 +207,8 @@ CHART_VERSION=<2.3.0 chart version, from the release notes>
 VALUES=my-values.yaml      # the values file your release uses
 ADMIN_TOKEN=<an admin API token, e.g. AUTH_TOKEN>
 PG_POD=openrag-postgresql-0   # the bundled PostgreSQL pod: <postgresql.fullnameOverride>-0
+PG_USER=root               # postgresql.auth.username
+DB=partitions_for_collection_vdb_test   # POSTGRES_DATABASE; when unset, partitions_for_collection_<VDB_COLLECTION_NAME>
 ```
 
 Besides the [changes for every deployment](#changes-in-230-for-every-deployment),
@@ -235,16 +241,17 @@ None of this interrupts the running release.
 
 #### Render the new chart offline
 
+A failure here would also fail `helm upgrade`. Pass the same `--set` flags or
+secret values your install used: `-f "$VALUES"` alone does not carry a
+`--set postgresql.auth.password=…` given at install time, and the render then
+fails on the missing secret. The same applies to the `helm upgrade` in step 4.
+
 ```bash
 helm template "$RELEASE" oci://ghcr.io/linagora/openrag-stack \
   --version "$CHART_VERSION" -n "$NS" -f "$VALUES" > /dev/null
 ```
 
-Pass the same `--set` flags or secret values your install used: `-f "$VALUES"`
-alone does not carry a `--set postgresql.auth.password=…` given at install time,
-and the render then fails on the missing secret. The same applies to the
-`helm upgrade` in step 4. A failure here would also fail `helm upgrade`. The ones
-an existing release can hit:
+The failures an existing release can hit:
 
 - **Secrets** that break the [rules above](#secrets). With the bundled
   PostgreSQL, the chart reads `POSTGRES_PASSWORD` from `postgresql.auth.password`.
@@ -290,20 +297,16 @@ while it rolls.
 
 #### Run the default-embedder check
 
-With the bundled PostgreSQL (replace `root` if you changed
-`postgresql.auth.username`):
+With the bundled PostgreSQL. The password file is the bundled chart's default;
+with `postgresql.auth.existingSecret` and a custom key, adjust its name:
 
 ```bash
-kubectl exec -n "$NS" "$PG_POD" -- sh -c \
-  'PGPASSWORD="$(cat /opt/bitnami/postgresql/secrets/password)" psql -U root -d <database> -c \
+kubectl exec -n "$NS" "$PG_POD" -- env PGUSER="$PG_USER" PGDATABASE="$DB" sh -c \
+  'PGPASSWORD="$(cat /opt/bitnami/postgresql/secrets/password)" psql -c \
    "SELECT name FROM model_endpoints WHERE model_type = '"'"'embedder'"'"' AND is_default"'
 ```
 
-`<database>` is your `POSTGRES_DATABASE`, or `partitions_for_collection_<VDB_COLLECTION_NAME>`
-when it is unset (`partitions_for_collection_vdb_test` with the defaults). The
-password file is the bundled chart's default; with `postgresql.auth.existingSecret`
-and a custom key, adjust its name. With an external PostgreSQL, run the query
-with your usual client.
+With an external PostgreSQL, run the query with your usual client.
 
 ### During the maintenance window
 
@@ -324,7 +327,7 @@ Tasks still running when the pods restart are lost.
 Take the backups as one set, after step 1:
 
 - PostgreSQL, for example
-  `kubectl exec -n "$NS" "$PG_POD" -- sh -c 'PGPASSWORD="$(cat /opt/bitnami/postgresql/secrets/password)" pg_dump -U <postgresql.auth.username, root by default> -Fc <database>' > openrag.dump`
+  `kubectl exec -n "$NS" "$PG_POD" -- env PGUSER="$PG_USER" PGDATABASE="$DB" sh -c 'PGPASSWORD="$(cat /opt/bitnami/postgresql/secrets/password)" pg_dump -Fc' > openrag.dump`
 - Milvus: its etcd and its object storage (MinIO or your S3 bucket). Stop them
   first, so that the snapshots are one point in time: note the replica counts
   that `kubectl get deploy,statefulset -n "$NS"` shows for Milvus, etcd and
@@ -362,6 +365,14 @@ they stay idle.
 kubectl scale -n "$NS" deploy/"$FULLNAME-openrag" --replicas=0
 ```
 
+Your values decide what applies the PostgreSQL migrations:
+
+| `postgresProvisioning` | What applies the migrations |
+|---|---|
+| `migrationJob.enabled: true` | The `pre-upgrade` migration Job, before the pods roll. A failing migration fails `helm upgrade`. |
+| `runMigrationsInApp: true` (the default), Job off | The new OpenRAG pod, when it starts. Under Ray Serve, the Serve replicas on the Ray pods, once you scale OpenRAG back up. |
+| Both off | Nothing: run them by hand after `helm upgrade`, as shown below. |
+
 If you change the PostgreSQL password (see [Secrets](#secrets)), do it now, before
 `helm upgrade`:
 
@@ -369,7 +380,7 @@ If you change the PostgreSQL password (see [Secrets](#secrets)), do it now, befo
 
    ```bash
    echo "ALTER ROLE CURRENT_USER WITH PASSWORD '<new password>'" | kubectl exec -i -n "$NS" "$PG_POD" -- \
-     env PGPASSWORD='<old password>' psql -v ON_ERROR_STOP=1 -U <postgresql.auth.username, root by default> -d postgres
+     env PGPASSWORD='<old password>' psql -v ON_ERROR_STOP=1 -U "$PG_USER" -d postgres
    ```
 
    With an external PostgreSQL, run the same `ALTER ROLE` with your client.
@@ -389,12 +400,15 @@ If you change the PostgreSQL password (see [Secrets](#secrets)), do it now, befo
    [Render the new chart offline](#render-the-new-chart-offline); with
    `postgresql.auth.existingSecret`, update that Secret's password too.
 
-Then upgrade the release:
+Then upgrade the release. With `ray.enabled: false`:
 
 ```bash
 helm upgrade "$RELEASE" oci://ghcr.io/linagora/openrag-stack \
   --version "$CHART_VERSION" -n "$NS" -f "$VALUES"
 ```
+
+If `kubectl get deploy -n "$NS" "$FULLNAME-openrag"` still shows zero replicas
+afterwards, scale it back to your usual count.
 
 With `ray.enabled: true`, add `--set openrag.replicas=0`, which keeps OpenRAG from
 starting against the 2.2.x Ray pods:
@@ -404,21 +418,12 @@ helm upgrade "$RELEASE" oci://ghcr.io/linagora/openrag-stack \
   --version "$CHART_VERSION" -n "$NS" -f "$VALUES" --set openrag.replicas=0
 ```
 
-Without Ray, if `kubectl get deploy -n "$NS" "$FULLNAME-openrag"` still shows zero
-replicas afterwards, scale it back to your usual count.
-
-If `helm upgrade` fails after you changed the password, do not run a bare
-`helm rollback`: it puts the old password back in the Secret the chart renders
-from your values, and the database no longer accepts it. Fix the cause and run
-`helm upgrade` again, or follow
-[Rolling back a Kubernetes upgrade](#rolling-back-a-kubernetes-upgrade).
-
-With `ray.enabled: true`, once `helm upgrade` has returned, delete every Ray pod,
-head included, so KubeRay recreates them from the 2.3.0 template (deleting them
-earlier would bring them back on 2.2.x). The notes `helm upgrade` prints
-recreate only the workers, for their metrics port; this upgrade needs the head
-recreated too. Once they are Ready, scale OpenRAG up. A later
-`helm upgrade` without the flag sets the count from your values again:
+Once `helm upgrade` has returned, delete every Ray pod, head included, so KubeRay
+recreates them from the 2.3.0 template (deleting them earlier would bring them
+back on 2.2.x). The notes `helm upgrade` prints recreate only the workers, for
+their metrics port; this upgrade needs the head recreated too. Once they are
+Ready, scale OpenRAG up. A later `helm upgrade` without the flag sets the count
+from your values again:
 
 ```bash
 kubectl delete pod -n "$NS" -l ray.io/cluster="$FULLNAME-raycluster"
@@ -429,13 +434,15 @@ kubectl scale -n "$NS" deploy/"$FULLNAME-openrag" --replicas=<your usual count>
 `kubectl get raycluster -n "$NS"` prints the cluster's name if you changed
 `fullnameOverride`. A wrong name selects no pods, and Ray stays on 2.2.x.
 
-The new OpenRAG pod applies the PostgreSQL migrations when it starts. With
-`postgresProvisioning.runMigrationsInApp: false` and
-`postgresProvisioning.migrationJob.enabled: true`, the `pre-upgrade` migration Job
-runs them before the pods roll instead, and a failing migration fails
-`helm upgrade`. With both off, nothing applies them: the new pod starts without
-its services and stays unready until they are applied and it restarts. Run them
-from it, then restart it:
+If `helm upgrade` fails after you changed the password, do not run a bare
+`helm rollback`: it puts the old password back in the Secret the chart renders
+from your values, and the database no longer accepts it. Fix the cause and run
+`helm upgrade` again, or follow
+[Rolling back a Kubernetes upgrade](#rolling-back-a-kubernetes-upgrade).
+
+With both `runMigrationsInApp` and `migrationJob.enabled` off, the new pod starts
+without its services and stays unready until the migrations are applied and it
+restarts. Run them from it, then restart it:
 
 ```bash
 kubectl exec -n "$NS" deploy/"$FULLNAME-openrag" -- \
@@ -457,6 +464,18 @@ changes nothing and lists the pending migrations:
 kubectl exec -n "$NS" deploy/"$FULLNAME-openrag" -- \
   uv run --no-dev --no-sync python services/persistence/migrations/milvus/migrate.py --dry-run
 ```
+
+The dry run prints the collection's current version:
+
+- `2`, normally, for 2.2.1 and 2.2.2.
+- `1` means version 2 was never applied (2.2.x only enforced it on uploads), and
+  `0` that no migration was: the upgrade then runs the missing versions too.
+  Version 2 rebuilds the collection and keeps a backup copy of it, unless
+  `hybrid_search` is off; see
+  [Milvus migrations — Version 2](/openrag/documentation/milvus_migration/#version-2--case-insensitive-bm25-analyzer).
+- `3` means the collection is already migrated, by an earlier run of this step
+  (the dry run then says it is already up to date) or by a development build;
+  for the latter, see [If you ran a development build](#if-you-ran-a-development-build).
 
 Check that the plan routes every partition to an embedder field, and review any
 `row(s) belong to partitions that do not exist in Postgres` warning: those rows
@@ -485,15 +504,11 @@ What the migration does to the data:
   IDs, which the copy folds below 2^53 so that each chunk stays linked to its
   neighbours. PostgreSQL keeps each file's original upload metadata.
 
+Details are in
+[Milvus migrations — Version 3](/openrag/documentation/milvus_migration/#version-3--one-vector-field-per-embedder).
 Searches and uploads recover on their own once it finishes; no restart is needed.
 
 #### 6. Verify
-
-The index for a new `vector_<embedder>` field can remain `InProgress` while
-superseded 2.2.x copies are pending; Milvus does not index those rows. Attu
-shows the index state, and `describe_index` reports `indexed_rows`,
-`total_rows` and `pending_index_rows`. For example, the tested collection
-reported 13,805 indexed rows out of 27,610, with 13,805 pending.
 
 - `GET /ready` returns `200` with `"status": "ready"`, and `embedder` is `ok`
   under `checks` (only `postgres`, `milvus` and `ray` decide the `200`, unless
@@ -504,6 +519,12 @@ reported 13,805 indexed rows out of 27,610, with 13,805 pending.
 - A chat completion returns sources in the new shape.
 - Uploading a small file completes (`GET /queue/tasks?task_status=active` empties again).
 - `GET /metrics` answers with `Authorization: Bearer <METRICS_TOKEN>`.
+
+The index for a new `vector_<embedder>` field can remain `InProgress` while
+superseded 2.2.x copies are pending; Milvus does not index those rows. Attu
+shows the index state, and `describe_index` reports `indexed_rows`,
+`total_rows` and `pending_index_rows`. For example, the tested collection
+reported 13,805 indexed rows out of 27,610, with 13,805 pending.
 
 Then let traffic back in.
 
@@ -537,18 +558,19 @@ integers, folded section IDs):
 2. Restore the backup set from step 2:
    - PostgreSQL: empty its schema, then restore the dump. `pg_restore --clean`
      alone fails here: the constraints 2.3.0 added and changed stop the tables in
-     the dump from being dropped. With the bundled PostgreSQL:
+     the dump from being dropped. With the bundled PostgreSQL, where `<password>`
+     is the one the database has now (the new one if you changed it in upgrade
+     step 4):
 
      ```bash
      echo "DROP SCHEMA public CASCADE; CREATE SCHEMA public; GRANT USAGE ON SCHEMA public TO PUBLIC;" | kubectl exec -i -n "$NS" "$PG_POD" -- \
-       env PGPASSWORD='<password>' psql -v ON_ERROR_STOP=1 -U <postgresql.auth.username, root by default> -d <database>
+       env PGPASSWORD='<password>' psql -v ON_ERROR_STOP=1 -U "$PG_USER" -d "$DB"
      kubectl exec -i -n "$NS" "$PG_POD" -- \
-       env PGPASSWORD='<password>' pg_restore --no-owner --exit-on-error -U <postgresql.auth.username, root by default> -d <database> < openrag.dump
+       env PGPASSWORD='<password>' pg_restore --no-owner --exit-on-error -U "$PG_USER" -d "$DB" < openrag.dump
      ```
 
-     `<password>` is the one the database has now: the new one if you changed it
-     in upgrade step 4. With an external PostgreSQL, do the same with your client,
-     as the database's owner.
+     With an external PostgreSQL, do the same with your client, as the database's
+     owner.
    - Milvus: scale Milvus, etcd and MinIO to zero, restore their volumes (or your
      bucket) from the snapshots, then scale them back.
    - Uploaded files: restore the `<FULLNAME>-data` volume.
@@ -558,7 +580,7 @@ integers, folded section IDs):
 
    ```bash
    echo "ALTER ROLE CURRENT_USER WITH PASSWORD '<old password>'" | kubectl exec -i -n "$NS" "$PG_POD" -- \
-     env PGPASSWORD='<new password>' psql -v ON_ERROR_STOP=1 -U <postgresql.auth.username, root by default> -d postgres
+     env PGPASSWORD='<new password>' psql -v ON_ERROR_STOP=1 -U "$PG_USER" -d postgres
    ```
 
    With an external PostgreSQL, use your client. `helm rollback` puts the old
@@ -573,13 +595,15 @@ integers, folded section IDs):
 ## 2.2.x to 2.3.0 with Docker Compose
 
 This section upgrades a deployment started from `infra/compose` in a checkout of
-this repository. Run the commands from `infra/compose`, after setting these two
+this repository. Run the commands from `infra/compose`, after setting these
 variables to match how you start the stack:
 
 ```bash
 # bash; in zsh, see the note at the top of this page
 DC="docker compose"   # add -p <project>, your -f overlays, and --profile cpu on a CPU host
 SVC=openrag           # openrag-cpu on a CPU host
+PG_USER=root          # POSTGRES_USER
+DB=partitions_for_collection_vdb_test   # POSTGRES_DATABASE; when unset, partitions_for_collection_<VDB_COLLECTION_NAME>
 ```
 
 Besides the [changes for every deployment](#changes-in-230-for-every-deployment),
@@ -595,20 +619,32 @@ the Compose files change:
 
 ### Before the maintenance window
 
-#### Check the GPU driver
+#### Check the host
+
+On GPU hosts that run the bundled vLLM, the driver must be 580 or newer, or the
+bundled vLLM containers do not start. Update it before upgrading:
 
 ```bash
 nvidia-smi --query-gpu=driver_version --format=csv,noheader
 ```
 
-This applies to GPU hosts that run the bundled vLLM. Below 580, update the driver
-before upgrading: the bundled vLLM containers would not start.
+If you run the monitoring overlay, the 2.3.0 overlay needs Docker Compose 2.23.1
+or newer:
+
+```bash
+docker compose version --short
+```
 
 #### Update `.env`
 
-Your `.env` is not tracked, so checking out 2.3.0 keeps it. Copy it aside first
-(`cp .env .env.2.2.x`), which the rollback needs, then compare it with the 2.3.0
-`infra/compose/.env.example` and change:
+Your `.env` is not tracked, so checking out 2.3.0 keeps it. Copy it aside first;
+the rollback needs it:
+
+```bash
+cp .env .env.2.2.x
+```
+
+Then compare it with the 2.3.0 `infra/compose/.env.example` and change:
 
 - **Secrets** that break the [rules above](#secrets). The 2.2.x `.env.example`
   shipped example values for `AUTH_TOKEN`, `POSTGRES_PASSWORD`, `MINIO_ACCESS_KEY`,
@@ -630,18 +666,14 @@ Your `.env` is not tracked, so checking out 2.3.0 keeps it. Copy it aside first
 - **`METRICS_TOKEN`**, if you scrape `GET /metrics` or run the monitoring overlay,
   which refuses to start without it. With the overlay in `$DC`, every `$DC`
   command, `down` included, fails until `.env` sets both `METRICS_TOKEN` and
-  `GRAFANA_ADMIN_PASSWORD`; the 2.3.0 overlay also needs Docker Compose 2.23.1 or
-  newer.
+  `GRAFANA_ADMIN_PASSWORD`.
 
 #### Run the default-embedder check
 
 ```bash
-$DC exec rdb psql -U <POSTGRES_USER, root by default> -d <database> -c \
+$DC exec rdb psql -U "$PG_USER" -d "$DB" -c \
   "SELECT name FROM model_endpoints WHERE model_type = 'embedder' AND is_default"
 ```
-
-`<database>` is your `POSTGRES_DATABASE`, or `partitions_for_collection_<VDB_COLLECTION_NAME>`
-when it is unset (`partitions_for_collection_vdb_test` with the defaults).
 
 ### During the maintenance window
 
@@ -695,7 +727,7 @@ password first:
 ```bash
 $DC up -d rdb
 until $DC exec rdb pg_isready -q; do sleep 1; done   # if it keeps waiting, check `$DC ps rdb`
-$DC exec rdb psql -U <POSTGRES_USER, root by default> -d postgres \
+$DC exec rdb psql -U "$PG_USER" -d postgres \
   -c "ALTER ROLE CURRENT_USER WITH PASSWORD '<new password>'"
 ```
 
@@ -723,6 +755,18 @@ $DC run --no-deps --rm --entrypoint "" "$SVC" \
   uv run --no-dev python services/persistence/migrations/milvus/migrate.py --dry-run
 ```
 
+The dry run prints the collection's current version:
+
+- `2`, normally, for 2.2.1 and 2.2.2.
+- `1` means version 2 was never applied (2.2.x only enforced it on uploads), and
+  `0` that no migration was: the upgrade then runs the missing versions too.
+  Version 2 rebuilds the collection and keeps a backup copy of it, unless
+  `hybrid_search` is off; see
+  [Milvus migrations — Version 2](/openrag/documentation/milvus_migration/#version-2--case-insensitive-bm25-analyzer).
+- `3` means the collection is already migrated, by an earlier run of this step
+  (the dry run then says it is already up to date) or by a development build;
+  for the latter, see [If you ran a development build](#if-you-ran-a-development-build).
+
 Check that the plan routes every partition to an embedder field, and review any
 `row(s) belong to partitions that do not exist in Postgres` warning: those rows
 lose their vector. Then apply it:
@@ -733,7 +777,18 @@ $DC run --no-deps --rm --entrypoint "" "$SVC" \
 ```
 
 A failed run can be run again: until its last step drops the old `vector` field,
-the original vectors stay in place. What it does to the data is described in
+the original vectors stay in place.
+
+What the migration does to the data:
+
+- Each chunk's vector moves to the field of the embedder its partition uses.
+  Rows of a partition that PostgreSQL does not know are already unreachable,
+  and lose their vector.
+- Integers above 2^53 in a chunk's metadata come back rounded, except section
+  IDs, which the copy folds below 2^53 so that each chunk stays linked to its
+  neighbours. PostgreSQL keeps each file's original upload metadata.
+
+Details are in
 [Milvus migrations — Version 3](/openrag/documentation/milvus_migration/#version-3--one-vector-field-per-embedder).
 
 #### 6. Start OpenRAG and verify
@@ -741,12 +796,6 @@ the original vectors stay in place. What it does to the data is described in
 ```bash
 $DC up -d
 ```
-
-The index for a new `vector_<embedder>` field can remain `InProgress` while
-superseded 2.2.x copies are pending; Milvus does not index those rows. Attu
-shows the index state, and `describe_index` reports `indexed_rows`,
-`total_rows` and `pending_index_rows`. For example, the tested collection
-reported 13,805 indexed rows out of 27,610, with 13,805 pending.
 
 - `GET /ready` returns `200` with `"status": "ready"`, and `embedder` is `ok`
   under `checks` (only `postgres`, `milvus` and `ray` decide the `200`, unless
@@ -757,6 +806,12 @@ reported 13,805 indexed rows out of 27,610, with 13,805 pending.
 - A chat completion returns sources in the new shape.
 - Uploading a small file completes.
 - `GET /metrics` answers with `Authorization: Bearer <METRICS_TOKEN>`.
+
+The index for a new `vector_<embedder>` field can remain `InProgress` while
+superseded 2.2.x copies are pending; Milvus does not index those rows. Attu
+shows the index state, and `describe_index` reports `indexed_rows`,
+`total_rows` and `pending_index_rows`. For example, the tested collection
+reported 13,805 indexed rows out of 27,610, with 13,805 pending.
 
 Then let traffic back in.
 
@@ -801,7 +856,7 @@ still at 2.3.0, which neither version runs on:
 
 - no workspace ID shared by two partitions, which 2.3.0 allows and the PostgreSQL
   downgrade refuses:
-  `$DC exec rdb psql -U <POSTGRES_USER> -d <database> -c "SELECT workspace_id FROM workspaces GROUP BY workspace_id HAVING COUNT(*) > 1"`
+  `$DC exec rdb psql -U "$PG_USER" -d "$DB" -c "SELECT workspace_id FROM workspaces GROUP BY workspace_id HAVING COUNT(*) > 1"`
   returns no row;
 - every embedder field in use has the same dimension;
 - every partition holding files still resolves, through PostgreSQL, to an
@@ -811,7 +866,8 @@ still at 2.3.0, which neither version runs on:
 
 A dry run of the Milvus downgrade checks the dimensions, the routing and the
 number of vector fields without changing anything; the workspace check is yours. Then, in this order (the Milvus
-downgrade reads the PostgreSQL schema that `alembic downgrade` removes):
+downgrade reads the PostgreSQL schema that `alembic downgrade` removes).
+`b9c0d1e2f3a4` is the last PostgreSQL revision of 2.2.1 and 2.2.2:
 
 ```bash
 $DC stop "$SVC"
@@ -828,7 +884,6 @@ docker volume rm <project>_openrag_venv
 Then `git checkout` the version you ran before, restore the `.env` you copied
 aside, and `$DC up -d`. If you changed `POSTGRES_PASSWORD` in step 4, keep the new
 value in the restored `.env`: this way does not restore the database's copy of it.
-`b9c0d1e2f3a4` is the last PostgreSQL revision of 2.2.1 and
-2.2.2. Files indexed after the upgrade are kept. The chunk metadata the upgrade
+Files indexed after the upgrade are kept. The chunk metadata the upgrade
 rewrote is not restored: integers above 2^53 stay rounded and section IDs stay
 folded. To recover it, roll back from the backups instead.
