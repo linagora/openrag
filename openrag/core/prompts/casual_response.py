@@ -16,6 +16,10 @@ _INTENT_INSTRUCTIONS = {
         "Acknowledge the user's gratitude warmly and offer further help. Do not repeat the introduction "
         "or list your capabilities."
     ),
+    "acknowledgement": (
+        "Acknowledge the user's response briefly and invite them to continue the current topic or ask a follow-up. "
+        "Do not imply that the user expressed gratitude. Do not repeat the introduction or list capabilities."
+    ),
     "capability": (
         "Briefly explain that you can answer questions using indexed documents and media, or general knowledge when "
         "no relevant indexed content is available. Do not provide the full introduction."
