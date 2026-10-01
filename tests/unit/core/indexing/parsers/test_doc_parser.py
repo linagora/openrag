@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from core.indexing.parsers import doc_parser as doc_parser_module
-from core.indexing.parsers.doc_parser import DocParser
+from core.indexing.parsers.doc_parser import DocParser, _SPIRE_WATERMARK, _strip_watermark
 from core.models.document import Document, DocumentType, ProcessedDocument, TextBlock
 
 
@@ -365,3 +365,105 @@ class TestAgainstTheRealDocxParser:
         assert any("converted content" in b.text for b in result.text_blocks), (
             "the real DocxParser produced nothing from the handed-over path"
         )
+
+
+class TestStripWatermark:
+    """#1080: Spire.Doc free edition prepends an evaluation warning to every
+    converted document. Verify the helper and both conversion paths strip it."""
+
+    def test_strip_watermark_removes_standalone_line(self):
+        text = f"{_SPIRE_WATERMARK}\n\nActual content here."
+        assert _SPIRE_WATERMARK not in _strip_watermark(text)
+        assert "Actual content here." in _strip_watermark(text)
+
+    def test_strip_watermark_leaves_unrelated_text_intact(self):
+        text = "Normal paragraph.\n\nAnother paragraph."
+        assert _strip_watermark(text) == text
+
+    def test_strip_watermark_empty_string(self):
+        assert _strip_watermark("") == ""
+
+    def test_strip_watermark_only_watermark(self):
+        assert _strip_watermark(_SPIRE_WATERMARK).strip() == ""
+
+    def test_strip_watermark_does_not_match_partial_line(self):
+        partial = f"prefix {_SPIRE_WATERMARK} suffix"
+        assert _strip_watermark(partial) == partial
+
+    @pytest.mark.asyncio
+    async def test_watermark_stripped_from_docx_text_blocks(self, fake_spire):
+        """Watermark in a text block returned by DocxParser is removed (#1080)."""
+        instance = MagicMock()
+        instance.SaveToFile.side_effect = lambda path, _fmt: pathlib.Path(path).write_bytes(b"DOCX")
+        fake_spire.return_value = instance
+
+        docx_parser = MagicMock()
+        docx_parser.parse = AsyncMock(
+            return_value=ProcessedDocument(
+                document_id="test",
+                text_blocks=[
+                    TextBlock(text=_SPIRE_WATERMARK, page_number=1),
+                    TextBlock(text=f"{_SPIRE_WATERMARK}\nReal content.", page_number=1),
+                    TextBlock(text="Clean block.", page_number=2),
+                ],
+                page_count=2,
+            )
+        )
+
+        result = await DocParser(docx_parser=docx_parser).parse(_doc_document())
+
+        texts = [b.text for b in result.text_blocks]
+        assert not any(_SPIRE_WATERMARK in t for t in texts), "watermark survived into text blocks"
+        assert any("Real content." in t for t in texts), "real content was wrongly discarded"
+        assert any("Clean block." in t for t in texts), "unrelated block was wrongly discarded"
+
+    @pytest.mark.asyncio
+    async def test_watermark_only_block_is_dropped(self, fake_spire):
+        """A text block that is nothing but the watermark is dropped entirely (#1080)."""
+        instance = MagicMock()
+        instance.SaveToFile.side_effect = lambda path, _fmt: pathlib.Path(path).write_bytes(b"DOCX")
+        fake_spire.return_value = instance
+
+        docx_parser = MagicMock()
+        docx_parser.parse = AsyncMock(
+            return_value=ProcessedDocument(
+                document_id="test",
+                text_blocks=[
+                    TextBlock(text=_SPIRE_WATERMARK, page_number=1),
+                    TextBlock(text="Actual content.", page_number=1),
+                ],
+                page_count=1,
+            )
+        )
+
+        result = await DocParser(docx_parser=docx_parser).parse(_doc_document())
+
+        assert len(result.text_blocks) == 1
+        assert result.text_blocks[0].text == "Actual content."
+
+    @pytest.mark.asyncio
+    async def test_watermark_stripped_from_fallback_text(self, fake_spire):
+        """Watermark in the GetText() fallback path is stripped (#1080)."""
+        instance = MagicMock()
+        instance.SaveToFile.side_effect = RuntimeError("conversion failed")
+        instance.GetText.return_value = f"{_SPIRE_WATERMARK}\n\nFallback content."
+        fake_spire.return_value = instance
+
+        result = await DocParser().parse(_doc_document())
+
+        assert len(result.text_blocks) == 1
+        assert _SPIRE_WATERMARK not in result.text_blocks[0].text
+        assert "Fallback content." in result.text_blocks[0].text
+
+    @pytest.mark.asyncio
+    async def test_fallback_only_watermark_returns_empty(self, fake_spire):
+        """If GetText() returns only the watermark, the result has no text blocks (#1080)."""
+        instance = MagicMock()
+        instance.SaveToFile.side_effect = RuntimeError("conversion failed")
+        instance.GetText.return_value = _SPIRE_WATERMARK
+        fake_spire.return_value = instance
+
+        result = await DocParser().parse(_doc_document())
+
+        assert result.text_blocks == []
+        assert result.page_count == 0
