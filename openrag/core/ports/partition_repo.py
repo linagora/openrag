@@ -39,3 +39,11 @@ class PartitionRepository(ABC):
 
     @abstractmethod
     async def update_partition(self, name: str, **fields: object) -> dict | None: ...
+
+    @abstractmethod
+    async def pin_default_embedder(self, name: str) -> str | None:
+        """Replace a partition's ``default`` embedder alias with the endpoint it resolves to.
+
+        Returns the partition's embedder afterwards, or ``None`` if it does not exist.
+        """
+        ...

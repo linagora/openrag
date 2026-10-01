@@ -1,0 +1,24 @@
+# Accepted dependency advisories, read by the pull-request gate in
+# .github/workflows/security.yml.
+#
+# The gate fails a pull request that brings in a HIGH or CRITICAL advisory its
+# base does not have. When that is a deliberate decision — no fixed version
+# exists, or the vulnerable code path is unreachable here — record it below in
+# the same pull request, so the reason is reviewed with the change:
+#
+#   vulnerabilities:
+#     - id: CVE-2025-43859
+#       purls: ["pkg:pypi/h11@0.14.0"]   # scope it to the version you accept
+#       statement: "Why this is acceptable, and what would change that (see #123)."
+#       expired_at: 2027-03-01           # optional; the entry stops matching after it
+#
+# Quote the statement: unquoted, YAML ends it at the first " #". The check
+# lists every accepted advisory with its statement in its summary, and
+# annotates the ones a pull request adds, so an acceptance is never silent.
+#
+# An entry only speaks for the pull request that introduces the advisory. Once
+# merged, the finding is on the base revision too, so later pull requests do
+# not report it either way; its ongoing tracking is the code scanning alert,
+# which this file does not suppress.
+
+vulnerabilities: []

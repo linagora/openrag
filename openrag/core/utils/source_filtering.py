@@ -12,11 +12,50 @@ from core.utils.logging import get_logger
 logger = get_logger()
 
 _EMAIL_RE = re.compile(r"(?<![\w.+-])[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}(?![\w.-])")
+# Models copy the prompt's markdown literally (`[Sources: none]` in backticks,
+# **Sources:** in bold) and move the emphasis around freely: outside the
+# brackets, inside them around the label ([**Sources:** none],
+# [**Sources**]: 1, 3), or around the value ([Sources: **1, 3**],
+# [Sources: **1**, **3**]). So emphasis/code marks are accepted at every
+# boundary of the tag, and are part of it when it is stripped.
+#
+# Every run of marks or whitespace below is possessive, so a failed search never
+# retries the ways of splitting a run between neighbours (a long run of marks or
+# spaces after the value made it quadratic). That loses no match: what follows a
+# run either cannot start with one of its characters or is another run that
+# would take the same ones, so giving any back could not help. The lookbehinds
+# enter the leading whitespace and mark runs only at their first character, for
+# the same reason: a match starting mid-run is never needed, starting at the run
+# covers it. After the value, whitespace stays on the tag's line unless a
+# closing bracket follows, which is what the end-of-line lookahead needs anyway.
+#
+# The label up to its colon, with marks allowed before and after each bracket
+# and around "Sources".
+_SOURCES_LABEL = r"\n?(?<![ \t])[ \t]*+(?<![*_`])[*_`]*+\[?[*_`]*+Sources?[*_`]*+\]?[*_`]*+\s*+:\s*+[*_`]*+\[?[ \t]*+"
+_SOURCES_TAG_TAIL = r"[.*_` \t\r]*+(?=\n|$)"
+# The closing bracket may sit on the next line ([Sources: 1, 3,\n]); without
+# one, the tag ends on its own line.
+_SOURCES_TAG_CLOSE = r"[,\s*_`]*+\]"
+_SOURCES_TAG_END = r"(?:" + _SOURCES_TAG_CLOSE + r"|[,*_` \t]*+)" + _SOURCES_TAG_TAIL
 _SOURCES_NONE_RE = re.compile(
-    r"\n?[ \t]*\[?Sources?\]?\s*:\s*\[?\s*none\s*\]?[.\s]*?(?=\n|$)",
+    _SOURCES_LABEL + r"[*_`]*+none" + _SOURCES_TAG_END,
     re.IGNORECASE,
 )
-_SOURCES_NUMS_RE = re.compile(r"\n?[ \t]*\[?Sources?\]?\s*:\s*\[?([\d,\s]+)\]?[.\s]*?(?=\n|$)", re.IGNORECASE)
+# Each number may carry its own marks and separators ([Sources: **1**, **3**]),
+# and a long list may wrap onto the next line. The repetition itself is not
+# possessive: when what follows the last number is not the end of the tag
+# ("Sources: 1\n2. Next item"), it gives numbers back one at a time, which
+# costs one short scan each since every separator run stops at the next digit.
+_SOURCES_NUMS_RE = re.compile(
+    _SOURCES_LABEL + r"((?:[,\s*_`]*+\d++)+)" + _SOURCES_TAG_END,
+    re.IGNORECASE,
+)
+# An empty tag ([Sources: ]) cites nothing but is still stripped. It needs its
+# closing bracket: a bare "Sources:" at the end of a line may just be prose.
+_SOURCES_EMPTY_RE = re.compile(
+    _SOURCES_LABEL + _SOURCES_TAG_CLOSE + _SOURCES_TAG_TAIL,
+    re.IGNORECASE,
+)
 _INLINE_SOURCE_NUMS_RE = re.compile(
     r"[ \t]*\[\s*Sources?\s+(\d+(?:\s*,\s*\d+)*)\s*\]",
     re.IGNORECASE,
@@ -43,10 +82,15 @@ def _strip_sources_tags(text: str, *, include_inline_markers: bool = True) -> tu
         patterns.extend((_INLINE_SOURCE_NUMS_RE, _UNCLOSED_SOURCE_NUMS_RE))
     for pattern in patterns:
         for match in pattern.finditer(text):
-            cited.update(int(n.strip()) for n in match.group(1).split(",") if n.strip().isdigit())
+            # Every number the tag holds is a citation, whatever separates them:
+            # the regexes accept spaces, newlines and marks as well as commas
+            # ([Sources: **1** **3**]), and a tag stripped with its numbers
+            # unread would fall back to citing every source.
+            cited.update(int(n) for n in re.findall(r"\d+", match.group(1)))
     saw_none = bool(_SOURCES_NONE_RE.search(text))
     cleaned = _SOURCES_NUMS_RE.sub("", text)
     cleaned = _SOURCES_NONE_RE.sub("", cleaned)
+    cleaned = _SOURCES_EMPTY_RE.sub("", cleaned)
     if include_inline_markers:
         cleaned = _INLINE_SOURCE_NUMS_RE.sub("", cleaned)
         cleaned = _UNCLOSED_SOURCE_NUMS_RE.sub("", cleaned)
@@ -234,7 +278,7 @@ async def stream_with_source_filtering(
                                 "finish_reason": None,
                             }
                         ],
-                        "extra": "{}",
+                        "extra": {},
                     }
                     yield f"data: {json.dumps(out)}\n\n"
                     emitted_len = safe_end
@@ -243,7 +287,7 @@ async def stream_with_source_filtering(
                 # keep-alive chunk): pass it through untouched. A finish-only chunk
                 # is intentionally *not* re-emitted here — the terminal flush emits
                 # the finish chunk so it can carry `extra.sources`.
-                data["extra"] = "{}"
+                data["extra"] = {}
                 yield f"data: {json.dumps(data)}\n\n"
     except Exception as exc:
         # Upstream raised mid-stream (timeout, connection drop, worker restart):
@@ -305,7 +349,6 @@ async def stream_with_source_filtering(
             chars=len(final_clean),
             sources=len(filtered),
         )
-    filtered_json = json.dumps(extra_payload)
 
     if template and len(final_clean) > emitted_len:
         tail_chunk = copy.deepcopy(template)
@@ -314,7 +357,7 @@ async def stream_with_source_filtering(
         # finish chunk); clients treat such a chunk as terminal and drop its
         # delta. The separate finish chunk below emits it with an empty delta.
         tail_chunk["choices"][0]["finish_reason"] = None
-        tail_chunk["extra"] = filtered_json
+        tail_chunk["extra"] = extra_payload
         yield f"data: {json.dumps(tail_chunk)}\n\n"
 
     if template:
@@ -322,7 +365,7 @@ async def stream_with_source_filtering(
         finish_chunk = copy.deepcopy(template)
         finish_chunk["choices"][0]["delta"] = {}
         finish_chunk["choices"][0]["finish_reason"] = last_finish_reason or "stop"
-        finish_chunk["extra"] = filtered_json
+        finish_chunk["extra"] = extra_payload
         yield f"data: {json.dumps(finish_chunk)}\n\n"
 
     yield "data: [DONE]\n\n"

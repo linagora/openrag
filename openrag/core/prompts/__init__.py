@@ -1,5 +1,6 @@
 """Prompt assembly helpers — pure string-formatting builders + disk loader."""
 
+from .calendar_anchors import calendar_anchors
 from .casual_response import build_casual_response_prompt
 from .chat_prompt_builder import (
     EMPTY_CONTEXT_MESSAGE,
@@ -55,6 +56,8 @@ __all__ = [
     "build_contextualization_messages",
     "build_contextualization_user_message",
     "wrap_chunk_with_context",
+    # calendar anchors
+    "calendar_anchors",
     # query rewriter
     "MULTI_QUERY_SEPARATOR",
     "build_hyde_prompt",

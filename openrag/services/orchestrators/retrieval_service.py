@@ -25,7 +25,7 @@ built ``searcher`` / ``reranker`` / ``llm`` plus ``config``.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
 from core.prompts import load_template_by_key
@@ -37,6 +37,7 @@ from core.retrieval.retriever import (
     _expand_with_related_chunks,
 )
 from core.retrieval.rrf import rrf_reranking
+from core.retrieval.searcher import file_id_restriction
 from core.utils.exceptions import PartitionNotFoundError
 from core.utils.logging import get_logger
 
@@ -325,6 +326,33 @@ class RetrievalService:
             groups.append(([partition], pipeline, default_top_k))
         return groups
 
+    def _search_groups(self, partitions: list[str]) -> list[tuple[list[str], RetrievalSearcher]]:
+        """The partitions grouped by the vector field they are searched on, each with its searcher.
+
+        A query embedding only matches vectors of the same model, so each
+        embedder's partitions need their own search. Grouping by field rather
+        than embedder name keeps the ``default`` alias and the embedder behind
+        it in one search. A partition without a config is searched with the
+        default embedder, as before.
+        """
+        configs = self._partition_configs()
+        if self._searcher_factory is None or not configs or not partitions:
+            return [(partitions, self._searcher)]
+        expanded = list(configs) if "all" in partitions else partitions
+        endpoints = getattr(self._config.models, "embedder", None) or {}
+        groups: dict[str, tuple[str, list[str]]] = {}
+        for partition in expanded:
+            partition_cfg = configs.get(partition)
+            embedder = partition_cfg.embedder if partition_cfg is not None else "default"
+            endpoint = endpoints.get(embedder)
+            field = (endpoint.vector_field if endpoint is not None else None) or embedder
+            groups.setdefault(field, (embedder, []))[1].append(partition)
+        if len(groups) == 1:
+            # Keep the caller's partitions, so "all" stays unscoped.
+            ((embedder, _),) = groups.values()
+            return [(partitions, self._searcher_factory(embedder))]
+        return [(names, self._searcher_factory(embedder)) for embedder, names in groups.values()]
+
     # ------------------------------------------------------------------
     # Raw semantic search (powers routers/search.py — was indexer.asearch)
     # ------------------------------------------------------------------
@@ -343,25 +371,56 @@ class RetrievalService:
         related_limit: int = 20,
         max_ancestor_depth: int | None = None,
     ) -> list[Chunk]:
-        """One similarity search, then optional related/ancestor expansion.
+        """One similarity search per embedder, then optional related/ancestor expansion.
 
         Faithful port of ``indexer.asearch`` + the legacy
-        ``_expand_with_related_chunks``: a single ``searcher.search`` (no
-        query generation / reranking / RRF — those belong to QueryService).
+        ``_expand_with_related_chunks`` (no query generation / reranking —
+        those belong to QueryService). Partitions on different embedders are
+        searched separately, each with its own model's query embedding; their
+        hits are fused with RRF and cut to ``top_k`` before the surrounding
+        chunks are added.
         """
         parts = [partitions] if isinstance(partitions, str) else list(partitions)
-        chunks = await self._searcher.search(
-            query=text,
-            partition=parts,
-            top_k=top_k,
-            filter=filter,
-            filter_params=filter_params,
-            similarity_threshold=similarity_threshold,
-            with_surrounding_chunks=True,
-        )
+        groups = self._search_groups(parts)
+        search_kwargs = {
+            "query": text,
+            "top_k": top_k,
+            "filter": filter,
+            "filter_params": filter_params,
+            "similarity_threshold": similarity_threshold,
+        }
+        searcher = groups[0][1]
+        if len(groups) == 1:
+            chunks = await searcher.search(partition=groups[0][0], with_surrounding_chunks=True, **search_kwargs)
+        else:
+            hits = self.fuse(
+                await self._gather_partition_groups(
+                    [
+                        (names, group_searcher.search(partition=names, with_surrounding_chunks=False, **search_kwargs))
+                        for names, group_searcher in groups
+                    ]
+                ),
+                top_k=top_k,
+            )
+            # Neighbouring chunks are read by section id, whatever the embedder.
+            # They are context only: a failed lookup must not discard the hits
+            # the gather above already kept.
+            try:
+                surrounding = await searcher.get_surrounding_chunks(
+                    chunks=hits, allowed_file_ids=file_id_restriction(filter_params)
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.bind(partitions=parts).warning(
+                    f"Retrieval degraded: surrounding chunks skipped — {type(exc).__name__}: {exc}"
+                )
+                surrounding = []
+            seen = {c.id for c in hits}
+            chunks = hits + [c for c in surrounding if c.id not in seen]
         if include_related or include_ancestors:
             chunks = await _expand_with_related_chunks(
-                searcher=self._searcher,
+                searcher=searcher,
                 results=chunks,
                 include_related=include_related,
                 include_ancestors=include_ancestors,
@@ -375,8 +434,11 @@ class RetrievalService:
     # Pipeline retrieval (powers QueryService — 8C.2)
     # ------------------------------------------------------------------
 
-    async def _gather_partition_groups(self, coros: list) -> list:
+    async def _gather_partition_groups(self, legs: list[tuple[list[str], Awaitable[list]]]) -> list:
         """Await one coroutine per partition group, bounding concurrency.
+
+        Each leg is ``(partition_names, coroutine)``; the names are carried so a
+        dropped leg can be named in the log.
 
         Small fan-outs (the common case: a handful of partitions) run fully
         parallel via a plain gather — no added overhead, byte-identical to the
@@ -390,18 +452,44 @@ class RetrievalService:
         the ``retrieve_per_query`` → ``retrieve`` nesting (each inner call bounds
         its own leaves; the coroutines being awaited hold no permit while
         waiting for one, so there is no cross-level deadlock).
+
+        One unhealthy partition must not empty the whole result set (#736), so
+        legs are gathered with ``return_exceptions=True`` and a failed one is
+        dropped with a warning naming it. Two cases are deliberately not
+        degraded: ``CancelledError`` is re-raised so a client disconnect or a
+        timeout still unwinds, and if *every* leg failed the first error is
+        re-raised — an empty list is indistinguishable from "no match" and would
+        answer from no context instead of surfacing the outage.
         """
         limit = self._config.retriever.max_partition_concurrency
-        if len(coros) <= limit:
-            return await asyncio.gather(*coros)
+        coros = [coro for _, coro in legs]
+        if len(coros) > limit:
+            semaphore = asyncio.Semaphore(limit)
 
-        semaphore = asyncio.Semaphore(limit)
+            async def _bounded(coro):
+                async with semaphore:
+                    return await coro
 
-        async def _bounded(coro):
-            async with semaphore:
-                return await coro
+            coros = [_bounded(c) for c in coros]
+        results = await asyncio.gather(*coros, return_exceptions=True)
 
-        return await asyncio.gather(*(_bounded(c) for c in coros))
+        ranked_lists = []
+        first_error: BaseException | None = None
+        for (partition_names, _), result in zip(legs, results, strict=True):
+            if not isinstance(result, BaseException):
+                ranked_lists.append(result)
+                continue
+            if isinstance(result, asyncio.CancelledError):
+                raise result
+            if first_error is None:
+                first_error = result
+            logger.bind(partitions=partition_names).warning(
+                f"Retrieval degraded: dropping partition(s) {partition_names} — {type(result).__name__}: {result}"
+            )
+
+        if first_error is not None and not ranked_lists:
+            raise first_error
+        return ranked_lists
 
     async def retrieve(
         self,
@@ -415,11 +503,14 @@ class RetrievalService:
         groups = await self._pipeline_groups_for_partitions(partitions)
         ranked_lists = await self._gather_partition_groups(
             [
-                pipeline.retrieve_docs(
-                    partition=partition_group,
-                    query=query,
-                    top_k=top_k if top_k is not None else default_top_k,
-                    filter_params=filter_params,
+                (
+                    partition_group,
+                    pipeline.retrieve_docs(
+                        partition=partition_group,
+                        query=query,
+                        top_k=top_k if top_k is not None else default_top_k,
+                        filter_params=filter_params,
+                    ),
                 )
                 for partition_group, pipeline, default_top_k in groups
             ]
@@ -438,11 +529,14 @@ class RetrievalService:
         groups = await self._pipeline_groups_for_partitions(partitions)
         ranked_lists = await self._gather_partition_groups(
             [
-                pipeline.get_relevant_docs(
-                    partition=partition_group,
-                    search_queries=search_queries,
-                    top_k=top_k if top_k is not None else default_top_k,
-                    filter_params=filter_params,
+                (
+                    partition_group,
+                    pipeline.get_relevant_docs(
+                        partition=partition_group,
+                        search_queries=search_queries,
+                        top_k=top_k if top_k is not None else default_top_k,
+                        filter_params=filter_params,
+                    ),
                 )
                 for partition_group, pipeline, default_top_k in groups
             ]

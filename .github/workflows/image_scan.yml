@@ -1,0 +1,71 @@
+# Vulnerability scan of the published container images, reported to code
+# scanning (the Security tab). Source-tree scanning is security.yml.
+#
+# Runs after every successful GA release build — which has just moved `latest`
+# to the new release — and weekly, because a base image picks up advisories
+# after it ships whether or not anything is rebuilt.
+#
+# Report-only. These images hold the operating system packages of their base
+# image plus pip; the backend's Python dependencies are not in them at all (the
+# API and Ray entrypoints install uv.lock at container start), so those are
+# covered by the lockfile scan in security.yml, which does gate pull requests.
+# What is found here is fixed by a base-image bump, not by a code change, so
+# failing a release on it would block the release without pointing at a fix.
+# --ignore-unfixed drops advisories the distribution has no package for yet.
+name: Image scan
+
+on:
+  workflow_run:
+    workflows: ["Build and Release"]
+    types: [completed]
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Image tag to scan
+        required: true
+        default: latest
+
+permissions:
+  contents: read
+
+env:
+  TRIVY_IMAGE: ghcr.io/aquasecurity/trivy:0.74.0@sha256:62b1e65e8869bc4b4c6aa4fa2b21595256c7c2f6018a9d9ad61caf87187c1969
+
+jobs:
+  scan:
+    name: Scan ${{ matrix.image }}
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [openrag, openrag-ray, openrag-admin-ui]
+    env:
+      IMAGE_REF: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}:${{ inputs.tag || 'latest' }}
+    steps:
+      # upload-sarif reads the commit and ref from the checkout.
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Scan ${{ env.IMAGE_REF }}
+        env:
+          TRIVY_USERNAME: ${{ github.actor }}
+          TRIVY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          docker run --rm -e TRIVY_USERNAME -e TRIVY_PASSWORD -v "$RUNNER_TEMP:/reports" "$TRIVY_IMAGE" \
+            image --quiet --image-src remote --scanners vuln --ignore-unfixed \
+            --format sarif --output /reports/image.sarif "$IMAGE_REF"
+
+      - name: Upload the report to code scanning
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: ${{ runner.temp }}/image.sarif
+          category: image/${{ matrix.image }}

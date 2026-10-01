@@ -359,6 +359,52 @@ _OPTIONAL_PHASE_PROVIDERS = {"get_model_endpoint_service", "get_preset_service",
 class TestPhase8OrchestratorWiring:
     """8F: all orchestrators wired consistently (container + providers)."""
 
+    async def test_default_and_named_searchers_filter_deleted_documents(self, monkeypatch):
+        from unittest.mock import AsyncMock, MagicMock
+
+        container = ServiceContainer(_settings())
+        embedder = AsyncMock()
+        embedder.embed.return_value = [[0.1]]
+        monkeypatch.setattr(container, "create_embedder", lambda *a, **kw: embedder)
+        monkeypatch.setattr(container, "create_llm", lambda *a, **kw: MagicMock())
+        monkeypatch.setattr(container, "embedder_factory", lambda name: embedder)
+        monkeypatch.setattr(
+            container.vector_store,
+            "search",
+            AsyncMock(return_value=[{"id": "1", "file_id": "deleted", "partition": "a"}]),
+        )
+        monkeypatch.setattr(container.document_repo, "get_indexed_documents", AsyncMock(return_value={}))
+
+        service = container.retrieval_service
+        for searcher in (service._searcher, service._searcher_factory("named")):
+            assert await searcher.search("q", ["a"], 5, with_surrounding_chunks=False) == []
+
+    def test_clients_built_from_static_settings_are_labelled_default(self, monkeypatch):
+        """An unlabelled client records its inference metrics under
+        ``unconfigured``, where no per-provider alert can see it."""
+        from types import SimpleNamespace
+
+        from core.observability.inference_metrics import PROVIDER_NAME_ATTR
+
+        built: list[SimpleNamespace] = []
+
+        def _build(*_args, **_kwargs):
+            built.append(SimpleNamespace())
+            return built[-1]
+
+        base = _settings()
+        settings = base.model_copy(update={"reranker": base.reranker.model_copy(update={"enabled": True})})
+        container = ServiceContainer(settings)
+        for method in ("create_embedder", "create_llm", "create_reranker"):
+            monkeypatch.setattr(container, method, _build)
+        monkeypatch.setattr("services.websearch.WebSearchFactory.create_service", lambda settings: None)
+
+        container.retrieval_service
+        container.query_service
+
+        assert len(built) == 4
+        assert [getattr(client, PROVIDER_NAME_ATTR, None) for client in built] == ["default"] * 4
+
     @pytest.mark.parametrize("prop,_provider", _ORCHESTRATORS)
     def test_property_is_lazy_and_cache_slot_starts_none(self, prop, _provider):
         """Keep orchestrator properties lazy until the first access."""

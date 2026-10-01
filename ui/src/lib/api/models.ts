@@ -24,6 +24,10 @@ export interface ModelEndpointResponse {
   extra: Record<string, unknown>;
   has_api_key?: boolean;
   is_default: boolean;
+  /** Partitions whose resolved reference is this endpoint — those naming it,
+   *  plus (for the default endpoint) those riding the `default` alias. 0 for
+   *  types referenced through presets. */
+  used_by_partitions?: number;
   created_at: string;
   updated_at: string;
 }
@@ -48,6 +52,10 @@ export interface UpdateModelEndpointRequest {
   timeout?: number;
   extra?: Record<string, unknown>;
   is_default?: boolean;
+  /** Required by the server for an embedder edit that changes what its vectors
+   *  are while partitions hold files indexed with it (409 otherwise). Set only
+   *  after the user has seen and acknowledged what is indexed. */
+  acknowledge_indexed_data?: boolean;
 }
 
 export interface ValidateModelEndpointResponse {
@@ -107,7 +115,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function isSecretField(key: string | undefined): boolean {
+/** Whether a key holds a secret, and so comes back redacted rather than as its
+ *  stored value — which is why a diff has to leave it alone. */
+export function isSecretField(key: string | undefined): boolean {
   if (!key) return false;
   const normalized = key.toLowerCase();
   return SECRET_FIELD_NAMES.has(normalized) || SECRET_FIELD_SUFFIXES.some((suffix) => normalized.endsWith(suffix));
@@ -367,6 +377,26 @@ export function updateModelEndpoint(
   });
 }
 
+/** One partition's already-indexed file count for an endpoint. */
+export interface IndexedPartitionUsage {
+  partition: string;
+  file_count: number;
+}
+
+/** What an in-place edit of an embedder endpoint would strand (#762 C).
+ *
+ *  Empty means nothing is indexed against it yet, so the edit carries no
+ *  retrieval risk and the confirmation can say so instead of warning anyway.
+ */
+export interface IndexedFileUsage {
+  partitions: IndexedPartitionUsage[];
+  total_files: number;
+}
+
+export function getModelEndpointIndexedUsage(modelType: ModelType, name: string) {
+  return request<IndexedFileUsage>(`${BASE}/${enc(modelType)}/${enc(name)}/indexed-usage`);
+}
+
 export function setDefaultModelEndpoint(modelType: ModelType, name: string) {
   return request<ModelEndpointResponse>(
     `${BASE}/${enc(modelType)}/${enc(name)}/set-default`,
@@ -444,4 +474,23 @@ export function resolveEmbedderName(
 ): string {
   if (value !== "default") return value || "—";
   return pickDefaultEndpoint(embedderEndpoints)?.name ?? "default";
+}
+
+/** The model an embedder reference currently runs, or null if unknown.
+ *
+ *  Endpoint names are labels and can be renamed (#770 cascades the rename to
+ *  `partitions.embedder`, but a file's recorded provenance is a historical
+ *  fact and is never rewritten). The model is what actually determines the
+ *  vector space, so it — not the label — is what drift must be judged on.
+ */
+export function resolveEmbedderModel(
+  value: string | null | undefined,
+  embedderEndpoints: ModelEndpointResponse[] | undefined | null,
+): string | null {
+  if (!value) return null;
+  const endpoint =
+    value === "default"
+      ? pickDefaultEndpoint(embedderEndpoints)
+      : embedderEndpoints?.find((e) => e.name === value);
+  return endpoint?.model_name ?? null;
 }

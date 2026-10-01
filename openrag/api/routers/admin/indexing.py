@@ -31,11 +31,10 @@ from api.dependencies.files import (
     validate_file_id,
     validate_metadata,
 )
-from api.routers.admin.task_logs import collect_task_logs
 from core.models.catalog import TERMINAL_TASK_STATES
-from core.utils.exceptions import OpenRAGError, indexing_worker_may_be_running
+from core.utils.error_summary import summarize_task_error
+from core.utils.exceptions import ConflictError, OpenRAGError, indexing_worker_may_be_running
 from core.utils.filename import sanitize_filename
-from core.utils.log_tail import app_log_file
 from core.utils.logging import get_logger
 from core.utils.url_safety import is_safe_url
 from di.providers import get_auth_service, get_config, get_indexing_service, get_partition_service
@@ -86,6 +85,27 @@ def build_url(request: Request, route_name: str, *, preferred_url_scheme: str | 
     return str(url)
 
 
+def _point_conflict_at_running_task(exc: BaseException, request: Request, config) -> None:
+    """Tell a caller turned away by the admission fence where to look.
+
+    The fence lives in the dispatcher, which has no ``Request`` and so cannot
+    build the link itself. Left as an extra field on the 409 body: a client that
+    retried after a timeout can poll the task it already started instead of
+    treating the refusal as a lost upload.
+    """
+    if not isinstance(exc, ConflictError) or exc.code != "DOCUMENT_INDEXING_IN_PROGRESS":
+        return
+    existing_task_id = exc.extra.get("existing_task_id")
+    if not existing_task_id:
+        return
+    exc.extra["task_status_url"] = build_url(
+        request,
+        "get_task_status",
+        preferred_url_scheme=config.server.preferred_url_scheme,
+        task_id=existing_task_id,
+    )
+
+
 router = APIRouter()
 
 
@@ -96,6 +116,9 @@ router = APIRouter()
 **Response:**
 Returns a list of supported file extensions and MIME types that can be indexed by the system.
 """,
+    # The handler doesn't read the user, so the dependency is declared here
+    # rather than left to AuthMiddleware alone.
+    dependencies=[Depends(current_user)],
 )
 async def get_supported_types(config=Depends(get_config)):
     """
@@ -143,6 +166,15 @@ JSON string containing file metadata. Example:
 
 **Response:**
 Returns 201 Created with a task status URL for tracking indexing progress.
+
+**Conflicts (409):**
+- The file is already in the partition's catalog.
+- `DOCUMENT_INDEXING_IN_PROGRESS` — another task is still indexing this
+  `file_id`. `extra.existing_task_id` / `extra.task_status_url` point at it, so
+  a client that re-sent after a timeout can poll the first task instead of
+  re-uploading.
+- `DOCUMENT_CONTENT_EXISTS` — content deduplication matched an existing file
+  (`extra.existing_file_id`).
 """,
 )
 async def add_file(
@@ -176,14 +208,15 @@ async def add_file(
             parsed_workspace_ids = json.loads(workspace_ids)
             if not isinstance(parsed_workspace_ids, list):
                 raise ValueError
+            if not all(isinstance(workspace_id, str) for workspace_id in parsed_workspace_ids):
+                raise ValueError
         except (json.JSONDecodeError, ValueError):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="workspace_ids must be a JSON array of strings",
             )
         for ws_id in parsed_workspace_ids:
-            ws = await service.get_workspace(ws_id)
-            if not ws or ws["partition_name"] != partition:
+            if not await service.get_workspace(partition, ws_id):
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail=f"Workspace '{ws_id}' not found in partition '{partition}'",
@@ -237,6 +270,7 @@ async def add_file(
         # run that could still succeed. The worker cleans up its own input.
         if not indexing_worker_may_be_running(exc):
             file_path.unlink(missing_ok=True)
+        _point_conflict_at_running_task(exc, request, config)
         raise
 
     return JSONResponse(
@@ -562,6 +596,8 @@ async def get_task_status(
 **Response:**
 Returns error information including:
 - `task_id`: The task identifier
+- `reason`: Complete failure reason for administrators
+- `summary`: Concise failure reason for backward-compatible clients
 - `traceback`: Error traceback as an array of lines
 
 **Note:** Only available if task state is FAILED.
@@ -582,48 +618,15 @@ async def get_task_error(
     # The raw traceback exposes filesystem paths and internals; only return it
     # to admins. Task owners get a generic failure indicator.
     if user and user.get("is_admin", False):
-        return {"task_id": task_id, "traceback": error.splitlines()}
-    return {"task_id": task_id, "traceback": ["Task failed. Contact an administrator for details."]}
-
-
-@router.get(
-    "/task/{task_id}/logs",
-    description="""Get logs for a specific task.
-
-**Parameters:**
-- `task_id`: The unique task identifier
-- `max_lines`: Maximum number of log lines to return (default: 100)
-
-**Response:**
-Returns task logs including:
-- `task_id`: The task identifier
-- `logs`: Array of log entries with timestamps and messages
-
-**Note:** Logs are returned in chronological order (oldest first).
-""",
-)
-async def get_task_logs(
-    task_id: str,
-    max_lines: int = 100,
-    task_details=Depends(require_task_owner),
-    config=Depends(get_config),
-):
-    log_file = app_log_file(config.paths.log_dir)
-    if not log_file.exists():
-        raise HTTPException(status_code=500, detail="Log file not found.")
-
-    try:
-        logs = collect_task_logs(log_file, task_id, max_lines)
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=str(exc),
-        ) from exc
-
-    if not logs:
-        raise HTTPException(status_code=404, detail=f"No logs found for task '{task_id}'")
-
-    return JSONResponse(content={"task_id": task_id, "logs": logs})
+        reason = await service.get_task_error_reason(task_id)
+        return {
+            "task_id": task_id,
+            "reason": reason,
+            "summary": summarize_task_error(error, reason=reason) or "Task failed.",
+            "traceback": error.splitlines(),
+        }
+    message = "Task failed. Contact an administrator for details."
+    return {"task_id": task_id, "summary": message, "traceback": [message]}
 
 
 @router.delete(

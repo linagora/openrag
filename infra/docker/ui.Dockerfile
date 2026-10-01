@@ -41,6 +41,17 @@ USER root
 
 COPY --chown=10001:0 --from=build /app/dist /usr/share/nginx/html
 COPY --chown=10001:0 infra/compose/nginx/openrag-admin.conf /etc/nginx/conf.d/default.conf
+COPY --chown=10001:0 infra/compose/nginx/security-headers.conf /etc/nginx/security-headers.conf
+
+# A browser-direct build (VITE_API_BASE_URL set to an absolute URL, see
+# env_vars.md) still gets served by this same nginx, so its CSP must allow
+# that origin too or every fetch is blocked client-side. Same-origin builds
+# (the default, empty ARG) are unaffected.
+ARG VITE_API_BASE_URL=""
+RUN if [ -n "$VITE_API_BASE_URL" ]; then \
+        origin=$(echo "$VITE_API_BASE_URL" | grep -oE '^https?://[^/]+'); \
+        sed -i "s#connect-src 'self'#connect-src 'self' ${origin}#" /etc/nginx/security-headers.conf; \
+    fi
 
 # /var/cache/nginx and /var/run come from the base image (not copied above) —
 # own them as 10001:0 and make them group-writable, the same arbitrary-UID

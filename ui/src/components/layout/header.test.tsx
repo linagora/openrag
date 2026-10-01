@@ -54,6 +54,7 @@ describe("Header", () => {
     localStorage.clear();
     fetchMock.mockReset();
     openMock.mockReset();
+    authState.logout.mockReset();
     authState.logout.mockImplementation(() => false);
     fetchMock.mockResolvedValue(fakeResponse());
   });
@@ -142,12 +143,18 @@ describe("Header", () => {
     expect(screen.queryByRole("button", { name: /open chat in a new tab/i })).toBeNull();
   });
 
-  it("clears the Chainlit handoff cookie before token logout", async () => {
+  it("waits for the Chainlit cookie cleanup before token logout", async () => {
     localStorage.setItem(TOKEN_KEY, "or-user-token");
     authState.logout.mockImplementation(() => {
       localStorage.removeItem(TOKEN_KEY);
       return false;
     });
+    let finishCleanup: (response: Response) => void = () => undefined;
+    fetchMock.mockReturnValue(
+      new Promise<Response>((resolve) => {
+        finishCleanup = resolve;
+      }),
+    );
 
     render(
       <MemoryRouter>
@@ -166,15 +173,19 @@ describe("Header", () => {
         }),
       );
     });
+    expect(authState.logout).not.toHaveBeenCalled();
+
+    finishCleanup(fakeResponse());
+
+    await waitFor(() => {
+      expect(authState.logout).toHaveBeenCalled();
+    });
     expect(localStorage.getItem(TOKEN_KEY)).toBeNull();
   });
 
-  it("does not wait for Chainlit cookie cleanup before local token logout", () => {
+  it("logs out after the cleanup timeout if the Chainlit cookie cleanup stalls", async () => {
+    vi.useFakeTimers();
     localStorage.setItem(TOKEN_KEY, "or-user-token");
-    authState.logout.mockImplementation(() => {
-      localStorage.removeItem(TOKEN_KEY);
-      return false;
-    });
     fetchMock.mockReturnValue(new Promise(() => undefined));
 
     render(
@@ -185,7 +196,27 @@ describe("Header", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /log out/i }));
 
+    await vi.advanceTimersByTimeAsync(2999);
+    expect(authState.logout).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(1);
     expect(authState.logout).toHaveBeenCalled();
-    expect(localStorage.getItem(TOKEN_KEY)).toBeNull();
+  });
+
+  it("still logs out when the Chainlit cookie cleanup fails", async () => {
+    localStorage.setItem(TOKEN_KEY, "or-user-token");
+    fetchMock.mockRejectedValue(new TypeError("Failed to fetch"));
+
+    render(
+      <MemoryRouter>
+        <Header />
+      </MemoryRouter>,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /log out/i }));
+
+    await waitFor(() => {
+      expect(authState.logout).toHaveBeenCalled();
+    });
   });
 });

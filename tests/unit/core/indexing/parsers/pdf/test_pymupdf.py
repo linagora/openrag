@@ -66,3 +66,35 @@ class TestPyMuPDFParserRecovery:
 
         assert [block.text for block in result.text_blocks] == ["hello world"]
         assert result.page_count == 1
+
+
+class TestRecoveryPathResidency:
+    def test_failed_document_is_closed_before_the_cleaned_copy_is_opened(self):
+        """Peak memory on the #640 recovery path (#846).
+
+        The failed document and the cleaned copy used to be open at the same
+        time, so MuPDF held parsed structures for both. Closing the first before
+        opening the second releases one of them. ``raw`` itself belongs to the
+        caller's Document and stays live either way — this is the part the
+        parser can actually control.
+        """
+        raw = _minimal_pdf_bytes()
+        opened: list[pymupdf.Document] = []
+        real_open = pymupdf.open
+        closed_when_second_opened: list[bool] = []
+
+        def tracking_open(*args, **kwargs):
+            if opened:
+                closed_when_second_opened.append(opened[0].is_closed)
+            doc = real_open(*args, **kwargs)
+            opened.append(doc)
+            return doc
+
+        with (
+            patch("core.indexing.parsers.pdf.pymupdf.pymupdf.open", side_effect=tracking_open),
+            patch(_TO_MARKDOWN, side_effect=[RuntimeError("code=4"), [{"text": "ok"}]]),
+        ):
+            pages, _ = _extract_markdown(raw, "broken.pdf")
+
+        assert pages == ["ok"]
+        assert closed_when_second_opened == [True], "the failed document was still open"

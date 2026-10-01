@@ -1,0 +1,35 @@
+# Findings already in public git history, acknowledged so the secret scan in
+# .github/workflows/security.yml can gate on anything new.
+#
+# An entry here does NOT make the value safe. History of a public repository
+# cannot be recalled, so the only remediation for a real credential is to
+# revoke it at its issuer; listing it here only stops CI re-reporting it.
+# Placeholder shapes (YOUR_AUTH_TOKEN, or-xxx...) belong in .gitleaks.toml,
+# not here.
+#
+# Format: <commit>:<path>:<rule>:<line>, as printed in the gitleaks report.
+# Add an entry only after deciding what the finding is.
+
+# Example values in the OIDC docs (files since moved under docs/content/).
+a6b6dc8864b08ca1105327d254ad969f7c2e28c0:docs/sso-quickstart.md:generic-api-key:84
+f8f8e9715bc3955bde8e89f3952b56e5898ca02e:docs/sso-quickstart.md:generic-api-key:84
+0fe29a5a9b6114264def4998d6878c0199e1aef4:docs/oidc.md:generic-api-key:148
+7b22ca6312ead282de4297ed2bebcd8725c72139:docs/oidc.md:generic-api-key:148
+2a3a9bb0f3e9e029b9232117140611b4e9fd9e4a:PHASE_10_PR430_E2E_TEST_PLAN.md:curl-auth-header:98
+
+# Fake credentials in the admin UI's mock API handlers.
+f2028a359f2b155b36d2e1648214356af6453b59:ui/src/mocks/handlers.ts:generic-api-key:194
+f2028a359f2b155b36d2e1648214356af6453b59:ui/src/mocks/handlers.ts:generic-api-key:202
+f2028a359f2b155b36d2e1648214356af6453b59:ui/src/mocks/handlers.ts:generic-api-key:384
+
+# Values in files that no longer exist on develop.
+d2df13e0adb61ac451f6aa78162c112a83108213:.env.example:generic-api-key:3
+f8dc4fcc2e2e321eba3a06ede1f45ddb796a6cbd:.env.example:generic-api-key:50
+72b3ae49d52c94f399aa4017a119e58b5d638ba4:.env.example:generic-api-key:55
+2e763d8a45fad4269936ca4bd1e36230e6a7f678:utility/data_indexer.py:generic-api-key:7
+a3d08e6ceecc1b0d4f91804407378fae95edc797:evaluation-embedder-reranker/instruct-IR/index_data.py:generic-api-key:20
+a3d08e6ceecc1b0d4f91804407378fae95edc797:evaluation-embedder-reranker/benchmark-with-reference/index_data.py:generic-api-key:21
+169b420e47f0764bb91e93f1e301cd712d779511:main.py:generic-api-key:45
+169b420e47f0764bb91e93f1e301cd712d779511:main.py:huggingface-access-token:19
+25a4a17d13208510db3604c4f46397b9197f2665:src/pipeline.py:huggingface-access-token:11
+f9e58e2db20a0743810873550e303da09d4dfdae:ssl/key.pem:private-key:1

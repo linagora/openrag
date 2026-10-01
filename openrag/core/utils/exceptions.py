@@ -9,9 +9,11 @@ The hierarchy is organised by concern:
     +-- ConfigError
     +-- RegistryError
     +-- PipelineError
+    |   +-- NoIndexableContentError     (422)
     +-- AuthError
     |   +-- AuthenticationError          (401)
     +-- ValidationError                  (422)
+    |   +-- AmbiguousWorkspaceError
     +-- NotFoundError                    (404)
     |   +-- DocumentNotFoundError
     |   +-- PartitionNotFoundError
@@ -108,8 +110,15 @@ class RegistryError(OpenRAGError):
 class PipelineError(OpenRAGError):
     """Pipeline execution errors."""
 
+    def __init__(self, message: str, *, code: str = "PIPELINE_ERROR", status_code: int = 500, **kwargs):
+        super().__init__(message, code=code, status_code=status_code, **kwargs)
+
+
+class NoIndexableContentError(PipelineError):
+    """The pipeline produced no content that retrieval could return."""
+
     def __init__(self, message: str, **kwargs):
-        super().__init__(message, code="PIPELINE_ERROR", status_code=500, **kwargs)
+        super().__init__(message, code="NO_INDEXABLE_CONTENT", status_code=422, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -146,6 +155,24 @@ class ValidationError(OpenRAGError):
 
     def __init__(self, message: str, *, status_code: int = 422, code: str = "VALIDATION_ERROR", **kwargs):
         super().__init__(message, code=code, status_code=status_code, **kwargs)
+
+
+class AmbiguousWorkspaceError(ValidationError):
+    """A workspace id matched several partitions the caller may search.
+
+    ``workspace_id`` is only unique per partition, so a multi-partition
+    request must be narrowed to one partition before it can be scoped.
+    """
+
+    def __init__(self, workspace_id: str, partitions: list[str], **kwargs):
+        super().__init__(
+            f"Workspace '{workspace_id}' exists in several partitions ({', '.join(partitions)}); "
+            "target a single partition.",
+            code="WORKSPACE_AMBIGUOUS",
+            workspace_id=workspace_id,
+            partitions=list(partitions),
+            **kwargs,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -241,10 +268,27 @@ class CircuitBreakerOpenError(ServiceUnavailableError):
 
 
 class InferenceError(OpenRAGError):
-    """Base for all inference service failures. Maps to HTTP 503."""
+    """Base for all inference service failures. Maps to HTTP 503.
 
-    def __init__(self, message: str, *, code: str = "INFERENCE_ERROR", status_code: int = 503, **kwargs):
+    ``caller_shaped`` marks a call sent with the caller's own endpoint and key
+    (an honoured ``llm_override.base_url``): the API answers its 401 or 403 as
+    the caller's error rather than an upstream failure. A model-only override
+    still sends OpenRag's key, and a 401 there cannot be told from that key
+    being revoked, so it is not caller-shaped. Kept off ``extra``, which is
+    serialised into the response body.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "INFERENCE_ERROR",
+        status_code: int = 503,
+        caller_shaped: bool = False,
+        **kwargs,
+    ):
         super().__init__(message, code=code, status_code=status_code, **kwargs)
+        self.caller_shaped = caller_shaped
 
 
 class LLMParsingError(InferenceError):

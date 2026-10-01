@@ -3,8 +3,8 @@ name: openrag-stack
 description: A Helm chart for Kubernetes
 type: application
 
-version: 0.6.5
-appVersion: "2.2.2"
+version: 0.7.0
+appVersion: "2.3.0"
 
 maintainers:
   - name: linagora
@@ -26,14 +26,24 @@ dependencies:
     repository: "https://charts.bitnami.com/bitnami"
     condition: postgresql.enabled
   - name: milvus
-    # The Milvus 3 chart is 5.0.26, but that release is not yet present in the
-    # published repository index. Keep 5.0.25 and override its image tag in
-    # values.yaml until 5.0.26 can be resolved through helm dependency update.
-    version: "5.0.25"
+    # 5.0.26 declares Milvus 3.0.0 but was never added to the published index,
+    # so helm cannot resolve it. 5.0.27 is the first *indexed* chart with Milvus
+    # 3 defaults; values.yaml pins the image to v3.0.2 until an indexed
+    # milvus-helm release defaults to v3.0.2 or later.
+    version: "5.0.27"
     repository: "https://zilliztech.github.io/milvus-helm/"
     condition: milvus.enabled
   - name: vllm-stack
     alias: vllm
-    version: ">=0.1.7 <1.0.0"
+    version: ">=0.1.12 <1.0.0"
     repository: "https://vllm-project.github.io/production-stack"
     condition: vllm.enabled
+  # Standalone monitoring. Off by default so an install next to a platform's
+  # own Prometheus Operator never plants a second one. Aliased because
+  # vllm-stack carries its own (disabled) kube-prometheus-stack, and two
+  # sub-charts of one name make Helm coalesce one's defaults into the other.
+  - name: kube-prometheus-stack
+    alias: kubePrometheusStack
+    version: "91.4.1"
+    repository: "https://prometheus-community.github.io/helm-charts"
+    condition: monitoring.bundled

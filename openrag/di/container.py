@@ -22,10 +22,13 @@ from __future__ import annotations
 
 import os
 from collections.abc import Awaitable, Callable
+from functools import cached_property
 from typing import TYPE_CHECKING, Any
 
+from core.config.model_endpoints import DEFAULT_MODEL_IMPLEMENTATIONS
 from core.embeddings import embedder_registry
 from core.llm import llm_registry
+from core.observability.inference_metrics import DEFAULT_PROVIDER, set_provider_name
 from core.rerankers import reranker_registry
 from core.utils.logging import get_logger
 from core.vlm import vlm_registry
@@ -82,6 +85,12 @@ _NO_SETTINGS_MESSAGE = (
 
 class ServiceContainer:
     """Populates registries and provides typed factory access."""
+
+    @cached_property
+    def readiness_service(self):
+        from di.readiness import create_readiness_service
+
+        return create_readiness_service(self)
 
     def __init__(self, settings: Settings | None = None) -> None:
         register_embedders()
@@ -173,26 +182,26 @@ class ServiceContainer:
         self.embedder_factory, self._embedder_cache = make_component_factory(
             registry=embedder_registry,
             config_section=models.embedder,
-            default_impl="vllm",
+            default_impl=DEFAULT_MODEL_IMPLEMENTATIONS["embedder"],
             client_caches=self._client_caches,
             extra_kwargs_fn=_embedder_extra_kwargs,
         )
         self.reranker_factory, self._reranker_cache = make_component_factory(
             registry=reranker_registry,
             config_section=models.reranker,
-            default_impl="infinity",
+            default_impl=DEFAULT_MODEL_IMPLEMENTATIONS["reranker"],
             client_caches=self._client_caches,
         )
         self.llm_factory, self._llm_cache = make_component_factory(
             registry=llm_registry,
             config_section=models.llm,
-            default_impl="vllm",
+            default_impl=DEFAULT_MODEL_IMPLEMENTATIONS["llm"],
             client_caches=self._client_caches,
         )
         self.vlm_factory, self._vlm_cache = make_component_factory(
             registry=vlm_registry,
             config_section=models.vlm,
-            default_impl="vllm",
+            default_impl=DEFAULT_MODEL_IMPLEMENTATIONS["vlm"],
             client_caches=self._client_caches,
         )
 
@@ -452,6 +461,7 @@ class ServiceContainer:
                     "llm": self._llm_cache,
                     "vlm": self._vlm_cache,
                 },
+                vector_store=self.vector_store,
             )
         return self._model_endpoint_service
 
@@ -502,52 +512,73 @@ class ServiceContainer:
         """RetrievalService — lazily built, cached for the container's lifetime."""
         if self._retrieval_service is None:
             from services.orchestrators.retrieval_service import RetrievalService
+            from services.storage.catalog_searcher import CatalogSearcher
             from services.storage.vector_store_searcher import VectorStoreSearcher
 
             settings = self._require_settings()
             embed_cfg = settings.embedder
-            embedder = self.create_embedder(
-                "vllm",
-                endpoint=embed_cfg.base_url,
-                model_name=embed_cfg.model_name,
-                api_key=embed_cfg.api_key,
-                max_model_len=embed_cfg.max_model_len,
-                timeout=embed_cfg.timeout,
-                batch_size=embed_cfg.batch_size,
-                embed_concurrency=embed_cfg.embed_concurrency,
+            embedder = set_provider_name(
+                self.create_embedder(
+                    "vllm",
+                    endpoint=embed_cfg.base_url,
+                    model_name=embed_cfg.model_name,
+                    api_key=embed_cfg.api_key,
+                    max_model_len=embed_cfg.max_model_len,
+                    timeout=embed_cfg.timeout,
+                    batch_size=embed_cfg.batch_size,
+                    embed_concurrency=embed_cfg.embed_concurrency,
+                ),
+                DEFAULT_PROVIDER,
             )
+
+            def _vector_field_for(embedder_name: str) -> str | None:
+                endpoint_cfg = settings.models.embedder.get(embedder_name)
+                return endpoint_cfg.vector_field if endpoint_cfg is not None else None
+
             searcher = VectorStoreSearcher(
                 vector_store=self.vector_store,
                 embedder=embedder,
                 document_repo=self.document_repo,
                 collection=settings.vectordb.collection_name,
+                vector_field=lambda: _vector_field_for("default"),
             )
+            searcher = CatalogSearcher(searcher, self.document_repo)
 
             def searcher_factory(embedder_name: str):
-                return VectorStoreSearcher(
-                    vector_store=self.vector_store,
-                    embedder=self.embedder_factory(embedder_name),
-                    document_repo=self.document_repo,
-                    collection=settings.vectordb.collection_name,
+                return CatalogSearcher(
+                    VectorStoreSearcher(
+                        vector_store=self.vector_store,
+                        embedder=self.embedder_factory(embedder_name),
+                        document_repo=self.document_repo,
+                        collection=settings.vectordb.collection_name,
+                        vector_field=lambda: _vector_field_for(embedder_name),
+                    ),
+                    self.document_repo,
                 )
 
             llm_cfg = settings.llm.model_dump()
-            llm = self.create_llm(
-                "vllm",
-                endpoint=llm_cfg["base_url"],
-                model_name=llm_cfg["model"],
-                api_key=llm_cfg.get("api_key", ""),
-                **{k: v for k, v in llm_cfg.items() if k not in ("base_url", "model", "api_key")},
+            llm = set_provider_name(
+                self.create_llm(
+                    "vllm",
+                    endpoint=llm_cfg["base_url"],
+                    model_name=llm_cfg["model"],
+                    api_key=llm_cfg.get("api_key", ""),
+                    **{k: v for k, v in llm_cfg.items() if k not in ("base_url", "model", "api_key")},
+                ),
+                DEFAULT_PROVIDER,
             )
             reranker = None
             rcfg = settings.reranker
             if rcfg.enabled:
-                reranker = self.create_reranker(
-                    rcfg.provider,
-                    endpoint=rcfg.base_url,
-                    model_name=rcfg.model_name,
-                    api_key=rcfg.api_key,
-                    timeout=rcfg.timeout,
+                reranker = set_provider_name(
+                    self.create_reranker(
+                        rcfg.provider,
+                        endpoint=rcfg.base_url,
+                        model_name=rcfg.model_name,
+                        api_key=rcfg.api_key,
+                        timeout=rcfg.timeout,
+                    ),
+                    DEFAULT_PROVIDER,
                 )
             self._retrieval_service = RetrievalService(
                 searcher=searcher,
@@ -579,12 +610,15 @@ class ServiceContainer:
 
             settings = self._require_settings()
             llm_cfg = settings.llm.model_dump()
-            llm = self.create_llm(
-                "vllm",
-                endpoint=llm_cfg["base_url"],
-                model_name=llm_cfg["model"],
-                api_key=llm_cfg.get("api_key", ""),
-                **{k: v for k, v in llm_cfg.items() if k not in ("base_url", "model", "api_key")},
+            llm = set_provider_name(
+                self.create_llm(
+                    "vllm",
+                    endpoint=llm_cfg["base_url"],
+                    model_name=llm_cfg["model"],
+                    api_key=llm_cfg.get("api_key", ""),
+                    **{k: v for k, v in llm_cfg.items() if k not in ("base_url", "model", "api_key")},
+                ),
+                DEFAULT_PROVIDER,
             )
             self._query_service = QueryService(
                 retrieval_service=self.retrieval_service,
@@ -617,10 +651,12 @@ class ServiceContainer:
                     document_repo=self.document_repo,
                     workspace_repo=self.workspace_repo,
                     collection=settings.vectordb.collection_name,
+                    job_repo=self.job_repo,
                 ),
                 config=settings,
                 partition_service=self.partition_service,
                 preset_service=self.preset_service,
+                embedder_factory=lambda name: self.embedder_factory(name),
             )
         return self._indexing_service
 
@@ -636,7 +672,7 @@ class ServiceContainer:
             from services.orchestrators.job_service import JobService
             from services.workers.bootstrap import get_task_state_manager
 
-            self._job_service = JobService(task_state_manager=get_task_state_manager())
+            self._job_service = JobService(task_state_manager=get_task_state_manager(), job_repo=self.job_repo)
         return self._job_service
 
     @property

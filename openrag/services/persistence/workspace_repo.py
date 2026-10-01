@@ -10,21 +10,33 @@ ten workspace methods that all map onto this class:
 ``get_file_workspaces``, ``get_existing_file_ids``,
 ``remove_file_from_all_workspaces``.
 
-The join references the canonical ``files.id`` integer PK (not the
-opaque ``file_id`` string), so deletion cascades correctly — when a
-``files`` row goes away the workspace_files entries it backed go with
-it without any application-side bookkeeping. Conversely the workspace
-APIs accept and emit the human ``file_id`` form; the repo translates at
-the boundary.
+The join references the canonical ``files.id`` and ``workspaces.id``
+integer PKs (not the client-facing ``file_id`` / ``workspace_id`` strings,
+neither of which is unique across partitions), so deletion cascades
+correctly — when a ``files`` or ``workspaces`` row goes away the
+workspace_files entries it backed go with it without any application-side
+bookkeeping. Conversely the workspace APIs accept and emit the human
+string ids; the repo translates at the boundary, and because
+``workspace_id`` is only unique per partition every translation is keyed
+on ``(partition, workspace_id)``.
 """
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
+from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 
 from core.models.workspace import Workspace
 from core.ports.workspace_repo import WorkspaceRepository
+from services.persistence.file_count import decrement_file_counts
+
+CLEANUP_NONE = "NONE"
+CLEANUP_CLAIMED = "CLAIMED"
+CLEANUP_STARTED = "CLEANUP_STARTED"
+CLEANUP_FAILED = "CLEANUP_FAILED"
+CLEANUP_FINALIZED = "CLEANUP_FINALIZED"
 
 if TYPE_CHECKING:
     import asyncpg
@@ -35,6 +47,36 @@ class PgWorkspaceRepository(WorkspaceRepository):
 
     def __init__(self, pool_getter: Callable[[], asyncpg.Pool]) -> None:
         self._pool_getter = pool_getter
+        self._cleanup_conn = None
+        self._cleanup_target = None
+
+    @asynccontextmanager
+    async def cleanup_session(self, file_id: str, partition: str):
+        # Session locks survive commits, keeping durable state visible while
+        # excluding other workers for the entire external deletion operation.
+        key = json.dumps([partition, file_id])
+        async with self.pool.acquire() as conn:
+            acquired = await conn.fetchval("SELECT pg_try_advisory_lock(hashtextextended($1, 0))", key)
+            if not acquired:
+                yield None
+                return
+            owned = PgWorkspaceRepository(self._pool_getter)
+            owned._cleanup_conn = conn
+            owned._cleanup_target = (file_id, partition)
+            try:
+                yield owned
+            finally:
+                owned._cleanup_conn = None
+                owned._cleanup_target = None
+                # A disconnected owner cannot mutate state through a new
+                # connection. PostgreSQL releases its lock on disconnect.
+                if not conn.is_closed():
+                    await conn.execute("SELECT pg_advisory_unlock(hashtextextended($1, 0))", key)
+
+    def _owned_connection(self, file_id: str, partition: str):
+        if self._cleanup_conn is None or self._cleanup_target != (file_id, partition):
+            raise RuntimeError("Cleanup requires an active owning session")
+        return self._cleanup_conn
 
     @property
     def pool(self) -> asyncpg.Pool:
@@ -58,12 +100,33 @@ class PgWorkspaceRepository(WorkspaceRepository):
         )
         return self._row_to_workspace(row)
 
-    async def get_workspace(self, workspace_id: str) -> Workspace | None:
+    async def get_workspace(self, partition: str, workspace_id: str) -> Workspace | None:
         row = await self.pool.fetchrow(
-            "SELECT * FROM workspaces WHERE workspace_id = $1",
+            "SELECT * FROM workspaces WHERE partition_name = $1 AND workspace_id = $2",
+            partition,
             workspace_id,
         )
         return self._row_to_workspace(row) if row else None
+
+    async def find_workspaces(self, workspace_id: str, partitions: list[str] | None) -> list[Workspace]:
+        if partitions is None:
+            rows = await self.pool.fetch(
+                "SELECT * FROM workspaces WHERE workspace_id = $1 ORDER BY partition_name",
+                workspace_id,
+            )
+        elif not partitions:
+            return []
+        else:
+            rows = await self.pool.fetch(
+                """
+                SELECT * FROM workspaces
+                WHERE workspace_id = $1 AND partition_name = ANY($2::text[])
+                ORDER BY partition_name
+                """,
+                workspace_id,
+                partitions,
+            )
+        return [self._row_to_workspace(r) for r in rows]
 
     async def list_workspaces(self, partition: str) -> list[Workspace]:
         rows = await self.pool.fetch(
@@ -76,14 +139,13 @@ class PgWorkspaceRepository(WorkspaceRepository):
         )
         return [self._row_to_workspace(r) for r in rows]
 
-    async def delete_workspace(self, workspace_id: str) -> list[str]:
+    async def delete_workspace(self, partition: str, workspace_id: str, *, keep_files: bool = False) -> list[str]:
         """Delete the workspace and return the orphaned ``file_id`` list.
 
-        An orphan = a file currently in this workspace and in no other.
-        Because ``workspace_files.file_id`` is an integer FK to
-        ``files.id``, every workspace_files row already has a backing
-        files row; the orphan check therefore reduces to
-        "file_id NOT IN (other workspaces' file_ids)".
+        Only files uploaded for workspaces, with no independent ownership
+        and no remaining workspace reference, are eligible for cleanup. The
+        transaction claims every eligible file before removing the workspace;
+        attachment refuses claimed files until cleanup succeeds or fails.
 
         Returning the orphans (rather than auto-deleting them) keeps the
         deletion of the underlying file optional — the legacy router
@@ -92,27 +154,105 @@ class PgWorkspaceRepository(WorkspaceRepository):
         """
         async with self.pool.acquire() as conn:
             async with conn.transaction():
-                orphan_rows = await conn.fetch(
+                workspace_pk = await self._workspace_pk(conn, partition, workspace_id, for_update=True)
+                if workspace_pk is None:
+                    return []
+                await conn.fetch(
                     """
-                    SELECT f.file_id
+                    SELECT f.id
                     FROM workspace_files wf
                     JOIN files f ON f.id = wf.file_id
                     WHERE wf.workspace_id = $1
-                      AND wf.file_id NOT IN (
-                          SELECT file_id FROM workspace_files
-                          WHERE workspace_id <> $1
-                      )
+                    ORDER BY f.id
+                    FOR UPDATE OF f
                     """,
-                    workspace_id,
+                    workspace_pk,
                 )
-                await conn.execute(
-                    "DELETE FROM workspaces WHERE workspace_id = $1",
-                    workspace_id,
-                )
+                if keep_files:
+                    orphan_rows = await conn.fetch(
+                        """
+                        SELECT f.file_id
+                        FROM workspace_files wf
+                        JOIN files f ON f.id = wf.file_id
+                        WHERE wf.workspace_id = $1
+                          AND NOT f.independently_indexed
+                          AND wf.file_id NOT IN (
+                              SELECT file_id FROM workspace_files
+                              WHERE workspace_id <> $1
+                          )
+                        """,
+                        workspace_pk,
+                    )
+                    await conn.execute(
+                        """
+                        UPDATE files f
+                        SET independently_indexed = TRUE,
+                            workspace_cleanup_claimed = FALSE,
+                            workspace_cleanup_claimed_at = NULL,
+                            workspace_cleanup_started = FALSE,
+                            workspace_cleanup_failed = FALSE,
+                            workspace_cleanup_state = $2
+                        WHERE f.id IN (
+                            SELECT wf.file_id
+                            FROM workspace_files wf
+                            WHERE wf.workspace_id = $1
+                              AND NOT EXISTS (
+                                  SELECT 1
+                                  FROM workspace_files other_wf
+                                  WHERE other_wf.file_id = wf.file_id
+                                    AND other_wf.workspace_id <> $1
+                              )
+                        )
+                        """,
+                        workspace_pk,
+                        CLEANUP_NONE,
+                    )
+                else:
+                    orphan_rows = await conn.fetch(
+                        """
+                        WITH candidates AS (
+                            SELECT f.id, f.file_id
+                            FROM workspace_files wf
+                            JOIN files f ON f.id = wf.file_id
+                            WHERE wf.workspace_id = $1
+                              AND NOT f.independently_indexed
+                              AND (
+                                  f.workspace_cleanup_state = $2
+                                  OR (
+                                      f.workspace_cleanup_state = $3
+                                      AND (
+                                          f.workspace_cleanup_claimed_at IS NULL
+                                          OR f.workspace_cleanup_claimed_at < NOW() - INTERVAL '1 hour'
+                                      )
+                                  )
+                              )
+                              AND wf.file_id NOT IN (
+                                  SELECT file_id FROM workspace_files
+                                  WHERE workspace_id <> $1
+                              )
+                            FOR UPDATE OF f
+                        )
+                        UPDATE files f
+                        SET workspace_cleanup_claimed = TRUE,
+                            workspace_cleanup_claimed_at = NOW(),
+                            workspace_cleanup_started = FALSE,
+                            workspace_cleanup_failed = FALSE,
+                            workspace_cleanup_state = $4
+                        FROM candidates
+                        WHERE f.id = candidates.id
+                        RETURNING candidates.file_id
+                        """,
+                        workspace_pk,
+                        CLEANUP_NONE,
+                        CLEANUP_CLAIMED,
+                        CLEANUP_CLAIMED,
+                    )
+                await conn.execute("DELETE FROM workspaces WHERE id = $1", workspace_pk)
         return [r["file_id"] for r in orphan_rows]
 
     async def add_files_to_workspace(
         self,
+        partition: str,
         workspace_id: str,
         file_ids: list[str],
     ) -> list[str]:
@@ -120,30 +260,68 @@ class PgWorkspaceRepository(WorkspaceRepository):
 
         Returns the list of supplied ``file_ids`` that do not exist in
         the workspace's partition — callers surface these to the user as
-        "not found".
+        "not found". An unknown workspace resolves nothing, so every id
+        comes back.
         """
         if not file_ids:
             return []
         async with self.pool.acquire() as conn:
             async with conn.transaction():
-                workspace = await conn.fetchrow(
-                    "SELECT partition_name FROM workspaces WHERE workspace_id = $1",
-                    workspace_id,
-                )
-                if workspace is None:
+                # Lock the workspace row before the file rows: ``delete_workspace``
+                # takes them in that order, and the ``workspace_files`` insert
+                # below would otherwise grab a KEY SHARE on the workspace only
+                # after the file locks, deadlocking against a concurrent delete.
+                workspace_pk = await self._workspace_pk(conn, partition, workspace_id, for_key_share=True)
+                if workspace_pk is None:
                     return list(file_ids)
-                partition = workspace["partition_name"]
                 resolved = await conn.fetch(
                     """
                     SELECT file_id, id FROM files
-                    WHERE file_id = ANY($1::text[]) AND partition_name = $2
-                    """,
+                    WHERE file_id = ANY($1::text[])
+                      AND partition_name = $2
+                      AND (
+                          workspace_cleanup_state = $3
+                          OR (
+                              workspace_cleanup_state = $4
+                              AND (
+                                  workspace_cleanup_claimed_at IS NULL
+                                  OR workspace_cleanup_claimed_at < NOW() - INTERVAL '1 hour'
+                              )
+                          )
+                      )
+                    ORDER BY id
+                    FOR UPDATE
+                        """,
                     file_ids,
                     partition,
+                    CLEANUP_NONE,
+                    CLEANUP_CLAIMED,
                 )
                 id_map = {r["file_id"]: r["id"] for r in resolved}
                 missing = [fid for fid in file_ids if fid not in id_map]
                 if id_map:
+                    # A claim without a recent timestamp is recoverable. The
+                    # row lock held by the SELECT above makes clearing it
+                    # serialize with the cleanup worker before attachment.
+                    await conn.execute(
+                        """
+                        UPDATE files
+                        SET workspace_cleanup_claimed = FALSE,
+                            workspace_cleanup_claimed_at = NULL,
+                            workspace_cleanup_started = FALSE,
+                            workspace_cleanup_failed = FALSE,
+                            workspace_cleanup_state = $2
+                        WHERE id = ANY($1::int[])
+                          AND workspace_cleanup_state = $3
+                          AND (
+                              workspace_cleanup_claimed_at IS NULL
+                              OR workspace_cleanup_claimed_at < NOW() - INTERVAL '1 hour'
+                          )
+                        """,
+                        list(id_map.values()),
+                        CLEANUP_NONE,
+                        CLEANUP_CLAIMED,
+                    )
                     # Insert each row separately with ON CONFLICT DO NOTHING.
                     # asyncpg has no native bulk-with-conflict; the row count
                     # is bounded by file_ids so the loop is fine here.
@@ -154,23 +332,149 @@ class PgWorkspaceRepository(WorkspaceRepository):
                             VALUES ($1, $2)
                             ON CONFLICT ON CONSTRAINT uix_workspace_file DO NOTHING
                             """,
-                            workspace_id,
+                            workspace_pk,
                             file_pk,
                         )
         return missing
 
+    async def finalize_claimed_file_cleanup(self, file_id: str, partition: str) -> bool:
+        """Delete one claimed orphan and account for its uploader quota."""
+        conn = self._owned_connection(file_id, partition)
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                """
+                    UPDATE files
+                    SET workspace_cleanup_state = $3,
+                        workspace_cleanup_claimed = FALSE,
+                        workspace_cleanup_claimed_at = NULL,
+                        workspace_cleanup_started = FALSE,
+                        workspace_cleanup_failed = FALSE
+                    WHERE file_id = $1
+                      AND partition_name = $2
+                      AND workspace_cleanup_state IN ($4, $5)
+                    RETURNING id, created_by
+                    """,
+                file_id,
+                partition,
+                CLEANUP_FINALIZED,
+                CLEANUP_STARTED,
+                CLEANUP_FAILED,
+            )
+            if row is not None:
+                await conn.execute(
+                    "DELETE FROM files WHERE id = $1 AND workspace_cleanup_state = $2",
+                    row["id"],
+                    CLEANUP_FINALIZED,
+                )
+            await decrement_file_counts(conn, [row] if row is not None else [])
+            return row is not None
+
+    async def start_claimed_file_cleanup(self, file_id: str, partition: str) -> bool:
+        """Prevent a claim from being recovered before vector deletion."""
+        row = await self._owned_connection(file_id, partition).fetchrow(
+            """
+            UPDATE files
+            SET workspace_cleanup_started = TRUE,
+                workspace_cleanup_claimed_at = NOW(),
+                workspace_cleanup_failed = FALSE,
+                workspace_cleanup_state = $3
+            WHERE file_id = $1
+              AND partition_name = $2
+              AND workspace_cleanup_state = $4
+            RETURNING id
+            """,
+            file_id,
+            partition,
+            CLEANUP_STARTED,
+            CLEANUP_CLAIMED,
+        )
+        return row is not None
+
+    async def mark_cleanup_failed(self, file_id: str, partition: str) -> bool:
+        """Persist a destructive cleanup failure without allowing attachment."""
+        row = await self._owned_connection(file_id, partition).fetchrow(
+            """
+            UPDATE files
+            SET workspace_cleanup_failed = TRUE,
+                workspace_cleanup_claimed = TRUE,
+                workspace_cleanup_started = TRUE,
+                workspace_cleanup_claimed_at = NOW(),
+                workspace_cleanup_state = $3
+            WHERE file_id = $1
+              AND partition_name = $2
+              AND workspace_cleanup_state = $4
+            RETURNING id
+            """,
+            file_id,
+            partition,
+            CLEANUP_FAILED,
+            CLEANUP_STARTED,
+        )
+        return row is not None
+
+    async def claim_failed_file_cleanup(self, file_id: str, partition: str) -> bool:
+        """Reclaim failed or abandoned cleanup before restarting deletion."""
+        row = await self._owned_connection(file_id, partition).fetchrow(
+            """
+            UPDATE files
+            SET workspace_cleanup_claimed = TRUE,
+                workspace_cleanup_claimed_at = NOW(),
+                workspace_cleanup_started = TRUE,
+                workspace_cleanup_failed = FALSE,
+                workspace_cleanup_state = $3
+            WHERE file_id = $1
+              AND partition_name = $2
+              AND workspace_cleanup_state IN ($4, $5)
+              AND (
+                  workspace_cleanup_state = $4
+                  OR (
+                      workspace_cleanup_state = $5
+                      AND (
+                          workspace_cleanup_claimed_at IS NULL
+                          OR workspace_cleanup_claimed_at < NOW() - INTERVAL '1 hour'
+                      )
+                  )
+              )
+            RETURNING id
+            """,
+            file_id,
+            partition,
+            CLEANUP_STARTED,
+            CLEANUP_FAILED,
+            CLEANUP_STARTED,
+        )
+        return row is not None
+
+    async def release_claimed_file_cleanup(self, file_id: str, partition: str) -> None:
+        """Release a failed cleanup claim so the file can be attached again."""
+        await self._owned_connection(file_id, partition).execute(
+            """
+            UPDATE files
+            SET workspace_cleanup_claimed = FALSE,
+                workspace_cleanup_claimed_at = NULL,
+                workspace_cleanup_started = FALSE,
+                workspace_cleanup_failed = FALSE,
+                workspace_cleanup_state = $3
+            WHERE file_id = $1
+              AND partition_name = $2
+              AND workspace_cleanup_state = $4
+            """,
+            file_id,
+            partition,
+            CLEANUP_NONE,
+            CLEANUP_CLAIMED,
+        )
+
     async def remove_file_from_workspace(
         self,
+        partition: str,
         workspace_id: str,
         file_id: str,
     ) -> bool:
         async with self.pool.acquire() as conn:
             async with conn.transaction():
-                workspace = await conn.fetchrow(
-                    "SELECT partition_name FROM workspaces WHERE workspace_id = $1",
-                    workspace_id,
-                )
-                if workspace is None:
+                workspace_pk = await self._workspace_pk(conn, partition, workspace_id)
+                if workspace_pk is None:
                     return False
                 file_pk = await conn.fetchval(
                     """
@@ -178,7 +482,7 @@ class PgWorkspaceRepository(WorkspaceRepository):
                     WHERE file_id = $1 AND partition_name = $2
                     """,
                     file_id,
-                    workspace["partition_name"],
+                    partition,
                 )
                 if file_pk is None:
                     return False
@@ -187,7 +491,7 @@ class PgWorkspaceRepository(WorkspaceRepository):
                     DELETE FROM workspace_files
                     WHERE workspace_id = $1 AND file_id = $2
                     """,
-                    workspace_id,
+                    workspace_pk,
                     file_pk,
                 )
         try:
@@ -195,14 +499,16 @@ class PgWorkspaceRepository(WorkspaceRepository):
         except (ValueError, IndexError):
             return False
 
-    async def list_workspace_files(self, workspace_id: str) -> list[str]:
+    async def list_workspace_files(self, partition: str, workspace_id: str) -> list[str]:
         rows = await self.pool.fetch(
             """
             SELECT f.file_id
             FROM workspace_files wf
+            JOIN workspaces w ON w.id = wf.workspace_id
             JOIN files f ON f.id = wf.file_id
-            WHERE wf.workspace_id = $1
+            WHERE w.partition_name = $1 AND w.workspace_id = $2
             """,
+            partition,
             workspace_id,
         )
         return [r["file_id"] for r in rows]
@@ -212,21 +518,24 @@ class PgWorkspaceRepository(WorkspaceRepository):
         file_id: str,
         partition: str,
     ) -> list[str]:
-        """Workspaces containing ``file_id``, scoped to ``partition``.
+        """Workspace ids containing ``file_id``, scoped to ``partition``.
 
         Scoping is necessary because a given ``file_id`` string is unique
         only within a partition — the underlying ``files`` rows are
-        distinct PKs across partitions.
+        distinct PKs across partitions. A workspace can only hold files
+        of its own partition, so the returned ids all belong to
+        ``partition`` and are unambiguous there.
         """
         rows = await self.pool.fetch(
             """
-            SELECT wf.workspace_id
+            SELECT w.workspace_id
             FROM workspace_files wf
             JOIN files f ON f.id = wf.file_id
-            JOIN workspaces w ON w.workspace_id = wf.workspace_id
+            JOIN workspaces w ON w.id = wf.workspace_id
             WHERE f.file_id = $1
               AND f.partition_name = $2
               AND w.partition_name = $2
+            ORDER BY w.workspace_id
             """,
             file_id,
             partition,
@@ -294,7 +603,7 @@ class PgWorkspaceRepository(WorkspaceRepository):
                     DELETE FROM workspace_files
                     WHERE file_id = $1
                       AND workspace_id IN (
-                          SELECT workspace_id FROM workspaces
+                          SELECT id FROM workspaces
                           WHERE partition_name = $2
                       )
                     """,
@@ -336,15 +645,38 @@ class PgWorkspaceRepository(WorkspaceRepository):
         )
         return [self._row_to_dict(r) for r in rows]
 
-    async def get_workspace_dict(self, workspace_id: str) -> dict | None:
+    async def get_workspace_dict(self, partition: str, workspace_id: str) -> dict | None:
         """TODO(phase-9): remove. Legacy router-facing dict shape."""
         row = await self.pool.fetchrow(
-            "SELECT * FROM workspaces WHERE workspace_id = $1",
+            "SELECT * FROM workspaces WHERE partition_name = $1 AND workspace_id = $2",
+            partition,
             workspace_id,
         )
         return self._row_to_dict(row) if row else None
 
     # ── Helpers ──────────────────────────────────────────────────────
+
+    @staticmethod
+    async def _workspace_pk(
+        conn: asyncpg.Connection,
+        partition: str,
+        workspace_id: str,
+        *,
+        for_update: bool = False,
+        for_key_share: bool = False,
+    ) -> int | None:
+        """Translate ``(partition, workspace_id)`` to the ``workspaces.id`` the join table uses.
+
+        ``for_update`` is what deletion takes; ``for_key_share`` is the lock a
+        ``workspace_files`` insert acquires through its FK, taken up front so
+        every path locks the workspace row before any file row.
+        """
+        query = "SELECT id FROM workspaces WHERE partition_name = $1 AND workspace_id = $2"
+        if for_update:
+            query += " FOR UPDATE"
+        elif for_key_share:
+            query += " FOR KEY SHARE"
+        return await conn.fetchval(query, partition, workspace_id)
 
     @staticmethod
     def _row_to_workspace(row: asyncpg.Record) -> Workspace:

@@ -22,7 +22,7 @@ repository call should never touch it.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from core.ports.catalog_store import CatalogStore
 from services.persistence.audit_log_repo import PgAuditLogRepository
@@ -64,6 +64,15 @@ if TYPE_CHECKING:
     from core.ports.workspace_repo import WorkspaceRepository
 
 
+def catalog_rdb_config(settings: Any) -> Any:
+    """Resolve the catalog database for a process that has only the settings."""
+    if settings.rdb.database is not None:
+        return settings.rdb
+    return settings.rdb.model_copy(
+        update={"database": f"partitions_for_collection_{settings.vectordb.collection_name}"}
+    )
+
+
 class PostgresStore(CatalogStore):
     """asyncpg-backed :class:`CatalogStore` composing all repository ports."""
 
@@ -79,14 +88,15 @@ class PostgresStore(CatalogStore):
 
         self._document_repo = PgDocumentRepository(pool_getter)
         self._user_repo = PgUserRepository(pool_getter)
-        self._partition_repo = PgPartitionRepository(pool_getter)
+        self._partition_repo = PgPartitionRepository(pool_getter, connect=self._conn.connect)
         self._membership_repo = PgPartitionMembershipRepository(pool_getter)
         self._oidc_session_repo = PgOIDCSessionRepository(pool_getter)
         self._workspace_repo = PgWorkspaceRepository(pool_getter)
 
+        self._job_repo = PgJobRepository(pool_getter)
+
         # Stubs — every method raises StubRepositoryError until the matching
         # table exists. Listed in the post-refactoring roadmap.
-        self._job_repo = PgJobRepository(pool_getter)
         self._chunk_repo = PgChunkRepository(pool_getter)
         self._prompt_repo = PgPromptRepository(pool_getter)
         self._conversation_repo = PgConversationRepository(pool_getter)
@@ -123,8 +133,13 @@ class PostgresStore(CatalogStore):
         self._initialized = True
 
     async def shutdown(self) -> None:
+        await self._partition_repo.aclose()
         await self._conn.shutdown()
         self._initialized = False
+
+    async def check_health(self) -> None:
+        async with self.pool.acquire(timeout=2.0) as conn:
+            await conn.fetchval("SELECT 1", timeout=2.0)
 
     # ------------------------------------------------------------------
     # Connection access (escape hatch for Phase 8 orchestrators)
@@ -169,14 +184,14 @@ class PostgresStore(CatalogStore):
     def workspace_repo(self) -> WorkspaceRepository:
         return self._workspace_repo
 
+    @property
+    def job_repo(self) -> JobRepository:
+        return self._job_repo
+
     # ------------------------------------------------------------------
     # Stub repos — methods raise StubRepositoryError until the matching
     # tables and orchestrators are added in the post-refactoring roadmap.
     # ------------------------------------------------------------------
-
-    @property
-    def job_repo(self) -> JobRepository:
-        return self._job_repo
 
     @property
     def chunk_repo(self) -> ChunkRepository:

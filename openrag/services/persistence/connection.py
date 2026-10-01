@@ -97,6 +97,10 @@ class ConnectionManager:
             )
         return self._pool
 
+    async def connect(self) -> asyncpg.Connection:
+        """A connection outside the pool, for a session that outlives any request."""
+        return await asyncpg.connect(**self._conn_kwargs, command_timeout=self._command_timeout)
+
     async def initialize(self) -> None:
         """Open the pool with bounded exponential-backoff retry.
 

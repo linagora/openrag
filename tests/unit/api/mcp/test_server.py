@@ -268,7 +268,11 @@ async def test_startup_shuts_down_container_when_initialize_fails(monkeypatch):
             calls.append("shutdown")
 
     monkeypatch.setattr(server.ray, "is_initialized", lambda: True)
-    monkeypatch.setattr(server, "ensure_worker_bootstrap", lambda: calls.append("bootstrap"))
+    monkeypatch.setattr(
+        server,
+        "ensure_worker_bootstrap",
+        lambda settings: calls.append("bootstrap") if settings is server.config else None,
+    )
     monkeypatch.setattr(server, "ServiceContainer", lambda _config: FailingContainer())
     monkeypatch.setattr(server, "_container", None)
 

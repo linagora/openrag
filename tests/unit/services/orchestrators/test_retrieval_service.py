@@ -32,13 +32,22 @@ class FakeSearcher:
         self.search_result: list[Chunk] = []
         self.related_result: list[Chunk] = []
         self.ancestor_result: list[Chunk] = []
+        self.surrounding_calls: list[dict] = []
+        self.surrounding_result: list[Chunk] = []
+        self.search_error: Exception | None = None
 
     async def search(self, **kwargs):
         self.search_calls.append(kwargs)
+        if self.search_error is not None:
+            raise self.search_error
         return list(self.search_result)
 
     async def multi_query_search(self, **kwargs):
         return list(self.search_result)
+
+    async def get_surrounding_chunks(self, **kwargs):
+        self.surrounding_calls.append(kwargs)
+        return list(self.surrounding_result)
 
     async def get_related_chunks(self, **kwargs):
         return list(self.related_result)
@@ -156,6 +165,150 @@ async def test_search_expands_related_when_requested():
     )
     ids = {c.id for c in out}
     assert "1" in ids and "rel" in ids
+
+
+def _embedder_svc(partitions: dict[str, str], fields: dict[str, str]):
+    """A service whose partitions map to embedders, and embedders to vector fields.
+
+    Returns the service, the default searcher and one searcher per embedder name.
+    """
+    cfg = _config()
+    cfg.partitions = {name: _partition(name=name, embedder=embedder) for name, embedder in partitions.items()}
+    cfg.models = SimpleNamespace(
+        reranker={}, embedder={name: SimpleNamespace(vector_field=field) for name, field in fields.items()}
+    )
+    searchers: dict[str, FakeSearcher] = {}
+    default_searcher = FakeSearcher()
+    svc = RetrievalService(
+        searcher=default_searcher,
+        reranker=None,
+        llm=None,
+        config=cfg,
+        searcher_factory=lambda name: searchers.setdefault(name, FakeSearcher()),
+    )
+    return svc, default_searcher, searchers
+
+
+@pytest.mark.asyncio
+async def test_search_uses_the_partition_embedder():
+    # The default embedder's field holds no vectors of this partition.
+    svc, default_searcher, searchers = _embedder_svc({"p1": "embed-a"}, {"embed-a": "vector_embed_a"})
+    searchers["embed-a"] = FakeSearcher()
+    searchers["embed-a"].search_result = [_chunk("a")]
+
+    out = await svc.search(text="q", partitions="p1", top_k=5, similarity_threshold=0.5)
+
+    assert [c.id for c in out] == ["a"]
+    assert default_searcher.search_calls == []
+    call = searchers["embed-a"].search_calls[0]
+    assert call["partition"] == ["p1"]
+    assert call["with_surrounding_chunks"] is True
+
+
+@pytest.mark.asyncio
+async def test_search_across_embedders_fuses_hits_then_adds_surrounding():
+    svc, _, searchers = _embedder_svc(
+        {"p1": "embed-a", "p2": "embed-b"}, {"embed-a": "vector_embed_a", "embed-b": "vector_embed_b"}
+    )
+    searchers["embed-a"] = FakeSearcher()
+    searchers["embed-a"].search_result = [_chunk("a1"), _chunk("a2")]
+    searchers["embed-a"].surrounding_result = [_chunk("a1-next"), _chunk("b1")]
+    searchers["embed-b"] = FakeSearcher()
+    searchers["embed-b"].search_result = [_chunk("b1"), _chunk("b2")]
+
+    out = await svc.search(
+        text="q",
+        partitions=["p1", "p2"],
+        top_k=3,
+        similarity_threshold=0.5,
+        filter_params={"file_id": ["f"]},
+    )
+
+    # Each field is searched once with its own partitions and no surrounding
+    # chunks, so neighbours cannot take a hit's place in the top_k.
+    for name, partitions in (("embed-a", ["p1"]), ("embed-b", ["p2"])):
+        (call,) = searchers[name].search_calls
+        assert call["partition"] == partitions
+        assert call["top_k"] == 3
+        assert call["with_surrounding_chunks"] is False
+    # Hits interleave by rank and are cut to top_k; neighbours follow, once.
+    assert [c.id for c in out] == ["a1", "b1", "a2", "a1-next"]
+    (surrounding_call,) = searchers["embed-a"].surrounding_calls
+    assert [c.id for c in surrounding_call["chunks"]] == ["a1", "b1", "a2"]
+    assert surrounding_call["allowed_file_ids"] == ["f"]
+
+
+@pytest.mark.asyncio
+async def test_search_keeps_the_default_alias_and_its_embedder_in_one_search():
+    # "default" points at embed-a: both write the same field.
+    svc, _, searchers = _embedder_svc(
+        {"p1": "default", "p2": "embed-a"}, {"default": "vector_embed_a", "embed-a": "vector_embed_a"}
+    )
+
+    await svc.search(text="q", partitions=["p1", "p2"], top_k=5, similarity_threshold=0.5)
+
+    assert list(searchers) == ["default"]
+    (call,) = searchers["default"].search_calls
+    assert call["partition"] == ["p1", "p2"]
+    assert call["with_surrounding_chunks"] is True
+
+
+@pytest.mark.asyncio
+async def test_search_all_on_one_embedder_stays_unscoped():
+    svc, _, searchers = _embedder_svc({"p1": "embed-a", "p2": "embed-a"}, {"embed-a": "vector_embed_a"})
+
+    await svc.search(text="q", partitions=["all"], top_k=5, similarity_threshold=0.5)
+
+    assert searchers["embed-a"].search_calls[0]["partition"] == ["all"]
+
+
+@pytest.mark.asyncio
+async def test_search_all_expands_per_embedder():
+    svc, _, searchers = _embedder_svc(
+        {"p1": "embed-a", "p2": "embed-b", "p3": "embed-a"},
+        {"embed-a": "vector_embed_a", "embed-b": "vector_embed_b"},
+    )
+
+    await svc.search(text="q", partitions=["all"], top_k=5, similarity_threshold=0.5)
+
+    assert searchers["embed-a"].search_calls[0]["partition"] == ["p1", "p3"]
+    assert searchers["embed-b"].search_calls[0]["partition"] == ["p2"]
+
+
+@pytest.mark.asyncio
+async def test_search_across_embedders_drops_a_failing_one():
+    svc, _, searchers = _embedder_svc(
+        {"p1": "embed-a", "p2": "embed-b"}, {"embed-a": "vector_embed_a", "embed-b": "vector_embed_b"}
+    )
+    searchers["embed-a"] = FakeSearcher()
+    searchers["embed-a"].search_result = [_chunk("a1")]
+    searchers["embed-b"] = FakeSearcher()
+    searchers["embed-b"].search_error = RuntimeError("embedder down")
+
+    out = await svc.search(text="q", partitions=["p1", "p2"], top_k=5, similarity_threshold=0.5)
+
+    assert [c.id for c in out] == ["a1"]
+
+
+@pytest.mark.asyncio
+async def test_search_across_embedders_keeps_hits_when_surrounding_lookup_fails():
+    svc, _, searchers = _embedder_svc(
+        {"p1": "embed-a", "p2": "embed-b"}, {"embed-a": "vector_embed_a", "embed-b": "vector_embed_b"}
+    )
+    # The first group's searcher also reads the neighbours; its backend is down.
+    searchers["embed-a"] = FakeSearcher()
+    searchers["embed-a"].search_error = RuntimeError("milvus down")
+
+    async def _fail(**kwargs):
+        raise RuntimeError("milvus down")
+
+    searchers["embed-a"].get_surrounding_chunks = _fail
+    searchers["embed-b"] = FakeSearcher()
+    searchers["embed-b"].search_result = [_chunk("b1")]
+
+    out = await svc.search(text="q", partitions=["p1", "p2"], top_k=5, similarity_threshold=0.5)
+
+    assert [c.id for c in out] == ["b1"]
 
 
 # --------------------------------------------------------------------------- #
@@ -565,3 +718,192 @@ async def test_single_strategy_resolves_no_prompt():
     svc = RetrievalService(searcher=FakeSearcher(), reranker=None, llm=None, config=cfg, prompt_service=rec)
     await svc._pipeline_for_partition("tenant-a")
     assert rec.calls == []
+
+
+# --------------------------------------------------------------------------- #
+# Partition fan-out resilience (#736)
+# --------------------------------------------------------------------------- #
+
+
+class ExplodingSearcher(FakeSearcher):
+    """A searcher whose partition is unreachable — e.g. its embedder endpoint is
+    down, which is the realistic per-leg failure now that every partition shares
+    one Milvus collection."""
+
+    async def search(self, **kwargs):
+        raise RuntimeError("embedder endpoint unreachable")
+
+
+def _mixed_factory(failing: set[str]):
+    """Searcher factory where the named embedders raise and the rest answer."""
+    made: dict[str, FakeSearcher] = {}
+
+    def factory(name: str) -> FakeSearcher:
+        if name not in made:
+            s = ExplodingSearcher() if name in failing else FakeSearcher()
+            s.search_result = [_chunk(f"{name}-hit")]
+            made[name] = s
+        return made[name]
+
+    return factory
+
+
+@pytest.mark.asyncio
+async def test_retrieve_survives_one_failing_partition():
+    """One unhealthy partition must not wipe out the healthy ones (#736).
+
+    The fan-out gathers one leg per partition group. Without
+    ``return_exceptions`` a single raising leg aborts the whole gather, so a
+    user with several memberships — or a super-admin on ``all`` — gets nothing
+    back instead of the partitions that answered fine.
+    """
+    cfg = _config()
+    cfg.partitions = {
+        "good": _partition(name="good", embedder="embed-good"),
+        "bad": _partition(name="bad", embedder="embed-bad"),
+    }
+    svc = RetrievalService(
+        searcher=FakeSearcher(),
+        reranker=None,
+        llm=None,
+        config=cfg,
+        searcher_factory=_mixed_factory({"embed-bad"}),
+    )
+
+    out = await svc.retrieve(partitions=["all"], query=Query(query="hello"))
+
+    assert [c.id for c in out] == ["embed-good-hit"]
+
+
+@pytest.mark.asyncio
+async def test_retrieve_multi_survives_one_failing_partition():
+    """The multi-query fan-out shares the same choke point, so it degrades too."""
+    cfg = _config()
+    cfg.partitions = {
+        "good": _partition(name="good", embedder="embed-good"),
+        "bad": _partition(name="bad", embedder="embed-bad"),
+    }
+    svc = RetrievalService(
+        searcher=FakeSearcher(),
+        reranker=None,
+        llm=None,
+        config=cfg,
+        searcher_factory=_mixed_factory({"embed-bad"}),
+    )
+
+    out = await svc.retrieve_multi(partitions=["all"], search_queries=SearchQueries(query_list=[Query(query="hello")]))
+
+    assert [c.id for c in out] == ["embed-good-hit"]
+
+
+@pytest.mark.asyncio
+async def test_retrieve_raises_when_every_partition_fails():
+    """Fail-open stops at total failure.
+
+    With no leg left there is nothing to degrade to, and an empty list reads as
+    "the corpus has no match" — the caller would answer from no context instead
+    of surfacing the outage. The original error type is preserved so the API
+    keeps mapping it as before.
+    """
+    cfg = _config()
+    cfg.partitions = {
+        "a": _partition(name="a", embedder="embed-a"),
+        "b": _partition(name="b", embedder="embed-b"),
+    }
+    svc = RetrievalService(
+        searcher=FakeSearcher(),
+        reranker=None,
+        llm=None,
+        config=cfg,
+        searcher_factory=_mixed_factory({"embed-a", "embed-b"}),
+    )
+
+    with pytest.raises(RuntimeError, match="embedder endpoint unreachable"):
+        await svc.retrieve(partitions=["all"], query=Query(query="hello"))
+
+
+@pytest.mark.asyncio
+async def test_retrieve_propagates_cancellation_rather_than_degrading():
+    """A cancelled request is not a degraded partition.
+
+    ``return_exceptions=True`` captures ``CancelledError`` like any other
+    exception, which would silently turn a client disconnect or a timeout into
+    a partial result. It must unwind instead.
+    """
+
+    class CancellingSearcher(FakeSearcher):
+        async def search(self, **kwargs):
+            raise asyncio.CancelledError()
+
+    def factory(name: str) -> FakeSearcher:
+        if name == "embed-cancel":
+            return CancellingSearcher()
+        s = FakeSearcher()
+        s.search_result = [_chunk(f"{name}-hit")]
+        return s
+
+    cfg = _config()
+    cfg.partitions = {
+        "good": _partition(name="good", embedder="embed-good"),
+        "gone": _partition(name="gone", embedder="embed-cancel"),
+    }
+    svc = RetrievalService(searcher=FakeSearcher(), reranker=None, llm=None, config=cfg, searcher_factory=factory)
+
+    with pytest.raises(asyncio.CancelledError):
+        await svc.retrieve(partitions=["all"], query=Query(query="hello"))
+
+
+@pytest.mark.asyncio
+async def test_bounded_fanout_also_degrades_per_partition():
+    """Resilience must hold on the throttled path too, not just the fast one.
+
+    Above ``max_partition_concurrency`` the legs run through a semaphore
+    wrapper, which is a separate gather call — the earlier fix would have been
+    easy to apply to only one of them.
+    """
+    cfg = _config()
+    cfg.retriever.max_partition_concurrency = 2
+    cfg.partitions = {f"p{i}": _partition(name=f"p{i}", embedder=f"e{i}") for i in range(5)}
+    svc = RetrievalService(
+        searcher=FakeSearcher(),
+        reranker=None,
+        llm=None,
+        config=cfg,
+        searcher_factory=_mixed_factory({"e1", "e3"}),
+    )
+
+    out = await svc.retrieve(partitions=["all"], query=Query(query="hi"))
+
+    assert sorted(c.id for c in out) == ["e0-hit", "e2-hit", "e4-hit"]
+
+
+@pytest.mark.asyncio
+async def test_dropped_partition_is_named_in_the_log():
+    """Degrading silently would hide a broken partition indefinitely: results
+    still come back, so nobody notices until someone asks why a tenant's
+    documents stopped being cited. The warning names the partitions (#736)."""
+    from loguru import logger as _logger
+
+    messages: list[str] = []
+    sink_id = _logger.add(lambda m: messages.append(str(m)), level="WARNING")
+    try:
+        cfg = _config()
+        cfg.partitions = {
+            "healthy": _partition(name="healthy", embedder="embed-good"),
+            "broken": _partition(name="broken", embedder="embed-bad"),
+        }
+        svc = RetrievalService(
+            searcher=FakeSearcher(),
+            reranker=None,
+            llm=None,
+            config=cfg,
+            searcher_factory=_mixed_factory({"embed-bad"}),
+        )
+        await svc.retrieve(partitions=["all"], query=Query(query="hello"))
+    finally:
+        _logger.remove(sink_id)
+
+    dropped = [m for m in messages if "broken" in m]
+    assert dropped, f"the dropped partition was not logged: {messages}"
+    assert "RuntimeError" in dropped[0]
+    assert "healthy" not in dropped[0], "only the failed partition should be named"

@@ -54,7 +54,7 @@ _PROMPT_FORMAT_FIELDS: dict[str, frozenset[str]] = {
     # when a request sets metadata.spoken_style_answer), so it takes the same
     # placeholders and must be validated identically.
     PromptType.SPOKEN_STYLE_ANSWER.value: frozenset({"context", "current_date", "custom_prompt"}),
-    PromptType.QUERY_CONTEXTUALIZER.value: frozenset({"query_language", "current_date"}),
+    PromptType.QUERY_CONTEXTUALIZER.value: frozenset({"query_language", "current_date", "calendar_anchors"}),
     PromptType.HYDE.value: frozenset({"question"}),
     PromptType.MULTI_QUERY.value: frozenset({"query", "k_queries"}),
 }

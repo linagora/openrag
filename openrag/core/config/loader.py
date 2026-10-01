@@ -47,6 +47,7 @@ _ENV_OVERRIDES: list[tuple[str, str, type]] = [
     ("EMBEDDER_CONCURRENCY", "embedder.embed_concurrency", int),
     # Model endpoint registry
     ("MODEL_ENDPOINT_SYNC_ON_BOOT", "models.sync_on_boot", bool),
+    ("READINESS_REQUIRE_EMBEDDER", "models.readiness_requires_embedder", bool),
     # VectorDB
     ("VDB_HOST", "vectordb.host", str),
     ("VDB_iPORT", "vectordb.port", int),
@@ -84,8 +85,11 @@ _ENV_OVERRIDES: list[tuple[str, str, type]] = [
     ("MAP_REDUCE_DEBUG", "map_reduce.debug", bool),
     # Verbose
     ("LOG_LEVEL", "verbose.level", str),
+    ("LOG_FORMAT", "verbose.format", str),
     # Server
     ("PREFERRED_URL_SCHEME", "server.preferred_url_scheme", str),
+    ("METRICS_TOKEN", "server.metrics_token", str),
+    ("METRICS_ALLOW_UNAUTHENTICATED", "server.metrics_allow_unauthenticated", bool),
     ("ASSISTANT_NAME", "server.assistant_name", str),
     # LLM Context
     ("MAX_LLM_CONTEXT_SIZE", "llm_context.max_llm_context_size", int),
@@ -94,7 +98,6 @@ _ENV_OVERRIDES: list[tuple[str, str, type]] = [
     ("PROMPTS_DIR", "paths.prompts_dir", str),
     ("DATA_DIR", "paths.data_dir", str),
     ("DB_DIR", "paths.db_dir", str),
-    ("LOG_DIR", "paths.log_dir", str),
     # Loader
     ("IMAGE_CAPTIONING", "loader.image_captioning", bool),
     ("IMAGE_CAPTIONING_URL", "loader.image_captioning_url", bool),
@@ -110,6 +113,7 @@ _ENV_OVERRIDES: list[tuple[str, str, type]] = [
     ("MARKER_MAX_PROCESSES", "loader.marker_max_processes", int),
     ("MARKER_NUM_GPUS", "loader.marker_num_gpus", float),
     ("MARKER_TIMEOUT", "loader.marker_timeout", int),
+    ("MARKER_CHILD_TIMEOUT_RATIO", "loader.marker_child_timeout_ratio", float),
     ("MARKER_PDFTEXT_WORKERS", "loader.marker_pdftext_workers", int),
     ("MARKER_CHUNK_SIZE", "loader.marker_chunk_size", int),
     ("DOCLING_NUM_GPUS", "loader.docling_num_gpus", float),
@@ -298,7 +302,7 @@ def load_config(
         data = _deep_merge(data, overrides)
 
     paths = data.get("paths", {})
-    for key in ("prompts_dir", "data_dir", "db_dir", "log_dir"):
+    for key in ("prompts_dir", "data_dir", "db_dir"):
         if key in paths and paths[key]:
             paths[key] = str(Path(paths[key]).resolve())
 

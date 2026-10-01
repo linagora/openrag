@@ -14,12 +14,14 @@ decremented in application code (no SQL trigger) so the books stay balanced.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Callable
+import asyncio
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from core.ports.partition_repo import PartitionRepository
-from core.utils.exceptions import ValidationError
+from core.utils.exceptions import ServiceUnavailableError, ValidationError
 from core.utils.logging import get_logger
 from services.persistence.file_count import decrement_file_counts
 
@@ -36,15 +38,40 @@ _PRESET_COLUMN_TYPES = {
     "retrieval_preset": "retrieval",
 }
 # Partition columns that reference a model_endpoints row, mapped to the
-# model_type they point at. Only `chat_llm` is assignment-validated today
-# (PartitionService._validate_chat_llm_ref checks the in-memory catalog);
-# `embedder` carries no such check, so it is deliberately not listed here.
-# Assigning chat_llm must be guarded against a concurrent rename the same way
-# a preset assignment is guarded against a concurrent preset delete — see
-# update_partition and PgModelEndpointRepository.rename.
+# model_type they point at. Both are assignment-validated in
+# PartitionService (_validate_chat_llm_ref / _validate_embedder_ref check the
+# in-memory catalog) and re-checked here against the DB inside the write's
+# transaction. Assigning either must be guarded against a concurrent rename the
+# same way a preset assignment is guarded against a concurrent preset delete —
+# see update_partition and PgModelEndpointRepository.rename.
 _MODEL_ENDPOINT_COLUMN_TYPES = {
     "chat_llm": "llm",
+    "embedder": "embedder",
 }
+# `default` is a virtual name: ModelEndpointService.load_all files the
+# is_default=True row under it so a partition can reference "the default
+# embedder" without naming it. No model_endpoints row is called that, so the
+# existence check has to resolve the alias rather than match on name alone.
+_DEFAULT_ENDPOINT_ALIAS = "default"
+_ENDPOINT_EXISTS_SQL = (
+    "SELECT 1 FROM model_endpoints "
+    "WHERE model_type = $2 AND (name = $1 OR ($1 = '" + _DEFAULT_ENDPOINT_ALIAS + "' AND is_default))"
+)
+# Replaces the `default` alias with the embedder it resolves to, on a partition
+# about to receive data (#762). Conditional on the alias, so an explicit
+# embedder — or a PATCH that got there first — is left alone and a second
+# upload changes nothing. The name is read from the database, not from a
+# replica's in-memory catalog: whichever default this sees, the upload is
+# dispatched with the same name, so the partition and its vectors agree.
+_PIN_DEFAULT_EMBEDDER_SQL = """
+    UPDATE partitions
+    SET embedder = e.name, updated_at = now()
+    FROM model_endpoints e
+    WHERE partitions.partition = $1
+      AND partitions.embedder = $2
+      AND e.model_type = 'embedder' AND e.is_default
+    RETURNING partitions.embedder
+    """
 _PARTITION_UPDATE_COLUMNS = frozenset(
     {
         "description",
@@ -59,6 +86,9 @@ _PARTITION_UPDATE_COLUMNS = frozenset(
     }
 )
 _PARTITION_OPERATION_LOCK_NAMESPACE = 20260720
+_PARTITION_COPY_LOCK_NAMESPACE = 20260921
+_HOLD_COPY_LOCK_SQL = "SELECT pg_advisory_lock_shared($1::integer, hashtext($2)::integer)"
+_RELEASE_COPY_LOCK_SQL = "SELECT pg_advisory_unlock_shared($1::integer, hashtext($2)::integer)"
 
 logger = get_logger()
 
@@ -105,12 +135,130 @@ class _PartitionOperationGuard:
     async def list_partition_rows(self) -> list[dict]:
         return await self._repo._list_partition_rows_on_conn(self._conn)
 
+    async def pin_default_embedder(self, name: str) -> str | None:
+        return await self._repo._pin_default_embedder_on_conn(self._conn, name)
+
+
+@dataclass(eq=False)
+class _CopyHold:
+    name: str
+    conn: asyncpg.Connection
+    task: asyncio.Task
+    # The task's pending cancellations when the hold was taken, to tell ours apart.
+    cancelling: int
+    lost: bool = False
+
+
+class _CopyLocks:
+    """The shared locks of this process's copies in flight, on a connection of their own.
+
+    A copy can re-embed for minutes, so a pool connection per copy would let a
+    few large ones starve every request. A session can hold a shared lock
+    several times over: each copy takes and releases one hold.
+
+    Losing the session releases its holds at once. Taking them back later would
+    leave a gap an embedder change could slip through, so the copies they
+    protected are cancelled instead.
+    """
+
+    def __init__(self, connect: Callable[[], Awaitable[asyncpg.Connection]]) -> None:
+        self._connect = connect
+        self._conn: asyncpg.Connection | None = None
+        self._holds: set[_CopyHold] = set()
+        self._mutex = asyncio.Lock()
+
+    async def hold(self, name: str) -> _CopyHold:
+        task = asyncio.current_task()
+        assert task is not None
+        # Shielded: a lock granted to a caller cancelled meanwhile would stay
+        # on the session with no hold to release it.
+        taking = asyncio.ensure_future(self._take(name, task))
+        try:
+            return await asyncio.shield(taking)
+        except asyncio.CancelledError:
+            await asyncio.shield(self._give_back(taking))
+            raise
+
+    async def _take(self, name: str, task: asyncio.Task) -> _CopyHold:
+        async with self._mutex:
+            try:
+                conn = await self._connection()
+                await conn.execute(_HOLD_COPY_LOCK_SQL, _PARTITION_COPY_LOCK_NAMESPACE, name)
+            except Exception:  # noqa: BLE001 - most likely a lost session: retry once on a new one
+                self._discard()
+                conn = await self._connection()
+                await conn.execute(_HOLD_COPY_LOCK_SQL, _PARTITION_COPY_LOCK_NAMESPACE, name)
+            hold = _CopyHold(name, conn, task, task.cancelling())
+            self._holds.add(hold)
+            return hold
+
+    async def _give_back(self, taking: asyncio.Future[_CopyHold]) -> None:
+        """Release the lock a cancelled caller was granted all the same."""
+        try:
+            hold = await taking
+        except Exception:  # noqa: BLE001 - never granted: nothing to release
+            return
+        self.forget(hold)
+        await self.release(hold)
+
+    def forget(self, hold: _CopyHold) -> None:
+        """Stop guarding *hold*: its copy is over, and must no longer be cancelled."""
+        self._holds.discard(hold)
+
+    async def release(self, hold: _CopyHold) -> None:
+        async with self._mutex:
+            if hold.conn is not self._conn:
+                return  # its session is gone, and the hold with it
+            try:
+                await hold.conn.execute(_RELEASE_COPY_LOCK_SQL, _PARTITION_COPY_LOCK_NAMESPACE, hold.name)
+            except Exception as exc:  # noqa: BLE001 - dropping the session releases the hold anyway
+                logger.bind(partition=hold.name, error=str(exc)).warning("Dropped the copy-lock connection")
+                self._discard()
+
+    async def close(self) -> None:
+        async with self._mutex:
+            if self._conn is not None:
+                await self._conn.close()
+            self._conn = None
+
+    def _discard(self) -> None:
+        """Drop the session, and every copy holding a lock on it."""
+        conn = self._conn
+        if conn is not None:
+            self._lose(conn)
+            conn.terminate()
+
+    def _lose(self, conn: asyncpg.Connection) -> None:
+        """Cancel the copies whose holds went with *conn*'s session."""
+        if self._conn is conn:
+            self._conn = None
+        for hold in [hold for hold in self._holds if hold.conn is conn]:
+            self._holds.discard(hold)
+            hold.lost = True
+            hold.task.cancel()
+            logger.bind(partition=hold.name).warning("Lost a copy lock: stopping the copy")
+
+    async def _connection(self) -> asyncpg.Connection:
+        if self._conn is not None and self._conn.is_closed():
+            self._discard()
+        if self._conn is None:
+            conn = await self._connect()
+            conn.add_termination_listener(self._lose)
+            self._conn = conn
+        return self._conn
+
 
 class PgPartitionRepository(PartitionRepository):
     """asyncpg-backed implementation of :class:`PartitionRepository`."""
 
-    def __init__(self, pool_getter: Callable[[], asyncpg.Pool]) -> None:
+    def __init__(
+        self,
+        pool_getter: Callable[[], asyncpg.Pool],
+        connect: Callable[[], Awaitable[asyncpg.Connection]] | None = None,
+    ) -> None:
         self._pool_getter = pool_getter
+        # Opens the connection copy locks live on, outside the pool.
+        self._copy_locks = _CopyLocks(connect) if connect is not None else None
 
     @property
     def pool(self) -> asyncpg.Pool:
@@ -133,6 +281,48 @@ class PgPartitionRepository(PartitionRepository):
                     _PARTITION_OPERATION_LOCK_NAMESPACE,
                     name,
                 )
+
+    @asynccontextmanager
+    async def copy_lock(self, name: str) -> AsyncIterator[None]:
+        """Mark a copy into partition *name* as in flight, for :meth:`copy_in_progress`.
+
+        Shared: copies never wait on each other, and uploads never take it.
+        Held outside the request pool, see :class:`_CopyLocks`. Raises
+        :class:`ServiceUnavailableError` from the copy if the lock is lost.
+        """
+        if self._copy_locks is None:
+            raise RuntimeError("PgPartitionRepository was built without a connect callable for copy locks.")
+        hold = await self._copy_locks.hold(name)
+        try:
+            yield
+        except asyncio.CancelledError:
+            if hold.lost and hold.task.uncancel() <= hold.cancelling:
+                raise ServiceUnavailableError(
+                    f"The copy into partition '{name}' was stopped: it lost the lock that keeps "
+                    "the partition's embedder from changing meanwhile. Retry the copy.",
+                    code="COPY_INTERRUPTED",
+                ) from None
+            raise
+        finally:
+            # Before any await, so a copy that finished is never cancelled.
+            self._copy_locks.forget(hold)
+            # Shielded: a hold left behind would block the partition's
+            # embedder changes until the process exits.
+            await asyncio.shield(self._copy_locks.release(hold))
+
+    async def aclose(self) -> None:
+        if self._copy_locks is not None:
+            await self._copy_locks.close()
+
+    async def copy_in_progress(self, name: str) -> bool:
+        """Whether a copy into partition *name* holds :meth:`copy_lock`. Never waits."""
+        # Released as soon as the statement's own transaction ends.
+        acquired = await self.pool.fetchval(
+            "SELECT pg_try_advisory_xact_lock($1::integer, hashtext($2)::integer)",
+            _PARTITION_COPY_LOCK_NAMESPACE,
+            name,
+        )
+        return not acquired
 
     # ── PartitionRepository port methods ─────────────────────────────
 
@@ -326,9 +516,10 @@ class PgPartitionRepository(PartitionRepository):
           from, which is what a validate-in-memory-then-blind-UPDATE sequence
           could otherwise do.
 
-        ``embedder`` carries no such check — it has no assignment-time
-        validation at all today (see ``_MODEL_ENDPOINT_COLUMN_TYPES``), so
-        there is nothing here for a concurrent rename to race against.
+        ``embedder`` takes the same guard as ``chat_llm``, and needs it more:
+        a ``chat_llm`` that goes stale falls back to the default LLM at request
+        time, whereas an ``embedder`` that names nothing is a hard failure on
+        every upload and every query in that partition.
         """
         updates = _partition_updates(fields)
         if updates:
@@ -383,7 +574,7 @@ class PgPartitionRepository(PartitionRepository):
                     )
             for col, model_type in endpoint_refs.items():
                 exists = await conn.fetchval(
-                    "SELECT 1 FROM model_endpoints WHERE name = $1 AND model_type = $2",
+                    _ENDPOINT_EXISTS_SQL,
                     updates[col],
                     model_type,
                 )
@@ -393,6 +584,22 @@ class PgPartitionRepository(PartitionRepository):
                         code="MODEL_ENDPOINT_NOT_FOUND",
                     )
             return self._row_to_full_dict(row)
+
+    async def pin_default_embedder(self, name: str) -> str | None:
+        """Resolve a partition's ``default`` embedder alias to the endpoint it names.
+
+        Returns the partition's embedder afterwards: the endpoint it is now
+        pinned to, the explicit name it already had, ``"default"`` when no
+        default embedder exists to resolve to, or ``None`` when the partition
+        does not exist.
+        """
+        return await self._pin_default_embedder_on_conn(self.pool, name)
+
+    async def _pin_default_embedder_on_conn(self, conn: asyncpg.Connection | asyncpg.Pool, name: str) -> str | None:
+        pinned = await conn.fetchval(_PIN_DEFAULT_EMBEDDER_SQL, name, _DEFAULT_ENDPOINT_ALIAS)
+        if pinned is not None:
+            return pinned
+        return await conn.fetchval("SELECT embedder FROM partitions WHERE partition = $1", name)
 
     # ── Legacy method names used by the Phase 7C shim ────────────────
 
@@ -434,6 +641,11 @@ class PgPartitionRepository(PartitionRepository):
             "embedder": row["embedder"],
             "indexation_preset": row["indexation_preset"],
             "retrieval_preset": row["retrieval_preset"],
+            # Never written by any code path — it sits at its server_default of
+            # 1024 for the life of the row. Kept as the hook a per-partition
+            # collection topology would need, but the API reports the live
+            # collection's dimension instead (see
+            # PartitionService._live_vector_dimension, #762 G).
             "dimension": row["dimension"],
             "collection_name": row["collection_name"],
             "chat_history_depth": row["chat_history_depth"],

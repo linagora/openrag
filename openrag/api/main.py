@@ -43,6 +43,8 @@ from api.routers.admin.cluster import router as actors_router
 from api.routers.admin.indexing import router as indexer_router
 from api.routers.admin.jobs import router as queue_router
 from api.routers.admin.model_endpoints import router as model_endpoints_router
+from api.routers.admin.monitoring import admin_router as monitoring_admin_router
+from api.routers.admin.monitoring import describe_metrics_access
 from api.routers.admin.monitoring import router as monitoring_router
 from api.routers.admin.partitions import router as partition_router
 from api.routers.admin.presets import router as presets_router
@@ -58,11 +60,12 @@ from api.routers.user.extract import router as extract_router
 from api.routers.user.health import router as health_router
 from api.routers.user.search import router as search_router
 from api.runtime_flags import WITH_CHAINLIT_UI, WITH_OPENAI_API
+from api.runtime_ui import get_grafana_url
 from core.config import load_config
 from core.utils.banner import print_startup_banner
 from core.utils.logging import get_logger
 from di.container import ServiceContainer
-from di.providers import set_container
+from di.providers import get_container, set_container
 from di.workers import ensure_worker_bootstrap
 from dotenv import dotenv_values
 from fastapi import Depends, FastAPI
@@ -128,6 +131,46 @@ class Tags(Enum):
 
 
 # ---------------------------------------------------------------------------
+# Ray runtime
+# ---------------------------------------------------------------------------
+
+
+def _init_ray() -> None:
+    """Start the embedded Ray cluster, or join the one ``RAY_ADDRESS`` names.
+
+    Called by the lifespan, and by the Ray Serve launcher at the bottom of this
+    module before ``serve.start()``. Serve starts Ray itself when it is not
+    running yet, with none of the settings below, and every Serve replica then
+    finds Ray running and skips the lifespan's call: without the launcher's own
+    call, the dashboard host and the metrics port would never apply under Serve.
+    """
+    _ray_address = os.environ.get("RAY_ADDRESS")
+    if _ray_address:
+        # Connect to an external Ray cluster (e.g. a dedicated ray-head
+        # container). No local dashboard is started — the head node owns it.
+        ray.init(address=_ray_address, ignore_reinit_error=True)
+    else:
+        # Embedded mode: start a local Ray cluster inside this process.
+        # Bind the Ray dashboard to localhost by default; the dashboard /
+        # Jobs API is unauthenticated (CVE-2023-48022 "ShadowRay") so it
+        # must never listen on a routable interface. Operators that front it
+        # with an auth proxy can override via RAY_DASHBOARD_HOST.
+        #
+        # Ray also picks a random port for its metrics agent unless given
+        # one, and a scrape config can only name a fixed port: without
+        # RAY_METRICS_EXPORT_PORT the metrics recorded in Ray actors are
+        # exported but never collected. The Compose monitoring overlay
+        # sets it. Like the dashboard it is unauthenticated, so it must
+        # not be published on the host.
+        metrics_port = os.environ.get("RAY_METRICS_EXPORT_PORT", "").strip()
+        ray.init(
+            dashboard_host=os.environ.get("RAY_DASHBOARD_HOST", "127.0.0.1"),
+            ignore_reinit_error=True,
+            _metrics_export_port=int(metrics_port) if metrics_port else None,
+        )
+
+
+# ---------------------------------------------------------------------------
 # Lifespan — owns the ServiceContainer lifecycle
 # ---------------------------------------------------------------------------
 
@@ -139,7 +182,7 @@ async def lifespan(app: FastAPI):
     Replaces the legacy ``@app.on_event("startup"/"shutdown")`` pair
     (deprecated since FastAPI 0.105). Order:
 
-    1. ``ray.init`` (guarded by ``ray.is_initialized``) so test imports
+    1. ``_init_ray`` (guarded by ``ray.is_initialized``) so test imports
        can pre-initialise Ray with a custom ``runtime_env``.
     2. ``services.workers.bootstrap`` — imported here (not at module
        load) so the detached worker actors are created with Ray live.
@@ -155,21 +198,7 @@ async def lifespan(app: FastAPI):
     """
     if not ray.is_initialized():
         logger.info("Startup: initializing Ray")
-        _ray_address = os.environ.get("RAY_ADDRESS")
-        if _ray_address:
-            # Connect to an external Ray cluster (e.g. a dedicated ray-head
-            # container). No local dashboard is started — the head node owns it.
-            ray.init(address=_ray_address, ignore_reinit_error=True)
-        else:
-            # Embedded mode: start a local Ray cluster inside this process.
-            # Bind the Ray dashboard to localhost by default; the dashboard /
-            # Jobs API is unauthenticated (CVE-2023-48022 "ShadowRay") so it
-            # must never listen on a routable interface. Operators that front it
-            # with an auth proxy can override via RAY_DASHBOARD_HOST.
-            ray.init(
-                dashboard_host=os.environ.get("RAY_DASHBOARD_HOST", "127.0.0.1"),
-                ignore_reinit_error=True,
-            )
+        _init_ray()
     logger.info("Startup: Ray is initialized")
 
     # ``ensure_worker_bootstrap`` imports ``services.workers.bootstrap``
@@ -222,6 +251,11 @@ async def lifespan(app: FastAPI):
     # degraded boot keeps di.providers serving the intended 503.
     logger.info("Startup: registering process container", available=getattr(app.state, "container", None) is not None)
     set_container(getattr(app.state, "container", None))
+    # Prometheus only shows "403 Forbidden" on its targets page; name the
+    # fix here so an empty Grafana is diagnosed from the API log.
+    metrics_notice = describe_metrics_access(settings.server)
+    if metrics_notice:
+        logger.warning(metrics_notice)
     logger.info("Startup: complete")
     print_startup_banner(app_version)
 
@@ -279,7 +313,10 @@ app.openapi = custom_openapi
 app.add_middleware(RateLimitMiddleware)
 app.add_middleware(
     AuthMiddleware,
-    get_auth_service=lambda request: request.app.state.container.auth_service,
+    # Resolved through `get_container`, not off `app.state.container` directly:
+    # the boot guard sets that to None on a degraded start, and attribute access
+    # on None raises AttributeError, which no guard below catches (#937).
+    get_auth_service=lambda request: get_container(request).auth_service,
 )
 app.add_middleware(RequestIdMiddleware)
 app.add_middleware(RequestTimeoutMiddleware)
@@ -342,6 +379,7 @@ def get_config():
         **redact_secrets(jsonable_encoder(settings)),
         "super_admin_mode": SUPER_ADMIN_MODE,
         "chainlit_enabled": WITH_CHAINLIT_UI,
+        "grafana_url": get_grafana_url(),
     }
 
 
@@ -365,6 +403,7 @@ app.include_router(actors_router, prefix="/actors", tags=[Tags.ACTORS])
 app.include_router(users_router, prefix="/users", tags=[Tags.USERS])
 app.include_router(workspaces_router, tags=[Tags.WORKSPACES])
 app.include_router(monitoring_router, tags=[Tags.MONITORING])
+app.include_router(monitoring_admin_router, prefix="/monitoring", tags=[Tags.MONITORING])
 app.include_router(tools_router, prefix="/v1", tags=[Tags.TOOLS])
 # Mount the auth router (OIDC flows). Most routes are bypassed by
 # AuthMiddleware; ``/auth/me`` remains protected.
@@ -391,10 +430,8 @@ if __name__ == "__main__":
         from ray import serve
 
         # @serve.ingress cloudpickles `app` to ship it to replica processes.
-        # loguru's file sink isn't picklable (an open file handle, and with
-        # enqueue=True a multiprocessing.SimpleQueue that errors with "SimpleQueue
-        # objects should only be shared between processes through inheritance"),
-        # and the app graph (lifespan, exception handlers) captures the
+        # loguru handlers aren't picklable (they hold an open stream and a
+        # lock), and the app graph (lifespan, exception handlers) captures the
         # module-global logger by value. Strip the sinks before binding so the
         # captured logger is handler-less (picklable), then restore them for this
         # driver process below. Replica processes re-add their own sinks via the
@@ -410,6 +447,9 @@ if __name__ == "__main__":
 
         get_logger()  # restore this driver's logging now that `app` is serialized
 
+        # Before serve.start(), which would otherwise start Ray with its own
+        # defaults: no pinned metrics port, so nothing could scrape it.
+        _init_ray()
         serve.start(http_options={"host": settings.ray.serve.host, "port": settings.ray.serve.port})
         if WITH_CHAINLIT_UI:
             from chainlit_api import app as chainlit_app

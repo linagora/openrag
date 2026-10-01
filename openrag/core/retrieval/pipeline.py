@@ -24,6 +24,7 @@ from typing import Any
 
 from core.models.chunk import Chunk
 from core.models.query import Query, SearchQueries
+from core.models.retrieval_result import ScoredChunk
 from core.rerankers.reranker import Reranker
 from core.retrieval.retriever import Retriever
 from core.retrieval.rrf import rrf_reranking
@@ -40,11 +41,19 @@ async def _rerank_chunks(reranker: Reranker, query: str, chunks: list[Chunk]) ->
     The ABC scores text+query pairs and returns ``[(orig_index, score), ...]``;
     we look up the original chunk for each ranked index. Items the reranker
     drops are excluded.
+
+    Each survivor comes back as a :class:`ScoredChunk` carrying its score.
+    ``ScoredChunk`` is a ``Chunk`` subclass, so this stays a ``list[Chunk]`` for
+    every caller downstream while the score travels as a typed field rather than
+    a magic metadata key. It reaches clients via ``ScoredChunk.to_langchain()``,
+    which folds the scores into the metadata that API source entries are built
+    from. A chunk that never met a reranker stays a plain ``Chunk`` and simply
+    has no score — not a null, and not a 0.0 that reads like a real one.
     """
     if not chunks:
         return chunks
     ranking = await reranker.rerank(query=query, documents=[c.text for c in chunks], top_k=None)
-    return [chunks[idx] for idx, _ in ranking]
+    return [ScoredChunk.from_chunk(chunks[idx], rerank_score=score) for idx, score in ranking]
 
 
 class RetrieverPipeline:
