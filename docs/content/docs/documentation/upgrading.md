@@ -6,22 +6,23 @@ tableOfContents:
 
 Each upgrade has a section for what changes in every deployment, followed by the
 procedure for Kubernetes and for Docker Compose. Read all of it for the version you
-are moving to before you start. The 2.3.0 sections start from 2.2.1 or 2.2.2; from
-an earlier release, upgrade to 2.2.2 first.
+are moving to before you start. The 2.3.0 instructions assume you run 2.2.1 or
+2.2.2; on an earlier release, upgrade to 2.2.2 first.
 
 The commands are written for bash. In zsh, run `setopt interactive_comments sh_word_split`
-first: without it, the comments after the commands are read as arguments and the
-variables below are not set.
+first. Without it, zsh does not treat `#` as the start of a comment and does not
+split `$DC` into `docker compose`, so the commands below fail.
 
 ## Changes in 2.3.0 for every deployment
 
-These apply to an upgrade from OpenRAG 2.2.1 or 2.2.2, whichever way it is
-deployed. The [Kubernetes](#22x-to-230-on-kubernetes) and
-[Docker Compose](#22x-to-230-with-docker-compose) procedures below include them.
+This section applies to every upgrade from OpenRAG 2.2.1 or 2.2.2, on Kubernetes
+or with Docker Compose. The [Kubernetes](#22x-to-230-on-kubernetes) and
+[Docker Compose](#22x-to-230-with-docker-compose) procedures below include its
+steps, except the changes on the client side: API clients and metrics scrapers.
 
 The upgrade needs a **maintenance window**: the Milvus collection must be migrated
-while nothing writes to it, and searches fail until it is. Each procedure has three
-parts:
+while nothing writes to it, and searches and uploads fail until the migration
+finishes. Each procedure has three parts:
 
 1. **Before the maintenance window**, with no downtime: check the new chart or
    `.env`, the secrets and the default embedder.
@@ -35,10 +36,10 @@ parts:
 | Change | Impact on an existing deployment |
 |---|---|
 | Milvus schema version 3: one vector field per embedder | Manual migration, run once. Until it runs, every search answers `503` while OpenRAG reports ready, and uploads fail. The old `vector` field is dropped. |
-| New PostgreSQL migrations | Applied when OpenRAG 2.3.0 starts, or on Kubernetes by the migration Job when you enabled it. |
+| New PostgreSQL migrations | Applied when OpenRAG 2.3.0 starts, or on Kubernetes by the migration Job if you enabled it. |
 | Chat and text completion responses: `extra` and its source entries | `extra` is a JSON object instead of a JSON-encoded string, and each document source puts the chunk's metadata under `chunk`. Clients must be updated. |
 | `GET /metrics` | The admin token is refused (`403`); scrapers need `METRICS_TOKEN`. |
-| Secret checks | Five credentials shorter than 12 characters, or a checked secret set to a value the project publishes as an example, stop OpenRAG at startup. |
+| Secret checks | OpenRAG refuses to start if a secret is too short or still set to a published example value; see [Secrets](#secrets). |
 | Ray | Indexer actors change protocol: tasks running when the old version stops are lost. |
 | Readiness | `GET /ready` is new: it fails while PostgreSQL, Milvus or Ray is unreachable, and reports the model endpoints. |
 | vLLM embedder | Runs on vLLM `v0.30.0` with `--runner pooling --convert embed`. |
@@ -48,10 +49,11 @@ parts:
 
 In chat completion responses, streamed or not, and in text completion responses,
 `extra` is now a JSON object. Up to 2.2.2 it was a JSON-encoded string that clients had to parse with
-`json.loads`. Its keys are unchanged; they are listed in
+`json.loads`; clients must stop doing so. Its keys are unchanged; they are listed in
 [API — Response: the `extra` field](/openrag/documentation/api/#response-the-extra-field).
 
-Each document entry in those lists now nests the chunk's metadata:
+Each document entry in the source lists of `extra` (`sources`, `presented_sources`,
+`cited_sources`, …) now nests the chunk's metadata under `chunk`:
 
 ```json
 {
@@ -63,7 +65,7 @@ Each document entry in those lists now nests the chunk's metadata:
 }
 ```
 
-A client that read `sources[i].filename` reads `sources[i].chunk.filename` now.
+A client that read `sources[i].filename` must read `sources[i].chunk.filename` now.
 `rerank_score`, new in 2.3.0, is present only when a reranker ran. Web entries
 (`source_type: "web"`) are unchanged.
 
@@ -105,24 +107,25 @@ reaches, leave `METRICS_TOKEN` unset and set `METRICS_ALLOW_UNAUTHENTICATED=true
 
 ### Secrets
 
-`AUTH_TOKEN`, `POSTGRES_PASSWORD`, `CHAINLIT_AUTH_SECRET`, `MINIO_SECRET_KEY` and
-`GRAFANA_ADMIN_PASSWORD` need at least 12 characters, and none of the checked secrets may be a value
-the project publishes as an example, such as the defaults of the 2.2.x
-`.env.example`. OpenRAG refuses to start otherwise, with an error naming the
-variable. The rules are in
+OpenRAG 2.3.0 refuses to start, with an error naming the variable, when:
+
+- `AUTH_TOKEN`, `POSTGRES_PASSWORD`, `CHAINLIT_AUTH_SECRET`, `MINIO_SECRET_KEY` or
+  `GRAFANA_ADMIN_PASSWORD` is shorter than 12 characters;
+- a secret is set to a value the project publishes as an example, such as the
+  defaults of the 2.2.x `.env.example`.
+
+The rules are in
 [Environment variables — What will be refused](/openrag/documentation/env_vars/#what-will-be-refused).
 
 Changing a secret of a deployment that already holds data needs care:
 
-- **PostgreSQL password.** The bundled PostgreSQL sets its password only when it
-  initialises an empty data directory, so a new value in the configuration also
-  needs an `ALTER ROLE` in the database; changing the configuration alone leaves
-  OpenRAG unable to log in. If your current password passes the rules, keep it.
-  Otherwise change it in the database during the window, after the backup and
-  before 2.3.0 starts, and in the configuration where the steps below say: 2.2.x
-  cannot open a connection once the database has the new value. The rollback
-  sections below account for it. Pick a value without quotes or `$`, such as the
-  output of `openssl rand -hex 16`: the commands below pass it inside quotes.
+- **PostgreSQL password.** If your current password passes the rules, keep it.
+  The bundled PostgreSQL reads the password from your configuration only once,
+  when it creates the database. To change it afterwards, you must change it in
+  both the configuration and the database (`ALTER ROLE`). The procedures below
+  show when. Do not change it in the database before the window: 2.2.x could no
+  longer connect. Pick a value without quotes or `$`, such as the output of
+  `openssl rand -hex 16`, because the commands below wrap it in single quotes.
 - **`AUTH_TOKEN`** is the admin user's token: clients using it need the new value.
 - **`CHAINLIT_AUTH_SECRET`**: changing it signs out every chat session.
 - **`GRAFANA_ADMIN_PASSWORD`** (Compose monitoring overlay): like PostgreSQL,
@@ -133,41 +136,49 @@ Changing a secret of a deployment that already holds data needs care:
   Grafana keeps it through a rollback: set the old one back the same way.
 - **Milvus's object storage keys** (`MINIO_ACCESS_KEY` and `MINIO_SECRET_KEY`
   with Compose). Milvus v3.0.1, which 2.2.1 and 2.2.2 run, writes both to its log
-  on every compaction attempt. The v3.0.2 of 2.3.0 no longer does, but the lines
-  already written stay. If you keep Milvus logs or ship them to a log system,
+  on every compaction attempt. Milvus v3.0.2, which 2.3.0 ships, no longer does,
+  but the lines already written stay. If you keep Milvus logs or ship them to a log system,
   change the keys during the upgrade. MinIO and Milvus must restart together with
   the new pair; with Compose, [Update `.env`](#update-env) says how.
 
 ### Check the default embedder
 
-A PostgreSQL migration pins the partitions that hold files and follow the
-`default` embedder to the endpoint marked as default. If such partitions exist and
-there is not exactly one default embedder, it stops: OpenRAG answers `503`, or,
-when the Helm migration Job applies the migrations, `helm upgrade` fails. Run this query in OpenRAG's database before the window (the
-commands for each deployment are below):
+When 2.3.0 migrates the database, partitions that hold files and use the
+`default` embedder are tied, for good, to the embedder endpoint marked as
+default. If such partitions exist and there is not exactly one default
+embedder, this migration stops: OpenRAG answers `503`, or `helm upgrade` fails
+if the Helm migration Job runs the migrations.
+
+Before the window, run this query in OpenRAG's database (the commands for each
+deployment are below):
 
 ```sql
 SELECT name FROM model_endpoints WHERE model_type = 'embedder' AND is_default;
 ```
 
-One row is expected; otherwise mark one embedder endpoint as the default, in the
-admin UI or through the admin API, first. Mark the embedder those partitions were
-indexed with: the migration pins them to it for good, and the Milvus migration
-moves their vectors into its field.
+It should return one row. If not, mark one embedder endpoint as the default
+before upgrading, in the admin UI or through the admin API. Choose the embedder
+those partitions were indexed with: the choice is permanent, and the Milvus
+migration moves their vectors into that embedder's field.
 
-If the migration has already stopped 2.3.0, whose admin UI is then unavailable,
-mark it in the database and check that the query above returns that one row:
+If 2.3.0 already stopped on this migration, its admin UI is down. Set the
+default in the database instead, then check that the query above returns one
+row:
 
 ```sql
 UPDATE model_endpoints SET is_default = (name = '<endpoint name>') WHERE model_type = 'embedder';
 ```
 
-Then apply the migrations again: restart OpenRAG where it applies them itself; on
-Kubernetes with the migration Job, run `helm upgrade` again; with both off, run
-them by hand as in [step 4](#4-upgrade-the-release), then restart OpenRAG.
+Then apply the migrations again:
 
-Rolling back from the backups undoes the pinning; the Compose rollback without
-backups keeps it.
+- With Docker Compose, or on Kubernetes when OpenRAG applies them itself (the
+  default): restart OpenRAG.
+- On Kubernetes with the migration Job: run `helm upgrade` again.
+- On Kubernetes with both off: run them by hand as in
+  [Kubernetes step 4](#4-upgrade-the-release), then restart OpenRAG.
+
+Rolling back from the backups undoes this choice; the Compose rollback without
+backups does not.
 
 ### If you ran a development build
 
@@ -279,7 +290,8 @@ image under the new chart never becomes Ready, and the rollout stops.
 If your values pin `milvus.image.all.tag`, set it to `v3.0.2` or remove the
 override. Charts 0.6.4 and 0.6.5 pinned this value to `v3.0.1`; carrying that
 setting forward makes Helm keep the old Milvus version for the migration,
-despite the newer chart default.
+despite the newer chart default, and v3.0.1 cannot compact the segments the
+migration creates.
 
 #### vLLM engine overrides
 
@@ -384,10 +396,10 @@ If you change the PostgreSQL password (see [Secrets](#secrets)), do it now, befo
    ```
 
    With an external PostgreSQL, run the same `ALTER ROLE` with your client.
-2. Put the new value in the Secret OpenRAG reads. With
-   `postgresProvisioning.migrationJob.enabled`, the migration Job runs before
-   `helm upgrade` updates that Secret, and would otherwise fail to log in. For the
-   Secret the chart renders from your values:
+2. Put the new value in the Secret OpenRAG reads yourself, without waiting for
+   `helm upgrade`: with `postgresProvisioning.migrationJob.enabled`, the migration
+   Job runs before Helm updates that Secret, and would log in with the old
+   password. For the Secret the chart renders from your values:
 
    ```bash
    kubectl patch secret -n "$NS" "$FULLNAME-env-secrets" \
@@ -420,10 +432,9 @@ helm upgrade "$RELEASE" oci://ghcr.io/linagora/openrag-stack \
 
 Once `helm upgrade` has returned, delete every Ray pod, head included, so KubeRay
 recreates them from the 2.3.0 template (deleting them earlier would bring them
-back on 2.2.x). The notes `helm upgrade` prints recreate only the workers, for
-their metrics port; this upgrade needs the head recreated too. Once they are
-Ready, scale OpenRAG up. A later `helm upgrade` without the flag sets the count
-from your values again:
+back on 2.2.x). The notes `helm upgrade` prints say to recreate only the workers,
+for their metrics port; this upgrade needs the head recreated too. Once they are
+Ready, scale OpenRAG up:
 
 ```bash
 kubectl delete pod -n "$NS" -l ray.io/cluster="$FULLNAME-raycluster"
@@ -432,7 +443,9 @@ kubectl scale -n "$NS" deploy/"$FULLNAME-openrag" --replicas=<your usual count>
 ```
 
 `kubectl get raycluster -n "$NS"` prints the cluster's name if you changed
-`fullnameOverride`. A wrong name selects no pods, and Ray stays on 2.2.x.
+`fullnameOverride`. A wrong name selects no pods, and Ray stays on 2.2.x. A later
+`helm upgrade` without `--set openrag.replicas=0` sets the count from your values
+again.
 
 If `helm upgrade` fails after you changed the password, do not run a bare
 `helm rollback`: it puts the old password back in the Secret the chart renders
@@ -520,11 +533,14 @@ Searches and uploads recover on their own once it finishes; no restart is needed
 - Uploading a small file completes (`GET /queue/tasks?task_status=active` empties again).
 - `GET /metrics` answers with `Authorization: Bearer <METRICS_TOKEN>`.
 
-The index for a new `vector_<embedder>` field can remain `InProgress` while
-superseded 2.2.x copies are pending; Milvus does not index those rows. Attu
-shows the index state, and `describe_index` reports `indexed_rows`,
-`total_rows` and `pending_index_rows`. For example, the tested collection
-reported 13,805 indexed rows out of 27,610, with 13,805 pending.
+In Attu, the index on a new `vector_<embedder>` field can stay `InProgress`
+indefinitely. This is expected: the migration rewrites every row, and Milvus
+keeps the old 2.2.x copies without indexing them, so they stay pending. Look at
+`indexed_rows` instead, which `describe_index` reports. The index is complete
+once it reaches the number of rows the migration copied into that field; the
+migration logs both numbers (`N row(s) indexed, M copied`). For example, the
+tested collection reported 13,805 indexed rows, with `total_rows` 27,610 and
+13,805 pending: complete.
 
 Then let traffic back in.
 
@@ -649,24 +665,24 @@ Then compare it with the 2.3.0 `infra/compose/.env.example` and change:
 - **Secrets** that break the [rules above](#secrets). The 2.2.x `.env.example`
   shipped example values for `AUTH_TOKEN`, `POSTGRES_PASSWORD`, `MINIO_ACCESS_KEY`,
   `MINIO_SECRET_KEY` and `CHAINLIT_AUTH_SECRET`; OpenRAG 2.3.0 refuses them.
-  - `POSTGRES_PASSWORD`: put the new value in `.env`; step 4 changes it in the
-    database. 2.2.x keeps running with the old value until step 2 stops it; do not
-    run `$DC up` before then, which would restart OpenRAG with the new value.
-  - `MINIO_ACCESS_KEY` and `MINIO_SECRET_KEY`: MinIO and Milvus both read them
-    from `.env`, and MinIO takes the new pair at its next start. Change them in
-    `.env` only, and restart both together, which the upgrade does.
-- **`EMBEDDER_MODEL_NAME`.** The bundled vLLM reads only this variable, and its
-  default is now `Qwen/Qwen3-Embedding-0.6B`. If your `.env` does not set it, set
-  it to the model your data was indexed with, `jinaai/jina-embeddings-v3` unless
-  you chose another; if you also set the legacy `EMBEDDING_MODEL`, give both the
-  same value. Otherwise vLLM serves Qwen while OpenRAG's saved endpoint still asks
-  for the model you indexed with: every embedding call fails, and `/ready` reports
-  `checks.embedder: unavailable`. See the
+  - `POSTGRES_PASSWORD`: put the new value in `.env` now; step 4 changes it in
+    the database. Until step 4, do not run `$DC up`: it would start OpenRAG with
+    a password the database does not accept yet.
+  - `MINIO_ACCESS_KEY` and `MINIO_SECRET_KEY`: change them in `.env` only. MinIO
+    and Milvus both read them from there, and the upgrade restarts both
+    together.
+- **`EMBEDDER_MODEL_NAME`.** Its default is now `Qwen/Qwen3-Embedding-0.6B`, and it
+  is the only variable the bundled vLLM reads to pick its model. If your `.env`
+  does not set it, set it to the model your data was indexed with:
+  `jinaai/jina-embeddings-v3`, unless you chose another. If you also set the
+  legacy `EMBEDDING_MODEL`, give it the same value. Otherwise vLLM serves Qwen
+  while OpenRAG still asks for your old model: every embedding call fails, and
+  `/ready` reports `checks.embedder: unavailable`. See the
   [`EMBEDDER_MODEL_NAME` row](/openrag/documentation/env_vars/).
-- **`METRICS_TOKEN`**, if you scrape `GET /metrics` or run the monitoring overlay,
-  which refuses to start without it. With the overlay in `$DC`, every `$DC`
-  command, `down` included, fails until `.env` sets both `METRICS_TOKEN` and
-  `GRAFANA_ADMIN_PASSWORD`.
+- **`METRICS_TOKEN`**, if you scrape `GET /metrics` or run the monitoring overlay.
+  The overlay needs both `METRICS_TOKEN` and `GRAFANA_ADMIN_PASSWORD` in `.env`:
+  without them, every `$DC` command that includes the overlay fails, `down`
+  included.
 
 #### Run the default-embedder check
 
@@ -719,7 +735,7 @@ $DC pull
 `pull` fetches the released images. If you build them yourself, add `--build` to
 the `up` and `run` commands below instead.
 
-#### 4. Start 2.3.0 once
+#### 4. Start 2.3.0 to apply the PostgreSQL migrations
 
 If you changed `POSTGRES_PASSWORD`, start PostgreSQL alone and change the role's
 password first:
@@ -731,16 +747,21 @@ $DC exec rdb psql -U "$PG_USER" -d postgres \
   -c "ALTER ROLE CURRENT_USER WITH PASSWORD '<new password>'"
 ```
 
-Start the stack, so that OpenRAG applies the PostgreSQL migrations, which the
-Milvus migration needs:
+Start the stack. OpenRAG applies the PostgreSQL migrations when it starts, and
+the Milvus migration needs them:
 
 ```bash
 $DC up -d
-$DC logs -f "$SVC"   # until the API reports it is serving
+$DC logs -f "$SVC"   # until it logs "Startup: complete"; Ctrl-C stops following
 ```
 
-Searches answer `503` with `VDB_SCHEMA_MIGRATION_REQUIRED` until the next step. Then
-stop OpenRAG, leaving PostgreSQL and Milvus running:
+`Startup: complete` is logged even when startup failed. If
+`ServiceContainer.initialize failed` appears before it, stop here and read the
+error logged with it: a PostgreSQL migration may have failed, for example on the
+[default embedder](#check-the-default-embedder).
+
+Otherwise, stop OpenRAG, leaving PostgreSQL and Milvus running. Until the next
+step, searches would answer `503` with `VDB_SCHEMA_MIGRATION_REQUIRED` anyway:
 
 ```bash
 $DC stop "$SVC"
@@ -807,11 +828,14 @@ $DC up -d
 - Uploading a small file completes.
 - `GET /metrics` answers with `Authorization: Bearer <METRICS_TOKEN>`.
 
-The index for a new `vector_<embedder>` field can remain `InProgress` while
-superseded 2.2.x copies are pending; Milvus does not index those rows. Attu
-shows the index state, and `describe_index` reports `indexed_rows`,
-`total_rows` and `pending_index_rows`. For example, the tested collection
-reported 13,805 indexed rows out of 27,610, with 13,805 pending.
+In Attu, the index on a new `vector_<embedder>` field can stay `InProgress`
+indefinitely. This is expected: the migration rewrites every row, and Milvus
+keeps the old 2.2.x copies without indexing them, so they stay pending. Look at
+`indexed_rows` instead, which `describe_index` reports. The index is complete
+once it reaches the number of rows the migration copied into that field; the
+migration logs both numbers (`N row(s) indexed, M copied`). For example, the
+tested collection reported 13,805 indexed rows, with `total_rows` 27,610 and
+13,805 pending: complete.
 
 Then let traffic back in.
 
@@ -864,10 +888,11 @@ still at 2.3.0, which neither version runs on:
 - the collection has fewer than 10 vector fields, since the downgrade adds
   `vector` back.
 
-A dry run of the Milvus downgrade checks the dimensions, the routing and the
-number of vector fields without changing anything; the workspace check is yours. Then, in this order (the Milvus
-downgrade reads the PostgreSQL schema that `alembic downgrade` removes).
-`b9c0d1e2f3a4` is the last PostgreSQL revision of 2.2.1 and 2.2.2:
+Run the commands below in this order: the Milvus downgrade reads the PostgreSQL
+schema that `alembic downgrade` removes. The first one, a dry run, checks the
+dimensions, the routing and the number of vector fields without changing
+anything; the workspace check above is yours to run. `b9c0d1e2f3a4` is the last
+PostgreSQL revision of 2.2.1 and 2.2.2:
 
 ```bash
 $DC stop "$SVC"
@@ -882,8 +907,8 @@ docker volume rm <project>_openrag_venv
 ```
 
 Then `git checkout` the version you ran before, restore the `.env` you copied
-aside, and `$DC up -d`. If you changed `POSTGRES_PASSWORD` in step 4, keep the new
-value in the restored `.env`: this way does not restore the database's copy of it.
+aside, and `$DC up -d`. If you changed `POSTGRES_PASSWORD` in step 4, edit the
+restored `.env` to use the new password: the database still has it.
 Files indexed after the upgrade are kept. The chunk metadata the upgrade
 rewrote is not restored: integers above 2^53 stay rounded and section IDs stay
 folded. To recover it, roll back from the backups instead.
