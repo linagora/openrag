@@ -19,7 +19,7 @@ export interface Release {
  */
 export const releaseNotes: Release = {
   version: "2.3.0",
-  date: "2026-09-30",
+  date: "2026-10-01",
   summary:
     "OpenRAG 2.3.0 makes deployments observable and more robust: durable job history, dependency-aware readiness, metrics, alerts and dashboards, and one vector field per embedder so partitions can use different embedding models.",
 
@@ -35,7 +35,7 @@ export const releaseNotes: Release = {
     "Chat sources report the reranker score of each document when a reranker ran.",
     "A new /ready endpoint reports PostgreSQL, Milvus, Ray and the model endpoints in use.",
     "Prometheus metrics, alert rules with runbooks and Grafana dashboards ship with the Helm chart and Docker Compose.",
-    "Logs can be written as JSON with a request ID on every line and shipped to Loki.",
+    "Logs can be written as JSON, with the request ID on every line logged while serving a request, and shipped to Loki.",
   ],
 
   breakingChange: {
