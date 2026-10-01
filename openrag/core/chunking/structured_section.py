@@ -297,11 +297,7 @@ class StructuredSectionChunker(BaseChunker):
 
         paginated = self.layout == "paginated" or (self.layout == "auto" and self._looks_paginated(document))
         units = self._page_units(content) if paginated else self._build_units(content)
-        csv_metadata = {
-            key: value
-            for key, value in metadata.items()
-            if key.startswith("csv_")
-        }
+        csv_metadata = {key: value for key, value in metadata.items() if key.startswith("csv_")}
         if csv_metadata:
             for unit in units:
                 if unit.chunk_type is ChunkType.TABLE:

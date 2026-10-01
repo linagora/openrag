@@ -325,11 +325,7 @@ class BaseChunker(ChunkingStrategy):
         for element in tables_and_images:
             if element.type == "table" and self.length_function(element.content) > self.chunk_size:
                 if metadata.get("csv_columns"):
-                    element.metadata = {
-                        key: value
-                        for key, value in metadata.items()
-                        if key.startswith("csv_")
-                    }
+                    element.metadata = {key: value for key, value in metadata.items() if key.startswith("csv_")}
                 subtables = chunk_table(
                     table_element=element,
                     chunk_size=self.chunk_size,

@@ -228,9 +228,7 @@ async def test_expansion_fetches_and_orders_csv_continuations():
     out = await SingleRetriever(searcher=s).expand_search_results(initial)
 
     assert [chunk.id for chunk in out] == ["part-1", "part-2", "part-3"]
-    assert s.csv_row_calls == [
-        {"partition": "p1", "file_id": "file-1", "row_number": 30, "allowed_file_ids": None}
-    ]
+    assert s.csv_row_calls == [{"partition": "p1", "file_id": "file-1", "row_number": 30, "allowed_file_ids": None}]
 
 
 @pytest.mark.asyncio
