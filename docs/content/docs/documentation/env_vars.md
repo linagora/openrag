@@ -463,7 +463,7 @@ The reranker enhances search quality by re-scoring and reordering retrieved docu
 | `RERANKER_ENABLED` | `bool` | true | Enable or disable the reranking mechanism |
 | `RERANKER_PROVIDER` | `str` | `infinity` | Reranker backend to use. Accepted values: `infinity`, `openai`, `tei` |
 | `RERANKER_MODEL` | `str` | Alibaba-NLP/gte-multilingual-reranker-base | Model used for reranking documents. Ignored by the `tei` provider (a TEI instance serves a single fixed model) |
-| `RERANKER_TOP_K` | `int` | 10 | Number of top documents to return after reranking. Increase for better results if your LLM has a wider context window |
+| `RERANKER_TOP_K` | `int` | 10 | Number of chunks kept after reranking and given to the LLM, for every retrieval preset that leaves `top_n` empty (a preset's own `top_n` overrides it). The prompt is sized to fit that many chunks of the partition's chunk size. Increase for better results if your LLM has a wider context window |
 | `RERANKER_BASE_URL` | `str` | `http://reranker:7997` | Base URL of the reranker service |
 | `RERANKER_API_KEY` | `str` | `EMPTY` | API key for the reranker service, sent as a `Bearer` token when set. Whether a key is required depends on your endpoint |
 | `RERANKER_TIMEOUT` | `float` | 60.0 | HTTP timeout in seconds for reranker requests |

@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from api.dependencies.auth import require_admin
 from api.routers.admin import model_endpoints, presets
-from di.providers import get_model_endpoint_service, get_preset_service
+from di.providers import get_config, get_model_endpoint_service, get_preset_service
 from fastapi import FastAPI
 
 
@@ -863,6 +864,7 @@ async def test_reprime_failure_does_not_fail_the_request(async_client_factory, m
 async def test_preset_options_return_registered_choices(async_client_factory):
     """Preset options should expose available registry choices."""
     app = _build_app()
+    app.dependency_overrides[get_config] = lambda: SimpleNamespace(reranker=SimpleNamespace(top_k=12))
 
     async with async_client_factory(app) as client:
         response = await client.get("/presets/options")
@@ -872,6 +874,8 @@ async def test_preset_options_return_registered_choices(async_client_factory):
     assert body["chunking_strategies"] == ["recursive_splitter", "structured_section"]
     assert set(body["retrieval_types"]) == {"single", "multiQuery", "hyde"}
     assert body["reranker_providers"] == ["infinity", "openai", "tei"]
+    # An unset retrieval top_n follows RERANKER_TOP_K; the UI shows it as the placeholder.
+    assert body["default_top_n"] == 12
 
 
 @pytest.mark.asyncio

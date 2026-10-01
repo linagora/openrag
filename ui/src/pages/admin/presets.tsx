@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { Plus, Trash2, Pencil, Eye } from "lucide-react";
+import { Plus, Trash2, Pencil, Eye, Info } from "lucide-react";
 import { NewBadge } from "@/components/shared/new-badge";
 import {
   listPresets,
@@ -40,6 +40,7 @@ import { Switch } from "@/components/ui/switch";
 import { Separator } from "@/components/ui/separator";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { formatDate, intOr, numOr } from "@/lib/utils";
 import {
   PROMPT_DEFAULT_OPTION,
@@ -51,6 +52,7 @@ import {
   type Config,
   configGet,
   configSet,
+  configUnset,
   applyParsingStrategyChange,
   PARSING_STRATEGY_INHERIT,
   STT_ENDPOINT_DEFAULT_OPTION,
@@ -716,6 +718,7 @@ function RetrievalPresetForm({
   rerankers,
   llms,
   prompts,
+  defaultTopN,
 }: {
   config: Config;
   onChange: (c: Config) => void;
@@ -723,6 +726,8 @@ function RetrievalPresetForm({
   rerankers: string[];
   llms: string[];
   prompts: PromptResponse[];
+  /** What an unset top_n resolves to (RERANKER_TOP_K); absent on older backends. */
+  defaultTopN?: number;
 }) {
   const set = (key: string, value: unknown) => onChange(configSet(config, key, value));
   const pipelineType: string = configGet(config, "type", "single");
@@ -843,14 +848,46 @@ function RetrievalPresetForm({
           </Select>
         </div>
         <div className="space-y-1.5">
-          <Label className="text-xs">top_n (post-rerank count)</Label>
+          <div className="flex items-center gap-1.5">
+            <Label className="text-xs">top_n (post-rerank count)</Label>
+            <TooltipProvider>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <button
+                    type="button"
+                    className="text-muted-foreground hover:text-foreground"
+                    aria-label="top_n info"
+                  >
+                    <Info className="h-3.5 w-3.5" />
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent className="max-w-xs">
+                  How many chunks are kept after retrieval (and reranking, when it is on) and
+                  given to the LLM to write its answer. The prompt is sized to fit that many
+                  chunks. Leave empty to use
+                  RERANKER_TOP_K{defaultTopN !== undefined ? ` (currently ${defaultTopN})` : ""}.
+                </TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
+          </div>
+          {/* Not tied to enable_reranker: top_n cuts retrieval and sizes the
+              prompt whether or not a reranker runs. */}
           <Input
             type="number"
             min={1}
             max={1000}
-            value={configGet(config, "top_n", 10)}
-            onChange={(e) => set("top_n", intOr(e.target.value, 10))}
-            disabled={!configGet(config, "enable_reranker", true)}
+            value={configGet<number | string>(config, "top_n", "")}
+            placeholder={defaultTopN !== undefined ? `Default: ${defaultTopN}` : "Default"}
+            onChange={(e) => {
+              // A number input reports "" for unparseable text ("1e", "-") too;
+              // only a truly empty field clears the override.
+              if (e.target.validity.badInput) return;
+              onChange(
+                e.target.value === ""
+                  ? configUnset(config, "top_n")
+                  : configSet(config, "top_n", intOr(e.target.value, defaultTopN ?? 10)),
+              );
+            }}
           />
         </div>
       </section>
@@ -1045,6 +1082,7 @@ function PresetDialog({
               rerankers={rerankers}
               llms={llms}
               prompts={allPrompts}
+              defaultTopN={options?.default_top_n}
             />
           )}
 

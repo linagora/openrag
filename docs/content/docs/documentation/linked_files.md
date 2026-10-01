@@ -165,7 +165,7 @@ flowchart TD
 :::caution
 **Context Size Limitation**
 
-At the `Format Context` stage, only documents fitting within the fixed context size limit (`RERANKER_TOP_K` × `CHUNK_SIZE`, which defaults to 5120 tokens) are retained. Additional filtering strategies should be considered to remove irrelevant chunks.
+At the `Format Context` stage, only documents fitting within the context size limit are retained: the retrieval preset's `top_n` (`RERANKER_TOP_K` when the preset leaves it empty) × the partition's chunk size, 10 × 512 = 5120 tokens by default. Additional filtering strategies should be considered to remove irrelevant chunks.
 
 **Possible Approaches:**
 * **Map-Reduce**: Processes chunks in batches, summarizes relevant ones individually, filters out irrelevant ones, then combines the summaries. However, this approach requires a high-token endpoint and can be time-consuming and resource-intensive when dealing with large numbers of chunks.

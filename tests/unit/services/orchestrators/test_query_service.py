@@ -17,6 +17,7 @@ from types import SimpleNamespace
 import pytest
 import services.orchestrators.query_service as qs
 from core.config import load_config
+from core.config.retrieval_pipeline import RetrievalPipelineConfig
 from core.models.chunk import Chunk
 from core.models.workspace import WorkspaceScope
 from core.utils.exceptions import WorkspaceNotFoundError
@@ -195,6 +196,49 @@ def test_resolve_chat_history_depth_zero_inherits_global_default():
     assert svc._resolve_chat_history_depth(["p"]) == 4
 
 
+# --------------------------------------------------------------------------- #
+# context budget: sized from the partition's top_n and chunk size
+# --------------------------------------------------------------------------- #
+
+
+def _partition_cfg(top_n: int | None = None, chunk_size: int = 512, **fields) -> SimpleNamespace:
+    """A partition config stand-in carrying what the context budget reads, plus *fields*."""
+    return SimpleNamespace(
+        retrieval=RetrievalPipelineConfig(top_n=top_n),
+        indexation=SimpleNamespace(chunking=SimpleNamespace(chunk_size=chunk_size)),
+        **fields,
+    )
+
+
+def test_max_context_tokens_follows_partition_top_n_and_chunk_size():
+    svc = _svc()  # reranker.top_k = 5, chunker.chunk_size = 512
+    svc._config.partitions = {"p": _partition_cfg(top_n=15, chunk_size=768)}
+    assert svc._resolve_max_context_tokens(["p"]) == 15 * 768
+
+
+def test_max_context_tokens_unset_top_n_follows_reranker_top_k():
+    svc = _svc()
+    svc._config.partitions = {"p": _partition_cfg(top_n=None, chunk_size=1024)}
+    assert svc._resolve_max_context_tokens(["p"]) == 5 * 1024
+
+
+def test_max_context_tokens_takes_largest_budget_across_partitions():
+    svc = _svc()
+    svc._config.partitions = {
+        "small": _partition_cfg(top_n=15, chunk_size=512),
+        "big": _partition_cfg(top_n=None, chunk_size=1024),
+    }
+    assert svc._resolve_max_context_tokens(["small", "big"]) == 15 * 512
+    assert svc._resolve_max_context_tokens(["all"]) == 15 * 512
+
+
+def test_max_context_tokens_falls_back_to_global_budget():
+    svc = _svc()
+    svc._config.partitions = {"p": _partition_cfg(top_n=15, chunk_size=512)}
+    assert svc._resolve_max_context_tokens(None) == 5 * 512
+    assert svc._resolve_max_context_tokens(["unknown"]) == 5 * 512
+
+
 def test_empty_response_retry_instruction_uses_one_system_message():
     messages = [
         {"role": "system", "content": "Follow the existing answer instructions."},
@@ -269,7 +313,7 @@ def test_default_chat_history_depth_clamps_invalid_global_config(global_depth):
 
 
 def _partition(chat_llm=None, chat_history_depth=0):
-    return SimpleNamespace(chat_llm=chat_llm, chat_history_depth=chat_history_depth)
+    return _partition_cfg(chat_llm=chat_llm, chat_history_depth=chat_history_depth)
 
 
 class RecordingFactory:
@@ -734,6 +778,31 @@ async def test_complete_all_retrieved_sources_survives_context_budget_truncation
 
     extra = out["extra"]
     assert extra["sources"] == [{"id": "c1"}]
+    assert extra["all_retrieved_sources"] == [{"id": "c1"}, {"id": "c2"}]
+
+
+@pytest.mark.asyncio
+async def test_complete_sizes_prompt_from_partition_budget():
+    """The prompt's document budget comes from the partition's top_n × chunk size,
+    not the global reranker.top_k × chunk_size fallback."""
+    chunks = [
+        Chunk(id="c1", text="short", metadata={"_id": "c1"}),
+        Chunk(id="c2", text="this one does not fit the token budget", metadata={"_id": "c2"}),
+    ]
+    svc = _svc(retrieval=FakeRetrieval(chunks=chunks), llm=FakeLLM(gen_text="answer\n[Sources: 1]"))
+    # The global fallback (5 × 512) would fit both; the partition's 1 × len(c1) fits only c1.
+    svc._config.partitions = {
+        "p": _partition_cfg(top_n=1, chunk_size=qs.get_num_tokens()("[Source 1]\nshort"), chat_llm=None)
+    }
+
+    out = await svc.complete(
+        partitions=["p"],
+        payload={"prompt": "q", "metadata": {"include_all_retrieved_sources": True}},
+        prepare_sources=lambda d, w: [{"id": doc.metadata.get("_id")} for doc in d],
+    )
+
+    extra = out["extra"]
+    assert extra["presented_sources"] == [{"id": "c1"}]
     assert extra["all_retrieved_sources"] == [{"id": "c1"}, {"id": "c2"}]
 
 
@@ -1831,7 +1900,7 @@ async def test_generation_prompt_name_from_partition_reaches_resolver():
     rec = RecordingPromptService()
     svc._prompt_service = rec
     svc._config.partitions = {
-        "p": SimpleNamespace(generation_prompt_names={"sys_prompt": "legal"}, chat_history_depth=4)
+        "p": _partition_cfg(generation_prompt_names={"sys_prompt": "legal"}, chat_history_depth=4)
     }
 
     await svc._prepare_chat(["p"], {"messages": [{"role": "user", "content": "q"}], "metadata": {}})
@@ -1862,7 +1931,7 @@ async def test_spoken_style_metadata_swaps_the_answer_prompt():
     rec = RecordingPromptService()
     svc._prompt_service = rec
     svc._config.partitions = {
-        "p": SimpleNamespace(generation_prompt_names={"spoken_style_answer": "voice"}, chat_history_depth=4)
+        "p": _partition_cfg(generation_prompt_names={"spoken_style_answer": "voice"}, chat_history_depth=4)
     }
 
     await svc._prepare_chat(

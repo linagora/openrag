@@ -540,7 +540,7 @@ All routes are prefixed with **`/presets`** and require the **admin** role. `pre
 ```http
 GET /presets/options
 ```
-Returns the choices valid inside a preset `config`: `chunking_strategies`, `parsing_strategies` (`pymupdf`, `marker`, `docling`), `retrieval_types`, and `reranker_providers`.
+Returns the choices valid inside a preset `config`: `chunking_strategies`, `parsing_strategies` (`pymupdf`, `marker`, `docling`), `retrieval_types`, and `reranker_providers`, plus `default_top_n`: what a retrieval preset's `top_n` resolves to when it is left out (the deployment's `RERANKER_TOP_K`).
 
 #### Create a preset
 ```http

@@ -208,6 +208,18 @@ async def test_seed_defaults_retrieval_enables_reranker_when_available():
 
 
 @pytest.mark.asyncio
+async def test_seed_defaults_retrieval_leaves_top_n_unset():
+    """Seeded retrieval presets follow RERANKER_TOP_K at query time instead of freezing a top_n."""
+    repo = _FakePresetRepo()
+    svc = _make_service(repo)
+    await svc.seed_defaults()
+
+    ret = [r for r in repo._store.values() if r["preset_type"] == "retrieval"]
+    assert ret
+    assert all(r["config"].get("top_n") is None for r in ret)
+
+
+@pytest.mark.asyncio
 async def test_seed_defaults_default_indexation_inherits_contextual_retrieval_disabled():
     from core.config.root import Settings
 
