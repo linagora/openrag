@@ -77,8 +77,8 @@ Other requests that 2.2.x accepted, or answered differently:
   DOCX, PPTX, `.doc`) is refused with `415`. A second `POST` of a file that is
   still indexing is refused with `409 DOCUMENT_INDEXING_IN_PROGRESS`, which gives
   the running task's status URL; `PUT` is unchanged. A document that produces no
-  chunks fails with `422 NO_INDEXABLE_CONTENT` instead of being reported as
-  indexed, and its callback reports `"error"`.
+  chunks ends its task `FAILED` (`NO_INDEXABLE_CONTENT`), and its callback
+  reports `"error"`, instead of being reported as indexed.
 - **Workspaces.** Workspace IDs are unique per partition, so two partitions can
   use the same ID. A search over several partitions that finds the ID in more
   than one answers `422 WORKSPACE_AMBIGUOUS`. Deleting a workspace no longer
@@ -349,6 +349,12 @@ traffic is stopped, so that they match each other:
   ```bash
   kubectl exec -n "$NS" "$PG_POD" -- env PGUSER="$PG_USER" PGDATABASE="$DB" \
     sh -c 'PGPASSWORD="$(cat /opt/bitnami/postgresql/secrets/password)" pg_dump -Fc' > openrag.dump
+  ```
+
+  Check that the dump is not empty: this lists its contents.
+
+  ```bash
+  kubectl exec -i -n "$NS" "$PG_POD" -- pg_restore -l < openrag.dump | head
   ```
 
 - **Milvus**: its etcd and its object storage (MinIO or your S3 bucket). Stop
@@ -686,11 +692,12 @@ docker compose version --short
 
 #### Update `.env`
 
-Your `.env` is not tracked, so checking out 2.3.0 keeps it. Copy it aside first;
-the rollback needs it:
+Your `.env` is not tracked, so checking out 2.3.0 keeps it. Copy it aside first,
+outside the repository: the rollback needs it, and a copy inside the checkout is
+not git-ignored, so it could be committed with your secrets.
 
 ```bash
-cp .env .env.2.2.x
+cp .env ~/openrag-2.2.x.env
 ```
 
 Then compare it with the 2.3.0 `infra/compose/.env.example` and change:
@@ -712,6 +719,10 @@ Then compare it with the 2.3.0 `infra/compose/.env.example` and change:
   while OpenRAG still asks for your old model: every embedding call fails, and
   `/ready` reports `checks.embedder: unavailable`. See the
   [`EMBEDDER_MODEL_NAME` row](/openrag/documentation/env_vars/).
+- **`RERANKER_EXTRA_ARGS`**, if you set `RERANKER_PROVIDER=openai` with the
+  `Alibaba-NLP/gte-multilingual-reranker-base` model. The bundled vLLM reranker
+  now needs the `--hf-overrides` line that the 2.3.0 `.env.example` ships
+  commented out: uncomment it in your `.env`.
 - **`METRICS_TOKEN`**, if you scrape `GET /metrics` or run the monitoring overlay.
   The overlay needs both `METRICS_TOKEN` and `GRAFANA_ADMIN_PASSWORD` in `.env`:
   without them, every `$DC` command that includes the overlay fails, `down`
@@ -897,8 +908,8 @@ project is `compose` unless you set one (`docker volume ls` lists it).
    then copy the backup back with `sudo cp -a`. Copying over a directory that
    still exists merges the two, which corrupts PostgreSQL and etcd. Then remove
    the `openrag_venv` volume: `docker volume rm <project>_openrag_venv`.
-3. `git checkout` the version you ran before, restore the `.env` you copied aside,
-   and `$DC up -d`.
+3. `git checkout` the version you ran before, restore the `.env` you copied aside
+   (`cp ~/openrag-2.2.x.env .env`), and `$DC up -d`.
 
 **Without the backups**, by undoing the migrations with 2.3.0 still checked out.
 Before you start, make sure **all** of the following hold. Some of them are only
@@ -941,7 +952,7 @@ docker volume rm <project>_openrag_venv
 ```
 
 Then `git checkout` the version you ran before, restore the `.env` you copied
-aside, and `$DC up -d`. If you changed `POSTGRES_PASSWORD` in step 4, edit the
+aside (`cp ~/openrag-2.2.x.env .env`), and `$DC up -d`. If you changed `POSTGRES_PASSWORD` in step 4, edit the
 restored `.env` to use the new password: the database still has it.
 Files indexed after the upgrade are kept. The chunk metadata the upgrade
 rewrote is not restored: integers above 2^53 stay rounded and section IDs stay
