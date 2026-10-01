@@ -142,6 +142,8 @@ class CsvParser(DocumentParser):
         # for lower memory usage we must use iter_batches() directly instead
         return ProcessedDocument(
             document_id=document.id,
-            text_blocks=list(self.iter_batches(document)), # consumes the entire generator and keeps all batches in memory inside one single ProcessedDocument
+            text_blocks=list(
+                self.iter_batches(document)
+            ),  # consumes the entire generator and keeps all batches in memory inside one single ProcessedDocument
             metadata=dict(document.metadata),
         )
