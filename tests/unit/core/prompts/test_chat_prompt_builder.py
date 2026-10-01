@@ -40,6 +40,34 @@ def test_format_context_drops_to_fit_budget():
     assert included == [0]
 
 
+def test_format_context_skips_a_source_that_does_not_fit_and_keeps_going():
+    docs = ["one two three four", "five", "six"]
+    # [Source 1] + doc0 = 6 > 5: skipped, and the shorter ones after it still fit.
+    text, included = format_context(docs, max_context_tokens=5, length_function=_word_tokens)
+    assert included == [1]
+    assert text == "[Source 1]\nfive"
+
+
+def test_format_context_counts_the_separators_between_sources():
+    docs = ["a", "b"]
+    # [Source 1] + a = 3, then separator 1 + [Source 2] + b = 4.
+    assert format_context(docs, max_context_tokens=6, length_function=_word_tokens)[1] == [0]
+    assert format_context(docs, max_context_tokens=7, length_function=_word_tokens)[1] == [0, 1]
+
+
+def test_format_context_takes_at_most_max_sources():
+    docs = ["a", "b", "c"]
+    text, included = format_context(docs, max_context_tokens=None, length_function=_word_tokens, max_sources=2)
+    assert included == [0, 1]
+    assert "[Source 3]" not in text
+
+
+def test_format_context_without_a_token_limit_takes_every_source():
+    docs = ["word " * 10_000, "b"]
+    _, included = format_context(docs, max_context_tokens=None, length_function=_word_tokens)
+    assert included == [0, 1]
+
+
 def test_format_context_no_numbering():
     docs = ["a", "b"]
     text, included = format_context(docs, max_context_tokens=100, length_function=_word_tokens, number_sources=False)
@@ -155,6 +183,15 @@ def test_format_web_context_empty_returns_empty_tuple():
     assert text == ""
     assert nums == []
     assert total == 0
+
+
+def test_format_web_context_counts_the_separators_between_results():
+    results = [_FakeWeb("T1", "u1", "one two"), _FakeWeb("T2", "u2", "three four")]
+    # Each block is 5 words, plus 1 for the separator before the second.
+    _, nums, total = format_web_context(results, length_function=_word_tokens, max_tokens=10)
+    assert (nums, total) == ([1], 5)
+    _, nums, total = format_web_context(results, length_function=_word_tokens, max_tokens=11)
+    assert (nums, total) == ([1, 2], 11)
 
 
 def test_format_web_context_drops_overflow_block_after_first_fits():

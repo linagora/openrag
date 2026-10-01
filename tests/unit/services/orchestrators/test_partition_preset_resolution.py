@@ -666,6 +666,18 @@ async def test_get_partition_config_returns_resolved_detail():
 
 
 @pytest.mark.asyncio
+async def test_get_partition_config_reports_top_n_as_it_applies():
+    """A preset that leaves top_n unset reports RERANKER_TOP_K, so the field stays an int."""
+    unset = {k: v for k, v in _RET_CONFIG.items() if k != "top_n"}
+    settings = _settings(ret={"default": {**_RET_CONFIG, "top_n": 15}, "unset": unset})
+    repo = _FakePartitionRepo(rows=[_full_row("p1"), _full_row("p2", retrieval_preset="unset")])
+    svc = _make_service(repo, settings=settings)
+
+    assert (await svc.get_partition_config("p1"))["retrieval_pipeline"]["top_n"] == 15
+    assert (await svc.get_partition_config("p2"))["retrieval_pipeline"]["top_n"] == settings.reranker.top_k
+
+
+@pytest.mark.asyncio
 async def test_list_partition_summaries_has_counts_and_no_pipelines():
     repo = _FakePartitionRepo(rows=[_full_row("p1", description="docs"), _full_row("p2")])
     repo._counts["p1"] = 4
