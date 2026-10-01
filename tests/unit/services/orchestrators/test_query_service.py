@@ -70,6 +70,14 @@ class FakeLLM:
             content = self._chat_responses.pop(0)
         else:
             content = "final answer"
+        if isinstance(content, Exception):
+            raise content
+        if isinstance(content, dict):
+            message = {"content": content.get("content", "")}
+            for key in ("tool_calls", "function_call", "refusal"):
+                if key in content:
+                    message[key] = content[key]
+            return {"choices": [{"message": message, "finish_reason": content.get("finish_reason")}]}
         return {"choices": [{"message": {"content": content}}]}
 
     async def generate(self, prompt, **kwargs):
@@ -80,6 +88,8 @@ class FakeLLM:
         self.stream_calls.append((messages, kwargs))
         lines = self._stream_sequences.pop(0) if self._stream_sequences else self._stream_lines
         for line in lines:
+            if isinstance(line, Exception):
+                raise line
             yield line
 
 
@@ -183,6 +193,28 @@ def test_resolve_chat_history_depth_zero_inherits_global_default():
     svc = _svc()
     svc._config.partitions = {"p": SimpleNamespace(chat_history_depth=0)}
     assert svc._resolve_chat_history_depth(["p"]) == 4
+
+
+def test_empty_response_retry_instruction_uses_one_system_message():
+    messages = [
+        {"role": "system", "content": "Follow the existing answer instructions."},
+        {"role": "user", "content": "ok"},
+    ]
+
+    retry_messages = qs._empty_response_retry_messages(messages)
+
+    assert [message["role"] for message in retry_messages].count("system") == 1
+    assert "Follow the existing answer instructions." in retry_messages[0]["content"]
+    assert "previous response was empty" in retry_messages[0]["content"]
+    assert messages[0]["content"] == "Follow the existing answer instructions."
+
+
+def test_acknowledgement_prompt_does_not_assume_the_user_expressed_gratitude():
+    prompt = qs.build_casual_response_prompt("acknowledgement", "en")
+
+    assert "Acknowledge the user's response briefly" in prompt
+    assert "current topic" in prompt
+    assert "Do not imply that the user expressed gratitude." in prompt
 
 
 def test_resolve_chat_history_depth_none_and_unknown_use_default():
@@ -974,7 +1006,7 @@ async def test_ok_after_social_history_uses_contextualizer_gratitude_decision():
 
     assert retrieval.retrieve_multi_calls == []
     assert result.retrieved_docs == []
-    assert "intent is gratitude" in result.payload["messages"][0]["content"]
+    assert "intent is acknowledgement" in result.payload["messages"][0]["content"]
 
 
 @pytest.mark.asyncio
@@ -999,7 +1031,7 @@ async def test_explicit_retrieval_metadata_still_forces_retrieval_for_acknowledg
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("acknowledgement", ["ok", "👍"])
+@pytest.mark.parametrize("acknowledgement", ["ok", "👍", "👍🏻", "👍🏼", "👍🏽", "👍🏾", "👍🏿", "👍️"])
 async def test_ack_after_factual_offer_still_retrieves_the_accepted_request(acknowledgement):
     accepted_query = "Recommended dosages of albendazole"
     llm = FakeLLM(
@@ -1036,6 +1068,20 @@ async def test_ack_after_factual_offer_still_retrieves_the_accepted_request(ackn
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("reaction", ["👍", "👍🏻", "👍🏼", "👍🏽", "👍🏾", "👍🏿", "👍️"])
+async def test_thumb_reaction_keeps_simple_rag_casual_behavior(reaction):
+    retrieval = FakeRetrieval()
+    svc = _svc(mode="SimpleRag", retrieval=retrieval)
+
+    await svc._prepare_chat(
+        ["p"],
+        {"messages": [{"role": "user", "content": reaction}], "metadata": {}},
+    )
+
+    assert retrieval.retrieve_multi_calls == []
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("operation", ["chat", "chat_stream"])
 async def test_empty_contextualized_casual_answer_retries_in_the_same_language(operation, monkeypatch):
     contextualizer_result = json.dumps({"intent": "gratitude", "requires_retrieval": False, "query_list": []})
@@ -1052,7 +1098,15 @@ async def test_empty_contextualized_casual_answer_retries_in_the_same_language(o
     )
     retrieval = FakeRetrieval()
     svc = _svc(mode="ChatBotRag", llm=llm, retrieval=retrieval)
-    monkeypatch.setattr(qs, "detect_language", lambda _text, **_kwargs: "fr")
+
+    def detect_test_language(text, **_kwargs):
+        if text.startswith("Voici"):
+            return "fr"
+        if text == "ok, merci":
+            return "en"
+        return None
+
+    monkeypatch.setattr(qs, "detect_language", detect_test_language)
     kwargs = {
         "partitions": ["p"],
         "payload": {
@@ -1082,9 +1136,339 @@ async def test_empty_contextualized_casual_answer_retries_in_the_same_language(o
     assert "Avec plaisir" in answer
     assert retrieval.retrieve_multi_calls == []
     if operation == "chat":
-        assert "response language already specified above" in llm.chat_calls[2][0][1]["content"]
+        retry_messages = llm.chat_calls[2][0]
+        assert [message["role"] for message in retry_messages].count("system") == 1
+        assert "Respond in French." in retry_messages[0]["content"]
+        assert "previous response was empty" in retry_messages[0]["content"]
     else:
-        assert "response language already specified above" in llm.stream_calls[1][0][1]["content"]
+        retry_messages = llm.stream_calls[1][0]
+        assert [message["role"] for message in retry_messages].count("system") == 1
+        assert "Respond in French." in retry_messages[0]["content"]
+        assert "previous response was empty" in retry_messages[0]["content"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["chat", "chat_stream"])
+async def test_empty_retrieval_answer_after_source_tag_retries(operation):
+    contextualizer_result = json.dumps(
+        {
+            "intent": "other",
+            "requires_retrieval": True,
+            "query_list": [{"query": "ok", "temporal_filters": None}],
+        }
+    )
+    answer_lines = [
+        'data: {"choices":[{"delta":{"content":"The document answer is 42. [Sources: 1]"}}]}\n\n',
+        'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n',
+        "data: [DONE]\n\n",
+    ]
+    llm = FakeLLM(
+        chat_responses=[contextualizer_result, "[Sources: none]", "The document answer is 42. [Sources: 1]"],
+        stream_sequences=[
+            [
+                'data: {"choices":[{"delta":{"content":"[Sources: none]"}}]}\n\n',
+                'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n',
+                "data: [DONE]\n\n",
+            ],
+            answer_lines,
+        ],
+    )
+    retrieval = FakeRetrieval()
+    svc = _svc(mode="ChatBotRag", llm=llm, retrieval=retrieval)
+    kwargs = {
+        "partitions": ["p"],
+        "payload": {"messages": [{"role": "user", "content": "ok"}], "metadata": {}},
+        "prepare_sources": lambda docs, web: [{"source_type": "document", "filename": "answer.pdf"}],
+        "model_name": "m",
+    }
+
+    if operation == "chat":
+        response = await svc.chat(**kwargs)
+        answer = response["choices"][0]["message"]["content"]
+    else:
+        events = [
+            json.loads(line[6:])
+            async for line in svc.chat_stream(**kwargs)
+            if line.startswith("data: ") and line.strip() != "data: [DONE]"
+        ]
+        answer = "".join(
+            event["choices"][0].get("delta", {}).get("content", "") for event in events if event.get("choices")
+        )
+
+    assert answer == "The document answer is 42."
+    assert len(retrieval.retrieve_multi_calls) == 1
+    if operation == "chat":
+        assert len(llm.chat_calls) == 3
+    else:
+        assert len(llm.stream_calls) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["chat", "chat_stream"])
+async def test_empty_response_retry_returns_fallback_if_retry_is_still_empty(operation):
+    contextualizer_result = json.dumps({"intent": "gratitude", "requires_retrieval": False, "query_list": []})
+    empty_stream = [
+        'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n',
+        "data: [DONE]\n\n",
+    ]
+    llm = FakeLLM(
+        chat_responses=[contextualizer_result, "", ""],
+        stream_sequences=[empty_stream, empty_stream],
+    )
+    svc = _svc(mode="ChatBotRag", llm=llm)
+    kwargs = {
+        "partitions": ["p"],
+        "payload": {"messages": [{"role": "user", "content": "ok"}], "metadata": {}},
+        "prepare_sources": lambda docs, web: [],
+        "model_name": "m",
+    }
+
+    if operation == "chat":
+        response = await svc.chat(**kwargs)
+        answer = response["choices"][0]["message"]["content"]
+    else:
+        events = [
+            json.loads(line[6:])
+            async for line in svc.chat_stream(**kwargs)
+            if line.startswith("data: ") and line.strip() != "data: [DONE]"
+        ]
+        answer = "".join(
+            event["choices"][0].get("delta", {}).get("content", "") for event in events if event.get("choices")
+        )
+
+    assert answer == "I'm here if you'd like to continue."
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["chat", "chat_stream"])
+async def test_empty_response_retry_failure_returns_fallback_and_marks_truncation(operation):
+    contextualizer_result = json.dumps({"intent": "gratitude", "requires_retrieval": False, "query_list": []})
+    empty_stream = [
+        'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n',
+        "data: [DONE]\n\n",
+    ]
+    llm = FakeLLM(
+        chat_responses=[contextualizer_result, "", RuntimeError("retry failed")],
+        stream_sequences=[empty_stream, [RuntimeError("retry failed")]],
+    )
+    svc = _svc(mode="ChatBotRag", llm=llm)
+    kwargs = {
+        "partitions": ["p"],
+        "payload": {"messages": [{"role": "user", "content": "ok"}], "metadata": {}},
+        "prepare_sources": lambda docs, web: [],
+        "model_name": "m",
+    }
+
+    if operation == "chat":
+        response = await svc.chat(**kwargs)
+        answer = response["choices"][0]["message"]["content"]
+        extra = response["extra"]
+    else:
+        events = [
+            json.loads(line[6:])
+            async for line in svc.chat_stream(**kwargs)
+            if line.startswith("data: ") and line.strip() != "data: [DONE]"
+        ]
+        answer = "".join(
+            event["choices"][0].get("delta", {}).get("content", "") for event in events if event.get("choices")
+        )
+        extra = next(event["extra"] for event in reversed(events) if event.get("extra"))
+
+    assert answer == "I'm here if you'd like to continue."
+    assert extra["truncated"] is True
+
+
+@pytest.mark.asyncio
+async def test_partial_retry_stream_failure_keeps_partial_text_and_truncation_flag():
+    contextualizer_result = json.dumps({"intent": "gratitude", "requires_retrieval": False, "query_list": []})
+    llm = FakeLLM(
+        chat_responses=[contextualizer_result],
+        stream_sequences=[
+            [
+                'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n',
+                "data: [DONE]\n\n",
+            ],
+            [
+                'data: {"choices":[{"delta":{"content":"Avec"}}]}\n\n',
+                RuntimeError("retry failed after partial output"),
+            ],
+        ],
+    )
+    svc = _svc(mode="ChatBotRag", llm=llm)
+
+    events = [
+        json.loads(line[6:])
+        async for line in svc.chat_stream(
+            partitions=["p"],
+            payload={"messages": [{"role": "user", "content": "ok"}], "metadata": {}},
+            prepare_sources=lambda docs, web: [],
+            model_name="m",
+        )
+        if line.startswith("data: ") and line.strip() != "data: [DONE]"
+    ]
+    answer = "".join(
+        event["choices"][0].get("delta", {}).get("content", "") for event in events if event.get("choices")
+    )
+    extra = next(event["extra"] for event in reversed(events) if event.get("extra"))
+
+    assert answer == "Avec"
+    assert extra["truncated"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("close_early", [False, True])
+async def test_empty_response_retry_closes_streams_before_retry_and_on_disconnect(close_early):
+    close_order = []
+    retry_opened_after = []
+
+    class TrackedStream:
+        def __init__(self, name, lines):
+            self.name = name
+            self.lines = list(lines)
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            if not self.lines:
+                raise StopAsyncIteration
+            return self.lines.pop(0)
+
+        async def aclose(self):
+            close_order.append(self.name)
+
+    initial_stream = TrackedStream(
+        "initial",
+        [
+            'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n',
+            "data: [DONE]\n\n",
+        ],
+    )
+
+    def retry_stream_factory():
+        retry_opened_after.append(list(close_order))
+        return TrackedStream(
+            "retry",
+            [
+                'data: {"choices":[{"delta":{"content":"Answer"}}]}\n\n',
+                'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n',
+                "data: [DONE]\n\n",
+            ],
+        )
+
+    response_stream = qs._retry_empty_response_stream(
+        initial_stream,
+        retry_stream_factory,
+        fallback_text="Please try again.",
+        fallback_extra={},
+        model_name="m",
+    )
+    if close_early:
+        await anext(response_stream)
+        await response_stream.aclose()
+    else:
+        _ = [line async for line in response_stream]
+
+    assert retry_opened_after == [["initial"]]
+    assert close_order == ["initial", "retry"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["chat", "chat_stream"])
+async def test_empty_length_completion_uses_fallback_without_retry(operation):
+    contextualizer_result = json.dumps({"intent": "other", "requires_retrieval": True, "query_list": []})
+    length_stream = [
+        'data: {"choices":[{"delta":{},"finish_reason":"length"}]}\n\n',
+        "data: [DONE]\n\n",
+    ]
+    llm = FakeLLM(
+        chat_responses=[contextualizer_result, {"content": "", "finish_reason": "length"}, "unexpected retry"],
+        stream_sequences=[length_stream, ['data: {"choices":[{"delta":{"content":"unexpected retry"}}]}\n\n']],
+    )
+    svc = _svc(mode="ChatBotRag", llm=llm)
+    kwargs = {
+        "partitions": ["p"],
+        "payload": {"messages": [{"role": "user", "content": "How does this work?"}], "metadata": {}},
+        "prepare_sources": lambda docs, web: [],
+        "model_name": "m",
+    }
+
+    if operation == "chat":
+        response = await svc.chat(**kwargs)
+        answer = response["choices"][0]["message"]["content"]
+        extra = response["extra"]
+        assert len(llm.chat_calls) == 2
+    else:
+        events = [
+            json.loads(line[6:])
+            async for line in svc.chat_stream(**kwargs)
+            if line.startswith("data: ") and line.strip() != "data: [DONE]"
+        ]
+        answer = "".join(
+            event["choices"][0].get("delta", {}).get("content", "") for event in events if event.get("choices")
+        )
+        extra = next(event["extra"] for event in reversed(events) if event.get("extra"))
+        assert len(llm.stream_calls) == 1
+
+    assert answer == "I couldn't produce a response. Please try again."
+    assert extra["truncated"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["chat", "chat_stream"])
+@pytest.mark.parametrize(
+    ("finish_reason", "message_fields", "stream_delta"),
+    [
+        ("content_filter", {}, {}),
+        ("function_call", {"function_call": {"name": "lookup"}}, {"function_call": {"name": "lookup"}}),
+    ],
+)
+async def test_empty_filtered_or_function_call_response_is_preserved(
+    operation, finish_reason, message_fields, stream_delta
+):
+    contextualizer_result = json.dumps({"intent": "other", "requires_retrieval": True, "query_list": []})
+    filtered_stream = []
+    if stream_delta:
+        filtered_stream.append(f'data: {{"choices":[{{"delta":{json.dumps(stream_delta)}}}]}}\n\n')
+    filtered_stream.extend(
+        [
+            f'data: {{"choices":[{{"delta":{{}},"finish_reason":"{finish_reason}"}}]}}\n\n',
+            "data: [DONE]\n\n",
+        ]
+    )
+    llm = FakeLLM(
+        chat_responses=[contextualizer_result, {"content": "", "finish_reason": finish_reason, **message_fields}],
+        stream_sequences=[filtered_stream],
+    )
+    svc = _svc(mode="ChatBotRag", llm=llm)
+    kwargs = {
+        "partitions": ["p"],
+        "payload": {"messages": [{"role": "user", "content": "Explain this."}], "metadata": {}},
+        "prepare_sources": lambda docs, web: [],
+        "model_name": "m",
+    }
+
+    if operation == "chat":
+        response = await svc.chat(**kwargs)
+        choice = response["choices"][0]
+        assert choice["message"]["content"] == ""
+        if message_fields:
+            assert choice["message"]["function_call"] == message_fields["function_call"]
+        assert choice["finish_reason"] == finish_reason
+        assert len(llm.chat_calls) == 2
+    else:
+        events = [
+            json.loads(line[6:])
+            async for line in svc.chat_stream(**kwargs)
+            if line.startswith("data: ") and line.strip() != "data: [DONE]"
+        ]
+        final_choice = events[-1]["choices"][0]
+        assert final_choice["finish_reason"] == finish_reason
+        if stream_delta:
+            assert events[0]["choices"][0]["delta"]["function_call"] == stream_delta["function_call"]
+        else:
+            assert all(not event["choices"][0].get("delta", {}).get("content") for event in events)
+        assert len(llm.stream_calls) == 1
 
 
 @pytest.mark.asyncio
