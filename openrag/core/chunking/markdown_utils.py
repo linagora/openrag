@@ -255,6 +255,170 @@ def _markdown_row(cells: list[str]) -> str:
     return "| " + " | ".join(cells) + " |"
 
 
+def _markdown_table(columns: list[str], cells: list[str]) -> str:
+    """Render one canonical CSV row with its own Markdown header."""
+    return "\n".join(
+        [
+            _markdown_row(columns),
+            _markdown_row(["---"] * len(columns)),
+            _markdown_row(cells),
+        ]
+    )
+
+
+def _identity_column_indexes(columns: list[str]) -> list[int]:
+    """Choose compact, generic row identifiers for a CSV column group.
+
+    Prefer a conventional identifier and then one human-readable label.  The
+    first column is the stable fallback for files without either convention.
+    These values repeat in each group so retrieval can still associate a group
+    with the original row without repeating every wide-table field.
+    """
+    normalized = [re.sub(r"[^a-z0-9]+", "_", column.lower()).strip("_") for column in columns]
+    identifiers = [
+        index
+        for index, name in enumerate(normalized)
+        if name in {"id", "uuid", "identifier", "key"} or name.endswith("_id")
+    ]
+    labels = [
+        index
+        for index, name in enumerate(normalized)
+        if name in {"name", "title", "label", "legal_name", "preferred_name"} or name.endswith("_name")
+    ]
+
+    selected: list[int] = []
+    if identifiers:
+        selected.append(identifiers[0])
+    if labels:
+        selected.append(next((index for index in labels if index not in selected), labels[0]))
+    if not selected and columns:
+        selected.append(0)
+    return selected
+
+
+def _requires_csv_column_groups(
+    columns: list[str],
+    cells: list[str],
+    *,
+    chunk_size: int,
+    length_function: Callable[[str], int],
+) -> bool:
+    """True when width, rather than one large cell, overflowed the row.
+
+    Removing the largest value isolates the width of the remaining schema and
+    scalar values.  A narrow row with one large note keeps the established
+    continuation format; a row whose remaining fields still overflow uses
+    column groups.
+    """
+    if len(columns) < 2:
+        return False
+    largest_index = max(range(len(cells)), key=lambda index: length_function(cells[index]))
+    remaining = [index for index in range(len(columns)) if index != largest_index]
+    return (
+        length_function(_markdown_table([columns[index] for index in remaining], [cells[index] for index in remaining]))
+        > chunk_size
+    )
+
+
+def _chunk_wide_csv_row(
+    *,
+    columns: list[str],
+    cells: list[str],
+    row_number: int,
+    table_element: MDElement,
+    chunk_size: int,
+    length_function: Callable[[str], int],
+) -> list[MDElement]:
+    """Split one wide CSV row into token-bounded vertical column groups.
+
+    Each group keeps stable identifiers and a subset of the original columns.
+    Values are never omitted: identity values repeat, and every other value
+    occurs in exactly one group.  A cell too large for its own group reuses the
+    existing lossless continuation split, now with only that group's columns.
+    """
+    identity_indexes = _identity_column_indexes(columns)
+    payload_indexes = [index for index in range(len(columns)) if index not in identity_indexes]
+    if not payload_indexes:
+        return []
+
+    group_indexes: list[list[int]] = []
+    current_payload: list[int] = []
+    for payload_index in payload_indexes:
+        candidate = [*current_payload, payload_index]
+        candidate_indexes = [*identity_indexes, *candidate]
+        candidate_text = _markdown_table(
+            [columns[index] for index in candidate_indexes],
+            [cells[index] for index in candidate_indexes],
+        )
+        if current_payload and length_function(candidate_text) > chunk_size:
+            group_indexes.append([*identity_indexes, *current_payload])
+            current_payload = [payload_index]
+        else:
+            current_payload = candidate
+    if current_payload:
+        group_indexes.append([*identity_indexes, *current_payload])
+
+    total_groups = len(group_indexes)
+    chunks: list[MDElement] = []
+    for group_number, indexes in enumerate(group_indexes, start=1):
+        group_columns = [columns[index] for index in indexes]
+        group_cells = [cells[index] for index in indexes]
+        group_text = _markdown_table(group_columns, group_cells)
+        metadata = {
+            **(table_element.metadata or {}),
+            "csv_columns": group_columns,
+            "csv_source_columns": columns,
+            "csv_row_start": row_number,
+            "csv_row_end": row_number,
+            "csv_row_number": row_number,
+            "csv_column_group": group_number,
+            "csv_column_groups_total": total_groups,
+        }
+        if length_function(group_text) <= chunk_size:
+            chunks.append(
+                MDElement(
+                    type="table",
+                    content=group_text,
+                    page_number=table_element.page_number,
+                    metadata=metadata,
+                )
+            )
+            continue
+
+        # Greedy grouping leaves an oversize group only when its one payload
+        # cell exceeds the budget alongside the identity columns.
+        payload_in_group = [index for index in indexes if index not in identity_indexes]
+        if len(payload_in_group) != 1:
+            raise ValueError("CSV column group exceeded its token budget")
+        split_index = payload_in_group[0]
+        split_position = indexes.index(split_index)
+        column_name = columns[split_index]
+        label = f"[CSV row {row_number}; {column_name} continuation 999/999]"
+        reserved_cells = list(group_cells)
+        reserved_cells[split_position] = label
+        cell_budget = max(1, chunk_size - length_function(_markdown_table(group_columns, reserved_cells)))
+        parts = _split_to_budget(cells[split_index], cell_budget, length_function)
+        for part_number, part in enumerate(parts, start=1):
+            continuation_cells = list(group_cells)
+            continuation_cells[split_position] = (
+                f"[CSV row {row_number}; {column_name} continuation {part_number}/{len(parts)}] {part}"
+            )
+            chunks.append(
+                MDElement(
+                    type="table",
+                    content=_markdown_table(group_columns, continuation_cells),
+                    page_number=table_element.page_number,
+                    metadata={
+                        **metadata,
+                        "csv_column": column_name,
+                        "csv_part": part_number,
+                        "csv_parts_total": len(parts),
+                    },
+                )
+            )
+    return chunks
+
+
 def _split_to_budget(text: str, budget: int, length_function: Callable[[str], int]) -> list[str]:
     """Without loss divide text at whitespace and then characters if it isnecessary."""
     if not text:
@@ -281,7 +445,7 @@ def _split_to_budget(text: str, budget: int, length_function: Callable[[str], in
                 else:
                     high = middle - 1
             cut = best or 1
-        # Keep the separator at the beginning of the following part.  Stripping
+        # Keep the separator at the beginning of the following part because stripping
         # it would silently change the original CSV cell when all continuation
         # parts are joined again.
         pieces.append(remaining[:cut])
@@ -298,16 +462,20 @@ def _chunk_csv_table(
     chunk_size: int,
     length_function: Callable[[str], int],
 ) -> list[MDElement]:
-    """Pack complete CSV rows and split only an oversized cell when required.
+    """Pack complete CSV rows and split oversized records when required.
 
     Every emitted piece repeats the two Markdown header rows. Normal CSV rows
-    are never split or overlapped. A cell that cannot fit with its row becomes
-    labelled continuation rows which retain the other row values, making each
-    embedding chunk independently readable.
+    are never split or overlapped. A width-driven overflow becomes vertical
+    column groups; a narrow row with one large cell keeps labelled continuation
+    rows.
     """
     lines = table.strip().split("\n")
     if len(lines) <= 2:
-        return [MDElement(type="table", content=table, page_number=table_element.page_number, metadata=table_element.metadata)]
+        return [
+            MDElement(
+                type="table", content=table, page_number=table_element.page_number, metadata=table_element.metadata
+            )
+        ]
 
     header_lines = lines[:2]
     data_rows = lines[2:]
@@ -364,6 +532,24 @@ def _chunk_csv_table(
                     content="\n".join([header_text, row]),
                     page_number=table_element.page_number,
                     metadata={**table_element.metadata, "csv_row_start": row_number, "csv_row_end": row_number},
+                )
+            )
+            continue
+
+        if _requires_csv_column_groups(
+            columns,
+            cells,
+            chunk_size=chunk_size,
+            length_function=length_function,
+        ):
+            chunks.extend(
+                _chunk_wide_csv_row(
+                    columns=columns,
+                    cells=cells,
+                    row_number=row_number,
+                    table_element=table_element,
+                    chunk_size=chunk_size,
+                    length_function=length_function,
                 )
             )
             continue

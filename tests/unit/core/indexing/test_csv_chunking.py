@@ -53,9 +53,7 @@ def test_records_headers_and_metadata_survive_chunking():
     chunks = [chunk for group in groups for chunk in group]
 
     # chunk numbering must not restart for each batch
-    assert [chunk.chunk_index for chunk in chunks] == list(
-        range(len(chunks))
-    )
+    assert [chunk.chunk_index for chunk in chunks] == list(range(len(chunks)))
 
     for batch_index, group in enumerate(groups, start=1):
         for chunk in group:
@@ -68,10 +66,7 @@ def test_records_headers_and_metadata_survive_chunking():
     # all the records must appear + the table chunker may repeat rows
     # intentionally as overlap, so we do not require exactly one occurrence
     for number in range(1, 10):
-        assert any(
-            f"| {number:03d} |" in chunk.text
-            for chunk in chunks
-        )
+        assert any(f"| {number:03d} |" in chunk.text for chunk in chunks)
 
 
 def test_empty_csv_produces_no_chunk_batches():
@@ -86,9 +81,7 @@ def test_empty_csv_produces_no_chunk_batches():
 
 
 def test_later_invalid_record_is_checked_on_demand():
-    document = Document(
-        text="id,note\n1,ok\n2,ok\n3,extra,cell"
-    )
+    document = Document(text="id,note\n1,ok\n2,ok\n3,extra,cell")
 
     with closing(
         iter_csv_chunks(
