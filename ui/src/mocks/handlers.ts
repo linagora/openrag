@@ -510,6 +510,7 @@ export const handlers = [
       chunking_strategies: ["recursive", "sentence", "semantic", "markdown"],
       retrieval_types: ["simple", "multiquery", "hyde"],
       reranker_providers: ["infinity", "openai", "none"],
+      default_top_n: 10,
     }),
   ),
 

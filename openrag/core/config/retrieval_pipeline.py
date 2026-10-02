@@ -22,7 +22,9 @@ class RetrievalPipelineConfig(BaseModel):
     llm: str | None = None  # endpoint name for multiQuery / hyde expansion
 
     top_k: int = Field(default=50, gt=0, le=1000)  # vector candidates fetched
-    top_n: int = Field(default=10, gt=0, le=1000)  # final results after reranking
+    # Final results after reranking, which the answer prompt is sized for.
+    # None follows the deployment's reranker.top_k (RERANKER_TOP_K).
+    top_n: int | None = Field(default=None, gt=0, le=1000)
     enable_reranker: bool = True
     similarity_threshold: float = Field(default=0.6, ge=0.0, le=1.0)
     include_related: bool = True
@@ -39,6 +41,10 @@ class RetrievalPipelineConfig(BaseModel):
     hyde_prompt_name: str | None = None
     multi_query_prompt_name: str | None = None
     query_contextualizer_prompt_name: str | None = None
+
+    def effective_top_n(self, default: int) -> int:
+        """``top_n``, or *default* (the global ``reranker.top_k``) when the preset leaves it unset."""
+        return self.top_n if self.top_n is not None else default
 
 
 __all__ = ["RetrievalPipelineConfig"]

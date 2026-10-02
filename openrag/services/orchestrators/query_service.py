@@ -272,12 +272,9 @@ class QueryService:
             config.rag.chat_history_depth if config.rag.chat_history_depth >= 1 else self._CHAT_HISTORY_DEPTH_DEFAULT
         )
         self._max_contextualized_query_len = config.rag.max_contextualized_query_len
-        # Sized on the assumption that retrieval returns ~reranker.top_k chunks,
-        # but reranker_top_k is never actually applied as a cutoff in
-        # RetrieverPipeline.retrieve_docs() on the no-map-reduce path — retrieval
-        # can return up to retriever.top_k candidates, so this budget (not
-        # reranker.top_k) is what actually determines how many reach the prompt.
-        # Tracked separately: https://github.com/linagora/openrag/issues/851
+        # Fallback budget for requests without a partition config (direct LLM,
+        # web-only, nothing hydrated yet). A partition request sizes its budget
+        # from the retrieval preset's top_n instead: see _resolve_max_context_tokens.
         self._max_context_tokens = config.reranker.top_k * config.chunker.chunk_size
 
         mr = config.map_reduce
@@ -315,6 +312,30 @@ class QueryService:
             if explicit:
                 return max(explicit)
         return self._default_chat_history_depth
+
+    def _resolve_max_context_tokens(self, partition: list[str] | None) -> int:
+        """Token budget for the documents in this request's prompt.
+
+        Sized for ``top_n`` chunks of the partition's chunk size, so the
+        retrieval preset's ``top_n`` (``reranker.top_k`` when the preset leaves
+        it unset) is the number of chunks the LLM sees, give or take chunks
+        longer than the chunk size. Retrieval already cuts each partition to
+        ``top_n``; this budget only has to fit them. A request over several
+        partitions, or ``"all"``, takes the largest budget among them: their
+        fused results can hold up to the *sum* of the partitions' ``top_n``,
+        so only about one partition's worth (in RRF order) reaches the prompt.
+        """
+        configs = self._config.partitions
+        if partition and configs:
+            names = list(configs) if "all" in partition else partition
+            budgets = [
+                cfg.retrieval.effective_top_n(self._config.reranker.top_k) * cfg.indexation.chunking.chunk_size
+                for name in names
+                if (cfg := configs.get(name)) is not None
+            ]
+            if budgets:
+                return max(budgets)
+        return self._max_context_tokens
 
     def _resolve_llm(self, partition: list[str] | None) -> LLM:
         """Effective LLM for this request — query generation and answering.
@@ -717,7 +738,7 @@ class QueryService:
             )
         context, included = format_context(
             [doc.page_content for doc in docs],
-            max_context_tokens=self._max_context_tokens - web_tokens,
+            max_context_tokens=self._resolve_max_context_tokens(partition) - web_tokens,
             length_function=get_num_tokens(),
         )
         docs = [docs[i] for i in included]
@@ -800,7 +821,7 @@ class QueryService:
             retrieved_docs = docs
             context, included = format_context(
                 [doc.page_content for doc in docs],
-                max_context_tokens=self._max_context_tokens,
+                max_context_tokens=self._resolve_max_context_tokens(partition),
                 length_function=get_num_tokens(),
             )
             docs = [docs[i] for i in included]
