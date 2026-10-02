@@ -53,7 +53,7 @@ class CsvParser(DocumentParser):
         if document.source_path is not None:
             raw_stream = Path(document.source_path).open("rb")
             try:
-                encoding = detect_encoding(raw_stream.read(64 * 1024))
+                encoding = detect_encoding(raw_stream.read(64 * 1024), allow_truncated_utf8=True)
                 raw_stream.seek(0)
                 return io.TextIOWrapper(raw_stream, encoding=encoding, errors="replace", newline="")
             except Exception:
