@@ -18,6 +18,7 @@ async def store_stage(
     timeout: float | None = None,
     per_chunk_timeout: float = 0.0,
     vector_field: str | None = None,
+    indexed_at: datetime | None = None,
 ) -> MutableMapping[str, Any]:
     """Upsert ``row["chunks"]`` into the configured vector collection.
 
@@ -49,7 +50,7 @@ async def store_stage(
         # arg below) and the Postgres catalog row (read back from the row in the
         # orchestrator). Keep it a ``datetime``: the catalog write binds it to a
         # ``timestamptz`` column and asyncpg rejects a pre-stringified value.
-        indexed_at = datetime.now(UTC)
+        indexed_at = indexed_at if indexed_at is not None else datetime.now(UTC)
         row["indexed_at"] = indexed_at
 
         row["stored_count"] = await run_with_optional_timeout(

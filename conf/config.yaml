@@ -159,6 +159,8 @@ prompts:
 loader:
   # Env: IMAGE_CAPTIONING, IMAGE_CAPTIONING_URL, SAVE_MARKDOWN, SAVE_UPLOADED_FILES,
   #      CONTENT_DEDUPLICATION_ENABLED
+  csv_batch_size: 10000
+  csv_delimiter: ","
   image_captioning: true
   image_captioning_url: true
   save_markdown: false

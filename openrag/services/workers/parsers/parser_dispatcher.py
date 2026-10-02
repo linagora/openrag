@@ -136,6 +136,11 @@ class ParserDispatcher(DocumentParser):
             )
         return _PdfStrategyParser(self, strategy)
 
+    def resolve(self, document: Document) -> DocumentParser:
+        """Return the concrete parser (does not require parsing the document)."""
+        backend = self._resolve_backend(document.content_type, _suffix(document.filename))
+        return self._get(backend)
+
     # ----- backend resolution -----
 
     def _resolve_backend(self, content_type: DocumentType, ext: str) -> str:
@@ -265,6 +270,11 @@ class _PdfStrategyParser(DocumentParser):
     def supported_types(self) -> list[str]:
         return self._dispatcher.supported_types()
 
+    def resolve(self, document: Document) -> DocumentParser:
+        if document.content_type is DocumentType.PDF:
+            return self._dispatcher._get(self._pdf_backend)
+        return self._dispatcher.resolve(document)
+
     async def parse(self, document: Document) -> ProcessedDocument:
         if document.content_type is DocumentType.PDF:
             return await self._dispatcher._parse_with(self._pdf_backend, document)
@@ -286,6 +296,12 @@ _BUILDERS: dict[str, Any] = {
     "local_whisper": lambda d: d._build_local_whisper(),
     "pdf_client": lambda d: d._build_pdf_client(),
     "audio_client": lambda d: d._build_audio_client(),
+    "csv": lambda d: _create(
+        "core.indexing.parsers.tabular.csv_parser",
+        "csv",
+        batch_size=d._config.loader.csv_batch_size,
+        delimiter=d._config.loader.csv_delimiter,
+    ),
 }
 
 

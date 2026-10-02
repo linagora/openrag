@@ -26,7 +26,7 @@ from core.models.chunk import Chunk
 from core.models.query import Query, SearchQueries
 from core.models.retrieval_result import ScoredChunk
 from core.rerankers.reranker import Reranker
-from core.retrieval.retriever import Retriever
+from core.retrieval.retriever import Retriever, order_csv_continuations
 from core.retrieval.rrf import rrf_reranking
 
 
@@ -148,7 +148,7 @@ class RetrieverPipeline:
         # https://github.com/linagora/openrag/issues/851
         if top_k is not None:
             chunks = chunks[:top_k]
-        return chunks
+        return order_csv_continuations(chunks)
 
     async def get_relevant_docs(
         self,
@@ -171,4 +171,4 @@ class RetrieverPipeline:
         fused = rrf_reranking(ranked_lists, key_fn=_chunk_key, k=self.rrf_k)
         if top_k is not None:
             fused = fused[:top_k]
-        return fused
+        return order_csv_continuations(fused)

@@ -285,6 +285,66 @@ class QueryService:
         self._mr_expansion = mr.expansion_batch_size
         self._mr_max = mr.max_total_documents
 
+    def _answer_context_budget(
+        self,
+        partition: list[str] | None,
+        payload: dict,
+        messages: list[dict],
+        system_template: str,
+        custom_prompt: str | None,
+        current_date: str,
+    ) -> int:
+        """Return the source-token budget that fits the selected chat model.
+
+        Retrieval used to reserve ``reranker.top_k * chunker.chunk_size`` for
+        sources alone.  That can exceed a small local model's context window
+        once the system prompt, chat history, user question, and requested
+        answer are added.  Ollama then truncates the request, which may remove
+        the most relevant source before the model sees it.
+        """
+        models = getattr(self._config, "models", None)
+        llms = getattr(models, "llm", {}) if models is not None else {}
+        endpoint_name = self._agreed_partition_chat_llm(partition)
+        if endpoint_name is None or endpoint_name not in llms:
+            endpoint_name = "default"
+
+        configured_context = (
+            models.llm_context_size(endpoint_name)
+            if models is not None and hasattr(models, "llm_context_size")
+            else None
+        )
+        configured_output = (
+            models.llm_output_tokens(endpoint_name)
+            if models is not None and hasattr(models, "llm_output_tokens")
+            else None
+        )
+        defaults = getattr(self._config, "llm_context", None)
+        context_window = configured_context or getattr(defaults, "max_llm_context_size", None)
+        output_tokens = (
+            payload.get("max_completion_tokens")
+            or payload.get("max_tokens")
+            or configured_output
+            or getattr(defaults, "max_output_tokens", None)
+        )
+
+        # Older tests and deployments without LLM budget configuration retain
+        # the existing retrieval budget.
+        if not isinstance(context_window, int) or not isinstance(output_tokens, int):
+            return self._max_context_tokens
+
+        base_messages = prepend_system_prompt(
+            messages,
+            system_template,
+            context="",
+            current_date=current_date,
+            custom_prompt=custom_prompt,
+        )
+        length_function = get_num_tokens()
+        prompt_tokens = sum(length_function(message.get("content") or "") + 4 for message in base_messages)
+        # Small protocol margin for provider-specific chat framing.
+        available = context_window - output_tokens - prompt_tokens - 32
+        return max(0, min(self._max_context_tokens, available))
+
     def _resolve_chat_history_depth(self, partition: list[str] | None) -> int:
         """Effective chat-history depth for this request.
 
@@ -576,6 +636,10 @@ class QueryService:
     # ------------------------------------------------------------------
 
     async def _prepare_chat(self, partition: list[str] | None, payload: dict, llm: LLM | None = None):
+        # A workspace can narrow retrieval to one partition.  The answer model
+        # was resolved by the public chat method before that narrowing, so its
+        # context budget must use the original request scope as well.
+        answer_partition = partition
         messages = payload["messages"][-self._resolve_chat_history_depth(partition) :]
         custom_prompt, messages = _split_leading_system_prompt(payload["messages"], messages)
         if not messages:
@@ -706,6 +770,20 @@ class QueryService:
         if use_map_reduce and docs:
             docs = await self._map_reduce(" ".join(q.query for q in queries.query_list), docs)
 
+        prompt_type = "spoken_style_answer" if spoken_style else "sys_prompt"
+        tmpl = await self._prompt_service.resolve_prompt(
+            prompt_type, names=[self._generation_prompt_name(prompt_type, partition)]
+        )
+        current_date = datetime.now().strftime("%A, %B %d, %Y, %H:%M:%S")
+        source_budget = self._answer_context_budget(
+            answer_partition,
+            payload,
+            messages,
+            tmpl,
+            custom_prompt,
+            current_date,
+        )
+
         web_formatted, web_source_numbers, web_tokens = "", [], 0
         web_start_index = 1
         if web_results:
@@ -713,11 +791,11 @@ class QueryService:
                 web_results,
                 length_function=get_num_tokens(),
                 start_index=web_start_index,
-                max_tokens=self._web.max_tokens,
+                max_tokens=min(self._web.max_tokens, source_budget),
             )
         context, included = format_context(
             [doc.page_content for doc in docs],
-            max_context_tokens=self._max_context_tokens - web_tokens,
+            max_context_tokens=max(0, source_budget - web_tokens),
             length_function=get_num_tokens(),
         )
         docs = [docs[i] for i in included]
@@ -729,22 +807,18 @@ class QueryService:
                     web_results,
                     length_function=get_num_tokens(),
                     start_index=web_start_index,
-                    max_tokens=self._web.max_tokens,
+                    max_tokens=min(self._web.max_tokens, source_budget),
                 )
             else:
                 context = ""
             context = f"{context}{SOURCE_SEPARATOR}{web_formatted}" if context else web_formatted
             web_results = [web_results[number - web_start_index] for number in web_source_numbers]
 
-        prompt_type = "spoken_style_answer" if spoken_style else "sys_prompt"
-        tmpl = await self._prompt_service.resolve_prompt(
-            prompt_type, names=[self._generation_prompt_name(prompt_type, partition)]
-        )
         new_messages = prepend_system_prompt(
             messages,
             tmpl,
             context=context,
-            current_date=datetime.now().strftime("%A, %B %d, %Y, %H:%M:%S"),
+            current_date=current_date,
             custom_prompt=custom_prompt,
         )
         payload["messages"] = new_messages
