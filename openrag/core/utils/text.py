@@ -44,6 +44,28 @@ def get_num_tokens():
     return _cached_length_function
 
 
+def detect_encoding(raw: bytes, encoding: str | None = None) -> str:
+    """Return a usable encoding for bytes with a UTF-8-first strategy."""
+    if encoding:
+        try:
+            "".encode(encoding)
+        except LookupError:
+            pass
+        else:
+            return encoding
+    try:
+        raw.decode("utf-8")
+    except UnicodeDecodeError:
+        pass
+    else:
+        return "utf-8-sig"
+    try:
+        import chardet
+    except ImportError:
+        return "cp1252"
+    return chardet.detect(raw).get("encoding") or DEFAULT_FALLBACK_ENCODING
+
+
 def decode_bytes(raw: bytes, encoding: str | None = None) -> str:
     """Decode ``raw`` to ``str`` with a UTF-8-first detection strategy.
 
@@ -52,22 +74,7 @@ def decode_bytes(raw: bytes, encoding: str | None = None) -> str:
     catches the common case; chardet handles genuinely non-UTF-8 inputs.
     Falls back to UTF-8 with ``errors="replace"`` so this never raises.
     """
-    if encoding:
-        try:
-            return raw.decode(encoding, errors="replace")
-        except LookupError:
-            # Invalid codec name — fall through to detection.
-            pass
-    try:
-        return raw.decode("utf-8")
-    except UnicodeDecodeError:
-        pass
-    try:
-        import chardet
-    except ImportError:
-        return raw.decode(DEFAULT_FALLBACK_ENCODING, errors="replace")
-    guess = chardet.detect(raw)
-    detected = guess.get("encoding") or DEFAULT_FALLBACK_ENCODING
+    detected = detect_encoding(raw, encoding)
     try:
         return raw.decode(detected, errors="replace")
     except LookupError:

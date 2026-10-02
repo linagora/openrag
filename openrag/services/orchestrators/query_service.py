@@ -320,7 +320,12 @@ class QueryService:
         )
         defaults = getattr(self._config, "llm_context", None)
         context_window = configured_context or getattr(defaults, "max_llm_context_size", None)
-        output_tokens = payload.get("max_tokens") or configured_output or getattr(defaults, "max_output_tokens", None)
+        output_tokens = (
+            payload.get("max_completion_tokens")
+            or payload.get("max_tokens")
+            or configured_output
+            or getattr(defaults, "max_output_tokens", None)
+        )
 
         # Older tests and deployments without LLM budget configuration retain
         # the existing retrieval budget.
@@ -631,6 +636,10 @@ class QueryService:
     # ------------------------------------------------------------------
 
     async def _prepare_chat(self, partition: list[str] | None, payload: dict, llm: LLM | None = None):
+        # A workspace can narrow retrieval to one partition.  The answer model
+        # was resolved by the public chat method before that narrowing, so its
+        # context budget must use the original request scope as well.
+        answer_partition = partition
         messages = payload["messages"][-self._resolve_chat_history_depth(partition) :]
         custom_prompt, messages = _split_leading_system_prompt(payload["messages"], messages)
         if not messages:
@@ -767,7 +776,7 @@ class QueryService:
         )
         current_date = datetime.now().strftime("%A, %B %d, %Y, %H:%M:%S")
         source_budget = self._answer_context_budget(
-            partition,
+            answer_partition,
             payload,
             messages,
             tmpl,
@@ -782,7 +791,7 @@ class QueryService:
                 web_results,
                 length_function=get_num_tokens(),
                 start_index=web_start_index,
-                max_tokens=self._web.max_tokens,
+                max_tokens=min(self._web.max_tokens, source_budget),
             )
         context, included = format_context(
             [doc.page_content for doc in docs],
@@ -798,7 +807,7 @@ class QueryService:
                     web_results,
                     length_function=get_num_tokens(),
                     start_index=web_start_index,
-                    max_tokens=self._web.max_tokens,
+                    max_tokens=min(self._web.max_tokens, source_budget),
                 )
             else:
                 context = ""

@@ -42,10 +42,15 @@ def _dict_to_chunk(row: dict[str, Any]) -> Chunk:
         "partition",
         "page",
         "chunk_type",
+        "$meta",
         *RETRIEVAL_SCORE_KEYS,
     }
+    dynamic_metadata = row.get("$meta")
+    dynamic_metadata = dynamic_metadata if isinstance(dynamic_metadata, dict) else {}
     metadata = {
-        k: v for k, v in row.items() if k not in skip and not is_vector_field_key(k) and not is_internal_metadata_key(k)
+        k: v
+        for k, v in {**dynamic_metadata, **row}.items()
+        if k not in skip and not is_vector_field_key(k) and not is_internal_metadata_key(k)
     }
     return Chunk(
         id=chunk_id,

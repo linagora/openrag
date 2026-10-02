@@ -93,6 +93,20 @@ def test_dict_to_chunk_metadata_excludes_reserved_keys():
     assert "extra_key" in c.metadata
 
 
+def test_dict_to_chunk_includes_milvus_dynamic_metadata():
+    c = _dict_to_chunk(
+        {
+            "id": "csv-2",
+            "text": "continuation",
+            "partition": "p1",
+            "file_id": "f1",
+            "$meta": {"csv_row_number": 30, "csv_part": 2, "csv_parts_total": 3},
+        }
+    )
+
+    assert c.metadata == {"csv_row_number": 30, "csv_part": 2, "csv_parts_total": 3}
+
+
 # ---------------------------------------------------------------------------
 # search()
 # ---------------------------------------------------------------------------

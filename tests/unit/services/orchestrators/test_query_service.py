@@ -714,6 +714,65 @@ async def test_chat_reserves_room_for_prompt_and_answer_in_small_model_context(m
     assert result.docs[0].metadata["_id"] == "c0"
 
 
+def test_answer_context_budget_prefers_max_completion_tokens(monkeypatch):
+    monkeypatch.setattr(qs, "get_num_tokens", lambda: lambda text: len(text.split()))
+    svc = _svc()
+    svc._config.llm_context = SimpleNamespace(max_llm_context_size=4096, max_output_tokens=1024)
+    svc._config.models = SimpleNamespace(
+        llm={"default": object()},
+        llm_context_size=lambda _name: 4096,
+        llm_output_tokens=lambda _name: 1024,
+    )
+
+    default_budget = svc._answer_context_budget(
+        None, {}, [{"role": "user", "content": "question"}], "{context}", None, "today"
+    )
+    requested_budget = svc._answer_context_budget(
+        None,
+        {"max_completion_tokens": 3_000},
+        [{"role": "user", "content": "question"}],
+        "{context}",
+        None,
+        "today",
+    )
+
+    assert requested_budget < default_budget
+
+
+@pytest.mark.asyncio
+async def test_workspace_narrowing_does_not_change_answer_budget_partition(monkeypatch):
+    monkeypatch.setattr(qs, "get_num_tokens", lambda: lambda text: len(text.split()))
+    svc = _svc(workspace=FakeWorkspace(scope=WorkspaceScope(workspace_id="w", partition="p1", file_ids=["file-1"])))
+    seen: list[list[str] | None] = []
+
+    def budget(partition, *_args):
+        seen.append(partition)
+        return 512
+
+    monkeypatch.setattr(svc, "_answer_context_budget", budget)
+    await svc._prepare_chat(
+        ["p1", "p2"],
+        {"messages": [{"role": "user", "content": "Find this record."}], "metadata": {"workspace": "w"}},
+    )
+
+    assert seen == [["p1", "p2"]]
+
+
+@pytest.mark.asyncio
+async def test_web_context_respects_the_remaining_source_budget(monkeypatch):
+    monkeypatch.setattr(qs, "get_num_tokens", lambda: lambda text: len(text.split()))
+    web_result = SimpleNamespace(url="https://example.test", title="Evidence", content="fact", snippet="")
+    svc = _svc(web=FakeWeb(results=[web_result]))
+    svc._max_context_tokens = 0
+
+    result = await svc._prepare_chat(
+        None,
+        {"messages": [{"role": "user", "content": "Find evidence."}], "metadata": {"websearch": True}},
+    )
+
+    assert result.web_results == []
+
+
 @pytest.mark.asyncio
 async def test_chat_stream_all_retrieved_sources_survives_context_budget_truncation():
     chunks = [

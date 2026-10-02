@@ -77,6 +77,19 @@ async def test_05_reading_file_preserves_original(tmp_path):
     assert path.read_bytes() == original
 
 
+@pytest.mark.parametrize("encoding", ["cp1252", "latin-1"])
+async def test_csv_decodes_non_utf8_sources(encoding, tmp_path):
+    text = "id,name\n1,André\n2,Zoë"
+    path = tmp_path / f"people-{encoding}.csv"
+    path.write_bytes(text.encode(encoding))
+
+    from_path = await CsvParser().parse(Document(source_path=str(path)))
+    from_bytes = await CsvParser().parse(Document(raw_bytes=text.encode(encoding)))
+
+    assert from_path.text_blocks[0].text == from_bytes.text_blocks[0].text
+    assert "André" in from_path.text_blocks[0].text
+
+
 async def test_06_empty_file():
     result = await CsvParser().parse(Document(raw_bytes=b""))
     assert result.text_blocks == []
