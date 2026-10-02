@@ -33,7 +33,7 @@ from typing import TYPE_CHECKING, Any
 from core.models.preset import resolve_partition_chat_llm
 from core.models.retrieval_trace import TraceRemovalReason
 from core.prompts import load_template_by_key
-from core.retrieval.pipeline import RetrieverPipeline
+from core.retrieval.pipeline import RetrieverPipeline, _rerank_chunks
 from core.retrieval.retriever import (
     HyDeRetriever,
     MultiQueryRetriever,
@@ -49,7 +49,7 @@ from core.retrieval.trace import (
     merge_child_traces,
     merge_query_traces,
 )
-from core.utils.exceptions import PartitionNotFoundError
+from core.utils.exceptions import PartitionNotFoundError, ValidationError
 from core.utils.logging import get_logger
 
 if TYPE_CHECKING:
@@ -919,6 +919,37 @@ class RetrievalService:
             return [(partitions, self._searcher_factory(embedder))]
         return [(names, self._searcher_factory(embedder)) for embedder, names in groups.values()]
 
+    def _single_partition_retrieval_config(self, partitions: list[str]):
+        """The retrieval preset of a search scoped to exactly one configured partition, else ``None``."""
+        if len(partitions) != 1:
+            return None
+        partition_cfg = self._partition_configs().get(partitions[0])
+        return partition_cfg.retrieval if partition_cfg is not None else None
+
+    def _search_reranker(self, partitions: list[str]) -> Reranker:
+        """Reranker for an explicit ``search(rerank=True)``.
+
+        A single-partition search uses that partition's reranker preset, same
+        resolution as the chat pipeline. A search spanning several partitions is
+        reranked as one list, so it uses the default reranker: scores from
+        different models are not comparable. The preset's ``enable_reranker``
+        is not consulted — the caller asked for reranking explicitly.
+        """
+        pipeline_cfg = self._single_partition_retrieval_config(partitions)
+        reranker = self._resolve_reranker(pipeline_cfg.reranker if pipeline_cfg else None, ",".join(partitions))
+        if reranker is None:
+            raise ValidationError(
+                "Reranking was requested but no reranker is configured on this deployment.",
+                status_code=400,
+                code="RERANKER_UNAVAILABLE",
+            )
+        return reranker
+
+    def _search_rerank_candidates(self, partitions: list[str]) -> int:
+        """Default number of vector candidates handed to the reranker by ``search``."""
+        pipeline_cfg = self._single_partition_retrieval_config(partitions)
+        return pipeline_cfg.top_k if pipeline_cfg else self._config.retriever.top_k
+
     # ------------------------------------------------------------------
     # Raw semantic search (powers routers/search.py — was indexer.asearch)
     # ------------------------------------------------------------------
@@ -936,25 +967,38 @@ class RetrievalService:
         include_ancestors: bool = False,
         related_limit: int = 20,
         max_ancestor_depth: int | None = None,
+        rerank: bool = False,
+        rerank_candidates: int | None = None,
         trace: RetrievalTraceBuilder | None = None,
     ) -> list[Chunk]:
-        """One similarity search per embedder, then optional related/ancestor expansion.
+        """One similarity search per embedder, then optional reranking and related/ancestor expansion.
 
-        Faithful port of ``indexer.asearch`` + the legacy
-        ``_expand_with_related_chunks`` (no query generation / reranking —
+        Without ``rerank`` this is a faithful port of ``indexer.asearch`` + the
+        legacy ``_expand_with_related_chunks`` (no query generation / reranking —
         those belong to QueryService). Partitions on different embedders are
         searched separately, each with its own model's query embedding; their
         hits are fused with RRF and cut to ``top_k`` before the surrounding
         chunks are added.
+
+        With ``rerank`` each search fetches ``rerank_candidates`` chunks instead
+        of ``top_k``, the reranker reorders them, and only the best ``top_k``
+        are kept (as ``ScoredChunk``s carrying ``rerank_score``). Surrounding
+        chunks are not fetched on that path, so the reranker scores exactly the
+        candidates asked for and ``top_k`` is an exact cap. Related and ancestor
+        chunks are still appended after the cut, unscored.
         """
         await self.refresh_partition_configs()
         parts = [partitions] if isinstance(partitions, str) else list(partitions)
+        reranker = self._search_reranker(parts) if rerank else None
+        candidates = top_k
+        if reranker is not None:
+            candidates = max(top_k, rerank_candidates or self._search_rerank_candidates(parts))
         if trace is not None:
             trace.record_stage("original_query", status="complete", candidates=[])
         groups = self._search_groups(parts)
         search_kwargs = {
             "query": text,
-            "top_k": top_k,
+            "top_k": candidates,
             "filter": filter,
             "filter_params": filter_params,
             "similarity_threshold": similarity_threshold,
@@ -963,7 +1007,7 @@ class RetrievalService:
         if len(groups) == 1:
             trace_kwargs = {"trace": trace} if trace is not None else {}
             chunks = await searcher.search(
-                partition=groups[0][0], with_surrounding_chunks=True, **search_kwargs, **trace_kwargs
+                partition=groups[0][0], with_surrounding_chunks=reranker is None, **search_kwargs, **trace_kwargs
             )
         else:
             group_traces = (
@@ -1006,16 +1050,16 @@ class RetrievalService:
                         except Exception:
                             pass
             if trace is None:
-                hits = self.fuse(group_hits, top_k=top_k)
+                hits = self.fuse(group_hits, top_k=candidates)
             else:
                 fused_hits = self.fuse(group_hits)
-                hits = fused_hits[:top_k]
+                hits = fused_hits[:candidates]
                 selected_ids = {_chunk_key(chunk) for chunk in hits}
-                candidates = candidates_from_chunks(
+                trace_candidates = candidates_from_chunks(
                     fused_hits,
                     limit=trace.candidate_capacity_for_stage("partition_fused"),
                 )
-                candidates = [
+                trace_candidates = [
                     candidate
                     if candidate.id in selected_ids
                     else candidate.model_copy(
@@ -1026,30 +1070,19 @@ class RetrievalService:
                             )
                         }
                     )
-                    for candidate in candidates
+                    for candidate in trace_candidates
                 ]
                 trace.record_stage(
                     "partition_fused",
                     status="complete",
-                    candidates=candidates,
+                    candidates=trace_candidates,
                     candidate_count=len(fused_hits),
                 )
-            # Neighbouring chunks are read by section id, whatever the embedder.
-            # They are context only: a failed lookup must not discard the hits
-            # the gather above already kept.
-            try:
-                surrounding = await searcher.get_surrounding_chunks(
-                    chunks=hits, allowed_file_ids=file_id_restriction(filter_params)
-                )
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                logger.bind(partitions=parts).warning(
-                    f"Retrieval degraded: surrounding chunks skipped — {type(exc).__name__}: {exc}"
-                )
-                surrounding = []
-            seen = {c.id for c in hits}
-            chunks = hits + [c for c in surrounding if c.id not in seen]
+            chunks = hits
+            if reranker is None:
+                chunks = await self._with_surrounding_chunks(searcher, hits, parts, filter_params)
+        if reranker is not None:
+            chunks = await self._rerank_search_hits(reranker, text, chunks, top_k, trace)
         if include_related or include_ancestors:
             chunks = await _expand_with_related_chunks(
                 searcher=searcher,
@@ -1071,6 +1104,74 @@ class RetrievalService:
             except Exception as error:
                 trace.record_error("final", error)
         return chunks
+
+    async def _rerank_search_hits(
+        self,
+        reranker: Reranker,
+        text: str,
+        hits: list[Chunk],
+        top_k: int,
+        trace: RetrievalTraceBuilder | None,
+    ) -> list[Chunk]:
+        """The best ``top_k`` of ``hits`` by the reranker, as ``ScoredChunk``s.
+
+        With a trace, ``pre_rerank`` holds the candidates as fetched and
+        ``post_rerank`` the reranked list, the ones past ``top_k`` marked
+        ``reranker_top_n`` — the same shape ``partition_fused`` gives the
+        cross-embedder cut.
+        """
+        if trace is not None:
+            trace.record_stage(
+                "pre_rerank",
+                status="complete",
+                candidates=trace.project_chunks("pre_rerank", hits),
+                candidate_count=len(hits),
+            )
+        reranked = await _rerank_chunks(reranker, text, hits)
+        kept = reranked[:top_k]
+        if trace is not None:
+            kept_ids = {_chunk_key(chunk) for chunk in kept}
+            trace_candidates = [
+                candidate
+                if candidate.id in kept_ids
+                else candidate.model_copy(
+                    update={
+                        "removal_reason": TraceRemovalReason(
+                            code="reranker_top_n",
+                            explanation="Candidate fell outside the reranked top-k.",
+                        )
+                    }
+                )
+                for candidate in trace.project_chunks("post_rerank", reranked)
+            ]
+            trace.record_stage(
+                "post_rerank",
+                status="complete",
+                candidates=trace_candidates,
+                candidate_count=len(reranked),
+            )
+        return kept
+
+    async def _with_surrounding_chunks(
+        self, searcher: RetrievalSearcher, hits: list[Chunk], partitions: list[str], filter_params: dict | None
+    ) -> list[Chunk]:
+        """``hits`` followed by their neighbouring chunks, deduplicated by id."""
+        # Neighbouring chunks are read by section id, whatever the embedder.
+        # They are context only: a failed lookup must not discard the hits
+        # the search already kept.
+        try:
+            surrounding = await searcher.get_surrounding_chunks(
+                chunks=hits, allowed_file_ids=file_id_restriction(filter_params)
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.bind(partitions=partitions).warning(
+                f"Retrieval degraded: surrounding chunks skipped — {type(exc).__name__}: {exc}"
+            )
+            surrounding = []
+        seen = {c.id for c in hits}
+        return hits + [c for c in surrounding if c.id not in seen]
 
     # ------------------------------------------------------------------
     # Pipeline retrieval (powers QueryService — 8C.2)
