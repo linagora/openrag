@@ -316,8 +316,7 @@ def _scrub_unquoted_named_credential(match: re.Match[str]) -> str:
 def _looks_like_bare_scheme_credential(value: str) -> bool:
     candidate = value.strip()
     return _looks_like_credential(candidate) or (
-        any(character.isalpha() for character in candidate)
-        and any(character.isdigit() for character in candidate)
+        any(character.isalpha() for character in candidate) and any(character.isdigit() for character in candidate)
     )
 
 
