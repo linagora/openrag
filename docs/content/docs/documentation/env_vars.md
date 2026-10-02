@@ -818,6 +818,15 @@ Deployment-level knobs; most deployments never need to touch these — the compo
 | `OPENRAG_BANNER` | `bool` | `true` | Set to `false` to suppress the ASCII startup banner. Its colors also auto-disable under the standard `NO_COLOR` / `TERM=dumb` conventions. |
 | `UVICORN_RELOAD` | `bool` | `false` | Development only — starts uvicorn with `--reload` (auto-restart on code changes). Also forces a single worker. Never enable in production. |
 
+#### TLS proxy overlay (opt-in)
+
+Read only by the opt-in proxy compose file (`infra/compose/proxy.docker-compose.yaml`). Relative paths resolve against `infra/compose/`:
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `PROXY_DATA_DIR` | `str` | `../../nginx_data` | Host directory for Nginx Proxy Manager's state (config and `database.sqlite`). |
+| `PROXY_LETSENCRYPT_DIR` | `str` | `../../letsencrypt` | Host directory for the Let's Encrypt certificates NPM issues. |
+
 #### Monitoring profile (opt-in)
 
 Read only by the opt-in monitoring compose file (`infra/compose/monitoring.docker-compose.yaml`):
