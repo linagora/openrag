@@ -232,6 +232,39 @@ async def test_expansion_fetches_and_orders_csv_continuations():
 
 
 @pytest.mark.asyncio
+async def test_expansion_fetches_and_orders_csv_column_groups():
+    s = FakeSearcher()
+    s.csv_row_result = [
+        Chunk(
+            id="group-3",
+            text="third group",
+            document_id="file-1",
+            partition="p1",
+            metadata={"csv_row_number": 40, "csv_column_group": 3, "csv_column_groups_total": 3},
+        ),
+        Chunk(
+            id="group-1",
+            text="first group",
+            document_id="file-1",
+            partition="p1",
+            metadata={"csv_row_number": 40, "csv_column_group": 1, "csv_column_groups_total": 3},
+        ),
+        Chunk(
+            id="group-2",
+            text="second group",
+            document_id="file-1",
+            partition="p1",
+            metadata={"csv_row_number": 40, "csv_column_group": 2, "csv_column_groups_total": 3},
+        ),
+    ]
+
+    out = await SingleRetriever(searcher=s).expand_search_results([s.csv_row_result[0]])
+
+    assert [chunk.id for chunk in out] == ["group-1", "group-2", "group-3"]
+    assert s.csv_row_calls == [{"partition": "p1", "file_id": "file-1", "row_number": 40, "allowed_file_ids": None}]
+
+
+@pytest.mark.asyncio
 async def test_expansion_swallows_per_call_errors():
     class BoomSearcher(FakeSearcher):
         async def get_related_chunks(self, **kwargs):

@@ -237,8 +237,8 @@ async def _expand_with_related_chunks(
     """
     if not results:
         return results
-    has_csv_continuation = any(_csv_continuation_ref(chunk) is not None for chunk in results)
-    if not include_related and not include_ancestors and not has_csv_continuation:
+    has_csv_row_siblings = any(_csv_row_sibling_ref(chunk) is not None for chunk in results)
+    if not include_related and not include_ancestors and not has_csv_row_siblings:
         return results
 
     allowed_file_ids = file_id_restriction(filter_params)
@@ -256,7 +256,7 @@ async def _expand_with_related_chunks(
                 relationship_ids.add((c.partition, rel_id))
         if include_ancestors and c.partition and c.document_id:
             file_infos.add((c.partition, c.document_id))
-        csv_ref = _csv_continuation_ref(c)
+        csv_ref = _csv_row_sibling_ref(c)
         if csv_ref is not None:
             csv_rows.add((c.partition, c.document_id, csv_ref))
 
@@ -316,45 +316,77 @@ async def _expand_with_related_chunks(
                 seen_ids.add(chunk.id)
             expanded.append(chunk)
 
-    return order_csv_continuations(expanded)
+    return order_csv_row_siblings(expanded)
 
 
-def _csv_continuation_ref(chunk: Chunk) -> int | None:
-    """Return a logical CSV-row number only for a multi-part continuation."""
+def _csv_row_sibling_ref(chunk: Chunk) -> int | None:
+    """Return a logical CSV-row number when the row has sibling chunks.
+
+    A row can be represented by several labelled cell continuations or by
+    several vertical column groups. Both shapes need one retrieval lookup so
+    an answer sees every value from the logical CSV record.
+    """
     metadata = chunk.metadata
     try:
-        if int(metadata.get("csv_parts_total", 0)) < 2:
-            return None
-        int(metadata["csv_part"])
-        return int(metadata["csv_row_number"])
+        row_number = int(metadata["csv_row_number"])
     except (KeyError, TypeError, ValueError):
         return None
+    for number_key, total_key in (
+        ("csv_part", "csv_parts_total"),
+        ("csv_column_group", "csv_column_groups_total"),
+    ):
+        try:
+            if int(metadata.get(total_key, 0)) >= 2 and int(metadata[number_key]) >= 1:
+                return row_number
+        except (KeyError, TypeError, ValueError):
+            continue
+    return None
 
 
-def order_csv_continuations(chunks: list[Chunk]) -> list[Chunk]:
-    """Keep all retrieved parts of a CSV row together in continuation order.
+def order_csv_row_siblings(chunks: list[Chunk]) -> list[Chunk]:
+    """Keep all retrieved pieces of a CSV row together in their source order.
 
     Retrieval and reranking rank chunks independently. A question that needs
-    the last value of a long cell must instead receive the complete logical
-    row, with part 1 before part 2 and so on.
+    a value from a split cell or a distant column group must instead receive
+    the complete logical row. Column groups come first, then cell parts within
+    each group.
     """
     groups: dict[tuple[str, str, int], list[Chunk]] = {}
     for chunk in chunks:
-        row_number = _csv_continuation_ref(chunk)
+        row_number = _csv_row_sibling_ref(chunk)
         if row_number is not None and chunk.partition and chunk.document_id:
             groups.setdefault((chunk.partition, chunk.document_id, row_number), []).append(chunk)
 
     ordered: list[Chunk] = []
     emitted: set[tuple[str, str, int]] = set()
     for chunk in chunks:
-        row_number = _csv_continuation_ref(chunk)
+        row_number = _csv_row_sibling_ref(chunk)
         key = (chunk.partition, chunk.document_id, row_number) if row_number is not None else None
         if key is None:
             ordered.append(chunk)
         elif key not in emitted:
-            ordered.extend(sorted(groups[key], key=lambda item: (int(item.metadata["csv_part"]), item.id)))
+            ordered.extend(sorted(groups[key], key=_csv_sibling_sort_key))
             emitted.add(key)
     return ordered
+
+
+def _csv_sibling_sort_key(chunk: Chunk) -> tuple[int, int, str]:
+    """Sort column groups, then continuations within each group."""
+    metadata = chunk.metadata
+    try:
+        column_group = int(metadata.get("csv_column_group", 1))
+    except (TypeError, ValueError):
+        column_group = 1
+    try:
+        cell_part = int(metadata.get("csv_part", 1))
+    except (TypeError, ValueError):
+        cell_part = 1
+    return column_group, cell_part, chunk.id
+
+
+def order_csv_continuations(chunks: list[Chunk]) -> list[Chunk]:
+    """Backward-compatible name for ordering all CSV row siblings."""
+    return order_csv_row_siblings(chunks)
 
 
 # ---------------------------------------------------------------------------
