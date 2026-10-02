@@ -18,7 +18,7 @@ from core.config.retrieval_pipeline import RetrievalPipelineConfig
 from core.models.chunk import Chunk
 from core.models.preset import PartitionConfig
 from core.models.query import Query, SearchQueries
-from core.utils.exceptions import PartitionNotFoundError
+from core.utils.exceptions import PartitionNotFoundError, ValidationError
 from services.orchestrators.retrieval_service import RetrievalService
 
 
@@ -309,6 +309,134 @@ async def test_search_across_embedders_keeps_hits_when_surrounding_lookup_fails(
     out = await svc.search(text="q", partitions=["p1", "p2"], top_k=5, similarity_threshold=0.5)
 
     assert [c.id for c in out] == ["b1"]
+
+
+class ReversingReranker:
+    """Ranks the last candidate first, scoring by rank."""
+
+    def __init__(self):
+        self.calls: list[dict] = []
+
+    async def rerank(self, *, query, documents, top_k):
+        self.calls.append({"query": query, "documents": documents, "top_k": top_k})
+        order = list(reversed(range(len(documents))))
+        return [(idx, 1.0 - rank / 10) for rank, idx in enumerate(order)]
+
+
+@pytest.mark.asyncio
+async def test_search_rerank_fetches_candidates_reorders_and_cuts_to_top_k():
+    s = FakeSearcher()
+    s.search_result = [_chunk("1", "one"), _chunk("2", "two"), _chunk("3", "three")]
+    reranker = ReversingReranker()
+    svc = RetrievalService(searcher=s, reranker=reranker, llm=None, config=_config(reranker_enabled=True))
+
+    out = await svc.search(
+        text="hello", partitions="p1", top_k=2, similarity_threshold=0.5, rerank=True, rerank_candidates=30
+    )
+
+    assert [c.id for c in out] == ["3", "2"]
+    assert [c.rerank_score for c in out] == [1.0, 0.9]
+    assert reranker.calls == [{"query": "hello", "documents": ["one", "two", "three"], "top_k": None}]
+    call = s.search_calls[0]
+    assert call["top_k"] == 30
+    # Only the requested candidates reach the reranker, not their neighbours.
+    assert call["with_surrounding_chunks"] is False
+
+
+@pytest.mark.asyncio
+async def test_search_rerank_candidates_default_to_retriever_top_k_and_never_below_top_k():
+    s = FakeSearcher()
+    svc = RetrievalService(searcher=s, reranker=ReversingReranker(), llm=None, config=_config(reranker_enabled=True))
+
+    await svc.search(text="q", partitions=["p1", "p2"], top_k=2, similarity_threshold=0.5, rerank=True)
+    await svc.search(text="q", partitions=["p1"], top_k=40, similarity_threshold=0.5, rerank=True, rerank_candidates=10)
+
+    assert [call["top_k"] for call in s.search_calls] == [6, 40]
+
+
+@pytest.mark.asyncio
+async def test_search_rerank_uses_single_partition_preset():
+    s = FakeSearcher()
+    s.search_result = [_chunk("1")]
+    reranker_calls: list[str] = []
+    cfg = _config()
+    cfg.partitions = {
+        "tenant-a": _partition(
+            # enable_reranker only governs the chat pipeline: an explicit
+            # rerank=true on search still reranks.
+            retrieval=RetrievalPipelineConfig(top_k=25, enable_reranker=False, reranker="fast-ranker")
+        ),
+        "tenant-b": _partition(name="tenant-b"),
+    }
+    svc = RetrievalService(
+        searcher=s,
+        reranker=None,
+        llm=None,
+        config=cfg,
+        reranker_factory=lambda name: reranker_calls.append(name) or ReversingReranker(),
+    )
+
+    await svc.search(text="q", partitions=["tenant-a"], top_k=5, similarity_threshold=0.5, rerank=True)
+    await svc.search(text="q", partitions=["tenant-a", "tenant-b"], top_k=5, similarity_threshold=0.5, rerank=True)
+
+    # One partition: its preset. Several: one list, so the default reranker.
+    assert reranker_calls == ["fast-ranker", "default"]
+    assert [call["top_k"] for call in s.search_calls] == [25, 6]
+
+
+@pytest.mark.asyncio
+async def test_search_rerank_keeps_expansion_after_the_cut():
+    s = FakeSearcher()
+    s.search_result = [
+        Chunk(id="1", text="t", partition="p", metadata={"_id": "1", "relationship_id": "r1"}),
+        Chunk(id="2", text="t", partition="p", metadata={"_id": "2", "relationship_id": "r1"}),
+    ]
+    s.related_result = [_chunk("rel")]
+    svc = RetrievalService(searcher=s, reranker=ReversingReranker(), llm=None, config=_config(reranker_enabled=True))
+
+    out = await svc.search(
+        text="q", partitions=["p"], top_k=1, similarity_threshold=0.5, rerank=True, include_related=True
+    )
+
+    assert [c.id for c in out] == ["2", "rel"]
+    assert not hasattr(out[1], "rerank_score")
+
+
+@pytest.mark.asyncio
+async def test_search_rerank_without_reranker_is_rejected_before_searching():
+    s = FakeSearcher()
+    with pytest.raises(ValidationError) as exc:
+        await _svc(s).search(text="q", partitions=["p"], top_k=5, similarity_threshold=0.5, rerank=True)
+
+    assert exc.value.status_code == 400
+    assert exc.value.code == "RERANKER_UNAVAILABLE"
+    assert s.search_calls == []
+
+
+@pytest.mark.asyncio
+async def test_search_rerank_across_embedders_reranks_the_fused_candidates():
+    svc, _, searchers = _embedder_svc(
+        {"p1": "embed-a", "p2": "embed-b"}, {"embed-a": "vector_embed_a", "embed-b": "vector_embed_b"}
+    )
+    reranker = ReversingReranker()
+    svc._reranker_factory = lambda name: reranker
+    searchers["embed-a"] = FakeSearcher()
+    searchers["embed-a"].search_result = [_chunk("a1"), _chunk("a2")]
+    searchers["embed-b"] = FakeSearcher()
+    searchers["embed-b"].search_result = [_chunk("b1"), _chunk("b2")]
+
+    out = await svc.search(
+        text="q", partitions=["p1", "p2"], top_k=2, similarity_threshold=0.5, rerank=True, rerank_candidates=3
+    )
+
+    for name in ("embed-a", "embed-b"):
+        (call,) = searchers[name].search_calls
+        assert call["top_k"] == 3
+        assert call["with_surrounding_chunks"] is False
+    # The fused list is cut to the candidates, reranked, then cut to top_k.
+    assert len(reranker.calls[0]["documents"]) == 3
+    assert [c.id for c in out] == ["a2", "b1"]
+    assert searchers["embed-a"].surrounding_calls == []
 
 
 # --------------------------------------------------------------------------- #

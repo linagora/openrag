@@ -245,3 +245,53 @@ def test_search_one_partition_invalid_workspace_404s():
     assert resp.status_code == 404
     assert resp.json()["detail"] == "Workspace not found"
     assert retrieval.calls == []
+
+
+# --------------------------------------------------------------------------- #
+# Reranking
+# --------------------------------------------------------------------------- #
+
+
+def _rerank_client(retrieval):
+    from api.dependencies.auth import require_partition_viewer
+    from api.routers.user.extract import router as extract_router
+
+    app = FastAPI()
+    register_error_handlers(app)
+    app.include_router(search_router, prefix="/search")
+    app.include_router(extract_router, prefix="/extract")
+    app.dependency_overrides[require_partition_viewer] = lambda: None
+    app.dependency_overrides[get_retrieval_service] = lambda: retrieval
+    app.dependency_overrides[get_workspace_service] = lambda: object()
+    return TestClient(app)
+
+
+def test_search_forwards_rerank_params_and_defaults_to_no_rerank():
+    retrieval = _CapturingRetrieval()
+    client = _rerank_client(retrieval)
+
+    client.get("/search/partition/mine", params={"text": "q"})
+    client.get("/search/partition/mine", params={"text": "q", "rerank": "true", "rerank_candidates": 40})
+
+    assert (retrieval.calls[0]["rerank"], retrieval.calls[0]["rerank_candidates"]) == (False, None)
+    assert (retrieval.calls[1]["rerank"], retrieval.calls[1]["rerank_candidates"]) == (True, 40)
+
+
+def test_search_returns_rerank_score_beside_metadata():
+    from core.models.chunk import Chunk
+    from core.models.retrieval_result import ScoredChunk
+
+    class _Reranked:
+        async def search(self, **_kwargs):
+            return [
+                ScoredChunk(id="1", text="scored", metadata={"_id": "1"}, rerank_score=0.42),
+                Chunk(id="2", text="expanded", metadata={"_id": "2"}),
+            ]
+
+    resp = _rerank_client(_Reranked()).get("/search/partition/mine", params={"text": "q", "rerank": "true"})
+
+    assert resp.status_code == 200
+    scored, expanded = resp.json()["documents"]
+    assert scored["rerank_score"] == 0.42
+    assert "rerank_score" not in scored["metadata"]
+    assert "rerank_score" not in expanded
