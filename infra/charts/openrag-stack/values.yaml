@@ -73,7 +73,7 @@ monitoring:
   # configured under `kubePrometheusStack:` below. Off by default: next to a
   # Prometheus Operator the cluster already runs, a second one fights it over
   # the same CRDs and objects.
-  # When on, it also turns on the dashboard ConfigMaps and the API
+  # When on, it also turns on the dashboard ConfigMaps, the alert rules and the API
   # ServiceMonitor, which then sends env.secrets.METRICS_TOKEN as its bearer
   # (required, like the Compose overlay). Helm installs the operator's CRDs on
   # the first install only: to turn this on for an existing release, apply
@@ -101,6 +101,68 @@ monitoring:
     # Helm does not create it, and installs into a namespace it does not own
     # need the rights to write there.
     namespace: ""
+  # Alert rules, as a PrometheusRule. They come from rules/openrag-alerts.yaml.tpl,
+  # the template the Compose stack's copy is generated from
+  # (scripts/gen_alert_rules.py), so both deployments alert on one definition.
+  prometheusRule:
+    # Needs the monitoring.coreos.com CRDs (kube-prometheus-stack or a
+    # standalone Prometheus Operator). Off by default: creating the CRD object
+    # without the operator present fails the install. monitoring.bundled turns
+    # it on as well.
+    enabled: false
+    # Labels the operator's ruleSelector matches on, e.g.
+    # release: kube-prometheus-stack. An unmatched PrometheusRule is created
+    # and never loaded, which is indistinguishable from having no alerts.
+    labels: {}
+    # Labels stamped onto every alert, to match the Alertmanager routing of the
+    # stack receiving them. A rule's own labels win on conflict.
+    # e.g. team: platform / service: openrag
+    commonLabels: {}
+    # Override the runbook_url base baked into the rules. Empty links the
+    # runbooks at this chart's release (…/blob/v<appVersion>/docs/deployment/
+    # runbooks) from appVersion 2.3.0, the first release that ships them, and
+    # at develop before that; set it for an air-gapped or mirrored copy.
+    runbookBaseUrl: ""
+    # Alert thresholds. Empty keeps what the rules ship with; set one to retune
+    # without cutting a chart release. Every threshold here was chosen against
+    # synthetic traffic, not yours — expect to move them in the first weeks.
+    # `for` durations are the other half of each decision; see below.
+    thresholds:
+      # 720 — no parse completed for this long, with work queued = stalled.
+      # Whole seconds only (5400, not 1h30m): a duration literal compared with
+      # time() needs Prometheus 2.54 or newer.
+      # Must exceed the longest NORMAL parse on this deployment: the rule sees
+      # completions only, so one legitimately long parse (a large scanned PDF on
+      # a single-GPU Marker worker; Marker's timeout is 3600s) pages while it
+      # runs. Single-GPU Marker deployments: set it above the expected longest
+      # parse.
+      ingestIdleSeconds: ""
+      ingestFailureRatio: ""   # 0.25 — share of terminal documents that failed
+      ingestVolumeFloor: ""    # 5 — terminal documents in 15m before judging the ratio
+      backlogDepth: ""         # 50 — queue depth below which growth is not worth alerting on
+      inferenceErrorRatio: ""  # 0.5 — share of a provider's calls erroring or timing out
+      inferenceVolumeFloor: "" # 5 — calls to a provider in 10m before judging its ratio
+    # How long a condition must hold before the alert fires, keyed by alert
+    # name. Shortening one trades false positives for detection speed; each
+    # default was measured against the failure shape it has to tolerate, so
+    # read the rule's comment before changing it.
+    #   OpenRagIngestStalled: 2m      OpenRagIngestFailureRate: 5m
+    #   OpenRagBacklogGrowing: 25m    OpenRagCatalogDriftDetected: 5m
+    #   OpenRagInferenceProviderDown: 5m
+    #   OpenRagCircuitBreakerOpen: 5m OpenRagTargetDown: 5m
+    for: {}
+    # Regex OpenRagTargetDown matches the `job` label on, default
+    # `.*openrag.*|ray` (the API, the chart's Ray PodMonitor, and Compose's
+    # `openrag-ray` job, named `ray` up to 2.2.x). The datastore exporters (a
+    # job whose own name, after any `<namespace>/`, is `*-postgresql*` or
+    # `*-milvus*`) are always excluded,
+    # whatever this is set to: they are not OpenRAG's targets.
+    # The label is assigned by whoever configures the scrape — the Operator
+    # derives it from the Service name, Compose sets job_name: "openrag" — so a
+    # platform that relabels `job` breaks the match. Set this to whatever `job`
+    # the scrape actually produces. Getting it wrong is silent: the alert simply
+    # never fires, and never firing is indistinguishable from healthy.
+    jobMatcher: ""
 
 # === Bundled monitoring stack (kube-prometheus-stack) ===
 # Sub-chart values, used only with monitoring.bundled=true. The chart is
@@ -274,6 +336,13 @@ kuberay:
 
 ray:
   enabled: false
+  # The API attaches to a Ray cluster outside this release (RAY_ADDRESS). The
+  # chart detects that from env.config.RAY_ADDRESS or env.secrets.RAY_ADDRESS;
+  # set this when RAY_ADDRESS comes from env.existingSecret or an external
+  # secrets provider, which the chart cannot read. The openrag pod then starts
+  # no Ray, so the chart renders no embedded-Ray metrics port or PodMonitor
+  # (they would be a target that is always down). Ignored with enabled=true.
+  externalCluster: false
   # 0.0.0.0 would expose the unauthenticated Ray dashboard on every pod
   # interface (ShadowRay / CVE-2023-48022); loopback-only is safe because the
   # dashboard is still reachable through ray.ingress / openrag.rayDashboard.ingress.
@@ -304,7 +373,7 @@ ray:
     registry: "ghcr.io"
     repository: "linagora/openrag-ray"
     # Pin to a release tag (ideally a digest) for reproducible deploys.
-    tag: "v2.2.1"
+    tag: "v2.3.0"
   resources:
     head:
       requests:
@@ -334,11 +403,18 @@ ray:
     tls: []
     path: /
     pathType: Prefix
-  # Every Ray node, head and workers, exports unauthenticated metrics on 8090
-  # (ray_tasks, ray_actors, ray_resources, ray_node_*).
+  # Every Ray node exports unauthenticated metrics on 8090 (ray_tasks,
+  # ray_actors, ray_resources, ray_node_*): the RayCluster's head and workers
+  # with ray.enabled=true, the Ray embedded in the openrag pod otherwise.
   metrics:
-    # Prometheus Operator discovery. Needs the monitoring.coreos.com CRDs, and
-    # ray.enabled=true: the embedded Ray has no fixed port to scrape.
+    # Prometheus Operator discovery; needs the monitoring.coreos.com CRDs.
+    # Scrapes Ray's metrics endpoint: the RayCluster's nodes with
+    # ray.enabled=true, the embedded Ray in the openrag pod otherwise (both on
+    # port 8090). The ingestion series and the worker-side inference series
+    # exist there only, so without it their alerts cannot fire.
+    # monitoring.bundled turns it on. With ray.enabled=false and RAY_ADDRESS
+    # set (an external cluster) the openrag pod exports no Ray metrics: scrape
+    # that cluster where it runs.
     podMonitor:
       enabled: false
       # Labels the operator's podMonitorSelector matches, e.g.
@@ -412,6 +488,12 @@ postgresProvisioning:
 # === Milvus ===
 milvus:
   enabled: true
+  # The 5.0.27 milvus-helm chart defaults to v3.0.1, which cannot compact
+  # segments written by OpenRAG's version 3 migration. Remove this pin once a
+  # milvus-helm release defaults to v3.0.2 or later.
+  image:
+    all:
+      tag: v3.0.2
   # Kept in sync with the root fullnameOverride ("openrag") by hand — see the
   # note on it above. Without this, the milvus sub-chart names its own proxy
   # Service from the real Release.Name instead, which won't match VDB_HOST.
@@ -433,12 +515,11 @@ milvus:
     replicas: 3
     # MinIO no longer publishes images (removed from Docker Hub, then quay.io);
     # linagoraai/minio is an unmodified mirror of the same upstream release,
-    # matching the compose stacks. The tag is pinned here, not left to the
-    # Milvus chart's default, so a chart bump can't select a tag the mirror
-    # doesn't have.
+    # matching the compose stacks. The digest keeps deployments on the
+    # verified image even if the mirror's tag changes.
     image:
       repository: linagoraai/minio
-      tag: RELEASE.2024-12-18T13-15-44Z
+      tag: RELEASE.2024-12-18T13-15-44Z@sha256:34c8e2f52a5984492555427fee07254c80036bdb7079bb91679232abd7a4fa20
     persistence:
       enabled: true
       size: 20Gi
@@ -498,13 +579,29 @@ vllm:
       capabilities:
         drop:
           - ALL
-    # NOTE: the per-model `tag: "latest"` entries below are operator-supplied
-    # serving images — pin each to a specific vLLM release tag (or digest)
-    # before production use for reproducible deploys (see vlm, pinned to v0.11.2).
+    # The tags below are pinned, so a pod restart never changes the engine
+    # version; vllm-stack's default, Always, only re-checks the registry.
+    imagePullPolicy: "IfNotPresent"
+    # Run as uid 10001, the engines get HOME=/, which they cannot write:
+    # FlashInfer's JIT workspace (under HOME) and vLLM's cache (under
+    # XDG_CACHE_HOME, else HOME/.cache) fail at engine start with
+    # "Permission denied: '/.cache'". HF_HOME is vllm-stack's (/tmp, or /data
+    # with pvcStorage).
+    env:
+      - name: HOME
+        value: "/tmp"
+      - name: XDG_CACHE_HOME
+        value: "/tmp/.cache"
+    # The vllm/vllm-openai engines share one pinned version (vllmTag); vlm stays
+    # on the version it was validated with. v0.30.0 rejects `--task`: a pooling
+    # model takes `runner: "pooling"` and `--convert embed` instead.
+    # `-cu129` is v0.30.0's CUDA 12.9 build, the CUDA vlm's v0.11.2 runs on. The
+    # plain `v0.30.0` tag is the CUDA 13 build: it needs an NVIDIA driver >= 580,
+    # and on an older one the embedder fails CUDA init while vlm starts fine.
     modelSpec:
       - name: "embedder"
         repository: "vllm/vllm-openai"
-        tag: "latest"
+        tag: &vllmTag "v0.30.0-cu129"
         modelURL: *embedderModel
         replicaCount: 1
         requestCPU: 4
@@ -516,13 +613,38 @@ vllm:
           secretName: *vllmHfTokenSecretName
           secretKey: HF_TOKEN
         vllmConfig:
-          gpuMemoryUtilization: 0.3
-          extraArgs: ["--trust-remote-code", "--task", "embed"]
+          # Measured on an L4 (24 GB) with vLLM v0.17.1 under an indexing-shaped
+          # load (batch 32, 16 in flight, inputs up to 2046 tokens):
+          #   0.3, default max-model-len (32768) -> 7.0 GiB reserved
+          #   0.1, maxModelLen 2048              -> 2.6 GiB peak, same throughput
+          # On v0.30.0, 0.1 / 2048 takes 2.1 GiB and leaves a 0.39 GiB KV cache
+          # (1.8x the longest request, was 3.4x): vLLM now counts CUDA graph
+          # memory inside the fraction.
+          # Weights are 1.1 GiB; the rest is KV cache, sized by maxModelLen.
+          # vLLM pre-allocates this fraction whatever the model's size, and the
+          # card is shared with Marker and the reranker, so keep it tight.
+          # Keep maxModelLen >= every OpenRag embedder max_model_len: the
+          # MAX_MODEL_LEN env (default 2047) *and* any per-endpoint
+          # extra.max_model_len set in the admin UI. vLLM rejects a request whose
+          # truncate_prompt_tokens (max_model_len - 1) exceeds it; OpenRag then
+          # embeds and sizes new chunks for this value instead.
+          # Re-measure when the embedder model or the GPU changes.
+          gpuMemoryUtilization: 0.1
+          maxModelLen: 2048
+          runner: "pooling"
+          # `--convert embed` adapts a *ForCausalLM checkpoint such as
+          # Qwen3-Embedding to embeddings, and changes nothing for a model that
+          # is already one. This is the command started on v0.30.0 (L4, #1087).
+          extraArgs: ["--trust-remote-code", "--convert", "embed"]
         nodeSelectorTerms: []
 
       - name: "whisper"
         repository: "ghcr.io/linagora/vllm-whisper"
-        tag: "latest"
+        # No workflow builds this image yet (#1031), so it has no version tag;
+        # the digest pins the build `latest` pointed to on 25 Sep 2026 (built
+        # 2 Dec 2025). The shared imagePullPolicy (IfNotPresent) would otherwise
+        # keep whatever build a node happened to cache.
+        tag: "latest@sha256:d0c25f4aea64814171df29f51923be4e1e7fab529d141cb440f33a838e72e364"
         modelURL: *whisperModel
         replicaCount: 1
         requestCPU: 4
@@ -540,7 +662,7 @@ vllm:
 
       - name: "llm"
         repository: "vllm/vllm-openai"
-        tag: "latest"
+        tag: *vllmTag
         modelURL: *llmModel
         replicaCount: 0
         requestCPU: 8
@@ -605,7 +727,7 @@ reranker:
   servicePort: &rerankerPort 7997
   image:
     repository: "michaelf34/infinity"
-    tag: "0.0.75"
+    tag: "0.0.77"
   nodeSelector: {}
   model:
     id: Alibaba-NLP/gte-multilingual-reranker-base
@@ -651,7 +773,7 @@ adminUi:
     repository: "linagoraai/openrag-admin-ui"
     # Pin to a release tag (ideally a digest) for reproducible deploys. Must be a
     # build from infra/docker/ui.Dockerfile (nginx-unprivileged, listens :8080).
-    tag: "v2.2.1"
+    tag: "v2.3.0"
     pullPolicy: IfNotPresent
   replicaCount: 1
   service:
@@ -708,7 +830,7 @@ openrag:
     registry: ""
     repository: "linagoraai/openrag"
     # Pin to a release tag (ideally a digest) for reproducible deploys.
-    tag: "v2.2.1"
+    tag: "v2.3.0"
     pullPolicy: IfNotPresent
   service:
     type: ClusterIP
@@ -898,8 +1020,16 @@ env:
     # TRANSCRIBER_BASE_URL below must stay on .Release.Name. Under ArgoCD, set
     # spec.source.helm.releaseName to match fullnameOverride ("openrag") so
     # these resolve too.
-    BASE_URL: 'http://{{ .Release.Name }}-llm-engine-service/v1/'
-    MODEL: '{{ .Values.vllm.llmModelName }}'
+    #
+    # Empty while the bundled llm engine is at replicaCount 0: a URL would
+    # point at a Service with no pods, and the first boot would seed it as the
+    # default LLM endpoint. Empty, nothing is seeded, and the LLM is set in the
+    # admin UI. When you scale llm up, set:
+    #   BASE_URL: 'http://{{ .Release.Name }}-llm-engine-service/v1/'
+    #   MODEL: '{{ .Values.vllm.llmModelName }}'
+    # Any engine scaled to 0 needs its *_BASE_URL emptied or pointed elsewhere.
+    BASE_URL: ""
+    MODEL: ""
     LLM_SEMAPHORE: "50"
 
     # VLM
@@ -909,6 +1039,8 @@ env:
 
     # App
     APP_PORT: "8080"
+    # Optional white-label name for casual introductions; empty is neutral.
+    ASSISTANT_NAME: ""
     # Requires ray.enabled=true (a separate RayCluster with its own "serve" port
     # 80 exposed on {{ fullname }}-raycluster-head-svc — see templates/openrag.yaml
     # Ingress). With the default ray.enabled=false, the app is expected to run
@@ -986,6 +1118,13 @@ env:
     # false to let endpoints edited from the admin UI stay as the source of
     # truth. See docs/content/docs/documentation/env_vars.md#model-endpoint-registry.
     MODEL_ENDPOINT_SYNC_ON_BOOT: "false"
+    # When true, /ready (the readiness probe) fails while the default embedder is
+    # unavailable. Every replica shares it, so its outage or restart then takes
+    # all of them out of the Service, admin API and UI included. Before enabling,
+    # check that /ready reports checks.embedder: ok (the probe needs the model
+    # name verbatim in GET /models). See
+    # docs/content/docs/documentation/env_vars.md#model-endpoint-registry.
+    READINESS_REQUIRE_EMBEDDER: "false"
 
     # Prompts: templates ship inside the package (openrag/prompts/templates);
     # set PROMPTS_DIR only to override with a custom template directory.

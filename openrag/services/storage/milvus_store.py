@@ -95,6 +95,11 @@ _DENSE_VECTOR_TYPES = frozenset(
 #: Milvus caps a collection at ten vector fields, ``sparse`` included.
 MAX_VECTOR_FIELDS = 10
 
+#: Largest section ID. Section IDs live in the dynamic JSON field, where a
+#: Milvus partial upsert rewrites every number as a float64, and a float64
+#: rounds integers above 2**53 — so do JavaScript clients.
+MAX_SECTION_ID = 2**53 - 1
+
 
 #: Dense ANN search params for the HNSW/COSINE index on each dense field. ``ef``
 #: governs the search-time candidate pool size and trades recall for latency.
@@ -175,6 +180,20 @@ def _vector_field_count(description: dict[str, Any]) -> int:
     return sum(1 for field in description.get("fields", []) if field.get("type") in dense_or_sparse)
 
 
+def _scalar_output_fields(description: dict[str, Any]) -> list[str]:
+    """Every field of a described collection but the vectors, as ``output_fields``.
+
+    The static fields are named one by one, and the dynamic ones come back
+    through ``$meta``. Only fields on the schema are named: Milvus reads an
+    unknown name as a dynamic key, and then returns no other dynamic key.
+    """
+    dense_or_sparse = _DENSE_VECTOR_TYPES | {DataType.SPARSE_FLOAT_VECTOR}
+    fields = [field["name"] for field in description.get("fields", []) if field.get("type") not in dense_or_sparse]
+    if description.get("enable_dynamic_field"):
+        fields.append("$meta")
+    return fields
+
+
 class MilvusVectorStore(VectorStore):
     """Milvus 3.0 implementation of :class:`VectorStore`.
 
@@ -217,6 +236,9 @@ class MilvusVectorStore(VectorStore):
         self._vector_field_lock = asyncio.Lock()
         # Dense field names on the live schema, ``None`` until read.
         self._dense_fields_cache: frozenset[str] | None = None
+        # Default projection of `query_chunks_by_filter`, ``None`` until read.
+        # Only dense fields are added or dropped at runtime, so it never goes stale.
+        self._scalar_output_fields: list[str] | None = None
         # Connection healing: PyMilvus 3.0 exposes no documented client-level
         # reconnect knob (no retry/keepalive params on MilvusClient or
         # AsyncMilvusClient). Trust the gRPC
@@ -591,11 +613,19 @@ class MilvusVectorStore(VectorStore):
                 "Run, with OpenRAG stopped: uv run python "
                 "services/persistence/migrations/milvus/migrate.py --dry-run (then without --dry-run)."
             )
-        return (
+        warning = (
             f"Collection `{self._collection_name}` is at schema version {stored_version}, ahead of the "
             f"{expected_version} this build expects. It was migrated by a newer OpenRAG: run that version, "
-            "or downgrade the collection with the migration runner."
+            f"or downgrade the collection with that version's migration runner (--downgrade --target {expected_version})."
         )
+        if expected_version < 2 <= stored_version:
+            # Reverting version 2 swaps its pre-upgrade backup back in: say so
+            # before the operator copies the command, not after the swap.
+            warning += (
+                " That downgrade reverts version 2, which puts the pre-upgrade backup back in place: "
+                "rows indexed since that upgrade leave the live collection."
+            )
+        return warning
 
     def warn_if_migration_pending(self) -> None:
         """Log a warning when the collection is not at the configured version.
@@ -888,15 +918,14 @@ class MilvusVectorStore(VectorStore):
     def _gen_chunk_order_metadata(n: int) -> list[dict[str, int | None]]:
         """Generate prev/section/next IDs for a batch of ``n`` chunks.
 
-        Uses a randomised base so IDs are unique across rapid batches.
-        Preserves the legacy MilvusDB ordering so existing
-        surrounding-chunk hydration keeps working.
+        The batch is one file, and neighbour lookups are scoped to that file,
+        so the IDs only need to be consecutive within it. The random base keeps
+        them unique across a partition too, for readers that predate the file
+        scoping. Every ID stays at or below :data:`MAX_SECTION_ID`.
         """
         if n <= 0:
             return []
-        int64_max = 2**63 - 1
-        random_offset = secrets.randbits(32)
-        base = (time.time_ns() + random_offset) % (int64_max - n)
+        base = secrets.randbelow(MAX_SECTION_ID - n + 1)
         ids = [base + i for i in range(n)]
         return [
             {
@@ -1750,12 +1779,16 @@ class MilvusVectorStore(VectorStore):
     ) -> list[dict[str, Any]]:
         """Return full row data for every chunk matching ``filters``.
 
-        ``output_fields`` defaults to ``["*"]``, which in Milvus 3.0 includes
-        every dense vector field (unlike :meth:`search`, which strips them).
-        Callers that don't want the vectors should pass an explicit scalar
-        projection instead of ``["*"]``.
+        ``output_fields`` defaults to every field but the vectors. Callers that
+        write the rows back need the vectors too and pass ``["*"]``, which in
+        Milvus 3.0 includes every dense vector field (unlike :meth:`search`,
+        which strips them).
         """
         self._resolve_collection(collection)
         expr = self._build_filter_expr(filters)
-        fields = output_fields or ["*"]
-        return await asyncio.to_thread(self._iter_query, expr, fields)
+        if not output_fields:
+            if self._scalar_output_fields is None:
+                description = await asyncio.to_thread(self._client.describe_collection, self._collection_name)
+                self._scalar_output_fields = _scalar_output_fields(description)
+            output_fields = list(self._scalar_output_fields)
+        return await asyncio.to_thread(self._iter_query, expr, output_fields)

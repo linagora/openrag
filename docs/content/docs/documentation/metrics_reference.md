@@ -14,8 +14,8 @@ indicate it.
 
 | Target | Produced by | How to scrape |
 |---|---|---|
-| The API's `/metrics` | The API process | `ServiceMonitor` on the API Service |
-| Ray's metrics agent, on every Ray node | Every Ray actor — indexing workers, and the API itself under `ENABLE_RAY_SERVE=true` | `PodMonitor` on the Ray pods |
+| The API's `/metrics` | The API process | `ServiceMonitor` on the API Service; the `openrag` job on Compose |
+| Ray's metrics agent, on every Ray node | Every Ray actor — indexing workers, and the API itself under `ENABLE_RAY_SERVE=true` | `PodMonitor` on the Ray pods; the `openrag-ray` job on Compose |
 
 Indexing runs in Ray actors, which are separate processes and often separate
 nodes; a `prometheus_client` counter incremented there is written to a registry
@@ -25,16 +25,16 @@ replica the proxy picks, so per-replica counters in the API process are
 unreliable too.
 
 The Helm chart scrapes the Ray target with a `PodMonitor` on port `8090`,
-off by default (`ray.metrics.podMonitor`, which needs `ray.enabled=true`; see
+off by default (`ray.metrics.podMonitor.enabled`, for the RayCluster or the Ray embedded in the `openrag` pod; `monitoring.bundled` turns it on; see
 [Monitoring Ray, Postgres and Milvus](/openrag/documentation/kubernetes/#monitoring-ray-postgres-and-milvus)).
-The compose monitoring overlay's Prometheus has no job for it yet: there, the
-Ray-exported series below exist but are not collected.
+The Compose monitoring overlay scrapes it as the `openrag-ray` job, on the port
+it pins for the embedded Ray with `RAY_METRICS_EXPORT_PORT` (`8091`).
 
 Ray prefixes every metric it exports with `ray_`: on the wire,
 `openrag_ingest_documents_total` is `ray_openrag_ingest_documents_total`. The
-chart's `PodMonitor` renames OpenRAG's series back, so that both targets store
-one name and one query covers the API and the workers. A scrape job written by
-hand needs the same rule:
+chart's `PodMonitor` and the Compose `openrag-ray` job rename OpenRAG's series
+back, so that both targets store one name and one query covers the API and the
+workers. A scrape job written by hand needs the same rule:
 
 ```yaml
 metric_relabel_configs:   # metricRelabelings on a PodMonitor
@@ -94,7 +94,7 @@ Supporting metrics:
 | Metric | Type | Labels | Target | Answers |
 |---|---|---|---|---|
 | `openrag_ingest_queue_wait_seconds` | histogram | — | Ray | Admission-to-processing latency |
-| `openrag_ingest_last_parse_completion_timestamp_seconds` | gauge | `pool` | Ray | Progress watchdog — is a parser pool wedged |
+| `openrag_ingest_last_parse_completion_timestamp_seconds` | gauge | `pool` | Ray | Progress watchdog — is a parser pool wedged. Last completed parse, or the pool's first use in the process |
 | `openrag_ingest_clock_skew_events_total` | counter | — | Ray | Queue-wait measurements that came out negative |
 | `openrag_circuit_breaker_state` | gauge | `name` | both | 0 closed, 1 open, 2 half-open, -1 unknown |
 
@@ -117,7 +117,8 @@ Label values:
 - `outcome` — `success`, `error`, `timeout`, `circuit_open`, `cancelled` (the caller gave
   up: a closed stream, its own deadline, or siblings cancelled after one failed; not a
   provider failure, so keep it out of error ratios), `rejected` (a 4xx the request caused,
-  such as an unknown model or an over-long prompt; 408 and 429 stay `error`)
+  such as an unknown model or an over-long prompt; 408 and 429 stay `error`, and so
+  does 401 except on LLM calls, whose request the caller shapes)
 - `kind` — `prompt`, `completion`
 - `pool` — `marker`, `docling`, `pymupdf`, `pdf_client`, `local_whisper`, `audio_client` for PDF and audio; any other format is labelled by its document type (`text`, `docx`, `eml`, `image`, ...)
 - `name` — `llm`, `embedder`, `vlm`, `reranker`
@@ -156,19 +157,26 @@ and on()
 (time() - max(openrag_ingest_last_parse_completion_timestamp_seconds) > 720)
 ```
 
+The stamp is the last completed parse, or the pool's first use in the worker
+process: a pool that fails from its very first parse would otherwise never
+produce the series, and a stall starting at boot would have nothing to age. A
+worker that restarts more often than the threshold re-seeds each time and so
+never ages past it; for a crash-looping worker, pod restarts are the signal.
+
 A "seconds since" gauge would have to be rewritten continuously to stay
 truthful, and would freeze at its last value exactly when a pool wedges — the
 condition it exists to detect. A timestamp climbs on its own — which is also
 why the age alone is not an alert:
 
-- It is stamped only when a parse succeeds, so an idle system ages exactly like
-  a wedged one. Gate it on queued work.
+- After a pool's first use it is stamped only when a parse succeeds, so an idle
+  system ages exactly like a wedged one. Gate it on queued work.
 - Take `max()` across pools and nodes, not the age per pool: rarely used
   formats go hours without a parse, and a node that simply got no work is not
   stalled while another makes progress.
-- It is absent until some pool has parsed once, and again after every worker
-  restart (Ray drops a dead worker's series after `RAY_WORKER_TIMEOUT_S`), so
-  it cannot fire then. Pair it with an alert on a growing backlog.
+- It is absent until some pool is first used, and again after every worker
+  restart until a pool is used again (Ray drops a dead worker's series after
+  `RAY_WORKER_TIMEOUT_S`), so it cannot fire then. Pair it with an alert on a
+  growing backlog.
 - Set the threshold above your slowest normal parse; large scanned PDFs take
   minutes.
 

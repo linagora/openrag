@@ -51,6 +51,7 @@ from __future__ import annotations
 import time
 from datetime import UTC, datetime
 
+from core.observability._ray_counters import start_counter_at_zero
 from core.observability._reporting import report_once
 from core.observability.metric_specs import (
     INGEST_CLOCK_SKEW_TOTAL,
@@ -58,6 +59,7 @@ from core.observability.metric_specs import (
     INGEST_LAST_PARSE_TIMESTAMP,
     INGEST_QUEUE_WAIT_SECONDS,
     INGEST_STAGE_DURATION_SECONDS,
+    INGEST_STATUS_VALUES,
     MetricSpec,
 )
 from ray.util.metrics import Counter, Gauge, Histogram
@@ -82,6 +84,22 @@ _STAGE_DURATION = _histogram(INGEST_STAGE_DURATION_SECONDS)
 _QUEUE_WAIT = _histogram(INGEST_QUEUE_WAIT_SECONDS)
 _CLOCK_SKEW_TOTAL = _counter(INGEST_CLOCK_SKEW_TOTAL)
 _LAST_PARSE_TIMESTAMP = _gauge(INGEST_LAST_PARSE_TIMESTAMP)
+
+
+def initialize_ingest_counters() -> None:
+    """Start the ingest counters at 0 in the process that will record them.
+
+    Called when the TaskStateManager starts. Without it each status series
+    first appears at 1, which ``increase()`` does not count: the first failure
+    after every restart was missing from the failure ratio
+    ``OpenRagIngestFailureRate`` reads.
+    """
+    try:
+        for status in INGEST_STATUS_VALUES:
+            start_counter_at_zero(_DOCUMENTS_TOTAL, {"status": status})
+        start_counter_at_zero(_CLOCK_SKEW_TOTAL)
+    except Exception as exc:  # noqa: BLE001 - metrics must never stop the actor starting
+        report_once(INGEST_DOCUMENTS_TOTAL.name, exc)
 
 
 def record_document_terminal(status: str) -> None:
@@ -154,7 +172,7 @@ def observe_queue_wait_from(created_at: str | None, *, now: datetime | None = No
         report_once(INGEST_QUEUE_WAIT_SECONDS.name, exc)
 
 
-def record_parse_completion(pool: str, *, at: float | None = None) -> None:
+def record_parse_completion(pool: str, *, at: float | None = None) -> bool:
     """Stamp the time a parse finished, per parser backend.
 
     Exports a *timestamp*, not an age. An age gauge has to be rewritten
@@ -169,11 +187,37 @@ def record_parse_completion(pool: str, *, at: float | None = None) -> None:
         time() - max without(WorkerId, SessionName, NodeAddress, Component, Version) (
             openrag_ingest_last_parse_completion_timestamp_seconds
         ) > 300
+
+    Returns whether the stamp was written; a failure is reported, never raised.
     """
     try:
         _LAST_PARSE_TIMESTAMP.set(float(at if at is not None else time.time()), tags={"pool": pool})
     except Exception as exc:  # noqa: BLE001
         report_once(INGEST_LAST_PARSE_TIMESTAMP.name, exc)
+        return False
+    return True
+
+
+_WATCHDOG_SEEDED: set[str] = set()
+
+
+def seed_parse_watchdog(pool: str) -> None:
+    """Stamp a pool's first use in this process, once.
+
+    ``record_parse_completion`` stamps successes only, so a pool that fails from
+    its very first parse never produces the series, and an alert computing
+    ``time() - max(<stamp>)`` has nothing to evaluate: the stall that starts at
+    boot is the one it cannot see. Seeding at first use gives the stamp a start,
+    and a pool that then completes nothing ages from there like any other.
+
+    Marked seeded only once the stamp is written: a failed write would
+    otherwise use up the one seed, and a pool that also never completes would
+    be left without a series again.
+    """
+    if pool in _WATCHDOG_SEEDED:
+        return
+    if record_parse_completion(pool):
+        _WATCHDOG_SEEDED.add(pool)
 
 
 __all__ = [
@@ -181,4 +225,5 @@ __all__ = [
     "observe_stage_duration",
     "record_document_terminal",
     "record_parse_completion",
+    "seed_parse_watchdog",
 ]

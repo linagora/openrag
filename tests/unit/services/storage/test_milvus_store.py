@@ -32,6 +32,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pymilvus import DataType, MilvusException
 from services.storage.milvus_store import (
+    MAX_SECTION_ID,
     SCHEMA_VERSION_PROPERTY_KEY,
     MilvusVectorStore,
     analyzer_params,
@@ -206,6 +207,36 @@ async def test_metadata_scan_closes_on_error_and_empty_filter_reads_nothing(stor
     with pytest.raises(RuntimeError, match="scan failed"):
         _ = [p async for p in store.iter_chunk_metadata("default", partition="a")]
     iterator.close.assert_called_once()
+
+
+async def test_filter_query_defaults_to_every_field_but_the_vectors(store):
+    """Naming a field the schema lacks would make Milvus drop the dynamic ones,
+    so the default projection is read from the live schema, once."""
+    store._client.describe_collection.return_value = {
+        "fields": [
+            {"name": "_id", "type": DataType.INT64},
+            {"name": "text", "type": DataType.VARCHAR},
+            {"name": "partition", "type": DataType.VARCHAR},
+            {"name": "file_id", "type": DataType.VARCHAR},
+            {"name": "vector_a", "type": DataType.FLOAT_VECTOR},
+            {"name": "created_at", "type": DataType.TIMESTAMPTZ},
+            {"name": "sparse", "type": DataType.SPARSE_FLOAT_VECTOR},
+        ],
+        "enable_dynamic_field": True,
+    }
+    iterator = MagicMock()
+    iterator.next.return_value = []
+    store._client.query_iterator.return_value = iterator
+
+    await store.query_chunks_by_filter("test_collection", {"file_id": "f"})
+    await store.query_chunks_by_filter("test_collection", {"file_id": "g"})
+
+    projections = [c.kwargs["output_fields"] for c in store._client.query_iterator.call_args_list]
+    assert projections == [["_id", "text", "partition", "file_id", "created_at", "$meta"]] * 2
+    store._client.describe_collection.assert_called_once()
+    # Rows written back need their vectors, so an explicit "*" is kept.
+    await store.query_chunks_by_filter("test_collection", {"file_id": "f"}, output_fields=["*"])
+    assert store._client.query_iterator.call_args.kwargs["output_fields"] == ["*"]
 
 
 async def test_close_releases_sync_client_even_if_async_client_fails(store):
@@ -522,22 +553,24 @@ class TestChunkOrderMetadata:
         # Section IDs are monotonically increasing within a batch.
         assert out[0]["section_id"] < out[1]["section_id"] < out[2]["section_id"]
 
-    def test_two_concurrent_calls_have_disjoint_ranges(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        import services.storage.milvus_store as store_mod
-
-        monkeypatch.setattr(store_mod.time, "time_ns", lambda: 123456789)
-
+    def test_two_concurrent_calls_have_disjoint_ranges(self) -> None:
         a = MilvusVectorStore._gen_chunk_order_metadata(200)
         b = MilvusVectorStore._gen_chunk_order_metadata(200)
         ids_a = {row["section_id"] for row in a}
         ids_b = {row["section_id"] for row in b}
         assert ids_a.isdisjoint(ids_b)
 
-    def test_ids_fit_in_int64(self) -> None:
+    @pytest.mark.parametrize("draw", ["lowest", "highest"])
+    def test_ids_stay_exact_as_float64(self, monkeypatch: pytest.MonkeyPatch, draw: str) -> None:
+        """A Milvus partial upsert stores the dynamic field's numbers as float64,
+        which rounds integers above 2**53 until neighbouring chunks share one ID."""
+        import services.storage.milvus_store as store_mod
+
+        monkeypatch.setattr(store_mod.secrets, "randbelow", lambda k: 0 if draw == "lowest" else k - 1)
         rows = MilvusVectorStore._gen_chunk_order_metadata(10_000)
-        int64_max = 2**63 - 1
-        for row in rows:
-            assert 0 <= row["section_id"] < int64_max
+        ids = [row["section_id"] for row in rows]
+        assert 0 <= min(ids) and max(ids) <= MAX_SECTION_ID
+        assert all(int(float(i)) == i for i in ids)
 
 
 # ---------------------------------------------------------------------------
@@ -1120,6 +1153,31 @@ class TestWarnIfMigrationPending:
 
         (warning,) = logs.warnings
         assert "ahead of the 1" in warning
+        assert "that version's migration runner (--downgrade --target 1)" in warning
+
+    def test_a_downgrade_across_version_2_is_announced_before_the_command(
+        self, store: MilvusVectorStore, logs: _LogRecorder
+    ) -> None:
+        # The fixture's build expects version 1; version 2's rollback restores a
+        # point-in-time backup, which the command in the warning would run.
+        _describes(store, "3")
+
+        store.warn_if_migration_pending()
+
+        (warning,) = logs.warnings
+        assert "rows indexed since that upgrade leave the live collection" in warning
+
+    def test_a_downgrade_that_stays_above_version_2_has_no_backup_warning(
+        self, store: MilvusVectorStore, logs: _LogRecorder
+    ) -> None:
+        store._config = store._config.model_copy(update={"schema_version": 2})
+        _describes(store, "3")
+
+        store.warn_if_migration_pending()
+
+        (warning,) = logs.warnings
+        assert "--downgrade --target 2" in warning
+        assert "pre-upgrade backup" not in warning
 
     def test_absent_collection_is_not_a_mismatch(self, store: MilvusVectorStore, logs: _LogRecorder) -> None:
         store._client.has_collection.return_value = False

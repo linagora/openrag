@@ -56,6 +56,15 @@ describe("validatePlaceholders", () => {
     expect(validatePlaceholders("About {topic}", "sys_prompt").unknown).toEqual(["topic"]);
   });
 
+  it("accepts every placeholder the API allows for the query contextualizer", () => {
+    const v = validatePlaceholders(
+      "{current_date}\n{calendar_anchors}\nLanguage: {query_language}",
+      "query_contextualizer",
+    );
+    expect(v.unknown).toEqual([]);
+    expect(v.missing).toEqual([]);
+  });
+
   it("accepts any literal text for verbatim prompt types", () => {
     // chunk_contextualizer is sent to the model as-is and never `.format`-ed,
     // so braces in it are just characters.

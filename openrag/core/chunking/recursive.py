@@ -195,6 +195,9 @@ class BaseChunker(ChunkingStrategy):
                 metadata={k: v for k, v in md_chunks_meta.items() if k not in ("page_content", "chunk_type", "page")},
                 partition=partition,
                 page_number=md_chunks_meta.get("page"),
+                # The embedder-window checks read the stored count instead of
+                # re-tokenising every chunk on the event loop.
+                token_count=self.length_function(md_chunks_meta["page_content"]),
             )
             for i, md_chunks_meta in enumerate(md_chunks)
         ]
