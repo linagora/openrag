@@ -18,6 +18,7 @@ from pathlib import Path
 from core.indexing.parsers.document_parser import DocumentParser
 from core.indexing.parsers.registry import parser_registry
 from core.models.document import Document, ProcessedDocument, TextBlock
+from core.utils.text import decode_bytes, detect_encoding
 
 
 def markdown_row(cells: list[str]) -> str:
@@ -50,21 +51,20 @@ class CsvParser(DocumentParser):
 
     def _open_stream(self, document: Document):
         if document.source_path is not None:
-            return Path(document.source_path).open(
-                "r",
-                encoding="utf-8-sig",
-                newline="",
-            )
+            raw_stream = Path(document.source_path).open("rb")
+            try:
+                encoding = detect_encoding(raw_stream.read(64 * 1024))
+                raw_stream.seek(0)
+                return io.TextIOWrapper(raw_stream, encoding=encoding, errors="replace", newline="")
+            except Exception:
+                raw_stream.close()
+                raise
         if document.text is not None:
             return io.StringIO(
                 document.text.removeprefix("\ufeff"),
                 newline="",
             )
-        return io.TextIOWrapper(
-            io.BytesIO(document.raw_bytes or b""),
-            encoding="utf-8-sig",
-            newline="",
-        )
+        return io.StringIO(decode_bytes(document.raw_bytes or b"").removeprefix("\ufeff"), newline="")
 
     def iter_batches(self, document: Document) -> Iterator[TextBlock]:
         """Yield tables with at most batch_size data rows by repeating their header.

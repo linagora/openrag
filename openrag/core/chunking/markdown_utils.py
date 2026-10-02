@@ -431,7 +431,16 @@ def _split_to_budget(text: str, budget: int, length_function: Callable[[str], in
     while remaining and length_function(remaining) > budget:
         # prefer the largest whitespace boundary rather than one over the token budget
         boundaries = [match.end() for match in re.finditer(r"\s+", remaining)]
-        cut = next((end for end in reversed(boundaries) if length_function(remaining[:end]) <= budget), None)
+        cut = None
+        low, high = 0, len(boundaries) - 1
+        while low <= high:
+            middle = (low + high) // 2
+            boundary = boundaries[middle]
+            if length_function(remaining[:boundary]) <= budget:
+                cut = boundary
+                low = middle + 1
+            else:
+                high = middle - 1
         if cut is None:
             #  single long word or a URL can still exceed the budget
             # so find the largest character prefix that fits without discarding anything.
@@ -542,17 +551,17 @@ def _chunk_csv_table(
             chunk_size=chunk_size,
             length_function=length_function,
         ):
-            chunks.extend(
-                _chunk_wide_csv_row(
-                    columns=columns,
-                    cells=cells,
-                    row_number=row_number,
-                    table_element=table_element,
-                    chunk_size=chunk_size,
-                    length_function=length_function,
-                )
+            grouped_chunks = _chunk_wide_csv_row(
+                columns=columns,
+                cells=cells,
+                row_number=row_number,
+                table_element=table_element,
+                chunk_size=chunk_size,
+                length_function=length_function,
             )
-            continue
+            if grouped_chunks:
+                chunks.extend(grouped_chunks)
+                continue
 
         # split the largest cell (the label keeps its column name and part
         # number visible to the LLM) + unchanged cells retain the whole row identity
