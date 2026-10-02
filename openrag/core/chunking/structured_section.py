@@ -924,6 +924,11 @@ class StructuredSectionChunker(BaseChunker):
         out (a table glued to unrelated prose loses the column headers that make
         it readable) and the heading paths must be compatible.
         """
+        # CSV chunks carry row and continuation identifiers that must describe
+        # exactly one emitted table fragment.  Absorbing two rows would retain
+        # only ``prev.metadata`` and make those identifiers incorrect.
+        if "csv_row_start" in prev.metadata or "csv_row_start" in unit.metadata:
+            return False
         if prev.tokens >= self.min_tokens and unit.tokens >= self.min_tokens:
             return False
         # Never fold a heading-only unit into the chunk before it: the heading
