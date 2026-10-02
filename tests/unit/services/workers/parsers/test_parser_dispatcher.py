@@ -50,6 +50,10 @@ def _config(
         image_captioning=image_captioning,
         openai=openai,
         transcriber=transcriber,
+        # Defaults matching the real config: one worker, no ceiling.
+        pymupdf_pool_size=1,
+        pymupdf_parse_memory_limit_mb=0,
+        pymupdf_max_tasks_per_child=20,
     )
     vlm = SimpleNamespace(
         base_url=vlm_base_url,
