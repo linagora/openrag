@@ -67,3 +67,44 @@ docker compose -f docker-compose.yaml -f logging.docker-compose.yaml up -d
 
 Set `LOKI_URL` (and the optional `LOKI_USERNAME`, `LOKI_PASSWORD`,
 `LOKI_TENANT_ID`) in `.env`. See [Loki logs](/openrag/documentation/loki_logs/).
+
+## Reverse proxy (TLS)
+
+An opt-in overlay adds [Nginx Proxy Manager](https://nginxproxymanager.com/)
+as the TLS front door on ports 80/443:
+
+```bash
+docker compose -f docker-compose.yaml -f proxy.docker-compose.yaml up -d
+```
+
+It also rebinds the API, Chainlit and Admin UI ports to `127.0.0.1`, so the
+only public path to OpenRAG goes through TLS. This needs Docker Compose
+2.24.4 or newer, for the `!override` tag. Use the overlay instead of
+`--profile`: an explicit profile deselects the API's default profile.
+
+NPM keeps its state in `nginx_data/` and its certificates in `letsencrypt/` at
+the repository root. Set `PROXY_DATA_DIR` and `PROXY_LETSENCRYPT_DIR` to move
+them. Its admin UI listens on `127.0.0.1:81` only, so reach it through an SSH
+tunnel (`ssh -L 81:127.0.0.1:81 <host>`). In that UI, create a proxy host for
+your domain that forwards to `openrag:8080`, with a custom location `/app`
+forwarding to `admin-ui:8080`:
+
+| Path   | Forward to      | Serves                                  |
+|--------|-----------------|-----------------------------------------|
+| `/app` | `admin-ui:8080` | Admin UI. Do not strip the `/app` prefix. |
+| `/`    | `openrag:8080`  | API, `/auth`, `/v1` and Chainlit at `/chainlit` |
+
+Send `/` straight to `openrag`, not through `admin-ui`. The Admin UI's own
+catch-all proxy would add a second hop on every API call. With a single hop,
+Chainlit's WebSocket upgrade depends only on the headers NPM sets.
+
+To check the setup, request the Chainlit WebSocket. It must answer
+`101 Switching Protocols`:
+
+```bash
+curl -sS -o /dev/null -D- \
+  -H "Connection: Upgrade" -H "Upgrade: websocket" \
+  -H "Sec-WebSocket-Key: $(head -c16 /dev/urandom | base64)" \
+  -H "Sec-WebSocket-Version: 13" \
+  "https://<domain>/chainlit/ws/socket.io/?EIO=4&transport=websocket" | grep -i '^HTTP'
+```

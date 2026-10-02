@@ -1,0 +1,54 @@
+# Opt-in TLS front door (Nginx Proxy Manager). Layer it on the base stack:
+#
+#   docker compose -f docker-compose.yaml -f proxy.docker-compose.yaml up -d
+#
+# Terminates TLS on 80/443. Route by path in NPM's proxy host for your domain:
+#   /app  -> admin-ui:8080   (React SPA; prefix preserved, NOT stripped)
+#   /     -> openrag:8080    (API, /auth, /v1 and the Chainlit UI at /chainlit)
+#
+# `/` deliberately bypasses admin-ui's own catch-all proxy so Chainlit's
+# WebSocket upgrade goes through a single hop that sets the upgrade headers
+# (NPM does, at server scope). Full walkthrough: docs, "Reverse proxy (TLS)".
+#
+# An overlay rather than a profile: the API service declares `profiles: [""]`,
+# and passing any explicit --profile deselects that default profile — a
+# `--profile proxy` would start the front door with no backend behind it.
+
+services:
+  nginx:
+    image: jc21/nginx-proxy-manager:2.12.3
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      # NPM's own admin UI — loopback only; reach it via an SSH tunnel
+      # (`ssh -L 81:127.0.0.1:81 host`, then http://localhost:81).
+      - "127.0.0.1:81:81"
+    volumes:
+      # NPM's state (config + database.sqlite) and its Let's Encrypt certs.
+      # Relative paths resolve against THIS file's directory (infra/compose/),
+      # so the defaults land at the repo root.
+      - ${PROXY_DATA_DIR:-../../nginx_data}:/data
+      - ${PROXY_LETSENCRYPT_DIR:-../../letsencrypt}:/etc/letsencrypt
+
+  # With TLS terminated here, the app ports must not stay on 0.0.0.0: that
+  # would offer a plaintext path around TLS and the OIDC redirect (and, for
+  # admin-ui, its catch-all reverse proxy to the API). Rebind them to loopback.
+  # `!override` replaces the base list instead of appending to it (Compose
+  # merges `ports` entries, so a plain list would publish both bindings and
+  # collide on the host port); it needs Docker Compose >= 2.24.4.
+  openrag:
+    ports: !override
+      - 127.0.0.1:${APP_PORT:-8080}:${APP_iPORT:-8080}
+      - 127.0.0.1:${RAY_DASHBOARD_PORT:-8265}:8265
+      - 127.0.0.1:${CHAINLIT_PORT:-8090}:${CHAINLIT_PORT:-8090}
+
+  openrag-cpu:
+    ports: !override
+      - 127.0.0.1:${APP_PORT:-8080}:${APP_iPORT:-8080}
+      - 127.0.0.1:${RAY_DASHBOARD_PORT:-8265}:8265
+      - 127.0.0.1:${CHAINLIT_PORT:-8090}:${CHAINLIT_PORT:-8090}
+
+  admin-ui:
+    ports: !override
+      - "127.0.0.1:${ADMIN_UI_PORT:-8081}:8080"
