@@ -2,6 +2,11 @@
 .env
 infra/compose/prometheus/openrag_token
 
+# State of the opt-in TLS proxy overlay (infra/compose/proxy.docker-compose.yaml):
+# NPM's config database and the Let's Encrypt private keys.
+/nginx_data/
+/letsencrypt/
+
 # generated files and folders
 .files/
 .chainlit/
