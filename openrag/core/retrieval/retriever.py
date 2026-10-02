@@ -361,7 +361,11 @@ def order_csv_row_siblings(chunks: list[Chunk]) -> list[Chunk]:
     emitted: set[tuple[str, str, int]] = set()
     for chunk in chunks:
         row_number = _csv_row_sibling_ref(chunk)
-        key = (chunk.partition, chunk.document_id, row_number) if row_number is not None else None
+        key = (
+            (chunk.partition, chunk.document_id, row_number)
+            if row_number is not None and chunk.partition and chunk.document_id
+            else None
+        )
         if key is None:
             ordered.append(chunk)
         elif key not in emitted:

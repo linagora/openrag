@@ -265,6 +265,24 @@ async def test_expansion_fetches_and_orders_csv_column_groups():
 
 
 @pytest.mark.asyncio
+async def test_csv_sibling_expansion_skips_chunks_without_document_id():
+    s = FakeSearcher()
+    initial = [
+        Chunk(
+            id="missing-file",
+            text="continuation",
+            partition="p1",
+            metadata={"csv_row_number": 50, "csv_part": 1, "csv_parts_total": 2},
+        )
+    ]
+
+    out = await SingleRetriever(searcher=s).expand_search_results(initial)
+
+    assert out == initial
+    assert s.csv_row_calls == []
+
+
+@pytest.mark.asyncio
 async def test_expansion_swallows_per_call_errors():
     class BoomSearcher(FakeSearcher):
         async def get_related_chunks(self, **kwargs):

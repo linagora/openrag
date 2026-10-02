@@ -90,6 +90,17 @@ async def test_csv_decodes_non_utf8_sources(encoding, tmp_path):
     assert "André" in from_path.text_blocks[0].text
 
 
+async def test_csv_path_sample_can_end_inside_a_utf8_character(tmp_path):
+    sample_size = 64 * 1024
+    prefix = b"id,note\n1,"
+    path = tmp_path / "boundary.csv"
+    path.write_bytes(prefix + b"x" * (sample_size - len(prefix) - 1) + "é".encode() + b"\n")
+
+    result = await CsvParser().parse(Document(source_path=str(path)))
+
+    assert result.text_blocks[0].text.endswith("é |")
+
+
 async def test_06_empty_file():
     result = await CsvParser().parse(Document(raw_bytes=b""))
     assert result.text_blocks == []

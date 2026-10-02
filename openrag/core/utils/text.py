@@ -44,8 +44,12 @@ def get_num_tokens():
     return _cached_length_function
 
 
-def detect_encoding(raw: bytes, encoding: str | None = None) -> str:
-    """Return a usable encoding for bytes with a UTF-8-first strategy."""
+def detect_encoding(raw: bytes, encoding: str | None = None, *, allow_truncated_utf8: bool = False) -> str:
+    """Return a usable encoding for bytes with a UTF-8-first strategy.
+
+    ``allow_truncated_utf8`` is for a bounded prefix of a stream: a prefix can
+    end between the bytes of an otherwise valid UTF-8 character.
+    """
     if encoding:
         try:
             "".encode(encoding)
@@ -55,8 +59,9 @@ def detect_encoding(raw: bytes, encoding: str | None = None) -> str:
             return encoding
     try:
         raw.decode("utf-8")
-    except UnicodeDecodeError:
-        pass
+    except UnicodeDecodeError as exc:
+        if allow_truncated_utf8 and exc.reason == "unexpected end of data" and exc.end == len(raw):
+            return "utf-8-sig"
     else:
         return "utf-8-sig"
     try:
