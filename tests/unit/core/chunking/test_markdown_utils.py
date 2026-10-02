@@ -9,6 +9,7 @@ from __future__ import annotations
 import pytest
 from core.chunking.markdown_utils import (
     MDElement,
+    _split_to_budget,
     chunk_table,
     get_chunk_page_number,
     parse_markdown_table,
@@ -326,6 +327,48 @@ class TestChunkTable:
             recovered.update(dict(zip(group_columns[2:], group_values[2:], strict=True)))
 
         assert recovered == dict(zip(columns[2:], values[2:], strict=True))
+
+    def test_csv_identity_only_wide_row_falls_back_to_cell_continuations(self):
+        values = [" ".join(["identifier"] * 20), " ".join(["display-name"] * 20)]
+        table = "\n".join(
+            [
+                "| id | name |",
+                "| --- | --- |",
+                f"| {values[0]} | {values[1]} |",
+            ]
+        )
+
+        chunks = chunk_table(
+            MDElement(
+                type="table",
+                content=table,
+                metadata={"csv_columns": ["id", "name"], "csv_row_start": 2},
+            ),
+            chunk_size=20,
+            length_function=lambda text: len(text.split()),
+        )
+
+        assert chunks
+        assert all(chunk.metadata["csv_row_number"] == 2 for chunk in chunks)
+        assert values[1] in chunks[0].content
+        reconstructed = [chunk.content.split("] ", 1)[1].split(" |", 1)[0] for chunk in chunks]
+        assert "".join(reconstructed) == values[0]
+
+
+def test_split_to_budget_uses_logarithmic_whitespace_probes():
+    text = " ".join(f"word{number}" for number in range(2_000))
+    calls = 0
+
+    def counted_length(value: str) -> int:
+        nonlocal calls
+        calls += 1
+        return len(value.split())
+
+    pieces = _split_to_budget(text, budget=1_000, length_function=counted_length)
+
+    assert "".join(pieces) == text
+    assert all(len(piece.split()) <= 1_000 for piece in pieces)
+    assert calls < 100
 
 
 def test_md_element_repr_truncates_content():
