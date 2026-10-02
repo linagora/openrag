@@ -214,8 +214,12 @@ def _dense_fields(desc: dict[str, Any]) -> dict[str, int]:
 
 
 def _literal(value: str) -> str:
-    """A Milvus string literal — JSON escaping is the escaping Milvus parses."""
-    return json.dumps(value)
+    """A Milvus string literal — JSON escaping is the escaping Milvus parses.
+
+    Non-ASCII stays raw UTF-8: Milvus rejects the surrogate-pair escapes
+    ``json.dumps`` emits for astral characters (emoji) by default.
+    """
+    return json.dumps(value, ensure_ascii=False)
 
 
 def _count(client: MilvusClient, collection_name: str, filter_expr: str = "") -> int:
