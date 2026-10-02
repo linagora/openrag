@@ -7,8 +7,8 @@ from unittest.mock import patch
 import pymupdf
 import pytest
 from core.indexing.parsers.pdf.pymupdf import (
-    PyMuPDFParser,
     _MARKDOWN_TEXT_RATIO_THRESHOLD,
+    PyMuPDFParser,
     _extract_markdown,
     _pages_with_fallback,
 )
