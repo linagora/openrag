@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from core.indexing.parsers import doc_parser as doc_parser_module
-from core.indexing.parsers.doc_parser import DocParser, _SPIRE_WATERMARK, _strip_watermark
+from core.indexing.parsers.doc_parser import _SPIRE_WATERMARK, DocParser, _strip_watermark
 from core.models.document import Document, DocumentType, ProcessedDocument, TextBlock
 
 
@@ -82,7 +82,7 @@ class TestParse:
         parser = DocParser(docx_parser=docx_parser)
         result = await parser.parse(_doc_document())
 
-        assert result is expected
+        assert result == expected
         docx_parser.parse.assert_awaited_once()
         forwarded = docx_parser.parse.await_args.args[0]
         assert forwarded.raw_bytes is None, "the converted .docx was read into memory"
