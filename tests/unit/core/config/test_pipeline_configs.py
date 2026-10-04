@@ -111,3 +111,28 @@ def test_default_chunker_is_structured_section():
     # A default that is not registered would fail every partition at chunker
     # build time (create_chunker) rather than at config load.
     assert ChunkerConfig().name in chunking_registry
+
+
+def test_retrieval_pipeline_top_n_semantics():
+    """#1133: RetrievalPipelineConfig.top_n defaults to None so unset top_n can
+    fall back dynamically to RERANKER_TOP_K at query time, while explicit values
+    are validated and preserved."""
+    # Default is None
+    cfg_default = RetrievalPipelineConfig()
+    assert cfg_default.top_n is None
+
+    # Explicit None is accepted
+    cfg_none = RetrievalPipelineConfig(top_n=None)
+    assert cfg_none.top_n is None
+
+    # Explicit positive integer is preserved
+    cfg_explicit = RetrievalPipelineConfig(top_n=25)
+    assert cfg_explicit.top_n == 25
+
+    # Out of range values are rejected
+    with pytest.raises(ValidationError):
+        RetrievalPipelineConfig(top_n=0)
+    with pytest.raises(ValidationError):
+        RetrievalPipelineConfig(top_n=-1)
+    with pytest.raises(ValidationError):
+        RetrievalPipelineConfig(top_n=1001)

@@ -272,11 +272,10 @@ class QueryService:
             config.rag.chat_history_depth if config.rag.chat_history_depth >= 1 else self._CHAT_HISTORY_DEPTH_DEFAULT
         )
         self._max_contextualized_query_len = config.rag.max_contextualized_query_len
-        # Sized on the assumption that retrieval returns ~reranker.top_k chunks,
-        # but reranker_top_k is never actually applied as a cutoff in
-        # RetrieverPipeline.retrieve_docs() on the no-map-reduce path — retrieval
-        # can return up to retriever.top_k candidates, so this budget (not
-        # reranker.top_k) is what actually determines how many reach the prompt.
+        # Global fallback: sized on the assumption that retrieval returns
+        # ~reranker.top_k chunks at the deployment's default chunk_size.
+        # Per-partition requests use _context_budget() instead, which reads
+        # the active preset's top_n and chunk_size at query time (#1133).
         # Tracked separately: https://github.com/linagora/openrag/issues/851
         self._max_context_tokens = config.reranker.top_k * config.chunker.chunk_size
 
@@ -284,6 +283,41 @@ class QueryService:
         self._mr_initial = mr.initial_batch_size
         self._mr_expansion = mr.expansion_batch_size
         self._mr_max = mr.max_total_documents
+
+    def _context_budget(self, partition: list[str] | None) -> int:
+        """Token budget for ``format_context``, resolved per request.
+
+        For a request scoped to exactly one named partition the budget is
+        derived from that partition's active retrieval preset ``top_n``
+        (how many chunks the reranker keeps) multiplied by the partition's
+        indexation preset ``chunk_size`` (the expected size of each chunk).
+        This ensures the LLM receives approximately ``top_n`` chunks even
+        when those values differ from the deployment-wide defaults (#1133).
+
+        Falls back to the global ``_max_context_tokens`` (``reranker.top_k``
+        × ``chunker.chunk_size``) for:
+        * direct/web-only requests (no partition)
+        * cross-partition ``"all"`` sentinel
+        * multi-partition requests (no single owning preset)
+        * a named partition that is not yet in the resolved config dict
+
+        Uses the same single-owning-partition rule as ``_resolve_chat_history_depth``
+        and ``_resolve_llm``.
+        """
+        if partition and "all" not in partition and len(partition) == 1:
+            cfg = self._config.partitions.get(partition[0])
+            if cfg is not None:
+                retrieval = getattr(cfg, "retrieval", None)
+                indexation = getattr(cfg, "indexation", None)
+                chunking = getattr(indexation, "chunking", None) if indexation is not None else None
+                top_n = getattr(retrieval, "top_n", None)
+                if top_n is None:
+                    top_n = self._config.reranker.top_k
+                chunk_size = getattr(chunking, "chunk_size", None)
+                if chunk_size is None:
+                    chunk_size = self._config.chunker.chunk_size
+                return top_n * chunk_size
+        return self._config.reranker.top_k * self._config.chunker.chunk_size
 
     def _resolve_chat_history_depth(self, partition: list[str] | None) -> int:
         """Effective chat-history depth for this request.
@@ -717,7 +751,7 @@ class QueryService:
             )
         context, included = format_context(
             [doc.page_content for doc in docs],
-            max_context_tokens=self._max_context_tokens - web_tokens,
+            max_context_tokens=self._context_budget(partition) - web_tokens,
             length_function=get_num_tokens(),
         )
         docs = [docs[i] for i in included]
@@ -800,7 +834,7 @@ class QueryService:
             retrieved_docs = docs
             context, included = format_context(
                 [doc.page_content for doc in docs],
-                max_context_tokens=self._max_context_tokens,
+                max_context_tokens=self._context_budget(partition),
                 length_function=get_num_tokens(),
             )
             docs = [docs[i] for i in included]

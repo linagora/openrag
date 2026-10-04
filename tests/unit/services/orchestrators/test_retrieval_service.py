@@ -575,6 +575,40 @@ async def test_retrieve_all_applies_partition_top_n():
 
 
 @pytest.mark.asyncio
+async def test_retrieve_uses_reranker_top_k_when_preset_top_n_is_none():
+    """#1133 regression: when a retrieval preset has top_n=None, retrieval
+    must fall back to the live RERANKER_TOP_K resolved at query time."""
+    s = FakeSearcher()
+    s.search_result = [_chunk("a"), _chunk("b"), _chunk("c"), _chunk("d")]
+    reranker = FakeReranker()
+    cfg = _config()
+    cfg.reranker.top_k = 2  # live RERANKER_TOP_K
+    cfg.partitions = {
+        "solo": _partition(
+            name="solo",
+            retrieval=RetrievalPipelineConfig(top_k=4, top_n=None, enable_reranker=True, reranker="r"),
+        )
+    }
+    svc = RetrievalService(
+        searcher=s,
+        reranker=None,
+        llm=None,
+        config=cfg,
+        searcher_factory=lambda name: s,
+        reranker_factory=lambda name: reranker,
+    )
+
+    out = await svc.retrieve(partitions=["solo"], query=Query(query="hello"))
+    assert [c.id for c in out] == ["a", "b"]  # truncated to RERANKER_TOP_K=2
+
+    # Verify dynamic change at query time
+    cfg.reranker.top_k = 3
+    out2 = await svc.retrieve(partitions=["solo"], query=Query(query="hello"))
+    assert [c.id for c in out2] == ["a", "b", "c"]  # dynamically truncated to 3
+
+
+
+@pytest.mark.asyncio
 async def test_retrieve_all_falls_back_to_legacy_when_no_partitions_exist():
     """On a fresh system with zero hydrated partitions there is nothing to
     expand — keep the single legacy pipeline searching ["all"]."""

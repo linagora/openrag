@@ -264,6 +264,108 @@ def test_default_chat_history_depth_clamps_invalid_global_config(global_depth):
 
 
 # --------------------------------------------------------------------------- #
+# context budget resolution (#1133: preset top_n × chunk_size)
+# --------------------------------------------------------------------------- #
+
+
+def _partition_config(top_n=10, chunk_size=512, chat_llm=None, chat_history_depth=4):
+    """Minimal PartitionConfig-like namespace for context-budget tests."""
+    return SimpleNamespace(
+        chat_llm=chat_llm,
+        chat_history_depth=chat_history_depth,
+        retrieval=SimpleNamespace(top_n=top_n),
+        indexation=SimpleNamespace(chunking=SimpleNamespace(chunk_size=chunk_size)),
+    )
+
+
+def test_context_budget_uses_preset_top_n_and_chunk_size():
+    """#1133 regression: a single-partition request must use that partition's
+    retrieval top_n × indexation chunk_size, not the global reranker.top_k ×
+    global chunker.chunk_size."""
+    svc = _svc()  # global: reranker.top_k=5, chunker.chunk_size=512 → 2560
+    svc._config.partitions = {"p": _partition_config(top_n=20, chunk_size=1024)}
+    assert svc._context_budget(["p"]) == 20 * 1024  # 20480, not 2560
+
+
+def test_context_budget_preset_top_n_larger_than_global_reranker_top_k():
+    """When the preset top_n (e.g. 25) exceeds the global reranker.top_k (e.g. 5)
+    the budget must still use the preset value so all retrieved chunks can reach
+    the LLM."""
+    svc = _svc()  # global reranker.top_k=5, chunker.chunk_size=512 → 2560
+    svc._config.partitions = {"p": _partition_config(top_n=25, chunk_size=512)}
+    assert svc._context_budget(["p"]) == 25 * 512  # 12800, not 2560
+
+
+def test_context_budget_preset_specific_chunk_size():
+    """When the indexation preset uses a non-default chunk_size (e.g. 768 for
+    the finance preset) the budget must reflect that size."""
+    svc = _svc()  # global chunk_size=512
+    svc._config.partitions = {"p": _partition_config(top_n=10, chunk_size=768)}
+    assert svc._context_budget(["p"]) == 10 * 768  # 7680, not 5120
+
+
+def test_context_budget_missing_or_empty_top_n_falls_back_to_reranker_top_k():
+    """#1133 regression: when a retrieval preset has no top_n set (or top_n=None),
+    the context budget must fall back to the live RERANKER_TOP_K resolved at
+    query time multiplied by the preset's chunk_size."""
+    svc = _svc()  # global reranker.top_k=5, chunker.chunk_size=512
+    # Preset with explicit top_n=None
+    svc._config.partitions = {"p": _partition_config(top_n=None, chunk_size=1024)}
+    assert svc._context_budget(["p"]) == 5 * 1024  # 5120
+
+    # Changing RERANKER_TOP_K dynamically at query time is immediately respected
+    svc._config.reranker.top_k = 8
+    assert svc._context_budget(["p"]) == 8 * 1024  # 8192
+
+    # Retrieval preset without top_n attribute at all
+    svc._config.partitions = {
+        "p": SimpleNamespace(
+            retrieval=SimpleNamespace(),
+            indexation=SimpleNamespace(chunking=SimpleNamespace(chunk_size=768)),
+        )
+    }
+    assert svc._context_budget(["p"]) == 8 * 768  # 6144
+
+
+def test_context_budget_no_partition_falls_back_to_global():
+    """Requests without a single owning partition must fall back to the global
+    _max_context_tokens (reranker.top_k × chunker.chunk_size)."""
+    svc = _svc()  # reranker.top_k=5, chunk_size=512 → _max_context_tokens=2560
+    svc._config.partitions = {"p": _partition_config(top_n=20, chunk_size=1024)}
+    global_budget = 5 * 512
+    # No partition (direct / web-only)
+    assert svc._context_budget(None) == global_budget
+    # "all" cross-partition sentinel
+    assert svc._context_budget(["all"]) == global_budget
+    # Multi-partition (no single owning preset)
+    assert svc._context_budget(["p", "q"]) == global_budget
+    # Unknown partition (not yet resolved in config.partitions)
+    assert svc._context_budget(["unknown"]) == global_budget
+
+
+@pytest.mark.asyncio
+async def test_prepare_chat_allows_preset_top_n_chunks_to_reach_llm():
+    """#1133 end-to-end regression: verify that when a partition's preset top_n (e.g. 5)
+    exceeds global reranker.top_k (e.g. 2), all retrieved chunks reach the LLM prompt
+    instead of being truncated by the global budget."""
+    chunks = [Chunk(id=f"c{i}", text=f"Document chunk content number {i}", metadata={"_id": f"c{i}"}) for i in range(5)]
+    svc = _svc(retrieval=FakeRetrieval(chunks=chunks))
+    svc._config.reranker.top_k = 2  # global: would only allow ~2 chunks
+    svc._config.chunker.chunk_size = 50
+
+    # With partition preset top_n=5, chunk_size=50 (budget = 250 tokens):
+    svc._config.partitions = {"p": _partition_config(top_n=5, chunk_size=50)}
+    result = await svc._prepare_chat(
+        partition=["p"],
+        payload={"messages": [{"role": "user", "content": "test question"}], "metadata": {}},
+    )
+    # All 5 chunks are included in the prompt context
+    assert len(result.docs) == 5
+    assert [d.metadata["_id"] for d in result.docs] == ["c0", "c1", "c2", "c3", "c4"]
+
+
+
+# --------------------------------------------------------------------------- #
 # chat LLM resolution (per-partition chat_llm model-endpoint preset)
 # --------------------------------------------------------------------------- #
 
