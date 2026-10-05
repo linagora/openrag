@@ -1,0 +1,111 @@
+{
+  "schema_version": 1,
+  "request_id": "req-1",
+  "original_query": "What changed?",
+  "contextualization": null,
+  "stages": [
+    {
+      "name": "original_query",
+      "status": "complete",
+      "duration_seconds": null,
+      "candidate_count": 0,
+      "candidates": [],
+      "error": null
+    },
+    {
+      "name": "contextualized_query",
+      "status": "not_run",
+      "duration_seconds": null,
+      "candidate_count": 0,
+      "candidates": [],
+      "error": null
+    },
+    {
+      "name": "dense_before_threshold",
+      "status": "not_run",
+      "duration_seconds": null,
+      "candidate_count": 0,
+      "candidates": [],
+      "error": null
+    },
+    {
+      "name": "dense_after_threshold",
+      "status": "complete",
+      "duration_seconds": 0.012,
+      "candidate_count": 1,
+      "candidates": [
+        {
+          "id": "chunk-1",
+          "document_id": "document-1",
+          "rank": 1,
+          "scores": {
+            "dense": 0.75
+          },
+          "duplicate_of": null,
+          "removal_reason": null
+        }
+      ],
+      "error": null
+    },
+    {
+      "name": "sparse",
+      "status": "not_run",
+      "duration_seconds": null,
+      "candidate_count": 0,
+      "candidates": [],
+      "error": null
+    },
+    {
+      "name": "hybrid_fused",
+      "status": "not_run",
+      "duration_seconds": null,
+      "candidate_count": 0,
+      "candidates": [],
+      "error": null
+    },
+    {
+      "name": "multi_query_fused",
+      "status": "not_run",
+      "duration_seconds": null,
+      "candidate_count": 0,
+      "candidates": [],
+      "error": null
+    },
+    {
+      "name": "partition_fused",
+      "status": "not_run",
+      "duration_seconds": null,
+      "candidate_count": 0,
+      "candidates": [],
+      "error": null
+    },
+    {
+      "name": "pre_rerank",
+      "status": "not_run",
+      "duration_seconds": null,
+      "candidate_count": 0,
+      "candidates": [],
+      "error": null
+    },
+    {
+      "name": "post_rerank",
+      "status": "not_run",
+      "duration_seconds": null,
+      "candidate_count": 0,
+      "candidates": [],
+      "error": null
+    },
+    {
+      "name": "final",
+      "status": "not_run",
+      "duration_seconds": null,
+      "candidate_count": 0,
+      "candidates": [],
+      "error": null
+    }
+  ],
+  "timings": {},
+  "comparisons": {},
+  "errors": [],
+  "configuration_fingerprint": "abc123"
+}
