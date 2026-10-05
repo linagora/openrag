@@ -45,6 +45,7 @@ if TYPE_CHECKING:
     from core.config.root import Settings
     from core.llm.llm import LLM
     from core.models.chunk import Chunk
+    from core.models.preset import PartitionConfig
     from core.models.query import Query, SearchQueries
     from core.rerankers.reranker import Reranker
     from core.retrieval.searcher import RetrievalSearcher
@@ -260,8 +261,9 @@ class RetrievalService:
 
         rtype = pipeline_cfg.type
         llm = self._legacy_llm
-        if rtype in {"multiQuery", "hyde"} and self._llm_factory is not None:
-            llm = self._llm_factory(pipeline_cfg.llm or partition_cfg.chat_llm or "default")
+        expansion_llm = self._expansion_llm_name(partition_cfg)
+        if expansion_llm is not None and self._llm_factory is not None:
+            llm = self._llm_factory(expansion_llm)
 
         # Only the expansion strategies need a prompt; type="single" (the common
         # case) resolves nothing, so the DB is never touched on that path.
@@ -304,27 +306,63 @@ class RetrievalService:
     async def _pipeline_groups_for_partitions(
         self, partitions: list[str]
     ) -> list[tuple[list[str], RetrieverPipeline, int | None]]:
+        """The partitions grouped by the pipeline that retrieves them, each with that pipeline.
+
+        A query embedding only matches vectors of the same model, so partitions
+        on different embedders need their own retrieval. Partitions on the
+        same vector field with the same retrieval settings share one pipeline: one
+        query embedding, one search over all of them, one rerank pass, so their
+        chunks compete on score rather than being fused by rank. The groups' lists
+        are fused with RRF by the caller.
+
+        ``"all"`` only reaches this layer post-authorization (a SUPER_ADMIN_MODE
+        admin; regular users are already expanded to their memberships upstream),
+        so every hydrated partition is in scope. With a single group it is kept,
+        so the search stays unscoped, as in :meth:`_search_groups`.
+        """
         configs = self._partition_configs()
-        # Expand the "all" sentinel to concrete partitions so each is retrieved
-        # with its own embedder and top_n, via the same per-partition fan-out the
-        # named-partition path already uses (#708). Collapsing to self._pipeline
-        # embedded the query with the deployment-default embedder — near-random
-        # recall for any partition indexed with a different one — and dropped the
-        # reranker top_n (its default_top_k was None). "all" only reaches this
-        # layer post-authorization (a SUPER_ADMIN_MODE admin; regular users are
-        # already expanded to their memberships upstream), so every hydrated
-        # partition is in scope.
-        if "all" in partitions and configs:
-            partitions = list(configs.keys())
-        elif not partitions or not configs:
+        if not partitions or not configs:
             # Nothing to expand (no partitions exist yet) — keep the single
             # legacy pipeline; there is no per-partition config to honour.
             return [(["all"] if "all" in partitions else partitions, self._pipeline, None)]
+        expanded = list(configs) if "all" in partitions else partitions
+        grouped: dict[tuple[str, str, str | None], list[str]] = {}
+        for partition in expanded:
+            partition_cfg = self._require_partition_config(partition)
+            key = (
+                self._vector_field(partition_cfg.embedder),
+                partition_cfg.retrieval.model_dump_json(),
+                self._expansion_llm_name(partition_cfg),
+            )
+            grouped.setdefault(key, []).append(partition)
         groups: list[tuple[list[str], RetrieverPipeline, int | None]] = []
-        for partition in partitions:
-            pipeline, default_top_k = await self._pipeline_for_partition(partition)
-            groups.append(([partition], pipeline, default_top_k))
+        for names in grouped.values():
+            # Every partition of a group builds the same pipeline.
+            pipeline, default_top_k = await self._pipeline_for_partition(names[0])
+            groups.append((names, pipeline, default_top_k))
+        if len(groups) == 1:
+            # Keep the caller's partitions, so "all" stays unscoped.
+            _, pipeline, default_top_k = groups[0]
+            return [(partitions, pipeline, default_top_k)]
         return groups
+
+    def _vector_field(self, embedder: str) -> str:
+        """The dense field an embedder's vectors are stored in.
+
+        The ``default`` alias resolves to the same field as the embedder behind
+        it, so grouping by field keeps the two together.
+        """
+        endpoints = getattr(self._config.models, "embedder", None) or {}
+        endpoint = endpoints.get(embedder)
+        return (endpoint.vector_field if endpoint is not None else None) or embedder
+
+    @staticmethod
+    def _expansion_llm_name(partition_cfg: PartitionConfig) -> str | None:
+        """The LLM a multiQuery or hyde pipeline rewrites the query with; ``None`` for ``single``."""
+        retrieval = partition_cfg.retrieval
+        if retrieval.type not in {"multiQuery", "hyde"}:
+            return None
+        return retrieval.llm or partition_cfg.chat_llm or "default"
 
     def _search_groups(self, partitions: list[str]) -> list[tuple[list[str], RetrievalSearcher]]:
         """The partitions grouped by the vector field they are searched on, each with its searcher.
@@ -339,14 +377,11 @@ class RetrievalService:
         if self._searcher_factory is None or not configs or not partitions:
             return [(partitions, self._searcher)]
         expanded = list(configs) if "all" in partitions else partitions
-        endpoints = getattr(self._config.models, "embedder", None) or {}
         groups: dict[str, tuple[str, list[str]]] = {}
         for partition in expanded:
             partition_cfg = configs.get(partition)
             embedder = partition_cfg.embedder if partition_cfg is not None else "default"
-            endpoint = endpoints.get(embedder)
-            field = (endpoint.vector_field if endpoint is not None else None) or embedder
-            groups.setdefault(field, (embedder, []))[1].append(partition)
+            groups.setdefault(self._vector_field(embedder), (embedder, []))[1].append(partition)
         if len(groups) == 1:
             # Keep the caller's partitions, so "all" stays unscoped.
             ((embedder, _),) = groups.values()
@@ -440,12 +475,13 @@ class RetrievalService:
         Each leg is ``(partition_names, coroutine)``; the names are carried so a
         dropped leg can be named in the log.
 
-        Small fan-outs (the common case: a handful of partitions) run fully
+        Small fan-outs (the common case: a handful of groups) run fully
         parallel via a plain gather — no added overhead, byte-identical to the
         prior behaviour. Only a fan-out larger than ``max_partition_concurrency``
-        (e.g. a SUPER_ADMIN_MODE ``openrag-all`` expanded to every partition) is
-        throttled through a per-call semaphore, so one request cannot launch a
-        partition-count-proportional flood of embed+Milvus calls (#708).
+        (e.g. a SUPER_ADMIN_MODE ``openrag-all`` over partitions on many
+        embedders or retrieval presets) is throttled through a per-call
+        semaphore, so one request cannot launch a group-count-proportional
+        flood of embed+Milvus calls (#708).
 
         The semaphore is per-call, not shared: it caps this request's own fan-out
         without coupling concurrent requests, and the caps compose safely across
@@ -563,11 +599,11 @@ class RetrievalService:
 
     @staticmethod
     def fuse(doc_lists: list[list[Chunk]], top_k: int | None = None) -> list[Chunk]:
-        """RRF-fuse ranked lists across partitions (and doc+web).
+        """RRF-fuse ranked lists across partition groups (and doc+web).
 
         Uses the canonical RRF constant (60) rather than a preset's ``rrf_k``:
-        this fuses lists from *different* partitions (and the web branch), so no
-        single partition's ``rrf_k`` applies. Per-partition ``rrf_k`` is honoured
+        this fuses lists from *different* partition groups (and the web branch),
+        so no single preset's ``rrf_k`` applies. A preset's ``rrf_k`` is honoured
         one layer down, in ``RetrieverPipeline.get_relevant_docs`` (#707).
         """
         fused = rrf_reranking(doc_lists, key_fn=_chunk_key)
