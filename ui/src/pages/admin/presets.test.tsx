@@ -426,6 +426,30 @@ describe("PresetsPage top_n change asks to check the LLM's context size", () => 
     expect(within(confirm).queryByText(/No partition uses this preset/)).toBeNull();
   });
 
+  it("shows no context size when no LLM endpoint is marked default", async () => {
+    // A sole endpoint isn't the default to the backend: without an is_default one,
+    // the partitions that name no LLM answer with the deployment's LLM settings.
+    const actual = await vi.importActual<typeof import("@/lib/api/models")>("@/lib/api/models");
+    vi.mocked(pickDefaultEndpoint).mockImplementation(actual.pickDefaultEndpoint);
+    listModelEndpointsMock.mockReset().mockResolvedValue([
+      llm("vllm-qwen", { detected_max_llm_context_size: 131072 }),
+    ] as never);
+    const user = userEvent.setup();
+    const { dialog, topN } = await openRetrievalPreset(user);
+    await user.clear(topN);
+    await user.type(topN, "15");
+    await user.click(within(dialog).getByRole("button", { name: "Update" }));
+
+    const confirm = await screen.findByRole("alertdialog");
+    const fallback = (await within(confirm).findByText(/No LLM endpoint is the default/)).closest("li") as HTMLElement;
+    expect(within(fallback).getByText("default")).toBeTruthy();
+    expect(within(fallback).getByText("—")).toBeTruthy();
+    expect(within(fallback).getByText("for docs, notes")).toBeTruthy();
+    const qwen = within(confirm).getByText("vllm-qwen").closest("li") as HTMLElement;
+    expect(within(qwen).getByText("131,072 (detected)")).toBeTruthy();
+    expect(within(qwen).getByText("for research")).toBeTruthy();
+  });
+
   it("says when it could not check the LLMs, without blocking the update", async () => {
     vi.mocked(listPartitions).mockRejectedValueOnce(new Error("boom"));
     const user = userEvent.setup();

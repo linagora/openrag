@@ -973,14 +973,17 @@ function RetrievalPresetForm({
 /* ---------- top_n / LLM context size confirmation ---------- */
 
 /** The LLM endpoints answering for the partitions on *presetName*, each with
- *  those partitions: a partition's chat_llm, or the default endpoint when it
- *  names none (or names one since deleted), as the backend resolves it. */
+ *  those partitions: a partition's chat_llm, or the is_default endpoint when it
+ *  names none (or names one since deleted), as the backend resolves it. With no
+ *  is_default endpoint, the backend answers with the deployment's own LLM
+ *  settings rather than a catalog endpoint: `endpoint` is then undefined. */
 function llmsAnsweringForPreset(
   presetName: string,
   partitions: PartitionResponse[],
   llmEndpoints: ModelEndpointResponse[],
 ): { endpoint: ModelEndpointResponse | undefined; name: string; partitions: string[] }[] {
-  const defaultLlm = pickDefaultEndpoint(llmEndpoints);
+  // Not pickDefaultEndpoint: it also takes a sole endpoint that isn't marked default.
+  const defaultLlm = llmEndpoints.find((e) => e.is_default);
   const groups = new Map<string, { endpoint: ModelEndpointResponse | undefined; name: string; partitions: string[] }>();
   for (const p of partitions) {
     if (p.retrieval_preset !== presetName) continue;
@@ -1089,6 +1092,12 @@ function TopNContextSizeDialog({
                           <span className="shrink-0 font-medium">{budget ? formatLlmBudget(budget) : "—"}</span>
                         </div>
                         <div className="text-xs text-muted-foreground">for {partitions.join(", ")}</div>
+                        {!endpoint && (
+                          <div className="text-xs text-amber-700 dark:text-amber-300">
+                            No LLM endpoint is the default: these partitions answer with the deployment&apos;s LLM
+                            settings. Mark one as default in Model Endpoints.
+                          </div>
+                        )}
                         {budget?.source === "default" && (
                           <div className="text-xs text-amber-700 dark:text-amber-300">
                             The endpoint doesn&apos;t report its window: set Max context size if the model&apos;s
