@@ -8,6 +8,7 @@ from importlib.metadata import version as package_version
 from typing import TYPE_CHECKING, Any
 
 from core.retrieval.trace import canonical_fingerprint
+from core.utils.exceptions import ServiceUnavailableError
 
 MAX_SNAPSHOT_DOCUMENT_IDS = 10_000
 
@@ -44,6 +45,12 @@ class RetrievalSnapshotService:
 
     async def snapshot(self, partition: str, *, include_document_ids: bool = False) -> dict[str, object]:
         detail = await self._partitions.get_partition_config(partition)
+        has_loaded_config = getattr(self._retrieval, "has_loaded_partition_retrieval_config", None)
+        if has_loaded_config is not None and not has_loaded_config(partition):
+            raise ServiceUnavailableError(
+                f"Retrieval configuration for partition '{partition}' is not loaded; retry the snapshot request.",
+                code="PARTITION_RETRIEVAL_CONFIG_NOT_LOADED",
+            )
         resolve_plan = getattr(self._retrieval, "resolve_retrieval_plan", None)
         if resolve_plan is not None:
             plan = await resolve_plan([partition], build_execution=False)

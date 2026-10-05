@@ -223,6 +223,10 @@ class RetrievalService:
     def _partition_configs(self) -> dict[str, Any]:
         return getattr(self._config, "partitions", {}) or {}
 
+    def has_loaded_partition_retrieval_config(self, partition: str) -> bool:
+        """Return whether this process has resolved retrieval settings for a partition."""
+        return partition in self._partition_configs()
+
     def _effective_contextualizer_name(self, partitions: Sequence[str]) -> str:
         """Mirror QueryService's partition LLM resolution for public metadata."""
         if self._llm_factory is None:
@@ -239,6 +243,15 @@ class RetrievalService:
         return {
             "name": name,
             "model": getattr(endpoint, "model_name", None),
+        }
+
+    def _legacy_reranker_identity(self) -> dict[str, object]:
+        """Describe the startup reranker used by the legacy retrieval pipeline."""
+        if self._legacy_reranker is None:
+            return {"name": None, "model": None}
+        return {
+            "name": "default",
+            "model": getattr(getattr(self._config, "reranker", None), "model_name", None),
         }
 
     def public_retrieval_configuration(self, partitions: Sequence[str]) -> dict[str, object]:
@@ -285,6 +298,11 @@ class RetrievalService:
                 )
             )
             reranker_name = getattr(retrieval, "reranker", None) or ("default" if reranker_enabled else None)
+            reranker_endpoint = (
+                self._legacy_reranker_identity()
+                if partition is None
+                else self._public_endpoint(self._config, "reranker", reranker_name)
+            )
             related_limit = getattr(
                 retrieval,
                 "related_limit",
@@ -313,7 +331,7 @@ class RetrievalService:
                         "query_expansion_llm": query_expansion_llm,
                     },
                     "reranker": {
-                        **self._public_endpoint(self._config, "reranker", reranker_name),
+                        **reranker_endpoint,
                         "enabled": reranker_enabled,
                         "top_n": getattr(
                             retrieval,
@@ -663,7 +681,7 @@ class RetrievalService:
                     "enable_reranker",
                     getattr(getattr(self._config, "reranker", None), "enabled", False),
                 )
-                if reranker_enabled and not disable_reranker:
+                if partition is not None and reranker_enabled and not disable_reranker:
                     _reranker, identity = self._resolve_reranker_with_identity(
                         getattr(retrieval, "reranker", None),
                         partition_name,
