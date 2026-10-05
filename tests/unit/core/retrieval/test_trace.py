@@ -69,7 +69,6 @@ def test_safe_public_value_redacts_secrets_and_content():
         }
     )
     assert value == {
-        "model": "public",
         "contextualization": {
             "model": "also-public",
             "prompt": {"content_hash": "hash"},
