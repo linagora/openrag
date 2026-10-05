@@ -47,10 +47,12 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import NamedTuple, Protocol
 
+from core.observability._ray_counters import start_counter_at_zero
 from core.observability._reporting import report_once
 from core.observability.metric_specs import (
     CIRCUIT_BREAKER_STATE,
     INFERENCE_DURATION_SECONDS,
+    INFERENCE_OUTCOME_VALUES,
     INFERENCE_REQUESTS_TOTAL,
     LLM_TOKENS_TOTAL,
     MetricSpec,
@@ -85,7 +87,48 @@ def set_provider_name[C](instance: C, name: str) -> C:
         setattr(instance, PROVIDER_NAME_ATTR, name)
     except (AttributeError, TypeError) as exc:
         report_once("inference provider label", exc)
+        return instance
+    _start_request_series(name, instance)
     return instance
+
+
+#: Attribute ``with_inference_metrics`` stamps on the method it wraps, naming
+#: the operation that method records. Lets ``set_provider_name`` start exactly
+#: the series a client will write, and no others.
+INFERENCE_OPERATION_ATTR = "openrag_inference_operation"
+
+
+def _operations_of(instance: object) -> set[str]:
+    operations = set()
+    for klass in type(instance).__mro__:
+        for member in vars(klass).values():
+            operation = getattr(member, INFERENCE_OPERATION_ATTR, None)
+            if isinstance(operation, str):
+                operations.add(operation)
+    return operations
+
+
+def _start_request_series(provider: str, instance: object) -> None:
+    """Create this client's request series at 0 before its first call.
+
+    ``rate()``/``increase()`` count the change between samples, so a series
+    that first appears already at 1 loses that first event. Every Ray worker
+    process has its own ``WorkerId`` and therefore its own series, so each
+    worker's first failure went uncounted — a provider's first errors after a
+    restart read as 0%. Starting every outcome at 0 when the client is built
+    makes the first event a visible 0 → 1.
+
+    Takes the client, not its operations: reading them walks the class's
+    attributes, which can raise, and belongs inside the guard too.
+    """
+    try:
+        operations = _operations_of(instance)
+        requests = _instruments().requests
+        for operation in operations:
+            for outcome in INFERENCE_OUTCOME_VALUES:
+                requests.start_at_zero({"provider": provider, "operation": operation, "outcome": outcome})
+    except Exception as exc:  # noqa: BLE001 - metrics must never stop a client from being built
+        report_once(INFERENCE_REQUESTS_TOTAL.name, exc)
 
 
 #: Fixed bucket for a call that targeted a client-supplied endpoint — a single
@@ -98,6 +141,8 @@ class _Instrument(Protocol):
 
     def inc(self, value: float, tags: dict[str, str]) -> None: ...
 
+    def start_at_zero(self, tags: dict[str, str]) -> None: ...
+
     def observe(self, value: float, tags: dict[str, str]) -> None: ...
 
     def set(self, value: float, tags: dict[str, str]) -> None: ...
@@ -109,6 +154,9 @@ class _RayInstrument:
 
     def inc(self, value: float, tags: dict[str, str]) -> None:
         self._metric.inc(value, tags=tags)
+
+    def start_at_zero(self, tags: dict[str, str]) -> None:
+        start_counter_at_zero(self._metric, tags)
 
     def observe(self, value: float, tags: dict[str, str]) -> None:
         self._metric.observe(value, tags=tags)
@@ -123,6 +171,9 @@ class _PrometheusInstrument:
 
     def inc(self, value: float, tags: dict[str, str]) -> None:
         self._metric.labels(**tags).inc(value)
+
+    def start_at_zero(self, tags: dict[str, str]) -> None:
+        self._metric.labels(**tags).inc(0)
 
     def observe(self, value: float, tags: dict[str, str]) -> None:
         self._metric.labels(**tags).observe(value)

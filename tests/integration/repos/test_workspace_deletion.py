@@ -23,7 +23,7 @@ async def upload(store, file_id, *, partition="p", workspace_ids=None, replace=F
     )
     if not replace:
         for workspace_id in workspace_ids or []:
-            assert await store.workspace_repo.add_files_to_workspace(workspace_id, [file_id]) == []
+            assert await store.workspace_repo.add_files_to_workspace(partition, workspace_id, [file_id]) == []
         if workspace_ids:
             assert await store.document_repo.finalize_file_workspace_ownership(file_id, partition, workspace_ids)
 
@@ -49,7 +49,7 @@ async def test_mixed_workspace_preserves_partition_files_and_shared_uploads(post
     await setup_workspace(store)
     await store.workspace_repo.create_workspace(Workspace(workspace_id="ws2", partition="p"))
     await upload(store, "independent")
-    await store.workspace_repo.add_files_to_workspace("ws1", ["independent"])
+    await store.workspace_repo.add_files_to_workspace("p", "ws1", ["independent"])
     await upload(store, "exclusive", workspace_ids=["ws1"])
     await upload(store, "shared", workspace_ids=["ws1", "ws2"])
     svc, vectors = service(store)
@@ -57,8 +57,8 @@ async def test_mixed_workspace_preserves_partition_files_and_shared_uploads(post
     result = await svc.delete_workspace("p", "ws1")
 
     assert result == {"orphaned_files_deleted": 1, "orphaned_files_failed": [], "kept_files": 0}
-    assert await store.workspace_repo.get_workspace("ws1") is None
-    assert await store.workspace_repo.list_workspace_files("ws1") == []
+    assert await store.workspace_repo.get_workspace("p", "ws1") is None
+    assert await store.workspace_repo.list_workspace_files("p", "ws1") == []
     assert await store.document_repo.file_exists_in_partition("independent", "p")
     assert await store.document_repo.file_exists_in_partition("shared", "p")
     assert not await store.document_repo.file_exists_in_partition("exclusive", "p")
@@ -79,7 +79,7 @@ async def test_keep_files_preserves_upload_after_later_workspace_deletion(postgr
 
     result = await svc.delete_workspace("p", "ws1", keep_files=True)
     assert result["kept_files"] == (0 if shared else 1)
-    await store.workspace_repo.add_files_to_workspace("ws2", ["kept"])
+    await store.workspace_repo.add_files_to_workspace("p", "ws2", ["kept"])
     final_result = await svc.delete_workspace("p", "ws2")
 
     assert final_result["orphaned_files_deleted"] == (1 if shared else 0)
@@ -95,7 +95,7 @@ async def test_replacement_preserves_original_ownership(postgres_store, workspac
     store = postgres_store
     await setup_workspace(store)
     await upload(store, "file", workspace_ids=["ws1"] if workspace_owned else None)
-    await store.workspace_repo.add_files_to_workspace("ws1", ["file"])
+    await store.workspace_repo.add_files_to_workspace("p", "ws1", ["file"])
     await upload(store, "file", replace=True)
     svc, _ = service(store)
     result = await svc.delete_workspace("p", "ws1")
@@ -118,8 +118,8 @@ async def test_same_file_id_in_another_partition_is_untouched(postgres_store):
 
 async def test_empty_and_missing_workspaces_return_no_candidates(postgres_store):
     await setup_workspace(postgres_store)
-    assert await postgres_store.workspace_repo.delete_workspace("ws1") == []
-    assert await postgres_store.workspace_repo.delete_workspace("ws1") == []
+    assert await postgres_store.workspace_repo.delete_workspace("p", "ws1") == []
+    assert await postgres_store.workspace_repo.delete_workspace("p", "ws1") == []
 
 
 async def test_workspace_attachment_cannot_race_orphan_cleanup(postgres_store):
@@ -133,7 +133,7 @@ async def test_workspace_attachment_cannot_race_orphan_cleanup(postgres_store):
         await tx.start()
         await conn.execute("LOCK TABLE workspaces IN SHARE MODE")
 
-        deletion = asyncio.create_task(store.workspace_repo.delete_workspace("ws1"))
+        deletion = asyncio.create_task(store.workspace_repo.delete_workspace("p", "ws1"))
         for _ in range(100):
             blocked = await store.pool.fetchval(
                 """
@@ -153,7 +153,7 @@ async def test_workspace_attachment_cannot_race_orphan_cleanup(postgres_store):
             raise AssertionError("workspace deletion did not reach the blocked DELETE")
 
         attachment = asyncio.create_task(
-            store.workspace_repo.add_files_to_workspace("ws2", ["exclusive"]),
+            store.workspace_repo.add_files_to_workspace("p", "ws2", ["exclusive"]),
         )
         await asyncio.sleep(0.05)
         assert not attachment.done()
@@ -176,7 +176,7 @@ async def test_workspace_cleanup_rechecks_membership_after_waiting_for_attachmen
             await conn.execute("LOCK TABLE workspace_files IN SHARE MODE")
 
             attachment = asyncio.create_task(
-                store.workspace_repo.add_files_to_workspace("ws2", ["exclusive"]),
+                store.workspace_repo.add_files_to_workspace("p", "ws2", ["exclusive"]),
             )
             for _ in range(100):
                 blocked = await store.pool.fetchval(
@@ -196,13 +196,13 @@ async def test_workspace_cleanup_rechecks_membership_after_waiting_for_attachmen
             else:
                 raise AssertionError("workspace attachment did not reach the blocked INSERT")
 
-            deletion = asyncio.create_task(store.workspace_repo.delete_workspace("ws1"))
+            deletion = asyncio.create_task(store.workspace_repo.delete_workspace("p", "ws1"))
             await asyncio.sleep(0.05)
             assert not deletion.done()
 
     assert await attachment == []
     assert await deletion == []
-    assert await store.workspace_repo.list_workspace_files("ws2") == ["exclusive"]
+    assert await store.workspace_repo.list_workspace_files("p", "ws2") == ["exclusive"]
     assert await store.document_repo.file_exists_in_partition("exclusive", "p")
 
 
@@ -224,8 +224,8 @@ async def test_concurrent_last_workspace_deletions_claim_the_shared_file(postgre
             """,
         )
 
-        delete_ws1 = asyncio.create_task(store.workspace_repo.delete_workspace("ws1"))
-        delete_ws2 = asyncio.create_task(store.workspace_repo.delete_workspace("ws2"))
+        delete_ws1 = asyncio.create_task(store.workspace_repo.delete_workspace("p", "ws1"))
+        delete_ws2 = asyncio.create_task(store.workspace_repo.delete_workspace("p", "ws2"))
         await asyncio.sleep(0.05)
         assert not delete_ws1.done()
         assert not delete_ws2.done()
@@ -250,7 +250,7 @@ async def test_stale_cleanup_claim_can_be_attached_again(postgres_store):
         """,
     )
 
-    assert await store.workspace_repo.add_files_to_workspace("ws1", ["stale"]) == []
+    assert await store.workspace_repo.add_files_to_workspace("p", "ws1", ["stale"]) == []
     assert (
         await store.pool.fetchval(
             "SELECT workspace_cleanup_claimed FROM files WHERE file_id = 'stale'",
@@ -274,7 +274,7 @@ async def test_stale_destructive_cleanup_claim_cannot_be_attached(postgres_store
         """,
     )
 
-    assert await store.workspace_repo.add_files_to_workspace("ws1", ["stale"]) == ["stale"]
+    assert await store.workspace_repo.add_files_to_workspace("p", "ws1", ["stale"]) == ["stale"]
     assert (
         await store.pool.fetchval(
             "SELECT workspace_cleanup_claimed FROM files WHERE file_id = 'stale'",
@@ -306,7 +306,7 @@ async def test_failed_vector_cleanup_is_durable_and_retryable(postgres_store):
         "workspace_cleanup_state": "CLEANUP_FAILED",
     }
     await store.workspace_repo.create_workspace(Workspace(workspace_id="ws2", partition="p"))
-    assert await store.workspace_repo.add_files_to_workspace("ws2", ["retryable"]) == ["retryable"]
+    assert await store.workspace_repo.add_files_to_workspace("p", "ws2", ["retryable"]) == ["retryable"]
 
     vectors.delete.side_effect = None
     vectors.query_ids_by_filter.side_effect = RuntimeError("retry query failed")
@@ -316,7 +316,7 @@ async def test_failed_vector_cleanup_is_durable_and_retryable(postgres_store):
         await store.pool.fetchval("SELECT workspace_cleanup_state FROM files WHERE file_id = 'retryable'")
         == "CLEANUP_FAILED"
     )
-    assert await store.workspace_repo.add_files_to_workspace("ws2", ["retryable"]) == ["retryable"]
+    assert await store.workspace_repo.add_files_to_workspace("p", "ws2", ["retryable"]) == ["retryable"]
     vectors.query_ids_by_filter.side_effect = None
     # Retry already enters CLEANUP_STARTED and must not start a second time.
     assert await svc.retry_failed_file_cleanup("retryable", "p") is True
@@ -385,7 +385,7 @@ async def test_migration_preserves_preexisting_workspace_files(postgres_store, t
             engine.dispose()
 
     await asyncio.to_thread(migrate_legacy_data)
-    assert await postgres_store.workspace_repo.delete_workspace("ws1") == []
+    assert await postgres_store.workspace_repo.delete_workspace("p", "ws1") == []
     assert await postgres_store.document_repo.file_exists_in_partition("legacy", "p")
 
 
@@ -442,10 +442,10 @@ async def test_pending_attachments_protect_upload_during_workspace_deletion(post
         indexation_config=None,
         workspace_ids=["ws1", "missing"],
     )
-    assert await store.workspace_repo.add_files_to_workspace("ws1", ["pending"]) == []
+    assert await store.workspace_repo.add_files_to_workspace("p", "ws1", ["pending"]) == []
     svc, vectors = service(store)
     assert (await svc.delete_workspace("p", "ws1"))["orphaned_files_deleted"] == 0
-    assert await store.workspace_repo.add_files_to_workspace("missing", ["pending"]) == ["pending"]
+    assert await store.workspace_repo.add_files_to_workspace("p", "missing", ["pending"]) == ["pending"]
     assert await store.document_repo.mark_file_independently_indexed("pending", "p")
     assert not await store.document_repo.finalize_file_workspace_ownership("pending", "p", ["ws1", "missing"])
     assert await store.document_repo.file_exists_in_partition("pending", "p")
@@ -456,7 +456,7 @@ async def test_protection_cannot_claim_success_after_destructive_cleanup_starts(
     store = postgres_store
     await setup_workspace(store)
     await upload(store, "f", workspace_ids=["ws1"])
-    assert await store.workspace_repo.delete_workspace("ws1") == ["f"]
+    assert await store.workspace_repo.delete_workspace("p", "ws1") == ["f"]
     async with store.workspace_repo.cleanup_session("f", "p") as owned:
         assert await owned.start_claimed_file_cleanup("f", "p")
         assert not await store.document_repo.mark_file_independently_indexed("f", "p")

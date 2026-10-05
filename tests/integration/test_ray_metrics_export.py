@@ -82,13 +82,25 @@ def exported_metrics() -> str:
                     record_circuit_breaker_state,
                     record_inference,
                     record_tokens,
+                    set_provider_name,
                 )
                 from core.observability.ray_metrics import (
+                    initialize_ingest_counters,
                     observe_queue_wait_from,
                     observe_stage_duration,
                     record_document_terminal,
                     record_parse_completion,
                 )
+                from services.inference._metrics import with_inference_metrics
+
+                class _ZeroStartClient:
+                    @with_inference_metrics("rerank")
+                    async def rerank(self) -> None: ...
+
+                # Series started at 0: nothing below ever cancels a document or
+                # calls this client, so only the zero start can produce them.
+                initialize_ingest_counters()
+                set_provider_name(_ZeroStartClient(), "zero-start")
 
                 record_document_terminal("COMPLETED")
                 record_document_terminal("FAILED")
@@ -141,6 +153,29 @@ def test_metric_reaches_the_export_endpoint(exported_metrics: str, metric: str, 
     assert matching, f"{_PREFIX}{metric} is absent from the exposition"
     if label:
         assert any(label in line for line in matching), f"{_PREFIX}{metric} has no sample with {label}"
+
+
+@pytest.mark.parametrize(
+    ("metric", "labels"),
+    [
+        ("ingest_documents_total", ('status="cancelled"',)),
+        ("inference_requests_total", ('provider="zero-start"', 'operation="rerank"', 'outcome="timeout"')),
+    ],
+)
+def test_counters_are_exported_at_zero_before_their_first_event(
+    exported_metrics: str, metric: str, labels: tuple[str, ...]
+) -> None:
+    """Pins the zero start on the wire. Ray's public ``Counter.inc`` refuses 0,
+    so ``_ray_counters`` records through Ray's private ``_record``; a Ray upgrade
+    that changes it fails here instead of silently losing every worker's first
+    event to ``increase()`` again."""
+    matching = [
+        line
+        for line in exported_metrics.splitlines()
+        if line.startswith(f"{_PREFIX}{metric}") and all(label in line for label in labels)
+    ]
+    assert matching, f"no zero-started {metric} series with {labels}"
+    assert all(float(line.rsplit(" ", 1)[1]) == 0 for line in matching), matching
 
 
 @pytest.mark.parametrize("forbidden", _FORBIDDEN_LABELS)

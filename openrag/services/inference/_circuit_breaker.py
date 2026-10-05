@@ -28,15 +28,43 @@ _STATE_VALUES = {
 _UNKNOWN_STATE = -1
 
 
+#: 4xx statuses that say the provider will not serve *us* — a revoked, expired
+#: or wrong credential — rather than that one request was bad. The metrics
+#: count them as failures of that endpoint (``_metrics.outcome_for``): every
+#: call fails the same way until an operator fixes the key, and
+#: ``OpenRagInferenceProviderDown`` then names the endpoint.
+#:
+#: 401 only. 403 can also mean "this key may not use *that* model".
+#: OpenAI-compatible APIs answer a bad key with 401.
+PROVIDER_AUTH_4XX = frozenset({401})
+
+
+def counts_refused_credential(status: int, *, caller_shaped: bool) -> bool:
+    """Is *status* our credential being refused, rather than this request?
+
+    For the metrics only. ``caller_shaped`` is true for LLM calls: callers pick
+    the model (``llm_override``) and extra chat-body fields are forwarded, so a
+    401 there can be the caller's doing (LiteLLM answers a refused model, or an
+    ``api_key`` sent in the body, with 401)."""
+    return status in PROVIDER_AUTH_4XX and not caller_shaped
+
+
 def _is_client_error(exc: Exception) -> bool:
     if isinstance(exc, httpx.HTTPStatusError):
-        return 400 <= exc.response.status_code < 500
-    if isinstance(exc, OpenRAGError):
-        return 400 <= exc.status_code < 500
-    return False
+        status = exc.response.status_code
+    elif isinstance(exc, OpenRAGError):
+        status = exc.status_code
+    else:
+        return False
+    return 400 <= status < 500
 
 
 def _is_excluded(exc: Exception) -> bool:
+    """No 4xx opens a breaker, 401 included. Breakers are shared per kind, not
+    per endpoint (``get_breaker(name)``), so one endpoint's bad key counted here
+    opened the ``embedder`` breaker for every partition (#1100). The key is
+    still the endpoint's failure in the metrics, where it is labelled by
+    endpoint and does not stop the others."""
     if _is_client_error(exc):
         return True
     if isinstance(exc, LLMParsingError):
@@ -59,13 +87,19 @@ class _LoggingListener(CircuitBreakerListener):
 def get_breaker(name: str, fail_max: int = 50, timeout_duration: float = 60.0) -> CircuitBreaker:
     requested = (fail_max, timeout_duration)
     if name not in _breakers:
-        _breakers[name] = CircuitBreaker(
+        breaker = CircuitBreaker(
             fail_max=fail_max,
             timeout_duration=timedelta(seconds=timeout_duration),
             name=name,
             exclude=[_is_excluded],
             listeners=[_LoggingListener()],
         )
+        # State is otherwise written only on a transition, so a breaker that
+        # never tripped had no series: "Unknown" on a healthy system. Written
+        # before the breaker is registered: once a caller can reach it, a
+        # transition may already have exported "open", which this would undo.
+        record_circuit_breaker_state(name, _STATE_VALUES[CircuitBreakerState.CLOSED])
+        _breakers[name] = breaker
         _breaker_config[name] = requested
     elif _breaker_config.get(name) != requested:
         raise ValueError(f"Breaker '{name}' already exists with config={_breaker_config[name]}, requested={requested}")

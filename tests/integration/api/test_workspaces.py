@@ -57,6 +57,54 @@ class TestWorkspaceCRUD:
         assert response.status_code == 200
         assert response.json()["workspace_id"] == workspace_id
 
+    def test_create_duplicate_in_same_partition_is_409(self, api_client, workspace_partition, workspace_id):
+        api_client.post(f"/partition/{workspace_partition}/workspaces", json={"workspace_id": workspace_id})
+        response = api_client.post(f"/partition/{workspace_partition}/workspaces", json={"workspace_id": workspace_id})
+        assert response.status_code == 409
+        assert workspace_partition in response.json()["detail"]
+
+    def test_same_workspace_id_in_two_partitions(self, api_client, workspace_partition, workspace_id):
+        """workspace_id is unique per partition: each partition gets its own workspace."""
+        other = f"ws-test-{uuid.uuid4().hex[:8]}"
+        assert api_client.post(f"/partition/{other}").status_code in [200, 201]
+        try:
+            for partition, name in ((workspace_partition, "first"), (other, "second")):
+                response = api_client.post(
+                    f"/partition/{partition}/workspaces",
+                    json={"workspace_id": workspace_id, "display_name": name},
+                )
+                assert response.status_code == 201, response.text
+
+            first = api_client.get(f"/partition/{workspace_partition}/workspaces/{workspace_id}").json()
+            second = api_client.get(f"/partition/{other}/workspaces/{workspace_id}").json()
+            assert (first["partition_name"], first["display_name"]) == (workspace_partition, "first")
+            assert (second["partition_name"], second["display_name"]) == (other, "second")
+
+            # Memberships and deletion are scoped to the addressed partition.
+            api_client.post(f"/partition/{other}/workspaces/{workspace_id}/files", json={"file_ids": ["only-in-other"]})
+            assert api_client.delete(f"/partition/{workspace_partition}/workspaces/{workspace_id}").status_code == 200
+            assert api_client.get(f"/partition/{workspace_partition}/workspaces/{workspace_id}").status_code == 404
+            assert api_client.get(f"/partition/{other}/workspaces/{workspace_id}").status_code == 200
+
+            # A workspace-scoped search across both partitions cannot pick one.
+            api_client.post(
+                f"/partition/{workspace_partition}/workspaces",
+                json={"workspace_id": workspace_id},
+            )
+            response = api_client.get(
+                "/search",
+                params={"partitions": [workspace_partition, other], "text": "anything", "workspace": workspace_id},
+            )
+            assert response.status_code == 422
+            assert "[WORKSPACE_AMBIGUOUS]" in response.json()["detail"]
+            response = api_client.get(
+                f"/search/partition/{other}",
+                params={"text": "anything", "workspace": workspace_id},
+            )
+            assert response.status_code == 200
+        finally:
+            api_client.delete(f"/partition/{other}")
+
     def test_get_workspace_not_found(self, api_client, workspace_partition):
         response = api_client.get(f"/partition/{workspace_partition}/workspaces/nonexistent")
         assert response.status_code == 404

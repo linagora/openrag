@@ -313,6 +313,13 @@ def _scrub_unquoted_named_credential(match: re.Match[str]) -> str:
     return f"{match.group('name')}{match.group('separator')}{match.group('spacing')}{_REDACTED_CREDENTIAL}"
 
 
+def _looks_like_bare_scheme_credential(value: str) -> bool:
+    candidate = value.strip()
+    return _looks_like_credential(candidate) or (
+        any(character.isalpha() for character in candidate) and any(character.isdigit() for character in candidate)
+    )
+
+
 def _scrub_query_credentials(value: str) -> str:
     """Redact credential-shaped values embedded in public query telemetry."""
 
@@ -328,7 +335,7 @@ def _scrub_query_credentials(value: str) -> str:
     return _AUTH_SCHEME_CREDENTIAL.sub(
         lambda match: (
             f"{match.group('scheme')}{match.group('spacing')}{_REDACTED_CREDENTIAL}"
-            if _looks_like_credential(match.group("credential"))
+            if _looks_like_bare_scheme_credential(match.group("credential"))
             else match.group(0)
         ),
         value,

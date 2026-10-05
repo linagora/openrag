@@ -154,5 +154,9 @@ class VectorStore(ABC):
         filters: dict[str, Any],
         output_fields: list[str] | None = None,
     ) -> list[dict[str, Any]]:
-        """Return full chunk data matching the given filter expression."""
+        """Return full chunk data matching the given filter expression.
+
+        Without ``output_fields``, every field but the vectors; ``["*"]``
+        includes them.
+        """
         ...

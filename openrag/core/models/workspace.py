@@ -13,7 +13,11 @@ from pydantic import BaseModel, Field
 
 
 class Workspace(BaseModel):
-    """A named subset of files within a partition."""
+    """A named subset of files within a partition.
+
+    ``workspace_id`` is unique within ``partition`` only; the pair is the
+    identity of a workspace.
+    """
 
     workspace_id: str
     partition: str

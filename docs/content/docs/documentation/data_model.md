@@ -57,7 +57,7 @@ erDiagram
 
     workspaces {
         int id PK
-        varchar workspace_id UK
+        varchar workspace_id
         varchar partition_name FK
         varchar display_name
         int created_by FK
@@ -66,8 +66,8 @@ erDiagram
 
     workspace_files {
         int id PK
-        varchar workspace_id FK
-        varchar file_id FK
+        int workspace_id FK
+        int file_id FK
     }
 
     jobs {
@@ -172,7 +172,7 @@ Groups files within a partition into named subsets for scoped search and chat. S
 | Column          | Type | Description |
 |------------------|------|-------------|
 | `id`             | Integer (PK) | Internal identifier |
-| `workspace_id`   | String (unique) | Client-facing workspace identifier |
+| `workspace_id`   | String | Client-facing workspace identifier, unique per partition (`uix_workspace_partition_id` on `(partition_name, workspace_id)`), not globally |
 | `partition_name` | String (FK → `partitions.partition`, CASCADE) | Owning partition |
 | `display_name`   | String (nullable) | Human-readable name |
 | `created_by`     | Integer (FK → `users.id`, SET NULL) | User who created the workspace |
@@ -189,8 +189,8 @@ Join table linking workspaces to files.
 | Column          | Type | Description |
 |------------------|------|-------------|
 | `id`             | Integer (PK) | Internal identifier |
-| `workspace_id`   | String (FK → `workspaces.workspace_id`, CASCADE) | Workspace reference |
-| `file_id`        | String | File reference (no FK constraint — referential integrity enforced at application level) |
+| `workspace_id`   | Integer (FK → `workspaces.id`, CASCADE) | Workspace reference (the integer PK, since the string `workspace_id` is only unique per partition) |
+| `file_id`        | Integer (FK → `files.id`, CASCADE) | File reference (the integer PK, since the string `file_id` is only unique per partition) |
 
 **Constraints:**
 - `UniqueConstraint(workspace_id, file_id)` → a file appears at most once per workspace

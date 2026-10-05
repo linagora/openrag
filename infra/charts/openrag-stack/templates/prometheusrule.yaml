@@ -1,0 +1,61 @@
+{{- /* monitoring.bundled turns the rules on too, like the dashboards and the API
+   ServiceMonitor: a standalone stack with no alerts would look healthy. Its
+   Prometheus selects every PrometheusRule, so no labels are needed there. */}}
+{{- if or .Values.monitoring.prometheusRule.enabled .Values.monitoring.bundled }}
+{{- /*
+Alert rules for the Prometheus Operator.
+
+rules/openrag-alerts.yaml.tpl is the single source of truth and a Helm template,
+so thresholds and `for` durations are ordinary values — they are deployment
+config, varying with a client's SLO, corpus size and query volume, not
+constants. `tpl` renders it against this release's values.
+
+The Compose stack cannot render Helm templates, so it loads a generated copy at
+infra/compose/prometheus/rules/, produced from this same file with default
+values by scripts/gen_alert_rules.py and checked for drift in CI. Generated, not
+duplicated: one definition still decides what both deployments alert on.
+
+Requires the monitoring.coreos.com CRDs (kube-prometheus-stack or a standalone
+operator). Disabled by default, like the ServiceMonitor.
+*/}}
+{{- /* Overrides are validated inside the rule template itself, next to the
+   defaults they override, so the Compose generator gets the same checks. */}}
+{{- /* A copy of the chart without rules/ would otherwise render a PrometheusRule
+   holding no rules: created, accepted, and alerting on nothing. */}}
+{{- if not (.Files.Get "rules/openrag-alerts.yaml.tpl") }}
+{{- fail "monitoring.prometheusRule: the chart holds no rules/openrag-alerts.yaml.tpl. It ships inside the chart package; check that .helmignore does not exclude it." }}
+{{- end }}
+{{- $rules := tpl (.Files.Get "rules/openrag-alerts.yaml.tpl") . }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "openrag-stack.fullname" . }}-alerts
+  labels:
+    {{- include "openrag-stack.labels" . | nindent 4 }}
+    {{- /* The label the operator's ruleSelector matches on, e.g.
+       release: kube-prometheus-stack. Without it the rules are created and
+       never loaded, which looks exactly like a healthy system. */}}
+    {{- with .Values.monitoring.prometheusRule.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+{{- with .Values.monitoring.prometheusRule.commonLabels }}
+{{- /* Stamp deployment-wide routing labels onto every alert, so they match the
+   Alertmanager conventions of whichever stack is running. A rule whose labels
+   miss those conventions fires into a void indistinguishable from silence.
+   A rule's own labels win on conflict: severity is the rule's to decide.
+   Structural rather than textual — `severity` appears on every rule. */}}
+{{- $common := . }}
+{{- $parsed := $rules | fromYaml }}
+{{- range $group := $parsed.groups }}
+{{- range $rule := $group.rules }}
+{{- $_ := set $rule "labels" (merge ($rule.labels | default dict) $common) }}
+{{- end }}
+{{- end }}
+  {{- toYaml $parsed | nindent 2 }}
+{{- else }}
+{{- /* Nothing to inject: pass the rendered rules through as text, which keeps
+   their comments in `helm get manifest` for whoever is reading it at 3am. */}}
+{{- $rules | nindent 2 }}
+{{- end }}
+{{- end }}
