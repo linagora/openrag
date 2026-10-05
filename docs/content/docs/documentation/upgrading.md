@@ -1090,24 +1090,28 @@ for field in c.describe_collection(name)["fields"]:
    TIMEOUT = 3600  # seconds; raise it for a large collection
    vdb = load_config().vectordb
    c = MilvusClient(uri=f"http://{vdb.host}:{vdb.port}")
-   job = c.compact(vdb.collection_name)
    deadline = time.monotonic() + TIMEOUT
-   while (state := c.get_compaction_state(job)) != "Completed":
+   def left():  # each call to Milvus may wait only until the deadline
+       seconds = deadline - time.monotonic()
+       if seconds <= 0:
+           sys.exit(f"compaction: still executing after {TIMEOUT} s")
+       return seconds
+   job = c.compact(vdb.collection_name, timeout=left())
+   while (state := c.get_compaction_state(job, timeout=left())) != "Completed":
        if state != "Executing":
            sys.exit(f"compaction {job}: unexpected state {state}")
-       if time.monotonic() > deadline:
-           sys.exit(f"compaction {job}: still executing after {TIMEOUT} s")
-       time.sleep(15)
+       time.sleep(min(15, left()))
    print("done")
    '
    ```
 
    It prints `done` once Milvus reports the job `Completed`, and stops with an
    error on any state other than `Executing`, such as `UndefiedState`, or when
-   the job outlasts `TIMEOUT`. Go to step 4 either way. After a timeout, the
-   compaction keeps running in Milvus. `Completed` only means that no task of the
-   job is still running (Milvus also reports it for a job ID it does not know):
-   step 5 checks what the compaction did.
+   the job, or a call to Milvus that does not answer, outlasts `TIMEOUT`. Go to
+   step 4 either way. After a timeout, the compaction keeps running in Milvus.
+   `Completed` only means that no task of the job is still running (Milvus also
+   reports it for a job ID it does not know): step 5 checks what the compaction
+   did.
 4. Restore the previous value, even if step 3 failed:
 
    ```bash
