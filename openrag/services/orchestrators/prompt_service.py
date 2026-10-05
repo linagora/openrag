@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, Literal
 
 from core.models.prompt import Prompt, PromptType
 from core.prompts.template_loader import load_template_by_key
-from core.utils.exceptions import ConfigError, NotFoundError, ValidationError
+from core.utils.exceptions import ConfigError, NotFoundError, ServiceUnavailableError, ValidationError
 from core.utils.logging import get_logger
 
 if TYPE_CHECKING:
@@ -330,6 +330,7 @@ class PromptService:
         names: Sequence[str | None] | None = None,
         *,
         strict_names: bool = False,
+        strict_errors: bool = False,
     ) -> ResolvedPrompt:
         """Resolve a prompt while retaining its stable public identity."""
         candidates = [n for n in (names or ()) if n]
@@ -348,6 +349,11 @@ class PromptService:
                     self._log_resolution(prompt_type, candidates, "default", default.name, default.content)
                     return ResolvedPrompt.create(default.content, name=default.name, source="default")
         except Exception as exc:  # noqa: BLE001 - a DB blip must not fail the request
+            if strict_errors:
+                raise ServiceUnavailableError(
+                    f"Prompt lookup for type '{prompt_type}' is temporarily unavailable.",
+                    code="PROMPT_LOOKUP_UNAVAILABLE",
+                ) from exc
             if prompt_type == PromptType.ASR_TRANSCRIPTION.value:
                 logger.warning(f"Prompt lookup failed for '{prompt_type}'; using the provider's native prompt: {exc}")
                 self._log_resolution(prompt_type, candidates, "native", None, "")

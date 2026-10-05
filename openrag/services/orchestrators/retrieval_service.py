@@ -191,6 +191,8 @@ class RetrievalService:
         prompt_type: str,
         name: str | None,
         disk_key: str,
+        *,
+        strict: bool = False,
     ) -> tuple[str, dict[str, str | None]]:
         """Resolve a query-side prompt to its text and content-free identity.
 
@@ -200,7 +202,7 @@ class RetrievalService:
         """
         resolve_with_identity = getattr(self._prompt_service, "resolve_prompt_with_identity", None)
         if resolve_with_identity is not None:
-            resolved = await resolve_with_identity(prompt_type, names=[name])
+            resolved = await resolve_with_identity(prompt_type, names=[name], strict_errors=strict)
             return resolved.content, self._public_prompt_identity(resolved)
         if self._prompt_service is not None:
             content = await self._prompt_service.resolve_prompt(prompt_type, names=[name])
@@ -342,6 +344,10 @@ class RetrievalService:
                     "contextualizer": {
                         **contextualizer_endpoint,
                         "prompt_name": getattr(retrieval, "query_contextualizer_prompt_name", None),
+                        "mode": getattr(getattr(self._config, "rag", None), "mode", None),
+                        "max_contextualized_query_len": getattr(
+                            getattr(self._config, "rag", None), "max_contextualized_query_len", None
+                        ),
                     },
                     "expansion": {
                         "include_related": getattr(retrieval, "include_related", False),
@@ -371,11 +377,20 @@ class RetrievalService:
         partition = self._partition_configs().get(selected[0])
         return getattr(getattr(partition, "retrieval", None), "query_contextualizer_prompt_name", None)
 
-    async def _contextualizer_prompt_identity(self, partitions: Sequence[str]) -> dict[str, str | None]:
+    async def _contextualizer_prompt_identity(
+        self,
+        partitions: Sequence[str],
+        *,
+        strict: bool = False,
+    ) -> dict[str, str | None]:
         prompt_name = self._contextualizer_prompt_name(partitions)
         resolve_with_identity = getattr(self._prompt_service, "resolve_prompt_with_identity", None)
         if resolve_with_identity is not None:
-            resolved = await resolve_with_identity("query_contextualizer", names=[prompt_name])
+            resolved = await resolve_with_identity(
+                "query_contextualizer",
+                names=[prompt_name],
+                strict_errors=strict,
+            )
             return {
                 "name": resolved.name,
                 "source": resolved.source,
@@ -411,7 +426,12 @@ class RetrievalService:
             "content_hash": field("content_hash"),
         }
 
-    async def _query_expansion_prompt_identity(self, retrieval: object) -> dict[str, str | None] | None:
+    async def _query_expansion_prompt_identity(
+        self,
+        retrieval: object,
+        *,
+        strict: bool = False,
+    ) -> dict[str, str | None] | None:
         retrieval_type = getattr(retrieval, "type", None)
         if retrieval_type == "hyde":
             prompt_type = "hyde"
@@ -421,7 +441,12 @@ class RetrievalService:
             prompt_name = getattr(retrieval, "multi_query_prompt_name", None)
         else:
             return None
-        _content, identity = await self._resolve_query_prompt(prompt_type, prompt_name, prompt_type)
+        _content, identity = await self._resolve_query_prompt(
+            prompt_type,
+            prompt_name,
+            prompt_type,
+            strict=strict,
+        )
         return {"type": prompt_type, **identity}
 
     async def resolved_public_retrieval_configuration(
@@ -658,6 +683,7 @@ class RetrievalService:
         disable_expansion: bool = False,
         contextualizer_prompt: object | None = None,
         build_execution: bool = True,
+        strict_prompt_resolution: bool = False,
     ) -> ResolvedRetrievalPlan:
         """Resolve executable pipelines and their public identity once."""
         requested = list(partitions)
@@ -672,7 +698,7 @@ class RetrievalService:
                 partition = configs.get(partition_name)
                 retrieval = partition.retrieval if partition is not None else self._config.retriever
                 prompt_identities[partition_name] = (
-                    await self._query_expansion_prompt_identity(retrieval)
+                    await self._query_expansion_prompt_identity(retrieval, strict=strict_prompt_resolution)
                     if configs
                     else self._legacy_query_expansion_prompt_identity(self._pipeline)
                 )
@@ -741,7 +767,7 @@ class RetrievalService:
         public["contextualizer_prompt"] = (
             self._public_prompt_identity(contextualizer_prompt)
             if contextualizer_prompt is not None
-            else await self._contextualizer_prompt_identity(requested)
+            else await self._contextualizer_prompt_identity(requested, strict=strict_prompt_resolution)
         )
         return ResolvedRetrievalPlan(
             groups=tuple(groups),
