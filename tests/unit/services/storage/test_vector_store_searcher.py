@@ -438,6 +438,22 @@ async def test_get_related_chunks_queries_store_with_file_ids():
 
 
 @pytest.mark.asyncio
+async def test_get_related_chunks_accepts_limit_with_shared_vector_store(mock_vector_store):
+    doc_repo = MagicMock()
+    doc_repo.get_file_ids_by_relationship = AsyncMock(return_value=["f1"])
+    searcher = VectorStoreSearcher(
+        vector_store=mock_vector_store,
+        embedder=MagicMock(),
+        document_repo=doc_repo,
+        collection="test_col",
+    )
+
+    chunks = await searcher.get_related_chunks(partition="p1", relationship_id="r1", limit=1)
+
+    assert chunks == []
+
+
+@pytest.mark.asyncio
 async def test_get_related_chunks_intersects_allowed_file_ids():
     """#706: related-file expansion must not escape a workspace's file allowlist."""
     rows = [_make_row("1")]
