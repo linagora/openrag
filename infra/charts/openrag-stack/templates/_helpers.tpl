@@ -157,3 +157,58 @@ Usage: {{- if eq (include "openrag-stack.rayServeApi" .) "true" }}
 {{- define "openrag-stack.rayServeApi" -}}
 {{- if and .Values.ray.enabled (eq (toString .Values.env.config.ENABLE_RAY_SERVE) "true") -}}true{{- else -}}false{{- end -}}
 {{- end }}
+
+{{/*
+Port every Ray node exports its metrics on, head and workers alike, and the
+embedded Ray inside the openrag pod when ray.enabled=false. Kept off
+networkPolicy.externalPorts' 8080 on purpose: that rule matches by port number
+across every pod in the namespace, and these metrics are unauthenticated.
+KubeRay's own default is exactly 8080, so both halves of raycluster.yaml must
+override it — see the comments there.
+*/}}
+{{- define "openrag-stack.rayMetricsPort" -}}
+8090
+{{- end }}
+
+{{/*
+Whether Ray's metrics get a PodMonitor. monitoring.bundled turns it on like the
+API's ServiceMonitor: the ingestion and worker-side inference series exist on
+Ray's endpoint only, so a stack that scrapes the API alone leaves the alerts
+built on them unable to fire.
+*/}}
+{{- define "openrag-stack.rayPodMonitor" -}}
+{{- if or .Values.ray.metrics.podMonitor.enabled .Values.monitoring.bundled -}}true{{- else -}}false{{- end -}}
+{{- end }}
+
+{{/*
+Whether the openrag pod starts Ray itself. With ray.enabled=false and
+RAY_ADDRESS set, the API attaches to an external cluster (ray.init(address=...))
+and starts no metrics agent, so nothing would listen on the embedded Ray's
+port: a monitor on it is a target that is always down. Only env.config and
+env.secrets are visible here; a RAY_ADDRESS supplied through env.existingSecret
+or an external secrets provider is not, which is what ray.externalCluster says.
+*/}}
+{{- define "openrag-stack.embeddedRay" -}}
+{{- $address := include "openrag-stack.rayAddress" . -}}
+{{- if and (not .Values.ray.enabled) (not $address) (not .Values.ray.externalCluster) -}}true{{- else -}}false{{- end -}}
+{{- end }}
+
+{{/*
+The RAY_ADDRESS the API will see, as configmap-env.yaml and secrets-env.yaml
+render it: both pass values through tpl, so a raw value can be an expression
+that renders empty. Empty when the chart sees none.
+
+The pod reads the ConfigMap, then the Secret (envFrom), so a key in both takes
+the Secret's value, even an empty one. env.secrets only reaches that Secret
+when the chart renders it: no env.existingSecret and the "values" provider.
+Otherwise the Secret is opaque here and env.config is all the chart can read.
+*/}}
+{{- define "openrag-stack.rayAddress" -}}
+{{- $secrets := .Values.env.secrets | default dict -}}
+{{- $chartSecret := and (not .Values.env.existingSecret) (eq (.Values.env.secretsProvider.type | default "values") "values") -}}
+{{- $raw := dig "RAY_ADDRESS" "" (.Values.env.config | default dict) -}}
+{{- if and $chartSecret (hasKey $secrets "RAY_ADDRESS") -}}
+{{- $raw = get $secrets "RAY_ADDRESS" -}}
+{{- end -}}
+{{- tpl (printf "%v" $raw) . | trim -}}
+{{- end }}

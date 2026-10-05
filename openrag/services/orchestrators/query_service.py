@@ -40,6 +40,7 @@ import time
 import unicodedata
 import uuid
 from collections.abc import AsyncIterator, Callable
+from contextlib import aclosing
 from datetime import UTC, datetime
 from enum import Enum
 from typing import TYPE_CHECKING, Any, NamedTuple
@@ -104,6 +105,9 @@ CASUAL_MESSAGE_INTENTS: dict[str, CasualMessagePolicy] = {
     "comment allez vous": CasualMessagePolicy("greeting", "fr"),
     "how are you": CasualMessagePolicy("greeting", "en"),
     "hey how are you": CasualMessagePolicy("greeting", "en"),
+    "comment pouvez vous m aider": CasualMessagePolicy("capability", "fr"),
+    "how can you help me": CasualMessagePolicy("capability", "en"),
+    "what can you do": CasualMessagePolicy("capability", "en"),
     "merci": CasualMessagePolicy("gratitude", "fr"),
     "thank you": CasualMessagePolicy("gratitude", "en"),
     "thanks": CasualMessagePolicy("gratitude", "en"),
@@ -112,7 +116,6 @@ CASUAL_MESSAGE_INTENTS: dict[str, CasualMessagePolicy] = {
 }
 CASUAL_MESSAGES = frozenset(CASUAL_MESSAGE_INTENTS)
 _EMPTY_CASUAL_POLICY = CasualMessagePolicy("empty", "en")
-_CASUAL_LANGUAGE_MIN_CONFIDENCE = 0.8
 
 
 def normalize_casual_message(message: str) -> str:
@@ -129,6 +132,43 @@ def normalize_casual_message(message: str) -> str:
     return " ".join("".join(characters).split())
 
 
+CASUAL_ACKNOWLEDGEMENTS = frozenset(
+    normalize_casual_message(phrase)
+    for phrase in (
+        "ok",
+        "okay",
+        "yes",
+        "yep",
+        "yeah",
+        "sure",
+        "cool",
+        "great",
+        "nice",
+        "perfect",
+        "sounds good",
+        "got it",
+        "ok thanks",
+        "ok thank you",
+        "okay thanks",
+        "okay thank you",
+        "ok merci",
+        "okay merci",
+        "oui",
+        "oui merci",
+        "d'accord",
+        "d'accord merci",
+        "super",
+        "super merci",
+        "parfait",
+        "parfait merci",
+    )
+)
+_THUMB_SKIN_TONES = ("🏻", "🏼", "🏽", "🏾", "🏿")
+_THUMBS_UP_REACTIONS = frozenset(
+    ("👍", "👍️") + tuple(f"👍{tone}" for tone in _THUMB_SKIN_TONES) + tuple(f"👍️{tone}" for tone in _THUMB_SKIN_TONES)
+)
+
+
 def casual_message_policy(message: str) -> CasualMessagePolicy | None:
     """Return the exact-match casual policy, including empty-input fallback."""
     normalized = normalize_casual_message(message)
@@ -137,10 +177,26 @@ def casual_message_policy(message: str) -> CasualMessagePolicy | None:
     return CASUAL_MESSAGE_INTENTS.get(normalized)
 
 
+def _is_thumbs_up_reaction(message: str) -> bool:
+    """Recognize the common text and skin-tone forms of a thumbs-up reply."""
+    return message.strip() in _THUMBS_UP_REACTIONS
+
+
+def _acknowledgement_language(messages: list[dict], latest_message: str) -> str:
+    """Prefer the last assistant turn's language for very short replies."""
+    for message in reversed(messages[:-1]):
+        if message.get("role") != "assistant":
+            continue
+        content = message.get("content")
+        if isinstance(content, str) and content.strip():
+            language = detect_language(content)
+            if language:
+                return language
+    return detect_language(latest_message) or "en"
+
+
 class _PrepareChatResult(NamedTuple):
-    """A named tuple stays positionally unpackable, so existing
-    ``a, b, c, ... = await self._prepare_chat(...)`` call sites still work.
-    """
+    """Prepared chat data passed from orchestration to the response methods."""
 
     payload: dict
     docs: list
@@ -150,6 +206,7 @@ class _PrepareChatResult(NamedTuple):
     citation_protocol_active: bool
     indexed_attachment_ids: list[str]
     configuration_fingerprint: str
+    retry_empty_response: bool = True
 
 
 _MAP_SYSTEM_PROMPT = """You are an AI assistant specialized in extracting and synthesizing relevant information from text.
@@ -683,9 +740,17 @@ class QueryService:
             # file_id-only filtering could match a same-named file in another
             # partition the caller also has access to (#706).
             partition = [scope.partition]
-            filter_params = {"file_id": scope.file_ids}
+            if attachment_ids:
+                # Attachments narrow the workspace, never widen it: only the
+                # attached files that belong to it are searched.
+                indexed_attachment_ids = _within_workspace(attachment_ids, scope.file_ids)
+                filter_params = {"file_id": indexed_attachment_ids}
+                scope_kind = "attachment"
+            else:
+                filter_params = {"file_id": scope.file_ids}
+                scope_kind = "workspace"
             if trace is not None:
-                filter_params[TRACE_FILE_SCOPE_KIND_KEY] = "workspace"
+                filter_params[TRACE_FILE_SCOPE_KIND_KEY] = scope_kind
         elif attachment_ids and partition:
             # No ownership check needed: file_id is ANDed with the server-fixed
             # partition (or, for the "all" wildcard, SUPER_ADMIN_MODE-only).
@@ -696,6 +761,16 @@ class QueryService:
 
         last_user_message = messages[-1].get("content") or ""
         casual_policy = casual_message_policy(last_user_message)
+        normalized_last_user = normalize_casual_message(last_user_message)
+        acknowledgement_reaction = _is_thumbs_up_reaction(last_user_message)
+        acknowledgement_candidate = normalized_last_user in CASUAL_ACKNOWLEDGEMENTS or acknowledgement_reaction
+        contextual_acknowledgement = normalized_last_user in CASUAL_ACKNOWLEDGEMENTS or (
+            acknowledgement_reaction and RAGMODE(self._rag_mode) is RAGMODE.CHATBOTRAG
+        )
+        if contextual_acknowledgement:
+            # Short acknowledgements need the full history: they can be thanks
+            # after a social question or acceptance of a factual offer.
+            casual_policy = None
         explicitly_required = metadata.get("require_retrieval") is True
         existing_force_retrieval = use_websearch or use_map_reduce or bool(indexed_attachment_ids)
 
@@ -711,18 +786,16 @@ class QueryService:
         elif casual_policy is None or retrieval_forced:
             queries = await self.generate_query(messages, llm=llm, partition=partition, trace=trace)
             usable_queries = [query for query in queries.query_list if query.query.strip()]
-            contextualizer_found_casual = (
-                not retrieval_forced
+            if (
+                acknowledgement_candidate
+                and not retrieval_forced
+                and queries.intent == "gratitude"
                 and not queries.requires_retrieval
-                and queries.intent in {"greeting", "gratitude", "farewell", "capability"}
-                and not queries.query_list
-            )
-            if contextualizer_found_casual:
-                language = detect_language(
-                    last_user_message,
-                    min_confidence=_CASUAL_LANGUAGE_MIN_CONFIDENCE,
+                and not usable_queries
+            ):
+                casual_policy = CasualMessagePolicy(
+                    "acknowledgement", _acknowledgement_language(messages, last_user_message)
                 )
-                casual_policy = CasualMessagePolicy(queries.intent, language or "en")
             elif not usable_queries:
                 queries = SearchQueries(query_list=[Query(query=last_user_message)])
                 self._mark_contextualization_fallback(trace, queries)
@@ -759,7 +832,9 @@ class QueryService:
                 )
                 trace.record_stage("original_query", status="complete", candidates=[])
                 trace.record_stage("contextualized_query", status="not_run", candidates=[])
-            casual_prompt = build_casual_response_prompt(casual_policy.intent, casual_policy.language)
+            casual_prompt = build_casual_response_prompt(
+                casual_policy.intent, casual_policy.language, assistant_name=self._config.server.assistant_name
+            )
             payload["messages"] = prepend_system_prompt(
                 messages,
                 casual_prompt,
@@ -776,6 +851,7 @@ class QueryService:
                 True,
                 indexed_attachment_ids,
                 configuration_fingerprint,
+                True,
             )
 
         if queries is None:  # pragma: no cover - guarded by the casual return above
@@ -1250,6 +1326,7 @@ class QueryService:
         configuration_fingerprint = "unavailable"
         llm = self._resolve_llm(partitions)
         citation_protocol_active = False
+        retry_empty_response = True
         if partitions is None and not metadata.get("websearch", False):
             docs, web_results, retrieved_docs, retrieved_web_results = [], [], [], []
             attachments: list[str] = []
@@ -1264,6 +1341,7 @@ class QueryService:
             citation_protocol_active = result.citation_protocol_active
             attachments = result.indexed_attachment_ids
             configuration_fingerprint = result.configuration_fingerprint
+            retry_empty_response = result.retry_empty_response
         sources = prepare_sources(docs, web_results)
         # `all_retrieved_sources` is debug/eval telemetry, not needed by most
         # callers — skip building it (and calling prepare_sources on the full,
@@ -1282,8 +1360,51 @@ class QueryService:
             )
         else:
             clean, citations = content, None
-        chunk["choices"][0]["message"]["content"] = clean
+        response_message = chunk["choices"][0]["message"]
+        retry_failed = False
+        can_retry = (
+            retry_empty_response
+            and not structured_output
+            and chunk["choices"][0].get("finish_reason") in (None, "stop")
+            and not clean.strip()
+            and not response_message.get("tool_calls")
+            and not response_message.get("refusal")
+        )
+        if can_retry:
+            try:
+                retry_chunk = await llm.chat(_empty_response_retry_messages(payload["messages"]), **_sampling(payload))
+            except Exception as exc:
+                retry_failed = True
+                logger.warning("Empty-response retry failed; returning a short fallback", error=str(exc))
+            else:
+                retry_chunk["model"] = model_name
+                retry_content = retry_chunk.get("choices", [{}])[0].get("message", {}).get("content", "") or ""
+                if citation_protocol_active:
+                    clean, citations = extract_and_strip_sources_block(
+                        retry_content,
+                        include_inline_markers=bool(sources),
+                    )
+                else:
+                    clean, citations = retry_content, None
+                chunk = retry_chunk
+                response_message = chunk["choices"][0]["message"]
+
+        response_truncated = chunk["choices"][0].get("finish_reason") == "length"
+        if (
+            retry_empty_response
+            and not structured_output
+            and not clean.strip()
+            and not response_message.get("tool_calls")
+            and not response_message.get("function_call")
+            and not response_message.get("refusal")
+            and chunk["choices"][0].get("finish_reason") in (None, "stop", "length")
+        ):
+            clean = _empty_response_fallback(payload["messages"])
+            chunk["choices"][0]["finish_reason"] = "stop"
+        response_message["content"] = clean
         extra = _build_extra_payload(sources, citations, all_sources, include_all_retrieved=include_all_retrieved)
+        if retry_failed or response_truncated:
+            extra["truncated"] = True
         if metadata.get("attachments"):
             # Indicate which attachments were actually searched to generate the answer.
             extra["attachments"] = attachments
@@ -1326,6 +1447,7 @@ class QueryService:
         configuration_fingerprint = "unavailable"
         llm = self._resolve_llm(partitions)
         citation_protocol_active = False
+        retry_empty_response = True
         if partitions is None and not metadata.get("websearch", False):
             docs, web_results, retrieved_docs, retrieved_web_results = [], [], [], []
             attachments: list[str] = []
@@ -1340,6 +1462,7 @@ class QueryService:
             citation_protocol_active = result.citation_protocol_active
             attachments = result.indexed_attachment_ids
             configuration_fingerprint = result.configuration_fingerprint
+            retry_empty_response = result.retry_empty_response
         sources = prepare_sources(docs, web_results)
         all_sources = prepare_sources(retrieved_docs, retrieved_web_results) if include_all_retrieved else None
         structured_output = _is_structured_output(payload)
@@ -1361,17 +1484,34 @@ class QueryService:
             terminal_extra_fields = finish_trace
 
         payload["messages"] = self._sanitize_messages(payload["messages"])
-        llm_stream = llm.stream_chat(payload["messages"], **_sampling(payload))
-        async for sse_line in stream_with_source_filtering(
-            llm_stream,
-            sources,
-            model_name,
-            all_sources=all_sources,
-            include_all_retrieved=include_all_retrieved,
-            citation_protocol_active=citation_protocol_active and not structured_output,
-            extra_fields=extra_fields or None,
-            terminal_extra_fields=terminal_extra_fields,
-        ):
+
+        def filtered_stream(messages):
+            return stream_with_source_filtering(
+                llm.stream_chat(messages, **_sampling(payload)),
+                sources,
+                model_name,
+                all_sources=all_sources,
+                include_all_retrieved=include_all_retrieved,
+                citation_protocol_active=citation_protocol_active and not structured_output,
+                extra_fields=extra_fields or None,
+                terminal_extra_fields=terminal_extra_fields,
+            )
+
+        response_stream = filtered_stream(payload["messages"])
+        if retry_empty_response and not structured_output:
+            fallback_extra = _build_extra_payload(
+                sources, None, all_sources, include_all_retrieved=include_all_retrieved
+            )
+            if extra_fields:
+                fallback_extra.update(extra_fields)
+            response_stream = _retry_empty_response_stream(
+                response_stream,
+                lambda: filtered_stream(_empty_response_retry_messages(payload["messages"])),
+                fallback_text=_empty_response_fallback(payload["messages"]),
+                fallback_extra=fallback_extra,
+                model_name=model_name,
+            )
+        async for sse_line in response_stream:
             yield sse_line
 
     async def complete(
@@ -1413,6 +1553,164 @@ class QueryService:
 # --------------------------------------------------------------------------- #
 # Helpers
 # --------------------------------------------------------------------------- #
+
+
+_EMPTY_RESPONSE_RETRY_INSTRUCTION = (
+    "Your previous response was empty after response filtering. Try once more using the conversation, "
+    "the supplied context, and the response language already specified above. If the context does not support a "
+    "substantive answer, say so briefly. Do not return only a source marker or an empty message."
+)
+
+
+def _empty_response_retry_messages(messages: list[dict]) -> list[dict]:
+    """Append the retry instruction to the existing system message when present."""
+    retry_messages = [dict(message) for message in messages]
+    if retry_messages and retry_messages[0].get("role") == "system":
+        existing = retry_messages[0].get("content") or ""
+        retry_messages[0]["content"] = f"{existing.rstrip()}\n\n{_EMPTY_RESPONSE_RETRY_INSTRUCTION}"
+    else:
+        retry_messages.insert(0, {"role": "system", "content": _EMPTY_RESPONSE_RETRY_INSTRUCTION})
+    return retry_messages
+
+
+def _empty_response_fallback(messages: list[dict]) -> str:
+    """Return a short, language-aware response when one retry cannot answer."""
+    latest_user = next(
+        (message.get("content") or "" for message in reversed(messages) if message.get("role") == "user"),
+        "",
+    )
+    is_casual = (
+        casual_message_policy(latest_user) is not None
+        or normalize_casual_message(latest_user) in CASUAL_ACKNOWLEDGEMENTS
+        or _is_thumbs_up_reaction(latest_user)
+    )
+    language = _acknowledgement_language(messages, latest_user) if is_casual else detect_language(latest_user) or "en"
+    if language == "fr":
+        if is_casual:
+            return "Je suis là si vous souhaitez continuer."
+        return "Je n'ai pas pu formuler de réponse. Veuillez réessayer."
+    if is_casual:
+        return "I'm here if you'd like to continue."
+    return "I couldn't produce a response. Please try again."
+
+
+def _fallback_stream_lines(template, fallback_text: str, extra: dict, model_name: str):
+    """Build a complete SSE response around a short fallback message."""
+    base = dict(template or {})
+    base.setdefault("model", model_name)
+    choices = base.get("choices") or [{"index": 0, "delta": {}, "finish_reason": "stop"}]
+    original_choice = dict(choices[0])
+    base["choices"] = [{**original_choice, "delta": {"content": fallback_text}, "finish_reason": None}]
+    base["extra"] = dict(extra)
+    yield f"data: {json.dumps(base)}\n\n"
+
+    finish = dict(template or base)
+    finish.setdefault("model", model_name)
+    finish_choice = dict((finish.get("choices") or [original_choice])[0])
+    finish["choices"] = [{**finish_choice, "delta": {}, "finish_reason": "stop"}]
+    finish["extra"] = dict(extra)
+    yield f"data: {json.dumps(finish)}\n\n"
+    yield "data: [DONE]\n\n"
+
+
+async def _retry_empty_response_stream(
+    initial_stream,
+    retry_stream_factory,
+    *,
+    fallback_text: str,
+    fallback_extra: dict,
+    model_name: str,
+):
+    """Retry once after source filtering proves a completed answer is empty."""
+    template = None
+    extra = dict(fallback_extra)
+
+    for attempt in range(2):
+        buffered: list[str] = []
+        answer_started = False
+        saw_done = False
+        saw_non_text_output = False
+        saw_truncated = False
+        last_finish_reason = None
+
+        try:
+            stream = initial_stream if attempt == 0 else retry_stream_factory()
+            async with aclosing(stream):
+                async for line in stream:
+                    if answer_started:
+                        yield line
+                        continue
+
+                    buffered.append(line)
+                    if not line.startswith("data:"):
+                        continue
+                    data_text = line[len("data:") :].strip()
+                    if data_text == "[DONE]":
+                        saw_done = True
+                        break
+
+                    try:
+                        data = json.loads(data_text)
+                    except json.JSONDecodeError:
+                        # Filtered streams should be valid SSE JSON; pass unexpected
+                        # events through instead of treating them as an empty answer.
+                        answer_started = True
+                        for buffered_line in buffered:
+                            yield buffered_line
+                        buffered.clear()
+                        continue
+
+                    event_extra = data.get("extra")
+                    if isinstance(event_extra, dict) and event_extra:
+                        extra = dict(event_extra)
+                        saw_truncated = saw_truncated or event_extra.get("truncated") is True
+
+                    choices = data.get("choices") or []
+                    if not choices:
+                        continue
+                    template = data
+                    choice = choices[0]
+                    delta = choice.get("delta", {}) or {}
+                    content = delta.get("content", "") or ""
+                    if choice.get("finish_reason") is not None:
+                        last_finish_reason = choice["finish_reason"]
+                    if delta.get("tool_calls") or delta.get("function_call") or delta.get("refusal"):
+                        saw_non_text_output = True
+                    if (isinstance(content, str) and content.strip()) or saw_non_text_output:
+                        answer_started = True
+                        for buffered_line in buffered:
+                            yield buffered_line
+                        buffered.clear()
+        except Exception as exc:
+            if answer_started or attempt == 0:
+                raise
+            logger.warning("Empty-response stream retry failed; returning a short fallback", error=str(exc))
+            fallback_extra = {**extra, "truncated": True}
+            for fallback_line in _fallback_stream_lines(template, fallback_text, fallback_extra, model_name):
+                yield fallback_line
+            return
+
+        if answer_started:
+            return
+        if attempt == 0 and saw_truncated:
+            for buffered_line in buffered:
+                yield buffered_line
+            return
+        if attempt == 0 and saw_done and not saw_truncated and last_finish_reason in (None, "stop"):
+            continue
+
+        if last_finish_reason not in (None, "stop", "length"):
+            for buffered_line in buffered:
+                yield buffered_line
+            return
+
+        if attempt == 1 and saw_truncated:
+            extra = {**extra, "truncated": True}
+        if last_finish_reason == "length":
+            extra = {**extra, "truncated": True}
+        for fallback_line in _fallback_stream_lines(template, fallback_text, extra, model_name):
+            yield fallback_line
+        return
 
 
 def _json_slice(text: str) -> str:
@@ -1472,6 +1770,12 @@ def _extract_attachment_ids(metadata: dict) -> list[str]:
     if not isinstance(raw, list):
         return []
     return [a["id"] for a in raw if isinstance(a, dict) and isinstance(a.get("id"), str) and a["id"]]
+
+
+def _within_workspace(attachment_ids: list[str], workspace_file_ids: list[str]) -> list[str]:
+    """Order-preserving, deduplicated subset of ``attachment_ids`` allowed by the workspace."""
+    allowed = set(workspace_file_ids)
+    return list(dict.fromkeys(fid for fid in attachment_ids if fid in allowed))
 
 
 def _dedupe_web(web_lists: list[list]) -> list:

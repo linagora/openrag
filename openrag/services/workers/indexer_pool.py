@@ -57,7 +57,10 @@ _MISSING_WORKER_REF_ERROR = "Indexer worker did not receive a registered task re
 # separately; v10 workers interpret all three as the same indexing failure.
 # v12: workers write each embedder's own vector field; v11 workers still write
 # the shared `vector` field, which the schema-v3 migration drops.
-_INDEXER_ACTOR_PROTOCOL_VERSION = "v12"
+# v13: TaskStateManager fences admission against a task already indexing the
+# same file and is replaced during bootstrap when it lacks that method; the
+# replacement changes the actor id the previous generation's handles point at.
+_INDEXER_ACTOR_PROTOCOL_VERSION = "v13"
 _INDEXER_POOL_DISPATCHER_ACTOR_NAME = f"IndexerPoolDispatcher-{_INDEXER_ACTOR_PROTOCOL_VERSION}"
 
 # Detached actors default to max_restarts=0, so one that dies — an OOM on a
@@ -173,6 +176,7 @@ class IndexerWorkerActor:
             caption_prompt=caption_prompt,
             timeouts=_build_pipeline_timeouts(cfg),
             chunker_factory=_build_chunker_from_config,
+            default_chunking=getattr(cfg, "chunker", None),
             embedder_window_resolver=_build_embedder_window_resolver(cfg),
             vector_field_resolver=_build_vector_field_resolver(cfg),
             parser_factory=parser_factory,
@@ -563,7 +567,7 @@ class IndexerWorkerActor:
             if workspace_ids and not replace and file_id:
                 results = await asyncio.gather(
                     *(
-                        self._catalog_store.workspace_repo.add_files_to_workspace(workspace_id, [file_id])
+                        self._catalog_store.workspace_repo.add_files_to_workspace(partition, workspace_id, [file_id])
                         for workspace_id in workspace_ids
                     ),
                     return_exceptions=True,

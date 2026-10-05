@@ -313,6 +313,13 @@ def _scrub_unquoted_named_credential(match: re.Match[str]) -> str:
     return f"{match.group('name')}{match.group('separator')}{match.group('spacing')}{_REDACTED_CREDENTIAL}"
 
 
+def _looks_like_bare_scheme_credential(value: str) -> bool:
+    candidate = value.strip()
+    return _looks_like_credential(candidate) or (
+        any(character.isalpha() for character in candidate) and any(character.isdigit() for character in candidate)
+    )
+
+
 def _scrub_query_credentials(value: str) -> str:
     """Redact credential-shaped values embedded in public query telemetry."""
 
@@ -328,7 +335,7 @@ def _scrub_query_credentials(value: str) -> str:
     return _AUTH_SCHEME_CREDENTIAL.sub(
         lambda match: (
             f"{match.group('scheme')}{match.group('spacing')}{_REDACTED_CREDENTIAL}"
-            if _looks_like_credential(match.group("credential"))
+            if _looks_like_bare_scheme_credential(match.group("credential"))
             else match.group(0)
         ),
         value,
@@ -715,3 +722,33 @@ class RetrievalTraceBuilder:
             trace["candidates_truncated"] = True
         public = safe_public_value(trace)
         return public  # type: ignore[return-value]
+
+
+def merge_query_traces(parent: RetrievalTraceBuilder, children: Sequence[RetrievalTraceBuilder]) -> None:
+    """Attach child traces and combine the stages they completed in caller order."""
+    for child in children:
+        parent.record_query_trace(child)
+    for stage_name in TRACE_STAGE_NAMES:
+        stages = [child.stages[stage_name] for child in children if child.stages[stage_name].status != "not_run"]
+        if not stages:
+            continue
+        statuses = {stage.status for stage in stages}
+        if "error" in statuses:
+            status = "error"
+        elif "complete" in statuses:
+            status = "complete"
+        else:
+            status = "unavailable"
+        durations = [stage.duration_seconds for stage in stages if stage.duration_seconds is not None]
+        parent.record_stage(
+            stage_name,
+            status=status,
+            candidates=[candidate for stage in stages for candidate in stage.candidates],
+            candidate_count=sum(stage.candidate_count for stage in stages),
+            duration_seconds=max(durations) if durations else None,
+            error="child diagnostics failed" if status == "error" else None,
+        )
+    for key in sorted({key for child in children for key in child.timings}):
+        parent.timings[key] = max(child.timings[key] for child in children if key in child.timings)
+    for child in children:
+        parent.errors.extend(child.errors)
