@@ -1,7 +1,8 @@
 import { useState, useEffect } from "react";
+import { Link } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { Plus, Trash2, Pencil, Eye } from "lucide-react";
+import { Plus, Trash2, Pencil, Eye, Info } from "lucide-react";
 import { NewBadge } from "@/components/shared/new-badge";
 import {
   listPresets,
@@ -13,7 +14,16 @@ import {
 import type { PresetResponse, PresetType } from "@/lib/api/presets";
 import { listAllPrompts } from "@/lib/api/prompts";
 import type { PromptResponse } from "@/lib/api/prompts";
-import { listModelEndpoints, pickDefaultEndpoint } from "@/lib/api/models";
+import {
+  formatLlmBudget,
+  llmContextSize,
+  listModelEndpoints,
+  pickDefaultEndpoint,
+  refetchWhileDetecting,
+} from "@/lib/api/models";
+import type { ModelEndpointResponse } from "@/lib/api/models";
+import { listPartitions } from "@/lib/api/partitions";
+import type { PartitionResponse } from "@/lib/api/partitions";
 import { PageHeader } from "@/components/shared/page-header";
 import { ConfirmDialog } from "@/components/shared/confirm-dialog";
 import { useNewOptions } from "@/components/shared/new-badge";
@@ -40,6 +50,16 @@ import { Switch } from "@/components/ui/switch";
 import { Separator } from "@/components/ui/separator";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
+import {
+  AlertDialog,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { formatDate, intOr, numOr } from "@/lib/utils";
 import {
   PROMPT_DEFAULT_OPTION,
@@ -51,6 +71,7 @@ import {
   type Config,
   configGet,
   configSet,
+  configUnset,
   applyParsingStrategyChange,
   PARSING_STRATEGY_INHERIT,
   STT_ENDPOINT_DEFAULT_OPTION,
@@ -716,6 +737,7 @@ function RetrievalPresetForm({
   rerankers,
   llms,
   prompts,
+  defaultTopN,
 }: {
   config: Config;
   onChange: (c: Config) => void;
@@ -723,6 +745,8 @@ function RetrievalPresetForm({
   rerankers: string[];
   llms: string[];
   prompts: PromptResponse[];
+  /** What an unset top_n resolves to (RERANKER_TOP_K); absent on older backends. */
+  defaultTopN?: number;
 }) {
   const set = (key: string, value: unknown) => onChange(configSet(config, key, value));
   const pipelineType: string = configGet(config, "type", "single");
@@ -843,14 +867,46 @@ function RetrievalPresetForm({
           </Select>
         </div>
         <div className="space-y-1.5">
-          <Label className="text-xs">top_n (post-rerank count)</Label>
+          <div className="flex items-center gap-1.5">
+            <Label className="text-xs">top_n (post-rerank count)</Label>
+            <TooltipProvider>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <button
+                    type="button"
+                    className="text-muted-foreground hover:text-foreground"
+                    aria-label="top_n info"
+                  >
+                    <Info className="h-3.5 w-3.5" />
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent className="max-w-xs">
+                  How many chunks are kept after retrieval (and reranking, when it is on) and
+                  given to the LLM to write its answer, as many as fit in its context size.
+                  Leave empty to use
+                  RERANKER_TOP_K{defaultTopN !== undefined ? ` (currently ${defaultTopN})` : ""}.
+                </TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
+          </div>
+          {/* Not tied to enable_reranker: top_n cuts retrieval and sets how many
+              chunks the LLM gets whether or not a reranker runs. */}
           <Input
             type="number"
             min={1}
             max={1000}
-            value={configGet(config, "top_n", 10)}
-            onChange={(e) => set("top_n", intOr(e.target.value, 10))}
-            disabled={!configGet(config, "enable_reranker", true)}
+            value={configGet<number | string>(config, "top_n", "")}
+            placeholder={defaultTopN !== undefined ? `Default: ${defaultTopN}` : "Default"}
+            onChange={(e) => {
+              // A number input reports "" for unparseable text ("1e", "-") too;
+              // only a truly empty field clears the override.
+              if (e.target.validity.badInput) return;
+              onChange(
+                e.target.value === ""
+                  ? configUnset(config, "top_n")
+                  : configSet(config, "top_n", intOr(e.target.value, defaultTopN ?? 10)),
+              );
+            }}
           />
         </div>
       </section>
@@ -914,6 +970,136 @@ function RetrievalPresetForm({
   );
 }
 
+/* ---------- top_n / LLM context size confirmation ---------- */
+
+/** The LLM endpoints answering for the partitions on *presetName*, each with
+ *  those partitions: a partition's chat_llm, or the default endpoint when it
+ *  names none (or names one since deleted), as the backend resolves it. */
+function llmsAnsweringForPreset(
+  presetName: string,
+  partitions: PartitionResponse[],
+  llmEndpoints: ModelEndpointResponse[],
+): { endpoint: ModelEndpointResponse | undefined; name: string; partitions: string[] }[] {
+  const defaultLlm = pickDefaultEndpoint(llmEndpoints);
+  const groups = new Map<string, { endpoint: ModelEndpointResponse | undefined; name: string; partitions: string[] }>();
+  for (const p of partitions) {
+    if (p.retrieval_preset !== presetName) continue;
+    const endpoint = (p.chat_llm ? llmEndpoints.find((e) => e.name === p.chat_llm) : undefined) ?? defaultLlm;
+    const name = endpoint?.name ?? "default";
+    const group = groups.get(name) ?? { endpoint, name, partitions: [] };
+    group.partitions.push(p.name);
+    groups.set(name, group);
+  }
+  return [...groups.values()];
+}
+
+/** Shown when an update changes a retrieval preset's top_n. The LLM gets top_n
+ *  chunks, as many as fit in the answering LLM's context size, so a context size
+ *  left on a default smaller than the model's real window quietly gives the LLM
+ *  fewer chunks than top_n. */
+function TopNContextSizeDialog({
+  presetName,
+  usedByPartitions,
+  topN,
+  defaultTopN,
+  onCancel,
+  onConfirm,
+  loading,
+}: {
+  presetName: string;
+  /** Every partition on the preset, including those the partition list doesn't show this admin. */
+  usedByPartitions: number;
+  topN: number | undefined;
+  defaultTopN: number | undefined;
+  onCancel: () => void;
+  onConfirm: () => void;
+  loading: boolean;
+}) {
+  const partitionsQuery = useQuery({ queryKey: ["partitions"], queryFn: listPartitions });
+  const llmQuery = useQuery({
+    queryKey: ["model-endpoints", "llm"],
+    queryFn: () => listModelEndpoints("llm"),
+    refetchInterval: refetchWhileDetecting,
+  });
+  const llms =
+    partitionsQuery.data && llmQuery.data
+      ? llmsAnsweringForPreset(presetName, partitionsQuery.data.partitions, llmQuery.data)
+      : null;
+  // Without SUPER_ADMIN_MODE the partition list holds only this admin's memberships.
+  const hidden =
+    llms === null ? 0 : Math.max(0, usedByPartitions - llms.reduce((n, llm) => n + llm.partitions.length, 0));
+  const count = topN !== undefined ? String(topN) : "RERANKER_TOP_K";
+  const current = topN === undefined && defaultTopN !== undefined ? ` (currently ${defaultTopN})` : "";
+
+  return (
+    <AlertDialog open onOpenChange={(next) => (next ? undefined : onCancel())}>
+      <AlertDialogContent className="max-h-[calc(100vh-4rem)] overflow-y-auto">
+        <AlertDialogHeader>
+          <AlertDialogTitle>Check the LLM&apos;s context size</AlertDialogTitle>
+          <AlertDialogDescription asChild>
+            <div className="space-y-3">
+              <p className="text-sm">
+                Partitions on the <span className="font-medium">{presetName}</span> preset will give the LLM up to{" "}
+                {count} chunks{current} to generate the final answer.
+              </p>
+              <p className="text-sm">
+                Make sure each LLM below has enough context size for them, plus the conversation and the answer;
+                chunks that don&apos;t fit are left out. Set it as{" "}
+                <span className="font-medium">Max context size</span> in{" "}
+                <Link to="/models" target="_blank" rel="noreferrer" className="text-primary hover:underline">
+                  Model Endpoints
+                </Link>
+                .
+              </p>
+              {llms === null && (partitionsQuery.isLoading || llmQuery.isLoading) && (
+                <p className="text-sm text-muted-foreground">Checking which LLMs answer for this preset&hellip;</p>
+              )}
+              {llms !== null && llms.length === 0 && hidden === 0 && (
+                <p className="text-sm text-muted-foreground">No partition uses this preset yet.</p>
+              )}
+              {llms !== null && llms.length > 0 && (
+                <ul className="space-y-2 rounded-md border p-3 text-sm">
+                  {llms.map(({ endpoint, name, partitions }) => {
+                    const budget = endpoint ? llmContextSize(endpoint) : null;
+                    return (
+                      <li key={name}>
+                        <div className="flex items-baseline justify-between gap-3">
+                          <span className="font-mono break-all">{name}</span>
+                          <span className="shrink-0 font-medium">{budget ? formatLlmBudget(budget) : "—"}</span>
+                        </div>
+                        <div className="text-xs text-muted-foreground">for {partitions.join(", ")}</div>
+                        {budget?.source === "default" && (
+                          <div className="text-xs text-amber-700 dark:text-amber-300">
+                            The endpoint doesn&apos;t report its window: set Max context size if the model&apos;s
+                            is larger.
+                          </div>
+                        )}
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+              {hidden > 0 && (
+                <p className="text-sm text-amber-700 dark:text-amber-300">
+                  {hidden === 1
+                    ? "1 more partition on this preset isn't listed, as you aren't a member of it: check its LLM too."
+                    : `${hidden} more partitions on this preset aren't listed, as you aren't a member of them: check their LLMs too.`}
+                </p>
+              )}
+            </div>
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter className="gap-2">
+          <AlertDialogCancel>Back</AlertDialogCancel>
+          <Button onClick={onConfirm} disabled={loading}>
+            {loading ? "Saving..." : "Update"}
+          </Button>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+  );
+}
+
 /* ---------- Preset dialog ---------- */
 
 function PresetDialog({
@@ -937,6 +1123,8 @@ function PresetDialog({
 
   const [name, setName] = useState("");
   const [config, setConfig] = useState<Config>({});
+  // An update that changes top_n first says how the LLM's context size caps it.
+  const [confirmTopN, setConfirmTopN] = useState(false);
 
   // Intentionally sync the form to the editing target each time the dialog
   // opens (and reset it for "create"). This is the controlled-dialog reset
@@ -944,6 +1132,7 @@ function PresetDialog({
   /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
     if (open) {
+      setConfirmTopN(false);
       if (editing) {
         setName(editing.name);
         setConfig({ ...editing.config });
@@ -1000,13 +1189,24 @@ function PresetDialog({
   });
   const allPrompts = promptData ?? [];
 
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
+  const topNChanged =
+    editing?.preset_type === "retrieval" && (editing.config.top_n ?? null) !== (config.top_n ?? null);
+
+  const save = () => {
     if (editing) {
       onUpdate(editing.preset_type, editing.name, name, config);
     } else {
       onCreate({ name, preset_type: activeTab as PresetType, config });
     }
+  };
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (topNChanged) {
+      setConfirmTopN(true);
+      return;
+    }
+    save();
   };
 
   return (
@@ -1045,6 +1245,7 @@ function PresetDialog({
               rerankers={rerankers}
               llms={llms}
               prompts={allPrompts}
+              defaultTopN={options?.default_top_n}
             />
           )}
 
@@ -1054,6 +1255,20 @@ function PresetDialog({
             </Button>
           </DialogFooter>
         </form>
+        {confirmTopN && editing && (
+          <TopNContextSizeDialog
+            presetName={editing.name}
+            usedByPartitions={editing.used_by_partitions}
+            topN={typeof config.top_n === "number" ? config.top_n : undefined}
+            defaultTopN={options?.default_top_n}
+            onCancel={() => setConfirmTopN(false)}
+            onConfirm={() => {
+              setConfirmTopN(false);
+              save();
+            }}
+            loading={loading}
+          />
+        )}
       </DialogContent>
     </Dialog>
   );

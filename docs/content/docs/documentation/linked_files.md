@@ -165,7 +165,7 @@ flowchart TD
 :::caution
 **Context Size Limitation**
 
-At the `Format Context` stage, only documents fitting within the fixed context size limit (`RERANKER_TOP_K` × `CHUNK_SIZE`, which defaults to 5120 tokens) are retained. Additional filtering strategies should be considered to remove irrelevant chunks.
+At the `Format Context` stage, the LLM gets the retrieval preset's `top_n` best chunks (`RERANKER_TOP_K` when the preset leaves it empty, 10 by default), as many of them as fit in what the answering LLM's context window leaves once the instructions, the conversation and any web results are in (see `MAX_LLM_CONTEXT_SIZE`). Additional filtering strategies should be considered to remove irrelevant chunks.
 
 **Possible Approaches:**
 * **Map-Reduce**: Processes chunks in batches, summarizes relevant ones individually, filters out irrelevant ones, then combines the summaries. However, this approach requires a high-token endpoint and can be time-consuming and resource-intensive when dealing with large numbers of chunks.

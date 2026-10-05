@@ -31,6 +31,14 @@ def _mock_get_num_tokens():
         yield
 
 
+@pytest.fixture(autouse=True)
+def _restore_probe_pending(monkeypatch):
+    """Invalidation flips a module-level flag; keep it from leaking into other tests."""
+    import api.routers.user.chat as chat
+
+    monkeypatch.setattr(chat, "_max_model_tokens_pending", False)
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -472,6 +480,8 @@ class TestInvalidateMaxModelTokens:
         await chat.prime_max_model_tokens(s)
 
         assert chat._max_model_tokens_by_name == {}  # discarded, not published
+        # The write's own refresh is still to come, so the detection stays pending.
+        assert chat.max_model_tokens_probe_pending() is True
 
     async def test_uninvalidated_refresh_still_publishes(self, monkeypatch):
         """The generation guard must not block the normal path."""
@@ -491,6 +501,107 @@ class TestInvalidateMaxModelTokens:
         await chat.prime_max_model_tokens(s)
 
         assert chat._max_model_tokens_by_name == {"default": 8192}
+
+
+class TestProbePending:
+    """The admin UI shows "detecting" rather than the global fallback while an
+    endpoint write's re-probe is in flight: an empty cache entry then means
+    "not probed yet", not "the endpoint reports no max_model_len"."""
+
+    def test_not_pending_before_any_write(self):
+        import api.routers.user.chat as chat
+
+        assert chat.max_model_tokens_probe_pending() is False
+
+    async def test_pending_from_invalidation_until_the_refresh_publishes(self, monkeypatch):
+        import api.routers.user.chat as chat
+        from core.config.model_endpoints import ModelEndpointConfig
+        from core.config.root import Settings
+
+        s = Settings()
+        s.models.llm["default"] = ModelEndpointConfig(endpoint="http://default:8000/v1", model_name="model-a")
+
+        async def fake_get_openai_models(base_url, api_key, timeout=30):
+            return [_FakeOpenAIModel("model-a", 131072)]
+
+        monkeypatch.setattr(chat, "get_openai_models", fake_get_openai_models)
+        monkeypatch.setattr(chat, "_max_model_tokens_by_name", {"default": 131072})
+
+        chat.invalidate_max_model_tokens()
+        assert chat.max_model_tokens_probe_pending() is True
+        assert chat.probed_max_model_tokens("default") is None
+
+        await chat.prime_max_model_tokens(s)
+        assert chat.max_model_tokens_probe_pending() is False
+        assert chat.probed_max_model_tokens("default") == 131072
+
+    async def test_a_failed_refresh_stops_the_detection(self, monkeypatch):
+        """Requests fall back to the global window after a failed refresh, so
+        the admin UI must show that rather than poll "detecting" forever."""
+        import api.routers.user.chat as chat
+        from core.config.model_endpoints import ModelEndpointConfig
+        from core.config.root import Settings
+
+        s = Settings()
+        s.models.llm["default"] = ModelEndpointConfig(endpoint="http://default:8000/v1", model_name="model-a")
+
+        async def broken_fetch(**kwargs):
+            raise RuntimeError("probe blew up")
+
+        monkeypatch.setattr(chat, "_fetch_max_model_tokens", broken_fetch)
+        chat.invalidate_max_model_tokens()
+
+        with pytest.raises(RuntimeError):
+            await chat.prime_max_model_tokens(s)
+
+        assert chat.max_model_tokens_probe_pending() is False
+        assert chat.probed_max_model_tokens("default") is None
+
+
+class TestMaxPromptTokens:
+    """What the router hands QueryService to cap the retrieved sources: the
+    answering endpoint's window minus the output budget."""
+
+    def test_window_minus_output_budget(self, monkeypatch):
+        import api.routers.user.chat as chat
+        from core.config.model_endpoints import LLM_CONTEXT_SIZE_KEY
+
+        s = _settings_with_default_llm(**{LLM_CONTEXT_SIZE_KEY: 16384})
+        monkeypatch.setattr(chat, "_max_model_tokens_by_name", {})
+        req = OpenAIChatCompletionRequest(messages=[{"role": "user", "content": "hello"}], max_tokens=2048)
+        assert chat._max_prompt_tokens(req, s, None) == 16384 - 2048
+
+    def test_probed_window_when_the_endpoint_sets_none(self, monkeypatch):
+        import api.routers.user.chat as chat
+
+        s = _settings_with_default_llm()
+        monkeypatch.setattr(chat, "_max_model_tokens_by_name", {"default": 131072})
+        req = OpenAIChatCompletionRequest(messages=[{"role": "user", "content": "hello"}])
+        chat._apply_default_max_tokens(req, s, None)
+        assert chat._max_prompt_tokens(req, s, None) == 131072 - s.llm_context.max_output_tokens
+
+    def test_global_fallback_window_when_nothing_is_known(self, monkeypatch):
+        import api.routers.user.chat as chat
+
+        s = _settings_with_default_llm()
+        monkeypatch.setattr(chat, "_max_model_tokens_by_name", {})
+        req = OpenAIChatCompletionRequest(messages=[{"role": "user", "content": "hello"}])
+        chat._apply_default_max_tokens(req, s, None)
+        assert chat._max_prompt_tokens(req, s, None) == (
+            s.llm_context.max_llm_context_size - s.llm_context.max_output_tokens
+        )
+
+    def test_client_supplied_endpoint_has_no_known_window(self, monkeypatch):
+        import api.routers.user.chat as chat
+        from core.config.endpoints import LLM_OVERRIDE_ENDPOINT_ENV
+
+        monkeypatch.setenv(LLM_OVERRIDE_ENDPOINT_ENV, "true")
+        s = _settings_with_default_llm()
+        req = OpenAIChatCompletionRequest(
+            messages=[{"role": "user", "content": "hello"}],
+            metadata={"llm_override": {"base_url": "https://api.example.com/v1", "model": "m"}},
+        )
+        assert chat._max_prompt_tokens(req, s, None) is None
 
 
 def _partition_config(chat_llm=None):

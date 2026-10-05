@@ -17,9 +17,10 @@ from types import SimpleNamespace
 import pytest
 import services.orchestrators.query_service as qs
 from core.config import load_config
+from core.config.retrieval_pipeline import RetrievalPipelineConfig
 from core.models.chunk import Chunk
 from core.models.workspace import WorkspaceScope
-from core.utils.exceptions import WorkspaceNotFoundError
+from core.utils.exceptions import ContextWindowExceededError, WorkspaceNotFoundError
 from services.orchestrators.query_service import QueryService
 
 # Real prompt-template config (dir + key->filename mapping) so QueryService
@@ -195,6 +196,43 @@ def test_resolve_chat_history_depth_zero_inherits_global_default():
     assert svc._resolve_chat_history_depth(["p"]) == 4
 
 
+# --------------------------------------------------------------------------- #
+# sources: the retrieval preset's top_n, within the model window
+# --------------------------------------------------------------------------- #
+
+
+def _partition_cfg(top_n: int | None = None, **fields) -> SimpleNamespace:
+    """A partition config stand-in carrying what the source count and the chat path read, plus *fields*."""
+    defaults = {"chat_llm": None, "chat_history_depth": 4, "generation_prompt_names": {}}
+    return SimpleNamespace(retrieval=RetrievalPipelineConfig(top_n=top_n), **{**defaults, **fields})
+
+
+def test_top_n_follows_the_partition_preset():
+    svc = _svc()  # reranker.top_k = 5
+    svc._config.partitions = {"p": _partition_cfg(top_n=15)}
+    assert svc._resolve_top_n(["p"]) == 15
+
+
+def test_unset_top_n_follows_reranker_top_k():
+    svc = _svc()
+    svc._config.partitions = {"p": _partition_cfg(top_n=None)}
+    assert svc._resolve_top_n(["p"]) == 5
+
+
+def test_top_n_takes_the_largest_across_partitions():
+    svc = _svc()
+    svc._config.partitions = {"small": _partition_cfg(top_n=15), "unset": _partition_cfg(top_n=None)}
+    assert svc._resolve_top_n(["small", "unset"]) == 15
+    assert svc._resolve_top_n(["all"]) == 15
+
+
+def test_top_n_falls_back_to_reranker_top_k():
+    svc = _svc()
+    svc._config.partitions = {"p": _partition_cfg(top_n=15)}
+    assert svc._resolve_top_n(None) == 5
+    assert svc._resolve_top_n(["unknown"]) == 5
+
+
 def test_empty_response_retry_instruction_uses_one_system_message():
     messages = [
         {"role": "system", "content": "Follow the existing answer instructions."},
@@ -269,7 +307,7 @@ def test_default_chat_history_depth_clamps_invalid_global_config(global_depth):
 
 
 def _partition(chat_llm=None, chat_history_depth=0):
-    return SimpleNamespace(chat_llm=chat_llm, chat_history_depth=chat_history_depth)
+    return _partition_cfg(chat_llm=chat_llm, chat_history_depth=chat_history_depth)
 
 
 class RecordingFactory:
@@ -663,7 +701,7 @@ async def test_chat_all_retrieved_sources_survives_context_budget_truncation():
         Chunk(id="c2", text="this one does not fit the token budget", metadata={"_id": "c2"}),
     ]
     svc = _svc(retrieval=FakeRetrieval(chunks=chunks), llm=FakeLLM(chat_responses=["answer [Sources: 1]"]))
-    svc._max_context_tokens = qs.get_num_tokens()("[Source 1]\nshort")
+    svc._config.reranker.top_k = 1  # the prompt takes one source: c2 doesn't make it
 
     out = await svc.chat(
         partitions=["p"],
@@ -692,7 +730,7 @@ async def test_chat_stream_all_retrieved_sources_survives_context_budget_truncat
         "data: [DONE]\n\n",
     ]
     svc = _svc(retrieval=FakeRetrieval(chunks=chunks), llm=FakeLLM(stream_lines=stream_lines))
-    svc._max_context_tokens = qs.get_num_tokens()("[Source 1]\nshort")
+    svc._config.reranker.top_k = 1  # the prompt takes one source: c2 doesn't make it
 
     lines = [
         line
@@ -724,7 +762,7 @@ async def test_complete_all_retrieved_sources_survives_context_budget_truncation
         Chunk(id="c2", text="this one does not fit the token budget", metadata={"_id": "c2"}),
     ]
     svc = _svc(retrieval=FakeRetrieval(chunks=chunks), llm=FakeLLM(gen_text="answer\n[Sources: 1]"))
-    svc._max_context_tokens = qs.get_num_tokens()("[Source 1]\nshort")
+    svc._config.reranker.top_k = 1  # the prompt takes one source: c2 doesn't make it
 
     out = await svc.complete(
         partitions=["p"],
@@ -735,6 +773,277 @@ async def test_complete_all_retrieved_sources_survives_context_budget_truncation
     extra = out["extra"]
     assert extra["sources"] == [{"id": "c1"}]
     assert extra["all_retrieved_sources"] == [{"id": "c1"}, {"id": "c2"}]
+
+
+@pytest.mark.asyncio
+async def test_complete_presents_the_partition_top_n():
+    """The prompt takes the partition's top_n sources, not the global reranker.top_k."""
+    chunks = [
+        Chunk(id="c1", text="short", metadata={"_id": "c1"}),
+        Chunk(id="c2", text="another short one", metadata={"_id": "c2"}),
+    ]
+    svc = _svc(retrieval=FakeRetrieval(chunks=chunks), llm=FakeLLM(gen_text="answer\n[Sources: 1]"))
+    # reranker.top_k (5) would take both.
+    svc._config.partitions = {"p": _partition_cfg(top_n=1)}
+
+    out = await svc.complete(
+        partitions=["p"],
+        payload={"prompt": "q", "metadata": {"include_all_retrieved_sources": True}},
+        prepare_sources=lambda d, w: [{"id": doc.metadata.get("_id")} for doc in d],
+    )
+
+    extra = out["extra"]
+    assert extra["presented_sources"] == [{"id": "c1"}]
+    assert extra["all_retrieved_sources"] == [{"id": "c1"}, {"id": "c2"}]
+
+
+@pytest.mark.asyncio
+async def test_chat_presents_the_partition_top_n():
+    """The chat path reads the partition's top_n too, not the global reranker.top_k."""
+    chunks = [
+        Chunk(id="c1", text="short", metadata={"_id": "c1"}),
+        Chunk(id="c2", text="another short one", metadata={"_id": "c2"}),
+    ]
+    svc = _svc(retrieval=FakeRetrieval(chunks=chunks), llm=FakeLLM(chat_responses=["answer [Sources: 1]"]))
+    # reranker.top_k (5) would take both.
+    svc._config.partitions = {"p": _partition_cfg(top_n=1)}
+
+    out = await svc.chat(
+        partitions=["p"],
+        payload={"messages": [{"role": "user", "content": "q"}], "metadata": {}},
+        prepare_sources=lambda d, w: [{"id": doc.metadata.get("_id")} for doc in d],
+        model_name="m",
+    )
+
+    assert out["extra"]["presented_sources"] == [{"id": "c1"}]
+
+
+def _two_chunk_svc(**kwargs):
+    """Two chunks, and a partition whose top_n takes both of them."""
+    chunks = [
+        Chunk(id="c1", text="short", metadata={"_id": "c1"}),
+        Chunk(id="c2", text="a second chunk", metadata={"_id": "c2"}),
+    ]
+    svc = _svc(retrieval=FakeRetrieval(chunks=chunks), llm=FakeLLM(chat_responses=["answer"]), **kwargs)
+    svc._config.partitions = {"p": _partition_cfg(top_n=2)}
+    return svc
+
+
+async def _presented(svc, *, max_prompt_tokens, metadata=None):
+    out = await svc.chat(
+        partitions=["p"],
+        payload={"messages": [{"role": "user", "content": "q"}], "metadata": metadata or {}},
+        prepare_sources=lambda d, w: [doc.metadata.get("_id") for doc in d] + [r.url for r in w],
+        model_name="m",
+        max_prompt_tokens=max_prompt_tokens,
+    )
+    return out["extra"]["presented_sources"]
+
+
+@pytest.mark.asyncio
+async def test_chat_caps_sources_at_what_the_model_window_leaves(monkeypatch):
+    """With the window known, the sources get what is left of it after the
+    instructions and the conversation, even below the partition's top_n."""
+    monkeypatch.setattr(qs, "_messages_tokens", lambda messages: 100)
+    svc = _two_chunk_svc()
+    first_only = 100 + qs.get_num_tokens()("[Source 1]\nshort")
+
+    assert await _presented(svc, max_prompt_tokens=first_only) == ["c1"]
+    assert await _presented(svc, max_prompt_tokens=100) == []
+
+
+@pytest.mark.asyncio
+async def test_chat_takes_top_n_chunks_however_long(monkeypatch):
+    """The count is top_n, not a token budget sized from the chunk size: a chunk
+    longer than the chunk size, or one carrying a long header, still makes it."""
+    monkeypatch.setattr(qs, "_messages_tokens", lambda messages: 100)
+    chunks = [Chunk(id="c1", text="word " * 2000, metadata={"_id": "c1"})]
+    svc = _svc(retrieval=FakeRetrieval(chunks=chunks), llm=FakeLLM(chat_responses=["answer"]))
+    svc._config.partitions = {"p": _partition_cfg(top_n=1)}
+
+    assert await _presented(svc, max_prompt_tokens=None) == ["c1"]
+    assert await _presented(svc, max_prompt_tokens=8192) == ["c1"]
+
+
+@pytest.mark.asyncio
+async def test_chat_skips_a_source_the_window_cannot_fit_and_keeps_going(monkeypatch):
+    monkeypatch.setattr(qs, "_messages_tokens", lambda messages: 100)
+    chunks = [
+        Chunk(id="long", text="word " * 2000, metadata={"_id": "long"}),
+        Chunk(id="short", text="short", metadata={"_id": "short"}),
+    ]
+    svc = _svc(retrieval=FakeRetrieval(chunks=chunks), llm=FakeLLM(chat_responses=["answer"]))
+    svc._config.partitions = {"p": _partition_cfg(top_n=2)}
+
+    assert await _presented(svc, max_prompt_tokens=1000) == ["short"]
+
+
+@pytest.mark.asyncio
+async def test_chat_without_a_known_window_takes_top_n(monkeypatch):
+    monkeypatch.setattr(qs, "_messages_tokens", lambda messages: 100)
+    svc = _two_chunk_svc()
+
+    assert await _presented(svc, max_prompt_tokens=None) == ["c1", "c2"]
+    svc._config.partitions = {"p": _partition_cfg(top_n=1)}
+    assert await _presented(svc, max_prompt_tokens=None) == ["c1"]
+
+
+def _long_web_result():
+    return SimpleNamespace(url="https://example.test/web", title="Web", content="word " * 600, snippet="")
+
+
+@pytest.mark.asyncio
+async def test_window_cap_counts_the_web_results(monkeypatch):
+    """Under a known window the web results take their share of it."""
+    monkeypatch.setattr(qs, "_messages_tokens", lambda messages: 100)
+    web = _long_web_result()
+    svc = _two_chunk_svc(web=FakeWeb(results=[web]))
+    _, _, web_tokens = qs.format_web_context([web], length_function=qs.get_num_tokens(), max_tokens=2000)
+    first_only = 100 + web_tokens + qs.get_num_tokens()("[Source 1]\nshort")
+
+    presented = await _presented(svc, max_prompt_tokens=first_only, metadata={"websearch": True})
+
+    assert presented == ["c1", "https://example.test/web"]
+
+
+@pytest.mark.asyncio
+async def test_web_results_take_no_more_than_the_window_leaves(monkeypatch):
+    """A web context larger than the room left is cut to it, not sent over the window."""
+    monkeypatch.setattr(qs, "_messages_tokens", lambda messages: 100)
+    svc = _two_chunk_svc(web=FakeWeb(results=[_long_web_result()]))
+
+    # 50 tokens left: the 600-word web result doesn't fit, both chunks do.
+    presented = await _presented(svc, max_prompt_tokens=150, metadata={"websearch": True})
+
+    assert presented == ["c1", "c2"]
+
+
+@pytest.mark.asyncio
+async def test_chat_never_sends_more_than_the_window_leaves(monkeypatch):
+    """Whatever the window, the answer messages fit it: the separator between the
+    documents and the web results counts too, though the sizing leaves it out."""
+    monkeypatch.setattr(qs, "get_num_tokens", lambda: len)
+    chunks = [Chunk(id=f"c{i}", text="word " * (5 * i), metadata={"_id": f"c{i}"}) for i in range(1, 6)]
+    web = [
+        SimpleNamespace(url=f"https://example.test/{i}", title="Web", content="word " * 8, snippet="") for i in range(3)
+    ]
+    llm = FakeLLM()
+    svc = _svc(retrieval=FakeRetrieval(chunks=chunks), llm=llm, web=FakeWeb(results=web))
+    svc._config.partitions = {"p": _partition_cfg(top_n=5)}
+
+    async def sent(max_prompt_tokens):
+        await svc.chat(
+            partitions=["p"],
+            payload={"messages": [{"role": "user", "content": "q"}], "metadata": {"websearch": True}},
+            prepare_sources=lambda d, w: [],
+            model_name="m",
+            max_prompt_tokens=max_prompt_tokens,
+        )
+        return llm.chat_calls[-1][0]
+
+    everything = qs._messages_tokens(await sent(None))
+    for window in range(everything - 400, everything + 1):
+        assert qs._messages_tokens(await sent(window)) <= window
+
+
+@pytest.mark.asyncio
+async def test_complete_never_sends_more_than_the_window_leaves(monkeypatch):
+    """The documents are sized one by one; the prompt sent is measured whole."""
+
+    def num_tokens(text: str) -> int:
+        # The assembled prompt costs more than its parts: 5 per source in it.
+        return len(text) + (5 * text.count("[Source") if "# User request" in text else 0)
+
+    monkeypatch.setattr(qs, "get_num_tokens", lambda: num_tokens)
+    chunks = [Chunk(id=f"c{i}", text="word " * (5 * i), metadata={"_id": f"c{i}"}) for i in range(1, 6)]
+    llm = FakeLLM(gen_text="answer")
+    svc = _svc(retrieval=FakeRetrieval(chunks=chunks), llm=llm)
+    svc._config.partitions = {"p": _partition_cfg(top_n=5)}
+
+    async def sent(max_prompt_tokens):
+        await svc.complete(
+            partitions=["p"],
+            payload={"prompt": "q", "metadata": {}},
+            prepare_sources=lambda d, w: [],
+            max_prompt_tokens=max_prompt_tokens,
+        )
+        return llm.generate_calls[-1][0]
+
+    everything = num_tokens(await sent(None))
+    for window in range(everything - 300, everything + 1):
+        assert num_tokens(await sent(window)) <= window
+
+
+@pytest.mark.asyncio
+async def test_chat_rejects_a_conversation_the_window_cannot_hold(monkeypatch):
+    monkeypatch.setattr(qs, "_messages_tokens", lambda messages: 100)
+    svc = _two_chunk_svc()
+
+    with pytest.raises(ContextWindowExceededError) as exc:
+        await _presented(svc, max_prompt_tokens=99)
+    assert exc.value.status_code == 413
+    assert exc.value.code == "CONTEXT_WINDOW_EXCEEDED"
+    # A window the instructions and the conversation exactly fill still answers, without sources.
+    assert await _presented(svc, max_prompt_tokens=100) == []
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_rejects_a_conversation_the_window_cannot_hold(monkeypatch):
+    monkeypatch.setattr(qs, "_messages_tokens", lambda messages: 100)
+    svc = _two_chunk_svc()
+
+    with pytest.raises(ContextWindowExceededError):
+        async for _ in svc.chat_stream(
+            partitions=["p"],
+            payload={"messages": [{"role": "user", "content": "q"}], "metadata": {}},
+            prepare_sources=lambda d, w: [],
+            model_name="m",
+            max_prompt_tokens=99,
+        ):
+            pass
+
+
+@pytest.mark.asyncio
+async def test_web_results_leave_the_top_n_whole_when_the_window_has_room(monkeypatch):
+    """Web results come out of the window, not out of the top_n chunks."""
+    monkeypatch.setattr(qs, "_messages_tokens", lambda messages: 100)
+    svc = _two_chunk_svc(web=FakeWeb(results=[_long_web_result()]))
+
+    for window in (None, 100_000):
+        presented = await _presented(svc, max_prompt_tokens=window, metadata={"websearch": True})
+        assert presented == ["c1", "c2", "https://example.test/web"]
+
+
+@pytest.mark.asyncio
+async def test_complete_caps_sources_at_what_the_model_window_leaves(monkeypatch):
+    """The sources get what is left of the window after the rendered instructions."""
+    instructions = 1000
+
+    def num_tokens(text: str) -> int:
+        # The rendered instructions always end with the user request; count them as one block.
+        return instructions if "# User request" in text else len(text.split())
+
+    monkeypatch.setattr(qs, "get_num_tokens", lambda: num_tokens)
+    chunks = [Chunk(id="c1", text="short", metadata={"_id": "c1"})]
+    svc = _svc(retrieval=FakeRetrieval(chunks=chunks), llm=FakeLLM(gen_text="answer\n[Sources: 1]"))
+    svc._config.partitions = {"p": _partition_cfg(top_n=10)}
+    c1 = num_tokens("[Source 1]\n") + num_tokens("short")
+
+    async def presented(max_prompt_tokens):
+        out = await svc.complete(
+            partitions=["p"],
+            payload={"prompt": "q", "metadata": {}},
+            prepare_sources=lambda d, w: [doc.metadata.get("_id") for doc in d],
+            max_prompt_tokens=max_prompt_tokens,
+        )
+        return out["extra"]["presented_sources"]
+
+    assert await presented(None) == ["c1"]
+    assert await presented(instructions + c1) == ["c1"]
+    assert await presented(instructions + c1 - 1) == []
+    assert await presented(instructions) == []
+    with pytest.raises(ContextWindowExceededError):
+        await presented(instructions - 1)
 
 
 @pytest.mark.asyncio
@@ -1831,7 +2140,7 @@ async def test_generation_prompt_name_from_partition_reaches_resolver():
     rec = RecordingPromptService()
     svc._prompt_service = rec
     svc._config.partitions = {
-        "p": SimpleNamespace(generation_prompt_names={"sys_prompt": "legal"}, chat_history_depth=4)
+        "p": _partition_cfg(generation_prompt_names={"sys_prompt": "legal"}, chat_history_depth=4)
     }
 
     await svc._prepare_chat(["p"], {"messages": [{"role": "user", "content": "q"}], "metadata": {}})
@@ -1862,7 +2171,7 @@ async def test_spoken_style_metadata_swaps_the_answer_prompt():
     rec = RecordingPromptService()
     svc._prompt_service = rec
     svc._config.partitions = {
-        "p": SimpleNamespace(generation_prompt_names={"spoken_style_answer": "voice"}, chat_history_depth=4)
+        "p": _partition_cfg(generation_prompt_names={"spoken_style_answer": "voice"}, chat_history_depth=4)
     }
 
     await svc._prepare_chat(
