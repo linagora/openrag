@@ -454,11 +454,15 @@ partition_memberships = Table(
 )
 
 
+# ``workspace_id`` is the client-facing identifier and is unique *per partition*
+# only: two partitions may each own a workspace called ``default``. Every lookup
+# therefore takes the partition as well; the join table below references the
+# integer ``id`` so that non-uniqueness never leaks into ``workspace_files``.
 workspaces = Table(
     "workspaces",
     metadata,
     Column("id", Integer, primary_key=True),
-    Column("workspace_id", String, unique=True, nullable=False, index=True),
+    Column("workspace_id", String, nullable=False, index=True),
     Column(
         "partition_name",
         String,
@@ -474,6 +478,7 @@ workspaces = Table(
     ),
     Column("display_name", String, nullable=True),
     Column("created_at", DateTime, default=datetime.now),
+    UniqueConstraint("partition_name", "workspace_id", name="uix_workspace_partition_id"),
 )
 
 
@@ -481,10 +486,13 @@ workspace_files = Table(
     "workspace_files",
     metadata,
     Column("id", Integer, primary_key=True),
+    # Both columns hold the *integer* PK of the referenced row, not the
+    # client-facing string ids (``workspaces.workspace_id`` / ``files.file_id``),
+    # neither of which is unique across partitions.
     Column(
         "workspace_id",
-        String,
-        ForeignKey("workspaces.workspace_id", ondelete="CASCADE"),
+        Integer,
+        ForeignKey("workspaces.id", ondelete="CASCADE"),
         nullable=False,
         index=True,
     ),

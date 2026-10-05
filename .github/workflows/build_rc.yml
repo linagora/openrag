@@ -7,10 +7,10 @@
 #
 # api + admin-ui -> ghcr + Docker Hub; ray -> ghcr only (same split as build.yml).
 #
-# The GA pipeline (`build.yml`) also triggers on `v*` tags, but its jobs are
-# guarded to `base_ref == refs/heads/main`, so an rc tag on a release branch is
-# a no-op there. This workflow is the mirror image: it only runs for rc tags
-# whose base branch is `release/*`.
+# The GA pipeline (`build.yml`) also triggers on `v*` tags, but its verify-tag
+# job skips `-rc.` tags, so an rc tag is a no-op there. This workflow is the
+# mirror image: its verify-tag job accepts only an exact `vX.Y.Z-rc.N` tag on a
+# commit of `release/X.Y.Z`, and every build job needs it.
 name: Build RC
 
 on:
@@ -22,9 +22,45 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
+  # github.event.base_ref cannot tell which branch an rc tag was cut from: it
+  # is empty for a pushed tag, so a base_ref guard silently skips every build
+  # (v2.3.0-rc.1). As in build.yml, verify the branch explicitly and fail loud.
+  verify-tag:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      # Tag name and SHA are passed as env data, never interpolated into the
+      # script body: git permits ; $ ` " | & in ref names.
+      - name: Verify this is an exact rc tag on its release branch
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+          TAG_SHA: ${{ github.sha }}
+        run: |
+          if ! printf '%s' "$TAG_NAME" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+-rc\.[0-9]+$'; then
+            echo "::error::$TAG_NAME is not an exact release-candidate tag (vMAJOR.MINOR.PATCH-rc.N) — refusing to publish RC images."
+            exit 1
+          fi
+          version="${TAG_NAME#v}"
+          branch="release/${version%-rc.*}"
+          if ! git fetch --no-tags origin "refs/heads/$branch"; then
+            echo "::error::$branch does not exist — an rc tag must be cut from its release branch."
+            exit 1
+          fi
+          if git merge-base --is-ancestor "$TAG_SHA" FETCH_HEAD; then
+            echo "OK: $TAG_NAME ($TAG_SHA) is on $branch"
+          else
+            echo "::error::$TAG_NAME is not on $branch — refusing to publish RC images."
+            exit 1
+          fi
+
   build-and-push-image:
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/') && startsWith(github.event.base_ref, 'refs/heads/release/')
+    needs: verify-tag
     permissions:
       contents: read
       packages: write
@@ -79,7 +115,7 @@ jobs:
 
   build-and-push-image-ray:
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/') && startsWith(github.event.base_ref, 'refs/heads/release/')
+    needs: verify-tag
     permissions:
       contents: read
       packages: write
@@ -124,7 +160,7 @@ jobs:
 
   build-and-push-image-admin-ui:
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/') && startsWith(github.event.base_ref, 'refs/heads/release/')
+    needs: verify-tag
     permissions:
       contents: read
       packages: write
