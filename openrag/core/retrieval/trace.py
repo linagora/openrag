@@ -5,21 +5,28 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-import re
 from collections.abc import Mapping, Sequence
 from datetime import date, datetime
 from enum import Enum
-from typing import Any
+from typing import Any, Literal, get_args, get_origin
 
 from core.models.chunk import Chunk
 from core.models.retrieval_result import ScoredChunk
 from core.models.retrieval_trace import (
     REDACTED_ERROR_MESSAGE,
     ContextualizationTrace,
+    ContextualizedSubqueryTrace,
     QueryRetrievalTrace,
+    RemovalReasonCode,
+    RetrievalTraceV1,
+    TemporalFilterTrace,
     TraceCandidate,
+    TraceComparison,
+    TraceComparisons,
     TraceError,
     TraceStage,
+    TraceStageName,
+    TraceStatus,
 )
 from pydantic import BaseModel
 
@@ -33,198 +40,75 @@ MAX_TRACE_IDENTIFIER_BYTES = 1024
 MAX_TRACE_STRING_BYTES = 1024
 MAX_TRACE_COLLECTION_ITEMS = 500
 TRACE_FILE_SCOPE_KIND_KEY = "_trace_file_scope_kind"
-TRACE_STAGE_NAMES = (
-    "original_query",
-    "contextualized_query",
-    "dense_before_threshold",
-    "dense_after_threshold",
-    "sparse",
-    "hybrid_fused",
-    "multi_query_fused",
-    "partition_fused",
-    "pre_rerank",
-    "post_rerank",
-    "final",
-)
-TRACE_STATUSES = ("complete", "not_run", "unavailable", "error")
-REMOVAL_REASONS = (
-    "dense_threshold",
-    "hybrid_top_k",
-    "reranker_top_n",
-    "final_top_n",
-    "duplicate",
-    "partition_filter",
-    "workspace_filter",
-    "attachment_filter",
-    "file_filter",
-    "temporal_filter",
-)
+TRACE_STAGE_NAMES = get_args(TraceStageName)
+TRACE_STATUSES = get_args(TraceStatus)
+REMOVAL_REASONS = get_args(RemovalReasonCode)
+_EMPTY_CONTEXT: frozenset[str] = frozenset()
 
-_ROOT_PUBLIC_KEYS = frozenset(
-    {
-        "schema_version",
-        "request_id",
-        "original_query",
-        "contextualization",
-        "stages",
-        "timings",
-        "comparisons",
-        "query_traces",
-        "errors",
-        "configuration_fingerprint",
-        "name",
-        "status",
-        "duration_seconds",
-        "candidate_count",
-        "candidates",
-        "candidate_limit",
-        "candidates_truncated",
-        "query_trace_limit",
-        "query_traces_truncated",
-        "trace_truncated",
-        "serialized_size_limit",
-        "partition",
-        "error",
-        "id",
-        "document_id",
-        "rank",
-        "scores",
-        "duplicate_of",
-        "removal_reason",
-        "code",
-        "explanation",
-        "stage",
-        "message",
-        "kind",
-        "subqueries",
-        "query",
-        "temporal_filters",
-        "operator",
-        "value",
-        "intent",
-        "requires_retrieval",
-        "fallback_used",
-        "bypassed",
-        "model",
-        "prompt",
-        "source",
-        "content_hash",
-        "dense",
-        "sparse",
-        "fused",
-        "reranker",
-        "original_query",
-        "dense_search",
-        "sparse_search",
-        "fusion",
-        "reranking",
-        "total",
-    }
-).union(TRACE_STAGE_NAMES)
-_PUBLIC_KEYS_BY_CONTEXT = {
-    "root": _ROOT_PUBLIC_KEYS,
-    "contextualization": frozenset(
-        {
-            "original_query",
-            "subqueries",
-            "intent",
-            "requires_retrieval",
-            "fallback_used",
-            "bypassed",
-            "error",
-            "duration_seconds",
-            "model",
-            "prompt",
-        }
-    ),
-    "prompt": frozenset({"content_hash", "name", "source"}),
-    "subquery": frozenset({"query", "temporal_filters"}),
-    "temporal_filter": frozenset({"operator", "value"}),
-    "stage": frozenset({"name", "status", "duration_seconds", "candidate_count", "candidates", "error"}),
-    "candidate": frozenset({"id", "document_id", "partition", "rank", "scores", "duplicate_of", "removal_reason"}),
-    "scores": frozenset({"dense", "sparse", "fused", "reranker"}),
-    "removal_reason": frozenset({"code", "explanation"}),
-    "trace_error": frozenset({"stage", "message", "kind"}),
-    "timings": frozenset(
-        {
-            "contextualization",
-            "embedding",
-            "dense_search",
-            "sparse_search",
-            "fusion",
-            "reranking",
-            "total",
-        }
-    ).union(TRACE_STAGE_NAMES),
-    "comparisons": frozenset({"original_query"}),
-    "comparison": frozenset(
-        {
-            "status",
-            "stages",
-            "timings",
-            "errors",
-            "query_traces",
-            "candidate_limit",
-            "candidates_truncated",
-            "query_trace_limit",
-            "query_traces_truncated",
-            "trace_truncated",
-            "serialized_size_limit",
-            "configuration_fingerprint",
-        }
-    ),
-    "query_trace": frozenset({"query", "partition", "attempt", "stages", "timings", "errors", "query_traces"}),
-    "empty": frozenset(),
-}
-_CHILD_CONTEXTS = {
-    "contextualization": "contextualization",
-    "prompt": "prompt",
-    "subqueries": "subquery",
-    "temporal_filters": "temporal_filter",
-    "stages": "stage",
-    "candidates": "candidate",
-    "scores": "scores",
-    "removal_reason": "removal_reason",
-    "errors": "trace_error",
-    "error": "trace_error",
-    "timings": "timings",
-    "comparisons": "comparisons",
-    "query_traces": "query_trace",
-}
+
+def _literal_values(annotation: object) -> frozenset[str]:
+    if get_origin(annotation) is Literal:
+        return frozenset(value for value in get_args(annotation) if isinstance(value, str))
+    return frozenset(value for child in get_args(annotation) for value in _literal_values(child))
+
+
+def _model_type(annotation: object) -> type[BaseModel] | None:
+    if isinstance(annotation, type):
+        try:
+            if issubclass(annotation, BaseModel):
+                return annotation
+        except TypeError:
+            pass
+    return next((model for child in get_args(annotation) if (model := _model_type(child)) is not None), None)
+
+
+def _model_types(annotation: object) -> set[type[BaseModel]]:
+    model = _model_type(annotation)
+    found = {model} if model is not None else set()
+    for child in get_args(annotation):
+        found.update(_model_types(child))
+    return found
+
+
+def _trace_model_types() -> frozenset[type[BaseModel]]:
+    models: set[type[BaseModel]] = set()
+    pending = [RetrievalTraceV1]
+    while pending:
+        model = pending.pop()
+        if model in models:
+            continue
+        models.add(model)
+        for field in model.model_fields.values():
+            pending.extend(_model_types(field.annotation) - models)
+    return frozenset(models)
+
+
+_TRACE_MODEL_TYPES = _trace_model_types()
+
+
+def _child_context(model: type[BaseModel], key: str) -> type[BaseModel] | frozenset[str]:
+    field = model.model_fields.get(key)
+    if field is None:
+        return _EMPTY_CONTEXT
+
+    annotation = field.annotation
+    child_model = _model_type(annotation)
+    if child_model is not None:
+        return child_model
+
+    if get_origin(annotation) is dict:
+        key_annotation = get_args(annotation)[0]
+        allowed_keys = _literal_values(key_annotation)
+        if allowed_keys:
+            return allowed_keys
+    return _EMPTY_CONTEXT
+
+
+def _is_context(context: type[BaseModel] | frozenset[str], model: type[BaseModel]) -> bool:
+    return isinstance(context, type) and issubclass(context, model)
+
+
 _OMITTED = object()
-_REDACTED_CREDENTIAL = "[redacted]"
-_AUTH_SCHEME_CREDENTIAL = re.compile(
-    r"\b(?P<scheme>bearer|basic)(?P<spacing>\s+)(?P<credential>[^\s,;]+)",
-    re.IGNORECASE,
-)
-_AUTHORIZATION_HEADER_CREDENTIAL = re.compile(
-    r"(?P<prefix>\bauthorization\s*:\s*(?:bearer|basic)\s+)(?P<credential>[^\s,;]+)",
-    re.IGNORECASE,
-)
-_QUOTED_NAMED_CREDENTIAL = re.compile(
-    r"(?P<prefix>[\"']?(?:api[_-]?key|access[_-]?token|refresh[_-]?token|id[_-]?token|token|credential|secret|password)[\"']?\s*[:=]\s*)"
-    r"(?P<quote>[\"'])(?P<credential>.*?)(?P=quote)",
-    re.IGNORECASE | re.DOTALL,
-)
-_UNQUOTED_NAMED_CREDENTIAL = re.compile(
-    r"(?P<name>\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|id[_-]?token|token|credential|secret|password)\b\s*)"
-    r"(?P<separator>[:=])(?P<spacing>\s*)"
-    r"(?![\"'])(?P<credential>[^\s,;]+)",
-    re.IGNORECASE,
-)
-_JWT_CREDENTIAL = re.compile(r"[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+")
-_COMMON_CREDENTIAL_VALUES = frozenset(
-    {
-        "admin",
-        "changeme",
-        "hunter2",
-        "letmein",
-        "password",
-        "passwd",
-        "qwerty",
-        "secret",
-    }
-)
 
 
 class _CandidateBudget:
@@ -280,74 +164,6 @@ class RetrievalDiagnosticsContext:
         self.remaining_candidates = min(self.candidate_limit, self.remaining_candidates + max(count, 0))
 
 
-def _looks_like_credential(value: str) -> bool:
-    candidate = value.strip()
-    if (
-        candidate.lower().startswith("or-")
-        or candidate.lower() in _COMMON_CREDENTIAL_VALUES
-        or _JWT_CREDENTIAL.fullmatch(candidate)
-    ):
-        return True
-    without_sentence_punctuation = candidate.rstrip(".?!")
-    if without_sentence_punctuation.isalpha():
-        candidate = without_sentence_punctuation
-    if (
-        len(candidate) >= 6
-        and any(character.isalpha() for character in candidate)
-        and any(character.isdigit() for character in candidate)
-    ):
-        return True
-    if len(candidate) >= 6 and candidate.isdigit():
-        return True
-    if len(candidate) >= 8 and any(not character.isalpha() for character in candidate):
-        return True
-    return len(candidate) >= 20 and candidate.isalnum()
-
-
-def _scrub_unquoted_named_credential(match: re.Match[str]) -> str:
-    name = match.group("name").strip().lower().replace("-", "_")
-    credential = match.group("credential")
-    strong_secret_name = name not in {"password", "token"}
-    if match.group("separator") != "=" and not strong_secret_name and not _looks_like_credential(credential):
-        return match.group(0)
-    return f"{match.group('name')}{match.group('separator')}{match.group('spacing')}{_REDACTED_CREDENTIAL}"
-
-
-def _looks_like_bare_scheme_credential(value: str) -> bool:
-    candidate = value.strip()
-    return _looks_like_credential(candidate) or (
-        any(character.isalpha() for character in candidate) and any(character.isdigit() for character in candidate)
-    )
-
-
-def _scrub_query_credentials(value: str) -> str:
-    """Redact credential-shaped values embedded in public query telemetry."""
-
-    value = _AUTHORIZATION_HEADER_CREDENTIAL.sub(
-        lambda match: f"{match.group('prefix')}{_REDACTED_CREDENTIAL}",
-        value,
-    )
-    value = _QUOTED_NAMED_CREDENTIAL.sub(
-        lambda match: f"{match.group('prefix')}{match.group('quote')}{_REDACTED_CREDENTIAL}{match.group('quote')}",
-        value,
-    )
-    value = _UNQUOTED_NAMED_CREDENTIAL.sub(_scrub_unquoted_named_credential, value)
-    return _AUTH_SCHEME_CREDENTIAL.sub(
-        lambda match: (
-            f"{match.group('scheme')}{match.group('spacing')}{_REDACTED_CREDENTIAL}"
-            if _looks_like_bare_scheme_credential(match.group("credential"))
-            else match.group(0)
-        ),
-        value,
-    )
-
-
-def _child_context(context: str, key: str) -> str:
-    if context == "comparisons" and key == "original_query":
-        return "comparison"
-    return _CHILD_CONTEXTS.get(key, "empty")
-
-
 def _truncate_utf8(value: str, limit: int) -> str:
     encoded = value.encode("utf-8")
     if len(encoded) <= limit:
@@ -363,69 +179,78 @@ def _string_limit(key: str | None) -> int:
     return MAX_TRACE_STRING_BYTES
 
 
-def _sequence_limit(context: str) -> int | None:
-    return {
-        "candidate": MAX_TRACE_CANDIDATES_PER_STAGE,
-        "stage": len(TRACE_STAGE_NAMES),
-        "subquery": 50,
-        "temporal_filter": 10,
-        "trace_error": 100,
-        "query_trace": None,
-    }.get(context, MAX_TRACE_COLLECTION_ITEMS)
+def _sequence_limit(context: type[BaseModel] | frozenset[str]) -> int | None:
+    if _is_context(context, TraceCandidate):
+        return MAX_TRACE_CANDIDATES_PER_STAGE
+    if _is_context(context, TraceStage):
+        return len(TRACE_STAGE_NAMES)
+    if _is_context(context, ContextualizedSubqueryTrace):
+        return 50
+    if _is_context(context, TemporalFilterTrace):
+        return 10
+    if _is_context(context, TraceError):
+        return 100
+    if _is_context(context, QueryRetrievalTrace):
+        return None
+    return MAX_TRACE_COLLECTION_ITEMS
 
 
 def _safe_public_value(
     value: object,
     *,
-    context: str = "root",
+    context: type[BaseModel] | frozenset[str] = RetrievalTraceV1,
     key: str | None = None,
     candidate_budget: _CandidateBudget,
     query_trace_budget: _QueryTraceBudget,
     state: _SanitizationState,
+    allow_standalone_model: bool = True,
 ) -> object:
     candidate_consumed = False
     query_trace_consumed = False
-    if isinstance(value, ContextualizationTrace):
-        context = "contextualization"
-    elif isinstance(value, QueryRetrievalTrace):
-        context = "query_trace"
-        if not query_trace_budget.consume():
-            return _OMITTED
-        query_trace_consumed = True
-    elif isinstance(value, TraceStage):
-        context = "stage"
-    elif isinstance(value, TraceCandidate):
-        context = "candidate"
-        if not candidate_budget.consume():
-            return _OMITTED
-        candidate_consumed = True
-    elif isinstance(value, TraceError):
-        context = "trace_error"
     if isinstance(value, BaseModel):
+        if not any(isinstance(value, model) for model in _TRACE_MODEL_TYPES):
+            return _OMITTED
+        if _is_context(context, BaseModel):
+            if (context is not RetrievalTraceV1 or not allow_standalone_model) and not isinstance(value, context):
+                return _OMITTED
+        elif not allow_standalone_model:
+            return _OMITTED
+        context = type(value)
+        if _is_context(context, QueryRetrievalTrace):
+            if not query_trace_budget.consume():
+                return _OMITTED
+            query_trace_consumed = True
+        elif _is_context(context, TraceCandidate):
+            if not candidate_budget.consume():
+                return _OMITTED
+            candidate_consumed = True
         if isinstance(value, TraceCandidate):
             exclude = {"partition"} if value.partition is None else None
             value = value.model_dump(mode="json", exclude=exclude)
+        elif isinstance(value, (RetrievalTraceV1, TraceComparisons, TraceComparison)):
+            value = {field: getattr(value, field) for field in value.model_fields_set}
         else:
             value = {field: getattr(value, field) for field in type(value).model_fields}
     if isinstance(value, Mapping):
-        if context == "candidate" and not candidate_consumed:
+        if _is_context(context, TraceCandidate) and not candidate_consumed:
             if not candidate_budget.consume():
                 return _OMITTED
-        if context == "query_trace" and not query_trace_consumed:
+        if _is_context(context, QueryRetrievalTrace) and not query_trace_consumed:
             if not query_trace_budget.consume():
                 return _OMITTED
         public: dict[str, object] = {}
-        allowed_keys = _PUBLIC_KEYS_BY_CONTEXT[context]
+        allowed_keys = frozenset(context.model_fields) if _is_context(context, BaseModel) else context
         for raw_key, raw_value in value.items():
             if not isinstance(raw_key, str) or raw_key not in allowed_keys:
                 continue
             safe_value = _safe_public_value(
                 raw_value,
-                context=_child_context(context, raw_key),
+                context=_child_context(context, raw_key) if _is_context(context, BaseModel) else _EMPTY_CONTEXT,
                 key=raw_key,
                 candidate_budget=candidate_budget,
                 query_trace_budget=query_trace_budget,
                 state=state,
+                allow_standalone_model=False,
             )
             if safe_value is not _OMITTED:
                 public[raw_key] = safe_value
@@ -437,10 +262,10 @@ def _safe_public_value(
             if sequence_limit is not None and len(public_items) >= sequence_limit:
                 state.collection_truncated = True
                 break
-            if context == "candidate" and candidate_budget.remaining == 0:
+            if _is_context(context, TraceCandidate) and candidate_budget.remaining == 0:
                 candidate_budget.truncated = True
                 break
-            if context == "query_trace" and query_trace_budget.remaining == 0:
+            if _is_context(context, QueryRetrievalTrace) and query_trace_budget.remaining == 0:
                 query_trace_budget.truncated = True
                 break
             safe = _safe_public_value(
@@ -449,6 +274,7 @@ def _safe_public_value(
                 candidate_budget=candidate_budget,
                 query_trace_budget=query_trace_budget,
                 state=state,
+                allow_standalone_model=allow_standalone_model,
             )
             if safe is not _OMITTED:
                 public_items.append(safe)
@@ -461,16 +287,17 @@ def _safe_public_value(
             candidate_budget=candidate_budget,
             query_trace_budget=query_trace_budget,
             state=state,
+            allow_standalone_model=allow_standalone_model,
         )
     if isinstance(value, (datetime, date)):
         return value.isoformat()
     if isinstance(value, float) and not math.isfinite(value):
         return _OMITTED
     if value is None or isinstance(value, (bool, int, float, str)):
+        if key in {"candidates_truncated", "query_traces_truncated", "trace_truncated"} and value is True:
+            state.collection_truncated = True
         if key in {"error", "message"} and isinstance(value, str):
             return REDACTED_ERROR_MESSAGE
-        if key in {"original_query", "query"} and isinstance(value, str):
-            value = _scrub_query_credentials(value)
         if isinstance(value, str):
             truncated = _truncate_utf8(value, _string_limit(key))
             if truncated != value:
@@ -502,7 +329,12 @@ def _render_public_value(
     if query_trace_budget.truncated and isinstance(safe, dict):
         safe["query_trace_limit"] = query_trace_limit
         safe["query_traces_truncated"] = True
-    trace_truncated = state.collection_truncated or query_trace_budget.truncated or enforce_size_metadata
+    trace_truncated = (
+        state.collection_truncated
+        or candidate_budget.truncated
+        or query_trace_budget.truncated
+        or enforce_size_metadata
+    )
     if trace_truncated and isinstance(safe, dict):
         safe["trace_truncated"] = True
     if trace_truncated and isinstance(safe, dict):
