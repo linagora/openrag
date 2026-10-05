@@ -132,14 +132,14 @@ Filtered queries match the selections with regular expressions:
 
 ## Persist changes in the repository
 
-The bundled dashboard is provisioned from `infra/compose/grafana/dashboards/openrag-http.json`. A change saved only in Grafana can be lost when the container is recreated.
+The bundled dashboard is provisioned from `infra/charts/openrag-stack/dashboards/openrag-http.json`, the one copy that both the Compose overlay and the Helm chart deliver. A change saved only in Grafana can be lost when the container is recreated.
 
 After testing a dashboard copy, open **Dashboard settings → JSON model** or **Share → Export**, export the JSON without the external-sharing option, and replace the provisioned file. Preserve the UID `openrag-http`; the Admin UI link depends on it.
 
 Validate the file before restarting Grafana:
 
 ```bash
-jq empty infra/compose/grafana/dashboards/openrag-http.json
+jq empty ../charts/openrag-stack/dashboards/openrag-http.json
 docker restart openrag-grafana
 docker logs --tail 50 openrag-grafana
 ```

@@ -143,6 +143,8 @@ def test_contextualization_bypass_is_preserved_by_safe_serialization():
         ("Authorization: Bearer abc123", "abc123"),
         ("Authorization: Basic basic-secret", "basic-secret"),
         ("Use Bearer bare-secret for the request", "bare-secret"),
+        ("Use Bearer abc12 for the request", "abc12"),
+        ("Use Basic a1 for authentication", "a1"),
         ("password=hunter2", "hunter2"),
         ("api_key=secret", "secret"),
         ("token=abc123", "abc123"),
