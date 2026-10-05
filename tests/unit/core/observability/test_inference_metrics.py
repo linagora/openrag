@@ -434,7 +434,9 @@ def _streaming_client(lines: list[str], monkeypatch: pytest.MonkeyPatch, calls: 
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("status", "outcome"), [(400, "rejected"), (429, "error"), (503, "error")])
+@pytest.mark.parametrize(
+    ("status", "outcome"), [(400, "rejected"), (401, "rejected"), (403, "rejected"), (429, "error"), (503, "error")]
+)
 async def test_a_refused_stream_is_classified_by_status(
     monkeypatch: pytest.MonkeyPatch, status: int, outcome: str
 ) -> None:
@@ -449,6 +451,20 @@ async def test_a_refused_stream_is_classified_by_status(
             pass
 
     assert [c["outcome"] for c in calls] == [outcome]
+
+
+@pytest.mark.parametrize(
+    ("operation", "outcome"),
+    [("chat", "rejected"), ("completion", "rejected"), ("embed", "error"), ("rerank", "error"), ("vlm", "error")],
+)
+def test_a_401_is_an_error_only_where_callers_cannot_shape_the_request(operation: str, outcome: str) -> None:
+    """Callers shape an LLM request: the model through llm_override, and any
+    extra chat-body field, which is forwarded. LiteLLM answers a refused model,
+    or an ``api_key`` sent in the body, with 401, so counting it as ``error`` let
+    any user raise the provider's error ratio. Elsewhere a 401 is our key."""
+    from services.inference._metrics import outcome_for
+
+    assert outcome_for(InferenceError("refused", status_code=401), operation=operation) == outcome
 
 
 @pytest.mark.asyncio
@@ -551,10 +567,11 @@ def test_content_mentioning_usage_records_nothing(recorded) -> None:
     ],
 )
 def test_every_outcome_is_a_declared_value(exc: BaseException) -> None:
-    from core.observability.metric_specs import INFERENCE_OUTCOME_VALUES
+    from core.observability.metric_specs import INFERENCE_OPERATION_VALUES, INFERENCE_OUTCOME_VALUES
     from services.inference._metrics import outcome_for
 
-    assert outcome_for(exc) in INFERENCE_OUTCOME_VALUES
+    for operation in INFERENCE_OPERATION_VALUES:
+        assert outcome_for(exc, operation=operation) in INFERENCE_OUTCOME_VALUES
 
 
 def test_success_is_a_declared_outcome() -> None:
@@ -593,3 +610,88 @@ def test_a_client_that_cannot_be_labelled_is_still_built() -> None:
         pass
 
     assert resolve_provider(set_provider_name(_Plain(), "embedder-a"), {}) == "embedder-a"
+
+
+# ---------------------------------------------------------------------------
+# Series start at 0, so the first event is a visible 0 -> 1
+# ---------------------------------------------------------------------------
+
+
+def test_a_labelled_client_starts_every_outcome_of_its_operations_at_zero(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``increase()`` does not count a series that first appears at 1, and every
+    Ray worker has its own series: without a zero start, each worker's first
+    error is invisible to ``OpenRagInferenceProviderDown``."""
+    from types import SimpleNamespace
+
+    from core.observability import inference_metrics as im
+    from core.observability.metric_specs import INFERENCE_OUTCOME_VALUES
+
+    started: list[dict[str, str]] = []
+    monkeypatch.setattr(
+        im, "_instruments", lambda: SimpleNamespace(requests=SimpleNamespace(start_at_zero=started.append))
+    )
+
+    class _Client:
+        @with_inference_metrics("embed")
+        async def embed(self) -> None: ...
+
+        async def helper(self) -> None: ...
+
+    im.set_provider_name(_Client(), "embedder-a")
+
+    assert {(t["provider"], t["operation"], t["outcome"]) for t in started} == {
+        ("embedder-a", "embed", outcome) for outcome in INFERENCE_OUTCOME_VALUES
+    }
+
+
+def test_a_client_with_no_instrumented_method_starts_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    from types import SimpleNamespace
+
+    from core.observability import inference_metrics as im
+
+    started: list[dict[str, str]] = []
+    monkeypatch.setattr(
+        im, "_instruments", lambda: SimpleNamespace(requests=SimpleNamespace(start_at_zero=started.append))
+    )
+
+    class _Plain:
+        async def embed(self) -> None: ...
+
+    im.set_provider_name(_Plain(), "embedder-a")
+
+    assert started == []
+
+
+def test_a_class_attribute_that_raises_does_not_stop_the_client(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Finding the operations walks the class's attributes, and ``getattr(...,
+    None)`` only swallows ``AttributeError``. Read outside the guard, anything
+    else escaped ``set_provider_name`` and stopped the client being built."""
+    from core.observability import inference_metrics as im
+
+    reported: list[str] = []
+    monkeypatch.setattr(im, "report_once", lambda what, exc: reported.append(what))
+
+    class _Raises:
+        def __getattr__(self, name: str) -> None:
+            raise RuntimeError(name)
+
+    class _Client:
+        odd = _Raises()
+
+    client = _Client()
+
+    assert im.set_provider_name(client, "embedder-a") is client
+    assert getattr(client, im.PROVIDER_NAME_ATTR) == "embedder-a"
+    assert reported
+
+
+def test_the_prometheus_backend_exports_a_zero_started_series() -> None:
+    import prometheus_client
+    from core.observability.inference_metrics import _PrometheusInstrument
+
+    registry = prometheus_client.CollectorRegistry()
+    counter = prometheus_client.Counter("zero_probe_total", "probe", ["outcome"], registry=registry)
+
+    _PrometheusInstrument(counter).start_at_zero({"outcome": "error"})
+
+    assert registry.get_sample_value("zero_probe_total", {"outcome": "error"}) == 0.0

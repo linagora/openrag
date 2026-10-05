@@ -16,47 +16,13 @@ from core.embeddings import Embedder
 from core.models.chunk import Chunk, _coerce_chunk_type
 from core.ports.document_repo import DocumentRepository
 from core.retrieval.searcher import RetrievalSearcher, file_id_restriction
-from core.retrieval.trace import RetrievalTraceBuilder
+from core.retrieval.trace import RetrievalTraceBuilder, merge_query_traces
 from core.utils.consts import RETRIEVAL_SCORE_KEYS, is_internal_metadata_key
+from core.utils.logging import get_logger
 from core.vector_stores import VectorStore
 from core.vector_stores.vector_field import is_vector_field_key
 
-_STORE_TRACE_STAGES = (
-    "dense_before_threshold",
-    "dense_after_threshold",
-    "sparse",
-    "hybrid_fused",
-)
-
-
-def _merge_store_traces(parent: RetrievalTraceBuilder, children: list[RetrievalTraceBuilder]) -> None:
-    """Merge completed per-query traces in query order, never completion order."""
-    for child in children:
-        parent.record_query_trace(child)
-    for stage_name in _STORE_TRACE_STAGES:
-        stages = [child.stages[stage_name] for child in children if child.stages[stage_name].status != "not_run"]
-        if not stages:
-            continue
-        statuses = {stage.status for stage in stages}
-        if "error" in statuses:
-            status = "error"
-        elif "complete" in statuses:
-            status = "complete"
-        else:
-            status = "unavailable"
-        durations = [stage.duration_seconds for stage in stages if stage.duration_seconds is not None]
-        parent.record_stage(
-            stage_name,
-            status=status,
-            candidates=[candidate for stage in stages for candidate in stage.candidates],
-            candidate_count=sum(stage.candidate_count for stage in stages),
-            duration_seconds=max(durations) if durations else None,
-            error="sub-query diagnostics failed" if status == "error" else None,
-        )
-    for key in sorted({key for child in children for key in child.timings}):
-        parent.timings[key] = max(child.timings[key] for child in children if key in child.timings)
-    for child in children:
-        parent.errors.extend(child.errors)
+logger = get_logger()
 
 
 def _dict_to_chunk(row: dict[str, Any]) -> Chunk:
@@ -211,7 +177,7 @@ class VectorStoreSearcher(RetrievalSearcher):
             ]
         )
         if trace is not None:
-            _merge_store_traces(trace, query_traces)
+            merge_query_traces(trace, query_traces)
         seen_ids: set[str] = set()
         chunks: list[Chunk] = []
         for results in per_query:
@@ -224,6 +190,13 @@ class VectorStoreSearcher(RetrievalSearcher):
             surrounding = await self._fetch_surrounding(chunks, allowed_file_ids=file_id_restriction(filter_params))
             chunks.extend(c for c in surrounding if c.id not in seen_ids)
         return chunks
+
+    async def get_surrounding_chunks(
+        self,
+        chunks: list[Chunk],
+        allowed_file_ids: list[str] | None = None,
+    ) -> list[Chunk]:
+        return await self._fetch_surrounding(chunks, allowed_file_ids=allowed_file_ids)
 
     async def get_related_chunks(
         self,
@@ -275,33 +248,52 @@ class VectorStoreSearcher(RetrievalSearcher):
         return [_dict_to_chunk(r) for r in rows[:limit]]
 
     async def _fetch_surrounding(self, chunks: list[Chunk], allowed_file_ids: list[str] | None = None) -> list[Chunk]:
-        # section_id is only unique within a partition, so the lookup MUST be
-        # scoped to each source chunk's partition; otherwise a neighbouring
-        # section_id could resolve to another tenant's chunk (cross-tenant leak,
-        # N6). Group section_ids by partition and query each partition
-        # separately; drop refs whose source chunk has no partition.
-        by_partition: dict[str, list] = {}
+        # A chunk's neighbours are in its own file (a file's chunks are
+        # numbered in one batch), so each file's neighbours come from one query
+        # scoped to its partition, the file and the section_ids asked for in
+        # it. The partition scope keeps the lookup inside the tenant. The file
+        # scope ignores another file that holds the same section_id, such as a
+        # copy of this one in the same partition. Refs whose source chunk has
+        # no partition or file are dropped, and so are those of a file outside
+        # the caller's restriction: the source chunks passed it, so that only
+        # guards a caller that passes chunks from outside it.
+        allowed = set(allowed_file_ids) if allowed_file_ids is not None else None
+        # (partition, file_id) → the section_ids asked for, as an ordered set.
+        refs: dict[tuple[str, str], dict[Any, None]] = {}
         for c in chunks:
-            if not c.partition:
+            if not c.partition or not c.document_id or (allowed is not None and c.document_id not in allowed):
                 continue
             for sid in (c.metadata.get("prev_section_id"), c.metadata.get("next_section_id")):
                 if sid is not None:
-                    by_partition.setdefault(c.partition, []).append(sid)
-        if not by_partition:
+                    refs.setdefault((c.partition, c.document_id), {})[sid] = None
+        if not refs:
             return []
-        allowed = set(allowed_file_ids) if allowed_file_ids is not None else None
-        results: list[Chunk] = []
-        for partition, section_ids in by_partition.items():
-            rows = await self._store.query_chunks_by_filter(
-                self._collection,
-                {"section_id": section_ids, "partition": partition},
+        per_file = await asyncio.gather(
+            *(
+                self._store.query_chunks_by_filter(
+                    self._collection,
+                    {"partition": partition, "file_id": file_id, "section_id": list(section_ids)},
+                )
+                for (partition, file_id), section_ids in refs.items()
             )
-            if allowed is not None:
-                # A neighbouring section can belong to an adjacent file that sits
-                # outside the caller's workspace/file scope — filter it out rather
-                # than trusting section adjacency alone (workspace scoping, #706).
-                rows = [r for r in rows if r.get("file_id") in allowed]
-            results.extend(_dict_to_chunk(r) for r in rows)
+        )
+        results: list[Chunk] = []
+        for (partition, file_id), rows in zip(refs, per_file, strict=True):
+            hits_by_sid: dict[Any, list[dict[str, Any]]] = {}
+            for r in rows:
+                hits_by_sid.setdefault(r.get("section_id"), []).append(r)
+            # An ID matching several chunks of one file means the file's IDs
+            # are damaged: a Milvus partial upsert rounds IDs above 2**53, and
+            # a few hundred neighbours then share one value. Taking every match
+            # would return the whole document, so such a neighbour is skipped.
+            if any(len(hits) > 1 for hits in hits_by_sid.values()):
+                logger.warning(
+                    "Skipped neighbour chunks whose section_id matches several chunks of the same file; "
+                    "re-index the file to restore its neighbours",
+                    partition=partition,
+                    file_id=file_id,
+                )
+            results.extend(_dict_to_chunk(hits[0]) for hits in hits_by_sid.values() if len(hits) == 1)
         return results
 
 

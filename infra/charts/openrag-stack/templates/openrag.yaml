@@ -2,6 +2,16 @@
 {{- if and $rayServeEnabled (not .Values.ray.enabled) -}}
 {{- fail "ENABLE_RAY_SERVE=true requires ray.enabled=true" -}}
 {{- end -}}
+{{- /* The reverse half of the same contract. With a RayCluster but neither Ray
+   Serve nor a RAY_ADDRESS, the API starts its own Ray inside the openrag pod:
+   the RayCluster does no work, and the Ray PodMonitor scrapes a cluster that
+   holds none of the indexing metrics, so their alerts stay silent. A
+   RAY_ADDRESS the chart cannot read (env.existingSecret, an external secrets
+   provider) belongs in env.config as well: envFrom reads the ConfigMap first,
+   so the Secret's copy still wins at runtime. */ -}}
+{{- if and .Values.ray.enabled (not $rayServeEnabled) (not (include "openrag-stack.rayAddress" .)) -}}
+{{- fail (printf "ray.enabled=true with neither ENABLE_RAY_SERVE=true nor a RAY_ADDRESS: the API would start its own Ray inside the openrag pod, the RayCluster would do no work, and the Ray PodMonitor would scrape a cluster holding none of the indexing metrics. Point the API at the cluster with env.config.RAY_ADDRESS: ray://%s-raycluster-head-svc:10001 (in env.config even when env.existingSecret also carries it), or set env.config.ENABLE_RAY_SERVE=true." (include "openrag-stack.fullname" .)) -}}
+{{- end -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -70,11 +80,22 @@ spec:
             - containerPort: 8265
               name: ray-dashboard
             {{- end }}
+            {{- if eq (include "openrag-stack.embeddedRay" .) "true" }}
+            {{- /* The embedded Ray's metrics agent. Unpinned it takes a random
+               port, and nothing can scrape the indexing and worker-side
+               inference series recorded in Ray actors. */}}
+            - containerPort: {{ include "openrag-stack.rayMetricsPort" . }}
+              name: ray-metrics
+            {{- end }}
           resources:
             {{- toYaml .Values.openrag.resources | nindent 12 }}
           {{- if .Values.openrag.probes.startup }}
+          {{- /* /health_check, like the HTTP probe in values: a startup probe that
+             fails restarts the container, and with READINESS_REQUIRE_EMBEDDER=true
+             /ready also fails while the default embedder is down (#1099),
+             which a restart cannot fix. */}}
           startupProbe:
-            {{- include "openrag-stack.openragProbe" (dict "probe" .Values.openrag.probes.startup "rayServe" $rayServeEnabled "path" "/ready" "context" $) | nindent 12 }}
+            {{- include "openrag-stack.openragProbe" (dict "probe" .Values.openrag.probes.startup "rayServe" $rayServeEnabled "path" "/health_check" "context" $) | nindent 12 }}
           {{- end }}
           {{- if .Values.openrag.probes.readiness }}
           readinessProbe:
@@ -83,6 +104,11 @@ spec:
           {{- if .Values.openrag.probes.liveness }}
           livenessProbe:
             {{- include "openrag-stack.openragProbe" (dict "probe" .Values.openrag.probes.liveness "rayServe" $rayServeEnabled "path" "/health_check" "context" $) | nindent 12 }}
+          {{- end }}
+          {{- if eq (include "openrag-stack.embeddedRay" .) "true" }}
+          env:
+            - name: RAY_METRICS_EXPORT_PORT
+              value: {{ include "openrag-stack.rayMetricsPort" . | quote }}
           {{- end }}
           envFrom:
             - configMapRef:

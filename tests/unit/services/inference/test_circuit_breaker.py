@@ -163,3 +163,90 @@ class TestStateIsExported:
         states = [s for n, s in recorded if n == "test-state-recovery"]
         assert 1 in states, f"open not exported: {recorded}"
         assert 0 in states, f"closed not exported: {recorded}"
+
+
+def test_a_new_breaker_publishes_closed_before_any_transition(monkeypatch):
+    """State is otherwise written only on a transition, so a breaker that never
+    tripped had no series and the dashboard read "Unknown" on a healthy system."""
+    import services.inference._circuit_breaker as module
+
+    recorded: list[tuple[str, int]] = []
+    monkeypatch.setattr(module, "record_circuit_breaker_state", lambda n, s: recorded.append((n, s)))
+
+    module.get_breaker("fresh-breaker")
+    module.get_breaker("fresh-breaker")
+
+    assert recorded == [("fresh-breaker", 0)]
+
+
+def test_the_closed_state_is_written_before_the_breaker_is_reachable(monkeypatch):
+    """Written after registration, the initial "closed" could land after
+    another caller had already opened the breaker, and overwrite its exported
+    "open": ``OpenRagCircuitBreakerOpen`` would stay silent until the next
+    transition."""
+    import services.inference._circuit_breaker as module
+
+    reachable_at_write: list[bool] = []
+    monkeypatch.setattr(
+        module, "record_circuit_breaker_state", lambda n, s: reachable_at_write.append(n in module._breakers)
+    )
+
+    module.get_breaker("ordered-breaker")
+
+    assert reachable_at_write == [False]
+
+
+@pytest.mark.parametrize("breaker", ["llm", "embedder", "reranker", "vlm"])
+@pytest.mark.parametrize(
+    ("status", "excluded"),
+    [(400, True), (401, True), (403, True), (404, True), (408, True), (429, True), (500, False)],
+)
+def test_no_4xx_opens_a_breaker(breaker: str, status: int, excluded: bool) -> None:
+    """A breaker is shared by every endpoint of its kind. A 401 counted here let
+    one endpoint's bad key open the ``embedder`` breaker for every partition
+    (#1100); the metrics count it against that endpoint instead. Both shapes the
+    breaker sees are checked: the raw httpx error and the wrapped one."""
+    from core.utils.exceptions import InferenceError
+    from services.inference import _circuit_breaker as cb
+
+    request = httpx.Request("POST", "http://provider.invalid/v1/embeddings")
+    raw = httpx.HTTPStatusError("refused", request=request, response=httpx.Response(status, request=request))
+
+    assert cb._is_excluded(raw) is excluded
+    assert cb._is_excluded(InferenceError("refused", status_code=status)) is excluded
+    assert cb.get_breaker(breaker).is_system_error(InferenceError("refused", status_code=status)) is not excluded
+
+
+@pytest.mark.asyncio
+async def test_one_endpoints_bad_key_does_not_stop_the_others() -> None:
+    """#1100: one embedder endpoint answering 401 must not open the breaker its
+    kind shares, or a healthy endpoint behind it gets CircuitBreakerOpenError."""
+    from core.utils.exceptions import InferenceError
+
+    @with_circuit_breaker("test-1100", fail_max=3, timeout_duration=60.0)
+    async def call(endpoint: str) -> str:
+        if endpoint == "revoked":
+            raise InferenceError("refused", status_code=401)
+        return "ok"
+
+    for _ in range(10):
+        with pytest.raises(InferenceError):
+            await call("revoked")
+
+    assert await call("healthy") == "ok"
+
+
+@pytest.mark.asyncio
+async def test_provider_failures_still_open_the_breaker() -> None:
+    """Control for the test above: a 5xx is the provider failing, and trips it."""
+    from core.utils.exceptions import InferenceError
+
+    @with_circuit_breaker("test-1100-control", fail_max=3, timeout_duration=60.0)
+    async def call() -> str:
+        raise InferenceError("down", status_code=503)
+
+    for _ in range(2):
+        with pytest.raises(InferenceError):
+            await call()
+    with pytest.raises(CircuitBreakerOpenError):
+        await call()

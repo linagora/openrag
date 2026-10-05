@@ -165,7 +165,7 @@ class OllamaClient(LLM):
                         f"Ollama streaming error ({resp.status_code}): {resp.text[:500]}",
                         status_code=resp.status_code,
                     )
-                    outcome = outcome_for(error)
+                    outcome = outcome_for(error, operation="chat")
                     raise error
                 async for line in resp.aiter_lines():
                     if _record_stream_usage(line) and not forward_usage:

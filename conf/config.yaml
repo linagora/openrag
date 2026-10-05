@@ -47,7 +47,7 @@ semaphore:
 #      EMBEDDER_TIMEOUT, EMBEDDER_BATCH_SIZE, EMBEDDER_CONCURRENCY
 embedder:
   provider: openai
-  model_name: jinaai/jina-embeddings-v3
+  model_name: Qwen/Qwen3-Embedding-0.6B
   base_url: http://vllm:8000/v1
   api_key: EMPTY
   max_model_len: 2047 # truncate_prompt_tokens = this - 1; keep below the model's context boundary (vllm#29496)
@@ -124,9 +124,10 @@ verbose:
   format: text
 
 # --- Server ---
-# Env: PREFERRED_URL_SCHEME
+# Env: PREFERRED_URL_SCHEME, ASSISTANT_NAME
 server:
   preferred_url_scheme: null
+  assistant_name: ""
 
 # --- LLM Context ---
 # Env: MAX_LLM_CONTEXT_SIZE, MAX_OUTPUT_TOKENS

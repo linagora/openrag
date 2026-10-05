@@ -45,11 +45,16 @@ def _raise_reranker_http_error(endpoint: str, exc: httpx.HTTPStatusError) -> NoR
     The response body is logged for operators but deliberately kept out of the
     raised message: ``InferenceConnectionError.message`` reaches API clients
     verbatim (SSE error events, 503 ``detail``), and an upstream error body can
-    carry internals — stack traces, proxy pages, hostnames — that must not leak."""
+    carry internals — stack traces, proxy pages, hostnames — that must not leak.
+
+    The upstream status is kept, as the other inference clients keep it: the
+    breaker, the retry and the metrics all read it. Without it every reply read
+    as 503, so a 401 from one reranker endpoint opened the ``reranker`` breaker
+    for every endpoint behind it (#1100)."""
     status = exc.response.status_code
     detail = _response_detail(exc.response)
     logger.bind(endpoint=endpoint, status=status, body=detail).error("Reranker returned HTTP error")
-    raise InferenceConnectionError(f"Reranker at {endpoint} returned HTTP {status}") from exc
+    raise InferenceConnectionError(f"Reranker at {endpoint} returned HTTP {status}", status_code=status) from exc
 
 
 @reranker_registry.register("infinity")

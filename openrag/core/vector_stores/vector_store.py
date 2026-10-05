@@ -158,5 +158,9 @@ class VectorStore(ABC):
         output_fields: list[str] | None = None,
         limit: int | None = None,
     ) -> list[dict[str, Any]]:
-        """Return full chunk data matching the filter, optionally bounded by ``limit``."""
+        """Return full chunk data matching the given filter expression.
+
+        Without ``output_fields``, every field but the vectors is returned;
+        ``["*"]`` includes them. Results can be bounded with ``limit``.
+        """
         ...
