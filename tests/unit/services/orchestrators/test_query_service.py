@@ -829,10 +829,10 @@ def _two_chunk_svc(**kwargs):
     return svc
 
 
-async def _presented(svc, *, max_prompt_tokens, metadata=None):
+async def _presented(svc, *, max_prompt_tokens, metadata=None, **request):
     out = await svc.chat(
         partitions=["p"],
-        payload={"messages": [{"role": "user", "content": "q"}], "metadata": metadata or {}},
+        payload={"messages": [{"role": "user", "content": "q"}], "metadata": metadata or {}, **request},
         prepare_sources=lambda d, w: [doc.metadata.get("_id") for doc in d] + [r.url for r in w],
         model_name="m",
         max_prompt_tokens=max_prompt_tokens,
@@ -886,6 +886,53 @@ async def test_chat_without_a_known_window_takes_top_n(monkeypatch):
     assert await _presented(svc, max_prompt_tokens=None) == ["c1", "c2"]
     svc._config.partitions = {"p": _partition_cfg(top_n=1)}
     assert await _presented(svc, max_prompt_tokens=None) == ["c1"]
+
+
+def _long_tool_definition():
+    return {"type": "function", "function": {"name": "lookup", "description": "word " * 500}}
+
+
+@pytest.mark.asyncio
+async def test_chat_sources_leave_room_for_the_tool_definitions(monkeypatch):
+    """The client's tool definitions reach the provider with the prompt, so
+    the sources get what is left of the window after them too."""
+    monkeypatch.setattr(qs, "_messages_tokens", lambda messages: 100)
+    svc = _two_chunk_svc()
+    tools = [_long_tool_definition()]
+    tools_tokens = qs.tool_definition_tokens({"tools": tools}, qs.get_num_tokens())
+    first_only = 100 + tools_tokens + qs.get_num_tokens()("[Source 1]\nshort")
+
+    assert await _presented(svc, max_prompt_tokens=first_only, tools=tools) == ["c1"]
+    assert await _presented(svc, max_prompt_tokens=first_only - 1, tools=tools) == []
+    with pytest.raises(ContextWindowExceededError):
+        await _presented(svc, max_prompt_tokens=100 + tools_tokens - 1, tools=tools)
+
+
+@pytest.mark.asyncio
+async def test_chat_with_tools_never_sends_more_than_the_window_leaves(monkeypatch):
+    """The messages sent and the tool definitions forwarded with them fit the window together."""
+    chunks = [Chunk(id=f"c{i}", text="word " * (50 * i), metadata={"_id": f"c{i}"}) for i in range(1, 6)]
+    llm = FakeLLM()
+    svc = _svc(retrieval=FakeRetrieval(chunks=chunks), llm=llm)
+    svc._config.partitions = {"p": _partition_cfg(top_n=5)}
+    tools = [_long_tool_definition()]
+    tools_tokens = qs.tool_definition_tokens({"tools": tools}, qs.get_num_tokens())
+
+    async def sent(max_prompt_tokens):
+        await svc.chat(
+            partitions=["p"],
+            payload={"messages": [{"role": "user", "content": "q"}], "metadata": {}, "tools": tools},
+            prepare_sources=lambda d, w: [],
+            model_name="m",
+            max_prompt_tokens=max_prompt_tokens,
+        )
+        messages, kwargs = llm.chat_calls[-1]
+        assert kwargs["tools"] == tools
+        return qs._messages_tokens(messages) + tools_tokens
+
+    everything = await sent(None)
+    for window in range(everything - 600, everything + 1):
+        assert await sent(window) <= window
 
 
 def _long_web_result():

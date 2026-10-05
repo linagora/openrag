@@ -7,7 +7,9 @@ from core.prompts.chat_prompt_builder import (
     SOURCE_SEPARATOR,
     format_context,
     format_web_context,
+    message_tokens,
     prepend_system_prompt,
+    tool_definition_tokens,
 )
 
 
@@ -205,3 +207,24 @@ def test_format_web_context_drops_overflow_block_after_first_fits():
     assert "[Source 1]" in text
     assert "[Source 2]" not in text
     assert nums == [1]
+
+
+def test_message_tokens_counts_the_content_and_the_turn():
+    assert message_tokens({"role": "user", "content": "one two three"}, _word_tokens) == 3 + 4
+    assert message_tokens({"role": "assistant"}, _word_tokens) == 4
+
+
+def test_message_tokens_counts_the_tool_call_history():
+    """An assistant turn's tool calls reach the provider with the message, content or not."""
+    call = {"id": "c1", "type": "function", "function": {"name": "lookup", "arguments": "word " * 50}}
+    turn = {"role": "assistant", "tool_calls": [call]}
+    assert message_tokens(turn, _word_tokens) > 50 + 4
+    result = {"role": "tool", "tool_call_id": "c1", "content": "one two"}
+    assert message_tokens(result, _word_tokens) > 2 + 4
+
+
+def test_tool_definition_tokens_counts_tools_and_functions():
+    tool = {"type": "function", "function": {"name": "lookup", "description": "word " * 50}}
+    assert tool_definition_tokens({"messages": []}, _word_tokens) == 0
+    assert tool_definition_tokens({"tools": [tool]}, _word_tokens) > 50
+    assert tool_definition_tokens({"functions": [tool["function"]]}, _word_tokens) > 50

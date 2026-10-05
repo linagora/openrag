@@ -9,6 +9,9 @@ Pure helpers extracted from ``components/utils.py`` and ``components/pipeline.py
 * ``prepend_system_prompt``  — clone a message list and prepend a system
                                 prompt rendered against ``context`` and
                                 ``current_date``.
+* ``message_tokens``         — tokens one chat message takes in the prompt.
+* ``tool_definition_tokens`` — tokens the tool definitions a chat request
+                                forwards take in the prompt.
 * ``SOURCE_SEPARATOR``       — separator emitted between consecutive sources.
 
 Tokenizers are injected as ``Callable[[str], int]`` so this module stays pure
@@ -18,6 +21,7 @@ Tokenizers are injected as ``Callable[[str], int]`` so this module stays pure
 from __future__ import annotations
 
 import copy
+import json
 import re
 from collections.abc import Callable
 from typing import Protocol
@@ -26,6 +30,10 @@ from core.utils.text import neutralize_prompt_control_tokens, sanitize_text
 
 SOURCE_SEPARATOR = "-" * 10 + "\n\n"
 EMPTY_CONTEXT_MESSAGE = "No document found from the database"
+
+#: Fields of a chat request, besides its messages, that the provider renders
+#: into the prompt.
+TOOL_DEFINITION_FIELDS = ("tools", "functions")
 
 _UNSAFE_PROMPT_CLOSE_TAG_RE = re.compile(r"</unsafe_custom_prompt>", re.IGNORECASE)
 
@@ -186,3 +194,31 @@ def prepend_system_prompt(
     )
     out.insert(0, {"role": "system", "content": rendered})
     return out
+
+
+def message_tokens(message: dict, length_function: Callable[[str], int]) -> int:
+    """Tokens *message* takes in the prompt: its text, plus 4 for the turn.
+
+    The provider gets every other field of the message too, and renders the
+    ones it knows into the prompt: an assistant turn's ``tool_calls`` /
+    ``function_call``, a tool result's ``tool_call_id``. Those fields count as
+    their JSON.
+    """
+    content = message.get("content")
+    if isinstance(content, list):
+        content = " ".join(p.get("text", "") for p in content if isinstance(p, dict))
+    tokens = length_function(content if isinstance(content, str) else "") + 4
+    fields = {k: v for k, v in message.items() if k not in ("role", "content") and v is not None}
+    if fields:
+        tokens += length_function(json.dumps(fields, ensure_ascii=False, default=str))
+    return tokens
+
+
+def tool_definition_tokens(request: dict, length_function: Callable[[str], int]) -> int:
+    """Tokens the tool definitions in a chat *request* take, as their JSON.
+
+    OpenRag doesn't call tools itself, but forwards a client's definitions to
+    the provider, which renders them into the prompt.
+    """
+    definitions = {k: request[k] for k in TOOL_DEFINITION_FIELDS if request.get(k)}
+    return length_function(json.dumps(definitions, ensure_ascii=False, default=str)) if definitions else 0

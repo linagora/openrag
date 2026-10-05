@@ -51,7 +51,9 @@ from core.prompts import (
     calendar_anchors,
     format_context,
     format_web_context,
+    message_tokens,
     prepend_system_prompt,
+    tool_definition_tokens,
 )
 from core.utils.exceptions import ContextWindowExceededError, ValidationError, WorkspaceNotFoundError
 from core.utils.logging import get_logger
@@ -746,15 +748,16 @@ class QueryService:
             prompt_type, names=[self._generation_prompt_name(prompt_type, partition)]
         )
         current_date = datetime.now().strftime("%A, %B %d, %Y, %H:%M:%S")
-        # What the window leaves for sources once the instructions and the
-        # conversation are in. A conversation it can't hold fails here, before
-        # map-reduce, rather than at the provider.
+        # What the window leaves for sources once the instructions, the
+        # conversation and the client's tool definitions are in. A conversation
+        # it can't hold fails here, before map-reduce, rather than at the provider.
         room = None
+        tools_tokens = tool_definition_tokens(payload, get_num_tokens())
         if max_prompt_tokens is not None:
             without_sources = prepend_system_prompt(
                 messages, tmpl, context="", current_date=current_date, custom_prompt=custom_prompt
             )
-            room = max_prompt_tokens - _messages_tokens(without_sources)
+            room = max_prompt_tokens - _messages_tokens(without_sources) - tools_tokens
             if room < 0:
                 raise ContextWindowExceededError(max_prompt_tokens - room, max_prompt_tokens)
 
@@ -800,7 +803,7 @@ class QueryService:
         while (
             max_prompt_tokens is not None
             and (docs or web_results)
-            and _messages_tokens(new_messages) > max_prompt_tokens
+            and _messages_tokens(new_messages) + tools_tokens > max_prompt_tokens
         ):
             if docs:
                 docs = docs[:-1]
@@ -1395,15 +1398,9 @@ def _documents_context(docs: list, *, any_retrieved: bool) -> str:
 
 
 def _messages_tokens(messages: list[dict]) -> int:
-    """Tokens a chat message list takes, counted as the router's preflight does (+4 per message)."""
+    """Tokens a chat message list takes, counted as the router's preflight does."""
     length_function = get_num_tokens()
-    total = 0
-    for message in messages:
-        content = message.get("content")
-        if isinstance(content, list):
-            content = " ".join(p.get("text", "") for p in content if isinstance(p, dict))
-        total += length_function(content if isinstance(content, str) else "") + 4
-    return total
+    return sum(message_tokens(message, length_function) for message in messages)
 
 
 def _sampling(payload: dict, key: str = "messages") -> dict:

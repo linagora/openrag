@@ -30,6 +30,7 @@ from api.schemas.user.chat import OpenAIChatCompletionRequest, OpenAICompletionR
 from core.config import load_config
 from core.config.endpoints import client_llm_override, custom_endpoint_override_enabled
 from core.models.preset import resolve_partition_chat_llm
+from core.prompts import message_tokens, tool_definition_tokens
 from core.utils import consts
 from core.utils.exceptions import OpenRAGError
 from core.utils.logging import get_logger
@@ -377,14 +378,18 @@ def validate_tokens_limit(
         _length_function = get_num_tokens()
 
         if isinstance(request, OpenAIChatCompletionRequest):
-            message_tokens = sum(_length_function(m.content or "") + 4 for m in request.messages)
+            body = request.model_dump(exclude_none=True)
+            messages_tokens = sum(message_tokens(m, _length_function) for m in body["messages"])
+            tools_tokens = tool_definition_tokens(body, _length_function)
             default_output_tokens = _effective_max_output_tokens(config, partitions)
             requested_tokens = request.max_tokens or default_output_tokens
-            total_tokens_needed = message_tokens + requested_tokens
+            total_tokens_needed = messages_tokens + tools_tokens + requested_tokens
             if total_tokens_needed > max_tokens_allowed:
+                tools_part = f"Tool definitions: {tools_tokens} tokens + " if tools_tokens else ""
                 return False, (
                     f"Request exceeds maximum token limit. "
-                    f"Messages: {message_tokens} tokens + "
+                    f"Messages: {messages_tokens} tokens + "
+                    f"{tools_part}"
                     f"Requested output: {requested_tokens} tokens = "
                     f"{total_tokens_needed} tokens. "
                     f"Maximum allowed: {max_tokens_allowed} tokens."

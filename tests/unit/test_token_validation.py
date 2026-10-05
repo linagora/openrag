@@ -151,6 +151,28 @@ class TestValidateTokensLimit:
         assert "100" in msg  # requested tokens
         assert "10" in msg  # max allowed
 
+    def test_counts_the_tool_definitions(self):
+        """The client's tool definitions are forwarded to the provider, which renders them into the prompt."""
+        tool = {"type": "function", "function": {"name": "lookup", "description": "word " * 100}}
+        req = OpenAIChatCompletionRequest(messages=[{"role": "user", "content": "hello"}], max_tokens=100)
+        assert validate_tokens_limit(req, max_tokens_allowed=105)[0] is True
+
+        req = OpenAIChatCompletionRequest(messages=[{"role": "user", "content": "hello"}], max_tokens=100, tools=[tool])
+        is_valid, msg = validate_tokens_limit(req, max_tokens_allowed=200)
+        assert is_valid is False
+        assert "Tool definitions:" in msg
+
+    def test_counts_the_tool_call_history(self):
+        call = {"id": "c1", "type": "function", "function": {"name": "lookup", "arguments": "word " * 100}}
+        messages = [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "tool_calls": [call]},
+            {"role": "tool", "tool_call_id": "c1", "content": "result"},
+            {"role": "user", "content": "and?"},
+        ]
+        req = OpenAIChatCompletionRequest(messages=messages, max_tokens=100)
+        assert validate_tokens_limit(req, max_tokens_allowed=200)[0] is False
+
     def test_graceful_on_exception(self):
         """When get_num_tokens raises, validation returns True (graceful skip)."""
         with patch("api.routers.user.chat.get_num_tokens", side_effect=RuntimeError("boom")):
