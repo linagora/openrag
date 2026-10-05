@@ -1054,6 +1054,27 @@ function TopNContextSizeDialog({
               {llms === null && (partitionsQuery.isLoading || llmQuery.isLoading) && (
                 <p className="text-sm text-muted-foreground">Checking which LLMs answer for this preset&hellip;</p>
               )}
+              {(partitionsQuery.isError || llmQuery.isError) && (
+                <div className="flex items-center justify-between gap-3">
+                  <p className="text-sm text-destructive">
+                    {llms === null
+                      ? "Could not check which LLMs answer for this preset."
+                      : "Could not refresh which LLMs answer for this preset; showing the last known data."}
+                  </p>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => {
+                      if (partitionsQuery.isError) void partitionsQuery.refetch();
+                      if (llmQuery.isError) void llmQuery.refetch();
+                    }}
+                    disabled={partitionsQuery.isFetching || llmQuery.isFetching}
+                  >
+                    {partitionsQuery.isFetching || llmQuery.isFetching ? "Retrying..." : "Retry"}
+                  </Button>
+                </div>
+              )}
               {llms !== null && llms.length === 0 && hidden === 0 && (
                 <p className="text-sm text-muted-foreground">No partition uses this preset yet.</p>
               )}

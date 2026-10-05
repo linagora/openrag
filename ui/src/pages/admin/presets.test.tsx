@@ -426,6 +426,49 @@ describe("PresetsPage top_n change asks to check the LLM's context size", () => 
     expect(within(confirm).queryByText(/No partition uses this preset/)).toBeNull();
   });
 
+  it("says when it could not check the LLMs, without blocking the update", async () => {
+    vi.mocked(listPartitions).mockRejectedValueOnce(new Error("boom"));
+    const user = userEvent.setup();
+    const { dialog, topN } = await openRetrievalPreset(user);
+    await user.clear(topN);
+    await user.type(topN, "15");
+    await user.click(within(dialog).getByRole("button", { name: "Update" }));
+
+    const confirm = await screen.findByRole("alertdialog");
+    expect(await within(confirm).findByText("Could not check which LLMs answer for this preset.")).toBeTruthy();
+    expect(within(confirm).queryByText("gateway-mistral")).toBeNull();
+    expect((within(confirm).getByRole("button", { name: "Update" }) as HTMLButtonElement).disabled).toBe(false);
+
+    await user.click(within(confirm).getByRole("button", { name: "Retry" }));
+    expect(await within(confirm).findByText("gateway-mistral")).toBeTruthy();
+    expect(within(confirm).queryByText(/Could not check/)).toBeNull();
+  });
+
+  it("says when the LLMs it shows could not be refreshed", async () => {
+    // The form's fetch succeeds; the pop-up's own on opening fails.
+    let fetches = 0;
+    const endpoints = [llm("gateway-mistral", { is_default: true }), llm("vllm-qwen")];
+    listModelEndpointsMock.mockReset().mockImplementation(async (modelType) => {
+      if (modelType !== "llm") return [] as never;
+      if (++fetches === 2) throw new Error("boom");
+      return endpoints as never;
+    });
+    const user = userEvent.setup();
+    const { dialog, topN } = await openRetrievalPreset(user);
+    await user.clear(topN);
+    await user.type(topN, "15");
+    await user.click(within(dialog).getByRole("button", { name: "Update" }));
+
+    const confirm = await screen.findByRole("alertdialog");
+    expect(
+      await within(confirm).findByText(
+        "Could not refresh which LLMs answer for this preset; showing the last known data.",
+      ),
+    ).toBeTruthy();
+    expect(within(confirm).getByText("gateway-mistral")).toBeTruthy();
+    expect((within(confirm).getByRole("button", { name: "Update" }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
   it("saves straight away when top_n is unchanged", async () => {
     const user = userEvent.setup();
     const { dialog } = await openRetrievalPreset(user);
