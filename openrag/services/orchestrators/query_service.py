@@ -702,6 +702,10 @@ class QueryService:
                 current_date=datetime.now().strftime("%A, %B %d, %Y, %H:%M:%S"),
                 custom_prompt=custom_prompt,
             )
+            if max_prompt_tokens is not None:
+                sent = _messages_tokens(payload["messages"]) + tool_definition_tokens(payload, get_num_tokens())
+                if sent > max_prompt_tokens:
+                    raise ContextWindowExceededError(sent, max_prompt_tokens)
             return _PrepareChatResult(
                 payload,
                 [],
@@ -799,12 +803,15 @@ class QueryService:
         new_messages, web_results = assemble(docs, web_candidates)
         # The sources were sized part by part, without the separators between
         # documents and web results or the web results' final numbering: measure
-        # what is sent, and drop sources (documents first) until it fits.
-        while (
-            max_prompt_tokens is not None
-            and (docs or web_results)
-            and _messages_tokens(new_messages) + tools_tokens > max_prompt_tokens
-        ):
+        # what is sent, and drop sources (documents first) until it fits. With
+        # none left, the prompt can still carry what the room above didn't
+        # measure: the no-document message when retrieval found nothing.
+        while max_prompt_tokens is not None:
+            sent = _messages_tokens(new_messages) + tools_tokens
+            if sent <= max_prompt_tokens:
+                break
+            if not (docs or web_results):
+                raise ContextWindowExceededError(sent, max_prompt_tokens)
             if docs:
                 docs = docs[:-1]
             else:
@@ -888,8 +895,14 @@ class QueryService:
             retrieved_docs = docs
             docs = [docs[i] for i in self._fit_sources([doc.page_content for doc in docs], partition, room)]
             context = _documents_context(docs, any_retrieved=bool(retrieved_docs))
-            # Sized part by part: measure what is sent and drop documents until it fits.
-            while max_prompt_tokens is not None and docs and get_num_tokens()(render(context)) > max_prompt_tokens:
+            # Sized part by part: measure what is sent and drop documents until
+            # it fits. With none left, the no-document message can still overflow.
+            while max_prompt_tokens is not None:
+                sent = get_num_tokens()(render(context))
+                if sent <= max_prompt_tokens:
+                    break
+                if not docs:
+                    raise ContextWindowExceededError(sent, max_prompt_tokens)
                 docs = docs[:-1]
                 context = _documents_context(docs, any_retrieved=bool(retrieved_docs))
 

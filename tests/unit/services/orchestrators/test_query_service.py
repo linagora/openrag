@@ -20,6 +20,7 @@ from core.config import load_config
 from core.config.retrieval_pipeline import RetrievalPipelineConfig
 from core.models.chunk import Chunk
 from core.models.workspace import WorkspaceScope
+from core.prompts import EMPTY_CONTEXT_MESSAGE
 from core.utils.exceptions import ContextWindowExceededError, WorkspaceNotFoundError
 from services.orchestrators.query_service import QueryService
 
@@ -1019,6 +1020,88 @@ async def test_complete_never_sends_more_than_the_window_leaves(monkeypatch):
     everything = num_tokens(await sent(None))
     for window in range(everything - 300, everything + 1):
         assert num_tokens(await sent(window)) <= window
+
+
+async def _sent_or_rejected(send, window):
+    """What *send* sends under *window*, or None when it is rejected as not fitting."""
+    try:
+        return await send(window)
+    except ContextWindowExceededError:
+        return None
+
+
+@pytest.mark.asyncio
+async def test_chat_without_documents_never_sends_more_than_the_window_leaves():
+    """Retrieval found nothing: the no-document message the prompt carries counts too."""
+    llm = FakeLLM()
+    svc = _svc(retrieval=FakeRetrieval(chunks=[]), llm=llm)
+    svc._config.partitions = {"p": _partition_cfg(top_n=5)}
+
+    async def sent(max_prompt_tokens):
+        await svc.chat(
+            partitions=["p"],
+            payload={"messages": [{"role": "user", "content": "q"}], "metadata": {}},
+            prepare_sources=lambda d, w: [],
+            model_name="m",
+            max_prompt_tokens=max_prompt_tokens,
+        )
+        messages = llm.chat_calls[-1][0]
+        assert EMPTY_CONTEXT_MESSAGE in messages[0]["content"]
+        return qs._messages_tokens(messages)
+
+    everything = await sent(None)
+    for window in range(everything - 50, everything + 1):
+        tokens = await _sent_or_rejected(sent, window)
+        assert tokens is None or tokens <= window
+    assert await _sent_or_rejected(sent, everything - 1) is None
+
+
+@pytest.mark.asyncio
+async def test_complete_without_documents_never_sends_more_than_the_window_leaves():
+    llm = FakeLLM(gen_text="answer")
+    svc = _svc(retrieval=FakeRetrieval(chunks=[]), llm=llm)
+    svc._config.partitions = {"p": _partition_cfg(top_n=5)}
+
+    async def sent(max_prompt_tokens):
+        await svc.complete(
+            partitions=["p"],
+            payload={"prompt": "q", "metadata": {"require_retrieval": True}},
+            prepare_sources=lambda d, w: [],
+            max_prompt_tokens=max_prompt_tokens,
+        )
+        prompt = llm.generate_calls[-1][0]
+        assert EMPTY_CONTEXT_MESSAGE in prompt
+        return qs.get_num_tokens()(prompt)
+
+    everything = await sent(None)
+    for window in range(everything - 50, everything + 1):
+        tokens = await _sent_or_rejected(sent, window)
+        assert tokens is None or tokens <= window
+    assert await _sent_or_rejected(sent, everything - 1) is None
+
+
+@pytest.mark.asyncio
+async def test_casual_answer_never_sends_more_than_the_window_leaves():
+    """The casual answer's own instructions count against the window too."""
+    llm = FakeLLM()
+    retrieval = FakeRetrieval()
+    svc = _svc(mode="ChatBotRag", llm=llm, retrieval=retrieval)
+
+    async def sent(max_prompt_tokens):
+        await svc.chat(
+            partitions=["p"],
+            payload={"messages": [{"role": "user", "content": "Bonjour ! 👋"}], "metadata": {}},
+            prepare_sources=lambda d, w: [],
+            model_name="m",
+            max_prompt_tokens=max_prompt_tokens,
+        )
+        return qs._messages_tokens(llm.chat_calls[-1][0])
+
+    everything = await sent(None)
+    assert await sent(everything) == everything
+    with pytest.raises(ContextWindowExceededError):
+        await sent(everything - 1)
+    assert retrieval.retrieve_multi_calls == []
 
 
 @pytest.mark.asyncio
