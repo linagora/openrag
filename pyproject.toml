@@ -72,6 +72,7 @@ dependencies = [
     "aiobreaker>=1.2.0",
     "mcp>=1.11.0",
     "httpx>=0.27.0",
+    "langfuse>=4.17,<5",
 ]
 
 [dependency-groups]

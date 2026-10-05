@@ -28,6 +28,7 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
+from core.observability import tracing
 from core.prompts import load_template_by_key
 from core.retrieval.pipeline import RetrieverPipeline
 from core.retrieval.retriever import (
@@ -393,7 +394,7 @@ class RetrievalService:
         if len(groups) == 1:
             chunks = await searcher.search(partition=groups[0][0], with_surrounding_chunks=True, **search_kwargs)
         else:
-            hits = self.fuse(
+            hits = self._traced_fuse(
                 await self._gather_partition_groups(
                     [
                         (names, group_searcher.search(partition=names, with_surrounding_chunks=False, **search_kwargs))
@@ -419,15 +420,19 @@ class RetrievalService:
             seen = {c.id for c in hits}
             chunks = hits + [c for c in surrounding if c.id not in seen]
         if include_related or include_ancestors:
-            chunks = await _expand_with_related_chunks(
-                searcher=searcher,
-                results=chunks,
-                include_related=include_related,
-                include_ancestors=include_ancestors,
-                related_limit=related_limit,
-                max_ancestor_depth=max_ancestor_depth,
-                filter_params=filter_params,
-            )
+            with tracing.observe("expand-related-chunks", as_type="retriever", input={"head": len(chunks)}) as step:
+                head = len(chunks)
+                chunks = await _expand_with_related_chunks(
+                    searcher=searcher,
+                    results=chunks,
+                    include_related=include_related,
+                    include_ancestors=include_ancestors,
+                    related_limit=related_limit,
+                    max_ancestor_depth=max_ancestor_depth,
+                    filter_params=filter_params,
+                )
+                if tracing.recording():
+                    step.update(output=tracing.describe_chunks(chunks[head:], with_text=False))
         return chunks
 
     # ------------------------------------------------------------------
@@ -505,17 +510,21 @@ class RetrievalService:
             [
                 (
                     partition_group,
-                    pipeline.retrieve_docs(
-                        partition=partition_group,
-                        query=query,
-                        top_k=top_k if top_k is not None else default_top_k,
-                        filter_params=filter_params,
+                    _traced_partition(
+                        partition_group,
+                        pipeline,
+                        pipeline.retrieve_docs(
+                            partition=partition_group,
+                            query=query,
+                            top_k=top_k if top_k is not None else default_top_k,
+                            filter_params=filter_params,
+                        ),
                     ),
                 )
                 for partition_group, pipeline, default_top_k in groups
             ]
         )
-        return ranked_lists[0] if len(ranked_lists) == 1 else self.fuse(ranked_lists, top_k=top_k)
+        return ranked_lists[0] if len(ranked_lists) == 1 else self._traced_fuse(ranked_lists, top_k=top_k)
 
     async def retrieve_multi(
         self,
@@ -531,17 +540,21 @@ class RetrievalService:
             [
                 (
                     partition_group,
-                    pipeline.get_relevant_docs(
-                        partition=partition_group,
-                        search_queries=search_queries,
-                        top_k=top_k if top_k is not None else default_top_k,
-                        filter_params=filter_params,
+                    _traced_partition(
+                        partition_group,
+                        pipeline,
+                        pipeline.get_relevant_docs(
+                            partition=partition_group,
+                            search_queries=search_queries,
+                            top_k=top_k if top_k is not None else default_top_k,
+                            filter_params=filter_params,
+                        ),
                     ),
                 )
                 for partition_group, pipeline, default_top_k in groups
             ]
         )
-        return ranked_lists[0] if len(ranked_lists) == 1 else self.fuse(ranked_lists, top_k=top_k)
+        return ranked_lists[0] if len(ranked_lists) == 1 else self._traced_fuse(ranked_lists, top_k=top_k)
 
     async def retrieve_per_query(
         self,
@@ -561,6 +574,13 @@ class RetrievalService:
             *[self.retrieve(partitions=partitions, query=q, top_k=top_k, filter_params=filter_params) for q in queries]
         )
 
+    def _traced_fuse(self, doc_lists: list[list[Chunk]], top_k: int | None = None) -> list[Chunk]:
+        with tracing.observe("fuse-partitions", input={"lists": len(doc_lists), "top_k": top_k}) as step:
+            fused = self.fuse(doc_lists, top_k=top_k)
+            if tracing.recording():
+                step.update(output=tracing.describe_chunks(fused, with_text=False))
+            return fused
+
     @staticmethod
     def fuse(doc_lists: list[list[Chunk]], top_k: int | None = None) -> list[Chunk]:
         """RRF-fuse ranked lists across partitions (and doc+web).
@@ -572,6 +592,22 @@ class RetrievalService:
         """
         fused = rrf_reranking(doc_lists, key_fn=_chunk_key)
         return fused[:top_k] if top_k is not None else fused
+
+
+async def _traced_partition(partitions: list[str], pipeline: RetrieverPipeline, retrieval: Awaitable[list[Chunk]]):
+    """Await one partition group's retrieval inside an observation carrying its pipeline settings."""
+    if not tracing.recording():
+        return await retrieval
+    config = pipeline.describe()
+    with tracing.observe(
+        "retrieve-partition",
+        as_type="retriever",
+        input={"partitions": partitions},
+        metadata={"pipeline": config, "pipeline_fingerprint": tracing.fingerprint(config)},
+    ) as step:
+        chunks = await retrieval
+        step.update(output=tracing.describe_chunks(chunks))
+        return chunks
 
 
 __all__ = ["RetrievalService"]

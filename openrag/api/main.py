@@ -62,6 +62,7 @@ from api.routers.user.search import router as search_router
 from api.runtime_flags import WITH_CHAINLIT_UI, WITH_OPENAI_API
 from api.runtime_ui import get_grafana_url
 from core.config import load_config
+from core.observability import tracing
 from core.utils.banner import print_startup_banner
 from core.utils.logging import get_logger
 from di.container import ServiceContainer
@@ -269,6 +270,8 @@ async def lifespan(app: FastAPI):
             except Exception:  # pragma: no cover - defensive shutdown guard
                 logger.exception("ServiceContainer.shutdown skipped")
         set_container(None)
+        # Send the traces still buffered; the SDK's own atexit hook may run too late.
+        tracing.flush()
 
 
 # ---------------------------------------------------------------------------

@@ -819,6 +819,24 @@ Deployment-level knobs; most deployments never need to touch these — the compo
 | `OPENRAG_BANNER` | `bool` | `true` | Set to `false` to suppress the ASCII startup banner. Its colors also auto-disable under the standard `NO_COLOR` / `TERM=dumb` conventions. |
 | `UVICORN_RELOAD` | `bool` | `false` | Development only — starts uvicorn with `--reload` (auto-restart on code changes). Also forces a single worker. Never enable in production. |
 
+#### Request tracing (opt-in)
+
+Read by the API, and by the opt-in compose file `infra/compose/langfuse.docker-compose.yaml`, which runs Langfuse with the stack. Tracing is off unless both keys are set; each chat, completion and search request then becomes one [Langfuse](https://langfuse.com) trace, and its id is returned in the `X-Trace-Id` response header. Traces hold user messages, prompts and chunk excerpts.
+
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `LANGFUSE_PUBLIC_KEY` | `str` | _(unset)_ | Public key of a Langfuse project API key pair. |
+| `LANGFUSE_SECRET_KEY` | `str` | _(unset)_ | Secret key of that pair. |
+| `LANGFUSE_BASE_URL` | `str` | `https://cloud.langfuse.com` | Langfuse server URL. The overlay sets it to its own Langfuse. |
+| `LANGFUSE_SAMPLE_RATE` | `float` | `1.0` | Share of requests traced. |
+| `LANGFUSE_TRACING_ENVIRONMENT` | `str` | `default` | Environment shown on the traces, e.g. `production` or `staging`. |
+| `LANGFUSE_TRACING_ENABLED` | `bool` | `true` | Set to `false` to turn tracing off while keeping the keys. |
+| `LANGFUSE_INIT_USER_EMAIL`, `LANGFUSE_INIT_USER_PASSWORD` | `str` | _(required with the overlay)_ | The Langfuse login created on first start. Sign-up is off, so it is the only one until more users are invited from the UI. |
+| `LANGFUSE_NEXTAUTH_SECRET`, `LANGFUSE_SALT`, `LANGFUSE_ENCRYPTION_KEY`, `LANGFUSE_DB_PASSWORD`, `LANGFUSE_CLICKHOUSE_PASSWORD`, `LANGFUSE_REDIS_PASSWORD`, `LANGFUSE_S3_PASSWORD` | `str` | _(required with the overlay)_ | Secrets of the bundled Langfuse and its stores. Generate each with `openssl rand -hex 32`. |
+| `LANGFUSE_BIND` | `str` | `127.0.0.1` | Address the Langfuse UI is published on. `0.0.0.0` opens it to other machines. |
+| `LANGFUSE_PORT` | `int` | `3000` | Host port of the Langfuse UI. |
+| `LANGFUSE_URL` | `str` | `http://localhost:3000` | URL browsers open the Langfuse UI at; login redirects are built from it. |
+
 #### Monitoring profile (opt-in)
 
 Read only by the opt-in monitoring compose file (`infra/compose/monitoring.docker-compose.yaml`):

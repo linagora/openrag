@@ -18,6 +18,7 @@ import json
 import re
 import time
 from collections.abc import AsyncIterator, Mapping
+from datetime import UTC, datetime
 from urllib.parse import unquote, urlsplit
 
 import httpx
@@ -28,6 +29,7 @@ from core.config.endpoints import (
 )
 from core.embeddings import Embedder, embedder_registry
 from core.llm import LLM, llm_registry
+from core.observability import tracing
 from core.observability.inference_metrics import record_inference, record_usage_from_response
 from core.utils.exceptions import (
     EmbeddingAPIError,
@@ -108,6 +110,86 @@ def _record_stream_usage(line: str) -> bool:
         return False
     record_usage_from_response(payload, operation="chat")
     return isinstance(payload, dict) and payload.get("choices") == [] and isinstance(payload.get("usage"), dict)
+
+
+#: Request parameters shown on a traced generation, next to its model.
+_TRACED_MODEL_PARAMETERS = (
+    "temperature",
+    "top_p",
+    "max_tokens",
+    "max_completion_tokens",
+    "frequency_penalty",
+    "presence_penalty",
+    "seed",
+)
+
+
+def _traced_model_parameters(payload: dict) -> dict:
+    params = {key: payload[key] for key in _TRACED_MODEL_PARAMETERS if payload.get(key) is not None}
+    response_format = payload.get("response_format")
+    if isinstance(response_format, dict) and response_format.get("type"):
+        params["response_format"] = response_format["type"]
+    return params
+
+
+def _traced_usage(response: object) -> dict | None:
+    """An OpenAI ``usage`` block in Langfuse's terms, or ``None`` without one."""
+    usage = response.get("usage") if isinstance(response, dict) else None
+    if not isinstance(usage, dict):
+        return None
+    traced = {
+        "input": usage.get("prompt_tokens"),
+        "output": usage.get("completion_tokens"),
+        "total": usage.get("total_tokens"),
+    }
+    return {key: value for key, value in traced.items() if isinstance(value, int)} or None
+
+
+class _TracedStream:
+    """Collects a streamed answer for its generation: text, reasoning, first-token time, usage."""
+
+    def __init__(self, generation) -> None:
+        self.generation = generation
+        self.content: list[str] = []
+        self.reasoning: list[str] = []
+        self.usage: dict | None = None
+        self.first_token_at: datetime | None = None
+
+    def add(self, line: str) -> None:
+        if not line.startswith("data:"):
+            return
+        body = line[len("data:") :].strip()
+        if not body or body == "[DONE]":
+            return
+        try:
+            chunk = json.loads(body)
+        except ValueError:
+            return
+        if not isinstance(chunk, dict):
+            return
+        self.usage = _traced_usage(chunk) or self.usage
+        for choice in chunk.get("choices") or []:
+            delta = choice.get("delta") or {}
+            text, reasoning = delta.get("content"), delta.get("reasoning_content") or delta.get("reasoning")
+            if (text or reasoning) and self.first_token_at is None:
+                self.first_token_at = datetime.now(UTC)
+            if text:
+                self.content.append(text)
+            if reasoning:
+                self.reasoning.append(reasoning)
+
+    def end(self, outcome: str) -> None:
+        output: dict = {"role": "assistant", "content": "".join(self.content)}
+        if self.reasoning:
+            output["reasoning_content"] = "".join(self.reasoning)
+        self.generation.update(
+            output=output,
+            usage_details=self.usage,
+            completion_start_time=self.first_token_at,
+            level="ERROR" if outcome in {"error", "timeout"} else None,
+            status_message=None if outcome == "success" else outcome,
+        )
+        self.generation.end()
 
 
 def _parse_response(resp: httpx.Response) -> dict:
@@ -446,20 +528,31 @@ class VLLMClient(LLM):
         payload = {**({} if overridden else self._defaults), **kwargs, "model": model, "prompt": prompt}
         payload = _strip_credential_fields(_strip_falsy_logprobs(payload))
         log_llm_call(caller="VLLMClient.generate", model=model, endpoint=base_url, prompt=prompt)
-        try:
-            resp = await self._client.post(f"{base_url}/completions", json=payload, headers=headers)
-            resp.raise_for_status()
-        except httpx.ConnectError as exc:
-            raise InferenceConnectionError(f"Cannot reach LLM at {base_url}") from exc
-        except httpx.TimeoutException as exc:
-            raise InferenceTimeoutError(f"LLM request timed out at {base_url}") from exc
-        except httpx.HTTPStatusError as exc:
-            raise InferenceError(
-                f"LLM error ({exc.response.status_code}): {exc.response.text[:500]}",
-                status_code=exc.response.status_code,
-                caller_shaped=overridden,
-            ) from exc
-        return _parse_response(resp)
+        with tracing.observe(
+            "llm-completion",
+            as_type="generation",
+            model=model,
+            input=prompt,
+            model_parameters=_traced_model_parameters(payload),
+        ) as generation:
+            try:
+                resp = await self._client.post(f"{base_url}/completions", json=payload, headers=headers)
+                resp.raise_for_status()
+            except httpx.ConnectError as exc:
+                raise InferenceConnectionError(f"Cannot reach LLM at {base_url}") from exc
+            except httpx.TimeoutException as exc:
+                raise InferenceTimeoutError(f"LLM request timed out at {base_url}") from exc
+            except httpx.HTTPStatusError as exc:
+                raise InferenceError(
+                    f"LLM error ({exc.response.status_code}): {exc.response.text[:500]}",
+                    status_code=exc.response.status_code,
+                    caller_shaped=overridden,
+                ) from exc
+            response = _parse_response(resp)
+            generation.update(
+                output=(response.get("choices") or [{}])[0].get("text"), usage_details=_traced_usage(response)
+            )
+            return response
 
     @with_inference_metrics("chat", capture_usage=True)
     @with_circuit_breaker("llm", skip_if=_targets_client_endpoint)
@@ -474,20 +567,31 @@ class VLLMClient(LLM):
             "stream": False,
         }
         log_llm_call(caller="VLLMClient.chat", model=model, endpoint=base_url, messages=messages)
-        try:
-            resp = await self._client.post(f"{base_url}/chat/completions", json=payload, headers=headers)
-            resp.raise_for_status()
-        except httpx.ConnectError as exc:
-            raise InferenceConnectionError(f"Cannot reach LLM at {base_url}") from exc
-        except httpx.TimeoutException as exc:
-            raise InferenceTimeoutError(f"LLM request timed out at {base_url}") from exc
-        except httpx.HTTPStatusError as exc:
-            raise InferenceError(
-                f"LLM error ({exc.response.status_code}): {exc.response.text[:500]}",
-                status_code=exc.response.status_code,
-                caller_shaped=overridden,
-            ) from exc
-        return _parse_response(resp)
+        with tracing.observe(
+            "llm-chat",
+            as_type="generation",
+            model=model,
+            input=messages,
+            model_parameters=_traced_model_parameters(payload),
+        ) as generation:
+            try:
+                resp = await self._client.post(f"{base_url}/chat/completions", json=payload, headers=headers)
+                resp.raise_for_status()
+            except httpx.ConnectError as exc:
+                raise InferenceConnectionError(f"Cannot reach LLM at {base_url}") from exc
+            except httpx.TimeoutException as exc:
+                raise InferenceTimeoutError(f"LLM request timed out at {base_url}") from exc
+            except httpx.HTTPStatusError as exc:
+                raise InferenceError(
+                    f"LLM error ({exc.response.status_code}): {exc.response.text[:500]}",
+                    status_code=exc.response.status_code,
+                    caller_shaped=overridden,
+                ) from exc
+            response = _parse_response(resp)
+            generation.update(
+                output=(response.get("choices") or [{}])[0].get("message"), usage_details=_traced_usage(response)
+            )
+            return response
 
     async def stream_chat(self, messages: list[dict[str, str]], **kwargs) -> AsyncIterator[str]:
         base_url, model, headers, overridden = self._resolve_overrides(kwargs)
@@ -503,6 +607,15 @@ class VLLMClient(LLM):
         forward_usage = _request_stream_usage(payload, add_for_metrics=not overridden)
         log_llm_call(caller="VLLMClient.stream_chat", model=model, endpoint=base_url, messages=messages, stream=True)
         provider = resolve_provider(self, {"metadata": metadata})
+        # Not made current: this body yields to the consumer between chunks.
+        generation = tracing.start(
+            "llm-chat",
+            as_type="generation",
+            model=model,
+            input=messages,
+            model_parameters=_traced_model_parameters(payload),
+        )
+        traced = _TracedStream(generation) if generation is not tracing.NOOP else None
         started = time.perf_counter()
         # Pessimistic until `[DONE]` proves the answer complete. The consumer
         # breaks on `[DONE]` and closes this generator, which raises
@@ -524,6 +637,8 @@ class VLLMClient(LLM):
                     outcome = outcome_for(error, operation="chat")
                     raise error
                 async for line in resp.aiter_lines():
+                    if traced is not None:
+                        traced.add(line)
                     if _record_stream_usage(line) and not forward_usage:
                         continue
                     if line.strip() == _STREAM_DONE:
@@ -549,6 +664,8 @@ class VLLMClient(LLM):
                 outcome=outcome,
                 duration_seconds=time.perf_counter() - started,
             )
+            if traced is not None:
+                traced.end(outcome)
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -618,6 +735,12 @@ class VLLMEmbedder(Embedder):
         into ``batch_size`` chunks and run at most ``embed_concurrency`` requests
         at once, then concatenate the vectors back in input order.
         """
+        with tracing.observe("embed-texts", as_type="embedding", model=self._model, input=texts) as embedding:
+            vectors = await self._embed_in_batches(texts)
+            embedding.update(output={"vectors": len(vectors), "dimension": len(vectors[0]) if vectors else 0})
+            return vectors
+
+    async def _embed_in_batches(self, texts: list[str]) -> list[list[float]]:
         if not texts:
             return []
         if len(texts) <= self._batch_size:

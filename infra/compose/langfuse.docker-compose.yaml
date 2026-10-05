@@ -1,0 +1,137 @@
+# Opt-in request tracing with a bundled Langfuse.
+#
+#   docker compose -f docker-compose.yaml -f langfuse.docker-compose.yaml up -d
+#
+# Each chat, completion and search request becomes one trace: query
+# contextualization, each vector search with its scored candidates, reranking,
+# fusion, the context given to the LLM, and every LLM call with its tokens.
+# Traces hold user messages, prompts and chunk excerpts.
+#
+# On first start Langfuse creates the OpenRag project, with LANGFUSE_PUBLIC_KEY
+# / LANGFUSE_SECRET_KEY as its API keys, and one login (LANGFUSE_INIT_USER_*).
+# Sign-up is off. Generate each secret with `openssl rand -hex 32`.
+#
+# For Langfuse Cloud or an existing instance, skip this overlay and set
+# LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY and LANGFUSE_BASE_URL in .env.
+x-langfuse-env: &langfuse_env
+  NEXTAUTH_URL: ${LANGFUSE_URL:-http://localhost:3000}
+  DATABASE_URL: postgresql://postgres:${LANGFUSE_DB_PASSWORD:?Set LANGFUSE_DB_PASSWORD in .env}@langfuse-postgres:5432/postgres
+  SALT: ${LANGFUSE_SALT:?Set LANGFUSE_SALT in .env}
+  ENCRYPTION_KEY: ${LANGFUSE_ENCRYPTION_KEY:?Set LANGFUSE_ENCRYPTION_KEY in .env}
+  TELEMETRY_ENABLED: "false"
+  CLICKHOUSE_MIGRATION_URL: clickhouse://langfuse-clickhouse:9000
+  CLICKHOUSE_URL: http://langfuse-clickhouse:8123
+  CLICKHOUSE_USER: clickhouse
+  CLICKHOUSE_PASSWORD: ${LANGFUSE_CLICKHOUSE_PASSWORD:?Set LANGFUSE_CLICKHOUSE_PASSWORD in .env}
+  CLICKHOUSE_CLUSTER_ENABLED: "false"
+  REDIS_HOST: langfuse-redis
+  REDIS_AUTH: ${LANGFUSE_REDIS_PASSWORD:?Set LANGFUSE_REDIS_PASSWORD in .env}
+  LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+  LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://langfuse-s3:9000
+  LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: langfuse
+  LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: ${LANGFUSE_S3_PASSWORD:?Set LANGFUSE_S3_PASSWORD in .env}
+  LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+  LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
+
+x-langfuse-ready: &langfuse_ready
+  langfuse-postgres: {condition: service_healthy}
+  langfuse-clickhouse: {condition: service_healthy}
+  langfuse-redis: {condition: service_healthy}
+  langfuse-s3: {condition: service_healthy}
+
+x-openrag-tracing: &openrag_tracing
+  LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:?Set LANGFUSE_PUBLIC_KEY in .env}
+  LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:?Set LANGFUSE_SECRET_KEY in .env}
+  LANGFUSE_BASE_URL: http://langfuse-web:3000
+
+services:
+  openrag:
+    environment: *openrag_tracing
+  openrag-cpu:
+    environment: *openrag_tracing
+
+  langfuse-web:
+    image: docker.langfuse.com/langfuse/langfuse:4.50.0
+    restart: unless-stopped
+    depends_on: *langfuse_ready
+    ports:
+      # Localhost only by default. To open the UI to other machines, set
+      # LANGFUSE_BIND=0.0.0.0 and LANGFUSE_URL to the address they browse to.
+      - "${LANGFUSE_BIND:-127.0.0.1}:${LANGFUSE_PORT:-3000}:3000"
+    environment:
+      <<: *langfuse_env
+      NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET:?Set LANGFUSE_NEXTAUTH_SECRET in .env}
+      AUTH_DISABLE_SIGNUP: "true"
+      LANGFUSE_INIT_ORG_ID: openrag
+      LANGFUSE_INIT_ORG_NAME: OpenRag
+      LANGFUSE_INIT_PROJECT_ID: openrag
+      LANGFUSE_INIT_PROJECT_NAME: OpenRag
+      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY}
+      LANGFUSE_INIT_PROJECT_SECRET_KEY: ${LANGFUSE_SECRET_KEY}
+      LANGFUSE_INIT_USER_EMAIL: ${LANGFUSE_INIT_USER_EMAIL:?Set LANGFUSE_INIT_USER_EMAIL in .env}
+      LANGFUSE_INIT_USER_PASSWORD: ${LANGFUSE_INIT_USER_PASSWORD:?Set LANGFUSE_INIT_USER_PASSWORD in .env}
+
+  langfuse-worker:
+    image: docker.langfuse.com/langfuse/langfuse-worker:4.50.0
+    restart: unless-stopped
+    depends_on: *langfuse_ready
+    environment: *langfuse_env
+
+  langfuse-postgres:
+    image: postgres:17
+    restart: unless-stopped
+    environment:
+      POSTGRES_PASSWORD: ${LANGFUSE_DB_PASSWORD}
+    volumes:
+      - langfuse_postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 3s
+      retries: 10
+
+  langfuse-clickhouse:
+    image: clickhouse/clickhouse-server:25.12
+    restart: unless-stopped
+    user: "101:101"
+    environment:
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: ${LANGFUSE_CLICKHOUSE_PASSWORD}
+    volumes:
+      - langfuse_clickhouse:/var/lib/clickhouse
+    healthcheck:
+      test: wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1
+      interval: 5s
+      retries: 10
+
+  langfuse-redis:
+    image: redis:7
+    restart: unless-stopped
+    command: --requirepass ${LANGFUSE_REDIS_PASSWORD} --maxmemory-policy noeviction
+    volumes:
+      - langfuse_redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      retries: 10
+
+  langfuse-s3:
+    # The MinIO mirror Milvus uses (milvus/milvus.yaml), as its own instance.
+    image: linagoraai/minio:RELEASE.2024-12-18T13-15-44Z@sha256:34c8e2f52a5984492555427fee07254c80036bdb7079bb91679232abd7a4fa20
+    restart: unless-stopped
+    entrypoint: sh
+    command: -c 'mkdir -p /data/langfuse && exec minio server /data'
+    environment:
+      MINIO_ROOT_USER: langfuse
+      MINIO_ROOT_PASSWORD: ${LANGFUSE_S3_PASSWORD}
+    volumes:
+      - langfuse_s3:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      retries: 10
+
+volumes:
+  langfuse_postgres:
+  langfuse_clickhouse:
+  langfuse_redis:
+  langfuse_s3:

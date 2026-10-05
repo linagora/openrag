@@ -17,6 +17,7 @@ from api.dependencies.auth import (
     require_partitions_viewer,
 )
 from api.dependencies.files import validate_file_id
+from core.observability import tracing
 from core.utils.filter_validation import validate_search_filter
 from core.utils.logging import get_logger
 from di.providers import get_retrieval_service, get_workspace_service
@@ -67,6 +68,28 @@ class CommonSearchParams:
         self.top_k = top_k
         self.similarity_threshold = similarity_threshold
         self.filter = filter
+
+
+async def _traced_search(request: Request, user: dict | None, service, **search) -> tuple[list, dict | None]:
+    """Run ``service.search`` as the root of a trace; return its results and the trace header."""
+    partitions = search["partitions"]
+    partitions = [partitions] if isinstance(partitions, str) else partitions
+    trace_id = tracing.new_trace_id(seed=getattr(request.state, "request_id", None))
+    with tracing.start_trace(
+        "semantic-search",
+        input=search["text"],
+        trace_id=trace_id,
+        user_id=str(user["id"]) if user else None,
+        metadata={
+            "endpoint": request.url.path[:200],
+            "partitions": ",".join(partitions)[:200],
+            "request_id": getattr(request.state, "request_id", ""),
+        },
+    ) as root:
+        results = await service.search(**search)
+        if tracing.recording():
+            root.update(output=tracing.describe_chunks(results, with_text=False))
+    return results, ({"X-Trace-Id": trace_id} if trace_id else None)
 
 
 def _documents(request: Request, chunks) -> list[dict]:
@@ -173,7 +196,10 @@ async def search_multiple_partitions(
         partitions = [scope.partition]
         filter_params = {"file_id": scope.file_ids}
 
-    results = await service.search(
+    results, trace_headers = await _traced_search(
+        request,
+        partition_viewer,
+        service,
         text=search_params.text,
         partitions=partitions,
         top_k=search_params.top_k,
@@ -190,6 +216,7 @@ async def search_multiple_partitions(
     return JSONResponse(
         status_code=status.HTTP_200_OK,
         content={"documents": _documents(request, results)},
+        headers=trace_headers,
     )
 
 
@@ -258,7 +285,10 @@ async def search_one_partition(
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Workspace not found")
         filter_params = {"file_id": scope.file_ids}
 
-    results = await service.search(
+    results, trace_headers = await _traced_search(
+        request,
+        partition_viewer,
+        service,
         text=search_params.text,
         partitions=partition,
         top_k=search_params.top_k,
@@ -275,6 +305,7 @@ async def search_one_partition(
     return JSONResponse(
         status_code=status.HTTP_200_OK,
         content={"documents": _documents(request, results)},
+        headers=trace_headers,
     )
 
 
@@ -331,7 +362,10 @@ async def search_file(
     # with the raw `filter` expr and parenthesises each operand, so a caller
     # filter like ``page > 5 OR 1==1`` cannot widen the file_id scope. It is
     # already validated by CommonSearchParams.
-    results = await service.search(
+    results, trace_headers = await _traced_search(
+        request,
+        partition_viewer,
+        service,
         text=search_params.text,
         partitions=partition,
         top_k=search_params.top_k,
@@ -344,4 +378,5 @@ async def search_file(
     return JSONResponse(
         status_code=status.HTTP_200_OK,
         content={"documents": _documents(request, results)},
+        headers=trace_headers,
     )

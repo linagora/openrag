@@ -30,6 +30,7 @@ from api.schemas.user.chat import OpenAIChatCompletionRequest, OpenAICompletionR
 from core.config import load_config
 from core.config.endpoints import client_llm_override, custom_endpoint_override_enabled
 from core.models.preset import resolve_partition_chat_llm
+from core.observability import tracing
 from core.utils import consts
 from core.utils.exceptions import OpenRAGError
 from core.utils.logging import get_logger
@@ -163,6 +164,69 @@ async def prime_max_model_tokens(settings: "Settings | None" = None) -> None:
             logger.debug("Discarding auto-probed LLM token results invalidated mid-refresh")
             return
         _max_model_tokens_by_name = results
+
+
+def _trace_attributes(
+    request: Request, user: dict | None, model_name: str, partitions: list[str] | None, metadata: dict
+):
+    """Who and what a chat trace is about: filterable in Langfuse, at most 200 characters each."""
+    tags = [feature for feature in ("websearch", "use_map_reduce", "workspace") if metadata.get(feature)]
+    return {
+        "user_id": str(user["id"]) if user else None,
+        "tags": tags,
+        "metadata": {
+            "model": model_name,
+            "partitions": ",".join(partitions)[:200] if partitions else "none",
+            "request_id": getattr(request.state, "request_id", ""),
+        },
+    }
+
+
+def _trace_source(source: dict) -> dict:
+    if source.get("source_type") == "web":
+        return {"url": source.get("url")}
+    chunk = source.get("chunk") or {}
+    return {
+        "filename": chunk.get("filename"),
+        "file_id": chunk.get("file_id"),
+        "chunk_id": chunk.get("_id"),
+        "rerank_score": source.get("rerank_score"),
+    }
+
+
+def _trace_answer(answer: str, extra: dict | None) -> dict:
+    """A chat trace's output: the answer the client got and the sources it cites."""
+    extra = extra or {}
+    return {
+        "answer": answer,
+        "cited_sources": [_trace_source(s) for s in extra.get("cited_sources") or []],
+        "presented_sources": len(extra.get("presented_sources") or []),
+    }
+
+
+class _StreamedAnswer:
+    """Rebuilds a streamed answer from the SSE lines sent to the client, for the trace output."""
+
+    def __init__(self) -> None:
+        self.parts: list[str] = []
+        self.extra: dict | None = None
+
+    def add(self, line: str) -> None:
+        if not line.startswith("data: {"):
+            return
+        try:
+            chunk = json.loads(line[len("data: ") :])
+        except ValueError:
+            return
+        for choice in chunk.get("choices") or []:
+            content = (choice.get("delta") or {}).get("content")
+            if content:
+                self.parts.append(content)
+        if chunk.get("extra"):
+            self.extra = chunk["extra"]
+
+    def output(self) -> dict:
+        return _trace_answer("".join(self.parts), self.extra)
 
 
 def _make_sse_error(message: str, code: str) -> str:
@@ -527,40 +591,61 @@ async def openai_chat_completion(
     def prep(docs, web):
         return __prepare_sources(request2, docs, web)
 
+    # Handed out before the trace starts, so a streamed response can carry it.
+    trace_id = tracing.new_trace_id(seed=getattr(request2.state, "request_id", None))
+    trace_headers = {"X-Trace-Id": trace_id} if trace_id else None
+    trace = {
+        "input": request.messages[-1].content,
+        "trace_id": trace_id,
+        **_trace_attributes(request2, user, model_name, partitions, request.metadata or {}),
+    }
+
     if request.stream:
 
         async def stream_response():
-            try:
-                async for sse_line in service.chat_stream(
-                    partitions=partitions,
-                    payload=request.model_dump(exclude_none=True),
-                    prepare_sources=prep,
-                    model_name=model_name,
-                ):
-                    yield sse_line
-            except asyncio.CancelledError:
-                log.info("Client disconnected during streaming")
-                return
-            except OpenRAGError as e:
-                log.warning("OpenRAG error during streaming", code=e.code, error=e.message)
-                yield _make_sse_error(e.message, e.code)
-            except Exception as e:
-                # Unexpected (non-OpenRAGError) failure: attach the traceback so the
-                # actual fault is visible, not just its str() — the client only gets
-                # a generic message, so the log is the only record of the root cause.
-                log.opt(exception=e).error("Error during streaming", error=str(e))
-                yield _make_sse_error("An unexpected error occurred during streaming", "UNEXPECTED_ERROR")
+            with tracing.start_trace("chat-completion", **trace) as root:
+                answer = _StreamedAnswer() if tracing.recording() else None
+                try:
+                    async for sse_line in service.chat_stream(
+                        partitions=partitions,
+                        payload=request.model_dump(exclude_none=True),
+                        prepare_sources=prep,
+                        model_name=model_name,
+                    ):
+                        if answer is not None:
+                            answer.add(sse_line)
+                        yield sse_line
+                except asyncio.CancelledError:
+                    log.info("Client disconnected during streaming")
+                    root.update(level="WARNING", status_message="client disconnected")
+                    return
+                except OpenRAGError as e:
+                    log.warning("OpenRAG error during streaming", code=e.code, error=e.message)
+                    root.update(level="ERROR", status_message=e.message)
+                    yield _make_sse_error(e.message, e.code)
+                except Exception as e:
+                    # Unexpected (non-OpenRAGError) failure: attach the traceback so the
+                    # actual fault is visible, not just its str() — the client only gets
+                    # a generic message, so the log is the only record of the root cause.
+                    log.opt(exception=e).error("Error during streaming", error=str(e))
+                    root.update(level="ERROR", status_message=str(e))
+                    yield _make_sse_error("An unexpected error occurred during streaming", "UNEXPECTED_ERROR")
+                if answer is not None:
+                    root.update(output=answer.output())
 
-        return StreamingResponse(stream_response(), media_type="text/event-stream")
+        return StreamingResponse(stream_response(), media_type="text/event-stream", headers=trace_headers)
 
-    chunk = await service.chat(
-        partitions=partitions,
-        payload=request.model_dump(exclude_none=True),
-        prepare_sources=prep,
-        model_name=model_name,
-    )
+    with tracing.start_trace("chat-completion", **trace) as root:
+        chunk = await service.chat(
+            partitions=partitions,
+            payload=request.model_dump(exclude_none=True),
+            prepare_sources=prep,
+            model_name=model_name,
+        )
+        message = (chunk.get("choices") or [{}])[0].get("message") or {}
+        root.update(output=_trace_answer(message.get("content") or "", chunk.get("extra")))
     log.debug("Returning non-streaming completion chunk.")
-    return JSONResponse(content=chunk)
+    return JSONResponse(content=chunk, headers=trace_headers)
 
 
 @router.post(
@@ -647,10 +732,19 @@ async def openai_completion(
     _apply_default_max_tokens(request, config, partitions)
     check_tokens_limit(request, log, config, partitions=partitions)
 
-    resp = await service.complete(
-        partitions=partitions,
-        payload=request.model_dump(exclude_none=True),
-        prepare_sources=lambda docs, _web: __prepare_sources(request2, docs),
-    )
+    trace_id = tracing.new_trace_id(seed=getattr(request2.state, "request_id", None))
+    with tracing.start_trace(
+        "text-completion",
+        input=request.prompt,
+        trace_id=trace_id,
+        **_trace_attributes(request2, user, model_name, partitions, request.metadata or {}),
+    ) as root:
+        resp = await service.complete(
+            partitions=partitions,
+            payload=request.model_dump(exclude_none=True),
+            prepare_sources=lambda docs, _web: __prepare_sources(request2, docs),
+        )
+        text = (resp.get("choices") or [{}])[0].get("text") or ""
+        root.update(output=_trace_answer(text, resp.get("extra")))
     log.debug("Returning completion response.")
-    return JSONResponse(content=resp)
+    return JSONResponse(content=resp, headers={"X-Trace-Id": trace_id} if trace_id else None)

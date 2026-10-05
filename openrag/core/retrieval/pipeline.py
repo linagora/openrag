@@ -25,6 +25,7 @@ from typing import Any
 from core.models.chunk import Chunk
 from core.models.query import Query, SearchQueries
 from core.models.retrieval_result import ScoredChunk
+from core.observability import tracing
 from core.rerankers.reranker import Reranker
 from core.retrieval.retriever import Retriever
 from core.retrieval.rrf import rrf_reranking
@@ -52,8 +53,20 @@ async def _rerank_chunks(reranker: Reranker, query: str, chunks: list[Chunk]) ->
     """
     if not chunks:
         return chunks
-    ranking = await reranker.rerank(query=query, documents=[c.text for c in chunks], top_k=None)
-    return [ScoredChunk.from_chunk(chunks[idx], rerank_score=score) for idx, score in ranking]
+    with tracing.observe(
+        "rerank-candidates",
+        input={"query": query, "candidates": tracing.describe_chunks(chunks) if tracing.recording() else None},
+        metadata={"reranker": type(reranker).__name__, "model": getattr(reranker, "_model", None)},
+    ) as step:
+        ranking = await reranker.rerank(query=query, documents=[c.text for c in chunks], top_k=None)
+        reranked = [ScoredChunk.from_chunk(chunks[idx], rerank_score=score) for idx, score in ranking]
+        if tracing.recording():
+            kept = {idx for idx, _ in ranking}
+            step.update(
+                output=tracing.describe_chunks(reranked),
+                metadata={"dropped_chunk_ids": [c.id for idx, c in enumerate(chunks) if idx not in kept]},
+            )
+        return reranked
 
 
 class RetrieverPipeline:
@@ -92,6 +105,25 @@ class RetrieverPipeline:
     def reranker_enabled(self) -> bool:
         return self.reranker is not None
 
+    def describe(self) -> dict[str, Any]:
+        """The settings that shape this pipeline's results, as recorded in a trace."""
+        retriever = self.retriever
+        return {
+            "retriever": type(retriever).__name__,
+            "top_k": getattr(retriever, "top_k", None),
+            "similarity_threshold": getattr(retriever, "similarity_threshold", None),
+            "with_surrounding_chunks": getattr(retriever, "with_surrounding_chunks", None),
+            "include_related": getattr(retriever, "include_related", None),
+            "include_ancestors": getattr(retriever, "include_ancestors", None),
+            "k_queries": getattr(retriever, "k_queries", None),
+            "hyde_combine": getattr(retriever, "combine", None),
+            "reranker": type(self.reranker).__name__ if self.reranker else None,
+            "reranker_model": getattr(self.reranker, "_model", None),
+            "reranker_top_k": self.reranker_top_k,
+            "rrf_k": self.rrf_k,
+            "allow_filterless_fallback": self.allow_filterless_fallback,
+        }
+
     @property
     def expansion_enabled(self) -> bool:
         # The retriever's BaseRetriever sets this; non-Base implementations
@@ -107,6 +139,24 @@ class RetrieverPipeline:
     ) -> list[Chunk]:
         """Run a single ``Query`` through retrieval, expansion, and reranking."""
         milvus_filter = query.to_milvus_filter()
+        with tracing.observe(
+            "retrieve-subquery",
+            as_type="retriever",
+            input={"query": query.query, "temporal_filter": milvus_filter, "top_k": top_k},
+        ) as step:
+            chunks = await self._retrieve_docs(partition, query, milvus_filter, top_k, filter_params)
+            if tracing.recording():
+                step.update(output=tracing.describe_chunks(chunks))
+            return chunks
+
+    async def _retrieve_docs(
+        self,
+        partition: list[str],
+        query: Query,
+        milvus_filter: str | None,
+        top_k: int | None,
+        filter_params: dict | None,
+    ) -> list[Chunk]:
         chunks = await self.retriever.retrieve(
             partition=partition,
             query=query.query,
@@ -117,6 +167,7 @@ class RetrieverPipeline:
         if not chunks and milvus_filter and self.allow_filterless_fallback:
             # Temporal filter killed every candidate — retry without it so
             # the user gets some results rather than none.
+            tracing.event("drop-temporal-filter", input={"temporal_filter": milvus_filter})
             chunks = await self.retriever.retrieve(
                 partition=partition,
                 query=query.query,
@@ -133,7 +184,10 @@ class RetrieverPipeline:
         if self.expansion_enabled:
             limit = self.reranker_top_k if top_k is None else max(self.reranker_top_k, top_k)
             head = copy.deepcopy(chunks[:limit])
-            expanded = await self.retriever.expand_search_results(results=head, filter_params=filter_params)
+            with tracing.observe("expand-related-chunks", as_type="retriever", input={"head": len(head)}) as step:
+                expanded = await self.retriever.expand_search_results(results=head, filter_params=filter_params)
+                if tracing.recording():
+                    step.update(output=tracing.describe_chunks(expanded[len(head) :], with_text=False))
             if len(expanded) > len(head):
                 chunks = expanded
                 if self.reranker_enabled:
@@ -168,7 +222,13 @@ class RetrieverPipeline:
             for q in search_queries.query_list
         ]
         ranked_lists = await asyncio.gather(*tasks)
-        fused = rrf_reranking(ranked_lists, key_fn=_chunk_key, k=self.rrf_k)
+        if len(ranked_lists) == 1:
+            fused = list(ranked_lists[0])
+        else:
+            with tracing.observe("fuse-subqueries", input={"lists": len(ranked_lists), "rrf_k": self.rrf_k}) as step:
+                fused = rrf_reranking(ranked_lists, key_fn=_chunk_key, k=self.rrf_k)
+                if tracing.recording():
+                    step.update(output=tracing.describe_chunks(fused, with_text=False))
         if top_k is not None:
             fused = fused[:top_k]
         return fused

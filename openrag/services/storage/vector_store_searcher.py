@@ -13,6 +13,7 @@ from typing import Any
 
 from core.embeddings import Embedder
 from core.models.chunk import Chunk, _coerce_chunk_type
+from core.observability import tracing
 from core.ports.document_repo import DocumentRepository
 from core.retrieval.searcher import RetrievalSearcher, file_id_restriction
 from core.utils.consts import RETRIEVAL_SCORE_KEYS, is_internal_metadata_key
@@ -86,6 +87,21 @@ class VectorStoreSearcher(RetrievalSearcher):
     def _field(self) -> str | None:
         return self._vector_field() if callable(self._vector_field) else self._vector_field
 
+    @staticmethod
+    def _traced_filters(filters: dict[str, Any]) -> dict[str, Any]:
+        # A workspace scope is every file id in it: keep the trace readable.
+        return {
+            key: f"<{len(value)} values>" if isinstance(value, list) and len(value) > 10 else value
+            for key, value in filters.items()
+        }
+
+    def _trace_metadata(self) -> dict[str, Any]:
+        return {
+            "collection": self._collection,
+            "vector_field": self._field(),
+            "embedder_model": getattr(self._embedder, "_model", None),
+        }
+
     async def search(
         self,
         query: str,
@@ -96,27 +112,44 @@ class VectorStoreSearcher(RetrievalSearcher):
         similarity_threshold: float = 0.0,
         with_surrounding_chunks: bool = True,
     ) -> list[Chunk]:
-        (embedding,) = await self._embedder.embed([query])
         filters: dict[str, Any] = {"partition": partition}
         if filter:
             filters["expr"] = filter
         if filter_params:
             filters.update(filter_params)
-        results = await self._store.search(
-            embedding=embedding,
-            query_text=query,
-            collection=self._collection,
-            filters=filters,
-            top_k=top_k,
-            similarity_threshold=similarity_threshold or None,
-            vector_field=self._field(),
-        )
-        chunks = [_dict_to_chunk(r) for r in results]
-        if with_surrounding_chunks and chunks:
-            surrounding = await self._fetch_surrounding(chunks, allowed_file_ids=file_id_restriction(filter_params))
-            seen = {c.id for c in chunks}
-            chunks.extend(c for c in surrounding if c.id not in seen)
-        return chunks
+        with tracing.observe(
+            "search-vectors",
+            as_type="retriever",
+            input={
+                "query": query,
+                "top_k": top_k,
+                "similarity_threshold": similarity_threshold,
+                "filters": self._traced_filters(filters),
+            },
+            metadata=self._trace_metadata(),
+        ) as step:
+            (embedding,) = await self._embedder.embed([query])
+            results = await self._store.search(
+                embedding=embedding,
+                query_text=query,
+                collection=self._collection,
+                filters=filters,
+                top_k=top_k,
+                similarity_threshold=similarity_threshold or None,
+                vector_field=self._field(),
+            )
+            chunks = [_dict_to_chunk(r) for r in results]
+            hits = len(chunks)
+            if with_surrounding_chunks and chunks:
+                surrounding = await self._fetch_surrounding(chunks, allowed_file_ids=file_id_restriction(filter_params))
+                seen = {c.id for c in chunks}
+                chunks.extend(c for c in surrounding if c.id not in seen)
+            if tracing.recording():
+                step.update(
+                    output=tracing.describe_chunks(chunks[:hits], scores=[r.get("score") for r in results]),
+                    metadata={"hits": hits, "surrounding_chunks_added": len(chunks) - hits},
+                )
+            return chunks
 
     async def multi_query_search(
         self,
@@ -128,39 +161,64 @@ class VectorStoreSearcher(RetrievalSearcher):
         similarity_threshold: float = 0.0,
         with_surrounding_chunks: bool = True,
     ) -> list[Chunk]:
-        embeddings = await self._embedder.embed(queries)
         field = self._field()
         filters: dict[str, Any] = {"partition": partition}
         if filter:
             filters["expr"] = filter
         if filter_params:
             filters.update(filter_params)
-        per_query = await asyncio.gather(
-            *[
-                self._store.search(
-                    embedding=emb,
-                    query_text=q,
-                    collection=self._collection,
-                    filters=filters,
-                    top_k=top_k_per_query,
-                    similarity_threshold=similarity_threshold or None,
-                    vector_field=field,
+        with tracing.observe(
+            "search-vectors",
+            as_type="retriever",
+            input={
+                "queries": queries,
+                "top_k": top_k_per_query,
+                "similarity_threshold": similarity_threshold,
+                "filters": self._traced_filters(filters),
+            },
+            metadata=self._trace_metadata(),
+        ) as step:
+            embeddings = await self._embedder.embed(queries)
+            per_query = await asyncio.gather(
+                *[
+                    self._store.search(
+                        embedding=emb,
+                        query_text=q,
+                        collection=self._collection,
+                        filters=filters,
+                        top_k=top_k_per_query,
+                        similarity_threshold=similarity_threshold or None,
+                        vector_field=field,
+                    )
+                    for emb, q in zip(embeddings, queries)
+                ]
+            )
+            seen_ids: set[str] = set()
+            chunks: list[Chunk] = []
+            for results in per_query:
+                for r in results:
+                    c = _dict_to_chunk(r)
+                    if c.id not in seen_ids:
+                        seen_ids.add(c.id)
+                        chunks.append(c)
+            hits = len(chunks)
+            if with_surrounding_chunks and chunks:
+                surrounding = await self._fetch_surrounding(chunks, allowed_file_ids=file_id_restriction(filter_params))
+                chunks.extend(c for c in surrounding if c.id not in seen_ids)
+            if tracing.recording():
+                step.update(
+                    output=[
+                        {
+                            "query": q,
+                            "candidates": tracing.describe_chunks(
+                                [_dict_to_chunk(r) for r in results], scores=[r.get("score") for r in results]
+                            ),
+                        }
+                        for q, results in zip(queries, per_query)
+                    ],
+                    metadata={"hits": hits, "surrounding_chunks_added": len(chunks) - hits},
                 )
-                for emb, q in zip(embeddings, queries)
-            ]
-        )
-        seen_ids: set[str] = set()
-        chunks: list[Chunk] = []
-        for results in per_query:
-            for r in results:
-                c = _dict_to_chunk(r)
-                if c.id not in seen_ids:
-                    seen_ids.add(c.id)
-                    chunks.append(c)
-        if with_surrounding_chunks and chunks:
-            surrounding = await self._fetch_surrounding(chunks, allowed_file_ids=file_id_restriction(filter_params))
-            chunks.extend(c for c in surrounding if c.id not in seen_ids)
-        return chunks
+            return chunks
 
     async def get_surrounding_chunks(
         self,

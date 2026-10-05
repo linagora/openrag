@@ -24,6 +24,7 @@ from typing import Any
 
 from core.llm.llm import LLM, chat_content
 from core.models.chunk import Chunk
+from core.observability import tracing
 from core.prompts.query_rewriter import (
     build_hyde_prompt,
     build_multi_query_prompt,
@@ -138,11 +139,13 @@ class MultiQueryRetriever(BaseRetriever):
 
     async def _generate_queries(self, query: str) -> list[str]:
         prompt = build_multi_query_prompt(self.multi_query_template, query, self.k_queries)
-        response = await self.llm.chat([{"role": "user", "content": prompt}])
-        # Cap to k_queries — a non-compliant LLM response can otherwise fan
-        # out far more searches than configured.
-        queries = split_multi_query_response(chat_content(response))[: self.k_queries]
-        return queries or [query]
+        with tracing.observe("generate-query-variants", as_type="chain", input=query) as step:
+            response = await self.llm.chat([{"role": "user", "content": prompt}])
+            # Cap to k_queries — a non-compliant LLM response can otherwise fan
+            # out far more searches than configured.
+            queries = split_multi_query_response(chat_content(response))[: self.k_queries]
+            step.update(output=queries or [query])
+            return queries or [query]
 
     async def retrieve(
         self,
@@ -187,8 +190,10 @@ class HyDeRetriever(BaseRetriever):
 
     async def get_hyde(self, query: str) -> str:
         prompt = build_hyde_prompt(self.hyde_template, query)
-        response = await self.llm.chat([{"role": "user", "content": prompt}])
-        return chat_content(response)
+        with tracing.observe("generate-hypothetical-document", as_type="chain", input=query) as step:
+            response = await self.llm.chat([{"role": "user", "content": prompt}])
+            step.update(output=chat_content(response))
+            return chat_content(response)
 
     async def retrieve(
         self,

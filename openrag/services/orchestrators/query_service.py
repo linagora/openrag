@@ -45,6 +45,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 
 from core.models.preset import resolve_partition_chat_llm
 from core.models.query import Query, SearchQueries
+from core.observability import tracing
 from core.prompts import (
     SOURCE_SEPARATOR,
     build_casual_response_prompt,
@@ -502,6 +503,14 @@ class QueryService:
             # question flip between a date filter and none across requests.
             "temperature": 0,
         }
+        with tracing.observe("contextualize-query", as_type="chain", input=messages) as step:
+            queries = await self._contextualize(llm, llm_messages, params)
+            fallback = queries is None
+            queries = queries or SearchQueries(query_list=[Query(query=last_user)])
+            step.update(output=queries.model_dump(mode="json"), metadata={"fallback_to_raw_query": fallback})
+            return queries
+
+    async def _contextualize(self, llm: LLM, llm_messages: list[dict], params: dict) -> SearchQueries | None:
         for attempt in (1, 2):
             try:
                 resp = await llm.chat(llm_messages, **params)
@@ -515,7 +524,7 @@ class QueryService:
                         "Query generation failed twice — falling back to raw user query",
                         error=str(exc),
                     )
-        return SearchQueries(query_list=[Query(query=last_user)])
+        return None
 
     # ------------------------------------------------------------------
     # Map-reduce (was map_reduce.RAGMapReduce — no LangChain)
@@ -652,6 +661,11 @@ class QueryService:
                     queries = queries.model_copy(update={"query_list": usable_queries})
 
         if casual_policy is not None and not retrieval_forced:
+            tracing.event(
+                "skip-retrieval",
+                input={"message": last_user_message},
+                metadata={"intent": casual_policy.intent, "language": casual_policy.language},
+            )
             casual_prompt = build_casual_response_prompt(
                 casual_policy.intent, casual_policy.language, assistant_name=self._config.server.assistant_name
             )
@@ -677,16 +691,30 @@ class QueryService:
             queries = SearchQueries(query_list=[Query(query=last_user_message)])
 
         web_results: list = []
-        if partition is not None and use_websearch:
-            chunks, web_lists = await self._gather_rag_and_web(queries, partition, top_k, filter_params)
-            web_results = _dedupe_web(web_lists)
-        elif partition is not None:
-            chunks = await self._retrieval.retrieve_multi(
-                partitions=partition, search_queries=queries, top_k=top_k, filter_params=filter_params
-            )
-        else:
-            web_results = _dedupe_web(await asyncio.gather(*[self._web.search(q.query) for q in queries.query_list]))
-            chunks = []
+        with tracing.observe(
+            "retrieve-documents",
+            as_type="retriever",
+            input={
+                "queries": [q.query for q in queries.query_list],
+                "partitions": partition,
+                "filter_params": filter_params,
+                "websearch": use_websearch,
+            },
+        ) as step:
+            if partition is not None and use_websearch:
+                chunks, web_lists = await self._gather_rag_and_web(queries, partition, top_k, filter_params)
+                web_results = _dedupe_web(web_lists)
+            elif partition is not None:
+                chunks = await self._retrieval.retrieve_multi(
+                    partitions=partition, search_queries=queries, top_k=top_k, filter_params=filter_params
+                )
+            else:
+                web_results = _dedupe_web(
+                    await asyncio.gather(*[self._web.search(q.query) for q in queries.query_list])
+                )
+                chunks = []
+            if tracing.recording():
+                step.update(output=tracing.describe_chunks(chunks), metadata={"web_results": len(web_results)})
 
         if not chunks and not web_results and partition is None:
             return _PrepareChatResult(payload, [], [], [], [], False, indexed_attachment_ids)
@@ -720,6 +748,7 @@ class QueryService:
             max_context_tokens=self._max_context_tokens - web_tokens,
             length_function=get_num_tokens(),
         )
+        _trace_context_selection(docs, included, self._max_context_tokens - web_tokens)
         docs = [docs[i] for i in included]
 
         if web_results:
@@ -793,7 +822,14 @@ class QueryService:
             else:
                 queries = SearchQueries(query_list=[Query(query=prompt)])
         if queries.query_list:
-            chunks = await self._retrieval.retrieve_multi(partitions=partition, search_queries=queries)
+            with tracing.observe(
+                "retrieve-documents",
+                as_type="retriever",
+                input={"queries": [q.query for q in queries.query_list], "partitions": partition},
+            ) as step:
+                chunks = await self._retrieval.retrieve_multi(partitions=partition, search_queries=queries)
+                if tracing.recording():
+                    step.update(output=tracing.describe_chunks(chunks))
             docs = [c.to_langchain() for c in chunks]
             # Full retrieval set before the token-budget selection below, kept
             # separately for `all_retrieved_sources` (#847).
@@ -803,6 +839,7 @@ class QueryService:
                 max_context_tokens=self._max_context_tokens,
                 length_function=get_num_tokens(),
             )
+            _trace_context_selection(docs, included, self._max_context_tokens)
             docs = [docs[i] for i in included]
 
         prompt_type = "spoken_style_answer" if metadata.get("spoken_style_answer", False) else "sys_prompt"
@@ -1075,6 +1112,22 @@ _EMPTY_RESPONSE_RETRY_INSTRUCTION = (
     "the supplied context, and the response language already specified above. If the context does not support a "
     "substantive answer, say so briefly. Do not return only a source marker or an empty message."
 )
+
+
+def _trace_context_selection(docs: list, included: list[int], max_context_tokens: int) -> None:
+    """Record which retrieved documents fit in the prompt's token budget, and which were dropped."""
+    if not tracing.recording():
+        return
+    kept = set(included)
+    with tracing.observe(
+        "assemble-context",
+        as_type="chain",
+        input={"candidates": len(docs), "max_context_tokens": max_context_tokens},
+    ) as step:
+        described = tracing.describe_chunks(docs, with_text=False)
+        for entry in described:
+            entry["in_context"] = entry["rank"] - 1 in kept
+        step.update(output=described, metadata={"included": len(kept), "dropped": len(docs) - len(kept)})
 
 
 def _empty_response_retry_messages(messages: list[dict]) -> list[dict]:
