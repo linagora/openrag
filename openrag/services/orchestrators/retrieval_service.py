@@ -657,7 +657,12 @@ class RetrievalService:
                     if configs
                     else self._legacy_query_expansion_prompt_identity(self._pipeline)
                 )
-                if getattr(retrieval, "enable_reranker", False) and not disable_reranker:
+                reranker_enabled = getattr(
+                    retrieval,
+                    "enable_reranker",
+                    getattr(getattr(self._config, "reranker", None), "enabled", False),
+                )
+                if reranker_enabled and not disable_reranker:
                     _reranker, identity = self._resolve_reranker_with_identity(
                         getattr(retrieval, "reranker", None),
                         partition_name,

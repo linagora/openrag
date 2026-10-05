@@ -215,3 +215,46 @@ async def test_resolved_plan_records_effective_request_overrides():
     assert partition["reranker"]["enabled"] is False
     assert partition["expansion"]["include_related"] is False
     assert partition["expansion"]["include_ancestors"] is False
+
+
+@pytest.mark.asyncio
+async def test_resolved_snapshot_uses_global_reranker_for_legacy_preset():
+    config = _config()
+    config.reranker.enabled = True
+    config.models.reranker = {"default": SimpleNamespace(model_name="legacy-reranker")}
+    config.partitions = {
+        "tenant-a": SimpleNamespace(
+            embedder="embed-a",
+            chat_llm=None,
+            retrieval=SimpleNamespace(
+                type="single",
+                reranker="removed-reranker",
+                top_k=20,
+                similarity_threshold=0.5,
+            ),
+        )
+    }
+
+    def reranker_factory(name):
+        if name == "default":
+            return object()
+        raise KeyError(name)
+
+    service = RetrievalService(
+        searcher=_Searcher(),
+        reranker=object(),
+        llm=None,
+        config=config,
+        reranker_factory=reranker_factory,
+    )
+
+    plan = await service.resolve_retrieval_plan(
+        ["tenant-a"],
+        contextualizer_prompt=SimpleNamespace(content_hash="context-hash", name=None, source="default"),
+        build_execution=False,
+    )
+
+    reranker = plan.public_configuration["partitions"][0]["reranker"]
+    assert reranker["enabled"] is True
+    assert reranker["name"] == "default"
+    assert reranker["model"] == "legacy-reranker"
