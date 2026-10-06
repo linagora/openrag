@@ -156,6 +156,30 @@ async def test_pipeline_runs_required_stages_in_order_and_keeps_row_object():
 
 
 @pytest.mark.asyncio
+async def test_run_attaches_stage_timings_in_seconds(monkeypatch):
+    from types import SimpleNamespace
+
+    import services.workers.pipeline_builder as pb
+
+    clock = iter((1.0, 1.25, 2.0, 2.5, 3.0, 4.0, 5.0, 5.75))
+    monkeypatch.setattr(pb, "time", SimpleNamespace(perf_counter=lambda: next(clock)))
+
+    document = Document(filename="note.txt", text="hello", partition="tenant-a")
+    processed = ProcessedDocument(document_id=document.id, text_blocks=[TextBlock(text="hello")])
+    pipeline = build_indexing_pipeline(
+        parser=FakeParser(processed),
+        chunker=FakeChunker([Chunk(id="c1", text="hello", partition="tenant-a")]),
+        embedder=FakeEmbedder([[1.0, 0.0]]),
+        vector_store=FakeVectorStore(),
+    )
+    row = {"document": document, "partition": "tenant-a"}
+
+    await pipeline.run(row)
+
+    assert row["stage_timings"] == {"parse": 0.25, "chunk": 0.5, "embed": 1.0, "store": 0.75}
+
+
+@pytest.mark.asyncio
 async def test_run_keeps_partial_stage_timings_when_stage_fails():
     document = Document(filename="note.txt", text="hello", partition="tenant-a")
     processed = ProcessedDocument(document_id=document.id, text_blocks=[TextBlock(text="hello")])

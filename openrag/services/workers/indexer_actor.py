@@ -112,6 +112,7 @@ class IndexerWorker:
         metadata: dict[str, Any],
         user: dict[str, Any] | None,
         degraded_stages: list[str],
+        stage_timings: dict[str, float],
     ) -> None:
         """Repair durable history when the in-memory task receipt was evicted."""
         if self._job_repo is None:
@@ -125,6 +126,7 @@ class IndexerWorker:
                     file_id=metadata.get("file_id"),
                     user_id=(user or {}).get("id"),
                     degraded_stages=degraded_stages,
+                    stage_timings=stage_timings or None,
                     completed_at=datetime.now(UTC),
                 )
             )
@@ -261,6 +263,7 @@ class IndexerWorker:
                     metadata=metadata,
                     user=user,
                     degraded_stages=degraded_stages,
+                    stage_timings=stage_timings,
                 )
                 log.warning("Task receipt was missing after the catalog commit; durable history was repaired")
             elif completion_outcome == "cancelled":

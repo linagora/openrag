@@ -1144,6 +1144,37 @@ async def test_missing_task_state_after_catalog_commit_reports_success_and_repai
 
 
 @pytest.mark.asyncio
+async def test_completed_task_repair_persists_stage_timings(tmp_path: Path) -> None:
+    from core.models.catalog import DocumentStatus
+
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"content")
+    timings = {"parse": 0.25, "chunk": 0.5, "embed": 1.0, "store": 0.75}
+
+    class TimedPipeline:
+        async def run(self, row: dict[str, Any]) -> dict[str, Any]:
+            row.update(stored_count=1, stage="stored", stage_timings=timings)
+            return row
+
+    tsm = _fake_tsm()
+    tsm.complete_with_degraded_stages.remote.return_value = "missing"
+    job_repo = _RecordingJobRepo()
+    worker = IndexerWorker(pipeline=TimedPipeline(), task_state_manager=tsm, job_repo=job_repo)
+
+    await worker.process_file(
+        task_id="lost-timed-task",
+        path=str(path),
+        metadata={"file_id": "f1"},
+        partition="p",
+        user={"id": 42},
+    )
+
+    completed = job_repo.saved[-1]
+    assert completed.status is DocumentStatus.COMPLETED
+    assert completed.stage_timings == timings
+
+
+@pytest.mark.asyncio
 async def test_cancelled_task_after_catalog_commit_finishes_without_error_or_callback(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

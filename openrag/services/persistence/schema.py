@@ -316,6 +316,7 @@ jobs = Table(
         server_default=text("ARRAY[]::text[]"),
         nullable=False,
     ),
+    Column("stage_timings", JSONB, nullable=True),
     Column("created_at", DateTime(timezone=True), server_default=text("now()"), nullable=False),
     Column("updated_at", DateTime(timezone=True), server_default=text("now()"), nullable=False),
     # Queue wait is ``started_at - created_at`` and service time is
