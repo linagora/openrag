@@ -881,10 +881,11 @@ class PartitionService:
         return metadata
 
     async def get_file_chunks(self, partition: str, file_id: str, limit: int = 2000) -> list[dict]:
-        """Return chunk rows (``_id`` kept, ``text`` dropped) for one file.
+        """Return chunk IDs and page numbers for one file.
 
-        The router builds the extract links and strips ``_id`` from the
-        surfaced metadata, exactly as before.
+        The file-detail route needs only extract links and the first page
+        number. Chunk text, vectors and other per-chunk fields do not belong
+        in the file's metadata response.
         """
         _validate_limit(limit)
         if not await self.file_exists(file_id, partition):
@@ -895,11 +896,10 @@ class PartitionService:
         rows = await self._vector_store.query_chunks_by_filter(
             self._collection,
             {"partition": partition, "file_id": file_id},
-            output_fields=["*"],
         )
         if len(rows) > limit:
             rows = rows[:limit]
-        return [{k: v for k, v in row.items() if k != "text" and not is_internal_metadata_key(k)} for row in rows]
+        return [{k: row[k] for k in ("_id", "page") if k in row} for row in rows]
 
     async def list_all_chunks(
         self,
