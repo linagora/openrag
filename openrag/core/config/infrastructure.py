@@ -105,7 +105,7 @@ class ServerConfig(ConfigMixin):
     # (METRICS_ALLOW_UNAUTHENTICATED=true) opens the endpoint to anyone who can
     # reach the API port — a deliberate opt-in for deployments that block the
     # path at the edge and scrape in-cluster. When both are set, the token wins.
-    metrics_token: str | None = None
+    metrics_token: str | None = Field(default=None, repr=False)
     metrics_allow_unauthenticated: bool = False
 
     @field_validator("metrics_token", mode="before")
