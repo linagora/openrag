@@ -691,6 +691,9 @@ class QueryService:
                 elif len(usable_queries) != len(queries.query_list):
                     queries = queries.model_copy(update={"query_list": usable_queries})
 
+        # The history as the model gets it, so the window is checked against what is sent.
+        messages = self._sanitize_messages(messages)
+
         if casual_policy is not None and not retrieval_forced:
             casual_prompt = build_casual_response_prompt(
                 casual_policy.intent, casual_policy.language, assistant_name=self._config.server.assistant_name

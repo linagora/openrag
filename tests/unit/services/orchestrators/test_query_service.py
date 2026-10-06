@@ -1105,6 +1105,37 @@ async def test_casual_answer_never_sends_more_than_the_window_leaves():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("question", ["q", "Bonjour ! 👋"], ids=["retrieval", "casual"])
+async def test_window_counts_an_empty_assistant_turn_as_sent(question):
+    """An empty assistant turn reaches the model as a placeholder, and the window counts the placeholder."""
+    llm = FakeLLM()
+    svc = _svc(mode="ChatBotRag", retrieval=FakeRetrieval(chunks=[]), llm=llm)
+    svc._config.partitions = {"p": _partition_cfg(top_n=5)}
+    history = [
+        {"role": "user", "content": "q"},
+        {"role": "assistant", "content": ""},
+        {"role": "user", "content": question},
+    ]
+
+    async def sent(max_prompt_tokens):
+        await svc.chat(
+            partitions=["p"],
+            payload={"messages": history, "metadata": {}},
+            prepare_sources=lambda d, w: [],
+            model_name="m",
+            max_prompt_tokens=max_prompt_tokens,
+        )
+        messages = llm.chat_calls[-1][0]
+        assert messages[2]["content"] == "NO_CONTENT"
+        return qs._messages_tokens(messages)
+
+    everything = await sent(None)
+    assert await sent(everything) == everything
+    with pytest.raises(ContextWindowExceededError):
+        await sent(everything - 1)
+
+
+@pytest.mark.asyncio
 async def test_chat_rejects_a_conversation_the_window_cannot_hold(monkeypatch):
     monkeypatch.setattr(qs, "_messages_tokens", lambda messages: 100)
     svc = _two_chunk_svc()
