@@ -151,6 +151,27 @@ async def test_pipeline_runs_required_stages_in_order_and_keeps_row_object():
     assert row["stored_count"] == 1
     assert row["chunks"][0].embedding == [1.0, 0.0]
     assert "token" not in row
+    assert set(row["stage_timings"]) == {"parse", "chunk", "embed", "store"}
+    assert all(isinstance(value, float) and value >= 0 for value in row["stage_timings"].values())
+
+
+@pytest.mark.asyncio
+async def test_run_keeps_partial_stage_timings_when_stage_fails():
+    document = Document(filename="note.txt", text="hello", partition="tenant-a")
+    processed = ProcessedDocument(document_id=document.id, text_blocks=[TextBlock(text="hello")])
+    row = {"document": document, "partition": "tenant-a", "filename": "note.txt"}
+    pipeline = build_indexing_pipeline(
+        parser=FakeParser(processed),
+        chunker=FakeChunker([], error=RuntimeError("chunk stage failed")),
+        embedder=FakeEmbedder([[1.0]]),
+        vector_store=FakeVectorStore(),
+    )
+
+    with pytest.raises(RuntimeError, match="chunk stage failed"):
+        await pipeline.run(row)
+
+    assert set(row["stage_timings"]) == {"parse", "chunk"}
+    assert all(isinstance(value, float) and value >= 0 for value in row["stage_timings"].values())
 
 
 @pytest.mark.asyncio

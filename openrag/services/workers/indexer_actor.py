@@ -6,7 +6,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from core.models.catalog import DocumentStatus, IndexationJob, normalize_degraded_stages
+from core.models.catalog import (
+    DocumentStatus,
+    IndexationJob,
+    normalize_degraded_stages,
+    normalize_stage_timings,
+)
 from core.models.document import Document
 from core.utils.error_summary import failure_reason_from_exception
 from core.utils.exceptions import NoIndexableContentError
@@ -188,6 +193,7 @@ class IndexerWorker:
             if resolved_prompts:
                 row.update(resolved_prompts)
             row = await self._pipeline.run(row)
+            stage_timings = normalize_stage_timings(row.get("stage_timings"))
             stored_count = row.get("stored_count", 0)
             if stored_count == 0:
                 raise NoIndexableContentError("No indexable content was extracted from this document.")
@@ -226,9 +232,27 @@ class IndexerWorker:
                     partition=partition,
                     indexation_config=indexation_config,
                 )
+            method_names = getattr(self._tsm, "_ray_actor_method_names", None)
+            if (
+                isinstance(method_names, (frozenset, list, set, tuple))
+                and "complete_with_degraded_stages_and_timings" in method_names
+            ):
+
+                def completion_call() -> Any:
+                    return self._tsm.complete_with_degraded_stages_and_timings.remote(
+                        task_id, degraded_stages, stage_timings
+                    )
+
+                completion_method = "complete_with_degraded_stages_and_timings"
+            else:
+
+                def completion_call() -> Any:
+                    return self._tsm.complete_with_degraded_stages.remote(task_id, degraded_stages)
+
+                completion_method = "complete_with_degraded_stages"
             completion_outcome = await retry_idempotent_ray_actor_method(
-                lambda: self._tsm.complete_with_degraded_stages.remote(task_id, degraded_stages),
-                task_description=f"complete_with_degraded_stages({task_id})",
+                completion_call,
+                task_description=f"{completion_method}({task_id})",
             )
             if completion_outcome == "missing":
                 await self._record_completed(
@@ -273,6 +297,7 @@ class IndexerWorker:
                         task_id,
                         tb,
                         error_reason,
+                        stage_timings=normalize_stage_timings(row.get("stage_timings")) if row is not None else None,
                     ),
                     task_description=f"set_failed_if_not_cancelled({task_id})",
                 )

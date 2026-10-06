@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import uuid
 from datetime import UTC, datetime
 from enum import Enum
@@ -54,6 +55,7 @@ LEGACY_ACTIVE_INDEXING_STATES = frozenset({"CHUNKING", "INSERTING"})
 # Enrichment can fail without making the base-content index unusable. Keep the
 # names bounded and stable because they are persisted and exposed through APIs.
 DEGRADABLE_ENRICHMENT_STAGES = frozenset({"caption", "contextualize", "topic_tag"})
+INDEXING_STAGE_NAMES = frozenset({"parse", "caption", "chunk", "contextualize", "topic_tag", "embed", "store"})
 
 
 def normalize_degraded_stages(value: Any) -> list[str]:
@@ -65,6 +67,28 @@ def normalize_degraded_stages(value: Any) -> list[str]:
     else:
         return []
     return sorted({stage for stage in candidates if isinstance(stage, str) and stage in DEGRADABLE_ENRICHMENT_STAGES})
+
+
+def normalize_stage_timings(value: Any) -> dict[str, float]:
+    """Return valid per-stage durations, in seconds, from task or API data."""
+    if not isinstance(value, dict):
+        return {}
+    normalized: dict[str, float] = {}
+    for stage, duration in value.items():
+        if (
+            not isinstance(stage, str)
+            or stage not in INDEXING_STAGE_NAMES
+            or isinstance(duration, bool)
+            or not isinstance(duration, int | float)
+        ):
+            continue
+        try:
+            seconds = float(duration)
+        except OverflowError:
+            continue
+        if math.isfinite(seconds) and seconds >= 0:
+            normalized[stage] = seconds
+    return normalized
 
 
 # Kept inside TaskInfo.details.metadata (a free-form dict) rather than as
@@ -121,6 +145,7 @@ class IndexationJob(BaseModel):
     error: str | None = None
     error_reason: str | None = None
     degraded_stages: list[str] = Field(default_factory=list)
+    stage_timings: dict[str, float] | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime | None = None
     started_at: datetime | None = None

@@ -267,6 +267,77 @@ async def test_process_file_success_completes_atomically_and_returns_count(tmp_p
 
 
 @pytest.mark.asyncio
+async def test_indexer_worker_passes_stage_timings_to_terminal_state(tmp_path: Path) -> None:
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"content")
+    timings = {"parse": 0.25, "chunk": 0.5, "embed": 1.0, "store": 0.75}
+
+    class TimedPipeline:
+        async def run(self, row: dict[str, Any]) -> dict[str, Any]:
+            row.update(stored_count=1, stage="stored", stage_timings=timings)
+            return row
+
+    tsm = _fake_tsm()
+    tsm._ray_actor_method_names = {
+        "complete_with_degraded_stages",
+        "complete_with_degraded_stages_and_timings",
+    }
+    tsm.complete_with_degraded_stages_and_timings = MagicMock()
+    tsm.complete_with_degraded_stages_and_timings.remote = AsyncMock(return_value="completed")
+    worker = IndexerWorker(pipeline=TimedPipeline(), task_state_manager=tsm)
+
+    await worker.process_file(task_id="t-timed", path=str(path), metadata={"file_id": "f1"}, partition="p")
+
+    tsm.complete_with_degraded_stages_and_timings.remote.assert_awaited_once_with("t-timed", [], timings)
+    tsm.complete_with_degraded_stages.remote.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_indexer_worker_falls_back_for_older_task_state_actor(tmp_path: Path) -> None:
+    path = tmp_path / "doc.txt"
+    path.write_bytes(b"content")
+
+    class TimedPipeline:
+        async def run(self, row: dict[str, Any]) -> dict[str, Any]:
+            row.update(stored_count=1, stage="stored", stage_timings={"parse": 0.25})
+            return row
+
+    tsm = _fake_tsm()
+    tsm._ray_actor_method_names = {"complete_with_degraded_stages"}
+    worker = IndexerWorker(pipeline=TimedPipeline(), task_state_manager=tsm)
+
+    await worker.process_file(task_id="t-legacy", path=str(path), metadata={"file_id": "f1"}, partition="p")
+
+    tsm.complete_with_degraded_stages.remote.assert_awaited_once_with("t-legacy", [])
+
+
+@pytest.mark.asyncio
+async def test_indexer_worker_passes_partial_stage_timings_on_failure(tmp_path: Path) -> None:
+    path = tmp_path / "bad.txt"
+    path.write_bytes(b"content")
+    timings = {"parse": 0.25, "chunk": 0.5}
+
+    class TimedFailingPipeline:
+        async def run(self, row: dict[str, Any]) -> dict[str, Any]:
+            row["stage_timings"] = timings
+            raise RuntimeError("chunk stage failed")
+
+    tsm = _fake_tsm()
+    tsm._ray_actor_method_names = {"set_failed_with_reason_and_stage_timings_if_not_cancelled"}
+    tsm.set_failed_with_reason_and_stage_timings_if_not_cancelled = MagicMock()
+    tsm.set_failed_with_reason_and_stage_timings_if_not_cancelled.remote = AsyncMock(return_value=True)
+    worker = IndexerWorker(pipeline=TimedFailingPipeline(), task_state_manager=tsm)
+
+    with pytest.raises(RuntimeError, match="chunk stage failed"):
+        await worker.process_file(task_id="t-failed-timed", path=str(path), metadata={"file_id": "f1"}, partition="p")
+
+    call = tsm.set_failed_with_reason_and_stage_timings_if_not_cancelled.remote.await_args
+    assert call.args[0] == "t-failed-timed"
+    assert call.args[2] == "RuntimeError: chunk stage failed"
+    assert call.args[3] == timings
+
+
+@pytest.mark.asyncio
 async def test_process_file_stops_when_task_was_cancelled_before_start(tmp_path: Path) -> None:
     path = tmp_path / "doc.txt"
     path.write_bytes(b"content")
