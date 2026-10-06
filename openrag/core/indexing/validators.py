@@ -265,6 +265,11 @@ def validate_content_matches_extension(extension: str, head: bytes) -> None:
 
     kind = filetype.guess(head)
     detected = kind.extension if kind is not None else None
+    # PDF readers accept a small preamble before the header. ``filetype`` only
+    # checks offset zero, so also recognise a header in the first 1024 bytes.
+    # A known non-PDF signature at offset zero still takes precedence.
+    if extension == "pdf" and detected is None and b"%PDF-" in head[:1024]:
+        return
     if detected in expected:
         return
 
