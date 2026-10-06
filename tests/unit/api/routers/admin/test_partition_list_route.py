@@ -161,7 +161,15 @@ async def test_file_list_rejects_an_unbounded_degraded_stage(async_client_factor
 @pytest.mark.asyncio
 async def test_file_detail_uses_authoritative_catalog_metadata(async_client_factory) -> None:
     service = _FakeService({})
-    service.file_chunks = [{"_id": "chunk-1", "filename": "stale-chunk-name.pdf", "page": 1}]
+    service.file_chunks = [
+        {
+            "_id": "chunk-1",
+            "filename": "stale-chunk-name.pdf",
+            "page": 1,
+            "vector": [0.1, 0.2],
+            "text": "private chunk text",
+        }
+    ]
     app = _build_app(service, [])
 
     async with async_client_factory(app) as client:
