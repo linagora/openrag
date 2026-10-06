@@ -1730,3 +1730,9 @@ class TestVectorFieldRouting:
 
         with pytest.raises(RuntimeError, match="milvus unreachable"):
             await store.vector_dimension(FIELD)
+
+    async def test_dimension_is_absent_before_collection_creation(self, store: MilvusVectorStore) -> None:
+        store._client.has_collection.return_value = False
+        store._client.describe_collection.side_effect = RuntimeError("collection does not exist")
+
+        assert await store.vector_dimension(FIELD) is None

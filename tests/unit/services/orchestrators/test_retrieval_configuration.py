@@ -316,3 +316,31 @@ async def test_resolved_snapshot_uses_global_reranker_for_legacy_preset():
     assert reranker["enabled"] is True
     assert reranker["name"] == "default"
     assert reranker["model"] == "legacy-reranker"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("has_factory", [False, True])
+async def test_static_reranker_model_changes_resolved_fingerprint(has_factory):
+    config = _config()
+    config.reranker.model_name = "reranker-a"
+    config.partitions = {"tenant-a": _partition(retrieval=RetrievalPipelineConfig(enable_reranker=True))}
+
+    def missing_catalog_endpoint(name):
+        raise KeyError(name)
+
+    service = RetrievalService(
+        searcher=_Searcher(),
+        reranker=object(),
+        llm=None,
+        config=config,
+        reranker_factory=missing_catalog_endpoint if has_factory else None,
+    )
+
+    prompt = SimpleNamespace(content_hash="context-hash", name=None, source="default")
+    first = await service.resolve_retrieval_plan(["tenant-a"], contextualizer_prompt=prompt, build_execution=False)
+    config.reranker.model_name = "reranker-b"
+    second = await service.resolve_retrieval_plan(["tenant-a"], contextualizer_prompt=prompt, build_execution=False)
+
+    assert first.public_configuration["partitions"][0]["reranker"]["model"] == "reranker-a"
+    assert second.public_configuration["partitions"][0]["reranker"]["model"] == "reranker-b"
+    assert first.configuration_fingerprint != second.configuration_fingerprint

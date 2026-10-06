@@ -302,7 +302,7 @@ class RetrievalService:
             reranker_name = getattr(retrieval, "reranker", None) or ("default" if reranker_enabled else None)
             reranker_endpoint = (
                 self._legacy_reranker_identity()
-                if partition is None
+                if partition is None or self._reranker_factory is None
                 else self._public_endpoint(self._config, "reranker", reranker_name)
             )
             related_limit = getattr(
@@ -511,10 +511,7 @@ class RetrievalService:
         the default, so "which reranker ran?" is answerable from the logs.
         """
         if self._reranker_factory is None:
-            return self._legacy_reranker, {
-                **self._public_endpoint(self._config, "reranker", "default"),
-                "name": "default" if self._legacy_reranker is not None else None,
-            }
+            return self._legacy_reranker, self._legacy_reranker_identity()
         if reranker_name:
             try:
                 reranker = self._reranker_factory(reranker_name)
@@ -540,10 +537,7 @@ class RetrievalService:
         logger.bind(partition=partition).debug(
             "Reranking with the static default reranker (no catalog default endpoint)"
         )
-        return self._legacy_reranker, {
-            **self._public_endpoint(self._config, "reranker", "default"),
-            "name": "default" if self._legacy_reranker is not None else None,
-        }
+        return self._legacy_reranker, self._legacy_reranker_identity()
 
     def _resolve_reranker(self, reranker_name: str | None, partition: str) -> Reranker | None:
         reranker, _identity = self._resolve_reranker_with_identity(reranker_name, partition)

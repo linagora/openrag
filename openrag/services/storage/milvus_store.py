@@ -1678,6 +1678,8 @@ class MilvusVectorStore(VectorStore):
             return None
 
         def _read() -> int | None:
+            if not self._client.has_collection(self._collection_name):
+                return None
             return _dense_fields(self._client.describe_collection(self._collection_name)).get(vector_field)
 
         return await asyncio.to_thread(_read)
