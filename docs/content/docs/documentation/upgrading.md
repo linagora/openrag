@@ -1015,20 +1015,29 @@ indexes are built. Turn that setting off for one compaction, then back on.
 Milvus reads it from etcd, under `<etcd.rootPath>/config/`, without a
 restart.
 
-Set these variables for your deployment:
+Set these variables, with the block for your deployment only: both set `RUN`,
+`ETCD` and `CONFIG`.
+
+With Docker Compose, from `infra/compose`:
 
 ```bash
-# Docker Compose, from infra/compose, with DC and SVC set as in the procedure above
+# bash; in zsh, see the note at the top of this page
+DC="docker compose"   # add -p <project>, your -f overlays, and --profile cpu on a CPU host
+SVC=openrag           # openrag-cpu on a CPU host
 RUN="$DC exec $SVC"
 ETCD="$DC exec -T etcd etcdctl"
+CONFIG=by-dev/config  # <Milvus's etcd.rootPath>/config; the root path is by-dev unless you changed it
+```
 
-# Kubernetes, with NS and FULLNAME set as in the procedure above;
-# `kubectl get pod -n "$NS" | grep etcd` lists the etcd pods Milvus uses
+On Kubernetes:
+
+```bash
+NS=openrag            # the release namespace
+FULLNAME=openrag      # fullnameOverride; `kubectl get deploy -n $NS` shows it as <FULLNAME>-openrag
+ETCD_POD=<etcd pod>   # one of the etcd pods Milvus uses; `kubectl get pod -n $NS | grep etcd` lists them
 RUN="kubectl exec -n $NS deploy/$FULLNAME-openrag --"
-ETCD="kubectl exec -n $NS <etcd pod> -- etcdctl"
-
-# Both: Milvus's etcd.rootPath, by-dev unless you changed it
-CONFIG=by-dev/config
+ETCD="kubectl exec -n $NS $ETCD_POD -- etcdctl"
+CONFIG=by-dev/config  # <Milvus's etcd.rootPath>/config; the root path is by-dev unless you changed it
 ```
 
 And this check, which reads the collection from OpenRAG's configuration:
@@ -1097,14 +1106,17 @@ for field in c.describe_collection(name)["fields"]:
            sys.exit(f"compaction: still executing after {TIMEOUT} s")
        return seconds
    job = c.compact(vdb.collection_name, timeout=left())
+   print("job", job, flush=True)
    while (state := c.get_compaction_state(job, timeout=left())) != "Completed":
        if state != "Executing":
            sys.exit(f"compaction {job}: unexpected state {state}")
+       print(state, flush=True)
        time.sleep(min(15, left()))
    print("done")
    '
    ```
 
+   It prints the job ID, then `Executing` every 15 seconds while the job runs.
    It prints `done` once Milvus reports the job `Completed`, and stops with an
    error on any state other than `Executing`, such as `UndefiedState`, or when
    the job, or a call to Milvus that does not answer, outlasts `TIMEOUT`. Go to
@@ -1136,7 +1148,9 @@ for field in c.describe_collection(name)["fields"]:
 
 Milvus deletes the old files from its object storage after
 `dataCoord.gc.dropTolerance`, 3 hours by default, so the disk space comes back a
-few hours later. Do not delete files from MinIO or the bucket yourself.
+few hours later. With Docker Compose, `$DC exec -T minio du -sh /minio_data`
+shows how much MinIO holds. Do not delete files from MinIO or the bucket
+yourself.
 
 On one deployment, this brought 291,628 physical rows down to 144,474 for
 144,683 live rows, with the index `Finished` and 0 pending.
