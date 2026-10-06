@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 from core.ports.document_repo import IndexedCorpusState
 from core.retrieval.trace import canonical_fingerprint
-from core.utils.exceptions import ServiceUnavailableError
+from core.utils.exceptions import PartitionNotFoundError, ServiceUnavailableError
 from services.orchestrators.retrieval_snapshot_service import RetrievalSnapshotService
 
 
@@ -316,6 +316,35 @@ async def test_snapshot_still_fails_when_partition_config_is_missing_after_refre
         await service.snapshot("legal-rag-bench")
 
     assert partitions.reload_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_snapshot_preserves_not_found_when_partition_is_not_loaded():
+    class MissingPartitions(_Partitions):
+        def __init__(self):
+            self.reload_calls = 0
+
+        async def get_partition_config(self, partition, *, strict_vector_dimension=False):
+            raise PartitionNotFoundError(f"Partition '{partition}' does not exist.")
+
+        async def load_partitions(self):
+            self.reload_calls += 1
+
+    class MissingRetrieval(_Retrieval):
+        def has_loaded_partition_retrieval_config(self, _partition):
+            return False
+
+    partitions = MissingPartitions()
+    service = RetrievalSnapshotService(
+        partition_service=partitions,
+        document_repo=_Documents(),
+        retrieval_service=MissingRetrieval(),
+    )
+
+    with pytest.raises(PartitionNotFoundError):
+        await service.snapshot("typo-partition")
+
+    assert partitions.reload_calls == 0
 
 
 @pytest.mark.asyncio

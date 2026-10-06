@@ -44,6 +44,7 @@ class RetrievalSnapshotService:
         self._commit = (commit if commit is not None else os.getenv("OPENRAG_COMMIT")) or None
 
     async def snapshot(self, partition: str, *, include_document_ids: bool = False) -> dict[str, object]:
+        detail = await self._partitions.get_partition_config(partition, strict_vector_dimension=True)
         has_loaded_config = getattr(self._retrieval, "has_loaded_partition_retrieval_config", None)
         if has_loaded_config is not None and not has_loaded_config(partition):
             refresh_partitions = getattr(self._partitions, "load_partitions", None)
@@ -60,7 +61,6 @@ class RetrievalSnapshotService:
                     f"Retrieval configuration for partition '{partition}' is not loaded; retry the snapshot request.",
                     code="PARTITION_RETRIEVAL_CONFIG_NOT_LOADED",
                 )
-        detail = await self._partitions.get_partition_config(partition, strict_vector_dimension=True)
         resolve_plan = getattr(self._retrieval, "resolve_retrieval_plan", None)
         if resolve_plan is not None:
             plan = await resolve_plan(
