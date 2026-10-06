@@ -20,7 +20,7 @@ from core.models.preset import PartitionConfig
 from core.models.query import Query, SearchQueries
 from core.retrieval.trace import RetrievalTraceBuilder
 from core.utils.consts import MAX_RERANK_CANDIDATES
-from core.utils.exceptions import PartitionNotFoundError, ValidationError
+from core.utils.exceptions import PartitionNotFoundError, ServiceUnavailableError
 from services.orchestrators.retrieval_service import RetrievalService
 
 
@@ -555,10 +555,10 @@ async def test_search_rerank_keeps_expansion_after_the_cut():
 @pytest.mark.asyncio
 async def test_search_rerank_without_reranker_is_rejected_before_searching():
     s = FakeSearcher()
-    with pytest.raises(ValidationError) as exc:
+    with pytest.raises(ServiceUnavailableError) as exc:
         await _svc(s).search(text="q", partitions=["p"], top_k=5, similarity_threshold=0.5, rerank=True)
 
-    assert exc.value.status_code == 400
+    assert exc.value.status_code == 503
     assert exc.value.code == "RERANKER_UNAVAILABLE"
     assert s.search_calls == []
 

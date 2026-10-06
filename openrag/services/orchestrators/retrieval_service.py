@@ -50,7 +50,7 @@ from core.retrieval.trace import (
     merge_query_traces,
 )
 from core.utils.consts import MAX_RERANK_CANDIDATES
-from core.utils.exceptions import PartitionNotFoundError, ValidationError
+from core.utils.exceptions import PartitionNotFoundError, ServiceUnavailableError
 from core.utils.logging import get_logger
 
 if TYPE_CHECKING:
@@ -939,9 +939,8 @@ class RetrievalService:
         pipeline_cfg = self._single_partition_retrieval_config(partitions)
         reranker = self._resolve_reranker(pipeline_cfg.reranker if pipeline_cfg else None, ",".join(partitions))
         if reranker is None:
-            raise ValidationError(
+            raise ServiceUnavailableError(
                 "Reranking was requested but no reranker is configured on this deployment.",
-                status_code=400,
                 code="RERANKER_UNAVAILABLE",
             )
         return reranker
