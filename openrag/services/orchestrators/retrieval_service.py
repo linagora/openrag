@@ -315,6 +315,10 @@ class RetrievalService:
                 "max_ancestor_depth",
                 self._legacy_retriever_value("max_ancestor_depth", None),
             )
+            # top_n as it applies: a preset that leaves it unset follows RERANKER_TOP_K.
+            top_n = getattr(retrieval, "top_n", None)
+            if top_n is None:
+                top_n = getattr(getattr(self._config, "reranker", None), "top_k", None)
             public_partitions.append(
                 {
                     "name": partition_name,
@@ -335,11 +339,7 @@ class RetrievalService:
                     "reranker": {
                         **reranker_endpoint,
                         "enabled": reranker_enabled,
-                        "top_n": getattr(
-                            retrieval,
-                            "top_n",
-                            getattr(getattr(self._config, "reranker", None), "top_k", None),
-                        ),
+                        "top_n": top_n,
                     },
                     "contextualizer": {
                         **contextualizer_endpoint,

@@ -129,6 +129,30 @@ def test_configuration_fingerprint_tracks_pipeline_settings(retrieval_type, sett
     assert service.configuration_fingerprint(["tenant-a"]) != first
 
 
+def test_public_configuration_reports_the_top_n_that_applies():
+    config = _config()
+    config.partitions = {
+        "tenant-a": _partition(name="tenant-a"),
+        "tenant-b": _partition(name="tenant-b", retrieval=RetrievalPipelineConfig(top_n=12)),
+    }
+    service = RetrievalService(searcher=_Searcher(), reranker=None, llm=None, config=config)
+
+    public = service.public_retrieval_configuration(["all"])
+
+    assert [partition["reranker"]["top_n"] for partition in public["partitions"]] == [5, 12]
+
+
+def test_configuration_fingerprint_tracks_global_top_n_when_preset_leaves_it_unset():
+    config = _config()
+    config.partitions = {"tenant-a": _partition()}
+    service = RetrievalService(searcher=_Searcher(), reranker=None, llm=None, config=config)
+
+    first = service.configuration_fingerprint(["tenant-a"])
+    config.reranker.top_k = 15
+
+    assert service.configuration_fingerprint(["tenant-a"]) != first
+
+
 def test_configuration_fingerprint_expands_all_partitions():
     config = _config()
     tenant_a = RetrievalPipelineConfig(rrf_k=42)
