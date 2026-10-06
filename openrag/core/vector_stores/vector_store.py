@@ -129,11 +129,12 @@ class VectorStore(ABC):
     async def vector_dimension(self, vector_field: str | None = None) -> int | None:
         """Dimension the live collection actually stores for ``vector_field``.
 
-        ``None`` when it cannot be established — no field given, nothing
-        indexed with it yet, or the backend can't be reached. Callers that need
-        a number to size buffers should pick their own fallback; callers that
-        *report* the dimension must pass the ``None`` through rather than
-        substitute a guess.
+        ``None`` when the field is absent or nothing has been indexed with it.
+        Backend errors propagate so callers can distinguish an unavailable
+        store from an actual missing field. Callers that need a number to size
+        buffers should pick their own fallback; callers that *report* the
+        dimension must pass a genuine ``None`` through rather than substitute
+        a guess.
         """
         ...
 

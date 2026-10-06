@@ -316,6 +316,24 @@ Search within a specific partition only.
 
 **Response:** Same as multi-partition search
 
+* Retrieval Snapshot
+```http
+GET /search/partition/{partition}/snapshot
+```
+
+Returns the public retrieval, model, and index identity needed to reproduce a benchmark run. The endpoint is
+administrator-only. Document identifiers are optional, bounded, and excluded from the snapshot fingerprint so compact
+and expanded snapshots remain comparable.
+
+**Query Parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `include_document_ids` (optional) | boolean | `false` | Include indexed document identifiers in the snapshot, up to 10,000 IDs. |
+
+When requested, `index.document_ids` contains at most 10,000 identifiers, `index.document_ids_limit` reports that limit,
+and `index.document_ids_truncated` indicates whether additional identifiers were omitted.
+
 * Search Within Specific File
 ```http
 GET /search/partition/{partition}/file/{file_id}

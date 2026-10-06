@@ -17,9 +17,10 @@ from api.dependencies.auth import (
     require_partitions_viewer,
 )
 from api.dependencies.files import validate_file_id
+from api.dependencies.retrieval_diagnostics import get_retrieval_diagnostics_guard
 from core.utils.filter_validation import validate_search_filter
 from core.utils.logging import get_logger
-from di.providers import get_retrieval_service, get_workspace_service
+from di.providers import get_retrieval_service, get_retrieval_snapshot_service, get_workspace_service
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import JSONResponse
 
@@ -86,6 +87,21 @@ def _documents(request: Request, chunks) -> list[dict]:
             }
         )
     return docs
+
+
+@router.get(
+    "/partition/{partition}/snapshot",
+    description="Return a bounded, content-free retrieval and index snapshot for benchmark reproducibility.",
+)
+async def retrieval_snapshot(
+    partition: str,
+    include_document_ids: bool = Query(False, description="Include the bounded set of indexed document identifiers"),
+    partition_viewer=Depends(require_partition_viewer),
+    service=Depends(get_retrieval_snapshot_service),
+    diagnostics_guard=Depends(get_retrieval_diagnostics_guard),
+):
+    await diagnostics_guard.authorize(partition_viewer)
+    return await service.snapshot(partition, include_document_ids=include_document_ids)
 
 
 @router.get(
