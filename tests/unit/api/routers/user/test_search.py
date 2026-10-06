@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 
+import pytest
 from api.dependencies.auth import (
     current_user,
     current_user_or_admin_partitions_list,
@@ -254,6 +255,7 @@ def test_search_one_partition_invalid_workspace_404s():
 
 def _rerank_client(retrieval):
     from api.dependencies.auth import require_partition_viewer
+    from api.dependencies.files import validate_file_id
     from api.routers.user.extract import router as extract_router
 
     app = FastAPI()
@@ -261,17 +263,19 @@ def _rerank_client(retrieval):
     app.include_router(search_router, prefix="/search")
     app.include_router(extract_router, prefix="/extract")
     app.dependency_overrides[require_partition_viewer] = lambda: None
+    app.dependency_overrides[validate_file_id] = lambda: "abc123"
     app.dependency_overrides[get_retrieval_service] = lambda: retrieval
     app.dependency_overrides[get_workspace_service] = lambda: object()
     return TestClient(app)
 
 
-def test_search_forwards_rerank_params_and_defaults_to_no_rerank():
+@pytest.mark.parametrize("path", ["/search/partition/mine", "/search/partition/mine/file/abc123"])
+def test_search_forwards_rerank_params_and_defaults_to_no_rerank(path):
     retrieval = _CapturingRetrieval()
     client = _rerank_client(retrieval)
 
-    client.get("/search/partition/mine", params={"text": "q"})
-    client.get("/search/partition/mine", params={"text": "q", "rerank": "true", "rerank_candidates": 40})
+    client.get(path, params={"text": "q"})
+    client.get(path, params={"text": "q", "rerank": "true", "rerank_candidates": 40})
 
     assert (retrieval.calls[0]["rerank"], retrieval.calls[0]["rerank_candidates"]) == (False, None)
     assert (retrieval.calls[1]["rerank"], retrieval.calls[1]["rerank_candidates"]) == (True, 40)
