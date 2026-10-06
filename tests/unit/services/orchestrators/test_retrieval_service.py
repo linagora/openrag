@@ -19,6 +19,7 @@ from core.models.chunk import Chunk
 from core.models.preset import PartitionConfig
 from core.models.query import Query, SearchQueries
 from core.retrieval.trace import RetrievalTraceBuilder
+from core.utils.consts import MAX_RERANK_CANDIDATES
 from core.utils.exceptions import PartitionNotFoundError, ValidationError
 from services.orchestrators.retrieval_service import RetrievalService
 
@@ -479,6 +480,28 @@ async def test_search_rerank_candidates_default_to_retriever_top_k_and_never_bel
     await svc.search(text="q", partitions=["p1"], top_k=40, similarity_threshold=0.5, rerank=True, rerank_candidates=10)
 
     assert [call["top_k"] for call in s.search_calls] == [6, 40]
+
+
+@pytest.mark.asyncio
+async def test_search_rerank_candidates_are_capped():
+    s = FakeSearcher()
+    svc = RetrievalService(searcher=s, reranker=ReversingReranker(), llm=None, config=_config(reranker_enabled=True))
+
+    # A direct caller bypasses the router's bound, and a top_k above the cap
+    # would otherwise raise the candidate count past it.
+    await svc.search(
+        text="q",
+        partitions=["p1"],
+        top_k=5,
+        similarity_threshold=0.5,
+        rerank=True,
+        rerank_candidates=MAX_RERANK_CANDIDATES + 1,
+    )
+    await svc.search(
+        text="q", partitions=["p1"], top_k=MAX_RERANK_CANDIDATES * 2, similarity_threshold=0.5, rerank=True
+    )
+
+    assert [call["top_k"] for call in s.search_calls] == [MAX_RERANK_CANDIDATES, MAX_RERANK_CANDIDATES]
 
 
 @pytest.mark.asyncio

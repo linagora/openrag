@@ -277,6 +277,19 @@ def test_search_forwards_rerank_params_and_defaults_to_no_rerank():
     assert (retrieval.calls[1]["rerank"], retrieval.calls[1]["rerank_candidates"]) == (True, 40)
 
 
+def test_search_rejects_rerank_candidates_above_the_cap():
+    from core.utils.consts import MAX_RERANK_CANDIDATES
+
+    retrieval = _CapturingRetrieval()
+    resp = _rerank_client(retrieval).get(
+        "/search/partition/mine",
+        params={"text": "q", "rerank": "true", "rerank_candidates": MAX_RERANK_CANDIDATES + 1},
+    )
+
+    assert resp.status_code == 422
+    assert retrieval.calls == []
+
+
 def test_search_returns_rerank_score_beside_metadata():
     from core.models.chunk import Chunk
     from core.models.retrieval_result import ScoredChunk

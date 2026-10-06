@@ -49,6 +49,7 @@ from core.retrieval.trace import (
     merge_child_traces,
     merge_query_traces,
 )
+from core.utils.consts import MAX_RERANK_CANDIDATES
 from core.utils.exceptions import PartitionNotFoundError, ValidationError
 from core.utils.logging import get_logger
 
@@ -984,15 +985,20 @@ class RetrievalService:
         of ``top_k``, the reranker reorders them, and only the best ``top_k``
         are kept (as ``ScoredChunk``s carrying ``rerank_score``). Surrounding
         chunks are not fetched on that path, so the reranker scores exactly the
-        candidates asked for and ``top_k`` is an exact cap. Related and ancestor
-        chunks are still appended after the cut, unscored.
+        candidates asked for and ``top_k`` is an exact cap. The candidate count
+        is clamped to ``MAX_RERANK_CANDIDATES``, so a ``top_k`` above it returns
+        at most that many reranked chunks. Related and ancestor chunks are still
+        appended after the cut, unscored, so they can take the result past
+        ``top_k``.
         """
         await self.refresh_partition_configs()
         parts = [partitions] if isinstance(partitions, str) else list(partitions)
         reranker = self._search_reranker(parts) if rerank else None
         candidates = top_k
         if reranker is not None:
-            candidates = max(top_k, rerank_candidates or self._search_rerank_candidates(parts))
+            candidates = min(
+                max(top_k, rerank_candidates or self._search_rerank_candidates(parts)), MAX_RERANK_CANDIDATES
+            )
         if trace is not None:
             trace.record_stage("original_query", status="complete", candidates=[])
         groups = self._search_groups(parts)

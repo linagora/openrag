@@ -25,7 +25,7 @@ from core.retrieval.trace import (
     RetrievalTraceBuilder,
     canonical_fingerprint,
 )
-from core.utils.consts import RETRIEVAL_SCORE_KEYS
+from core.utils.consts import MAX_RERANK_CANDIDATES, RETRIEVAL_SCORE_KEYS
 from core.utils.filter_validation import validate_search_filter
 from core.utils.logging import get_logger
 from di.providers import (
@@ -80,8 +80,10 @@ class CommonSearchParams:
         rerank_candidates: int | None = Query(
             None,
             ge=1,
+            le=MAX_RERANK_CANDIDATES,
             description="Number of vector search candidates sent to the reranker (only with `rerank=true`). "
-            "Defaults to the partition's retrieval `top_k`; never lower than `top_k`.",
+            "Defaults to the partition's retrieval `top_k`; never lower than `top_k`, never above "
+            f"{MAX_RERANK_CANDIDATES}.",
         ),
         include_retrieval_trace: bool = Query(
             False,
@@ -235,8 +237,8 @@ async def retrieval_snapshot(
 - `text`: Search query text (required)
 - `top_k`: Number of results to return (default: 5)
 - similarity_threshold: Minimum similarity score for results (0 to 1, default: 0.75)
-- `rerank`: Rerank the vector search candidates with the partition's reranker and return the best `top_k` (default: false). Each reranked document carries a `rerank_score`; its scale depends on the reranker, compare it within one response only.
-- `rerank_candidates`: Number of candidates fetched from the vector search and sent to the reranker (default: the partition's retrieval `top_k`). Only used with `rerank=true`.
+- `rerank`: Rerank the vector search candidates with the partition's reranker and return the best `top_k` (default: false). Each reranked document carries a `rerank_score`; its scale depends on the reranker, compare it within one response only. Related and ancestor chunks are appended after the reranked `top_k`, without a score.
+- `rerank_candidates`: Number of candidates fetched from the vector search and sent to the reranker (default: the partition's retrieval `top_k`, at most 1000). Only used with `rerank=true`.
 - `include_related`: Include chunks from files with same relationship_id (default: false)
 - `include_ancestors`: Include chunks from ancestor files in hierarchy (default: false)
 - `related_limit`: Maximum number of related/ancestor chunks to fetch per result (default: 20). This is used when `include_related` or `include_ancestors` is true.
@@ -357,8 +359,8 @@ async def search_multiple_partitions(
 - `text`: Search query text (required)
 - `top_k`: Number of results to return (default: 5)
 - similarity_threshold: Minimum similarity score for results (0 to 1, default: 0.75)
-- `rerank`: Rerank the vector search candidates with the partition's reranker and return the best `top_k` (default: false). Each reranked document carries a `rerank_score`; its scale depends on the reranker, compare it within one response only.
-- `rerank_candidates`: Number of candidates fetched from the vector search and sent to the reranker (default: the partition's retrieval `top_k`). Only used with `rerank=true`.
+- `rerank`: Rerank the vector search candidates with the partition's reranker and return the best `top_k` (default: false). Each reranked document carries a `rerank_score`; its scale depends on the reranker, compare it within one response only. Related and ancestor chunks are appended after the reranked `top_k`, without a score.
+- `rerank_candidates`: Number of candidates fetched from the vector search and sent to the reranker (default: the partition's retrieval `top_k`, at most 1000). Only used with `rerank=true`.
 - `include_related`: Include chunks from files with same relationship_id (default: false)
 - `include_ancestors`: Include chunks from ancestor files in hierarchy (default: false)
 - `related_limit`: Maximum number of related/ancestor chunks to fetch per result (default: 20). This is used when `include_related` or `include_ancestors` is true.
@@ -459,7 +461,7 @@ async def search_one_partition(
 - `top_k`: Number of results to return (default: 5)
 - similarity_threshold: Minimum similarity score for results (0 to 1, default: 0.75)
 - `rerank`: Rerank the vector search candidates with the partition's reranker and return the best `top_k` (default: false). Each reranked document carries a `rerank_score`; its scale depends on the reranker, compare it within one response only.
-- `rerank_candidates`: Number of candidates fetched from the vector search and sent to the reranker (default: the partition's retrieval `top_k`). Only used with `rerank=true`.
+- `rerank_candidates`: Number of candidates fetched from the vector search and sent to the reranker (default: the partition's retrieval `top_k`, at most 1000). Only used with `rerank=true`.
 - `filter`: Milvus filter expression string for additional filtering (optional)
     Milvus supports the following operators:
     - Comparison: ==, !=, >, <, >=, <=
