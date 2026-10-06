@@ -622,14 +622,15 @@ class RetrievalService:
             k_queries=self._legacy_retriever_value("k_queries", 3),
             combine=self._legacy_retriever_value("combine", False),
         )
+        top_n = pipeline_cfg.effective_top_n(self._config.reranker.top_k)
         pipeline = RetrieverPipeline(
             retriever=retriever,
             reranker=reranker,
-            reranker_top_k=pipeline_cfg.top_n,
+            reranker_top_k=top_n,
             allow_filterless_fallback=self._legacy_retriever_value("allow_filterless_fallback", True),
             rrf_k=pipeline_cfg.rrf_k,
         )
-        return pipeline, pipeline_cfg.top_n, prompt_identity, reranker_identity
+        return pipeline, top_n, prompt_identity, reranker_identity
 
     @staticmethod
     def _legacy_query_expansion_prompt_identity(pipeline: RetrieverPipeline) -> dict[str, str | None] | None:
