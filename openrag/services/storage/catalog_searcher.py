@@ -109,6 +109,22 @@ class CatalogSearcher(RetrievalSearcher):
             await self._searcher.get_surrounding_chunks(chunks=chunks, allowed_file_ids=allowed_file_ids)
         )
 
+    async def get_csv_row_chunks(
+        self,
+        partition: str,
+        file_id: str,
+        row_number: int,
+        allowed_file_ids: list[str] | None = None,
+    ) -> list[Chunk]:
+        return await self._filter(
+            await self._searcher.get_csv_row_chunks(
+                partition=partition,
+                file_id=file_id,
+                row_number=row_number,
+                allowed_file_ids=allowed_file_ids,
+            )
+        )
+
     async def get_related_chunks(
         self,
         partition: str,

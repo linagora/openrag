@@ -90,6 +90,22 @@ class RetrievalSearcher(ABC):
         ...
 
     @abstractmethod
+    async def get_csv_row_chunks(
+        self,
+        partition: str,
+        file_id: str,
+        row_number: int,
+        allowed_file_ids: list[str] | None = None,
+    ) -> list[Chunk]:
+        """Fetch every continuation chunk for one logical CSV row.
+
+        ``row_number`` is the CSV record number (including its header offset),
+        not a chunk index. ``allowed_file_ids`` keeps expansion inside the same
+        workspace scope as the original vector search.
+        """
+        ...
+
+    @abstractmethod
     async def get_related_chunks(
         self,
         partition: str,

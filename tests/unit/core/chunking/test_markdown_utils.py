@@ -9,6 +9,7 @@ from __future__ import annotations
 import pytest
 from core.chunking.markdown_utils import (
     MDElement,
+    _split_to_budget,
     chunk_table,
     get_chunk_page_number,
     parse_markdown_table,
@@ -227,6 +228,147 @@ class TestChunkTable:
         # The earlier rows of g1 must NOT appear in the second chunk.
         assert "first" not in second_chunk
         assert "second" not in second_chunk
+
+    def test_csv_rows_are_packed_whole_with_a_header_in_every_chunk(self):
+        table = (
+            "| id | name | note |\n"
+            "| --- | --- | --- |\n"
+            "| 001 | Ali | short note |\n"
+            "| 002 | Bob | another short note |\n"
+            "| 003 | Cam | final short note |"
+        )
+        chunks = chunk_table(
+            MDElement(
+                type="table",
+                content=table,
+                metadata={"csv_columns": ["id", "name", "note"], "csv_row_start": 2},
+            ),
+            chunk_size=24,
+            length_function=lambda text: len(text.split()),
+        )
+
+        assert len(chunks) == 3
+        for row_number, chunk in enumerate(chunks, start=2):
+            assert chunk.content.splitlines()[:2] == table.splitlines()[:2]
+            assert chunk.metadata["csv_row_start"] == row_number
+            assert chunk.metadata["csv_row_end"] == row_number
+        assert "001" in chunks[0].content
+        assert "002" in chunks[1].content
+        assert "003" in chunks[2].content
+
+    def test_csv_long_cell_becomes_labelled_continuation_rows(self):
+        long_note = " ".join(f"word{number}" for number in range(45))
+        table = f"| id | name | note |\n| --- | --- | --- |\n| 024 | Theo | {long_note} |"
+        chunks = chunk_table(
+            MDElement(
+                type="table",
+                content=table,
+                metadata={"csv_columns": ["id", "name", "note"], "csv_row_start": 24},
+            ),
+            chunk_size=40,
+            length_function=lambda text: len(text.split()),
+        )
+
+        assert len(chunks) > 1
+        reconstructed = []
+        for part_number, chunk in enumerate(chunks, start=1):
+            assert "| id | name | note |" in chunk.content
+            assert "| 024 | Theo |" in chunk.content
+            assert f"[CSV row 24; note continuation {part_number}/{len(chunks)}]" in chunk.content
+            assert chunk.metadata["csv_row_number"] == 24
+            assert chunk.metadata["csv_column"] == "note"
+            assert chunk.metadata["csv_part"] == part_number
+            assert chunk.metadata["csv_parts_total"] == len(chunks)
+            reconstructed.append(chunk.content.split("] ", 1)[1].rsplit(" |", 1)[0])
+        assert "".join(reconstructed) == long_note
+
+    def test_csv_wide_row_is_grouped_by_columns_without_losing_values(self):
+        columns = ["person_id", "legal_name", *(f"fact_{number}" for number in range(1, 9))]
+        values = ["P-001", "Ari", *(f"value_{number}" for number in range(1, 9))]
+
+        def markdown_row(cells):
+            return "| " + " | ".join(cells) + " |"
+
+        def table_cells(row):
+            return [cell.strip() for cell in row.strip().split("|")[1:-1]]
+
+        table = "\n".join(
+            [
+                markdown_row(columns),
+                markdown_row(["---"] * len(columns)),
+                markdown_row(values),
+            ]
+        )
+
+        chunks = chunk_table(
+            MDElement(
+                type="table",
+                content=table,
+                metadata={"csv_columns": columns, "csv_row_start": 7},
+            ),
+            chunk_size=35,
+            length_function=lambda text: len(text.split()),
+        )
+
+        assert len(chunks) == 3
+        recovered: dict[str, str] = {}
+        for group_number, chunk in enumerate(chunks, start=1):
+            header, _, data = chunk.content.splitlines()
+            group_columns = table_cells(header)
+            group_values = table_cells(data)
+            assert group_columns[:2] == ["person_id", "legal_name"]
+            assert group_values[:2] == ["P-001", "Ari"]
+            assert chunk.metadata["csv_row_number"] == 7
+            assert chunk.metadata["csv_column_group"] == group_number
+            assert chunk.metadata["csv_column_groups_total"] == len(chunks)
+            assert chunk.metadata["csv_columns"] == group_columns
+            assert chunk.metadata["csv_source_columns"] == columns
+            assert len(chunk.content.split()) <= 35
+            recovered.update(dict(zip(group_columns[2:], group_values[2:], strict=True)))
+
+        assert recovered == dict(zip(columns[2:], values[2:], strict=True))
+
+    def test_csv_identity_only_wide_row_falls_back_to_cell_continuations(self):
+        values = [" ".join(["identifier"] * 20), " ".join(["display-name"] * 20)]
+        table = "\n".join(
+            [
+                "| id | name |",
+                "| --- | --- |",
+                f"| {values[0]} | {values[1]} |",
+            ]
+        )
+
+        chunks = chunk_table(
+            MDElement(
+                type="table",
+                content=table,
+                metadata={"csv_columns": ["id", "name"], "csv_row_start": 2},
+            ),
+            chunk_size=20,
+            length_function=lambda text: len(text.split()),
+        )
+
+        assert chunks
+        assert all(chunk.metadata["csv_row_number"] == 2 for chunk in chunks)
+        assert values[1] in chunks[0].content
+        reconstructed = [chunk.content.split("] ", 1)[1].split(" |", 1)[0] for chunk in chunks]
+        assert "".join(reconstructed) == values[0]
+
+
+def test_split_to_budget_uses_logarithmic_whitespace_probes():
+    text = " ".join(f"word{number}" for number in range(2_000))
+    calls = 0
+
+    def counted_length(value: str) -> int:
+        nonlocal calls
+        calls += 1
+        return len(value.split())
+
+    pieces = _split_to_budget(text, budget=1_000, length_function=counted_length)
+
+    assert "".join(pieces) == text
+    assert all(len(piece.split()) <= 1_000 for piece in pieces)
+    assert calls < 100
 
 
 def test_md_element_repr_truncates_content():

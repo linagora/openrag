@@ -20,6 +20,7 @@ from pydantic import BaseModel, Field
 class DocumentType(str, Enum):
     PDF = "pdf"
     TEXT = "text"
+    CSV = "csv"
     HTML = "html"
     MARKDOWN = "markdown"
     IMAGE = "image"
@@ -123,6 +124,7 @@ class Document(BaseModel):
         mapping = {
             "pdf": DocumentType.PDF,
             "txt": DocumentType.TEXT,
+            "csv": DocumentType.CSV,
             "md": DocumentType.MARKDOWN,
             "html": DocumentType.HTML,
             "htm": DocumentType.HTML,
