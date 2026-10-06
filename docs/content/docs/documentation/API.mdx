@@ -290,6 +290,8 @@ Perform semantic search across specified partitions.
 | `include_related` (optional)   | boolean | `false`   | Include chunks from files with same `relationship_id` |
 | `include_ancestors` (optional) | boolean | `false`   | Include chunks from ancestor files (via `parent_id` chain) |
 | `related_limit` (optional)     | integer | 20      | Max related/ancestor chunks to fetch per result (used when `include_related` or `include_ancestors` is true) |
+| `rerank` (optional)            | boolean | `false`   | Rerank the vector search candidates and return the best `top_k`. See [reranking](#reranking-search-results) |
+| `rerank_candidates` (optional) | integer | partition's retrieval `top_k` | Candidates fetched from the vector search and sent to the reranker, only with `rerank=true`. Never lower than `top_k`, at most 1000 |
 | `filter` (optional)            | string  | None    | Milvus filter expression string for additional filtering. Supports comparison (`==`, `!=`, `>`, `<`, `>=`, `<=`), range (`IN`, `LIKE`), and logical (`AND`, `OR`, `NOT`) operators. |
 | `include_retrieval_trace` (optional) | boolean | `false` | Add content-free retrieval diagnostics for administrators. This may execute additional search work. |
 
@@ -313,6 +315,8 @@ Search within a specific partition only.
 | `include_related` (optional)   | boolean | `false`   | Include chunks from files with same `relationship_id` |
 | `include_ancestors` (optional) | boolean | `false`   | Include chunks from ancestor files (via `parent_id` chain) |
 | `related_limit` (optional)     | integer | 20      | Max related/ancestor chunks to fetch per result (used when `include_related` or `include_ancestors` is true) |
+| `rerank` (optional)            | boolean | `false`   | Rerank the vector search candidates and return the best `top_k`. See [reranking](#reranking-search-results) |
+| `rerank_candidates` (optional) | integer | partition's retrieval `top_k` | Candidates fetched from the vector search and sent to the reranker, only with `rerank=true`. Never lower than `top_k`, at most 1000 |
 | `filter` (optional)            | string  | None    | Milvus filter expression string for additional filtering. Supports comparison (`==`, `!=`, `>`, `<`, `>=`, `<=`), range (`IN`, `LIKE`), and logical (`AND`, `OR`, `NOT`) operators. |
 | `include_retrieval_trace` (optional) | boolean | `false` | Add content-free retrieval diagnostics for administrators. This may execute additional search work. |
 
@@ -349,6 +353,28 @@ Search within a particular file in a partition.
 
 **Query Parameters:** Same as partition search, including `filter`.
 **Response:** Same as other search endpoints
+
+#### Reranking search results
+
+With `rerank=true`, each search fetches `rerank_candidates` chunks instead of `top_k`, the reranker reorders them, and only the best `top_k` are returned, best first.
+
+- `rerank_candidates` defaults to the partition's retrieval preset `top_k` (`retriever.top_k` for a search over several partitions). It is raised to `top_k` when lower, and the candidate count never goes above 1000: a `top_k` above 1000 returns at most 1000 reranked documents.
+- A single-partition search uses that partition's reranker preset. A search over several partitions reranks all candidates as one list with the default reranker. The preset's `enable_reranker` only governs the chat pipeline: an explicit `rerank=true` still reranks.
+- Each reranked document carries a `rerank_score` beside `metadata`. Its scale depends on the reranker, so compare it within one response only and don't threshold on an absolute value.
+- Surrounding chunks are not added on this path. Related and ancestor chunks (`include_related`, `include_ancestors`) are appended after the reranked `top_k`, without a `rerank_score`, so the response can hold more than `top_k` documents.
+
+```json title="A reranked document"
+{
+  "link": "https://host/extract/<chunk id>",
+  "metadata": { "file_id": "report.pdf", "page": 3 },
+  "content": "...",
+  "rerank_score": 0.87
+}
+```
+
+**Responses:**
+- `422 Unprocessable Entity`: `rerank_candidates` below 1 or above 1000
+- `503 Service Unavailable`, code `RERANKER_UNAVAILABLE`: reranking was requested but the deployment has no reranker configured
 
 ---
 
