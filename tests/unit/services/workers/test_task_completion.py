@@ -503,6 +503,22 @@ async def test_settled_task_is_written_to_the_job_history() -> None:
 
 
 @pytest.mark.asyncio
+async def test_settled_job_copies_stage_timings_from_task_details() -> None:
+    timings = {"parse": 0.25, "chunk": 0.5, "embed": 1.0, "store": 0.75}
+    repo = _FakeJobRepo()
+    tsm = _task_state_manager(state="COMPLETED")
+
+    with patch("services.workers.task_completion.ray.get_actor", return_value=tsm):
+        tracker = _tracker_with_repo(repo)
+        await tracker._record_settled_job(
+            "task-1",
+            {"partition": "tenant-a", "stage_timings": timings},
+        )
+
+    assert repo.saved[0].stage_timings == timings
+
+
+@pytest.mark.asyncio
 async def test_failed_task_reason_is_written_to_job_history() -> None:
     repo = _FakeJobRepo()
     tsm = _task_state_manager(state="FAILED")

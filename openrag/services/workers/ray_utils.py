@@ -37,11 +37,27 @@ logger = get_logger()
 __all__ = [
     "call_ray_actor_method_with_timeout",
     "call_ray_actor_with_timeout",
+    "get_ray_actor_method",
     "retry_idempotent_ray_actor_method",
     "retry_with_backoff",
     "with_retry",
     "with_timeout",
 ]
+
+
+def get_ray_actor_method(actor: Any, name: str) -> Any | None:
+    """Return an available actor method, using method names only as a hint.
+
+    Some Ray ActorHandle versions expose ``_ray_actor_method_names`` and
+    others do not. When the list is available it can reject methods missing
+    from a retained older actor; otherwise ``getattr`` is the compatibility
+    check.
+    """
+    method_names = getattr(actor, "_ray_actor_method_names", None)
+    if isinstance(method_names, (frozenset, list, set, tuple)) and name not in method_names:
+        return None
+    method = getattr(actor, name, None)
+    return method if callable(getattr(method, "remote", None)) else None
 
 
 def _actor_unavailable(task_description: str, exc: BaseException) -> ServiceUnavailableError:

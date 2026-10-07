@@ -89,6 +89,64 @@ async def test_failure_reason_settles_atomically_with_traceback() -> None:
 
 
 @pytest.mark.asyncio
+async def test_complete_with_stage_timings_persists_details() -> None:
+    manager = _task_state_manager()
+    await manager.set_queued_details("task-1", file_id="f1", partition="p", metadata={}, user_id=7)
+    timings = {"parse": 0.25, "chunk": 0.5, "embed": 1.0, "store": 0.75}
+
+    outcome = await manager.complete_with_degraded_stages_and_timings("task-1", [], timings)
+
+    assert outcome == "completed"
+    assert (await manager.get_details("task-1"))["stage_timings"] == timings
+
+
+@pytest.mark.asyncio
+async def test_stage_timings_ignore_invalid_values() -> None:
+    manager = _task_state_manager()
+    await manager.set_queued_details("task-1", file_id="f1", partition="p", metadata={}, user_id=7)
+    timings = {
+        "parse": 0.25,
+        "chunk": -0.5,
+        "embed": float("nan"),
+        "store": float("inf"),
+        "caption": True,
+        "topic_tag": 10**10000,
+        "unknown": 1.0,
+    }
+
+    await manager.complete_with_degraded_stages_and_timings("task-1", [], timings)
+
+    assert (await manager.get_details("task-1"))["stage_timings"] == {"parse": 0.25}
+
+
+@pytest.mark.asyncio
+async def test_fail_with_stage_timings_persists_partial_details() -> None:
+    manager = _task_state_manager()
+    await manager.set_queued_details("task-1", file_id="f1", partition="p", metadata={}, user_id=7)
+    timings = {"parse": 0.25, "chunk": 0.5}
+
+    accepted = await manager.set_failed_with_reason_and_stage_timings_if_not_cancelled(
+        "task-1", "traceback", "RuntimeError: chunk failed", timings
+    )
+
+    assert accepted is True
+    assert await manager.get_state("task-1") == "FAILED"
+    assert (await manager.get_details("task-1"))["stage_timings"] == timings
+
+
+@pytest.mark.asyncio
+async def test_refreshing_task_details_preserves_stage_timings() -> None:
+    manager = _task_state_manager()
+    await manager.set_queued_details("task-1", file_id="f1", partition="p", metadata={}, user_id=7)
+    timings = {"parse": 0.25, "chunk": 0.5}
+    await manager.complete_with_degraded_stages_and_timings("task-1", [], timings)
+
+    await manager.set_details("task-1", file_id="f1", partition="p", metadata={"finished": True}, user_id=7)
+
+    assert (await manager.get_details("task-1"))["stage_timings"] == timings
+
+
+@pytest.mark.asyncio
 async def test_failure_reason_does_not_overwrite_cancellation() -> None:
     manager = _task_state_manager()
     await manager.set_state("task-1", "QUEUED")

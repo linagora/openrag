@@ -23,6 +23,7 @@ from core.models.catalog import (
     TASK_FINISHED_AT_METADATA_KEY,
     TERMINAL_TASK_STATES,
     normalize_degraded_stages,
+    normalize_stage_timings,
     reconcile_task_state,
 )
 from core.utils.error_summary import summarize_task_error
@@ -367,17 +368,21 @@ def _job_to_info(job: Any) -> dict[str, Any]:
     created_at = job.created_at.isoformat() if job.created_at else None
     completed_at = job.completed_at.isoformat() if job.completed_at else None
     state = job.status.value
+    details = {
+        "file_id": job.file_id,
+        "partition": job.partition,
+        "metadata": {"filename": job.filename} if job.filename else {},
+        "user_id": job.user_id,
+        "degraded_stages": job.degraded_stages,
+    }
+    stage_timings = normalize_stage_timings(getattr(job, "stage_timings", None))
+    if stage_timings:
+        details["stage_timings"] = stage_timings
     return {
         "state": state,
         "error": job.error,
         "error_reason": job.error_reason,
-        "details": {
-            "file_id": job.file_id,
-            "partition": job.partition,
-            "metadata": {"filename": job.filename} if job.filename else {},
-            "user_id": job.user_id,
-            "degraded_stages": job.degraded_stages,
-        },
+        "details": details,
         "created_at": created_at,
         "duration_ms": _duration_ms(created_at, completed_at, state=state, now=datetime.now(UTC)),
     }
@@ -406,6 +411,8 @@ def _merge_durable_task_info(actor_info: dict[str, Any], durable_info: dict[str,
     details = {**actor_details, **durable_details}
     if actor_terminal_wins and "degraded_stages" in actor_details:
         details["degraded_stages"] = actor_details["degraded_stages"]
+    if durable_details.get("stage_timings") is None and "stage_timings" in actor_details:
+        details["stage_timings"] = actor_details["stage_timings"]
     actor_metadata = actor_details.get("metadata")
     durable_metadata = durable_details.get("metadata")
     if isinstance(actor_metadata, dict) or isinstance(durable_metadata, dict):
@@ -439,6 +446,12 @@ def _task_details(details: Any) -> tuple[dict[str, Any], Any, Any]:
     public_details = dict(details) if isinstance(details, dict) else {}
     if "degraded_stages" in public_details:
         public_details["degraded_stages"] = normalize_degraded_stages(public_details["degraded_stages"])
+    if "stage_timings" in public_details:
+        stage_timings = normalize_stage_timings(public_details["stage_timings"])
+        if stage_timings:
+            public_details["stage_timings"] = stage_timings
+        else:
+            public_details.pop("stage_timings")
     raw_metadata = public_details.get("metadata")
     if not isinstance(raw_metadata, dict):
         return public_details, None, None

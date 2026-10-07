@@ -12,6 +12,7 @@ from core.embeddings.embedder import Embedder
 from core.indexing.contextualize import ChunkContextualizer
 from core.indexing.parsers.document_parser import DocumentParser
 from core.indexing.topic_tags import TopicTagger
+from core.models.catalog import normalize_stage_timings
 from core.models.document import Document, DocumentType
 from core.observability.ray_metrics import observe_stage_duration
 from core.utils.exceptions import PipelineError
@@ -350,6 +351,9 @@ class IndexingPipeline:
                     await self._delete_replaced_chunks(row, old_chunk_ids)
             return row
         finally:
+            stage_timings = normalize_stage_timings({name: value / 1000.0 for name, value in timings.items()})
+            if stage_timings:
+                row["stage_timings"] = stage_timings
             logger.bind(
                 task_id=row.get("task_id"),
                 filename=row.get("filename", ""),
