@@ -738,6 +738,11 @@ async def test_a_swap_another_process_runs_is_left_to_it(monkeypatch):
     assert repo.swap["status"] == "running"
 
 
+async def _shutdown(service: EmbedderSwapService) -> None:
+    # Fails instead of hanging if the watcher is no longer cancelled.
+    await asyncio.wait_for(service.shutdown(), timeout=5)
+
+
 async def _until(condition, rounds: int = 200) -> None:
     for _ in range(rounds):
         if condition():
@@ -761,7 +766,7 @@ async def test_a_swap_another_process_lets_go_of_is_claimed_on_a_later_round(mon
     await _until(lambda: repo.swap["status"] == "completed")
 
     assert repo.swap["status"] == "completed"
-    await service.shutdown()
+    await _shutdown(service)
 
 
 async def test_a_failed_check_does_not_stop_the_watch(monkeypatch):
@@ -783,7 +788,7 @@ async def test_a_failed_check_does_not_stop_the_watch(monkeypatch):
 
     assert failures == ["running"]
     assert repo.swap["status"] == "completed"
-    await service.shutdown()
+    await _shutdown(service)
 
 
 async def test_shutdown_stops_the_watch_before_the_jobs(monkeypatch):
@@ -792,7 +797,7 @@ async def test_shutdown_stops_the_watch_before_the_jobs(monkeypatch):
     await service.watch()
     watcher = service._watcher
 
-    await service.shutdown()
+    await _shutdown(service)
 
     assert watcher.cancelled()
     assert service._watcher is None
@@ -824,6 +829,6 @@ async def test_shutdown_stops_jobs_without_ending_their_swaps(monkeypatch):
     await service.start("p1", "bge-m3")
     await asyncio.sleep(0)
 
-    await service.shutdown()
+    await _shutdown(service)
 
     assert parts["repo"].swap["status"] == "running"
