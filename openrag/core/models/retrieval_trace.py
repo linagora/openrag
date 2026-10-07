@@ -1,4 +1,9 @@
-"""Typed public contract for retrieval trace schema version 1."""
+"""Typed contract for bounded, in-band retrieval diagnostics responses.
+
+This versioned snapshot lets an authorized caller inspect one retrieval without
+requiring a telemetry backend. Any future telemetry exporter should adapt the
+diagnostic data separately from this response contract.
+"""
 
 from __future__ import annotations
 
@@ -21,6 +26,18 @@ TraceStageName = Literal[
     "post_rerank",
     "final",
 ]
+TraceTimingName = (
+    TraceStageName
+    | Literal[
+        "contextualization",
+        "embedding",
+        "dense_search",
+        "sparse_search",
+        "fusion",
+        "reranking",
+        "total",
+    ]
+)
 TraceStatus = Literal["complete", "not_run", "unavailable", "error"]
 TraceScoreName = Literal["dense", "sparse", "fused", "reranker"]
 RemovalReasonCode = Literal[
@@ -96,9 +113,32 @@ class QueryRetrievalTrace(_TraceModel):
     partition: str | None = None
     attempt: Literal["temporal_filter", "filterless_fallback"] | None = None
     stages: list[TraceStage] = Field(default_factory=list)
-    timings: dict[str, float] = Field(default_factory=dict)
+    timings: dict[TraceTimingName, float] = Field(default_factory=dict)
     errors: list[TraceError] = Field(default_factory=list)
     query_traces: list[QueryRetrievalTrace] = Field(default_factory=list)
+
+
+class TraceComparison(_TraceModel):
+    """One isolated retrieval result compared with the primary trace."""
+
+    status: TraceStatus | None = None
+    stages: list[TraceStage] = Field(default_factory=list)
+    timings: dict[TraceTimingName, float] = Field(default_factory=dict)
+    errors: list[TraceError] = Field(default_factory=list)
+    query_traces: list[QueryRetrievalTrace] = Field(default_factory=list)
+    configuration_fingerprint: str | None = None
+    candidate_limit: int | None = None
+    candidates_truncated: bool | None = None
+    query_trace_limit: int | None = None
+    query_traces_truncated: bool | None = None
+    trace_truncated: bool | None = None
+    serialized_size_limit: int | None = None
+
+
+class TraceComparisons(_TraceModel):
+    """Named comparison traces included in one diagnostics response."""
+
+    original_query: TraceComparison | None = None
 
 
 class TemporalFilterTrace(_TraceModel):
@@ -136,3 +176,24 @@ class ContextualizationTrace(_TraceModel):
     duration_seconds: float | None = Field(default=None, ge=0)
     model: str | None = None
     prompt: PromptTrace | None = None
+
+
+class RetrievalTraceV1(_TraceModel):
+    """Version 1 response envelope for bounded retrieval diagnostics."""
+
+    schema_version: Literal[1]
+    request_id: str
+    original_query: str | None
+    contextualization: ContextualizationTrace | None
+    stages: list[TraceStage]
+    timings: dict[TraceTimingName, float]
+    comparisons: TraceComparisons
+    errors: list[TraceError]
+    configuration_fingerprint: str
+    query_traces: list[QueryRetrievalTrace] = Field(default_factory=list)
+    candidate_limit: int | None = None
+    candidates_truncated: bool | None = None
+    query_trace_limit: int | None = None
+    query_traces_truncated: bool | None = None
+    trace_truncated: bool | None = None
+    serialized_size_limit: int | None = None

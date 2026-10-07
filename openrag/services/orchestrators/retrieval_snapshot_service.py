@@ -8,6 +8,7 @@ from importlib.metadata import version as package_version
 from typing import TYPE_CHECKING, Any
 
 from core.retrieval.trace import canonical_fingerprint
+from core.utils.exceptions import ServiceUnavailableError
 
 MAX_SNAPSHOT_DOCUMENT_IDS = 10_000
 
@@ -43,10 +44,30 @@ class RetrievalSnapshotService:
         self._commit = (commit if commit is not None else os.getenv("OPENRAG_COMMIT")) or None
 
     async def snapshot(self, partition: str, *, include_document_ids: bool = False) -> dict[str, object]:
-        detail = await self._partitions.get_partition_config(partition)
+        detail = await self._partitions.get_partition_config(partition, strict_vector_dimension=True)
+        has_loaded_config = getattr(self._retrieval, "has_loaded_partition_retrieval_config", None)
+        if has_loaded_config is not None and not has_loaded_config(partition):
+            refresh_partitions = getattr(self._partitions, "load_partitions", None)
+            if refresh_partitions is not None:
+                try:
+                    await refresh_partitions()
+                except Exception as exc:  # noqa: BLE001 - an unavailable config source cannot produce a snapshot
+                    raise ServiceUnavailableError(
+                        f"Could not refresh retrieval configuration for partition '{partition}'.",
+                        code="PARTITION_RETRIEVAL_CONFIG_REFRESH_FAILED",
+                    ) from exc
+            if not has_loaded_config(partition):
+                raise ServiceUnavailableError(
+                    f"Retrieval configuration for partition '{partition}' is not loaded; retry the snapshot request.",
+                    code="PARTITION_RETRIEVAL_CONFIG_NOT_LOADED",
+                )
         resolve_plan = getattr(self._retrieval, "resolve_retrieval_plan", None)
         if resolve_plan is not None:
-            plan = await resolve_plan([partition], build_execution=False)
+            plan = await resolve_plan(
+                [partition],
+                build_execution=False,
+                strict_prompt_resolution=True,
+            )
             public = plan.public_configuration
             retrieval_fingerprint = plan.configuration_fingerprint
         else:
@@ -61,6 +82,8 @@ class RetrievalSnapshotService:
             "name",
             "model",
             "prompt_name",
+            "mode",
+            "max_contextualized_query_len",
         )
         contextualizer["prompt"] = self._keys(
             public.get("contextualizer_prompt"),
@@ -80,6 +103,16 @@ class RetrievalSnapshotService:
             "allow_filterless_fallback",
             "hyde_prompt_name",
             "multi_query_prompt_name",
+            "query_expansion_llm",
+        )
+        retrieval["query_expansion_llm"] = (
+            self._keys(
+                retrieval.get("query_expansion_llm"),
+                "name",
+                "model",
+            )
+            if isinstance(retrieval.get("query_expansion_llm"), dict)
+            else None
         )
         retrieval_source = partition_config.get("retrieval")
         query_expansion_prompt = (
