@@ -31,6 +31,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from core.models.preset import resolve_partition_chat_llm
+from core.models.retrieval_trace import TraceRemovalReason
 from core.prompts import load_template_by_key
 from core.retrieval.pipeline import RetrieverPipeline
 from core.retrieval.retriever import (
@@ -41,7 +42,12 @@ from core.retrieval.retriever import (
 )
 from core.retrieval.rrf import rrf_reranking
 from core.retrieval.searcher import file_id_restriction
-from core.retrieval.trace import RetrievalTraceBuilder, canonical_fingerprint, merge_query_traces
+from core.retrieval.trace import (
+    RetrievalTraceBuilder,
+    candidates_from_chunks,
+    canonical_fingerprint,
+    merge_query_traces,
+)
 from core.utils.exceptions import PartitionNotFoundError
 from core.utils.logging import get_logger
 
@@ -949,25 +955,50 @@ class RetrievalService:
                 if trace is not None
                 else []
             )
-            hits = self.fuse(
-                await self._gather_partition_groups(
-                    [
-                        (
-                            names,
-                            group_searcher.search(
-                                partition=names,
-                                with_surrounding_chunks=False,
-                                **search_kwargs,
-                                **({"trace": group_traces[index]} if trace is not None else {}),
-                            ),
-                        )
-                        for index, (names, group_searcher) in enumerate(groups)
-                    ]
-                ),
-                top_k=top_k,
+            group_hits = await self._gather_partition_groups(
+                [
+                    (
+                        names,
+                        group_searcher.search(
+                            partition=names,
+                            with_surrounding_chunks=False,
+                            **search_kwargs,
+                            **({"trace": group_traces[index]} if trace is not None else {}),
+                        ),
+                    )
+                    for index, (names, group_searcher) in enumerate(groups)
+                ]
             )
-            if trace is not None:
+            if trace is None:
+                hits = self.fuse(group_hits, top_k=top_k)
+            else:
+                fused_hits = self.fuse(group_hits)
+                hits = fused_hits[:top_k]
                 merge_query_traces(trace, group_traces)
+                selected_ids = {_chunk_key(chunk) for chunk in hits}
+                candidates = candidates_from_chunks(
+                    fused_hits,
+                    limit=trace.candidate_capacity_for_stage("partition_fused"),
+                )
+                candidates = [
+                    candidate
+                    if candidate.id in selected_ids
+                    else candidate.model_copy(
+                        update={
+                            "removal_reason": TraceRemovalReason(
+                                code="partition_top_k",
+                                explanation="Candidate fell outside the cross-embedder top-k.",
+                            )
+                        }
+                    )
+                    for candidate in candidates
+                ]
+                trace.record_stage(
+                    "partition_fused",
+                    status="complete",
+                    candidates=candidates,
+                    candidate_count=len(fused_hits),
+                )
             # Neighbouring chunks are read by section id, whatever the embedder.
             # They are context only: a failed lookup must not discard the hits
             # the gather above already kept.

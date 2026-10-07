@@ -38,6 +38,7 @@ from fastapi.responses import JSONResponse
 logger = get_logger()
 
 router = APIRouter()
+MAX_TRACE_TOP_K = 1000
 
 
 class RelatedDocSearchParams:
@@ -66,7 +67,7 @@ class CommonSearchParams:
     def __init__(
         self,
         text: str = Query(..., description="Text to search semantically"),
-        top_k: int = Query(5, ge=1, le=1000, description="Number of top results to return"),
+        top_k: int = Query(5, ge=1, description="Number of top results to return"),
         similarity_threshold: float = Query(
             0.75, ge=0, le=1, description="Minimum similarity score for results (0 to 1)"
         ),
@@ -83,6 +84,11 @@ class CommonSearchParams:
         # scope (unbalanced parens rebalancing the `(partition …) and (…)`
         # wrapper) before the raw string reaches the store. Raises 400.
         validate_search_filter(filter)
+        if include_retrieval_trace and top_k > MAX_TRACE_TOP_K:
+            raise HTTPException(
+                status_code=422,
+                detail=f"top_k must be <= {MAX_TRACE_TOP_K} when retrieval tracing is enabled",
+            )
         self.text = text
         self.top_k = top_k
         self.similarity_threshold = similarity_threshold

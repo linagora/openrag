@@ -366,10 +366,8 @@ async def test_multi_query_search_uses_independent_traces_and_merges_in_query_or
         "first",
         "second",
     ]
-    assert [candidate.id for candidate in parent.stages["dense_after_threshold"].candidates] == [
-        "first",
-        "second",
-    ]
+    assert parent.stages["dense_after_threshold"].status == "unavailable"
+    assert parent.stages["dense_after_threshold"].candidates == []
     assert parent.stages["hybrid_fused"].status == "unavailable"
 
 
@@ -403,6 +401,7 @@ async def test_multi_query_search_uses_parallel_wall_clock_latency():
         trace=parent,
     )
 
+    assert parent.stages["dense_after_threshold"].status == "unavailable"
     assert parent.stages["dense_after_threshold"].duration_seconds == 0.7
     assert parent.timings["dense_search"] == 0.7
 

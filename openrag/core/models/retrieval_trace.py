@@ -51,6 +51,7 @@ RemovalReasonCode = Literal[
     "attachment_filter",
     "file_filter",
     "temporal_filter",
+    "partition_top_k",
 ]
 
 

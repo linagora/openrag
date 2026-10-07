@@ -206,9 +206,22 @@ def test_workspace_trace_labels_explicit_workspace_scope():
     }
 
 
-def test_raw_search_rejects_top_k_above_resource_limit():
+def test_untraced_search_preserves_top_k_above_trace_limit():
+    client, retrieval = _client()
+
+    response = client.get("/search/partition/mine", params={"text": "q", "top_k": 2000})
+
+    assert response.status_code == 200
+    assert retrieval.calls[0]["top_k"] == 2000
+
+
+def test_traced_search_rejects_top_k_above_trace_limit():
     client, _retrieval = _client()
 
-    response = client.get("/search/partition/mine", params={"text": "q", "top_k": 1001})
+    response = client.get(
+        "/search/partition/mine",
+        params={"text": "q", "top_k": 1001, "include_retrieval_trace": True},
+    )
 
     assert response.status_code == 422
+    assert response.json()["detail"] == "top_k must be <= 1000 when retrieval tracing is enabled"

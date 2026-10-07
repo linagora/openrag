@@ -557,30 +557,17 @@ class RetrievalTraceBuilder:
 
 
 def merge_query_traces(parent: RetrievalTraceBuilder, children: Sequence[RetrievalTraceBuilder]) -> None:
-    """Attach child traces and combine the stages they completed in caller order."""
-    for child in children:
-        parent.record_query_trace(child)
+    """Attach fan-out traces and retain max durations without copying candidates."""
+    merge_child_traces(parent, children)
     for stage_name in TRACE_STAGE_NAMES:
-        stages = [child.stages[stage_name] for child in children if child.stages[stage_name].status != "not_run"]
-        if not stages:
-            continue
-        statuses = {stage.status for stage in stages}
-        if "error" in statuses:
-            status = "error"
-        elif "complete" in statuses:
-            status = "complete"
-        else:
-            status = "unavailable"
-        durations = [stage.duration_seconds for stage in stages if stage.duration_seconds is not None]
-        parent.record_stage(
-            stage_name,
-            status=status,
-            candidates=[candidate for stage in stages for candidate in stage.candidates],
-            candidate_count=sum(stage.candidate_count for stage in stages),
-            duration_seconds=max(durations) if durations else None,
-            error="child diagnostics failed" if status == "error" else None,
-        )
+        durations = [
+            child.stages[stage_name].duration_seconds
+            for child in children
+            if child.stages[stage_name].duration_seconds is not None
+        ]
+        if durations and parent.stages[stage_name].status == "unavailable":
+            parent.stages[stage_name] = parent.stages[stage_name].model_copy(
+                update={"duration_seconds": max(durations)}
+            )
     for key in sorted({key for child in children for key in child.timings}):
         parent.timings[key] = max(child.timings[key] for child in children if key in child.timings)
-    for child in children:
-        parent.errors.extend(child.errors)

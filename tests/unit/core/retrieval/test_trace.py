@@ -27,6 +27,7 @@ from core.retrieval.trace import (
     candidates_from_chunks,
     canonical_fingerprint,
     merge_child_traces,
+    merge_query_traces,
     safe_public_value,
 )
 from pydantic import ValidationError, create_model
@@ -474,6 +475,7 @@ def test_trace_errors_are_safe_and_unvisited_stages_are_explicit():
         "attachment_filter",
         "file_filter",
         "temporal_filter",
+        "partition_top_k",
     )
 
 
@@ -655,3 +657,32 @@ def test_merge_child_traces_preserves_partition_and_nested_query_stages():
     dense = next(stage for stage in generated_trace["stages"] if stage["name"] == "dense_after_threshold")
     assert dense["candidates"][0]["id"] == "gold"
     assert request.stages["dense_after_threshold"].status == "unavailable"
+
+
+def test_merge_query_traces_keeps_child_candidates_without_reclaiming_shared_budget():
+    diagnostics = RetrievalDiagnosticsContext(candidate_limit=10)
+    parent = RetrievalTraceBuilder("parent", "query", diagnostics=diagnostics)
+    children = []
+    for group in range(2):
+        child = RetrievalTraceBuilder(f"child-{group}", "query", diagnostics=diagnostics)
+        child.record_stage(
+            "hybrid_fused",
+            status="complete",
+            candidates=[TraceCandidate(id=f"group-{group}-chunk-{index}", rank=index + 1) for index in range(3)],
+        )
+        if group == 0:
+            child.record_error("hybrid_fused", RuntimeError("diagnostic failed"))
+        children.append(child)
+
+    merge_query_traces(parent, children)
+
+    aggregate = parent.stages["hybrid_fused"]
+    assert aggregate.status == "unavailable"
+    assert aggregate.candidates == []
+    assert diagnostics.remaining_candidates == 4
+    assert parent.errors == []
+    assert parent.query_traces[0].errors[0].kind == "RuntimeError"
+    assert [
+        len(next(stage for stage in child.stages if stage.name == "hybrid_fused").candidates)
+        for child in parent.query_traces
+    ] == [3, 3]
