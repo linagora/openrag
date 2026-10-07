@@ -117,3 +117,39 @@ def test_raw_search_fingerprint_tracks_embedder_vector_field_and_hybrid_mode():
     changed_hybrid = service.search_configuration_fingerprint(["tenant-a"], options)
 
     assert len({baseline, changed_field, changed_hybrid}) == 3
+
+
+def test_raw_search_configuration_uses_factory_embedder_per_partition():
+    config = _config()
+    default_endpoint = SimpleNamespace(model_name="default-model", vector_field="vector-default")
+    partition_endpoint = SimpleNamespace(model_name="partition-model", vector_field="vector-partition")
+    config.models.embedder = {"default": default_endpoint, "embed-a": partition_endpoint}
+    config.partitions = {"tenant-a": _partition()}
+    service = RetrievalService(
+        searcher=_Searcher(),
+        reranker=None,
+        llm=None,
+        config=config,
+        searcher_factory=lambda _name: _Searcher(),
+    )
+    options = {"top_k": 25, "similarity_threshold": 0.4}
+
+    before = service.search_configuration_fingerprint(["tenant-a", "unconfigured"], options)
+    public_config = service.public_search_configuration(["tenant-a", "unconfigured"], options)
+    partition_endpoint.model_name = "updated-partition-model"
+    after_model_change = service.search_configuration_fingerprint(["tenant-a", "unconfigured"], options)
+    partition_endpoint.vector_field = "updated-partition-vector"
+    after_field_change = service.search_configuration_fingerprint(["tenant-a", "unconfigured"], options)
+
+    assert public_config["partitions"] == [
+        {
+            "name": "tenant-a",
+            "embedder": {"name": "embed-a", "model": "partition-model", "vector_field": "vector-partition"},
+        },
+        {
+            "name": "unconfigured",
+            "embedder": {"name": "default", "model": "default-model", "vector_field": "vector-default"},
+        },
+    ]
+    assert before != after_model_change
+    assert after_model_change != after_field_change

@@ -386,10 +386,28 @@ class RetrievalService:
             "model": getattr(getattr(self._config, "embedder", None), "model_name", None),
             "vector_field": getattr(default_embedder, "vector_field", None),
         }
-        public_partitions = [
-            {"name": partition_name, "embedder": raw_search_embedder}
-            for partition_name in sorted(set(selected_partitions))
-        ]
+        if self._searcher_factory is None or not configured_partitions:
+            public_partitions = [
+                {"name": partition_name, "embedder": raw_search_embedder}
+                for partition_name in sorted(set(selected_partitions))
+            ]
+        else:
+            endpoints = getattr(getattr(self._config, "models", None), "embedder", {}) or {}
+            public_partitions = []
+            for partition_name in sorted(set(selected_partitions)):
+                partition = configured_partitions.get(partition_name)
+                embedder_name = partition.embedder if partition is not None else "default"
+                endpoint = endpoints.get(embedder_name)
+                public_partitions.append(
+                    {
+                        "name": partition_name,
+                        "embedder": {
+                            "name": embedder_name,
+                            "model": getattr(endpoint, "model_name", None),
+                            "vector_field": getattr(endpoint, "vector_field", None),
+                        },
+                    }
+                )
         hybrid_enabled = getattr(getattr(self._config, "vectordb", None), "hybrid_search", None)
         return {
             "operation": "raw_search",
