@@ -390,6 +390,28 @@ async def test_multi_query_fusion_does_not_overwrite_store_hybrid_status():
 
 
 @pytest.mark.asyncio
+async def test_get_relevant_docs_survives_child_trace_merge_failure(monkeypatch):
+    retriever = FakeRetriever()
+    retriever.results_queue = [_chunks("a"), _chunks("b")]
+    trace = RetrievalTraceBuilder("req-1", "question")
+    pipeline = RetrieverPipeline(retriever=retriever)
+
+    def fail_merge(*_args, **_kwargs):
+        raise RuntimeError("trace merge failed")
+
+    monkeypatch.setattr("core.retrieval.pipeline.merge_child_traces", fail_merge)
+
+    out = await pipeline.get_relevant_docs(
+        partition=["p1"],
+        search_queries=SearchQueries(query_list=[Query(query="q1"), Query(query="q2")]),
+        trace=trace,
+    )
+
+    assert {chunk.id for chunk in out} == {"a", "b"}
+    assert [error.stage for error in trace.errors] == ["query_traces"]
+
+
+@pytest.mark.asyncio
 async def test_get_relevant_docs_traces_single_query_reranking_stages():
     r = FakeRetriever()
     r.results_queue = [_chunks("a", "b", "c")]

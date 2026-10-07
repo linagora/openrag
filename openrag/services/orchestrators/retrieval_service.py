@@ -1092,6 +1092,19 @@ class RetrievalService:
             except Exception:
                 pass
 
+    @staticmethod
+    def _safe_merge_child_traces(
+        trace: RetrievalTraceBuilder,
+        children: Sequence[RetrievalTraceBuilder],
+    ) -> None:
+        try:
+            merge_child_traces(trace, children)
+        except Exception as error:
+            try:
+                trace.record_error("partition_traces", error)
+            except Exception:
+                pass
+
     async def retrieve(
         self,
         *,
@@ -1146,7 +1159,7 @@ class RetrievalService:
             ]
         )
         if trace is not None and child_traces is not None:
-            merge_child_traces(trace, child_traces)
+            self._safe_merge_child_traces(trace, child_traces)
         if len(ranked_lists) == 1:
             result = ranked_lists[0]
             if len(groups) > 1:
@@ -1208,7 +1221,7 @@ class RetrievalService:
             ]
         )
         if trace is not None and child_traces is not None:
-            merge_child_traces(trace, child_traces)
+            self._safe_merge_child_traces(trace, child_traces)
         if len(ranked_lists) == 1:
             result = ranked_lists[0]
             if len(groups) > 1:

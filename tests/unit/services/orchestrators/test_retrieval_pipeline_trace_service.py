@@ -162,3 +162,37 @@ async def test_single_query_multi_partition_trace_uses_effective_query():
         ("a", "contextualized question"),
         ("b", "contextualized question"),
     ]
+
+
+@pytest.mark.parametrize("method", ["retrieve", "retrieve_multi"])
+@pytest.mark.asyncio
+async def test_multi_partition_retrieval_survives_child_trace_merge_failure(monkeypatch, method):
+    config = _config()
+    config.partitions = {
+        "a": _partition("a", "embed-a"),
+        "b": _partition("b", "embed-b"),
+    }
+    searchers = {"embed-a": _Searcher([_chunk("a-hit")]), "embed-b": _Searcher([_chunk("b-hit")])}
+    trace = RetrievalTraceBuilder("request-1", "question")
+    service = _service(config=config, searcher_factory=lambda name: searchers[name])
+
+    def fail_merge(*_args, **_kwargs):
+        raise RuntimeError("trace merge failed")
+
+    monkeypatch.setattr("services.orchestrators.retrieval_service.merge_child_traces", fail_merge)
+
+    if method == "retrieve":
+        chunks = await service.retrieve(
+            partitions=["a", "b"],
+            query=Query(query="question"),
+            trace=trace,
+        )
+    else:
+        chunks = await service.retrieve_multi(
+            partitions=["a", "b"],
+            search_queries=SearchQueries(query_list=[Query(query="question")]),
+            trace=trace,
+        )
+
+    assert {chunk.id for chunk in chunks} == {"a-hit", "b-hit"}
+    assert [error.stage for error in trace.errors] == ["partition_traces"]

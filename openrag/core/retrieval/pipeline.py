@@ -372,7 +372,7 @@ class RetrieverPipeline:
         ]
         ranked_lists = await asyncio.gather(*tasks)
         if trace is not None and child_traces is not None:
-            merge_child_traces(trace, child_traces)
+            _safe_trace(trace, "query_traces", lambda: merge_child_traces(trace, child_traces))
         fusion_kwargs: dict[str, Any] = {"k": self.rrf_k}
         if top_k is not None:
             fusion_kwargs["top_k"] = top_k
