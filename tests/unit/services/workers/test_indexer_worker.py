@@ -108,6 +108,12 @@ class FakeVectorStore:
 def _fake_tsm() -> MagicMock:
     """Task-state-manager mock whose .remote() methods return awaitables."""
     tsm = MagicMock()
+    tsm._ray_actor_method_names = {
+        "set_state",
+        "set_failed_if_not_cancelled",
+        "set_degraded_stages",
+        "complete_with_degraded_stages",
+    }
     tsm.set_state = MagicMock()
     tsm.set_state.remote = AsyncMock(return_value=None)
     tsm.set_failed_if_not_cancelled = MagicMock()
@@ -278,10 +284,7 @@ async def test_indexer_worker_passes_stage_timings_to_terminal_state(tmp_path: P
             return row
 
     tsm = _fake_tsm()
-    tsm._ray_actor_method_names = {
-        "complete_with_degraded_stages",
-        "complete_with_degraded_stages_and_timings",
-    }
+    tsm._ray_actor_method_names = None
     tsm.complete_with_degraded_stages_and_timings = MagicMock()
     tsm.complete_with_degraded_stages_and_timings.remote = AsyncMock(return_value="completed")
     worker = IndexerWorker(pipeline=TimedPipeline(), task_state_manager=tsm)
@@ -323,7 +326,7 @@ async def test_indexer_worker_passes_partial_stage_timings_on_failure(tmp_path: 
             raise RuntimeError("chunk stage failed")
 
     tsm = _fake_tsm()
-    tsm._ray_actor_method_names = {"set_failed_with_reason_and_stage_timings_if_not_cancelled"}
+    tsm._ray_actor_method_names = None
     tsm.set_failed_with_reason_and_stage_timings_if_not_cancelled = MagicMock()
     tsm.set_failed_with_reason_and_stage_timings_if_not_cancelled.remote = AsyncMock(return_value=True)
     worker = IndexerWorker(pipeline=TimedFailingPipeline(), task_state_manager=tsm)

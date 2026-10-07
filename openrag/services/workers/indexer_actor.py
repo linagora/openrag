@@ -23,7 +23,7 @@ from services.workers.pipeline_builder import (
     REPLACE_OLD_CHUNK_IDS_ROW_KEY,
     IndexingPipeline,
 )
-from services.workers.ray_utils import retry_idempotent_ray_actor_method
+from services.workers.ray_utils import get_ray_actor_method, retry_idempotent_ray_actor_method
 from services.workers.stages._common import run_with_optional_timeout
 from services.workers.stages.store import INDEXING_TASK_ID_METADATA_KEY
 
@@ -234,16 +234,11 @@ class IndexerWorker:
                     partition=partition,
                     indexation_config=indexation_config,
                 )
-            method_names = getattr(self._tsm, "_ray_actor_method_names", None)
-            if (
-                isinstance(method_names, (frozenset, list, set, tuple))
-                and "complete_with_degraded_stages_and_timings" in method_names
-            ):
+            timed_completion = get_ray_actor_method(self._tsm, "complete_with_degraded_stages_and_timings")
+            if timed_completion is not None:
 
                 def completion_call() -> Any:
-                    return self._tsm.complete_with_degraded_stages_and_timings.remote(
-                        task_id, degraded_stages, stage_timings
-                    )
+                    return timed_completion.remote(task_id, degraded_stages, stage_timings)
 
                 completion_method = "complete_with_degraded_stages_and_timings"
             else:

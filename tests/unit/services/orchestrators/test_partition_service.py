@@ -735,6 +735,7 @@ async def test_delete_partition_marks_stale_ref_less_task_failed_before_cleanup(
     prepo = FakePartitionRepo(existing={"p1"})
     vstore = FakeVectorStore()
     tsm = MagicMock()
+    tsm._ray_actor_method_names = {"get_matching_active_task_refs_v2", "set_failed_if_not_cancelled"}
     tsm.get_matching_active_task_refs_v2 = MagicMock()
     tsm.get_matching_active_task_refs_v2.remote = AsyncMock(return_value={"task-1": {"ref": None}})
     tsm.set_failed_if_not_cancelled = MagicMock()
