@@ -211,6 +211,13 @@ class PresetService:
             self._loaded_revision = revision
             return True
 
+    async def try_refresh_if_stale(self) -> None:
+        """:meth:`refresh_if_stale` for a request that reads them: a failed probe keeps the cached settings."""
+        try:
+            await self.refresh_if_stale()
+        except Exception as exc:  # noqa: BLE001 - a stale-cache probe must not fail the request
+            logger.warning(f"Preset cache staleness check failed; using the cached config: {exc}")
+
     async def _load_all(self, *, remember_revision: bool = True) -> int:
         rows, revision = await self._repo.load_all_with_revision()
         idx_bucket: dict[str, dict[str, Any]] = {}

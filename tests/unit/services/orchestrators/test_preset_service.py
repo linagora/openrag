@@ -400,6 +400,28 @@ async def test_refresh_if_stale_keeps_revision_unadvanced_when_partition_reload_
     assert svc._loaded_revision == 0
 
 
+@pytest.mark.asyncio
+async def test_try_refresh_if_stale_reloads_or_keeps_the_cache_when_the_probe_fails():
+    from core.config.root import Settings
+
+    repo = _FakePresetRepo(rows=[_make_row("audio", "indexation", {"stt": "old-stt"})])
+    settings = Settings()
+    partition_service = _FakePartitionService()
+    svc = _make_service(repo, settings=settings, partition_service=partition_service)
+    await svc.load_all()
+    repo._revision += 1
+
+    await svc.try_refresh_if_stale()
+    assert partition_service.load_calls == 1
+
+    async def unavailable() -> int:
+        raise RuntimeError("database unavailable")
+
+    repo.latest_revision = unavailable
+    await svc.try_refresh_if_stale()
+    assert partition_service.load_calls == 1
+
+
 # ------------------------------------------------------------------
 # create_preset
 # ------------------------------------------------------------------

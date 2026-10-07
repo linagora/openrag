@@ -623,6 +623,7 @@ class ServiceContainer:
                 reranker_factory=self.reranker_factory,
                 llm_factory=self.llm_factory,
                 prompt_service=self.prompt_service,
+                preset_service=self.preset_service,
             )
         return self._retrieval_service
 
