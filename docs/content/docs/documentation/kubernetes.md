@@ -409,7 +409,9 @@ The migration Job (`templates/postgres-migration-job.yaml`) is a Helm hook, anno
 
 If the Job fails, Helm leaves its copies in the namespace, and `helm uninstall` does not remove them, since Helm does not track hook resources. The Secret copy holds the same credentials as the app's Secret. The next `helm install` or `helm upgrade` replaces the copies. To remove them before that, delete the ConfigMap `<fullname>-migration-env` and the Secret `<fullname>-migration-env-secrets`, and with `externalSecret` or `vaultStaticSecret` also the `ExternalSecret` or `VaultStaticSecret` of that name.
 
-When `postgresProvisioning.migrationJob` is disabled (the default), the Job is not rendered at all, and the application runs the migrations itself at startup while `postgresProvisioning.runMigrationsInApp` is on (the default). With both off, nothing applies them.
+The Job is for an external PostgreSQL only. It runs before Helm creates any of the release's own resources, the bundled PostgreSQL included, so the chart refuses `migrationJob.enabled` together with `postgresql.enabled`.
+
+When `postgresProvisioning.migrationJob` is disabled (the default), the Job is not rendered at all, and the application runs the migrations itself at startup while `postgresProvisioning.runMigrationsInApp` is on (the default). With both off, nothing applies them, so the chart refuses to render unless you set `postgresProvisioning.externalMigrations: true` to say you run `python -m services.persistence.migrations.run` yourself. Set the app's side through `runMigrationsInApp` only: the chart also refuses an `env.config.POSTGRES_RUN_MIGRATIONS` or `env.secrets.POSTGRES_RUN_MIGRATIONS` that disagrees with it, since that entry would silently replace it. Do not put `POSTGRES_RUN_MIGRATIONS` in an `env.existingSecret` or in a secret from an external secrets operator: the pods read the Secret after the ConfigMap, so its value wins, and the chart cannot read it to check it.
 
 ## GPU metrics
 

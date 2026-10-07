@@ -240,3 +240,137 @@ def test_without_the_job_nothing_is_a_hook(tmp_path: Path) -> None:
     assert not [
         key for key, document in documents.items() if "helm.sh/hook" in (document["metadata"].get("annotations") or {})
     ]
+
+
+@requires_helm
+@pytest.mark.parametrize(
+    "args",
+    [
+        pytest.param(("--set", "env.config.POSTGRES_RUN_MIGRATIONS=false"), id="env-off-app-on"),
+        pytest.param(("--set-string", "env.config.POSTGRES_RUN_MIGRATIONS=no"), id="env-no-app-on"),
+        pytest.param((*_JOB_ON, "--set", "env.config.POSTGRES_RUN_MIGRATIONS=true"), id="env-on-app-off"),
+        # Blank is unset to the app, which then migrates.
+        pytest.param((*_JOB_ON, "--set-string", "env.config.POSTGRES_RUN_MIGRATIONS="), id="env-blank-app-off"),
+        # Unset in the ConfigMap, which the app also reads as true.
+        pytest.param((*_JOB_ON, "--set", "env.config.POSTGRES_RUN_MIGRATIONS=null"), id="env-removed-app-off"),
+    ],
+)
+def test_an_env_override_that_disagrees_is_refused(tmp_path: Path, args: tuple[str, ...]) -> None:
+    """env.config.POSTGRES_RUN_MIGRATIONS replaces the value derived from
+    runMigrationsInApp, which then has no effect (#1039)."""
+    result = _render(tmp_path, *args)
+
+    assert result.returncode != 0
+    assert "env.config.POSTGRES_RUN_MIGRATIONS is" in result.stderr
+
+
+@requires_helm
+@pytest.mark.parametrize(
+    "args",
+    [
+        pytest.param(("--set-string", "env.secrets.POSTGRES_RUN_MIGRATIONS=false"), id="secret-off-app-on"),
+        pytest.param((*_JOB_ON, "--set-string", "env.secrets.POSTGRES_RUN_MIGRATIONS=true"), id="secret-on-app-off"),
+        pytest.param((*_JOB_ON, "--set-string", "env.secrets.POSTGRES_RUN_MIGRATIONS="), id="secret-blank-app-off"),
+    ],
+)
+def test_a_secret_override_that_disagrees_is_refused(tmp_path: Path, args: tuple[str, ...]) -> None:
+    """The pods read the env Secret after the ConfigMap, so its value wins."""
+    result = _render(tmp_path, *args)
+
+    assert result.returncode != 0
+    assert "env.secrets.POSTGRES_RUN_MIGRATIONS is" in result.stderr
+
+
+@requires_helm
+@pytest.mark.parametrize(
+    "args",
+    [
+        pytest.param(("--set-string", "env.config.POSTGRES_RUN_MIGRATIONS=on"), id="env-on"),
+        pytest.param(("--set-string", "env.config.POSTGRES_RUN_MIGRATIONS=true "), id="env-trailing-space"),
+        pytest.param(("--set-string", "env.secrets.POSTGRES_RUN_MIGRATIONS=on"), id="secret-on"),
+    ],
+)
+def test_an_env_value_the_app_rejects_is_refused(tmp_path: Path, args: tuple[str, ...]) -> None:
+    """The app accepts true/1/yes and false/0/no in any case, untrimmed, and
+    stops at startup on anything else (_coerce in core/config/loader.py)."""
+    result = _render(tmp_path, *args)
+
+    assert result.returncode != 0
+    assert "which the app rejects at startup" in result.stderr
+
+
+@requires_helm
+def test_a_run_migrations_in_app_the_app_rejects_is_refused(tmp_path: Path) -> None:
+    result = _render(tmp_path, *_JOB_ON, "--set-string", "postgresProvisioning.runMigrationsInApp=on")
+
+    assert result.returncode != 0
+    assert "set it to true or false" in result.stderr
+
+
+@requires_helm
+@pytest.mark.parametrize(
+    "args",
+    [
+        pytest.param((), id="defaults"),
+        pytest.param(("--set", "env.config.POSTGRES_RUN_MIGRATIONS=True"), id="env-agrees-app-on"),
+        pytest.param((*_JOB_ON, "--set-string", "env.config.POSTGRES_RUN_MIGRATIONS=0"), id="env-agrees-app-off"),
+        pytest.param(("--set-string", "env.config.POSTGRES_RUN_MIGRATIONS=YES"), id="env-uppercase-agrees"),
+        pytest.param(("--set-string", "env.config.POSTGRES_RUN_MIGRATIONS="), id="env-blank-app-on"),
+        pytest.param(("--set-string", "env.secrets.POSTGRES_RUN_MIGRATIONS=yes"), id="secret-agrees-app-on"),
+        # The chart does not render env.secrets then, so they cannot override.
+        pytest.param(
+            ("--set", "env.existingSecret=my-secret", "--set-string", "env.secrets.POSTGRES_RUN_MIGRATIONS=false"),
+            id="secrets-unused-with-existing-secret",
+        ),
+        pytest.param(
+            (
+                "--set",
+                "postgresProvisioning.runMigrationsInApp=false",
+                "--set",
+                "postgresProvisioning.externalMigrations=true",
+            ),
+            id="applied-externally",
+        ),
+    ],
+)
+def test_settings_that_apply_the_migrations_render(tmp_path: Path, args: tuple[str, ...]) -> None:
+    result = _render(tmp_path, *args)
+
+    assert result.returncode == 0, result.stderr
+
+
+@requires_helm
+@pytest.mark.parametrize(
+    "args",
+    [
+        pytest.param((), id="external-unset"),
+        # A non-empty string, which a template condition reads as true.
+        pytest.param(("--set-string", "postgresProvisioning.externalMigrations=false"), id="external-string-false"),
+    ],
+)
+def test_nothing_applying_the_migrations_is_refused(tmp_path: Path, args: tuple[str, ...]) -> None:
+    """Migrations off in the app and no Job: the app answers 503 (#1039)."""
+    result = _render(tmp_path, "--set", "postgresProvisioning.runMigrationsInApp=false", *args)
+
+    assert result.returncode != 0
+    assert "nothing applies the PostgreSQL migrations" in result.stderr
+
+
+_BUNDLED_POSTGRES = (
+    "--set",
+    "postgresql.enabled=true",
+    "--set",
+    "postgresql.auth.password=render-check-pg-0123",
+)
+
+
+@requires_helm
+@pytest.mark.parametrize("args", [pytest.param((), id="install"), pytest.param(("--is-upgrade",), id="upgrade")])
+def test_the_job_with_the_bundled_postgres_is_refused(tmp_path: Path, args: tuple[str, ...]) -> None:
+    """The Job runs before Helm creates the bundled PostgreSQL, so on a first
+    install it cannot resolve its host. Refused on upgrades too: the Job is for
+    an external PostgreSQL."""
+    result = _render(tmp_path, *_JOB_ON, *_BUNDLED_POSTGRES, *args)
+
+    assert result.returncode != 0
+    assert "postgresProvisioning.migrationJob is for an external PostgreSQL" in result.stderr

@@ -47,4 +47,5 @@ data:
   no_proxy: {{ .Values.proxy.noProxy | quote }}
 {{- end }}
 {{- end }}
+{{- include "openrag-stack.validateMigrationSettings" . }}
 {{- include "openrag-stack.envConfigMap" (merge (dict "configMapName" (printf "%s-env" (include "openrag-stack.fullname" .))) .) }}
