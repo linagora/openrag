@@ -59,6 +59,39 @@ describe("useEmbedderSwap", () => {
     await waitFor(() => expect(toast.success).toHaveBeenCalledWith("a now uses bge-m3"));
   });
 
+  it("refreshes the partition when a whole swap ran between two polls", async () => {
+    const { client } = setup("a");
+    await waitFor(() => expect(client.getQueryData(embedderSwapQueryKey("a"))).toBeNull());
+    const invalidate = vi.spyOn(client, "invalidateQueries");
+
+    act(() => client.setQueryData(embedderSwapQueryKey("a"), swap("a", "completed")));
+
+    await waitFor(() => expect(invalidate).toHaveBeenCalledWith({ queryKey: ["partition", "a"] }));
+    expect(toast.success).not.toHaveBeenCalled();
+  });
+
+  it("refreshes the partition when a newer swap replaced the one it last saw", async () => {
+    swaps.set("a", swap("a", "completed"));
+    const { client } = setup("a");
+    const invalidate = vi.spyOn(client, "invalidateQueries");
+
+    const newer = { ...swap("a", "completed"), started_at: "2026-09-15T00:00:00Z" };
+    act(() => client.setQueryData(embedderSwapQueryKey("a"), newer));
+
+    await waitFor(() => expect(invalidate).toHaveBeenCalledWith({ queryKey: ["partition", "a"] }));
+    expect(toast.success).not.toHaveBeenCalled();
+  });
+
+  it("leaves the partition alone when the same ended swap comes back", () => {
+    swaps.set("a", swap("a", "completed"));
+    const { client } = setup("a");
+    const invalidate = vi.spyOn(client, "invalidateQueries");
+
+    act(() => client.setQueryData(embedderSwapQueryKey("a"), swap("a", "completed")));
+
+    expect(invalidate).not.toHaveBeenCalled();
+  });
+
   it("keeps asking once a swap ends, and when there is none", () => {
     // Another admin can start one, and a finished swap can be replaced by a
     // newer one: a page that stopped asking would show neither until reloaded.

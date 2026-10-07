@@ -31,21 +31,27 @@ export function useEmbedderSwap(partition: string | undefined) {
   });
   const swap = query.data ?? null;
   const status = swap?.status;
+  const loaded = query.data !== undefined;
+  const startedAt = swap?.started_at;
 
   // A swap ending changes what the partition page shows — its embedder, the
-  // per-file embedder breakdown — so refetch those once, on the transition.
-  // The partition is tracked too: moving from a running partition to one whose
-  // last swap ended is not that swap ending.
-  const previous = useRef({ partition, status });
+  // per-file embedder breakdown — so refetch those once it has. A poll can miss
+  // the running state, or a whole swap that replaced the last one, so a swap
+  // first seen already ended counts too; only an ending seen happen is announced.
+  // The partition is tracked too: moving to another one is not its swap ending.
+  const previous = useRef({ partition, loaded, status, startedAt });
   useEffect(() => {
-    const wasRunning = previous.current.partition === partition && previous.current.status === "running";
-    previous.current = { partition, status };
-    if (!wasRunning || status === "running" || !partition) return;
+    const prev = previous.current;
+    previous.current = { partition, loaded, status, startedAt };
+    if (!partition || !status || status === "running" || prev.partition !== partition || !prev.loaded) return;
+    const sameSwap = prev.startedAt === startedAt;
+    if (sameSwap && prev.status !== "running") return;
     queryClient.invalidateQueries({ queryKey: ["partition", partition] });
     queryClient.invalidateQueries({ queryKey: ["partitions"] });
+    if (!sameSwap) return;
     if (status === "completed") toast.success(`${partition} now uses ${swap?.target_embedder}`);
     if (status === "failed") toast.error(`Re-embedding ${partition} failed`);
-  }, [status, partition, queryClient, swap?.target_embedder]);
+  }, [status, partition, loaded, startedAt, queryClient, swap?.target_embedder]);
 
   return { swap, running: status === "running" };
 }
