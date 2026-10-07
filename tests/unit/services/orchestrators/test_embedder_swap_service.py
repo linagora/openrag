@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import pytest
 from core.config.model_endpoints import ModelEndpointConfig
 from core.config.root import Settings
-from core.utils.exceptions import ConflictError, ValidationError, VDBInsertError
+from core.utils.exceptions import ConflictError, ValidationError, VDBInsertError, VDBSearchError
 from services.orchestrators.embedder_swap_service import EmbedderSwapService
 
 SOURCE_FIELD = "vector_e5"
@@ -101,6 +101,7 @@ class FakeVectorStore:
         self.ensured: dict[str, int] = {}
         self.written: dict[str, dict[str, list[float] | None]] = {}
         self.write_failures: list[Exception] = []
+        self.on_searchable = lambda field: None
 
     async def query_chunks_by_filter(self, collection, filters, output_fields=None):
         return [dict(row) for row in self.chunks.get(filters["file_id"], [])]
@@ -114,6 +115,9 @@ class FakeVectorStore:
             raise self.write_failures.pop(0)
         self.written.setdefault(field, {}).update(vectors)
         return len(vectors)
+
+    async def make_searchable(self, field: str) -> None:
+        self.on_searchable(field)
 
 
 class FakeEmbedder:
@@ -301,6 +305,34 @@ async def test_completion_points_the_partition_at_the_target_under_the_partition
     # Start and completion both take the fence uploads are admitted under.
     assert parts["partitions"].locks == ["p1", "p1"]
     assert parts["partitions"].reloads == 1
+
+
+async def test_the_target_field_answers_searches_before_the_partition_switches(monkeypatch):
+    """Milvus refuses searches on a newly added field until its data is flushed."""
+    service, parts = _make(monkeypatch=monkeypatch)
+    seen = []
+    parts["store"].on_searchable = lambda field: seen.append((field, parts["repo"].swap["status"]))
+
+    await service.start("p1", "bge-m3")
+    await _finish(service)
+
+    assert seen == [(TARGET_FIELD, "running")]
+    assert parts["repo"].swap["status"] == "completed"
+
+
+async def test_a_target_field_that_never_answers_fails_the_swap(monkeypatch):
+    service, parts = _make(monkeypatch=monkeypatch)
+
+    def refuse(field):
+        raise VDBSearchError(f"`{field}` still refuses searches")
+
+    parts["store"].on_searchable = refuse
+
+    await service.start("p1", "bge-m3")
+    await _finish(service)
+
+    assert parts["repo"].swap["status"] == "failed"
+    assert parts["repo"].rows["p1"]["embedder"] != "bge-m3"
 
 
 async def test_the_old_fields_vectors_are_left_alone(monkeypatch):

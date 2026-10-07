@@ -295,6 +295,9 @@ class EmbedderSwapService:
             # Doubles as the cancellation check: the update only applies to a
             # swap that is still running, and still this run.
             await self._progress(partition, run_id, files_done=done, chunks_over_window=over_window)
+        # Searches switch to the field on completion, and Milvus refuses them on
+        # a newly added field until its data is flushed.
+        await self._vector_store.make_searchable(field)
 
     async def _files_to_reembed(self, partition: str, embedder: Embedder, field: str) -> list[dict]:
         """The files of *partition* not yet recorded with *embedder*'s model in *field*."""

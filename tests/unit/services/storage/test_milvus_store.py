@@ -18,6 +18,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+import services.storage.milvus_store as milvus_store_module
 from api.error_handlers import register_error_handlers
 from core.config.infrastructure import VectorDBConfig
 from core.models.chunk import Chunk, ChunkType
@@ -1625,6 +1626,80 @@ def _section_ids(store: MilvusVectorStore, rows: list[dict]) -> None:
     iterator = MagicMock()
     iterator.next.side_effect = [rows, []]
     store._client.query_iterator.return_value = iterator
+
+
+class TestNewFieldIsMadeSearchable:
+    """Milvus refuses searches on a field added to a loaded collection until its data is flushed."""
+
+    async def _new_field(self, store: MilvusVectorStore) -> None:
+        store._client.describe_collection.return_value = _descriptor(FIELD)
+        store._client.query.return_value = [{"count(*)": 3}]
+        await store.ensure_vector_field("vector_bge_m3", 768)
+        store._client.describe_collection.return_value = _descriptor(FIELD, "vector_bge_m3")
+        store._async_client.search = AsyncMock(return_value=[[]])
+        _section_ids(store, [])
+        store._async_client.upsert = AsyncMock(return_value={"upsert_count": 1})
+        store._async_client.insert = AsyncMock(return_value={"insert_count": 1})
+
+    async def test_the_first_write_flushes_once(self, store: MilvusVectorStore) -> None:
+        await self._new_field(store)
+
+        await store.write_vectors("vector_bge_m3", {"11": [0.1]})
+        _section_ids(store, [])
+        await store.write_vectors("vector_bge_m3", {"12": [0.2]})
+
+        store._client.flush.assert_called_once_with(store._collection_name)
+
+    async def test_an_upload_into_it_flushes_too(self, store: MilvusVectorStore) -> None:
+        await self._new_field(store)
+
+        chunk = Chunk(id="c1", document_id="f1", text="hi", partition="p", embedding=[0.1, 0.2])
+        await store.upsert([chunk], vector_field="vector_bge_m3")
+        await store.insert_entities([{"text": "hi", "vector_bge_m3": [0.1]}])
+
+        store._client.flush.assert_called_once_with(store._collection_name)
+
+    async def test_it_waits_until_the_field_answers(self, store: MilvusVectorStore, monkeypatch) -> None:
+        # The flushed data takes a moment to be indexed and loaded.
+        monkeypatch.setattr(milvus_store_module, "_SEARCHABLE_POLL", 0)
+        await self._new_field(store)
+        store._async_client.search = AsyncMock(side_effect=[MilvusException(1, "not loaded"), [[]]])
+
+        await store.make_searchable("vector_bge_m3")
+
+        assert store._async_client.search.await_count == 2
+        assert store._async_client.search.call_args.kwargs["anns_field"] == "vector_bge_m3"
+
+    async def test_a_field_that_never_answers_is_an_error(self, store: MilvusVectorStore, monkeypatch) -> None:
+        monkeypatch.setattr(milvus_store_module, "_SEARCHABLE_TIMEOUT", 0)
+        await self._new_field(store)
+        store._async_client.search = AsyncMock(side_effect=MilvusException(1, "not loaded"))
+
+        with pytest.raises(VDBSearchError, match="still refuses searches"):
+            await store.make_searchable("vector_bge_m3")
+
+    async def test_a_field_already_there_is_not_flushed(self, store: MilvusVectorStore) -> None:
+        store._client.describe_collection.return_value = _descriptor(FIELD, "vector_bge_m3")
+        store._client.list_indexes.return_value = ["vector_bge_m3"]
+        await store.ensure_vector_field("vector_bge_m3", 768)
+        _section_ids(store, [])
+        store._async_client.upsert = AsyncMock(return_value={"upsert_count": 1})
+
+        await store.write_vectors("vector_bge_m3", {"11": [0.1]})
+
+        store._client.flush.assert_not_called()
+
+    async def test_a_failed_flush_keeps_the_write_and_the_next_one_retries(self, store: MilvusVectorStore) -> None:
+        await self._new_field(store)
+        store._client.flush.side_effect = [MilvusException(1, "busy"), None]
+
+        assert await store.write_vectors("vector_bge_m3", {"11": [0.1]}) == 1
+        _section_ids(store, [])
+        await store.write_vectors("vector_bge_m3", {"12": [0.2]})
+        _section_ids(store, [])
+        await store.write_vectors("vector_bge_m3", {"13": [0.3]})
+
+        assert store._client.flush.call_count == 2
 
 
 class TestWriteVectors:

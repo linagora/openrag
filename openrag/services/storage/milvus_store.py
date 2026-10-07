@@ -36,7 +36,7 @@ from __future__ import annotations
 import asyncio
 import secrets
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 from datetime import UTC, datetime
 from typing import Any
 
@@ -47,6 +47,7 @@ from core.utils.exceptions import (
     VDBConnectionError,
     VDBCreateOrLoadCollectionError,
     VDBDeleteError,
+    VDBError,
     VDBInsertError,
     VDBSchemaMigrationRequiredError,
     VDBSearchError,
@@ -132,6 +133,11 @@ RRF_K = 100
 #: *unreachable* server is already handled — ``MilvusClient`` connects eagerly in
 #: ``__init__`` and raises :class:`VDBConnectionError` before the probe runs.
 _SCHEMA_PROBE_TIMEOUT = 5.0
+
+#: How long :meth:`MilvusVectorStore.make_searchable` waits for a flushed field
+#: to answer, and how often it asks.
+_SEARCHABLE_TIMEOUT = 120.0
+_SEARCHABLE_POLL = 0.5
 
 #: Fallback dense-vector dimension for page sizing when the real one is
 #: unknown — i.e. a read-only process that never ran ``initialize`` AND the
@@ -235,6 +241,8 @@ class MilvusVectorStore(VectorStore):
         self._search_schema_checked = False
         # Serializes adding and dropping dense fields.
         self._vector_field_lock = asyncio.Lock()
+        # Dense fields this process added and has not flushed a write into yet.
+        self._unflushed_fields: set[str] = set()
         # Dense field names on the live schema, ``None`` until read.
         self._dense_fields_cache: frozenset[str] | None = None
         # Default projection of `query_chunks_by_filter`, ``None`` until read.
@@ -1036,6 +1044,7 @@ class MilvusVectorStore(VectorStore):
                 collection_name=self._collection_name,
             ) from e
 
+        await self._flush_new_fields([field])
         # Milvus 3.0 returns {"insert_count": N, "ids": [...], "cost": ...}.
         # Fall back to len(entities) if the server omits insert_count.
         return int(result.get("insert_count", len(entities))) if isinstance(result, dict) else len(entities)
@@ -1438,6 +1447,7 @@ class MilvusVectorStore(VectorStore):
                 collection_name=self._collection_name,
             ) from e
 
+        await self._flush_new_fields(entities[0])
         return int(result.get("upsert_count", len(entities))) if isinstance(result, dict) else len(entities)
 
     async def write_vectors(self, field: str, vectors: dict[str, list[float] | None]) -> int:
@@ -1497,6 +1507,7 @@ class MilvusVectorStore(VectorStore):
                 collection_name=self._collection_name,
             ) from e
 
+        await self._flush_new_fields([field])
         return int(result.get("upsert_count", len(entities))) if isinstance(result, dict) else len(entities)
 
     async def insert_entities(self, entities: list[dict[str, Any]], collection: str = "default") -> int:
@@ -1521,7 +1532,52 @@ class MilvusVectorStore(VectorStore):
                 collection_name=self._collection_name,
             ) from e
 
+        await self._flush_new_fields(entities[0])
         return int(result.get("insert_count", len(entities))) if isinstance(result, dict) else len(entities)
+
+    async def make_searchable(self, field: str) -> None:
+        """Flush, then wait until ``field`` answers a search.
+
+        Milvus refuses searches on a dense field added to a loaded collection
+        until some of its data is flushed (verified on Milvus 3.0.2), and by
+        default seals a segment under 16 MB by itself only once it is a day old.
+        The flushed data then takes a moment to be indexed and loaded. After
+        that, later writes into the field are searchable at once.
+        """
+        try:
+            await asyncio.to_thread(self._client.flush, self._collection_name)
+        except MilvusException as e:
+            raise VDBInsertError(f"Milvus flush failed: {e!s}", collection_name=self._collection_name) from e
+        dimension = await self.vector_dimension(field)
+        if not dimension:
+            return
+        probe = [1.0] + [0.0] * (dimension - 1)
+        deadline = time.monotonic() + _SEARCHABLE_TIMEOUT
+        logger.bind(field=field).info("Flushed; waiting for the vector field to answer searches")
+        while True:
+            try:
+                await self._async_client.search(
+                    collection_name=self._collection_name, data=[probe], anns_field=field, limit=1
+                )
+                return
+            except MilvusException as e:
+                if time.monotonic() >= deadline:
+                    raise VDBSearchError(
+                        f"`{field}` still refuses searches {_SEARCHABLE_TIMEOUT:.0f}s after a flush: {e!s}",
+                        collection_name=self._collection_name,
+                    ) from e
+            await asyncio.sleep(_SEARCHABLE_POLL)
+
+    async def _flush_new_fields(self, fields: Iterable[str]) -> None:
+        """After the first write into a field this process added, make it searchable."""
+        for field in self._unflushed_fields.intersection(fields):
+            try:
+                await self.make_searchable(field)
+            except VDBError as e:
+                # The write itself landed; the next one into the field retries.
+                logger.bind(field=field).warning(f"New vector field not searchable yet: {e!s}")
+                continue
+            self._unflushed_fields.discard(field)
 
     async def ensure_collection(self, name: str, dimension: int, **kwargs: Any) -> None:
         """Public entry point for materialising the backing collection.
@@ -1603,6 +1659,7 @@ class MilvusVectorStore(VectorStore):
                     operation="create_index",
                 ) from e
             self._dense_fields_cache = None
+            self._unflushed_fields.add(field)
             logger.bind(field=field, dimension=dimension).info("Indexed per-embedder dense vector field")
         return created
 

@@ -87,6 +87,13 @@ class VectorStore(ABC):
         """
         ...
 
+    async def make_searchable(self, field: str) -> None:
+        """Make every write into ``field`` so far answer searches, on a backend that defers it.
+
+        A no-op by default.
+        """
+        return None
+
     @abstractmethod
     async def delete(self, ids: list[str], collection: str = "default") -> int:
         """Delete chunks by ID. Returns count of deleted items."""
