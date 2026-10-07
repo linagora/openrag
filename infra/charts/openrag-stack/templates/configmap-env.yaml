@@ -1,7 +1,21 @@
+{{- /*
+The env ConfigMap, rendered from one definition twice: here as an ordinary
+release resource, and in postgres-migration-job.yaml as a copy the migration
+hook reads. A pre-install hook runs before Helm creates any ordinary resource,
+so on a fresh install the hook cannot read this one.
+
+Called with the release context plus `configMapName`, and `hookAnnotations`
+for the hook copy.
+*/}}
+{{- define "openrag-stack.envConfigMap" -}}
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: {{ include "openrag-stack.fullname" . }}-env
+  name: {{ .configMapName }}
+  {{- with .hookAnnotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
 data:
 {{- range $key, $value := .Values.env.config }}
   {{ $key }}: "{{ tpl (printf "%v" $value) $ }}"
@@ -32,3 +46,5 @@ data:
   NO_PROXY: {{ .Values.proxy.noProxy | quote }}
   no_proxy: {{ .Values.proxy.noProxy | quote }}
 {{- end }}
+{{- end }}
+{{- include "openrag-stack.envConfigMap" (merge (dict "configMapName" (printf "%s-env" (include "openrag-stack.fullname" .))) .) }}

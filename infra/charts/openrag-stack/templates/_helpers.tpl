@@ -89,6 +89,28 @@ When env.existingSecret is set, that name is returned directly.
 {{- end }}
 
 {{/*
+Names of the env ConfigMap and Secret the migration hook reads: copies created
+as hooks themselves, since a pre-install hook runs before the release's own
+resources exist. An env.existingSecret is created before the install, so the
+hook reads it directly.
+
+The fullname is cut before the suffix, not after: cut after, a 62-character
+fullname would give the copy the same name as the app's Secret, and the copy's
+hook-delete-policy would then delete the app's Secret.
+*/}}
+{{- define "openrag-stack.migrationConfigMapName" -}}
+{{- printf "%s-migration-env" (include "openrag-stack.fullname" . | trunc 49 | trimSuffix "-") }}
+{{- end }}
+
+{{- define "openrag-stack.migrationSecretName" -}}
+{{- if .Values.env.existingSecret }}
+{{- .Values.env.existingSecret }}
+{{- else }}
+{{- printf "%s-migration-env-secrets" (include "openrag-stack.fullname" . | trunc 41 | trimSuffix "-") }}
+{{- end }}
+{{- end }}
+
+{{/*
 Merge a component's security context override (e.g. just runAsUser/runAsGroup/
 fsGroup, tuned to that component's own Dockerfile) on top of a shared default
 from values.yaml's top-level `security` block — component keys win on

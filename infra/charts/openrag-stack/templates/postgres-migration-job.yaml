@@ -4,10 +4,19 @@ PostgreSQL schema-migration Job (managed-Postgres provisioning).
 This is a Helm *hook*, not a regular chart resource. The
 `helm.sh/hook: pre-install,pre-upgrade` annotation makes Helm run it
 automatically before the OpenRAG Deployment on every `helm install` /
-`helm upgrade`, and wait for it to complete before continuing. It applies the
-Alembic migrations (`python -m services.persistence.migrations.run`) against the
-externally provisioned database — it always migrates the schema and never
-creates the database (the runner does not open the app pool, so it ignores
+`helm upgrade`, and wait for it to complete before continuing.
+
+Helm creates a release's ordinary resources only after its pre-install hooks
+succeed, so the Job cannot read the env ConfigMap and Secret the app reads: on
+a fresh install they do not exist yet. It reads copies rendered from the same
+definitions as hooks of lower weight, which Helm creates first and deletes once
+the hooks succeed. On an upgrade they also carry the new values, where the
+release's own resources still hold the old ones until the hooks finish.
+
+It applies the Alembic migrations
+(`python -m services.persistence.migrations.run`) against the externally
+provisioned database — it always migrates the schema and never creates the
+database (the runner does not open the app pool, so it ignores
 `POSTGRES_AUTO_CREATE_DB` / `POSTGRES_RUN_MIGRATIONS`).
 
 Disabled by default via `postgresProvisioning.migrationJob.enabled`. Enable it
@@ -24,6 +33,13 @@ reject a UID outside the namespace's assigned range — the Job would fail as a
 pre-upgrade hook and abort the whole release.
 */}}
 {{- if .Values.postgresProvisioning.migrationJob.enabled }}
+{{- $hookAnnotations := dict
+      "helm.sh/hook" "pre-install,pre-upgrade"
+      "helm.sh/hook-weight" "-10"
+      "helm.sh/hook-delete-policy" "before-hook-creation,hook-succeeded" }}
+{{ include "openrag-stack.envConfigMap" (merge (dict "configMapName" (include "openrag-stack.migrationConfigMapName" .) "hookAnnotations" $hookAnnotations) .) }}
+{{ include "openrag-stack.envSecret" (merge (dict "envSecretName" (include "openrag-stack.migrationSecretName" .) "hookAnnotations" $hookAnnotations) .) }}
+---
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -64,9 +80,9 @@ spec:
                 uv run python -m services.persistence.migrations.run
           envFrom:
             - configMapRef:
-                name: {{ include "openrag-stack.fullname" . }}-env
+                name: {{ include "openrag-stack.migrationConfigMapName" . }}
             - secretRef:
-                name: {{ include "openrag-stack.secretName" . }}
+                name: {{ include "openrag-stack.migrationSecretName" . }}
           env:
             # The runner (services.persistence.migrations.run) always runs
             # migrations and never auto-creates the database, so it ignores
