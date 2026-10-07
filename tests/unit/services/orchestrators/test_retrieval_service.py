@@ -18,6 +18,7 @@ from core.config.retrieval_pipeline import RetrievalPipelineConfig
 from core.models.chunk import Chunk
 from core.models.preset import PartitionConfig
 from core.models.query import Query, SearchQueries
+from core.retrieval.trace import RetrievalTraceBuilder
 from core.utils.exceptions import PartitionNotFoundError
 from services.orchestrators.retrieval_service import RetrievalService
 
@@ -239,6 +240,55 @@ async def test_search_across_embedders_fuses_hits_then_adds_surrounding():
 
 
 @pytest.mark.asyncio
+async def test_search_merges_raw_trace_across_embedder_groups():
+    svc, _, searchers = _embedder_svc(
+        {"p1": "embed-a", "p2": "embed-b"}, {"embed-a": "vector_embed_a", "embed-b": "vector_embed_b"}
+    )
+    trace = RetrievalTraceBuilder("request-1", "q")
+
+    for searcher in (searchers.setdefault("embed-a", FakeSearcher()), searchers.setdefault("embed-b", FakeSearcher())):
+
+        async def traced_search(_searcher=searcher, **kwargs):
+            _searcher.search_calls.append(kwargs)
+            kwargs["trace"].record_stage("dense_before_threshold", status="complete", candidates=[])
+            return []
+
+        searcher.search = traced_search
+
+    await svc.search(text="q", partitions=["p1", "p2"], top_k=5, similarity_threshold=0.5, trace=trace)
+
+    assert trace.stages["original_query"].status == "complete"
+    assert trace.stages["dense_before_threshold"].status == "unavailable"
+    assert len(trace.query_traces) == 2
+    assert {child.partition for child in trace.query_traces} == {"p1", "p2"}
+    assert all(
+        next(stage for stage in child.stages if stage.name == "dense_before_threshold").status == "complete"
+        for child in trace.query_traces
+    )
+    assert all(call["trace"] is not trace for searcher in searchers.values() for call in searcher.search_calls)
+
+
+@pytest.mark.asyncio
+async def test_search_records_pre_top_k_partition_fusion_candidates():
+    svc, _, searchers = _embedder_svc(
+        {"p1": "embed-a", "p2": "embed-b"}, {"embed-a": "vector_embed_a", "embed-b": "vector_embed_b"}
+    )
+    searchers.setdefault("embed-a", FakeSearcher()).search_result = [_chunk("a1")]
+    searchers.setdefault("embed-b", FakeSearcher()).search_result = [_chunk("b1")]
+    trace = RetrievalTraceBuilder("request-1", "q")
+
+    results = await svc.search(text="q", partitions=["p1", "p2"], top_k=1, similarity_threshold=0.5, trace=trace)
+
+    assert [chunk.id for chunk in results] == ["a1"]
+    fused = trace.stages["partition_fused"]
+    assert fused.status == "complete"
+    assert fused.candidate_count == 2
+    assert [candidate.id for candidate in fused.candidates] == ["a1", "b1"]
+    assert fused.candidates[0].removal_reason is None
+    assert fused.candidates[1].removal_reason.code == "partition_top_k"
+
+
+@pytest.mark.asyncio
 async def test_search_keeps_the_default_alias_and_its_embedder_in_one_search():
     # "default" points at embed-a: both write the same field.
     svc, _, searchers = _embedder_svc(
@@ -288,6 +338,26 @@ async def test_search_across_embedders_drops_a_failing_one():
     out = await svc.search(text="q", partitions=["p1", "p2"], top_k=5, similarity_threshold=0.5)
 
     assert [c.id for c in out] == ["a1"]
+
+
+@pytest.mark.asyncio
+async def test_search_across_embedders_records_failed_group_in_child_trace():
+    svc, _, searchers = _embedder_svc(
+        {"p1": "embed-a", "p2": "embed-b"}, {"embed-a": "vector_embed_a", "embed-b": "vector_embed_b"}
+    )
+    searchers["embed-a"] = FakeSearcher()
+    searchers["embed-a"].search_result = [_chunk("a1")]
+    searchers["embed-b"] = FakeSearcher()
+    searchers["embed-b"].search_error = RuntimeError("embedder down")
+    trace = RetrievalTraceBuilder("request-1", "q")
+
+    out = await svc.search(text="q", partitions=["p1", "p2"], top_k=5, similarity_threshold=0.5, trace=trace)
+
+    assert [chunk.id for chunk in out] == ["a1"]
+    traces_by_partition = {child.partition: child for child in trace.query_traces}
+    failed_errors = traces_by_partition["p2"].errors
+    assert any(error.stage == "partition_search" and error.kind == "RuntimeError" for error in failed_errors)
+    assert traces_by_partition["p1"].errors == []
 
 
 @pytest.mark.asyncio
