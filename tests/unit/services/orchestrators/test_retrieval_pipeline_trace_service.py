@@ -196,3 +196,19 @@ async def test_multi_partition_retrieval_survives_child_trace_merge_failure(monk
 
     assert {chunk.id for chunk in chunks} == {"a-hit", "b-hit"}
     assert [error.stage for error in trace.errors] == ["partition_traces"]
+
+
+@pytest.mark.asyncio
+async def test_retrieve_per_query_traces_each_query_in_order():
+    searcher = _Searcher([_chunk("hit")])
+    trace = RetrievalTraceBuilder("request-1", "original question")
+
+    results = await _service(searcher).retrieve_per_query(
+        partitions=["tenant-a"],
+        queries=[Query(query="rewrite one"), Query(query="rewrite two")],
+        trace=trace,
+    )
+
+    assert [[chunk.id for chunk in chunks] for chunks in results] == [["hit"], ["hit"]]
+    assert [child.query for child in trace.query_traces] == ["rewrite one", "rewrite two"]
+    assert [call["trace"].original_query for call in searcher.calls] == ["rewrite one", "rewrite two"]

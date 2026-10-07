@@ -1249,8 +1249,19 @@ class RetrievalService:
         searches concurrently, then fuses; exposing the un-fused lists
         lets it run one ``asyncio.gather`` over both.
         """
-        query_trace = trace if len(queries) == 1 else None
-        return await asyncio.gather(
+        child_traces = (
+            [
+                RetrievalTraceBuilder(
+                    f"{trace.request_id}:query:{index}",
+                    query.query,
+                    diagnostics=trace.diagnostics,
+                )
+                for index, query in enumerate(queries)
+            ]
+            if trace is not None and len(queries) > 1
+            else None
+        )
+        results = await asyncio.gather(
             *[
                 self.retrieve(
                     partitions=partitions,
@@ -1258,15 +1269,18 @@ class RetrievalService:
                     top_k=top_k,
                     retrieval_top_k=retrieval_top_k,
                     filter_params=filter_params,
-                    trace=query_trace,
+                    trace=child_traces[index] if child_traces is not None else trace,
                     similarity_threshold=similarity_threshold,
                     disable_reranker=disable_reranker,
                     disable_expansion=disable_expansion,
                     resolved_plan=resolved_plan,
                 )
-                for q in queries
+                for index, q in enumerate(queries)
             ]
         )
+        if trace is not None and child_traces is not None:
+            self._safe_merge_child_traces(trace, child_traces)
+        return results
 
     @staticmethod
     def fuse(
