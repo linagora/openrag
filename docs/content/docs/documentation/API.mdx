@@ -286,7 +286,7 @@ Perform semantic search across specified partitions.
 |---------------------|---------|---------|-------------|
 | `partitions` (optional)        | array   | ["all"] | Partitions to search. (optional) |
 | `text`              | string  | required | Search query |
-| `top_k` (optional)             | integer | 5       | Number of initial results, from 1 to 1000 (optional) |
+| `top_k` (optional)             | integer | 5       | Number of initial results (minimum 1; maximum 1000 when retrieval tracing is enabled) (optional) |
 | `include_related` (optional)   | boolean | `false`   | Include chunks from files with same `relationship_id` |
 | `include_ancestors` (optional) | boolean | `false`   | Include chunks from ancestor files (via `parent_id` chain) |
 | `related_limit` (optional)     | integer | 20      | Max related/ancestor chunks to fetch per result (used when `include_related` or `include_ancestors` is true) |
@@ -309,7 +309,7 @@ Search within a specific partition only.
 | Parameter           | Type    | Default | Description |
 |---------------------|---------|---------|-------------|
 | `text`              | string  | required | Search query |
-| `top_k` (optional)             | integer | 5       | Number of initial results, from 1 to 1000 (optional) |
+| `top_k` (optional)             | integer | 5       | Number of initial results (minimum 1; maximum 1000 when retrieval tracing is enabled) (optional) |
 | `include_related` (optional)   | boolean | `false`   | Include chunks from files with same `relationship_id` |
 | `include_ancestors` (optional) | boolean | `false`   | Include chunks from ancestor files (via `parent_id` chain) |
 | `related_limit` (optional)     | integer | 20      | Max related/ancestor chunks to fetch per result (used when `include_related` or `include_ancestors` is true) |

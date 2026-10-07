@@ -401,16 +401,16 @@ class RetrievalService:
             endpoints = getattr(getattr(self._config, "models", None), "embedder", {}) or {}
             public_partitions = []
             for partition_name in sorted(set(selected_partitions)):
-                partition = configured_partitions.get(partition_name)
-                embedder_name = partition.embedder if partition is not None else "default"
-                endpoint = endpoints.get(embedder_name)
+                embedder_name, endpoint, vector_field, _group_key = self._partition_search_identity(
+                    partition_name, configured_partitions, endpoints
+                )
                 public_partitions.append(
                     {
                         "name": partition_name,
                         "embedder": {
                             "name": embedder_name,
                             "model": getattr(endpoint, "model_name", None),
-                            "vector_field": getattr(endpoint, "vector_field", None),
+                            "vector_field": vector_field,
                         },
                     }
                 )
@@ -432,6 +432,20 @@ class RetrievalService:
     ) -> str:
         """Fingerprint the effective raw-search path without chat-only settings."""
         return canonical_fingerprint(self.public_search_configuration(partitions, effective_options))
+
+    @staticmethod
+    def _partition_search_identity(
+        partition_name: str,
+        configured_partitions: Mapping[str, Any],
+        endpoints: Mapping[str, Any],
+    ) -> tuple[str, Any | None, str | None, str]:
+        """Resolve a partition to the embedder and vector field used by search."""
+        partition = configured_partitions.get(partition_name)
+        embedder_name = partition.embedder if partition is not None else "default"
+        endpoint = endpoints.get(embedder_name)
+        vector_field = getattr(endpoint, "vector_field", None) if endpoint is not None else None
+        group_key = vector_field or embedder_name
+        return embedder_name, endpoint, vector_field, group_key
 
     def _contextualizer_prompt_name(self, partitions: Sequence[str]) -> str | None:
         selected = list(dict.fromkeys(partitions))
@@ -885,11 +899,10 @@ class RetrievalService:
         endpoints = getattr(self._config.models, "embedder", None) or {}
         groups: dict[str, tuple[str, list[str]]] = {}
         for partition in expanded:
-            partition_cfg = configs.get(partition)
-            embedder = partition_cfg.embedder if partition_cfg is not None else "default"
-            endpoint = endpoints.get(embedder)
-            field = (endpoint.vector_field if endpoint is not None else None) or embedder
-            groups.setdefault(field, (embedder, []))[1].append(partition)
+            embedder, _endpoint, _vector_field, group_key = self._partition_search_identity(
+                partition, configs, endpoints
+            )
+            groups.setdefault(group_key, (embedder, []))[1].append(partition)
         if len(groups) == 1:
             # Keep the caller's partitions, so "all" stays unscoped.
             ((embedder, _),) = groups.values()
@@ -967,7 +980,8 @@ class RetrievalService:
                         ),
                     )
                     for index, (names, group_searcher) in enumerate(groups)
-                ]
+                ],
+                child_traces=group_traces if trace is not None else None,
             )
             if trace is None:
                 hits = self.fuse(group_hits, top_k=top_k)
@@ -1041,7 +1055,12 @@ class RetrievalService:
     # Pipeline retrieval (powers QueryService — 8C.2)
     # ------------------------------------------------------------------
 
-    async def _gather_partition_groups(self, legs: list[tuple[list[str], Awaitable[list]]]) -> list:
+    async def _gather_partition_groups(
+        self,
+        legs: list[tuple[list[str], Awaitable[list]]],
+        *,
+        child_traces: Sequence[RetrievalTraceBuilder] | None = None,
+    ) -> list:
         """Await one coroutine per partition group, bounding concurrency.
 
         Each leg is ``(partition_names, coroutine)``; the names are carried so a
@@ -1082,12 +1101,14 @@ class RetrievalService:
 
         ranked_lists = []
         first_error: BaseException | None = None
-        for (partition_names, _), result in zip(legs, results, strict=True):
+        for index, ((partition_names, _), result) in enumerate(zip(legs, results, strict=True)):
             if not isinstance(result, BaseException):
                 ranked_lists.append(result)
                 continue
             if isinstance(result, asyncio.CancelledError):
                 raise result
+            if child_traces is not None:
+                child_traces[index].record_error("partition_search", result)
             if first_error is None:
                 first_error = result
             logger.bind(partitions=partition_names).warning(
