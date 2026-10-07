@@ -933,10 +933,27 @@ class RetrievalService:
         A single-partition search uses that partition's reranker preset, same
         resolution as the chat pipeline. A search spanning several partitions is
         reranked as one list, so it uses the default reranker: scores from
-        different models are not comparable. The preset's ``enable_reranker``
-        is not consulted — the caller asked for reranking explicitly.
+        different models are not comparable.
+
+        Availability follows ``reranker.enabled``, not the catalog: the seeder
+        registers the reranker endpoint even when reranking is off (a Helm
+        install with ``reranker.enabled: false`` still points
+        ``RERANKER_BASE_URL`` at a Service that doesn't exist), so resolving a
+        reranker proves nothing. A disabled reranker is reachable only through
+        the per-partition opt-in the seeder describes: a single-partition search
+        whose retrieval preset sets ``enable_reranker``. The preset can only
+        switch reranking on, never off — with the deployment's reranker enabled,
+        an explicit ``rerank=True`` still reranks a partition whose preset
+        disables it for chat.
         """
         pipeline_cfg = self._single_partition_retrieval_config(partitions)
+        opted_in = pipeline_cfg is not None and pipeline_cfg.enable_reranker
+        if not self._config.reranker.enabled and not opted_in:
+            raise ServiceUnavailableError(
+                "Reranking was requested but the reranker is disabled on this deployment; "
+                "only a search over one partition whose retrieval preset enables it can rerank.",
+                code="RERANKER_UNAVAILABLE",
+            )
         reranker = self._resolve_reranker(pipeline_cfg.reranker if pipeline_cfg else None, ",".join(partitions))
         if reranker is None:
             raise ServiceUnavailableError(

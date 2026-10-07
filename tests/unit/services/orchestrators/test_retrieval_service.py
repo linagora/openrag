@@ -169,12 +169,12 @@ async def test_search_expands_related_when_requested():
     assert "1" in ids and "rel" in ids
 
 
-def _embedder_svc(partitions: dict[str, str], fields: dict[str, str]):
+def _embedder_svc(partitions: dict[str, str], fields: dict[str, str], *, reranker_enabled: bool = False):
     """A service whose partitions map to embedders, and embedders to vector fields.
 
     Returns the service, the default searcher and one searcher per embedder name.
     """
-    cfg = _config()
+    cfg = _config(reranker_enabled=reranker_enabled)
     cfg.partitions = {name: _partition(name=name, embedder=embedder) for name, embedder in partitions.items()}
     cfg.models = SimpleNamespace(
         reranker={}, embedder={name: SimpleNamespace(vector_field=field) for name, field in fields.items()}
@@ -509,11 +509,11 @@ async def test_search_rerank_uses_single_partition_preset():
     s = FakeSearcher()
     s.search_result = [_chunk("1")]
     reranker_calls: list[str] = []
-    cfg = _config()
+    cfg = _config(reranker_enabled=True)
     cfg.partitions = {
         "tenant-a": _partition(
-            # enable_reranker only governs the chat pipeline: an explicit
-            # rerank=true on search still reranks.
+            # With the deployment's reranker enabled, enable_reranker only
+            # governs the chat pipeline: an explicit rerank=true still reranks.
             retrieval=RetrievalPipelineConfig(top_k=25, enable_reranker=False, reranker="fast-ranker")
         ),
         "tenant-b": _partition(name="tenant-b"),
@@ -556,7 +556,9 @@ async def test_search_rerank_keeps_expansion_after_the_cut():
 async def test_search_rerank_without_reranker_is_rejected_before_searching():
     s = FakeSearcher()
     with pytest.raises(ServiceUnavailableError) as exc:
-        await _svc(s).search(text="q", partitions=["p"], top_k=5, similarity_threshold=0.5, rerank=True)
+        await _svc(s, reranker_enabled=True).search(
+            text="q", partitions=["p"], top_k=5, similarity_threshold=0.5, rerank=True
+        )
 
     assert exc.value.status_code == 503
     assert exc.value.code == "RERANKER_UNAVAILABLE"
@@ -564,9 +566,63 @@ async def test_search_rerank_without_reranker_is_rejected_before_searching():
 
 
 @pytest.mark.asyncio
+async def test_search_rerank_with_reranker_disabled_is_rejected_even_if_the_catalog_has_one():
+    # A deployment with reranker.enabled=false still seeds the reranker endpoint
+    # into the catalog (Helm points RERANKER_BASE_URL at a Service that doesn't
+    # exist), so a resolvable "default" reranker proves nothing: the request
+    # must fail as unavailable, not with a connection error after the search.
+    s = FakeSearcher()
+    reranker = ReversingReranker()
+    cfg = _config(reranker_enabled=False)
+    # Seeded retrieval presets inherit reranker.enabled, so neither partition opts in.
+    off = RetrievalPipelineConfig(enable_reranker=False)
+    cfg.partitions = {"tenant-a": _partition(retrieval=off), "tenant-b": _partition(name="tenant-b", retrieval=off)}
+    svc = RetrievalService(searcher=s, reranker=None, llm=None, config=cfg, reranker_factory=lambda name: reranker)
+
+    for partitions in (["tenant-a"], ["tenant-a", "tenant-b"], ["unknown"]):
+        with pytest.raises(ServiceUnavailableError) as exc:
+            await svc.search(text="q", partitions=partitions, top_k=5, similarity_threshold=0.5, rerank=True)
+        assert exc.value.code == "RERANKER_UNAVAILABLE"
+
+    assert s.search_calls == []
+    assert reranker.calls == []
+
+
+@pytest.mark.asyncio
+async def test_search_rerank_with_reranker_disabled_honours_the_partition_opt_in():
+    s = FakeSearcher()
+    s.search_result = [_chunk("1", "one"), _chunk("2", "two")]
+    reranker_calls: list[str] = []
+    cfg = _config(reranker_enabled=False)
+    cfg.partitions = {
+        "opted-in": _partition(name="opted-in", retrieval=RetrievalPipelineConfig(enable_reranker=True, reranker="r")),
+        "other": _partition(name="other", retrieval=RetrievalPipelineConfig(enable_reranker=True)),
+    }
+    svc = RetrievalService(
+        searcher=s,
+        reranker=None,
+        llm=None,
+        config=cfg,
+        reranker_factory=lambda name: reranker_calls.append(name) or ReversingReranker(),
+    )
+
+    out = await svc.search(text="q", partitions=["opted-in"], top_k=1, similarity_threshold=0.5, rerank=True)
+    # The opt-in is per partition: a search spanning several partitions reranks
+    # one list with the default reranker, which the deployment has disabled.
+    with pytest.raises(ServiceUnavailableError):
+        await svc.search(text="q", partitions=["opted-in", "other"], top_k=1, similarity_threshold=0.5, rerank=True)
+
+    assert [c.id for c in out] == ["2"]
+    assert reranker_calls == ["r"]
+    assert len(s.search_calls) == 1
+
+
+@pytest.mark.asyncio
 async def test_search_rerank_across_embedders_reranks_the_fused_candidates():
     svc, _, searchers = _embedder_svc(
-        {"p1": "embed-a", "p2": "embed-b"}, {"embed-a": "vector_embed_a", "embed-b": "vector_embed_b"}
+        {"p1": "embed-a", "p2": "embed-b"},
+        {"embed-a": "vector_embed_a", "embed-b": "vector_embed_b"},
+        reranker_enabled=True,
     )
     reranker = ReversingReranker()
     svc._reranker_factory = lambda name: reranker

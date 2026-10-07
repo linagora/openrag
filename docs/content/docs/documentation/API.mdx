@@ -359,7 +359,9 @@ Search within a particular file in a partition.
 With `rerank=true`, each search fetches `rerank_candidates` chunks instead of `top_k`, the reranker reorders them, and only the best `top_k` are returned, best first.
 
 - `rerank_candidates` defaults to the partition's retrieval preset `top_k` (`retriever.top_k` for a search over several partitions). It is raised to `top_k` when lower, and the candidate count never goes above 1000: a `top_k` above 1000 returns at most 1000 reranked documents.
-- A single-partition search uses that partition's reranker preset. A search over several partitions reranks all candidates as one list with the default reranker. The preset's `enable_reranker` only governs the chat pipeline: an explicit `rerank=true` still reranks.
+- A single-partition search uses that partition's reranker preset. A search over several partitions reranks all candidates as one list with the default reranker.
+- Reranking is available when the deployment enables the reranker (`RERANKER_ENABLED=true`), or, for a single-partition search, when that partition's retrieval preset sets `enable_reranker: true`. Otherwise the request fails with `503 RERANKER_UNAVAILABLE`. The preset can only switch reranking on: with the deployment's reranker enabled, `enable_reranker: false` governs the chat pipeline and an explicit `rerank=true` still reranks.
+- Reranker failures on this route count toward the same `reranker` circuit breaker as chat completions: a burst of failing `rerank=true` searches opens it for chat too.
 - Each reranked document carries a `rerank_score` beside `metadata`. Its scale depends on the reranker, so compare it within one response only and don't threshold on an absolute value.
 - Surrounding chunks are not added on this path. Related and ancestor chunks (`include_related`, `include_ancestors`) are appended after the reranked `top_k`, without a `rerank_score`, so the response can hold more than `top_k` documents.
 
@@ -374,7 +376,7 @@ With `rerank=true`, each search fetches `rerank_candidates` chunks instead of `t
 
 **Responses:**
 - `422 Unprocessable Entity`: `rerank_candidates` below 1 or above 1000
-- `503 Service Unavailable`, code `RERANKER_UNAVAILABLE`: reranking was requested but the deployment has no reranker configured
+- `503 Service Unavailable`, code `RERANKER_UNAVAILABLE`: reranking was requested but the reranker is disabled on the deployment (and the partition's preset does not enable it), or no reranker endpoint is configured
 
 ---
 
