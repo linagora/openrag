@@ -564,7 +564,7 @@ All routes are prefixed with **`/presets`** and require the **admin** role. `pre
 ```http
 GET /presets/options
 ```
-Returns the choices valid inside a preset `config`: `chunking_strategies`, `parsing_strategies` (`pymupdf`, `marker`, `docling`), `retrieval_types`, and `reranker_providers`.
+Returns the choices valid inside a preset `config`: `chunking_strategies`, `parsing_strategies` (`pymupdf`, `marker`, `docling`), `retrieval_types`, and `reranker_providers`, plus `default_top_n`: what a retrieval preset's `top_n` resolves to when it is left out (the deployment's `RERANKER_TOP_K`).
 
 #### Create a preset
 ```http
@@ -702,6 +702,8 @@ PUT    /model-endpoints/{model_type}/{name}
 DELETE /model-endpoints/{model_type}/{name}    # 204 No Content
 ```
 `PUT` takes a partial body (any of the create fields, plus `name` to rename) and returns the updated endpoint.
+
+An **LLM** endpoint's token budgets live in `extra.max_llm_context_size` and `extra.max_output_tokens`. Every route returning an LLM endpoint also reports what a missing value falls back to: `detected_max_llm_context_size` (the `max_model_len` the endpoint reported on `/v1/models`, `null` when it reports none, as most gateways and hosted APIs don't), `default_max_llm_context_size` and `default_max_output_tokens` (the deployment's `MAX_LLM_CONTEXT_SIZE` and `MAX_OUTPUT_TOKENS`). The context size that applies is `max_llm_context_size`, else `detected_max_llm_context_size`, else `default_max_llm_context_size`. A write to an LLM endpoint re-probes `/v1/models` after responding; until that lands, `context_size_detection_pending` is `true` and `detected_max_llm_context_size` is `null`. These fields are `null` on other endpoint types.
 
 Changing an **embedder**'s `endpoint`, `model_name`, `extra.implementation` or `extra.max_model_len` changes the vectors it produces. While partitions hold files indexed with it, such an edit returns `409 EMBEDDER_EDIT_AFFECTS_INDEXED_DATA` naming the partitions and file counts; resend it with `"acknowledge_indexed_data": true` to apply it anyway. The existing vectors are not rebuilt, so queries on those partitions are then compared against vectors from the previous configuration. `GET /model-endpoints/{model_type}/{name}/indexed-usage` returns the same counts ahead of time.
 
