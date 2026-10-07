@@ -751,7 +751,11 @@ class PartitionService:
             "indexation_preset": row.get("indexation_preset") or "default",
             "retrieval_preset": row.get("retrieval_preset") or "default",
             "indexation_pipeline": cfg.indexation.model_dump(mode="json"),
-            "retrieval_pipeline": cfg.retrieval.model_dump(mode="json"),
+            # top_n as it applies: a preset that leaves it unset follows RERANKER_TOP_K.
+            "retrieval_pipeline": {
+                **cfg.retrieval.model_dump(mode="json"),
+                "top_n": cfg.retrieval.effective_top_n(self._config.reranker.top_k),
+            },
             # Placeholder: the column is not the dimension of anything (see
             # _live_vector_dimension). get_partition_config overwrites it with
             # the live value; nothing else should read it.

@@ -490,3 +490,12 @@ def test_downgrade_refuses_fields_of_different_dimensions(migration, use_catalog
     with pytest.raises(RuntimeError, match="different dimensions"):
         migration.downgrade(client, "c")
     assert "vector" not in client.field_names()
+
+
+@pytest.mark.parametrize("name", ["qualité", "no-scope 🏴‍☠️", 'say "hi" \\ bye'])
+def test_partition_literals_keep_non_ascii_raw(migration, name) -> None:
+    """Milvus rejects the ``\\uXXXX`` surrogate pairs ``json.dumps`` emits for emoji by default."""
+    literal = migration._literal(name)
+
+    assert "\\u" not in literal
+    assert json.loads(literal) == name

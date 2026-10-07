@@ -77,22 +77,21 @@ _DEFAULT_SEEDS: dict[str, dict[str, dict[str, Any]]] = {
     # time from the global ``reranker.enabled`` kill-switch (see _finalize_seed)
     # so a deployment without a reranker (CPU-only, CI) does not force reranking
     # on every partition and then fail against an unreachable reranker endpoint.
+    # ``top_n`` is omitted too: unset, it follows the global ``reranker.top_k``
+    # (RERANKER_TOP_K) at query time rather than freezing it at seed time.
     "retrieval": {
         "default": {
             "type": "single",
             "top_k": 50,
-            "top_n": 10,
             "similarity_threshold": 0.6,
         },
         "multiquery": {
             "type": "multiQuery",
             "top_k": 50,
-            "top_n": 10,
         },
         "hyde": {
             "type": "hyde",
             "top_k": 50,
-            "top_n": 10,
         },
     },
 }
