@@ -476,6 +476,7 @@ def test_trace_errors_are_safe_and_unvisited_stages_are_explicit():
         "file_filter",
         "temporal_filter",
         "partition_top_k",
+        "catalog_filter",
     )
 
 
