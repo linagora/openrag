@@ -163,7 +163,9 @@ class PgDocumentRepository(DocumentRepository):
                 rows = conn.cursor(
                     """
                     SELECT file_id, indexed_at, content_sha256, chunk_count,
-                           relationship_id, parent_id
+                           relationship_id, parent_id,
+                           indexation_config->>'embedder_model_name' AS embedder_model_name,
+                           indexation_config->>'embedder_vector_field' AS embedder_vector_field
                     FROM files
                     WHERE partition_name = $1
                     ORDER BY file_id COLLATE "C"
@@ -180,6 +182,9 @@ class PgDocumentRepository(DocumentRepository):
                         row["chunk_count"],
                         row["relationship_id"],
                         row["parent_id"],
+                        # A re-embed changes the vectors and only these.
+                        row["embedder_model_name"],
+                        row["embedder_vector_field"],
                     ]
                     digest.update(json.dumps(identity, separators=(",", ":"), ensure_ascii=False).encode())
                     digest.update(b"\n")

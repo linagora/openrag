@@ -1422,6 +1422,9 @@ function EndpointUpdateConfirmDialog({
   onConfirm: () => void;
 }) {
   const material = hasMaterialChange(changes);
+  // Drift is a file recording another model, so only a model change makes the
+  // affected files show as drifted and re-embeddable on this endpoint.
+  const modelChanged = changes.some((c) => c.field === "model_name");
   const [acknowledged, setAcknowledged] = useState(false);
 
   // Only worth asking for when it changes what the dialog says. The count is
@@ -1531,8 +1534,18 @@ function EndpointUpdateConfirmDialog({
                       working until they are.
                     </li>
                     <li>
-                      If you go ahead anyway, each affected partition can re-embed its drifted files
-                      afterwards from its page.
+                      {modelChanged ? (
+                        <>
+                          If you go ahead anyway, each affected partition can re-embed its drifted files
+                          afterwards from its page.
+                        </>
+                      ) : (
+                        <>
+                          The model name stays the same, so nothing marks these files as drifted afterwards,
+                          and re-embedding onto this endpoint skips them. Rebuilding their vectors takes a
+                          second endpoint and <span className="font-medium">Change embedder</span>.
+                        </>
+                      )}
                     </li>
                   </ul>
 
