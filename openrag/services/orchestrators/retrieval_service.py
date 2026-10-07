@@ -191,6 +191,8 @@ class RetrievalService:
         prompt_type: str,
         name: str | None,
         disk_key: str,
+        *,
+        strict: bool = False,
     ) -> tuple[str, dict[str, str | None]]:
         """Resolve a query-side prompt to its text and content-free identity.
 
@@ -200,7 +202,7 @@ class RetrievalService:
         """
         resolve_with_identity = getattr(self._prompt_service, "resolve_prompt_with_identity", None)
         if resolve_with_identity is not None:
-            resolved = await resolve_with_identity(prompt_type, names=[name])
+            resolved = await resolve_with_identity(prompt_type, names=[name], strict_errors=strict)
             return resolved.content, self._public_prompt_identity(resolved)
         if self._prompt_service is not None:
             content = await self._prompt_service.resolve_prompt(prompt_type, names=[name])
@@ -223,6 +225,10 @@ class RetrievalService:
     def _partition_configs(self) -> dict[str, Any]:
         return getattr(self._config, "partitions", {}) or {}
 
+    def has_loaded_partition_retrieval_config(self, partition: str) -> bool:
+        """Return whether this process has resolved retrieval settings for a partition."""
+        return partition in self._partition_configs()
+
     def _effective_contextualizer_name(self, partitions: Sequence[str]) -> str:
         """Mirror QueryService's partition LLM resolution for public metadata."""
         if self._llm_factory is None:
@@ -239,6 +245,15 @@ class RetrievalService:
         return {
             "name": name,
             "model": getattr(endpoint, "model_name", None),
+        }
+
+    def _legacy_reranker_identity(self) -> dict[str, object]:
+        """Describe the startup reranker used by the legacy retrieval pipeline."""
+        if self._legacy_reranker is None:
+            return {"name": None, "model": None}
+        return {
+            "name": "default",
+            "model": getattr(getattr(self._config, "reranker", None), "model_name", None),
         }
 
     def public_retrieval_configuration(self, partitions: Sequence[str]) -> dict[str, object]:
@@ -285,6 +300,11 @@ class RetrievalService:
                 )
             )
             reranker_name = getattr(retrieval, "reranker", None) or ("default" if reranker_enabled else None)
+            reranker_endpoint = (
+                self._legacy_reranker_identity()
+                if partition is None or self._reranker_factory is None
+                else self._public_endpoint(self._config, "reranker", reranker_name)
+            )
             related_limit = getattr(
                 retrieval,
                 "related_limit",
@@ -313,7 +333,7 @@ class RetrievalService:
                         "query_expansion_llm": query_expansion_llm,
                     },
                     "reranker": {
-                        **self._public_endpoint(self._config, "reranker", reranker_name),
+                        **reranker_endpoint,
                         "enabled": reranker_enabled,
                         "top_n": getattr(
                             retrieval,
@@ -324,6 +344,10 @@ class RetrievalService:
                     "contextualizer": {
                         **contextualizer_endpoint,
                         "prompt_name": getattr(retrieval, "query_contextualizer_prompt_name", None),
+                        "mode": getattr(getattr(self._config, "rag", None), "mode", None),
+                        "max_contextualized_query_len": getattr(
+                            getattr(self._config, "rag", None), "max_contextualized_query_len", None
+                        ),
                     },
                     "expansion": {
                         "include_related": getattr(retrieval, "include_related", False),
@@ -392,11 +416,20 @@ class RetrievalService:
         partition = self._partition_configs().get(selected[0])
         return getattr(getattr(partition, "retrieval", None), "query_contextualizer_prompt_name", None)
 
-    async def _contextualizer_prompt_identity(self, partitions: Sequence[str]) -> dict[str, str | None]:
+    async def _contextualizer_prompt_identity(
+        self,
+        partitions: Sequence[str],
+        *,
+        strict: bool = False,
+    ) -> dict[str, str | None]:
         prompt_name = self._contextualizer_prompt_name(partitions)
         resolve_with_identity = getattr(self._prompt_service, "resolve_prompt_with_identity", None)
         if resolve_with_identity is not None:
-            resolved = await resolve_with_identity("query_contextualizer", names=[prompt_name])
+            resolved = await resolve_with_identity(
+                "query_contextualizer",
+                names=[prompt_name],
+                strict_errors=strict,
+            )
             return {
                 "name": resolved.name,
                 "source": resolved.source,
@@ -432,7 +465,12 @@ class RetrievalService:
             "content_hash": field("content_hash"),
         }
 
-    async def _query_expansion_prompt_identity(self, retrieval: object) -> dict[str, str | None] | None:
+    async def _query_expansion_prompt_identity(
+        self,
+        retrieval: object,
+        *,
+        strict: bool = False,
+    ) -> dict[str, str | None] | None:
         retrieval_type = getattr(retrieval, "type", None)
         if retrieval_type == "hyde":
             prompt_type = "hyde"
@@ -442,7 +480,12 @@ class RetrievalService:
             prompt_name = getattr(retrieval, "multi_query_prompt_name", None)
         else:
             return None
-        _content, identity = await self._resolve_query_prompt(prompt_type, prompt_name, prompt_type)
+        _content, identity = await self._resolve_query_prompt(
+            prompt_type,
+            prompt_name,
+            prompt_type,
+            strict=strict,
+        )
         return {"type": prompt_type, **identity}
 
     async def resolved_public_retrieval_configuration(
@@ -507,10 +550,7 @@ class RetrievalService:
         the default, so "which reranker ran?" is answerable from the logs.
         """
         if self._reranker_factory is None:
-            return self._legacy_reranker, {
-                **self._public_endpoint(self._config, "reranker", "default"),
-                "name": "default" if self._legacy_reranker is not None else None,
-            }
+            return self._legacy_reranker, self._legacy_reranker_identity()
         if reranker_name:
             try:
                 reranker = self._reranker_factory(reranker_name)
@@ -536,10 +576,7 @@ class RetrievalService:
         logger.bind(partition=partition).debug(
             "Reranking with the static default reranker (no catalog default endpoint)"
         )
-        return self._legacy_reranker, {
-            **self._public_endpoint(self._config, "reranker", "default"),
-            "name": "default" if self._legacy_reranker is not None else None,
-        }
+        return self._legacy_reranker, self._legacy_reranker_identity()
 
     def _resolve_reranker(self, reranker_name: str | None, partition: str) -> Reranker | None:
         reranker, _identity = self._resolve_reranker_with_identity(reranker_name, partition)
@@ -679,6 +716,7 @@ class RetrievalService:
         disable_expansion: bool = False,
         contextualizer_prompt: object | None = None,
         build_execution: bool = True,
+        strict_prompt_resolution: bool = False,
     ) -> ResolvedRetrievalPlan:
         """Resolve executable pipelines and their public identity once."""
         requested = list(partitions)
@@ -693,7 +731,7 @@ class RetrievalService:
                 partition = configs.get(partition_name)
                 retrieval = partition.retrieval if partition is not None else self._config.retriever
                 prompt_identities[partition_name] = (
-                    await self._query_expansion_prompt_identity(retrieval)
+                    await self._query_expansion_prompt_identity(retrieval, strict=strict_prompt_resolution)
                     if configs
                     else self._legacy_query_expansion_prompt_identity(self._pipeline)
                 )
@@ -702,7 +740,7 @@ class RetrievalService:
                     "enable_reranker",
                     getattr(getattr(self._config, "reranker", None), "enabled", False),
                 )
-                if reranker_enabled and not disable_reranker:
+                if partition is not None and reranker_enabled and not disable_reranker:
                     _reranker, identity = self._resolve_reranker_with_identity(
                         getattr(retrieval, "reranker", None),
                         partition_name,
@@ -762,7 +800,7 @@ class RetrievalService:
         public["contextualizer_prompt"] = (
             self._public_prompt_identity(contextualizer_prompt)
             if contextualizer_prompt is not None
-            else await self._contextualizer_prompt_identity(requested)
+            else await self._contextualizer_prompt_identity(requested, strict=strict_prompt_resolution)
         )
         return ResolvedRetrievalPlan(
             groups=tuple(groups),

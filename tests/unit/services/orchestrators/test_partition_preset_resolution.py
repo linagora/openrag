@@ -718,6 +718,8 @@ async def test_detail_dimension_is_null_when_the_store_cannot_tell():
     detail = await svc.get_partition_config("p1")
 
     assert detail["dimension"] is None
+    strict_detail = await svc.get_partition_config("p1", strict_vector_dimension=True)
+    assert strict_detail["dimension"] is None
 
 
 @pytest.mark.asyncio
@@ -737,6 +739,23 @@ async def test_detail_dimension_survives_a_vector_store_failure():
 
     assert detail["dimension"] is None
     assert detail["name"] == "p1"
+
+
+@pytest.mark.asyncio
+async def test_strict_detail_dimension_fails_when_vector_store_is_unavailable():
+    from core.utils.exceptions import ServiceUnavailableError
+
+    class _BrokenStore(_FakeVectorStore):
+        async def vector_dimension(self, vector_field: str | None = None) -> int | None:
+            raise RuntimeError("milvus unreachable")
+
+    svc = _make_service(_FakePartitionRepo(rows=[_full_row("p1")]))
+    svc._vector_store = _BrokenStore()
+
+    with pytest.raises(ServiceUnavailableError) as exc:
+        await svc.get_partition_config("p1", strict_vector_dimension=True)
+
+    assert exc.value.code == "PARTITION_DIMENSION_UNAVAILABLE"
 
 
 @pytest.mark.asyncio

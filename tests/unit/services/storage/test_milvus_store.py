@@ -2140,3 +2140,15 @@ class TestVectorFieldRouting:
         assert await store.vector_dimension(FIELD) == 1024
         assert await store.vector_dimension("vector_not_there_yet") is None
         assert await store.vector_dimension() is None
+
+    async def test_dimension_lookup_propagates_backend_errors(self, store: MilvusVectorStore) -> None:
+        store._client.describe_collection.side_effect = RuntimeError("milvus unreachable")
+
+        with pytest.raises(RuntimeError, match="milvus unreachable"):
+            await store.vector_dimension(FIELD)
+
+    async def test_dimension_is_absent_before_collection_creation(self, store: MilvusVectorStore) -> None:
+        store._client.has_collection.return_value = False
+        store._client.describe_collection.side_effect = RuntimeError("collection does not exist")
+
+        assert await store.vector_dimension(FIELD) is None

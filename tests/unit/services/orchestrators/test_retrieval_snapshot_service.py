@@ -6,11 +6,13 @@ from types import SimpleNamespace
 import pytest
 from core.ports.document_repo import IndexedCorpusState
 from core.retrieval.trace import canonical_fingerprint
+from core.utils.exceptions import PartitionNotFoundError, ServiceUnavailableError
 from services.orchestrators.retrieval_snapshot_service import RetrievalSnapshotService
 
 
 class _Partitions:
-    async def get_partition_config(self, partition):
+    async def get_partition_config(self, partition, *, strict_vector_dimension=False):
+        self.strict_vector_dimension = strict_vector_dimension
         return {
             "partition": partition,
             "created_at": "2026-09-16T12:00:00+00:00",
@@ -54,15 +56,15 @@ class _ManyDocuments:
 
 
 class _Retrieval:
-    def __init__(self, prompt_hash="prompt-hash-a"):
+    def __init__(self, prompt_hash="prompt-hash-a", expansion_model="query-model-a"):
         self.prompt_hash = prompt_hash
+        self.expansion_model = expansion_model
 
     @staticmethod
     def configuration_fingerprint(_partitions):
         return "retrieval-fingerprint"
 
-    @staticmethod
-    def public_retrieval_configuration(partitions):
+    def public_retrieval_configuration(self, partitions):
         assert partitions == ["legal-rag-bench"]
         return {
             "hybrid": {"enabled": True, "fusion": "rrf"},
@@ -81,6 +83,11 @@ class _Retrieval:
                         "allow_filterless_fallback": True,
                         "hyde_prompt_name": None,
                         "multi_query_prompt_name": "legal-multi-query",
+                        "query_expansion_llm": {
+                            "name": "query-llm",
+                            "model": self.expansion_model,
+                            "api_key": "query-must-not-leak",
+                        },
                     },
                     "reranker": {"name": "rerank", "model": "bge-reranker", "enabled": True, "top_n": 10},
                     "contextualizer": {"name": "chat", "model": "qwen", "prompt_name": "legal"},
@@ -130,6 +137,7 @@ async def test_snapshot_is_allowlisted_and_fingerprinted():
         "allow_filterless_fallback": True,
         "hyde_prompt_name": None,
         "multi_query_prompt_name": "legal-multi-query",
+        "query_expansion_llm": {"name": "query-llm", "model": "query-model-a"},
         "query_expansion_prompt": {
             "type": "multi_query",
             "name": "legal-multi-query",
@@ -141,6 +149,10 @@ async def test_snapshot_is_allowlisted_and_fingerprinted():
         await retrieval.resolved_public_retrieval_configuration(["legal-rag-bench"])
     )
     assert snapshot["configuration"]["embedder"]["dimensions"] == 768
+    assert snapshot["configuration"]["retrieval"]["query_expansion_llm"] == {
+        "name": "query-llm",
+        "model": "query-model-a",
+    }
     assert snapshot["index"]["indexed_corpus_count"] == 2
     assert snapshot["index"]["document_ids"] == ["doc-1", "doc-2"]
     assert snapshot["index"]["document_ids_truncated"] is False
@@ -187,7 +199,7 @@ async def test_snapshot_consumes_the_resolved_plan_configuration_and_fingerprint
 
     snapshot = await service.snapshot("legal-rag-bench")
 
-    assert retrieval.plan_calls == [(["legal-rag-bench"], {"build_execution": False})]
+    assert retrieval.plan_calls == [(["legal-rag-bench"], {"build_execution": False, "strict_prompt_resolution": True})]
     assert snapshot["retrieval_configuration_fingerprint"] == retrieval.resolved_plan.configuration_fingerprint
 
 
@@ -217,6 +229,122 @@ async def test_prompt_hash_changes_retrieval_and_snapshot_fingerprints_without_e
     )
     assert first_snapshot["fingerprint"] != second_snapshot["fingerprint"]
     assert "private contextualizer instructions" not in json.dumps(first_snapshot)
+
+
+@pytest.mark.asyncio
+async def test_query_expansion_model_changes_top_level_snapshot_fingerprint():
+    first = RetrievalSnapshotService(
+        partition_service=_Partitions(),
+        document_repo=_Documents(),
+        retrieval_service=_Retrieval(expansion_model="query-model-a"),
+    )
+    second = RetrievalSnapshotService(
+        partition_service=_Partitions(),
+        document_repo=_Documents(),
+        retrieval_service=_Retrieval(expansion_model="query-model-b"),
+    )
+
+    first_snapshot = await first.snapshot("legal-rag-bench")
+    second_snapshot = await second.snapshot("legal-rag-bench")
+
+    assert (
+        first_snapshot["retrieval_configuration_fingerprint"] != second_snapshot["retrieval_configuration_fingerprint"]
+    )
+    assert first_snapshot["fingerprint"] != second_snapshot["fingerprint"]
+
+
+@pytest.mark.asyncio
+async def test_snapshot_refreshes_partition_config_once_before_returning_not_loaded():
+    class ReloadablePartitions(_Partitions):
+        def __init__(self):
+            self.reload_calls = 0
+
+        async def load_partitions(self):
+            self.reload_calls += 1
+
+    class ReloadableRetrieval(_Retrieval):
+        def __init__(self, partitions):
+            super().__init__()
+            self.partitions = partitions
+
+        def has_loaded_partition_retrieval_config(self, _partition):
+            return self.partitions.reload_calls > 0
+
+        async def resolve_retrieval_plan(self, partitions, **kwargs):
+            assert kwargs == {"build_execution": False, "strict_prompt_resolution": True}
+            public = await super().resolved_public_retrieval_configuration(partitions)
+            return SimpleNamespace(public_configuration=public, configuration_fingerprint="plan-fingerprint")
+
+    partitions = ReloadablePartitions()
+    service = RetrievalSnapshotService(
+        partition_service=partitions,
+        document_repo=_Documents(),
+        retrieval_service=ReloadableRetrieval(partitions),
+    )
+
+    await service.snapshot("legal-rag-bench")
+
+    assert partitions.reload_calls == 1
+    assert partitions.strict_vector_dimension is True
+
+
+@pytest.mark.asyncio
+async def test_snapshot_still_fails_when_partition_config_is_missing_after_refresh():
+    class MissingPartitions(_Partitions):
+        def __init__(self):
+            self.reload_calls = 0
+
+        async def load_partitions(self):
+            self.reload_calls += 1
+
+    class MissingRetrieval(_Retrieval):
+        def __init__(self, partitions):
+            super().__init__()
+            self.partitions = partitions
+
+        def has_loaded_partition_retrieval_config(self, _partition):
+            return False
+
+    partitions = MissingPartitions()
+    service = RetrievalSnapshotService(
+        partition_service=partitions,
+        document_repo=_Documents(),
+        retrieval_service=MissingRetrieval(partitions),
+    )
+
+    with pytest.raises(ServiceUnavailableError, match="not loaded"):
+        await service.snapshot("legal-rag-bench")
+
+    assert partitions.reload_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_snapshot_preserves_not_found_when_partition_is_not_loaded():
+    class MissingPartitions(_Partitions):
+        def __init__(self):
+            self.reload_calls = 0
+
+        async def get_partition_config(self, partition, *, strict_vector_dimension=False):
+            raise PartitionNotFoundError(f"Partition '{partition}' does not exist.")
+
+        async def load_partitions(self):
+            self.reload_calls += 1
+
+    class MissingRetrieval(_Retrieval):
+        def has_loaded_partition_retrieval_config(self, _partition):
+            return False
+
+    partitions = MissingPartitions()
+    service = RetrievalSnapshotService(
+        partition_service=partitions,
+        document_repo=_Documents(),
+        retrieval_service=MissingRetrieval(),
+    )
+
+    with pytest.raises(PartitionNotFoundError):
+        await service.snapshot("typo-partition")
+
+    assert partitions.reload_calls == 0
 
 
 @pytest.mark.asyncio
