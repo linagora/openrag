@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from services.orchestrators.partition_service import PartitionService
     from services.orchestrators.query_service import QueryService
     from services.orchestrators.retrieval_service import RetrievalService
+    from services.orchestrators.retrieval_snapshot_service import RetrievalSnapshotService
     from services.orchestrators.user_service import UserService
     from services.orchestrators.workspace_service import WorkspaceService
 
@@ -103,6 +104,11 @@ def get_retrieval_service(request: Request = None) -> RetrievalService:
     return _require_initialized(request).retrieval_service
 
 
+def get_retrieval_snapshot_service(request: Request = None) -> RetrievalSnapshotService:
+    """Resolve the public retrieval-snapshot orchestrator."""
+    return _require_initialized(request).retrieval_snapshot_service
+
+
 def get_query_service(request: Request = None) -> QueryService:
     """Resolve the query orchestrator from the active container."""
     return _require_initialized(request).query_service
@@ -173,6 +179,7 @@ __all__ = [
     "get_prompt_service",
     "get_query_service",
     "get_retrieval_service",
+    "get_retrieval_snapshot_service",
     "get_user_service",
     "get_workspace_service",
     "set_container",

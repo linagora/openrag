@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 from core.config.indexation_pipeline import IndexationPipelineConfig
 from core.config.presets import PresetsConfig
+from core.config.retrieval import InfinityRerankerConfig, OpenAIRerankerConfig, TEIRerankerConfig
 from core.config.retrieval_pipeline import RetrievalPipelineConfig
 from pydantic import ValidationError
 
@@ -60,6 +61,14 @@ def test_retrieval_pipeline_rejects_unknown_type():
     """Retrieval presets reject unsupported retrieval modes."""
     with pytest.raises(ValidationError):
         RetrievalPipelineConfig(type="unknown")
+
+
+@pytest.mark.parametrize("provider", [InfinityRerankerConfig, OpenAIRerankerConfig, TEIRerankerConfig])
+@pytest.mark.parametrize("top_k", [0, -1])
+def test_reranker_top_k_must_be_positive(provider, top_k: int):
+    """RERANKER_TOP_K is the top_n of every preset that leaves it unset: 0 would keep no chunk, -1 drop the last."""
+    with pytest.raises(ValidationError):
+        provider(top_k=top_k)
 
 
 @pytest.mark.parametrize("threshold", [-0.1, 1.1])
