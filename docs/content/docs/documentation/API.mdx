@@ -291,7 +291,7 @@ Perform semantic search across specified partitions.
 | `include_ancestors` (optional) | boolean | `false`   | Include chunks from ancestor files (via `parent_id` chain) |
 | `related_limit` (optional)     | integer | 20      | Max related/ancestor chunks to fetch per result (used when `include_related` or `include_ancestors` is true) |
 | `rerank` (optional)            | boolean | `false`   | Rerank the vector search candidates and return the best `top_k`. See [reranking](#reranking-search-results) |
-| `rerank_candidates` (optional) | integer | partition's retrieval `top_k` | Candidates fetched from the vector search and sent to the reranker, only with `rerank=true`. Never lower than `top_k`, at most 1000 |
+| `rerank_candidates` (optional) | integer | partition's retrieval `top_k`, or `retriever.top_k` over several partitions | Candidates fetched from the vector search and sent to the reranker, only with `rerank=true`. Never lower than `top_k`, at most 1000 |
 | `filter` (optional)            | string  | None    | Milvus filter expression string for additional filtering. Supports comparison (`==`, `!=`, `>`, `<`, `>=`, `<=`), range (`IN`, `LIKE`), and logical (`AND`, `OR`, `NOT`) operators. |
 | `include_retrieval_trace` (optional) | boolean | `false` | Add content-free retrieval diagnostics for administrators. This may execute additional search work. |
 

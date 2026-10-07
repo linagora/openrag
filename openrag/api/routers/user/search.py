@@ -82,8 +82,8 @@ class CommonSearchParams:
             ge=1,
             le=MAX_RERANK_CANDIDATES,
             description="Number of vector search candidates sent to the reranker (only with `rerank=true`). "
-            "Defaults to the partition's retrieval `top_k`; never lower than `top_k`, never above "
-            f"{MAX_RERANK_CANDIDATES}.",
+            "Defaults to the partition's retrieval `top_k` (`retriever.top_k` for a search over several "
+            f"partitions); never lower than `top_k`, never above {MAX_RERANK_CANDIDATES}.",
         ),
         include_retrieval_trace: bool = Query(
             False,
@@ -237,8 +237,8 @@ async def retrieval_snapshot(
 - `text`: Search query text (required)
 - `top_k`: Number of results to return (default: 5)
 - similarity_threshold: Minimum similarity score for results (0 to 1, default: 0.75)
-- `rerank`: Rerank the vector search candidates with the partition's reranker and return the best `top_k` (default: false). Each reranked document carries a `rerank_score`; its scale depends on the reranker, compare it within one response only. Related and ancestor chunks are appended after the reranked `top_k`, without a score.
-- `rerank_candidates`: Number of candidates fetched from the vector search and sent to the reranker (default: the partition's retrieval `top_k`, at most 1000). Only used with `rerank=true`.
+- `rerank`: Rerank the vector search candidates and return the best `top_k` (default: false). A search over one partition uses that partition's reranker preset, a search over several partitions uses the default reranker. Each reranked document carries a `rerank_score`; its scale depends on the reranker, compare it within one response only. Related and ancestor chunks are appended after the reranked `top_k`, without a score.
+- `rerank_candidates`: Number of candidates fetched from the vector search and sent to the reranker (default: the partition's retrieval `top_k`, or `retriever.top_k` for a search over several partitions; at most 1000). Only used with `rerank=true`.
 - `include_related`: Include chunks from files with same relationship_id (default: false)
 - `include_ancestors`: Include chunks from ancestor files in hierarchy (default: false)
 - `related_limit`: Maximum number of related/ancestor chunks to fetch per result (default: 20). This is used when `include_related` or `include_ancestors` is true.
