@@ -43,6 +43,7 @@ from core.utils.exceptions import (
     ConflictError,
     NotFoundError,
     PartitionNotFoundError,
+    ServiceUnavailableError,
     UserNotFoundError,
     ValidationError,
 )
@@ -580,7 +581,7 @@ class PartitionService:
         logger.info("Partition updated.", partition=partition, fields=sorted(updates))
         return result
 
-    async def get_partition_config(self, partition: str) -> dict:
+    async def get_partition_config(self, partition: str, *, strict_vector_dimension: bool = False) -> dict:
         """Return the resolved Phase 14 detail for a partition.
 
         Shapes a ``PartitionDetailResponse``: the stored preset references plus
@@ -592,7 +593,7 @@ class PartitionService:
         if row is None:
             raise PartitionNotFoundError(f"Partition '{partition}' does not exist.")
         detail = self._partition_detail(row, self.resolve_partition_row(row))
-        detail["dimension"] = await self._live_vector_dimension(row.get("embedder"))
+        detail["dimension"] = await self._live_vector_dimension(row.get("embedder"), strict=strict_vector_dimension)
         detail["document_count"] = await self._partition_repo.get_partition_file_count(partition)
         detail["indexed_embedders"] = await self._indexed_embedders(partition)
         return detail
@@ -671,7 +672,7 @@ class PartitionService:
             logger.debug("Could not read per-file embedder provenance", partition=partition, error=str(exc))
             return []
 
-    async def _live_vector_dimension(self, embedder: str | None) -> int | None:
+    async def _live_vector_dimension(self, embedder: str | None, *, strict: bool = False) -> int | None:
         """Dimension of the vectors ``embedder`` actually stored, or ``None``.
 
         Replaces ``partitions.dimension``, which no code path has ever written:
@@ -684,21 +685,36 @@ class PartitionService:
         Read from the dense field of ``embedder``: ``None`` before anything was
         indexed with it.
 
-        A vector-store failure yields ``None`` rather than propagating: the
-        dimension is informational, and a briefly unreachable Milvus should not
-        turn a partition-config read into a 500.
+        Ordinary partition-config reads are best effort because the dimension
+        is informational. Snapshot callers pass ``strict=True`` so an outage
+        cannot be mistaken for a real ``None`` dimension and alter its hash.
         """
         getter = getattr(self._vector_store, "vector_dimension", None)
         if getter is None or self._config is None:
+            if strict:
+                raise ServiceUnavailableError(
+                    "The live vector dimension cannot be read for this partition.",
+                    code="PARTITION_DIMENSION_UNAVAILABLE",
+                )
             return None
         endpoint = self._config.models.embedder.get(embedder or "default")
         field = getattr(endpoint, "vector_field", None)
         if field is None:
+            if strict:
+                raise ServiceUnavailableError(
+                    "The configured embedder has no vector field for this partition.",
+                    code="PARTITION_DIMENSION_UNAVAILABLE",
+                )
             return None
         try:
             return await getter(field)
         except Exception as exc:
             logger.debug("Could not read the live vector dimension", error=str(exc))
+            if strict:
+                raise ServiceUnavailableError(
+                    "The live vector dimension is temporarily unavailable.",
+                    code="PARTITION_DIMENSION_UNAVAILABLE",
+                ) from exc
             return None
 
     async def _active_vector_field(self, partition: str) -> str | None:
@@ -787,7 +803,11 @@ class PartitionService:
             "indexation_preset": row.get("indexation_preset") or "default",
             "retrieval_preset": row.get("retrieval_preset") or "default",
             "indexation_pipeline": cfg.indexation.model_dump(mode="json"),
-            "retrieval_pipeline": cfg.retrieval.model_dump(mode="json"),
+            # top_n as it applies: a preset that leaves it unset follows RERANKER_TOP_K.
+            "retrieval_pipeline": {
+                **cfg.retrieval.model_dump(mode="json"),
+                "top_n": cfg.retrieval.effective_top_n(self._config.reranker.top_k),
+            },
             # Placeholder: the column is not the dimension of anything (see
             # _live_vector_dimension). get_partition_config overwrites it with
             # the live value; nothing else should read it.

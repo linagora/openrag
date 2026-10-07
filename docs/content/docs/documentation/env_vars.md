@@ -371,7 +371,7 @@ These are external services to provide !!!
 | `LLM_ENABLE_THINKING` | bool | _(unset)_ | Optional chat-template control for models that support `enable_thinking`; leave unset for Mistral tokenizers, set `false` to suppress Qwen-style reasoning traces |
 | `LLM_SEMAPHORE` | int | 10 | Maximum number of concurrent requests to allow for the LLM service |
 | `LLM_OVERRIDE_ALLOW_CUSTOM_ENDPOINT` | bool | `false` | Honor a client-supplied `base_url`/`api_key` in `metadata.llm_override`. Off by default; read the trade-off below before enabling. |
-| `MAX_LLM_CONTEXT_SIZE` | `int` | `8192` | Fallback maximum token limit for chat/completion requests. At startup, the `/v1/models` endpoint is queried for the model's `max_model_len`; if that query fails this value is used instead. Requests whose total token count (prompt + `max_tokens`) exceeds the limit are rejected with a **413** error. |
+| `MAX_LLM_CONTEXT_SIZE` | `int` | `8192` | Fallback context window of the LLM answering a request. An LLM endpoint's own **Max context size** (Model Endpoints) wins; without one, the `max_model_len` the endpoint reports on `/v1/models` is used (vLLM reports it, most gateways and hosted APIs don't), and this value only when neither is known. The admin UI shows which one applies to each endpoint. Requests whose prompt (with the `tools` definitions and tool-call history a client sends) + `max_tokens` exceed the window are rejected with a **413** error, as are those the answer instructions push over it (`CONTEXT_WINDOW_EXCEEDED`, sent as an error event on a streaming request). The documents and web results given to the LLM are cut to fit what the window leaves, so a value smaller than the model's real window means the LLM gets fewer chunks than the retrieval preset's `top_n`. |
 | `MAX_OUTPUT_TOKENS` | `int` | `1024` | Default output-token budget (`max_tokens`) applied to chat completions when the request doesn't set one explicitly. |
 
 
@@ -463,7 +463,7 @@ The reranker enhances search quality by re-scoring and reordering retrieved docu
 | `RERANKER_ENABLED` | `bool` | true | Enable or disable the reranking mechanism |
 | `RERANKER_PROVIDER` | `str` | `infinity` | Reranker backend to use. Accepted values: `infinity`, `openai`, `tei` |
 | `RERANKER_MODEL` | `str` | Alibaba-NLP/gte-multilingual-reranker-base | Model used for reranking documents. Ignored by the `tei` provider (a TEI instance serves a single fixed model) |
-| `RERANKER_TOP_K` | `int` | 10 | Number of top documents to return after reranking. Increase for better results if your LLM has a wider context window |
+| `RERANKER_TOP_K` | `int` | 10 | Number of chunks kept after reranking and given to the LLM, for every retrieval preset that leaves `top_n` empty (a preset's own `top_n` overrides it), as many of them as fit in the answering LLM's context window (see `MAX_LLM_CONTEXT_SIZE`). Must be greater than 0. The retrieval presets an earlier release seeded store `top_n: 10` and keep it on upgrade: clear the field in the admin UI for them to follow this value. Increase for better results if your LLM has a wider context window |
 | `RERANKER_BASE_URL` | `str` | `http://reranker:7997` | Base URL of the reranker service |
 | `RERANKER_API_KEY` | `str` | `EMPTY` | API key for the reranker service, sent as a `Bearer` token when set. Whether a key is required depends on your endpoint |
 | `RERANKER_TIMEOUT` | `float` | 60.0 | HTTP timeout in seconds for reranker requests |
@@ -700,16 +700,17 @@ Always set a strong **`AUTH_TOKEN`** in production environments. Never leave it 
 
 ### Rate Limiting
 
-Per-identity request rate limiting, tiered by path prefix. Requests are keyed on the authenticated user id, falling back to the client IP for unauthenticated paths (`/auth/*`). **Admin users bypass rate limiting entirely.** Limits use a moving window and are enforced **per worker/replica** — front OpenRAG with shared storage (e.g. Redis) if you scale out and need a global budget. Exceeding a limit returns **429** with a `Retry-After` header.
+Per-identity request rate limiting, tiered by path prefix. Requests are keyed on the authenticated user id, falling back to the client IP for unauthenticated paths (`/auth/*`). Admin users bypass the general tiers, but retrieval diagnostics have their own administrator limit. Limits use a moving window and are enforced **per worker/replica** — front OpenRAG with shared storage (e.g. Redis) if you scale out and need a global budget. Exceeding a limit returns **429** with a `Retry-After` header.
 
 Limit values use the `<count>/<period>` format from the [`limits`](https://limits.readthedocs.io/) library (e.g. `120/minute`, `10/second`).
 
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
-| `RATE_LIMIT_ENABLED` | `bool` | `true` | Master switch for request rate limiting. When `false`, no limits are applied and malformed limit values are ignored. |
+| `RATE_LIMIT_ENABLED` | `bool` | `true` | Master switch for the general path-based limits. When `false`, those limits are not applied and malformed `RATE_LIMIT_*` values are ignored. The separate administrator retrieval-diagnostics limit remains active. |
 | `RATE_LIMIT_DEFAULT` | `str` | `600/minute` | Limit applied to every path except the tiers below. |
 | `RATE_LIMIT_AUTH` | `str` | `60/minute` | Limit for `/auth/*` (login/callback/logout). Keyed on client IP because callers are unauthenticated there — keep it high enough that a shared corporate/NAT egress IP does not throttle a legitimate login rush. |
 | `RATE_LIMIT_CHAT` | `str` | `120/minute` | Limit for `/v1/*` (chat completions, tools). |
+| `RETRIEVAL_DIAGNOSTICS_RATE_LIMIT` | `str` | `120/minute` | Separate per-administrator limit for retrieval traces, original-query comparisons, and retrieval snapshots. This limit applies even though administrators bypass the general tiers. It is enforced per API process, so the deployment-wide capacity scales with the number of replicas. |
 | `RATE_LIMIT_AUTH_FAILURE` | `str` | `RATE_LIMIT_AUTH`, else `20/minute` | Separate, stricter budget for **failed** authentication attempts, keyed by client IP (brute-force protection). Falls back to `RATE_LIMIT_AUTH` when unset, then to `20/minute`. Disabled together with `RATE_LIMIT_ENABLED=false`. |
 | `RATE_LIMIT_EXEMPT_PATHS` | `str` | `/chainlit/,/assets/` | Comma-separated path prefixes the limiter skips, matched with `startswith`. These are auth-bypassed (Chainlit does its own header auth), so requests there carry no user and can only be keyed by IP. Chainlit's Socket.IO transport also issues one HTTP request per packet when it long-polls. Keep the trailing slash so a sibling like `/chainlithack` stays rate-limited rather than being swept into the `/chainlit` exemption. Set-but-empty (`RATE_LIMIT_EXEMPT_PATHS=`) removes all exemptions; `/auth/*` is never exempt. |
 

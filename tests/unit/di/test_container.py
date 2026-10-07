@@ -351,6 +351,7 @@ _ORCHESTRATORS = [
     ("embedder_swap_service", "get_embedder_swap_service"),
     ("workspace_service", "get_workspace_service"),
     ("retrieval_service", "get_retrieval_service"),
+    ("retrieval_snapshot_service", "get_retrieval_snapshot_service"),
     ("query_service", "get_query_service"),
     ("indexing_service", "get_indexing_service"),
     ("job_service", "get_job_service"),

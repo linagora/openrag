@@ -741,6 +741,18 @@ async def test_get_partition_config_returns_resolved_detail():
 
 
 @pytest.mark.asyncio
+async def test_get_partition_config_reports_top_n_as_it_applies():
+    """A preset that leaves top_n unset reports RERANKER_TOP_K, so the field stays an int."""
+    unset = {k: v for k, v in _RET_CONFIG.items() if k != "top_n"}
+    settings = _settings(ret={"default": {**_RET_CONFIG, "top_n": 15}, "unset": unset})
+    repo = _FakePartitionRepo(rows=[_full_row("p1"), _full_row("p2", retrieval_preset="unset")])
+    svc = _make_service(repo, settings=settings)
+
+    assert (await svc.get_partition_config("p1"))["retrieval_pipeline"]["top_n"] == 15
+    assert (await svc.get_partition_config("p2"))["retrieval_pipeline"]["top_n"] == settings.reranker.top_k
+
+
+@pytest.mark.asyncio
 async def test_list_partition_summaries_has_counts_and_no_pipelines():
     repo = _FakePartitionRepo(rows=[_full_row("p1", description="docs"), _full_row("p2")])
     repo._counts["p1"] = 4
@@ -793,6 +805,8 @@ async def test_detail_dimension_is_null_when_the_store_cannot_tell():
     detail = await svc.get_partition_config("p1")
 
     assert detail["dimension"] is None
+    strict_detail = await svc.get_partition_config("p1", strict_vector_dimension=True)
+    assert strict_detail["dimension"] is None
 
 
 @pytest.mark.asyncio
@@ -812,6 +826,23 @@ async def test_detail_dimension_survives_a_vector_store_failure():
 
     assert detail["dimension"] is None
     assert detail["name"] == "p1"
+
+
+@pytest.mark.asyncio
+async def test_strict_detail_dimension_fails_when_vector_store_is_unavailable():
+    from core.utils.exceptions import ServiceUnavailableError
+
+    class _BrokenStore(_FakeVectorStore):
+        async def vector_dimension(self, vector_field: str | None = None) -> int | None:
+            raise RuntimeError("milvus unreachable")
+
+    svc = _make_service(_FakePartitionRepo(rows=[_full_row("p1")]))
+    svc._vector_store = _BrokenStore()
+
+    with pytest.raises(ServiceUnavailableError) as exc:
+        await svc.get_partition_config("p1", strict_vector_dimension=True)
+
+    assert exc.value.code == "PARTITION_DIMENSION_UNAVAILABLE"
 
 
 @pytest.mark.asyncio

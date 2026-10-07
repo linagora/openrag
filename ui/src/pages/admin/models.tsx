@@ -22,12 +22,16 @@ import {
   deleteModelEndpoint,
   getModelEndpointIndexedUsage,
   DEFAULT_VENDOR_BY_TYPE,
+  formatLlmBudget,
+  llmContextSize,
+  llmOutputTokens,
   mergeModelEndpointApiKeyExtra,
   mergeModelEndpointImplementation,
   mergeModelEndpointLlmContext,
   mergeModelEndpointMossSpeakerAware,
   mergeModelEndpointSttLanguage,
   prepareModelEndpointExtraForSubmit,
+  refetchWhileDetecting,
   revealModelEndpointApiKey,
   REDACTED_SECRET,
   setDefaultModelEndpoint,
@@ -40,6 +44,7 @@ import {
   VENDOR_OPTIONS_BY_TYPE,
 } from "@/lib/api/models";
 import type {
+  LlmBudget,
   ModelEndpointResponse,
   CreateModelEndpointRequest,
   UpdateModelEndpointRequest,
@@ -125,12 +130,16 @@ function describeDelete(ep: ModelEndpointResponse): string {
 const NAME_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/;
 const NAME_MAX_LENGTH = 128;
 
-// Placeholder shown when a per-endpoint budget is left blank. The real
-// fallback (the MAX_LLM_CONTEXT_SIZE / MAX_OUTPUT_TOKENS env vars — see
-// core/config/endpoints.py:LLMContextConfig) is environment-configurable, so
-// a generic label is used instead of a hard-coded number that could misstate
-// a given deployment's actual default.
-const BUDGET_PLACEHOLDER = "System default";
+// Placeholder for a blank per-endpoint budget: the value the server falls back
+// to, as it reports it (the endpoint's detected max_model_len, else the
+// MAX_LLM_CONTEXT_SIZE / MAX_OUTPUT_TOKENS defaults — environment-configurable,
+// so never hard-coded here). Generic only on a backend too old to report it.
+function budgetPlaceholder(budget: LlmBudget): string {
+  if (budget.source === "detecting") return "Detecting…";
+  if (budget.value === null) return "System default";
+  const n = budget.value.toLocaleString("en-US");
+  return budget.source === "detected" ? `Detected: ${n}` : `System default: ${n}`;
+}
 
 function LabelWithInfo({ label, tooltip }: { label: string; tooltip: string }) {
   return (
@@ -172,6 +181,7 @@ export default function ModelsPage() {
   const { data, isLoading } = useQuery({
     queryKey: ["model-endpoints"],
     queryFn: () => listModelEndpoints(),
+    refetchInterval: refetchWhileDetecting,
   });
 
   const createMut = useMutation({
@@ -336,6 +346,18 @@ export default function ModelsPage() {
                             <span className="text-muted-foreground">Timeout</span>
                             <span>{ep.timeout}s</span>
                           </div>
+                          {ep.model_type === "llm" && (
+                            <>
+                              <div className="flex justify-between">
+                                <span className="text-muted-foreground">Context size</span>
+                                <span>{formatLlmBudget(llmContextSize(ep))}</span>
+                              </div>
+                              <div className="flex justify-between">
+                                <span className="text-muted-foreground">Max output tokens</span>
+                                <span>{formatLlmBudget(llmOutputTokens(ep))}</span>
+                              </div>
+                            </>
+                          )}
                           <div className="text-xs text-muted-foreground">
                             Updated {formatDate(ep.updated_at)}
                           </div>
@@ -409,6 +431,12 @@ export default function ModelsPage() {
           if (!v) setSeed(null);
         }}
         editing={editing}
+        liveEditing={
+          editing
+            ? (endpoints.find((ep) => ep.model_type === editing.model_type && ep.name === editing.name) ?? editing)
+            : null
+        }
+        llmDefaults={endpoints.find((ep) => ep.model_type === "llm") ?? null}
         seed={seed}
         activeTab={activeTab}
         onCreate={(data) => createMut.mutate(data)}
@@ -567,6 +595,8 @@ function EndpointDialog({
   open,
   onOpenChange,
   editing,
+  liveEditing,
+  llmDefaults,
   seed,
   activeTab,
   onCreate,
@@ -576,6 +606,11 @@ function EndpointDialog({
   open: boolean;
   onOpenChange: (v: boolean) => void;
   editing: ModelEndpointResponse | null;
+  /** `editing` as the list currently has it, so the budget placeholders follow
+   *  a detection that lands while the dialog is open. */
+  liveEditing: ModelEndpointResponse | null;
+  /** Any LLM endpoint, for the deployment defaults a new endpoint starts on. */
+  llmDefaults: ModelEndpointResponse | null;
   /** Endpoint a prefilled create is copying from, with the free name suggested
    *  for the copy; null for a blank create. */
   seed: { from: ModelEndpointResponse; name: string } | null;
@@ -618,6 +653,15 @@ function EndpointDialog({
   const modelType = (editing?.model_type ?? seed?.from.model_type ?? activeTab) as ModelType;
   // LLM token-budget fields (max context / max output) apply to LLM endpoints only.
   const isLlm = modelType === "llm";
+  // What a blank budget falls back to: the endpoint's own detected window when
+  // editing; a new endpoint is only probed once saved, so it starts on the
+  // deployment defaults.
+  const contextFallback: LlmBudget = liveEditing
+    ? llmContextSize(liveEditing, { ignoreSet: true })
+    : { value: llmDefaults?.default_max_llm_context_size ?? null, source: "default" };
+  const outputFallback: LlmBudget = liveEditing
+    ? llmOutputTokens(liveEditing, { ignoreSet: true })
+    : { value: llmDefaults?.default_max_output_tokens ?? null, source: "default" };
   const isStt = modelType === "stt";
   const sttValidationTimeout = isStt ? timeout : null;
   const sttValidationLanguageHint = isStt ? languageHint.trim() : null;
@@ -1141,7 +1185,7 @@ function EndpointDialog({
               <div className="space-y-2">
                 <LabelWithInfo
                   label="Max context size"
-                  tooltip="Maximum token limit for chat/completion requests answered by this endpoint. When set, this value takes precedence over the model's max_model_len (auto-probed from /v1/models at startup); leave it blank to use that probed value, or the global default if the probe fails. Requests whose total token count (prompt + max_tokens) exceeds the limit are rejected with a 413 error."
+                  tooltip="Context window of the model behind this endpoint. Leave it blank to use the max_model_len the endpoint reports on /v1/models (vLLM does; most gateways and hosted APIs don't), else the system default (MAX_LLM_CONTEXT_SIZE) — the placeholder shows which applies. Requests whose prompt + max_tokens exceed it are rejected with a 413, and the documents given to the LLM are cut to fit it, so set it when the endpoint reports none."
                 />
                 <Input
                   type="number"
@@ -1149,7 +1193,7 @@ function EndpointDialog({
                   step="1"
                   value={maxContextSize}
                   onChange={(e) => setMaxContextSize(e.target.value)}
-                  placeholder={BUDGET_PLACEHOLDER}
+                  placeholder={budgetPlaceholder(contextFallback)}
                 />
               </div>
               <div className="space-y-2">
@@ -1163,11 +1207,11 @@ function EndpointDialog({
                   step="1"
                   value={maxOutputTokens}
                   onChange={(e) => setMaxOutputTokens(e.target.value)}
-                  placeholder={BUDGET_PLACEHOLDER}
+                  placeholder={budgetPlaceholder(outputFallback)}
                 />
               </div>
               <p className="col-span-2 text-xs text-muted-foreground">
-                Token budgets for this endpoint. Leave blank to use the system default. Applied whenever this
+                Token budgets for this endpoint. Leave blank to use the value shown. Applied whenever this
                 endpoint answers a request — as the default LLM, or as a partition&apos;s chat LLM preset.
               </p>
             </div>
