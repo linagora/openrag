@@ -1128,17 +1128,25 @@ class MilvusVectorStore(VectorStore):
         ]
 
     @staticmethod
-    def _relaxed_diagnostic_filters(
+    def _scope_relaxed_diagnostic_filters(
         filters: dict[str, Any] | None,
-    ) -> tuple[dict[str, Any], object | None, bool, str | None]:
-        """Relax explainable filters while retaining the authorized partition scope."""
+    ) -> tuple[dict[str, Any], object | None, str | None]:
+        """Relax only a recognized file scope for its own diagnostic query."""
         relaxed = dict(filters or {})
         file_scope_kind = relaxed.pop(TRACE_FILE_SCOPE_KIND_KEY, None)
-        if file_scope_kind in {"workspace", "attachment", "file"}:
+        candidate_scope = relaxed.get("file_id")
+        if file_scope_kind in {"workspace", "attachment", "file"} and candidate_scope:
             file_scope = relaxed.pop("file_id", None)
         else:
             file_scope = None
             file_scope_kind = None
+        return relaxed, file_scope, file_scope_kind
+
+    @staticmethod
+    def _temporal_relaxed_diagnostic_filters(filters: dict[str, Any] | None) -> tuple[dict[str, Any], bool]:
+        """Relax only a simple temporal filter for its own diagnostic query."""
+        relaxed = dict(filters or {})
+        relaxed.pop(TRACE_FILE_SCOPE_KIND_KEY, None)
         raw_expr = relaxed.get("expr")
         temporal_relaxed = isinstance(raw_expr, str) and re.fullmatch(
             r'\s*(?:created_at|indexed_at)\s*(?:==|!=|>=|<=|>|<)\s*(?:ISO\s+)?(?:"[^"\r\n]*"|\'[^\'\r\n]*\')\s*',
@@ -1147,7 +1155,33 @@ class MilvusVectorStore(VectorStore):
         )
         if temporal_relaxed:
             relaxed.pop("expr", None)
-        return relaxed, file_scope, bool(temporal_relaxed), file_scope_kind
+        return relaxed, bool(temporal_relaxed)
+
+    @classmethod
+    def _relaxed_diagnostic_filters(
+        cls,
+        filters: dict[str, Any] | None,
+    ) -> tuple[dict[str, Any], object | None, bool, str | None]:
+        """Return combined relaxations for compatibility with direct callers."""
+        scope_filters, file_scope, file_scope_kind = cls._scope_relaxed_diagnostic_filters(filters)
+        _, temporal_relaxed = cls._temporal_relaxed_diagnostic_filters(filters)
+        if temporal_relaxed:
+            scope_filters.pop("expr", None)
+        return scope_filters, file_scope, temporal_relaxed, file_scope_kind
+
+    @staticmethod
+    def _merge_diagnostic_candidates(
+        results: list[tuple[list[TraceCandidate], set[str], int, float, Exception | None]],
+    ) -> tuple[list[TraceCandidate], int]:
+        """Merge result sets, prioritizing the primary scoped query for trace budget."""
+        by_id: dict[str, TraceCandidate] = {}
+        result_ids: set[str] = set()
+        for candidates, ids, _count, _duration, _error in results:
+            result_ids.update(ids)
+            for candidate in candidates:
+                by_id.setdefault(candidate.id, candidate)
+        merged = [candidate.model_copy(update={"rank": rank}) for rank, candidate in enumerate(by_id.values(), 1)]
+        return merged, len(result_ids)
 
     @staticmethod
     def _mark_dense_filter_removals(
@@ -1272,16 +1306,16 @@ class MilvusVectorStore(VectorStore):
         vector_field: str,
     ) -> None:
         """Run opt-in ANN legs after production ordering is already fixed."""
-        relaxed_filters, file_scope, temporal_relaxed, file_scope_kind = self._relaxed_diagnostic_filters(filters)
-        relaxed_expr = self._build_filter_expr(relaxed_filters)
+        scope_filters, file_scope, file_scope_kind = self._scope_relaxed_diagnostic_filters(filters)
+        temporal_filters, temporal_relaxed = self._temporal_relaxed_diagnostic_filters(filters)
         expr = self._build_filter_expr(filters)
-        before_result, after_result, sparse_result = await asyncio.gather(
+        calls = [
             self._diagnostic_search(
                 data=[embedding],
                 anns_field=vector_field,
                 search_params=self._dense_search_params(None),
                 top_k=top_k,
-                expr=relaxed_expr,
+                expr=expr,
                 score_name="dense",
                 candidate_limit=trace.candidate_capacity_for_stage("dense_before_threshold"),
             ),
@@ -1303,8 +1337,40 @@ class MilvusVectorStore(VectorStore):
                 score_name="sparse",
                 candidate_limit=trace.candidate_capacity_for_stage("sparse"),
             ),
-        )
-        before, _before_ids, before_count, before_duration, before_error = before_result
+        ]
+        if file_scope is not None and file_scope_kind is not None:
+            calls.append(
+                self._diagnostic_search(
+                    data=[embedding],
+                    anns_field=vector_field,
+                    search_params=self._dense_search_params(similarity_threshold),
+                    top_k=top_k,
+                    expr=self._build_filter_expr(scope_filters),
+                    score_name="dense",
+                    candidate_limit=trace.candidate_capacity_for_stage("dense_before_threshold"),
+                )
+            )
+        if temporal_relaxed:
+            calls.append(
+                self._diagnostic_search(
+                    data=[embedding],
+                    anns_field=vector_field,
+                    search_params=self._dense_search_params(similarity_threshold),
+                    top_k=top_k,
+                    expr=self._build_filter_expr(temporal_filters),
+                    score_name="dense",
+                    candidate_limit=trace.candidate_capacity_for_stage("dense_before_threshold"),
+                )
+            )
+        results = await asyncio.gather(*calls)
+        before_result, after_result, sparse_result = results[:3]
+        before_results = [before_result, *results[3:]]
+        before, before_count = self._merge_diagnostic_candidates(before_results)
+        before_duration = max(result[3] for result in before_results)
+        before_error = before_result[4]
+        for _candidates, _ids, _count, _duration, error in before_results[1:]:
+            if error is not None:
+                trace.record_error("dense_before_threshold", error)
         after, after_ids, after_count, after_duration, after_error = after_result
         sparse, _sparse_ids, sparse_count, sparse_duration, sparse_error = sparse_result
         fused_ids = self._row_ids(fused_rows)
@@ -1378,16 +1444,50 @@ class MilvusVectorStore(VectorStore):
             before_error = None
             dense_duration = production_duration
         else:
-            relaxed_filters, file_scope, temporal_relaxed, file_scope_kind = self._relaxed_diagnostic_filters(filters)
-            before, _before_ids, before_count, before_duration, before_error = await self._diagnostic_search(
-                data=[embedding],
-                anns_field=vector_field,
-                search_params=self._dense_search_params(None),
-                top_k=top_k,
-                expr=self._build_filter_expr(relaxed_filters),
-                score_name="dense",
-                candidate_limit=trace.candidate_capacity_for_stage("dense_before_threshold"),
-            )
+            scope_filters, file_scope, file_scope_kind = self._scope_relaxed_diagnostic_filters(filters)
+            temporal_filters, temporal_relaxed = self._temporal_relaxed_diagnostic_filters(filters)
+            calls = [
+                self._diagnostic_search(
+                    data=[embedding],
+                    anns_field=vector_field,
+                    search_params=self._dense_search_params(None),
+                    top_k=top_k,
+                    expr=self._build_filter_expr(filters),
+                    score_name="dense",
+                    candidate_limit=trace.candidate_capacity_for_stage("dense_before_threshold"),
+                )
+            ]
+            if file_scope is not None and file_scope_kind is not None:
+                calls.append(
+                    self._diagnostic_search(
+                        data=[embedding],
+                        anns_field=vector_field,
+                        search_params=self._dense_search_params(similarity_threshold),
+                        top_k=top_k,
+                        expr=self._build_filter_expr(scope_filters),
+                        score_name="dense",
+                        candidate_limit=trace.candidate_capacity_for_stage("dense_before_threshold"),
+                    )
+                )
+            if temporal_relaxed:
+                calls.append(
+                    self._diagnostic_search(
+                        data=[embedding],
+                        anns_field=vector_field,
+                        search_params=self._dense_search_params(similarity_threshold),
+                        top_k=top_k,
+                        expr=self._build_filter_expr(temporal_filters),
+                        score_name="dense",
+                        candidate_limit=trace.candidate_capacity_for_stage("dense_before_threshold"),
+                    )
+                )
+            before_results = await asyncio.gather(*calls)
+            before, before_count = self._merge_diagnostic_candidates(before_results)
+            before_duration = max(result[3] for result in before_results)
+            before_error = before_results[0][4]
+            for _candidates, _ids, _count, _duration, error in before_results[1:]:
+                if error is not None:
+                    trace.record_error("dense_before_threshold", error)
             dense_duration = production_duration + before_duration
         if before_error is None:
             if similarity_threshold is None:

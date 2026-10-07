@@ -957,9 +957,10 @@ class TestHybridDispatch:
         store._async_client.hybrid_search = AsyncMock(return_value=production)  # type: ignore[attr-defined]
         store._async_client.search = AsyncMock(  # type: ignore[attr-defined]
             side_effect=[
-                [[self._hit(10, 0.95, file_id="scoped"), self._hit(20, 0.9, file_id="outside")]],
+                [[self._hit(10, 0.95, file_id="scoped"), self._hit(20, 0.69, file_id="scoped")]],
                 [[self._hit(10, 0.95, file_id="scoped")]],
                 [[self._hit(20, 4.2), self._hit(30, 3.1)]],
+                [[self._hit(40, 0.97, file_id="outside")]],
             ]
         )
         trace = RetrievalTraceBuilder("req-1", "query")
@@ -990,22 +991,74 @@ class TestHybridDispatch:
                 "hybrid_fused",
             )
         ] == ["complete", "complete", "complete", "complete"]
-        assert [candidate["id"] for candidate in stages["dense_before_threshold"]["candidates"]] == ["10", "20"]
+        assert [candidate["id"] for candidate in stages["dense_before_threshold"]["candidates"]] == ["10", "20", "40"]
         assert [candidate["id"] for candidate in stages["dense_after_threshold"]["candidates"]] == ["10"]
         assert [candidate["id"] for candidate in stages["sparse"]["candidates"]] == ["20", "30"]
         assert [candidate["id"] for candidate in stages["hybrid_fused"]["candidates"]] == ["30", "10"]
-        assert stages["dense_before_threshold"]["candidates"][1]["removal_reason"]["code"] == "workspace_filter"
+        assert stages["dense_before_threshold"]["candidates"][1]["removal_reason"]["code"] == "dense_threshold"
+        assert stages["dense_before_threshold"]["candidates"][2]["removal_reason"]["code"] == "workspace_filter"
         assert set(finished["timings"]) >= {"dense_search", "sparse_search"}
-        assert store._async_client.search.await_count == 3  # type: ignore[attr-defined]
+        assert store._async_client.search.await_count == 4  # type: ignore[attr-defined]
         diagnostic_calls = store._async_client.search.await_args_list  # type: ignore[attr-defined]
-        assert "file_id" not in diagnostic_calls[0].kwargs["filter"]
+        assert "file_id" in diagnostic_calls[0].kwargs["filter"]
         assert "file_id" in diagnostic_calls[1].kwargs["filter"]
         assert "file_id" in diagnostic_calls[2].kwargs["filter"]
+        assert "file_id" not in diagnostic_calls[3].kwargs["filter"]
         assert "radius" not in diagnostic_calls[0].kwargs["search_params"]["params"]
+        assert "radius" in diagnostic_calls[3].kwargs["search_params"]["params"]
         for call in diagnostic_calls:
             assert 'partition in ["allowed"]' in call.kwargs["filter"]
             assert "forbidden" not in call.kwargs["filter"]
             assert call.kwargs["output_fields"] == ["file_id", "partition"]
+
+    @pytest.mark.asyncio
+    async def test_hybrid_threshold_diagnostic_keeps_scoped_candidates_when_outside_hits_rank_higher(
+        self, store: MilvusVectorStore
+    ) -> None:
+        store._async_client.hybrid_search = AsyncMock(  # type: ignore[attr-defined]
+            return_value=[[self._hit(1, 0.09, file_id="scoped")]]
+        )
+        store._async_client.search = AsyncMock(  # type: ignore[attr-defined]
+            side_effect=[
+                [[self._hit(20, 0.69, file_id="scoped")]],
+                [[]],
+                [[]],
+                [[self._hit(99, 0.99, file_id="outside")]],
+            ]
+        )
+        trace = RetrievalTraceBuilder(
+            "req-1",
+            "query",
+            diagnostics=RetrievalDiagnosticsContext(candidate_limit=1),
+        )
+
+        await store.search(
+            [0.1, 0.2],
+            query_text="query",
+            filters={
+                "partition": ["allowed"],
+                "file_id": ["scoped"],
+                "_trace_file_scope_kind": "workspace",
+            },
+            top_k=1,
+            similarity_threshold=0.7,
+            trace=trace,
+            vector_field=FIELD,
+        )
+
+        stage = next(
+            stage
+            for stage in trace.finish(configuration_fingerprint="fingerprint")["stages"]
+            if stage["name"] == "dense_before_threshold"
+        )
+        assert stage["candidate_count"] == 2
+        assert [candidate["id"] for candidate in stage["candidates"]] == ["20"]
+        assert stage["candidates"][0]["removal_reason"]["code"] == "dense_threshold"
+        diagnostic_calls = store._async_client.search.await_args_list  # type: ignore[attr-defined]
+        assert "file_id" in diagnostic_calls[0].kwargs["filter"]
+        assert "radius" not in diagnostic_calls[0].kwargs["search_params"]["params"]
+        assert "file_id" not in diagnostic_calls[3].kwargs["filter"]
+        assert "radius" in diagnostic_calls[3].kwargs["search_params"]["params"]
 
     @pytest.mark.asyncio
     async def test_hybrid_removal_reasons_use_uncapped_fused_ids(self, store: MilvusVectorStore) -> None:
@@ -1056,6 +1109,7 @@ class TestHybridDispatch:
             side_effect=[
                 [[self._hit(10, 0.9), self._hit(20, 0.8)]],
                 [[self._hit(20, 0.8)]],
+                [[]],
             ]
         )
         trace = RetrievalTraceBuilder(
@@ -1094,19 +1148,38 @@ class TestHybridDispatch:
         store = MilvusVectorStore(vdb_config.model_copy(update={"hybrid_search": False}))
         _ready_for_search(store)
         store._async_client.search = AsyncMock(  # type: ignore[attr-defined]
-            side_effect=[[[self._hit(10, 0.8)]], [[self._hit(20, -0.2)]]]
+            side_effect=[
+                [[self._hit(10, 0.8, file_id="scoped")]],
+                [[self._hit(20, 0.69, file_id="scoped")]],
+                [[self._hit(99, 0.99, file_id="outside")]],
+            ]
         )
+        trace = RetrievalTraceBuilder("req-1", "query")
 
         await store.search(
             [0.1, 0.2],
-            filters={"partition": ["allowed"]},
+            filters={
+                "partition": ["allowed"],
+                "file_id": ["scoped"],
+                "_trace_file_scope_kind": "file",
+            },
+            top_k=1,
             similarity_threshold=0.7,
-            trace=RetrievalTraceBuilder("req-1", "query"),
+            trace=trace,
             vector_field=FIELD,
         )
 
         diagnostic_call = store._async_client.search.await_args_list[1]  # type: ignore[attr-defined]
+        assert "file_id" in diagnostic_call.kwargs["filter"]
         assert "radius" not in diagnostic_call.kwargs["search_params"]["params"]
+        before_stage = next(
+            stage
+            for stage in trace.finish(configuration_fingerprint="fp")["stages"]
+            if stage["name"] == "dense_before_threshold"
+        )
+        candidates = {candidate["id"]: candidate for candidate in before_stage["candidates"]}
+        assert candidates["20"]["removal_reason"]["code"] == "dense_threshold"
+        assert candidates["99"]["removal_reason"]["code"] == "file_filter"
 
     @pytest.mark.asyncio
     async def test_parallel_dense_diagnostics_report_wall_clock_duration(self, store: MilvusVectorStore) -> None:
@@ -1173,6 +1246,7 @@ class TestHybridDispatch:
         store._async_client.search = AsyncMock(  # type: ignore[attr-defined]
             side_effect=[
                 [[self._hit(40, 0.95)]],
+                [[]],
                 [[]],
                 [[]],
             ]
