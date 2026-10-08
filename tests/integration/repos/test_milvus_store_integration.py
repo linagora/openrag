@@ -30,6 +30,7 @@ from unittest.mock import AsyncMock
 import pytest
 from core.config.infrastructure import VectorDBConfig
 from core.models.chunk import Chunk, ChunkType
+from pymilvus import DataType
 from services.storage.milvus_store import MilvusVectorStore, analyzer_params
 
 pytestmark = pytest.mark.integration
@@ -43,7 +44,7 @@ async def test_catalog_guard_and_reconciliation_with_real_stores(dense_only_stor
     from services.storage.vector_store_searcher import VectorStoreSearcher
 
     vectors = dense_only_store
-    await vectors.initialize(_EMBEDDING_DIM)
+    await vectors.initialize(_EMBEDDING_DIM, _FIELD)
     catalog = postgres_store.document_repo
     await postgres_store.partition_repo.create_partition("reconcile_a")
     for file_id in ("live", "missing"):
@@ -57,6 +58,7 @@ async def test_catalog_guard_and_reconciliation_with_real_stores(dense_only_stor
             _chunk("other tenant", "reconcile_b", 0.3, document_id="orphan"),
         ],
         indexed_at=old,
+        vector_field=_FIELD,
     )
     # Dynamic fields may be absent on legacy rows. They must remain report-only.
     await vectors.insert_entities(
@@ -65,13 +67,13 @@ async def test_catalog_guard_and_reconciliation_with_real_stores(dense_only_stor
                 "file_id": "legacy",
                 "partition": "reconcile_a",
                 "text": "undated legacy",
-                "vector": _embedding(0.4),
+                _FIELD: _embedding(0.4),
             }
         ]
     )
     embedder = AsyncMock()
     embedder.embed.return_value = [_embedding(0.1)]
-    searcher = CatalogSearcher(VectorStoreSearcher(vectors, embedder, catalog, "default"), catalog)
+    searcher = CatalogSearcher(VectorStoreSearcher(vectors, embedder, catalog, "default", vector_field=_FIELD), catalog)
     chunks = await searcher.search("document", ["reconcile_a"], 10, with_surrounding_chunks=False)
     assert [c.document_id for c in chunks] == ["live"]
 
@@ -105,6 +107,9 @@ def _milvus_reachable(host: str, port: int, timeout: float = 1.0) -> bool:
 # Embedding dimension is intentionally tiny — smaller = faster index build,
 # and the schema cares about *having* a dimension, not the specific value.
 _EMBEDDING_DIM = 4
+
+# The dense field of the embedder these tests index with.
+_FIELD = "vector_itest"
 
 
 def _embedding(seed: float) -> list[float]:
@@ -248,14 +253,14 @@ class TestEndToEnd:
         self, hybrid_store: MilvusVectorStore, hybrid_config: VectorDBConfig
     ) -> None:
         assert await hybrid_store.collection_exists(hybrid_config.collection_name) is False
-        await hybrid_store.initialize(_EMBEDDING_DIM)
+        await hybrid_store.initialize(_EMBEDDING_DIM, _FIELD)
         assert await hybrid_store.collection_exists(hybrid_config.collection_name) is True
 
     @pytest.mark.asyncio
     async def test_initialize_is_idempotent(self, hybrid_store: MilvusVectorStore) -> None:
-        await hybrid_store.initialize(_EMBEDDING_DIM)
+        await hybrid_store.initialize(_EMBEDDING_DIM, _FIELD)
         # Second call must not raise and must not re-create.
-        await hybrid_store.initialize(_EMBEDDING_DIM)
+        await hybrid_store.initialize(_EMBEDDING_DIM, _FIELD)
         assert hybrid_store._loaded is True
 
     @pytest.mark.asyncio
@@ -264,68 +269,105 @@ class TestEndToEnd:
             _embedding(0.1),
             query_text="collection not created yet",
             filters={"partition": "default"},
+            vector_field=_FIELD,
         )
 
         assert hits == []
 
     @pytest.mark.asyncio
-    async def test_ensure_collection_rejects_dimension_change(
-        self, hybrid_store: MilvusVectorStore, hybrid_config: VectorDBConfig
+    async def test_a_second_embedder_gets_a_field_of_its_own(self, dense_only_store: MilvusVectorStore) -> None:
+        await dense_only_store.initialize(_EMBEDDING_DIM, _FIELD)
+        await dense_only_store.upsert([_chunk("first embedder", "p1", 0.1)], vector_field=_FIELD)
+        other_dim = _EMBEDDING_DIM + 2
+
+        # Added to the live collection, with its own dimension.
+        assert await dense_only_store.ensure_vector_field("vector_other", other_dim) is True
+        other = Chunk(text="second embedder", partition="p1", embedding=[0.5] * other_dim, chunk_type=ChunkType.TEXT)
+        await dense_only_store.upsert([other], vector_field="vector_other")
+
+        hits = await dense_only_store.search([0.5] * other_dim, top_k=10, vector_field="vector_other")
+        # The first embedder's row is null in this field, and skipped.
+        assert [hit["text"] for hit in hits] == ["second embedder"]
+        assert await dense_only_store.vector_dimension("vector_other") == other_dim
+
+    @pytest.mark.asyncio
+    async def test_initialize_indexes_a_field_its_creator_left_without_an_index(
+        self, dense_only_store: MilvusVectorStore, dense_only_config: VectorDBConfig
     ) -> None:
-        await hybrid_store.initialize(_EMBEDDING_DIM)
-        with pytest.raises(ValueError, match="Drop the collection before re-sizing"):
-            await hybrid_store.ensure_collection(hybrid_config.collection_name, _EMBEDDING_DIM + 1)
+        await dense_only_store.initialize(_EMBEDDING_DIM, _FIELD)
+        await dense_only_store.upsert([_chunk("indexed", "p1", 0.1)], vector_field=_FIELD)
+        # A process added this field and died before indexing it.
+        dense_only_store._client.add_collection_field(
+            collection_name=dense_only_config.collection_name,
+            field_name="vector_orphan",
+            data_type=DataType.FLOAT_VECTOR,
+            dim=_EMBEDDING_DIM,
+            nullable=True,
+        )
+
+        restarted = MilvusVectorStore(dense_only_config)
+        try:
+            await restarted.initialize(_EMBEDDING_DIM, _FIELD)
+            await restarted.upsert([_chunk("orphan", "p1", 0.1)], vector_field="vector_orphan")
+            hits = await restarted.search(_embedding(0.1), top_k=10, vector_field="vector_orphan")
+        finally:
+            await restarted.aclose()
+
+        assert [hit["text"] for hit in hits] == ["orphan"]
 
     @pytest.mark.asyncio
     async def test_upsert_returns_insert_count(self, hybrid_store: MilvusVectorStore) -> None:
-        await hybrid_store.initialize(_EMBEDDING_DIM)
+        await hybrid_store.initialize(_EMBEDDING_DIM, _FIELD)
         chunks = [
             _chunk("alpha doc one", "p1", 0.1),
             _chunk("beta doc two", "p1", 0.2),
             _chunk("gamma doc three", "p1", 0.3),
         ]
-        n = await hybrid_store.upsert(chunks)
+        n = await hybrid_store.upsert(chunks, vector_field=_FIELD)
         assert n == 3
 
     @pytest.mark.asyncio
     async def test_upsert_without_embedding_raises(self, hybrid_store: MilvusVectorStore) -> None:
-        await hybrid_store.initialize(_EMBEDDING_DIM)
+        await hybrid_store.initialize(_EMBEDDING_DIM, _FIELD)
         bad = Chunk(text="missing", partition="p1", embedding=None)
         from core.utils.exceptions import VDBInsertError
 
         with pytest.raises(VDBInsertError, match="no embedding"):
-            await hybrid_store.upsert([bad])
+            await hybrid_store.upsert([bad], vector_field=_FIELD)
 
     @pytest.mark.asyncio
     async def test_dense_search_returns_results(self, dense_only_store: MilvusVectorStore) -> None:
-        await dense_only_store.initialize(_EMBEDDING_DIM)
+        await dense_only_store.initialize(_EMBEDDING_DIM, _FIELD)
         chunks = [
             _chunk("alpha", "p1", 0.1),
             _chunk("beta", "p1", 0.5),
             _chunk("gamma", "p1", 0.9),
         ]
-        await dense_only_store.upsert(chunks)
+        await dense_only_store.upsert(chunks, vector_field=_FIELD)
         # Force the collection to flush so reads see the writes — Milvus is
         # eventually consistent in default mode but our config sets Strong
         # consistency so the search below should see everything.
-        hits = await dense_only_store.search(_embedding(0.1), top_k=10)
+        hits = await dense_only_store.search(_embedding(0.1), top_k=10, vector_field=_FIELD)
         assert len(hits) >= 1
         for hit in hits:
             assert "id" in hit
             assert "score" in hit
-            assert "vector" not in hit, "raw vector must be stripped from results"
+            assert _FIELD not in hit, "raw vectors must be stripped from results"
 
     @pytest.mark.asyncio
     async def test_search_with_partition_filter(self, dense_only_store: MilvusVectorStore) -> None:
-        await dense_only_store.initialize(_EMBEDDING_DIM)
+        await dense_only_store.initialize(_EMBEDDING_DIM, _FIELD)
         await dense_only_store.upsert(
             [
                 _chunk("a", "p1", 0.1),
                 _chunk("b", "p1", 0.2),
                 _chunk("c", "p2", 0.3),
-            ]
+            ],
+            vector_field=_FIELD,
         )
-        hits = await dense_only_store.search(_embedding(0.1), top_k=10, filters={"partition": "p1"})
+        hits = await dense_only_store.search(
+            _embedding(0.1), top_k=10, filters={"partition": "p1"}, vector_field=_FIELD
+        )
         assert len(hits) >= 1
         for hit in hits:
             assert hit["partition"] == "p1"
@@ -334,19 +376,16 @@ class TestEndToEnd:
 class TestHybridSearch:
     @pytest.mark.asyncio
     async def test_hybrid_search_returns_fused_results(self, hybrid_store: MilvusVectorStore) -> None:
-        await hybrid_store.initialize(_EMBEDDING_DIM)
+        await hybrid_store.initialize(_EMBEDDING_DIM, _FIELD)
         await hybrid_store.upsert(
             [
                 _chunk("milvus vector database", "p1", 0.1),
                 _chunk("postgres relational database", "p1", 0.5),
                 _chunk("redis key value store", "p1", 0.9),
-            ]
+            ],
+            vector_field=_FIELD,
         )
-        hits = await hybrid_store.search(
-            _embedding(0.1),
-            query_text="milvus database",
-            top_k=5,
-        )
+        hits = await hybrid_store.search(_embedding(0.1), query_text="milvus database", top_k=5, vector_field=_FIELD)
         assert len(hits) >= 1
         # RRF fusion still returns the same shape — id, score, entity fields.
         for hit in hits:
@@ -356,14 +395,15 @@ class TestHybridSearch:
 
     @pytest.mark.asyncio
     async def test_hybrid_search_empty_partition_returns_no_results(self, hybrid_store: MilvusVectorStore) -> None:
-        await hybrid_store.initialize(_EMBEDDING_DIM)
-        await hybrid_store.upsert([_chunk("existing chunk", "__populated_partition__", 0.1)])
+        await hybrid_store.initialize(_EMBEDDING_DIM, _FIELD)
+        await hybrid_store.upsert([_chunk("existing chunk", "__populated_partition__", 0.1)], vector_field=_FIELD)
 
         hits = await hybrid_store.search(
             _embedding(0.1),
             query_text="no matching partition",
             top_k=5,
             filters={"partition": "__empty_partition__"},
+            vector_field=_FIELD,
         )
 
         assert hits == []
@@ -372,8 +412,8 @@ class TestHybridSearch:
     async def test_hybrid_search_populated_partition_without_candidates_returns_no_results(
         self, hybrid_store: MilvusVectorStore
     ) -> None:
-        await hybrid_store.initialize(_EMBEDDING_DIM)
-        await hybrid_store.upsert([_chunk("alpha known vocabulary", "p1", 1.0)])
+        await hybrid_store.initialize(_EMBEDDING_DIM, _FIELD)
+        await hybrid_store.upsert([_chunk("alpha known vocabulary", "p1", 1.0)], vector_field=_FIELD)
 
         hits = await hybrid_store.search(
             [-1.0, -1.1, -1.2, -1.3],
@@ -381,6 +421,7 @@ class TestHybridSearch:
             top_k=5,
             filters={"partition": "p1"},
             similarity_threshold=0.99,
+            vector_field=_FIELD,
         )
 
         assert hits == []
@@ -410,8 +451,8 @@ class TestCaseInsensitiveBM25:
 
     @pytest.mark.asyncio
     async def test_lowercase_query_matches_capitalised_text(self, hybrid_store: MilvusVectorStore) -> None:
-        await hybrid_store.initialize(_EMBEDDING_DIM)
-        await hybrid_store.upsert([_chunk("Le Rapport annuel de PARIS", "p1", 1.0)])
+        await hybrid_store.initialize(_EMBEDDING_DIM, _FIELD)
+        await hybrid_store.upsert([_chunk("Le Rapport annuel de PARIS", "p1", 1.0)], vector_field=_FIELD)
 
         # The dense leg is range-filtered out (far vector, threshold 0.99), so
         # anything returned came from BM25 alone.
@@ -421,6 +462,7 @@ class TestCaseInsensitiveBM25:
             top_k=5,
             filters={"partition": "p1"},
             similarity_threshold=0.99,
+            vector_field=_FIELD,
         )
 
         assert [hit["text"] for hit in hits] == ["Le Rapport annuel de PARIS"]
@@ -429,12 +471,13 @@ class TestCaseInsensitiveBM25:
 class TestDeleteByFilter:
     @pytest.mark.asyncio
     async def test_delete_by_partition(self, hybrid_store: MilvusVectorStore) -> None:
-        await hybrid_store.initialize(_EMBEDDING_DIM)
+        await hybrid_store.initialize(_EMBEDDING_DIM, _FIELD)
         await hybrid_store.upsert(
             [
                 _chunk("a", "p1", 0.1),
                 _chunk("b", "p2", 0.2),
-            ]
+            ],
+            vector_field=_FIELD,
         )
         deleted = await hybrid_store.delete_by_filter({"partition": "p1"})
         # We don't assert an exact count — Milvus returns delete_count, but
@@ -445,7 +488,7 @@ class TestDeleteByFilter:
 
     @pytest.mark.asyncio
     async def test_delete_by_filter_with_wildcard_partition_raises(self, hybrid_store: MilvusVectorStore) -> None:
-        await hybrid_store.initialize(_EMBEDDING_DIM)
+        await hybrid_store.initialize(_EMBEDDING_DIM, _FIELD)
         with pytest.raises(ValueError, match="drop_collection"):
             await hybrid_store.delete_by_filter({"partition": "all"})
 
@@ -453,8 +496,8 @@ class TestDeleteByFilter:
 class TestQueryByFilter:
     @pytest.mark.asyncio
     async def test_query_ids_returns_string_ids(self, hybrid_store: MilvusVectorStore) -> None:
-        await hybrid_store.initialize(_EMBEDDING_DIM)
-        await hybrid_store.upsert([_chunk("only", "p1", 0.1)])
+        await hybrid_store.initialize(_EMBEDDING_DIM, _FIELD)
+        await hybrid_store.upsert([_chunk("only", "p1", 0.1)], vector_field=_FIELD)
         ids = await hybrid_store.query_ids_by_filter(hybrid_store._collection_name, {"partition": "p1"})
         assert ids, "expected at least one row matching partition=p1"
         for chunk_id in ids:
@@ -463,18 +506,18 @@ class TestQueryByFilter:
 
     @pytest.mark.asyncio
     async def test_query_chunks_returns_full_records(self, hybrid_store: MilvusVectorStore) -> None:
-        await hybrid_store.initialize(_EMBEDDING_DIM)
-        await hybrid_store.upsert([_chunk("only", "p1", 0.1)])
+        await hybrid_store.initialize(_EMBEDDING_DIM, _FIELD)
+        await hybrid_store.upsert([_chunk("only", "p1", 0.1)], vector_field=_FIELD)
         rows = await hybrid_store.query_chunks_by_filter(hybrid_store._collection_name, {"partition": "p1"})
         assert rows
         assert rows[0]["partition"] == "p1"
         assert rows[0]["text"] == "only"
-        # Milvus 3.0 returns the dense ``vector`` for the default ``["*"]``
-        # projection (unlike the search path, which strips it via
-        # ``_SEARCH_RESULT_DROPPED_KEYS``). ``_safe_batch_size`` relies on this
-        # to shrink the query_iterator page for wildcard reads, so assert the
-        # behaviour explicitly rather than only documenting it in prose.
-        assert "vector" in rows[0]
+        # Milvus 3.0 returns the dense fields for the default ``["*"]``
+        # projection (unlike the search path, which strips them).
+        # ``_safe_batch_size`` relies on this to shrink the query_iterator page
+        # for wildcard reads, so assert the behaviour explicitly rather than
+        # only documenting it in prose.
+        assert _FIELD in rows[0]
 
 
 class TestDropAndDelete:
@@ -482,19 +525,19 @@ class TestDropAndDelete:
     async def test_drop_collection_lets_initialize_recreate(
         self, hybrid_store: MilvusVectorStore, hybrid_config: VectorDBConfig
     ) -> None:
-        await hybrid_store.initialize(_EMBEDDING_DIM)
+        await hybrid_store.initialize(_EMBEDDING_DIM, _FIELD)
         await hybrid_store.drop_collection(hybrid_config.collection_name)
         assert await hybrid_store.collection_exists(hybrid_config.collection_name) is False
         # After drop, the store is allowed to re-initialize from scratch —
         # otherwise per-tenant lifecycles would need a new instance just to
         # rebuild the collection.
-        await hybrid_store.initialize(_EMBEDDING_DIM)
+        await hybrid_store.initialize(_EMBEDDING_DIM, _FIELD)
         assert await hybrid_store.collection_exists(hybrid_config.collection_name) is True
 
     @pytest.mark.asyncio
     async def test_delete_by_id_removes_rows(self, hybrid_store: MilvusVectorStore) -> None:
-        await hybrid_store.initialize(_EMBEDDING_DIM)
-        await hybrid_store.upsert([_chunk("to-delete", "p1", 0.1)])
+        await hybrid_store.initialize(_EMBEDDING_DIM, _FIELD)
+        await hybrid_store.upsert([_chunk("to-delete", "p1", 0.1)], vector_field=_FIELD)
         ids = await hybrid_store.query_ids_by_filter(hybrid_store._collection_name, {"partition": "p1"})
         assert ids, "expected the upsert to land at least one row"
         deleted = await hybrid_store.delete(ids)

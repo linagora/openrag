@@ -334,3 +334,15 @@ class TestContentClaims:
             )
             == "copy-file"
         )
+
+
+async def test_get_indexation_config_reads_one_partitions_row(postgres_store):
+    a = await _seed_partition(postgres_store, "a")
+    b = await _seed_partition(postgres_store, "b")
+    repo = postgres_store.document_repo
+    await repo.add_file_to_partition(file_id="f1", partition=a, indexation_config={"embedder": "e5"})
+    await repo.add_file_to_partition(file_id="f1", partition=b)
+
+    assert await repo.get_indexation_config("f1", a) == {"embedder": "e5"}
+    assert await repo.get_indexation_config("f1", b) is None
+    assert await repo.get_indexation_config("missing", a) is None

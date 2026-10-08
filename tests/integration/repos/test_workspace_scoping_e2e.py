@@ -31,6 +31,7 @@ from core.embeddings.embedder import Embedder
 from core.models.catalog import DocumentRecord
 from core.models.chunk import Chunk
 from core.models.workspace import Workspace
+from core.utils.exceptions import AmbiguousWorkspaceError
 from services.orchestrators.workspace_service import WorkspaceService
 from services.storage.milvus_store import MilvusVectorStore
 from services.storage.postgres_store import PostgresStore
@@ -40,6 +41,7 @@ pytestmark = [pytest.mark.integration, pytest.mark.asyncio(loop_scope="session")
 
 _DIM = 4
 _QUERY_VEC = [1.0, 0.0, 0.0, 0.0]
+_FIELD = "vector_itest"
 
 
 class _FixedEmbedder(Embedder):
@@ -86,7 +88,7 @@ async def milvus_store(_live_milvus: None, milvus_host_port: tuple[str, int]) ->
     collection = f"itest_ws706_{uuid.uuid4().hex[:12]}"
     config = VectorDBConfig(host=host, port=port, collection_name=collection, hybrid_search=False, schema_version=1)
     store = MilvusVectorStore(config)
-    await store.initialize(_DIM)
+    await store.initialize(_DIM, _FIELD)
     try:
         yield store
     finally:
@@ -100,6 +102,7 @@ def searcher(milvus_store: MilvusVectorStore) -> VectorStoreSearcher:
         embedder=_FixedEmbedder(),
         document_repo=None,  # not exercised — no related/ancestor expansion here
         collection=milvus_store._collection_name,
+        vector_field=_FIELD,
     )
 
 
@@ -132,7 +135,8 @@ class TestWorkspaceScopingAcrossPartitions:
                 _chunk(part_a, "included-file", "the one that should come back"),
                 _chunk(part_a, "excluded-file", "must never be returned"),
                 _chunk(part_b, "included-file", "same file_id, wrong partition — must never leak"),
-            ]
+            ],
+            vector_field=_FIELD,
         )
 
         workspace_service = WorkspaceService(
@@ -143,7 +147,7 @@ class TestWorkspaceScopingAcrossPartitions:
         )
         ws_id = f"ws-{uuid.uuid4().hex[:8]}"
         await postgres_store.workspace_repo.create_workspace(Workspace(workspace_id=ws_id, partition=part_a))
-        missing = await workspace_service.add_files(ws_id, ["included-file"])
+        missing = await workspace_service.add_files(part_a, ws_id, ["included-file"])
         assert missing == []
 
         # A caller with access to both partitions searches "all" with the workspace set.
@@ -162,7 +166,7 @@ class TestWorkspaceScopingAcrossPartitions:
         assert texts == {"the one that should come back"}
 
         # Now unassign the file — the workspace is valid but empty.
-        assert await workspace_service.remove_file(ws_id, "included-file") is True
+        assert await workspace_service.remove_file(part_a, ws_id, "included-file") is True
         empty_scope = await workspace_service.resolve_scope(ws_id, [part_a, part_b])
         assert empty_scope.file_ids == []
 
@@ -184,3 +188,32 @@ class TestWorkspaceScopingAcrossPartitions:
             collection="unused",
         )
         assert await workspace_service.resolve_scope("does-not-exist", ["all"]) is None
+
+    async def test_resolve_scope_with_the_same_id_in_two_partitions(self, postgres_store: PostgresStore):
+        """workspace_id is unique per partition: the caller's partitions decide."""
+        part_a, part_b = f"a-{uuid.uuid4().hex[:8]}", f"b-{uuid.uuid4().hex[:8]}"
+        await postgres_store.partition_repo.create_partition(part_a)
+        await postgres_store.partition_repo.create_partition(part_b)
+        await _seed_document(postgres_store, part_a, "doc-a")
+        await _seed_document(postgres_store, part_b, "doc-b")
+        await postgres_store.workspace_repo.create_workspace(Workspace(workspace_id="shared", partition=part_a))
+        await postgres_store.workspace_repo.create_workspace(Workspace(workspace_id="shared", partition=part_b))
+        workspace_service = WorkspaceService(
+            workspace_repo=postgres_store.workspace_repo,
+            document_repo=postgres_store.document_repo,
+            vector_store=None,
+            collection="unused",
+        )
+        assert await workspace_service.add_files(part_a, "shared", ["doc-a"]) == []
+        assert await workspace_service.add_files(part_b, "shared", ["doc-b"]) == []
+
+        # One searchable partition: unambiguous, and the other one's files never leak.
+        scope = await workspace_service.resolve_scope("shared", [part_b])
+        assert (scope.partition, scope.file_ids) == (part_b, ["doc-b"])
+
+        # Both searchable: the request cannot be scoped to one workspace.
+        with pytest.raises(AmbiguousWorkspaceError) as excinfo:
+            await workspace_service.resolve_scope("shared", [part_a, part_b])
+        assert excinfo.value.extra["partitions"] == sorted([part_a, part_b])
+        with pytest.raises(AmbiguousWorkspaceError):
+            await workspace_service.resolve_scope("shared", ["all"])

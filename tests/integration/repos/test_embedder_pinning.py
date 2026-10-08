@@ -145,9 +145,10 @@ class TestDeleteTheDefault:
         await _embedders(postgres_store, "bge", "jina", default="jina")
         await _partition(postgres_store, "empty")
 
-        status, promoted = await postgres_store.model_endpoint_repo.delete_and_promote_default("jina", "embedder")
+        field = (await postgres_store.model_endpoint_repo.get("jina", "embedder")).vector_field
+        result = await postgres_store.model_endpoint_repo.delete_and_promote_default("jina", "embedder")
 
-        assert (status, promoted) == ("ok", "bge")
+        assert result == ("ok", "bge", field)
         assert await _embedder_of(postgres_store, "empty") == "default"
 
     async def test_indexed_alias_partitions_still_refuse_the_delete(self, postgres_store: PostgresStore):

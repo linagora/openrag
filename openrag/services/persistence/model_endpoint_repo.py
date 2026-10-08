@@ -10,11 +10,19 @@ from __future__ import annotations
 from collections.abc import Callable
 
 import asyncpg
-from core.config.model_endpoints import DEFAULT_ENDPOINT_ALIAS, ModelEndpointConfig, ModelEndpointRow, ModelEndpointType
+from core.config.model_endpoints import (
+    DEFAULT_ENDPOINT_ALIAS,
+    ModelEndpointConfig,
+    ModelEndpointRow,
+    ModelEndpointType,
+    material_embedder_changes,
+)
+from core.models.embedder_swap import EmbedderSwapStatus
 from core.models.readiness import ConfigurationReferenceFinding, ModelEndpointDiscovery, ModelEndpointTarget
 from core.ports.model_endpoint_repo import EndpointEditGuard, ModelEndpointRepository
 from core.utils.exceptions import ConflictError, NotFoundError, ValidationError
 from core.utils.logging import get_logger
+from core.vector_stores.vector_field import allocate_vector_field_name
 
 logger = get_logger()
 
@@ -26,7 +34,13 @@ logger = get_logger()
 # on a non-default endpoint yielded two defaults for the type.) Promotion must go
 # through set_default / delete_and_promote_default, which clear-then-set inside one
 # transaction; ModelEndpointService.update_model_endpoint routes is_default there.
+# ``vector_field`` is absent too: an endpoint keeps its vectors' field for life.
 _ALLOWED_UPDATE_FIELDS = frozenset({"endpoint", "model_name", "batch_size", "timeout", "extra"})
+
+# Running embedder swaps re-embedding partitions with an endpoint.
+_RUNNING_SWAPS_ONTO_SQL = (
+    "SELECT COUNT(*)::int FROM partition_embedder_swaps WHERE target_embedder = $1 AND status = $2"
+)
 
 # Endpoint names are referenced by value elsewhere, and nothing updates those
 # references when an endpoint is renamed (#770) — so ``rename()`` cascades to
@@ -105,6 +119,19 @@ _PARTITION_USAGE_COUNTS_SQL = """
     GROUP BY e.name, e.model_type
     """
 
+# Run inside an embedder delete, whose field is dropped next. The files still
+# recorded in it — re-embedded by a swap cancelled before it completed, so their
+# partition never moved there — lose the vectors that record points to. And the
+# field's name is free again (allocate_vector_field_name): an endpoint created
+# under the same name gets it back, and a swap onto it would skip these files as
+# already done, then complete with them absent from search. Forgetting the field
+# makes them unrecorded, which a swap re-embeds.
+_FORGET_DROPPED_VECTOR_FIELD_SQL = """
+    UPDATE files
+    SET indexation_config = indexation_config - 'embedder_vector_field'
+    WHERE indexation_config->>'embedder_vector_field' = $1
+    """
+
 # Per-partition indexed-file counts for one endpoint. `usage_counts` above
 # answers "how many partitions point here"; this answers "how much already-built
 # data rides on it", which is what sizes an in-place repoint.
@@ -140,6 +167,7 @@ class PgModelEndpointRepository(ModelEndpointRepository):
             timeout=row["timeout"],
             extra=row["extra"] or {},
             is_default=row["is_default"],
+            vector_field=row["vector_field"],
             created_at=row["created_at"],
             updated_at=row["updated_at"],
         )
@@ -170,11 +198,13 @@ class PgModelEndpointRepository(ModelEndpointRepository):
                             "UPDATE model_endpoints SET is_default = false, updated_at = now() WHERE model_type = $1",
                             row.model_type,
                         )
+                    vector_field = await self._allocate_vector_field(conn, row)
                     rec = await conn.fetchrow(
                         """
                         INSERT INTO model_endpoints
-                            (name, model_type, endpoint, model_name, batch_size, timeout, extra, is_default)
-                        VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8)
+                            (name, model_type, endpoint, model_name, batch_size, timeout, extra,
+                             is_default, vector_field)
+                        VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9)
                         RETURNING *
                         """,
                         row.name,
@@ -185,6 +215,7 @@ class PgModelEndpointRepository(ModelEndpointRepository):
                         row.timeout,
                         row.extra,
                         row.is_default,
+                        vector_field,
                     )
         except asyncpg.UniqueViolationError as exc:
             # The service's preflight check cannot make a concurrent create
@@ -196,6 +227,20 @@ class PgModelEndpointRepository(ModelEndpointRepository):
                 code="ENDPOINT_EXISTS",
             ) from exc
         return self._to_model(rec)
+
+    @staticmethod
+    async def _allocate_vector_field(conn: asyncpg.Connection, row: ModelEndpointRow) -> str | None:
+        """The dense field a new embedder will own; ``None`` for other endpoint types.
+
+        Allocated inside the insert's transaction, under a lock that keeps two
+        creates from picking the same name. Any ``vector_field`` on ``row`` is
+        ignored: the server owns the column.
+        """
+        if row.model_type != "embedder":
+            return None
+        await conn.execute("SELECT pg_advisory_xact_lock(hashtext('model_endpoints.vector_field'))")
+        taken = await conn.fetch("SELECT vector_field FROM model_endpoints WHERE vector_field IS NOT NULL")
+        return allocate_vector_field_name(row.name, {rec["vector_field"] for rec in taken})
 
     async def get(self, name: str, model_type: str) -> ModelEndpointRow | None:
         rec = await self.pool.fetchrow(
@@ -453,7 +498,7 @@ class PgModelEndpointRepository(ModelEndpointRepository):
             f"WHERE name = $1 AND model_type = $2 RETURNING *"
         )
 
-        if guard is None:
+        if guard is None and model_type != "embedder":
             rec = await self.pool.fetchrow(sql, *params)
             return self._to_model(rec) if rec else None
         async with self.pool.acquire() as conn:
@@ -469,9 +514,38 @@ class PgModelEndpointRepository(ModelEndpointRepository):
                 )
                 if locked is None:
                     return None
-                await guard(self._to_model(locked), lambda: self._indexed_file_usage(conn, name, model_type))
+                existing = self._to_model(locked)
+                if model_type == "embedder":
+                    await self._refuse_edit_under_a_swap(conn, existing, updates)
+                if guard is not None:
+                    await guard(existing, lambda: self._indexed_file_usage(conn, name, model_type))
                 rec = await conn.fetchrow(sql, *params)
         return self._to_model(rec) if rec else None
+
+    @staticmethod
+    async def _refuse_edit_under_a_swap(
+        conn: asyncpg.Connection, existing: ModelEndpointRow, updates: dict[str, object]
+    ) -> None:
+        """Refuse an edit that changes the vectors of an embedder a running swap fills.
+
+        The swap skips a file recorded with the target's model and field, so the
+        files it re-embedded before such an edit would pass for done after it,
+        and the field would hold vectors from two configurations nothing tells
+        apart. Acknowledging indexed data does not lift this: cancel the swap,
+        or let it finish. A swap starts with this row locked FOR SHARE, so it is
+        either counted here or starts after the edit.
+        """
+        changed = material_embedder_changes(existing, updates)
+        if not changed:
+            return
+        swapping = await conn.fetchval(_RUNNING_SWAPS_ONTO_SQL, existing.name, EmbedderSwapStatus.RUNNING.value)
+        if swapping:
+            raise ConflictError(
+                f"Embedder '{existing.name}' is the target of {swapping} running embedder swap(s), and changing "
+                f"{', '.join(changed)} would change the vectors they write. "
+                "Wait for them to finish, or cancel them, before editing it.",
+                code="EMBEDDER_SWAP_IN_PROGRESS",
+            )
 
     async def rename(self, name: str, model_type: str, new_name: str) -> None:
         """Rename an endpoint and cascade the new name to every stored reference.
@@ -530,6 +604,17 @@ class PgModelEndpointRepository(ModelEndpointRepository):
                         name,
                         new_name,
                     )
+                if model_type == "embedder":
+                    # A running swap completes by writing its target into
+                    # partitions.embedder, so it must name the endpoint as it is
+                    # called by then. Finished ones are history, and
+                    # follow along so they keep resolving too.
+                    for column in ("source_embedder", "target_embedder"):
+                        await conn.execute(
+                            f"UPDATE partition_embedder_swaps SET {column} = $2 WHERE {column} = $1",
+                            name,
+                            new_name,
+                        )
 
                 for preset_type, keys in (
                     ("retrieval", _RETRIEVAL_PRESET_KEYS_BY_TYPE.get(model_type, ())),
@@ -687,6 +772,17 @@ class PgModelEndpointRepository(ModelEndpointRepository):
             direct, via_default = row["direct"], row["via_default"]
             if direct or via_default:
                 raise ConflictError(_embedder_in_use_message(name, direct, via_default))
+            # Not referenced by a partition yet, but a running swap is filling
+            # its field: deleting it would drop that field under the swap. A
+            # swap records itself while holding a lock that conflicts with the
+            # SHARE lock taken on partitions above.
+            swapping = await conn.fetchval(_RUNNING_SWAPS_ONTO_SQL, name, EmbedderSwapStatus.RUNNING.value)
+            if swapping:
+                raise ConflictError(
+                    f"Embedder '{name}' is the target of {swapping} running embedder swap(s). "
+                    "Wait for them to finish, or cancel them, before deleting it.",
+                    code="EMBEDDER_SWAP_IN_PROGRESS",
+                )
             return
 
         column = _CLEARABLE_PARTITION_COLUMN_BY_TYPE.get(model_type)
@@ -728,16 +824,17 @@ class PgModelEndpointRepository(ModelEndpointRepository):
         rows = await conn.fetch(_EMBEDDER_INDEXED_USAGE_SQL, name, model_type, DEFAULT_ENDPOINT_ALIAS)
         return [{"partition": r["partition"], "file_count": r["file_count"]} for r in rows]
 
-    async def delete_and_promote_default(self, name: str, model_type: str) -> tuple[str, str | None]:
+    async def delete_and_promote_default(self, name: str, model_type: str) -> tuple[str, str | None, str | None]:
         """Delete an endpoint and, if it was the default, promote a survivor to
         default — all atomically and decided under a row lock.
 
         Locking and deciding inside one transaction means concurrent deletes of the
         same model type can't both pass a stale last-endpoint check or promote an
         already-deleted survivor, so the type is never left with no endpoint or no
-        default. Returns ``(status, promoted_name)`` where ``status`` is
-        ``"not_found" | "last" | "ok"`` and ``promoted_name`` is set only when a
-        deleted default was replaced.
+        default. Returns ``(status, promoted_name, vector_field)`` where
+        ``status`` is ``"not_found" | "last" | "ok"``, ``promoted_name`` is set
+        only when a deleted default was replaced, and ``vector_field`` is the
+        deleted row's own, so a concurrent rename cannot swap it for another's.
 
         Partition references are settled here too, differently per column (#762):
         an ``embedder`` still referenced refuses the delete with
@@ -775,17 +872,19 @@ class PgModelEndpointRepository(ModelEndpointRepository):
                 )
                 names = [r["name"] for r in rows]
                 if name not in names:
-                    return ("not_found", None)
+                    return ("not_found", None, None)
                 if len(names) <= 1:
-                    return ("last", None)
+                    return ("last", None, None)
                 was_default = next(r["is_default"] for r in rows if r["name"] == name)
                 await self._settle_partition_references(conn, name, model_type, was_default=was_default)
                 await self._clear_preset_references(conn, name, model_type)
-                await conn.execute(
-                    "DELETE FROM model_endpoints WHERE name = $1 AND model_type = $2",
+                vector_field = await conn.fetchval(
+                    "DELETE FROM model_endpoints WHERE name = $1 AND model_type = $2 RETURNING vector_field",
                     name,
                     model_type,
                 )
+                if vector_field:
+                    await conn.execute(_FORGET_DROPPED_VECTOR_FIELD_SQL, vector_field)
                 promoted: str | None = None
                 if was_default:
                     promoted = next(n for n in names if n != name)  # deterministic: first by name
@@ -799,7 +898,7 @@ class PgModelEndpointRepository(ModelEndpointRepository):
                         promoted,
                         model_type,
                     )
-                return ("ok", promoted)
+                return ("ok", promoted, vector_field)
 
 
 def _embedder_in_use_message(name: str, direct: int, via_default: int) -> str:

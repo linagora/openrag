@@ -50,6 +50,8 @@ model_endpoints = Table(
     Column("timeout", Float, server_default="30.0", nullable=False),
     Column("extra", JSONB, server_default=text("'{}'::jsonb"), nullable=False),
     Column("is_default", Boolean, server_default="false", nullable=False),
+    # The dense field an embedder owns; other endpoint types have none.
+    Column("vector_field", String, nullable=True),
     Column(
         "created_at",
         DateTime(timezone=True),
@@ -65,6 +67,16 @@ model_endpoints = Table(
     CheckConstraint(
         "model_type IN ('embedder','reranker','llm','vlm','stt')",
         name="ck_model_endpoint_type",
+    ),
+    CheckConstraint(
+        "model_type <> 'embedder' OR vector_field IS NOT NULL",
+        name="ck_embedder_has_vector_field",
+    ),
+    Index(
+        "uq_model_endpoint_vector_field",
+        "vector_field",
+        unique=True,
+        postgresql_where=text("vector_field IS NOT NULL"),
     ),
 )
 
@@ -195,6 +207,34 @@ partitions = Table(
 )
 
 
+# At most one row per partition: the running swap, or the outcome of the last
+# one. Deleted with its partition.
+partition_embedder_swaps = Table(
+    "partition_embedder_swaps",
+    metadata,
+    Column(
+        "partition",
+        String,
+        ForeignKey("partitions.partition", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    Column("source_embedder", String, nullable=False),
+    Column("target_embedder", String, nullable=False, index=True),
+    Column("status", String, nullable=False, index=True),
+    Column("files_total", Integer, server_default="0", nullable=False),
+    Column("files_done", Integer, server_default="0", nullable=False),
+    # Chunks longer than the target embedder's window, cut before embedding.
+    Column("chunks_over_window", Integer, server_default="0", nullable=False),
+    Column("error", String, nullable=True),
+    # Set anew by each start. A runner writes only to the run it was started
+    # for, so one left behind by a newer swap can neither advance nor complete it.
+    Column("run_id", String, nullable=False),
+    Column("started_at", DateTime(timezone=True), server_default=text("now()"), nullable=False),
+    Column("updated_at", DateTime(timezone=True), server_default=text("now()"), nullable=False),
+    Column("finished_at", DateTime(timezone=True), nullable=True),
+)
+
+
 files = Table(
     "files",
     metadata,
@@ -292,6 +332,7 @@ jobs = Table(
     Column("id", String, primary_key=True),
     Column("partition", String, nullable=False),
     Column("file_id", String, nullable=True),
+    Column("filename", String, nullable=True),
     # ``users.id`` is Integer, so the FK target fixes this type.
     Column("user_id", Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True),
     Column("status", String, nullable=False),
@@ -441,11 +482,15 @@ partition_memberships = Table(
 )
 
 
+# ``workspace_id`` is the client-facing identifier and is unique *per partition*
+# only: two partitions may each own a workspace called ``default``. Every lookup
+# therefore takes the partition as well; the join table below references the
+# integer ``id`` so that non-uniqueness never leaks into ``workspace_files``.
 workspaces = Table(
     "workspaces",
     metadata,
     Column("id", Integer, primary_key=True),
-    Column("workspace_id", String, unique=True, nullable=False, index=True),
+    Column("workspace_id", String, nullable=False, index=True),
     Column(
         "partition_name",
         String,
@@ -461,6 +506,7 @@ workspaces = Table(
     ),
     Column("display_name", String, nullable=True),
     Column("created_at", DateTime, default=datetime.now),
+    UniqueConstraint("partition_name", "workspace_id", name="uix_workspace_partition_id"),
 )
 
 
@@ -468,10 +514,13 @@ workspace_files = Table(
     "workspace_files",
     metadata,
     Column("id", Integer, primary_key=True),
+    # Both columns hold the *integer* PK of the referenced row, not the
+    # client-facing string ids (``workspaces.workspace_id`` / ``files.file_id``),
+    # neither of which is unique across partitions.
     Column(
         "workspace_id",
-        String,
-        ForeignKey("workspaces.workspace_id", ondelete="CASCADE"),
+        Integer,
+        ForeignKey("workspaces.id", ondelete="CASCADE"),
         nullable=False,
         index=True,
     ),
@@ -493,6 +542,7 @@ __all__ = [
     "prompts",
     "topic_tags",
     "partitions",
+    "partition_embedder_swaps",
     "files",
     "users",
     "oidc_sessions",

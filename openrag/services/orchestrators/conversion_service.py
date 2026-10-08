@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING
 from core.utils.consts import is_internal_metadata_key
 from core.utils.logging import get_logger
 from core.utils.text import sanitize_extracted_text
+from core.vector_stores.vector_field import is_vector_field_key
 
 if TYPE_CHECKING:
     from core.indexing.serializer import FileSerializer
@@ -97,5 +98,7 @@ __all__ = ["ConversionService"]
 
 def _public_chunk_metadata(row: dict) -> dict:
     return {
-        key: value for key, value in row.items() if key not in ("text", "vector") and not is_internal_metadata_key(key)
+        key: value
+        for key, value in row.items()
+        if key != "text" and not is_vector_field_key(key) and not is_internal_metadata_key(key)
     }

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import traceback
 import uuid
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Any
 
@@ -13,18 +14,23 @@ from core.models.catalog import (
     INDEXING_CONTENT_CLAIM_TOKEN_PREFIX,
     TASK_CREATED_AT_METADATA_KEY,
     TASK_FINISHED_AT_METADATA_KEY,
+    TERMINAL_TASK_STATES,
     DocumentStatus,
     IndexationJob,
+    reconcile_task_state,
 )
 from core.utils.consts import is_internal_metadata_key, strip_internal_metadata
 from core.utils.error_summary import extract_task_error_reason, failure_reason_from_exception
 from core.utils.exceptions import ConflictError, mark_indexing_worker_may_be_running
 from core.utils.logging import get_logger
+from core.vector_stores.vector_field import is_vector_field_key
 from ray.exceptions import TaskCancelledError
+from services.workers.embedder_provenance import embedder_provenance
 from services.workers.failure_reporting import submit_task_failure
 from services.workers.ray_utils import call_ray_actor_with_timeout, retry_idempotent_ray_actor_method
 from services.workers.stages.store import INDEXING_TASK_ID_METADATA_KEY
 from services.workers.task_cancellation import cancel_active_indexing_tasks
+from services.workers.task_state import QUEUE_REFUSED_CANCELLED, QUEUE_REFUSED_FILE_INDEXING
 
 logger = get_logger()
 
@@ -90,9 +96,40 @@ class WorkerDispatcher(IndexingDispatcher):
         partition: str,
         metadata: dict[str, Any],
         user_id: int | None,
-    ) -> bool:
+        reject_if_file_active: bool = False,
+    ) -> dict[str, Any]:
+        """Register the task as QUEUED and report whether the actor took it.
+
+        Returns the ``{"accepted", "reason", "existing_task_id"}`` shape of
+        ``set_queued_details_v2``. Against an actor left by an earlier release
+        this degrades to the boolean method, which has no admission fence — the
+        submission is then accepted exactly as it was before this fence existed,
+        never refused on a guess.
+        """
+        remote_v2 = _remote_actor_method(self._tsm, "set_queued_details_v2")
+        if remote_v2 is not None:
+            outcome = await retry_idempotent_ray_actor_method(
+                submit=lambda: remote_v2(
+                    task_id,
+                    file_id=file_id,
+                    partition=partition,
+                    metadata=metadata,
+                    user_id=user_id,
+                    reject_if_file_active=reject_if_file_active,
+                ),
+                recovery_timeout=self._timeout,
+                task_description=f"set_queued_details_v2({task_id})",
+            )
+            if isinstance(outcome, dict):
+                return outcome
+            return _queue_admitted(outcome is not False)
+
         remote = _remote_actor_method(self._tsm, "set_queued_details")
         if remote is not None:
+            if reject_if_file_active:
+                logger.bind(task_id=task_id, file_id=file_id, partition=partition).warning(
+                    "TaskStateManager predates the file admission fence; a duplicate upload cannot be refused"
+                )
             accepted = await retry_idempotent_ray_actor_method(
                 submit=lambda: remote(
                     task_id,
@@ -104,7 +141,7 @@ class WorkerDispatcher(IndexingDispatcher):
                 recovery_timeout=self._timeout,
                 task_description=f"set_queued_details({task_id})",
             )
-            return accepted is not False
+            return _queue_admitted(accepted is not False)
 
         await self._call_method(
             lambda: self._tsm.set_state.remote(task_id, "QUEUED"),
@@ -120,7 +157,7 @@ class WorkerDispatcher(IndexingDispatcher):
             ),
             task_description=f"set_details({task_id})",
         )
-        return True
+        return _queue_admitted(True)
 
     async def _active_content_claim_tokens(self, partition: str) -> set[str] | None:
         """Return task tokens whose content reservations must be preserved.
@@ -157,6 +194,30 @@ class WorkerDispatcher(IndexingDispatcher):
         # lookup. A concurrent renewal changes that value, so the repository's
         # conditional delete fails instead of reclaiming a live reservation.
         return bool(await release_lease(lease))
+
+    async def _active_indexing_task_for_file(self, *, partition: str, file_id: str) -> str | None:
+        """Return the task indexing ``file_id`` right now, or ``None``.
+
+        ``None`` also covers an older TaskStateManager without the lookup, and a
+        lookup that failed: the caller then keeps the label it already had. The
+        submission is refused either way, so an unavailable or slow actor must
+        not turn that 409 into a 503 or a 500.
+        """
+        remote = _remote_actor_method(self._tsm, "get_active_indexing_task_for_file")
+        if remote is None:
+            return None
+        try:
+            task_id = await self._call_method(
+                lambda: remote(partition=partition, file_id=file_id),
+                task_description=f"get_active_indexing_task_for_file({partition}, {file_id})",
+            )
+        except Exception as exc:
+            logger.bind(partition=partition, file_id=file_id).warning(
+                "Could not look up the task indexing this file; keeping the content conflict",
+                error=str(exc),
+            )
+            return None
+        return task_id if isinstance(task_id, str) and task_id else None
 
     async def _begin_worker_submission(self, task_id: str) -> bool:
         remote = _remote_actor_method(self._tsm, "begin_worker_submission")
@@ -258,6 +319,17 @@ class WorkerDispatcher(IndexingDispatcher):
             ):
                 conflicting_file_id = await self._document_repo.claim_content_sha256(**claim_kwargs)
             if conflicting_file_id is not None:
+                # A retry of an upload still being indexed sends the same bytes
+                # under the same file_id, so it is the first task's own claim
+                # that turns it away here, before the admission fence below
+                # ever sees it. Name that task rather than pointing the client
+                # at a file the catalog does not show yet. Only for a first-time
+                # upload, the one the fence applies to: a replace keeps the
+                # content conflict it always got.
+                if conflicting_file_id == file_id and not replace:
+                    busy_task_id = await self._active_indexing_task_for_file(partition=partition, file_id=file_id)
+                    if busy_task_id is not None:
+                        raise _indexing_in_progress(file_id, partition, busy_task_id)
                 raise ConflictError(
                     f"This document already exists in partition '{partition}'.",
                     code="DOCUMENT_CONTENT_EXISTS",
@@ -277,25 +349,34 @@ class WorkerDispatcher(IndexingDispatcher):
             "metadata": user_metadata,
             "user_id": user.get("id") if user else None,
         }
+
+        async def release_claim() -> None:
+            if claimed_content:
+                await self._document_repo.release_content_sha256_claim(
+                    file_id=file_id,
+                    partition=partition,
+                    content_sha256=content_sha256,
+                    claim_token=content_claim_token,
+                )
+
         try:
-            accepted = await self._set_queued_details(task_id, **task_details)
+            # A first-time upload is fenced against a task already indexing the
+            # same file: the second one can only redo the first one's work and
+            # then fail on the catalog insert, after a full parse and embed. A
+            # replace is not fenced — re-indexing a file that already exists is
+            # what it is for.
+            admission = await self._set_queued_details(task_id, reject_if_file_active=not replace, **task_details)
         except BaseException:
-            if claimed_content:
-                await self._document_repo.release_content_sha256_claim(
-                    file_id=file_id,
-                    partition=partition,
-                    content_sha256=content_sha256,
-                    claim_token=content_claim_token,
-                )
+            await release_claim()
             raise
-        if not accepted:
-            if claimed_content:
-                await self._document_repo.release_content_sha256_claim(
-                    file_id=file_id,
-                    partition=partition,
-                    content_sha256=content_sha256,
-                    claim_token=content_claim_token,
-                )
+        if not admission["accepted"]:
+            await release_claim()
+            busy_task_id = admission.get("existing_task_id")
+            reason = admission.get("reason")
+            if reason == QUEUE_REFUSED_FILE_INDEXING and busy_task_id:
+                raise _indexing_in_progress(file_id, partition, busy_task_id)
+            if reason == QUEUE_REFUSED_CANCELLED:
+                raise RuntimeError(f"Task {task_id} was cancelled before it queued")
             raise RuntimeError(
                 f"Task {task_id} was rejected because file {file_id!r} in partition {partition!r} is being deleted"
             )
@@ -305,6 +386,7 @@ class WorkerDispatcher(IndexingDispatcher):
             status=DocumentStatus.QUEUED,
             partition=partition,
             file_id=file_id,
+            filename=task_details["metadata"].get("filename"),
             user_id=task_details["user_id"],
         )
 
@@ -373,6 +455,7 @@ class WorkerDispatcher(IndexingDispatcher):
                             status=DocumentStatus.FAILED,
                             partition=partition,
                             file_id=file_id,
+                            filename=task_details["metadata"].get("filename"),
                             user_id=task_details["user_id"],
                             error=tb,
                             error_reason=error_reason,
@@ -575,7 +658,8 @@ class WorkerDispatcher(IndexingDispatcher):
         rows = await self._vector_store.query_chunks_by_filter(
             self._collection,
             {"partition": partition, "file_id": file_id},
-            output_fields=["*", "vector"],
+            # The whole row is written back, so "*" must include the vectors.
+            output_fields=["*"],
         )
         if not rows:
             return
@@ -599,6 +683,11 @@ class WorkerDispatcher(IndexingDispatcher):
         metadata: dict,
         partition: str,
         user: dict | None,
+        *,
+        vector_field: str | None = None,
+        embedder: Any = None,
+        embedder_reference: str | None = None,
+        embedder_fingerprint: Mapping[str, str | None] | None = None,
     ) -> None:
         source_file_metadata = await self._document_repo.get_file_metadata(file_id, partition)
         if source_file_metadata is None:
@@ -627,7 +716,7 @@ class WorkerDispatcher(IndexingDispatcher):
             rows = await self._vector_store.query_chunks_by_filter(
                 self._collection,
                 {"partition": partition, "file_id": file_id},
-                output_fields=["*", "vector"],
+                output_fields=["*"],
             )
             if not rows:
                 return
@@ -640,24 +729,48 @@ class WorkerDispatcher(IndexingDispatcher):
                 entity.pop("_id", None)
                 entity.update(public_metadata)
                 entity["indexed_at"] = indexed_at.isoformat()
+                # Marks this copy's chunks, so a refused catalog write removes exactly them.
+                entity[INDEXING_TASK_ID_METADATA_KEY] = claim_token
                 entities.append(entity)
 
+            # The source's record, embedder included, still describes vectors copied as they are.
+            indexation_config = await self._document_repo.get_indexation_config(file_id, partition)
+            catalog_kwargs: dict[str, Any] = {}
+            recorded_field = (indexation_config or {}).get("embedder_vector_field")
+            if vector_field is not None and await self._move_to_vector_field(
+                entities, vector_field, embedder, recorded_field
+            ):
+                indexation_config = {
+                    **(indexation_config or {}),
+                    **self._copy_provenance(entities, vector_field, embedder, embedder_reference),
+                }
+                if embedder_fingerprint is not None:
+                    catalog_kwargs["embedder_fingerprint"] = embedder_fingerprint
+            if indexation_config is not None:
+                catalog_kwargs["indexation_config"] = indexation_config
             await self._insert_entities(entities)
 
             file_metadata = dict(source_file_metadata)
             file_metadata.update(public_metadata)
             file_metadata["indexed_at"] = indexed_at.isoformat()
-            await self._document_repo.add_file_to_partition(
-                file_id=target_file_id,
-                partition=target_partition,
-                file_metadata=file_metadata,
-                user_id=user.get("id") if user else None,
-                relationship_id=file_metadata.get("relationship_id"),
-                parent_id=file_metadata.get("parent_id"),
-                content_sha256=content_sha256,
-                indexed_at=indexed_at,
-                chunk_count=len(entities),
-            )
+            try:
+                await self._document_repo.add_file_to_partition(
+                    file_id=target_file_id,
+                    partition=target_partition,
+                    file_metadata=file_metadata,
+                    user_id=user.get("id") if user else None,
+                    relationship_id=file_metadata.get("relationship_id"),
+                    parent_id=file_metadata.get("parent_id"),
+                    content_sha256=content_sha256,
+                    indexed_at=indexed_at,
+                    chunk_count=len(entities),
+                    **catalog_kwargs,
+                )
+            except Exception:
+                await self._cleanup_submitted_vectors(
+                    claim_token, metadata={"file_id": target_file_id}, partition=target_partition
+                )
+                raise
         finally:
             if claimed_content:
                 await self._document_repo.release_content_sha256_claim(
@@ -666,6 +779,54 @@ class WorkerDispatcher(IndexingDispatcher):
                     content_sha256=content_sha256,
                     claim_token=claim_token,
                 )
+
+    async def _move_to_vector_field(
+        self,
+        entities: list[dict[str, Any]],
+        vector_field: str,
+        embedder: Any,
+        recorded_field: str | None = None,
+    ) -> bool:
+        """Give copied chunks a vector in ``vector_field`` and in no other field.
+
+        A partition only searches its embedder's field, so a chunk copied from a
+        partition on another embedder is re-embedded from its stored text.
+        Returns whether any chunk was.
+
+        A vector already in ``vector_field`` is reused only when the source file
+        is recorded there (``recorded_field``). An embedder swap leaves the old
+        field's vectors behind: after one, the chunks hold vectors in both
+        fields, and the old ones may come from a model the endpoint was since
+        edited away from — while the file's record names the new field, so
+        copying them under it would make a later swap skip a file with nothing
+        in the field it searches. For a file recorded in no field — indexed
+        before the record existed — whether a vector is there is all there is
+        to go on.
+        """
+        reuse = recorded_field is None or recorded_field == vector_field
+        missing = [entity for entity in entities if not reuse or entity.get(vector_field) is None]
+        if missing:
+            vectors = await embedder.embed([entity.get("text") or "" for entity in missing])
+            await self._vector_store.ensure_vector_field(vector_field, len(vectors[0]))
+            for entity, vector in zip(missing, vectors, strict=True):
+                entity[vector_field] = vector
+        for entity in entities:
+            for key in [key for key in entity if is_vector_field_key(key) and key != vector_field]:
+                del entity[key]
+        return bool(missing)
+
+    @staticmethod
+    def _copy_provenance(
+        entities: list[dict[str, Any]], vector_field: str, embedder: Any, embedder_reference: str | None
+    ) -> dict[str, Any]:
+        """The embedder record of a copy that was re-embedded: the target's, not the source's."""
+        provenance = embedder_provenance(embedder, embedder_reference, vector_field)
+        if provenance["embedder_dimension"] is None:
+            # An embedder that does not report its width: the vectors it just made do.
+            widths = {len(entity[vector_field]) for entity in entities}
+            if len(widths) == 1:
+                provenance["embedder_dimension"] = widths.pop()
+        return provenance
 
     async def _upsert_entities(self, entities: list[dict[str, Any]]) -> None:
         upsert_entities = getattr(self._vector_store, "upsert_entities", None)
@@ -686,6 +847,7 @@ class WorkerDispatcher(IndexingDispatcher):
         status: DocumentStatus,
         partition: str,
         file_id: str | None = None,
+        filename: str | None = None,
         user_id: int | None = None,
         error: str | None = None,
         error_reason: str | None = None,
@@ -702,6 +864,7 @@ class WorkerDispatcher(IndexingDispatcher):
                     status=status,
                     partition=partition,
                     file_id=file_id,
+                    filename=filename,
                     user_id=user_id,
                     error=error,
                     error_reason=error_reason,
@@ -729,43 +892,59 @@ class WorkerDispatcher(IndexingDispatcher):
             return None
 
     async def get_task_state(self, task_id: str) -> str | None:
-        state = await self._call_method(
-            lambda: self._tsm.get_state.remote(task_id),
-            task_description=f"get_state({task_id})",
-        )
-        if state is not None:
-            return state
-        # The actor forgets settled tasks; the durable record outlives it.
         job = await self._durable_job(task_id)
-        return job.status.value if job is not None else None
+        actor_state = None
+        if job is None or job.status not in TERMINAL_TASK_STATES:
+            try:
+                actor_state = await self._call_method(
+                    lambda: self._tsm.get_state.remote(task_id),
+                    task_description=f"get_state({task_id})",
+                )
+            except Exception:
+                if job is None:
+                    raise
+                logger.warning("Failed to read live task state", task_id=task_id)
+        return reconcile_task_state(actor_state, job.status.value if job is not None else None)
 
     async def get_task_error(self, task_id: str) -> str | None:
-        error = await self._call_method(
-            lambda: self._tsm.get_error.remote(task_id),
-            task_description=f"get_error({task_id})",
-        )
-        if error is not None:
-            return error
         job = await self._durable_job(task_id)
-        return job.error if job is not None else None
+        if job is not None and job.status in TERMINAL_TASK_STATES and job.error is not None:
+            return job.error
+        try:
+            error = await self._call_method(
+                lambda: self._tsm.get_error.remote(task_id),
+                task_description=f"get_error({task_id})",
+            )
+        except Exception:
+            if job is None:
+                raise
+            logger.warning("Failed to read live task error", task_id=task_id)
+            error = None
+        return error if error is not None else (job.error if job is not None else None)
 
     async def get_task_error_reason(self, task_id: str) -> str | None:
+        job = await self._durable_job(task_id)
+        if job is not None and job.status in TERMINAL_TASK_STATES and job.error_reason is not None:
+            return job.error_reason
         method_names = getattr(self._tsm, "_ray_actor_method_names", None)
         supports_reason = isinstance(method_names, (frozenset, list, set, tuple)) and (
             "get_error_reason" in method_names
         )
         if supports_reason:
-            reason = await self._call_method(
-                lambda: self._tsm.get_error_reason.remote(task_id),
-                task_description=f"get_error_reason({task_id})",
-            )
+            try:
+                reason = await self._call_method(
+                    lambda: self._tsm.get_error_reason.remote(task_id),
+                    task_description=f"get_error_reason({task_id})",
+                )
+            except Exception:
+                if job is None:
+                    raise
+                logger.warning("Failed to read live task error reason", task_id=task_id)
+                reason = None
             if reason is not None:
                 return reason
-        job = await self._durable_job(task_id)
-        if job is not None and job.error_reason is not None:
-            return job.error_reason
         error = await self.get_task_error(task_id)
-        return extract_task_error_reason(error)
+        return extract_task_error_reason(error) or (job.error_reason if job is not None else None)
 
     async def cancel_task(self, task_id: str) -> bool:
         import ray
@@ -787,7 +966,13 @@ class WorkerDispatcher(IndexingDispatcher):
             task_description=f"set_cancelled_if_active({task_id})",
         )
         if not cancelled:
-            state = await self.get_task_state(task_id)
+            state = await self._call_method(
+                lambda: self._tsm.get_state.remote(task_id),
+                task_description=f"get_state({task_id}) after cancellation claim",
+            )
+            if state is None:
+                job = await self._durable_job(task_id)
+                state = reconcile_task_state(None, job.status.value if job is not None else None)
             if state != "CANCELLED":
                 return False
 
@@ -836,6 +1021,19 @@ def _exception_chain(exc: BaseException):
         seen.add(id(current))
         yield current
         current = current.__cause__ or current.__context__
+
+
+def _queue_admitted(accepted: bool) -> dict[str, Any]:
+    """Wrap a boolean queue registration in the v2 result shape."""
+    return {"accepted": accepted, "reason": None, "existing_task_id": None}
+
+
+def _indexing_in_progress(file_id: str, partition: str, task_id: str) -> ConflictError:
+    return ConflictError(
+        f"File '{file_id}' is already being indexed in partition '{partition}'.",
+        code="DOCUMENT_INDEXING_IN_PROGRESS",
+        existing_task_id=task_id,
+    )
 
 
 def _remote_actor_method(actor: Any, name: str) -> Any | None:

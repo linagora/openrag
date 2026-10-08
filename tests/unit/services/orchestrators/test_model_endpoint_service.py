@@ -55,6 +55,9 @@ class _FakeEndpointRepo:
         # Set to a message to make the delete refuse, the way the real repo
         # does when a partition still resolves to the embedder.
         self.conflict_on_delete: str | None = None
+        # Embedders a running swap re-embeds partitions into: the real repo
+        # refuses any edit changing their vectors.
+        self.swap_targets: set[str] = set()
         for r in rows or []:
             self._store[(r.name, r.model_type)] = r
 
@@ -86,7 +89,18 @@ class _FakeEndpointRepo:
         row = self._store.get((name, model_type))
         if row is None:
             return None
-        # The real repo runs the guard on the row it just locked, before writing.
+        # The real repo checks for a running swap, then runs the guard, on the
+        # row it just locked, before writing.
+        if model_type == "embedder" and name in self.swap_targets:
+            from core.config.model_endpoints import material_embedder_changes
+            from core.utils.exceptions import ConflictError
+
+            if changed := material_embedder_changes(row, fields):
+                raise ConflictError(
+                    f"Embedder '{name}' is the target of 1 running embedder swap(s), and changing "
+                    f"{', '.join(changed)} would change the vectors they write.",
+                    code="EMBEDDER_SWAP_IN_PROGRESS",
+                )
         if guard is not None:
             await guard(row, lambda: self.indexed_file_usage(name, model_type))
         self.calls.append(("update", (name, model_type)))
@@ -106,7 +120,7 @@ class _FakeEndpointRepo:
         for key, row in list(self._store.items()):
             self._store[key] = row.model_copy(update={"is_default": key[0] == name and key[1] == model_type})
 
-    async def delete_and_promote_default(self, name: str, model_type: str) -> tuple[str, str | None]:
+    async def delete_and_promote_default(self, name: str, model_type: str) -> tuple[str, str | None, str | None]:
         names = sorted(k[0] for k in self._store if k[1] == model_type)
         self.calls.append(("delete_and_promote_default", (name, model_type)))
         if self.conflict_on_delete is not None:
@@ -114,18 +128,18 @@ class _FakeEndpointRepo:
 
             raise ConflictError(self.conflict_on_delete)
         if name not in names:
-            return ("not_found", None)
+            return ("not_found", None, None)
         if len(names) <= 1:
-            return ("last", None)
+            return ("last", None, None)
         was_default = self._store[(name, model_type)].is_default
-        self._store.pop((name, model_type), None)
+        deleted = self._store.pop((name, model_type))
         promoted = None
         if was_default:
             promoted = next(n for n in names if n != name)
             for key, row in list(self._store.items()):
                 if key[1] == model_type:
                     self._store[key] = row.model_copy(update={"is_default": key[0] == promoted})
-        return ("ok", promoted)
+        return ("ok", promoted, deleted.vector_field)
 
 
 def _make_service(
@@ -135,6 +149,7 @@ def _make_service(
     partition_service=None,
     preset_service=None,
     prompt_service=None,
+    vector_store=None,
 ):
     from core.config.root import Settings
     from services.orchestrators.model_endpoint_service import ModelEndpointService
@@ -145,6 +160,7 @@ def _make_service(
         partition_service=partition_service,
         preset_service=preset_service,
         prompt_service=prompt_service,
+        vector_store=vector_store,
     )
 
 
@@ -266,14 +282,49 @@ async def test_seed_defaults_preserves_endpoint_api_keys(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_seed_defaults_omits_placeholder_api_keys(monkeypatch):
+async def test_seed_defaults_keeps_the_empty_api_key_except_for_stt(monkeypatch):
+    """#1113: the bundled reranker runs with ``--api-key EMPTY`` and answers 401
+    without ``Bearer EMPTY``, so ``EMPTY`` is seeded as a key. STT alone drops
+    it: some transcription endpoints reject any Authorization header."""
+    from core.config.root import Settings
+
     monkeypatch.delenv("LLM_ENDPOINT", raising=False)
     monkeypatch.delenv("LLM_MODEL", raising=False)
 
+    settings = Settings(
+        embedder={"api_key": "EMPTY"},
+        llm={"base_url": "http://llm:8000/v1", "model": "mistral", "api_key": "EMPTY"},
+        vlm={"base_url": "http://vlm:8000/v1", "model": "pixtral", "api_key": "EMPTY"},
+        reranker={"provider": "infinity", "api_key": "EMPTY"},
+        loader={"transcriber": {"base_url": "http://stt:8000/v1", "model_name": "whisper", "api_key": "EMPTY"}},
+    )
     repo = _FakeEndpointRepo()
-    await _make_service(repo).seed_defaults()
+    await _make_service(repo, settings=settings).seed_defaults()
 
-    assert all("api_key" not in row.extra for row in repo._store.values())
+    assert {row.model_type: row.extra.get("api_key") for row in repo._store.values()} == {
+        "embedder": "EMPTY",
+        "llm": "EMPTY",
+        "vlm": "EMPTY",
+        "reranker": "EMPTY",
+        "stt": None,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("api_key", ["", "   "])
+async def test_seed_defaults_omits_blank_api_keys(monkeypatch, api_key):
+    from core.config.root import Settings
+
+    monkeypatch.delenv("LLM_ENDPOINT", raising=False)
+    monkeypatch.delenv("LLM_MODEL", raising=False)
+
+    settings = Settings(embedder={"api_key": api_key}, reranker={"provider": "infinity", "api_key": api_key})
+    repo = _FakeEndpointRepo()
+    await _make_service(repo, settings=settings).seed_defaults()
+
+    rows = {row.model_type: row for row in repo._store.values()}
+    assert "api_key" not in rows["embedder"].extra
+    assert "api_key" not in rows["reranker"].extra
 
 
 @pytest.mark.asyncio
@@ -651,6 +702,154 @@ async def test_seed_defaults_sync_on_boot_follows_a_changed_model_slug(monkeypat
     assert synced.endpoint == "http://embedder:8000/v1"
 
 
+def _indexed_env_managed_embedder(**overrides):
+    """The env-seeded default embedder of an install that has indexed files."""
+    from core.config.model_endpoints import ENV_MANAGED_KEY, ENV_MANAGED_VALUE
+
+    fields = {
+        "name": "indexed-model",
+        "model_type": "embedder",
+        "model_name": "indexed-model",
+        "endpoint": "http://embedder:8000/v1",
+        "batch_size": 512,
+        "extra": {"implementation": "vllm", "api_key": "old-key", ENV_MANAGED_KEY: ENV_MANAGED_VALUE},
+        "is_default": True,
+    }
+    fields.update(overrides)
+    row = _make_row(**fields)
+    return row, _FakeEndpointRepo(rows=[row], indexed_usage=[{"partition": "docs", "file_count": 3}])
+
+
+async def _seed_capturing_warnings(svc) -> list[tuple[str, str]]:
+    """Run the seed; return the (level, message) of every warning or worse."""
+    from loguru import logger
+
+    records: list[tuple[str, str]] = []
+    sink = logger.add(
+        lambda message: records.append((message.record["level"].name, message.record["message"])), level="WARNING"
+    )
+    try:
+        await svc.seed_defaults()
+    finally:
+        logger.remove(sink)
+    return records
+
+
+def _sync_settings(**embedder):
+    from core.config.root import Settings
+
+    return Settings(
+        embedder={"base_url": "http://embedder:8000/v1", "model_name": "indexed-model", **embedder},
+        models={"sync_on_boot": True},
+    )
+
+
+@pytest.mark.asyncio
+async def test_seed_defaults_sync_on_boot_keeps_the_model_of_an_embedder_with_indexed_files(monkeypatch):
+    """#1099: after an upgrade that moved the default embedder, an .env without
+    EMBEDDER_MODEL_NAME made the boot sync rewrite the indexed embedder's model,
+    so new uploads wrote another model's vectors into the field search compares.
+    The model now changes only through the admin API's guard. The rest of the
+    row still follows env: a refused model must not also block a rotated key or
+    a tunable the operator set in the same rollout."""
+
+    monkeypatch.setenv("EMBEDDER_BATCH_SIZE", "64")
+    _, repo = _indexed_env_managed_embedder()
+    settings = _sync_settings(
+        base_url="http://new-embedder:8000/v1", model_name="new-model", api_key="rotated-key", batch_size=64
+    )
+    svc = _make_service(repo, settings=settings)
+
+    warnings = await _seed_capturing_warnings(svc)
+
+    synced = repo._store[("indexed-model", "embedder")]
+    assert synced.model_name == "indexed-model"
+    assert synced.extra["api_key"] == "rotated-key"
+    assert synced.batch_size == 64
+    assert synced.endpoint == "http://new-embedder:8000/v1"
+    # The boot log is read by an operator, not an admin-API client: it names
+    # the variable to set, not the API's "Resend ..." instruction. A warning,
+    # worded as a disagreement: the database's model may be an admin's
+    # deliberate change that env was never updated for.
+    [(level, warning)] = warnings
+    assert level == "WARNING"
+    assert "env asks for 'new-model', the database keeps 'indexed-model'" in warning
+    assert "EMBEDDER_MODEL_NAME" in warning
+    assert "vllm.embedderModelName" in warning
+    assert "acknowledge_indexed_data=true" in warning
+    assert "Resend" not in warning
+
+
+@pytest.mark.asyncio
+async def test_seed_defaults_sync_on_boot_rotates_the_key_of_an_embedder_with_indexed_files(monkeypatch):
+    """An API key cannot change a vector, so indexed files do not hold it back."""
+    _, repo = _indexed_env_managed_embedder()
+    svc = _make_service(repo, settings=_sync_settings(api_key="rotated-key"))
+
+    warnings = await _seed_capturing_warnings(svc)
+
+    assert repo._store[("indexed-model", "embedder")].extra["api_key"] == "rotated-key"
+    # Not refused and then applied by the fallback: nothing is reported.
+    assert warnings == []
+
+
+@pytest.mark.asyncio
+async def test_seed_defaults_sync_on_boot_moves_an_embedder_with_indexed_files_to_a_new_url(monkeypatch):
+    """A new URL is how an operator moves the same model to another server. If
+    that server serves another model, readiness reports the embedder unavailable;
+    the sync does not refuse the move."""
+    _, repo = _indexed_env_managed_embedder()
+    svc = _make_service(repo, settings=_sync_settings(base_url="http://embedder.gpu-pool:8000/v1"))
+
+    warnings = await _seed_capturing_warnings(svc)
+
+    synced = repo._store[("indexed-model", "embedder")]
+    assert synced.endpoint == "http://embedder.gpu-pool:8000/v1"
+    assert synced.model_name == "indexed-model"
+    assert warnings == []
+
+
+@pytest.mark.asyncio
+async def test_seed_defaults_sync_on_boot_holds_the_url_and_model_of_a_running_swaps_target(monkeypatch):
+    """A running swap refuses any change to its target's vectors, the URL
+    included, so the fallback that holds back only the model was refused too and
+    failed boot — before the step that resumes the swap, so every boot failed
+    the same way. The row keeps its URL and model until the swap ends, and takes
+    the rest."""
+    monkeypatch.setenv("EMBEDDER_BATCH_SIZE", "64")
+    _, repo = _indexed_env_managed_embedder()
+    repo.swap_targets.add("indexed-model")
+    settings = _sync_settings(
+        base_url="http://embedder.gpu-pool:8000/v1", model_name="new-model", api_key="rotated-key", batch_size=64
+    )
+    svc = _make_service(repo, settings=settings)
+
+    warnings = await _seed_capturing_warnings(svc)
+
+    synced = repo._store[("indexed-model", "embedder")]
+    assert synced.endpoint == "http://embedder:8000/v1"
+    assert synced.model_name == "indexed-model"
+    assert synced.extra["api_key"] == "rotated-key"
+    assert synced.batch_size == 64
+    [(level, warning)] = warnings
+    assert level == "WARNING"
+    assert "running embedder swap" in warning
+    assert "http://embedder.gpu-pool:8000/v1" in warning
+
+
+@pytest.mark.asyncio
+async def test_seed_defaults_sync_on_boot_rotates_the_key_of_a_running_swaps_target(monkeypatch):
+    """A swap holds back only what changes its vectors."""
+    _, repo = _indexed_env_managed_embedder()
+    repo.swap_targets.add("indexed-model")
+    svc = _make_service(repo, settings=_sync_settings(api_key="rotated-key"))
+
+    warnings = await _seed_capturing_warnings(svc)
+
+    assert repo._store[("indexed-model", "embedder")].extra["api_key"] == "rotated-key"
+    assert warnings == []
+
+
 @pytest.mark.asyncio
 async def test_seed_defaults_sync_on_boot_rotates_the_api_key(monkeypatch):
     """A rotated *_API_KEY must reach the row it owns.
@@ -912,6 +1111,37 @@ async def test_load_all_no_default_alias_without_is_default():
 
     assert "jina" in settings.models.embedder
     assert "default" not in settings.models.embedder
+
+
+@pytest.mark.asyncio
+async def test_load_new_registers_endpoints_created_elsewhere_and_keeps_the_loaded_ones():
+    """A partition a swap switched on another process names an endpoint created
+    there; ``load_new`` makes it resolvable here. Loaded entries stay as they are:
+    their clients are cached by name, and a rename here keeps its old-name alias."""
+    from core.config.root import Settings
+
+    repo = _FakeEndpointRepo(rows=[_make_row(name="embed-a", is_default=True)])
+    settings = Settings()
+    svc = _make_service(repo, settings=settings)
+    await svc.load_all()
+    loaded = settings.models.embedder["embed-a"]
+    settings.models.embedder["renamed-from"] = loaded
+
+    # Another process creates embed-b and a reranker, and edits embed-a.
+    repo._store[("embed-b", "embedder")] = _make_row(
+        name="embed-b", model_name="embed-model-b", is_default=False, vector_field="vector_embed_b"
+    )
+    repo._store[("rank-b", "reranker")] = _make_row(name="rank-b", model_type="reranker", is_default=False)
+    repo._store[("embed-a", "embedder")] = _make_row(name="embed-a", endpoint="http://edited:8000/v1")
+
+    await svc.load_new()
+
+    assert settings.models.embedder["embed-b"].model_name == "embed-model-b"
+    assert settings.models.embedder["embed-b"].vector_field == "vector_embed_b"
+    assert "rank-b" in settings.models.reranker
+    assert settings.models.embedder["embed-a"] is loaded
+    assert settings.models.embedder["default"] is loaded
+    assert settings.models.embedder["renamed-from"] is loaded
 
 
 # ------------------------------------------------------------------
@@ -1282,6 +1512,8 @@ async def test_update_refuses_a_material_embedder_edit_over_indexed_files(fields
 
     assert exc.value.code == "EMBEDDER_EDIT_AFFECTS_INDEXED_DATA"
     assert "35 indexed file(s) in 2 partition(s) (docs, hr)" in exc.value.message
+    # An API client's way out, not the boot sync's (which names env vars).
+    assert "Resend with acknowledge_indexed_data=true" in exc.value.message
     assert not any(c[0] == "update" for c in repo.calls)
 
 
@@ -2418,7 +2650,8 @@ async def test_validate_non_stt_endpoint_keeps_auth_gated_model_list_reachable(m
 
 
 @pytest.mark.asyncio
-async def test_validate_endpoint_sends_api_key(monkeypatch):
+@pytest.mark.parametrize("scheme", ["http", "https"])
+async def test_validate_endpoint_sends_api_key(monkeypatch, scheme):
     import httpx
 
     svc = _make_service()
@@ -2446,32 +2679,11 @@ async def test_validate_endpoint_sends_api_key(monkeypatch):
 
     monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
 
-    await svc.validate_endpoint("https://llm:8000/v1", "mistral-small", api_key="secret-token")
+    result = await svc.validate_endpoint(f"{scheme}://llm:8000/v1", "mistral-small", api_key="secret-token")
 
     assert captured_headers == [{"Authorization": "Bearer secret-token"}]
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("model_type", [None, "stt"])
-async def test_validate_endpoint_rejects_api_key_over_http_without_request(monkeypatch, model_type):
-    import httpx
-
-    svc = _make_service()
-
-    def fail_client(**_kwargs):
-        raise AssertionError("HTTP client should not be created for credential-bearing HTTP URLs")
-
-    monkeypatch.setattr(httpx, "AsyncClient", fail_client)
-
-    result = await svc.validate_endpoint(
-        "http://model:8000/v1",
-        "model",
-        api_key="secret-token",
-        model_type=model_type,
-    )
-
-    assert result["reachable"] is False
-    assert result["detail"] == "Model endpoints with API keys must use HTTPS."
+    assert result["reachable"] is True
+    assert result["model_found"] is True
 
 
 @pytest.mark.asyncio
@@ -2651,3 +2863,78 @@ async def test_delete_model_endpoint_propagates_conflict_without_touching_caches
 
     assert exc.value.status_code == 409
     assert partition_service.load_partitions_calls == 0
+
+
+# ── dropping a deleted embedder's vector field ──────────────
+
+
+def _embedders_with_fields():
+    return [
+        _make_row(name="jina", is_default=True, vector_field="vector_jina"),
+        _make_row(name="e5", is_default=False, vector_field="vector_e5"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_deleting_an_embedder_drops_its_vector_field(mock_vector_store):
+    mock_vector_store.vector_fields = {"vector_jina": 1024, "vector_e5": 768}
+    svc = _make_service(_FakeEndpointRepo(rows=_embedders_with_fields()), vector_store=mock_vector_store)
+
+    await svc.delete_model_endpoint("e5", "embedder")
+
+    assert mock_vector_store.vector_fields == {"vector_jina": 1024}
+
+
+@pytest.mark.asyncio
+async def test_a_refused_embedder_delete_keeps_its_vector_field(mock_vector_store):
+    from core.utils.exceptions import ConflictError, NotFoundError, ValidationError
+
+    mock_vector_store.vector_fields = {"vector_jina": 1024, "vector_e5": 768}
+    repo = _FakeEndpointRepo(rows=_embedders_with_fields())
+    svc = _make_service(repo, vector_store=mock_vector_store)
+
+    with pytest.raises(NotFoundError):
+        await svc.delete_model_endpoint("ghost", "embedder")
+    repo.conflict_on_delete = "Embedder 'e5' is still in use: 3 partition(s) name it."
+    with pytest.raises(ConflictError):
+        await svc.delete_model_endpoint("e5", "embedder")
+    repo.conflict_on_delete = None
+    await svc.delete_model_endpoint("e5", "embedder")
+    with pytest.raises(ValidationError, match="last"):
+        await svc.delete_model_endpoint("jina", "embedder")
+
+    assert mock_vector_store.vector_fields == {"vector_jina": 1024}
+
+
+@pytest.mark.asyncio
+async def test_the_dropped_field_is_the_one_the_locked_delete_removed(mock_vector_store):
+    # 'e5' was renamed and a new 'e5' created after a read done before the
+    # delete's lock: dropping what that read saw would drop a live field.
+    mock_vector_store.vector_fields = {"vector_jina": 1024, "vector_e5": 768, "vector_e5_2": 768}
+    repo = _FakeEndpointRepo(
+        rows=[
+            _make_row(name="jina", is_default=True, vector_field="vector_jina"),
+            _make_row(name="e5-renamed", is_default=False, vector_field="vector_e5"),
+            _make_row(name="e5", is_default=False, vector_field="vector_e5_2"),
+        ]
+    )
+    repo.get = AsyncMock(return_value=_make_row(name="e5", is_default=False, vector_field="vector_e5"))
+    svc = _make_service(repo, vector_store=mock_vector_store)
+
+    await svc.delete_model_endpoint("e5", "embedder")
+
+    assert mock_vector_store.vector_fields == {"vector_jina": 1024, "vector_e5": 768}
+
+
+@pytest.mark.asyncio
+async def test_a_failed_field_drop_does_not_fail_the_committed_delete():
+    store = SimpleNamespace(drop_vector_field=AsyncMock(side_effect=RuntimeError("milvus down")))
+    repo = _FakeEndpointRepo(rows=_embedders_with_fields())
+    partition_service = _FakePartitionServiceForReload()
+    svc = _make_service(repo, partition_service=partition_service, vector_store=store)
+
+    await svc.delete_model_endpoint("e5", "embedder")
+
+    store.drop_vector_field.assert_awaited_once_with("vector_e5")
+    assert ("e5", "embedder") not in repo._store
+    assert partition_service.load_partitions_calls == 1

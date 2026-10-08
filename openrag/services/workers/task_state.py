@@ -19,6 +19,11 @@ from core.models.catalog import (
     DocumentStatus,
     normalize_degraded_stages,
 )
+from core.observability.ray_metrics import (
+    initialize_ingest_counters,
+    observe_queue_wait_from,
+    record_document_terminal,
+)
 
 ACTIVE_INDEXING_STATES = frozenset({"QUEUED", "SERIALIZING"})
 # Legacy indexing states removed from the public state machine in #721. Current
@@ -30,7 +35,17 @@ ACTIVE_INDEXING_STATES = frozenset({"QUEUED", "SERIALIZING"})
 CANCELLABLE_INDEXING_STATES = ACTIVE_INDEXING_STATES | LEGACY_ACTIVE_INDEXING_STATES
 RECOVERABLE_TASK_STATES = CANCELLABLE_INDEXING_STATES | {"CANCELLED"}
 TERMINAL_INDEXING_STATES = frozenset({"COMPLETED", "FAILED"})
+#: ``TERMINAL_TASK_STATES`` as plain strings. ``TaskInfo.state`` is a bare
+#: ``str`` (it round-trips through the recoverable-task JSON), so comparing it
+#: against the enum members directly would silently never match.
+_TERMINAL_STATE_NAMES = frozenset(state.value for state in TERMINAL_TASK_STATES)
 PENDING_TASK_DETAILS = "__openrag_pending_task_details__"
+# Reasons ``set_queued_details_v2`` can turn a submission away. Shared with
+# the dispatcher, which maps FILE_INDEXING to a 409 and the rest to the
+# pre-existing "rejected before it queued" error.
+QUEUE_REFUSED_CANCELLED = "cancelled"
+QUEUE_REFUSED_FILE_DELETING = "file_deleting"
+QUEUE_REFUSED_FILE_INDEXING = "file_indexing"
 SUBMITTED_TASK_WITHOUT_REF = "__openrag_submitted_task_without_ref__"
 _FENCE_KV_KEY = b"file-delete-fences-v1"
 _TASK_STATE_KV_NAMESPACE = "openrag-task-state-manager"
@@ -229,6 +244,10 @@ def _delete_recoverable_task(task_id: str) -> None:
     _internal_kv_del(_recoverable_task_key(task_id), namespace=_task_state_kv_namespace())
 
 
+def _queue_refused(reason: str, *, existing_task_id: str | None = None) -> dict[str, Any]:
+    return {"accepted": False, "reason": reason, "existing_task_id": existing_task_id}
+
+
 def _truncate_error(tb_str: str | None) -> str | None:
     """Keep the tail of a traceback: the raising frame and message live there."""
     if tb_str is None or len(tb_str) <= _MAX_TASK_ERROR_CHARS:
@@ -278,10 +297,34 @@ def _object_ref_is_ready(object_ref: Any) -> bool:
     return bool(ready)
 
 
-def _content_claim_registration_expired(details: dict[str, Any]) -> bool:
-    metadata = details.get("metadata")
+def _worker_has_settled(info: TaskInfo) -> bool:
+    """Whether the task's worker can no longer write, whatever the record says.
+
+    The completion tracker stamps ``TASK_FINISHED_AT`` once the worker ref
+    resolves, success or error; a ready ref says the same before the stamp.
+    """
+    metadata = (info.details or {}).get("metadata")
+    if isinstance(metadata, dict) and TASK_FINISHED_AT_METADATA_KEY in metadata:
+        return True
+    return _object_ref_is_ready(info.object_ref)
+
+
+def _task_created_at(details: dict[str, Any] | None) -> str | None:
+    """The dispatcher's admission timestamp for a task, if it recorded one.
+
+    Read defensively: ``details`` is free-form and survives a rolling deploy
+    from a TaskStateManager running the previous schema, so the key can be
+    absent or the wrong type. Returning ``None`` records no observation,
+    which is honest — a zero would be a lie that drags the p50 down.
+    """
+    metadata = (details or {}).get("metadata")
     created_at = metadata.get(TASK_CREATED_AT_METADATA_KEY) if isinstance(metadata, dict) else None
-    if not isinstance(created_at, str):
+    return created_at if isinstance(created_at, str) else None
+
+
+def _content_claim_registration_expired(details: dict[str, Any]) -> bool:
+    created_at = _task_created_at(details)
+    if created_at is None:
         return False
     try:
         created = datetime.fromisoformat(created_at)
@@ -312,6 +355,7 @@ class TaskStateManager:
         # Ray runs each concurrency group on a separate event loop. A single
         # asyncio lock cannot safely coordinate methods across those loops.
         self.lock = threading.Lock()
+        initialize_ingest_counters()
 
     def _ensure_task(self, task_id: str) -> TaskInfo:
         # Every path that can add a task goes through here, so admission always
@@ -447,9 +491,36 @@ class TaskStateManager:
         self._prune_expired_file_delete_fences()
         return bool(self.file_delete_fences.get((partition, file_id)))
 
+    @staticmethod
+    def _count_terminal(previous: str | None, new: str) -> None:
+        """Count a document reaching a terminal state, once per transition.
+
+        Every setter here is re-entrant by design: a retried actor call can
+        set FAILED on an already-failed task, and ``finish_rejected_submission``
+        can run after ``set_failed_if_not_cancelled`` for the same task.
+        Counting the *write* rather than the transition would inflate the
+        failure ratio that ``OpenRagIngestFailureRate`` (S3-4) alerts on, so
+        the guard is on the previous state, not on the new one.
+
+        The first terminal state wins. A task later moved from FAILED to
+        COMPLETED counts once, as failed — the guard cannot distinguish a
+        correction from a duplicate write, and under-counting a rare correction
+        is safer than double-counting every retry.
+
+        Counted in the TaskStateManager rather than in the indexer worker
+        because the worker only sees documents that reached it. Tasks that
+        fail before dispatch — a rejected submission, a stale ref-less task,
+        a cancellation while queued — are exactly the systemic failures the
+        alert needs to see, and the worker never observes them.
+        """
+        if new in _TERMINAL_STATE_NAMES and previous not in _TERMINAL_STATE_NAMES:
+            record_document_terminal(new)
+
     def _set_cancelled_locked(self, task_id: str, info: TaskInfo) -> None:
+        previous = info.state
         info.state = "CANCELLED"
         self._settle_task_locked(task_id, info)
+        self._count_terminal(previous, "CANCELLED")
 
     def _expire_refless_task_if_stale_locked(self, task_id: str, info: TaskInfo) -> bool:
         ref = info.object_ref.get("ref") if isinstance(info.object_ref, dict) else info.object_ref
@@ -465,9 +536,11 @@ class TaskStateManager:
             or not registration_expired
         ):
             return False
+        previous = info.state
         info.state = "FAILED"
         info.error = STALE_REFLESS_TASK_ERROR
         self._persist_task_locked(task_id, info)
+        self._count_terminal(previous, "FAILED")
         return True
 
     def _expire_refless_tasks_if_stale_locked(self, task_ids: Iterable[str] | None = None) -> None:
@@ -543,14 +616,21 @@ class TaskStateManager:
                 ref = object_ref.get("ref") if isinstance(object_ref, dict) else object_ref
                 if ref is None:
                     return False
+            previous = info.state
             info.state = state
             if state == "SERIALIZING":
                 info.worker_submitted = True
                 info.submission_started_at = None
+                # Only on the entering edge: a retried set_state must not
+                # observe the same wait twice. This is the one place holding
+                # both halves — the worker never receives ``created_at``.
+                if previous != "SERIALIZING":
+                    observe_queue_wait_from(_task_created_at(info.details))
             if state in TERMINAL_TASK_STATES:
                 self._settle_task_locked(task_id, info)
             else:
                 self._persist_task_locked(task_id, info)
+            self._count_terminal(previous, state)
             return True
 
     @ray.method(concurrency_group="set")
@@ -573,9 +653,11 @@ class TaskStateManager:
             if info is not None and info.state == "CANCELLED":
                 return False
             if info is not None:
+                previous = info.state
                 info.state = "FAILED"
                 info.error = _truncate_error(tb_str)
                 self._settle_task_locked(task_id, info)
+                self._count_terminal(previous, "FAILED")
             return True
 
     @ray.method(concurrency_group="set")
@@ -591,10 +673,12 @@ class TaskStateManager:
             if info is not None and info.state == "CANCELLED":
                 return False
             if info is not None:
+                previous = info.state
                 info.state = "FAILED"
                 info.error = _truncate_error(tb_str)
                 info.error_reason = error_reason
                 self._settle_task_locked(task_id, info)
+                self._count_terminal(previous, "FAILED")
             return True
 
     @ray.method(concurrency_group="set")
@@ -632,10 +716,12 @@ class TaskStateManager:
             info.object_ref = None
             info.worker_submitted = False
             info.submission_started_at = None
+            previous = info.state
             if info.state in CANCELLABLE_INDEXING_STATES:
                 info.state = "FAILED"
                 info.error = "Indexer worker submission was rejected after the worker settled."
             self._persist_task_locked(task_id, info)
+            self._count_terminal(previous, info.state)
             return True
 
     @ray.method(concurrency_group="set")
@@ -694,8 +780,10 @@ class TaskStateManager:
             if info.state not in CANCELLABLE_INDEXING_STATES:
                 return "conflict"
             info.details["degraded_stages"] = normalized
+            previous = info.state
             info.state = "COMPLETED"
             self._settle_task_locked(task_id, info)
+            self._count_terminal(previous, "COMPLETED")
             return "completed"
 
     @ray.method(concurrency_group="set")
@@ -709,23 +797,138 @@ class TaskStateManager:
         user_id: int | None,
     ) -> bool:
         with self.lock:
-            info = self._ensure_task(task_id)
-            if info.state == DocumentStatus.CANCELLED:
-                return False
-            self._record_details(
+            return self._queue_task_locked(
                 task_id,
-                info,
                 file_id=file_id,
                 partition=partition,
                 metadata=metadata,
                 user_id=user_id,
+                reject_if_file_active=False,
+            )["accepted"]
+
+    @ray.method(concurrency_group="set")
+    async def set_queued_details_v2(
+        self,
+        task_id: str,
+        *,
+        file_id: str | None,
+        partition: str,
+        metadata: dict[str, Any],
+        user_id: int | None,
+        reject_if_file_active: bool = False,
+    ) -> dict[str, Any]:
+        """Queue a task, optionally refusing one whose file is already indexing.
+
+        Returns ``{"accepted", "reason", "existing_task_id"}`` instead of the
+        bare boolean ``set_queued_details`` returns, because a caller that is
+        turned away needs to know *which* task holds the file to tell its own
+        client where to look. Both methods stay on the actor: a dispatcher from
+        an earlier release keeps calling the boolean one, and a dispatcher from
+        this one falls back to it against an actor that predates this method —
+        in which case admission simply is not fenced, exactly as before.
+
+        ``reject_if_file_active`` is the admission fence (#1046). It is opt-in
+        rather than always-on because only a first-time upload can say that a
+        second task for the same file is unambiguously redundant; a replace
+        legitimately re-indexes a file that already exists.
+        """
+        with self.lock:
+            return self._queue_task_locked(
+                task_id,
+                file_id=file_id,
+                partition=partition,
+                metadata=metadata,
+                user_id=user_id,
+                reject_if_file_active=reject_if_file_active,
             )
-            if self._file_delete_fenced(partition=partition, file_id=file_id):
-                self._set_cancelled_locked(task_id, info)
-                return False
-            info.state = "QUEUED"
-            self._persist_task_locked(task_id, info)
-            return True
+
+    def _queue_task_locked(
+        self,
+        task_id: str,
+        *,
+        file_id: str | None,
+        partition: str,
+        metadata: dict[str, Any],
+        user_id: int | None,
+        reject_if_file_active: bool,
+    ) -> dict[str, Any]:
+        previous = self.tasks.get(task_id)
+        info = self._ensure_task(task_id)
+        if info.state == DocumentStatus.CANCELLED:
+            return _queue_refused(QUEUE_REFUSED_CANCELLED)
+        if reject_if_file_active and file_id is not None:
+            busy_task_id = self._active_indexing_task_for_file_locked(
+                partition=partition, file_id=file_id, excluding=task_id
+            )
+            if busy_task_id is not None:
+                if info is not previous:
+                    # Drop the stateless record _ensure_task just made for this
+                    # id. Kept, it would show in get_all_info with no state,
+                    # which the admin task list cannot render, and hold a slot
+                    # under _MAX_TERMINAL_TASKS for every refused retry. Nothing
+                    # was persisted or indexed for it yet, and a retried
+                    # registration of the same id simply creates it again.
+                    self.tasks.pop(task_id, None)
+                    self.terminal_tasks.pop(task_id, None)
+                return _queue_refused(QUEUE_REFUSED_FILE_INDEXING, existing_task_id=busy_task_id)
+        self._record_details(
+            task_id,
+            info,
+            file_id=file_id,
+            partition=partition,
+            metadata=metadata,
+            user_id=user_id,
+        )
+        if self._file_delete_fenced(partition=partition, file_id=file_id):
+            self._set_cancelled_locked(task_id, info)
+            return _queue_refused(QUEUE_REFUSED_FILE_DELETING)
+        info.state = "QUEUED"
+        self._persist_task_locked(task_id, info)
+        return {"accepted": True, "reason": None, "existing_task_id": None}
+
+    def _active_indexing_task_for_file_locked(
+        self,
+        *,
+        partition: str,
+        file_id: str,
+        excluding: str,
+    ) -> str | None:
+        """Return a task already indexing ``file_id``, or ``None``.
+
+        Narrower than :meth:`_matching_active_task_refs_locked`, which
+        over-matches on purpose so cleanup never misses a worker. Refusing work
+        has the opposite failure cost, so this skips a task that has not
+        registered its file yet: it may well be for another file.
+
+        A cancelled task whose worker has not settled still counts. Cancellation
+        does not fence the worker's catalog commit: ``process_file`` writes the
+        row and only then learns from ``complete_with_degraded_stages`` that it
+        was cancelled. A second task admitted meanwhile would race that commit
+        for the same file, which is exactly what this fence exists to prevent.
+
+        Any candidate whose worker has settled is released, whatever its state:
+        a worker that crashed mid-``process_file``, or one from a previous
+        generation whose terminal write went to a replaced actor, leaves the
+        record QUEUED or SERIALIZING with nothing left to write. Settled is the
+        rule ``get_content_claim_task_ids`` applies (:func:`_worker_has_settled`),
+        so the file fence and the content claim agree on when a task is done.
+        Readiness is only probed for a candidate that names this very file, so
+        the fence costs no ``ray.wait`` otherwise.
+        """
+        for candidate_id, info in self.tasks.items():
+            if candidate_id == excluding:
+                continue
+            if info.state not in CANCELLABLE_INDEXING_STATES and not _cancelled_task_has_worker_fence(info):
+                continue
+            if self._expire_refless_task_if_stale_locked(candidate_id, info):
+                continue
+            details = info.details or {}
+            if details.get("partition") != partition or details.get("file_id") != file_id:
+                continue
+            if _worker_has_settled(info):
+                continue
+            return candidate_id
+        return None
 
     @ray.method(concurrency_group="set")
     async def begin_worker_submission(self, task_id: str) -> bool:
@@ -815,6 +1018,24 @@ class TaskStateManager:
             return self._matching_active_task_refs_locked(partition=partition, file_id=file_id)
 
     @ray.method(concurrency_group="get")
+    async def get_active_indexing_task_for_file(self, *, partition: str, file_id: str) -> str | None:
+        """The admission fence's answer for a file, for labelling a refusal.
+
+        The dispatcher asks this when the content claim already turned a
+        submission away holding the same ``file_id``: that claim belongs to a
+        task indexing this very file, and the caller deserves its id rather
+        than a deduplication error pointing at itself. It is not an admission
+        check — ``set_queued_details_v2`` stays the only gate, atomic with the
+        QUEUED registration.
+
+        It queues nothing, but it is not side-effect free: like
+        ``get_content_claim_task_ids``, it expires any stale ref-less task it
+        walks past, whatever file that task is for, and persists it as FAILED.
+        """
+        with self.lock:
+            return self._active_indexing_task_for_file_locked(partition=partition, file_id=file_id, excluding="")
+
+    @ray.method(concurrency_group="get")
     async def get_content_claim_task_ids(self, *, partition: str) -> set[str]:
         """Return active tasks and cancellations whose workers have not settled."""
         with self.lock:
@@ -825,9 +1046,7 @@ class TaskStateManager:
                 owns_claim = info.state in CANCELLABLE_INDEXING_STATES or _cancelled_task_has_worker_fence(info)
                 if not owns_claim:
                     continue
-                metadata = (info.details or {}).get("metadata")
-                has_finished = isinstance(metadata, dict) and TASK_FINISHED_AT_METADATA_KEY in metadata
-                if has_finished or _object_ref_is_ready(info.object_ref):
+                if _worker_has_settled(info):
                     continue
                 details = info.details or {}
                 if details and details.get("partition") != partition:

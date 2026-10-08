@@ -382,6 +382,8 @@ describe("DocumentListPage", () => {
 describe("DocumentsPage embedder drift (#762 E)", () => {
   beforeEach(() => {
     permissions.isAdmin = true;
+    // Already acknowledged, so the one-time notice does not cover the table.
+    localStorage.setItem("openrag:embedder-drift-acknowledged:docs", "2026-01-01T00:00:00Z");
   });
 
   const file = (extra: Record<string, unknown>) => ({
@@ -447,6 +449,40 @@ describe("DocumentsPage embedder drift (#762 E)", () => {
     expect(driftMarkers()).toHaveLength(0);
   });
 
+  it("warns once about files indexed with another embedder, until acknowledged", async () => {
+    localStorage.clear();
+    withPartitionEmbedder("default");
+    listPartitionFilesMock.mockResolvedValue({
+      files: [file({ embedder: "bge-m3", embedder_model_name: "bge-m3" })],
+    } as never);
+
+    const view = renderDocuments(["/documents?partition=docs"]);
+
+    const dialog = await screen.findByRole("alertdialog");
+    expect(dialog.textContent).toContain("now embeds with Qwen3-Embedding-0.6B");
+    expect(dialog.textContent).toContain("1 of its file(s) were indexed with bge-m3");
+    await userEvent.click(screen.getByRole("button", { name: "I understand" }));
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull());
+
+    view.unmount();
+    renderDocuments(["/documents?partition=docs"]);
+    await screen.findByText("a.pdf");
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+  });
+
+  it("does not warn when every file matches the partition's embedder", async () => {
+    localStorage.clear();
+    withPartitionEmbedder("default");
+    listPartitionFilesMock.mockResolvedValue({
+      files: [file({ embedder: "Qwen3-Embedding-0.6B", embedder_model_name: "Qwen3-Embedding-0.6B" })],
+    } as never);
+
+    renderDocuments(["/documents?partition=docs"]);
+
+    await screen.findByText("a.pdf");
+    expect(screen.queryByRole("alertdialog")).toBeNull();
+  });
+
   it("flags a file recorded against a different embedder", async () => {
     withPartitionEmbedder("default");
     listPartitionFilesMock.mockResolvedValue({
@@ -474,6 +510,28 @@ describe("DocumentsPage embedder drift (#762 E)", () => {
 
     await screen.findByText("a.pdf");
     expect(driftMarkers()).toHaveLength(0);
+  });
+
+  it("marks the toolbar entry drifted when any file in it drifted, not just the first", async () => {
+    // Both files are listed under "bge-m3": the first only by the endpoint
+    // label it recorded, whose model is unknown — so its drift is unknown too —
+    // and the second with the model recorded, which differs from the one
+    // queries run. One toolbar entry, and only the file seen second drifted.
+    withPartitionEmbedder("default");
+    listPartitionFilesMock.mockResolvedValue({
+      files: [
+        file({ file_id: "file-a", filename: "a.pdf", embedder: "bge-m3" }),
+        file({ file_id: "file-b", filename: "b.pdf", embedder: "bge-m3", embedder_model_name: "bge-m3" }),
+      ],
+    } as never);
+
+    renderDocuments();
+
+    await screen.findByText("b.pdf");
+    await waitFor(() => expect(driftMarkers()).toHaveLength(1));
+    const summary = screen.getByTitle("Embedder these files were indexed with");
+    const entry = [...summary.querySelectorAll("span.font-medium")].find((el) => el.textContent === "bge-m3");
+    expect(entry?.className).toContain("text-amber-700");
   });
 
   it("does not flag files indexed before provenance existed", async () => {

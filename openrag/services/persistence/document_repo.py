@@ -22,12 +22,14 @@ columns is a post-refactoring feature.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import Callable, Collection, Mapping
 from typing import TYPE_CHECKING, Any
 
 from core.config.model_endpoints import DEFAULT_ENDPOINT_ALIAS, embedder_fingerprint
 from core.models.catalog import INDEXING_CONTENT_CLAIM_TOKEN_PREFIX, DocumentRecord, DocumentStatus
-from core.ports.document_repo import ContentClaimLease, DocumentRepository
+from core.ports.document_repo import ContentClaimLease, DocumentRepository, IndexedCorpusState
 from core.utils.exceptions import ConflictError
 from core.utils.logging import get_logger
 from services.persistence.file_count import decrement_file_counts
@@ -40,7 +42,8 @@ if TYPE_CHECKING:
 # Note on JSON: ``ConnectionManager.initialize`` registers a json/jsonb codec
 # on every connection, so reading a JSON column yields a Python dict and
 # binding a dict to a JSON parameter is encoded transparently. The repo
-# therefore never calls ``json.dumps`` itself.
+# therefore does not encode values passed to JSON query parameters. The corpus
+# digest below uses ``json.dumps`` only for an unambiguous local hash payload.
 
 logger = get_logger()
 
@@ -140,6 +143,63 @@ class PgDocumentRepository(DocumentRepository):
             limit,
         )
         return [r["file_id"] for r in rows]
+
+    async def get_indexed_corpus_state(
+        self,
+        partition: str,
+        *,
+        document_ids_limit: int = 0,
+    ) -> IndexedCorpusState:
+        if not partition:
+            raise ValueError("A partition is required")
+        if document_ids_limit < 0:
+            raise ValueError("The document ID limit cannot be negative")
+        digest = hashlib.sha256()
+        count = 0
+        document_ids: list[str] = []
+        document_ids_truncated = False
+        async with self.pool.acquire() as conn:
+            async with conn.transaction(isolation="repeatable_read", readonly=True):
+                rows = conn.cursor(
+                    """
+                    SELECT file_id, indexed_at, content_sha256, chunk_count,
+                           relationship_id, parent_id,
+                           indexation_config->>'embedder_model_name' AS embedder_model_name,
+                           indexation_config->>'embedder_vector_field' AS embedder_vector_field
+                    FROM files
+                    WHERE partition_name = $1
+                    ORDER BY file_id COLLATE "C"
+                    """,
+                    partition,
+                    prefetch=1000,
+                )
+                async for row in rows:
+                    indexed_at = row["indexed_at"]
+                    identity = [
+                        row["file_id"],
+                        indexed_at.isoformat() if indexed_at is not None else None,
+                        row["content_sha256"],
+                        row["chunk_count"],
+                        row["relationship_id"],
+                        row["parent_id"],
+                        # A re-embed changes the vectors and only these.
+                        row["embedder_model_name"],
+                        row["embedder_vector_field"],
+                    ]
+                    digest.update(json.dumps(identity, separators=(",", ":"), ensure_ascii=False).encode())
+                    digest.update(b"\n")
+                    count += 1
+                    if document_ids_limit:
+                        if len(document_ids) < document_ids_limit:
+                            document_ids.append(row["file_id"])
+                        else:
+                            document_ids_truncated = True
+        return IndexedCorpusState(
+            count=count,
+            digest=digest.hexdigest(),
+            document_ids=tuple(document_ids),
+            document_ids_truncated=document_ids_truncated,
+        )
 
     async def create_document(self, doc: DocumentRecord) -> DocumentRecord:
         """Insert a document row keyed by (file_id, partition).
@@ -356,6 +416,14 @@ class PgDocumentRepository(DocumentRepository):
             partition,
         )
         return dict(metadata) if isinstance(metadata, dict) else None
+
+    async def get_indexation_config(self, file_id: str, partition: str) -> dict[str, Any] | None:
+        config = await self.pool.fetchval(
+            "SELECT indexation_config FROM files WHERE file_id = $1 AND partition_name = $2",
+            file_id,
+            partition,
+        )
+        return dict(config) if isinstance(config, dict) else None
 
     async def get_content_sha256(self, file_id: str, partition: str) -> str | None:
         return await self.pool.fetchval(
@@ -686,7 +754,10 @@ class PgDocumentRepository(DocumentRepository):
                           SELECT 1 FROM unnest($3::text[]) AS requested(workspace_id)
                           WHERE NOT EXISTS (
                               SELECT 1 FROM workspace_files wf
-                              WHERE wf.file_id = f.id AND wf.workspace_id = requested.workspace_id
+                              JOIN workspaces w ON w.id = wf.workspace_id
+                              WHERE wf.file_id = f.id
+                                AND w.workspace_id = requested.workspace_id
+                                AND w.partition_name = f.partition_name
                           )
                       )
                     RETURNING f.id
@@ -839,6 +910,33 @@ class PgDocumentRepository(DocumentRepository):
             return {}
         return {"files": [self._row_to_dict(r) for r in rows]}
 
+    async def list_file_embedders(self, partition: str) -> list[dict]:
+        rows = await self.pool.fetch(
+            """
+            SELECT file_id,
+                   indexation_config->>'embedder_model_name'   AS embedder_model_name,
+                   indexation_config->>'embedder_vector_field' AS embedder_vector_field
+            FROM files
+            WHERE partition_name = $1
+            ORDER BY file_id
+            """,
+            partition,
+        )
+        return [dict(r) for r in rows]
+
+    async def record_file_embedder(self, file_id: str, partition: str, provenance: dict) -> bool:
+        result = await self.pool.execute(
+            """
+            UPDATE files
+            SET indexation_config = COALESCE(indexation_config, '{}'::jsonb) || $3::jsonb
+            WHERE file_id = $1 AND partition_name = $2
+            """,
+            file_id,
+            partition,
+            provenance,
+        )
+        return result.split()[-1] != "0"
+
     async def count_files_by_embedder(self, partition: str) -> list[dict]:
         """How many files in *partition* were indexed with each embedder.
 
@@ -851,13 +949,14 @@ class PgDocumentRepository(DocumentRepository):
         """
         rows = await self.pool.fetch(
             """
-            SELECT indexation_config->>'embedder'            AS embedder,
-                   indexation_config->>'embedder_model_name' AS model_name,
+            SELECT indexation_config->>'embedder'             AS embedder,
+                   indexation_config->>'embedder_model_name'  AS model_name,
                    (indexation_config->>'embedder_dimension')::int AS dimension,
-                   COUNT(*)::int                             AS file_count
+                   indexation_config->>'embedder_vector_field' AS vector_field,
+                   COUNT(*)::int                              AS file_count
             FROM files
             WHERE partition_name = $1
-            GROUP BY 1, 2, 3
+            GROUP BY 1, 2, 3, 4
             ORDER BY file_count DESC, embedder NULLS LAST
             """,
             partition,
@@ -867,6 +966,7 @@ class PgDocumentRepository(DocumentRepository):
                 "embedder": r["embedder"],
                 "model_name": r["model_name"],
                 "dimension": r["dimension"],
+                "vector_field": r["vector_field"],
                 "file_count": r["file_count"],
             }
             for r in rows

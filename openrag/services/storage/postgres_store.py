@@ -88,7 +88,7 @@ class PostgresStore(CatalogStore):
 
         self._document_repo = PgDocumentRepository(pool_getter)
         self._user_repo = PgUserRepository(pool_getter)
-        self._partition_repo = PgPartitionRepository(pool_getter)
+        self._partition_repo = PgPartitionRepository(pool_getter, connect=self._conn.connect)
         self._membership_repo = PgPartitionMembershipRepository(pool_getter)
         self._oidc_session_repo = PgOIDCSessionRepository(pool_getter)
         self._workspace_repo = PgWorkspaceRepository(pool_getter)
@@ -133,6 +133,7 @@ class PostgresStore(CatalogStore):
         self._initialized = True
 
     async def shutdown(self) -> None:
+        await self._partition_repo.aclose()
         await self._conn.shutdown()
         self._initialized = False
 

@@ -23,7 +23,7 @@ class VectorDBConfig(ConfigMixin):
     enable: bool = True
     # Per-request timeout (s) applied to the Milvus sync and async clients.
     timeout: float = Field(default=120.0, gt=0)
-    schema_version: int = 2
+    schema_version: int = 3
 
 
 # ---------------------------------------------------------------------------
@@ -98,6 +98,7 @@ class PathsConfig(ConfigMixin):
 
 class ServerConfig(ConfigMixin):
     preferred_url_scheme: str | None = None
+    assistant_name: str = ""
     # Access to ``GET /metrics``. Fails closed: with neither field set the
     # route answers 403 to every scrape. ``metrics_token`` (METRICS_TOKEN) is
     # the bearer a Prometheus scraper must present; ``metrics_allow_unauthenticated``

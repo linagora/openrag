@@ -13,7 +13,6 @@ from core.config.model_endpoints import (
     DEFAULT_MODEL_IMPLEMENTATIONS,
     ModelEndpointConfig,
     ModelEndpointType,
-    is_placeholder_api_key,
 )
 from core.models.readiness import (
     ConfigurationReferenceReadiness,
@@ -51,13 +50,6 @@ class ModelListUnavailableError(ValueError):
         super().__init__("Endpoint returned an invalid model list.")
 
 
-class InsecureModelEndpointError(ValueError):
-    """A model probe would send credentials over cleartext transport."""
-
-    def __init__(self) -> None:
-        super().__init__("Model endpoints with API keys must use HTTPS.")
-
-
 @dataclass(frozen=True, slots=True)
 class _ModelProbeRequest:
     url: str
@@ -82,6 +74,7 @@ class ReadinessService:
         *,
         discover_model_endpoints: Callable[[], Awaitable[ModelEndpointDiscovery]] | None = None,
         summary_model_kinds: tuple[ModelEndpointType, ...] = (),
+        requires_embedder: bool = False,
         publish: Callable[[ReadinessSnapshot], None] | None = None,
         timeout: float = 2.0,
         cache_ttl: float = 2.0,
@@ -89,6 +82,8 @@ class ReadinessService:
         self._checks = checks
         self._discover_model_endpoints = discover_model_endpoints
         self._summary_model_kinds = summary_model_kinds
+        #: Whether an unusable default embedder fails readiness; the router applies it.
+        self.requires_embedder = requires_embedder
         self._publish = publish
         self._timeout = timeout
         self._cache_ttl = cache_ttl
@@ -189,13 +184,7 @@ class ReadinessService:
         for target in targets:
             if target.config is None:
                 continue
-            try:
-                request = _model_probe_request(target.config, target.kind)
-            except InsecureModelEndpointError:
-                readiness.append(
-                    ModelEndpointReadiness(provider=target.provider, kind=target.kind, status="unavailable")
-                )
-                continue
+            request = _model_probe_request(target.config, target.kind)
             key = (request.url, request.authorization)
             if key not in groups:
                 groups[key] = (request, [])
@@ -267,17 +256,14 @@ def _model_probe_request(config: ModelEndpointConfig, model_type: str | None = N
     if implementation == "ollama" and not base.endswith("/v1"):
         base += "/v1"
     health_only = implementation in {"infinity", "tei"}
+    # Keep non-STT keys as configured (``EMPTY`` is real for the bundled
+    # reranker). The audio client trims STT keys and treats whitespace-only as
+    # anonymous, so normalize those probes the same way.
     configured_api_key = config.extra.get("api_key")
-    api_key = None if is_placeholder_api_key(configured_api_key) else configured_api_key
-    try:
-        parsed_url = httpx.URL(base)
-    except httpx.InvalidURL as exc:
-        if api_key:
-            raise InsecureModelEndpointError from exc
+    if isinstance(configured_api_key, str):
+        api_key = configured_api_key.strip() if model_type == "stt" else configured_api_key
     else:
-        has_credentials = bool(api_key or parsed_url.username or parsed_url.password)
-        if has_credentials and parsed_url.scheme != "https":
-            raise InsecureModelEndpointError
+        api_key = None
     authorization = f"Bearer {api_key}" if api_key else None
     return _ModelProbeRequest(
         url=_canonical_probe_url(base + ("/health" if health_only else "/models")),

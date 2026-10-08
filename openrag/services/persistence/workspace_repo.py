@@ -10,12 +10,15 @@ ten workspace methods that all map onto this class:
 ``get_file_workspaces``, ``get_existing_file_ids``,
 ``remove_file_from_all_workspaces``.
 
-The join references the canonical ``files.id`` integer PK (not the
-opaque ``file_id`` string), so deletion cascades correctly — when a
-``files`` row goes away the workspace_files entries it backed go with
-it without any application-side bookkeeping. Conversely the workspace
-APIs accept and emit the human ``file_id`` form; the repo translates at
-the boundary.
+The join references the canonical ``files.id`` and ``workspaces.id``
+integer PKs (not the client-facing ``file_id`` / ``workspace_id`` strings,
+neither of which is unique across partitions), so deletion cascades
+correctly — when a ``files`` or ``workspaces`` row goes away the
+workspace_files entries it backed go with it without any application-side
+bookkeeping. Conversely the workspace APIs accept and emit the human
+string ids; the repo translates at the boundary, and because
+``workspace_id`` is only unique per partition every translation is keyed
+on ``(partition, workspace_id)``.
 """
 
 from __future__ import annotations
@@ -97,12 +100,33 @@ class PgWorkspaceRepository(WorkspaceRepository):
         )
         return self._row_to_workspace(row)
 
-    async def get_workspace(self, workspace_id: str) -> Workspace | None:
+    async def get_workspace(self, partition: str, workspace_id: str) -> Workspace | None:
         row = await self.pool.fetchrow(
-            "SELECT * FROM workspaces WHERE workspace_id = $1",
+            "SELECT * FROM workspaces WHERE partition_name = $1 AND workspace_id = $2",
+            partition,
             workspace_id,
         )
         return self._row_to_workspace(row) if row else None
+
+    async def find_workspaces(self, workspace_id: str, partitions: list[str] | None) -> list[Workspace]:
+        if partitions is None:
+            rows = await self.pool.fetch(
+                "SELECT * FROM workspaces WHERE workspace_id = $1 ORDER BY partition_name",
+                workspace_id,
+            )
+        elif not partitions:
+            return []
+        else:
+            rows = await self.pool.fetch(
+                """
+                SELECT * FROM workspaces
+                WHERE workspace_id = $1 AND partition_name = ANY($2::text[])
+                ORDER BY partition_name
+                """,
+                workspace_id,
+                partitions,
+            )
+        return [self._row_to_workspace(r) for r in rows]
 
     async def list_workspaces(self, partition: str) -> list[Workspace]:
         rows = await self.pool.fetch(
@@ -115,7 +139,7 @@ class PgWorkspaceRepository(WorkspaceRepository):
         )
         return [self._row_to_workspace(r) for r in rows]
 
-    async def delete_workspace(self, workspace_id: str, *, keep_files: bool = False) -> list[str]:
+    async def delete_workspace(self, partition: str, workspace_id: str, *, keep_files: bool = False) -> list[str]:
         """Delete the workspace and return the orphaned ``file_id`` list.
 
         Only files uploaded for workspaces, with no independent ownership
@@ -130,6 +154,9 @@ class PgWorkspaceRepository(WorkspaceRepository):
         """
         async with self.pool.acquire() as conn:
             async with conn.transaction():
+                workspace_pk = await self._workspace_pk(conn, partition, workspace_id, for_update=True)
+                if workspace_pk is None:
+                    return []
                 await conn.fetch(
                     """
                     SELECT f.id
@@ -139,7 +166,7 @@ class PgWorkspaceRepository(WorkspaceRepository):
                     ORDER BY f.id
                     FOR UPDATE OF f
                     """,
-                    workspace_id,
+                    workspace_pk,
                 )
                 if keep_files:
                     orphan_rows = await conn.fetch(
@@ -154,7 +181,7 @@ class PgWorkspaceRepository(WorkspaceRepository):
                               WHERE workspace_id <> $1
                           )
                         """,
-                        workspace_id,
+                        workspace_pk,
                     )
                     await conn.execute(
                         """
@@ -177,7 +204,7 @@ class PgWorkspaceRepository(WorkspaceRepository):
                               )
                         )
                         """,
-                        workspace_id,
+                        workspace_pk,
                         CLEANUP_NONE,
                     )
                 else:
@@ -215,19 +242,17 @@ class PgWorkspaceRepository(WorkspaceRepository):
                         WHERE f.id = candidates.id
                         RETURNING candidates.file_id
                         """,
-                        workspace_id,
+                        workspace_pk,
                         CLEANUP_NONE,
                         CLEANUP_CLAIMED,
                         CLEANUP_CLAIMED,
                     )
-                await conn.execute(
-                    "DELETE FROM workspaces WHERE workspace_id = $1",
-                    workspace_id,
-                )
+                await conn.execute("DELETE FROM workspaces WHERE id = $1", workspace_pk)
         return [r["file_id"] for r in orphan_rows]
 
     async def add_files_to_workspace(
         self,
+        partition: str,
         workspace_id: str,
         file_ids: list[str],
     ) -> list[str]:
@@ -235,19 +260,20 @@ class PgWorkspaceRepository(WorkspaceRepository):
 
         Returns the list of supplied ``file_ids`` that do not exist in
         the workspace's partition — callers surface these to the user as
-        "not found".
+        "not found". An unknown workspace resolves nothing, so every id
+        comes back.
         """
         if not file_ids:
             return []
         async with self.pool.acquire() as conn:
             async with conn.transaction():
-                workspace = await conn.fetchrow(
-                    "SELECT partition_name FROM workspaces WHERE workspace_id = $1",
-                    workspace_id,
-                )
-                if workspace is None:
+                # Lock the workspace row before the file rows: ``delete_workspace``
+                # takes them in that order, and the ``workspace_files`` insert
+                # below would otherwise grab a KEY SHARE on the workspace only
+                # after the file locks, deadlocking against a concurrent delete.
+                workspace_pk = await self._workspace_pk(conn, partition, workspace_id, for_key_share=True)
+                if workspace_pk is None:
                     return list(file_ids)
-                partition = workspace["partition_name"]
                 resolved = await conn.fetch(
                     """
                     SELECT file_id, id FROM files
@@ -306,7 +332,7 @@ class PgWorkspaceRepository(WorkspaceRepository):
                             VALUES ($1, $2)
                             ON CONFLICT ON CONSTRAINT uix_workspace_file DO NOTHING
                             """,
-                            workspace_id,
+                            workspace_pk,
                             file_pk,
                         )
         return missing
@@ -441,16 +467,14 @@ class PgWorkspaceRepository(WorkspaceRepository):
 
     async def remove_file_from_workspace(
         self,
+        partition: str,
         workspace_id: str,
         file_id: str,
     ) -> bool:
         async with self.pool.acquire() as conn:
             async with conn.transaction():
-                workspace = await conn.fetchrow(
-                    "SELECT partition_name FROM workspaces WHERE workspace_id = $1",
-                    workspace_id,
-                )
-                if workspace is None:
+                workspace_pk = await self._workspace_pk(conn, partition, workspace_id)
+                if workspace_pk is None:
                     return False
                 file_pk = await conn.fetchval(
                     """
@@ -458,7 +482,7 @@ class PgWorkspaceRepository(WorkspaceRepository):
                     WHERE file_id = $1 AND partition_name = $2
                     """,
                     file_id,
-                    workspace["partition_name"],
+                    partition,
                 )
                 if file_pk is None:
                     return False
@@ -467,7 +491,7 @@ class PgWorkspaceRepository(WorkspaceRepository):
                     DELETE FROM workspace_files
                     WHERE workspace_id = $1 AND file_id = $2
                     """,
-                    workspace_id,
+                    workspace_pk,
                     file_pk,
                 )
         try:
@@ -475,14 +499,16 @@ class PgWorkspaceRepository(WorkspaceRepository):
         except (ValueError, IndexError):
             return False
 
-    async def list_workspace_files(self, workspace_id: str) -> list[str]:
+    async def list_workspace_files(self, partition: str, workspace_id: str) -> list[str]:
         rows = await self.pool.fetch(
             """
             SELECT f.file_id
             FROM workspace_files wf
+            JOIN workspaces w ON w.id = wf.workspace_id
             JOIN files f ON f.id = wf.file_id
-            WHERE wf.workspace_id = $1
+            WHERE w.partition_name = $1 AND w.workspace_id = $2
             """,
+            partition,
             workspace_id,
         )
         return [r["file_id"] for r in rows]
@@ -492,21 +518,24 @@ class PgWorkspaceRepository(WorkspaceRepository):
         file_id: str,
         partition: str,
     ) -> list[str]:
-        """Workspaces containing ``file_id``, scoped to ``partition``.
+        """Workspace ids containing ``file_id``, scoped to ``partition``.
 
         Scoping is necessary because a given ``file_id`` string is unique
         only within a partition — the underlying ``files`` rows are
-        distinct PKs across partitions.
+        distinct PKs across partitions. A workspace can only hold files
+        of its own partition, so the returned ids all belong to
+        ``partition`` and are unambiguous there.
         """
         rows = await self.pool.fetch(
             """
-            SELECT wf.workspace_id
+            SELECT w.workspace_id
             FROM workspace_files wf
             JOIN files f ON f.id = wf.file_id
-            JOIN workspaces w ON w.workspace_id = wf.workspace_id
+            JOIN workspaces w ON w.id = wf.workspace_id
             WHERE f.file_id = $1
               AND f.partition_name = $2
               AND w.partition_name = $2
+            ORDER BY w.workspace_id
             """,
             file_id,
             partition,
@@ -574,7 +603,7 @@ class PgWorkspaceRepository(WorkspaceRepository):
                     DELETE FROM workspace_files
                     WHERE file_id = $1
                       AND workspace_id IN (
-                          SELECT workspace_id FROM workspaces
+                          SELECT id FROM workspaces
                           WHERE partition_name = $2
                       )
                     """,
@@ -616,15 +645,38 @@ class PgWorkspaceRepository(WorkspaceRepository):
         )
         return [self._row_to_dict(r) for r in rows]
 
-    async def get_workspace_dict(self, workspace_id: str) -> dict | None:
+    async def get_workspace_dict(self, partition: str, workspace_id: str) -> dict | None:
         """TODO(phase-9): remove. Legacy router-facing dict shape."""
         row = await self.pool.fetchrow(
-            "SELECT * FROM workspaces WHERE workspace_id = $1",
+            "SELECT * FROM workspaces WHERE partition_name = $1 AND workspace_id = $2",
+            partition,
             workspace_id,
         )
         return self._row_to_dict(row) if row else None
 
     # ── Helpers ──────────────────────────────────────────────────────
+
+    @staticmethod
+    async def _workspace_pk(
+        conn: asyncpg.Connection,
+        partition: str,
+        workspace_id: str,
+        *,
+        for_update: bool = False,
+        for_key_share: bool = False,
+    ) -> int | None:
+        """Translate ``(partition, workspace_id)`` to the ``workspaces.id`` the join table uses.
+
+        ``for_update`` is what deletion takes; ``for_key_share`` is the lock a
+        ``workspace_files`` insert acquires through its FK, taken up front so
+        every path locks the workspace row before any file row.
+        """
+        query = "SELECT id FROM workspaces WHERE partition_name = $1 AND workspace_id = $2"
+        if for_update:
+            query += " FOR UPDATE"
+        elif for_key_share:
+            query += " FOR KEY SHARE"
+        return await conn.fetchval(query, partition, workspace_id)
 
     @staticmethod
     def _row_to_workspace(row: asyncpg.Record) -> Workspace:

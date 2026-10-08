@@ -74,6 +74,8 @@ _PROVENANCE = {
     "embedder_model_name": "fake-embed-v1",
     "embedder_endpoint": "http://fake:8000/v1",
     "embedder_dimension": 1,
+    # This harness wires no vector-field resolver.
+    "embedder_vector_field": None,
 }
 
 
@@ -84,7 +86,9 @@ class FakeVectorStore:
         self.deleted_filters: list[dict[str, Any]] = []
         self.deleted_ids: list[tuple[list[str], str]] = []
 
-    async def upsert(self, chunks: list[Chunk], collection: str = "default", *, indexed_at=None) -> int:
+    async def upsert(
+        self, chunks: list[Chunk], collection: str = "default", *, indexed_at=None, vector_field=None
+    ) -> int:
         self.calls.append((chunks, collection, indexed_at))
         return len(chunks)
 
