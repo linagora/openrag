@@ -442,6 +442,27 @@ class TestStripWatermark:
         assert result.text_blocks[0].text == "Actual content."
 
     @pytest.mark.asyncio
+    async def test_watermark_only_docx_block_zeroes_page_count(self, fake_spire):
+        """A DOCX whose only block is the watermark should produce page_count=0 (#1080)."""
+        instance = MagicMock()
+        instance.SaveToFile.side_effect = lambda path, _fmt: pathlib.Path(path).write_bytes(b"DOCX")
+        fake_spire.return_value = instance
+
+        docx_parser = MagicMock()
+        docx_parser.parse = AsyncMock(
+            return_value=ProcessedDocument(
+                document_id="test",
+                text_blocks=[TextBlock(text=_SPIRE_WATERMARK, page_number=1)],
+                page_count=1,
+            )
+        )
+
+        result = await DocParser(docx_parser=docx_parser).parse(_doc_document())
+
+        assert result.text_blocks == []
+        assert result.page_count == 0
+
+    @pytest.mark.asyncio
     async def test_watermark_stripped_from_fallback_text(self, fake_spire):
         """Watermark in the GetText() fallback path is stripped (#1080)."""
         instance = MagicMock()

@@ -113,7 +113,11 @@ class DocParser(DocumentParser):
                     for block in processed.text_blocks
                     if _strip_watermark(block.text).strip()
                 ]
-                return processed.model_copy(update={"text_blocks": cleaned_blocks})
+                has_content = bool(cleaned_blocks) or bool(processed.images)
+                return processed.model_copy(update={
+                    "text_blocks": cleaned_blocks,
+                    **({"page_count": 0} if not has_content else {}),
+                })
 
             text = _strip_watermark(fallback_text or "").strip()
             text_blocks = [TextBlock(text=text, page_number=1)] if text else []
