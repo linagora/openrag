@@ -34,6 +34,16 @@ class _Searcher:
         return []
 
 
+class _FailingSearcher(_Searcher):
+    def __init__(self, message: str):
+        super().__init__()
+        self.message = message
+
+    async def search(self, **kwargs):
+        self.calls.append(kwargs)
+        raise RuntimeError(self.message)
+
+
 def _config() -> SimpleNamespace:
     return SimpleNamespace(
         retriever=SimpleNamespace(
@@ -162,6 +172,52 @@ async def test_single_query_multi_partition_trace_uses_effective_query():
         ("a", "contextualized question"),
         ("b", "contextualized question"),
     ]
+
+
+@pytest.mark.parametrize("per_query", [False, True])
+@pytest.mark.asyncio
+async def test_all_partition_failures_are_preserved_when_retrieval_raises(per_query):
+    config = _config()
+    config.partitions = {
+        "a": _partition("a", "embed-a"),
+        "b": _partition("b", "embed-b"),
+    }
+    searchers = {
+        "embed-a": _FailingSearcher("partition a failed"),
+        "embed-b": _FailingSearcher("partition b failed"),
+    }
+    trace = RetrievalTraceBuilder("request-1", "original question")
+    service = _service(config=config, searcher_factory=lambda name: searchers[name])
+
+    with pytest.raises(RuntimeError, match="partition a failed"):
+        if per_query:
+            await service.retrieve_per_query(
+                partitions=["a", "b"],
+                queries=[Query(query="rewrite one"), Query(query="rewrite two")],
+                trace=trace,
+            )
+        else:
+            await service.retrieve(
+                partitions=["a", "b"],
+                query=Query(query="original question"),
+                trace=trace,
+            )
+
+    if per_query:
+        assert [child.query for child in trace.query_traces] == ["rewrite one", "rewrite two"]
+        for query_trace in trace.query_traces:
+            assert [error.stage for error in query_trace.errors] == ["query_retrieval"]
+            assert [child.partition for child in query_trace.query_traces] == ["a", "b"]
+            assert [[error.stage for error in child.errors] for child in query_trace.query_traces] == [
+                ["partition_retrieval"],
+                ["partition_retrieval"],
+            ]
+    else:
+        assert [child.partition for child in trace.query_traces] == ["a", "b"]
+        assert [[error.stage for error in child.errors] for child in trace.query_traces] == [
+            ["partition_retrieval"],
+            ["partition_retrieval"],
+        ]
 
 
 @pytest.mark.parametrize("method", ["retrieve", "retrieve_multi"])

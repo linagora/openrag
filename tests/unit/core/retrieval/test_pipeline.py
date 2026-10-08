@@ -353,6 +353,34 @@ async def test_retrieve_docs_expansion_path_re_reranks():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("with_reranker", [False, True])
+async def test_expansion_trace_marks_candidates_outside_seed_limit(with_reranker):
+    candidate_ids = [f"c{index}" for index in range(10)]
+    seed_ids = ["c9", "c8", "c7"] if with_reranker else ["c0", "c1", "c2"]
+    retriever = FakeRetriever(expansion_enabled=True)
+    retriever.results_queue = [_chunks(*candidate_ids)]
+    retriever.expand_result = _chunks(*seed_ids, "related")
+    trace = RetrievalTraceBuilder("req-1", "hi")
+    pipeline = RetrieverPipeline(
+        retriever=retriever,
+        reranker=FakeReranker() if with_reranker else None,
+        reranker_top_k=3,
+    )
+
+    await pipeline.retrieve_docs(partition=["p1"], query=Query(query="hi"), trace=trace)
+
+    stage_name = "post_rerank" if with_reranker else "pre_rerank"
+    candidates = {candidate.id: candidate for candidate in trace.stages[stage_name].candidates}
+    assert set(candidates) == set(candidate_ids)
+    assert {
+        candidate_id
+        for candidate_id, candidate in candidates.items()
+        if candidate.removal_reason is not None and candidate.removal_reason.code == "expansion_top_n"
+    } == set(candidate_ids) - set(seed_ids)
+    assert {candidate.id for candidate in trace.stages["post_expansion"].candidates} == set(seed_ids) | {"related"}
+
+
+@pytest.mark.asyncio
 async def test_get_relevant_docs_runs_one_call_per_subquery_and_fuses():
     r = FakeRetriever()
     r.results_queue = [_chunks("a", "b"), _chunks("b", "c")]
