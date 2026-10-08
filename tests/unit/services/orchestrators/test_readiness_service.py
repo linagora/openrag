@@ -296,6 +296,88 @@ async def test_malformed_model_list_entry_marks_endpoint_unavailable(respx_mock)
     assert [(item.provider, item.status) for item in snapshot.model_endpoints] == [("malformed", "unavailable")]
 
 
+@pytest.mark.parametrize(
+    ("model_name", "served", "expected_status"),
+    [
+        # Ollama lists every model with its tag and resolves an untagged name to :latest.
+        ("nomic-embed-text", ["nomic-embed-text:latest"], "ok"),
+        ("hf.co/org/model", ["hf.co/org/model:latest"], "ok"),
+        ("registry:5000/org/model", ["registry:5000/org/model:latest"], "ok"),
+        ("nomic-embed-text:v1.5", ["nomic-embed-text:v1.5"], "ok"),
+        # Only :latest: Ollama answers 404 for an untagged name with no :latest pulled.
+        ("nomic-embed-text", ["nomic-embed-text:v1.5"], "unavailable"),
+        ("nomic-embed-text:v1.5", ["nomic-embed-text:latest"], "unavailable"),
+    ],
+)
+async def test_untagged_model_name_matches_its_latest_tag(respx_mock, model_name, served, expected_status):
+    respx_mock.get("http://ollama.test:11434/v1/models").respond(200, json={"data": [{"id": id_} for id_ in served]})
+    discovery = AsyncMock(
+        return_value=ModelEndpointDiscovery(
+            targets=(
+                ModelEndpointTarget(
+                    provider="default",
+                    kind="embedder",
+                    # Env-seeded endpoints run as ``vllm`` even when they point at Ollama.
+                    config=ModelEndpointConfig(endpoint="http://ollama.test:11434/v1", model_name=model_name),
+                    is_default=True,
+                ),
+            )
+        )
+    )
+    service = ReadinessService({}, discover_model_endpoints=discovery, summary_model_kinds=("embedder",))
+
+    snapshot = await service.snapshot()
+
+    assert snapshot.checks["embedder"] == expected_status
+
+
+@pytest.mark.parametrize("implementation", ["vllm", "ollama"])
+async def test_endpoint_without_a_model_list_route_is_ready(respx_mock, implementation):
+    """An Azure OpenAI deployment URL or a gateway can have no ``/models``."""
+    route = respx_mock.get("https://gateway.test/v1/models").respond(404, json={"error": "not found"})
+    discovery = AsyncMock(
+        return_value=ModelEndpointDiscovery(
+            targets=(
+                ModelEndpointTarget(
+                    provider="default",
+                    kind="embedder",
+                    config=ModelEndpointConfig(
+                        endpoint="https://gateway.test/v1",
+                        model_name="embedder",
+                        extra={"implementation": implementation},
+                    ),
+                    is_default=True,
+                ),
+            )
+        )
+    )
+    service = ReadinessService({}, discover_model_endpoints=discovery, summary_model_kinds=("embedder",))
+
+    snapshot = await service.snapshot()
+
+    assert route.call_count == 1
+    assert snapshot.checks["embedder"] == "ok"
+
+
+async def test_health_probe_404_is_still_unavailable(respx_mock):
+    respx_mock.get("https://reranker.test/health").respond(404)
+    discovery = AsyncMock(
+        return_value=ModelEndpointDiscovery(
+            targets=(
+                ModelEndpointTarget(
+                    provider="reranker",
+                    kind="reranker",
+                    config=ModelEndpointConfig(endpoint="https://reranker.test", model_name="reranker"),
+                ),
+            )
+        )
+    )
+
+    snapshot = await ReadinessService({}, discover_model_endpoints=discovery).snapshot()
+
+    assert [(item.provider, item.status) for item in snapshot.model_endpoints] == [("reranker", "unavailable")]
+
+
 async def test_missing_endpoint_config_is_unresolvable_without_http_request(respx_mock):
     discovery = AsyncMock(
         return_value=ModelEndpointDiscovery(targets=(ModelEndpointTarget(provider="deleted", kind="stt", config=None),))

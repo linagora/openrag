@@ -209,7 +209,7 @@ class ReadinessService:
                 for target in targets
             )
         try:
-            model_ids = await asyncio.wait_for(_request_model_probe(request, timeout), timeout=timeout)
+            model_ids = await asyncio.wait_for(_request_served_models(request, timeout), timeout=timeout)
         except (TimeoutError, httpx.TimeoutException):
             status: ReadinessStatus = "timeout"
         except Exception:
@@ -298,8 +298,39 @@ async def _request_model_probe(request: _ModelProbeRequest, timeout: float) -> l
     return [item["id"] for item in models]
 
 
+async def _request_served_models(request: _ModelProbeRequest, timeout: float) -> list[str] | None:
+    """The endpoint's model list, or ``None`` when it does not list its models.
+
+    A ``/models`` 404 is the endpoint answering without that route (Azure OpenAI
+    deployment URLs, some gateways): the model is unknown, as behind a
+    health-only probe, not unavailable. Admin validation keeps the 404 as its
+    detail, the one place left to spot a base URL missing its ``/v1``.
+    """
+    try:
+        return await _request_model_probe(request, timeout)
+    except ModelEndpointProbeError as exc:
+        if exc.status_code == 404 and not request.health_only:
+            return None
+        raise
+
+
+def model_is_listed(model_name: str, model_ids: list[str]) -> bool:
+    """Whether a ``GET /models`` list serves ``model_name``.
+
+    An untagged name also matches its ``:latest`` tag: Ollama lists every model
+    with its tag and resolves an untagged name to ``:latest``, and only to that,
+    so ``nomic-embed-text`` is served by ``nomic-embed-text:latest`` but not by
+    ``nomic-embed-text:v1.5``. This holds whatever the configured implementation,
+    since an Ollama endpoint seeded from env runs as ``vllm``.
+    """
+    if model_name in model_ids:
+        return True
+    untagged = ":" not in model_name.rpartition("/")[2]
+    return untagged and f"{model_name}:latest" in model_ids
+
+
 def _validate_model(config: ModelEndpointConfig, model_ids: list[str] | None) -> None:
-    if model_ids is not None and config.model_name and config.model_name not in model_ids:
+    if model_ids is not None and config.model_name and not model_is_listed(config.model_name, model_ids):
         raise ModelNotFoundError(model_ids)
 
 
