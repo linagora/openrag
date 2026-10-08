@@ -92,7 +92,7 @@ class DocumentRepository(ABC):
 
     @abstractmethod
     async def get_file_metadata(self, file_id: str, partition: str) -> dict[str, Any] | None:
-        """Return authoritative file metadata for one partition-scoped catalog row."""
+        """Return file metadata with authoritative partition and ISO indexed_at columns."""
         ...
 
     @abstractmethod

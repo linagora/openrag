@@ -952,6 +952,7 @@ class PartitionService:
         rows = await self._vector_store.query_chunks_by_filter(
             self._collection,
             {"partition": partition, "file_id": file_id},
+            output_fields=["_id", "page"],
         )
         if len(rows) > limit:
             rows = rows[:limit]

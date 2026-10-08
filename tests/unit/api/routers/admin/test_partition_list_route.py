@@ -9,11 +9,16 @@ every partition.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+from unittest.mock import AsyncMock
+
 import pytest
 from api.dependencies.auth import partitions_with_details, require_partition_viewer
 from api.routers.admin import partitions
 from di.providers import get_partition_service
 from fastapi import FastAPI
+from services.orchestrators.partition_service import PartitionService
+from services.persistence.document_repo import PgDocumentRepository
 
 
 def _summary(name: str, **overrides) -> dict:
@@ -58,7 +63,7 @@ class _FakeService:
 
 
 def _build_app(
-    service: _FakeService,
+    service: _FakeService | PartitionService,
     principal_partitions: list[dict],
     *,
     is_admin: bool = False,
@@ -202,3 +207,47 @@ async def test_file_detail_with_zero_limit_skips_chunk_storage(async_client_fact
         "documents": [],
     }
     assert service.file_chunk_calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("limit", [0, 2000])
+@pytest.mark.parametrize("stale_metadata", [{}, {"partition": "old-partition", "indexed_at": "old-timestamp"}])
+async def test_file_detail_preserves_catalog_columns(async_client_factory, limit, stale_metadata) -> None:
+    indexed_at = datetime(2026, 10, 1, tzinfo=UTC)
+    file_metadata = {"filename": "catalog.pdf", **stale_metadata}
+    pool = AsyncMock()
+    pool.fetchval.return_value = True
+    pool.fetchrow.return_value = {
+        "file_metadata": file_metadata,
+        "partition_name": "legal",
+        "indexed_at": indexed_at,
+    }
+    vector_store = AsyncMock()
+    vector_store.query_chunks_by_filter.return_value = [
+        {"_id": "chunk-1", "page": 1, "partition": "stale-chunk-partition", "indexed_at": "stale-chunk-timestamp"}
+    ]
+    service = PartitionService(
+        partition_repo=AsyncMock(),
+        membership_repo=AsyncMock(),
+        document_repo=PgDocumentRepository(lambda: pool),
+        vector_store=vector_store,
+        user_repo=AsyncMock(),
+        collection="test",
+    )
+    app = _build_app(service, [])
+
+    async with async_client_factory(app) as client:
+        response = await client.get("/partition/legal/file/file-1", params={"limit": limit})
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "metadata": {
+            "filename": "catalog.pdf",
+            "partition": "legal",
+            "indexed_at": indexed_at.isoformat(),
+            **({"page": 1} if limit else {}),
+        },
+        "documents": [{"link": "http://testserver/extract/chunk-1"}] if limit else [],
+    }
+    if not limit:
+        vector_store.query_chunks_by_filter.assert_not_awaited()

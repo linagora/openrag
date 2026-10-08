@@ -881,7 +881,7 @@ async def test_get_file_chunks_strips_text_keeps_id_and_caps_limit():
     assert all("vector" not in r for r in out)
     assert all("_id" in r for r in out)
     assert all("_openrag_indexing_task_id" not in r for r in out)
-    assert vstore.last_output_fields is None
+    assert vstore.last_output_fields == ["_id", "page"]
 
 
 @pytest.mark.asyncio

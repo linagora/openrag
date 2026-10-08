@@ -410,12 +410,21 @@ class PgDocumentRepository(DocumentRepository):
         )
 
     async def get_file_metadata(self, file_id: str, partition: str) -> dict[str, Any] | None:
-        metadata = await self.pool.fetchval(
-            "SELECT file_metadata FROM files WHERE file_id = $1 AND partition_name = $2",
+        row = await self.pool.fetchrow(
+            "SELECT file_metadata, partition_name, indexed_at FROM files WHERE file_id = $1 AND partition_name = $2",
             file_id,
             partition,
         )
-        return dict(metadata) if isinstance(metadata, dict) else None
+        if row is None:
+            return None
+        indexed_at = row["indexed_at"]
+        # These fields are catalog columns, not upload metadata. Keep them
+        # authoritative even when copied metadata contains stale values.
+        return {
+            **(row["file_metadata"] or {}),
+            "partition": row["partition_name"],
+            "indexed_at": indexed_at.isoformat() if indexed_at else None,
+        }
 
     async def get_indexation_config(self, file_id: str, partition: str) -> dict[str, Any] | None:
         config = await self.pool.fetchval(
