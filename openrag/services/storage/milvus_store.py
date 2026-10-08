@@ -1290,7 +1290,14 @@ class MilvusVectorStore(VectorStore):
                 duration_seconds=duration,
             )
             return
-        trace.record_stage(name, status="error", candidates=[], duration_seconds=duration, error=str(error))
+        trace.record_stage(
+            name,
+            status="error",
+            candidates=candidates,
+            candidate_count=candidate_count,
+            duration_seconds=duration,
+            error=str(error),
+        )
         trace.record_error(name, error)
 
     async def _record_hybrid_diagnostics(
@@ -1367,10 +1374,14 @@ class MilvusVectorStore(VectorStore):
         before_results = [before_result, *results[3:]]
         before, before_count = self._merge_diagnostic_candidates(before_results)
         before_duration = max(result[3] for result in before_results)
-        before_error = before_result[4]
-        for _candidates, _ids, _count, _duration, error in before_results[1:]:
-            if error is not None:
-                trace.record_error("dense_before_threshold", error)
+        first_error_index = next(
+            (index for index, result in enumerate(before_results) if result[4] is not None),
+            None,
+        )
+        before_error = before_results[first_error_index][4] if first_error_index is not None else None
+        for index, result in enumerate(before_results):
+            if result[4] is not None and index != first_error_index:
+                trace.record_error("dense_before_threshold", result[4])
         after, after_ids, after_count, after_duration, after_error = after_result
         sparse, _sparse_ids, sparse_count, sparse_duration, sparse_error = sparse_result
         fused_ids = self._row_ids(fused_rows)
@@ -1437,63 +1448,75 @@ class MilvusVectorStore(VectorStore):
         )
         after_ids = self._row_ids(dense_rows)
         after_count = len(dense_rows)
+        scope_filters, file_scope, file_scope_kind = self._scope_relaxed_diagnostic_filters(filters)
+        temporal_filters, temporal_relaxed = self._temporal_relaxed_diagnostic_filters(filters)
         if similarity_threshold is None:
-            before = list(after)
-            before_count = after_count
-            before_duration = production_duration
-            before_error = None
-            dense_duration = production_duration
+            before_result = (
+                self._trace_candidates(
+                    dense_rows,
+                    "dense",
+                    limit=trace.candidate_capacity_for_stage("dense_before_threshold"),
+                ),
+                after_ids,
+                after_count,
+                production_duration,
+                None,
+            )
         else:
-            scope_filters, file_scope, file_scope_kind = self._scope_relaxed_diagnostic_filters(filters)
-            temporal_filters, temporal_relaxed = self._temporal_relaxed_diagnostic_filters(filters)
-            calls = [
+            before_result = await self._diagnostic_search(
+                data=[embedding],
+                anns_field=vector_field,
+                search_params=self._dense_search_params(None),
+                top_k=top_k,
+                expr=self._build_filter_expr(filters),
+                score_name="dense",
+                candidate_limit=trace.candidate_capacity_for_stage("dense_before_threshold"),
+            )
+        before_results = [before_result]
+        calls = []
+        if file_scope is not None and file_scope_kind is not None:
+            calls.append(
                 self._diagnostic_search(
                     data=[embedding],
                     anns_field=vector_field,
-                    search_params=self._dense_search_params(None),
+                    search_params=self._dense_search_params(similarity_threshold),
                     top_k=top_k,
-                    expr=self._build_filter_expr(filters),
+                    expr=self._build_filter_expr(scope_filters),
                     score_name="dense",
                     candidate_limit=trace.candidate_capacity_for_stage("dense_before_threshold"),
                 )
-            ]
-            if file_scope is not None and file_scope_kind is not None:
-                calls.append(
-                    self._diagnostic_search(
-                        data=[embedding],
-                        anns_field=vector_field,
-                        search_params=self._dense_search_params(similarity_threshold),
-                        top_k=top_k,
-                        expr=self._build_filter_expr(scope_filters),
-                        score_name="dense",
-                        candidate_limit=trace.candidate_capacity_for_stage("dense_before_threshold"),
-                    )
+            )
+        if temporal_relaxed:
+            calls.append(
+                self._diagnostic_search(
+                    data=[embedding],
+                    anns_field=vector_field,
+                    search_params=self._dense_search_params(similarity_threshold),
+                    top_k=top_k,
+                    expr=self._build_filter_expr(temporal_filters),
+                    score_name="dense",
+                    candidate_limit=trace.candidate_capacity_for_stage("dense_before_threshold"),
                 )
-            if temporal_relaxed:
-                calls.append(
-                    self._diagnostic_search(
-                        data=[embedding],
-                        anns_field=vector_field,
-                        search_params=self._dense_search_params(similarity_threshold),
-                        top_k=top_k,
-                        expr=self._build_filter_expr(temporal_filters),
-                        score_name="dense",
-                        candidate_limit=trace.candidate_capacity_for_stage("dense_before_threshold"),
-                    )
-                )
-            before_results = await asyncio.gather(*calls)
-            before, before_count = self._merge_diagnostic_candidates(before_results)
+            )
+        extra_results = await asyncio.gather(*calls) if calls else []
+        before_results.extend(extra_results)
+        before, before_count = self._merge_diagnostic_candidates(before_results)
+        first_error_index = next(
+            (index for index, result in enumerate(before_results) if result[4] is not None),
+            None,
+        )
+        before_error = before_results[first_error_index][4] if first_error_index is not None else None
+        for index, result in enumerate(before_results):
+            if result[4] is not None and index != first_error_index:
+                trace.record_error("dense_before_threshold", result[4])
+        if similarity_threshold is None:
+            extra_duration = max((result[3] for result in extra_results), default=0.0)
+            before_duration = production_duration + extra_duration
+            dense_duration = before_duration
+        else:
             before_duration = max(result[3] for result in before_results)
-            before_error = before_results[0][4]
-            for _candidates, _ids, _count, _duration, error in before_results[1:]:
-                if error is not None:
-                    trace.record_error("dense_before_threshold", error)
             dense_duration = production_duration + before_duration
         if before_error is None:
-            if similarity_threshold is None:
-                file_scope = None
-                file_scope_kind = None
-                temporal_relaxed = False
             before = self._mark_dense_filter_removals(
                 before,
                 after_ids,

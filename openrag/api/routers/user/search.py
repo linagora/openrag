@@ -153,14 +153,25 @@ async def _response_payload(
     service,
     partitions: list[str],
     effective_options: dict[str, object],
+    filter_expression: str | None = None,
+    filter_params: dict | None = None,
 ) -> dict[str, object]:
     payload: dict[str, object] = {"documents": _documents(request, chunks)}
     if trace is None:
         return payload
+    fingerprint_options = dict(effective_options)
+    if filter_expression:
+        fingerprint_options["filter"] = filter_expression
+    if filter_params:
+        fingerprint_filter_params = dict(filter_params)
+        file_ids = fingerprint_filter_params.get("file_id")
+        if isinstance(file_ids, (list, tuple, set)):
+            fingerprint_filter_params["file_id"] = sorted(file_ids)
+        fingerprint_options["filter_params"] = fingerprint_filter_params
     try:
         search_fingerprint = getattr(service, "search_configuration_fingerprint", None)
         if search_fingerprint is not None:
-            fingerprint = search_fingerprint(partitions, effective_options)
+            fingerprint = search_fingerprint(partitions, fingerprint_options)
         else:
             resolved_fingerprint = getattr(service, "resolved_configuration_fingerprint", None)
             stored_fingerprint = (
@@ -171,7 +182,7 @@ async def _response_payload(
             fingerprint = canonical_fingerprint(
                 {
                     "stored_configuration_fingerprint": stored_fingerprint,
-                    "effective_request_overrides": effective_options,
+                    "effective_request_overrides": fingerprint_options,
                 }
             )
     except Exception as error:
@@ -303,7 +314,16 @@ async def search_multiple_partitions(
 
     return JSONResponse(
         status_code=status.HTTP_200_OK,
-        content=await _response_payload(request, results, trace, service, partitions, effective_options),
+        content=await _response_payload(
+            request,
+            results,
+            trace,
+            service,
+            partitions,
+            effective_options,
+            filter_expression=search_params.filter,
+            filter_params=filter_params,
+        ),
     )
 
 
@@ -391,7 +411,16 @@ async def search_one_partition(
 
     return JSONResponse(
         status_code=status.HTTP_200_OK,
-        content=await _response_payload(request, results, trace, service, [partition], effective_options),
+        content=await _response_payload(
+            request,
+            results,
+            trace,
+            service,
+            [partition],
+            effective_options,
+            filter_expression=search_params.filter,
+            filter_params=filter_params,
+        ),
     )
 
 
@@ -468,5 +497,14 @@ async def search_file(
 
     return JSONResponse(
         status_code=status.HTTP_200_OK,
-        content=await _response_payload(request, results, trace, service, [partition], effective_options),
+        content=await _response_payload(
+            request,
+            results,
+            trace,
+            service,
+            [partition],
+            effective_options,
+            filter_expression=search_params.filter,
+            filter_params=filter_params,
+        ),
     )

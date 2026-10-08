@@ -52,6 +52,7 @@ RemovalReasonCode = Literal[
     "file_filter",
     "temporal_filter",
     "partition_top_k",
+    "catalog_filter",
 ]
 
 

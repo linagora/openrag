@@ -341,6 +341,26 @@ async def test_search_across_embedders_drops_a_failing_one():
 
 
 @pytest.mark.asyncio
+async def test_search_across_embedders_records_failed_group_in_child_trace():
+    svc, _, searchers = _embedder_svc(
+        {"p1": "embed-a", "p2": "embed-b"}, {"embed-a": "vector_embed_a", "embed-b": "vector_embed_b"}
+    )
+    searchers["embed-a"] = FakeSearcher()
+    searchers["embed-a"].search_result = [_chunk("a1")]
+    searchers["embed-b"] = FakeSearcher()
+    searchers["embed-b"].search_error = RuntimeError("embedder down")
+    trace = RetrievalTraceBuilder("request-1", "q")
+
+    out = await svc.search(text="q", partitions=["p1", "p2"], top_k=5, similarity_threshold=0.5, trace=trace)
+
+    assert [chunk.id for chunk in out] == ["a1"]
+    traces_by_partition = {child.partition: child for child in trace.query_traces}
+    failed_errors = traces_by_partition["p2"].errors
+    assert any(error.stage == "partition_search" and error.kind == "RuntimeError" for error in failed_errors)
+    assert traces_by_partition["p1"].errors == []
+
+
+@pytest.mark.asyncio
 async def test_search_across_embedders_keeps_hits_when_surrounding_lookup_fails():
     svc, _, searchers = _embedder_svc(
         {"p1": "embed-a", "p2": "embed-b"}, {"embed-a": "vector_embed_a", "embed-b": "vector_embed_b"}
