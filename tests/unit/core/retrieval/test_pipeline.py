@@ -369,6 +369,8 @@ async def test_expansion_trace_marks_candidates_outside_seed_limit(with_reranker
 
     await pipeline.retrieve_docs(partition=["p1"], query=Query(query="hi"), trace=trace)
 
+    assert retriever.expand_input is not None
+    assert [chunk.id for chunk in retriever.expand_input] == seed_ids
     stage_name = "post_rerank" if with_reranker else "pre_rerank"
     candidates = {candidate.id: candidate for candidate in trace.stages[stage_name].candidates}
     assert set(candidates) == set(candidate_ids)
