@@ -1890,6 +1890,52 @@ async def test_validate_endpoint_reports_missing_model_on_reachable_endpoint(mon
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("served", "model_found"),
+    [
+        # Ollama lists the tag and serves an untagged name as :latest, and only as that.
+        (["nomic-embed-text:latest"], True),
+        (["nomic-embed-text:v1.5"], False),
+    ],
+)
+async def test_validate_endpoint_matches_an_untagged_model_name_to_its_latest_tag(monkeypatch, served, model_found):
+    import httpx
+
+    svc = _make_service()
+
+    class FakeResponse:
+        status_code = 200
+
+        def json(self):
+            return {"data": [{"id": model_id} for model_id in served]}
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, _url):
+            return FakeResponse()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+    result = await svc.validate_endpoint("http://ollama:11434/v1", "nomic-embed-text", model_type="embedder")
+
+    assert result == {
+        "reachable": True,
+        "model_found": model_found,
+        "models_served": served,
+        "transcription_supported": None,
+        "detail": None,
+    }
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("payload", [{"models": [{"id": "other-model"}]}, None])
 async def test_validate_endpoint_keeps_reachable_when_model_list_is_invalid(monkeypatch, payload):
     import httpx
@@ -2521,9 +2567,13 @@ async def test_validate_stt_endpoint_stops_after_model_list_auth_failure(monkeyp
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("status_code", [401, 403])
+@pytest.mark.parametrize("status_code", [401, 403, 404])
 async def test_validate_non_stt_endpoint_keeps_auth_gated_model_list_reachable(monkeypatch, status_code):
-    """An HTTP response proves reachability even when a non-STT model list is scoped."""
+    """An HTTP response proves reachability even when a non-STT model list is scoped.
+
+    A 404 keeps its detail although readiness reads it as "no model list": it
+    is also what a base URL missing its ``/v1`` returns.
+    """
     import httpx
 
     svc = _make_service()

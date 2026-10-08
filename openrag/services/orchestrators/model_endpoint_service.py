@@ -908,14 +908,15 @@ class ModelEndpointService:
         if parsed.username or parsed.password:
             result["detail"] = "Endpoint URL must not include credentials."
             return result
-        if model_type != "stt":
-            from services.orchestrators.readiness_service import (
-                ModelEndpointProbeError,
-                ModelListUnavailableError,
-                ModelNotFoundError,
-                check_model_endpoint,
-            )
+        from services.orchestrators.readiness_service import (
+            ModelEndpointProbeError,
+            ModelListUnavailableError,
+            ModelNotFoundError,
+            check_model_endpoint,
+            model_is_listed,
+        )
 
+        if model_type != "stt":
             config = ModelEndpointConfig(
                 endpoint=url,
                 model_name=normalized_model_name,
@@ -949,7 +950,7 @@ class ModelEndpointService:
                     if model_ids is None
                     else True
                     if normalized_model_name is None
-                    else normalized_model_name in model_ids
+                    else model_is_listed(normalized_model_name, model_ids)
                 )
             return result
         base_url = url.rstrip("/")
@@ -992,7 +993,7 @@ class ModelEndpointService:
                             ]
                             result["models_served"] = served
                             if normalized_model_name is not None:
-                                result["model_found"] = normalized_model_name in served
+                                result["model_found"] = model_is_listed(normalized_model_name, served)
                     else:
                         result["detail"] = f"Model list returned HTTP {resp.status_code}."
                 if model_type == "stt":
