@@ -95,6 +95,7 @@ class RetrievalService:
         reranker_factory: Callable[[str], Reranker] | None = None,
         llm_factory: Callable[[str], LLM] | None = None,
         prompt_service: Any | None = None,
+        preset_service: Any | None = None,
     ) -> None:
         self._searcher = searcher
         self._config = config
@@ -107,6 +108,7 @@ class RetrievalService:
         # disk). Optional: when absent (e.g. unit tests, no DB), we fall back to
         # the on-disk seed via load_template_by_key, preserving prior behaviour.
         self._prompt_service = prompt_service
+        self._preset_service = preset_service
         self._pipeline = self._build_legacy_pipeline(reranker=reranker, llm=llm)
 
         logger.debug(
@@ -231,6 +233,11 @@ class RetrievalService:
 
     def _partition_configs(self) -> dict[str, Any]:
         return getattr(self._config, "partitions", {}) or {}
+
+    async def refresh_partition_configs(self) -> None:
+        """Reload partition settings another process changed, such as the embedder a swap switched."""
+        if self._preset_service is not None:
+            await self._preset_service.try_refresh_if_stale()
 
     def has_loaded_partition_retrieval_config(self, partition: str) -> bool:
         """Return whether this process has resolved retrieval settings for a partition."""
@@ -759,6 +766,7 @@ class RetrievalService:
         strict_prompt_resolution: bool = False,
     ) -> ResolvedRetrievalPlan:
         """Resolve executable pipelines and their public identity once."""
+        await self.refresh_partition_configs()
         requested = list(partitions)
         configs = self._partition_configs()
         selected = list(configs) if "all" in requested and configs else list(dict.fromkeys(requested))
@@ -857,6 +865,7 @@ class RetrievalService:
         disable_reranker: bool = False,
         disable_expansion: bool = False,
     ) -> list[tuple[list[str], RetrieverPipeline, int | None]]:
+        await self.refresh_partition_configs()
         configs = self._partition_configs()
         if "all" in partitions and configs:
             partitions = list(configs.keys())
@@ -938,6 +947,7 @@ class RetrievalService:
         hits are fused with RRF and cut to ``top_k`` before the surrounding
         chunks are added.
         """
+        await self.refresh_partition_configs()
         parts = [partitions] if isinstance(partitions, str) else list(partitions)
         if trace is not None:
             trace.record_stage("original_query", status="complete", candidates=[])
