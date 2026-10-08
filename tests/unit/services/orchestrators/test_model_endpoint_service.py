@@ -55,6 +55,9 @@ class _FakeEndpointRepo:
         # Set to a message to make the delete refuse, the way the real repo
         # does when a partition still resolves to the embedder.
         self.conflict_on_delete: str | None = None
+        # Embedders a running swap re-embeds partitions into: the real repo
+        # refuses any edit changing their vectors.
+        self.swap_targets: set[str] = set()
         for r in rows or []:
             self._store[(r.name, r.model_type)] = r
 
@@ -86,7 +89,18 @@ class _FakeEndpointRepo:
         row = self._store.get((name, model_type))
         if row is None:
             return None
-        # The real repo runs the guard on the row it just locked, before writing.
+        # The real repo checks for a running swap, then runs the guard, on the
+        # row it just locked, before writing.
+        if model_type == "embedder" and name in self.swap_targets:
+            from core.config.model_endpoints import material_embedder_changes
+            from core.utils.exceptions import ConflictError
+
+            if changed := material_embedder_changes(row, fields):
+                raise ConflictError(
+                    f"Embedder '{name}' is the target of 1 running embedder swap(s), and changing "
+                    f"{', '.join(changed)} would change the vectors they write.",
+                    code="EMBEDDER_SWAP_IN_PROGRESS",
+                )
         if guard is not None:
             await guard(row, lambda: self.indexed_file_usage(name, model_type))
         self.calls.append(("update", (name, model_type)))
@@ -796,6 +810,47 @@ async def test_seed_defaults_sync_on_boot_moves_an_embedder_with_indexed_files_t
 
 
 @pytest.mark.asyncio
+async def test_seed_defaults_sync_on_boot_holds_the_url_and_model_of_a_running_swaps_target(monkeypatch):
+    """A running swap refuses any change to its target's vectors, the URL
+    included, so the fallback that holds back only the model was refused too and
+    failed boot — before the step that resumes the swap, so every boot failed
+    the same way. The row keeps its URL and model until the swap ends, and takes
+    the rest."""
+    monkeypatch.setenv("EMBEDDER_BATCH_SIZE", "64")
+    _, repo = _indexed_env_managed_embedder()
+    repo.swap_targets.add("indexed-model")
+    settings = _sync_settings(
+        base_url="http://embedder.gpu-pool:8000/v1", model_name="new-model", api_key="rotated-key", batch_size=64
+    )
+    svc = _make_service(repo, settings=settings)
+
+    warnings = await _seed_capturing_warnings(svc)
+
+    synced = repo._store[("indexed-model", "embedder")]
+    assert synced.endpoint == "http://embedder:8000/v1"
+    assert synced.model_name == "indexed-model"
+    assert synced.extra["api_key"] == "rotated-key"
+    assert synced.batch_size == 64
+    [(level, warning)] = warnings
+    assert level == "WARNING"
+    assert "running embedder swap" in warning
+    assert "http://embedder.gpu-pool:8000/v1" in warning
+
+
+@pytest.mark.asyncio
+async def test_seed_defaults_sync_on_boot_rotates_the_key_of_a_running_swaps_target(monkeypatch):
+    """A swap holds back only what changes its vectors."""
+    _, repo = _indexed_env_managed_embedder()
+    repo.swap_targets.add("indexed-model")
+    svc = _make_service(repo, settings=_sync_settings(api_key="rotated-key"))
+
+    warnings = await _seed_capturing_warnings(svc)
+
+    assert repo._store[("indexed-model", "embedder")].extra["api_key"] == "rotated-key"
+    assert warnings == []
+
+
+@pytest.mark.asyncio
 async def test_seed_defaults_sync_on_boot_rotates_the_api_key(monkeypatch):
     """A rotated *_API_KEY must reach the row it owns.
 
@@ -1056,6 +1111,37 @@ async def test_load_all_no_default_alias_without_is_default():
 
     assert "jina" in settings.models.embedder
     assert "default" not in settings.models.embedder
+
+
+@pytest.mark.asyncio
+async def test_load_new_registers_endpoints_created_elsewhere_and_keeps_the_loaded_ones():
+    """A partition a swap switched on another process names an endpoint created
+    there; ``load_new`` makes it resolvable here. Loaded entries stay as they are:
+    their clients are cached by name, and a rename here keeps its old-name alias."""
+    from core.config.root import Settings
+
+    repo = _FakeEndpointRepo(rows=[_make_row(name="embed-a", is_default=True)])
+    settings = Settings()
+    svc = _make_service(repo, settings=settings)
+    await svc.load_all()
+    loaded = settings.models.embedder["embed-a"]
+    settings.models.embedder["renamed-from"] = loaded
+
+    # Another process creates embed-b and a reranker, and edits embed-a.
+    repo._store[("embed-b", "embedder")] = _make_row(
+        name="embed-b", model_name="embed-model-b", is_default=False, vector_field="vector_embed_b"
+    )
+    repo._store[("rank-b", "reranker")] = _make_row(name="rank-b", model_type="reranker", is_default=False)
+    repo._store[("embed-a", "embedder")] = _make_row(name="embed-a", endpoint="http://edited:8000/v1")
+
+    await svc.load_new()
+
+    assert settings.models.embedder["embed-b"].model_name == "embed-model-b"
+    assert settings.models.embedder["embed-b"].vector_field == "vector_embed_b"
+    assert "rank-b" in settings.models.reranker
+    assert settings.models.embedder["embed-a"] is loaded
+    assert settings.models.embedder["default"] is loaded
+    assert settings.models.embedder["renamed-from"] is loaded
 
 
 # ------------------------------------------------------------------

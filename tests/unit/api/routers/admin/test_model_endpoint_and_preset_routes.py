@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from api.dependencies.auth import require_admin
 from api.routers.admin import model_endpoints, presets
-from di.providers import get_model_endpoint_service, get_preset_service
+from di.providers import get_config, get_model_endpoint_service, get_preset_service
 from fastapi import FastAPI
 
 
@@ -170,6 +171,14 @@ class FakePresetService:
         self.calls.append(("delete", {"name": name, "preset_type": preset_type}))
 
 
+# What the routes read from the config: the LLM token-budget fallbacks the
+# endpoint responses report, and the top_n default /presets/options reports.
+_ROUTE_CONFIG = SimpleNamespace(
+    reranker=SimpleNamespace(top_k=10),
+    llm_context=SimpleNamespace(max_llm_context_size=8192, max_output_tokens=1024),
+)
+
+
 def _build_app(
     *,
     model_service: FakeModelEndpointService | None = None,
@@ -180,6 +189,7 @@ def _build_app(
     app.include_router(model_endpoints.router, prefix="/model-endpoints")
     app.include_router(presets.router, prefix="/presets")
     app.dependency_overrides[require_admin] = lambda: {"id": "admin", "is_admin": True}
+    app.dependency_overrides[get_config] = lambda: _ROUTE_CONFIG
     if model_service is not None:
         app.dependency_overrides[get_model_endpoint_service] = lambda: model_service
     if preset_service is not None:
@@ -719,6 +729,124 @@ async def test_every_route_returning_an_endpoint_reports_its_partition_count(asy
     assert response.json()["used_by_partitions"] == 3
 
 
+@pytest.mark.asyncio
+async def test_an_embedder_endpoint_reports_the_vector_field_it_owns(async_client_factory):
+    """The admin UI compares it with the field each file was indexed into."""
+    from core.config.model_endpoints import ModelEndpointRow
+
+    model_service = FakeModelEndpointService()
+
+    async def get_model_endpoint(name: str, model_type: str) -> ModelEndpointRow:
+        return ModelEndpointRow(**_model_endpoint_row(name=name, model_type=model_type, vector_field="vector_jina"))
+
+    model_service.get_model_endpoint = get_model_endpoint
+    app = _build_app(model_service=model_service)
+
+    async with async_client_factory(app) as client:
+        response = await client.get("/model-endpoints/embedder/jina")
+
+    assert response.status_code == 200
+    assert response.json()["vector_field"] == "vector_jina"
+
+
+# --------------------------------------------------------------------------- #
+# What a blank max context size / max output tokens resolves to, reported on
+# every LLM endpoint so the admin UI can show the value in effect.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.fixture
+def probed_windows(monkeypatch):
+    """Set the auto-probed max_model_len cache (and its pending flag) the routes report."""
+    import api.routers.user.chat as chat
+
+    def _set(windows: dict[str, int], *, pending: bool = False) -> None:
+        monkeypatch.setattr(chat, "_max_model_tokens_by_name", dict(windows))
+        monkeypatch.setattr(chat, "_max_model_tokens_pending", pending)
+
+    _set({})
+    return _set
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "body"),
+    [
+        ("GET", "/model-endpoints/?model_type=llm", None),
+        ("GET", "/model-endpoints/llm/default", None),
+        (
+            "POST",
+            "/model-endpoints/",
+            {"name": "default", "model_type": "llm", "endpoint": "http://llm:8000/v1", "model_name": "mistral"},
+        ),
+        ("PUT", "/model-endpoints/llm/default", {"batch_size": 16}),
+        ("POST", "/model-endpoints/llm/default/set-default", None),
+    ],
+)
+@pytest.mark.asyncio
+async def test_every_route_returning_an_llm_endpoint_reports_its_token_budgets(
+    async_client_factory, monkeypatch, probed_windows, method, path, body
+):
+    # The write routes re-probe in the background; keep this test off the network.
+    async def no_prime() -> None:
+        return None
+
+    monkeypatch.setattr(model_endpoints, "prime_max_model_tokens", no_prime)
+    probed_windows({"default": 131072})
+    app = _build_app(model_service=FakeModelEndpointService())
+
+    async with async_client_factory(app) as client:
+        response = await client.request(method, path, json=body)
+
+    assert response.status_code in (200, 201)
+    payload = response.json()
+    endpoint = payload[0] if isinstance(payload, list) else payload
+    assert endpoint["default_max_llm_context_size"] == 8192
+    assert endpoint["default_max_output_tokens"] == 1024
+    if method == "GET":
+        assert endpoint["detected_max_llm_context_size"] == 131072
+        assert endpoint["context_size_detection_pending"] is False
+    else:
+        # A write clears the probed windows and re-probes after the response.
+        assert endpoint["detected_max_llm_context_size"] is None
+        assert endpoint["context_size_detection_pending"] is True
+
+
+@pytest.mark.parametrize(
+    ("windows", "detected"),
+    [
+        ({"default": 32768}, 32768),  # a vLLM endpoint reporting max_model_len
+        ({}, None),  # a gateway that reports none: the UI falls back to the default
+        ({"other": 4096}, None),  # another endpoint's window never leaks onto this one
+    ],
+)
+@pytest.mark.asyncio
+async def test_llm_endpoint_reports_only_its_own_detected_window(
+    async_client_factory, probed_windows, windows, detected
+):
+    probed_windows(windows)
+    app = _build_app(model_service=FakeModelEndpointService())
+
+    async with async_client_factory(app) as client:
+        response = await client.get("/model-endpoints/llm/default")
+
+    assert response.json()["detected_max_llm_context_size"] == detected
+
+
+@pytest.mark.asyncio
+async def test_non_llm_endpoints_carry_no_token_budgets(async_client_factory, probed_windows):
+    probed_windows({"default": 131072})
+    app = _build_app(model_service=FakeModelEndpointService())
+
+    async with async_client_factory(app) as client:
+        response = await client.get("/model-endpoints/?model_type=embedder")
+
+    (endpoint,) = response.json()
+    assert endpoint["detected_max_llm_context_size"] is None
+    assert endpoint["default_max_llm_context_size"] is None
+    assert endpoint["default_max_output_tokens"] is None
+    assert endpoint["context_size_detection_pending"] is False
+
+
 # --------------------------------------------------------------------------- #
 # Auto-probed max_model_len cache refresh after an LLM endpoint write (#639) —
 # config.models.llm itself is refreshed synchronously inside the service call
@@ -863,6 +991,7 @@ async def test_reprime_failure_does_not_fail_the_request(async_client_factory, m
 async def test_preset_options_return_registered_choices(async_client_factory):
     """Preset options should expose available registry choices."""
     app = _build_app()
+    app.dependency_overrides[get_config] = lambda: SimpleNamespace(reranker=SimpleNamespace(top_k=12))
 
     async with async_client_factory(app) as client:
         response = await client.get("/presets/options")
@@ -872,6 +1001,8 @@ async def test_preset_options_return_registered_choices(async_client_factory):
     assert body["chunking_strategies"] == ["recursive_splitter", "structured_section"]
     assert set(body["retrieval_types"]) == {"single", "multiQuery", "hyde"}
     assert body["reranker_providers"] == ["infinity", "openai", "tei"]
+    # An unset retrieval top_n follows RERANKER_TOP_K; the UI shows it as the placeholder.
+    assert body["default_top_n"] == 12
 
 
 @pytest.mark.asyncio

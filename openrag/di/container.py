@@ -62,6 +62,7 @@ if TYPE_CHECKING:
     from core.vector_stores import VectorStore
     from services.orchestrators.auth_service import AuthService
     from services.orchestrators.conversion_service import ConversionService
+    from services.orchestrators.embedder_swap_service import EmbedderSwapService
     from services.orchestrators.indexing_service import IndexingService
     from services.orchestrators.job_service import JobService
     from services.orchestrators.mcp_service import MCPService
@@ -125,6 +126,7 @@ class ServiceContainer:
         self._auth_service: AuthService | None = None
         self._user_service: UserService | None = None
         self._partition_service: PartitionService | None = None
+        self._embedder_swap_service: EmbedderSwapService | None = None
         self._model_endpoint_service: ModelEndpointService | None = None
         self._preset_service: PresetService | None = None
         self._prompt_service: PromptService | None = None
@@ -229,6 +231,10 @@ class ServiceContainer:
             await self._initialize_step("seeding prompts", self.prompt_service.seed_defaults)
             await self._initialize_step("ensuring default partition", self.partition_service.seed_default_partition)
             await self._initialize_step("loading partition configs", self.partition_service.load_partitions)
+            # Swaps interrupted by the last shutdown continue where they
+            # stopped, and ones another process lets go of later are claimed
+            # then. Only schedules the jobs; startup does not wait on them.
+            await self._initialize_step("resuming embedder swaps", self.embedder_swap_service.watch)
         self._initialized = True
 
     async def _initialize_step(self, label: str, operation: Callable[[], Awaitable[Any]]) -> None:
@@ -247,6 +253,10 @@ class ServiceContainer:
         remaining clients, the database pool, or the state reset.
         """
         try:
+            if self._embedder_swap_service is not None:
+                # Before the clients and the pool close under the jobs. Their
+                # swaps stay running and resume at the next start.
+                await self._embedder_swap_service.shutdown()
             seen_client_ids: set[int] = set()
             for client in self._inference_clients:
                 await self._close_inference_client(client, seen_client_ids)
@@ -446,6 +456,28 @@ class ServiceContainer:
         return self._partition_service
 
     @property
+    def embedder_swap_service(self) -> EmbedderSwapService:
+        """EmbedderSwapService — lazily built, cached for the container's lifetime."""
+        if self._embedder_swap_service is None:
+            from services.orchestrators.embedder_swap_service import EmbedderSwapService
+            from services.workers.bootstrap import get_task_state_manager
+
+            settings = self._require_settings()
+            self._embedder_swap_service = EmbedderSwapService(
+                partition_repo=self.partition_repo,
+                document_repo=self.document_repo,
+                vector_store=self.vector_store,
+                partition_service=self.partition_service,
+                config=settings,
+                embedder_factory=lambda name: self.embedder_factory(name),
+                collection=settings.vectordb.collection_name,
+                model_endpoint_repo=self.model_endpoint_repo,
+                refresh_endpoints=lambda: self.model_endpoint_service.load_all(),
+                task_state_manager_factory=get_task_state_manager,
+            )
+        return self._embedder_swap_service
+
+    @property
     def model_endpoint_service(self) -> ModelEndpointService:
         """ModelEndpointService — DB-backed named model endpoint registry."""
         if self._model_endpoint_service is None:
@@ -477,6 +509,7 @@ class ServiceContainer:
                 preset_repo=self.preset_repo,
                 config=self._require_settings(),
                 partition_service=self.partition_service,
+                load_new_endpoints=lambda: self.model_endpoint_service.load_new(),
             )
         return self._preset_service
 
@@ -591,6 +624,7 @@ class ServiceContainer:
                 reranker_factory=self.reranker_factory,
                 llm_factory=self.llm_factory,
                 prompt_service=self.prompt_service,
+                preset_service=self.preset_service,
             )
         return self._retrieval_service
 
