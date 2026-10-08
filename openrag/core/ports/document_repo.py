@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from openrag.core.models.catalog import DocumentRecord
+from core.models.catalog import DocumentRecord
 
 
 @dataclass(frozen=True, slots=True)
@@ -21,8 +22,43 @@ class ContentClaimLease:
     expires_at: datetime
 
 
+@dataclass(frozen=True, slots=True)
+class IndexedCorpusState:
+    """Catalog identity and optional bounded IDs from one consistent snapshot."""
+
+    count: int
+    digest: str
+    document_ids: tuple[str, ...] = ()
+    document_ids_truncated: bool = False
+
+
 class DocumentRepository(ABC):
     """CRUD operations for documents."""
+
+    @abstractmethod
+    async def get_indexed_documents(self, keys: Collection[tuple[str, str]]) -> dict[tuple[str, str], datetime]:
+        """Return existing (partition, file_id) keys and their indexing times.
+
+        Implementations must perform a fresh, batched lookup and propagate errors.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    async def list_indexed_documents(
+        self, partition: str, *, before: datetime, after: str | None = None, limit: int = 500
+    ) -> list[str]:
+        """Keyset page of file IDs indexed before a cutoff, ordered by file ID."""
+        raise NotImplementedError
+
+    @abstractmethod
+    async def get_indexed_corpus_state(
+        self,
+        partition: str,
+        *,
+        document_ids_limit: int = 0,
+    ) -> IndexedCorpusState:
+        """Return corpus identity and optional bounded IDs from one snapshot."""
+        raise NotImplementedError
 
     @abstractmethod
     async def create_document(self, doc: DocumentRecord) -> DocumentRecord: ...
@@ -53,6 +89,46 @@ class DocumentRepository(ABC):
 
     @abstractmethod
     async def file_exists_in_partition(self, file_id: str, partition: str) -> bool: ...
+
+    @abstractmethod
+    async def get_file_metadata(self, file_id: str, partition: str) -> dict[str, Any] | None:
+        """Return authoritative file metadata for one partition-scoped catalog row."""
+        ...
+
+    @abstractmethod
+    async def get_indexation_config(self, file_id: str, partition: str) -> dict[str, Any] | None:
+        """Return the config snapshot, embedder included, one catalog row was indexed with."""
+        ...
+
+    @abstractmethod
+    async def list_file_embedders(self, partition: str) -> list[dict]:
+        """Where each file of *partition* was embedded, ordered by ``file_id``.
+
+        ``[{"file_id", "embedder_model_name", "embedder_vector_field"}]``, read
+        from the per-file ``indexation_config`` snapshot; either value is
+        ``None`` when the file predates it being recorded.
+        """
+        ...
+
+    @abstractmethod
+    async def record_file_embedder(self, file_id: str, partition: str, provenance: dict) -> bool:
+        """Merge *provenance* into the file's ``indexation_config`` snapshot.
+
+        Only the embedder keys change; the rest of the snapshot describes how
+        the file was parsed and chunked, which a re-embed does not redo.
+        Returns ``False`` when the file no longer exists.
+        """
+        ...
+
+    @abstractmethod
+    async def mark_file_independently_indexed(self, file_id: str, partition: str) -> bool:
+        """Protect a file from workspace-owned cleanup."""
+        ...
+
+    @abstractmethod
+    async def finalize_file_workspace_ownership(self, file_id: str, partition: str, workspace_ids: list[str]) -> bool:
+        """Transfer a new upload to its workspaces only if all attachments remain."""
+        ...
 
     @abstractmethod
     async def get_content_sha256(self, file_id: str, partition: str) -> str | None: ...

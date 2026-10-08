@@ -9,6 +9,56 @@ OpenRAG provides a large range of environment variables that allow you to custom
 This page is up-to-date with OpenRAG v2.0.0. Types and defaults are cross-checked against `conf/config.yaml` and the config loader. Authentication and SSO variables (`AUTH_MODE`, `OIDC_*`) are documented separately in the [OIDC guide](/openrag/documentation/oidc/).
 :::
 
+# Secrets
+
+OpenRAG validates its credentials once, at startup, and **refuses to start** on any value
+published in this repository — the dev defaults in `.env.example`, the placeholders in the
+Helm chart, and the values used in the documentation and the test stacks. The same check
+runs at `helm template` time for the chart's `values` secrets provider.
+
+This exists because the common way a deployment ends up with a known credential is not a
+weak choice but no choice at all: a template copied verbatim. So the example files ship
+`__GENERATE_ME__` where a credential belongs, and one command fills them in:
+
+```bash
+python3 scripts/gen_env.py           # writes infra/compose/.env
+python3 scripts/gen_env.py --check   # verify nothing is left unset
+```
+
+## What must be supplied
+
+| Variable | Required | Notes |
+|---|---|---|
+| `AUTH_TOKEN` | Yes, unless using SSO | Bootstraps the admin user and guards the API. Minimum 12 characters. Leaving it unset enables the no-auth development mode only when `ALLOW_NO_AUTH=true`. |
+| `POSTGRES_PASSWORD` | Yes | Minimum 12 characters. Compose fails closed without it; the chart reads it from `postgresql.auth.password`. |
+| `CHAINLIT_AUTH_SECRET` | When the chat interface is enabled | Signs the chat session cookie. Minimum 12 characters; generate with `python -c "import secrets; print(secrets.token_urlsafe(32))"`. Rotating it invalidates live sessions. In the Helm chart the chat interface is off by default (`env.WITH_CHAINLIT_UI`). |
+| `MINIO_ACCESS_KEY` / `MINIO_SECRET_KEY` | Compose only | Shared by the MinIO service and Milvus — both sides must match. `MINIO_SECRET_KEY` has a 12-character minimum. Kubernetes deployments use external object storage instead. |
+| `GRAFANA_ADMIN_PASSWORD` | When bundled Grafana is enabled | Minimum 12 characters. |
+| `OIDC_CLIENT_SECRET`, `OIDC_TOKEN_ENCRYPTION_KEY` | SSO only | Formats are set by your identity provider and by Fernet respectively, so no length floor is applied. See the [OIDC guide](/openrag/documentation/oidc/). |
+| `HF_TOKEN` | When pulling gated model weights | |
+| `API_KEY`, `VLM_API_KEY`, `EMBEDDER_API_KEY`, `RERANKER_API_KEY`, `TRANSCRIBER_API_KEY`, `WEBSEARCH_API_TOKEN` | Per integration | Set by the provider, so no length floor. Use the literal `EMPTY` for a local OpenAI-compatible server that requires no credential — that is the documented sentinel and is always accepted. |
+
+`UVICORN_FORWARDED_ALLOW_IPS` is not a secret but belongs in the same conversation: it
+must name your proxy's subnet for session cookies and per-IP rate limits to behave
+correctly behind a reverse proxy. See [FastAPI & Access Control](#fastapi--access-control).
+
+## What will be refused
+
+Any value this project publishes, matched case-insensitively — including the
+`__GENERATE_ME__` marker itself — and any value shorter than 12 characters for the
+variables marked with a minimum above. The canonical list lives in
+`openrag/core/config/secrets_guard.py`; the chart carries the same list and a unit test
+fails the build if the two disagree.
+
+The startup error names the variables at fault and never prints their values.
+
+## Overriding the check
+
+`ALLOW_INSECURE_SECRETS=true` downgrades the refusal to a warning logged on every boot.
+It is an opt-out, never an opt-in: an unset value means the check is enforced. Use it for
+disposable development and CI stacks — the bundled API test stack sets it — and not in a
+deployment that holds real data.
+
 # Backend
 ## Indexer Pipeline
 ### Loaders
@@ -42,6 +92,7 @@ These settings apply when `MarkerLoader` is selected (`PDFLOADER=MarkerLoader`; 
 | `MARKER_MAX_TASKS_PER_CHILD` | int | 20 | Number of tasks a child (PDF worker) has to process before it gets restarted to clean up memory leaks |
 | `MARKER_TIMEOUT` | int | 3600 | Timeout in seconds for marker processes |
 | `MARKER_PDFTEXT_WORKERS` | int | 2 | Number of PDF text extractor workers inside marker. |
+| `MARKER_PARSE_MEMORY_LIMIT_MB` | int | 0 | Ceiling on what one Marker child may allocate (`RLIMIT_DATA`), so a single oversized parse raises `MemoryError` in that child instead of OOM-killing the pod. The file then fails at once, without retries, with a `MemoryError` that names this setting. `0` disables it. Bounds the child's **whole** memory — torch and Marker's startup included — so it must sit well above the child's baseline; the worker logs that baseline at startup, and warns when the headroom is too small. With page chunking on, each chunk runs under the same per-child bound; the limit is set once per child and persists across chunks until that child is restarted (`MARKER_MAX_TASKS_PER_CHILD`). **The ceiling is per process and is inherited by children**: Marker's pdftext starts its own workers, each with its own full allowance, so a chunk's process tree can reach about `(1 + MARKER_PDFTEXT_WORKERS) x` this value. Size it as *pod memory budget / (1 + MARKER_PDFTEXT_WORKERS)*. Measure per deployment before enabling. |
 | `MARKER_CHUNK_SIZE` | int | 10 | Split large PDFs into chunks of this many pages for parallel processing across workers. Use <= 0 to deactivate chunking. |
 
 :::note[Page chunking with `MARKER_CHUNK_SIZE`]
@@ -179,10 +230,10 @@ The default OpenRAG transcriber stack now ships with **vLLM v0.19.1**, which inc
 
 | Variable               | Type | Default              | Description |
 |------------------------|------|----------------------|-------------|
-| `CHUNKER`              | `str`  | recursive_splitter   | Defines the chunking strategy: `recursive_splitter`. |
+| `CHUNKER`              | `str`  | structured_section   | Defines the chunking strategy: `structured_section` or `recursive_splitter`. |
 | `CONTEXTUAL_RETRIEVAL` | `bool` | true                 | Enables contextual retrieval to chunk context, a technique introduced by Anthropic to improve retrieval performance ([Contextual Retrieval](https://www.anthropic.com/news/contextual-retrieval)) |
-| `CHUNK_SIZE`           | `int`  | 512                  | Maximum size (in characters) of each chunk. |
-| `CHUNK_OVERLAP_RATE`   | `float`| 0.2                  | Percentage of overlap between consecutive chunks. |
+| `CHUNK_SIZE`           | `int`  | 512                  | Target size of each chunk, in **tokens** — counted with the LLM tokenizer (`tiktoken` `cl100k_base` when the LLM is unreachable), not in characters. |
+| `CHUNK_OVERLAP_RATE`   | `float`| 0.2                  | Fraction of `CHUNK_SIZE` replayed between consecutive chunks. Applies to `recursive_splitter` only — `structured_section` forces overlap to 0. |
 | `CONTEXTUALIZATION_TIMEOUT` | `int` | 120 | Timeout in seconds for individual chunk contextualization LLM calls. Prevents long-running contextualization tasks from blocking the system. |
 | `MAX_CONCURRENT_CONTEXTUALIZATION` | `int` | 10 | Maximum number of concurrent chunk contextualization tasks. Limits parallel LLM requests to prevent CPU exhaustion during batch indexing. |
 
@@ -191,16 +242,18 @@ After files are converted to Markdown, only the **text content** is chunked.
 
 **Chunker strategies:**
 
-* **`recursive_splitter`**: Uses hierarchical text structure (sections, paragraphs, sentences). Based on [RecursiveCharacterTextSplitter](https://docs.langchain.com/oss/python/integrations/splitters/index#text-structure-based), it preserves natural boundaries whenever possible while ensuring chunks never exceeding the `CHUNK_SIZE`.
+* **`structured_section`** *(default)*: Cuts on the document's own structure instead of on character separators. It detects headings (Markdown `#`, plus keyword headings such as `Titre` / `Chapitre` / `Section`) and leaf units (e.g. `Article L110-1`) by matching line content, keeps each leaf atomic, greedily packs consecutive short leaves up to `CHUNK_SIZE`, and prepends the heading path so every chunk is self-describing at retrieval time. Overlap is always 0 — leaves are atomic, so replaying a tail would only duplicate whole sections, and `CHUNK_OVERLAP_RATE` is therefore ignored by this strategy. Best for structured documents (legal codes, standards, reports, technical manuals).
+* **`recursive_splitter`**: Uses hierarchical text structure (sections, paragraphs, sentences). Based on [RecursiveCharacterTextSplitter](https://docs.langchain.com/oss/python/integrations/splitters/index#text-structure-based), it preserves natural boundaries whenever possible while ensuring chunks never exceed `CHUNK_SIZE`, and replays `CHUNK_OVERLAP_RATE` of each chunk into the next. Set `CHUNKER=recursive_splitter` for unstructured prose, or to reproduce the chunking of earlier OpenRAG releases.
 
 ### Embedding
 Our embedder is **OpenAI-compatible** and runs on a **VLLM** instance configured with the following variables:
 
 | Variable | Type | Default | Description  |
 |----------|------|---------|--------------|
-| `EMBEDDER_MODEL_NAME` | `str` | jinaai/jina-embeddings-v3 | HuggingFace Embedding model served by VLLM .i.e `Qwen/Qwen3-Embedding-0.6B` or `jinaai/jina-embeddings-v3`|
+| `EMBEDDER_MODEL_NAME` | `str` | Qwen/Qwen3-Embedding-0.6B | HuggingFace Embedding model served by VLLM .i.e `Qwen/Qwen3-Embedding-0.6B` or `jinaai/jina-embeddings-v3`. **Upgrading from 2.2.x under Docker Compose:** the default was `jinaai/jina-embeddings-v3`. If your `.env` does not set this variable, set it to the model your data was indexed with **before** upgrading, since changing the model needs a reindex. Without it the vLLM container serves Qwen while the saved endpoint still asks for jina: every embedding call fails and `/ready` reports `checks.embedder: unavailable`. `MODEL_ENDPOINT_SYNC_ON_BOOT=true` does not get around this: the sync refuses to move an endpoint that holds indexed files to another model and logs a warning. The legacy `EMBEDDING_MODEL`, when set, takes precedence over this variable. The Helm chart has defaulted to Qwen since before 2.2.x; there the embedder's model is `vllm.embedderModelName` together with the embedder entry of `vllm.servingEngineSpec.modelSpec`, which an override must restate in full.|
 | `EMBEDDER_BASE_URL` | `str` | http://vllm:8000/v1 | Base URL of the embedder (OpenAI-style).|
 | `EMBEDDER_API_KEY`  | `str` | EMPTY | API key for authenticating embedder calls.|
+| `EMBEDDER_EXTRA_ARGS` | `str` | (empty) | Extra `vllm serve` flags appended to the **bundled** vLLM embedder's command (`vllm-gpu` / `vllm-cpu` in `infra/compose/docker-compose.yaml`). They come after the built-in flags, so repeating one overrides it, e.g. `--gpu_memory_utilization 0.1`. |
 | `MAX_MODEL_LEN` | `int` | 2047 | Maximum context length (in tokens) supported by the embedding model. Chunks exceeding this limit are truncated (`truncate_prompt_tokens` = this value − 1). Keep it below the model's real context boundary. |
 | `EMBEDDER_TIMEOUT` | `float` | 120.0 | Per-request HTTP timeout (in seconds) for embedding calls. Raise it for slow remote endpoints. |
 | `EMBEDDER_BATCH_SIZE` | `int` | 32 | Number of chunks sent per embedding request; large documents are split into batches of this size. |
@@ -214,10 +267,11 @@ Model endpoints (embedder, LLM, VLM, reranker) are stored in a **database-backed
 
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
-| `MODEL_ENDPOINT_SYNC_ON_BOOT` | `bool` | `false` | When `true`, the endpoint each type was auto-seeded with is re-synced from the environment on **every** boot — its `endpoint`, `model_name` and `api_key` are refreshed from the `*_BASE_URL` / `*_MODEL` / `*_API_KEY` values, and `batch_size` / `timeout` follow only when their own env var is set. This lets operators manage that endpoint via env vars + a pod rollout (e.g. a Helm values change), including **changing the model** and **rotating the API key**. Any endpoint created by hand is left untouched. Keep it `false` (the default) to preserve the "database wins after first boot" behavior. |
+| `MODEL_ENDPOINT_SYNC_ON_BOOT` | `bool` | `false` | When `true`, the endpoint each type was auto-seeded with is re-synced from the environment on **every** boot — its `endpoint`, `model_name` and `api_key` are refreshed from the `*_BASE_URL` / `*_MODEL` / `*_API_KEY` values, and `batch_size` / `timeout` follow only when their own env var is set. This lets operators manage that endpoint via env vars + a pod rollout (e.g. a Helm values change), including **changing the model** and **rotating the API key**. Any endpoint created by hand is left untouched. Keep it `false` (the default) to preserve the "database wins after first boot" behavior. An embedder that already holds indexed files does not change model through the sync: the model change is refused and logged as a warning on every boot while env and the database disagree (`EMBEDDER_EDIT_AFFECTS_INDEXED_DATA`, as in the admin API), the row keeps its model, and its URL, API key and env-set tunables are still synced. A URL change alone syncs; if the new server serves another model, `/ready` reports `checks.embedder: unavailable`, except for an `infinity` or `tei` embedder, whose probe checks only `/health` and cannot see the model. To change the model of indexed data, use the admin API with `acknowledge_indexed_data=true`. While an embedder swap re-embeds a partition into that embedder, neither its URL nor its model is synced (`EMBEDDER_SWAP_IN_PROGRESS`, logged as a warning) and the rest of the row still is; restart once the swap ends to sync them. |
+| `READINESS_REQUIRE_EMBEDDER` | `bool` | `false` | When `true`, `/ready` returns 503 while the default embedder is `unavailable` or `unresolvable` (not on a probe timeout, nor when model discovery itself fails). Off by default because every replica shares the embedder: under Kubernetes its outage, or a restart while the model loads, takes every replica out of the Service at once, admin API and admin UI included. `checks.embedder` in the `/ready` body reports the embedder either way. Before enabling it, check that `/ready` reports `checks.embedder: ok` on your deployment: the probe needs the configured model name verbatim in the endpoint's `GET /models` list, so an embedder that works can still read `unavailable`, for example an Ollama model configured without its `:tag`, or an endpoint that has no `/models` route. |
 
 :::note[How the synced endpoint is identified]
-The seeder stamps the endpoint it creates as env-managed (a `managed_by` marker in the endpoint's `extra`), and boot-time sync finds it by that marker rather than by name. Changing the model in env therefore re-points that same endpoint instead of stranding it.
+The seeder stamps the endpoint it creates as env-managed (a `managed_by` marker in the endpoint's `extra`), and boot-time sync finds it by that marker rather than by name. Changing the model in env therefore re-points that same endpoint instead of stranding it, unless it is an embedder holding indexed files (see above).
 
 The endpoint's **name never changes** — partitions (`chat_llm`) and presets store endpoint names by value and nothing cascades a rename, so a renamed row would leave those references dangling. After a model change the endpoint keeps its original name while serving the new model.
 
@@ -289,7 +343,6 @@ For an opt-in named-volume profile, copy the values from `infra/compose/.env.nam
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `DATA_VOLUME` | `../../data` | OpenRAG uploaded files and app data mounted at `/app/data`. |
-| `LOG_VOLUME` | `../../logs` | OpenRAG logs mounted at `/app/logs`. |
 | `MODEL_WEIGHTS_VOLUME` | `~/.cache/huggingface` | Model cache mounted at `/app/model_weights`. |
 | `VLLM_CACHE` | `/root/.cache/huggingface` | Hugging Face cache used by vLLM, reranker, and transcriber services. |
 | `DB_VOLUME` | `../../db` | PostgreSQL data mounted at `/var/lib/postgresql/data`. |
@@ -319,7 +372,7 @@ These are external services to provide !!!
 | `LLM_ENABLE_THINKING` | bool | _(unset)_ | Optional chat-template control for models that support `enable_thinking`; leave unset for Mistral tokenizers, set `false` to suppress Qwen-style reasoning traces |
 | `LLM_SEMAPHORE` | int | 10 | Maximum number of concurrent requests to allow for the LLM service |
 | `LLM_OVERRIDE_ALLOW_CUSTOM_ENDPOINT` | bool | `false` | Honor a client-supplied `base_url`/`api_key` in `metadata.llm_override`. Off by default; read the trade-off below before enabling. |
-| `MAX_LLM_CONTEXT_SIZE` | `int` | `8192` | Fallback maximum token limit for chat/completion requests. At startup, the `/v1/models` endpoint is queried for the model's `max_model_len`; if that query fails this value is used instead. Requests whose total token count (prompt + `max_tokens`) exceeds the limit are rejected with a **413** error. |
+| `MAX_LLM_CONTEXT_SIZE` | `int` | `8192` | Fallback context window of the LLM answering a request. An LLM endpoint's own **Max context size** (Model Endpoints) wins; without one, the `max_model_len` the endpoint reports on `/v1/models` is used (vLLM reports it, most gateways and hosted APIs don't), and this value only when neither is known. The admin UI shows which one applies to each endpoint. Requests whose prompt (with the `tools` definitions and tool-call history a client sends) + `max_tokens` exceed the window are rejected with a **413** error, as are those the answer instructions push over it (`CONTEXT_WINDOW_EXCEEDED`, sent as an error event on a streaming request). The documents and web results given to the LLM are cut to fit what the window leaves, so a value smaller than the model's real window means the LLM gets fewer chunks than the retrieval preset's `top_n`. |
 | `MAX_OUTPUT_TOKENS` | `int` | `1024` | Default output-token budget (`max_tokens`) applied to chat completions when the request doesn't set one explicitly. |
 
 
@@ -411,11 +464,12 @@ The reranker enhances search quality by re-scoring and reordering retrieved docu
 | `RERANKER_ENABLED` | `bool` | true | Enable or disable the reranking mechanism |
 | `RERANKER_PROVIDER` | `str` | `infinity` | Reranker backend to use. Accepted values: `infinity`, `openai`, `tei` |
 | `RERANKER_MODEL` | `str` | Alibaba-NLP/gte-multilingual-reranker-base | Model used for reranking documents. Ignored by the `tei` provider (a TEI instance serves a single fixed model) |
-| `RERANKER_TOP_K` | `int` | 10 | Number of top documents to return after reranking. Increase for better results if your LLM has a wider context window |
+| `RERANKER_TOP_K` | `int` | 10 | Number of chunks kept after reranking and given to the LLM, for every retrieval preset that leaves `top_n` empty (a preset's own `top_n` overrides it), as many of them as fit in the answering LLM's context window (see `MAX_LLM_CONTEXT_SIZE`). Must be greater than 0. The retrieval presets an earlier release seeded store `top_n: 10` and keep it on upgrade: clear the field in the admin UI for them to follow this value. Increase for better results if your LLM has a wider context window |
 | `RERANKER_BASE_URL` | `str` | `http://reranker:7997` | Base URL of the reranker service |
 | `RERANKER_API_KEY` | `str` | `EMPTY` | API key for the reranker service, sent as a `Bearer` token when set. Whether a key is required depends on your endpoint |
 | `RERANKER_TIMEOUT` | `float` | 60.0 | HTTP timeout in seconds for reranker requests |
 | `RERANKER_SEMAPHORE` | `int` | 5 | Maximum number of concurrent reranking requests. Adjust based on your server capacity |
+| `RERANKER_EXTRA_ARGS` | `str` | (empty) | Extra `vllm serve` flags appended to the **bundled** vLLM reranker's command (`extern/reranker/openai.yaml`, `RERANKER_PROVIDER=openai`). `Alibaba-NLP/gte-multilingual-reranker-base` needs `--hf-overrides '{"architectures": ["GteNewForSequenceClassification"]}'`: vLLM doesn't recognise its `NewForSequenceClassification` architecture on its own. |
 | `RERANKER_PORT` | `int` | `7997` (infinity) / `8000` (openai) | Host port the **bundled** reranker service is published on. Only read by the compose includes (`extern/reranker/*.yaml`), and only once you uncomment their `ports:` mapping — by default the service is reachable over the Docker network only, so publishing it is just for host-side debugging or direct calls. |
 
 #### Reranker Providers
@@ -458,52 +512,38 @@ To customize prompt:
 | `PROMPTS_DIR` | str | (bundled `openrag/prompts/templates`) | Path to a directory of prompt templates. Unset uses the templates bundled in the package; set it only to override with a custom directory. |
 
 ### Logging
-Our application uses Loguru with custom formatting. Log messages appear in two places:
-- **Terminal (stderr)**: Human-readable formatted output
-- **Log file** (`logs/app.json`): JSON format for monitoring tools like Grafana. This file resides at the mounted folder `./logs` 
+OpenRAG logs with Loguru on the process **stderr**, and nowhere else. Docker
+and Kubernetes capture that stream; a collector ships it to Loki (see
+[Loki logs](/openrag/documentation/loki_logs/)). "stderr" is the
+conventional diagnostic channel, not an error level: an `INFO` line goes
+there too.
 
-#### Log Message Format
-Terminal output follows this format:
+| Variable | Type | Default | Description |
+|----------|------|---------|-------------|
+| `LOG_LEVEL` | `str` | `INFO` | Minimum level emitted. `DEBUG` logs user queries and other request data; keep it for short-lived troubleshooting. |
+| `LOG_FORMAT` | `text` \| `json` | `text` | `text` is the colorized human format below. `json` writes one flat JSON object per line, no colour, for log collectors; it also routes every library's stdlib logs through the same sink (the five named ones — `asyncio`, `httpcore`, `httpx`, `urllib3` and `openai` — capped at WARNING), so with a collector attached `LOG_LEVEL=DEBUG` is a troubleshooting setting, not a production one. |
+
+#### Text format
 ```bash title="Logging message in the terminal..."
 LEVEL    | module:function:line - message [context_key=value]
 ```
-#### Logging Levels & What They Mean
-There are several logging levels available (TRACE, DEBUG, INFO, SUCCESS, WARNING, ERROR, CRITICAL). Only the levels intended for use in this project are documented here.
 
+Since this release every request-scoped line ends with
+`[request_id=req_…]` in text mode too — the same correlation id the
+response carries in its `X-Request-ID` header.
+
+#### JSON format
+```json
+{"ts":"2026-09-07T14:03:12.481000+00:00","level":"INFO","logger":"api.routers.user.chat","function":"chat_completions","line":212,"msg":"Retrieved 8 documents","request_id":"req_7f3c…","partition":"docs"}
+```
+Reserved keys: `ts`, `level`, `logger`, `function`, `line`, `msg`, `exception` (only when a traceback is attached). Every field bound with `logger.bind()` is emitted at the top level; a bound field named like a reserved key is prefixed `extra_`.
+
+#### Logging levels
 | Level | What You'll See in Logs |
 |-------|-------------------------|
 | **WARNING** | Potential issues that don't stop execution: approaching rate limits, deprecated features used, retryable failures, configuration concerns. Review these periodically. |
 | **DEBUG** | Detailed diagnostic information including variable states, intermediate processing steps, and function entry/exit points. Useful during development and troubleshooting. |
 | **INFO** | Standard operational messages showing normal application behavior: server startup, request handling, major workflow stages. This is the typical production level. |
-
-#### Configuration
-Set the logging level via environment variable:
-
-```bash
-// .env
-# Show only warnings and errors
-LOG_LEVEL=WARNING
-
-# Show detailed debug information (use in dev and pre-prod)
-LOG_LEVEL=DEBUG
-
-# Production default (informational messages)
-LOG_LEVEL=INFO
-```
-
-#### Log File Features
-
-- **Rotation**: Files rotate automatically at 10 MB
-- **Retention**: Logs kept for 10 days
-- **Format**: JSON for easy parsing and ingestion into monitoring systems
-- **Async**: Queued writing (`enqueue=True`) prevents blocking operations
-
-:::tip[Reading Logs]
-- **In development**: Watch terminal output with DEBUG level
-- **In production**: Use INFO level and monitor the JSON log file
-- **For troubleshooting**: Temporarily switch to DEBUG or TRACE
-- **For monitoring**: Parse `logs/app.json` with your observability stack
-:::
 
 ### RAY
 Ray is used for distributed task processing and parallel execution in the RAG pipeline. This configuration controls **`resource allocation`**, **`concurrency limits`**, and **`serving options`**.
@@ -516,6 +556,7 @@ Ray is used for distributed task processing and parallel execution in the RAG pi
 | `RAY_MAX_TASKS_PER_WORKER` | `int` | 50 | Maximum number of files processed concurrently per indexer worker actor |
 | `RAY_DASHBOARD_PORT` | `int` | 8265 | Ray Dashboard port used for monitoring. In production, [comment out this line](https://github.com/linagora/openrag/blob/ee732ea8e080dcde0107d62d12703a7525f810cd/docker-compose.yaml#L21C1-L22C1) to avoid exposing the port, as it may introduce security vulnerabilities. |
 | `RAY_DASHBOARD_HOST` | `str` | `127.0.0.1` | Interface the **embedded** Ray dashboard binds to. Defaults to loopback because the Ray dashboard/job-submission API is **unauthenticated** ([CVE-2023-48022](https://nvd.nist.gov/vuln/detail/CVE-2023-48022)). Set to `0.0.0.0` only when the dashboard port is firewalled or sits behind an authenticating proxy. Ignored when `RAY_ADDRESS` is set. |
+| `RAY_METRICS_EXPORT_PORT` | `int` | (unset) | Port the **embedded** Ray's metrics agent listens on. Unset, Ray picks a random port, so the metrics recorded in Ray actors (indexing, and the inference calls the indexing workers make) are exported but no scrape config can reach them. The Compose monitoring overlay sets it to `8091` and scrapes it; the Helm chart sets it to `8090` on the `openrag` pod when `ray.enabled=false`. Applies under `ENABLE_RAY_SERVE=true` too. Under embedded Ray Serve with `WITH_CHAINLIT_UI`, Chainlit listens on `CHAINLIT_PORT` (default `8090`), so keep the two different. Unauthenticated and bound to every interface: never publish it on the host. Ignored when `RAY_ADDRESS` is set. |
 | `RAY_ADDRESS` | `str` | (unset) | When set, attach to an **external** Ray cluster at this address (e.g. `ray://HEAD_IP:10001`) instead of starting an embedded cluster in-process. In this mode the app does not start a local dashboard — the head node owns it. See [Ray Cluster deployment](/openrag/documentation/deploy_ray_cluster/). |
 
 :::danger[Attention]
@@ -524,7 +565,8 @@ The following environment variables control Ray's logging behavior, task retry s
 
 | Variable | Type | value | Description |
 |----------|------|---------|-------------|
-| `RAY_DEDUP_LOGS` | `number` | `0` | Turns off Ray log deduplication that appears across multiple processes. Set to `0` to see all logs from each process. |
+| `RAY_DEDUP_LOGS` | `number` | `0` | Turns off Ray log deduplication that appears across multiple processes. Set to `0` to see all logs from each process. Required (`0`) with `LOG_FORMAT=json`: the deduplicated survivor is rewritten as `{…} [repeated 2x across cluster]`, which is no longer JSON. The logging overlay and the Helm chart set it. |
+| `RAY_COLOR_PREFIX` | `number` | `0` | Turns off the ANSI colorization of Ray's `(Actor pid=N)` relay prefix, which is applied even when the output is a pipe. Required (`0`) with `LOG_FORMAT=json`, or every relayed worker line reaches the collector prefixed with escape sequences and fails to parse as JSON. |
 | `RAY_ENABLE_RECORD_ACTOR_TASK_LOGGING` | `number` | `1` | Enables logs at task level in the Ray dashboard for better debugging and monitoring. |
 | `RAY_task_retry_delay_ms` | `number` | `3000` | Delay (in milliseconds) before retrying a failed task. Controls the wait time between retry attempts. |
 | `RAY_ENABLE_UV_RUN_RUNTIME_ENV` | `number` | `0` | Controls UV runtime environment integration. **Critical**: Must be set to `0` when using the newest version of UV to avoid compatibility issues. |
@@ -641,6 +683,9 @@ The following environment variables configure the FastAPI server and control acc
 | `SUPER_ADMIN_MODE` | `boolean` | `false` | Enables super admin privileges when set to `true`, [granting unrestricted access](/openrag/documentation/data_model/#access-control) to all operations and bypassing standard access controls. This is for debugging |
 | `DEFAULT_FILE_QUOTA` | `int` | `-1` | Default per-user file quota. `<0` disables quotas globally; `>=0` sets the default limit when a user has no explicit quota. |
 | `PREFERRED_URL_SCHEME` | `string` | `null` | URL scheme (`http` or `https`) used when generating URLs in API responses (e.g., `task_status_url`). When running behind a reverse proxy that terminates SSL, set this to `https` to ensure generated URLs use the correct scheme. If unset, the scheme from the incoming request is used. |
+| `METRICS_TOKEN` | `string` | unset | Bearer a Prometheus scraper must send on `GET /metrics`. The route bypasses the auth middleware and admin tokens are not accepted there. It fails closed: with the token unset and `METRICS_ALLOW_UNAUTHENTICATED` off, every scrape gets `403`. The compose monitoring overlay forwards this value to its Prometheus. See [Prometheus metrics](/openrag/documentation/prometheus_metrics/). |
+| `METRICS_ALLOW_UNAUTHENTICATED` | `boolean` | `false` | Serve `GET /metrics` to anyone who can reach the API port when `METRICS_TOKEN` is unset. Only for deployments that block `/metrics` at the edge and scrape from inside the network; a configured token always wins. |
+| `ASSISTANT_NAME` | `string` | empty | Name used in the assistant's greeting. Leave unset for a neutral introduction; set it for a white-label deployment. |
 | `CORS_EXTRA_ORIGINS` | `string` | _(unset)_ | Semicolon-separated list of additional origins allowed by CORS (e.g. `https://app.example.com;https://other.example.com`). Extends the default list without replacing it. |
 | `UVICORN_FORWARDED_ALLOW_IPS` | `string` | `127.0.0.1` | Comma-separated CIDRs/IPs (or `*`) whose `X-Forwarded-*` headers uvicorn trusts. **Required when OpenRAG runs behind a reverse proxy that lives outside loopback** (typical docker-compose / k8s — including the bundled admin-ui proxy). Otherwise `X-Forwarded-Proto` is dropped and OIDC cookies ship with `Secure=False` even over HTTPS, and `X-Forwarded-For` is dropped so per-user rate limits collapse onto the proxy's single IP. **Set this to your proxy's subnet, not `*`** — see the proxy-trust caution under [Rate Limiting](#rate-limiting) for why `*` can be spoofed. |
 | `MAX_UPLOAD_SIZE_MB` | `int` | `1024` | Maximum accepted upload size, in MB. `0` or a negative value means unlimited. |
@@ -656,16 +701,17 @@ Always set a strong **`AUTH_TOKEN`** in production environments. Never leave it 
 
 ### Rate Limiting
 
-Per-identity request rate limiting, tiered by path prefix. Requests are keyed on the authenticated user id, falling back to the client IP for unauthenticated paths (`/auth/*`). **Admin users bypass rate limiting entirely.** Limits use a moving window and are enforced **per worker/replica** — front OpenRAG with shared storage (e.g. Redis) if you scale out and need a global budget. Exceeding a limit returns **429** with a `Retry-After` header.
+Per-identity request rate limiting, tiered by path prefix. Requests are keyed on the authenticated user id, falling back to the client IP for unauthenticated paths (`/auth/*`). Admin users bypass the general tiers, but retrieval diagnostics have their own administrator limit. Limits use a moving window and are enforced **per worker/replica** — front OpenRAG with shared storage (e.g. Redis) if you scale out and need a global budget. Exceeding a limit returns **429** with a `Retry-After` header.
 
 Limit values use the `<count>/<period>` format from the [`limits`](https://limits.readthedocs.io/) library (e.g. `120/minute`, `10/second`).
 
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
-| `RATE_LIMIT_ENABLED` | `bool` | `true` | Master switch for request rate limiting. When `false`, no limits are applied and malformed limit values are ignored. |
+| `RATE_LIMIT_ENABLED` | `bool` | `true` | Master switch for the general path-based limits. When `false`, those limits are not applied and malformed `RATE_LIMIT_*` values are ignored. The separate administrator retrieval-diagnostics limit remains active. |
 | `RATE_LIMIT_DEFAULT` | `str` | `600/minute` | Limit applied to every path except the tiers below. |
 | `RATE_LIMIT_AUTH` | `str` | `60/minute` | Limit for `/auth/*` (login/callback/logout). Keyed on client IP because callers are unauthenticated there — keep it high enough that a shared corporate/NAT egress IP does not throttle a legitimate login rush. |
 | `RATE_LIMIT_CHAT` | `str` | `120/minute` | Limit for `/v1/*` (chat completions, tools). |
+| `RETRIEVAL_DIAGNOSTICS_RATE_LIMIT` | `str` | `120/minute` | Separate per-administrator limit for retrieval traces, original-query comparisons, and retrieval snapshots. This limit applies even though administrators bypass the general tiers. It is enforced per API process, so the deployment-wide capacity scales with the number of replicas. |
 | `RATE_LIMIT_AUTH_FAILURE` | `str` | `RATE_LIMIT_AUTH`, else `20/minute` | Separate, stricter budget for **failed** authentication attempts, keyed by client IP (brute-force protection). Falls back to `RATE_LIMIT_AUTH` when unset, then to `20/minute`. Disabled together with `RATE_LIMIT_ENABLED=false`. |
 | `RATE_LIMIT_EXEMPT_PATHS` | `str` | `/chainlit/,/assets/` | Comma-separated path prefixes the limiter skips, matched with `startswith`. These are auth-bypassed (Chainlit does its own header auth), so requests there carry no user and can only be keyed by IP. Chainlit's Socket.IO transport also issues one HTTP request per packet when it long-polls. Keep the trailing slash so a sibling like `/chainlithack` stays rate-limited rather than being swept into the `/chainlit` exemption. Set-but-empty (`RATE_LIMIT_EXEMPT_PATHS=`) removes all exemptions; `/auth/*` is never exempt. |
 
@@ -711,9 +757,10 @@ flowchart TD
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
 | `ADMIN_UI_PORT` | `number` | `8081` | Host port the admin UI (nginx) is published on. Serves `/app/` and reverse-proxies `/auth`, `/v1`, `/chainlit`, … to the backend, so it is the OIDC front door (`OIDC_REDIRECT_URI` targets this port). Deploy-time (not a `VITE_*` build arg). |
+| `GRAFANA_URL` | `string` | `""` | Runtime, browser-reachable URL for the Grafana dashboard opened from **System → Metrics**. Restart the API after changing it. When this is empty or invalid, the action explains how to configure the dashboard instead of opening it. |
 | `VITE_API_BASE_URL` | `string` | `""` (same-origin) | API base baked into the SPA. **Empty (default) = same-origin**: nginx reverse-proxies the API over the Docker network, so the UI works on any host/IP with no CORS. Set to an absolute URL only for a browser-direct build — then list the UI's origin in `CORS_EXTRA_ORIGINS`. |
 | `VITE_BASE_PATH` | `string` | `/app/` | Sub-path the SPA is served under; must match the nginx `location`. |
-| `VITE_GRAFANA_URL` | `string` | `""` | Optional Grafana dashboard link shown on the admin **System** page. |
+| `VITE_GRAFANA_URL` | `string` | `""` | Build-time fallback for deployments whose API does not expose `GRAFANA_URL`. New deployments should use the runtime setting instead. |
 | `VITE_APP_NAME` | `string` | `OpenRAG` | Application display name used in the UI branding. |
 | `VITE_MOCK_API` | `boolean` | `false` | Development only — serves in-browser MSW API mocks when `true`. Ignored in production builds. |
 
@@ -747,7 +794,7 @@ OpenRAG ships a standalone [Model Context Protocol](https://modelcontextprotocol
 
 #### Model-endpoint seed overrides (legacy aliases)
 
-On first startup, OpenRAG seeds its model-endpoint catalog from the canonical variables documented above. The following **legacy aliases** are still read at seed time for backward compatibility and, when set, take precedence over their canonical counterpart **during that initial seeding only**. Prefer the canonical variables in new deployments — do not set both.
+On first startup, OpenRAG seeds its model-endpoint catalog from the canonical variables documented above. The following **legacy aliases** are still read at seed time for backward compatibility and, when set, take precedence over their canonical counterpart, at that initial seeding and, with `MODEL_ENDPOINT_SYNC_ON_BOOT=true`, at every boot's sync. Prefer the canonical variables in new deployments — do not set both.
 
 | Legacy alias | Falls back to (canonical) |
 |--------------|---------------------------|
@@ -769,7 +816,6 @@ Deployment-level knobs; most deployments never need to touch these — the compo
 | `OPENRAG_CONF_DIR` | `str` | bundled `conf/` | Directory containing `config.yaml`. Override to run against a custom configuration tree. |
 | `DATA_DIR` | `str` | `/app/data` (container) | Where uploaded files and app data are stored. In compose, relocate it via `DATA_VOLUME` rather than this variable. |
 | `DB_DIR` | `str` | `/app/db` | Local database directory. |
-| `LOG_DIR` | `str` | `/app/logs` | Log directory. In compose, relocate it via `LOG_VOLUME` rather than this variable. |
 | `OPENRAG_CONTAINER_STARTUP_TIMEOUT` | `float` | `max(60, 4 × POSTGRES_COMMAND_TIMEOUT)` (= 120 with defaults) | Seconds the API's service container (DB pools, Ray actors, …) is allowed to initialize at startup before the app fails fast. |
 | `OPENRAG_BANNER` | `bool` | `true` | Set to `false` to suppress the ASCII startup banner. Its colors also auto-disable under the standard `NO_COLOR` / `TERM=dumb` conventions. |
 | `UVICORN_RELOAD` | `bool` | `false` | Development only — starts uvicorn with `--reload` (auto-restart on code changes). Also forces a single worker. Never enable in production. |
@@ -782,3 +828,5 @@ Read only by the opt-in monitoring compose file (`infra/compose/monitoring.docke
 |----------|------|---------|-------------|
 | `GRAFANA_ADMIN_USER` | `str` | `admin` | Grafana admin username. |
 | `GRAFANA_ADMIN_PASSWORD` | `str` | _(required)_ | Grafana admin password — compose refuses to start the monitoring profile if unset. |
+| `GF_SERVER_ROOT_URL` | `str` | `http://localhost:3000` | Browser-facing Grafana root URL. Set this to the admin UI's `/grafana/` URL when using its proxy. |
+| `GF_SERVER_SERVE_FROM_SUB_PATH` | `bool` | `false` | Set to `true` when `GF_SERVER_ROOT_URL` includes the `/grafana/` subpath. |

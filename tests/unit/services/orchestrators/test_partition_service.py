@@ -18,14 +18,26 @@ from services.orchestrators.partition_service import PartitionService
 
 
 class FakePartitionRepo:
-    def __init__(self, existing: set[str] | None = None, *, owned_count: int = 0):
+    def __init__(
+        self,
+        existing: set[str] | None = None,
+        *,
+        owned_count: int = 0,
+        embedders: dict[str, str] | None = None,
+    ):
         self._existing = existing if existing is not None else set()
         self._owned_count = owned_count
+        self._embedders = embedders or {}
         self.created: list[tuple[str, int]] = []
         self.deleted: list[str] = []
 
     async def partition_exists(self, name: str) -> bool:
         return name in self._existing
+
+    async def get_partition_row(self, name: str) -> dict | None:
+        if name not in self._existing:
+            return None
+        return {"partition": name, "embedder": self._embedders.get(name, "default")}
 
     async def list_partitions(self) -> list[dict]:
         return [{"partition": p} for p in sorted(self._existing)]
@@ -205,15 +217,26 @@ class FakeMembershipRepo:
 
 
 class FakeDocumentRepo:
-    def __init__(self, files: set[tuple[str, str]] | None = None, listing: dict | None = None):
+    def __init__(
+        self,
+        files: set[tuple[str, str]] | None = None,
+        listing: dict | None = None,
+        metadata: dict | None = None,
+    ):
         self._files = files or set()
         self._listing = listing if listing is not None else {}
+        self._metadata = metadata
+        self.list_calls: list[dict] = []
 
     async def file_exists_in_partition(self, file_id: str, partition: str) -> bool:
         return (file_id, partition) in self._files
 
-    async def list_partition_files(self, partition: str, limit=None) -> dict:
+    async def list_partition_files(self, partition: str, limit=None, degraded_stage=None) -> dict:
+        self.list_calls.append({"partition": partition, "limit": limit, "degraded_stage": degraded_stage})
         return self._listing
+
+    async def get_file_metadata(self, file_id: str, partition: str) -> dict | None:
+        return self._metadata
 
     async def get_files_by_relationship(self, partition: str, relationship_id: str) -> list[dict]:
         return [{"file_id": "a", "relationship_id": relationship_id}]
@@ -498,6 +521,7 @@ async def test_create_partition_with_config_inside_indexing_admission_keeps_db_w
     config = SimpleNamespace(partitions={})
     svc = _svc(prepo=prepo, config=config)
     svc._validate_preset_refs = lambda row: None
+    svc._validate_embedder_ref = lambda name: None
     svc.resolve_partition_row = lambda row: f"resolved-{row['partition']}"
 
     async with svc.indexing_admission("p1") as existed:
@@ -794,6 +818,35 @@ async def test_list_files_empty_listing_returns_empty_list():
 
 
 @pytest.mark.asyncio
+async def test_list_files_pushes_degraded_stage_filter_to_catalog() -> None:
+    repo = FakeDocumentRepo(listing={"files": [{"file_id": "f1", "degraded_stages": ["caption"]}]})
+    svc = _svc(prepo=FakePartitionRepo({"p"}), drepo=repo)
+
+    files = await svc.list_files("p", limit=20, degraded_stage="caption")
+
+    assert files == [{"file_id": "f1", "degraded_stages": ["caption"]}]
+    assert repo.list_calls == [{"partition": "p", "limit": 20, "degraded_stage": "caption"}]
+
+
+@pytest.mark.asyncio
+async def test_get_file_metadata_reads_the_authoritative_catalog_row() -> None:
+    metadata = {"filename": "catalog.pdf", "degraded_stages": ["caption"]}
+    svc = _svc(drepo=FakeDocumentRepo(files={("f", "p")}, metadata=metadata))
+
+    assert await svc.get_file_metadata("p", "f") == metadata
+
+
+@pytest.mark.asyncio
+async def test_get_file_metadata_rejects_a_missing_catalog_row() -> None:
+    svc = _svc(drepo=FakeDocumentRepo(metadata=None))
+
+    with pytest.raises(NotFoundError) as exc_info:
+        await svc.get_file_metadata("p", "missing")
+
+    assert exc_info.value.status_code == 404
+
+
+@pytest.mark.asyncio
 async def test_get_file_chunks_missing_file_404():
     svc = _svc(drepo=FakeDocumentRepo(files=set()))
     with pytest.raises(NotFoundError) as ei:
@@ -844,12 +897,53 @@ async def test_list_all_chunks_excludes_vector_when_no_embedding():
     assert "_openrag_indexing_task_id" not in out[0]["metadata"]
 
 
+def _embedder_config(**fields: str | None):
+    """A config whose embedder endpoints own the given dense fields."""
+    return SimpleNamespace(
+        models=SimpleNamespace(embedder={name: SimpleNamespace(vector_field=field) for name, field in fields.items()})
+    )
+
+
 @pytest.mark.asyncio
 async def test_list_all_chunks_stringifies_vector_when_included():
-    rows = [{"text": "t", "_id": "1", "partition": "p", "vector": [0.1, 0.2]}]
-    svc = _svc(prepo=FakePartitionRepo({"p"}), vstore=FakeVectorStore(rows=rows))
+    rows = [{"text": "t", "_id": "1", "partition": "p", "vector_e5": [0.1, 0.2]}]
+    svc = _svc(
+        prepo=FakePartitionRepo({"p"}, embedders={"p": "e5"}),
+        vstore=FakeVectorStore(rows=rows),
+        config=_embedder_config(e5="vector_e5"),
+    )
     out = await svc.list_all_chunks("p", include_embedding=True)
     assert isinstance(out[0]["metadata"]["vector"], str)
+
+
+@pytest.mark.asyncio
+async def test_list_all_chunks_exports_the_partitions_own_vector_not_a_leftover():
+    """A swap leaves the old embedder's vector in place, so rows carry two."""
+    rows = [{"text": "t", "_id": "1", "partition": "p", "vector_old": [9.0], "vector_e5": [0.1, 0.2]}]
+    svc = _svc(
+        prepo=FakePartitionRepo({"p"}, embedders={"p": "e5"}),
+        vstore=FakeVectorStore(rows=rows),
+        config=_embedder_config(e5="vector_e5", old="vector_old"),
+    )
+
+    out = await svc.list_all_chunks("p", include_embedding=True)
+
+    assert out[0]["metadata"]["vector"] == str([0.1, 0.2])
+
+
+@pytest.mark.asyncio
+async def test_list_all_chunks_omits_the_vector_when_the_field_is_unresolvable():
+    """Better no embedding than one from a field nothing searches."""
+    rows = [{"text": "t", "_id": "1", "partition": "p", "vector_e5": [0.1, 0.2]}]
+    svc = _svc(
+        prepo=FakePartitionRepo({"p"}, embedders={"p": "gone"}),
+        vstore=FakeVectorStore(rows=rows),
+        config=_embedder_config(e5="vector_e5"),
+    )
+
+    out = await svc.list_all_chunks("p", include_embedding=True)
+
+    assert "vector" not in out[0]["metadata"]
 
 
 async def test_list_all_chunks_without_file_id_filters_partition_only():

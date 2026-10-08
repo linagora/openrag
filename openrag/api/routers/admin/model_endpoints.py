@@ -8,9 +8,16 @@ delegated to the service resolved from the DI container.
 from datetime import UTC, datetime
 
 from api.dependencies.auth import require_admin
-from api.routers.user.chat import invalidate_max_model_tokens, prime_max_model_tokens
+from api.routers.user.chat import (
+    invalidate_max_model_tokens,
+    max_model_tokens_probe_pending,
+    prime_max_model_tokens,
+    probed_max_model_tokens,
+)
 from api.schemas.admin.model_endpoint_schemas import (
     CreateModelEndpointRequest,
+    IndexedFileUsageResponse,
+    IndexedPartitionUsage,
     ModelEndpointResponse,
     ModelEndpointType,
     RevealApiKeyResponse,
@@ -23,7 +30,7 @@ from api.schemas.admin.model_endpoint_schemas import (
 from core.config.model_endpoints import ModelEndpointRow
 from core.utils.exceptions import ValidationError
 from core.utils.logging import get_logger
-from di.providers import get_model_endpoint_service
+from di.providers import get_config, get_model_endpoint_service
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Response, status
 
 router = APIRouter(dependencies=[Depends(require_admin)])
@@ -83,6 +90,24 @@ def _refresh_llm_token_cache(background_tasks: BackgroundTasks, model_type: str)
     background_tasks.add_task(_reprime_llm_token_cache, model_type)
 
 
+def _with_llm_token_budgets(endpoint: dict, config) -> dict:
+    """*endpoint* plus what its blank token budgets resolve to (LLM endpoints only).
+
+    The same order ``get_max_model_tokens`` applies when a request is answered:
+    the admin-set value (already in ``extra``), else the ``max_model_len`` the
+    endpoint reported, else the global ``llm_context`` fallback.
+    """
+    if endpoint.get("model_type") != "llm":
+        return endpoint
+    return {
+        **endpoint,
+        "detected_max_llm_context_size": probed_max_model_tokens(endpoint["name"]),
+        "context_size_detection_pending": max_model_tokens_probe_pending(),
+        "default_max_llm_context_size": int(config.llm_context.max_llm_context_size),
+        "default_max_output_tokens": int(config.llm_context.max_output_tokens),
+    }
+
+
 def _reject_non_llm_token_budgets(model_type: str, extra: dict | None) -> None:
     """Apply the LLM token-budget rules to *extra*, but only for LLM endpoints.
 
@@ -129,22 +154,24 @@ async def create_model_endpoint(
     body: CreateModelEndpointRequest,
     background_tasks: BackgroundTasks,
     service=Depends(get_model_endpoint_service),
+    config=Depends(get_config),
 ):
     """Register a named inference endpoint."""
     now = datetime.now(UTC)
     row = ModelEndpointRow(**body.model_dump(), created_at=now, updated_at=now)
     result = await service.create_model_endpoint(row)
     _refresh_llm_token_cache(background_tasks, body.model_type)
-    return result
+    return _with_llm_token_budgets(await service.with_partition_usage(result), config)
 
 
 @router.get("/", response_model=list[ModelEndpointResponse])
 async def list_model_endpoints(
     model_type: ModelEndpointType | None = None,
     service=Depends(get_model_endpoint_service),
+    config=Depends(get_config),
 ):
     """List registered inference endpoints, optionally filtered by type."""
-    return await service.list_model_endpoints(model_type=model_type)
+    return [_with_llm_token_budgets(e, config) for e in await service.list_model_endpoints(model_type=model_type)]
 
 
 @router.get("/{model_type}/{name}", response_model=ModelEndpointResponse)
@@ -152,9 +179,33 @@ async def get_model_endpoint(
     model_type: ModelEndpointType,
     name: str,
     service=Depends(get_model_endpoint_service),
+    config=Depends(get_config),
 ):
     """Return one registered inference endpoint."""
-    return await service.get_model_endpoint(name=name, model_type=model_type)
+    endpoint = await service.with_partition_usage(await service.get_model_endpoint(name=name, model_type=model_type))
+    return _with_llm_token_budgets(endpoint, config)
+
+
+@router.get("/{model_type}/{name}/indexed-usage", response_model=IndexedFileUsageResponse)
+async def get_model_endpoint_indexed_usage(
+    model_type: ModelEndpointType,
+    name: str,
+    service=Depends(get_model_endpoint_service),
+):
+    """How many already-indexed files ride on this endpoint, per partition.
+
+    Read-only: it sizes what an in-place edit of the endpoint's URL or model
+    would strand, so a confirmation can state a real number rather than warn in
+    the abstract (#762 C). Meaningful for embedders — a repointed reranker or
+    LLM changes no stored vector — so other types answer empty.
+    """
+    if model_type != "embedder":
+        return IndexedFileUsageResponse()
+    rows = await service.indexed_file_usage(name=name, model_type=model_type)
+    return IndexedFileUsageResponse(
+        partitions=[IndexedPartitionUsage(**row) for row in rows],
+        total_files=sum(row["file_count"] for row in rows),
+    )
 
 
 @router.put("/{model_type}/{name}", response_model=ModelEndpointResponse)
@@ -164,9 +215,18 @@ async def update_model_endpoint(
     body: UpdateModelEndpointRequest,
     background_tasks: BackgroundTasks,
     service=Depends(get_model_endpoint_service),
+    config=Depends(get_config),
 ):
-    """Update a registered inference endpoint."""
+    """Update a registered inference endpoint.
+
+    Returns 409 ``EMBEDDER_EDIT_AFFECTS_INDEXED_DATA`` when an embedder's URL,
+    model, ``implementation`` or ``max_model_len`` changes while partitions hold
+    files indexed with it, unless ``acknowledge_indexed_data`` is true. The same
+    change on the target of a running embedder swap returns 409
+    ``EMBEDDER_SWAP_IN_PROGRESS``, acknowledged or not.
+    """
     fields = body.model_dump(exclude_unset=True)
+    acknowledge_indexed_data = bool(fields.pop("acknowledge_indexed_data", False))
     _reject_non_llm_token_budgets(model_type, fields.get("extra"))
     await _reject_invalid_stt_fields(model_type, name, fields, service)
     if "name" in fields:
@@ -174,10 +234,11 @@ async def update_model_endpoint(
     result = await service.update_model_endpoint(
         name=name,
         model_type=model_type,
+        acknowledge_indexed_data=acknowledge_indexed_data,
         **fields,
     )
     _refresh_llm_token_cache(background_tasks, model_type)
-    return result
+    return _with_llm_token_budgets(await service.with_partition_usage(result), config)
 
 
 @router.delete("/{model_type}/{name}", status_code=status.HTTP_204_NO_CONTENT)
@@ -187,7 +248,15 @@ async def delete_model_endpoint(
     background_tasks: BackgroundTasks,
     service=Depends(get_model_endpoint_service),
 ):
-    """Delete a registered inference endpoint."""
+    """Delete a registered inference endpoint.
+
+    Returns 409 if a partition still names this embedder, or — when it is the
+    default — a partition following the `default` alias already holds indexed
+    files; reassign those partitions first. Empty partitions on the alias just
+    follow the promoted default.
+    An LLM endpoint deletes regardless; partitions naming it as `chat_llm` are
+    reset to the default LLM they would have fallen back to anyway.
+    """
     await service.delete_model_endpoint(name=name, model_type=model_type)
     _refresh_llm_token_cache(background_tasks, model_type)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
@@ -199,11 +268,19 @@ async def set_default_model_endpoint(
     name: str,
     background_tasks: BackgroundTasks,
     service=Depends(get_model_endpoint_service),
+    config=Depends(get_config),
 ):
-    """Promote a registered endpoint to the default for its type."""
+    """Promote a registered endpoint to the default for its type.
+
+    For embedders, partitions following the ``default`` alias that already hold
+    indexed files stay on the outgoing default (their embedder is written down
+    by name); only partitions that have never received data move to the new
+    one.
+    """
     await service.set_default(model_type=model_type, name=name)
     _refresh_llm_token_cache(background_tasks, model_type)
-    return await service.get_model_endpoint(name=name, model_type=model_type)
+    endpoint = await service.with_partition_usage(await service.get_model_endpoint(name=name, model_type=model_type))
+    return _with_llm_token_budgets(endpoint, config)
 
 
 @router.post("/{model_type}/{name}/reveal-api-key", response_model=RevealApiKeyResponse)
@@ -252,7 +329,7 @@ async def validate_endpoint_draft(
         model_name=body.model_name,
         api_key=api_key,
         timeout=body.timeout,
-        extra=body.extra if body.model_type == "stt" else None,
+        extra=body.extra or None,
     )
 
 
@@ -264,11 +341,16 @@ async def validate_model_endpoint(
 ):
     """Probe a registered endpoint for reachability and model capabilities."""
     endpoint = await service.get_model_endpoint(name=name, model_type=model_type)
+    validation_extra = (
+        endpoint.extra
+        if model_type == "stt"
+        else {key: value for key, value in endpoint.extra.items() if key != "api_key"}
+    )
     return await service.validate_endpoint(
         url=endpoint.endpoint,
         model_type=model_type,
         model_name=endpoint.model_name,
         api_key=endpoint.extra.get("api_key"),
         timeout=endpoint.timeout,
-        extra=endpoint.extra if model_type == "stt" else None,
+        extra=validation_extra or None,
     )

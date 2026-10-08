@@ -5,6 +5,7 @@ default secret.
 
 import importlib
 import sys
+from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -37,6 +38,89 @@ def _stub_chainlit_elements(module):
         Video=lambda **kwargs: SimpleNamespace(**kwargs),
         Audio=lambda **kwargs: SimpleNamespace(**kwargs),
     )
+
+
+@pytest.mark.asyncio
+async def test_chainlit_forwards_the_complete_message_to_the_shared_streaming_chat_policy(monkeypatch):
+    module = _load_app_front(monkeypatch, auth_mode="token", module_name="app_front_shared_chat_policy_test")
+    captured_request = {}
+    formatted_sources = None
+
+    class UserSession:
+        def __init__(self):
+            self.values = {"messages": [], "chat_profile": "openrag-scifact"}
+
+        def get(self, key, default=None):
+            return self.values.get(key, default)
+
+        def set(self, key, value):
+            self.values[key] = value
+
+    class Step:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+    class Message:
+        def __init__(self, content="", **_kwargs):
+            self.content = content
+            self.elements = []
+
+        async def send(self):
+            return None
+
+        async def update(self):
+            return None
+
+        async def stream_token(self, token):
+            self.content += token
+
+    class Stream:
+        sent = False
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            if self.sent:
+                raise StopAsyncIteration
+            self.sent = True
+            return SimpleNamespace(
+                extra={"sources": [{"filename": "irrelevant.txt"}], "cited_sources": []},
+                choices=[],
+            )
+
+    class Completions:
+        async def create(self, **kwargs):
+            captured_request.update(deepcopy(kwargs))
+            return Stream()
+
+    class FakeAsyncOpenAI:
+        def __init__(self, **_kwargs):
+            self.chat = SimpleNamespace(completions=Completions())
+
+    async def capture_sources(sources, **_kwargs):
+        nonlocal formatted_sources
+        formatted_sources = sources
+        return [], []
+
+    module.cl = SimpleNamespace(user_session=UserSession(), Step=Step, Message=Message)
+    monkeypatch.setattr(module, "AsyncOpenAI", FakeAsyncOpenAI)
+    monkeypatch.setattr(module, "_format_sources", capture_sources)
+
+    claim = "Albendazole is used to treat lymphatic filariasis."
+    await module.on_message(SimpleNamespace(content=claim, command=None))
+
+    assert captured_request["model"] == "openrag-scifact"
+    assert captured_request["stream"] is True
+    assert captured_request["messages"][-1] == {"role": "user", "content": claim}
+    assert "require_retrieval" not in captured_request["metadata"]
+    assert formatted_sources == []
 
 
 def test_no_hardcoded_default_secret_assignment_in_source():
@@ -492,6 +576,52 @@ async def test_chainlit_keeps_page_less_pdf_sources(monkeypatch):
     assert source_names == ["report_ draft .pdf"]
     assert source_names == [element.name for element in elements]
     assert elements[0].page is None
+
+
+@pytest.mark.asyncio
+async def test_chainlit_reads_chunk_fields_from_the_nested_shape(monkeypatch):
+    """Source entries nest the chunk's metadata under `chunk`; `file_url` and
+    `chunk_url` stay authoritative at the top level."""
+    module = _load_app_front(monkeypatch, auth_mode="token", module_name="app_front_nested_chunk_test")
+    monkeypatch.setattr(module, "get_external_url", lambda: "https://openrag.example")
+    _stub_chainlit_elements(module)
+
+    elements, source_names = await module._format_sources(
+        [
+            {
+                "source_type": "document",
+                "chunk": {"filename": "report.pdf", "page": 4},
+                "rerank_score": 0.64,
+                "file_url": "https://openrag.example/static/pdf-id",
+            }
+        ]
+    )
+
+    assert source_names == ["report.pdf (page: 4)"]
+    assert elements[0].page == 4
+
+
+@pytest.mark.asyncio
+async def test_chainlit_still_reads_the_flat_pre_nesting_shape(monkeypatch):
+    """A server from before the nesting spreads those fields across the entry.
+    The UI has to render both so a rolling deploy in either direction works."""
+    module = _load_app_front(monkeypatch, auth_mode="token", module_name="app_front_flat_chunk_test")
+    monkeypatch.setattr(module, "get_external_url", lambda: "https://openrag.example")
+    _stub_chainlit_elements(module)
+
+    elements, source_names = await module._format_sources(
+        [
+            {
+                "source_type": "document",
+                "filename": "report.pdf",
+                "page": 4,
+                "file_url": "https://openrag.example/static/pdf-id",
+            }
+        ]
+    )
+
+    assert source_names == ["report.pdf (page: 4)"]
+    assert elements[0].page == 4
 
 
 @pytest.mark.asyncio

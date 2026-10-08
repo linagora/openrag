@@ -250,6 +250,9 @@ class TestCatalogStoreWiring:
             seed_default_partition=lambda: _async_call(calls, "partition.seed"),
             load_partitions=lambda: _async_call(calls, "partition.load"),
         )
+        c._embedder_swap_service = SimpleNamespace(
+            watch=lambda: _async_call(calls, "swaps.watch"),
+        )
 
         await c.initialize()
 
@@ -263,6 +266,7 @@ class TestCatalogStoreWiring:
             "prompt.seed",
             "partition.seed",
             "partition.load",
+            "swaps.watch",
         ]
 
 
@@ -344,8 +348,10 @@ _ORCHESTRATORS = [
     ("auth_service", "get_auth_service"),
     ("user_service", "get_user_service"),
     ("partition_service", "get_partition_service"),
+    ("embedder_swap_service", "get_embedder_swap_service"),
     ("workspace_service", "get_workspace_service"),
     ("retrieval_service", "get_retrieval_service"),
+    ("retrieval_snapshot_service", "get_retrieval_snapshot_service"),
     ("query_service", "get_query_service"),
     ("indexing_service", "get_indexing_service"),
     ("job_service", "get_job_service"),
@@ -358,6 +364,52 @@ _OPTIONAL_PHASE_PROVIDERS = {"get_model_endpoint_service", "get_preset_service",
 
 class TestPhase8OrchestratorWiring:
     """8F: all orchestrators wired consistently (container + providers)."""
+
+    async def test_default_and_named_searchers_filter_deleted_documents(self, monkeypatch):
+        from unittest.mock import AsyncMock, MagicMock
+
+        container = ServiceContainer(_settings())
+        embedder = AsyncMock()
+        embedder.embed.return_value = [[0.1]]
+        monkeypatch.setattr(container, "create_embedder", lambda *a, **kw: embedder)
+        monkeypatch.setattr(container, "create_llm", lambda *a, **kw: MagicMock())
+        monkeypatch.setattr(container, "embedder_factory", lambda name: embedder)
+        monkeypatch.setattr(
+            container.vector_store,
+            "search",
+            AsyncMock(return_value=[{"id": "1", "file_id": "deleted", "partition": "a"}]),
+        )
+        monkeypatch.setattr(container.document_repo, "get_indexed_documents", AsyncMock(return_value={}))
+
+        service = container.retrieval_service
+        for searcher in (service._searcher, service._searcher_factory("named")):
+            assert await searcher.search("q", ["a"], 5, with_surrounding_chunks=False) == []
+
+    def test_clients_built_from_static_settings_are_labelled_default(self, monkeypatch):
+        """An unlabelled client records its inference metrics under
+        ``unconfigured``, where no per-provider alert can see it."""
+        from types import SimpleNamespace
+
+        from core.observability.inference_metrics import PROVIDER_NAME_ATTR
+
+        built: list[SimpleNamespace] = []
+
+        def _build(*_args, **_kwargs):
+            built.append(SimpleNamespace())
+            return built[-1]
+
+        base = _settings()
+        settings = base.model_copy(update={"reranker": base.reranker.model_copy(update={"enabled": True})})
+        container = ServiceContainer(settings)
+        for method in ("create_embedder", "create_llm", "create_reranker"):
+            monkeypatch.setattr(container, method, _build)
+        monkeypatch.setattr("services.websearch.WebSearchFactory.create_service", lambda settings: None)
+
+        container.retrieval_service
+        container.query_service
+
+        assert len(built) == 4
+        assert [getattr(client, PROVIDER_NAME_ATTR, None) for client in built] == ["default"] * 4
 
     @pytest.mark.parametrize("prop,_provider", _ORCHESTRATORS)
     def test_property_is_lazy_and_cache_slot_starts_none(self, prop, _provider):
@@ -603,6 +655,61 @@ class TestPhase14NamedComponentFactories:
 
         assert c.embedder_factory("embed-a").kwargs["batch_size"] == 128
 
+    @pytest.mark.asyncio
+    async def test_a_partition_switched_elsewhere_resolves_its_endpoint_created_elsewhere(self):
+        """Another process created embed-b, swapped p1 onto it and bumped the revision.
+
+        This one reloads p1 on that revision, then builds embed-b for it, an
+        endpoint it never loaded (#1016). Without the endpoint load, the factory
+        raises ``KeyError`` and every search of p1 is a 500.
+        """
+        from datetime import UTC, datetime
+
+        from core.config.model_endpoints import ModelEndpointRow
+
+        now = datetime(2026, 1, 1, tzinfo=UTC)
+        settings = _settings_with_named_models()
+        created_elsewhere = ModelEndpointRow(
+            name="embed-b",
+            model_type="embedder",
+            endpoint="http://embedder-b:8000/v1",
+            model_name="embed-model-b",
+            extra={"implementation": "phase14i-test"},
+            vector_field="vector_embed_b",
+            created_at=now,
+            updated_at=now,
+        )
+
+        class PresetRepo:
+            revision = 0
+
+            async def latest_revision(self):
+                return self.revision
+
+            async def load_all_with_revision(self):
+                return [], self.revision
+
+        class EndpointRepo:
+            async def list_all(self, model_type=None):
+                return [created_elsewhere]
+
+        class SwappedPartitions:
+            async def load_partitions(self):
+                settings.partitions["p1"] = SimpleNamespace(embedder="embed-b")
+
+        c = ServiceContainer(settings)
+        preset_repo = PresetRepo()
+        c._catalog_store = SimpleNamespace(preset_repo=preset_repo, model_endpoint_repo=EndpointRepo())
+        c._partition_service = SwappedPartitions()
+        c._prompt_service = object()
+        await c.preset_service.load_all()
+
+        preset_repo.revision += 1
+        await c.preset_service.refresh_if_stale()
+
+        embedder = c.embedder_factory(settings.partitions["p1"].embedder)
+        assert embedder.kwargs["model_name"] == "embed-model-b"
+
     def test_named_factories_cache_by_endpoint_name(self):
         """Repeated factory calls for the same endpoint return one client."""
         c = ServiceContainer(_settings_with_named_models())
@@ -797,6 +904,13 @@ class TestPhase14ServiceWiring:
                 """Record partition config loading."""
                 calls.append("partition.load")
 
+        class FakeEmbedderSwapService:
+            """Embedder swap resume recorder."""
+
+            async def watch(self):
+                """Record resuming interrupted swaps — after partitions load, which a swap completes into."""
+                calls.append("swaps.watch")
+
         monkeypatch.setenv("AUTH_TOKEN", "admin-token")
         c = ServiceContainer(_settings())
         c._catalog_store = FakeCatalogStore()
@@ -804,6 +918,7 @@ class TestPhase14ServiceWiring:
         c._preset_service = FakePresetService()
         c._prompt_service = FakePromptService()
         c._partition_service = FakePartitionService()
+        c._embedder_swap_service = FakeEmbedderSwapService()
 
         await c.initialize()
 
@@ -817,5 +932,6 @@ class TestPhase14ServiceWiring:
             "prompt.seed",
             "partition.seed",
             "partition.load",
+            "swaps.watch",
         ]
         assert c.is_initialized is True

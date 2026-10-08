@@ -71,7 +71,7 @@ const users = [
 const modelEndpoints = [
   { name: "bge-m3", model_type: "embedder", endpoint: "http://tei-embedder:8080", model_name: "BAAI/bge-m3", batch_size: 64, timeout: 30, extra: {}, is_default: true, created_at: "2024-12-15T00:00:00Z", updated_at: "2025-01-10T00:00:00Z" },
   { name: "bge-reranker-v2", model_type: "reranker", endpoint: "http://tei-reranker:8080", model_name: "BAAI/bge-reranker-v2-m3", batch_size: 32, timeout: 30, extra: {}, is_default: true, created_at: "2024-12-15T00:00:00Z", updated_at: "2025-01-10T00:00:00Z" },
-  { name: "llama-3.1", model_type: "llm", endpoint: "http://vllm:8000/v1", model_name: "meta-llama/Llama-3.1-8B-Instruct", batch_size: 1, timeout: 120, extra: { max_tokens: 2048 }, is_default: true, created_at: "2024-12-20T00:00:00Z", updated_at: "2025-01-12T00:00:00Z" },
+  { name: "llama-3.1", model_type: "llm", endpoint: "http://vllm:8000/v1", model_name: "meta-llama/Llama-3.1-8B-Instruct", batch_size: 1, timeout: 120, extra: { max_tokens: 2048 }, is_default: true, detected_max_llm_context_size: 131072, context_size_detection_pending: false, default_max_llm_context_size: 8192, default_max_output_tokens: 1024, created_at: "2024-12-20T00:00:00Z", updated_at: "2025-01-12T00:00:00Z" },
   { name: "qwen-vl", model_type: "vlm", endpoint: "http://vllm-vlm:8000/v1", model_name: "Qwen/Qwen2-VL-7B-Instruct", batch_size: 1, timeout: 60, extra: {}, is_default: true, created_at: "2025-01-05T00:00:00Z", updated_at: "2025-01-05T00:00:00Z" },
   { name: "moss-transcribe-diarize", model_type: "stt", endpoint: "http://moss:8000/v1", model_name: "moss-transcribe-diarize", batch_size: 1, timeout: 900, extra: {}, is_default: true, created_at: "2025-01-05T00:00:00Z", updated_at: "2025-01-05T00:00:00Z" },
 ];
@@ -403,19 +403,6 @@ export const handlers = [
     });
   }),
 
-  http.get(`${API}/indexer/task/:taskId/logs`, ({ params }) => {
-    const id = String(params.taskId);
-    return HttpResponse.json({
-      task_id: id,
-      logs: [
-        `2024-01-15 10:32:01 | INFO | task ${id} QUEUED`,
-        `2024-01-15 10:32:03 | INFO | task ${id} SERIALIZING`,
-        `2024-01-15 10:32:09 | INFO | task ${id} serializing: 47 chunks embedded`,
-        `2024-01-15 10:32:14 | INFO | task ${id} COMPLETED`,
-      ],
-    });
-  }),
-
   http.delete(`${API}/indexer/task/:taskId`, ({ params }) =>
     HttpResponse.json({ message: `Cancellation signal sent for task ${params.taskId}` }),
   ),
@@ -523,6 +510,7 @@ export const handlers = [
       chunking_strategies: ["recursive", "sentence", "semantic", "markdown"],
       retrieval_types: ["simple", "multiquery", "hyde"],
       reranker_providers: ["infinity", "openai", "none"],
+      default_top_n: 10,
     }),
   ),
 
@@ -654,7 +642,7 @@ export const handlers = [
     }),
   ),
 
-  http.get(`${API}/metrics`, () => {
+  http.get(`${API}/monitoring/metrics`, () => {
     return HttpResponse.text(
       `# HELP openrag_requests_total Total API requests\n# TYPE openrag_requests_total counter\nopenrag_requests_total{method="POST",endpoint="/v1/chat/completions"} 1247\nopenrag_requests_total{method="POST",endpoint="/api/v1/retrieve"} 893\nopenrag_requests_total{method="POST",endpoint="/api/v1/admin/indexing/document"} 156\n# HELP openrag_request_duration_seconds Request duration\n# TYPE openrag_request_duration_seconds histogram\nopenrag_request_duration_seconds_bucket{le="0.1"} 450\nopenrag_request_duration_seconds_bucket{le="0.5"} 1800\nopenrag_request_duration_seconds_bucket{le="1.0"} 2100\nopenrag_request_duration_seconds_bucket{le="5.0"} 2290\nopenrag_request_duration_seconds_bucket{le="+Inf"} 2296\n# HELP openrag_documents_indexed_total Total documents indexed\n# TYPE openrag_documents_indexed_total counter\nopenrag_documents_indexed_total 342\n# HELP openrag_chunks_total Total chunks in vector store\n# TYPE openrag_chunks_total gauge\nopenrag_chunks_total 18947\n`,
     );
@@ -666,6 +654,7 @@ export const handlers = [
       // not nested under auth — the permission layer reads config.super_admin_mode.
       super_admin_mode: true,
       chainlit_enabled: true,
+      grafana_url: "http://localhost:3000/d/openrag-http/openrag-http-metrics",
       auth: { auth_mode: "oidc" },
       milvus: { host: "milvus", port: 19530, database: "openrag" },
       ray: { address: "ray://ray-head:10001", pool_size: 2, max_tasks_per_worker: 2 },

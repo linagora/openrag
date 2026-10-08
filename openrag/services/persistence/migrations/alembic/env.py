@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 from logging.config import fileConfig
 
@@ -53,6 +54,21 @@ if (not preset_url) or preset_url.startswith("driver://"):
 # Metadata target for autogenerate is imported from
 # `services.persistence.schema` (metadata-only Table definitions).
 
+#: A migration that removes rows copies them into a quarantine table named
+#: ``<table>_orphans_<revision>`` so operators can review them. Those tables are
+#: deliberately absent from `schema.py`, so autogenerate sees them only in the
+#: database and would propose a ``drop_table`` for each one, deleting the very rows
+#: the quarantine exists to preserve. Keep them out of the diff.
+_QUARANTINE_TABLE = re.compile(r"_orphans_[0-9a-z]+$")
+
+
+def include_object(object_, name, type_, reflected, compare_to) -> bool:
+    """Tell autogenerate which database objects to consider (see Alembic's docs)."""
+    if type_ == "table" and name and _QUARANTINE_TABLE.search(name):
+        return False
+    return True
+
+
 # other values from the config, defined by the needs of env.py,
 # can be acquired:
 # my_important_option = config.get_main_option("my_important_option")
@@ -77,6 +93,7 @@ def run_migrations_offline() -> None:
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
+        include_object=include_object,
     )
 
     with context.begin_transaction():
@@ -97,7 +114,11 @@ def run_migrations_online() -> None:
     )
 
     with connectable.connect() as connection:
-        context.configure(connection=connection, target_metadata=target_metadata)
+        context.configure(
+            connection=connection,
+            target_metadata=target_metadata,
+            include_object=include_object,
+        )
 
         with context.begin_transaction():
             context.run_migrations()

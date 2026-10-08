@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
-from openrag.core.prompts.chat_prompt_builder import (
+from core.prompts.chat_prompt_builder import (
     EMPTY_CONTEXT_MESSAGE,
     SOURCE_SEPARATOR,
     format_context,
     format_web_context,
+    message_tokens,
     prepend_system_prompt,
+    tool_definition_tokens,
 )
 
 
@@ -38,6 +40,34 @@ def test_format_context_drops_to_fit_budget():
     assert "[Source 1]" in text
     assert "[Source 2]" not in text
     assert included == [0]
+
+
+def test_format_context_skips_a_source_that_does_not_fit_and_keeps_going():
+    docs = ["one two three four", "five", "six"]
+    # [Source 1] + doc0 = 6 > 5: skipped, and the shorter ones after it still fit.
+    text, included = format_context(docs, max_context_tokens=5, length_function=_word_tokens)
+    assert included == [1]
+    assert text == "[Source 1]\nfive"
+
+
+def test_format_context_counts_the_separators_between_sources():
+    docs = ["a", "b"]
+    # [Source 1] + a = 3, then separator 1 + [Source 2] + b = 4.
+    assert format_context(docs, max_context_tokens=6, length_function=_word_tokens)[1] == [0]
+    assert format_context(docs, max_context_tokens=7, length_function=_word_tokens)[1] == [0, 1]
+
+
+def test_format_context_takes_at_most_max_sources():
+    docs = ["a", "b", "c"]
+    text, included = format_context(docs, max_context_tokens=None, length_function=_word_tokens, max_sources=2)
+    assert included == [0, 1]
+    assert "[Source 3]" not in text
+
+
+def test_format_context_without_a_token_limit_takes_every_source():
+    docs = ["word " * 10_000, "b"]
+    _, included = format_context(docs, max_context_tokens=None, length_function=_word_tokens)
+    assert included == [0, 1]
 
 
 def test_format_context_no_numbering():
@@ -157,6 +187,15 @@ def test_format_web_context_empty_returns_empty_tuple():
     assert total == 0
 
 
+def test_format_web_context_counts_the_separators_between_results():
+    results = [_FakeWeb("T1", "u1", "one two"), _FakeWeb("T2", "u2", "three four")]
+    # Each block is 5 words, plus 1 for the separator before the second.
+    _, nums, total = format_web_context(results, length_function=_word_tokens, max_tokens=10)
+    assert (nums, total) == ([1], 5)
+    _, nums, total = format_web_context(results, length_function=_word_tokens, max_tokens=11)
+    assert (nums, total) == ([1, 2], 11)
+
+
 def test_format_web_context_drops_overflow_block_after_first_fits():
     """If a later block would push past max_tokens we break — but only after
     at least one block has been admitted (parts truthy guard)."""
@@ -168,3 +207,24 @@ def test_format_web_context_drops_overflow_block_after_first_fits():
     assert "[Source 1]" in text
     assert "[Source 2]" not in text
     assert nums == [1]
+
+
+def test_message_tokens_counts_the_content_and_the_turn():
+    assert message_tokens({"role": "user", "content": "one two three"}, _word_tokens) == 3 + 4
+    assert message_tokens({"role": "assistant"}, _word_tokens) == 4
+
+
+def test_message_tokens_counts_the_tool_call_history():
+    """An assistant turn's tool calls reach the provider with the message, content or not."""
+    call = {"id": "c1", "type": "function", "function": {"name": "lookup", "arguments": "word " * 50}}
+    turn = {"role": "assistant", "tool_calls": [call]}
+    assert message_tokens(turn, _word_tokens) > 50 + 4
+    result = {"role": "tool", "tool_call_id": "c1", "content": "one two"}
+    assert message_tokens(result, _word_tokens) > 2 + 4
+
+
+def test_tool_definition_tokens_counts_tools_and_functions():
+    tool = {"type": "function", "function": {"name": "lookup", "description": "word " * 50}}
+    assert tool_definition_tokens({"messages": []}, _word_tokens) == 0
+    assert tool_definition_tokens({"tools": [tool]}, _word_tokens) > 50
+    assert tool_definition_tokens({"functions": [tool["function"]]}, _word_tokens) > 50

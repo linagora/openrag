@@ -1,5 +1,6 @@
 # Ignore environment files
 .env
+infra/compose/prometheus/openrag_token
 
 # generated files and folders
 .files/

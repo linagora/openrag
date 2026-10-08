@@ -38,7 +38,7 @@ from urllib.parse import quote
 from core.auth.chainlit import CHAINLIT_TOKEN_COOKIE_NAME
 from core.config.auth import AuthBypassConfig
 from core.utils.logging import get_logger
-from fastapi import Request
+from fastapi import HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 from limits import parse
 from limits.aio.storage import MemoryStorage
@@ -94,6 +94,14 @@ def is_bypass_path(path: str, *, bypass_config: AuthBypassConfig | None = None) 
     """
     cfg = bypass_config or _DEFAULT_BYPASS_CONFIG
     return path in cfg.bypass_paths or path == "/chainlit" or path.startswith(("/chainlit/", "/assets/"))
+
+
+def _login_redirect(request: Request, path: str) -> RedirectResponse:
+    # The query comes from the scope for the same reason ``path`` does (see
+    # ``AuthMiddleware.dispatch``).
+    query = request.scope.get("query_string", b"").decode()
+    next_path = f"{path}?{query}" if query else path
+    return RedirectResponse(url=f"/auth/login?next={quote(next_path, safe='')}", status_code=302)
 
 
 def _allow_no_auth() -> bool:
@@ -158,7 +166,7 @@ class AuthFailureRateLimiter:
         stats = await self._limiter.get_window_stats(self._limit, tier, identity)
         retry_after = max(1, int(stats.reset_time - time.time()))
         logger.bind(
-            path=self._safe_log_value(str(request.url.path)),
+            path=self._safe_log_value(str(request.scope["path"])),
             identity=self._safe_log_value(identity),
         ).warning("Auth failure rate limit exceeded")
         return JSONResponse(
@@ -195,6 +203,36 @@ class AuthMiddleware(BaseHTTPMiddleware):
             return limited
         return JSONResponse(status_code=status_code, content={"detail": detail})
 
+    def _resolve_auth_service(self, request: Request) -> tuple[Any, JSONResponse | None]:
+        """Resolve the auth service, or the response to send when it is unavailable.
+
+        The resolver goes through `di.providers.get_container`, which raises
+        `HTTPException(503)` on a degraded boot. Middleware runs outside the
+        router, so FastAPI's exception handlers never see this — uncaught it
+        becomes a 500 `[UNEXPECTED_ERROR]`, the opposite of the "serving degraded
+        (503)" the boot guard logged (#937). Every call site that is not already
+        inside its own ``except`` must go through here.
+
+        The resolver's own status, detail and headers are relayed rather than
+        flattened to 503, so a future resolver reporting something else — or
+        attaching ``Retry-After`` — is not masked.
+        """
+        # The routed path is percent-decoded, so `%0A` arrives as a newline and
+        # would forge a line in the text log format.
+        path = AuthFailureRateLimiter._safe_log_value(request.scope["path"])
+        try:
+            return self._get_auth_service(request), None
+        except HTTPException as exc:
+            logger.warning("Auth service unavailable", reason="service_unavailable", status=exc.status_code, path=path)
+            return None, JSONResponse(
+                status_code=exc.status_code,
+                content={"detail": exc.detail or "Service unavailable"},
+                headers=exc.headers,
+            )
+        except RuntimeError:
+            logger.warning("Auth service unavailable", reason="service_unavailable", status=503, path=path)
+            return None, JSONResponse(status_code=503, content={"detail": "Service unavailable"})
+
     async def dispatch(self, request: Request, call_next):
         # Read env lazily so tests can flip AUTH_MODE per-test.
         auth_mode = os.getenv("AUTH_MODE", "token").strip().lower()
@@ -212,7 +250,11 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 "ALLOW_NO_AUTH=true and AUTH_TOKEN is unset: authentication is DISABLED — "
                 "every request is treated as admin user 1. Never use this in production."
             )
-            auth_service = self._get_auth_service(request)
+            # Resolved before the bypass list, so on a degraded boot an unguarded
+            # call here would 500 every path, /health_check and /ready included.
+            auth_service, unavailable = self._resolve_auth_service(request)
+            if unavailable is not None:
+                return unavailable
             user = await auth_service.get_user_for_request(1)
             user_partitions = await auth_service.list_user_partitions_for_request(1)
             request.state.user = user
@@ -221,7 +263,10 @@ class AuthMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         # --- Bypass list (docs, health, /auth/* callbacks, chainlit).
-        path = request.url.path
+        # Decisions below key on ``scope["path"]``, the path the router
+        # dispatches on. ``request.url.path`` is parsed back out of a URL rebuilt
+        # from the Host header, so it is not guaranteed to be the same string.
+        path = request.scope["path"]
 
         # In oidc mode the interactive API docs are gated behind login rather
         # than served anonymously: they expose the full route + schema surface,
@@ -275,13 +320,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
                             )
                             session_valid = False
                 if not session_valid:
-                    next_path = path
-                    if request.url.query:
-                        next_path = f"{path}?{request.url.query}"
-                    return RedirectResponse(
-                        url=f"/auth/login?next={quote(next_path, safe='')}",
-                        status_code=302,
-                    )
+                    return _login_redirect(request, path)
             return await call_next(request)
 
         limited = await self._auth_failure_limiter.response_if_limited(request)
@@ -290,11 +329,9 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
         user = None
         session = None
-        try:
-            auth_service = self._get_auth_service(request)
-        except RuntimeError:
-            logger.warning("Auth service unavailable", reason="service_unavailable", path=request.url.path)
-            return JSONResponse(status_code=503, content={"detail": "Service unavailable"})
+        auth_service, unavailable = self._resolve_auth_service(request)
+        if unavailable is not None:
+            return unavailable
 
         # --- 1) Cookie session (OIDC UI flow). Gated on oidc mode so the
         #        legacy token-mode contract remains strictly Bearer-only —
@@ -368,13 +405,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         #        mode, else 401 JSON. ``oidc_gated`` is already mode-checked.
         if user is None:
             if oidc_gated or (auth_mode == "oidc" and is_ui_path(path, bypass_config=self._bypass_config)):
-                next_path = path
-                if request.url.query:
-                    next_path = f"{path}?{request.url.query}"
-                return RedirectResponse(
-                    url=f"/auth/login?next={quote(next_path, safe='')}",
-                    status_code=302,
-                )
+                return _login_redirect(request, path)
             return await self._auth_failure(request, status_code=401, detail="Unauthenticated")
 
         # --- Happy path: user resolved.

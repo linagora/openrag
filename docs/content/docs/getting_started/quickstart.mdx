@@ -24,12 +24,15 @@ cd openrag/
 git checkout main # or a given release
 ```
 #### 2. Create a `.env` File
-The Docker Compose stack lives under **`infra/compose/`**, next to its **`.env.example`** template. Copy it to a `.env` in the same folder and fill in the blanks (LLM/VLM endpoints, embedder, and the **required** MinIO / Postgres secrets):
+The Docker Compose stack lives under **`infra/compose/`**, next to its **`.env.example`** template. Generate a `.env` from it — this fills in every credential with a fresh random value, which the stack requires to start:
 
 ```bash title="Create your .env from the template"
-cd infra/compose
-cp .env.example .env
+python3 scripts/gen_env.py
 ```
+
+Then fill in the blanks the generator cannot guess: your LLM/VLM endpoints and the embedder.
+
+The template marks each credential `__GENERATE_ME__` rather than shipping a working default, and OpenRag refuses to start on any value published in this repository. A plain `cp .env.example .env` therefore fails at startup with a message naming the variables still to set — deliberately, because a default nobody changed is the most common way a deployment ends up with a known credential.
 
 Here is the minimal set of variables to get started — see the [full environment-variable reference](/openrag/documentation/env_vars/) for every other option:
 

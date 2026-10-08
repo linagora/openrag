@@ -1,0 +1,130 @@
+// OpenRAG -> Loki pipeline for the compose logging overlay.
+//
+// Scope: the API container (compose services "openrag" / "openrag-cpu"). Ray
+// worker logs are relayed onto the same stream by Ray with a
+// "(Actor pid=N) " prefix, which the pipeline strips before parsing the JSON.
+// To ship other services too, widen the "keep" regex below.
+
+discovery.docker "openrag" {
+  host = "unix:///var/run/docker.sock"
+}
+
+discovery.relabel "openrag" {
+  targets = discovery.docker.openrag.targets
+
+  // Deliberate deviation: there is no keep-rule on the compose *project*, only
+  // on the service name, because the project name is not reliably available to
+  // this container. One OpenRAG stack per host is assumed. With two stacks on
+  // the same host both are shipped under the same `app`/`service` labels and
+  // only `container` tells them apart. If that becomes a real deployment, add:
+  //   rule {
+  //     source_labels = ["__meta_docker_container_label_com_docker_compose_project"]
+  //     regex         = "<project>"
+  //     action        = "keep"
+  //   }
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+    regex         = "openrag|openrag-cpu"
+    action        = "keep"
+  }
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+    target_label  = "service"
+  }
+  rule {
+    source_labels = ["__meta_docker_container_name"]
+    regex         = "/?(.*)"
+    target_label  = "container"
+  }
+  rule {
+    target_label = "app"
+    replacement  = "openrag"
+  }
+}
+
+loki.source.docker "openrag" {
+  host       = "unix:///var/run/docker.sock"
+  targets    = discovery.relabel.openrag.output
+  forward_to = [loki.process.openrag.receiver]
+}
+
+loki.process "openrag" {
+  forward_to = [loki.write.default.receiver]
+
+  // 1. Ray colorizes the relay prefix it puts in front of every worker line,
+  //    even when its output is a pipe and not a TTY, so what actually arrives
+  //    is "<ESC>[36m(Indexer pid=42)<ESC>[0m {...}". Strip ANSI SGR sequences
+  //    first — otherwise the prefix regex below never matches (the line starts
+  //    with ESC, not "(") and the JSON parse chokes on the leftover escapes.
+  //    The ESC byte is matched as [[:cntrl:]] rather than \x1b: a "\\x1b" in an
+  //    Alloy-syntax string passes `alloy validate` but never matches at
+  //    runtime, whereas the POSIX class does (verified against v1.19.2).
+  stage.replace {
+    expression = "([[:cntrl:]]\\[[0-9;]*m)"
+    replace    = ""
+  }
+
+  // 2. Drop Ray's relay prefix "(Indexer pid=4242) " / "(pid=4242, ip=…) ".
+  //    Scoped to lines that actually start with the prefix, so `ray_actor`
+  //    is only ever extracted for worker lines: a regex with an optional
+  //    group would set it to "" on every API line, and the structured
+  //    metadata stage ships whatever key exists, empty or not.
+  stage.match {
+    selector = "{app=\"openrag\"} |~ \"^\\\\([^)]*pid=\""
+
+    stage.regex {
+      expression = "^\\((?P<ray_actor>[^)]*)\\) (?P<line>.*)$"
+    }
+    stage.output {
+      source = "line"
+    }
+  }
+
+  // 3. Parse the OpenRAG JSON line (LOG_FORMAT=json). Non-JSON lines (banner,
+  //    Ray startup chatter) pass through untouched.
+  stage.json {
+    expressions = {
+      ts         = "ts",
+      level      = "level",
+      request_id = "request_id",
+      task_id    = "task_id",
+    }
+    drop_malformed = false
+  }
+
+  // 4. level is a label (bounded set); ids are structured metadata, never
+  //    labels, so cardinality stays flat.
+  stage.labels {
+    values = { level = "" }
+  }
+  stage.structured_metadata {
+    values = {
+      request_id = "",
+      task_id    = "",
+      ray_actor  = "",
+    }
+  }
+
+  // 5. Use the application timestamp when present, Docker's otherwise.
+  stage.timestamp {
+    source            = "ts"
+    format            = "RFC3339Nano"
+    action_on_failure = "skip"
+  }
+}
+
+loki.write "default" {
+  endpoint {
+    url       = sys.env("LOKI_URL")
+    tenant_id = sys.env("LOKI_TENANT_ID")
+
+    // Safe to leave in place for an unauthenticated Loki: with both env vars
+    // empty Alloy sends no Authorization header at all (verified against
+    // v1.19.2 — an auth-requiring proxy logged the request with no remote
+    // user), so one config covers both deployments.
+    basic_auth {
+      username = sys.env("LOKI_USERNAME")
+      password = sys.env("LOKI_PASSWORD")
+    }
+  }
+}

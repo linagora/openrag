@@ -125,6 +125,29 @@ async def test_add_file_to_partition_persists_content_hash_column():
 
 
 @pytest.mark.asyncio
+async def test_add_file_to_partition_persists_chunk_count_column():
+    from services.persistence.document_repo import PgDocumentRepository
+
+    pool = _FakePool()
+    repo = PgDocumentRepository(pool_getter=lambda: pool)
+
+    assert (
+        await repo.add_file_to_partition(
+            file_id="f1",
+            partition="new-part",
+            user_id=42,
+            chunk_count=7,
+        )
+        is True
+    )
+    insert_query, insert_params = next(
+        (query, params) for query, params in pool.conn.executed if "INSERT INTO files" in query
+    )
+    columns = insert_query.split("INSERT INTO files (", 1)[1].split(")", 1)[0].split(", ")
+    assert insert_params[columns.index("chunk_count")] == 7
+
+
+@pytest.mark.asyncio
 async def test_require_existing_partition_does_not_auto_create_missing_partition():
     from services.persistence.document_repo import PgDocumentRepository
 
@@ -193,6 +216,20 @@ async def test_update_file_in_partition_updates_content_hash_column():
     assert "abc123" in params
 
 
+@pytest.mark.asyncio
+async def test_update_file_in_partition_updates_chunk_count_column():
+    from services.persistence.document_repo import PgDocumentRepository
+
+    pool = _DirectExecutePool()
+    repo = PgDocumentRepository(pool_getter=lambda: pool)
+
+    assert await repo.update_file_in_partition("f1", "tenant-a", chunk_count=8) is True
+
+    query, params = pool.executed[0]
+    assert "chunk_count = $1" in query
+    assert params == (8, "f1", "tenant-a")
+
+
 def test_row_to_document_exposes_indexation_config_snapshot():
     from services.persistence.document_repo import PgDocumentRepository
 
@@ -205,8 +242,29 @@ def test_row_to_document_exposes_indexation_config_snapshot():
         "relationship_id": None,
         "parent_id": None,
         "indexation_config": snapshot,
+        "chunk_count": 9,
     }
 
     doc = PgDocumentRepository._row_to_document(row)
 
     assert doc.indexation_config == snapshot
+    assert doc.chunk_count == 9
+
+
+def test_row_to_dict_exposes_chunk_count_as_catalog_data():
+    from services.persistence.document_repo import PgDocumentRepository
+
+    row = {
+        "file_id": "f1",
+        "partition_name": "tenant-a",
+        "file_metadata": {"filename": "doc.txt", "chunk_count": 999},
+        "relationship_id": None,
+        "parent_id": None,
+        "content_sha256": None,
+        "indexed_at": None,
+        "chunk_count": 9,
+    }
+
+    result = PgDocumentRepository._row_to_dict(row)
+
+    assert result["chunk_count"] == 9

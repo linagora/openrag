@@ -5,7 +5,7 @@ title: Milvus Migrations
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 
 # Milvus Upgrade
-OpenRAG now uses Milvus **3.0.0** with PyMilvus **3.0.1**. Existing Milvus 2.6 deployments can keep their data, but they must prepare the Milvus data directory before starting the new image because Milvus 3 runs as a non-root user.
+OpenRAG now uses Milvus **3.0.2** with PyMilvus **3.0.1**. Existing Milvus 2.6 deployments can keep their data, but they must prepare the Milvus data directory before starting the new image because Milvus 3 runs as a non-root user.
 
 Fresh installations need no manual ownership step. The Compose stack initializes empty bind mounts and named volumes before the server starts. If existing files are not already owned by the Milvus 3 user, startup stops with a migration error instead of risking a partially writable deployment. The procedure below remains mandatory for existing data in either storage mode because all files created by Milvus 2.6 must be transferred to the Milvus 3 user.
 
@@ -57,7 +57,7 @@ Do not skip this migration when upgrading an existing deployment:
 
 > For the full official reference, see the [Milvus upgrade guide](https://milvus.io/docs/upgrade_milvus_standalone-docker.md#Upgrade-process).
 
-### Upgrade from Milvus 2.6.x to 3.0.0
+### Upgrade from Milvus 2.6.x to 3.0.2
 
 Milvus 2.6 containers ran as root, so existing bind-mounted files and Docker named-volume contents are commonly owned by `root:root`. Milvus 3 runs as UID/GID `999:999` and cannot start until it owns the directory mounted at `/var/lib/milvus`.
 
@@ -122,7 +122,7 @@ Do not restart OpenRAG until Milvus is healthy and the logs contain no permissio
 docker compose ps milvus
 docker compose logs --tail 100 milvus
 docker inspect "$(docker compose ps -q milvus)" --format '{{.Config.Image}}'
-# Expected: milvusdb/milvus:v3.0.0
+# Expected: milvusdb/milvus:v3.0.2
 ```
 
 Once those checks pass, start the complete stack:
@@ -135,7 +135,7 @@ docker compose up -d
 
 The bundled Helm chart now installs the Milvus 3-compatible chart and image. Before upgrading an existing release, stop writes and back up the MinIO and etcd volumes, together with any standalone or log volume enabled through custom values.
 
-The upstream repository index does not yet publish chart 5.0.26, so OpenRAG currently uses chart 5.0.25 with the Milvus 3 image selected explicitly. Resources rendered by that chart can therefore retain the label `app.kubernetes.io/version: "2.6.21"`. This label describes the chart's default application version, not the running server; verify the container image as shown below.
+OpenRAG uses milvus-helm chart 5.0.27, whose default image is v3.0.1, and sets the image to v3.0.2. Resources rendered by that chart therefore keep the label `app.kubernetes.io/version: "3.0.1"`. This label describes the chart's default application version, not the running server; verify the container image as shown below.
 
 Milvus 3 runs with GID `999`. The chart sets `fsGroup: 999` with the `Always` policy so Kubernetes recursively makes supported mounted volumes writable before Milvus starts. The first startup can therefore take longer when a volume contains many files.
 
@@ -149,12 +149,12 @@ After the upgrade, confirm that every Milvus workload is ready and uses the expe
 kubectl get pods -n <namespace> -l app.kubernetes.io/name=milvus
 kubectl get pods -n <namespace> -l app.kubernetes.io/name=milvus \
   -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.spec.containers[*].image}{"\n"}{end}'
-# Expected Milvus image: milvusdb/milvus:v3.0.0
+# Expected Milvus image: milvusdb/milvus:v3.0.2
 ```
 
 ### Legacy path: upgrade Milvus 2.5.x to 2.6.11
 
-This intermediate path is only for deployments upgrading from **OpenRAG &lt;= 1.1.7 whose current Milvus server is 2.5.x**. Do not jump directly from Milvus 2.5.x to 3.0.0. Earlier Milvus versions can require additional intermediate or metadata migrations that are outside this procedure.
+This intermediate path is only for deployments upgrading from **OpenRAG &lt;= 1.1.7 whose current Milvus server is 2.5.x**. Do not jump directly from Milvus 2.5.x to 3.0.2. Earlier Milvus versions can require additional intermediate or metadata migrations that are outside this procedure.
 
 #### Step 1 — Upgrade Milvus to 2.5.16
 
@@ -189,7 +189,7 @@ docker inspect milvus-standalone --format '{{ .Config.Image }}'
 
 #### Preserve the message queue
 
-OpenRAG 2.5 standalone deployments normally use RocksMQ, but verify the effective source queue using the log check in the 2.6-to-3.0 procedure above. Keep that detected value in every Compose configuration used for the 2.6.11 and 3.0.0 steps.
+OpenRAG 2.5 standalone deployments normally use RocksMQ, but verify the effective source queue using the log check in the 2.6-to-3.0 procedure above. Keep that detected value in every Compose configuration used for the 2.6.11 and 3.0.2 steps.
 
 Before starting the intermediate OpenRAG release, add `MQ_TYPE: <detected-value>` to the Milvus service's environment. When moving to the current release, set the corresponding value in the Compose `.env` file and keep it until the upgrade is validated:
 
@@ -257,7 +257,7 @@ This is the last rebuild. Once `enable_match` is gone, a later analyzer change i
 - **Stop OpenRAG first**, as the banner above says — the copy reads a snapshot, so a row written while it runs would be missing from the rebuild. The migration re-counts the source afterwards and aborts, leaving the original untouched, if the count moved.
 - **`hybrid_search: false`** deployments have no BM25 leg and are only re-stamped — no rebuild, and no backup collection, in either direction.
 - A failed copy leaves the original untouched; drop the partial `<collection>_v2_rebuild` and retry.
-- The version check runs on the indexing path only. An un-migrated deployment still boots and still answers searches — with the old analyzer — and fails the first upload with `Collection ... is at schema version 1 but the application requires version 2`.
+- What an un-migrated collection does depends on the release. On 2.2.x the version check runs on the indexing path only: searches still answer, with the old analyzer, and the first upload fails with `Collection ... is at schema version 1 but the application requires version 2`. From 2.3.0 it runs on the search path too, and searches answer `503` (`VDB_SCHEMA_MIGRATION_REQUIRED`) until the migrations run.
 :::
 
 Once validated, drop the backup:
@@ -268,61 +268,96 @@ from pymilvus import MilvusClient
 MilvusClient(uri="http://localhost:19530").drop_collection("<collection>_v1_backup")
 ```
 
+### Version 3 — one vector field per embedder
+
+Schema version 3 moves every chunk's vector out of the shared `vector` field into a field owned by the embedder its partition uses, then drops `vector`. Chunk IDs, text and the BM25 `sparse` vector stay in place, and the metadata is rewritten as described below: the collection is not rebuilt.
+
+It reads PostgreSQL as well as Milvus, to know which embedder each partition uses and which field that embedder owns. That field is allocated by a PostgreSQL migration of the same release, so **start the new OpenRAG version once** before running it, and keep both databases up while it runs (`docker compose up -d rdb milvus` under Compose). A partition with chunks that PostgreSQL knows but cannot route (no single default embedder, a missing embedder, no field allocated) stops it before it changes anything; rows of a partition PostgreSQL does not know do not stop it: they lose their vector (see below). The dry run warns about them (`row(s) belong to partitions that do not exist in Postgres`); review that warning before applying.
+
+:::caution[Plan for version 3]
+- **Stop OpenRAG first**, or at least all traffic to it, as the [Kubernetes upgrade](/openrag/documentation/upgrading/#5-migrate-the-milvus-collection) does: until the collection reaches version 3, OpenRAG cannot index into it, but deleting a file still reaches Milvus. After copying, the migration counts the rows again. If the count moved, something was writing: it stops before dropping `vector`, and you run it again once the writes have stopped.
+- **A failed run can be run again.** Until its last step drops `vector`, the original vectors stay in place. By then it has already added the per-embedder fields and rewritten each chunk's metadata, with the rounding described below. Once `vector` is dropped, `--downgrade --target 2` copies the vectors back into it; see [Rollback](#rollback) for when that is possible. If a run failed after dropping `vector` but before stamping version 3, run the migration again: it only stamps the version.
+- **Rows of a partition PostgreSQL does not know** are already unreachable from OpenRAG, and lose their vector.
+- **Integers above 2^53** in a chunk's metadata come back rounded: the copy rewrites the metadata as floating-point numbers. Section IDs (`section_id`, `prev_section_id`, `next_section_id`) are the exception: the copy folds them below 2^53 first, which keeps each chunk linked to its neighbours. PostgreSQL keeps each file's original upload metadata.
+- **Development builds from 22 September 2026 (#994) until #1096 merged on 28 September** ran a copy that rounded chunk section IDs. The migration does not repair a collection they already migrated; re-index the files indexed before it.
+:::
+
+For an upgrade to 2.3.0, follow [Upgrading OpenRAG](/openrag/documentation/upgrading/): the [Kubernetes](/openrag/documentation/upgrading/#22x-to-230-on-kubernetes) procedure runs the migration from the upgraded OpenRAG pod, the [Docker Compose](/openrag/documentation/upgrading/#22x-to-230-with-docker-compose) one with `docker compose run`.
+
 :::note[Where to run these]
 The commands below run from `infra/compose/`. From the repo root, point Compose at the file (and at your project name, if you use one):
 
 ```bash
-docker compose -p <project> -f infra/compose/docker-compose.yaml run --no-deps --rm --build --entrypoint "" openrag \
-    uv run python services/persistence/migrations/milvus/migrate.py --dry-run
+docker compose -p <project> -f infra/compose/docker-compose.yaml run --no-deps --rm --entrypoint "" openrag \
+    uv run --no-dev python services/persistence/migrations/milvus/migrate.py --dry-run
 ```
 
-The migration runner is a file, not a package — pass the full path to `migrate.py`, and keep Milvus running.
+The migration runner is a file, not a package — pass the full path to `migrate.py`, and keep PostgreSQL and Milvus running.
+
+The migration scripts ship **inside the image**. If you pull released images, check out the release you are moving to first: its Compose file names that release's images, which `docker compose pull` then fetches; if you build them from this checkout, add `--build` to the `run` and `up` commands below. Either way, check that the `Discovered N migration(s)` line of the dry run lists the migration you expect: if it does not, the image is stale.
 :::
 
-### Step 1 — Start only the Milvus container
+### Step 1 — Start PostgreSQL and Milvus only
+
+Version 3 reads PostgreSQL as well as Milvus, so start both, without OpenRAG. For version 3, start the new OpenRAG version once before this step, as [Version 3](#version-3--one-vector-field-per-embedder) explains: the PostgreSQL migration it applies allocates the fields the Milvus migration fills.
 
 ```bash
-docker compose up -d milvus
+docker compose up -d rdb milvus
 ```
 
-Wait until Milvus is healthy:
+If OpenRAG is running, as it is after that first start, stop it, so that nothing
+writes to the collection while the migration runs:
 
+<Tabs>
+  <TabItem label="GPU">
 ```bash
-docker compose ps milvus
+docker compose stop openrag
+docker compose ps
 ```
+  </TabItem>
+  <TabItem label="CPU">
+```bash
+docker compose --profile cpu stop openrag-cpu
+docker compose --profile cpu ps
+```
+  </TabItem>
+</Tabs>
+
+Before the next step, `ps` must show Milvus healthy and PostgreSQL running (`rdb`
+has no health check), and no OpenRAG container.
 
 ### Step 2 — Dry-run (inspect, no changes)
 
 <Tabs>
   <TabItem label="GPU">
 ```bash
-docker compose run --no-deps --rm --build --entrypoint "" openrag \
-    uv run python services/persistence/migrations/milvus/migrate.py --dry-run
+docker compose run --no-deps --rm --entrypoint "" openrag \
+    uv run --no-dev python services/persistence/migrations/milvus/migrate.py --dry-run
 ```
   </TabItem>
   <TabItem label="CPU">
 ```bash
-docker compose --profile cpu run --no-deps --rm --build --entrypoint "" openrag-cpu \
-    uv run python services/persistence/migrations/milvus/migrate.py --dry-run
+docker compose --profile cpu run --no-deps --rm --entrypoint "" openrag-cpu \
+    uv run --no-dev python services/persistence/migrations/milvus/migrate.py --dry-run
 ```
   </TabItem>
 </Tabs>
 
-Review the output to confirm which migrations are pending and what changes they would apply. The migration scripts ship **inside the image**, which is why `--build` is there: if the `Discovered N migration(s)` line does not list the migration you expect, the image is stale — and on a shared host another checkout may have rebuilt the same `linagoraai/openrag` tag, so add `--build` to the apply step too.
+Review the output to confirm which migrations are pending and what changes they would apply.
 
 ### Step 3 — Apply all pending migrations
 
 <Tabs>
   <TabItem label="GPU">
 ```bash
-docker compose run --no-deps --rm --build --entrypoint "" openrag \
-    uv run python services/persistence/migrations/milvus/migrate.py
+docker compose run --no-deps --rm --entrypoint "" openrag \
+    uv run --no-dev python services/persistence/migrations/milvus/migrate.py
 ```
   </TabItem>
   <TabItem label="CPU">
 ```bash
-docker compose --profile cpu run --no-deps --rm --build --entrypoint "" openrag-cpu \
-    uv run python services/persistence/migrations/milvus/migrate.py
+docker compose --profile cpu run --no-deps --rm --entrypoint "" openrag-cpu \
+    uv run --no-dev python services/persistence/migrations/milvus/migrate.py
 ```
   </TabItem>
 </Tabs>
@@ -337,12 +372,12 @@ The runner will apply each pending migration in order. For the `add_temporal_fie
 <Tabs>
   <TabItem label="GPU">
 ```bash
-docker compose up --build -d
+docker compose up -d
 ```
   </TabItem>
   <TabItem label="CPU">
 ```bash
-docker compose --profile cpu up --build -d
+docker compose --profile cpu up -d
 ```
   </TabItem>
 </Tabs>
@@ -355,31 +390,36 @@ To upgrade or downgrade to a specific schema version rather than the latest:
   <TabItem label="GPU">
 ```bash
 # Upgrade to version 2 only
-docker compose run --no-deps --rm --build --entrypoint "" openrag \
-    uv run python services/persistence/migrations/milvus/migrate.py --target 2
+docker compose run --no-deps --rm --entrypoint "" openrag \
+    uv run --no-dev python services/persistence/migrations/milvus/migrate.py --target 2
 
-# Downgrade to version 0 (resets version stamp and drops indexes)
-docker compose run --no-deps --rm --build --entrypoint "" openrag \
-    uv run python services/persistence/migrations/milvus/migrate.py --downgrade --target 0
+# Downgrade to version 2 (copies the vectors back into `vector`)
+docker compose run --no-deps --rm --entrypoint "" openrag \
+    uv run --no-dev python services/persistence/migrations/milvus/migrate.py --downgrade --target 2
 ```
   </TabItem>
   <TabItem label="CPU">
 ```bash
 # Upgrade to version 2 only
-docker compose --profile cpu run --no-deps --rm --build --entrypoint "" openrag-cpu \
-    uv run python services/persistence/migrations/milvus/migrate.py --target 2
+docker compose --profile cpu run --no-deps --rm --entrypoint "" openrag-cpu \
+    uv run --no-dev python services/persistence/migrations/milvus/migrate.py --target 2
 
-# Downgrade to version 0 (resets version stamp and drops indexes)
-docker compose --profile cpu run --no-deps --rm --build --entrypoint "" openrag-cpu \
-    uv run python services/persistence/migrations/milvus/migrate.py --downgrade --target 0
+# Downgrade to version 2 (copies the vectors back into `vector`)
+docker compose --profile cpu run --no-deps --rm --entrypoint "" openrag-cpu \
+    uv run --no-dev python services/persistence/migrations/milvus/migrate.py --downgrade --target 2
 ```
   </TabItem>
 </Tabs>
 
 ### Rollback
 
+:::danger[Always pass `--target`]
+Pass the version you are going back to: `--target 2` undoes version 3 only, for a return to OpenRAG 2.2.x. From 2.3.0 the runner refuses a downgrade without `--target`, a target outside the known versions or in the wrong direction (a downgrade above the collection's version, an upgrade below it), and a collection whose version it does not know or is newer than its migrations; each migration script refuses its own `--downgrade` unless the collection is at its version. Earlier runners treated a bare `--downgrade` as `--target 0` and reverted every migration, including version 2, which swaps its pre-upgrade backup back into place.
+:::
+
 What a downgrade can undo depends on the migration:
 
+- **Version 3 → 2** copies each partition's vectors from its embedder's field back into `vector`, then drops the per-embedder fields. It is possible only while every field in use has the same dimension, every partition holding files still resolves through PostgreSQL to an embedder field (no embedder deleted, no default changed since the upgrade), and the collection has fewer than 10 vector fields, since `vector` is added back. PostgreSQL must be at a revision that still has the embedder fields, so run it before downgrading the PostgreSQL schema. It does not restore the chunk metadata the upgrade rewrote: integers above 2^53 stay rounded and section IDs stay folded. Only restoring a Milvus backup taken before the upgrade recovers the original metadata.
 - **Version 2 → 1** swaps the `<collection>_v1_backup` collection back into place and sets the version stamp to 1. The version-2 collection is kept aside as `<collection>_v2_rolled_back` rather than dropped, so nothing is lost — but this is a point-in-time rollback: **rows indexed after the upgrade exist only in the collection set aside**.
 
   The rollback needs that backup collection. If it is gone, the downgrade fails rather than reporting a rollback it did not perform, and there are three ways forward:
@@ -394,14 +434,14 @@ What a downgrade can undo depends on the migration:
 <Tabs>
   <TabItem label="GPU">
 ```bash
-docker compose run --no-deps --rm --build --entrypoint "" openrag \
-    uv run python services/persistence/migrations/milvus/migrate.py --downgrade
+docker compose run --no-deps --rm --entrypoint "" openrag \
+    uv run --no-dev python services/persistence/migrations/milvus/migrate.py --downgrade --target <version>
 ```
   </TabItem>
   <TabItem label="CPU">
 ```bash
-docker compose --profile cpu run --no-deps --rm --build --entrypoint "" openrag-cpu \
-    uv run python services/persistence/migrations/milvus/migrate.py --downgrade
+docker compose --profile cpu run --no-deps --rm --entrypoint "" openrag-cpu \
+    uv run --no-dev python services/persistence/migrations/milvus/migrate.py --downgrade --target <version>
 ```
   </TabItem>
 </Tabs>
@@ -422,7 +462,8 @@ Files must follow the pattern `N.short_description.py`, where `N` is the **targe
 openrag/services/persistence/migrations/milvus/
   1.add_created_at_temporal_fields.py  ← brings the schema to version 1
   2.rebuild_text_analyzer.py           ← brings the schema to version 2
-  3.your_new_migration.py              ← brings the schema to version 3
+  3.split_vector_per_embedder.py       ← brings the schema to version 3
+  4.your_new_migration.py              ← brings the schema to version 4
   migrate.py                           ← generic runner (do not rename)
 ```
 

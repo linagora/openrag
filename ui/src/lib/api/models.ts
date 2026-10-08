@@ -24,6 +24,22 @@ export interface ModelEndpointResponse {
   extra: Record<string, unknown>;
   has_api_key?: boolean;
   is_default: boolean;
+  /** Partitions whose resolved reference is this endpoint — those naming it,
+   *  plus (for the default endpoint) those riding the `default` alias. 0 for
+   *  types referenced through presets. */
+  used_by_partitions?: number;
+  /** LLM endpoints only (null otherwise; absent on older backends): what a blank
+   *  max context size / max output tokens resolves to. `detected_*` is the
+   *  `max_model_len` the endpoint reported on /v1/models (vLLM does, most
+   *  gateways don't); `context_size_detection_pending` means an endpoint write
+   *  cleared it and the re-probe hasn't landed yet. */
+  detected_max_llm_context_size?: number | null;
+  context_size_detection_pending?: boolean;
+  default_max_llm_context_size?: number | null;
+  default_max_output_tokens?: number | null;
+  /** Dense vector field this embedder owns; null for other model types. Set
+   *  when the endpoint is created and kept through renames. */
+  vector_field?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -48,6 +64,10 @@ export interface UpdateModelEndpointRequest {
   timeout?: number;
   extra?: Record<string, unknown>;
   is_default?: boolean;
+  /** Required by the server for an embedder edit that changes what its vectors
+   *  are while partitions hold files indexed with it (409 otherwise). Set only
+   *  after the user has seen and acknowledged what is indexed. */
+  acknowledge_indexed_data?: boolean;
 }
 
 export interface ValidateModelEndpointResponse {
@@ -107,7 +127,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function isSecretField(key: string | undefined): boolean {
+/** Whether a key holds a secret, and so comes back redacted rather than as its
+ *  stored value — which is why a diff has to leave it alone. */
+export function isSecretField(key: string | undefined): boolean {
   if (!key) return false;
   const normalized = key.toLowerCase();
   return SECRET_FIELD_NAMES.has(normalized) || SECRET_FIELD_SUFFIXES.some((suffix) => normalized.endsWith(suffix));
@@ -203,6 +225,62 @@ export const MOSS_SPEAKER_AWARE_KEY = "moss_speaker_aware";
 export interface LlmContextFields {
   maxContextSize: string;
   maxOutputTokens: string;
+}
+
+/** Where an LLM endpoint's token budget comes from. */
+export type LlmBudgetSource = "set" | "detected" | "default" | "detecting";
+
+export interface LlmBudget {
+  /** null while detecting, or when an older backend doesn't report the default. */
+  value: number | null;
+  source: LlmBudgetSource;
+}
+
+function positiveInt(v: unknown): number | null {
+  return typeof v === "number" && Number.isInteger(v) && v > 0 ? v : null;
+}
+
+/** The context window an LLM endpoint answers with, in the order the backend
+ *  resolves it: the admin-set value, else the `max_model_len` the endpoint
+ *  reports, else the deployment default (MAX_LLM_CONTEXT_SIZE). Pass
+ *  `ignoreSet` for what a blank field would fall back to. */
+export function llmContextSize(ep: ModelEndpointResponse, { ignoreSet = false } = {}): LlmBudget {
+  const set = ignoreSet ? null : positiveInt(ep.extra?.[LLM_CONTEXT_SIZE_KEY]);
+  if (set !== null) return { value: set, source: "set" };
+  if (ep.context_size_detection_pending) return { value: null, source: "detecting" };
+  const detected = positiveInt(ep.detected_max_llm_context_size);
+  if (detected !== null) return { value: detected, source: "detected" };
+  return { value: positiveInt(ep.default_max_llm_context_size), source: "default" };
+}
+
+/** The default output budget of an LLM endpoint: admin-set, else MAX_OUTPUT_TOKENS. */
+export function llmOutputTokens(ep: ModelEndpointResponse, { ignoreSet = false } = {}): LlmBudget {
+  const set = ignoreSet ? null : positiveInt(ep.extra?.[LLM_OUTPUT_TOKENS_KEY]);
+  if (set !== null) return { value: set, source: "set" };
+  return { value: positiveInt(ep.default_max_output_tokens), source: "default" };
+}
+
+const BUDGET_SOURCE_LABEL: Record<LlmBudgetSource, string> = {
+  set: "set",
+  detected: "detected",
+  default: "system default",
+  detecting: "detecting…",
+};
+
+/** `refetchInterval` for an endpoint list: an LLM endpoint write re-probes
+ *  /v1/models after responding, so poll until the detected windows are back
+ *  rather than leave "Detecting…" on screen. */
+export function refetchWhileDetecting(query: {
+  state: { data?: ModelEndpointResponse[] };
+}): number | false {
+  return query.state.data?.some((ep) => ep.context_size_detection_pending) ? 2000 : false;
+}
+
+/** "131,072 (detected)", "8,192 (system default)", "Detecting…" — for display. */
+export function formatLlmBudget(budget: LlmBudget): string {
+  if (budget.source === "detecting") return "Detecting…";
+  if (budget.value === null) return "System default";
+  return `${budget.value.toLocaleString("en-US")} (${BUDGET_SOURCE_LABEL[budget.source]})`;
 }
 
 /** Pull the two LLM budget keys out of `extra` into form-field strings. */
@@ -367,6 +445,26 @@ export function updateModelEndpoint(
   });
 }
 
+/** One partition's already-indexed file count for an endpoint. */
+export interface IndexedPartitionUsage {
+  partition: string;
+  file_count: number;
+}
+
+/** What an in-place edit of an embedder endpoint would strand (#762 C).
+ *
+ *  Empty means nothing is indexed against it yet, so the edit carries no
+ *  retrieval risk and the confirmation can say so instead of warning anyway.
+ */
+export interface IndexedFileUsage {
+  partitions: IndexedPartitionUsage[];
+  total_files: number;
+}
+
+export function getModelEndpointIndexedUsage(modelType: ModelType, name: string) {
+  return request<IndexedFileUsage>(`${BASE}/${enc(modelType)}/${enc(name)}/indexed-usage`);
+}
+
 export function setDefaultModelEndpoint(modelType: ModelType, name: string) {
   return request<ModelEndpointResponse>(
     `${BASE}/${enc(modelType)}/${enc(name)}/set-default`,
@@ -444,4 +542,23 @@ export function resolveEmbedderName(
 ): string {
   if (value !== "default") return value || "—";
   return pickDefaultEndpoint(embedderEndpoints)?.name ?? "default";
+}
+
+/** The model an embedder reference currently runs, or null if unknown.
+ *
+ *  Endpoint names are labels and can be renamed (#770 cascades the rename to
+ *  `partitions.embedder`, but a file's recorded provenance is a historical
+ *  fact and is never rewritten). The model is what actually determines the
+ *  vector space, so it — not the label — is what drift must be judged on.
+ */
+export function resolveEmbedderModel(
+  value: string | null | undefined,
+  embedderEndpoints: ModelEndpointResponse[] | undefined | null,
+): string | null {
+  if (!value) return null;
+  const endpoint =
+    value === "default"
+      ? pickDefaultEndpoint(embedderEndpoints)
+      : embedderEndpoints?.find((e) => e.name === value);
+  return endpoint?.model_name ?? null;
 }

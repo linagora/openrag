@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+import asyncio
+import concurrent.futures
+import multiprocessing
+import sys
 import threading
 from types import SimpleNamespace
 
+import pytest
 from services.workers.parsers import marker_workers
 
 
@@ -55,6 +60,12 @@ class _NullLogger:
     def info(self, *args, **kwargs) -> None:
         pass
 
+    def debug(self, *args, **kwargs) -> None:
+        pass
+
+    def exception(self, *args, **kwargs) -> None:
+        pass
+
 
 def test_force_kill_executor_kills_every_worker_then_shuts_down():
     procs = [_FakeProc(), _FakeProc(), _FakeProc()]
@@ -87,73 +98,915 @@ def test_force_kill_executor_survives_a_kill_error():
 
 
 # ---------------------------------------------------------------------------
-# MarkerWorker.setup_mp(old_executor=...) — concurrent-timeout guard (#674)
+# MarkerWorker.setup_mp(slot, old_executor=...) — per-slot executors (#674, #723)
 # ---------------------------------------------------------------------------
 
 
-def _bare_marker_worker():
+def _bare_marker_worker(slots: int = 1):
     """A MarkerWorker instance with __init__ skipped (no real models/pool)."""
     actor_class = marker_workers.MarkerWorker.__ray_metadata__.modified_class
     worker = actor_class.__new__(actor_class)
     worker.logger = _NullLogger()
-    worker._executor_lock = threading.Lock()
-    worker._workers = 1
+    worker._workers = slots
+    worker.executors = [None] * slots
+    worker._executor_locks = [threading.Lock() for _ in range(slots)]
     worker.model_dict = {}
-    worker.config = SimpleNamespace(loader=SimpleNamespace(marker_max_tasks_per_child=1))
+    worker.converter_config = {}
+    worker.config = SimpleNamespace(
+        loader=SimpleNamespace(marker_max_tasks_per_child=1, marker_child_timeout=1, marker_parse_memory_limit_mb=0)
+    )
     return worker
 
 
-def test_setup_mp_skips_rebuild_when_pool_already_recycled(monkeypatch):
-    """If another timeout handler already recycled the pool, a second handler
-    racing on the same stale executor must not force-kill the fresh one."""
+def _patch_executor_factory(monkeypatch, new_executors: list):
+    """Make setup_mp build the given fakes (in order) instead of real pools."""
+    monkeypatch.setattr("torch.multiprocessing.get_start_method", lambda allow_none=False: "spawn")
+    built_kwargs = []
+
+    def factory(*args, **kwargs):
+        built_kwargs.append(kwargs)
+        return new_executors.pop(0)
+
+    monkeypatch.setattr("concurrent.futures.ProcessPoolExecutor", factory)
+    return built_kwargs
+
+
+def test_setup_mp_skips_rebuild_when_slot_already_recycled(monkeypatch):
+    """If another handler already recycled the slot, a second handler racing on
+    the same stale executor must not force-kill the fresh one."""
     worker = _bare_marker_worker()
     stale_executor = _FakeExecutor([_FakeProc()])
     fresh_executor = _FakeExecutor([_FakeProc()])
-    worker.executor = fresh_executor  # already rebuilt by the "winning" handler
+    worker.executors[0] = fresh_executor  # already rebuilt by the "winning" handler
+    built = _patch_executor_factory(monkeypatch, [])
 
-    monkeypatch.setattr("torch.multiprocessing.get_start_method", lambda allow_none=False: "spawn")
-    built = []
-    monkeypatch.setattr(
-        "concurrent.futures.ProcessPoolExecutor",
-        lambda *a, **k: built.append(1) or _FakeExecutor([]),
-    )
+    worker.setup_mp(0, old_executor=stale_executor)
 
-    worker.setup_mp(old_executor=stale_executor)
-
-    assert worker.executor is fresh_executor  # left untouched
+    assert worker.executors[0] is fresh_executor  # left untouched
     assert fresh_executor.shutdown_kwargs is None  # never force-killed
-    assert not built  # no pool was rebuilt
+    assert not built  # no executor was rebuilt
 
 
 def test_setup_mp_rebuilds_when_old_executor_is_still_current(monkeypatch):
     """A timeout handler racing against nothing else must still reclaim the
-    wedged worker: kill the current pool and build a fresh one."""
+    wedged worker: kill the slot's executor and build a fresh one."""
     worker = _bare_marker_worker()
     current_executor = _FakeExecutor([_FakeProc()])
-    worker.executor = current_executor
-
-    monkeypatch.setattr("torch.multiprocessing.get_start_method", lambda allow_none=False: "spawn")
+    worker.executors[0] = current_executor
     new_executor = _FakeExecutor([])
-    monkeypatch.setattr("concurrent.futures.ProcessPoolExecutor", lambda *a, **k: new_executor)
+    _patch_executor_factory(monkeypatch, [new_executor])
 
-    worker.setup_mp(old_executor=current_executor)
+    worker.setup_mp(0, old_executor=current_executor)
 
     assert current_executor.shutdown_kwargs == {"wait": False, "cancel_futures": True}
-    assert worker.executor is new_executor
+    assert worker.executors[0] is new_executor
 
 
 def test_setup_mp_always_rebuilds_when_old_executor_is_none(monkeypatch):
-    """Explicit resets (init, MarkerPool health-check) always rebuild,
+    """Explicit resets (init, MarkerPool recycle/health-check) always rebuild,
     regardless of what's currently installed."""
     worker = _bare_marker_worker()
     current_executor = _FakeExecutor([_FakeProc()])
-    worker.executor = current_executor
-
-    monkeypatch.setattr("torch.multiprocessing.get_start_method", lambda allow_none=False: "spawn")
+    worker.executors[0] = current_executor
     new_executor = _FakeExecutor([])
-    monkeypatch.setattr("concurrent.futures.ProcessPoolExecutor", lambda *a, **k: new_executor)
+    _patch_executor_factory(monkeypatch, [new_executor])
 
-    worker.setup_mp()
+    worker.setup_mp(0)
 
     assert current_executor.shutdown_kwargs == {"wait": False, "cancel_futures": True}
-    assert worker.executor is new_executor
+    assert worker.executors[0] is new_executor
+
+
+def test_setup_mp_resets_only_its_own_slot(monkeypatch):
+    """Recycling one slot must not kill the child parsing in another slot of
+    the same actor — that was the collateral kill of a shared executor."""
+    worker = _bare_marker_worker(slots=3)
+    slot_procs = [_FakeProc(), _FakeProc(), _FakeProc()]
+    slot_executors = [_FakeExecutor([proc]) for proc in slot_procs]
+    worker.executors = list(slot_executors)
+    new_executor = _FakeExecutor([])
+    built = _patch_executor_factory(monkeypatch, [new_executor])
+
+    worker.setup_mp(1)
+
+    assert slot_procs[1].killed
+    assert worker.executors[1] is new_executor
+    assert not slot_procs[0].killed and not slot_procs[2].killed
+    assert worker.executors[0] is slot_executors[0] and worker.executors[2] is slot_executors[2]
+    assert built == [
+        {
+            "max_workers": 1,
+            "initializer": worker._worker_init,
+            "initargs": ({}, 0),  # (model_dict, marker_parse_memory_limit_mb)
+            "mp_context": built[0]["mp_context"],
+            "max_tasks_per_child": 1,
+        }
+    ]
+
+
+def test_is_pool_broken_checks_only_the_given_slot():
+    worker = _bare_marker_worker(slots=2)
+    healthy = _FakeExecutor([])
+    broken = _FakeExecutor([])
+    broken._broken = "A child process terminated abruptly"
+    worker.executors = [healthy, broken]
+
+    assert worker.is_pool_broken(0) is False
+    assert worker.is_pool_broken(1) is True
+
+
+class _TimedOutFuture:
+    def result(self, timeout=None):
+        from concurrent.futures import TimeoutError as FuturesTimeoutError
+
+        raise FuturesTimeoutError()
+
+
+class _SubmitExecutor(_FakeExecutor):
+    def __init__(self, procs, future) -> None:
+        super().__init__(procs)
+        self.future = future
+        self.submitted = 0
+
+    def submit(self, fn, *args, **kwargs):
+        self.submitted += 1
+        return self.future
+
+
+async def test_child_timeout_recycles_only_the_timed_out_slot(monkeypatch):
+    """A wedged child (#659) is reclaimed by recycling its own slot; a parse
+    running in another slot of the same actor keeps going."""
+    worker = _bare_marker_worker(slots=2)
+    other_proc, wedged_proc = _FakeProc(), _FakeProc()
+    other_executor = _SubmitExecutor([other_proc], future=None)
+    wedged_executor = _SubmitExecutor([wedged_proc], future=_TimedOutFuture())
+    worker.executors = [other_executor, wedged_executor]
+    new_executor = _FakeExecutor([])
+    _patch_executor_factory(monkeypatch, [new_executor])
+
+    from concurrent.futures import TimeoutError as FuturesTimeoutError
+
+    try:
+        await worker.process_pdf("f.pdf", page_range=[0, 1], slot=1)
+    except FuturesTimeoutError:
+        pass
+    else:
+        raise AssertionError("child timeout must propagate")
+
+    assert wedged_executor.submitted == 1 and other_executor.submitted == 0
+    assert wedged_proc.killed and worker.executors[1] is new_executor
+    assert not other_proc.killed and worker.executors[0] is other_executor
+
+
+# ---------------------------------------------------------------------------
+# MarkerPool._process_chunk — don't release a slot the child still owns (#723)
+# ---------------------------------------------------------------------------
+
+
+def _bare_marker_pool():
+    """A MarkerPool instance with __init__ skipped (no real Ray actors)."""
+    pool_class = marker_workers.MarkerPool.__ray_metadata__.modified_class
+    pool = pool_class.__new__(pool_class)
+    pool.logger = _NullLogger()
+    pool.config = SimpleNamespace(loader=SimpleNamespace(marker_max_task_retry=0, marker_retry_base_delay=0.01))
+    pool._queue = asyncio.Queue()
+    pool._queue.put_nowait("worker-1")
+    return pool
+
+
+class _RecordingActorMethod:
+    def __init__(self, calls: list, name: str) -> None:
+        self.calls = calls
+        self.name = name
+
+    def remote(self, *args, **kwargs):
+        self.calls.append((self.name, args, kwargs))
+        return f"ref-{self.name}"
+
+
+def _recording_actor(calls: list):
+    return SimpleNamespace(
+        is_pool_broken=_RecordingActorMethod(calls, "is_pool_broken"),
+        setup_mp=_RecordingActorMethod(calls, "setup_mp"),
+        process_pdf=_RecordingActorMethod(calls, "process_pdf"),
+    )
+
+
+async def test_pool_helpers_address_the_slot_not_the_whole_actor(monkeypatch):
+    """Every call MarkerPool makes on behalf of a slot must name that slot, so
+    a recycle or health check can't reach another slot's executor."""
+    pool = _bare_marker_pool()
+    pool.config.loader.marker_timeout = 5
+    calls = []
+    worker = (_recording_actor(calls), 2)
+
+    async def fake_call(future, timeout, task_description="Ray task"):
+        return future
+
+    monkeypatch.setattr(marker_workers, "call_ray_actor_with_timeout", fake_call)
+
+    await pool._check_pool_broken(worker)
+    await pool._reset_worker_pool(worker)
+    await pool._run_chunk(worker, "f.pdf", [0, 1], "[p0-1]")
+
+    assert calls == [
+        ("is_pool_broken", (2,), {}),
+        ("setup_mp", (2,), {}),
+        ("process_pdf", ("f.pdf",), {"page_range": [0, 1], "slot": 2}),
+    ]
+
+
+async def test_process_chunk_returns_worker_to_queue_on_success(monkeypatch):
+    pool = _bare_marker_pool()
+    monkeypatch.setattr(pool, "ensure_worker_pool_healthy", lambda worker: _noop())
+    monkeypatch.setattr(pool, "_run_chunk", lambda worker, file_path, page_range, label: _return("ok"))
+
+    result = await pool._process_chunk("f.pdf", None, "(all pages)")
+
+    assert result == "ok"
+    assert pool._queue.qsize() == 1
+    assert pool._queue.get_nowait() == "worker-1"
+
+
+async def test_process_chunk_recycles_before_releasing_on_cancellation(monkeypatch):
+    """A cancelled/timed-out chunk must not free its slot until the worker's
+    pool has been recycled — otherwise a still-busy worker re-enters rotation."""
+    pool = _bare_marker_pool()
+    reset_calls = []
+
+    async def fake_reset(worker):
+        reset_calls.append(worker)
+
+    async def fake_run_chunk(worker, file_path, page_range, label):
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(pool, "ensure_worker_pool_healthy", lambda worker: _noop())
+    monkeypatch.setattr(pool, "_run_chunk", fake_run_chunk)
+    monkeypatch.setattr(pool, "_reset_worker_pool", fake_reset)
+
+    try:
+        await pool._process_chunk("f.pdf", None, "(all pages)")
+    except asyncio.CancelledError:
+        pass
+
+    # The slot is not returned inline...
+    assert pool._queue.qsize() == 0
+
+    # ...it only reappears after the background recycle has run.
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    assert reset_calls == ["worker-1"]
+    assert pool._queue.qsize() == 1
+    assert pool._queue.get_nowait() == "worker-1"
+
+
+async def test_process_chunk_never_returns_worker_when_recycle_keeps_failing(monkeypatch):
+    """If recycling can't be confirmed, the slot must stay dropped rather than
+    hand back a worker that might still be running the previous parse."""
+    pool = _bare_marker_pool()
+
+    async def fake_run_chunk(worker, file_path, page_range, label):
+        raise TimeoutError("parse timed out")
+
+    async def failing_reset(worker):
+        raise RuntimeError("actor unavailable")
+
+    monkeypatch.setattr(pool, "ensure_worker_pool_healthy", lambda worker: _noop())
+    monkeypatch.setattr(pool, "_run_chunk", fake_run_chunk)
+    monkeypatch.setattr(pool, "_reset_worker_pool", failing_reset)
+
+    try:
+        await pool._process_chunk("f.pdf", None, "(all pages)")
+    except Exception:
+        pass
+
+    for _ in range(5):
+        await asyncio.sleep(0)
+
+    assert pool._queue.qsize() == 0
+
+
+async def test_process_chunk_returns_worker_without_recycling_on_ordinary_exception(monkeypatch):
+    """A parse error (not a cancel/timeout) means the child already stopped on
+    its own, so the slot must go back directly instead of recycling the whole
+    actor's pool and killing sibling chunks."""
+    pool = _bare_marker_pool()
+    reset_calls = []
+
+    async def fake_reset(worker):
+        reset_calls.append(worker)
+
+    async def fake_run_chunk(worker, file_path, page_range, label):
+        raise RuntimeError("parse error")
+
+    monkeypatch.setattr(pool, "ensure_worker_pool_healthy", lambda worker: _noop())
+    monkeypatch.setattr(pool, "_run_chunk", fake_run_chunk)
+    monkeypatch.setattr(pool, "_reset_worker_pool", fake_reset)
+
+    try:
+        await pool._process_chunk("f.pdf", None, "(all pages)")
+    except RuntimeError:
+        pass
+
+    assert reset_calls == []
+    assert pool._queue.qsize() == 1
+    assert pool._queue.get_nowait() == "worker-1"
+
+
+async def test_recycle_and_release_retries_across_cancellation(monkeypatch):
+    """A cancel delivered to the reset call itself (e.g. the same delete that
+    is tearing down the chunk) must be retried, not treated as a failed
+    recycle that permanently drops the slot."""
+    pool = _bare_marker_pool()
+    pool._queue = asyncio.Queue()
+    monkeypatch.setattr(marker_workers, "_RECYCLE_CANCEL_RETRY_DELAY", 0)
+    attempts = []
+
+    async def flaky_reset(worker):
+        attempts.append(worker)
+        if len(attempts) == 1:
+            raise asyncio.CancelledError()
+
+    monkeypatch.setattr(pool, "_reset_worker_pool", flaky_reset)
+
+    await pool._recycle_and_release("worker-1", "(all pages)")
+
+    assert len(attempts) == 2
+    assert pool._queue.qsize() == 1
+    assert pool._queue.get_nowait() == "worker-1"
+
+
+async def _noop():
+    return None
+
+
+async def _return(value):
+    return value
+
+
+# ---------------------------------------------------------------------------
+# _apply_parse_memory_limit — a hard ceiling on one parse (#997, audit A2)
+# ---------------------------------------------------------------------------
+
+
+def _child_alloc(mib: int) -> str:
+    """Allocate ``mib`` MiB in this process; report what happened."""
+    try:
+        buf = bytearray(mib * 1024 * 1024)
+        return f"allocated {len(buf) // (1024 * 1024)}"
+    except MemoryError:
+        return "MemoryError"
+
+
+def _vmdata_mib() -> int:
+    """This process's current private data size — what RLIMIT_DATA is measured against."""
+    with open("/proc/self/status") as status:
+        for line in status:
+            if line.startswith("VmData:"):
+                return int(line.split()[1]) // 1024
+    raise RuntimeError("VmData not reported")
+
+
+def _child_limit_unchanged() -> bool:
+    """Is a disabled limit a true no-op?
+
+    The parametrized success case above can only show there is no ceiling *below
+    its own size*, and sizing it to prove more means committing that much memory
+    in a child on a shared runner. Reading the limit back settles it exactly and
+    allocates nothing.
+    """
+    import resource
+
+    from services.workers.parsers.marker_workers import _apply_parse_memory_limit
+
+    before = resource.getrlimit(resource.RLIMIT_DATA)
+    _apply_parse_memory_limit(0)
+    return resource.getrlimit(resource.RLIMIT_DATA) == before
+
+
+def _child_probe(headroom_mb: int | None, alloc_mib: int) -> str:
+    from services.workers.parsers.marker_workers import _apply_parse_memory_limit
+
+    # The ceiling covers the whole child, not just the parse's own growth, so it
+    # has to sit above whatever the process already holds — a forked test child
+    # inherits the runner's heap, and a real Marker child holds torch's.
+    _apply_parse_memory_limit(0 if headroom_mb is None else _vmdata_mib() + headroom_mb)
+    return _child_alloc(alloc_mib)
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="RLIMIT_DATA only covers mmap on Linux")
+@pytest.mark.parametrize(
+    ("headroom_mb", "alloc_mib", "expected"),
+    [
+        (256, 1024, "MemoryError"),  # over the ceiling -> refused
+        (256, 64, "allocated 64"),  # under it -> untouched
+        (None, 64, "allocated 64"),  # disabled -> the same allocation is fine
+    ],
+)
+def test_the_limit_actually_bounds_an_allocation_in_a_real_child(headroom_mb, alloc_mib, expected):
+    """Run it for real in a forked child.
+
+    Asserting that ``setrlimit`` was *called* would pass just as well with the
+    wrong resource — and ``RLIMIT_AS`` is the wrong one here (it also refuses
+    file-backed mappings, so Marker's weights and CUDA's device maps would fail).
+    Only allocating against the live limit distinguishes them.
+    """
+    ctx = multiprocessing.get_context("fork")
+    with concurrent.futures.ProcessPoolExecutor(max_workers=1, mp_context=ctx) as pool:
+        assert pool.submit(_child_probe, headroom_mb, alloc_mib).result(timeout=60) == expected
+
+
+def _child_mmap_probe(headroom_mb: int) -> str:
+    """A file-backed mapping far over the ceiling must still be allowed."""
+    import mmap
+    import tempfile
+
+    from services.workers.parsers.marker_workers import _apply_parse_memory_limit
+
+    _apply_parse_memory_limit(_vmdata_mib() + headroom_mb)
+    with tempfile.NamedTemporaryFile() as fh:
+        fh.truncate(2 * 1024 * 1024 * 1024)
+        try:
+            with mmap.mmap(fh.fileno(), 0, prot=mmap.PROT_READ):
+                return "mapped"
+        except OSError as exc:
+            return f"refused: {exc.errno}"
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="RLIMIT_DATA only covers mmap on Linux")
+def test_a_disabled_limit_leaves_the_rlimit_untouched():
+    """0 must not lower the ceiling at all, not merely leave room for the test's
+    own allocation."""
+    ctx = multiprocessing.get_context("fork")
+    with concurrent.futures.ProcessPoolExecutor(max_workers=1, mp_context=ctx) as pool:
+        assert pool.submit(_child_limit_unchanged).result(timeout=60) is True
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="RLIMIT_DATA only covers mmap on Linux")
+def test_a_file_backed_mapping_is_not_counted_against_the_limit():
+    """Mutation guard for the choice of resource: with ``RLIMIT_AS`` this returns
+    ``refused: 12``, which is Marker failing to load its model weights."""
+    ctx = multiprocessing.get_context("fork")
+    with concurrent.futures.ProcessPoolExecutor(max_workers=1, mp_context=ctx) as pool:
+        assert pool.submit(_child_mmap_probe, 256).result(timeout=60) == "mapped"
+
+
+def test_a_refused_setrlimit_does_not_stop_the_worker_starting(monkeypatch):
+    """Best-effort: a platform that refuses the call must still yield a worker."""
+    resource = pytest.importorskip("resource", reason="Unix-only; the missing case is covered below")
+
+    def _boom(*_args, **_kwargs):
+        raise OSError("not supported here")
+
+    monkeypatch.setattr(resource, "setrlimit", _boom)
+    monkeypatch.setattr(marker_workers, "logger", _NullLogger())
+
+    marker_workers._apply_parse_memory_limit(256)  # must not raise
+
+
+def test_a_missing_resource_module_does_not_stop_the_worker_starting(monkeypatch):
+    """The case the import placement exists for — and it cannot import the module
+    it is proving absent, which is why it is separate from the test above.
+
+    ``resource`` is Unix-only. At module scope its absence would raise before any
+    handler could run and the worker would not start at all; inside the function
+    it degrades to a worker with no ceiling, which is the intended behaviour.
+    """
+    monkeypatch.setitem(sys.modules, "resource", None)  # import raises ImportError
+    monkeypatch.setattr(marker_workers, "logger", _NullLogger())
+
+    marker_workers._apply_parse_memory_limit(256)  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# MemoryError is the one failure that leaves the child alive (#997 review)
+# ---------------------------------------------------------------------------
+
+
+async def test_process_chunk_recycles_the_slot_after_a_memory_error(monkeypatch):
+    """The parse ceiling raises *in* the child instead of killing it, and freeing
+    the objects need not bring ``VmData`` back below the limit. Returning that
+    slot to the pool hands the next chunk a child that fails for a reason that is
+    not its own, so a MemoryError must recycle like a timeout does."""
+    pool = _bare_marker_pool()
+    reset_calls = []
+
+    async def fake_reset(worker):
+        reset_calls.append(worker)
+
+    async def fake_run_chunk(worker, file_path, page_range, label):
+        raise _as_production_raises_it()
+
+    monkeypatch.setattr(pool, "ensure_worker_pool_healthy", lambda worker: _noop())
+    monkeypatch.setattr(pool, "_run_chunk", fake_run_chunk)
+    monkeypatch.setattr(pool, "_reset_worker_pool", fake_reset)
+
+    with pytest.raises(MemoryError):
+        await pool._process_chunk("f.pdf", None, "(all pages)")
+
+    await asyncio.sleep(0)  # let the recycle task created in `finally` start
+    await asyncio.sleep(0)
+    assert reset_calls, "a MemoryError left the child alive but the slot was not recycled"
+
+
+async def test_process_chunk_does_not_retry_a_memory_error(monkeypatch):
+    """A chunk over the ceiling is over it again every time: retrying costs
+    ~4x the parse plus backoff and ends with the same error.
+
+    The pool is given a real retry budget on purpose — ``_bare_marker_pool``
+    defaults to ``marker_max_task_retry=0``, where one attempt happens whether
+    or not the fix is present and the assertion below proves nothing.
+    """
+    pool = _bare_marker_pool()
+    pool.config.loader.marker_max_task_retry = 3
+    attempts = []
+
+    async def fake_run_chunk(worker, file_path, page_range, label):
+        attempts.append(1)
+        raise _as_production_raises_it()
+
+    monkeypatch.setattr(pool, "ensure_worker_pool_healthy", lambda worker: _noop())
+    monkeypatch.setattr(pool, "_run_chunk", fake_run_chunk)
+    monkeypatch.setattr(pool, "_reset_worker_pool", lambda worker: _noop())
+
+    with pytest.raises(MemoryError):
+        await pool._process_chunk("f.pdf", None, "(all pages)")
+
+    assert len(attempts) == 1, f"MemoryError was retried {len(attempts)} times"
+
+
+def _as_production_raises_it() -> RuntimeError:
+    """Build the exception `_process_chunk` actually sees for a child OOM.
+
+    The child raises MemoryError; Ray hands it back as RayTaskError(MemoryError);
+    `call_ray_actor_with_timeout` re-raises *that* as RuntimeError with the Ray
+    error only as `__cause__`. Tests that raise MemoryError directly skip the two
+    conversions that decide whether the fix works at all.
+    """
+    from ray.exceptions import RayTaskError
+
+    try:
+        raise MemoryError("parse ceiling")
+    except MemoryError as exc:
+        ray_error = RayTaskError("t", "traceback", exc).as_instanceof_cause()
+    produced = RuntimeError("MarkerPool PDF (all pages) (f.pdf) failed")
+    produced.__cause__ = ray_error
+    return produced
+
+
+def test_call_ray_actor_with_timeout_really_converts_to_runtimeerror():
+    """The premise of `_as_production_raises_it`. If this ever stops holding —
+    say the wrapper starts re-raising the original type — the helper above is
+    testing a path that no longer exists, and both guards would go untested
+    while staying green."""
+    import inspect
+
+    from services.workers import ray_utils
+
+    source = inspect.getsource(ray_utils.call_ray_actor_with_timeout)
+    assert "except RayTaskError" in source
+    assert "raise RuntimeError" in source
+
+
+def test_caused_by_finds_the_memory_error_through_the_ray_wrapper():
+    """`isinstance(exc, MemoryError)` is False for what production raises; the
+    whole fix depends on looking through `__cause__`."""
+    from services.workers.ray_utils import caused_by
+
+    produced = _as_production_raises_it()
+
+    assert not isinstance(produced, MemoryError), "premise changed: it is a plain RuntimeError"
+    assert caused_by(produced, MemoryError)
+
+
+def test_caused_by_survives_a_chained_cycle():
+    """An explicitly chained cycle must not spin forever."""
+    from services.workers.ray_utils import caused_by
+
+    a, b = RuntimeError("a"), RuntimeError("b")
+    a.__cause__ = b
+    b.__cause__ = a
+
+    assert caused_by(a, MemoryError) is False
+
+
+async def test_an_ordinary_error_still_uses_the_retry_budget(monkeypatch):
+    """Control for the test above: with the same retry budget, a non-ceiling
+    failure is retried. Without this, a broken `no_retry` that swallowed every
+    retry would look identical to the fix working."""
+    pool = _bare_marker_pool()
+    pool.config.loader.marker_max_task_retry = 3
+    attempts = []
+
+    async def fake_run_chunk(worker, file_path, page_range, label):
+        attempts.append(1)
+        raise RuntimeError("parse error")
+
+    monkeypatch.setattr(pool, "ensure_worker_pool_healthy", lambda worker: _noop())
+    monkeypatch.setattr(pool, "_run_chunk", fake_run_chunk)
+    monkeypatch.setattr(pool, "_reset_worker_pool", lambda worker: _noop())
+
+    with pytest.raises(RuntimeError):
+        await pool._process_chunk("f.pdf", None, "(all pages)")
+
+    assert len(attempts) == 4, f"expected 1 try + 3 retries, got {len(attempts)}"
+
+
+# ---------------------------------------------------------------------------
+# The ceiling reports itself: a bad value must not be silent (#997 review)
+# ---------------------------------------------------------------------------
+
+
+class _RecordingLogger:
+    def __init__(self) -> None:
+        self.records: list[tuple[str, str]] = []
+
+    def _log(self, level):
+        def record(message):
+            self.records.append((level, str(message)))
+
+        return record
+
+    def __getattr__(self, name):
+        return self._log(name)
+
+    def levels(self):
+        return [level for level, _ in self.records]
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="/proc/self/status is Linux-only")
+@pytest.mark.parametrize(
+    ("headroom_mb", "expected"),
+    [
+        (-64, "error"),  # at or below the baseline: every parse fails
+        (32, "warning"),  # technically above it, with no room to work
+        (4096, "info"),  # comfortable
+    ],
+)
+def test_the_limit_reports_how_it_compares_to_the_child_baseline(monkeypatch, headroom_mb, expected):
+    """An operator who picks a value below the child's baseline gets 100% Marker
+    failures. The only thing standing between them and a silent outage is this
+    log line, so its level has to follow the headroom."""
+    from services.workers.parsers import marker_workers as mw
+
+    recorder = _RecordingLogger()
+    monkeypatch.setattr(mw, "logger", recorder)
+    monkeypatch.setattr(mw, "_child_vmdata_mb", lambda: 1000)
+
+    import resource as real_resource
+
+    monkeypatch.setattr(real_resource, "setrlimit", lambda *a: None)
+    monkeypatch.setattr(real_resource, "getrlimit", lambda _w: (real_resource.RLIM_INFINITY,) * 2)
+
+    mw._apply_parse_memory_limit(1000 + headroom_mb)
+
+    assert expected in recorder.levels(), f"headroom {headroom_mb} MiB logged {recorder.levels()}"
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="/proc/self/status is Linux-only")
+def test_child_vmdata_is_readable_and_positive():
+    """The baseline the log line reports has to be a real measurement."""
+    from services.workers.parsers.marker_workers import _child_vmdata_mb
+
+    assert (_child_vmdata_mb() or 0) > 0
+
+
+# ---------------------------------------------------------------------------
+# Torch's allocator fails as RuntimeError, and only the top-level type crosses
+# the process pool (#997 review)
+# ---------------------------------------------------------------------------
+
+
+class _TorchOverTheCeiling:
+    """Stands in for ``PdfConverter``: the parse allocates a tensor, as Marker's do."""
+
+    def __init__(self, artifact_dict=None, config=None):
+        pass
+
+    def __call__(self, file_path):
+        import torch
+
+        return torch.empty(1024 * 1024 * 1024, dtype=torch.uint8)  # 1 GiB, over a 256 MiB ceiling
+
+
+class _WrapsAMemoryError:
+    def __init__(self, artifact_dict=None, config=None):
+        pass
+
+    def __call__(self, file_path):
+        try:
+            raise MemoryError("inner")
+        except MemoryError as exc:
+            raise ValueError("a library wrapped it") from exc
+
+
+def _child_parse(headroom_mb: int) -> str:
+    """Run the real ``_process_pdf`` under a real ceiling, in this (forked) child,
+    set up by the real pool initializer as production does."""
+    from services.workers.parsers import marker_workers as mw
+
+    mw.MarkerWorker._worker_init({}, _vmdata_mib() + headroom_mb)
+    mw.MarkerWorker._process_pdf("f.pdf", {})
+    return "parsed"
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="RLIMIT_DATA only covers mmap on Linux")
+@pytest.mark.parametrize("converter", [_TorchOverTheCeiling, _WrapsAMemoryError])
+def test_a_ceiling_failure_reaches_the_parent_as_memory_error(monkeypatch, converter):
+    """The production path end to end, up to the pool: a real allocation under a
+    real ``RLIMIT_DATA`` in a real child, back through ``concurrent.futures``.
+
+    Torch raises ``RuntimeError`` here, not ``MemoryError``, and the pool keeps
+    only the top-level type — so without the conversion in the child the parent
+    sees ``RuntimeError`` (or the wrapper's ``ValueError``) and neither the
+    recycle nor ``no_retry`` fires. From ``MemoryError`` onwards, the Ray wrapping
+    is pinned by ``_as_production_raises_it``.
+    """
+    monkeypatch.setattr(marker_workers, "PdfConverter", converter)  # inherited by the fork
+    # On a GPU host the forked child cannot touch CUDA, so the cleanup in
+    # _process_pdf's `finally` would raise and replace the MemoryError.
+    # Production starts these children with spawn, where that doesn't happen.
+    monkeypatch.setattr(marker_workers.torch.cuda, "is_available", lambda: False)
+    ctx = multiprocessing.get_context("fork")
+    with concurrent.futures.ProcessPoolExecutor(max_workers=1, mp_context=ctx) as pool:
+        with pytest.raises(MemoryError):
+            pool.submit(_child_parse, 256).result(timeout=120)
+
+
+def test_the_real_torch_allocator_error_is_recognised():
+    """Pins the message the conversion matches on to the torch actually installed,
+    so an upgrade that rewords it fails here rather than silently disabling the
+    guard. Needs no ceiling: an impossible size fails the same allocator."""
+    import torch
+
+    with pytest.raises(RuntimeError) as caught:
+        torch.empty(2**62, dtype=torch.uint8)
+
+    assert not isinstance(caught.value, MemoryError), "premise changed: torch now raises MemoryError itself"
+    assert isinstance(marker_workers._as_parse_memory_error(caught.value), MemoryError)
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        pytest.param(RuntimeError("some other failure"), id="ordinary-runtime-error"),
+        pytest.param(ValueError("bad pdf"), id="unrelated"),
+    ],
+)
+def test_other_failures_are_not_turned_into_memory_errors(exc):
+    """Control: converting too much would stop ordinary errors being retried."""
+    assert marker_workers._as_parse_memory_error(exc) is None
+
+
+def test_a_gpu_out_of_memory_is_not_mistaken_for_the_ceiling():
+    """``torch.OutOfMemoryError`` is a ``RuntimeError`` too, but device memory is
+    not what ``RLIMIT_DATA`` bounds, so the conversion must leave it alone."""
+    import torch
+
+    gpu_oom = torch.OutOfMemoryError("CUDA out of memory. Tried to allocate 2.00 GiB")
+
+    assert isinstance(gpu_oom, RuntimeError)
+    assert marker_workers._as_parse_memory_error(gpu_oom) is None
+
+
+# ---------------------------------------------------------------------------
+# A limit that cannot work is not applied, and nothing logs after it (#997 review)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="/proc/self/status is Linux-only")
+@pytest.mark.parametrize(("headroom_mb", "applied"), [(-64, False), (0, False), (32, True), (4096, True)])
+def test_a_limit_at_or_below_the_baseline_is_not_applied(monkeypatch, headroom_mb, applied):
+    """Applied, it would fail every parse and — with the recycle on MemoryError —
+    respawn the child for every chunk. The thin-headroom case stays applied."""
+    from services.workers.parsers import marker_workers as mw
+
+    monkeypatch.setattr(mw, "logger", _RecordingLogger())
+    monkeypatch.setattr(mw, "_child_vmdata_mb", lambda: 1000)
+
+    import resource as real_resource
+
+    calls = []
+    monkeypatch.setattr(real_resource, "setrlimit", lambda *a: calls.append(a))
+    monkeypatch.setattr(real_resource, "getrlimit", lambda _w: (real_resource.RLIM_INFINITY,) * 2)
+
+    mw._apply_parse_memory_limit(1000 + headroom_mb)
+
+    assert bool(calls) is applied, f"headroom {headroom_mb} MiB: setrlimit called={bool(calls)}"
+
+
+def test_worker_init_logs_before_it_applies_the_limit(monkeypatch):
+    """Under a tight ceiling the log call's own allocation could raise, and the
+    pool initializer has no handler — so nothing may log after the limit."""
+    from services.workers.parsers import marker_workers as mw
+
+    order = []
+    monkeypatch.setattr(mw, "logger", SimpleNamespace(debug=lambda *a, **k: order.append("log")))
+    monkeypatch.setattr(mw, "_apply_parse_memory_limit", lambda _mb: order.append("limit"))
+
+    mw.MarkerWorker._worker_init({}, 2048)
+
+    assert order == ["log", "limit"]
+
+
+def _across_an_actor_boundary(exc: BaseException, description: str) -> RuntimeError:
+    """What a caller of `call_ray_actor_with_timeout` gets when the actor raised *exc*.
+
+    Ray pickles the actor's exception, and pickling keeps the type but drops
+    `__cause__`; the wrapper then re-raises a RuntimeError with the Ray error as
+    its cause. Applied to the pool's exception, this is what `MarkerLoader` sees.
+    """
+    import pickle
+
+    from ray.exceptions import RayTaskError
+
+    produced = RuntimeError(f"{description} failed")
+    produced.__cause__ = RayTaskError("t", "traceback", pickle.loads(pickle.dumps(exc))).as_instanceof_cause()
+    return produced
+
+
+async def _pool_failure(monkeypatch, child_failure: BaseException) -> BaseException:
+    """Run the real `_process_chunk` over a child failure; return what the pool raises."""
+    pool = _bare_marker_pool()
+
+    async def fake_run_chunk(worker, file_path, page_range, label):
+        raise child_failure
+
+    monkeypatch.setattr(pool, "ensure_worker_pool_healthy", lambda worker: _noop())
+    monkeypatch.setattr(pool, "_run_chunk", fake_run_chunk)
+    monkeypatch.setattr(pool, "_reset_worker_pool", lambda worker: _noop())
+
+    with pytest.raises(Exception) as raised:
+        await pool._process_chunk("f.pdf", [10, 11], "[p10-11]")
+    await asyncio.sleep(0)  # let the recycle task created in `finally` run
+    return raised.value
+
+
+def _loader_raising(monkeypatch, exc: BaseException, limit_mb: int):
+    """A `MarkerLoader` whose pool call fails with *exc*."""
+
+    async def fake_call(future, timeout, task_description):
+        raise exc
+
+    monkeypatch.setattr(marker_workers, "call_ray_actor_with_timeout", fake_call)
+    loader = marker_workers.MarkerLoader.__new__(marker_workers.MarkerLoader)
+    loader.config = SimpleNamespace(loader=SimpleNamespace(marker_timeout=60, marker_parse_memory_limit_mb=limit_mb))
+    loader._pool = lambda: SimpleNamespace(process_pdf=SimpleNamespace(remote=lambda path: None))
+    return loader
+
+
+def test_an_actor_boundary_drops_the_cause_but_keeps_the_type():
+    """The premise of the two tests below. A RuntimeError caused by a MemoryError
+    arrives one hop later with no MemoryError left to find — which is why the
+    pool must raise the type itself."""
+    from services.workers.ray_utils import caused_by
+
+    caused = RuntimeError("MarkerPool PDF [p10-11] failed")
+    caused.__cause__ = MemoryError("ceiling")
+
+    assert not caused_by(_across_an_actor_boundary(caused, "MarkerLoader PDF loading"), MemoryError)
+    assert caused_by(_across_an_actor_boundary(MemoryError("ceiling"), "MarkerLoader PDF loading"), MemoryError)
+
+
+async def test_a_ceiling_failure_reaches_the_task_reason_through_both_hops(monkeypatch):
+    """Child -> pool -> loader, each hop as Ray delivers it. With only the loader
+    looking for the MemoryError, the reason stayed "RuntimeError: MarkerLoader PDF
+    loading (...) failed" — the text a corrupt PDF gets too — measured on an L4
+    with a 1418 MiB limit, while a one-hop test of the loader passed."""
+    from core.utils.error_summary import failure_reason_from_exception
+
+    pool_raised = await _pool_failure(monkeypatch, _as_production_raises_it())
+    assert isinstance(pool_raised, MemoryError), "the pool must raise the type that survives the next hop"
+
+    loader = _loader_raising(monkeypatch, _across_an_actor_boundary(pool_raised, "MarkerLoader PDF loading"), 1418)
+    with pytest.raises(MemoryError) as raised:
+        await loader._convert_pdf("/tmp/doc.pdf")
+
+    reason = failure_reason_from_exception(raised.value)
+    assert reason.startswith("MemoryError: Marker ran out of memory")
+    assert "MARKER_PARSE_MEMORY_LIMIT_MB=1418 MiB" in reason
+    assert raised.value.__cause__ is not None, "the remote traceback must stay on the chain"
+
+
+async def test_a_memory_error_without_a_ceiling_does_not_name_the_setting(monkeypatch):
+    pool_raised = await _pool_failure(monkeypatch, _as_production_raises_it())
+    loader = _loader_raising(monkeypatch, _across_an_actor_boundary(pool_raised, "MarkerLoader PDF loading"), 0)
+
+    with pytest.raises(MemoryError, match=r"^Marker ran out of memory parsing this PDF\.$"):
+        await loader._convert_pdf("/tmp/doc.pdf")
+
+
+async def test_other_failures_cross_both_hops_unchanged(monkeypatch):
+    child_failure = RuntimeError("MarkerPool PDF [p10-11] failed")
+    child_failure.__cause__ = ValueError("not a PDF")
+
+    pool_raised = await _pool_failure(monkeypatch, child_failure)
+    assert pool_raised is child_failure
+
+    produced = _across_an_actor_boundary(pool_raised, "MarkerLoader PDF loading")
+    loader = _loader_raising(monkeypatch, produced, 1418)
+    with pytest.raises(RuntimeError) as raised:
+        await loader._convert_pdf("/tmp/doc.pdf")
+
+    assert raised.value is produced

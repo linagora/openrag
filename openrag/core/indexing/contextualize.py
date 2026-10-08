@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from contextlib import AbstractAsyncContextManager, nullcontext
 
 from tqdm.asyncio import tqdm
@@ -60,6 +60,7 @@ class ChunkContextualizer:
         filename: str,
         lang: str,
         system_prompt: str,
+        on_failure: Callable[[Exception], None] | None = None,
     ) -> str:
         messages = build_messages(
             system_prompt=system_prompt,
@@ -72,12 +73,19 @@ class ChunkContextualizer:
         async with self._semaphore:
             try:
                 response = await asyncio.wait_for(self._llm.chat(messages), timeout=self._timeout)
-                return _chat_response_text(response)
-            except TimeoutError:
+                context = _chat_response_text(response)
+                if not context.strip():
+                    raise ValueError("LLM returned an empty contextualization response")
+                return context
+            except TimeoutError as exc:
                 logger.warning("LLM timeout contextualizing chunk (filename=%s)", filename)
+                if on_failure is not None:
+                    on_failure(exc)
                 return ""
             except Exception as exc:
                 logger.warning("Error contextualizing chunk (filename=%s): %s", filename, exc)
+                if on_failure is not None:
+                    on_failure(exc)
                 return ""
 
     async def contextualize(
@@ -87,6 +95,7 @@ class ChunkContextualizer:
         filename: str = "",
         lang: str = "en",
         system_prompt: str | None = None,
+        on_failure: Callable[[Exception], None] | None = None,
     ) -> list[Chunk]:
         """Return new chunks with context prepended to ``text``.
 
@@ -121,6 +130,7 @@ class ChunkContextualizer:
                         filename=filename,
                         lang=lang,
                         system_prompt=effective_prompt,
+                        on_failure=on_failure,
                     )
                     for i in range(start, end)
                 ]
@@ -147,6 +157,8 @@ class ChunkContextualizer:
             ]
         except (TimeoutError, OSError, RuntimeError, ValueError) as exc:
             logger.warning("Error contextualizing chunks from %s: %s", filename, exc)
+            if on_failure is not None:
+                on_failure(exc)
             return chunks
 
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -14,6 +15,14 @@ def _remote_mock(return_value: Any = None) -> MagicMock:
     method = MagicMock()
     method.remote = AsyncMock(return_value=return_value)
     return method
+
+
+def _queue_admitted() -> dict[str, Any]:
+    return {"accepted": True, "reason": None, "existing_task_id": None}
+
+
+def _queue_refused(reason: str, existing_task_id: str | None = None) -> dict[str, Any]:
+    return {"accepted": False, "reason": reason, "existing_task_id": existing_task_id}
 
 
 def _pool_with_ref(ref: object) -> MagicMock:
@@ -64,8 +73,17 @@ def _document_repo() -> MagicMock:
     repo.renew_content_sha256_claim = AsyncMock(return_value=True)
     repo.release_content_sha256_claim = AsyncMock()
     repo.remove_file_from_partition = AsyncMock()
+    repo.get_file_metadata = AsyncMock(
+        return_value={
+            "file_id": "file-1",
+            "partition": "tenant-a",
+            "title": "old",
+            "indexed_at": "2000-01-01T00:00:00+00:00",
+        }
+    )
     repo.update_file_metadata_in_db = AsyncMock(return_value=True)
     repo.add_file_to_partition = AsyncMock(return_value=True)
+    repo.get_indexation_config = AsyncMock(return_value=None)
     return repo
 
 
@@ -90,8 +108,10 @@ def _task_state_manager() -> MagicMock:
     tsm.get_matching_active_task_refs_v2 = _remote_mock({})
     tsm.get_matching_active_task_refs = _remote_mock({})
     tsm.get_content_claim_task_ids = _remote_mock(set())
+    tsm.get_active_indexing_task_for_file = _remote_mock(None)
     tsm.get_all_info = None
     tsm.set_queued_details = _remote_mock(True)
+    tsm.set_queued_details_v2 = _remote_mock(_queue_admitted())
     tsm.begin_worker_submission = _remote_mock(True)
     tsm.begin_file_delete = _remote_mock()
     tsm.renew_file_delete = _remote_mock(True)
@@ -165,7 +185,7 @@ async def test_dispatch_maps_queued_details_submission_failure_to_unavailability
 
     pool = _pool_with_ref(object())
     tsm = _task_state_manager()
-    tsm.set_queued_details.remote = MagicMock(
+    tsm.set_queued_details_v2.remote = MagicMock(
         side_effect=ActorUnavailableError("actor is restarting", actor_id=None),
     )
     dispatcher = WorkerDispatcher(
@@ -195,12 +215,54 @@ async def test_dispatch_maps_queued_details_submission_failure_to_unavailability
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("reject_if_file_active", [True, False])
+async def test_queue_registration_warns_when_the_actor_predates_the_admission_fence(
+    reject_if_file_active: bool,
+) -> None:
+    """Against a v1-only actor, admission is unfenced: accepted, and said out loud when it mattered."""
+    from services.workers.dispatcher import WorkerDispatcher
+
+    tsm = _task_state_manager()
+    tsm._ray_actor_method_names = {"set_queued_details"}
+    dispatcher = WorkerDispatcher(
+        pool=_pool_with_ref(object()),
+        task_state_manager=tsm,
+        completion_tracker=_completion_tracker(),
+        vector_store=_vector_store(),
+        document_repo=_document_repo(),
+        workspace_repo=_workspace_repo(),
+        collection="default",
+        timeout=1,
+    )
+
+    with patch("services.workers.dispatcher.logger") as mock_logger:
+        admission = await dispatcher._set_queued_details(
+            "task-1",
+            file_id="file-1",
+            partition="tenant-a",
+            metadata={},
+            user_id=42,
+            reject_if_file_active=reject_if_file_active,
+        )
+
+    assert admission == _queue_admitted()
+    tsm.set_queued_details.remote.assert_called_once()
+    tsm.set_queued_details_v2.remote.assert_not_called()
+    warning = mock_logger.bind.return_value.warning
+    if reject_if_file_active:
+        mock_logger.bind.assert_called_once_with(task_id="task-1", file_id="file-1", partition="tenant-a")
+        assert "admission fence" in warning.call_args.args[0]
+    else:
+        warning.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_queue_registration_retries_actor_reconstruction() -> None:
     from services.workers.dispatcher import WorkerDispatcher
 
     tsm = _task_state_manager()
-    tsm.set_queued_details.remote = AsyncMock(
-        side_effect=[ActorUnavailableError("actor is restarting", actor_id=None), True]
+    tsm.set_queued_details_v2.remote = AsyncMock(
+        side_effect=[ActorUnavailableError("actor is restarting", actor_id=None), _queue_admitted()]
     )
     dispatcher = WorkerDispatcher(
         pool=_pool_with_ref(object()),
@@ -213,14 +275,15 @@ async def test_queue_registration_retries_actor_reconstruction() -> None:
         timeout=1,
     )
 
-    assert await dispatcher._set_queued_details(
+    admission = await dispatcher._set_queued_details(
         "task-1",
         file_id="file-1",
         partition="tenant-a",
         metadata={},
         user_id=42,
     )
-    assert tsm.set_queued_details.remote.await_count == 2
+    assert admission["accepted"] is True
+    assert tsm.set_queued_details_v2.remote.await_count == 2
 
 
 @pytest.mark.asyncio
@@ -266,7 +329,7 @@ async def test_dispatch_indexing_relies_on_pool_worker_registration() -> None:
         )
 
     assert task_id == "task-1"
-    tsm.set_queued_details.remote.assert_called_once_with(
+    tsm.set_queued_details_v2.remote.assert_called_once_with(
         "task-1",
         file_id="file-1",
         partition="tenant-a",
@@ -275,6 +338,8 @@ async def test_dispatch_indexing_relies_on_pool_worker_registration() -> None:
             "_openrag_job_created_at": "2026-07-20T08:00:00+00:00",
         },
         user_id=42,
+        # replace=True: re-indexing an existing file is not a duplicate submission.
+        reject_if_file_active=False,
     )
     tsm.set_state.remote.assert_not_called()
     tsm.set_details.remote.assert_not_called()
@@ -686,7 +751,7 @@ async def test_dispatch_indexing_releases_claim_when_queueing_fails() -> None:
 
     repo = _document_repo()
     tsm = _task_state_manager()
-    tsm.set_queued_details.remote.side_effect = RuntimeError("queue unavailable")
+    tsm.set_queued_details_v2.remote.side_effect = RuntimeError("queue unavailable")
     dispatcher = WorkerDispatcher(
         pool=_pool_with_ref(object()),
         task_state_manager=tsm,
@@ -763,7 +828,7 @@ async def test_dispatch_indexing_rejects_task_when_file_delete_fence_is_active()
 
     pool = _pool_with_ref(object())
     tsm = _task_state_manager()
-    tsm.set_queued_details.remote = AsyncMock(return_value=False)
+    tsm.set_queued_details_v2.remote = AsyncMock(return_value=_queue_refused("file_deleting"))
     dispatcher = WorkerDispatcher(
         pool=pool,
         task_state_manager=tsm,
@@ -792,6 +857,264 @@ async def test_dispatch_indexing_rejects_task_when_file_delete_fence_is_active()
     pool.submit.remote.assert_not_called()
     tsm.set_object_ref.remote.assert_not_called()
     tsm.set_failed_if_not_cancelled.remote.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_indexing_refuses_a_duplicate_submission_for_a_file_being_indexed() -> None:
+    """A retried POST must be turned away before the parse, not after it (#1046)."""
+    from core.utils.exceptions import ConflictError
+    from services.workers.dispatcher import WorkerDispatcher
+
+    pool = _pool_with_ref(object())
+    repo = _document_repo()
+    tsm = _task_state_manager()
+    tsm.set_queued_details_v2.remote = AsyncMock(return_value=_queue_refused("file_indexing", "task-running"))
+    dispatcher = WorkerDispatcher(
+        pool=pool,
+        task_state_manager=tsm,
+        completion_tracker=_completion_tracker(),
+        vector_store=_vector_store(),
+        document_repo=repo,
+        workspace_repo=_workspace_repo(),
+        collection="default",
+    )
+
+    with pytest.raises(ConflictError) as caught:
+        await dispatcher.dispatch_indexing(
+            path="/data/report.txt",
+            metadata={"file_id": "file-1", "filename": "report.txt", "content_sha256": "abc123"},
+            partition="tenant-a",
+            user={"id": 42},
+            workspace_ids=None,
+            replace=False,
+        )
+
+    assert caught.value.status_code == 409
+    assert caught.value.code == "DOCUMENT_INDEXING_IN_PROGRESS"
+    assert caught.value.extra == {"existing_task_id": "task-running"}
+    pool.submit.remote.assert_not_called()
+    # The refused submission must not strand the content reservation it took.
+    repo.release_content_sha256_claim.assert_awaited_once_with(
+        file_id="file-1",
+        partition="tenant-a",
+        content_sha256="abc123",
+        claim_token=repo.claim_content_sha256.await_args.kwargs["claim_token"],
+    )
+
+
+@pytest.mark.asyncio
+async def test_dispatch_indexing_names_the_running_task_when_the_claim_refuses_a_same_bytes_retry() -> None:
+    """A retry sends the same bytes under the same file_id, so the first task's
+    own content claim turns it away before the admission fence runs."""
+    from core.utils.exceptions import ConflictError
+    from services.workers.dispatcher import WorkerDispatcher
+
+    pool = _pool_with_ref(object())
+    repo = _document_repo()
+    repo.claim_content_sha256.return_value = "file-1"
+    tsm = _task_state_manager()
+    tsm.get_active_indexing_task_for_file = _remote_mock("task-running")
+    dispatcher = WorkerDispatcher(
+        pool=pool,
+        task_state_manager=tsm,
+        completion_tracker=_completion_tracker(),
+        vector_store=_vector_store(),
+        document_repo=repo,
+        workspace_repo=_workspace_repo(),
+        collection="default",
+    )
+
+    with pytest.raises(ConflictError) as caught:
+        await dispatcher.dispatch_indexing(
+            path="/data/report.txt",
+            metadata={"file_id": "file-1", "filename": "report.txt", "content_sha256": "abc123"},
+            partition="tenant-a",
+            user={"id": 42},
+            workspace_ids=None,
+            replace=False,
+        )
+
+    assert caught.value.code == "DOCUMENT_INDEXING_IN_PROGRESS"
+    assert caught.value.extra == {"existing_task_id": "task-running"}
+    tsm.get_active_indexing_task_for_file.remote.assert_awaited_once_with(partition="tenant-a", file_id="file-1")
+    tsm.set_queued_details_v2.remote.assert_not_called()
+    pool.submit.remote.assert_not_called()
+    # The claim was never taken, so there is nothing to release.
+    repo.release_content_sha256_claim.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("legacy_task_state_manager", [False, True])
+async def test_dispatch_indexing_keeps_the_dedup_error_when_no_task_is_indexing_the_claimed_file(
+    legacy_task_state_manager: bool,
+) -> None:
+    from core.utils.exceptions import ConflictError
+    from services.workers.dispatcher import WorkerDispatcher
+
+    repo = _document_repo()
+    repo.claim_content_sha256.return_value = "file-1"
+    tsm = _task_state_manager()
+    if legacy_task_state_manager:
+        tsm._ray_actor_method_names = {"set_queued_details_v2", "get_content_claim_task_ids"}
+        tsm.get_active_indexing_task_for_file = _remote_mock("task-running")
+    dispatcher = WorkerDispatcher(
+        pool=_pool_with_ref(object()),
+        task_state_manager=tsm,
+        completion_tracker=_completion_tracker(),
+        vector_store=_vector_store(),
+        document_repo=repo,
+        workspace_repo=_workspace_repo(),
+        collection="default",
+    )
+
+    with pytest.raises(ConflictError) as caught:
+        await dispatcher.dispatch_indexing(
+            path="/data/report.txt",
+            metadata={"file_id": "file-1", "content_sha256": "abc123"},
+            partition="tenant-a",
+            user={"id": 42},
+            workspace_ids=None,
+            replace=False,
+        )
+
+    assert caught.value.code == "DOCUMENT_CONTENT_EXISTS"
+    assert caught.value.extra["existing_file_id"] == "file-1"
+    if legacy_task_state_manager:
+        tsm.get_active_indexing_task_for_file.remote.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "lookup_failure",
+    [
+        MagicMock(side_effect=ActorUnavailableError("actor is restarting", actor_id=None)),
+        AsyncMock(side_effect=TimeoutError()),
+    ],
+    ids=["actor-unavailable", "timeout"],
+)
+async def test_dispatch_indexing_keeps_the_dedup_error_when_the_task_lookup_fails(lookup_failure: Any) -> None:
+    """The lookup only picks the 409's label; its failure must not turn it into a 503 or a 500."""
+    from core.utils.exceptions import ConflictError
+    from services.workers.dispatcher import WorkerDispatcher
+
+    repo = _document_repo()
+    repo.claim_content_sha256.return_value = "file-1"
+    tsm = _task_state_manager()
+    tsm.get_active_indexing_task_for_file.remote = lookup_failure
+    dispatcher = WorkerDispatcher(
+        pool=_pool_with_ref(object()),
+        task_state_manager=tsm,
+        completion_tracker=_completion_tracker(),
+        vector_store=_vector_store(),
+        document_repo=repo,
+        workspace_repo=_workspace_repo(),
+        collection="default",
+        timeout=1,
+    )
+
+    with pytest.raises(ConflictError) as caught:
+        await dispatcher.dispatch_indexing(
+            path="/data/report.txt",
+            metadata={"file_id": "file-1", "content_sha256": "abc123"},
+            partition="tenant-a",
+            user={"id": 42},
+            workspace_ids=None,
+            replace=False,
+        )
+
+    assert caught.value.code == "DOCUMENT_CONTENT_EXISTS"
+    assert caught.value.extra["existing_file_id"] == "file-1"
+    lookup_failure.assert_called_once_with(partition="tenant-a", file_id="file-1")
+
+
+@pytest.mark.asyncio
+async def test_dispatch_indexing_keeps_the_dedup_error_for_a_replace_with_the_same_bytes() -> None:
+    """A replace is not fenced, so the claim conflict is not relabelled for it either."""
+    from core.utils.exceptions import ConflictError
+    from services.workers.dispatcher import WorkerDispatcher
+
+    repo = _document_repo()
+    repo.claim_content_sha256.return_value = "file-1"
+    tsm = _task_state_manager()
+    tsm.get_active_indexing_task_for_file = _remote_mock("task-running")
+    dispatcher = WorkerDispatcher(
+        pool=_pool_with_ref(object()),
+        task_state_manager=tsm,
+        completion_tracker=_completion_tracker(),
+        vector_store=_vector_store(),
+        document_repo=repo,
+        workspace_repo=_workspace_repo(),
+        collection="default",
+    )
+
+    with pytest.raises(ConflictError) as caught:
+        await dispatcher.dispatch_indexing(
+            path="/data/report.txt",
+            metadata={"file_id": "file-1", "content_sha256": "abc123"},
+            partition="tenant-a",
+            user={"id": 42},
+            workspace_ids=None,
+            replace=True,
+        )
+
+    assert caught.value.code == "DOCUMENT_CONTENT_EXISTS"
+    assert caught.value.extra["existing_file_id"] == "file-1"
+    tsm.get_active_indexing_task_for_file.remote.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_indexing_reports_a_cancelled_refusal_as_such() -> None:
+    from services.workers.dispatcher import WorkerDispatcher
+
+    tsm = _task_state_manager()
+    tsm.set_queued_details_v2.remote = AsyncMock(return_value=_queue_refused("cancelled"))
+    dispatcher = WorkerDispatcher(
+        pool=_pool_with_ref(object()),
+        task_state_manager=tsm,
+        completion_tracker=_completion_tracker(),
+        vector_store=_vector_store(),
+        document_repo=_document_repo(),
+        workspace_repo=_workspace_repo(),
+        collection="default",
+    )
+
+    with pytest.raises(RuntimeError, match="cancelled before it queued"):
+        await dispatcher.dispatch_indexing(
+            path="/data/report.txt",
+            metadata={"file_id": "file-1", "filename": "report.txt"},
+            partition="tenant-a",
+            user={"id": 42},
+            workspace_ids=None,
+            replace=False,
+        )
+
+
+@pytest.mark.asyncio
+async def test_dispatch_indexing_fences_a_first_upload_but_not_a_replace() -> None:
+    from services.workers.dispatcher import WorkerDispatcher
+
+    tsm = _task_state_manager()
+    dispatcher = WorkerDispatcher(
+        pool=_pool_with_ref(object()),
+        task_state_manager=tsm,
+        completion_tracker=_completion_tracker(),
+        vector_store=_vector_store(),
+        document_repo=_document_repo(),
+        workspace_repo=_workspace_repo(),
+        collection="default",
+    )
+
+    for replace, expected in ((False, True), (True, False)):
+        tsm.set_queued_details_v2.remote.reset_mock()
+        await dispatcher.dispatch_indexing(
+            path="/data/report.txt",
+            metadata={"file_id": "file-1", "filename": "report.txt"},
+            partition="tenant-a",
+            user={"id": 42},
+            workspace_ids=None,
+            replace=replace,
+        )
+        assert tsm.set_queued_details_v2.remote.await_args.kwargs["reject_if_file_active"] is expected
 
 
 @pytest.mark.asyncio
@@ -997,7 +1320,7 @@ async def test_dispatch_indexing_preserves_task_when_submit_outcome_is_unknown()
                 replace=False,
             )
 
-    tsm.set_queued_details.remote.assert_called_once()
+    tsm.set_queued_details_v2.remote.assert_called_once()
     tsm.set_state.remote.assert_not_called()
     tsm.set_details.remote.assert_not_awaited()
     tsm.set_failed_if_not_cancelled.remote.assert_not_called()
@@ -1122,6 +1445,7 @@ async def test_worker_dispatcher_mutates_files_without_legacy_indexer() -> None:
 
     vector_store = _vector_store()
     vector_store.query_chunks_by_filter.return_value[0]["_openrag_indexing_task_id"] = "task-1"
+    vector_store.query_chunks_by_filter.return_value[0]["indexed_at"] = "2000-01-01T00:00:00+00:00"
     document_repo = _document_repo()
     workspace_repo = _workspace_repo()
     dispatcher = WorkerDispatcher(
@@ -1141,7 +1465,18 @@ async def test_worker_dispatcher_mutates_files_without_legacy_indexer() -> None:
         "tenant-a",
         user={"id": 7},
     )
-    await dispatcher.copy_file("file-1", {"file_id": "copy-1", "partition": "tenant-b"}, "tenant-b", user=None)
+    before_copy = datetime.now(UTC)
+    await dispatcher.copy_file(
+        "file-1",
+        {"file_id": "copy-1", "partition": "tenant-b", "indexed_at": "2000-01-01T00:00:00+00:00"},
+        "tenant-b",
+        user=None,
+    )
+    copied_at = document_repo.add_file_to_partition.call_args.kwargs["indexed_at"]
+    assert before_copy <= copied_at <= datetime.now(UTC)
+    assert all(
+        entity["indexed_at"] == copied_at.isoformat() for entity in vector_store.insert_entities.call_args.args[0]
+    )
 
     assert [call.args for call in vector_store.delete_by_filter.call_args_list] == [
         ({"partition": "tenant-a", "file_id": "file-1"},),
@@ -1153,21 +1488,191 @@ async def test_worker_dispatcher_mutates_files_without_legacy_indexer() -> None:
     document_repo.update_file_metadata_in_db.assert_called_once_with(
         "file-1",
         "tenant-a",
-        {"file_id": "file-1", "partition": "tenant-a", "title": "new"},
+        {"title": "new"},
     )
     document_repo.add_file_to_partition.assert_called_once_with(
         file_id="copy-1",
         partition="tenant-b",
-        file_metadata={"file_id": "copy-1", "partition": "tenant-b", "title": "old"},
+        file_metadata={
+            "file_id": "copy-1",
+            "partition": "tenant-b",
+            "title": "old",
+            "indexed_at": copied_at.isoformat(),
+        },
         user_id=None,
         relationship_id=None,
         parent_id=None,
         content_sha256=None,
+        indexed_at=copied_at,
+        chunk_count=1,
     )
     vector_store.upsert_entities.assert_awaited_once()
     vector_store.insert_entities.assert_awaited_once()
     assert vector_store.upsert_entities.await_args.args[0][0]["_openrag_indexing_task_id"] == "task-1"
-    assert "_openrag_indexing_task_id" not in vector_store.insert_entities.await_args.args[0][0]
+    # Not the source's task: the copy's own marker.
+    assert vector_store.insert_entities.await_args.args[0][0]["_openrag_indexing_task_id"].startswith("copy:")
+
+
+@pytest.mark.asyncio
+async def test_metadata_update_writes_patch_instead_of_stale_catalog_snapshot() -> None:
+    from services.workers.dispatcher import WorkerDispatcher
+
+    document_repo = _document_repo()
+    document_repo.get_file_metadata.return_value = {
+        "file_id": "file-1",
+        "partition": "tenant-a",
+        "title": "old",
+        "degraded_stages": ["caption", "topic_tag"],
+    }
+    dispatcher = WorkerDispatcher(
+        pool=_pool_with_ref(object()),
+        task_state_manager=_task_state_manager(),
+        completion_tracker=_completion_tracker(),
+        vector_store=_vector_store(),
+        document_repo=document_repo,
+        workspace_repo=_workspace_repo(),
+        collection="default",
+    )
+
+    await dispatcher.update_file_metadata("file-1", {"title": "new"}, "tenant-a", user={"id": 7})
+
+    assert document_repo.update_file_metadata_in_db.await_args.args[2] == {"title": "new"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("degraded_stages", [["caption"], []])
+async def test_copy_inherits_catalog_degraded_stages(degraded_stages: list[str]) -> None:
+    from services.workers.dispatcher import WorkerDispatcher
+
+    document_repo = _document_repo()
+    document_repo.get_file_metadata.return_value = {
+        "file_id": "source",
+        "partition": "tenant-a",
+        "title": "Source",
+        "degraded_stages": degraded_stages,
+    }
+    vector_store = _vector_store()
+    dispatcher = WorkerDispatcher(
+        pool=_pool_with_ref(object()),
+        task_state_manager=_task_state_manager(),
+        completion_tracker=_completion_tracker(),
+        vector_store=vector_store,
+        document_repo=document_repo,
+        workspace_repo=_workspace_repo(),
+        collection="default",
+    )
+
+    await dispatcher.copy_file(
+        "source",
+        {"file_id": "copy", "partition": "tenant-b", "title": "Copy"},
+        "tenant-a",
+        user={"id": 7},
+    )
+
+    copied_metadata = document_repo.add_file_to_partition.await_args.kwargs["file_metadata"]
+    assert copied_metadata["file_id"] == "copy"
+    assert copied_metadata["partition"] == "tenant-b"
+    assert copied_metadata["title"] == "Copy"
+    assert copied_metadata["degraded_stages"] == degraded_stages
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["update", "copy"])
+async def test_metadata_mutation_aborts_when_catalog_row_is_missing(operation: str) -> None:
+    from services.workers.dispatcher import WorkerDispatcher
+
+    document_repo = _document_repo()
+    document_repo.get_file_metadata.return_value = None
+    vector_store = _vector_store()
+    dispatcher = WorkerDispatcher(
+        pool=_pool_with_ref(object()),
+        task_state_manager=_task_state_manager(),
+        completion_tracker=_completion_tracker(),
+        vector_store=vector_store,
+        document_repo=document_repo,
+        workspace_repo=_workspace_repo(),
+        collection="default",
+    )
+
+    if operation == "update":
+        await dispatcher.update_file_metadata("missing", {"title": "new"}, "tenant-a", user=None)
+    else:
+        await dispatcher.copy_file(
+            "missing",
+            {"file_id": "copy", "partition": "tenant-b", "content_sha256": "abc123"},
+            "tenant-a",
+            user=None,
+        )
+
+    vector_store.query_chunks_by_filter.assert_not_awaited()
+    vector_store.upsert_entities.assert_not_awaited()
+    vector_store.insert_entities.assert_not_awaited()
+    document_repo.update_file_metadata_in_db.assert_not_awaited()
+    document_repo.add_file_to_partition.assert_not_awaited()
+    document_repo.claim_content_sha256.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_copy_receives_grace_before_catalog_write_and_matches_afterward() -> None:
+    from services.storage.reconciliation import reconcile_partition
+    from services.workers.dispatcher import WorkerDispatcher
+
+    old = "2000-01-01T00:00:00+00:00"
+    vectors = _vector_store()
+    vectors.query_chunks_by_filter.return_value = [
+        {"_id": index, "file_id": "source", "partition": "a", "indexed_at": old, "created_at": old}
+        for index in range(2)
+    ]
+    catalog = _document_repo()
+    entries = {}
+    copied = []
+
+    async def lookup(keys):
+        return {key: entries[key] for key in keys if key in entries}
+
+    async def list_documents(partition, *, before, after=None, limit=500):
+        return sorted(
+            f for (p, f), stamp in entries.items() if p == partition and stamp < before and (after is None or f > after)
+        )[:limit]
+
+    async def pages(collection, *, partition, file_ids=None, batch_size=500):
+        rows = [r for r in copied if r["partition"] == partition and (file_ids is None or r["file_id"] in file_ids)]
+        for offset in range(0, len(rows), batch_size):
+            yield rows[offset : offset + batch_size]
+
+    async def insert(entities, collection):
+        copied.extend({**entity, "_id": index + 10} for index, entity in enumerate(entities))
+        events = [e async for e in reconcile_partition(catalog, vectors, collection, "b", repair=True)]
+        assert events[-1]["recent_chunks_skipped"] == 2
+        assert events[-1]["orphan_chunks"] == 0
+        vectors.delete.assert_not_awaited()
+
+    async def add(**kwargs):
+        entries[kwargs["partition"], kwargs["file_id"]] = kwargs["indexed_at"]
+
+    catalog.get_indexed_documents.side_effect = lookup
+    catalog.list_indexed_documents = AsyncMock(side_effect=list_documents)
+    catalog.add_file_to_partition.side_effect = add
+    vectors.iter_chunk_metadata = pages
+    vectors.insert_entities.side_effect = insert
+    dispatcher = WorkerDispatcher(
+        pool=_pool_with_ref(object()),
+        task_state_manager=_task_state_manager(),
+        completion_tracker=_completion_tracker(),
+        vector_store=vectors,
+        document_repo=catalog,
+        workspace_repo=_workspace_repo(),
+        collection="default",
+    )
+    await dispatcher.copy_file("source", {"file_id": "copy", "partition": "b", "indexed_at": old}, "a", None)
+    stamp = entries["b", "copy"]
+    assert all(r["indexed_at"] == stamp.isoformat() and r["created_at"] == old for r in copied)
+    events = [e async for e in reconcile_partition(catalog, vectors, "default", "b", now=stamp + timedelta(hours=2))]
+    assert len(events) == 1
+    assert events[-1]["scanned_chunks"] == 2
+    assert events[-1]["scanned_documents"] == 1
+    assert events[-1]["timestamp_mismatches"] == 0
+    assert events[-1]["missing_documents"] == 0
 
 
 @pytest.mark.asyncio
@@ -1269,6 +1774,34 @@ async def test_cancel_task_retries_recovered_cancellation_without_finishing_it()
 
     cancel.assert_called_once_with(ref, recursive=True)
     tsm.finish_cancellation.remote.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_cancel_task_retries_live_cancellation_when_durable_state_is_stale() -> None:
+    from core.models.catalog import DocumentStatus, IndexationJob
+    from services.workers.dispatcher import WorkerDispatcher
+
+    ref = object()
+    tsm = _task_state_manager()
+    tsm.get_object_ref.remote = AsyncMock(return_value={"ref": ref})
+    tsm.set_cancelled_if_active.remote = AsyncMock(return_value=False)
+    tsm.get_state.remote = AsyncMock(return_value="CANCELLED")
+    job = IndexationJob(id="task-1", status=DocumentStatus.SERIALIZING, partition="tenant-a")
+    dispatcher = WorkerDispatcher(
+        pool=_pool_with_ref(object()),
+        task_state_manager=tsm,
+        completion_tracker=_completion_tracker(),
+        vector_store=_vector_store(),
+        document_repo=_document_repo(),
+        workspace_repo=_workspace_repo(),
+        collection="default",
+        job_repo=_JobRepoSpy(job),
+    )
+
+    with patch("ray.cancel") as cancel:
+        assert await dispatcher.cancel_task("task-1") is True
+
+    cancel.assert_called_once_with(ref, recursive=True)
 
 
 @pytest.mark.asyncio
@@ -2126,3 +2659,467 @@ async def test_dispatch_indexing_does_not_mark_failure_before_worker_submission(
             )
 
     assert indexing_worker_may_be_running(excinfo.value) is False
+
+
+class _JobRepoSpy:
+    def __init__(self, job=None):
+        self.saved: list[Any] = []
+        self._job = job
+
+    async def upsert_job(self, job):
+        self.saved.append(job)
+        return job
+
+    async def get_job(self, job_id):
+        return self._job
+
+
+def _dispatcher_with_job_repo(tsm, job_repo):
+    from services.workers.dispatcher import WorkerDispatcher
+
+    return WorkerDispatcher(
+        pool=_pool_with_ref(object()),
+        task_state_manager=tsm,
+        completion_tracker=_completion_tracker(),
+        vector_store=_vector_store(),
+        document_repo=_document_repo(),
+        workspace_repo=_workspace_repo(),
+        collection="default",
+        job_repo=job_repo,
+        timeout=0.01,
+    )
+
+
+@pytest.mark.asyncio
+async def test_task_state_falls_back_to_the_durable_job() -> None:
+    from core.models.catalog import DocumentStatus, IndexationJob
+
+    tsm = _task_state_manager()
+    tsm.get_state = _remote_mock(None)
+    tsm.get_error = _remote_mock(None)
+    job = IndexationJob(id="task-1", status=DocumentStatus.FAILED, partition="tenant-a", error="boom")
+    dispatcher = _dispatcher_with_job_repo(tsm, _JobRepoSpy(job))
+
+    assert await dispatcher.get_task_state("task-1") == "FAILED"
+    assert await dispatcher.get_task_error("task-1") == "boom"
+
+
+@pytest.mark.asyncio
+async def test_task_state_prefers_live_terminal_state_over_stale_durable_active_job() -> None:
+    from core.models.catalog import DocumentStatus, IndexationJob
+
+    tsm = _task_state_manager()
+    tsm.get_state = _remote_mock("COMPLETED")
+    job = IndexationJob(id="task-1", status=DocumentStatus.SERIALIZING, partition="tenant-a")
+    dispatcher = _dispatcher_with_job_repo(tsm, _JobRepoSpy(job))
+
+    assert await dispatcher.get_task_state("task-1") == "COMPLETED"
+
+
+@pytest.mark.asyncio
+async def test_task_error_falls_back_to_live_actor_while_durable_job_is_active() -> None:
+    from core.models.catalog import DocumentStatus, IndexationJob
+
+    tsm = _task_state_manager()
+    tsm.get_error = _remote_mock("actor traceback")
+    job = IndexationJob(id="task-1", status=DocumentStatus.SERIALIZING, partition="tenant-a")
+    dispatcher = _dispatcher_with_job_repo(tsm, _JobRepoSpy(job))
+
+    assert await dispatcher.get_task_error("task-1") == "actor traceback"
+
+
+@pytest.mark.asyncio
+async def test_task_error_reason_falls_back_to_the_durable_job() -> None:
+    from core.models.catalog import DocumentStatus, IndexationJob
+
+    tsm = _task_state_manager()
+    tsm._ray_actor_method_names = {"get_error"}
+    job = IndexationJob(
+        id="task-1",
+        status=DocumentStatus.FAILED,
+        partition="tenant-a",
+        error="traceback",
+        error_reason="RuntimeError: durable failure",
+    )
+    dispatcher = _dispatcher_with_job_repo(tsm, _JobRepoSpy(job))
+
+    assert await dispatcher.get_task_error_reason("task-1") == "RuntimeError: durable failure"
+
+
+@pytest.mark.asyncio
+async def test_task_error_reason_falls_back_to_live_actor_while_durable_job_is_active() -> None:
+    from core.models.catalog import DocumentStatus, IndexationJob
+
+    tsm = _task_state_manager()
+    tsm._ray_actor_method_names = {"get_error_reason"}
+    tsm.get_error_reason = _remote_mock("RuntimeError: actor failure")
+    job = IndexationJob(id="task-1", status=DocumentStatus.SERIALIZING, partition="tenant-a")
+    dispatcher = _dispatcher_with_job_repo(tsm, _JobRepoSpy(job))
+
+    assert await dispatcher.get_task_error_reason("task-1") == "RuntimeError: actor failure"
+
+
+@pytest.mark.asyncio
+async def test_submit_failure_captures_reason_with_new_task_state_actor() -> None:
+    tsm = _task_state_manager()
+    set_failed = AsyncMock(return_value=True)
+    tsm._ray_actor_method_names = {
+        "set_failed_if_not_cancelled",
+        "set_failed_with_reason_if_not_cancelled",
+    }
+    tsm.set_failed_with_reason_if_not_cancelled = MagicMock()
+    tsm.set_failed_with_reason_if_not_cancelled.remote = set_failed
+    dispatcher = _dispatcher_with_job_repo(tsm, _JobRepoSpy())
+
+    await dispatcher._mark_submit_failed(
+        "task-1",
+        "traceback",
+        "RuntimeError: submission failed",
+    )
+
+    set_failed.assert_awaited_once_with(
+        "task-1",
+        "traceback",
+        "RuntimeError: submission failed",
+    )
+    tsm.set_failed_if_not_cancelled.remote.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_durable_job_state_overrides_live_actor_state() -> None:
+    from core.models.catalog import DocumentStatus, IndexationJob
+
+    tsm = _task_state_manager()
+    job = IndexationJob(id="task-1", status=DocumentStatus.COMPLETED, partition="tenant-a")
+    dispatcher = _dispatcher_with_job_repo(tsm, _JobRepoSpy(job))
+
+    assert await dispatcher.get_task_state("task-1") == "COMPLETED"
+
+
+@pytest.mark.asyncio
+async def test_unknown_task_stays_unknown_without_a_durable_job() -> None:
+    tsm = _task_state_manager()
+    tsm.get_state = _remote_mock(None)
+    dispatcher = _dispatcher_with_job_repo(tsm, _JobRepoSpy(None))
+
+    assert await dispatcher.get_task_state("task-1") is None
+
+
+@pytest.mark.asyncio
+async def test_a_durable_read_failure_does_not_break_the_status_routes() -> None:
+    """A history-store outage must degrade the answer, not turn it into a 500.
+
+    The status routes are exactly what gets looked at while Postgres is down.
+    """
+    tsm = _task_state_manager()
+    tsm.get_state = _remote_mock(None)
+    tsm.get_error = _remote_mock(None)
+    repo = _JobRepoSpy()
+    repo.get_job = AsyncMock(side_effect=RuntimeError("postgres is unreachable"))
+    dispatcher = _dispatcher_with_job_repo(tsm, repo)
+
+    assert await dispatcher.get_task_state("task-1") is None
+    assert await dispatcher.get_task_error("task-1") is None
+
+
+@pytest.mark.asyncio
+async def test_recording_a_job_never_breaks_dispatch() -> None:
+    from core.models.catalog import DocumentStatus
+
+    repo = _JobRepoSpy()
+    repo.upsert_job = AsyncMock(side_effect=RuntimeError("jobs table is missing"))
+    dispatcher = _dispatcher_with_job_repo(_task_state_manager(), repo)
+
+    await dispatcher._record_job("task-1", status=DocumentStatus.QUEUED, partition="tenant-a")
+
+
+@pytest.mark.asyncio
+async def test_dispatch_records_the_job_before_the_worker_runs() -> None:
+    from core.models.catalog import DocumentStatus
+
+    repo = _JobRepoSpy()
+    tsm = _task_state_manager()
+    tsm.set_queued_details_v2 = _remote_mock(_queue_admitted())
+    dispatcher = _dispatcher_with_job_repo(tsm, repo)
+
+    await dispatcher.dispatch_indexing(
+        path="/data/report.txt",
+        metadata={"file_id": "file-1", "filename": "report.txt"},
+        partition="tenant-a",
+        user={"id": 42},
+        workspace_ids=None,
+        replace=False,
+    )
+
+    assert len(repo.saved) == 1
+    job = repo.saved[0]
+    assert (job.status, job.partition, job.file_id, job.user_id) == (
+        DocumentStatus.QUEUED,
+        "tenant-a",
+        "file-1",
+        42,
+    )
+    assert job.filename == "report.txt"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_failure_settles_the_durable_job() -> None:
+    """Nothing else settles this row: the completion tracker never saw the task."""
+    from core.models.catalog import DocumentStatus
+
+    repo = _JobRepoSpy()
+    tsm = _task_state_manager()
+    tsm.begin_worker_submission.remote = AsyncMock(return_value=False)
+    dispatcher = _dispatcher_with_job_repo(tsm, repo)
+
+    with pytest.raises(RuntimeError, match="rejected before worker submission"):
+        await dispatcher.dispatch_indexing(
+            path="/data/report.txt",
+            metadata={"file_id": "file-1"},
+            partition="tenant-a",
+            user={"id": 42},
+            workspace_ids=None,
+            replace=False,
+        )
+
+    assert [job.status for job in repo.saved] == [DocumentStatus.QUEUED, DocumentStatus.FAILED]
+    settled = repo.saved[-1]
+    assert (settled.partition, settled.file_id, settled.user_id) == ("tenant-a", "file-1", 42)
+    assert settled.completed_at is not None
+    assert "rejected before worker submission" in settled.error
+
+
+@pytest.mark.asyncio
+async def test_uncertain_submission_leaves_the_durable_job_queued() -> None:
+    """The worker may be running, so the row must not be settled as failed."""
+    from core.models.catalog import DocumentStatus
+
+    repo = _JobRepoSpy()
+    dispatcher = _dispatcher_with_job_repo(_task_state_manager(), repo)
+    dispatcher._pool.submit.remote = AsyncMock(side_effect=RuntimeError("pool is gone"))
+
+    with pytest.raises(RuntimeError, match="pool is gone"):
+        await dispatcher.dispatch_indexing(
+            path="/data/report.txt",
+            metadata={"file_id": "file-1"},
+            partition="tenant-a",
+            user={"id": 42},
+            workspace_ids=None,
+            replace=False,
+        )
+
+    assert [job.status for job in repo.saved] == [DocumentStatus.QUEUED]
+
+
+# ---------------------------------------------------------------------------
+# Copy into a partition on another embedder
+# ---------------------------------------------------------------------------
+
+
+class _CopyEmbedder:
+    def __init__(self) -> None:
+        self.calls: list[list[str]] = []
+
+    async def embed(self, texts: list[str]) -> list[list[float]]:
+        self.calls.append(texts)
+        return [[1.0, 2.0, 3.0] for _ in texts]
+
+
+async def _copy(rows: list[dict], embedder: _CopyEmbedder, repo: MagicMock | None = None, **destination):
+    from services.workers.dispatcher import WorkerDispatcher
+
+    store = _vector_store()
+    store.query_chunks_by_filter = AsyncMock(return_value=rows)
+    store.ensure_vector_field = AsyncMock(return_value=False)
+    store.insert_entities = AsyncMock(return_value=len(rows))
+    dispatcher = WorkerDispatcher(
+        pool=_pool_with_ref(object()),
+        task_state_manager=_task_state_manager(),
+        completion_tracker=_completion_tracker(),
+        vector_store=store,
+        document_repo=repo or _document_repo(),
+        workspace_repo=_workspace_repo(),
+        collection="default",
+    )
+    await dispatcher.copy_file(
+        "file-1",
+        {"file_id": "copy-1", "partition": "b"},
+        "a",
+        user=None,
+        vector_field="vector_bge_m3",
+        embedder=embedder,
+        **destination,
+    )
+    return store
+
+
+@pytest.mark.asyncio
+async def test_a_copy_re_embeds_chunks_into_the_target_embedders_field() -> None:
+    rows = [
+        {"_id": 1, "text": "hello", "vector_e5": [0.1, 0.2], "file_id": "file-1", "partition": "a"},
+        {"_id": 2, "text": "world", "vector_e5": [0.3, 0.4], "file_id": "file-1", "partition": "a"},
+    ]
+    embedder = _CopyEmbedder()
+
+    store = await _copy(rows, embedder)
+
+    assert embedder.calls == [["hello", "world"]]
+    store.ensure_vector_field.assert_awaited_once_with("vector_bge_m3", 3)
+    inserted = store.insert_entities.await_args.args[0]
+    assert [row["vector_bge_m3"] for row in inserted] == [[1.0, 2.0, 3.0], [1.0, 2.0, 3.0]]
+    assert all("vector_e5" not in row for row in inserted)
+
+
+@pytest.mark.asyncio
+async def test_a_copy_between_partitions_on_the_same_embedder_keeps_its_vectors() -> None:
+    rows = [{"_id": 1, "text": "hello", "vector_bge_m3": [0.5, 0.5, 0.5], "file_id": "file-1", "partition": "a"}]
+    embedder = _CopyEmbedder()
+
+    store = await _copy(rows, embedder)
+
+    assert embedder.calls == []
+    assert store.insert_entities.await_args.args[0][0]["vector_bge_m3"] == [0.5, 0.5, 0.5]
+
+
+_SOURCE_CONFIG = {"chunk_size": 512, "embedder": "e5", "embedder_model_name": "intfloat/e5", "embedder_dimension": 2}
+_TARGET_FINGERPRINT = {"endpoint": "http://bge/v1", "model_name": "BAAI/bge-m3"}
+
+
+@pytest.mark.asyncio
+async def test_a_re_embedded_copy_records_the_target_embedder_and_is_checked_against_it() -> None:
+    rows = [{"_id": 1, "text": "hello", "vector_e5": [0.1, 0.2], "file_id": "file-1", "partition": "a"}]
+    embedder = _CopyEmbedder()
+    embedder.model_name, embedder.endpoint = "BAAI/bge-m3", "http://bge/v1"
+    repo = _document_repo()
+    repo.get_indexation_config = AsyncMock(return_value=dict(_SOURCE_CONFIG))
+
+    await _copy(rows, embedder, repo, embedder_reference="bge-m3", embedder_fingerprint=_TARGET_FINGERPRINT)
+
+    repo.get_indexation_config.assert_awaited_once_with("file-1", "a")
+    catalog = repo.add_file_to_partition.await_args.kwargs
+    # Chunked like the source, embedded by the target: the dimension comes from the vectors it made.
+    assert catalog["indexation_config"] == {
+        "chunk_size": 512,
+        "embedder": "bge-m3",
+        "embedder_model_name": "BAAI/bge-m3",
+        "embedder_endpoint": "http://bge/v1",
+        "embedder_dimension": 3,
+        "embedder_vector_field": "vector_bge_m3",
+    }
+    assert catalog["embedder_fingerprint"] == _TARGET_FINGERPRINT
+
+
+@pytest.mark.asyncio
+async def test_a_copy_that_keeps_its_vectors_keeps_the_source_record() -> None:
+    rows = [{"_id": 1, "text": "hello", "vector_bge_m3": [0.5, 0.5, 0.5], "file_id": "file-1", "partition": "a"}]
+    repo = _document_repo()
+    repo.get_indexation_config = AsyncMock(return_value=dict(_SOURCE_CONFIG))
+
+    await _copy(rows, _CopyEmbedder(), repo, embedder_reference="bge-m3", embedder_fingerprint=_TARGET_FINGERPRINT)
+
+    catalog = repo.add_file_to_partition.await_args.kwargs
+    assert catalog["indexation_config"] == _SOURCE_CONFIG
+    # Nothing was embedded now, so there is no run to check against the endpoint.
+    assert "embedder_fingerprint" not in catalog
+
+
+@pytest.mark.asyncio
+async def test_a_copy_of_a_swapped_file_re_embeds_rather_than_reuse_the_old_fields_vectors() -> None:
+    """The file's partition moved from bge-m3 to e5: its chunks keep their old
+    bge-m3 vectors, and its record names the e5 field. Copied as they are, those
+    vectors may come from a model the endpoint was edited away from since, under
+    a record that names e5 — and with e5's own vectors stripped, a later swap of
+    the target to e5 would skip the file, then complete with it out of search."""
+    rows = [
+        {
+            "_id": 1,
+            "text": "hello",
+            "vector_bge_m3": [0.5, 0.5, 0.5],
+            "vector_e5": [0.1, 0.2],
+            "file_id": "file-1",
+            "partition": "a",
+        }
+    ]
+    embedder = _CopyEmbedder()
+    embedder.model_name, embedder.endpoint = "BAAI/bge-m3", "http://bge/v1"
+    repo = _document_repo()
+    repo.get_indexation_config = AsyncMock(return_value={**_SOURCE_CONFIG, "embedder_vector_field": "vector_e5"})
+
+    store = await _copy(rows, embedder, repo, embedder_reference="bge-m3", embedder_fingerprint=_TARGET_FINGERPRINT)
+
+    assert embedder.calls == [["hello"]]
+    inserted = store.insert_entities.await_args.args[0]
+    assert inserted[0]["vector_bge_m3"] == [1.0, 2.0, 3.0]
+    assert "vector_e5" not in inserted[0]
+    catalog = repo.add_file_to_partition.await_args.kwargs
+    assert catalog["indexation_config"]["embedder_vector_field"] == "vector_bge_m3"
+    assert catalog["embedder_fingerprint"] == _TARGET_FINGERPRINT
+
+
+@pytest.mark.asyncio
+async def test_a_copy_of_a_file_recorded_in_the_target_field_keeps_its_vectors() -> None:
+    rows = [
+        {
+            "_id": 1,
+            "text": "hello",
+            "vector_bge_m3": [0.5, 0.5, 0.5],
+            "vector_e5": [0.1, 0.2],
+            "file_id": "file-1",
+            "partition": "a",
+        }
+    ]
+    source_config = {**_SOURCE_CONFIG, "embedder_vector_field": "vector_bge_m3"}
+    embedder = _CopyEmbedder()
+    repo = _document_repo()
+    repo.get_indexation_config = AsyncMock(return_value=dict(source_config))
+
+    store = await _copy(rows, embedder, repo, embedder_reference="bge-m3", embedder_fingerprint=_TARGET_FINGERPRINT)
+
+    assert embedder.calls == []
+    inserted = store.insert_entities.await_args.args[0]
+    assert inserted[0]["vector_bge_m3"] == [0.5, 0.5, 0.5]
+    assert "vector_e5" not in inserted[0]
+    assert repo.add_file_to_partition.await_args.kwargs["indexation_config"] == source_config
+
+
+@pytest.mark.asyncio
+async def test_a_copy_the_catalog_refuses_leaves_none_of_its_chunks() -> None:
+    from core.utils.exceptions import ConflictError
+    from services.workers.dispatcher import WorkerDispatcher
+    from services.workers.stages.store import INDEXING_TASK_ID_METADATA_KEY
+
+    store = _vector_store()
+    store.query_chunks_by_filter = AsyncMock(
+        return_value=[{"_id": 1, "text": "hello", "vector_e5": [0.1, 0.2], "file_id": "file-1", "partition": "a"}]
+    )
+    store.ensure_vector_field = AsyncMock(return_value=False)
+    repo = _document_repo()
+    repo.add_file_to_partition = AsyncMock(side_effect=ConflictError("edited", code="EMBEDDER_CHANGED_DURING_INDEXING"))
+    dispatcher = WorkerDispatcher(
+        pool=_pool_with_ref(object()),
+        task_state_manager=_task_state_manager(),
+        completion_tracker=_completion_tracker(),
+        vector_store=store,
+        document_repo=repo,
+        workspace_repo=_workspace_repo(),
+        collection="default",
+    )
+
+    with pytest.raises(ConflictError, match="edited"):
+        await dispatcher.copy_file(
+            "file-1",
+            {"file_id": "copy-1", "partition": "b"},
+            "a",
+            user=None,
+            vector_field="vector_bge_m3",
+            embedder=_CopyEmbedder(),
+            embedder_reference="bge-m3",
+            embedder_fingerprint=_TARGET_FINGERPRINT,
+        )
+
+    # Only this copy's chunks: the marker is unique to it.
+    marker = store.insert_entities.await_args.args[0][0][INDEXING_TASK_ID_METADATA_KEY]
+    assert marker.startswith("copy:")
+    store.delete_by_filter.assert_awaited_once_with(
+        {"partition": "b", "file_id": "copy-1", INDEXING_TASK_ID_METADATA_KEY: marker}
+    )

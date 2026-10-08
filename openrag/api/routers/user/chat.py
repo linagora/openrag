@@ -30,6 +30,7 @@ from api.schemas.user.chat import OpenAIChatCompletionRequest, OpenAICompletionR
 from core.config import load_config
 from core.config.endpoints import client_llm_override, custom_endpoint_override_enabled
 from core.models.preset import resolve_partition_chat_llm
+from core.prompts import message_tokens, tool_definition_tokens
 from core.utils import consts
 from core.utils.exceptions import OpenRAGError
 from core.utils.logging import get_logger
@@ -69,6 +70,22 @@ _max_model_tokens_lock = asyncio.Lock()
 # on top of the invalidation, re-opening the stale window it just closed.
 _max_model_tokens_generation = 0
 
+# True from an invalidation until the refresh it scheduled publishes. While it
+# holds, an empty cache entry means "not probed yet", not "the endpoint reports
+# no max_model_len", so the admin UI can say the detection is still running
+# instead of showing the global fallback for an endpoint that does report one.
+_max_model_tokens_pending = False
+
+
+def probed_max_model_tokens(name: str) -> int | None:
+    """The ``max_model_len`` LLM endpoint *name* reported on ``/v1/models``, if any."""
+    return _max_model_tokens_by_name.get(name)
+
+
+def max_model_tokens_probe_pending() -> bool:
+    """Whether an endpoint write cleared the probed limits and their re-probe hasn't landed yet."""
+    return _max_model_tokens_pending
+
 
 def _runtime_config(settings: "Settings | None" = None) -> "Settings":
     return settings if settings is not None else load_config()
@@ -100,9 +117,10 @@ def invalidate_max_model_tokens() -> None:
     wait behind an in-flight probe, which is the stall the background task was
     introduced to avoid.
     """
-    global _max_model_tokens_by_name, _max_model_tokens_generation
+    global _max_model_tokens_by_name, _max_model_tokens_generation, _max_model_tokens_pending
     _max_model_tokens_generation += 1
     _max_model_tokens_by_name = {}
+    _max_model_tokens_pending = True
 
 
 async def prime_max_model_tokens(settings: "Settings | None" = None) -> None:
@@ -128,7 +146,7 @@ async def prime_max_model_tokens(settings: "Settings | None" = None) -> None:
     refresh whose generation was invalidated mid-probe discards its results
     rather than publishing them over the invalidation.
     """
-    global _max_model_tokens_by_name
+    global _max_model_tokens_by_name, _max_model_tokens_pending
     async with _max_model_tokens_lock:
         generation = _max_model_tokens_generation
         config = _runtime_config(settings)
@@ -138,24 +156,31 @@ async def prime_max_model_tokens(settings: "Settings | None" = None) -> None:
         # replaces its contents in place (ModelEndpointService.load_all does
         # dict.clear() + dict.update()), so iterating the live dict across the
         # `await` below could raise "dictionary changed size during iteration".
-        for name, endpoint in list(config.models.llm.items()):
-            if not endpoint.model_name:
-                continue
-            identity = id(endpoint)
-            if identity not in probed_by_identity:
-                probed_by_identity[identity] = await _fetch_max_model_tokens(
-                    base_url=endpoint.endpoint,
-                    model_id=endpoint.model_name,
-                    api_key=endpoint.extra.get("api_key", ""),
-                    # Honour the endpoint's own configured timeout rather than
-                    # the probe helper's generic default: probes run serially
-                    # under the lock, so an unreachable endpoint holds up every
-                    # later refresh for its full timeout.
-                    timeout=endpoint.timeout,
-                )
-            value = probed_by_identity[identity]
-            if value is not None:
-                results[name] = value
+        try:
+            for name, endpoint in list(config.models.llm.items()):
+                if not endpoint.model_name:
+                    continue
+                identity = id(endpoint)
+                if identity not in probed_by_identity:
+                    probed_by_identity[identity] = await _fetch_max_model_tokens(
+                        base_url=endpoint.endpoint,
+                        model_id=endpoint.model_name,
+                        api_key=endpoint.extra.get("api_key", ""),
+                        # Honour the endpoint's own configured timeout rather than
+                        # the probe helper's generic default: probes run serially
+                        # under the lock, so an unreachable endpoint holds up every
+                        # later refresh for its full timeout.
+                        timeout=endpoint.timeout,
+                    )
+                value = probed_by_identity[identity]
+                if value is not None:
+                    results[name] = value
+        except Exception:
+            # The cache stays as the invalidation left it, so requests use the
+            # global fallback: report that rather than "detecting" forever.
+            if generation == _max_model_tokens_generation:
+                _max_model_tokens_pending = False
+            raise
         if generation != _max_model_tokens_generation:
             # An endpoint write invalidated the cache while these probes were in
             # flight, so `results` describes a registry that is already gone.
@@ -163,6 +188,7 @@ async def prime_max_model_tokens(settings: "Settings | None" = None) -> None:
             logger.debug("Discarding auto-probed LLM token results invalidated mid-refresh")
             return
         _max_model_tokens_by_name = results
+        _max_model_tokens_pending = False
 
 
 def _make_sse_error(message: str, code: str) -> str:
@@ -352,14 +378,18 @@ def validate_tokens_limit(
         _length_function = get_num_tokens()
 
         if isinstance(request, OpenAIChatCompletionRequest):
-            message_tokens = sum(_length_function(m.content or "") + 4 for m in request.messages)
+            body = request.model_dump(exclude_none=True)
+            messages_tokens = sum(message_tokens(m, _length_function) for m in body["messages"])
+            tools_tokens = tool_definition_tokens(body, _length_function)
             default_output_tokens = _effective_max_output_tokens(config, partitions)
             requested_tokens = request.max_tokens or default_output_tokens
-            total_tokens_needed = message_tokens + requested_tokens
+            total_tokens_needed = messages_tokens + tools_tokens + requested_tokens
             if total_tokens_needed > max_tokens_allowed:
+                tools_part = f"Tool definitions: {tools_tokens} tokens + " if tools_tokens else ""
                 return False, (
                     f"Request exceeds maximum token limit. "
-                    f"Messages: {message_tokens} tokens + "
+                    f"Messages: {messages_tokens} tokens + "
+                    f"{tools_part}"
                     f"Requested output: {requested_tokens} tokens = "
                     f"{total_tokens_needed} tokens. "
                     f"Maximum allowed: {max_tokens_allowed} tokens."
@@ -416,6 +446,28 @@ def _apply_default_max_tokens(
     request.max_tokens = _effective_max_output_tokens(config, partitions)
 
 
+def _max_prompt_tokens(
+    request: OpenAIChatCompletionRequest | OpenAICompletionRequest,
+    config: "Settings",
+    partitions: list[str] | None,
+) -> int | None:
+    """Tokens the prompt may take on the endpoint answering this request.
+
+    Its context window (``get_max_model_tokens``: admin-set, else probed, else
+    the global fallback) minus the output budget. ``QueryService`` caps the
+    retrieved context to what is left of it once the instructions and the
+    conversation are in. ``None`` for a client-supplied endpoint, whose window
+    is unknown here.
+
+    Called after ``_apply_default_max_tokens``, which fills ``max_tokens`` for
+    every request this function doesn't return ``None`` for.
+    """
+    llm_override = client_llm_override(getattr(request, "metadata", None))
+    if llm_override.get("base_url") and custom_endpoint_override_enabled():
+        return None
+    return get_max_model_tokens(partitions=partitions, settings=config) - request.max_tokens
+
+
 def check_tokens_limit(
     request: OpenAIChatCompletionRequest | OpenAICompletionRequest,
     log,
@@ -455,7 +507,8 @@ Accepts OpenAI-compatible chat completion requests with:
 - Standard OpenAI parameters (temperature, max_tokens, etc.)
 
 **Response:**
-Returns OpenAI-compatible response with additional `extra` field containing:
+Returns OpenAI-compatible response with an additional `extra` field -- a JSON
+object (not a JSON-encoded string) -- containing:
 - `sources`: Legacy field, kept for backward compatibility. Cited sources, or
   every presented source as a fallback when the model didn't report citations
 - `presented_sources`: Array of every source actually shown to the model
@@ -468,6 +521,13 @@ Returns OpenAI-compatible response with additional `extra` field containing:
   by citation or context-budget truncation — only included when the request's
   `metadata.include_all_retrieved_sources` is `true` (off by default; this is
   debug/evaluation telemetry and can be large)
+
+Each entry in those arrays is shaped `{"source_type": "document", "chunk": {...},
+"rerank_score": 0.64, "chunk_url": "...", "file_url": "..."}` — `chunk` holds the
+chunk's own metadata, its siblings are what the server computed about it.
+`rerank_score` is absent when no reranker ran, and `file_url` when the chunk has
+no source file. Web entries (`source_type: "web"`) are flat: `url`, `title`,
+`snippet`, no `chunk`.
 
 **Streaming:**
 Set `stream: true` for Server-Sent Events (SSE) streaming responses.
@@ -503,18 +563,20 @@ async def openai_chat_completion(
             partition_service=partition_service,
             is_admin=user["is_admin"],
         )
+        await service.refresh_partition_configs()
         log.debug(f"Using partitions: {partitions}")
 
     # Bound the caller's input size in every mode, against the resolved
     # partition's chat_llm preset budget when one applies (else the default
     # LLM endpoint). RAG-injected context is added server-side and separately
-    # capped (max_context_tokens), but the user's own messages must be limited
-    # regardless of direct-LLM vs RAG.
+    # capped (top_n, and max_prompt_tokens below), but the user's own messages
+    # must be limited regardless of direct-LLM vs RAG.
     # Resolve the output budget now that the answering endpoint is known, so the
     # preflight below and the payload sent downstream both use the resolved
     # endpoint's budget rather than the default endpoint's.
     _apply_default_max_tokens(request, config, partitions)
     check_tokens_limit(request, log, config, partitions=partitions)
+    max_prompt_tokens = _max_prompt_tokens(request, config, partitions)
 
     def prep(docs, web):
         return __prepare_sources(request2, docs, web)
@@ -528,6 +590,7 @@ async def openai_chat_completion(
                     payload=request.model_dump(exclude_none=True),
                     prepare_sources=prep,
                     model_name=model_name,
+                    max_prompt_tokens=max_prompt_tokens,
                 ):
                     yield sse_line
             except asyncio.CancelledError:
@@ -550,6 +613,7 @@ async def openai_chat_completion(
         payload=request.model_dump(exclude_none=True),
         prepare_sources=prep,
         model_name=model_name,
+        max_prompt_tokens=max_prompt_tokens,
     )
     log.debug("Returning non-streaming completion chunk.")
     return JSONResponse(content=chunk)
@@ -572,7 +636,8 @@ Accepts OpenAI-compatible completion requests with:
 - Standard OpenAI parameters (temperature, max_tokens, etc.)
 
 **Response:**
-Returns OpenAI-compatible response with additional `extra` field containing:
+Returns OpenAI-compatible response with an additional `extra` field -- a JSON
+object (not a JSON-encoded string) -- containing:
 - `sources`: Legacy field, kept for backward compatibility. Cited sources, or
   every presented source as a fallback when the model didn't report citations
 - `presented_sources`: Array of every source actually shown to the model
@@ -585,6 +650,13 @@ Returns OpenAI-compatible response with additional `extra` field containing:
   by citation or context-budget truncation — only included when the request's
   `metadata.include_all_retrieved_sources` is `true` (off by default; this is
   debug/evaluation telemetry and can be large)
+
+Each entry in those arrays is shaped `{"source_type": "document", "chunk": {...},
+"rerank_score": 0.64, "chunk_url": "...", "file_url": "..."}` — `chunk` holds the
+chunk's own metadata, its siblings are what the server computed about it.
+`rerank_score` is absent when no reranker ran, and `file_url` when the chunk has
+no source file. Web entries (`source_type: "web"`) are flat: `url`, `title`,
+`snippet`, no `chunk`.
 
 **Note:** Streaming is not supported for this endpoint.
 """,
@@ -621,6 +693,7 @@ async def openai_completion(
             partition_service=partition_service,
             is_admin=user["is_admin"],
         )
+        await service.refresh_partition_configs()
 
     # Bound the caller's input size in every mode (RAG context is capped
     # separately), against the resolved partition's chat_llm preset budget
@@ -635,6 +708,7 @@ async def openai_completion(
         partitions=partitions,
         payload=request.model_dump(exclude_none=True),
         prepare_sources=lambda docs, _web: __prepare_sources(request2, docs),
+        max_prompt_tokens=_max_prompt_tokens(request, config, partitions),
     )
     log.debug("Returning completion response.")
     return JSONResponse(content=resp)

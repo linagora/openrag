@@ -13,6 +13,7 @@ divergence as a pending schema change.
 
 from datetime import datetime
 
+from core.models.catalog import DocumentStatus
 from sqlalchemy import (
     JSON,
     BigInteger,
@@ -33,7 +34,7 @@ from sqlalchemy import (
     func,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 
 metadata = MetaData()
 
@@ -49,6 +50,8 @@ model_endpoints = Table(
     Column("timeout", Float, server_default="30.0", nullable=False),
     Column("extra", JSONB, server_default=text("'{}'::jsonb"), nullable=False),
     Column("is_default", Boolean, server_default="false", nullable=False),
+    # The dense field an embedder owns; other endpoint types have none.
+    Column("vector_field", String, nullable=True),
     Column(
         "created_at",
         DateTime(timezone=True),
@@ -64,6 +67,16 @@ model_endpoints = Table(
     CheckConstraint(
         "model_type IN ('embedder','reranker','llm','vlm','stt')",
         name="ck_model_endpoint_type",
+    ),
+    CheckConstraint(
+        "model_type <> 'embedder' OR vector_field IS NOT NULL",
+        name="ck_embedder_has_vector_field",
+    ),
+    Index(
+        "uq_model_endpoint_vector_field",
+        "vector_field",
+        unique=True,
+        postgresql_where=text("vector_field IS NOT NULL"),
     ),
 )
 
@@ -194,11 +207,45 @@ partitions = Table(
 )
 
 
+# At most one row per partition: the running swap, or the outcome of the last
+# one. Deleted with its partition.
+partition_embedder_swaps = Table(
+    "partition_embedder_swaps",
+    metadata,
+    Column(
+        "partition",
+        String,
+        ForeignKey("partitions.partition", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    Column("source_embedder", String, nullable=False),
+    Column("target_embedder", String, nullable=False, index=True),
+    Column("status", String, nullable=False, index=True),
+    Column("files_total", Integer, server_default="0", nullable=False),
+    Column("files_done", Integer, server_default="0", nullable=False),
+    # Chunks longer than the target embedder's window, cut before embedding.
+    Column("chunks_over_window", Integer, server_default="0", nullable=False),
+    Column("error", String, nullable=True),
+    # Set anew by each start. A runner writes only to the run it was started
+    # for, so one left behind by a newer swap can neither advance nor complete it.
+    Column("run_id", String, nullable=False),
+    Column("started_at", DateTime(timezone=True), server_default=text("now()"), nullable=False),
+    Column("updated_at", DateTime(timezone=True), server_default=text("now()"), nullable=False),
+    Column("finished_at", DateTime(timezone=True), nullable=True),
+)
+
+
 files = Table(
     "files",
     metadata,
     Column("id", Integer, primary_key=True),
     Column("file_id", String, nullable=False, index=True),
+    Column("independently_indexed", Boolean, server_default="true", nullable=False),
+    Column("workspace_cleanup_claimed", Boolean, server_default="false", nullable=False),
+    Column("workspace_cleanup_claimed_at", DateTime(timezone=True), nullable=True),
+    Column("workspace_cleanup_started", Boolean, server_default="false", nullable=False),
+    Column("workspace_cleanup_failed", Boolean, server_default="false", nullable=False),
+    Column("workspace_cleanup_state", String, server_default="NONE", nullable=False),
     Column(
         "partition_name",
         String,
@@ -218,6 +265,7 @@ files = Table(
     Column("relationship_id", String, nullable=True, index=True),
     Column("parent_id", String, nullable=True, index=True),
     Column("content_sha256", String(64), nullable=True),
+    Column("chunk_count", Integer, nullable=True),
     Column(
         "indexed_at",
         DateTime(timezone=True),
@@ -225,6 +273,7 @@ files = Table(
         nullable=False,
     ),
     UniqueConstraint("file_id", "partition_name", name="uix_file_id_partition"),
+    CheckConstraint("chunk_count >= 0", name="ck_files_chunk_count_non_negative"),
     Index("ix_partition_file", "partition_name", "file_id"),
     Index("ix_relationship_partition", "relationship_id", "partition_name"),
     Index("ix_parent_partition", "parent_id", "partition_name"),
@@ -261,6 +310,67 @@ file_content_claims = Table(
         server_default=text("now() + interval '24 hours'"),
         nullable=False,
     ),
+)
+
+
+_JOB_STATUS_CHECK = "status IN ({})".format(",".join(f"'{status.value}'" for status in DocumentStatus))
+
+
+# One row per dispatched indexing task, keyed by the dispatcher's ``task_id``.
+#
+# ``partition`` deliberately carries no FK to ``partitions.partition``: a job row
+# is a historical record and must outlive the partition it targeted, and a
+# terminal job must not block a partition delete. ``user_id`` does carry one, so
+# deleting a user cannot leave a row pointing at an id that no longer resolves;
+# it is nulled rather than cascaded for the same must-outlive reason.
+#
+# Rows are bounded by retention, not by the table: see
+# ``PgJobRepository.purge_terminal_jobs``.
+jobs = Table(
+    "jobs",
+    metadata,
+    Column("id", String, primary_key=True),
+    Column("partition", String, nullable=False),
+    Column("file_id", String, nullable=True),
+    Column("filename", String, nullable=True),
+    # ``users.id`` is Integer, so the FK target fixes this type.
+    Column("user_id", Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True),
+    Column("status", String, nullable=False),
+    Column("error", String, nullable=True),
+    Column("error_reason", String, nullable=True),
+    Column(
+        "degraded_stages",
+        ARRAY(String),
+        server_default=text("ARRAY[]::text[]"),
+        nullable=False,
+    ),
+    Column("created_at", DateTime(timezone=True), server_default=text("now()"), nullable=False),
+    Column("updated_at", DateTime(timezone=True), server_default=text("now()"), nullable=False),
+    # Queue wait is ``started_at - created_at`` and service time is
+    # ``completed_at - started_at``; a single settle timestamp cannot separate
+    # the two, and the queue-wait series is what tells a slow parser apart from
+    # a starved pool.
+    Column("started_at", DateTime(timezone=True), nullable=True),
+    Column("completed_at", DateTime(timezone=True), nullable=True),
+    # The state machine is DocumentStatus, and the constraint is generated from
+    # it so the two cannot drift. It is what makes hydration total: a status the
+    # enum does not know would raise in ``PgJobRepository._row_to_job``, so the
+    # database has to refuse it on the way in. Note that this deliberately
+    # excludes the legacy CHUNKING/INSERTING states, which #721 removed from the
+    # public state machine and which no write path can produce.
+    CheckConstraint(_JOB_STATUS_CHECK, name="ck_jobs_status"),
+    # Queue views filter by status and order by recency.
+    Index("ix_jobs_status_created_at", "status", "created_at"),
+    # Per-user task listing, which filters on user_id and often on status too.
+    Index("ix_jobs_user_status", "user_id", "status"),
+    # Retention sweeps terminal rows by settle time, which is
+    # ``COALESCE(completed_at, created_at)``: a row whose terminal write raced a
+    # failure has no completed_at and ages out on created_at instead. The index
+    # has to match that expression, because a plain b-tree on bare completed_at
+    # serves neither the filter nor the ordering the sweep uses.
+    Index("ix_jobs_settled_at", text("COALESCE(completed_at, created_at)")),
+    # Incident lookups start from a file, not a task id.
+    Index("ix_jobs_partition_file_id", "partition", "file_id"),
 )
 
 
@@ -372,11 +482,15 @@ partition_memberships = Table(
 )
 
 
+# ``workspace_id`` is the client-facing identifier and is unique *per partition*
+# only: two partitions may each own a workspace called ``default``. Every lookup
+# therefore takes the partition as well; the join table below references the
+# integer ``id`` so that non-uniqueness never leaks into ``workspace_files``.
 workspaces = Table(
     "workspaces",
     metadata,
     Column("id", Integer, primary_key=True),
-    Column("workspace_id", String, unique=True, nullable=False, index=True),
+    Column("workspace_id", String, nullable=False, index=True),
     Column(
         "partition_name",
         String,
@@ -392,6 +506,7 @@ workspaces = Table(
     ),
     Column("display_name", String, nullable=True),
     Column("created_at", DateTime, default=datetime.now),
+    UniqueConstraint("partition_name", "workspace_id", name="uix_workspace_partition_id"),
 )
 
 
@@ -399,10 +514,13 @@ workspace_files = Table(
     "workspace_files",
     metadata,
     Column("id", Integer, primary_key=True),
+    # Both columns hold the *integer* PK of the referenced row, not the
+    # client-facing string ids (``workspaces.workspace_id`` / ``files.file_id``),
+    # neither of which is unique across partitions.
     Column(
         "workspace_id",
-        String,
-        ForeignKey("workspaces.workspace_id", ondelete="CASCADE"),
+        Integer,
+        ForeignKey("workspaces.id", ondelete="CASCADE"),
         nullable=False,
         index=True,
     ),
@@ -424,6 +542,7 @@ __all__ = [
     "prompts",
     "topic_tags",
     "partitions",
+    "partition_embedder_swaps",
     "files",
     "users",
     "oidc_sessions",

@@ -28,13 +28,16 @@ propagate; we log and continue.
 
 from __future__ import annotations
 
+import asyncio
 import email
+import io
 import logging
 from collections.abc import Mapping
 from email import policy
 from email.utils import parsedate_to_datetime
 
 from ...models.document import Document, DocumentType, ImageBlock, ProcessedDocument, TextBlock
+from ..validators import CONTENT_SNIFF_BYTES, validate_content_matches_extension, validate_ooxml_package
 from .document_parser import DocumentParser
 from .html_parser import HtmlParser
 from .registry import parser_registry
@@ -227,6 +230,19 @@ class EmlParser(DocumentParser):
 
     async def _render_one(self, attachment: dict, ext: str) -> tuple[str, list[ImageBlock]]:
         """Dispatch one attachment. Returns ``(text_to_inline, image_blocks)``."""
+        # An attachment's name decides how it is handled — which parser it
+        # reaches, or whether it is emitted as an image for captioning — but
+        # these bytes never crossed the upload check. Validate before that
+        # decision, not inside one branch of it: an attachment with no
+        # registered parser still falls through to the image path below.
+        # A mismatch skips this attachment; the rest of the message parses.
+        try:
+            validate_content_matches_extension(ext, attachment["raw"][:CONTENT_SNIFF_BYTES])
+            await asyncio.to_thread(validate_ooxml_package, ext, io.BytesIO(attachment["raw"]))
+        except Exception as exc:
+            logger.warning("Skipping attachment %s: %s", attachment["filename"], exc)
+            return "", []
+
         parser = self._attachment_parsers.get(ext)
         if parser is not None:
             try:

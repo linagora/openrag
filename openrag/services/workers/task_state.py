@@ -4,6 +4,7 @@ import base64
 import json
 import threading
 import time
+from collections import OrderedDict
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -11,10 +12,17 @@ from typing import Any
 
 import ray
 from core.models.catalog import (
+    LEGACY_ACTIVE_INDEXING_STATES,
     TASK_CREATED_AT_METADATA_KEY,
     TASK_FINISHED_AT_METADATA_KEY,
     TERMINAL_TASK_STATES,
     DocumentStatus,
+    normalize_degraded_stages,
+)
+from core.observability.ray_metrics import (
+    initialize_ingest_counters,
+    observe_queue_wait_from,
+    record_document_terminal,
 )
 
 ACTIVE_INDEXING_STATES = frozenset({"QUEUED", "SERIALIZING"})
@@ -24,11 +32,20 @@ ACTIVE_INDEXING_STATES = frozenset({"QUEUED", "SERIALIZING"})
 # must keep treating them as in-flight so cleanup never misses such a task and
 # lets a stale worker write data after the file/partition is gone. Kept out of
 # the public active counts and the DocumentStatus enum on purpose — fencing only.
-LEGACY_ACTIVE_INDEXING_STATES = frozenset({"CHUNKING", "INSERTING"})
 CANCELLABLE_INDEXING_STATES = ACTIVE_INDEXING_STATES | LEGACY_ACTIVE_INDEXING_STATES
 RECOVERABLE_TASK_STATES = CANCELLABLE_INDEXING_STATES | {"CANCELLED"}
 TERMINAL_INDEXING_STATES = frozenset({"COMPLETED", "FAILED"})
+#: ``TERMINAL_TASK_STATES`` as plain strings. ``TaskInfo.state`` is a bare
+#: ``str`` (it round-trips through the recoverable-task JSON), so comparing it
+#: against the enum members directly would silently never match.
+_TERMINAL_STATE_NAMES = frozenset(state.value for state in TERMINAL_TASK_STATES)
 PENDING_TASK_DETAILS = "__openrag_pending_task_details__"
+# Reasons ``set_queued_details_v2`` can turn a submission away. Shared with
+# the dispatcher, which maps FILE_INDEXING to a 409 and the rest to the
+# pre-existing "rejected before it queued" error.
+QUEUE_REFUSED_CANCELLED = "cancelled"
+QUEUE_REFUSED_FILE_DELETING = "file_deleting"
+QUEUE_REFUSED_FILE_INDEXING = "file_indexing"
 SUBMITTED_TASK_WITHOUT_REF = "__openrag_submitted_task_without_ref__"
 _FENCE_KV_KEY = b"file-delete-fences-v1"
 _TASK_STATE_KV_NAMESPACE = "openrag-task-state-manager"
@@ -37,6 +54,16 @@ _RECOVERABLE_TASK_KV_PREFIX = b"recoverable-task-v1:"
 _CANCELLATION_TOMBSTONE_TTL_SECONDS = 24 * 60 * 60
 _FILE_DELETE_FENCE_TTL_SECONDS = 2 * 60
 _CONTENT_CLAIM_REGISTRATION_GRACE_SECONDS = 60
+# Terminal task records are progress receipts, not the system of record: the
+# durable per-file state lives in the Postgres catalog. They are kept only long
+# enough to answer the reads that follow a job settling, then dropped, with a
+# hard cap so a burst cannot outrun the time bound. The cancellation tombstone
+# keeps its own, longer TTL: it fences late workers rather than answering reads.
+# A record that is both lives to the later of the two deadlines, so the receipt
+# window never cuts a fence short and a fence never extends a receipt.
+_TERMINAL_TASK_RETENTION_SECONDS = 60 * 60
+_MAX_TERMINAL_TASKS = 2_000
+_MAX_TASK_ERROR_CHARS = 8_000
 STALE_REFLESS_TASK_ERROR = (
     "Indexing task never exposed a worker reference within the registration grace period; marking it failed as stale."
 )
@@ -124,12 +151,14 @@ def _decode_recoverable_task(payload: bytes) -> tuple[str, TaskInfo, float | Non
     return task_id, info, expires_at
 
 
-def _load_recoverable_tasks() -> dict[str, TaskInfo]:
+def _load_recoverable_tasks() -> tuple[dict[str, TaskInfo], dict[str, float]]:
+    """Return the recovered tasks and, for those that carry one, their deadline."""
     from ray.experimental.internal_kv import _internal_kv_del, _internal_kv_get, _internal_kv_list
 
     if not _task_state_storage_available():
-        return {}
+        return {}, {}
     tasks: dict[str, TaskInfo] = {}
+    expiries: dict[str, float] = {}
     namespace = _task_state_kv_namespace()
     now = time.time()
     for key in _internal_kv_list(_RECOVERABLE_TASK_KV_PREFIX, namespace=namespace):
@@ -141,13 +170,30 @@ def _load_recoverable_tasks() -> dict[str, TaskInfo]:
             _internal_kv_del(key, namespace=namespace)
             continue
         tasks[task_id] = info
-    return tasks
+        if expires_at is not None:
+            expiries[task_id] = expires_at
+    return tasks, expiries
+
+
+def _tombstone_deadline(info: TaskInfo, *, now: float | None = None) -> float | None:
+    """When a record stops fencing late writers, or ``None`` if it fences none.
+
+    Ray actor-task cancellation is best effort. An elapsed deadline cannot prove
+    that an unreachable worker stopped, so a cancellation whose worker has not
+    settled gets no deadline and is held until its reference resolves.
+    """
+    timestamp = time.time() if now is None else now
+    if info.state == "FAILED" and info.error == STALE_REFLESS_TASK_ERROR:
+        return timestamp + _CANCELLATION_TOMBSTONE_TTL_SECONDS
+    if info.state != "CANCELLED" or _cancelled_task_has_worker_fence(info):
+        return None
+    return timestamp + _CANCELLATION_TOMBSTONE_TTL_SECONDS
 
 
 def _recovery_snapshot(info: TaskInfo, *, now: float | None = None) -> tuple[TaskInfo, float | None]:
+    timestamp = time.time() if now is None else now
     if info.state == "FAILED" and info.error == STALE_REFLESS_TASK_ERROR:
-        timestamp = time.time() if now is None else now
-        return info, timestamp + _CANCELLATION_TOMBSTONE_TTL_SECONDS
+        return info, _tombstone_deadline(info, now=timestamp)
     if info.state != "CANCELLED":
         return info, None
     # Keep the worker reference until cancellation is confirmed. If the actor
@@ -160,13 +206,7 @@ def _recovery_snapshot(info: TaskInfo, *, now: float | None = None) -> tuple[Tas
         worker_submitted=getattr(info, "worker_submitted", False),
         submission_started_at=getattr(info, "submission_started_at", None),
     )
-    timestamp = time.time() if now is None else now
-    if _cancelled_task_has_worker_fence(snapshot):
-        # Ray actor-task cancellation is best effort. An elapsed deadline cannot
-        # prove that an unreachable worker stopped, so unresolved workers remain
-        # durable until their reference settles or the pool confirms settlement.
-        return snapshot, None
-    return snapshot, timestamp + _CANCELLATION_TOMBSTONE_TTL_SECONDS
+    return snapshot, _tombstone_deadline(snapshot, now=timestamp)
 
 
 def _cancelled_task_has_worker_fence(info: TaskInfo) -> bool:
@@ -196,6 +236,27 @@ def _save_recoverable_task(task_id: str, info: TaskInfo) -> None:
         _internal_kv_del(key, namespace=_task_state_kv_namespace())
 
 
+def _delete_recoverable_task(task_id: str) -> None:
+    from ray.experimental.internal_kv import _internal_kv_del
+
+    if not _task_state_storage_available():
+        return
+    _internal_kv_del(_recoverable_task_key(task_id), namespace=_task_state_kv_namespace())
+
+
+def _queue_refused(reason: str, *, existing_task_id: str | None = None) -> dict[str, Any]:
+    return {"accepted": False, "reason": reason, "existing_task_id": existing_task_id}
+
+
+def _truncate_error(tb_str: str | None) -> str | None:
+    """Keep the tail of a traceback: the raising frame and message live there."""
+    if tb_str is None or len(tb_str) <= _MAX_TASK_ERROR_CHARS:
+        return tb_str
+    marker = "...[truncated]...\n"
+    keep = max(_MAX_TASK_ERROR_CHARS - len(marker), 0)
+    return marker + tb_str[len(tb_str) - keep :]
+
+
 try:
     from core.config import load_config as _load_config
 
@@ -216,6 +277,7 @@ except (ImportError, AttributeError) as _cfg_err:
 class TaskInfo:
     state: str | None = None
     error: str | None = None
+    error_reason: str | None = None
     details: dict[str, Any] = field(default_factory=dict)
     object_ref: ray.ObjectRef | None = None
     worker_submitted: bool = False
@@ -235,10 +297,34 @@ def _object_ref_is_ready(object_ref: Any) -> bool:
     return bool(ready)
 
 
-def _content_claim_registration_expired(details: dict[str, Any]) -> bool:
-    metadata = details.get("metadata")
+def _worker_has_settled(info: TaskInfo) -> bool:
+    """Whether the task's worker can no longer write, whatever the record says.
+
+    The completion tracker stamps ``TASK_FINISHED_AT`` once the worker ref
+    resolves, success or error; a ready ref says the same before the stamp.
+    """
+    metadata = (info.details or {}).get("metadata")
+    if isinstance(metadata, dict) and TASK_FINISHED_AT_METADATA_KEY in metadata:
+        return True
+    return _object_ref_is_ready(info.object_ref)
+
+
+def _task_created_at(details: dict[str, Any] | None) -> str | None:
+    """The dispatcher's admission timestamp for a task, if it recorded one.
+
+    Read defensively: ``details`` is free-form and survives a rolling deploy
+    from a TaskStateManager running the previous schema, so the key can be
+    absent or the wrong type. Returning ``None`` records no observation,
+    which is honest — a zero would be a lie that drags the p50 down.
+    """
+    metadata = (details or {}).get("metadata")
     created_at = metadata.get(TASK_CREATED_AT_METADATA_KEY) if isinstance(metadata, dict) else None
-    if not isinstance(created_at, str):
+    return created_at if isinstance(created_at, str) else None
+
+
+def _content_claim_registration_expired(details: dict[str, Any]) -> bool:
+    created_at = _task_created_at(details)
+    if created_at is None:
         return False
     try:
         created = datetime.fromisoformat(created_at)
@@ -252,19 +338,125 @@ def _content_claim_registration_expired(details: dict[str, Any]) -> bool:
 @ray.remote(concurrency_groups={"set": 1000, "get": 1000, "queue_info": 1000})
 class TaskStateManager:
     def __init__(self) -> None:
-        self.tasks = _load_recoverable_tasks()
+        self.tasks, expiries = _load_recoverable_tasks()
         self.user_index: dict[int | None, set[str]] = {}
+        # Terminal task ids in eviction order, mapped to the time they may go.
+        self.terminal_tasks: OrderedDict[str, float] = OrderedDict()
+        now = time.time()
         for task_id, info in self.tasks.items():
             self.user_index.setdefault(info.details.get("user_id"), set()).add(task_id)
+            if info.state not in TERMINAL_TASK_STATES:
+                continue
+            # A restart must not restart the clock: a record that was persisted
+            # with a fence deadline is held to that deadline, not to a fresh
+            # window. Only a fence has one, so the rest get the receipt window.
+            self.terminal_tasks[task_id] = expiries.get(task_id, now + _TERMINAL_TASK_RETENTION_SECONDS)
         self.file_delete_fences = _load_file_delete_fences()
         # Ray runs each concurrency group on a separate event loop. A single
         # asyncio lock cannot safely coordinate methods across those loops.
         self.lock = threading.Lock()
+        initialize_ingest_counters()
 
     def _ensure_task(self, task_id: str) -> TaskInfo:
+        # Every path that can add a task goes through here, so admission always
+        # sheds history first.
+        self._evict_terminal_tasks_locked()
         if task_id not in self.tasks:
             self.tasks[task_id] = TaskInfo()
+            # A stateless record here has no other owner: the caller may still
+            # refuse the write outright (state stays None) or only ever set
+            # details/error without setting state. Either way nothing else
+            # evicts it, so give it a receipt deadline immediately. A persist
+            # right after replaces this with the real one.
+            self.terminal_tasks[task_id] = time.time() + _TERMINAL_TASK_RETENTION_SECONDS
         return self.tasks[task_id]
+
+    def _persist_task_locked(self, task_id: str, info: TaskInfo) -> None:
+        """Persist a task mutation and keep the terminal-retention ledger in sync."""
+        _save_recoverable_task(task_id, info)
+        self.terminal_tasks.pop(task_id, None)
+        # A record that settled into a state we track normally follows the
+        # terminal/fence rule below. A record that never got a state at all
+        # (details or an error set on a fresh id, e.g. by a write racing an
+        # eviction) is just as unreachable otherwise, so it gets the same
+        # receipt window with no fence.
+        if info.state not in TERMINAL_TASK_STATES and info.state is not None:
+            return
+        now = time.time()
+        receipt_deadline = now + _TERMINAL_TASK_RETENTION_SECONDS
+        fence_deadline = _tombstone_deadline(info, now=now)
+        self.terminal_tasks[task_id] = max(receipt_deadline, fence_deadline or receipt_deadline)
+
+    def _settle_task_locked(self, task_id: str, info: TaskInfo) -> None:
+        """Persist a settled task and shed history straight away.
+
+        Admission-time eviction always runs one settle behind, so a burst that
+        ends the queue would leave its last records in memory until something
+        else touched the actor. Only call this from a public entry point:
+        eviction mutates ``self.tasks`` and would break a caller iterating it.
+        """
+        self._persist_task_locked(task_id, info)
+        self._evict_terminal_tasks_locked()
+
+    def _forget_task_locked(self, task_id: str) -> None:
+        info = self.tasks.pop(task_id, None)
+        if info is None:
+            return
+        user_id = (info.details or {}).get("user_id")
+        owned = self.user_index.get(user_id)
+        if owned is not None:
+            owned.discard(task_id)
+            if not owned:
+                self.user_index.pop(user_id, None)
+        _delete_recoverable_task(task_id)
+
+    def _evict_terminal_tasks_locked(self, *, now: float | None = None) -> None:
+        """Drop settled tasks once they age out or the retention cap is exceeded.
+
+        This removes entries from ``self.tasks`` and ``self.user_index``, so call
+        it before reading either, never while iterating one.
+        """
+        timestamp = time.time() if now is None else now
+        examined = 0
+        while self.terminal_tasks and examined < len(self.terminal_tasks):
+            task_id, deadline = next(iter(self.terminal_tasks.items()))
+            if len(self.terminal_tasks) <= _MAX_TERMINAL_TASKS and deadline > timestamp:
+                if deadline - timestamp <= _TERMINAL_TASK_RETENTION_SECONDS:
+                    # Receipts share one window, so everything queued behind this
+                    # one is younger and cannot have expired either.
+                    break
+                # A fence outlives the receipts behind it. Step over it rather
+                # than let it stall the sweep for as long as it is held.
+                self.terminal_tasks.move_to_end(task_id)
+                examined += 1
+                continue
+            info = self.tasks.get(task_id)
+            if info is not None and _cancelled_task_has_worker_fence(info):
+                # An unsettled cancellation still fences a live worker. Losing it
+                # would let that worker write after the file was cancelled.
+                self.terminal_tasks.move_to_end(task_id)
+                examined += 1
+                continue
+            if info is not None and deadline > timestamp:
+                is_tombstone = info.state == "CANCELLED" or (
+                    info.state == "FAILED" and info.error == STALE_REFLESS_TASK_ERROR
+                )
+                if is_tombstone:
+                    # A settled cancellation's or stale-refless task's worker has
+                    # already gone quiet, but the record itself still fences a
+                    # late write through set_state's state_is_fenced check.
+                    # Forgetting it here under cap pressure alone, before its own
+                    # stored deadline (the later of receipt and fence, computed
+                    # at persist/recovery time), would let that late write
+                    # recreate the task through _ensure_task with no fence at
+                    # all. The cap still bounds memory in the long run: this
+                    # entry keeps cycling to the end of the queue until its own
+                    # deadline passes, same as any other unexpired fence.
+                    self.terminal_tasks.move_to_end(task_id)
+                    examined += 1
+                    continue
+            self.terminal_tasks.pop(task_id)
+            self._forget_task_locked(task_id)
 
     def _record_details(
         self,
@@ -276,12 +468,15 @@ class TaskStateManager:
         metadata: dict[str, Any],
         user_id: int | None,
     ) -> None:
+        previous_details = info.details
         info.details = {
             "file_id": file_id,
             "partition": partition,
             "metadata": metadata,
             "user_id": user_id,
         }
+        if "degraded_stages" in previous_details:
+            info.details["degraded_stages"] = normalize_degraded_stages(previous_details["degraded_stages"])
         self.user_index.setdefault(user_id, set()).add(task_id)
 
     def _prune_expired_file_delete_fences(self) -> None:
@@ -296,9 +491,36 @@ class TaskStateManager:
         self._prune_expired_file_delete_fences()
         return bool(self.file_delete_fences.get((partition, file_id)))
 
+    @staticmethod
+    def _count_terminal(previous: str | None, new: str) -> None:
+        """Count a document reaching a terminal state, once per transition.
+
+        Every setter here is re-entrant by design: a retried actor call can
+        set FAILED on an already-failed task, and ``finish_rejected_submission``
+        can run after ``set_failed_if_not_cancelled`` for the same task.
+        Counting the *write* rather than the transition would inflate the
+        failure ratio that ``OpenRagIngestFailureRate`` (S3-4) alerts on, so
+        the guard is on the previous state, not on the new one.
+
+        The first terminal state wins. A task later moved from FAILED to
+        COMPLETED counts once, as failed — the guard cannot distinguish a
+        correction from a duplicate write, and under-counting a rare correction
+        is safer than double-counting every retry.
+
+        Counted in the TaskStateManager rather than in the indexer worker
+        because the worker only sees documents that reached it. Tasks that
+        fail before dispatch — a rejected submission, a stale ref-less task,
+        a cancellation while queued — are exactly the systemic failures the
+        alert needs to see, and the worker never observes them.
+        """
+        if new in _TERMINAL_STATE_NAMES and previous not in _TERMINAL_STATE_NAMES:
+            record_document_terminal(new)
+
     def _set_cancelled_locked(self, task_id: str, info: TaskInfo) -> None:
+        previous = info.state
         info.state = "CANCELLED"
-        _save_recoverable_task(task_id, info)
+        self._settle_task_locked(task_id, info)
+        self._count_terminal(previous, "CANCELLED")
 
     def _expire_refless_task_if_stale_locked(self, task_id: str, info: TaskInfo) -> bool:
         ref = info.object_ref.get("ref") if isinstance(info.object_ref, dict) else info.object_ref
@@ -314,9 +536,11 @@ class TaskStateManager:
             or not registration_expired
         ):
             return False
+        previous = info.state
         info.state = "FAILED"
         info.error = STALE_REFLESS_TASK_ERROR
-        _save_recoverable_task(task_id, info)
+        self._persist_task_locked(task_id, info)
+        self._count_terminal(previous, "FAILED")
         return True
 
     def _expire_refless_tasks_if_stale_locked(self, task_ids: Iterable[str] | None = None) -> None:
@@ -392,19 +616,29 @@ class TaskStateManager:
                 ref = object_ref.get("ref") if isinstance(object_ref, dict) else object_ref
                 if ref is None:
                     return False
+            previous = info.state
             info.state = state
             if state == "SERIALIZING":
                 info.worker_submitted = True
                 info.submission_started_at = None
-            _save_recoverable_task(task_id, info)
+                # Only on the entering edge: a retried set_state must not
+                # observe the same wait twice. This is the one place holding
+                # both halves — the worker never receives ``created_at``.
+                if previous != "SERIALIZING":
+                    observe_queue_wait_from(_task_created_at(info.details))
+            if state in TERMINAL_TASK_STATES:
+                self._settle_task_locked(task_id, info)
+            else:
+                self._persist_task_locked(task_id, info)
+            self._count_terminal(previous, state)
             return True
 
     @ray.method(concurrency_group="set")
     async def set_error(self, task_id: str, tb_str: str) -> None:
         with self.lock:
             info = self._ensure_task(task_id)
-            info.error = tb_str
-            _save_recoverable_task(task_id, info)
+            info.error = _truncate_error(tb_str)
+            self._persist_task_locked(task_id, info)
 
     @ray.method(concurrency_group="set")
     async def set_failed_if_not_cancelled(self, task_id: str, tb_str: str) -> bool:
@@ -419,9 +653,32 @@ class TaskStateManager:
             if info is not None and info.state == "CANCELLED":
                 return False
             if info is not None:
+                previous = info.state
                 info.state = "FAILED"
-                info.error = tb_str
-                _save_recoverable_task(task_id, info)
+                info.error = _truncate_error(tb_str)
+                self._settle_task_locked(task_id, info)
+                self._count_terminal(previous, "FAILED")
+            return True
+
+    @ray.method(concurrency_group="set")
+    async def set_failed_with_reason_if_not_cancelled(
+        self,
+        task_id: str,
+        tb_str: str,
+        error_reason: str,
+    ) -> bool:
+        """Atomically record a failed task's traceback and canonical reason."""
+        with self.lock:
+            info = self.tasks.get(task_id)
+            if info is not None and info.state == "CANCELLED":
+                return False
+            if info is not None:
+                previous = info.state
+                info.state = "FAILED"
+                info.error = _truncate_error(tb_str)
+                info.error_reason = error_reason
+                self._settle_task_locked(task_id, info)
+                self._count_terminal(previous, "FAILED")
             return True
 
     @ray.method(concurrency_group="set")
@@ -446,7 +703,7 @@ class TaskStateManager:
             info.object_ref = None
             info.worker_submitted = False
             info.submission_started_at = None
-            _save_recoverable_task(task_id, info)
+            self._persist_task_locked(task_id, info)
             return True
 
     @ray.method(concurrency_group="set")
@@ -459,10 +716,12 @@ class TaskStateManager:
             info.object_ref = None
             info.worker_submitted = False
             info.submission_started_at = None
+            previous = info.state
             if info.state in CANCELLABLE_INDEXING_STATES:
                 info.state = "FAILED"
                 info.error = "Indexer worker submission was rejected after the worker settled."
-            _save_recoverable_task(task_id, info)
+            self._persist_task_locked(task_id, info)
+            self._count_terminal(previous, info.state)
             return True
 
     @ray.method(concurrency_group="set")
@@ -491,7 +750,41 @@ class TaskStateManager:
                 metadata=metadata,
                 user_id=user_id,
             )
-            _save_recoverable_task(task_id, info)
+            self._persist_task_locked(task_id, info)
+
+    @ray.method(concurrency_group="set")
+    async def set_degraded_stages(self, task_id: str, stages: list[str]) -> bool:
+        """Attach safe enrichment outcomes without reviving an expired task."""
+        with self.lock:
+            info = self.tasks.get(task_id)
+            if info is None or info.state not in CANCELLABLE_INDEXING_STATES:
+                return False
+            info.details["degraded_stages"] = normalize_degraded_stages(stages)
+            self._persist_task_locked(task_id, info)
+            return True
+
+    @ray.method(concurrency_group="set")
+    async def complete_with_degraded_stages(self, task_id: str, stages: list[str]) -> str:
+        """Atomically settle a task and report why completion was accepted or fenced."""
+        normalized = normalize_degraded_stages(stages)
+        with self.lock:
+            info = self.tasks.get(task_id)
+            if info is None:
+                return "missing"
+            if info.state == "COMPLETED":
+                if normalize_degraded_stages(info.details.get("degraded_stages")) == normalized:
+                    return "completed"
+                return "conflict"
+            if info.state == "CANCELLED":
+                return "cancelled"
+            if info.state not in CANCELLABLE_INDEXING_STATES:
+                return "conflict"
+            info.details["degraded_stages"] = normalized
+            previous = info.state
+            info.state = "COMPLETED"
+            self._settle_task_locked(task_id, info)
+            self._count_terminal(previous, "COMPLETED")
+            return "completed"
 
     @ray.method(concurrency_group="set")
     async def set_queued_details(
@@ -504,23 +797,138 @@ class TaskStateManager:
         user_id: int | None,
     ) -> bool:
         with self.lock:
-            info = self._ensure_task(task_id)
-            if info.state == DocumentStatus.CANCELLED:
-                return False
-            self._record_details(
+            return self._queue_task_locked(
                 task_id,
-                info,
                 file_id=file_id,
                 partition=partition,
                 metadata=metadata,
                 user_id=user_id,
+                reject_if_file_active=False,
+            )["accepted"]
+
+    @ray.method(concurrency_group="set")
+    async def set_queued_details_v2(
+        self,
+        task_id: str,
+        *,
+        file_id: str | None,
+        partition: str,
+        metadata: dict[str, Any],
+        user_id: int | None,
+        reject_if_file_active: bool = False,
+    ) -> dict[str, Any]:
+        """Queue a task, optionally refusing one whose file is already indexing.
+
+        Returns ``{"accepted", "reason", "existing_task_id"}`` instead of the
+        bare boolean ``set_queued_details`` returns, because a caller that is
+        turned away needs to know *which* task holds the file to tell its own
+        client where to look. Both methods stay on the actor: a dispatcher from
+        an earlier release keeps calling the boolean one, and a dispatcher from
+        this one falls back to it against an actor that predates this method —
+        in which case admission simply is not fenced, exactly as before.
+
+        ``reject_if_file_active`` is the admission fence (#1046). It is opt-in
+        rather than always-on because only a first-time upload can say that a
+        second task for the same file is unambiguously redundant; a replace
+        legitimately re-indexes a file that already exists.
+        """
+        with self.lock:
+            return self._queue_task_locked(
+                task_id,
+                file_id=file_id,
+                partition=partition,
+                metadata=metadata,
+                user_id=user_id,
+                reject_if_file_active=reject_if_file_active,
             )
-            if self._file_delete_fenced(partition=partition, file_id=file_id):
-                self._set_cancelled_locked(task_id, info)
-                return False
-            info.state = "QUEUED"
-            _save_recoverable_task(task_id, info)
-            return True
+
+    def _queue_task_locked(
+        self,
+        task_id: str,
+        *,
+        file_id: str | None,
+        partition: str,
+        metadata: dict[str, Any],
+        user_id: int | None,
+        reject_if_file_active: bool,
+    ) -> dict[str, Any]:
+        previous = self.tasks.get(task_id)
+        info = self._ensure_task(task_id)
+        if info.state == DocumentStatus.CANCELLED:
+            return _queue_refused(QUEUE_REFUSED_CANCELLED)
+        if reject_if_file_active and file_id is not None:
+            busy_task_id = self._active_indexing_task_for_file_locked(
+                partition=partition, file_id=file_id, excluding=task_id
+            )
+            if busy_task_id is not None:
+                if info is not previous:
+                    # Drop the stateless record _ensure_task just made for this
+                    # id. Kept, it would show in get_all_info with no state,
+                    # which the admin task list cannot render, and hold a slot
+                    # under _MAX_TERMINAL_TASKS for every refused retry. Nothing
+                    # was persisted or indexed for it yet, and a retried
+                    # registration of the same id simply creates it again.
+                    self.tasks.pop(task_id, None)
+                    self.terminal_tasks.pop(task_id, None)
+                return _queue_refused(QUEUE_REFUSED_FILE_INDEXING, existing_task_id=busy_task_id)
+        self._record_details(
+            task_id,
+            info,
+            file_id=file_id,
+            partition=partition,
+            metadata=metadata,
+            user_id=user_id,
+        )
+        if self._file_delete_fenced(partition=partition, file_id=file_id):
+            self._set_cancelled_locked(task_id, info)
+            return _queue_refused(QUEUE_REFUSED_FILE_DELETING)
+        info.state = "QUEUED"
+        self._persist_task_locked(task_id, info)
+        return {"accepted": True, "reason": None, "existing_task_id": None}
+
+    def _active_indexing_task_for_file_locked(
+        self,
+        *,
+        partition: str,
+        file_id: str,
+        excluding: str,
+    ) -> str | None:
+        """Return a task already indexing ``file_id``, or ``None``.
+
+        Narrower than :meth:`_matching_active_task_refs_locked`, which
+        over-matches on purpose so cleanup never misses a worker. Refusing work
+        has the opposite failure cost, so this skips a task that has not
+        registered its file yet: it may well be for another file.
+
+        A cancelled task whose worker has not settled still counts. Cancellation
+        does not fence the worker's catalog commit: ``process_file`` writes the
+        row and only then learns from ``complete_with_degraded_stages`` that it
+        was cancelled. A second task admitted meanwhile would race that commit
+        for the same file, which is exactly what this fence exists to prevent.
+
+        Any candidate whose worker has settled is released, whatever its state:
+        a worker that crashed mid-``process_file``, or one from a previous
+        generation whose terminal write went to a replaced actor, leaves the
+        record QUEUED or SERIALIZING with nothing left to write. Settled is the
+        rule ``get_content_claim_task_ids`` applies (:func:`_worker_has_settled`),
+        so the file fence and the content claim agree on when a task is done.
+        Readiness is only probed for a candidate that names this very file, so
+        the fence costs no ``ray.wait`` otherwise.
+        """
+        for candidate_id, info in self.tasks.items():
+            if candidate_id == excluding:
+                continue
+            if info.state not in CANCELLABLE_INDEXING_STATES and not _cancelled_task_has_worker_fence(info):
+                continue
+            if self._expire_refless_task_if_stale_locked(candidate_id, info):
+                continue
+            details = info.details or {}
+            if details.get("partition") != partition or details.get("file_id") != file_id:
+                continue
+            if _worker_has_settled(info):
+                continue
+            return candidate_id
+        return None
 
     @ray.method(concurrency_group="set")
     async def begin_worker_submission(self, task_id: str) -> bool:
@@ -531,7 +939,7 @@ class TaskStateManager:
             if self._expire_refless_task_if_stale_locked(task_id, info):
                 return False
             info.submission_started_at = time.time()
-            _save_recoverable_task(task_id, info)
+            self._persist_task_locked(task_id, info)
             return True
 
     @ray.method(concurrency_group="set")
@@ -553,12 +961,13 @@ class TaskStateManager:
             info.object_ref = object_ref
             info.worker_submitted = True
             info.submission_started_at = None
-            _save_recoverable_task(task_id, info)
+            self._persist_task_locked(task_id, info)
             return True
 
     @ray.method(concurrency_group="get")
     async def get_state(self, task_id: str) -> str | None:
         with self.lock:
+            self._evict_terminal_tasks_locked()
             info = self.tasks.get(task_id)
             if info is not None:
                 self._expire_refless_task_if_stale_locked(task_id, info)
@@ -569,6 +978,12 @@ class TaskStateManager:
         with self.lock:
             info = self.tasks.get(task_id)
             return info.error if info else None
+
+    @ray.method(concurrency_group="get")
+    async def get_error_reason(self, task_id: str) -> str | None:
+        with self.lock:
+            info = self.tasks.get(task_id)
+            return getattr(info, "error_reason", None) if info else None
 
     @ray.method(concurrency_group="get")
     async def get_details(self, task_id: str) -> dict | None:
@@ -603,6 +1018,24 @@ class TaskStateManager:
             return self._matching_active_task_refs_locked(partition=partition, file_id=file_id)
 
     @ray.method(concurrency_group="get")
+    async def get_active_indexing_task_for_file(self, *, partition: str, file_id: str) -> str | None:
+        """The admission fence's answer for a file, for labelling a refusal.
+
+        The dispatcher asks this when the content claim already turned a
+        submission away holding the same ``file_id``: that claim belongs to a
+        task indexing this very file, and the caller deserves its id rather
+        than a deduplication error pointing at itself. It is not an admission
+        check — ``set_queued_details_v2`` stays the only gate, atomic with the
+        QUEUED registration.
+
+        It queues nothing, but it is not side-effect free: like
+        ``get_content_claim_task_ids``, it expires any stale ref-less task it
+        walks past, whatever file that task is for, and persists it as FAILED.
+        """
+        with self.lock:
+            return self._active_indexing_task_for_file_locked(partition=partition, file_id=file_id, excluding="")
+
+    @ray.method(concurrency_group="get")
     async def get_content_claim_task_ids(self, *, partition: str) -> set[str]:
         """Return active tasks and cancellations whose workers have not settled."""
         with self.lock:
@@ -613,9 +1046,7 @@ class TaskStateManager:
                 owns_claim = info.state in CANCELLABLE_INDEXING_STATES or _cancelled_task_has_worker_fence(info)
                 if not owns_claim:
                     continue
-                metadata = (info.details or {}).get("metadata")
-                has_finished = isinstance(metadata, dict) and TASK_FINISHED_AT_METADATA_KEY in metadata
-                if has_finished or _object_ref_is_ready(info.object_ref):
+                if _worker_has_settled(info):
                     continue
                 details = info.details or {}
                 if details and details.get("partition") != partition:
@@ -662,17 +1093,23 @@ class TaskStateManager:
     @ray.method(concurrency_group="queue_info")
     async def get_all_states(self) -> dict[str, str | None]:
         with self.lock:
+            # A queue that only gets polled admits no task, so the listing reads
+            # have to shed history or retention never runs. Sweep after the stale
+            # pass: it settles tasks itself, and it cannot evict while iterating.
             self._expire_refless_tasks_if_stale_locked()
+            self._evict_terminal_tasks_locked()
             return {tid: info.state for tid, info in self.tasks.items()}
 
     @ray.method(concurrency_group="queue_info")
     async def get_all_info(self) -> dict[str, dict]:
         with self.lock:
             self._expire_refless_tasks_if_stale_locked()
+            self._evict_terminal_tasks_locked()
             return {
                 task_id: {
                     "state": info.state,
                     "error": info.error,
+                    "error_reason": getattr(info, "error_reason", None),
                     "details": info.details,
                     "worker_submitted": getattr(info, "worker_submitted", False),
                     "submission_started_at": getattr(info, "submission_started_at", None),
@@ -683,12 +1120,15 @@ class TaskStateManager:
     @ray.method(concurrency_group="queue_info")
     async def get_all_user_info(self, user_id: int) -> dict[str, dict]:
         with self.lock:
+            self._expire_refless_tasks_if_stale_locked(list(self.user_index.get(user_id, set())))
+            # Before the index lookup: eviction can drop the user's whole entry.
+            self._evict_terminal_tasks_locked()
             task_ids = self.user_index.get(user_id, set())
-            self._expire_refless_tasks_if_stale_locked(task_ids)
             return {
                 tid: {
                     "state": self.tasks[tid].state,
                     "error": self.tasks[tid].error,
+                    "error_reason": getattr(self.tasks[tid], "error_reason", None),
                     "details": self.tasks[tid].details,
                 }
                 for tid in task_ids
@@ -706,6 +1146,16 @@ class TaskStateManager:
     @ray.method(concurrency_group="queue_info")
     async def supports_in_place_restart(self) -> bool:
         """Identify actors created with the restart policy introduced by #841."""
+        return True
+
+    @ray.method(concurrency_group="queue_info")
+    async def supports_bounded_task_retention(self) -> bool:
+        """Identify actors that bound terminal task retention (#660)."""
+        return True
+
+    @ray.method(concurrency_group="queue_info")
+    async def supports_explicit_completion_outcomes(self) -> bool:
+        """Identify actors that distinguish cancellation, loss, and conflicts."""
         return True
 
     @ray.method(concurrency_group="queue_info")

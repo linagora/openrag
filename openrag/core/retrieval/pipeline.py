@@ -20,18 +20,48 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import time
 from typing import Any
 
 from core.models.chunk import Chunk
 from core.models.query import Query, SearchQueries
+from core.models.retrieval_result import ScoredChunk
+from core.models.retrieval_trace import TraceCandidate, TraceRemovalReason
 from core.rerankers.reranker import Reranker
 from core.retrieval.retriever import Retriever
 from core.retrieval.rrf import rrf_reranking
+from core.retrieval.trace import RetrievalTraceBuilder, merge_child_traces
 
 
 def _chunk_key(c: Chunk) -> Any:
     """Identity key for fusion / dedup. Falls back to object id when missing."""
     return c.id or id(c)
+
+
+def _safe_trace(trace: RetrievalTraceBuilder | None, stage: str, operation) -> None:
+    if trace is None:
+        return
+    try:
+        operation()
+    except Exception as error:
+        try:
+            trace.record_error(stage, error)
+        except Exception:
+            pass
+
+
+def _with_removal_reasons(
+    candidates: list[TraceCandidate],
+    removed_ids: set[str],
+    code: str,
+    explanation: str,
+) -> list[TraceCandidate]:
+    return [
+        candidate.model_copy(update={"removal_reason": TraceRemovalReason(code=code, explanation=explanation)})
+        if candidate.id in removed_ids and candidate.duplicate_of is None
+        else candidate
+        for candidate in candidates
+    ]
 
 
 async def _rerank_chunks(reranker: Reranker, query: str, chunks: list[Chunk]) -> list[Chunk]:
@@ -40,11 +70,19 @@ async def _rerank_chunks(reranker: Reranker, query: str, chunks: list[Chunk]) ->
     The ABC scores text+query pairs and returns ``[(orig_index, score), ...]``;
     we look up the original chunk for each ranked index. Items the reranker
     drops are excluded.
+
+    Each survivor comes back as a :class:`ScoredChunk` carrying its score.
+    ``ScoredChunk`` is a ``Chunk`` subclass, so this stays a ``list[Chunk]`` for
+    every caller downstream while the score travels as a typed field rather than
+    a magic metadata key. It reaches clients via ``ScoredChunk.to_langchain()``,
+    which folds the scores into the metadata that API source entries are built
+    from. A chunk that never met a reranker stays a plain ``Chunk`` and simply
+    has no score — not a null, and not a 0.0 that reads like a real one.
     """
     if not chunks:
         return chunks
     ranking = await reranker.rerank(query=query, documents=[c.text for c in chunks], top_k=None)
-    return [chunks[idx] for idx, _ in ranking]
+    return [ScoredChunk.from_chunk(chunks[idx], rerank_score=score) for idx, score in ranking]
 
 
 class RetrieverPipeline:
@@ -95,40 +133,224 @@ class RetrieverPipeline:
         query: Query,
         top_k: int | None = None,
         filter_params: dict | None = None,
+        trace: RetrievalTraceBuilder | None = None,
     ) -> list[Chunk]:
         """Run a single ``Query`` through retrieval, expansion, and reranking."""
         milvus_filter = query.to_milvus_filter()
+        attempt_traces: list[RetrievalTraceBuilder] = []
+        retrieval_trace = trace
+        if trace is not None and milvus_filter and self.allow_filterless_fallback:
+            retrieval_trace = RetrievalTraceBuilder(
+                f"{trace.request_id}:temporal-filter",
+                query.query,
+                partition=partition[0] if len(partition) == 1 else None,
+                attempt="temporal_filter",
+                diagnostics=trace.diagnostics,
+            )
+            attempt_traces.append(retrieval_trace)
+        trace_kwargs = {"trace": retrieval_trace} if retrieval_trace is not None else {}
         chunks = await self.retriever.retrieve(
             partition=partition,
             query=query.query,
             filter=milvus_filter,
             filter_params=filter_params,
+            **trace_kwargs,
         )
 
         if not chunks and milvus_filter and self.allow_filterless_fallback:
             # Temporal filter killed every candidate — retry without it so
             # the user gets some results rather than none.
+            fallback_trace = None
+            if trace is not None:
+                fallback_trace = RetrievalTraceBuilder(
+                    f"{trace.request_id}:filterless-fallback",
+                    query.query,
+                    partition=partition[0] if len(partition) == 1 else None,
+                    attempt="filterless_fallback",
+                    diagnostics=trace.diagnostics,
+                )
+                attempt_traces.append(fallback_trace)
+            fallback_trace_kwargs = {"trace": fallback_trace} if fallback_trace is not None else {}
             chunks = await self.retriever.retrieve(
                 partition=partition,
                 query=query.query,
                 filter=None,
                 filter_params=filter_params,
+                **fallback_trace_kwargs,
+            )
+
+        if trace is not None and attempt_traces:
+            _safe_trace(
+                trace,
+                "retrieval_attempts",
+                lambda: merge_child_traces(trace, attempt_traces),
             )
 
         if not chunks:
+            _safe_trace(
+                trace,
+                "final",
+                lambda: trace.record_stage("final", status="complete", candidates=[]),
+            )
             return chunks
 
+        pre_rerank_chunks = list(chunks)
         if self.reranker_enabled:
+            started = time.perf_counter()
             chunks = await _rerank_chunks(self.reranker, query.query, chunks)
+            elapsed = time.perf_counter() - started
+            if trace is not None:
+                surviving_ids = {str(_chunk_key(chunk)) for chunk in chunks}
 
+                def record_pre_rerank() -> None:
+                    pre_candidates = _with_removal_reasons(
+                        trace.project_chunks("pre_rerank", pre_rerank_chunks),
+                        {str(_chunk_key(chunk)) for chunk in pre_rerank_chunks} - surviving_ids,
+                        "reranker_top_n",
+                        "Excluded by the reranker's hard top-n limit.",
+                    )
+                    trace.record_stage(
+                        "pre_rerank",
+                        status="complete",
+                        candidates=pre_candidates,
+                        candidate_count=len(pre_rerank_chunks),
+                    )
+
+                _safe_trace(
+                    trace,
+                    "pre_rerank",
+                    record_pre_rerank,
+                )
+                _safe_trace(
+                    trace,
+                    "post_rerank",
+                    lambda: trace.record_stage(
+                        "post_rerank",
+                        status="complete",
+                        candidates=trace.project_chunks("post_rerank", chunks),
+                        candidate_count=len(chunks),
+                        duration_seconds=elapsed,
+                    ),
+                )
+            _safe_trace(
+                trace,
+                "reranking",
+                lambda: trace.timings.__setitem__("reranking", trace.timings.get("reranking", 0.0) + elapsed),
+            )
+        else:
+            _safe_trace(
+                trace,
+                "pre_rerank",
+                lambda: trace.record_stage(
+                    "pre_rerank",
+                    status="complete",
+                    candidates=trace.project_chunks("pre_rerank", chunks),
+                    candidate_count=len(chunks),
+                ),
+            )
+
+        expansion_applied = False
         if self.expansion_enabled:
             limit = self.reranker_top_k if top_k is None else max(self.reranker_top_k, top_k)
+            expansion_seed_ids = {str(_chunk_key(chunk)) for chunk in chunks[:limit]}
             head = copy.deepcopy(chunks[:limit])
             expanded = await self.retriever.expand_search_results(results=head, filter_params=filter_params)
             if len(expanded) > len(head):
+                expansion_applied = True
+                expanded_chunks = list(expanded)
+                expanded_candidate_ids = {str(_chunk_key(chunk)) for chunk in expanded_chunks}
                 chunks = expanded
                 if self.reranker_enabled:
+                    if trace is not None:
+                        omitted_seed_ids = (
+                            {str(_chunk_key(chunk)) for chunk in pre_rerank_chunks}
+                            - expansion_seed_ids
+                            - expanded_candidate_ids
+                        )
+
+                        def record_expansion_seed_limit() -> None:
+                            previous = trace.stages["post_rerank"]
+                            candidates = [
+                                candidate
+                                if candidate.id not in omitted_seed_ids
+                                else candidate.model_copy(
+                                    update={
+                                        "removal_reason": TraceRemovalReason(
+                                            code="expansion_top_n",
+                                            explanation=(
+                                                "Excluded from expansion because it fell outside the selected seed limit."
+                                            ),
+                                        )
+                                    }
+                                )
+                                for candidate in previous.candidates
+                            ]
+                            trace.record_stage(
+                                "post_rerank",
+                                status=previous.status,
+                                candidates=candidates,
+                                candidate_count=previous.candidate_count,
+                                duration_seconds=previous.duration_seconds,
+                            )
+
+                        _safe_trace(trace, "post_rerank", record_expansion_seed_limit)
+                    started = time.perf_counter()
                     chunks = await _rerank_chunks(self.reranker, query.query, chunks)
+                    elapsed = time.perf_counter() - started
+                    _safe_trace(
+                        trace,
+                        "reranking",
+                        lambda: trace.timings.__setitem__("reranking", trace.timings.get("reranking", 0.0) + elapsed),
+                    )
+                elif trace is not None:
+                    excluded_ids = (
+                        {str(_chunk_key(chunk)) for chunk in pre_rerank_chunks}
+                        - expansion_seed_ids
+                        - expanded_candidate_ids
+                    )
+
+                    def record_expansion_pre_rerank() -> None:
+                        candidates = _with_removal_reasons(
+                            trace.project_chunks("pre_rerank", pre_rerank_chunks),
+                            excluded_ids,
+                            "expansion_top_n",
+                            "Excluded from expansion because it fell outside the selected seed limit.",
+                        )
+                        trace.record_stage(
+                            "pre_rerank",
+                            status="complete",
+                            candidates=candidates,
+                            candidate_count=len(pre_rerank_chunks),
+                        )
+
+                    _safe_trace(
+                        trace,
+                        "pre_rerank",
+                        record_expansion_pre_rerank,
+                    )
+                if trace is not None:
+                    removed_by_expansion_rerank = (
+                        {str(_chunk_key(chunk)) for chunk in expanded_chunks}
+                        - {str(_chunk_key(chunk)) for chunk in chunks}
+                        if self.reranker_enabled
+                        else set()
+                    )
+
+                    def record_post_expansion() -> None:
+                        candidates = _with_removal_reasons(
+                            trace.project_chunks("post_expansion", expanded_chunks),
+                            removed_by_expansion_rerank,
+                            "reranker_top_n",
+                            "Excluded by the reranker's hard top-n limit after expansion.",
+                        )
+                        trace.record_stage(
+                            "post_expansion",
+                            status="complete",
+                            candidates=candidates,
+                            candidate_count=len(expanded_chunks),
+                        )
+
+                    _safe_trace(trace, "post_expansion", record_post_expansion)
 
         # `reranker_top_k` is NOT applied here as a final cutoff — only
         # `top_k` (an explicit caller-supplied value, e.g. map-reduce's
@@ -138,7 +360,48 @@ class RetrieverPipeline:
         # should not assume is bounded by it. Tracked separately:
         # https://github.com/linagora/openrag/issues/851
         if top_k is not None:
+            removed_ids = {str(_chunk_key(chunk)) for chunk in chunks[top_k:]}
+            if expansion_applied:
+                stage_name = "post_expansion"
+            elif self.reranker_enabled:
+                stage_name = "post_rerank"
+            else:
+                stage_name = "pre_rerank"
+            if removed_ids and trace is not None:
+
+                def record_final_cutoff() -> None:
+                    stage = trace.stages.get(stage_name)
+                    if stage is None or stage.status != "complete":
+                        return
+                    trace.record_stage(
+                        stage_name,
+                        status=stage.status,
+                        candidates=_with_removal_reasons(
+                            list(stage.candidates),
+                            removed_ids,
+                            "final_top_n",
+                            "Excluded by the final public result cutoff.",
+                        ),
+                        candidate_count=stage.candidate_count,
+                        duration_seconds=stage.duration_seconds,
+                    )
+
+                _safe_trace(
+                    trace,
+                    stage_name,
+                    record_final_cutoff,
+                )
             chunks = chunks[:top_k]
+        _safe_trace(
+            trace,
+            "final",
+            lambda: trace.record_stage(
+                "final",
+                status="complete",
+                candidates=trace.project_chunks("final", chunks),
+                candidate_count=len(chunks),
+            ),
+        )
         return chunks
 
     async def get_relevant_docs(
@@ -147,19 +410,69 @@ class RetrieverPipeline:
         search_queries: SearchQueries,
         top_k: int | None = None,
         filter_params: dict | None = None,
+        trace: RetrievalTraceBuilder | None = None,
     ) -> list[Chunk]:
         """Run every sub-query in parallel and fuse the per-query rankings via RRF."""
+        child_traces = (
+            [
+                RetrievalTraceBuilder(
+                    f"{trace.request_id}:query:{index}",
+                    query.query,
+                    diagnostics=trace.diagnostics,
+                )
+                for index, query in enumerate(search_queries.query_list)
+            ]
+            if trace is not None and len(search_queries.query_list) > 1
+            else None
+        )
         tasks = [
             self.retrieve_docs(
                 partition=partition,
                 query=q,
                 top_k=top_k,
                 filter_params=filter_params,
+                trace=child_traces[index] if child_traces is not None else trace,
             )
-            for q in search_queries.query_list
+            for index, q in enumerate(search_queries.query_list)
         ]
-        ranked_lists = await asyncio.gather(*tasks)
-        fused = rrf_reranking(ranked_lists, key_fn=_chunk_key, k=self.rrf_k)
+        try:
+            ranked_lists = await asyncio.gather(*tasks, return_exceptions=child_traces is not None)
+            if child_traces is not None:
+                for child, result in zip(child_traces, ranked_lists, strict=True):
+                    if isinstance(result, Exception):
+                        try:
+                            child.record_error("query_retrieval", result)
+                        except Exception:
+                            pass
+        finally:
+            if trace is not None and child_traces is not None:
+                _safe_trace(trace, "query_traces", lambda: merge_child_traces(trace, child_traces))
+        if child_traces is not None:
+            for result in ranked_lists:
+                if isinstance(result, asyncio.CancelledError):
+                    raise result
+            for result in ranked_lists:
+                if isinstance(result, BaseException):
+                    raise result
+        fusion_kwargs: dict[str, Any] = {"k": self.rrf_k}
         if top_k is not None:
-            fused = fused[:top_k]
+            fusion_kwargs["top_k"] = top_k
+        if trace is not None:
+            fusion_kwargs["trace"] = trace
+        fused = rrf_reranking(
+            ranked_lists,
+            key_fn=_chunk_key,
+            trace_stage="multi_query_fused",
+            **fusion_kwargs,
+        )
+        _safe_trace(
+            trace,
+            "final",
+            lambda: trace.record_stage(
+                "final",
+                status="complete",
+                candidates=trace.project_chunks("final", fused),
+                candidate_count=len(fused),
+            ),
+        )
         return fused

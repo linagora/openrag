@@ -187,6 +187,17 @@ class UpdateModelEndpointRequest(BaseModel):
     timeout: float | None = Field(default=None, gt=0)
     extra: dict[str, Any] | None = None
     is_default: bool | None = None
+    # Not stored. An embedder edit that changes its URL, model, `implementation`
+    # or `max_model_len` while partitions hold files built with it is refused
+    # (409 EMBEDDER_EDIT_AFFECTS_INDEXED_DATA) unless this says the caller knows.
+    acknowledge_indexed_data: bool = Field(
+        default=False,
+        description=(
+            "Apply an embedder change that would leave already-indexed files with vectors from the "
+            "previous model or configuration. Without it such an edit returns 409 "
+            "EMBEDDER_EDIT_AFFECTS_INDEXED_DATA."
+        ),
+    )
 
     @field_validator("name")
     @classmethod
@@ -218,9 +229,28 @@ class UpdateModelEndpointRequest(BaseModel):
     @model_validator(mode="after")
     def require_at_least_one_update(self) -> UpdateModelEndpointRequest:
         """Reject empty update payloads."""
-        if not self.model_fields_set:
+        if not self.model_fields_set - {"acknowledge_indexed_data"}:
             raise ValueError("at least one field must be provided")
         return self
+
+
+class IndexedPartitionUsage(BaseModel):
+    """One partition's already-indexed file count for an endpoint."""
+
+    partition: str
+    file_count: int
+
+
+class IndexedFileUsageResponse(BaseModel):
+    """What an in-place edit of an embedder endpoint would strand (#762 C).
+
+    Sized per partition so a confirmation can name real numbers. An empty
+    ``partitions`` means nothing is indexed against this endpoint yet, and the
+    edit carries no retrieval risk at all.
+    """
+
+    partitions: list[IndexedPartitionUsage] = []
+    total_files: int = 0
 
 
 class ModelEndpointResponse(BaseModel):
@@ -235,6 +265,27 @@ class ModelEndpointResponse(BaseModel):
     extra: dict[str, Any]
     has_api_key: bool = False
     is_default: bool
+    # Dense vector field this embedder owns; null for other model types. Set
+    # when the endpoint is created and kept through renames. The admin UI
+    # compares it with the field each file was indexed into.
+    vector_field: str | None = None
+    # Partitions whose resolved reference is this endpoint — those naming it
+    # plus, for the default endpoint, those riding the `default` alias. Zero
+    # for types with no partition column (reranker/vlm/stt), which are
+    # referenced through presets instead. Every route returning this model
+    # fills it, through ModelEndpointService.with_partition_usage.
+    used_by_partitions: int = 0
+    # LLM endpoints only (None otherwise): what a blank max context size /
+    # max output tokens resolves to, so the admin UI can show the value in
+    # effect instead of a generic "System default". The window is the
+    # ``max_model_len`` the endpoint reported on ``/v1/models`` (vLLM does,
+    # most gateways don't), else ``default_max_llm_context_size``.
+    detected_max_llm_context_size: int | None = None
+    # An endpoint write cleared the detected values and the re-probe hasn't
+    # landed yet: ``detected_max_llm_context_size`` is unknown, not absent.
+    context_size_detection_pending: bool = False
+    default_max_llm_context_size: int | None = None
+    default_max_output_tokens: int | None = None
     created_at: datetime
     updated_at: datetime
 

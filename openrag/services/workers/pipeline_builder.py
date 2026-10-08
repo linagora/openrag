@@ -13,9 +13,12 @@ from core.indexing.contextualize import ChunkContextualizer
 from core.indexing.parsers.document_parser import DocumentParser
 from core.indexing.topic_tags import TopicTagger
 from core.models.document import Document, DocumentType
+from core.observability.ray_metrics import observe_stage_duration
+from core.utils.exceptions import PipelineError
 from core.utils.logging import get_logger
 from core.vector_stores.vector_store import VectorStore
 from core.vlm.vlm import VLM
+from services.workers.embedder_provenance import embedder_provenance
 from services.workers.stages._common import run_with_optional_timeout
 from services.workers.stages.caption import caption_stage
 from services.workers.stages.chunk import chunk_stage
@@ -94,15 +97,23 @@ class IndexingPipeline:
     indexation_config: IndexationPipelineConfig | None = None
     parser_factory: Callable[[str], DocumentParser] | None = None
     chunker_factory: Callable[..., ChunkingStrategy] | None = None
+    # The chunking settings ``chunker`` was built from, so it can be rebuilt for
+    # an embedder that serves a smaller window than the one configured.
+    default_chunking: Any = None
     embedder_factory: Callable[[str], Embedder] | None = None
     # Resolves an embedder endpoint name to its context window, so the chunker
     # can derive a hard safety bound from the embedder this partition actually
     # uses rather than from the deployment default.
     embedder_window_resolver: Callable[[str], int | None] | None = None
+    # Resolves an embedder endpoint name to the dense field it writes to.
+    vector_field_resolver: Callable[[str], str | None] | None = None
     vlm_factory: Callable[[str], VLM] | None = None
     contextualizer_factory: Callable[[str], ChunkContextualizer] | None = None
     topic_tagger_factory: Callable[[str], TopicTagger] | None = None
     defer_replace_cleanup: bool = False
+    # How many of a document's images may contend for the shared VLM gate at
+    # once. ``None`` leaves the fan-out unbounded (one caller per image).
+    caption_concurrency: int | None = None
 
     async def run(self, row: MutableMapping[str, Any]) -> MutableMapping[str, Any]:
         """Run a single row through parse, optional enrichments, embed, and store.
@@ -126,9 +137,14 @@ class IndexingPipeline:
         config = self._effective_indexation_config(row)
         parser = self._select_parser(config)
         embedder_name = str(row.get("embedder_name") or "default")
-        embedder_window = self.embedder_window_resolver(embedder_name) if self.embedder_window_resolver else None
-        chunker = self._select_chunker(config, embedder_name, embedder_window)
         embedder = self._select_embedder(row)
+        configured_window = self.embedder_window_resolver(embedder_name) if self.embedder_window_resolver else None
+        embedder_window = await self._embedded_window(embedder, configured_window)
+        chunker = self._select_chunker(
+            config, embedder_name, embedder_window, window_lowered=embedder_window != configured_window
+        )
+        # Resolved up front, so a file with nowhere to store its vectors fails before it is parsed and embedded.
+        vector_field = self.vector_field_resolver(embedder_name) if self.vector_field_resolver else None
         contextualizer, contextualization_llm = self._select_contextualizer(config)
         topic_tagger, topic_tagging_llm = self._select_topic_tagger(config)
 
@@ -139,10 +155,50 @@ class IndexingPipeline:
             try:
                 await coro
             finally:
-                timings[name] = (time.perf_counter() - start) * 1000.0
+                elapsed = time.perf_counter() - start
+                timings[name] = elapsed * 1000.0
+                # Exported in seconds (the Prometheus base unit) while ``timings``
+                # stays in milliseconds for the existing per-file log line.
+                # Recorded in ``finally`` so a failed or timed-out stage is still
+                # measured — a stage that hangs to its timeout is precisely what
+                # the duration histogram exists to show. ``observe_stage_duration``
+                # swallows its own errors; a raise here would replace the
+                # pipeline's real exception with a metrics one.
+                observe_stage_duration(name, elapsed)
+
+        async def _timed_enrichment(name: str, coro: Any) -> None:
+            """Run an enrichment stage best-effort (#702).
+
+            Captioning, contextualization and topic tagging improve a file's
+            index; they are not what makes it indexable. A failure here — a VLM
+            timeout, an unreachable LLM, a malformed response — used to abort
+            ``run()`` before chunk/embed/store, losing the whole file over an
+            enrichment step even though the base content was ready to store.
+            Skip the stage instead: warn, note it on the row, and index what we
+            have. This extends to *invocation* the reasoning ``_select_vlm`` /
+            ``_select_contextualizer`` / ``_select_topic_tagger`` already apply
+            to endpoint *resolution*.
+
+            Cancellation still propagates: ``CancelledError`` is a
+            ``BaseException``, so a cancelled task is never mistaken for a
+            degraded one. Each stage leaves the row's input intact on failure
+            (only successful stages overwrite ``processed_document``/``chunks``),
+            so the next stage runs on the un-enriched value.
+            """
+            try:
+                await _timed(name, coro)
+            except Exception as exc:  # noqa: BLE001 - enrichment must not fail the file
+                row.setdefault("degraded_stages", {})[name] = str(exc)
+                logger.bind(
+                    task_id=row.get("task_id"),
+                    filename=row.get("filename", ""),
+                    partition=row.get("partition"),
+                    stage=name,
+                ).warning(f"{name} stage failed; indexing the file without it: {exc}")
 
         try:
             await _timed("parse", parse_stage(row, parser, timeout=self.timeouts.parse))
+            _release_raw_bytes(row)
             # The caption decision needs the parsed document (standalone images
             # always caption), so the VLM is resolved after parse.
             vlm, vlm_name = self._select_vlm(config) if self._should_caption(row, config) else (None, None)
@@ -168,18 +224,22 @@ class IndexingPipeline:
                 # per-row value win, so that migration is a one-line change.
                 if self.caption_prompt is not None:
                     row.setdefault("caption_prompt", self.caption_prompt)
-                await _timed(
+                await _timed_enrichment(
                     "caption",
                     caption_stage(
                         row,
                         vlm,
                         timeout=self.timeouts.caption,
                         per_image_timeout=self.timeouts.caption_per_image,
+                        max_concurrency=self.caption_concurrency,
                     ),
                 )
+            # Outside the ``vlm is not None`` branch on purpose: if captioning
+            # was skipped, the bytes were never going to be read at all.
+            _release_image_bytes(row)
             await _timed("chunk", chunk_stage(row, chunker, timeout=self.timeouts.chunk))
             if contextualizer is not None:
-                await _timed(
+                await _timed_enrichment(
                     "contextualize",
                     contextualize_stage(
                         row,
@@ -194,7 +254,7 @@ class IndexingPipeline:
             self._warn_on_embedder_overflow(row, embedder_window, getattr(chunker, "length_function", None))
             if topic_tagger is not None:
                 max_tags = config.max_topic_tags if config is not None else 7
-                await _timed(
+                await _timed_enrichment(
                     "topic_tag",
                     topic_tag_stage(
                         row,
@@ -212,6 +272,31 @@ class IndexingPipeline:
                     per_chunk_timeout=self.timeouts.embed_per_chunk,
                 ),
             )
+            # The server can report a smaller window only now, having refused the
+            # configured truncation during the embed: it was unreachable when
+            # this file was chunked, or was redeployed with a smaller window
+            # after this client read it. Chunks sized for the larger window would
+            # be stored with only their head embedded, apparently indexed but
+            # partly unsearchable. Fail before the store instead, so a retry
+            # chunks the file for the window the server now serves.
+            served_after_embed = await self._embedded_window(embedder, configured_window)
+            if served_after_embed != embedder_window:
+                cut = self._chunks_over_window(
+                    row, served_after_embed, getattr(chunker, "length_function", None), unmeasured_is_over=True
+                )
+                if cut:
+                    raise PipelineError(
+                        f"Nothing stored: the embedder now serves {served_after_embed} tokens, less than the "
+                        f"{embedder_window} this file was chunked for, so {len(cut)} chunk(s) would be embedded "
+                        f"from their first {served_after_embed - 1} tokens only. Retry the file: it will be "
+                        f"chunked for {served_after_embed}.",
+                        code="EMBEDDER_WINDOW_SHRANK",
+                        status_code=503,
+                    )
+            # After the embed: the dimension is measured, not configured.
+            row["embedder_provenance"] = embedder_provenance(embedder, row.get("embedder_name"), vector_field)
+            # What the catalog write checks the partition's embedder against (#958).
+            row["embedder_fingerprint"] = getattr(embedder, "vector_fingerprint", None)
             # Re-index (``replace=True``) is insert-before-delete: snapshot the
             # file's existing chunk ids *before* the store stage inserts the new
             # set, then delete exactly that old set after a successful insert.
@@ -243,6 +328,7 @@ class IndexingPipeline:
                     self.vector_store,
                     timeout=self.timeouts.store,
                     per_chunk_timeout=self.timeouts.store_per_chunk,
+                    vector_field=vector_field,
                 ),
             )
             # BUG (#657 follow-up): ``store_stage`` completes successfully even
@@ -354,7 +440,8 @@ class IndexingPipeline:
         ``model_copy`` without refreshing the count, and the envelope only adds.
         So the stored count settles almost every chunk on its own — over the
         limit is already conclusive, and far enough under it cannot be pushed
-        over by an envelope. Only the band in between is re-tokenised.
+        over by an envelope. Only the band in between is re-tokenised. Every
+        registered chunker stores the count; a chunk without one is measured.
 
         That matters because this runs synchronously on the actor's event loop,
         unconditionally, for every file — including partitions on
@@ -364,24 +451,11 @@ class IndexingPipeline:
         file's continuation. The adjacent chunk stage goes out of its way to
         avoid exactly this, running the chunker under ``asyncio.to_thread``.
         """
-        if not window or window <= 0:
+        offenders = IndexingPipeline._chunks_over_window(row, window, length_function)
+        if not offenders:
             return
         limit = window - 1  # truncate_prompt_tokens
         chunks = row.get("chunks") or []
-
-        def tokens(chunk: Any) -> int:
-            stored = getattr(chunk, "token_count", 0) or 0
-            if length_function is None or not getattr(chunk, "text", None):
-                return stored
-            # Conclusive on the stored count alone: already over, or too far
-            # under for any envelope to close the gap.
-            if stored > limit or stored <= limit - _ENVELOPE_HEADROOM_TOKENS:
-                return stored
-            return length_function(chunk.text)
-
-        offenders = [(chunk, count) for chunk in chunks if (count := tokens(chunk)) > limit]
-        if not offenders:
-            return
         worst, worst_tokens = max(offenders, key=lambda pair: pair[1])
         logger.bind(
             task_id=row.get("task_id"),
@@ -400,11 +474,73 @@ class IndexingPipeline:
             f"their tail will not be retrievable"
         )
 
+    @staticmethod
+    def _chunks_over_window(
+        row: MutableMapping[str, Any],
+        window: int | None,
+        length_function: Callable[[str], int] | None = None,
+        *,
+        unmeasured_is_over: bool = False,
+    ) -> list[tuple[Any, int | None]]:
+        """The row's chunks longer than what *window* embeds, with their token
+        counts. How they are measured is explained in _warn_on_embedder_overflow.
+
+        A chunk with no stored count is measured. Without a counter it cannot
+        be, and it is left out, or listed with a None count when
+        *unmeasured_is_over*: a check that must not store a cut chunk has to
+        assume the worst."""
+        if not window or window <= 0:
+            return []
+        limit = window - 1  # truncate_prompt_tokens
+        chunks = row.get("chunks") or []
+
+        def tokens(chunk: Any) -> int | None:
+            stored = getattr(chunk, "token_count", None)
+            text = getattr(chunk, "text", None)
+            if not text:
+                return stored or 0
+            if length_function is None:
+                return stored
+            # Conclusive on the stored count alone: already over, or too far
+            # under for any envelope to close the gap.
+            if stored is not None and (stored > limit or stored <= limit - _ENVELOPE_HEADROOM_TOKENS):
+                return stored
+            return length_function(text)
+
+        offenders: list[tuple[Any, int | None]] = []
+        for chunk in chunks:
+            count = tokens(chunk)
+            if count is None:
+                if unmeasured_is_over:
+                    offenders.append((chunk, None))
+            elif count > limit:
+                offenders.append((chunk, count))
+        return offenders
+
+    @staticmethod
+    async def _embedded_window(embedder: Any, configured: int | None) -> int | None:
+        """The window *embedder* really embeds: the configured one, or the
+        endpoint's own when that is smaller (``Embedder.served_window``).
+
+        Chunk sizing and the overflow warning both follow it. Chunks sized for a
+        window the server no longer accepts are embedded from their head only,
+        and their tail is never retrievable.
+        """
+        if not configured:
+            return configured
+        served_window = getattr(embedder, "served_window", None)
+        served = await served_window() if served_window is not None else None
+        if isinstance(served, int) and 0 < served < configured:
+            return served
+        return configured
+
     def _select_chunker(
         self,
         config: IndexationPipelineConfig | None,
         embedder_name: str = "default",
         window: int | None = None,
+        *,
+        window_lowered: bool = False,
     ) -> ChunkingStrategy:
         if config is not None and self.chunker_factory is not None:
             # Decided from the signature, never by calling and catching
@@ -417,6 +553,15 @@ class IndexingPipeline:
             # A factory predating the window argument still works; it just falls
             # back to the chunker's own default bound.
             return self.chunker_factory(config.chunking)
+        # self.chunker was built at startup for the configured window; the
+        # embedder serving less needs the same chunking bounded by what it serves.
+        if (
+            window_lowered
+            and self.default_chunking is not None
+            and self.chunker_factory is not None
+            and _accepts_embedder_window(self.chunker_factory)
+        ):
+            return self.chunker_factory(self.default_chunking, window)
         return self.chunker
 
     def _select_embedder(self, row: MutableMapping[str, Any]) -> Embedder:
@@ -515,12 +660,15 @@ def build_indexing_pipeline(
     indexation_config: IndexationPipelineConfig | None = None,
     parser_factory: Callable[[str], DocumentParser] | None = None,
     chunker_factory: Callable[..., ChunkingStrategy] | None = None,
+    default_chunking: Any = None,
     embedder_window_resolver: Callable[[str], int | None] | None = None,
+    vector_field_resolver: Callable[[str], str | None] | None = None,
     embedder_factory: Callable[[str], Embedder] | None = None,
     vlm_factory: Callable[[str], VLM] | None = None,
     contextualizer_factory: Callable[[str], ChunkContextualizer] | None = None,
     topic_tagger_factory: Callable[[str], TopicTagger] | None = None,
     defer_replace_cleanup: bool = False,
+    caption_concurrency: int | None = None,
 ) -> IndexingPipeline:
     """Build the default sequential indexing pipeline."""
 
@@ -537,13 +685,82 @@ def build_indexing_pipeline(
         indexation_config=indexation_config,
         parser_factory=parser_factory,
         chunker_factory=chunker_factory,
+        default_chunking=default_chunking,
         embedder_window_resolver=embedder_window_resolver,
+        vector_field_resolver=vector_field_resolver,
         embedder_factory=embedder_factory,
         vlm_factory=vlm_factory,
         contextualizer_factory=contextualizer_factory,
         topic_tagger_factory=topic_tagger_factory,
         defer_replace_cleanup=defer_replace_cleanup,
+        caption_concurrency=caption_concurrency,
     )
+
+
+def _release_image_bytes(row: MutableMapping[str, Any]) -> None:
+    """Drop extracted image payloads once the caption decision has resolved.
+
+    ``ImageBlock.image_bytes`` is raw PNG/JPEG lifted out of the document. The
+    only consumer is ``caption_stage``: ``caption_one``
+    (``services/workers/stages/caption.py``) hands the payload straight to
+    ``VLM.caption_image``, which base64-encodes it for the request. Nothing
+    downstream reads it. Chunking works from ``text_blocks``, and the caption has
+    already been substituted into those via ``metadata["markdown_ref"]``; no
+    post-caption stage touches ``.images`` at all.
+
+    ``ImageBlock.image_url`` would also encode these bytes, but it has no callers
+    anywhere in the tree — do not grep for it when re-checking this release, or
+    the real reader above is the one you will miss.
+
+    Held to the end of ``run()`` they outlast the file itself: a figure-heavy
+    PDF through Marker extracts images that routinely exceed the source, and
+    they survived embed and store — measured at 10.5 MB on a ten-image document
+    where ``raw_bytes`` had already been freed. Same failure as
+    ``_release_raw_bytes`` fixes, on the larger payload.
+
+    Deliberately outside the ``vlm is not None`` branch. Captioning is optional
+    and best-effort, so when it is disabled or the VLM is unresolvable the bytes
+    are never read by anyone — holding them then is pure waste. Reached whether
+    captioning ran, was skipped, or failed: ``_timed_enrichment`` swallows an
+    enrichment failure, and a failed caption makes the bytes no more useful than
+    a successful one.
+
+    Only ``image_bytes`` is cleared. ``caption``, ``page_number``, ``mime_type``,
+    ``source_url`` and ``metadata`` stay — the substitution and the chunkers read
+    them.
+    """
+    processed = row.get("processed_document")
+    for image in getattr(processed, "images", ()) or ():
+        image.image_bytes = b""
+
+
+def _release_raw_bytes(row: MutableMapping[str, Any]) -> None:
+    """Drop the file payload once parsing has consumed it.
+
+    ``Document.raw_bytes`` is the whole file, read into memory by
+    ``indexer_actor._load_document`` before the pipeline starts. Nothing after
+    ``parse_stage`` needs it: the remaining reads of ``row["document"]`` are
+    ``content_type`` (the caption decision) and ``id``/``partition`` (the
+    re-index delete target) — all of which survive this.
+
+    Holding it to the end of ``run()`` kept the payload resident through
+    contextualization, embedding and the vector-store write — the slow,
+    network-bound stages where a batch spends nearly all its wall-clock. With
+    ``ray.indexer.max_tasks_per_worker`` defaulting to 50, that is up to 50 whole
+    files resident in one worker process at once, which is the OOM that #909's
+    ``max_restarts`` recovers *from*. Freeing here bounds residency to the parse.
+
+    Only reached on a successful parse: ``parse_stage`` re-raises, so a failure
+    leaves the payload intact for the caller. Rows are never re-run
+    (``ingest_batch`` runs each exactly once, and a task retry builds a fresh row
+    by re-reading the file), so no parser sees a document this has emptied.
+
+    This is the residency half of #846. It does not stop the file being read into
+    memory in the first place — that needs a path-carrying ``Document``.
+    """
+    document = row.get("document")
+    if isinstance(document, Document):
+        document.raw_bytes = None
 
 
 def _replace_target(row: MutableMapping[str, Any]) -> tuple[str | None, str | None]:

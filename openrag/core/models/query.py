@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
@@ -66,7 +66,12 @@ class Query(BaseModel):
 
         Pydantic validates the field/operator types up front. The ``value``
         field is parsed as ISO 8601 here defensively — predicates with an
-        unparseable value are dropped rather than crashing the search.
+        unparseable value are dropped rather than crashing the search. A
+        value without a timezone (a bare date, or a naive datetime) is read
+        as UTC: the prompt states every timestamp is UTC and hands the model
+        bare-date calendar anchors to copy, so such a value is the contract
+        being followed, not an error — and dropping it would silently turn a
+        dated question into an unfiltered search.
         """
         if not self.temporal_filters:
             return None
@@ -83,14 +88,8 @@ class Query(BaseModel):
                 )
                 continue
             if parsed.tzinfo is None:
-                logger.warning(
-                    "Dropping temporal predicate without timezone: field=%s operator=%s value=%r",
-                    p.field,
-                    p.operator,
-                    p.value,
-                )
-                continue
-            parts.append(f'{p.field} {p.operator} ISO "{p.value}"')
+                parsed = parsed.replace(tzinfo=UTC)
+            parts.append(f'{p.field} {p.operator} ISO "{parsed.isoformat()}"')
         if not parts:
             return None
         return " and ".join(parts)
@@ -103,6 +102,10 @@ class SearchQueries(BaseModel):
     """Collection of sub-queries produced by query decomposition."""
 
     query_list: list[Query] = Field(..., description="Search sub-queries to retrieve relevant documents.")
+    intent: Literal["greeting", "gratitude", "farewell", "capability", "other"] = Field(
+        default="other",
+        description="Conservative classification of the complete latest user message.",
+    )
     requires_retrieval: bool = Field(
         default=True,
         description="Whether the user's request needs document retrieval.",

@@ -64,7 +64,7 @@ vllm:
     modelSpec:
       - name: "embedder"
         repository: "vllm/vllm-openai"
-        tag: "latest"
+        tag: "v0.30.0-cu129"
         modelURL: "Qwen/Qwen3-Embedding-0.6B"
         replicaCount: 1
         requestCPU: 4
@@ -76,8 +76,29 @@ vllm:
           secretName: *hfTokenSecret
           secretKey: HF_TOKEN
         vllmConfig:
-          gpuMemoryUtilization: 0.3
-          extraArgs: ["--trust-remote-code", "--task", "embed"]
+          # Measured on an L4 (24 GB) with vLLM v0.17.1 under an indexing-shaped
+          # load (batch 32, 16 in flight, inputs up to 2046 tokens):
+          #   0.3, default max-model-len (32768) -> 7.0 GiB reserved
+          #   0.1, maxModelLen 2048              -> 2.6 GiB peak, same throughput
+          # On v0.30.0, 0.1 / 2048 takes 2.1 GiB and leaves a 0.39 GiB KV cache
+          # (1.8x the longest request, was 3.4x): vLLM now counts CUDA graph
+          # memory inside the fraction.
+          # Weights are 1.1 GiB; the rest is KV cache, sized by maxModelLen.
+          # vLLM pre-allocates this fraction whatever the model's size, and the
+          # card is shared with Marker and the reranker, so keep it tight.
+          # Keep maxModelLen >= every OpenRag embedder max_model_len: the
+          # MAX_MODEL_LEN env (default 2047) *and* any per-endpoint
+          # extra.max_model_len set in the admin UI. vLLM rejects a request whose
+          # truncate_prompt_tokens (max_model_len - 1) exceeds it; OpenRag then
+          # embeds and sizes new chunks for this value instead.
+          # Re-measure when the embedder model or the GPU changes.
+          gpuMemoryUtilization: 0.1
+          maxModelLen: 2048
+          runner: "pooling"
+          # `--convert embed` adapts a *ForCausalLM checkpoint such as
+          # Qwen3-Embedding to embeddings, and changes nothing for a model that
+          # is already one. This is the command started on v0.30.0 (L4, #1087).
+          extraArgs: ["--trust-remote-code", "--convert", "embed"]
         nodeSelectorTerms:
           - matchExpressions:
               - key: gpu-role
@@ -86,7 +107,11 @@ vllm:
 
       - name: "whisper"
         repository: "ghcr.io/linagora/vllm-whisper"
-        tag: "latest"
+        # No workflow builds this image yet (#1031), so it has no version tag;
+        # the digest pins the build `latest` pointed to on 25 Sep 2026 (built
+        # 2 Dec 2025). The shared imagePullPolicy (IfNotPresent) would otherwise
+        # keep whatever build a node happened to cache.
+        tag: "latest@sha256:d0c25f4aea64814171df29f51923be4e1e7fab529d141cb440f33a838e72e364"
         modelURL: "openai/whisper-large-v3-turbo"
         replicaCount: 1
         requestCPU: 4
@@ -108,7 +133,7 @@ vllm:
 
       - name: "llm"
         repository: "vllm/vllm-openai"
-        tag: "latest"
+        tag: "v0.30.0-cu129"
         modelURL: "RedHatAI/Mistral-Small-3.1-24B-Instruct-2503-quantized.w8a8"
         replicaCount: 0
         requestCPU: 8

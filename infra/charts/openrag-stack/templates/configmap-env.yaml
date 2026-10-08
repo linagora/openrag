@@ -6,6 +6,15 @@ data:
 {{- range $key, $value := .Values.env.config }}
   {{ $key }}: "{{ tpl (printf "%v" $value) $ }}"
 {{- end }}
+{{- if and .Values.ray.enabled (not (hasKey .Values.env.config "RAY_LOG_TO_STDERR")) }}
+  # Workers run in the Ray pods. Ray's driver-side relay only carries lines
+  # from actors created by the current driver job, so the detached worker
+  # actors go silent for the API after its first restart; with this flag the
+  # workers write to their own pod's stderr and the DaemonSet ships them with
+  # the Ray pods' labels (the "(Actor pid=N)" prefix is not added on this path).
+  # Set env.config.RAY_LOG_TO_STDERR yourself to override.
+  RAY_LOG_TO_STDERR: "1"
+{{- end }}
 {{- if .Values.proxy.enabled }}
 {{- if or (empty .Values.proxy.url) (eq .Values.proxy.url "http://192.168.100.100:80") }}
 {{- fail "proxy.enabled is true but proxy.url is not set or still uses the placeholder default. Set a valid proxy URL in proxy.url." }}

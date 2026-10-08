@@ -6,6 +6,7 @@ from api.schemas.admin.workspaces import AddFilesRequest, CreateWorkspaceRequest
 from api.schemas.auth.login import CurrentUserResponse, LoginResponse
 from api.schemas.user.chat import OpenAIChatCompletionRequest, OpenAICompletionRequest, OpenAIMessage
 from api.schemas.user.search import SearchRequest
+from core.utils import consts
 from pydantic import ValidationError
 
 
@@ -85,16 +86,39 @@ def test_chat_request_drops_top_logprobs_when_logprobs_not_enabled():
         assert "top_logprobs" not in dump
 
 
-def test_chat_request_omits_logprobs_when_unset():
-    """An unset logprobs must not be emitted — the server never requests it on the
-    client's behalf (sending it unsolicited can break streaming on some backends).
+def test_chat_request_defaults_logprobs_off():
+    """logprobs is off by default, and the "off" state is an explicit ``False`` so
+    it is visible in the OpenAPI schema rather than merely absent.
+
+    That explicit ``False`` survives ``model_dump(exclude_none=True)``, so it is
+    the *client* layer that has to keep it off the wire — see
+    ``_strip_falsy_logprobs`` and its tests in
+    tests/unit/services/inference/{test_vllm_client,test_ollama_client}.py, which
+    assert the payload actually sent. This test owns only the schema contract.
     """
     request = OpenAIChatCompletionRequest(messages=[OpenAIMessage(role="user", content="hi")])
     dump = request.model_dump(exclude_none=True)
 
-    assert request.logprobs is None
-    assert "logprobs" not in dump
+    assert request.logprobs is False
+    assert request.top_logprobs is None
     assert "top_logprobs" not in dump
+    assert OpenAIChatCompletionRequest.model_json_schema()["properties"]["logprobs"]["default"] is False
+
+
+@pytest.mark.parametrize("model", [OpenAIChatCompletionRequest, OpenAICompletionRequest])
+def test_openapi_example_is_a_valid_request(model):
+    """The Swagger "Try it out" bodies are hand-written dicts in ``json_schema_extra``
+    — nothing type-checks them, so a field rename silently leaves the docs handing
+    out a body the API rejects. Parse each pinned example back through its own model.
+
+    ``extra="allow"`` means a *misspelled* key still validates, so the model name is
+    asserted separately: it is the one part of the example the router will reject
+    outright (404) if the partition prefix ever moves again.
+    """
+    example = model.model_json_schema()["examples"][0]
+
+    model.model_validate(example)
+    assert example["model"].startswith(consts.PARTITION_PREFIX)
 
 
 def test_chat_request_passes_through_extra_openai_params():

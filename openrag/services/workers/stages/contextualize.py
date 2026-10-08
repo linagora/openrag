@@ -28,10 +28,24 @@ async def contextualize_stage(
         # contextualizer falls back to its own (disk-loaded) default.
         system_prompt = row.get("contextualizer_prompt")
         effective_timeout = stage_timeout(timeout, len(chunks), per_item_timeout=per_chunk_timeout)
+        failures: list[Exception] = []
+
+        def record_failure(exc: Exception) -> None:
+            if not failures:
+                failures.append(exc)
+
         row["chunks"] = await run_with_optional_timeout(
-            lambda: contextualizer.contextualize(chunks, filename=filename, lang=language, system_prompt=system_prompt),
+            lambda: contextualizer.contextualize(
+                chunks,
+                filename=filename,
+                lang=language,
+                system_prompt=system_prompt,
+                on_failure=record_failure,
+            ),
             effective_timeout,
         )
+        if failures:
+            row.setdefault("degraded_stages", {})["contextualize"] = str(failures[0])
         row["stage"] = "contextualized"
         row.pop("error", None)
         return row

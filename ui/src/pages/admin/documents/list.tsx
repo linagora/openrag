@@ -2,12 +2,17 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import type { ColumnDef, OnChangeFn, RowSelectionState } from "@tanstack/react-table";
-import { Download, Plus, Eye, Trash2, RefreshCw, Search } from "lucide-react";
+import { Download, Plus, Eye, Trash2, RefreshCw, Search, Cpu } from "lucide-react";
 import { toast } from "sonner";
 
 import { PageHeader } from "@/components/shared/page-header";
 import { DataTable, SortableHeader } from "@/components/shared/data-table";
 import { ConfirmDialog } from "@/components/shared/confirm-dialog";
+import {
+  DEGRADED_STAGE_OPTIONS,
+  DegradedStageBadges,
+  type DegradedStage,
+} from "@/components/shared/degraded-stages";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -20,6 +25,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import {
   Select,
   SelectContent,
@@ -32,19 +38,24 @@ import { listPartitionFiles, type PartitionFile } from "@/lib/api/documents";
 import { uploadFile, deleteFile, newFileId } from "@/lib/api/indexing";
 import { invalidateJobsQueries } from "@/lib/jobs-queries";
 import { listPartitions } from "@/lib/api/partitions";
+import { listModelEndpoints, resolveEmbedderName, resolveEmbedderModel } from "@/lib/api/models";
 import { usePermissions } from "@/lib/permissions";
 import { downloadCsv } from "@/lib/csv";
+import { EmbedderDriftDialog } from "./embedder-drift-dialog";
 import { resolveDocumentsPartition } from "./partition-selection";
+import { EmbedderSwapNotice } from "../partitions/embedder-swap";
+import { useEmbedderSwap } from "../partitions/use-embedder-swap";
 
 const fileHref = (partition: string, fileId: string) =>
   `/documents/${encodeURIComponent(partition)}/${encodeURIComponent(fileId)}`;
 const fileLabel = (f: PartitionFile) => (f.filename as string) || f.file_id;
 const str = (v: unknown) => (v == null ? "" : String(v));
+const ALL_DEGRADED_STAGES = "all";
 
 export default function DocumentListPage() {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
-  const { canWrite, superAdminModeResolved } = usePermissions();
+  const { canWrite, isAdmin, superAdminModeResolved } = usePermissions();
 
   // OpenRag has no flat/cross-partition file list — files live inside a
   // partition, so the view is partition-scoped (pick one, see its files). The
@@ -59,6 +70,9 @@ export default function DocumentListPage() {
   const [uploading, setUploading] = useState(false);
   const [fileSearch, setFileSearch] = useState("");
   const [indexedSince, setIndexedSince] = useState("");
+  const [degradedStage, setDegradedStage] = useState<DegradedStage | typeof ALL_DEGRADED_STAGES>(
+    ALL_DEGRADED_STAGES,
+  );
   const [fileSelection, setFileSelection] = useState<{
     partition: string;
     rows: RowSelectionState;
@@ -67,6 +81,17 @@ export default function DocumentListPage() {
   const fileRef = useRef<HTMLInputElement>(null);
 
   const partitionsQuery = useQuery({ queryKey: ["partitions"], queryFn: listPartitions });
+  // Needed to know the model the partition's embedder runs today: the partition
+  // stores an endpoint name, possibly the `default` alias, and only the registry
+  // turns that into a model. Admin-only, and this page renders for partition
+  // members too: a non-admin would collect 403s. Without it the column falls
+  // back to the model each file recorded, and drift stays unknown.
+  const { data: embedderEndpoints } = useQuery({
+    queryKey: ["model-endpoints", "embedder"],
+    queryFn: () => listModelEndpoints("embedder"),
+    staleTime: 60_000,
+    enabled: isAdmin,
+  });
   const partitions = partitionsQuery.data?.partitions ?? [];
   // Prefer the sticky choice (URL ?partition= or the remembered one), but fall
   // back to the first available partition once loaded if it no longer exists —
@@ -82,6 +107,15 @@ export default function DocumentListPage() {
   const selectedPartitionExists = partitions.some((p) => p.partition === selected);
   const role = partitions.find((p) => p.partition === selected)?.role;
   const writable = canWrite(role);
+  // The server refuses uploads while the partition is re-embedded with another
+  // embedder; say so before anyone picks files.
+  const { swap: embedderSwap, running: swapRunning } = useEmbedderSwap(
+    writable && selectedPartitionExists ? selected : undefined,
+  );
+  const uploadPausedReason = swapRunning
+    ? `Uploads are paused while ${selected} is re-embedded with ${embedderSwap?.target_embedder} ` +
+      `(${embedderSwap?.files_done} of ${embedderSwap?.files_total} files).`
+    : null;
 
   // Keep the remembered partition in sync, and heal a stale ?partition= URL so a
   // refresh / shared link doesn't re-trigger the not-found error.
@@ -136,8 +170,11 @@ export default function DocumentListPage() {
   };
 
   const filesQuery = useQuery({
-    queryKey: ["partition-files", selected],
-    queryFn: () => listPartitionFiles(selected),
+    queryKey: ["partition-files", selected, degradedStage],
+    queryFn: () =>
+      listPartitionFiles(selected, {
+        ...(degradedStage === ALL_DEGRADED_STAGES ? {} : { degradedStage }),
+      }),
     // Only fetch once we've confirmed `selected` is a real, still-existing
     // partition — avoids a 404 flash for a stale/deleted selection during load.
     enabled: !!selected && selectedPartitionExists,
@@ -191,8 +228,10 @@ export default function DocumentListPage() {
           { header: "file_id", value: (file) => file.file_id },
           { header: "filename", value: (file) => fileLabel(file) },
           { header: "mimetype", value: (file) => file.mimetype },
+          { header: "embedder", value: (file) => fileModel(file) ?? "" },
           { header: "indexed_at", value: (file) => file.indexed_at },
           { header: "created_at", value: (file) => file.created_at },
+          { header: "degraded_stages", value: (file) => file.degraded_stages?.join(",") },
         ],
         filteredFileRows,
       );
@@ -280,6 +319,62 @@ export default function DocumentListPage() {
     onSettled: () => setUploading(false),
   });
 
+  // The embedder queries will use, resolved through the `default` alias.
+  const configuredEmbedder = partitions.find((p) => p.partition === selected)?.embedder || "default";
+  const currentEmbedder = resolveEmbedderName(configuredEmbedder, embedderEndpoints);
+  const currentModel = resolveEmbedderModel(configuredEmbedder, embedderEndpoints);
+  // Named by the model, since that is what the column shows and what drift is
+  // judged on; the endpoint label is only a fallback for an unresolvable ref.
+  const currentLabel = currentModel ?? currentEmbedder;
+
+  // The model that produced a file's vectors — what the column names, because
+  // it is the model and not the endpoint that fixes the vector space. Prefer
+  // the model recorded at index time: the endpoint is a renameable label and
+  // may since have been repointed or deleted, so resolving the reference is a
+  // guess about today and the snapshot is a fact about then.
+  // null = indexed before provenance existed.
+  const fileModel = (file: PartitionFile): string | null => {
+    const recorded = file.embedder;
+    if (typeof recorded !== "string" || !recorded) return null;
+    return (
+      file.embedder_model_name ?? resolveEmbedderModel(recorded, embedderEndpoints) ?? resolveEmbedderName(recorded, embedderEndpoints)
+    );
+  };
+
+  // Drifted only if the file *recorded* an embedder and it ran a different
+  // model. No record is unknown, not known-bad: flagging it would put a marker
+  // on every legacy row and say nothing. Judged on the model rather than the
+  // endpoint label, or every file indexed before an endpoint rename reads as
+  // drifted when the same model produced it — and a model unknown on either
+  // side is unknown drift too. The labels left to compare disagree for healthy
+  // files: a non-admin cannot resolve the partition's `default` alias, and a
+  // file keeps the endpoint name it was indexed under through a rename.
+  const driftedFrom = (file: PartitionFile): string | null => {
+    const recorded = file.embedder;
+    if (typeof recorded !== "string" || !recorded) return null;
+    const model = file.embedder_model_name ?? resolveEmbedderModel(recorded, embedderEndpoints);
+    if (model === null || currentModel === null) return null;
+    return model === currentModel ? null : model;
+  };
+
+  // Distinct embedders across the partition's files, for the toolbar summary.
+  // Built from every row, including the ones the search and date filters hide:
+  // it describes the partition, not the filtered view, so keep it on `fileRows`.
+  // Grouped by model so two endpoints running one model read as one entry.
+  const indexedEmbedders = (() => {
+    const counts = new Map<string, { label: string; file_count: number; drifted: boolean }>();
+    for (const f of fileRows) {
+      const label = fileModel(f) ?? "unrecorded";
+      const entry = counts.get(label) ?? { label, file_count: 0, drifted: false };
+      entry.file_count += 1;
+      // Any drifted file marks the group: one model can be recorded under
+      // endpoint labels that disagree, and the first file seen decides nothing.
+      entry.drifted ||= driftedFrom(f) !== null;
+      counts.set(label, entry);
+    }
+    return [...counts.values()].sort((a, b) => b.file_count - a.file_count);
+  })();
+
   const columns: ColumnDef<PartitionFile, unknown>[] = [
     {
       id: "filename",
@@ -301,12 +396,45 @@ export default function DocumentListPage() {
       cell: ({ row }) => (row.original.mimetype as string) || "—",
     },
     {
+      id: "embedder",
+      // Sortable like any other column, so a mixed partition groups by embedder.
+      accessorFn: (f) => fileModel(f),
+      header: ({ column }) => <SortableHeader column={column} title="Embedder" />,
+      cell: ({ row }) => {
+        const drifted = driftedFrom(row.original);
+        const label = fileModel(row.original);
+        if (label === null) return <span className="text-muted-foreground">—</span>;
+        return (
+          <span
+            className={drifted ? "text-amber-700 dark:text-amber-100" : undefined}
+            title={
+              drifted
+                ? `Indexed with ${drifted}; queries now embed with ${currentLabel}. Re-embed this file to bring it back in line.`
+                : undefined
+            }
+          >
+            {label}
+          </span>
+        );
+      },
+    },
+    {
       id: "indexed_at",
       // ISO timestamps sort lexically = chronologically.
       accessorFn: (f) => (f.indexed_at as string) ?? (f.created_at as string) ?? "",
       header: ({ column }) => <SortableHeader column={column} title="Indexed" />,
       cell: ({ row }) =>
         formatDate((row.original.indexed_at as string) ?? (row.original.created_at as string) ?? null),
+    },
+    {
+      id: "enrichment",
+      header: "Enrichment",
+      cell: ({ row }) =>
+        row.original.degraded_stages?.length ? (
+          <DegradedStageBadges stages={row.original.degraded_stages} />
+        ) : (
+          <span className="text-muted-foreground">No failures recorded</span>
+        ),
     },
     {
       id: "actions",
@@ -345,17 +473,40 @@ export default function DocumentListPage() {
 
   return (
     <div>
+      {selected && filesQuery.data && currentModel && (
+        <EmbedderDriftDialog
+          partition={selected}
+          currentModel={currentModel}
+          drifted={indexedEmbedders.filter((e) => e.drifted)}
+        />
+      )}
       <PageHeader
         title="Documents"
         description="Files indexed in a partition"
         actions={
           writable && selected ? (
             <Dialog open={uploadOpen} onOpenChange={setUploadOpen}>
-              <DialogTrigger asChild>
-                <Button>
-                  <Plus className="h-4 w-4" /> Upload
-                </Button>
-              </DialogTrigger>
+              {uploadPausedReason ? (
+                <TooltipProvider>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      {/* A disabled button fires no pointer events, so the span carries the tooltip. */}
+                      <span tabIndex={0} aria-label={uploadPausedReason}>
+                        <Button disabled>
+                          <Plus className="h-4 w-4" /> Upload
+                        </Button>
+                      </span>
+                    </TooltipTrigger>
+                    <TooltipContent className="max-w-xs">{uploadPausedReason}</TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
+              ) : (
+                <DialogTrigger asChild>
+                  <Button>
+                    <Plus className="h-4 w-4" /> Upload
+                  </Button>
+                </DialogTrigger>
+              )}
               <DialogContent>
                 <DialogHeader>
                   <DialogTitle>Upload files</DialogTitle>
@@ -376,6 +527,7 @@ export default function DocumentListPage() {
                   {files.length > 0 && (
                     <p className="text-sm text-muted-foreground">{files.length} file(s) selected</p>
                   )}
+                  {uploadPausedReason && <p className="text-sm text-destructive">{uploadPausedReason}</p>}
                 </div>
                 <DialogFooter>
                   <Button
@@ -388,7 +540,10 @@ export default function DocumentListPage() {
                   >
                     Cancel
                   </Button>
-                  <Button onClick={() => uploadMutation.mutate()} disabled={!files.length || uploading}>
+                  <Button
+                    onClick={() => uploadMutation.mutate()}
+                    disabled={!files.length || uploading || !!uploadPausedReason}
+                  >
                     {uploading ? "Uploading..." : "Upload"}
                   </Button>
                 </DialogFooter>
@@ -429,6 +584,22 @@ export default function DocumentListPage() {
           className="w-[150px]"
           aria-label="Indexed since"
         />
+        <Select
+          value={degradedStage}
+          onValueChange={(value) => setDegradedStage(value as DegradedStage | typeof ALL_DEGRADED_STAGES)}
+        >
+          <SelectTrigger className="w-[210px]" aria-label="Filter by degraded stage">
+            <SelectValue placeholder="All enrichment outcomes" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value={ALL_DEGRADED_STAGES}>All enrichment outcomes</SelectItem>
+            {DEGRADED_STAGE_OPTIONS.map((stage) => (
+              <SelectItem key={stage.value} value={stage.value}>
+                {stage.label}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
         {writable && selectedFiles.length > 0 && (
           <>
             <ConfirmDialog
@@ -464,6 +635,29 @@ export default function DocumentListPage() {
               {(fileSearch || indexedSince) && ` of ${fileRows.length}`} file(s)
             </p>
           )}
+          {/* Partition-wide summary. The Embedder column says which rows
+              drifted; this says whether any did without paging through them. */}
+          {filesQuery.data && indexedEmbedders.length > 0 && (
+            <span
+              className="inline-flex items-center gap-1.5 rounded-md border bg-muted/40 px-2 py-1 text-xs"
+              title="Embedder these files were indexed with"
+            >
+              <Cpu className="h-3.5 w-3.5 text-muted-foreground" />
+              <span className="text-muted-foreground">Indexed with</span>
+              {indexedEmbedders.map((e) => (
+                <span key={e.label}>
+                  {/* No separator: the flex gap already spaces these, and a
+                      comma inside the next item renders after that gap. */}
+                  <span className={e.drifted ? "font-medium text-amber-700 dark:text-amber-100" : "font-medium"}>
+                    {e.label}
+                  </span>
+                  {indexedEmbedders.length > 1 && (
+                    <span className="text-muted-foreground"> ({e.file_count})</span>
+                  )}
+                </span>
+              ))}
+            </span>
+          )}
           <Button
             variant="outline"
             size="sm"
@@ -492,6 +686,10 @@ export default function DocumentListPage() {
           </Button>
         </div>
       </div>
+
+      {/* Above the table, not only on the disabled Upload button: this page is
+          where a paused partition is felt, and a tooltip has to be hunted for. */}
+      <EmbedderSwapNotice swap={embedderSwap} />
 
       {!selected ? (
         <div

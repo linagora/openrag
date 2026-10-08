@@ -21,6 +21,8 @@ from core.utils.logging import get_logger
 from services.orchestrators.partition_service import PartitionService
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     from core.config.root import Settings
     from core.ports.preset_repo import PresetRepository
 
@@ -45,7 +47,11 @@ _DEFAULT_SEEDS: dict[str, dict[str, dict[str, Any]]] = {
     # Named presets (legal/finance) keep their explicit choice.
     "indexation": {
         "default": {
-            "chunking": {"name": "recursive_splitter", "chunk_size": 512, "chunk_overlap_rate": 0.2},
+            # Kept in sync with ChunkerConfig's defaults, but note that
+            # _finalize_seed overwrites all three from the deployment's global
+            # chunker knobs (CHUNKER / CHUNK_SIZE / CHUNK_OVERLAP_RATE) before
+            # this seed is persisted — see #709.
+            "chunking": {"name": "structured_section", "chunk_size": 512, "chunk_overlap_rate": 0.2},
             # ``parsing_strategy`` is intentionally omitted so the default preset
             # inherits the deployment's global PDFLOADER (``file_loaders.pdf``)
             # rather than forcing one PDF backend on every partition. A hardcoded
@@ -73,22 +79,21 @@ _DEFAULT_SEEDS: dict[str, dict[str, dict[str, Any]]] = {
     # time from the global ``reranker.enabled`` kill-switch (see _finalize_seed)
     # so a deployment without a reranker (CPU-only, CI) does not force reranking
     # on every partition and then fail against an unreachable reranker endpoint.
+    # ``top_n`` is omitted too: unset, it follows the global ``reranker.top_k``
+    # (RERANKER_TOP_K) at query time rather than freezing it at seed time.
     "retrieval": {
         "default": {
             "type": "single",
             "top_k": 50,
-            "top_n": 10,
             "similarity_threshold": 0.6,
         },
         "multiquery": {
             "type": "multiQuery",
             "top_k": 50,
-            "top_n": 10,
         },
         "hyde": {
             "type": "hyde",
             "top_k": 50,
-            "top_n": 10,
         },
     },
 }
@@ -103,10 +108,12 @@ class PresetService:
         preset_repo: PresetRepository,
         config: Settings,
         partition_service: PartitionService | None = None,
+        load_new_endpoints: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         self._repo = preset_repo
         self._config = config
         self._partition_service = partition_service
+        self._load_new_endpoints = load_new_endpoints
         self._reload_lock = asyncio.Lock()
         self._loaded_revision: int | None = None
 
@@ -195,6 +202,9 @@ class PresetService:
         The cheap revision query runs before every indexing dispatch. A full
         reload happens only when the database holds a newer (or deleted)
         preset revision than this process has loaded.
+
+        Endpoints created elsewhere are registered first: what reloads after
+        them can name one, as a partition switched by a swap names its target.
         """
         if await self._repo.latest_revision() == self._loaded_revision:
             return False
@@ -202,11 +212,20 @@ class PresetService:
         async with self._reload_lock:
             if await self._repo.latest_revision() == self._loaded_revision:
                 return False
+            if self._load_new_endpoints is not None:
+                await self._load_new_endpoints()
             revision = await self._load_all(remember_revision=False)
             if self._partition_service is not None:
                 await self._partition_service.load_partitions()
             self._loaded_revision = revision
             return True
+
+    async def try_refresh_if_stale(self) -> None:
+        """:meth:`refresh_if_stale` for a request that reads them: a failed probe keeps the cached settings."""
+        try:
+            await self.refresh_if_stale()
+        except Exception as exc:  # noqa: BLE001 - a stale-cache probe must not fail the request
+            logger.warning(f"Preset cache staleness check failed; using the cached config: {exc}")
 
     async def _load_all(self, *, remember_revision: bool = True) -> int:
         rows, revision = await self._repo.load_all_with_revision()

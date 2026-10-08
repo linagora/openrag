@@ -3,16 +3,26 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING, Any
 
-from openrag.core.models.chunk import Chunk
+from core.models.chunk import Chunk
 
 if TYPE_CHECKING:
     from datetime import datetime
 
+    from core.retrieval.trace import RetrievalTraceBuilder
+
 
 class VectorStore(ABC):
     """Base class for vector database backends."""
+
+    @abstractmethod
+    def iter_chunk_metadata(
+        self, collection: str, *, partition: str, file_ids: list[str] | None = None, batch_size: int = 500
+    ) -> AsyncIterator[list[dict[str, Any]]]:
+        """Stream scalar-only pages for reconciliation; never load a corpus into memory."""
+        raise NotImplementedError
 
     @abstractmethod
     async def upsert(
@@ -21,11 +31,16 @@ class VectorStore(ABC):
         collection: str = "default",
         *,
         indexed_at: datetime | None = None,
+        vector_field: str | None = None,
     ) -> int:
         """Insert or update chunks. Returns count of upserted items.
 
         ``indexed_at`` optionally pins the indexation timestamp stamped on the
         chunks so it can match the catalog row; ``None`` means "use now".
+
+        ``vector_field`` is the dense field of the embedder that produced the
+        embeddings; a missing one is an error. Callers make sure it exists with
+        :meth:`ensure_vector_field`.
         """
         ...
 
@@ -38,8 +53,14 @@ class VectorStore(ABC):
         collection: str = "default",
         filters: dict[str, Any] | None = None,
         similarity_threshold: float | None = None,
+        trace: RetrievalTraceBuilder | None = None,
+        vector_field: str | None = None,
     ) -> list[dict[str, Any]]:
         """Similarity search returning raw result dicts.
+
+        ``vector_field`` is the dense field of the query's embedder; a missing
+        one is an error. Rows with no value in that field are not returned, and
+        a field that does not exist yet returns nothing.
 
         Hybrid (dense + lexical) retrieval is a backend configuration
         concern, not a separate entry point: when a backend has it enabled
@@ -54,6 +75,29 @@ class VectorStore(ABC):
         ...
 
     @abstractmethod
+    async def write_vectors(self, field: str, vectors: dict[str, list[float] | None]) -> int:
+        """Set one dense field on existing chunks, leaving the rest of each row as is.
+
+        ``vectors`` maps chunk IDs to the new value; ``None`` clears the field,
+        which takes the chunk out of that field's searches. IDs, text, metadata
+        and every other vector field are untouched — this is how a partition's
+        chunks are re-embedded in place when its embedder changes.
+
+        The field must exist (see :meth:`ensure_vector_field`), and so must
+        every chunk: a backend may refuse the whole batch when one ID names no
+        chunk, rather than create a row holding nothing but that vector.
+        Returns the number of chunks written.
+        """
+        ...
+
+    async def make_searchable(self, field: str) -> None:
+        """Make every write into ``field`` so far answer searches, on a backend that defers it.
+
+        A no-op by default.
+        """
+        return None
+
+    @abstractmethod
     async def delete(self, ids: list[str], collection: str = "default") -> int:
         """Delete chunks by ID. Returns count of deleted items."""
         ...
@@ -65,12 +109,59 @@ class VectorStore(ABC):
 
     @abstractmethod
     async def ensure_collection(self, name: str, dimension: int, **kwargs: Any) -> None:
-        """Create collection if it doesn't exist."""
+        """Create collection if it doesn't exist.
+
+        A fresh collection is created with the dense field named by the
+        ``vector_field`` keyword, sized to ``dimension``; both are ignored when
+        the collection exists.
+        """
         ...
 
     @abstractmethod
     async def drop_collection(self, name: str) -> None:
         """Drop a collection entirely."""
+        ...
+
+    @abstractmethod
+    async def ensure_vector_field(self, field: str, dimension: int) -> bool:
+        """Make ``field`` exist, be indexed, and be searchable. Idempotent.
+
+        Added to a live collection without disturbing the fields already in
+        it. The field is nullable, searches on it skip rows where it is null,
+        and it is indexed like every other dense field. ``dimension`` only
+        sizes a new field. Returns whether this call created the field.
+
+        Raises:
+            ValueError: the backend cannot hold another dense field, or
+                ``field`` exists with another dimension.
+        """
+        ...
+
+    @abstractmethod
+    async def drop_vector_field(self, field: str) -> bool:
+        """Remove a deleted embedder's dense field, and every vector in it.
+
+        The caller guarantees no partition still uses it. Returns whether this
+        call dropped the field, ``False`` when it was already gone.
+
+        Raises:
+            ValueError: ``field`` is not a per-embedder dense field, or it is
+                the collection's only vector field, which the backend cannot
+                drop.
+        """
+        ...
+
+    @abstractmethod
+    async def vector_dimension(self, vector_field: str | None = None) -> int | None:
+        """Dimension the live collection actually stores for ``vector_field``.
+
+        ``None`` when the field is absent or nothing has been indexed with it.
+        Backend errors propagate so callers can distinguish an unavailable
+        store from an actual missing field. Callers that need a number to size
+        buffers should pick their own fallback; callers that *report* the
+        dimension must pass a genuine ``None`` through rather than substitute
+        a guess.
+        """
         ...
 
     @abstractmethod
@@ -89,6 +180,11 @@ class VectorStore(ABC):
         collection: str,
         filters: dict[str, Any],
         output_fields: list[str] | None = None,
+        limit: int | None = None,
     ) -> list[dict[str, Any]]:
-        """Return full chunk data matching the given filter expression."""
+        """Return full chunk data matching the given filter expression.
+
+        Without ``output_fields``, every field but the vectors is returned;
+        ``["*"]`` includes them. Results can be bounded with ``limit``.
+        """
         ...

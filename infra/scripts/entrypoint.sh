@@ -2,7 +2,7 @@
 
 # --- Writable-dir permission fix + privilege drop --------------------------
 # The app runs as a non-root user whose primary group is GID 0. Its writable
-# dirs (/app/data, /app/logs, /app/model_weights) are bind-mounted from the
+# dirs (/app/data, /app/model_weights) are bind-mounted from the
 # host, so the image's group-0-writable perms (Dockerfile `chmod g=u`) don't
 # apply to them — the host directory's ownership does, and Docker creates a
 # missing bind source as root:root with no group-write. That makes the
@@ -21,7 +21,7 @@ if [ "$(id -u)" = "0" ]; then
   # host-owned mount keeps its host ownership, so Chainlit — which writes any
   # bundled language file missing from the mount on startup — hits
   # PermissionError as the non-root app user. Grant GID-0 write here too.
-  for d in /app/data /app/logs /app/model_weights /app/openrag/.chainlit/translations; do
+  for d in /app/data /app/model_weights /app/openrag/.chainlit/translations; do
     mkdir -p "$d" 2>/dev/null || true
     chgrp -R 0 "$d" 2>/dev/null || true
     chmod -R g+rwX "$d" 2>/dev/null || true

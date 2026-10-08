@@ -20,7 +20,11 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { formatDate, cn } from "@/lib/utils";
-import { listFileChunks, type PartitionChunk } from "@/lib/api/documents";
+import { getFileDetail, listFileChunks, type PartitionChunk } from "@/lib/api/documents";
+import {
+  DegradedStageBadges,
+  normalizeDegradedStages,
+} from "@/components/shared/degraded-stages";
 import { replaceFile, deleteFile, copyFile, newFileId } from "@/lib/api/indexing";
 import { listPartitions } from "@/lib/api/partitions";
 import { usePermissions } from "@/lib/permissions";
@@ -28,7 +32,7 @@ import { usePermissions } from "@/lib/permissions";
 const str = (v: unknown): string => (v == null ? "" : String(v));
 
 // File-level metadata keys are flattened onto each chunk; hide chunk-internal ones.
-const HIDDEN_META = new Set(["_id", "vector", "content", "embedding"]);
+const HIDDEN_META = new Set(["_id", "vector", "content", "embedding", "degraded_stages"]);
 
 function ChunksTab({ chunks }: { chunks: PartitionChunk[] }) {
   const [selected, setSelected] = useState(0);
@@ -140,6 +144,12 @@ export default function DocumentDetailPage() {
   const replaceFileRef = useRef<HTMLInputElement>(null);
 
   const chunksKey = ["file-chunks", partition, fileId];
+  const detailKey = ["file-detail", partition, fileId];
+  const detailQuery = useQuery({
+    queryKey: detailKey,
+    queryFn: () => getFileDetail(partition!, fileId!, 0),
+    enabled: !!partition && !!fileId,
+  });
   const chunksQuery = useQuery({
     queryKey: chunksKey,
     queryFn: () => listFileChunks(partition!, fileId!),
@@ -158,6 +168,7 @@ export default function DocumentDetailPage() {
       setReplaceSel(null);
       if (replaceFileRef.current) replaceFileRef.current.value = "";
       queryClient.invalidateQueries({ queryKey: chunksKey });
+      queryClient.invalidateQueries({ queryKey: detailKey });
     },
     onError: (err: Error) => toast.error(`Failed to replace: ${err.message}`),
   });
@@ -187,19 +198,23 @@ export default function DocumentDetailPage() {
     return <div className="text-center py-12 text-muted-foreground">Invalid file reference.</div>;
   }
 
-  if (chunksQuery.isLoading) {
+  if (detailQuery.isLoading || chunksQuery.isLoading) {
     return <div className="flex items-center justify-center py-12 text-muted-foreground">Loading file…</div>;
   }
-  if (chunksQuery.isError) {
+  if (detailQuery.isError || chunksQuery.isError) {
     return (
       <div className="flex items-center justify-center py-12 text-destructive">
-        Failed to load file: {(chunksQuery.error as Error).message}
+        Failed to load file: {((detailQuery.error ?? chunksQuery.error) as Error).message}
       </div>
     );
   }
 
   const chunks = chunksQuery.data ?? [];
-  const metadata = chunks[0]?.metadata ?? {};
+  const metadata = {
+    ...(chunks[0]?.metadata ?? {}),
+    ...(detailQuery.data?.metadata ?? {}),
+  };
+  const degradedStages = normalizeDegradedStages(metadata.degraded_stages);
   const filename = str(metadata.filename) || fileId;
   const mimetype = str(metadata.mimetype);
   // Gate write actions on the caller's role, like the documents list does — the
@@ -249,6 +264,18 @@ export default function DocumentDetailPage() {
           </ConfirmDialog>
         )}
       </div>
+
+      {degradedStages.length > 0 && (
+        <div className="rounded-lg border border-amber-300 bg-amber-50 p-4 text-amber-950 dark:border-amber-700 dark:bg-amber-950 dark:text-amber-100">
+          <p className="font-medium">Completed with degradation</p>
+          <p className="mt-1 text-sm text-amber-800 dark:text-amber-200">
+            Optional enrichment did not finish. Re-index this document after the affected service recovers.
+          </p>
+          <div className="mt-3">
+            <DegradedStageBadges stages={degradedStages} />
+          </div>
+        </div>
+      )}
 
       <Tabs defaultValue="chunks">
         <TabsList>

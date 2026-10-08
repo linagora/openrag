@@ -1,3 +1,17 @@
+{{- $rayServeEnabled := eq (toString .Values.env.config.ENABLE_RAY_SERVE) "true" -}}
+{{- if and $rayServeEnabled (not .Values.ray.enabled) -}}
+{{- fail "ENABLE_RAY_SERVE=true requires ray.enabled=true" -}}
+{{- end -}}
+{{- /* The reverse half of the same contract. With a RayCluster but neither Ray
+   Serve nor a RAY_ADDRESS, the API starts its own Ray inside the openrag pod:
+   the RayCluster does no work, and the Ray PodMonitor scrapes a cluster that
+   holds none of the indexing metrics, so their alerts stay silent. A
+   RAY_ADDRESS the chart cannot read (env.existingSecret, an external secrets
+   provider) belongs in env.config as well: envFrom reads the ConfigMap first,
+   so the Secret's copy still wins at runtime. */ -}}
+{{- if and .Values.ray.enabled (not $rayServeEnabled) (not (include "openrag-stack.rayAddress" .)) -}}
+{{- fail (printf "ray.enabled=true with neither ENABLE_RAY_SERVE=true nor a RAY_ADDRESS: the API would start its own Ray inside the openrag pod, the RayCluster would do no work, and the Ray PodMonitor would scrape a cluster holding none of the indexing metrics. Point the API at the cluster with env.config.RAY_ADDRESS: ray://%s-raycluster-head-svc:10001 (in env.config even when env.existingSecret also carries it), or set env.config.ENABLE_RAY_SERVE=true." (include "openrag-stack.fullname" .)) -}}
+{{- end -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -13,6 +27,13 @@ spec:
     metadata:
       annotations:
         checksum/config: {{ include (print $.Template.BasePath "/configmap-env.yaml") . | sha256sum }}
+        {{- /* Not under Ray Serve: this pod's 8080 is then the serve driver,
+           not the API (see templates/servicemonitor.yaml). */}}
+        {{- if and .Values.openrag.metrics.prometheusAnnotations (ne (include "openrag-stack.rayServeApi" .) "true") }}
+        prometheus.io/scrape: "true"
+        prometheus.io/path: "/metrics"
+        prometheus.io/port: {{ .Values.openrag.service.targetPort | quote }}
+        {{- end }}
       labels:
         {{- include "openrag-stack.componentSelectorLabels" (dict "component" "openrag" "context" $) | nindent 8 }}
     spec:
@@ -59,19 +80,35 @@ spec:
             - containerPort: 8265
               name: ray-dashboard
             {{- end }}
+            {{- if eq (include "openrag-stack.embeddedRay" .) "true" }}
+            {{- /* The embedded Ray's metrics agent. Unpinned it takes a random
+               port, and nothing can scrape the indexing and worker-side
+               inference series recorded in Ray actors. */}}
+            - containerPort: {{ include "openrag-stack.rayMetricsPort" . }}
+              name: ray-metrics
+            {{- end }}
           resources:
             {{- toYaml .Values.openrag.resources | nindent 12 }}
           {{- if .Values.openrag.probes.startup }}
+          {{- /* /health_check, like the HTTP probe in values: a startup probe that
+             fails restarts the container, and with READINESS_REQUIRE_EMBEDDER=true
+             /ready also fails while the default embedder is down (#1099),
+             which a restart cannot fix. */}}
           startupProbe:
-            {{- toYaml .Values.openrag.probes.startup | nindent 12 }}
+            {{- include "openrag-stack.openragProbe" (dict "probe" .Values.openrag.probes.startup "rayServe" $rayServeEnabled "path" "/health_check" "context" $) | nindent 12 }}
           {{- end }}
           {{- if .Values.openrag.probes.readiness }}
           readinessProbe:
-            {{- toYaml .Values.openrag.probes.readiness | nindent 12 }}
+            {{- include "openrag-stack.openragProbe" (dict "probe" .Values.openrag.probes.readiness "rayServe" $rayServeEnabled "path" "/ready" "context" $) | nindent 12 }}
           {{- end }}
           {{- if .Values.openrag.probes.liveness }}
           livenessProbe:
-            {{- toYaml .Values.openrag.probes.liveness | nindent 12 }}
+            {{- include "openrag-stack.openragProbe" (dict "probe" .Values.openrag.probes.liveness "rayServe" $rayServeEnabled "path" "/health_check" "context" $) | nindent 12 }}
+          {{- end }}
+          {{- if eq (include "openrag-stack.embeddedRay" .) "true" }}
+          env:
+            - name: RAY_METRICS_EXPORT_PORT
+              value: {{ include "openrag-stack.rayMetricsPort" . | quote }}
           {{- end }}
           envFrom:
             - configMapRef:
@@ -83,8 +120,6 @@ spec:
               mountPath: /app/model_weights
             - name: data
               mountPath: /app/data
-            - name: logs
-              mountPath: /app/logs
             - name: venv
               mountPath: /app/.venv
             {{- if .Values.openrag.shmSize }}
@@ -101,9 +136,6 @@ spec:
         - name: data
           persistentVolumeClaim:
             claimName: {{ include "openrag-stack.fullname" . }}-data
-        - name: logs
-          persistentVolumeClaim:
-            claimName: {{ include "openrag-stack.fullname" . }}-logs
         - name: venv
           persistentVolumeClaim:
             claimName: {{ include "openrag-stack.fullname" . }}-venv
@@ -172,7 +204,7 @@ spec:
                    RayCluster (templates/raycluster.yaml) — ENABLE_RAY_SERVE alone
                    isn't enough, otherwise this Ingress can dangle at a Service
                    that was never created. */}}
-                {{- if and .Values.ray.enabled (eq (toString .Values.env.config.ENABLE_RAY_SERVE) "true") }}
+                {{- if eq (include "openrag-stack.rayServeApi" .) "true" }}
                 name: {{ include "openrag-stack.fullname" . }}-raycluster-head-svc
                 port:
                   name: ray-serve

@@ -41,15 +41,30 @@ def test_default_bypass_paths_match_legacy_set() -> None:
         "/openapi.json",
         "/redoc",
         "/health_check",
+        "/ready",
         "/version",
         "/auth/login",
         "/auth/callback",
         "/auth/backchannel-logout",
         "/auth/logout",
         "/auth/chainlit-logout-signal",
+        "/metrics",
     }
     assert set(DEFAULT_BYPASS_PATHS) == expected
     assert set(AuthBypassConfig().bypass_paths) == expected
+
+
+def test_metrics_is_bypassed_by_default() -> None:
+    """Prometheus scrapes ``/metrics`` without a user token: the route enforces
+    its own optional ``METRICS_TOKEN`` (see api.routers.admin.monitoring), so
+    the middleware must not demand a bearer first."""
+    assert is_bypass_path("/metrics")
+
+
+def test_metrics_is_not_login_gated_under_oidc() -> None:
+    """A scraper can't follow an IdP redirect; ``/metrics`` stays out of the
+    oidc-gated subset."""
+    assert "/metrics" not in AuthBypassConfig().oidc_gated_paths
 
 
 def test_default_api_prefixes_match_legacy_set() -> None:
@@ -168,9 +183,11 @@ def test_auth_middleware_accepts_custom_bypass_config() -> None:
     assert instance._bypass_config is custom
 
 
-def _request(headers=None, path="/indexer/files"):
+def _request(headers=None, path="/indexer/files", app=None):
     raw = [(k.lower().encode(), v.encode()) for k, v in (headers or {}).items()]
     scope = {"type": "http", "method": "GET", "path": path, "headers": raw, "query_string": b""}
+    if app is not None:
+        scope["app"] = app
     return Request(scope)
 
 
@@ -389,3 +406,267 @@ def test_request_object_is_unused_by_helpers() -> None:
 
     sig = inspect.signature(is_ui_path)
     assert Request not in {p.annotation for p in sig.parameters.values()}
+
+
+# ---------------------------------------------------------------------------
+# /metrics reaches the route without a user token, in both auth modes
+# ---------------------------------------------------------------------------
+
+
+def _anonymous_request(path: str) -> Request:
+    return Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": path,
+            "headers": [],
+            "query_string": b"",
+            "client": ("10.0.0.9", 4321),
+        }
+    )
+
+
+async def _route_reached(_request) -> Response:
+    return Response("scraped", status_code=200)
+
+
+def _anonymous_auth_service():
+    from unittest.mock import AsyncMock
+
+    svc = AsyncMock()
+    svc.get_oidc_session_by_token_for_request = AsyncMock(return_value=None)
+    svc.get_user_by_token_for_request = AsyncMock(return_value=None)
+    return svc
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("auth_mode", ["token", "oidc"])
+async def test_anonymous_scrape_reaches_metrics_route(monkeypatch, auth_mode) -> None:
+    """A Prometheus scraper sends no user credential. The middleware must hand
+    ``/metrics`` straight to the route (which applies METRICS_TOKEN itself)
+    instead of answering 403 "Missing token" (token mode) or redirecting to
+    the IdP (oidc mode)."""
+    monkeypatch.setenv("AUTH_MODE", auth_mode)
+    monkeypatch.setenv("AUTH_TOKEN", "an-admin-token")
+    monkeypatch.setenv("OIDC_TOKEN_ENCRYPTION_KEY", "x")
+    monkeypatch.setenv("RATE_LIMIT_ENABLED", "false")
+    mw = AuthMiddleware(
+        lambda scope, receive, send: None,
+        get_auth_service=lambda _r: _anonymous_auth_service(),
+    )
+
+    resp = await mw.dispatch(_anonymous_request("/metrics"), _route_reached)
+
+    assert resp.status_code == 200
+    assert resp.body == b"scraped"
+
+
+# ---------------------------------------------------------------------------
+# Path decisions use the routed path
+# ---------------------------------------------------------------------------
+
+# A Host header under which ``request.url.path`` reads differently from the
+# path the router dispatches.
+_MISMATCHED_HOST = "testserver/health_check?x="
+
+
+def _auth_app(monkeypatch, *, auth_mode: str) -> FastAPI:
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setenv("AUTH_MODE", auth_mode)
+    monkeypatch.setenv("AUTH_TOKEN", "secret")
+
+    svc = type("S", (), {})()
+    svc.get_oidc_session_by_token_for_request = AsyncMock(return_value=None)
+    svc.get_user_by_token_for_request = AsyncMock(return_value=None)
+
+    app = FastAPI()
+
+    @app.get("/indexer/files")
+    async def protected() -> dict[str, str]:
+        return {"served": "yes"}
+
+    @app.get("/static/{file_id}")
+    async def static_file(file_id: str) -> dict[str, str]:
+        return {"served": file_id}
+
+    app.add_middleware(AuthMiddleware, get_auth_service=lambda _request: svc)
+    return app
+
+
+def test_bypass_check_uses_the_routed_path(monkeypatch) -> None:
+    from fastapi.testclient import TestClient
+
+    client = TestClient(_auth_app(monkeypatch, auth_mode="token"))
+
+    response = client.get("/indexer/files", headers={"host": _MISMATCHED_HOST})
+
+    assert response.status_code == 403
+    assert response.json() == {"detail": "Missing token"}
+
+
+def test_oidc_login_redirect_uses_the_routed_path_and_query(monkeypatch) -> None:
+    from fastapi.testclient import TestClient
+
+    client = TestClient(_auth_app(monkeypatch, auth_mode="oidc"))
+
+    response = client.get(
+        "/static/abc?page=2",
+        headers={"host": _MISMATCHED_HOST, "accept": "text/html"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 302
+    assert response.headers["location"] == "/auth/login?next=%2Fstatic%2Fabc%3Fpage%3D2"
+
+
+# ---------------------------------------------------------------------------
+# A degraded boot must answer 503, not 500 (#937)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_auth_middleware_returns_503_when_the_container_is_none(monkeypatch) -> None:
+    """The real resolver on a degraded boot.
+
+    `main.py` resolves the auth service through `di.providers.get_container`,
+    which raises `HTTPException(503)` when the boot guard has set
+    `app.state.container = None`. Middleware runs outside the router, so
+    FastAPI's handlers never convert that — uncaught it escapes as a 500
+    `[UNEXPECTED_ERROR]` on every authenticated request, which is the opposite
+    of the "serving degraded (503)" the boot guard logged.
+
+    Exercises the real `get_container`, not a stand-in that raises RuntimeError:
+    the bug was precisely that the production resolver raises something else.
+    """
+    monkeypatch.setenv("AUTH_MODE", "token")
+    monkeypatch.setenv("AUTH_TOKEN", "secret")
+
+    from types import SimpleNamespace
+
+    from di.providers import get_container
+
+    # `get_container` reads `request.app.state.container`, so the request needs a
+    # real app in its scope — a degraded one, exactly as the boot guard leaves it.
+    degraded_app = SimpleNamespace(state=SimpleNamespace(container=None))
+    request = _request(headers={"authorization": "Bearer token"}, app=degraded_app)
+
+    middleware = AuthMiddleware(
+        lambda scope, receive, send: None,
+        get_auth_service=lambda req: get_container(req).auth_service,
+    )
+
+    response = await middleware.dispatch(request, _unused_call_next)
+
+    # 503, and specifically not the 500 `[UNEXPECTED_ERROR]` the bug produced.
+    assert response.status_code == 503
+    # The resolver's own detail is relayed rather than flattened to a generic
+    # string, so the log and the response agree on why the request failed.
+    assert b"container is not available" in response.body
+
+
+def test_main_resolves_the_auth_service_through_get_container() -> None:
+    """The wiring is the fix. Reading `app.state.container.auth_service`
+    directly raises AttributeError on a degraded boot, which no guard catches."""
+    import pathlib
+
+    # Read as text rather than importing: importing `api.main` pulls in the
+    # chainlit entrypoint, which fails outside a running app.
+    source = (pathlib.Path(__file__).resolve().parents[4] / "openrag" / "api" / "main.py").read_text(encoding="utf-8")
+
+    assert "get_auth_service=lambda request: get_container(request).auth_service" in source
+    assert "request.app.state.container.auth_service" not in source, (
+        "the auth service is resolved off a possibly-None container again; "
+        "AttributeError there is not caught and surfaces as a 500"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["/v1/models", "/health_check", "/ready"])
+async def test_dev_bypass_returns_503_when_the_container_is_none(monkeypatch, path) -> None:
+    """The ``ALLOW_NO_AUTH`` branch resolves the auth service before the bypass
+    list, so on a degraded boot an unguarded call there turned *every* path —
+    health and readiness included — into a 500, not only authenticated ones.
+    """
+    monkeypatch.setenv("AUTH_MODE", "token")
+    monkeypatch.delenv("AUTH_TOKEN", raising=False)
+    monkeypatch.setenv("ALLOW_NO_AUTH", "true")
+
+    from types import SimpleNamespace
+
+    from di.providers import get_container
+
+    degraded_app = SimpleNamespace(state=SimpleNamespace(container=None))
+    middleware = AuthMiddleware(
+        lambda scope, receive, send: None,
+        get_auth_service=lambda req: get_container(req).auth_service,
+    )
+
+    response = await middleware.dispatch(_request(path=path, app=degraded_app), _unused_call_next)
+
+    assert response.status_code == 503
+    assert b"container is not available" in response.body
+
+
+@pytest.mark.asyncio
+async def test_unavailable_resolver_status_headers_and_log_are_relayed(monkeypatch) -> None:
+    """The resolver's response is relayed, not rebuilt: its headers survive (a
+    ``Retry-After`` on a 503 is the natural case), and the log names the status
+    the client actually received rather than a fixed one.
+
+    Uses a non-503 status on purpose — with 503 a hardcoded status in the log or
+    the response would pass unnoticed.
+    """
+    from fastapi import HTTPException
+    from loguru import logger
+
+    monkeypatch.setenv("AUTH_MODE", "token")
+    monkeypatch.setenv("AUTH_TOKEN", "secret")
+
+    def unavailable(_request):
+        raise HTTPException(status_code=502, detail="upstream gone", headers={"Retry-After": "7"})
+
+    captured: list[dict] = []
+    handler_id = logger.add(
+        lambda m: captured.append(dict(m.record["extra"], msg=m.record["message"])), level="WARNING"
+    )
+    try:
+        middleware = AuthMiddleware(lambda scope, receive, send: None, get_auth_service=unavailable)
+        response = await middleware.dispatch(_request(headers={"authorization": "Bearer token"}), _unused_call_next)
+    finally:
+        logger.remove(handler_id)
+
+    assert response.status_code == 502
+    assert response.headers["retry-after"] == "7"
+    assert b"upstream gone" in response.body
+    logged = [r for r in captured if r["msg"] == "Auth service unavailable"]
+    assert [r["status"] for r in logged] == [502]
+
+
+@pytest.mark.asyncio
+async def test_unavailable_resolver_log_escapes_the_request_path(monkeypatch) -> None:
+    """The routed path is percent-decoded, so ``%0A`` reaches here as a real
+    newline. Logged raw, it would forge a second line in the text log format."""
+    from loguru import logger
+
+    monkeypatch.setenv("AUTH_MODE", "token")
+    monkeypatch.setenv("AUTH_TOKEN", "secret")
+
+    def unavailable(_request):
+        raise RuntimeError("container unavailable")
+
+    captured: list[dict] = []
+    handler_id = logger.add(
+        lambda m: captured.append(dict(m.record["extra"], msg=m.record["message"])), level="WARNING"
+    )
+    try:
+        middleware = AuthMiddleware(lambda scope, receive, send: None, get_auth_service=unavailable)
+        await middleware.dispatch(
+            _request(headers={"authorization": "Bearer token"}, path="/v1/x\nFORGED line"), _unused_call_next
+        )
+    finally:
+        logger.remove(handler_id)
+
+    [logged] = [r for r in captured if r["msg"] == "Auth service unavailable"]
+    assert "\n" not in logged["path"]
+    assert logged["path"] == "/v1/x\\nFORGED line"

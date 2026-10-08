@@ -15,19 +15,21 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator, Callable
+from contextlib import AbstractAsyncContextManager, AsyncExitStack, asynccontextmanager, nullcontext
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from core.config.model_endpoints import embedder_fingerprint
 from core.utils.consts import strip_protected_metadata
-from core.utils.exceptions import AuthError, PartitionNotFoundError, ValidationError
+from core.utils.exceptions import AuthError, ConfigError, PartitionNotFoundError, ValidationError
 from core.utils.filename import extract_temporal_fields
 from core.utils.logging import get_logger
 from core.utils.partition_limits import max_partitions_for_user
 
 if TYPE_CHECKING:
     from core.config.root import Settings
+    from core.embeddings.embedder import Embedder
     from core.indexing.dispatcher import IndexingDispatcher
     from core.ports.document_repo import DocumentRepository
     from core.ports.workspace_repo import WorkspaceRepository
@@ -75,6 +77,7 @@ class IndexingService:
         config: Settings | None = None,
         partition_service: PartitionService | None = None,
         preset_service: PresetService | None = None,
+        embedder_factory: Callable[[str], Embedder] | None = None,
     ) -> None:
         self._document_repo = document_repo
         self._workspace_repo = workspace_repo
@@ -82,6 +85,7 @@ class IndexingService:
         self._config = config
         self._partition_service = partition_service
         self._preset_service = preset_service
+        self._embedder_factory = embedder_factory
 
     # ------------------------------------------------------------------
     # Lookups (used by the thin router for its byte-identical guards)
@@ -97,8 +101,8 @@ class IndexingService:
             logger.exception("File existence check failed.", file_id=file_id, partition=partition, error=str(e))
             return False
 
-    async def get_workspace(self, workspace_id: str) -> dict | None:
-        return await self._workspace_repo.get_workspace_dict(workspace_id)
+    async def get_workspace(self, partition: str, workspace_id: str) -> dict | None:
+        return await self._workspace_repo.get_workspace_dict(partition, workspace_id)
 
     # ------------------------------------------------------------------
     # Ingest
@@ -118,7 +122,9 @@ class IndexingService:
 
         The keys added below must match ``UPLOAD_METADATA_SERVER_KEYS`` exactly.
         """
-        metadata = dict(metadata or {})
+        metadata, dropped = strip_protected_metadata(metadata)
+        if dropped:
+            logger.bind(file_id=file_id).warning(f"Dropped protected metadata keys from file upload: {dropped}")
         metadata.update(
             {
                 "source": str(file_path),
@@ -144,6 +150,29 @@ class IndexingService:
             and getattr(getattr(self._config, "loader", None), "content_deduplication_enabled", False)
         )
 
+    async def _ensure_no_embedder_swap(self, partition: str) -> None:
+        ensure = getattr(self._partition_service, "ensure_no_embedder_swap", None)
+        if ensure is not None:
+            await ensure(partition)
+
+    @asynccontextmanager
+    async def _embedder_swap_fence(self, partition: str) -> AsyncIterator[None]:
+        """Refuse a chunk rewrite while *partition*'s embedder is being swapped.
+
+        Held for the whole write, not just the check: a metadata update reads
+        whole rows and writes them back, so one interleaving with a swap's
+        partial writes would put the old, empty field back over new vectors.
+        A swap starts under the same fence.
+        """
+        lock = getattr(self._partition_service, "operation_lock", None)
+        if lock is None:
+            await self._ensure_no_embedder_swap(partition)
+            yield
+            return
+        async with lock(partition):
+            await self._ensure_no_embedder_swap(partition)
+            yield
+
     @asynccontextmanager
     async def _partition_admission(self, partition: str) -> AsyncIterator[bool]:
         if self._partition_service is None:
@@ -168,6 +197,16 @@ class IndexingService:
             # Forbidden; a builtin PermissionError would fall through to the
             # catch-all handler and surface as a 500.
             raise AuthError(f"Editor role required for partition: {partition}")
+
+    async def _pin_partition_embedder(self, partition: str) -> None:
+        """Pin *partition* off the ``default`` embedder alias before data lands in it.
+
+        See :meth:`PartitionService.pin_embedder_for_write`. Must run before the
+        job's embedder is captured, so the worker gets the pinned name.
+        """
+        pin = getattr(self._partition_service, "pin_embedder_for_write", None)
+        if pin is not None:
+            await pin(partition)
 
     def _resolve_indexation_dispatch_config(self, partition: str) -> tuple[dict | None, str | None]:
         partitions = self._partition_configs()
@@ -269,8 +308,10 @@ class IndexingService:
             content_sha256=content_sha256,
         )
         async with self._partition_admission(partition) as partition_existed_at_admission:
+            await self._ensure_no_embedder_swap(partition)
             await self._ensure_partition_exists(partition, user)
             await self._refresh_preset_config_if_stale()
+            await self._pin_partition_embedder(partition)
             require_existing_partition = bool(self._partition_configs()) or partition_existed_at_admission
             indexation_config, embedder_name = self._resolve_indexation_dispatch_config(partition)
             legacy_actor_preserves_partition_guard = require_existing_partition and indexation_config is not None
@@ -312,7 +353,8 @@ class IndexingService:
                 f"Dropped protected metadata keys from file metadata update: {dropped}"
             )
         metadata["file_id"] = file_id
-        await self._dispatcher.update_file_metadata(file_id, metadata, partition, user)
+        async with self._embedder_swap_fence(partition):
+            await self._dispatcher.update_file_metadata(file_id, metadata, partition, user)
 
     async def copy_file(
         self,
@@ -337,7 +379,48 @@ class IndexingService:
         metadata["file_id"] = target_file_id
         metadata["partition"] = target_partition
         metadata["content_sha256"] = content_sha256
-        await self._dispatcher.copy_file(source_file_id, metadata, source_partition, user)
+        # Admitted like an upload, so a missing target is created and pinned.
+        # The copy itself runs outside the fence, which uploads wait on: it can
+        # re-embed for minutes. It holds the copy lock instead, taken under the
+        # fence, which keeps the target's embedder from changing, or a swap from
+        # starting, meanwhile.
+        async with AsyncExitStack() as copying:
+            async with self._partition_admission(target_partition):
+                await self._ensure_no_embedder_swap(target_partition)
+                await self._ensure_partition_exists(target_partition, user)
+                await self._refresh_preset_config_if_stale()
+                await self._pin_partition_embedder(target_partition)
+                destination = self._copy_destination(target_partition)
+                await copying.enter_async_context(self._copy_in_flight(target_partition))
+            await self._dispatcher.copy_file(source_file_id, metadata, source_partition, user, **destination)
+
+    def _copy_in_flight(self, partition: str) -> AbstractAsyncContextManager[None]:
+        copy_in_flight = getattr(self._partition_service, "copy_in_flight", None)
+        return copy_in_flight(partition) if copy_in_flight is not None else nullcontext()
+
+    def _copy_destination(self, partition: str) -> dict[str, Any]:
+        """The vector field and embedder a copy into *partition* must use.
+
+        Raises when they can't be resolved: vectors written to any other field
+        would never be found by the partition's searches.
+        """
+        if self._config is None or self._embedder_factory is None:
+            return {}
+        partition_cfg = self._partition_configs().get(partition)
+        endpoint = self._config.models.embedder.get(partition_cfg.embedder) if partition_cfg else None
+        if endpoint is None or not endpoint.vector_field:
+            raise ConfigError(
+                f"Cannot resolve the embedder of partition '{partition}', so the copy has no vector field to go to.",
+                code="EMBEDDER_ROUTING_UNRESOLVED",
+            )
+        return {
+            "vector_field": endpoint.vector_field,
+            "embedder": self._embedder_factory(partition_cfg.embedder),
+            "embedder_reference": partition_cfg.embedder,
+            # Of the config the embedder above was built from: the catalog write refuses a copy re-embedded
+            # with an endpoint edited meanwhile.
+            "embedder_fingerprint": embedder_fingerprint(endpoint.endpoint, endpoint.model_name, endpoint.extra),
+        }
 
     # ------------------------------------------------------------------
     # Task state
@@ -348,6 +431,9 @@ class IndexingService:
 
     async def get_task_error(self, task_id: str) -> str | None:
         return await self._dispatcher.get_task_error(task_id)
+
+    async def get_task_error_reason(self, task_id: str) -> str | None:
+        return await self._dispatcher.get_task_error_reason(task_id)
 
     async def cancel_task(self, task_id: str) -> bool:
         return await self._dispatcher.cancel_task(task_id)
