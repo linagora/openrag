@@ -951,6 +951,7 @@ class ModelEndpointService:
             return result
         if model_type != "stt":
             from services.orchestrators.readiness_service import (
+                LatestAliasTimeoutError,
                 ModelEndpointProbeError,
                 ModelListUnavailableError,
                 ModelNotFoundError,
@@ -980,18 +981,20 @@ class ModelEndpointService:
                 result["reachable"] = True
                 result["models_served"] = exc.model_ids
                 result["model_found"] = False
+            except LatestAliasTimeoutError as exc:
+                result["reachable"] = True
+                result["models_served"] = exc.model_ids
+                result["detail"] = (
+                    f'Reachable, but the endpoint did not say in time whether it serves "{normalized_model_name}" '
+                    f'as "{normalized_model_name}:latest".'
+                )
             except Exception as exc:
                 result["detail"] = str(exc)
             else:
                 result["reachable"] = True
                 result["models_served"] = model_ids
-                result["model_found"] = (
-                    None
-                    if model_ids is None
-                    else True
-                    if normalized_model_name is None
-                    else normalized_model_name in model_ids
-                )
+                # check_model_endpoint raises ModelNotFoundError for a model it does not serve.
+                result["model_found"] = None if model_ids is None or not normalized_model_name else True
             return result
         base_url = url.rstrip("/")
         models_url = base_url + "/models"

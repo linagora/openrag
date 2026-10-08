@@ -1976,6 +1976,115 @@ async def test_validate_endpoint_reports_missing_model_on_reachable_endpoint(mon
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("served", "version_status", "model_found", "detail"),
+    [
+        # Ollama lists the tag and serves an untagged name as :latest, and only as that.
+        (["nomic-embed-text:latest"], 200, True, None),
+        (["nomic-embed-text:v1.5"], 200, False, None),
+        # vLLM accepts only the names it lists, and has no /api/version.
+        (["nomic-embed-text:latest"], 404, False, None),
+        # A failed answer is not an Ollama answer.
+        (["nomic-embed-text:latest"], "refused", False, None),
+        # No answer in time: neither served nor refused.
+        (
+            ["nomic-embed-text:latest"],
+            "timeout",
+            None,
+            'Reachable, but the endpoint did not say in time whether it serves "nomic-embed-text" '
+            'as "nomic-embed-text:latest".',
+        ),
+    ],
+)
+async def test_validate_endpoint_matches_an_untagged_model_name_to_its_latest_tag_on_ollama(
+    monkeypatch, served, version_status, model_found, detail
+):
+    import httpx
+
+    svc = _make_service()
+
+    class FakeResponse:
+        def __init__(self, status_code, payload):
+            self.status_code = status_code
+            self._payload = payload
+
+        def json(self):
+            return self._payload
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, url):
+            if url == "http://models.test:11434/api/version":
+                if version_status == "refused":
+                    raise httpx.ConnectError("connection refused")
+                if version_status == "timeout":
+                    raise httpx.ReadTimeout("timed out")
+                return FakeResponse(version_status, {"version": "0.40.1"})
+            assert url == "http://models.test:11434/v1/models"
+            return FakeResponse(200, {"data": [{"id": model_id} for model_id in served]})
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+    result = await svc.validate_endpoint("http://models.test:11434/v1", "nomic-embed-text", model_type="embedder")
+
+    assert result == {
+        "reachable": True,
+        "model_found": model_found,
+        "models_served": served,
+        "transcription_supported": None,
+        "detail": detail,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [None, "", "   "])
+async def test_validate_endpoint_leaves_model_found_unset_without_a_model_name(monkeypatch, model_name):
+    import httpx
+
+    svc = _make_service()
+
+    class FakeResponse:
+        status_code = 200
+
+        def json(self):
+            return {"data": []}
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, url):
+            assert url == "http://llm:8000/v1/models"
+            return FakeResponse()
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+    result = await svc.validate_endpoint("http://llm:8000/v1", model_name)
+
+    assert result == {
+        "reachable": True,
+        "model_found": None,
+        "models_served": [],
+        "transcription_supported": None,
+        "detail": None,
+    }
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("payload", [{"models": [{"id": "other-model"}]}, None])
 async def test_validate_endpoint_keeps_reachable_when_model_list_is_invalid(monkeypatch, payload):
     import httpx
