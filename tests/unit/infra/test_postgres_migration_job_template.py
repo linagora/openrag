@@ -173,6 +173,26 @@ def test_a_long_fullname_keeps_the_copies_apart_from_the_originals(tmp_path: Pat
 
 
 @requires_helm
+@pytest.mark.parametrize(
+    ("fullname", "copy_name"),
+    [
+        pytest.param("a" * 49 + "-migration", "a" * 49 + "-migration-env", id="config-map"),
+        pytest.param("a" * 41 + "-migration", "a" * 41 + "-migration-env-secrets", id="secret"),
+    ],
+)
+def test_a_fullname_that_names_a_copy_like_the_original_is_refused(
+    tmp_path: Path, fullname: str, copy_name: str
+) -> None:
+    """Cut before the suffix, a fullname ending in "-migration" still names a
+    copy like the original at one length, and on an upgrade the copy's delete
+    policy would delete the app's object."""
+    result = _render(tmp_path, *_JOB_ON, "--set", "fullnameOverride=" + fullname)
+
+    assert result.returncode != 0
+    assert f'would be named "{copy_name}"' in result.stderr
+
+
+@requires_helm
 @pytest.mark.parametrize("args", [pytest.param((), id="job-off"), pytest.param(_JOB_ON, id="job-on")])
 def test_the_config_checksum_is_the_rendered_config_map(tmp_path: Path, args: tuple[str, ...]) -> None:
     """checksum/config hashes configmap-env.yaml as the template outputs it. A

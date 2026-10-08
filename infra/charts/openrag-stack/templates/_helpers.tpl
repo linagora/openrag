@@ -96,17 +96,27 @@ hook reads it directly.
 
 The fullname is cut before the suffix, not after: cut after, a 62-character
 fullname would give the copy the same name as the app's Secret, and the copy's
-hook-delete-policy would then delete the app's Secret.
+hook-delete-policy would then delete the app's Secret. Cutting before still
+collides for one length of a fullname ending in "-migration" (59 characters for
+the ConfigMap, 51 for the Secret), so the helpers refuse that case.
 */}}
 {{- define "openrag-stack.migrationConfigMapName" -}}
-{{- printf "%s-migration-env" (include "openrag-stack.fullname" . | trunc 49 | trimSuffix "-") }}
+{{- $name := printf "%s-migration-env" (include "openrag-stack.fullname" . | trunc 49 | trimSuffix "-") }}
+{{- if eq $name (printf "%s-env" (include "openrag-stack.fullname" .)) }}
+{{- fail (printf "the migration Job's ConfigMap copy would be named %q, like the app's ConfigMap, and deleting the copy would delete it; change the release name or fullnameOverride" $name) }}
+{{- end }}
+{{- $name }}
 {{- end }}
 
 {{- define "openrag-stack.migrationSecretName" -}}
 {{- if .Values.env.existingSecret }}
 {{- .Values.env.existingSecret }}
 {{- else }}
-{{- printf "%s-migration-env-secrets" (include "openrag-stack.fullname" . | trunc 41 | trimSuffix "-") }}
+{{- $name := printf "%s-migration-env-secrets" (include "openrag-stack.fullname" . | trunc 41 | trimSuffix "-") }}
+{{- if eq $name (include "openrag-stack.secretName" .) }}
+{{- fail (printf "the migration Job's Secret copy would be named %q, like the app's Secret, and deleting the copy would delete it; change the release name or fullnameOverride" $name) }}
+{{- end }}
+{{- $name }}
 {{- end }}
 {{- end }}
 
