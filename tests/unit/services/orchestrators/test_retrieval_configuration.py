@@ -46,6 +46,7 @@ def _config() -> SimpleNamespace:
         partitions={},
         models=SimpleNamespace(embedder={}, reranker={}, llm={}),
         vectordb=SimpleNamespace(hybrid_search=True),
+        rag=SimpleNamespace(mode="ChatBotRag", max_contextualized_query_len=512),
     )
 
 
@@ -88,7 +89,24 @@ def test_public_configuration_uses_effective_contextualizer_and_expansion_llms()
 
     partition = public["partitions"][0]
     assert partition["contextualizer"]["model"] == "contextualizer-model"
+    assert partition["contextualizer"]["mode"] == "ChatBotRag"
+    assert partition["contextualizer"]["max_contextualized_query_len"] == 512
     assert partition["retrieval"]["query_expansion_llm"]["model"] == "query-expansion-model"
+
+
+@pytest.mark.parametrize(
+    ("setting", "changed"),
+    [("mode", "SimpleRag"), ("max_contextualized_query_len", 1024)],
+)
+def test_configuration_fingerprint_tracks_rag_query_path_settings(setting, changed):
+    config = _config()
+    config.partitions = {"tenant-a": _partition()}
+    service = RetrievalService(searcher=_Searcher(), reranker=None, llm=None, config=config)
+
+    first = service.configuration_fingerprint(["tenant-a"])
+    setattr(config.rag, setting, changed)
+
+    assert service.configuration_fingerprint(["tenant-a"]) != first
 
 
 @pytest.mark.parametrize(
@@ -107,6 +125,30 @@ def test_configuration_fingerprint_tracks_pipeline_settings(retrieval_type, sett
 
     first = service.configuration_fingerprint(["tenant-a"])
     setattr(retrieval, setting, changed)
+
+    assert service.configuration_fingerprint(["tenant-a"]) != first
+
+
+def test_public_configuration_reports_the_top_n_that_applies():
+    config = _config()
+    config.partitions = {
+        "tenant-a": _partition(name="tenant-a"),
+        "tenant-b": _partition(name="tenant-b", retrieval=RetrievalPipelineConfig(top_n=12)),
+    }
+    service = RetrievalService(searcher=_Searcher(), reranker=None, llm=None, config=config)
+
+    public = service.public_retrieval_configuration(["all"])
+
+    assert [partition["reranker"]["top_n"] for partition in public["partitions"]] == [5, 12]
+
+
+def test_configuration_fingerprint_tracks_global_top_n_when_preset_leaves_it_unset():
+    config = _config()
+    config.partitions = {"tenant-a": _partition()}
+    service = RetrievalService(searcher=_Searcher(), reranker=None, llm=None, config=config)
+
+    first = service.configuration_fingerprint(["tenant-a"])
+    config.reranker.top_k = 15
 
     assert service.configuration_fingerprint(["tenant-a"]) != first
 
@@ -135,7 +177,7 @@ async def test_resolved_plan_reuses_the_prompt_used_for_execution_and_fingerprin
         def __init__(self):
             self.calls = 0
 
-        async def resolve_prompt_with_identity(self, _prompt_type, names):
+        async def resolve_prompt_with_identity(self, _prompt_type, names, *, strict_errors=False):
             self.calls += 1
             content = f"private prompt version {self.calls}"
             return SimpleNamespace(
@@ -182,6 +224,46 @@ async def test_resolved_plan_reuses_the_prompt_used_for_execution_and_fingerprin
         resolved_plan=plan,
     )
     assert prompts.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_snapshot_plan_uses_strict_prompt_resolution_for_both_prompt_identities():
+    class _Prompts:
+        def __init__(self):
+            self.strict_values = []
+
+        async def resolve_prompt_with_identity(self, prompt_type, names, *, strict_errors=False):
+            self.strict_values.append((prompt_type, strict_errors))
+            content = f"{prompt_type} prompt"
+            return SimpleNamespace(
+                content=content,
+                content_hash=hashlib.sha256(content.encode()).hexdigest(),
+                name=names[0] if names else None,
+                source="named",
+            )
+
+    config = _config()
+    config.partitions = {
+        "tenant-a": _partition(
+            retrieval=RetrievalPipelineConfig(type="multiQuery", multi_query_prompt_name="legal-query")
+        )
+    }
+    prompts = _Prompts()
+    service = RetrievalService(
+        searcher=_Searcher(),
+        reranker=None,
+        llm=None,
+        config=config,
+        prompt_service=prompts,
+    )
+
+    await service.resolve_retrieval_plan(
+        ["tenant-a"],
+        build_execution=False,
+        strict_prompt_resolution=True,
+    )
+
+    assert prompts.strict_values == [("multi_query", True), ("query_contextualizer", True)]
 
 
 @pytest.mark.asyncio
@@ -258,3 +340,56 @@ async def test_resolved_snapshot_uses_global_reranker_for_legacy_preset():
     assert reranker["enabled"] is True
     assert reranker["name"] == "default"
     assert reranker["model"] == "legacy-reranker"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("has_factory", [False, True])
+async def test_static_reranker_model_changes_resolved_fingerprint(has_factory):
+    config = _config()
+    config.reranker.model_name = "reranker-a"
+    config.partitions = {"tenant-a": _partition(retrieval=RetrievalPipelineConfig(enable_reranker=True))}
+
+    def missing_catalog_endpoint(name):
+        raise KeyError(name)
+
+    service = RetrievalService(
+        searcher=_Searcher(),
+        reranker=object(),
+        llm=None,
+        config=config,
+        reranker_factory=missing_catalog_endpoint if has_factory else None,
+    )
+
+    prompt = SimpleNamespace(content_hash="context-hash", name=None, source="default")
+    first = await service.resolve_retrieval_plan(["tenant-a"], contextualizer_prompt=prompt, build_execution=False)
+    config.reranker.model_name = "reranker-b"
+    second = await service.resolve_retrieval_plan(["tenant-a"], contextualizer_prompt=prompt, build_execution=False)
+
+    assert first.public_configuration["partitions"][0]["reranker"]["model"] == "reranker-a"
+    assert second.public_configuration["partitions"][0]["reranker"]["model"] == "reranker-b"
+    assert first.configuration_fingerprint != second.configuration_fingerprint
+
+
+@pytest.mark.asyncio
+async def test_resolved_plan_reloads_an_embedder_switched_by_another_process():
+    config = _config()
+    config.partitions = {"tenant-a": _partition()}
+
+    class SwappedElsewhere:
+        async def try_refresh_if_stale(self) -> None:
+            config.partitions = {
+                "tenant-a": PartitionConfig(
+                    name="tenant-a",
+                    embedder="embed-b",
+                    indexation=IndexationPipelineConfig(),
+                    retrieval=RetrievalPipelineConfig(),
+                )
+            }
+
+    service = RetrievalService(
+        searcher=_Searcher(), reranker=None, llm=None, config=config, preset_service=SwappedElsewhere()
+    )
+    prompt = SimpleNamespace(content_hash="context-hash", name=None, source="default")
+    plan = await service.resolve_retrieval_plan(["tenant-a"], contextualizer_prompt=prompt, build_execution=False)
+
+    assert plan.public_configuration["partitions"][0]["embedder"]["name"] == "embed-b"

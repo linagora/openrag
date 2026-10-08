@@ -38,8 +38,9 @@ import math
 import re
 import secrets
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Any
 
 from core.config.infrastructure import VectorDBConfig
@@ -51,6 +52,7 @@ from core.utils.exceptions import (
     VDBConnectionError,
     VDBCreateOrLoadCollectionError,
     VDBDeleteError,
+    VDBError,
     VDBInsertError,
     VDBSchemaMigrationRequiredError,
     VDBSearchError,
@@ -103,6 +105,7 @@ MAX_VECTOR_FIELDS = 10
 #: Milvus partial upsert rewrites every number as a float64, and a float64
 #: rounds integers above 2**53 — so do JavaScript clients.
 MAX_SECTION_ID = 2**53 - 1
+SECTION_ID_KEYS = ("prev_section_id", "section_id", "next_section_id")
 
 
 #: Dense ANN search params for the HNSW/COSINE index on each dense field. ``ef``
@@ -135,6 +138,11 @@ RRF_K = 100
 #: *unreachable* server is already handled — ``MilvusClient`` connects eagerly in
 #: ``__init__`` and raises :class:`VDBConnectionError` before the probe runs.
 _SCHEMA_PROBE_TIMEOUT = 5.0
+
+#: How long :meth:`MilvusVectorStore.make_searchable` waits for a flushed field
+#: to answer, and how often it asks.
+_SEARCHABLE_TIMEOUT = 120.0
+_SEARCHABLE_POLL = 0.5
 
 #: Fallback dense-vector dimension for page sizing when the real one is
 #: unknown — i.e. a read-only process that never ran ``initialize`` AND the
@@ -198,6 +206,24 @@ def _scalar_output_fields(description: dict[str, Any]) -> list[str]:
     return fields
 
 
+def _changed_by_float64(value: Any) -> bool:
+    """Whether a Milvus partial upsert changes *value*, or an integer in it at any depth.
+
+    Milvus turns each number into a float64 and writes it back in its shortest
+    decimal form, so even 2**60, which a float64 holds exactly, comes back as
+    1152921504606847000.
+    """
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, int):
+        return int(Decimal(repr(float(value)))) != value
+    if isinstance(value, dict):
+        return any(_changed_by_float64(item) for item in value.values())
+    if isinstance(value, list):
+        return any(_changed_by_float64(item) for item in value)
+    return False
+
+
 class MilvusVectorStore(VectorStore):
     """Milvus 3.0 implementation of :class:`VectorStore`.
 
@@ -238,6 +264,8 @@ class MilvusVectorStore(VectorStore):
         self._search_schema_checked = False
         # Serializes adding and dropping dense fields.
         self._vector_field_lock = asyncio.Lock()
+        # Dense fields this process added and has not flushed a write into yet.
+        self._unflushed_fields: set[str] = set()
         # Dense field names on the live schema, ``None`` until read.
         self._dense_fields_cache: frozenset[str] | None = None
         # Default projection of `query_chunks_by_filter`, ``None`` until read.
@@ -1046,6 +1074,7 @@ class MilvusVectorStore(VectorStore):
                 collection_name=self._collection_name,
             ) from e
 
+        await self._flush_new_fields([field])
         # Milvus 3.0 returns {"insert_count": N, "ids": [...], "cost": ...}.
         # Fall back to len(entities) if the server omits insert_count.
         return int(result.get("insert_count", len(entities))) if isinstance(result, dict) else len(entities)
@@ -1128,17 +1157,25 @@ class MilvusVectorStore(VectorStore):
         ]
 
     @staticmethod
-    def _relaxed_diagnostic_filters(
+    def _scope_relaxed_diagnostic_filters(
         filters: dict[str, Any] | None,
-    ) -> tuple[dict[str, Any], object | None, bool, str | None]:
-        """Relax explainable filters while retaining the authorized partition scope."""
+    ) -> tuple[dict[str, Any], object | None, str | None]:
+        """Relax only a recognized file scope for its own diagnostic query."""
         relaxed = dict(filters or {})
         file_scope_kind = relaxed.pop(TRACE_FILE_SCOPE_KIND_KEY, None)
-        if file_scope_kind in {"workspace", "attachment", "file"}:
+        candidate_scope = relaxed.get("file_id")
+        if file_scope_kind in {"workspace", "attachment", "file"} and candidate_scope:
             file_scope = relaxed.pop("file_id", None)
         else:
             file_scope = None
             file_scope_kind = None
+        return relaxed, file_scope, file_scope_kind
+
+    @staticmethod
+    def _temporal_relaxed_diagnostic_filters(filters: dict[str, Any] | None) -> tuple[dict[str, Any], bool]:
+        """Relax only a simple temporal filter for its own diagnostic query."""
+        relaxed = dict(filters or {})
+        relaxed.pop(TRACE_FILE_SCOPE_KIND_KEY, None)
         raw_expr = relaxed.get("expr")
         temporal_relaxed = isinstance(raw_expr, str) and re.fullmatch(
             r'\s*(?:created_at|indexed_at)\s*(?:==|!=|>=|<=|>|<)\s*(?:ISO\s+)?(?:"[^"\r\n]*"|\'[^\'\r\n]*\')\s*',
@@ -1147,7 +1184,33 @@ class MilvusVectorStore(VectorStore):
         )
         if temporal_relaxed:
             relaxed.pop("expr", None)
-        return relaxed, file_scope, bool(temporal_relaxed), file_scope_kind
+        return relaxed, bool(temporal_relaxed)
+
+    @classmethod
+    def _relaxed_diagnostic_filters(
+        cls,
+        filters: dict[str, Any] | None,
+    ) -> tuple[dict[str, Any], object | None, bool, str | None]:
+        """Return combined relaxations for compatibility with direct callers."""
+        scope_filters, file_scope, file_scope_kind = cls._scope_relaxed_diagnostic_filters(filters)
+        _, temporal_relaxed = cls._temporal_relaxed_diagnostic_filters(filters)
+        if temporal_relaxed:
+            scope_filters.pop("expr", None)
+        return scope_filters, file_scope, temporal_relaxed, file_scope_kind
+
+    @staticmethod
+    def _merge_diagnostic_candidates(
+        results: list[tuple[list[TraceCandidate], set[str], int, float, Exception | None]],
+    ) -> tuple[list[TraceCandidate], int]:
+        """Merge result sets, prioritizing the primary scoped query for trace budget."""
+        by_id: dict[str, TraceCandidate] = {}
+        result_ids: set[str] = set()
+        for candidates, ids, _count, _duration, _error in results:
+            result_ids.update(ids)
+            for candidate in candidates:
+                by_id.setdefault(candidate.id, candidate)
+        merged = [candidate.model_copy(update={"rank": rank}) for rank, candidate in enumerate(by_id.values(), 1)]
+        return merged, len(result_ids)
 
     @staticmethod
     def _mark_dense_filter_removals(
@@ -1256,7 +1319,14 @@ class MilvusVectorStore(VectorStore):
                 duration_seconds=duration,
             )
             return
-        trace.record_stage(name, status="error", candidates=[], duration_seconds=duration, error=str(error))
+        trace.record_stage(
+            name,
+            status="error",
+            candidates=candidates,
+            candidate_count=candidate_count,
+            duration_seconds=duration,
+            error=str(error),
+        )
         trace.record_error(name, error)
 
     async def _record_hybrid_diagnostics(
@@ -1272,16 +1342,16 @@ class MilvusVectorStore(VectorStore):
         vector_field: str,
     ) -> None:
         """Run opt-in ANN legs after production ordering is already fixed."""
-        relaxed_filters, file_scope, temporal_relaxed, file_scope_kind = self._relaxed_diagnostic_filters(filters)
-        relaxed_expr = self._build_filter_expr(relaxed_filters)
+        scope_filters, file_scope, file_scope_kind = self._scope_relaxed_diagnostic_filters(filters)
+        temporal_filters, temporal_relaxed = self._temporal_relaxed_diagnostic_filters(filters)
         expr = self._build_filter_expr(filters)
-        before_result, after_result, sparse_result = await asyncio.gather(
+        calls = [
             self._diagnostic_search(
                 data=[embedding],
                 anns_field=vector_field,
                 search_params=self._dense_search_params(None),
                 top_k=top_k,
-                expr=relaxed_expr,
+                expr=expr,
                 score_name="dense",
                 candidate_limit=trace.candidate_capacity_for_stage("dense_before_threshold"),
             ),
@@ -1303,8 +1373,44 @@ class MilvusVectorStore(VectorStore):
                 score_name="sparse",
                 candidate_limit=trace.candidate_capacity_for_stage("sparse"),
             ),
+        ]
+        if file_scope is not None and file_scope_kind is not None:
+            calls.append(
+                self._diagnostic_search(
+                    data=[embedding],
+                    anns_field=vector_field,
+                    search_params=self._dense_search_params(similarity_threshold),
+                    top_k=top_k,
+                    expr=self._build_filter_expr(scope_filters),
+                    score_name="dense",
+                    candidate_limit=trace.candidate_capacity_for_stage("dense_before_threshold"),
+                )
+            )
+        if temporal_relaxed:
+            calls.append(
+                self._diagnostic_search(
+                    data=[embedding],
+                    anns_field=vector_field,
+                    search_params=self._dense_search_params(similarity_threshold),
+                    top_k=top_k,
+                    expr=self._build_filter_expr(temporal_filters),
+                    score_name="dense",
+                    candidate_limit=trace.candidate_capacity_for_stage("dense_before_threshold"),
+                )
+            )
+        results = await asyncio.gather(*calls)
+        before_result, after_result, sparse_result = results[:3]
+        before_results = [before_result, *results[3:]]
+        before, before_count = self._merge_diagnostic_candidates(before_results)
+        before_duration = max(result[3] for result in before_results)
+        first_error_index = next(
+            (index for index, result in enumerate(before_results) if result[4] is not None),
+            None,
         )
-        before, _before_ids, before_count, before_duration, before_error = before_result
+        before_error = before_results[first_error_index][4] if first_error_index is not None else None
+        for index, result in enumerate(before_results):
+            if result[4] is not None and index != first_error_index:
+                trace.record_error("dense_before_threshold", result[4])
         after, after_ids, after_count, after_duration, after_error = after_result
         sparse, _sparse_ids, sparse_count, sparse_duration, sparse_error = sparse_result
         fused_ids = self._row_ids(fused_rows)
@@ -1371,29 +1477,75 @@ class MilvusVectorStore(VectorStore):
         )
         after_ids = self._row_ids(dense_rows)
         after_count = len(dense_rows)
+        scope_filters, file_scope, file_scope_kind = self._scope_relaxed_diagnostic_filters(filters)
+        temporal_filters, temporal_relaxed = self._temporal_relaxed_diagnostic_filters(filters)
         if similarity_threshold is None:
-            before = list(after)
-            before_count = after_count
-            before_duration = production_duration
-            before_error = None
-            dense_duration = production_duration
+            before_result = (
+                self._trace_candidates(
+                    dense_rows,
+                    "dense",
+                    limit=trace.candidate_capacity_for_stage("dense_before_threshold"),
+                ),
+                after_ids,
+                after_count,
+                production_duration,
+                None,
+            )
         else:
-            relaxed_filters, file_scope, temporal_relaxed, file_scope_kind = self._relaxed_diagnostic_filters(filters)
-            before, _before_ids, before_count, before_duration, before_error = await self._diagnostic_search(
+            before_result = await self._diagnostic_search(
                 data=[embedding],
                 anns_field=vector_field,
                 search_params=self._dense_search_params(None),
                 top_k=top_k,
-                expr=self._build_filter_expr(relaxed_filters),
+                expr=self._build_filter_expr(filters),
                 score_name="dense",
                 candidate_limit=trace.candidate_capacity_for_stage("dense_before_threshold"),
             )
+        before_results = [before_result]
+        calls = []
+        if file_scope is not None and file_scope_kind is not None:
+            calls.append(
+                self._diagnostic_search(
+                    data=[embedding],
+                    anns_field=vector_field,
+                    search_params=self._dense_search_params(similarity_threshold),
+                    top_k=top_k,
+                    expr=self._build_filter_expr(scope_filters),
+                    score_name="dense",
+                    candidate_limit=trace.candidate_capacity_for_stage("dense_before_threshold"),
+                )
+            )
+        if temporal_relaxed:
+            calls.append(
+                self._diagnostic_search(
+                    data=[embedding],
+                    anns_field=vector_field,
+                    search_params=self._dense_search_params(similarity_threshold),
+                    top_k=top_k,
+                    expr=self._build_filter_expr(temporal_filters),
+                    score_name="dense",
+                    candidate_limit=trace.candidate_capacity_for_stage("dense_before_threshold"),
+                )
+            )
+        extra_results = await asyncio.gather(*calls) if calls else []
+        before_results.extend(extra_results)
+        before, before_count = self._merge_diagnostic_candidates(before_results)
+        first_error_index = next(
+            (index for index, result in enumerate(before_results) if result[4] is not None),
+            None,
+        )
+        before_error = before_results[first_error_index][4] if first_error_index is not None else None
+        for index, result in enumerate(before_results):
+            if result[4] is not None and index != first_error_index:
+                trace.record_error("dense_before_threshold", result[4])
+        if similarity_threshold is None:
+            extra_duration = max((result[3] for result in extra_results), default=0.0)
+            before_duration = production_duration + extra_duration
+            dense_duration = before_duration
+        else:
+            before_duration = max(result[3] for result in before_results)
             dense_duration = production_duration + before_duration
         if before_error is None:
-            if similarity_threshold is None:
-                file_scope = None
-                file_scope_kind = None
-                temporal_relaxed = False
             before = self._mark_dense_filter_removals(
                 before,
                 after_ids,
@@ -1829,6 +1981,81 @@ class MilvusVectorStore(VectorStore):
                 collection_name=self._collection_name,
             ) from e
 
+        await self._flush_new_fields(entities[0])
+        return int(result.get("upsert_count", len(entities))) if isinstance(result, dict) else len(entities)
+
+    async def write_vectors(self, field: str, vectors: dict[str, list[float] | None]) -> int:
+        """Partial upsert of ``{_id, field}`` per chunk.
+
+        Milvus keeps every field the upsert does not name, including the
+        dynamic ones, and accepts ``None`` for a nullable vector: the chunk then
+        drops out of that field's searches. On an auto-id collection it refuses
+        the whole batch when any ``_id`` no longer exists, so a chunk deleted
+        concurrently fails the write instead of leaving a row holding only a
+        vector (all verified on Milvus 3.0.1).
+
+        It does rewrite every number in the dynamic field as a float64, so an
+        integer beyond ±2**53 in a chunk's metadata comes back rounded, nested
+        ones too, even when the upsert passes the exact value back (verified
+        on Milvus 3.0.2). Section IDs above :data:`MAX_SECTION_ID` are written
+        back folded into their low 53 bits, as Milvus migration 3 does, which
+        keeps chunks linked to their neighbours. Any other integer the write
+        changes is logged as a warning, with its file and keys: Postgres keeps
+        each file's exact upload metadata, and search results now differ from
+        it. A full-row upsert would keep the numbers but reassign ``_id``, which
+        the collection auto-generates.
+
+        Once Storage V3 is enabled, Milvus can generate a field from a function
+        and backfill existing rows itself (``add_function_field``). Today that
+        backfill covers BM25 and MinHash only, and embedding providers are read
+        from ``milvus.yaml`` at startup; when Milvus supports text-embedding
+        functions on existing rows, re-embedding could move there instead of
+        computing vectors client-side and writing them here.
+        """
+        if not field.startswith(VECTOR_FIELD_PREFIX):
+            raise ValueError(f"'{field}' is not a per-embedder dense vector field.")
+        if not vectors:
+            return 0
+
+        entities = {int(chunk_id): {"_id": int(chunk_id), field: vector} for chunk_id, vector in vectors.items()}
+        rounded: dict[str, set[str]] = {}
+        try:
+            rows = await asyncio.to_thread(self._iter_query, f"_id in {list(entities)}", ["file_id", "$meta"])
+            for row in rows:
+                entities[row["_id"]].update(
+                    (key, row[key] & MAX_SECTION_ID)
+                    for key in SECTION_ID_KEYS
+                    if isinstance(row.get(key), int) and not 0 <= row[key] <= MAX_SECTION_ID
+                )
+                keys = {
+                    key
+                    for key, value in row.items()
+                    if key not in ("_id", "file_id", *SECTION_ID_KEYS) and _changed_by_float64(value)
+                }
+                if keys:
+                    rounded.setdefault(str(row.get("file_id")), set()).update(keys)
+            result = await self._async_client.upsert(
+                collection_name=self._collection_name,
+                data=list(entities.values()),
+                partial_update=True,
+            )
+        except MilvusException as e:
+            raise VDBInsertError(
+                f"Milvus partial upsert into `{field}` failed: {e!s}",
+                collection_name=self._collection_name,
+            ) from e
+        except Exception as e:
+            raise UnexpectedVDBError(
+                f"Unexpected error during Milvus partial upsert into `{field}`: {e!s}",
+                collection_name=self._collection_name,
+            ) from e
+
+        if rounded:
+            logger.bind(field=field, rounded={file_id: sorted(keys) for file_id, keys in rounded.items()}).warning(
+                "Milvus rounded integers beyond ±2**53 in these files' chunk metadata; "
+                "search results now show the rounded values, Postgres keeps the exact ones"
+            )
+        await self._flush_new_fields([field])
         return int(result.get("upsert_count", len(entities))) if isinstance(result, dict) else len(entities)
 
     async def insert_entities(self, entities: list[dict[str, Any]], collection: str = "default") -> int:
@@ -1853,7 +2080,52 @@ class MilvusVectorStore(VectorStore):
                 collection_name=self._collection_name,
             ) from e
 
+        await self._flush_new_fields(entities[0])
         return int(result.get("insert_count", len(entities))) if isinstance(result, dict) else len(entities)
+
+    async def make_searchable(self, field: str) -> None:
+        """Flush, then wait until ``field`` answers a search.
+
+        Milvus refuses searches on a dense field added to a loaded collection
+        until some of its data is flushed (verified on Milvus 3.0.2), and by
+        default seals a segment under 16 MB by itself only once it is a day old.
+        The flushed data then takes a moment to be indexed and loaded. After
+        that, later writes into the field are searchable at once.
+        """
+        try:
+            await asyncio.to_thread(self._client.flush, self._collection_name)
+        except MilvusException as e:
+            raise VDBInsertError(f"Milvus flush failed: {e!s}", collection_name=self._collection_name) from e
+        dimension = await self.vector_dimension(field)
+        if not dimension:
+            return
+        probe = [1.0] + [0.0] * (dimension - 1)
+        deadline = time.monotonic() + _SEARCHABLE_TIMEOUT
+        logger.bind(field=field).info("Flushed; waiting for the vector field to answer searches")
+        while True:
+            try:
+                await self._async_client.search(
+                    collection_name=self._collection_name, data=[probe], anns_field=field, limit=1
+                )
+                return
+            except MilvusException as e:
+                if time.monotonic() >= deadline:
+                    raise VDBSearchError(
+                        f"`{field}` still refuses searches {_SEARCHABLE_TIMEOUT:.0f}s after a flush: {e!s}",
+                        collection_name=self._collection_name,
+                    ) from e
+            await asyncio.sleep(_SEARCHABLE_POLL)
+
+    async def _flush_new_fields(self, fields: Iterable[str]) -> None:
+        """After the first write into a field this process added, make it searchable."""
+        for field in self._unflushed_fields.intersection(fields):
+            try:
+                await self.make_searchable(field)
+            except VDBError as e:
+                # The write itself landed; the next one into the field retries.
+                logger.bind(field=field).warning(f"New vector field not searchable yet: {e!s}")
+                continue
+            self._unflushed_fields.discard(field)
 
     async def ensure_collection(self, name: str, dimension: int, **kwargs: Any) -> None:
         """Public entry point for materialising the backing collection.
@@ -1935,6 +2207,7 @@ class MilvusVectorStore(VectorStore):
                     operation="create_index",
                 ) from e
             self._dense_fields_cache = None
+            self._unflushed_fields.add(field)
             logger.bind(field=field, dimension=dimension).info("Indexed per-embedder dense vector field")
         return created
 
@@ -2070,10 +2343,9 @@ class MilvusVectorStore(VectorStore):
             return None
 
         def _read() -> int | None:
-            try:
-                return _dense_fields(self._client.describe_collection(self._collection_name)).get(vector_field)
-            except Exception:
+            if not self._client.has_collection(self._collection_name):
                 return None
+            return _dense_fields(self._client.describe_collection(self._collection_name)).get(vector_field)
 
         return await asyncio.to_thread(_read)
 

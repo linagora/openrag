@@ -18,6 +18,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+import services.storage.milvus_store as milvus_store_module
 from api.error_handlers import register_error_handlers
 from core.config.infrastructure import VectorDBConfig
 from core.models.chunk import Chunk, ChunkType
@@ -26,6 +27,7 @@ from core.retrieval.trace import RetrievalDiagnosticsContext, RetrievalTraceBuil
 from core.utils.exceptions import (
     VDBConnectionError,
     VDBCreateOrLoadCollectionError,
+    VDBInsertError,
     VDBSchemaMigrationRequiredError,
     VDBSearchError,
 )
@@ -37,6 +39,7 @@ from services.storage.milvus_store import (
     MAX_SECTION_ID,
     SCHEMA_VERSION_PROPERTY_KEY,
     MilvusVectorStore,
+    _changed_by_float64,
     analyzer_params,
 )
 
@@ -957,9 +960,10 @@ class TestHybridDispatch:
         store._async_client.hybrid_search = AsyncMock(return_value=production)  # type: ignore[attr-defined]
         store._async_client.search = AsyncMock(  # type: ignore[attr-defined]
             side_effect=[
-                [[self._hit(10, 0.95, file_id="scoped"), self._hit(20, 0.9, file_id="outside")]],
+                [[self._hit(10, 0.95, file_id="scoped"), self._hit(20, 0.69, file_id="scoped")]],
                 [[self._hit(10, 0.95, file_id="scoped")]],
                 [[self._hit(20, 4.2), self._hit(30, 3.1)]],
+                [[self._hit(40, 0.97, file_id="outside")]],
             ]
         )
         trace = RetrievalTraceBuilder("req-1", "query")
@@ -990,22 +994,74 @@ class TestHybridDispatch:
                 "hybrid_fused",
             )
         ] == ["complete", "complete", "complete", "complete"]
-        assert [candidate["id"] for candidate in stages["dense_before_threshold"]["candidates"]] == ["10", "20"]
+        assert [candidate["id"] for candidate in stages["dense_before_threshold"]["candidates"]] == ["10", "20", "40"]
         assert [candidate["id"] for candidate in stages["dense_after_threshold"]["candidates"]] == ["10"]
         assert [candidate["id"] for candidate in stages["sparse"]["candidates"]] == ["20", "30"]
         assert [candidate["id"] for candidate in stages["hybrid_fused"]["candidates"]] == ["30", "10"]
-        assert stages["dense_before_threshold"]["candidates"][1]["removal_reason"]["code"] == "workspace_filter"
+        assert stages["dense_before_threshold"]["candidates"][1]["removal_reason"]["code"] == "dense_threshold"
+        assert stages["dense_before_threshold"]["candidates"][2]["removal_reason"]["code"] == "workspace_filter"
         assert set(finished["timings"]) >= {"dense_search", "sparse_search"}
-        assert store._async_client.search.await_count == 3  # type: ignore[attr-defined]
+        assert store._async_client.search.await_count == 4  # type: ignore[attr-defined]
         diagnostic_calls = store._async_client.search.await_args_list  # type: ignore[attr-defined]
-        assert "file_id" not in diagnostic_calls[0].kwargs["filter"]
+        assert "file_id" in diagnostic_calls[0].kwargs["filter"]
         assert "file_id" in diagnostic_calls[1].kwargs["filter"]
         assert "file_id" in diagnostic_calls[2].kwargs["filter"]
+        assert "file_id" not in diagnostic_calls[3].kwargs["filter"]
         assert "radius" not in diagnostic_calls[0].kwargs["search_params"]["params"]
+        assert "radius" in diagnostic_calls[3].kwargs["search_params"]["params"]
         for call in diagnostic_calls:
             assert 'partition in ["allowed"]' in call.kwargs["filter"]
             assert "forbidden" not in call.kwargs["filter"]
             assert call.kwargs["output_fields"] == ["file_id", "partition"]
+
+    @pytest.mark.asyncio
+    async def test_hybrid_threshold_diagnostic_keeps_scoped_candidates_when_outside_hits_rank_higher(
+        self, store: MilvusVectorStore
+    ) -> None:
+        store._async_client.hybrid_search = AsyncMock(  # type: ignore[attr-defined]
+            return_value=[[self._hit(1, 0.09, file_id="scoped")]]
+        )
+        store._async_client.search = AsyncMock(  # type: ignore[attr-defined]
+            side_effect=[
+                [[self._hit(20, 0.69, file_id="scoped")]],
+                [[]],
+                [[]],
+                [[self._hit(99, 0.99, file_id="outside")]],
+            ]
+        )
+        trace = RetrievalTraceBuilder(
+            "req-1",
+            "query",
+            diagnostics=RetrievalDiagnosticsContext(candidate_limit=1),
+        )
+
+        await store.search(
+            [0.1, 0.2],
+            query_text="query",
+            filters={
+                "partition": ["allowed"],
+                "file_id": ["scoped"],
+                "_trace_file_scope_kind": "workspace",
+            },
+            top_k=1,
+            similarity_threshold=0.7,
+            trace=trace,
+            vector_field=FIELD,
+        )
+
+        stage = next(
+            stage
+            for stage in trace.finish(configuration_fingerprint="fingerprint")["stages"]
+            if stage["name"] == "dense_before_threshold"
+        )
+        assert stage["candidate_count"] == 2
+        assert [candidate["id"] for candidate in stage["candidates"]] == ["20"]
+        assert stage["candidates"][0]["removal_reason"]["code"] == "dense_threshold"
+        diagnostic_calls = store._async_client.search.await_args_list  # type: ignore[attr-defined]
+        assert "file_id" in diagnostic_calls[0].kwargs["filter"]
+        assert "radius" not in diagnostic_calls[0].kwargs["search_params"]["params"]
+        assert "file_id" not in diagnostic_calls[3].kwargs["filter"]
+        assert "radius" in diagnostic_calls[3].kwargs["search_params"]["params"]
 
     @pytest.mark.asyncio
     async def test_hybrid_removal_reasons_use_uncapped_fused_ids(self, store: MilvusVectorStore) -> None:
@@ -1056,6 +1112,7 @@ class TestHybridDispatch:
             side_effect=[
                 [[self._hit(10, 0.9), self._hit(20, 0.8)]],
                 [[self._hit(20, 0.8)]],
+                [[]],
             ]
         )
         trace = RetrievalTraceBuilder(
@@ -1094,19 +1151,38 @@ class TestHybridDispatch:
         store = MilvusVectorStore(vdb_config.model_copy(update={"hybrid_search": False}))
         _ready_for_search(store)
         store._async_client.search = AsyncMock(  # type: ignore[attr-defined]
-            side_effect=[[[self._hit(10, 0.8)]], [[self._hit(20, -0.2)]]]
+            side_effect=[
+                [[self._hit(10, 0.8, file_id="scoped")]],
+                [[self._hit(20, 0.69, file_id="scoped")]],
+                [[self._hit(99, 0.99, file_id="outside")]],
+            ]
         )
+        trace = RetrievalTraceBuilder("req-1", "query")
 
         await store.search(
             [0.1, 0.2],
-            filters={"partition": ["allowed"]},
+            filters={
+                "partition": ["allowed"],
+                "file_id": ["scoped"],
+                "_trace_file_scope_kind": "file",
+            },
+            top_k=1,
             similarity_threshold=0.7,
-            trace=RetrievalTraceBuilder("req-1", "query"),
+            trace=trace,
             vector_field=FIELD,
         )
 
         diagnostic_call = store._async_client.search.await_args_list[1]  # type: ignore[attr-defined]
+        assert "file_id" in diagnostic_call.kwargs["filter"]
         assert "radius" not in diagnostic_call.kwargs["search_params"]["params"]
+        before_stage = next(
+            stage
+            for stage in trace.finish(configuration_fingerprint="fp")["stages"]
+            if stage["name"] == "dense_before_threshold"
+        )
+        candidates = {candidate["id"]: candidate for candidate in before_stage["candidates"]}
+        assert candidates["20"]["removal_reason"]["code"] == "dense_threshold"
+        assert candidates["99"]["removal_reason"]["code"] == "file_filter"
 
     @pytest.mark.asyncio
     async def test_parallel_dense_diagnostics_report_wall_clock_duration(self, store: MilvusVectorStore) -> None:
@@ -1173,6 +1249,7 @@ class TestHybridDispatch:
         store._async_client.search = AsyncMock(  # type: ignore[attr-defined]
             side_effect=[
                 [[self._hit(40, 0.95)]],
+                [[]],
                 [[]],
                 [[]],
             ]
@@ -2036,6 +2113,247 @@ class TestDropVectorField:
         store._client.drop_collection_field.assert_not_called()
 
 
+def _section_ids(store: MilvusVectorStore, rows: list[dict]) -> None:
+    iterator = MagicMock()
+    iterator.next.side_effect = [rows, []]
+    store._client.query_iterator.return_value = iterator
+
+
+class TestNewFieldIsMadeSearchable:
+    """Milvus refuses searches on a field added to a loaded collection until its data is flushed."""
+
+    async def _new_field(self, store: MilvusVectorStore) -> None:
+        store._client.describe_collection.return_value = _descriptor(FIELD)
+        store._client.query.return_value = [{"count(*)": 3}]
+        await store.ensure_vector_field("vector_bge_m3", 768)
+        store._client.describe_collection.return_value = _descriptor(FIELD, "vector_bge_m3")
+        store._async_client.search = AsyncMock(return_value=[[]])
+        _section_ids(store, [])
+        store._async_client.upsert = AsyncMock(return_value={"upsert_count": 1})
+        store._async_client.insert = AsyncMock(return_value={"insert_count": 1})
+
+    async def test_the_first_write_flushes_once(self, store: MilvusVectorStore) -> None:
+        await self._new_field(store)
+
+        await store.write_vectors("vector_bge_m3", {"11": [0.1]})
+        _section_ids(store, [])
+        await store.write_vectors("vector_bge_m3", {"12": [0.2]})
+
+        store._client.flush.assert_called_once_with(store._collection_name)
+
+    @pytest.mark.parametrize(
+        "write",
+        [
+            # The upload path (stages/store.py).
+            pytest.param(
+                lambda store: store.upsert(
+                    [Chunk(id="c1", document_id="f1", text="hi", partition="p", embedding=[0.1, 0.2])],
+                    vector_field="vector_bge_m3",
+                ),
+                id="upsert",
+            ),
+            # A copy, and a metadata update, into the partition.
+            pytest.param(
+                lambda store: store.insert_entities([{"text": "hi", "vector_bge_m3": [0.1]}]), id="insert_entities"
+            ),
+            pytest.param(
+                lambda store: store.upsert_entities([{"text": "hi", "vector_bge_m3": [0.1]}]), id="upsert_entities"
+            ),
+        ],
+    )
+    async def test_an_upload_into_it_flushes_too(self, store: MilvusVectorStore, write) -> None:
+        await self._new_field(store)
+
+        await write(store)
+
+        store._client.flush.assert_called_once_with(store._collection_name)
+
+    async def test_it_waits_until_the_field_answers(self, store: MilvusVectorStore, monkeypatch) -> None:
+        # The flushed data takes a moment to be indexed and loaded.
+        monkeypatch.setattr(milvus_store_module, "_SEARCHABLE_POLL", 0)
+        await self._new_field(store)
+        store._async_client.search = AsyncMock(side_effect=[MilvusException(1, "not loaded"), [[]]])
+
+        await store.make_searchable("vector_bge_m3")
+
+        assert store._async_client.search.await_count == 2
+        assert store._async_client.search.call_args.kwargs["anns_field"] == "vector_bge_m3"
+
+    async def test_a_field_that_never_answers_is_an_error(self, store: MilvusVectorStore, monkeypatch) -> None:
+        monkeypatch.setattr(milvus_store_module, "_SEARCHABLE_TIMEOUT", 0)
+        await self._new_field(store)
+        store._async_client.search = AsyncMock(side_effect=MilvusException(1, "not loaded"))
+
+        # Fails instead of hanging if the deadline is no longer checked.
+        with pytest.raises(VDBSearchError, match="still refuses searches"):
+            await asyncio.wait_for(store.make_searchable("vector_bge_m3"), timeout=5)
+
+    async def test_a_field_already_there_is_not_flushed(self, store: MilvusVectorStore) -> None:
+        store._client.describe_collection.return_value = _descriptor(FIELD, "vector_bge_m3")
+        store._client.list_indexes.return_value = ["vector_bge_m3"]
+        await store.ensure_vector_field("vector_bge_m3", 768)
+        _section_ids(store, [])
+        store._async_client.upsert = AsyncMock(return_value={"upsert_count": 1})
+
+        await store.write_vectors("vector_bge_m3", {"11": [0.1]})
+
+        store._client.flush.assert_not_called()
+
+    async def test_a_failed_flush_keeps_the_write_and_the_next_one_retries(self, store: MilvusVectorStore) -> None:
+        await self._new_field(store)
+        store._client.flush.side_effect = [MilvusException(1, "busy"), None]
+
+        assert await store.write_vectors("vector_bge_m3", {"11": [0.1]}) == 1
+        _section_ids(store, [])
+        await store.write_vectors("vector_bge_m3", {"12": [0.2]})
+        _section_ids(store, [])
+        await store.write_vectors("vector_bge_m3", {"13": [0.3]})
+
+        assert store._client.flush.call_count == 2
+
+
+@pytest.mark.parametrize(
+    ("value", "changed"),
+    [
+        # Measured on Milvus 3.0.2: inserted, partially upserted, read back.
+        (2**53, False),
+        (2**53 + 1, True),
+        (2**53 + 2, False),
+        (2**60, True),
+        (10**17, False),
+        (123456789012345678, True),
+        (9007199254740993000, False),
+        (10**18, False),
+        (1234567890123456789, True),
+        (2**63 - 1, True),
+        (-(2**63), True),
+        (-(2**53 + 1), True),
+        (42, False),
+        (True, False),
+        (0.5, False),
+        ({"ids": [1, 2**53 + 1]}, True),
+    ],
+)
+def test_changed_by_float64_matches_what_milvus_writes_back(value, changed: bool) -> None:
+    assert _changed_by_float64(value) is changed
+
+
+class TestWriteVectors:
+    async def test_only_the_named_field_is_written(self, store: MilvusVectorStore) -> None:
+        _section_ids(store, [{"_id": 11, "section_id": 5, "next_section_id": 6}, {"_id": 12, "prev_section_id": 5}])
+        store._async_client.upsert = AsyncMock(return_value={"upsert_count": 2})
+
+        written = await store.write_vectors("vector_bge_m3", {"11": [0.1, 0.2], "12": None})
+
+        assert written == 2
+        store._async_client.upsert.assert_awaited_once_with(
+            collection_name=store._collection_name,
+            # A partial upsert: every field it does not name keeps its value,
+            # and None clears the vector. Milvus's primary key is INT64.
+            data=[{"_id": 11, "vector_bge_m3": [0.1, 0.2]}, {"_id": 12, "vector_bge_m3": None}],
+            partial_update=True,
+        )
+
+    async def test_section_ids_above_2_53_are_folded_and_stay_linked(self, store: MilvusVectorStore) -> None:
+        big = 1_800_000_000_000_000_000
+        _section_ids(
+            store,
+            [
+                {"_id": 11, "prev_section_id": None, "section_id": big, "next_section_id": big + 1},
+                {"_id": 12, "prev_section_id": big, "section_id": big + 1, "next_section_id": None},
+            ],
+        )
+        store._async_client.upsert = AsyncMock(return_value={"upsert_count": 2})
+
+        await store.write_vectors("vector_bge_m3", {"11": [0.1], "12": [0.2]})
+
+        kwargs = store._client.query_iterator.call_args.kwargs
+        assert kwargs["filter"] == "_id in [11, 12]"
+        assert kwargs["output_fields"] == ["file_id", "$meta"]
+        first, second = store._async_client.upsert.call_args.kwargs["data"]
+        assert first == {
+            "_id": 11,
+            "vector_bge_m3": [0.1],
+            "section_id": big & MAX_SECTION_ID,
+            "next_section_id": (big + 1) & MAX_SECTION_ID,
+        }
+        assert first["next_section_id"] == second["section_id"]
+        assert second["prev_section_id"] == first["section_id"]
+        assert "next_section_id" not in second
+
+    async def test_metadata_integers_a_float64_changes_are_logged(self, store: MilvusVectorStore) -> None:
+        from loguru import logger as _logger
+
+        records: list[dict] = []
+        sink = _logger.add(lambda message: records.append(message.record), level="WARNING")
+        try:
+            _section_ids(
+                store,
+                [
+                    {
+                        "_id": 2**60 + 1,
+                        "file_id": "f1",
+                        "section_id": 2**60 + 1,
+                        "ext_id": 2**53 + 1,
+                        "tags": {"ids": [7, 2**53 + 3]},
+                        "shortest": 2**60,
+                        "kept": 2**53 + 2,
+                        "ratio": 0.5,
+                        "flag": True,
+                    },
+                    {"_id": 12, "file_id": "f2", "page": 4},
+                ],
+            )
+            store._async_client.upsert = AsyncMock(return_value={"upsert_count": 2})
+
+            assert await store.write_vectors("vector_bge_m3", {str(2**60 + 1): [0.1], "12": [0.2]}) == 2
+        finally:
+            _logger.remove(sink)
+
+        # The typed `_id` and the folded section ID are not rounded, and Milvus
+        # writes 2**53 + 2 back unchanged.
+        (record,) = records
+        assert record["extra"]["rounded"] == {"f1": ["ext_id", "shortest", "tags"]}
+        assert record["extra"]["field"] == "vector_bge_m3"
+
+    async def test_a_failed_write_logs_no_rounding(self, store: MilvusVectorStore) -> None:
+        from loguru import logger as _logger
+
+        records: list[dict] = []
+        sink = _logger.add(lambda message: records.append(message.record), level="WARNING")
+        try:
+            _section_ids(store, [{"_id": 11, "file_id": "f1", "ext_id": 2**53 + 1}])
+            store._async_client.upsert = AsyncMock(side_effect=MilvusException(1, "boom"))
+
+            with pytest.raises(VDBInsertError):
+                await store.write_vectors("vector_bge_m3", {"11": [0.1]})
+        finally:
+            _logger.remove(sink)
+
+        assert records == []
+
+    async def test_nothing_to_write_makes_no_call(self, store: MilvusVectorStore) -> None:
+        store._async_client.upsert = AsyncMock()
+
+        assert await store.write_vectors("vector_bge_m3", {}) == 0
+        store._async_client.upsert.assert_not_called()
+
+    @pytest.mark.parametrize("field", ["vector", "sparse", "text"])
+    async def test_only_a_per_embedder_field_can_be_written(self, store: MilvusVectorStore, field: str) -> None:
+        store._async_client.upsert = AsyncMock()
+
+        with pytest.raises(ValueError, match="per-embedder"):
+            await store.write_vectors(field, {"11": [0.1]})
+        store._async_client.upsert.assert_not_called()
+
+    async def test_a_backend_failure_is_an_insert_error(self, store: MilvusVectorStore) -> None:
+        _section_ids(store, [])
+        store._async_client.upsert = AsyncMock(side_effect=MilvusException(1, "boom"))
+
+        with pytest.raises(VDBInsertError, match="vector_bge_m3"):
+            await store.write_vectors("vector_bge_m3", {"11": [0.1]})
+
+
 class TestVectorFieldRouting:
     async def test_upsert_writes_the_named_field_only(self, store: MilvusVectorStore) -> None:
         store._async_client.insert = AsyncMock(return_value={"insert_count": 1})
@@ -2140,3 +2458,15 @@ class TestVectorFieldRouting:
         assert await store.vector_dimension(FIELD) == 1024
         assert await store.vector_dimension("vector_not_there_yet") is None
         assert await store.vector_dimension() is None
+
+    async def test_dimension_lookup_propagates_backend_errors(self, store: MilvusVectorStore) -> None:
+        store._client.describe_collection.side_effect = RuntimeError("milvus unreachable")
+
+        with pytest.raises(RuntimeError, match="milvus unreachable"):
+            await store.vector_dimension(FIELD)
+
+    async def test_dimension_is_absent_before_collection_creation(self, store: MilvusVectorStore) -> None:
+        store._client.has_collection.return_value = False
+        store._client.describe_collection.side_effect = RuntimeError("collection does not exist")
+
+        assert await store.vector_dimension(FIELD) is None

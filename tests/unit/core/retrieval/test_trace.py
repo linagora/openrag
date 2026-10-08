@@ -27,9 +27,10 @@ from core.retrieval.trace import (
     candidates_from_chunks,
     canonical_fingerprint,
     merge_child_traces,
+    merge_query_traces,
     safe_public_value,
 )
-from pydantic import ValidationError
+from pydantic import ValidationError, create_model
 
 FIXTURE = Path(__file__).parents[3] / "fixtures" / "retrieval_trace_v1.json"
 
@@ -69,7 +70,6 @@ def test_safe_public_value_redacts_secrets_and_content():
         }
     )
     assert value == {
-        "model": "public",
         "contextualization": {
             "model": "also-public",
             "prompt": {"content_hash": "hash"},
@@ -137,30 +137,34 @@ def test_contextualization_bypass_is_preserved_by_safe_serialization():
 
 
 @pytest.mark.parametrize(
-    ("query", "secret"),
+    "query",
     [
-        ("Authorization: Bearer bearer-secret", "bearer-secret"),
-        ("Authorization: Bearer abc123", "abc123"),
-        ("Authorization: Basic basic-secret", "basic-secret"),
-        ("Use Bearer bare-secret for the request", "bare-secret"),
-        ("Use Bearer abc12 for the request", "abc12"),
-        ("Use Basic a1 for authentication", "a1"),
-        ("password=hunter2", "hunter2"),
-        ("api_key=secret", "secret"),
-        ("token=abc123", "abc123"),
-        ("password: hunter2", "hunter2"),
-        ("password: secret", "secret"),
-        ("password: 123456", "123456"),
-        ("api_key: secret", "secret"),
-        ("token: abc123", "abc123"),
-        ("token: secret", "secret"),
-        ("token: 123456", "123456"),
-        ('Find token="quoted-secret" in the policy', "quoted-secret"),
-        ('Find token="multiline-secret\ncontinued-secret" in the policy', "multiline-secret"),
-        ("Find api_key='quoted-key' in the policy", "quoted-key"),
+        "Authorization: Bearer bearer-secret",
+        "Authorization: Bearer abc123",
+        "Authorization: Basic basic-secret",
+        "Use Bearer bare-secret for the request",
+        "Use Bearer abc12 for the request",
+        "Use Basic a1 for authentication",
+        "password=hunter2",
+        "api_key=secret",
+        "token=abc123",
+        "password: hunter2",
+        "password: secret",
+        "password: 123456",
+        "api_key: secret",
+        "token: abc123",
+        "token: secret",
+        "token: 123456",
+        'Find token="quoted-secret" in the policy',
+        'Find token="multiline-secret\ncontinued-secret" in the policy',
+        "Find api_key='quoted-key' in the policy",
+        "What is basic 3D modeling?",
+        "basic COVID-19 guidance",
+        "Basic B2B sales process",
+        "api_key: how do I rotate it?",
     ],
 )
-def test_trace_query_fields_scrub_embedded_credentials(query, secret):
+def test_trace_query_fields_preserve_exact_text(query):
     builder = RetrievalTraceBuilder("request", query)
     builder.contextualization = ContextualizationTrace(
         original_query=query,
@@ -171,12 +175,10 @@ def test_trace_query_fields_scrub_embedded_credentials(query, secret):
 
     trace = builder.finish(configuration_fingerprint="fingerprint")
 
-    serialized = json.dumps(trace)
-    assert secret not in serialized
-    assert trace["original_query"] != query
-    assert trace["contextualization"]["original_query"] != query
-    assert trace["contextualization"]["subqueries"][0]["query"] != query
-    assert trace["query_traces"][0]["query"] != query
+    assert trace["original_query"] == query
+    assert trace["contextualization"]["original_query"] == query
+    assert trace["contextualization"]["subqueries"][0]["query"] == query
+    assert trace["query_traces"][0]["query"] == query
 
 
 @pytest.mark.parametrize(
@@ -267,6 +269,7 @@ def test_safe_public_value_is_deny_by_default_at_every_trace_boundary():
         {
             "chunk_text": "private root text",
             "embedding": [0.1, 0.2],
+            "source": "/srv/openrag/data/private.pdf",
             "stages": [
                 {
                     "name": "dense_after_threshold",
@@ -432,9 +435,18 @@ def test_safe_serialization_enforces_a_global_byte_budget():
         (ContextualizationTrace, {}),
     ],
 )
-def test_trace_models_forbid_unknown_fields(model, values):
+def test_trace_models_forbid_unknown_fields_and_keep_declared_fields_public(model, values):
     with pytest.raises(ValidationError):
         model(**values, private_content="must not be accepted")
+
+    ExtendedStage = create_model("ExtendedStage", __base__=TraceStage, reranker_model=(str | None, None))
+    extended = ExtendedStage(name="final", status="complete", reranker_model="bge-m3")
+    assert safe_public_value(extended)["reranker_model"] == "bge-m3"
+
+    builder = RetrievalTraceBuilder("request", "query")
+    builder.stages["final"] = extended
+    trace = builder.finish(configuration_fingerprint="fingerprint")
+    assert trace["stages"][-1]["reranker_model"] == "bge-m3"
 
 
 def test_trace_errors_are_safe_and_unvisited_stages_are_explicit():
@@ -456,6 +468,7 @@ def test_trace_errors_are_safe_and_unvisited_stages_are_explicit():
         "dense_threshold",
         "hybrid_top_k",
         "reranker_top_n",
+        "expansion_top_n",
         "final_top_n",
         "duplicate",
         "partition_filter",
@@ -463,6 +476,8 @@ def test_trace_errors_are_safe_and_unvisited_stages_are_explicit():
         "attachment_filter",
         "file_filter",
         "temporal_filter",
+        "partition_top_k",
+        "catalog_filter",
     )
 
 
@@ -614,6 +629,7 @@ def test_candidate_budget_stops_serializing_after_the_limit(monkeypatch):
     trace = parent.finish(configuration_fingerprint="fingerprint")
 
     assert trace["candidates_truncated"] is True
+    assert trace["trace_truncated"] is True
     assert model_dump_calls == trace["candidate_limit"]
 
 
@@ -643,3 +659,32 @@ def test_merge_child_traces_preserves_partition_and_nested_query_stages():
     dense = next(stage for stage in generated_trace["stages"] if stage["name"] == "dense_after_threshold")
     assert dense["candidates"][0]["id"] == "gold"
     assert request.stages["dense_after_threshold"].status == "unavailable"
+
+
+def test_merge_query_traces_keeps_child_candidates_without_reclaiming_shared_budget():
+    diagnostics = RetrievalDiagnosticsContext(candidate_limit=10)
+    parent = RetrievalTraceBuilder("parent", "query", diagnostics=diagnostics)
+    children = []
+    for group in range(2):
+        child = RetrievalTraceBuilder(f"child-{group}", "query", diagnostics=diagnostics)
+        child.record_stage(
+            "hybrid_fused",
+            status="complete",
+            candidates=[TraceCandidate(id=f"group-{group}-chunk-{index}", rank=index + 1) for index in range(3)],
+        )
+        if group == 0:
+            child.record_error("hybrid_fused", RuntimeError("diagnostic failed"))
+        children.append(child)
+
+    merge_query_traces(parent, children)
+
+    aggregate = parent.stages["hybrid_fused"]
+    assert aggregate.status == "unavailable"
+    assert aggregate.candidates == []
+    assert diagnostics.remaining_candidates == 4
+    assert parent.errors == []
+    assert parent.query_traces[0].errors[0].kind == "RuntimeError"
+    assert [
+        len(next(stage for stage in child.stages if stage.name == "hybrid_fused").candidates)
+        for child in parent.query_traces
+    ] == [3, 3]

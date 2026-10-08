@@ -769,6 +769,35 @@ describe("ModelsPage embedder edit guard (#762 C)", () => {
     return screen.findByRole("alertdialog");
   };
 
+  it("offers the drift repair only when the model name changes", async () => {
+    // Drift is a file recording another model: with the same name, the files
+    // never show as drifted, and a re-embed onto this endpoint skips them.
+    const user = userEvent.setup();
+    renderPage();
+
+    const confirm = await openModelChangeConfirm(user);
+    expect(within(confirm).getByText(/re-embed its drifted files afterwards/)).toBeTruthy();
+    expect(within(confirm).queryByText(/The model name stays the same/)).toBeNull();
+  });
+
+  it("points a same-model edit at Change embedder instead", async () => {
+    const user = userEvent.setup();
+    renderPage();
+
+    const form = await openEditForm(user);
+    const urlInput = within(form).getByDisplayValue("https://a.example/v1");
+    await user.clear(urlInput);
+    await user.type(urlInput, "https://b.example/v1");
+    await user.click(within(form).getByRole("button", { name: /Validate/ }));
+    await waitFor(() => expect(validateModelEndpointMock).toHaveBeenCalled());
+    await user.click(within(form).getByRole("button", { name: "Update" }));
+
+    const confirm = await screen.findByRole("alertdialog");
+    expect(within(confirm).getByText(/This changes the vector space/)).toBeTruthy();
+    expect(within(confirm).getByText(/The model name stays the same/)).toBeTruthy();
+    expect(within(confirm).queryByText(/re-embed its drifted files afterwards/)).toBeNull();
+  });
+
   it("keeps a model change unconfirmable until the indexed count arrives", async () => {
     // Ticking the box before the number shows acknowledges nothing.
     let resolveUsage: (value: never) => void = () => undefined;
@@ -955,5 +984,130 @@ describe("ModelsPage set default embedder (#762)", () => {
 
     await waitFor(() => expect(setDefaultMock).toHaveBeenCalledWith("llm", "qwen-chat"));
     expect(screen.queryByRole("alertdialog")).toBeNull();
+  });
+});
+
+describe("ModelsPage LLM context size", () => {
+  // One endpoint per way the backend can resolve a context window.
+  const llm = (name: string, over: Record<string, unknown> = {}) => ({
+    name,
+    model_type: "llm" as const,
+    endpoint: `http://${name}:8000/v1`,
+    model_name: name,
+    batch_size: 32,
+    timeout: 60,
+    extra: {},
+    has_api_key: false,
+    is_default: false,
+    used_by_partitions: 0,
+    detected_max_llm_context_size: null,
+    context_size_detection_pending: false,
+    default_max_llm_context_size: 8192,
+    default_max_output_tokens: 1024,
+    created_at: "2026-01-01T00:00:00+00:00",
+    updated_at: "2026-01-01T00:00:00+00:00",
+    ...over,
+  });
+  const endpoints = [
+    // A vLLM server: /v1/models reports max_model_len.
+    llm("vllm-qwen", { detected_max_llm_context_size: 131072, is_default: true }),
+    // A gateway reporting no max_model_len: the deployment default applies.
+    llm("gateway-mistral"),
+    // An admin-set window and output budget win over both.
+    llm("pinned-llama", {
+      detected_max_llm_context_size: 131072,
+      extra: { max_llm_context_size: 32768, max_output_tokens: 2048 },
+    }),
+    // Just edited: the re-probe hasn't landed yet.
+    llm("just-saved", { context_size_detection_pending: true }),
+    // An older backend that reports none of it.
+    llm("old-backend", {
+      detected_max_llm_context_size: undefined,
+      context_size_detection_pending: undefined,
+      default_max_llm_context_size: undefined,
+      default_max_output_tokens: undefined,
+    }),
+  ];
+
+  beforeEach(() => {
+    listModelEndpointsMock.mockReset().mockResolvedValue(endpoints as never);
+  });
+
+  const cardFor = (name: string) =>
+    screen.getByText(name, { selector: "[data-slot='card-title']" }).closest("[data-slot='card']") as HTMLElement;
+  const rowValue = (card: HTMLElement, label: string) =>
+    within(card).getByText(label).parentElement?.lastElementChild?.textContent;
+
+  const openLlmTab = async (user: ReturnType<typeof userEvent.setup>) => {
+    await screen.findByText("No embedder endpoints configured.");
+    await user.click(screen.getByRole("tab", { name: "llm" }));
+    await screen.findByText("vllm-qwen", { selector: "[data-slot='card-title']" });
+  };
+
+  it.each([
+    ["vllm-qwen", "131,072 (detected)", "1,024 (system default)"],
+    ["gateway-mistral", "8,192 (system default)", "1,024 (system default)"],
+    ["pinned-llama", "32,768 (set)", "2,048 (set)"],
+    ["just-saved", "Detecting…", "1,024 (system default)"],
+    ["old-backend", "System default", "System default"],
+  ])("shows %s's context size and output budget on its card", async (name, context, output) => {
+    const user = userEvent.setup();
+    renderPage();
+    await openLlmTab(user);
+
+    expect(rowValue(cardFor(name), "Context size")).toBe(context);
+    expect(rowValue(cardFor(name), "Max output tokens")).toBe(output);
+  });
+
+  it.each([
+    ["vllm-qwen", "Detected: 131,072", "System default: 1,024"],
+    ["gateway-mistral", "System default: 8,192", "System default: 1,024"],
+    ["just-saved", "Detecting…", "System default: 1,024"],
+  ])("puts what a blank field falls back to in %s's edit form", async (name, context, output) => {
+    const user = userEvent.setup();
+    renderPage();
+    await openLlmTab(user);
+    await user.click(within(cardFor(name)).getByRole("button", { name: /Edit/ }));
+
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByPlaceholderText(context)).toBeTruthy();
+    expect(within(dialog).getByPlaceholderText(output)).toBeTruthy();
+  });
+
+  it("keeps an admin-set window in the field, with the detected one as its fallback", async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await openLlmTab(user);
+    await user.click(within(cardFor("pinned-llama")).getByRole("button", { name: /Edit/ }));
+
+    const dialog = await screen.findByRole("dialog");
+    const field = within(dialog).getByPlaceholderText("Detected: 131,072") as HTMLInputElement;
+    expect(field.value).toBe("32768");
+  });
+
+  it("starts a new LLM endpoint on the deployment defaults", async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await openLlmTab(user);
+    await user.click(screen.getByRole("button", { name: /add endpoint/i }));
+
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByPlaceholderText("System default: 8,192")).toBeTruthy();
+    expect(within(dialog).getByPlaceholderText("System default: 1,024")).toBeTruthy();
+  });
+
+  it("polls until a pending detection lands", async () => {
+    listModelEndpointsMock
+      .mockReset()
+      .mockResolvedValueOnce([llm("vllm-qwen", { context_size_detection_pending: true })] as never)
+      .mockResolvedValue([llm("vllm-qwen", { detected_max_llm_context_size: 131072 })] as never);
+    const user = userEvent.setup();
+    renderPage();
+    await openLlmTab(user);
+
+    expect(rowValue(cardFor("vllm-qwen"), "Context size")).toBe("Detecting…");
+    await waitFor(() => expect(rowValue(cardFor("vllm-qwen"), "Context size")).toBe("131,072 (detected)"), {
+      timeout: 4000,
+    });
   });
 });

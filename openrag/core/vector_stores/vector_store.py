@@ -75,6 +75,29 @@ class VectorStore(ABC):
         ...
 
     @abstractmethod
+    async def write_vectors(self, field: str, vectors: dict[str, list[float] | None]) -> int:
+        """Set one dense field on existing chunks, leaving the rest of each row as is.
+
+        ``vectors`` maps chunk IDs to the new value; ``None`` clears the field,
+        which takes the chunk out of that field's searches. IDs, text, metadata
+        and every other vector field are untouched — this is how a partition's
+        chunks are re-embedded in place when its embedder changes.
+
+        The field must exist (see :meth:`ensure_vector_field`), and so must
+        every chunk: a backend may refuse the whole batch when one ID names no
+        chunk, rather than create a row holding nothing but that vector.
+        Returns the number of chunks written.
+        """
+        ...
+
+    async def make_searchable(self, field: str) -> None:
+        """Make every write into ``field`` so far answer searches, on a backend that defers it.
+
+        A no-op by default.
+        """
+        return None
+
+    @abstractmethod
     async def delete(self, ids: list[str], collection: str = "default") -> int:
         """Delete chunks by ID. Returns count of deleted items."""
         ...
@@ -132,11 +155,12 @@ class VectorStore(ABC):
     async def vector_dimension(self, vector_field: str | None = None) -> int | None:
         """Dimension the live collection actually stores for ``vector_field``.
 
-        ``None`` when it cannot be established — no field given, nothing
-        indexed with it yet, or the backend can't be reached. Callers that need
-        a number to size buffers should pick their own fallback; callers that
-        *report* the dimension must pass the ``None`` through rather than
-        substitute a guess.
+        ``None`` when the field is absent or nothing has been indexed with it.
+        Backend errors propagate so callers can distinguish an unavailable
+        store from an actual missing field. Callers that need a number to size
+        buffers should pick their own fallback; callers that *report* the
+        dimension must pass a genuine ``None`` through rather than substitute
+        a guess.
         """
         ...
 

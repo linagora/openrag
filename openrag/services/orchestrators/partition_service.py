@@ -35,6 +35,7 @@ from core.config.indexation_pipeline import IndexationPipelineConfig
 from core.config.model_endpoints import DEFAULT_ENDPOINT_ALIAS
 from core.config.retrieval_pipeline import RetrievalPipelineConfig
 from core.indexing.validators import validate_partition_name
+from core.models.embedder_swap import EmbedderSwapStatus
 from core.models.preset import PartitionConfig
 from core.utils.consts import is_internal_metadata_key
 from core.utils.exceptions import (
@@ -42,6 +43,7 @@ from core.utils.exceptions import (
     ConflictError,
     NotFoundError,
     PartitionNotFoundError,
+    ServiceUnavailableError,
     UserNotFoundError,
     ValidationError,
 )
@@ -231,6 +233,36 @@ class PartitionService:
             return
         async with copy_lock(partition):
             yield
+
+    @asynccontextmanager
+    async def operation_lock(self, partition: str) -> AsyncIterator[None]:
+        """Hold the cross-process partition fence uploads and deletes serialize on.
+
+        For operations that must not interleave with an upload admission or a
+        partition delete — an embedder swap starting or completing.
+        """
+        async with self._partition_operation_lock(partition):
+            yield
+
+    async def ensure_no_embedder_swap(self, partition: str) -> None:
+        """Refuse a write to *partition* while an embedder swap is re-embedding it.
+
+        The swap re-embeds the chunks the partition has when it starts, and
+        completes by pointing the partition at the new embedder. A file written
+        meanwhile would land in the old embedder's field and be left behind; a
+        metadata update would rewrite chunks under the swap. Repositories
+        without swap support never report one.
+        """
+        getter = getattr(self._partition_repo, "get_embedder_swap", None)
+        if getter is None:
+            return
+        swap = await getter(partition)
+        if swap is not None and swap.get("status") == EmbedderSwapStatus.RUNNING:
+            raise ConflictError(
+                f"Partition '{partition}' is being re-embedded with '{swap.get('target_embedder')}'. "
+                "Files can be added or changed once the embedder swap completes.",
+                code="EMBEDDER_SWAP_IN_PROGRESS",
+            )
 
     @asynccontextmanager
     async def _partition_operation_lock(self, partition: str) -> AsyncIterator[Any]:
@@ -549,7 +581,7 @@ class PartitionService:
         logger.info("Partition updated.", partition=partition, fields=sorted(updates))
         return result
 
-    async def get_partition_config(self, partition: str) -> dict:
+    async def get_partition_config(self, partition: str, *, strict_vector_dimension: bool = False) -> dict:
         """Return the resolved Phase 14 detail for a partition.
 
         Shapes a ``PartitionDetailResponse``: the stored preset references plus
@@ -561,7 +593,7 @@ class PartitionService:
         if row is None:
             raise PartitionNotFoundError(f"Partition '{partition}' does not exist.")
         detail = self._partition_detail(row, self.resolve_partition_row(row))
-        detail["dimension"] = await self._live_vector_dimension(row.get("embedder"))
+        detail["dimension"] = await self._live_vector_dimension(row.get("embedder"), strict=strict_vector_dimension)
         detail["document_count"] = await self._partition_repo.get_partition_file_count(partition)
         detail["indexed_embedders"] = await self._indexed_embedders(partition)
         return detail
@@ -571,6 +603,14 @@ class PartitionService:
 
         Its vectors would stay in the old field, which its searches stop reading.
         """
+        if embedder == current.get("embedder"):
+            return  # the value it already holds: nothing to refuse
+        # Ahead of the same-field shortcut below: a swap ends by pointing the
+        # partition at its target, so no other write may move the reference
+        # meanwhile — not even one the fields agree on, like the `default` alias
+        # for the endpoint it resolves to today, which a later set-default
+        # would then carry to another field under the partition's files.
+        await self.ensure_no_embedder_swap(partition)
         embedders = self._require_config().models.embedder
         old_field = getattr(embedders.get(current.get("embedder") or DEFAULT_ENDPOINT_ALIAS), "vector_field", None)
         new_field = getattr(embedders.get(embedder), "vector_field", None)
@@ -579,7 +619,7 @@ class PartitionService:
         if await self._partition_repo.get_partition_file_count(partition) > 0:
             raise ConflictError(
                 f"Partition '{partition}' has indexed files, which would disappear from search "
-                "if its embedder changed.",
+                f"if its embedder changed. Use POST /partition/{partition}/embedder-swap to re-embed them.",
                 code="PARTITION_HAS_INDEXED_FILES",
             )
         # An upload in flight has no file row yet, but already writes with the old embedder.
@@ -632,7 +672,7 @@ class PartitionService:
             logger.debug("Could not read per-file embedder provenance", partition=partition, error=str(exc))
             return []
 
-    async def _live_vector_dimension(self, embedder: str | None) -> int | None:
+    async def _live_vector_dimension(self, embedder: str | None, *, strict: bool = False) -> int | None:
         """Dimension of the vectors ``embedder`` actually stored, or ``None``.
 
         Replaces ``partitions.dimension``, which no code path has ever written:
@@ -645,22 +685,50 @@ class PartitionService:
         Read from the dense field of ``embedder``: ``None`` before anything was
         indexed with it.
 
-        A vector-store failure yields ``None`` rather than propagating: the
-        dimension is informational, and a briefly unreachable Milvus should not
-        turn a partition-config read into a 500.
+        Ordinary partition-config reads are best effort because the dimension
+        is informational. Snapshot callers pass ``strict=True`` so an outage
+        cannot be mistaken for a real ``None`` dimension and alter its hash.
         """
         getter = getattr(self._vector_store, "vector_dimension", None)
         if getter is None or self._config is None:
+            if strict:
+                raise ServiceUnavailableError(
+                    "The live vector dimension cannot be read for this partition.",
+                    code="PARTITION_DIMENSION_UNAVAILABLE",
+                )
             return None
         endpoint = self._config.models.embedder.get(embedder or "default")
         field = getattr(endpoint, "vector_field", None)
         if field is None:
+            if strict:
+                raise ServiceUnavailableError(
+                    "The configured embedder has no vector field for this partition.",
+                    code="PARTITION_DIMENSION_UNAVAILABLE",
+                )
             return None
         try:
             return await getter(field)
         except Exception as exc:
             logger.debug("Could not read the live vector dimension", error=str(exc))
+            if strict:
+                raise ServiceUnavailableError(
+                    "The live vector dimension is temporarily unavailable.",
+                    code="PARTITION_DIMENSION_UNAVAILABLE",
+                ) from exc
             return None
+
+    async def _active_vector_field(self, partition: str) -> str | None:
+        """The dense field *partition*'s current embedder reads and writes.
+
+        ``None`` when it cannot be resolved, which callers read as "do not
+        surface an embedding" rather than as "any field will do".
+        """
+        if self._config is None:
+            return None
+        row = await self._partition_repo.get_partition_row(partition)
+        embedder = (row or {}).get("embedder") or DEFAULT_ENDPOINT_ALIAS
+        endpoint = self._config.models.embedder.get(embedder)
+        return getattr(endpoint, "vector_field", None)
 
     def _validate_preset_refs(self, row: dict) -> None:
         """Validate a row's preset references for create/update.
@@ -735,7 +803,11 @@ class PartitionService:
             "indexation_preset": row.get("indexation_preset") or "default",
             "retrieval_preset": row.get("retrieval_preset") or "default",
             "indexation_pipeline": cfg.indexation.model_dump(mode="json"),
-            "retrieval_pipeline": cfg.retrieval.model_dump(mode="json"),
+            # top_n as it applies: a preset that leaves it unset follows RERANKER_TOP_K.
+            "retrieval_pipeline": {
+                **cfg.retrieval.model_dump(mode="json"),
+                "top_n": cfg.retrieval.effective_top_n(self._config.reranker.top_k),
+            },
             # Placeholder: the column is not the dimension of anything (see
             # _live_vector_dimension). get_partition_config overwrites it with
             # the live value; nothing else should read it.
@@ -901,6 +973,11 @@ class PartitionService:
         """
         _validate_limit(limit)
         await self._ensure_partition(partition)
+        # Which field to export: a chunk keeps the old embedder's vector after a
+        # swap (nothing clears it), so "the non-null one" is ambiguous and can
+        # return the stale space. None leaves the embedding out rather than
+        # guessing — the same stance resolve_vector_field takes.
+        active_field = await self._active_vector_field(partition) if include_embedding else None
         excluded = {"text"}
         filters: dict[str, Any] = {"partition": partition}
         if file_id is not None:
@@ -921,9 +998,9 @@ class PartitionService:
                 if is_internal_metadata_key(k):
                     continue
                 if is_vector_field_key(k):
-                    # "*" returns every embedder's field, null but for the one
-                    # that embedded this chunk. Surfaced as a string under "vector".
-                    if include_embedding and v is not None:
+                    # "*" returns one dense field per embedder. Legacy
+                    # surfaced the embedding as a flat string under "vector".
+                    if k == active_field and v is not None:
                         meta["vector"] = str(np.array(v).flatten().tolist())
                     continue
                 meta[k] = v

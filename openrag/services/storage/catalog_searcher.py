@@ -8,6 +8,7 @@ from time import monotonic
 from typing import TYPE_CHECKING
 
 from core.models.chunk import Chunk
+from core.models.retrieval_trace import QueryRetrievalTrace, TraceRemovalReason, TraceStage
 from core.observability.monitoring import ORPHAN_CHUNKS_DROPPED
 from core.ports.document_repo import DocumentRepository
 from core.retrieval.searcher import RetrievalSearcher
@@ -42,22 +43,56 @@ def _warn_orphans(keys: set[tuple[str, str]], dropped_chunks: int) -> None:
     )
 
 
+def _mark_stage_orphans(stage: TraceStage, orphan_ids: set[str]) -> TraceStage:
+    reason = TraceRemovalReason(
+        code="catalog_filter",
+        explanation="Candidate was removed because its file is absent from the document catalog.",
+    )
+    candidates = [
+        candidate.model_copy(update={"removal_reason": reason})
+        if candidate.id in orphan_ids and candidate.removal_reason is None
+        else candidate
+        for candidate in stage.candidates
+    ]
+    if candidates == stage.candidates:
+        return stage
+    return stage.model_copy(update={"candidates": candidates})
+
+
+def _mark_query_trace_orphans(query_trace: QueryRetrievalTrace, orphan_ids: set[str]) -> QueryRetrievalTrace:
+    return query_trace.model_copy(
+        update={
+            "stages": [_mark_stage_orphans(stage, orphan_ids) for stage in query_trace.stages],
+            "query_traces": [_mark_query_trace_orphans(child, orphan_ids) for child in query_trace.query_traces],
+        }
+    )
+
+
+def _mark_trace_orphans(trace: RetrievalTraceBuilder, orphan_ids: set[str]) -> None:
+    for stage_name, stage in trace.stages.items():
+        trace.stages[stage_name] = _mark_stage_orphans(stage, orphan_ids)
+    trace.query_traces = [_mark_query_trace_orphans(child, orphan_ids) for child in trace.query_traces]
+
+
 class CatalogSearcher(RetrievalSearcher):
     def __init__(self, searcher: RetrievalSearcher, document_repo: DocumentRepository) -> None:
         self._searcher = searcher
         self._document_repo = document_repo
 
-    async def _filter(self, chunks: list[Chunk]) -> list[Chunk]:
+    async def _filter(self, chunks: list[Chunk], *, trace: RetrievalTraceBuilder | None = None) -> list[Chunk]:
         if not chunks:
             return []
         keys = {(chunk.partition, chunk.document_id) for chunk in chunks}
         # No fallback or cache: a catalog outage must never expose deleted files.
         existing = await self._document_repo.get_indexed_documents(keys)
         result = [chunk for chunk in chunks if (chunk.partition, chunk.document_id) in existing]
-        dropped = len(chunks) - len(result)
+        orphaned_chunks = [chunk for chunk in chunks if (chunk.partition, chunk.document_id) not in existing]
+        dropped = len(orphaned_chunks)
         ORPHAN_CHUNKS_DROPPED.inc(dropped)
         if dropped:
             _warn_orphans(keys - existing.keys(), dropped)
+            if trace is not None:
+                _mark_trace_orphans(trace, {chunk.id for chunk in orphaned_chunks})
         return result
 
     async def search(
@@ -84,7 +119,8 @@ class CatalogSearcher(RetrievalSearcher):
                 similarity_threshold=similarity_threshold,
                 with_surrounding_chunks=with_surrounding_chunks,
                 **kwargs,
-            )
+            ),
+            trace=trace,
         )
 
     async def multi_query_search(
@@ -111,7 +147,8 @@ class CatalogSearcher(RetrievalSearcher):
                 similarity_threshold=similarity_threshold,
                 with_surrounding_chunks=with_surrounding_chunks,
                 **kwargs,
-            )
+            ),
+            trace=trace,
         )
 
     async def get_surrounding_chunks(

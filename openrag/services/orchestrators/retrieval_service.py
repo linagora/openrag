@@ -31,6 +31,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from core.models.preset import resolve_partition_chat_llm
+from core.models.retrieval_trace import TraceRemovalReason
 from core.prompts import load_template_by_key
 from core.retrieval.pipeline import RetrieverPipeline
 from core.retrieval.retriever import (
@@ -43,6 +44,7 @@ from core.retrieval.rrf import rrf_reranking
 from core.retrieval.searcher import file_id_restriction
 from core.retrieval.trace import (
     RetrievalTraceBuilder,
+    candidates_from_chunks,
     canonical_fingerprint,
     merge_child_traces,
     merge_query_traces,
@@ -93,6 +95,7 @@ class RetrievalService:
         reranker_factory: Callable[[str], Reranker] | None = None,
         llm_factory: Callable[[str], LLM] | None = None,
         prompt_service: Any | None = None,
+        preset_service: Any | None = None,
     ) -> None:
         self._searcher = searcher
         self._config = config
@@ -105,6 +108,7 @@ class RetrievalService:
         # disk). Optional: when absent (e.g. unit tests, no DB), we fall back to
         # the on-disk seed via load_template_by_key, preserving prior behaviour.
         self._prompt_service = prompt_service
+        self._preset_service = preset_service
         self._pipeline = self._build_legacy_pipeline(reranker=reranker, llm=llm)
 
         logger.debug(
@@ -196,6 +200,8 @@ class RetrievalService:
         prompt_type: str,
         name: str | None,
         disk_key: str,
+        *,
+        strict: bool = False,
     ) -> tuple[str, dict[str, str | None]]:
         """Resolve a query-side prompt to its text and content-free identity.
 
@@ -205,7 +211,7 @@ class RetrievalService:
         """
         resolve_with_identity = getattr(self._prompt_service, "resolve_prompt_with_identity", None)
         if resolve_with_identity is not None:
-            resolved = await resolve_with_identity(prompt_type, names=[name])
+            resolved = await resolve_with_identity(prompt_type, names=[name], strict_errors=strict)
             return resolved.content, self._public_prompt_identity(resolved)
         if self._prompt_service is not None:
             content = await self._prompt_service.resolve_prompt(prompt_type, names=[name])
@@ -228,6 +234,15 @@ class RetrievalService:
     def _partition_configs(self) -> dict[str, Any]:
         return getattr(self._config, "partitions", {}) or {}
 
+    async def refresh_partition_configs(self) -> None:
+        """Reload partition settings another process changed, such as the embedder a swap switched."""
+        if self._preset_service is not None:
+            await self._preset_service.try_refresh_if_stale()
+
+    def has_loaded_partition_retrieval_config(self, partition: str) -> bool:
+        """Return whether this process has resolved retrieval settings for a partition."""
+        return partition in self._partition_configs()
+
     def _effective_contextualizer_name(self, partitions: Sequence[str]) -> str:
         """Mirror QueryService's partition LLM resolution for public metadata."""
         if self._llm_factory is None:
@@ -244,6 +259,15 @@ class RetrievalService:
         return {
             "name": name,
             "model": getattr(endpoint, "model_name", None),
+        }
+
+    def _legacy_reranker_identity(self) -> dict[str, object]:
+        """Describe the startup reranker used by the legacy retrieval pipeline."""
+        if self._legacy_reranker is None:
+            return {"name": None, "model": None}
+        return {
+            "name": "default",
+            "model": getattr(getattr(self._config, "reranker", None), "model_name", None),
         }
 
     def public_retrieval_configuration(self, partitions: Sequence[str]) -> dict[str, object]:
@@ -290,6 +314,11 @@ class RetrievalService:
                 )
             )
             reranker_name = getattr(retrieval, "reranker", None) or ("default" if reranker_enabled else None)
+            reranker_endpoint = (
+                self._legacy_reranker_identity()
+                if partition is None or self._reranker_factory is None
+                else self._public_endpoint(self._config, "reranker", reranker_name)
+            )
             related_limit = getattr(
                 retrieval,
                 "related_limit",
@@ -300,6 +329,10 @@ class RetrievalService:
                 "max_ancestor_depth",
                 self._legacy_retriever_value("max_ancestor_depth", None),
             )
+            # top_n as it applies: a preset that leaves it unset follows RERANKER_TOP_K.
+            top_n = getattr(retrieval, "top_n", None)
+            if top_n is None:
+                top_n = getattr(getattr(self._config, "reranker", None), "top_k", None)
             public_partitions.append(
                 {
                     "name": partition_name,
@@ -318,17 +351,17 @@ class RetrievalService:
                         "query_expansion_llm": query_expansion_llm,
                     },
                     "reranker": {
-                        **self._public_endpoint(self._config, "reranker", reranker_name),
+                        **reranker_endpoint,
                         "enabled": reranker_enabled,
-                        "top_n": getattr(
-                            retrieval,
-                            "top_n",
-                            getattr(getattr(self._config, "reranker", None), "top_k", None),
-                        ),
+                        "top_n": top_n,
                     },
                     "contextualizer": {
                         **contextualizer_endpoint,
                         "prompt_name": getattr(retrieval, "query_contextualizer_prompt_name", None),
+                        "mode": getattr(getattr(self._config, "rag", None), "mode", None),
+                        "max_contextualized_query_len": getattr(
+                            getattr(self._config, "rag", None), "max_contextualized_query_len", None
+                        ),
                     },
                     "expansion": {
                         "include_related": getattr(retrieval, "include_related", False),
@@ -367,14 +400,28 @@ class RetrievalService:
             "model": getattr(getattr(self._config, "embedder", None), "model_name", None),
             "vector_field": getattr(default_embedder, "vector_field", None),
         }
-        public_partitions = []
-        for partition_name in sorted(set(selected_partitions)):
-            public_partitions.append(
-                {
-                    "name": partition_name,
-                    "embedder": raw_search_embedder,
-                }
-            )
+        if self._searcher_factory is None or not configured_partitions:
+            public_partitions = [
+                {"name": partition_name, "embedder": raw_search_embedder}
+                for partition_name in sorted(set(selected_partitions))
+            ]
+        else:
+            endpoints = getattr(getattr(self._config, "models", None), "embedder", {}) or {}
+            public_partitions = []
+            for partition_name in sorted(set(selected_partitions)):
+                embedder_name, endpoint, vector_field, _group_key = self._partition_search_identity(
+                    partition_name, configured_partitions, endpoints
+                )
+                public_partitions.append(
+                    {
+                        "name": partition_name,
+                        "embedder": {
+                            "name": embedder_name,
+                            "model": getattr(endpoint, "model_name", None),
+                            "vector_field": vector_field,
+                        },
+                    }
+                )
         hybrid_enabled = getattr(getattr(self._config, "vectordb", None), "hybrid_search", None)
         return {
             "operation": "raw_search",
@@ -394,6 +441,20 @@ class RetrievalService:
         """Fingerprint the effective raw-search path without chat-only settings."""
         return canonical_fingerprint(self.public_search_configuration(partitions, effective_options))
 
+    @staticmethod
+    def _partition_search_identity(
+        partition_name: str,
+        configured_partitions: Mapping[str, Any],
+        endpoints: Mapping[str, Any],
+    ) -> tuple[str, Any | None, str | None, str]:
+        """Resolve a partition to the embedder and vector field used by search."""
+        partition = configured_partitions.get(partition_name)
+        embedder_name = partition.embedder if partition is not None else "default"
+        endpoint = endpoints.get(embedder_name)
+        vector_field = getattr(endpoint, "vector_field", None) if endpoint is not None else None
+        group_key = vector_field or embedder_name
+        return embedder_name, endpoint, vector_field, group_key
+
     def _contextualizer_prompt_name(self, partitions: Sequence[str]) -> str | None:
         selected = list(dict.fromkeys(partitions))
         if len(selected) != 1 or "all" in selected:
@@ -401,11 +462,20 @@ class RetrievalService:
         partition = self._partition_configs().get(selected[0])
         return getattr(getattr(partition, "retrieval", None), "query_contextualizer_prompt_name", None)
 
-    async def _contextualizer_prompt_identity(self, partitions: Sequence[str]) -> dict[str, str | None]:
+    async def _contextualizer_prompt_identity(
+        self,
+        partitions: Sequence[str],
+        *,
+        strict: bool = False,
+    ) -> dict[str, str | None]:
         prompt_name = self._contextualizer_prompt_name(partitions)
         resolve_with_identity = getattr(self._prompt_service, "resolve_prompt_with_identity", None)
         if resolve_with_identity is not None:
-            resolved = await resolve_with_identity("query_contextualizer", names=[prompt_name])
+            resolved = await resolve_with_identity(
+                "query_contextualizer",
+                names=[prompt_name],
+                strict_errors=strict,
+            )
             return {
                 "name": resolved.name,
                 "source": resolved.source,
@@ -441,7 +511,12 @@ class RetrievalService:
             "content_hash": field("content_hash"),
         }
 
-    async def _query_expansion_prompt_identity(self, retrieval: object) -> dict[str, str | None] | None:
+    async def _query_expansion_prompt_identity(
+        self,
+        retrieval: object,
+        *,
+        strict: bool = False,
+    ) -> dict[str, str | None] | None:
         retrieval_type = getattr(retrieval, "type", None)
         if retrieval_type == "hyde":
             prompt_type = "hyde"
@@ -451,7 +526,12 @@ class RetrievalService:
             prompt_name = getattr(retrieval, "multi_query_prompt_name", None)
         else:
             return None
-        _content, identity = await self._resolve_query_prompt(prompt_type, prompt_name, prompt_type)
+        _content, identity = await self._resolve_query_prompt(
+            prompt_type,
+            prompt_name,
+            prompt_type,
+            strict=strict,
+        )
         return {"type": prompt_type, **identity}
 
     async def resolved_public_retrieval_configuration(
@@ -516,10 +596,7 @@ class RetrievalService:
         the default, so "which reranker ran?" is answerable from the logs.
         """
         if self._reranker_factory is None:
-            return self._legacy_reranker, {
-                **self._public_endpoint(self._config, "reranker", "default"),
-                "name": "default" if self._legacy_reranker is not None else None,
-            }
+            return self._legacy_reranker, self._legacy_reranker_identity()
         if reranker_name:
             try:
                 reranker = self._reranker_factory(reranker_name)
@@ -545,10 +622,7 @@ class RetrievalService:
         logger.bind(partition=partition).debug(
             "Reranking with the static default reranker (no catalog default endpoint)"
         )
-        return self._legacy_reranker, {
-            **self._public_endpoint(self._config, "reranker", "default"),
-            "name": "default" if self._legacy_reranker is not None else None,
-        }
+        return self._legacy_reranker, self._legacy_reranker_identity()
 
     def _resolve_reranker(self, reranker_name: str | None, partition: str) -> Reranker | None:
         reranker, _identity = self._resolve_reranker_with_identity(reranker_name, partition)
@@ -633,14 +707,15 @@ class RetrievalService:
             k_queries=self._legacy_retriever_value("k_queries", 3),
             combine=self._legacy_retriever_value("combine", False),
         )
+        top_n = pipeline_cfg.effective_top_n(self._config.reranker.top_k)
         pipeline = RetrieverPipeline(
             retriever=retriever,
             reranker=reranker,
-            reranker_top_k=pipeline_cfg.top_n,
+            reranker_top_k=top_n,
             allow_filterless_fallback=self._legacy_retriever_value("allow_filterless_fallback", True),
             rrf_k=pipeline_cfg.rrf_k,
         )
-        return pipeline, pipeline_cfg.top_n, prompt_identity, reranker_identity
+        return pipeline, top_n, prompt_identity, reranker_identity
 
     @staticmethod
     def _legacy_query_expansion_prompt_identity(pipeline: RetrieverPipeline) -> dict[str, str | None] | None:
@@ -688,8 +763,10 @@ class RetrievalService:
         disable_expansion: bool = False,
         contextualizer_prompt: object | None = None,
         build_execution: bool = True,
+        strict_prompt_resolution: bool = False,
     ) -> ResolvedRetrievalPlan:
         """Resolve executable pipelines and their public identity once."""
+        await self.refresh_partition_configs()
         requested = list(partitions)
         configs = self._partition_configs()
         selected = list(configs) if "all" in requested and configs else list(dict.fromkeys(requested))
@@ -702,7 +779,7 @@ class RetrievalService:
                 partition = configs.get(partition_name)
                 retrieval = partition.retrieval if partition is not None else self._config.retriever
                 prompt_identities[partition_name] = (
-                    await self._query_expansion_prompt_identity(retrieval)
+                    await self._query_expansion_prompt_identity(retrieval, strict=strict_prompt_resolution)
                     if configs
                     else self._legacy_query_expansion_prompt_identity(self._pipeline)
                 )
@@ -711,7 +788,7 @@ class RetrievalService:
                     "enable_reranker",
                     getattr(getattr(self._config, "reranker", None), "enabled", False),
                 )
-                if reranker_enabled and not disable_reranker:
+                if partition is not None and reranker_enabled and not disable_reranker:
                     _reranker, identity = self._resolve_reranker_with_identity(
                         getattr(retrieval, "reranker", None),
                         partition_name,
@@ -771,7 +848,7 @@ class RetrievalService:
         public["contextualizer_prompt"] = (
             self._public_prompt_identity(contextualizer_prompt)
             if contextualizer_prompt is not None
-            else await self._contextualizer_prompt_identity(requested)
+            else await self._contextualizer_prompt_identity(requested, strict=strict_prompt_resolution)
         )
         return ResolvedRetrievalPlan(
             groups=tuple(groups),
@@ -788,6 +865,7 @@ class RetrievalService:
         disable_reranker: bool = False,
         disable_expansion: bool = False,
     ) -> list[tuple[list[str], RetrieverPipeline, int | None]]:
+        await self.refresh_partition_configs()
         configs = self._partition_configs()
         if "all" in partitions and configs:
             partitions = list(configs.keys())
@@ -831,11 +909,10 @@ class RetrievalService:
         endpoints = getattr(self._config.models, "embedder", None) or {}
         groups: dict[str, tuple[str, list[str]]] = {}
         for partition in expanded:
-            partition_cfg = configs.get(partition)
-            embedder = partition_cfg.embedder if partition_cfg is not None else "default"
-            endpoint = endpoints.get(embedder)
-            field = (endpoint.vector_field if endpoint is not None else None) or embedder
-            groups.setdefault(field, (embedder, []))[1].append(partition)
+            embedder, _endpoint, _vector_field, group_key = self._partition_search_identity(
+                partition, configs, endpoints
+            )
+            groups.setdefault(group_key, (embedder, []))[1].append(partition)
         if len(groups) == 1:
             # Keep the caller's partitions, so "all" stays unscoped.
             ((embedder, _),) = groups.values()
@@ -870,6 +947,7 @@ class RetrievalService:
         hits are fused with RRF and cut to ``top_k`` before the surrounding
         chunks are added.
         """
+        await self.refresh_partition_configs()
         parts = [partitions] if isinstance(partitions, str) else list(partitions)
         if trace is not None:
             trace.record_stage("original_query", status="complete", candidates=[])
@@ -901,8 +979,8 @@ class RetrievalService:
                 if trace is not None
                 else []
             )
-            hits = self.fuse(
-                await self._gather_partition_groups(
+            try:
+                group_hits = await self._gather_partition_groups(
                     [
                         (
                             names,
@@ -914,12 +992,48 @@ class RetrievalService:
                             ),
                         )
                         for index, (names, group_searcher) in enumerate(groups)
-                    ]
-                ),
-                top_k=top_k,
-            )
-            if trace is not None:
-                merge_query_traces(trace, group_traces)
+                    ],
+                    child_traces=group_traces if trace is not None else None,
+                    error_stage="partition_search",
+                )
+            finally:
+                if trace is not None:
+                    try:
+                        merge_query_traces(trace, group_traces)
+                    except Exception as error:
+                        try:
+                            trace.record_error("partition_traces", error)
+                        except Exception:
+                            pass
+            if trace is None:
+                hits = self.fuse(group_hits, top_k=top_k)
+            else:
+                fused_hits = self.fuse(group_hits)
+                hits = fused_hits[:top_k]
+                selected_ids = {_chunk_key(chunk) for chunk in hits}
+                candidates = candidates_from_chunks(
+                    fused_hits,
+                    limit=trace.candidate_capacity_for_stage("partition_fused"),
+                )
+                candidates = [
+                    candidate
+                    if candidate.id in selected_ids
+                    else candidate.model_copy(
+                        update={
+                            "removal_reason": TraceRemovalReason(
+                                code="partition_top_k",
+                                explanation="Candidate fell outside the cross-embedder top-k.",
+                            )
+                        }
+                    )
+                    for candidate in candidates
+                ]
+                trace.record_stage(
+                    "partition_fused",
+                    status="complete",
+                    candidates=candidates,
+                    candidate_count=len(fused_hits),
+                )
             # Neighbouring chunks are read by section id, whatever the embedder.
             # They are context only: a failed lookup must not discard the hits
             # the gather above already kept.
@@ -962,7 +1076,13 @@ class RetrievalService:
     # Pipeline retrieval (powers QueryService — 8C.2)
     # ------------------------------------------------------------------
 
-    async def _gather_partition_groups(self, legs: list[tuple[list[str], Awaitable[list]]]) -> list:
+    async def _gather_partition_groups(
+        self,
+        legs: list[tuple[list[str], Awaitable[list]]],
+        *,
+        child_traces: Sequence[RetrievalTraceBuilder] | None = None,
+        error_stage: str = "partition_search",
+    ) -> list:
         """Await one coroutine per partition group, bounding concurrency.
 
         Each leg is ``(partition_names, coroutine)``; the names are carried so a
@@ -1003,12 +1123,17 @@ class RetrievalService:
 
         ranked_lists = []
         first_error: BaseException | None = None
-        for (partition_names, _), result in zip(legs, results, strict=True):
+        for index, ((partition_names, _), result) in enumerate(zip(legs, results, strict=True)):
             if not isinstance(result, BaseException):
                 ranked_lists.append(result)
                 continue
             if isinstance(result, asyncio.CancelledError):
                 raise result
+            if child_traces is not None and isinstance(result, Exception):
+                try:
+                    child_traces[index].record_error(error_stage, result)
+                except Exception:
+                    pass
             if first_error is None:
                 first_error = result
             logger.bind(partitions=partition_names).warning(
@@ -1036,6 +1161,19 @@ class RetrievalService:
         except Exception as error:
             try:
                 trace.record_error("final", error)
+            except Exception:
+                pass
+
+    @staticmethod
+    def _safe_merge_child_traces(
+        trace: RetrievalTraceBuilder,
+        children: Sequence[RetrievalTraceBuilder],
+    ) -> None:
+        try:
+            merge_child_traces(trace, children)
+        except Exception as error:
+            try:
+                trace.record_error("partition_traces", error)
             except Exception:
                 pass
 
@@ -1077,23 +1215,27 @@ class RetrievalService:
             if trace is not None and len(groups) > 1
             else None
         )
-        ranked_lists = await self._gather_partition_groups(
-            [
-                (
-                    partition_group,
-                    pipeline.retrieve_docs(
-                        partition=partition_group,
-                        query=query,
-                        top_k=top_k if top_k is not None else default_top_k,
-                        filter_params=filter_params,
-                        trace=child_traces[index] if child_traces is not None else trace,
-                    ),
-                )
-                for index, (partition_group, pipeline, default_top_k) in enumerate(groups)
-            ]
-        )
-        if trace is not None and child_traces is not None:
-            merge_child_traces(trace, child_traces)
+        try:
+            ranked_lists = await self._gather_partition_groups(
+                [
+                    (
+                        partition_group,
+                        pipeline.retrieve_docs(
+                            partition=partition_group,
+                            query=query,
+                            top_k=top_k if top_k is not None else default_top_k,
+                            filter_params=filter_params,
+                            trace=child_traces[index] if child_traces is not None else trace,
+                        ),
+                    )
+                    for index, (partition_group, pipeline, default_top_k) in enumerate(groups)
+                ],
+                child_traces=child_traces,
+                error_stage="partition_retrieval",
+            )
+        finally:
+            if trace is not None and child_traces is not None:
+                self._safe_merge_child_traces(trace, child_traces)
         if len(ranked_lists) == 1:
             result = ranked_lists[0]
             if len(groups) > 1:
@@ -1139,23 +1281,27 @@ class RetrievalService:
             if trace is not None and len(groups) > 1
             else None
         )
-        ranked_lists = await self._gather_partition_groups(
-            [
-                (
-                    partition_group,
-                    pipeline.get_relevant_docs(
-                        partition=partition_group,
-                        search_queries=search_queries,
-                        top_k=top_k if top_k is not None else default_top_k,
-                        filter_params=filter_params,
-                        trace=child_traces[index] if child_traces is not None else trace,
-                    ),
-                )
-                for index, (partition_group, pipeline, default_top_k) in enumerate(groups)
-            ]
-        )
-        if trace is not None and child_traces is not None:
-            merge_child_traces(trace, child_traces)
+        try:
+            ranked_lists = await self._gather_partition_groups(
+                [
+                    (
+                        partition_group,
+                        pipeline.get_relevant_docs(
+                            partition=partition_group,
+                            search_queries=search_queries,
+                            top_k=top_k if top_k is not None else default_top_k,
+                            filter_params=filter_params,
+                            trace=child_traces[index] if child_traces is not None else trace,
+                        ),
+                    )
+                    for index, (partition_group, pipeline, default_top_k) in enumerate(groups)
+                ],
+                child_traces=child_traces,
+                error_stage="partition_retrieval",
+            )
+        finally:
+            if trace is not None and child_traces is not None:
+                self._safe_merge_child_traces(trace, child_traces)
         if len(ranked_lists) == 1:
             result = ranked_lists[0]
             if len(groups) > 1:
@@ -1183,24 +1329,53 @@ class RetrievalService:
         searches concurrently, then fuses; exposing the un-fused lists
         lets it run one ``asyncio.gather`` over both.
         """
-        query_trace = trace if len(queries) == 1 else None
-        return await asyncio.gather(
-            *[
-                self.retrieve(
-                    partitions=partitions,
-                    query=q,
-                    top_k=top_k,
-                    retrieval_top_k=retrieval_top_k,
-                    filter_params=filter_params,
-                    trace=query_trace,
-                    similarity_threshold=similarity_threshold,
-                    disable_reranker=disable_reranker,
-                    disable_expansion=disable_expansion,
-                    resolved_plan=resolved_plan,
+        child_traces = (
+            [
+                RetrievalTraceBuilder(
+                    f"{trace.request_id}:query:{index}",
+                    query.query,
+                    diagnostics=trace.diagnostics,
                 )
-                for q in queries
+                for index, query in enumerate(queries)
             ]
+            if trace is not None and len(queries) > 1
+            else None
         )
+        tasks = [
+            self.retrieve(
+                partitions=partitions,
+                query=query,
+                top_k=top_k,
+                retrieval_top_k=retrieval_top_k,
+                filter_params=filter_params,
+                trace=child_traces[index] if child_traces is not None else trace,
+                similarity_threshold=similarity_threshold,
+                disable_reranker=disable_reranker,
+                disable_expansion=disable_expansion,
+                resolved_plan=resolved_plan,
+            )
+            for index, query in enumerate(queries)
+        ]
+        try:
+            results = await asyncio.gather(*tasks, return_exceptions=child_traces is not None)
+            if child_traces is not None:
+                for child, result in zip(child_traces, results, strict=True):
+                    if isinstance(result, Exception):
+                        try:
+                            child.record_error("query_retrieval", result)
+                        except Exception:
+                            pass
+        finally:
+            if trace is not None and child_traces is not None:
+                self._safe_merge_child_traces(trace, child_traces)
+        if child_traces is not None:
+            for result in results:
+                if isinstance(result, asyncio.CancelledError):
+                    raise result
+            for result in results:
+                if isinstance(result, BaseException):
+                    raise result
+        return results
 
     @staticmethod
     def fuse(

@@ -53,6 +53,43 @@ def _to_markdown(doc: pymupdf.Document) -> list[dict]:
     return pymupdf4llm.to_markdown(doc, page_chunks=True, embed_images=False, write_images=False)
 
 
+# Fraction of plain-text characters that pymupdf4llm must retain per page
+# before we fall back to ``page.get_text()``. Pages whose markdown drops below
+# this threshold are silently replaced by their plain-text equivalent.
+# 0.2 means "keep at least 20 % of the text layer characters" (#1102).
+_MARKDOWN_TEXT_RATIO_THRESHOLD = 0.2
+
+
+def _pages_with_fallback(doc: pymupdf.Document, chunks: list[dict], filename: str) -> list[str]:
+    """Return one text string per page, falling back per-page to ``page.get_text()``.
+
+    ``pymupdf4llm`` silently drops text on some InDesign/CS-generated PDFs that
+    have a valid text layer (issue #1102). For each page we compare the
+    character count returned by the Markdown converter against the raw text
+    layer. If the markdown retains less than ``_MARKDOWN_TEXT_RATIO_THRESHOLD``
+    of the plain-text characters, we substitute ``page.get_text()`` for that
+    page and log a warning so the silent data-loss is visible in logs.
+    """
+    pages: list[str] = []
+    for i, (chunk, page) in enumerate(zip(chunks, doc)):
+        md_text = (chunk.get("text") or "").strip()
+        plain_text = page.get_text().strip()
+        plain_len = len(plain_text)
+        if plain_len > 0 and len(md_text) < plain_len * _MARKDOWN_TEXT_RATIO_THRESHOLD:
+            logger.bind(
+                filename=filename,
+                page=i + 1,
+                md_chars=len(md_text),
+                plain_chars=plain_len,
+            ).warning(
+                "pymupdf4llm returned much less text than the text layer; falling back to page.get_text() for this page"
+            )
+            pages.append(plain_text)
+        else:
+            pages.append(md_text)
+    return pages
+
+
 def _extract_markdown(raw: bytes, filename: str) -> tuple[list[str], list[ImageBlock]]:
     """Return structured Markdown per page (no images).
 
@@ -67,7 +104,7 @@ def _extract_markdown(raw: bytes, filename: str) -> tuple[list[str], list[ImageB
     with pymupdf.open(stream=raw, filetype="pdf") as doc:
         try:
             chunks = _to_markdown(doc)
-            pages = [(chunk.get("text") or "").strip() for chunk in chunks]
+            pages = _pages_with_fallback(doc, chunks, filename)
             return pages, []
         except RuntimeError as exc:
             # MuPDF hard-errors on some legal-but-unusual object graphs — e.g.
@@ -87,7 +124,7 @@ def _extract_markdown(raw: bytes, filename: str) -> tuple[list[str], list[ImageB
     # Document and stays live either way (#846).
     with pymupdf.open(stream=cleaned, filetype="pdf") as clean_doc:
         chunks = _to_markdown(clean_doc)
-    pages = [(chunk.get("text") or "").strip() for chunk in chunks]
+        pages = _pages_with_fallback(clean_doc, chunks, filename)
     return pages, []
 
 
