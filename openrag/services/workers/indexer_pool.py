@@ -123,12 +123,16 @@ class IndexerWorkerActor:
         from services.workers.parsers.parser_dispatcher import (
             build_caption_vlm,
             build_parser_dispatcher,
+            configure_pymupdf_pool,
             load_caption_prompt,
         )
         from services.workers.pipeline_builder import build_indexing_pipeline
 
         self._namespace = namespace
         cfg = load_config()
+        # Indexing is where PDFs are parsed in bulk, so the PyMuPDF pool lives
+        # here; the API replicas keep the dedicated thread (#997).
+        configure_pymupdf_pool(cfg)
         parser = build_parser_dispatcher(
             cfg,
             transcription_prompt_resolver=self._resolve_transcription_prompt,

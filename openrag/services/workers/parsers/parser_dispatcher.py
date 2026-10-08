@@ -199,12 +199,6 @@ class ParserDispatcher(DocumentParser):
                 logger.warning(f"EML attachment parser for '.{ext}' unavailable: {exc}")
         return _create("core.indexing.parsers.eml_parser", "eml", attachment_parsers=attachment_parsers)
 
-    def _build_pymupdf(self) -> DocumentParser:
-        # Sizing and the memory ceiling are config, and ``core`` does not read
-        # config — so they are pushed into the module before the pool is built.
-        _configure_pymupdf_pool(self._config)
-        return _create("core.indexing.parsers.pdf.pymupdf", "pymupdf")
-
     def _build_marker(self) -> DocumentParser:
         from services.workers.parsers.marker_workers import MarkerLoader
 
@@ -259,11 +253,15 @@ class ParserDispatcher(DocumentParser):
         return _create("core.indexing.parsers.audio.client_based", "audio_client", client=client)
 
 
-def _configure_pymupdf_pool(config) -> None:
-    """Push pool settings into the parser module.
+def configure_pymupdf_pool(config) -> None:
+    """Give PyMuPDF its configured process pool in *this* process.
 
-    ``core`` never reads config, so the composition root hands it the numbers.
-    Idempotent: identical settings leave a running pool alone.
+    Called by the indexer worker only. The API replicas build the same
+    dispatcher for the direct-extract path and keep the one dedicated thread:
+    there a spawned child would start on the loop that serves ``/health_check``,
+    and under ``-m api.main`` (the Ray Serve entrypoint) it re-imports the whole
+    app as ``__mp_main__``. ``core`` never reads config, so the numbers are
+    pushed in. Idempotent: identical settings leave a running pool alone.
     """
     from core.indexing.parsers.pdf.pymupdf import PyMuPDFPoolSettings, configure_pool
 
@@ -303,7 +301,7 @@ _BUILDERS: dict[str, Any] = {
     # (the default): pymupdf4llm preserves structure (headings/tables) for the
     # markdown-aware chunker, with embed_images=False so no base64 bloats chunks
     # and no image rendering happens. Images/captioning are marker/docling's job.
-    "pymupdf": lambda d: d._build_pymupdf(),
+    "pymupdf": lambda d: _create("core.indexing.parsers.pdf.pymupdf", "pymupdf"),
     "eml": lambda d: d._build_eml(),
     "marker": lambda d: d._build_marker(),
     "docling": lambda d: d._build_docling(),

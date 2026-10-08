@@ -1670,6 +1670,8 @@ def test_indexer_pool_wires_contextualizer_factory_and_worker_namespace(monkeypa
     monkeypatch.setattr(core.embeddings.embedder_registry, "create", lambda *args, **kwargs: object())
     monkeypatch.setattr(milvus_store, "MilvusVectorStore", lambda _cfg: object())
     monkeypatch.setattr(postgres_store, "PostgresStore", fake_postgres_store)
+    pymupdf_pool_configs = []
+    monkeypatch.setattr(parser_dispatcher, "configure_pymupdf_pool", pymupdf_pool_configs.append)
     monkeypatch.setattr(parser_dispatcher, "build_parser_dispatcher", lambda _cfg, **_kwargs: object())
     monkeypatch.setattr(parser_dispatcher, "build_caption_vlm", lambda _cfg: object())
     monkeypatch.setattr(pipeline_builder, "build_indexing_pipeline", fake_build_pipeline)
@@ -1699,6 +1701,9 @@ def test_indexer_pool_wires_contextualizer_factory_and_worker_namespace(monkeypa
     # Without this the actor could stop forwarding it and every test still passed.
     assert captured["caption_concurrency"] == 7
     assert captured["caption_concurrency"] == cfg.semaphore.vlm_semaphore
+    # The PyMuPDF process pool belongs to the indexer: the API replicas build the
+    # same dispatcher and must keep the single thread (#997).
+    assert pymupdf_pool_configs == [cfg]
 
 
 def test_indexer_pool_loads_caption_prompt_without_global_vlm_default(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1760,6 +1765,7 @@ def test_indexer_pool_loads_caption_prompt_without_global_vlm_default(monkeypatc
     monkeypatch.setattr(core.embeddings.embedder_registry, "create", lambda *args, **kwargs: object())
     monkeypatch.setattr(milvus_store, "MilvusVectorStore", lambda _cfg: object())
     monkeypatch.setattr(postgres_store, "PostgresStore", lambda *args, **kwargs: Store())
+    monkeypatch.setattr(parser_dispatcher, "configure_pymupdf_pool", lambda _cfg: None)
     monkeypatch.setattr(parser_dispatcher, "build_parser_dispatcher", lambda _cfg, **_kwargs: object())
     # No global default VLM endpoint configured.
     monkeypatch.setattr(parser_dispatcher, "build_caption_vlm", lambda _cfg: None)
