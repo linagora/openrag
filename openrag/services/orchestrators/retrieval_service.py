@@ -969,28 +969,37 @@ class RetrievalService:
                 if trace is not None
                 else []
             )
-            group_hits = await self._gather_partition_groups(
-                [
-                    (
-                        names,
-                        group_searcher.search(
-                            partition=names,
-                            with_surrounding_chunks=False,
-                            **search_kwargs,
-                            **({"trace": group_traces[index]} if trace is not None else {}),
-                        ),
-                    )
-                    for index, (names, group_searcher) in enumerate(groups)
-                ],
-                child_traces=group_traces if trace is not None else None,
-                error_stage="partition_search",
-            )
+            try:
+                group_hits = await self._gather_partition_groups(
+                    [
+                        (
+                            names,
+                            group_searcher.search(
+                                partition=names,
+                                with_surrounding_chunks=False,
+                                **search_kwargs,
+                                **({"trace": group_traces[index]} if trace is not None else {}),
+                            ),
+                        )
+                        for index, (names, group_searcher) in enumerate(groups)
+                    ],
+                    child_traces=group_traces if trace is not None else None,
+                    error_stage="partition_search",
+                )
+            finally:
+                if trace is not None:
+                    try:
+                        merge_query_traces(trace, group_traces)
+                    except Exception as error:
+                        try:
+                            trace.record_error("partition_traces", error)
+                        except Exception:
+                            pass
             if trace is None:
                 hits = self.fuse(group_hits, top_k=top_k)
             else:
                 fused_hits = self.fuse(group_hits)
                 hits = fused_hits[:top_k]
-                merge_query_traces(trace, group_traces)
                 selected_ids = {_chunk_key(chunk) for chunk in hits}
                 candidates = candidates_from_chunks(
                     fused_hits,
@@ -1196,25 +1205,27 @@ class RetrievalService:
             if trace is not None and len(groups) > 1
             else None
         )
-        ranked_lists = await self._gather_partition_groups(
-            [
-                (
-                    partition_group,
-                    pipeline.retrieve_docs(
-                        partition=partition_group,
-                        query=query,
-                        top_k=top_k if top_k is not None else default_top_k,
-                        filter_params=filter_params,
-                        trace=child_traces[index] if child_traces is not None else trace,
-                    ),
-                )
-                for index, (partition_group, pipeline, default_top_k) in enumerate(groups)
-            ],
-            child_traces=child_traces,
-            error_stage="partition_retrieval",
-        )
-        if trace is not None and child_traces is not None:
-            self._safe_merge_child_traces(trace, child_traces)
+        try:
+            ranked_lists = await self._gather_partition_groups(
+                [
+                    (
+                        partition_group,
+                        pipeline.retrieve_docs(
+                            partition=partition_group,
+                            query=query,
+                            top_k=top_k if top_k is not None else default_top_k,
+                            filter_params=filter_params,
+                            trace=child_traces[index] if child_traces is not None else trace,
+                        ),
+                    )
+                    for index, (partition_group, pipeline, default_top_k) in enumerate(groups)
+                ],
+                child_traces=child_traces,
+                error_stage="partition_retrieval",
+            )
+        finally:
+            if trace is not None and child_traces is not None:
+                self._safe_merge_child_traces(trace, child_traces)
         if len(ranked_lists) == 1:
             result = ranked_lists[0]
             if len(groups) > 1:
@@ -1260,25 +1271,27 @@ class RetrievalService:
             if trace is not None and len(groups) > 1
             else None
         )
-        ranked_lists = await self._gather_partition_groups(
-            [
-                (
-                    partition_group,
-                    pipeline.get_relevant_docs(
-                        partition=partition_group,
-                        search_queries=search_queries,
-                        top_k=top_k if top_k is not None else default_top_k,
-                        filter_params=filter_params,
-                        trace=child_traces[index] if child_traces is not None else trace,
-                    ),
-                )
-                for index, (partition_group, pipeline, default_top_k) in enumerate(groups)
-            ],
-            child_traces=child_traces,
-            error_stage="partition_retrieval",
-        )
-        if trace is not None and child_traces is not None:
-            self._safe_merge_child_traces(trace, child_traces)
+        try:
+            ranked_lists = await self._gather_partition_groups(
+                [
+                    (
+                        partition_group,
+                        pipeline.get_relevant_docs(
+                            partition=partition_group,
+                            search_queries=search_queries,
+                            top_k=top_k if top_k is not None else default_top_k,
+                            filter_params=filter_params,
+                            trace=child_traces[index] if child_traces is not None else trace,
+                        ),
+                    )
+                    for index, (partition_group, pipeline, default_top_k) in enumerate(groups)
+                ],
+                child_traces=child_traces,
+                error_stage="partition_retrieval",
+            )
+        finally:
+            if trace is not None and child_traces is not None:
+                self._safe_merge_child_traces(trace, child_traces)
         if len(ranked_lists) == 1:
             result = ranked_lists[0]
             if len(groups) > 1:
@@ -1318,25 +1331,40 @@ class RetrievalService:
             if trace is not None and len(queries) > 1
             else None
         )
-        results = await asyncio.gather(
-            *[
-                self.retrieve(
-                    partitions=partitions,
-                    query=q,
-                    top_k=top_k,
-                    retrieval_top_k=retrieval_top_k,
-                    filter_params=filter_params,
-                    trace=child_traces[index] if child_traces is not None else trace,
-                    similarity_threshold=similarity_threshold,
-                    disable_reranker=disable_reranker,
-                    disable_expansion=disable_expansion,
-                    resolved_plan=resolved_plan,
-                )
-                for index, q in enumerate(queries)
-            ]
-        )
-        if trace is not None and child_traces is not None:
-            self._safe_merge_child_traces(trace, child_traces)
+        tasks = [
+            self.retrieve(
+                partitions=partitions,
+                query=query,
+                top_k=top_k,
+                retrieval_top_k=retrieval_top_k,
+                filter_params=filter_params,
+                trace=child_traces[index] if child_traces is not None else trace,
+                similarity_threshold=similarity_threshold,
+                disable_reranker=disable_reranker,
+                disable_expansion=disable_expansion,
+                resolved_plan=resolved_plan,
+            )
+            for index, query in enumerate(queries)
+        ]
+        try:
+            results = await asyncio.gather(*tasks, return_exceptions=child_traces is not None)
+            if child_traces is not None:
+                for child, result in zip(child_traces, results, strict=True):
+                    if isinstance(result, Exception):
+                        try:
+                            child.record_error("query_retrieval", result)
+                        except Exception:
+                            pass
+        finally:
+            if trace is not None and child_traces is not None:
+                self._safe_merge_child_traces(trace, child_traces)
+        if child_traces is not None:
+            for result in results:
+                if isinstance(result, asyncio.CancelledError):
+                    raise result
+            for result in results:
+                if isinstance(result, BaseException):
+                    raise result
         return results
 
     @staticmethod

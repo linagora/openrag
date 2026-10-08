@@ -173,12 +173,7 @@ def _record_single_list_trace(
             candidate_id = str(getattr(item, "id", key))
             duplicate_of = first_ids.get(key)
             removal = None
-            if duplicate_of is not None:
-                removal = TraceRemovalReason(
-                    code="duplicate",
-                    explanation="Duplicate identity retained in the source ranking.",
-                )
-            elif top_k is not None and rank > top_k:
+            if top_k is not None and rank > top_k:
                 removal = TraceRemovalReason(
                     code="final_top_n",
                     explanation="Excluded by the final public result cutoff.",

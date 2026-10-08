@@ -118,7 +118,7 @@ def test_rrf_single_list_trace_records_each_duplicate_once():
     assert [(candidate.id, candidate.rank) for candidate in candidates] == [("a", 1), ("a", 2)]
     assert candidates[0].duplicate_of is None
     assert candidates[1].duplicate_of == "a"
-    assert candidates[1].removal_reason.code == "duplicate"
+    assert candidates[1].removal_reason is None
     expected_score = 1 / 61 + 1 / 62
     assert candidates[0].scores["fused"] == pytest.approx(expected_score)
     assert candidates[1].scores["fused"] == pytest.approx(expected_score)
