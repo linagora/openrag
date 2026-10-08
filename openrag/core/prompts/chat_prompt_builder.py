@@ -9,6 +9,9 @@ Pure helpers extracted from ``components/utils.py`` and ``components/pipeline.py
 * ``prepend_system_prompt``  — clone a message list and prepend a system
                                 prompt rendered against ``context`` and
                                 ``current_date``.
+* ``message_tokens``         — tokens one chat message takes in the prompt.
+* ``tool_definition_tokens`` — tokens the tool definitions a chat request
+                                forwards take in the prompt.
 * ``SOURCE_SEPARATOR``       — separator emitted between consecutive sources.
 
 Tokenizers are injected as ``Callable[[str], int]`` so this module stays pure
@@ -18,6 +21,7 @@ Tokenizers are injected as ``Callable[[str], int]`` so this module stays pure
 from __future__ import annotations
 
 import copy
+import json
 import re
 from collections.abc import Callable
 from typing import Protocol
@@ -26,6 +30,10 @@ from core.utils.text import neutralize_prompt_control_tokens, sanitize_text
 
 SOURCE_SEPARATOR = "-" * 10 + "\n\n"
 EMPTY_CONTEXT_MESSAGE = "No document found from the database"
+
+#: Fields of a chat request, besides its messages, that the provider renders
+#: into the prompt.
+TOOL_DEFINITION_FIELDS = ("tools", "functions")
 
 _UNSAFE_PROMPT_CLOSE_TAG_RE = re.compile(r"</unsafe_custom_prompt>", re.IGNORECASE)
 
@@ -41,17 +49,24 @@ class WebSourceLike(Protocol):
 
 def format_context(
     texts: list[str],
-    max_context_tokens: int,
+    max_context_tokens: int | None,
     length_function: Callable[[str], int],
     *,
+    max_sources: int | None = None,
     number_sources: bool = True,
 ) -> tuple[str, list[int]]:
     """Render ``texts`` as numbered ``[Source N]`` blocks within a token budget.
 
+    ``texts`` are taken in order, best-ranked first. One that doesn't fit in
+    what's left of the budget is skipped, not the end of the list: a shorter
+    one after it may still fit.
+
     Args:
         texts: Document texts (e.g. ``[d.page_content for d in docs]``).
-        max_context_tokens: Maximum total tokens for the context.
+        max_context_tokens: Maximum total tokens for the context; ``None`` for
+            no token limit.
         length_function: Token counter, e.g. ``llm.get_num_tokens``.
+        max_sources: Maximum number of sources; ``None`` for no limit.
         number_sources: If ``True``, prefix each block with ``[Source N]\\n``.
 
     Returns:
@@ -67,6 +82,8 @@ def format_context(
     total_tokens = 0
 
     for i, text in enumerate(texts):
+        if max_sources is not None and len(reduced) >= max_sources:
+            break
         prefix = f"[Source {len(reduced) + 1}]\n" if number_sources else ""
         # Neutralize control tokens so a poisoned document cannot forge a
         # [Source N] block, inject a [Sources: ...] citation tag, or fake the
@@ -75,8 +92,10 @@ def format_context(
         n_tokens = length_function(content)
         if prefix:
             n_tokens += length_function(prefix)
-        if total_tokens + n_tokens > max_context_tokens:
-            break
+        if reduced:
+            n_tokens += length_function(SOURCE_SEPARATOR)
+        if max_context_tokens is not None and total_tokens + n_tokens > max_context_tokens:
+            continue
         reduced.append(f"{prefix}{content}")
         included.append(i)
         total_tokens += n_tokens
@@ -119,6 +138,8 @@ def format_web_context(
         body = neutralize_prompt_control_tokens(sanitize_text(body_raw)) if body_raw else ""
         block = f"[Source {n}]\n{title}\n{body}"
         block_tokens = length_function(block)
+        if parts:
+            block_tokens += length_function(SOURCE_SEPARATOR)
         if total_tokens + block_tokens > max_tokens:
             break
         parts.append(block)
@@ -173,3 +194,31 @@ def prepend_system_prompt(
     )
     out.insert(0, {"role": "system", "content": rendered})
     return out
+
+
+def message_tokens(message: dict, length_function: Callable[[str], int]) -> int:
+    """Tokens *message* takes in the prompt: its text, plus 4 for the turn.
+
+    The provider gets every other field of the message too, and renders the
+    ones it knows into the prompt: an assistant turn's ``tool_calls`` /
+    ``function_call``, a tool result's ``tool_call_id``. Those fields count as
+    their JSON.
+    """
+    content = message.get("content")
+    if isinstance(content, list):
+        content = " ".join(p.get("text", "") for p in content if isinstance(p, dict))
+    tokens = length_function(content if isinstance(content, str) else "") + 4
+    fields = {k: v for k, v in message.items() if k not in ("role", "content") and v is not None}
+    if fields:
+        tokens += length_function(json.dumps(fields, ensure_ascii=False, default=str))
+    return tokens
+
+
+def tool_definition_tokens(request: dict, length_function: Callable[[str], int]) -> int:
+    """Tokens the tool definitions in a chat *request* take, as their JSON.
+
+    OpenRag doesn't call tools itself, but forwards a client's definitions to
+    the provider, which renders them into the prompt.
+    """
+    definitions = {k: request[k] for k in TOOL_DEFINITION_FIELDS if request.get(k)}
+    return length_function(json.dumps(definitions, ensure_ascii=False, default=str)) if definitions else 0

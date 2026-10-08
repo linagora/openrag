@@ -1,0 +1,80 @@
+{{- if or .Values.monitoring.bundled .Values.monitoring.dashboards.enabled }}
+{{- /*
+One ConfigMap per file under dashboards/, for a Grafana dashboard sidecar to
+load. It is the directory the Compose overlay mounts, so both deployments show
+the same JSON; the files bind their data source through a variable, so they
+load in whichever Grafana picks them up.
+
+One per file rather than one for all: a client-side apply (Argo CD's default)
+copies the whole object into an annotation capped at 256 KiB, and together the
+dashboards would outgrow it. tests/unit/infra/ keeps each file under the cap.
+*/}}
+{{- $cfg := .Values.monitoring.dashboards }}
+{{- /* A blank label would render `: "1"`, which is not valid YAML, and a
+   sidecar matches on the key: there is no label that means "watch everything". */}}
+{{- if not $cfg.label }}
+{{- fail "monitoring.dashboards.label must name the label the Grafana sidecar watches, e.g. grafana_dashboard." }}
+{{- end }}
+{{- /* Repeated under labels, the watched label would be rendered twice, and the
+   value that lands is the last one: not the labelValue checked below. */}}
+{{- if hasKey (default dict $cfg.labels) $cfg.label }}
+{{- fail (printf "monitoring.dashboards.labels sets %s, the label the sidecar watches: set it through monitoring.dashboards.label and labelValue only." $cfg.label) }}
+{{- end }}
+{{- if .Values.monitoring.bundled }}
+{{- /* The bundled Grafana's sidecar is configured under kubePrometheusStack, and a
+   sub-chart's values cannot be derived from this chart's: refuse when it would
+   not load what the ConfigMaps carry. A label it does not watch leaves every
+   dashboard created and never shown; an annotation it does not read files them
+   in its default folder. Round-tripped because `dig` takes a plain map. */}}
+{{- $grafana := dig "grafana" dict (.Values.kubePrometheusStack | toYaml | fromYaml) }}
+{{- $sidecar := dig "sidecar" "dashboards" dict $grafana }}
+{{- if and (dig "enabled" true $grafana) (dig "enabled" true $sidecar) }}
+{{- $label := dig "label" "grafana_dashboard" $sidecar | default "" | toString }}
+{{- /* An empty labelValue makes the sidecar match the label with any value. */}}
+{{- $labelValue := dig "labelValue" "1" $sidecar | default "" | toString }}
+{{- if or (ne $label $cfg.label) (and $labelValue (ne $labelValue (toString $cfg.labelValue))) }}
+{{- fail (printf "monitoring.dashboards labels the ConfigMaps %s=%q, but the bundled Grafana's sidecar watches %s=%q (kubePrometheusStack.grafana.sidecar.dashboards.label and labelValue): set both to the same label, or the dashboards are created and never loaded." $cfg.label (toString $cfg.labelValue) $label $labelValue) }}
+{{- end }}
+{{- if and $cfg.folder $cfg.folderAnnotation }}
+{{- $folderAnnotation := dig "folderAnnotation" "" $sidecar | default "" | toString }}
+{{- if ne $folderAnnotation $cfg.folderAnnotation }}
+{{- fail (printf "monitoring.dashboards files the dashboards in %q through the %q annotation, but the bundled Grafana's sidecar reads %q (kubePrometheusStack.grafana.sidecar.dashboards.folderAnnotation): set both to the same annotation, or empty monitoring.dashboards.folderAnnotation to use the sidecar's default folder." $cfg.folder $cfg.folderAnnotation $folderAnnotation) }}
+{{- end }}
+{{- if not (dig "provider" "foldersFromFilesStructure" false $sidecar) }}
+{{- fail (printf "monitoring.dashboards files the dashboards in %q, but the bundled Grafana ignores the folder its sidecar reads without kubePrometheusStack.grafana.sidecar.dashboards.provider.foldersFromFilesStructure: true. Set it, or empty monitoring.dashboards.folderAnnotation to use the default folder." $cfg.folder) }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- $files := .Files.Glob "dashboards/*.json" }}
+{{- if not $files }}
+{{- fail "monitoring.dashboards: the chart holds no dashboards/*.json. They ship inside the chart package; check that .helmignore does not exclude them." }}
+{{- end }}
+{{- range $path, $_ := $files }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  {{- /* Not truncated to 63: that is the limit on a label value, while a name
+     is a DNS subdomain of up to 253 characters. Cutting at 63 would drop the
+     part that tells two dashboards apart — with a long fullnameOverride both
+     land on the same name, and Helm installs one ConfigMap instead of two. */}}
+  name: {{ printf "%s-dashboard-%s" (include "openrag-stack.fullname" $) (base $path | trimSuffix ".json") }}
+  {{- with $cfg.namespace }}
+  namespace: {{ . }}
+  {{- end }}
+  labels:
+    {{- include "openrag-stack.labels" $ | nindent 4 }}
+    {{ $cfg.label }}: {{ $cfg.labelValue | quote }}
+    {{- with $cfg.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- if and $cfg.folder $cfg.folderAnnotation }}
+  annotations:
+    {{ $cfg.folderAnnotation }}: {{ $cfg.folder | quote }}
+  {{- end }}
+data:
+  {{ base $path }}: |-
+{{ $.Files.Get $path | indent 4 }}
+{{- end }}
+{{- end }}

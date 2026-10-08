@@ -82,7 +82,10 @@ def test_ray_serve_uses_exec_probes_against_ray_head(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     container = _openrag_container(result.stdout)
     expected_base = "http://openrag-raycluster-head-svc:80"
-    assert container["startupProbe"]["exec"]["command"][-1] == f"{expected_base}/ready"
+    # Not /ready: a failing startup probe restarts the container, and /ready
+    # can fail while the default embedder is down (READINESS_REQUIRE_EMBEDDER),
+    # which a restart cannot fix.
+    assert container["startupProbe"]["exec"]["command"][-1] == f"{expected_base}/health_check"
     assert container["readinessProbe"]["exec"]["command"][-1] == f"{expected_base}/ready"
     assert container["livenessProbe"]["exec"]["command"][-1] == f"{expected_base}/health_check"
 

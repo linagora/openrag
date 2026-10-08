@@ -68,30 +68,66 @@ class JobService:
             "max_per_actor": worker_info["max_tasks_per_worker"],
         }
 
-    async def get_queue_info(self) -> dict:
+    async def _actor_states(self) -> dict[str, str | None]:
+        return await self._call(lambda: self._tsm.get_all_states.remote(), "get_all_states")
+
+    async def _task_status_counts(self, all_states: dict[str, str | None]) -> Counter[str]:
+        """Per-state task totals: durable counts first, reconciled with the live actor.
+
+        Falls back to the actor alone only when the durable counts are
+        unavailable. The in-flight states are counted by ``_active_task_counts``
+        instead: adjusting a count taken at one moment with rows read at another
+        can subtract a row the count never included.
+        """
         status_counts = await self._durable_status_counts()
         if not status_counts:
-            all_states: dict[str, str | None] = await self._call(
-                lambda: self._tsm.get_all_states.remote(), "get_all_states"
-            )
-            status_counts = Counter(all_states.values())
-        else:
-            all_states = await self._call(lambda: self._tsm.get_all_states.remote(), "get_all_states")
-            durable_actor_states = await self._durable_task_states_for_ids(all_states)
-            if durable_actor_states is None:
-                status_counts = Counter(all_states.values())
-            else:
-                for task_id, actor_state in all_states.items():
-                    durable_state = durable_actor_states.get(task_id)
-                    if durable_state is None:
-                        status_counts[actor_state] += 1
-                        continue
-                    effective_state = reconcile_task_state(actor_state, durable_state)
-                    if effective_state != durable_state:
-                        status_counts[durable_state] -= 1
-                        status_counts[effective_state] += 1
+            return Counter(all_states.values())
 
-        active = {s: status_counts.get(s, 0) for s in _ACTIVE_STATES}
+        durable_actor_states = await self._durable_task_states_for_ids(all_states)
+        if durable_actor_states is None:
+            return Counter(all_states.values())
+        for task_id, actor_state in all_states.items():
+            durable_state = durable_actor_states.get(task_id)
+            if durable_state is None:
+                status_counts[actor_state] += 1
+                continue
+            effective_state = reconcile_task_state(actor_state, durable_state)
+            if effective_state != durable_state:
+                status_counts[durable_state] -= 1
+                status_counts[effective_state] += 1
+        return status_counts
+
+    async def _active_task_counts(self, all_states: dict[str, str | None]) -> dict[str, int]:
+        """In-flight tasks by state, reconciled one task at a time.
+
+        Durable rows are authoritative, so tasks a restarted actor has forgotten
+        still count; a live terminal state still beats a stale active row. Each
+        task is resolved to one state before anything is counted, so a row
+        written between the reads can be counted late but never subtracted, and
+        the result cannot go negative. Only in-flight rows are read — the
+        metrics scrape calls this on every interval. Falls back to the actor
+        alone when the durable rows cannot be read.
+        """
+        actor_active = {tid: state for tid, state in all_states.items() if state in _ACTIVE_STATES}
+        if self._job_repo is None:
+            return _count_active(actor_active.values())
+        try:
+            durable_active = await self._job_repo.get_job_states(statuses=list(_ACTIVE_STATES))
+            # Live tasks the first read missed: written after it, or already settled.
+            unseen = [tid for tid in actor_active if tid not in durable_active]
+            durable_unseen = await self._job_repo.get_job_states(job_ids=unseen) if unseen else {}
+        except Exception as exc:
+            logger.warning("Failed to read durable in-flight jobs", error=str(exc))
+            return _count_active(actor_active.values())
+
+        effective = [reconcile_task_state(all_states.get(tid), state) for tid, state in durable_active.items()]
+        effective += [reconcile_task_state(actor_active[tid], durable_unseen.get(tid)) for tid in unseen]
+        return _count_active(effective)
+
+    async def get_queue_info(self) -> dict:
+        all_states = await self._actor_states()
+        status_counts = await self._task_status_counts(all_states)
+        active = await self._active_task_counts(all_states)
         task_summary = {
             "active": sum(active.values()),
             "active_statuses": active,
@@ -102,6 +138,15 @@ class JobService:
 
         worker_info = await self._call(lambda: self._tsm.get_pool_info.remote(), "get_pool_info")
         return {"workers": self._format_pool_info(worker_info), "tasks": task_summary}
+
+    async def get_active_task_counts(self) -> dict[str, int]:
+        """The ``active_statuses`` counts alone, without the worker-pool round trip.
+
+        ``get_queue_info`` always fetches pool info too, which the metrics scrape
+        never uses; that second Ray call would just eat into its timeout budget.
+        The counts themselves come from the same durable-first path.
+        """
+        return await self._active_task_counts(await self._actor_states())
 
     async def list_tasks(
         self,
@@ -297,6 +342,11 @@ class JobService:
             logger.warning("Failed to count durable jobs", error=str(exc))
             return None
         return Counter(counts)
+
+
+def _count_active(states: Any) -> dict[str, int]:
+    counts = Counter(states)
+    return {s: counts.get(s, 0) for s in _ACTIVE_STATES}
 
 
 def _durable_statuses(task_status: str | None) -> list[str] | None:

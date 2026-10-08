@@ -11,6 +11,8 @@ from core.models.chunk import Chunk
 if TYPE_CHECKING:
     from datetime import datetime
 
+    from core.retrieval.trace import RetrievalTraceBuilder
+
 
 class VectorStore(ABC):
     """Base class for vector database backends."""
@@ -51,6 +53,7 @@ class VectorStore(ABC):
         collection: str = "default",
         filters: dict[str, Any] | None = None,
         similarity_threshold: float | None = None,
+        trace: RetrievalTraceBuilder | None = None,
         vector_field: str | None = None,
     ) -> list[dict[str, Any]]:
         """Similarity search returning raw result dicts.
@@ -129,11 +132,12 @@ class VectorStore(ABC):
     async def vector_dimension(self, vector_field: str | None = None) -> int | None:
         """Dimension the live collection actually stores for ``vector_field``.
 
-        ``None`` when it cannot be established — no field given, nothing
-        indexed with it yet, or the backend can't be reached. Callers that need
-        a number to size buffers should pick their own fallback; callers that
-        *report* the dimension must pass the ``None`` through rather than
-        substitute a guess.
+        ``None`` when the field is absent or nothing has been indexed with it.
+        Backend errors propagate so callers can distinguish an unavailable
+        store from an actual missing field. Callers that need a number to size
+        buffers should pick their own fallback; callers that *report* the
+        dimension must pass a genuine ``None`` through rather than substitute
+        a guess.
         """
         ...
 
@@ -153,6 +157,11 @@ class VectorStore(ABC):
         collection: str,
         filters: dict[str, Any],
         output_fields: list[str] | None = None,
+        limit: int | None = None,
     ) -> list[dict[str, Any]]:
-        """Return full chunk data matching the given filter expression."""
+        """Return full chunk data matching the given filter expression.
+
+        Without ``output_fields``, every field but the vectors is returned;
+        ``["*"]`` includes them. Results can be bounded with ``limit``.
+        """
         ...

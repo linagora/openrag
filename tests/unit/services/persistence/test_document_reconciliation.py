@@ -32,6 +32,83 @@ async def test_catalog_pages_use_age_and_exclusive_cursor():
     assert "indexed_at < $2" in query
 
 
+class _AsyncContext:
+    def __init__(self, value):
+        self.value = value
+
+    async def __aenter__(self):
+        return self.value
+
+    async def __aexit__(self, *_args):
+        return False
+
+
+class _StreamingConnection:
+    def __init__(self, rows):
+        self.rows = rows
+        self.transaction_kwargs = None
+        self.cursor_call = None
+
+    def transaction(self, **kwargs):
+        self.transaction_kwargs = kwargs
+        return _AsyncContext(None)
+
+    def cursor(self, query, partition, *, prefetch):
+        self.cursor_call = (query, partition, prefetch)
+
+        async def rows():
+            for row in self.rows:
+                yield row
+
+        return rows()
+
+
+class _StreamingPool:
+    def __init__(self, connection):
+        self.connection = connection
+
+    def acquire(self):
+        return _AsyncContext(self.connection)
+
+
+async def test_indexed_corpus_state_streams_one_consistent_ordered_snapshot():
+    timestamp = datetime(2026, 9, 1, tzinfo=UTC)
+    rows = [
+        {
+            "file_id": "file-a",
+            "indexed_at": timestamp,
+            "content_sha256": "content-a",
+            "chunk_count": 3,
+            "relationship_id": "relationship-a",
+            "parent_id": "parent-a",
+        }
+    ]
+    connection = _StreamingConnection(rows)
+    pool = _StreamingPool(connection)
+    repo = PgDocumentRepository(lambda: pool)
+
+    first = await repo.get_indexed_corpus_state("a", document_ids_limit=1)
+    rows[0]["relationship_id"] = "relationship-b"
+    relationship_changed = await repo.get_indexed_corpus_state("a", document_ids_limit=1)
+    rows[0]["parent_id"] = "parent-b"
+    parent_changed = await repo.get_indexed_corpus_state("a", document_ids_limit=1)
+
+    assert first.count == 1
+    assert len(first.digest) == 64
+    assert first.document_ids == ("file-a",)
+    assert first.document_ids_truncated is False
+    assert first.digest != relationship_changed.digest
+    assert relationship_changed.digest != parent_changed.digest
+    query, partition, prefetch = connection.cursor_call
+    assert partition == "a"
+    assert prefetch == 1000
+    assert 'ORDER BY file_id COLLATE "C"' in query
+    assert "LIMIT" not in query
+    assert "relationship_id" in query
+    assert "parent_id" in query
+    assert connection.transaction_kwargs == {"isolation": "repeatable_read", "readonly": True}
+
+
 async def test_catalog_lookup_does_not_hide_outages():
     pool = AsyncMock()
     pool.fetch.side_effect = RuntimeError("offline")
@@ -39,7 +116,10 @@ async def test_catalog_lookup_does_not_hide_outages():
         await PgDocumentRepository(lambda: pool).get_indexed_documents({("a", "f")})
 
 
-@pytest.mark.parametrize("method", ["get_indexed_documents", "list_indexed_documents"])
+@pytest.mark.parametrize(
+    "method",
+    ["get_indexed_documents", "list_indexed_documents", "get_indexed_corpus_state"],
+)
 def test_repository_without_catalog_lookup_cannot_be_constructed(method):
     incomplete = type(
         "IncompleteRepository",

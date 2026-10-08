@@ -39,6 +39,9 @@ class FakeSearcher(RetrievalSearcher):
         self.multi_calls.append(kwargs)
         return list(self.multi_result)
 
+    async def get_surrounding_chunks(self, **kwargs):
+        return []
+
     async def get_related_chunks(self, **kwargs):
         self.related_calls.append(kwargs)
         return list(self.related_result)

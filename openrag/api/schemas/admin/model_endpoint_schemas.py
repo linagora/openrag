@@ -271,6 +271,17 @@ class ModelEndpointResponse(BaseModel):
     # referenced through presets instead. Every route returning this model
     # fills it, through ModelEndpointService.with_partition_usage.
     used_by_partitions: int = 0
+    # LLM endpoints only (None otherwise): what a blank max context size /
+    # max output tokens resolves to, so the admin UI can show the value in
+    # effect instead of a generic "System default". The window is the
+    # ``max_model_len`` the endpoint reported on ``/v1/models`` (vLLM does,
+    # most gateways don't), else ``default_max_llm_context_size``.
+    detected_max_llm_context_size: int | None = None
+    # An endpoint write cleared the detected values and the re-probe hasn't
+    # landed yet: ``detected_max_llm_context_size`` is unknown, not absent.
+    context_size_detection_pending: bool = False
+    default_max_llm_context_size: int | None = None
+    default_max_output_tokens: int | None = None
     created_at: datetime
     updated_at: datetime
 

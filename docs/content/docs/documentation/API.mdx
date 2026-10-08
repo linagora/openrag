@@ -58,7 +58,9 @@ Readiness returns 503 when PostgreSQL, Milvus, or Ray is unavailable. It also
 reports the health of default and partition-referenced inference endpoints, plus
 broken preset references. Those model findings are informational because one
 tenant's configuration must not remove a healthy shared API replica from
-service.
+service. `checks.embedder` shows whether the default embedder, which uploads and
+retrieval both need, is usable; with `READINESS_REQUIRE_EMBEDDER=true` readiness
+also returns 503 while it is `unavailable` or `unresolvable`.
 
 ### ℹ️ openRAG version
 
@@ -104,7 +106,17 @@ Upload a new file to a specific partition for indexing.
 **Responses:**
 - `201 Created`: Returns task status URL
 - `400 Bad Request`: `callback_url` is malformed or not a public `http(s)` URL
-- `409 Conflict`: File already exists in partition
+- `409 Conflict`: File already exists in partition. Two more cases name a code,
+  as the `[CODE]` prefix of `detail` (`"[CODE]: message"`):
+  - `DOCUMENT_INDEXING_IN_PROGRESS`: another task is still indexing this `file_id`.
+    `extra.existing_task_id` and `extra.task_status_url` point at it, so a client
+    that re-sent after a timeout can poll the first task instead of re-uploading.
+    Earlier releases answered such a retry with `409 DOCUMENT_CONTENT_EXISTS`
+    naming the retried `file_id` itself when content deduplication is on (the
+    default) and the bytes are the same; with deduplication off, or different
+    bytes, they accepted it with `201` and let it fail at the end of the pipeline.
+  - `DOCUMENT_CONTENT_EXISTS`: content deduplication matched another file
+    (`extra.existing_file_id`).
 
 ##### Indexing status callback
 
@@ -212,7 +224,13 @@ Replace an existing file in the partition. Deletes the current entry and creates
 
 **Parameters:** Same as POST endpoint
 **Request Body:** Same as POST endpoint
-**Response:** `202 Accepted` with task status URL
+**Responses:**
+- `202 Accepted`: Returns task status URL
+- `404 Not Found`: File not found in partition
+- `409 Conflict`: `DOCUMENT_CONTENT_EXISTS`, when content deduplication finds the
+  same bytes held by another file, or by a task still indexing this one
+  (`extra.existing_file_id`). A replace is not refused for a task already
+  indexing the file, so it never returns `DOCUMENT_INDEXING_IN_PROGRESS`.
 
 #### Update File Metadata
 ```http
@@ -268,11 +286,12 @@ Perform semantic search across specified partitions.
 |---------------------|---------|---------|-------------|
 | `partitions` (optional)        | array   | ["all"] | Partitions to search. (optional) |
 | `text`              | string  | required | Search query |
-| `top_k` (optional)             | integer | 5       | Number of initial results (optional) |
+| `top_k` (optional)             | integer | 5       | Number of initial results (minimum 1; maximum 1000 when retrieval tracing is enabled) (optional) |
 | `include_related` (optional)   | boolean | `false`   | Include chunks from files with same `relationship_id` |
 | `include_ancestors` (optional) | boolean | `false`   | Include chunks from ancestor files (via `parent_id` chain) |
 | `related_limit` (optional)     | integer | 20      | Max related/ancestor chunks to fetch per result (used when `include_related` or `include_ancestors` is true) |
 | `filter` (optional)            | string  | None    | Milvus filter expression string for additional filtering. Supports comparison (`==`, `!=`, `>`, `<`, `>=`, `<=`), range (`IN`, `LIKE`), and logical (`AND`, `OR`, `NOT`) operators. |
+| `include_retrieval_trace` (optional) | boolean | `false` | Add content-free retrieval diagnostics for administrators. This may execute additional search work. |
 
 **Responses:**
 - `200 OK`: JSON list of document links (HATEOAS format)
@@ -290,13 +309,36 @@ Search within a specific partition only.
 | Parameter           | Type    | Default | Description |
 |---------------------|---------|---------|-------------|
 | `text`              | string  | required | Search query |
-| `top_k` (optional)             | integer | 5       | Number of initial results (optional) |
+| `top_k` (optional)             | integer | 5       | Number of initial results (minimum 1; maximum 1000 when retrieval tracing is enabled) (optional) |
 | `include_related` (optional)   | boolean | `false`   | Include chunks from files with same `relationship_id` |
 | `include_ancestors` (optional) | boolean | `false`   | Include chunks from ancestor files (via `parent_id` chain) |
 | `related_limit` (optional)     | integer | 20      | Max related/ancestor chunks to fetch per result (used when `include_related` or `include_ancestors` is true) |
 | `filter` (optional)            | string  | None    | Milvus filter expression string for additional filtering. Supports comparison (`==`, `!=`, `>`, `<`, `>=`, `<=`), range (`IN`, `LIKE`), and logical (`AND`, `OR`, `NOT`) operators. |
+| `include_retrieval_trace` (optional) | boolean | `false` | Add content-free retrieval diagnostics for administrators. This may execute additional search work. |
 
 **Response:** Same as multi-partition search
+
+Tracing is opt-in and administrator-only because it exposes query and candidate identifiers and performs extra diagnostic
+searches. It reports identifiers, ranks, public scores, decisions, timings, and configuration identity. Document content,
+prompt content, credentials, and internal endpoint addresses are excluded.
+
+* Retrieval Snapshot
+```http
+GET /search/partition/{partition}/snapshot
+```
+
+Returns the public retrieval, model, and index identity needed to reproduce a benchmark run. The endpoint is
+administrator-only. Document identifiers are optional, bounded, and excluded from the snapshot fingerprint so compact
+and expanded snapshots remain comparable.
+
+**Query Parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `include_document_ids` (optional) | boolean | `false` | Include indexed document identifiers in the snapshot, up to 10,000 IDs. |
+
+When requested, `index.document_ids` contains at most 10,000 identifiers, `index.document_ids_limit` reports that limit,
+and `index.document_ids_truncated` indicates whether additional identifiers were omitted.
 
 * Search Within Specific File
 ```http
@@ -522,7 +564,7 @@ All routes are prefixed with **`/presets`** and require the **admin** role. `pre
 ```http
 GET /presets/options
 ```
-Returns the choices valid inside a preset `config`: `chunking_strategies`, `parsing_strategies` (`pymupdf`, `marker`, `docling`), `retrieval_types`, and `reranker_providers`.
+Returns the choices valid inside a preset `config`: `chunking_strategies`, `parsing_strategies` (`pymupdf`, `marker`, `docling`), `retrieval_types`, and `reranker_providers`, plus `default_top_n`: what a retrieval preset's `top_n` resolves to when it is left out (the deployment's `RERANKER_TOP_K`).
 
 #### Create a preset
 ```http
@@ -661,6 +703,8 @@ DELETE /model-endpoints/{model_type}/{name}    # 204 No Content
 ```
 `PUT` takes a partial body (any of the create fields, plus `name` to rename) and returns the updated endpoint.
 
+An **LLM** endpoint's token budgets live in `extra.max_llm_context_size` and `extra.max_output_tokens`. Every route returning an LLM endpoint also reports what a missing value falls back to: `detected_max_llm_context_size` (the `max_model_len` the endpoint reported on `/v1/models`, `null` when it reports none, as most gateways and hosted APIs don't), `default_max_llm_context_size` and `default_max_output_tokens` (the deployment's `MAX_LLM_CONTEXT_SIZE` and `MAX_OUTPUT_TOKENS`). The context size that applies is `max_llm_context_size`, else `detected_max_llm_context_size`, else `default_max_llm_context_size`. A write to an LLM endpoint re-probes `/v1/models` after responding; until that lands, `context_size_detection_pending` is `true` and `detected_max_llm_context_size` is `null`. These fields are `null` on other endpoint types.
+
 Changing an **embedder**'s `endpoint`, `model_name`, `extra.implementation` or `extra.max_model_len` changes the vectors it produces. While partitions hold files indexed with it, such an edit returns `409 EMBEDDER_EDIT_AFFECTS_INDEXED_DATA` naming the partitions and file counts; resend it with `"acknowledge_indexed_data": true` to apply it anyway. The existing vectors are not rebuilt, so queries on those partitions are then compared against vectors from the previous configuration. `GET /model-endpoints/{model_type}/{name}/indexed-usage` returns the same counts ahead of time.
 
 Files still indexing when such an edit is saved are not counted, since a file is only counted once indexing finishes. Instead, when the file is recorded, the indexer checks that the partition's embedder still has the configuration it embedded with. If it doesn't, the file fails with `EMBEDDER_CHANGED_DURING_INDEXING`, its vectors are removed, and it has to be indexed again. Indexers reload an edited endpoint before embedding, so only files already embedding during the edit are affected.
@@ -755,6 +799,49 @@ curl -X POST http://localhost:8080/v1/chat/completions \
 ```
 
 
+#### Response: the `extra` field
+
+Besides the OpenAI fields, the response carries `extra`, a JSON object with the
+sources of the answer. Up to 2.2.2 it was a JSON-encoded string that clients had
+to parse. In a streamed response every chunk carries `extra`, empty until the
+final chunks, which carry the whole object; only an error chunk carries none.
+
+| Key | Content |
+|---|---|
+| `sources` | The sources the model cited, or every presented source when it reported no citations: the answer has neither a `[Sources: …]` tag nor an inline `[Source N]` marker, or the request skipped citation reporting (structured output, direct LLM or web search without results). An explicit `[Sources: none]` gives an empty list. Kept for existing clients. |
+| `presented_sources` | Every source shown to the model, whether cited or not. |
+| `cited_sources` | Only the sources the model cited, in a `[Sources: …]` tag or inline `[Source N]` markers; empty when it cited none or reported no citations. |
+| `citations_reported` | `true` when the model reported its citations, including `[Sources: none]`; `false` when `sources` fell back to every presented source. An empty `[Sources: ]` counts as no tag. |
+| `all_retrieved_sources` | Every source retrieval returned, including those that did not fit in the prompt. Only when the request sets `metadata.include_all_retrieved_sources: true`. |
+| `attachments` | Chat completions only: the attached file IDs actually used, when the request sets `metadata.attachments`. |
+| `truncated` | Streamed chat completions only: `true` when the upstream stream ended without `[DONE]`, so the answer may be cut short. Absent otherwise. |
+
+A document source nests the chunk's metadata under `chunk` (since 2.3.0); the keys
+beside it are computed by the server:
+
+```json
+{
+  "source_type": "document",
+  "chunk": { "filename": "report.pdf", "file_id": "…", "partition": "…", "…": "…" },
+  "rerank_score": 0.646,
+  "chunk_url": "https://<host>/extract/<chunk id>",
+  "file_url": "https://<host>/static/<chunk id>"
+}
+```
+
+`rerank_score` is the score the reranker gave that chunk for this query, present
+only when a reranker ran; compare it within one response only. `file_url` is
+absent when the chunk has no source file. A web source is flat:
+
+```json
+{
+  "source_type": "web",
+  "url": "https://example.org/page",
+  "title": "Page title",
+  "snippet": "The search result's excerpt of the page."
+}
+```
+
 * Text Completions
 ```http
 POST /v1/completions
@@ -775,11 +862,11 @@ ambiguous, mixed, and factual messages retrieve. Text completions retain their c
 | `spoken_style_answer` | Chat and text completions | `bool` | `false` | Generates a succinct spoken-style conversational answer based on the retrieved documents. |
 | `use_map_reduce` | Chat only | `bool` | `false` | Uses a map-reduce strategy to aggregate information from multiple documents. See [map-reduce configuration](/openrag/documentation/env_vars/#map--reduce-configuration). |
 | `llm_override` | Chat and text completions | `object` | `null` | Overrides the downstream LLM for this request. Accepts `model` (string), always honored. Also accepts `base_url` and `api_key`, which are honored **only** when the deployment sets `LLM_OVERRIDE_ALLOW_CUSTOM_ENDPOINT` — otherwise they are ignored and the request goes to the server's configured endpoint. See [custom LLM endpoints](/openrag/documentation/env_vars/#client-supplied-llm-endpoints). |
-| `attachments` | Chat only | `list[{"id": string}]` | `null` | Scopes RAG retrieval to a specific list of file IDs within the target partition, instead of searching the whole partition. Unknown or unindexed IDs are silently dropped; duplicates are deduplicated. The response's `extra.attachments` reports which IDs were actually used. |
+| `attachments` | Chat only | `list[{"id": string}]` | `null` | Scopes RAG retrieval to a specific list of file IDs within the target partition, instead of searching the whole partition. Combined with `workspace`, only the attached files that belong to the workspace are searched. Unknown, unindexed or foreign IDs are silently dropped; duplicates are deduplicated. The response's `extra.attachments` reports which IDs were actually used. |
 
-Common English and French casual messages are recognized directly; other phrasing is checked conservatively by the
-contextualizer. Casual replies use a dedicated instruction in the detected language. Only greetings introduce
-OpenRAG, and ambiguous or normalized-empty input defaults to English.
+Only allowlisted English and French casual messages skip retrieval; other phrasing retrieves by default. Casual
+replies use a dedicated instruction in the detected language. Only greetings include an
+introduction; set `ASSISTANT_NAME` to use your deployment's name. Ambiguous or normalized-empty input defaults to English.
 
 Examples:
 
