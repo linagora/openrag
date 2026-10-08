@@ -11,7 +11,7 @@ _CURRENT_SEED_HASHES: dict[str, str] = {
     "hyde": "4c160d238359b43095b7ab223d217aa2e5f4348de6147ba33675da5f8f2aaf9d",
     "image_captioning": "0f6ea8060787d5d1c9d75243d9d2f1055b7852a2720fe226f6f0008ba2604056",
     "multi_query": "24724f4229137d869e91cf6608db656cefc400d8bd470080ed546449d5aad0dd",
-    "query_contextualizer": "db4fbb3ff1d1b91df19a31a872ae83b73a9b63b993f2f20a473d4c87725d19aa",
+    "query_contextualizer": "555e02415f6163dc40a0e23878314aeb410ea0a70dd1d9a805e08ff211dc7806",
     "spoken_style_answer": "1d99bca86e8dce884ac1a50d0071577eafe26b383d568225aa7f9b7ee4a02c67",
     "sys_prompt": "3f0e6c8d2e385eda15715c83f54d701cfe83fe4ffddc2cbfd6ba398ac1c599dd",
     "topic_tagger": "5d9965a1b3f84ab3000e2a68b9cbc78f579dfd49d2119ebf1547810f3b33bd0e",
@@ -30,6 +30,8 @@ _SUPERSEDED_SEED_HASHES: dict[str, frozenset[str]] = {
     "query_contextualizer": frozenset(
         {
             "d7b5f06862e57587c6bc2965af4a70dcc5327dfccae8172c32ab02623878f6f6",
+            "2a950346e27dd815fd42af0849caf0065f615c3bef4bff6d61d1621b39fcd066",
+            "db4fbb3ff1d1b91df19a31a872ae83b73a9b63b993f2f20a473d4c87725d19aa",
             "c1ff41d1a86909ea608e59cc4c50e8cbf831d5368c70b0018c256816f024be0f",
             "8a3b0fc89b47a189b8e696f9383ad1f1f5023759b1ab3e01636c9455694c0b4e",
             "e508d9b8a1c6f46f6e4b8a461c4f064d84b0242fc6e6dbb1136a94a27de79a61",
