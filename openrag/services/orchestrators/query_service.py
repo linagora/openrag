@@ -1708,7 +1708,7 @@ def _fallback_stream_lines(template, fallback_text: str, extra: dict, model_name
     choices = base.get("choices") or [{"index": 0, "delta": {}, "finish_reason": "stop"}]
     original_choice = dict(choices[0])
     base["choices"] = [{**original_choice, "delta": {"content": fallback_text}, "finish_reason": None}]
-    base["extra"] = dict(extra)
+    base["extra"] = {key: value for key, value in extra.items() if key != "retrieval_trace"}
     yield f"data: {json.dumps(base)}\n\n"
 
     finish = dict(template or base)
