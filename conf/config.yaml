@@ -221,6 +221,14 @@ loader:
     mp4: LocalWhisperLoader
     md: MarkdownLoader
 
+  # Env: PYMUPDF_POOL_SIZE, PYMUPDF_PARSE_MEMORY_LIMIT_MB,
+  #      PYMUPDF_MAX_TASKS_PER_CHILD (indexing only; 1 / 0 = one thread, as
+  #      before; more workers or a ceiling parse in child processes — see
+  #      env_vars.md)
+  pymupdf_pool_size: 1
+  pymupdf_parse_memory_limit_mb: 0
+  pymupdf_max_tasks_per_child: 20
+
   # Env: MARKER_MAX_TASKS_PER_CHILD, MARKER_POOL_SIZE, MARKER_MAX_PROCESSES,
   #      MARKER_NUM_GPUS, MARKER_TIMEOUT, MARKER_CHILD_TIMEOUT_RATIO,
   #      MARKER_PDFTEXT_WORKERS, MARKER_CHUNK_SIZE,
