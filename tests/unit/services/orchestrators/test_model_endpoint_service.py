@@ -1113,6 +1113,37 @@ async def test_load_all_no_default_alias_without_is_default():
     assert "default" not in settings.models.embedder
 
 
+@pytest.mark.asyncio
+async def test_load_new_registers_endpoints_created_elsewhere_and_keeps_the_loaded_ones():
+    """A partition a swap switched on another process names an endpoint created
+    there; ``load_new`` makes it resolvable here. Loaded entries stay as they are:
+    their clients are cached by name, and a rename here keeps its old-name alias."""
+    from core.config.root import Settings
+
+    repo = _FakeEndpointRepo(rows=[_make_row(name="embed-a", is_default=True)])
+    settings = Settings()
+    svc = _make_service(repo, settings=settings)
+    await svc.load_all()
+    loaded = settings.models.embedder["embed-a"]
+    settings.models.embedder["renamed-from"] = loaded
+
+    # Another process creates embed-b and a reranker, and edits embed-a.
+    repo._store[("embed-b", "embedder")] = _make_row(
+        name="embed-b", model_name="embed-model-b", is_default=False, vector_field="vector_embed_b"
+    )
+    repo._store[("rank-b", "reranker")] = _make_row(name="rank-b", model_type="reranker", is_default=False)
+    repo._store[("embed-a", "embedder")] = _make_row(name="embed-a", endpoint="http://edited:8000/v1")
+
+    await svc.load_new()
+
+    assert settings.models.embedder["embed-b"].model_name == "embed-model-b"
+    assert settings.models.embedder["embed-b"].vector_field == "vector_embed_b"
+    assert "rank-b" in settings.models.reranker
+    assert settings.models.embedder["embed-a"] is loaded
+    assert settings.models.embedder["default"] is loaded
+    assert settings.models.embedder["renamed-from"] is loaded
+
+
 # ------------------------------------------------------------------
 # create_model_endpoint
 # ------------------------------------------------------------------

@@ -247,6 +247,18 @@ def _with_usage(row: ModelEndpointRow, counts: Mapping[tuple[str, str], int]) ->
     return {**row.model_dump(), "used_by_partitions": counts.get((row.name, row.model_type), 0)}
 
 
+def _endpoint_config(row: ModelEndpointRow) -> ModelEndpointConfig:
+    return ModelEndpointConfig(
+        name=row.name,
+        endpoint=row.endpoint,
+        model_name=row.model_name,
+        batch_size=row.batch_size,
+        timeout=row.timeout,
+        extra=row.extra,
+        vector_field=row.vector_field,
+    )
+
+
 class ModelEndpointService:
     """CRUD and lifecycle management for named model endpoints."""
 
@@ -557,15 +569,7 @@ class ModelEndpointService:
             bucket = buckets.get(row.model_type)
             if bucket is None:
                 continue
-            cfg = ModelEndpointConfig(
-                name=row.name,
-                endpoint=row.endpoint,
-                model_name=row.model_name,
-                batch_size=row.batch_size,
-                timeout=row.timeout,
-                extra=row.extra,
-                vector_field=row.vector_field,
-            )
+            cfg = _endpoint_config(row)
             bucket[row.name] = cfg
             if row.is_default:
                 default_cfgs[row.model_type] = cfg
@@ -587,6 +591,29 @@ class ModelEndpointService:
             n_vlm=len(buckets["vlm"]),
             n_stt=len(buckets["stt"]),
         )
+
+    async def load_new(self) -> None:
+        """Register the endpoints another process created since this one loaded them.
+
+        Called when the configuration revision moves, before the presets and
+        partitions reload: a partition a swap switched elsewhere, or a preset,
+        can name an endpoint created on that other process, which a factory
+        here would refuse with ``KeyError`` (#1016). Loaded endpoints and the
+        ``default`` aliases are left as they are. Their clients are cached by
+        name, so replacing the config under one would leave the two disagreeing,
+        and a rename here keeps the old name aliased until its own ``load_all()``.
+        """
+        rows = await self._repo.list_all()
+        models = self._config.models
+        for row in rows:
+            if row.model_type not in _VALID_TYPES:
+                continue
+            bucket: dict = getattr(models, row.model_type)
+            if row.name not in bucket:
+                bucket[row.name] = _endpoint_config(row)
+                logger.bind(endpoint=row.name, model_type=row.model_type).info(
+                    "Loaded a model endpoint created by another process."
+                )
 
     # ------------------------------------------------------------------
     # CRUD

@@ -21,6 +21,8 @@ from core.utils.logging import get_logger
 from services.orchestrators.partition_service import PartitionService
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     from core.config.root import Settings
     from core.ports.preset_repo import PresetRepository
 
@@ -106,10 +108,12 @@ class PresetService:
         preset_repo: PresetRepository,
         config: Settings,
         partition_service: PartitionService | None = None,
+        load_new_endpoints: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         self._repo = preset_repo
         self._config = config
         self._partition_service = partition_service
+        self._load_new_endpoints = load_new_endpoints
         self._reload_lock = asyncio.Lock()
         self._loaded_revision: int | None = None
 
@@ -198,6 +202,9 @@ class PresetService:
         The cheap revision query runs before every indexing dispatch. A full
         reload happens only when the database holds a newer (or deleted)
         preset revision than this process has loaded.
+
+        Endpoints created elsewhere are registered first: what reloads after
+        them can name one, as a partition switched by a swap names its target.
         """
         if await self._repo.latest_revision() == self._loaded_revision:
             return False
@@ -205,6 +212,8 @@ class PresetService:
         async with self._reload_lock:
             if await self._repo.latest_revision() == self._loaded_revision:
                 return False
+            if self._load_new_endpoints is not None:
+                await self._load_new_endpoints()
             revision = await self._load_all(remember_revision=False)
             if self._partition_service is not None:
                 await self._partition_service.load_partitions()

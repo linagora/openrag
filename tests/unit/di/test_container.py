@@ -655,6 +655,61 @@ class TestPhase14NamedComponentFactories:
 
         assert c.embedder_factory("embed-a").kwargs["batch_size"] == 128
 
+    @pytest.mark.asyncio
+    async def test_a_partition_switched_elsewhere_resolves_its_endpoint_created_elsewhere(self):
+        """Another process created embed-b, swapped p1 onto it and bumped the revision.
+
+        This one reloads p1 on that revision, then builds embed-b for it, an
+        endpoint it never loaded (#1016). Without the endpoint load, the factory
+        raises ``KeyError`` and every search of p1 is a 500.
+        """
+        from datetime import UTC, datetime
+
+        from core.config.model_endpoints import ModelEndpointRow
+
+        now = datetime(2026, 1, 1, tzinfo=UTC)
+        settings = _settings_with_named_models()
+        created_elsewhere = ModelEndpointRow(
+            name="embed-b",
+            model_type="embedder",
+            endpoint="http://embedder-b:8000/v1",
+            model_name="embed-model-b",
+            extra={"implementation": "phase14i-test"},
+            vector_field="vector_embed_b",
+            created_at=now,
+            updated_at=now,
+        )
+
+        class PresetRepo:
+            revision = 0
+
+            async def latest_revision(self):
+                return self.revision
+
+            async def load_all_with_revision(self):
+                return [], self.revision
+
+        class EndpointRepo:
+            async def list_all(self, model_type=None):
+                return [created_elsewhere]
+
+        class SwappedPartitions:
+            async def load_partitions(self):
+                settings.partitions["p1"] = SimpleNamespace(embedder="embed-b")
+
+        c = ServiceContainer(settings)
+        preset_repo = PresetRepo()
+        c._catalog_store = SimpleNamespace(preset_repo=preset_repo, model_endpoint_repo=EndpointRepo())
+        c._partition_service = SwappedPartitions()
+        c._prompt_service = object()
+        await c.preset_service.load_all()
+
+        preset_repo.revision += 1
+        await c.preset_service.refresh_if_stale()
+
+        embedder = c.embedder_factory(settings.partitions["p1"].embedder)
+        assert embedder.kwargs["model_name"] == "embed-model-b"
+
     def test_named_factories_cache_by_endpoint_name(self):
         """Repeated factory calls for the same endpoint return one client."""
         c = ServiceContainer(_settings_with_named_models())

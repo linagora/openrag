@@ -509,6 +509,7 @@ class ServiceContainer:
                 preset_repo=self.preset_repo,
                 config=self._require_settings(),
                 partition_service=self.partition_service,
+                load_new_endpoints=lambda: self.model_endpoint_service.load_new(),
             )
         return self._preset_service
 
