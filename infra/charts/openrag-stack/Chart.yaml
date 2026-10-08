@@ -3,8 +3,8 @@ name: openrag-stack
 description: A Helm chart for Kubernetes
 type: application
 
-version: 0.6.8
-appVersion: "2.2.1"
+version: 0.7.1
+appVersion: "2.3.1"
 
 maintainers:
   - name: linagora
@@ -28,8 +28,8 @@ dependencies:
   - name: milvus
     # 5.0.26 declares Milvus 3.0.0 but was never added to the published index,
     # so helm cannot resolve it. 5.0.27 is the first *indexed* chart with Milvus
-    # 3 defaults (appVersion and image.all.tag are both v3.0.1), so values.yaml
-    # no longer overrides the image tag.
+    # 3 defaults; values.yaml pins the image to v3.0.2 until an indexed
+    # milvus-helm release defaults to v3.0.2 or later.
     version: "5.0.27"
     repository: "https://zilliztech.github.io/milvus-helm/"
     condition: milvus.enabled

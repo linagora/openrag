@@ -8,6 +8,7 @@ up with the on-disk filenames for all managed types.
 
 from __future__ import annotations
 
+import hashlib
 from hashlib import sha256
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,7 +18,7 @@ import pytest
 from api.schemas.admin.prompt_schemas import PromptTypeName
 from core.config.infrastructure import PathsConfig, PromptsConfig
 from core.models.prompt import Prompt, PromptType
-from core.utils.exceptions import ConfigError, NotFoundError, ValidationError
+from core.utils.exceptions import ConfigError, NotFoundError, ServiceUnavailableError, ValidationError
 from loguru import logger
 from services.orchestrators import prompt_service as prompt_module
 from services.orchestrators.prompt_service import PROMPT_TYPE_KEYS, PromptService
@@ -398,6 +399,30 @@ class TestSeeding:
 
 
 class TestResolution:
+    async def test_resolution_with_identity_preserves_prompt_provenance(self):
+        repo = FakePromptRepo()
+        svc = _service(repo)
+        await repo.create(Prompt(prompt_type="query_contextualizer", name="legal", content="LEGAL"))
+
+        resolved = await svc.resolve_prompt_with_identity("query_contextualizer", names=["legal"])
+
+        assert resolved.content == "LEGAL"
+        assert resolved.name == "legal"
+        assert resolved.source == "named"
+        assert resolved.content_hash == hashlib.sha256(b"LEGAL").hexdigest()
+
+    async def test_strict_identity_resolution_propagates_database_outage_as_503(self):
+        class BrokenRepo(FakePromptRepo):
+            async def get_by_name(self, prompt_type: str, name: str) -> Prompt | None:
+                raise RuntimeError("postgres unreachable")
+
+        svc = _service(BrokenRepo())
+
+        with pytest.raises(ServiceUnavailableError) as exc:
+            await svc.resolve_prompt_with_identity("query_contextualizer", names=["legal"], strict_errors=True)
+
+        assert exc.value.code == "PROMPT_LOOKUP_UNAVAILABLE"
+
     async def test_precedence_named_then_default_then_disk(self):
         repo = FakePromptRepo()
         svc = _service(repo)

@@ -35,8 +35,8 @@ How each deployment collects them:
 | Deployment | API `/metrics` | Ray's metrics agent |
 | --- | --- | --- |
 | Compose, monitoring overlay | job `openrag` | job `openrag-ray`, on the port the overlay pins with `RAY_METRICS_EXPORT_PORT` |
-| Kubernetes, `ray.enabled=true` | `openrag.metrics.serviceMonitor` | the Ray PodMonitor, once `ray.metrics.podMonitor.enabled=true` (off by default; see [Monitoring Ray, Postgres and Milvus](/openrag/documentation/kubernetes/#monitoring-ray-postgres-and-milvus)) |
-| Kubernetes, `ray.enabled=false` | `openrag.metrics.serviceMonitor` | not collected (see Limitations) |
+| Kubernetes, `ray.enabled=true` | `openrag.metrics.serviceMonitor` | the Ray PodMonitor on the Ray pods' `metrics` port, once `ray.metrics.podMonitor.enabled=true` or `monitoring.bundled` (off by default; see [Monitoring Ray, Postgres and Milvus](/openrag/documentation/kubernetes/#monitoring-ray-postgres-and-milvus)) |
+| Kubernetes, `ray.enabled=false` | `openrag.metrics.serviceMonitor` | the same PodMonitor, on the `openrag` pod's `ray-metrics` port, which the chart pins with `RAY_METRICS_EXPORT_PORT`. Not with an external Ray cluster (`RAY_ADDRESS`, or `ray.externalCluster`): the API then runs no Ray, and that cluster is scraped where it runs |
 
 `OpenRagTargetDown` watches every job whose name contains `openrag`, which is why the Compose
 Ray job is named `openrag-ray`.
@@ -140,10 +140,9 @@ matters; see [catalog reconciliation](/openrag/documentation/catalog_reconciliat
 
 ## Limitations
 
-- **Embedded Ray on Kubernetes is not collected.** With `ray.enabled=false` (the chart
-  default) Ray runs inside the API pod on a random metrics port, and the chart scrapes nothing
-  there. The ingestion rows and the inference calls made while indexing stay empty, and *Ray
-  scrape* reads **Not scraped**.
+- **Ray is scraped only with its `PodMonitor` on.** `ray.metrics.podMonitor.enabled`, or
+  `monitoring.bundled`, in either Ray topology. Without it the ingestion rows and the
+  inference calls made while indexing stay empty, and *Ray scrape* reads **Not scraped**.
 - **Everything Prometheus scrapes is aggregated.** Two OpenRAG releases scraped by one
   Prometheus show as one.
 - **Ray Serve.** Under `ENABLE_RAY_SERVE=true` the chart does not scrape the API's `/metrics`

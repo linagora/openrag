@@ -3,6 +3,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from core.models.chunk import Chunk
+from core.retrieval.trace import RetrievalTraceBuilder
 from loguru import logger
 from prometheus_client import REGISTRY
 from services.storage import catalog_searcher
@@ -84,11 +85,55 @@ async def test_empty_results_skip_catalog():
     repo.get_indexed_documents.assert_not_awaited()
 
 
+async def test_search_forwards_request_local_trace_to_inner_searcher():
+    inner = AsyncMock()
+    inner.search.return_value = []
+    trace = RetrievalTraceBuilder("req-1", "q")
+
+    await CatalogSearcher(inner, AsyncMock()).search("q", ["a"], 5, trace=trace)
+
+    assert inner.search.call_args.kwargs["trace"] is trace
+
+
+async def test_search_marks_catalog_orphans_in_recorded_stages_without_changing_live_hits():
+    live_chunk = Chunk(id="live", document_id="live-file", partition="a", text="live")
+    orphan_chunk = Chunk(id="orphan", document_id="deleted-file", partition="a", text="orphan")
+    inner = AsyncMock()
+
+    async def _search(**kwargs):
+        trace = kwargs["trace"]
+        trace.record_stage(
+            "dense_before_threshold",
+            status="complete",
+            candidates=trace.project_chunks("dense_before_threshold", [live_chunk, orphan_chunk]),
+        )
+        return [live_chunk, orphan_chunk]
+
+    inner.search.side_effect = _search
+    repo = AsyncMock()
+    repo.get_indexed_documents.return_value = {("a", "live-file"): datetime.now(UTC)}
+    trace = RetrievalTraceBuilder("req-1", "q")
+    searcher = CatalogSearcher(inner, repo)
+
+    result = await searcher.search("q", ["a"], 5, trace=trace)
+
+    assert result == [live_chunk]
+    assert result[0] is live_chunk
+    candidates = {candidate.id: candidate for candidate in trace.stages["dense_before_threshold"].candidates}
+    assert candidates["orphan"].removal_reason.code == "catalog_filter"
+    assert candidates["live"].removal_reason is None
+
+
 @pytest.mark.parametrize("multi", [False, True])
 async def test_surrounding_orphan_is_removed_after_real_search_expansion(multi):
     vectors = AsyncMock()
-    vectors.search.return_value = [{"id": "1", "file_id": "live", "partition": "a", "next_section_id": 2}]
-    vectors.query_chunks_by_filter.return_value = [{"_id": 2, "file_id": "deleted", "partition": "a"}]
+    # Neighbours come from the hit's own file: the orphan here is the neighbour
+    # of a hit whose file was deleted, which expansion adds after the search.
+    vectors.search.return_value = [
+        {"id": "1", "file_id": "live", "partition": "a"},
+        {"id": "5", "file_id": "deleted", "partition": "a", "next_section_id": 6},
+    ]
+    vectors.query_chunks_by_filter.return_value = [{"_id": 6, "file_id": "deleted", "partition": "a", "section_id": 6}]
     embedder = AsyncMock()
     embedder.embed.return_value = [[0.1]]
     repo = AsyncMock()

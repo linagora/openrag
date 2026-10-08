@@ -48,6 +48,7 @@ _ENV_OVERRIDES: list[tuple[str, str, type]] = [
     # Model endpoint registry
     ("MODEL_ENDPOINT_SYNC_ON_BOOT", "models.sync_on_boot", bool),
     ("PROMPTS_REFRESH_DEFAULTS", "prompts.refresh_defaults", bool),
+    ("READINESS_REQUIRE_EMBEDDER", "models.readiness_requires_embedder", bool),
     # VectorDB
     ("VDB_HOST", "vectordb.host", str),
     ("VDB_iPORT", "vectordb.port", int),
@@ -90,6 +91,7 @@ _ENV_OVERRIDES: list[tuple[str, str, type]] = [
     ("PREFERRED_URL_SCHEME", "server.preferred_url_scheme", str),
     ("METRICS_TOKEN", "server.metrics_token", str),
     ("METRICS_ALLOW_UNAUTHENTICATED", "server.metrics_allow_unauthenticated", bool),
+    ("ASSISTANT_NAME", "server.assistant_name", str),
     # LLM Context
     ("MAX_LLM_CONTEXT_SIZE", "llm_context.max_llm_context_size", int),
     ("MAX_OUTPUT_TOKENS", "llm_context.max_output_tokens", int),

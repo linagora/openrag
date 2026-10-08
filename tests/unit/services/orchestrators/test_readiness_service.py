@@ -513,13 +513,50 @@ async def test_model_probe_sends_api_key_over_http(respx_mock):
     assert probe.calls[0].request.headers["Authorization"] == "Bearer test-key"
 
 
-@pytest.mark.parametrize("api_key", ["EMPTY", "  EMPTY  ", "   "])
-async def test_model_probe_treats_placeholder_api_keys_as_credential_free(respx_mock, api_key):
+async def test_model_probe_sends_empty_api_key(respx_mock):
+    """#1113: EMPTY is a real key for non-STT endpoints such as the reranker."""
+    probe = respx_mock.get("http://model.test/v1/models").respond(200, json={"data": [{"id": "model"}]})
+    config = ModelEndpointConfig(
+        endpoint="http://model.test/v1",
+        model_name="model",
+        extra={"api_key": "EMPTY"},
+    )
+
+    await check_model_endpoint(config)
+
+    assert probe.calls[0].request.headers["Authorization"] == "Bearer EMPTY"
+
+
+@pytest.mark.parametrize(
+    ("api_key", "expected_authorization"),
+    [
+        ("  sk-test  ", "Bearer sk-test"),
+        ("  EMPTY  ", "Bearer EMPTY"),
+        ("   ", None),
+    ],
+)
+async def test_stt_model_probe_normalizes_api_key_like_audio_client(respx_mock, api_key, expected_authorization):
     probe = respx_mock.get("http://model.test/v1/models").respond(200, json={"data": [{"id": "model"}]})
     config = ModelEndpointConfig(
         endpoint="http://model.test/v1",
         model_name="model",
         extra={"api_key": api_key},
+    )
+
+    await check_model_endpoint(config, model_type="stt")
+
+    if expected_authorization is None:
+        assert "Authorization" not in probe.calls[0].request.headers
+    else:
+        assert probe.calls[0].request.headers["Authorization"] == expected_authorization
+
+
+async def test_model_probe_treats_an_empty_api_key_as_credential_free(respx_mock):
+    probe = respx_mock.get("http://model.test/v1/models").respond(200, json={"data": [{"id": "model"}]})
+    config = ModelEndpointConfig(
+        endpoint="http://model.test/v1",
+        model_name="model",
+        extra={"api_key": ""},
     )
 
     await check_model_endpoint(config)

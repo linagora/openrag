@@ -92,11 +92,16 @@ class FakeMilvus:
         self.unbuilt_rows = 0
         self.index_state: str | None = None
 
-    def add_rows(self, partition: str, n: int, field: str = "vector") -> None:
-        for _ in range(n):
+    def add_rows(self, partition: str, n: int, field: str = "vector", section_base: int | None = None) -> None:
+        """Add ``n`` rows; with ``section_base``, as one file linked by section IDs."""
+        for i in range(n):
             _id = len(self.rows) + 1
             row = {f["name"]: None for f in self.fields if f["type"] == DataType.FLOAT_VECTOR}
             row.update({"_id": _id, "partition": partition, field: [float(_id)] * 4})
+            if section_base is not None:
+                row["prev_section_id"] = section_base + i - 1 if i else None
+                row["section_id"] = section_base + i
+                row["next_section_id"] = section_base + i + 1 if i < n - 1 else None
             self.rows.append(row)
 
     # -- filters ------------------------------------------------------------
@@ -129,14 +134,22 @@ class FakeMilvus:
         return [{"count(*)": len(self._match(filter))}]
 
     def query_iterator(self, collection_name, filter, batch_size, output_fields):
-        (field,) = output_fields
-        return _Iterator([{"_id": r["_id"], field: r.get(field)} for r in self._match(filter)], batch_size)
+        # A dynamic key a row does not hold is left out of that row, as Milvus does.
+        rows = [{"_id": r["_id"], **{f: r[f] for f in output_fields if f in r}} for r in self._match(filter)]
+        return _Iterator(rows, batch_size)
 
     def upsert(self, collection_name, data, partial_update):
         assert partial_update is True
         by_id = {r["_id"]: r for r in self.rows}
+        static = set(self.field_names())
         for item in data:
-            by_id[item["_id"]].update({k: v for k, v in item.items() if k != "_id"})
+            row = by_id[item["_id"]]
+            row.update({k: v for k, v in item.items() if k != "_id"})
+            # As Milvus 3.0 does: a partial upsert rewrites every number in the
+            # row's dynamic field as a float64, sent or not.
+            for key, value in row.items():
+                if key not in static and isinstance(value, int) and not isinstance(value, bool):
+                    row[key] = int(float(value))
         self.superseded_rows += len(data)
         self.calls.append("upsert")
         for _ in range(self.writes_during_copy):
@@ -189,6 +202,20 @@ def _catalog(migration, partitions, embedders, default=None):
     return migration.Catalog(partitions=partitions, embedder_fields=embedders, default_embedder=default)
 
 
+#: A section ID as the generator used to make them, from ``time.time_ns()``.
+_NS_SECTION_BASE = 1_790_580_087_624_290_262
+
+
+def _assert_linked(rows: list[dict[str, Any]]) -> None:
+    """``rows`` are one file in order: distinct IDs, each linked to its neighbours, all exact as float64."""
+    ids = [r["section_id"] for r in rows]
+    assert len(set(ids)) == len(rows)
+    assert all(0 <= i <= 2**53 - 1 for i in ids)
+    for prev, row, nxt in zip([None, *rows[:-1]], rows, [*rows[1:], None], strict=True):
+        assert row["prev_section_id"] == (prev["section_id"] if prev else None)
+        assert row["next_section_id"] == (nxt["section_id"] if nxt else None)
+
+
 @pytest.fixture
 def use_catalog(monkeypatch, migration):
     def install(catalog):
@@ -229,6 +256,38 @@ def test_rows_move_to_their_partitions_embedder_field_and_vector_is_dropped(migr
     assert client.properties["openrag.schema_version"] == "3"
     # The irreversible step comes last.
     assert client.calls.index("drop_field:vector") > max(i for i, c in enumerate(client.calls) if c == "upsert")
+
+
+def test_section_ids_survive_the_copy_still_linked(migration, use_catalog) -> None:
+    """The copy's partial upsert stores the dynamic field's numbers as float64.
+    Unfolded, the old IDs would round until a few hundred neighbours share one,
+    and a neighbour lookup would return the whole file."""
+    client = FakeMilvus()
+    client.add_rows("p", 300, section_base=_NS_SECTION_BASE)
+    client.add_rows("p", 2)  # indexed before chunks had section IDs
+    assert len({int(float(_NS_SECTION_BASE + i)) for i in range(300)}) < 10
+    use_catalog(_catalog(migration, {"p": "bge"}, {"bge": "vector_bge"}))
+
+    migration.upgrade(client, "c")
+
+    _assert_linked(client.rows[:300])
+    assert not any(key in row for row in client.rows[300:] for key in migration.SECTION_ID_KEYS)
+
+
+def test_rerunning_after_a_failure_leaves_folded_section_ids_as_they_are(migration, use_catalog) -> None:
+    client = FakeMilvus()
+    client.add_rows("p", 3, section_base=_NS_SECTION_BASE)
+    client.writes_during_copy = 1
+    use_catalog(_catalog(migration, {"p": "bge", "intruder": "bge"}, {"bge": "vector_bge"}))
+    with pytest.raises(RuntimeError, match="changed during the copy"):
+        migration.upgrade(client, "c")
+    folded = [r["section_id"] for r in client.rows[:3]]
+    assert folded != [_NS_SECTION_BASE + i for i in range(3)]
+
+    migration.upgrade(client, "c")
+
+    assert [r["section_id"] for r in client.rows[:3]] == folded
+    _assert_linked(client.rows[:3])
 
 
 @pytest.mark.parametrize(
@@ -406,6 +465,19 @@ def test_downgrade_restores_vector_from_each_partitions_field(migration, use_cat
     assert client.properties["openrag.schema_version"] == "2"
 
 
+def test_downgrade_keeps_section_ids_linked(migration, use_catalog) -> None:
+    client = FakeMilvus(version="3")
+    client.drop_collection_field("c", "vector")
+    client.add_collection_field("c", "vector_bge", DataType.FLOAT_VECTOR, 4, True)
+    client.add_rows("p", 300, field="vector_bge", section_base=_NS_SECTION_BASE)
+    use_catalog(_catalog(migration, {"p": "bge"}, {"bge": "vector_bge"}))
+
+    migration.downgrade(client, "c")
+
+    assert "vector" in client.field_names()
+    _assert_linked(client.rows)
+
+
 def test_downgrade_refuses_fields_of_different_dimensions(migration, use_catalog) -> None:
     client = FakeMilvus(version="3")
     client.drop_collection_field("c", "vector")
@@ -418,3 +490,12 @@ def test_downgrade_refuses_fields_of_different_dimensions(migration, use_catalog
     with pytest.raises(RuntimeError, match="different dimensions"):
         migration.downgrade(client, "c")
     assert "vector" not in client.field_names()
+
+
+@pytest.mark.parametrize("name", ["qualité", "no-scope 🏴‍☠️", 'say "hi" \\ bye'])
+def test_partition_literals_keep_non_ascii_raw(migration, name) -> None:
+    """Milvus rejects the ``\\uXXXX`` surrogate pairs ``json.dumps`` emits for emoji by default."""
+    literal = migration._literal(name)
+
+    assert "\\u" not in literal
+    assert json.loads(literal) == name

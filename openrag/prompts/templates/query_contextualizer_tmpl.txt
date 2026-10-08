@@ -37,7 +37,7 @@ Each predicate: `field="created_at"`, `operator` ∈ {{`>=`, `>`, `<=`, `<`}}, `
 Predicates are AND-combined. Always use half-open intervals: `>= start` AND `< next_start`.
 
 Date resolution:
-- Relative periods (today, yesterday, this / last week, month, year, past N, recent) → copy the matching anchor under Current date verbatim; never recompute it.
+- Relative periods (today, yesterday, last / this week, month, year, past N, recent) → copy the matching anchor under Current date verbatim; never recompute it.
 - Explicit dates (e.g. January 2024, 2023, Q3 2025) → `[start, next start)` computed from the stated date.
 - since X → ONE predicate only: `>= X`. Do NOT add an upper bound.
 - before X → one predicate `< X`

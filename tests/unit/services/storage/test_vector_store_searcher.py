@@ -9,6 +9,8 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from core.models.retrieval_trace import TraceCandidate
+from core.retrieval.trace import RetrievalTraceBuilder
 from services.storage.vector_store_searcher import VectorStoreSearcher, _dict_to_chunk
 
 # ---------------------------------------------------------------------------
@@ -20,6 +22,18 @@ _EMBED_VEC = [0.1] * 8
 
 def _make_row(id_: str, text: str = "hello", partition: str = "p1", **extra) -> dict:
     return {"id": id_, "text": text, "partition": partition, "file_id": "f1", **extra}
+
+
+def _filtering(rows: list[dict]):
+    """A ``query_chunks_by_filter`` over ``rows`` that applies the filter, as Milvus does."""
+
+    async def query(_collection, filters, output_fields=None):
+        def keep(row):
+            return all(row.get(k) in (v if isinstance(v, list) else [v]) for k, v in filters.items())
+
+        return [r for r in rows if keep(r)]
+
+    return query
 
 
 def _make_searcher(
@@ -100,6 +114,24 @@ async def test_search_embeds_query_and_calls_store():
     assert call_kwargs["query_text"] == "hello"
     assert call_kwargs["top_k"] == 5
     assert call_kwargs["filters"]["partition"] == ["p1"]
+
+
+@pytest.mark.asyncio
+async def test_search_forwards_trace_and_records_embedding_duration():
+    searcher, store, _, _ = _make_searcher(search_results=[_make_row("1")])
+    trace = RetrievalTraceBuilder("req-1", "hello")
+
+    chunks = await searcher.search(
+        query="hello",
+        partition=["p1"],
+        top_k=5,
+        with_surrounding_chunks=False,
+        trace=trace,
+    )
+
+    assert [chunk.id for chunk in chunks] == ["1"]
+    assert store.search.call_args.kwargs["trace"] is trace
+    assert trace.timings["embedding"] >= 0
 
 
 @pytest.mark.asyncio
@@ -187,12 +219,13 @@ async def test_multi_query_search_merges_filter_params():
 async def test_search_scopes_surrounding_chunks_to_allowed_file_ids():
     """#706: surrounding-chunk hydration must not leak a neighbouring file
     outside the workspace/file-id restriction the main search was scoped by."""
-    main_row = _make_row("1", file_id="in-scope", prev_section_id="s0")
+    main_row = {**_make_row("1", prev_section_id="s0"), "file_id": "in-scope"}
     surrounding_rows = [
-        {**_make_row("0"), "file_id": "in-scope"},
-        {**_make_row("2"), "file_id": "outside-scope"},
+        {**_make_row("0", section_id="s0"), "file_id": "in-scope"},
+        {**_make_row("2", section_id="s0"), "file_id": "outside-scope"},
     ]
-    searcher, store, _, _ = _make_searcher(search_results=[main_row], filter_results=surrounding_rows)
+    searcher, store, _, _ = _make_searcher(search_results=[main_row])
+    store.query_chunks_by_filter.side_effect = _filtering(surrounding_rows)
     chunks = await searcher.search(
         query="q",
         partition=["p1"],
@@ -207,7 +240,7 @@ async def test_search_scopes_surrounding_chunks_to_allowed_file_ids():
 @pytest.mark.asyncio
 async def test_search_with_surrounding_chunks_deduplicates():
     main_row = _make_row("1", prev_section_id="s0", next_section_id="s2")
-    surrounding_rows = [_make_row("0"), _make_row("1")]  # "1" is a duplicate
+    surrounding_rows = [_make_row("0", section_id="s0"), _make_row("1", section_id="s2")]  # "1" is a duplicate
     searcher, store, _, _ = _make_searcher(
         search_results=[main_row],
         filter_results=surrounding_rows,
@@ -288,6 +321,106 @@ async def test_multi_query_search_deduplicates_across_queries():
     assert sorted(ids) == ["1", "2", "3"]
 
 
+@pytest.mark.asyncio
+async def test_multi_query_search_uses_independent_traces_and_merges_in_query_order():
+    embedder = MagicMock()
+    embedder.embed = AsyncMock(return_value=[_EMBED_VEC, _EMBED_VEC])
+    child_traces = []
+
+    async def search(*, query_text, trace, **_kwargs):
+        child_traces.append(trace)
+        candidate_id = "first" if query_text == "q1" else "second"
+        trace.record_stage(
+            "dense_after_threshold",
+            status="complete",
+            candidates=[TraceCandidate(id=candidate_id, rank=1)],
+        )
+        trace.record_stage("sparse", status="unavailable", candidates=[])
+        trace.record_stage("hybrid_fused", status="unavailable", candidates=[])
+        return [_make_row(candidate_id)]
+
+    store = MagicMock()
+    store.search = AsyncMock(side_effect=search)
+    store.query_chunks_by_filter = AsyncMock(return_value=[])
+    parent = RetrievalTraceBuilder("request", "question")
+    searcher = VectorStoreSearcher(store, embedder, MagicMock(), "col")
+
+    await searcher.multi_query_search(
+        queries=["q1", "q2"],
+        partition=["p1"],
+        top_k_per_query=3,
+        with_surrounding_chunks=False,
+        trace=parent,
+    )
+
+    assert len({id(trace) for trace in child_traces}) == 2
+    assert all(trace is not parent for trace in child_traces)
+    finished = parent.finish(configuration_fingerprint="fingerprint")
+    assert [query_trace["query"] for query_trace in finished["query_traces"]] == ["q1", "q2"]
+    assert [
+        next(stage for stage in query_trace["stages"] if stage["name"] == "dense_after_threshold")["candidates"][0][
+            "id"
+        ]
+        for query_trace in finished["query_traces"]
+    ] == [
+        "first",
+        "second",
+    ]
+    assert parent.stages["dense_after_threshold"].status == "unavailable"
+    assert parent.stages["dense_after_threshold"].candidates == []
+    assert parent.stages["hybrid_fused"].status == "unavailable"
+
+
+@pytest.mark.asyncio
+async def test_multi_query_search_uses_parallel_wall_clock_latency():
+    embedder = MagicMock()
+    embedder.embed = AsyncMock(return_value=[_EMBED_VEC, _EMBED_VEC])
+
+    async def search(*, query_text, trace, **_kwargs):
+        duration = 0.2 if query_text == "q1" else 0.7
+        trace.timings["dense_search"] = duration
+        trace.record_stage(
+            "dense_after_threshold",
+            status="complete",
+            candidates=[],
+            duration_seconds=duration,
+        )
+        return []
+
+    store = MagicMock()
+    store.search = AsyncMock(side_effect=search)
+    store.query_chunks_by_filter = AsyncMock(return_value=[])
+    parent = RetrievalTraceBuilder("request", "question")
+    searcher = VectorStoreSearcher(store, embedder, MagicMock(), "col")
+
+    await searcher.multi_query_search(
+        queries=["q1", "q2"],
+        partition=["p1"],
+        top_k_per_query=3,
+        with_surrounding_chunks=False,
+        trace=parent,
+    )
+
+    assert parent.stages["dense_after_threshold"].status == "unavailable"
+    assert parent.stages["dense_after_threshold"].duration_seconds == 0.7
+    assert parent.timings["dense_search"] == 0.7
+
+
+@pytest.mark.asyncio
+async def test_multi_query_search_does_not_create_traces_when_disabled():
+    searcher, store, embedder, _ = _make_searcher()
+    embedder.embed.return_value = [_EMBED_VEC, _EMBED_VEC]
+
+    await searcher.multi_query_search(
+        queries=["q1", "q2"],
+        partition=["p1"],
+        top_k_per_query=3,
+        with_surrounding_chunks=False,
+    )
+
+    assert all("trace" not in call.kwargs for call in store.search.await_args_list)
+
+
 # ---------------------------------------------------------------------------
 # get_related_chunks()
 # ---------------------------------------------------------------------------
@@ -313,6 +446,23 @@ async def test_get_related_chunks_queries_store_with_file_ids():
     doc_repo.get_file_ids_by_relationship.assert_awaited_once_with(partition="p1", relationship_id="r1")
     call_args = store.query_chunks_by_filter.call_args
     assert call_args.args[1]["file_id"] == ["f1", "f2"]
+    assert call_args.kwargs["limit"] == 2
+
+
+@pytest.mark.asyncio
+async def test_get_related_chunks_accepts_limit_with_shared_vector_store(mock_vector_store):
+    doc_repo = MagicMock()
+    doc_repo.get_file_ids_by_relationship = AsyncMock(return_value=["f1"])
+    searcher = VectorStoreSearcher(
+        vector_store=mock_vector_store,
+        embedder=MagicMock(),
+        document_repo=doc_repo,
+        collection="test_col",
+    )
+
+    chunks = await searcher.get_related_chunks(partition="p1", relationship_id="r1", limit=1)
+
+    assert chunks == []
 
 
 @pytest.mark.asyncio
@@ -360,6 +510,7 @@ async def test_get_ancestor_chunks_applies_limit():
     )
     chunks = await searcher.get_ancestor_chunks(partition="p1", file_id="f1", limit=4)
     assert len(chunks) == 4
+    assert store.query_chunks_by_filter.call_args.kwargs["limit"] == 4
 
 
 @pytest.mark.asyncio
@@ -398,10 +549,11 @@ async def test_fetch_surrounding_scopes_section_lookup_to_partition():
     ]
     await searcher._fetch_surrounding(chunks)
     calls = store.query_chunks_by_filter.call_args_list
-    # One scoped query per partition; section_id is never queried unscoped.
+    # One scoped query per partition and file; section_id is never queried unscoped.
     by_part = {c.args[1]["partition"]: set(c.args[1]["section_id"]) for c in calls}
     assert by_part == {"p1": {"s0"}, "p2": {"s9"}}
     assert all("partition" in c.args[1] for c in calls)
+    assert all(c.args[1]["file_id"] == "f1" for c in calls)
 
 
 @pytest.mark.asyncio
@@ -414,24 +566,77 @@ async def test_fetch_surrounding_drops_refs_without_partition():
 
 
 @pytest.mark.asyncio
-async def test_fetch_surrounding_filters_out_disallowed_file_ids():
-    """#706: neighbouring-section hydration must respect the allowed_file_ids
-    restriction even though the lookup itself is only scoped by partition."""
-    rows = [
-        {**_make_row("0"), "file_id": "allowed"},
-        {**_make_row("9"), "file_id": "not-allowed"},
-    ]
-    searcher, store, _, _ = _make_searcher(filter_results=rows)
+async def test_fetch_surrounding_drops_refs_without_file():
+    searcher, store, _, _ = _make_searcher()
     c = _dict_to_chunk(_make_row("1", partition="p1", prev_section_id="s0"))
-    out = await searcher._fetch_surrounding([c], allowed_file_ids=["allowed"])
+    c.document_id = ""  # source chunk with no file → dropped, not queried across files
+    assert await searcher._fetch_surrounding([c]) == []
+    store.query_chunks_by_filter.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_fetch_surrounding_queries_each_file_for_its_own_section_ids():
+    """A copy of a file in the same partition carries the same section IDs, and
+    another file may hold an ID asked for in this one: each file is queried for
+    its own IDs only, so neither comes back."""
+    rows = [
+        {**_make_row("a0", section_id="s0"), "file_id": "a"},
+        {**_make_row("copy0", section_id="s0"), "file_id": "a-copy"},
+        {**_make_row("b0", section_id="s5"), "file_id": "b"},
+        {**_make_row("a5", section_id="s5"), "file_id": "a"},
+    ]
+    searcher, store, _, _ = _make_searcher()
+    store.query_chunks_by_filter.side_effect = _filtering(rows)
+    chunks = [
+        _dict_to_chunk({**_make_row("a1", prev_section_id="s0"), "file_id": "a"}),
+        _dict_to_chunk({**_make_row("b1", prev_section_id="s5"), "file_id": "b"}),
+    ]
+    out = await searcher._fetch_surrounding(chunks)
+    assert [o.id for o in out] == ["a0", "b0"]
+    assert [c.args[1] for c in store.query_chunks_by_filter.call_args_list] == [
+        {"partition": "p1", "file_id": "a", "section_id": ["s0"]},
+        {"partition": "p1", "file_id": "b", "section_id": ["s5"]},
+    ]
+    # The store's default projection: every field but the vectors.
+    assert all("output_fields" not in c.kwargs for c in store.query_chunks_by_filter.call_args_list)
+
+
+@pytest.mark.asyncio
+async def test_fetch_surrounding_skips_a_section_id_shared_within_a_file():
+    """Damaged IDs (a partial upsert rounded them) make one ID match a whole run
+    of the file's chunks; the neighbour is skipped rather than the document returned."""
+    rows = [_make_row(str(i), section_id=7) for i in range(200)] + [_make_row("next", section_id=9)]
+    searcher, store, _, _ = _make_searcher(filter_results=rows)
+    c = _dict_to_chunk(_make_row("mid", prev_section_id=7, next_section_id=9))
+    out = await searcher._fetch_surrounding([c])
+    assert [o.id for o in out] == ["next"]
+
+
+@pytest.mark.asyncio
+async def test_fetch_surrounding_filters_out_disallowed_file_ids():
+    """Neighbours come from the source chunk's own file, which the search already
+    restricted; a source chunk from outside the restriction gets none."""
+    rows = [
+        {**_make_row("0", section_id="s0"), "file_id": "allowed"},
+        {**_make_row("9", section_id="s0"), "file_id": "not-allowed"},
+    ]
+    searcher, store, _, _ = _make_searcher()
+    store.query_chunks_by_filter.side_effect = _filtering(rows)
+    chunks = [
+        _dict_to_chunk({**_make_row("1", prev_section_id="s0"), "file_id": "allowed"}),
+        _dict_to_chunk({**_make_row("8", prev_section_id="s0"), "file_id": "not-allowed"}),
+    ]
+    out = await searcher._fetch_surrounding(chunks, allowed_file_ids=["allowed"])
     assert [o.id for o in out] == ["0"]
+    # The file outside the restriction is not even queried.
+    assert [c.args[1]["file_id"] for c in store.query_chunks_by_filter.call_args_list] == ["allowed"]
 
 
 @pytest.mark.asyncio
 async def test_fetch_surrounding_no_restriction_when_allowed_file_ids_none():
-    rows = [{**_make_row("0"), "file_id": "anything"}]
+    rows = [{**_make_row("0", section_id="s0"), "file_id": "anything"}]
     searcher, store, _, _ = _make_searcher(filter_results=rows)
-    c = _dict_to_chunk(_make_row("1", partition="p1", prev_section_id="s0"))
+    c = _dict_to_chunk({**_make_row("1", prev_section_id="s0"), "file_id": "anything"})
     out = await searcher._fetch_surrounding([c], allowed_file_ids=None)
     assert [o.id for o in out] == ["0"]
 
