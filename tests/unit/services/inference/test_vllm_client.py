@@ -166,16 +166,17 @@ class TestVLLMClient:
         assert captured["temperature"] == 0.3
 
     @pytest.mark.asyncio
-    async def test_enable_thinking_is_sent_as_chat_template_kwargs_when_configured(self):
+    @pytest.mark.parametrize("enable_thinking", [True, False])
+    async def test_enable_thinking_is_sent_as_chat_template_kwargs_when_configured(self, enable_thinking):
         captured: dict = {}
 
         def capture(req: httpx.Request) -> httpx.Response:
             captured.update(json.loads(req.content))
             return _chat_response()
 
-        await self._make_client(capture, enable_thinking=True).chat([{"role": "user", "content": "hi"}])
+        await self._make_client(capture, enable_thinking=enable_thinking).chat([{"role": "user", "content": "hi"}])
 
-        assert captured["chat_template_kwargs"] == {"enable_thinking": True}
+        assert captured["chat_template_kwargs"] == {"enable_thinking": enable_thinking}
         assert "enable_thinking" not in captured
 
     @pytest.mark.asyncio
