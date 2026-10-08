@@ -8,6 +8,7 @@ from core.models.query import Query, SearchQueries, TemporalPredicate
 from core.models.retrieval_result import ScoredChunk
 from core.retrieval.pipeline import RetrieverPipeline
 from core.retrieval.retriever import Retriever
+from core.retrieval.trace import RetrievalTraceBuilder, candidates_from_chunks
 
 
 class FakeRetriever(Retriever):
@@ -21,8 +22,16 @@ class FakeRetriever(Retriever):
         self.expand_filter_params: dict | None = None
         self.expansion_enabled = expansion_enabled
 
-    async def retrieve(self, partition, query, filter=None, filter_params=None):
-        self.calls.append({"partition": partition, "query": query, "filter": filter, "filter_params": filter_params})
+    async def retrieve(self, partition, query, filter=None, filter_params=None, trace=None):
+        self.calls.append(
+            {
+                "partition": partition,
+                "query": query,
+                "filter": filter,
+                "filter_params": filter_params,
+                "trace": trace,
+            }
+        )
         if self.results_queue:
             return self.results_queue.pop(0)
         return []
@@ -88,6 +97,43 @@ async def test_retrieve_docs_filterless_fallback_when_filter_returns_zero():
 
 
 @pytest.mark.asyncio
+async def test_filterless_fallback_trace_preserves_both_retrieval_attempts():
+    class StageTracingRetriever(FakeRetriever):
+        async def retrieve(self, partition, query, filter=None, filter_params=None, trace=None):
+            chunks = await super().retrieve(partition, query, filter, filter_params, trace)
+            if trace is not None:
+                trace.record_stage(
+                    "dense_after_threshold",
+                    status="complete",
+                    candidates=candidates_from_chunks(chunks),
+                )
+            return chunks
+
+    retriever = StageTracingRetriever()
+    retriever.results_queue = [[], _chunks("fallback-result")]
+    trace = RetrievalTraceBuilder("req-1", "hi")
+    pipeline = RetrieverPipeline(retriever=retriever, allow_filterless_fallback=True)
+    query = Query(
+        query="hi",
+        temporal_filters=[TemporalPredicate(operator=">=", value="2026-01-01T00:00:00+00:00")],
+    )
+
+    await pipeline.retrieve_docs(partition=["p1"], query=query, trace=trace)
+    payload = trace.finish(configuration_fingerprint="fingerprint")
+
+    assert [attempt["attempt"] for attempt in payload["query_traces"]] == [
+        "temporal_filter",
+        "filterless_fallback",
+    ]
+    dense_stages = [
+        next(stage for stage in attempt["stages"] if stage["name"] == "dense_after_threshold")
+        for attempt in payload["query_traces"]
+    ]
+    assert [stage["candidate_count"] for stage in dense_stages] == [0, 1]
+    assert [candidate["id"] for candidate in dense_stages[1]["candidates"]] == ["fallback-result"]
+
+
+@pytest.mark.asyncio
 async def test_retrieve_docs_no_fallback_when_disabled():
     r = FakeRetriever()
     r.results_queue = [[]]
@@ -120,6 +166,13 @@ class ScoringReranker:
         return [(2, 0.91), (0, 0.42), (1, 0.07)]
 
 
+class TruncatingReranker:
+    """Ranks only its hard top two, omitting the remaining candidate."""
+
+    async def rerank(self, query, documents, top_k=None):
+        return [(2, 0.91), (0, 0.42)]
+
+
 @pytest.mark.asyncio
 async def test_reranked_chunks_come_back_as_scored_chunks():
     """The reranker's score survives on the chunk as a typed field, and the
@@ -132,6 +185,99 @@ async def test_reranked_chunks_come_back_as_scored_chunks():
     assert [(c.id, c.rerank_score) for c in out] == [("c", 0.91), ("a", 0.42), ("b", 0.07)]
     assert all(isinstance(c, ScoredChunk) for c in out)
     assert all(isinstance(c, Chunk) for c in out)
+
+
+@pytest.mark.asyncio
+async def test_reranker_trace_keeps_pre_and_post_ranks_and_final_cutoff():
+    r = FakeRetriever()
+    r.results_queue = [_chunks("a", "b", "c")]
+    trace = RetrievalTraceBuilder("req-1", "hi")
+    p = RetrieverPipeline(retriever=r, reranker=ScoringReranker())
+
+    out = await p.retrieve_docs(partition=["p1"], query=Query(query="hi"), top_k=2, trace=trace)
+
+    assert [(c.id, c.rerank_score) for c in out] == [("c", 0.91), ("a", 0.42)]
+    assert [(c.id, c.rank) for c in trace.stages["pre_rerank"].candidates] == [
+        ("a", 1),
+        ("b", 2),
+        ("c", 3),
+    ]
+    assert [(c.id, c.rank, c.scores.get("reranker")) for c in trace.stages["post_rerank"].candidates] == [
+        ("c", 1, 0.91),
+        ("a", 2, 0.42),
+        ("b", 3, 0.07),
+    ]
+    assert trace.stages["post_rerank"].candidates[2].removal_reason.code == "final_top_n"
+    assert [c.id for c in trace.stages["final"].candidates] == ["c", "a"]
+
+
+@pytest.mark.asyncio
+async def test_final_cutoff_keeps_true_count_when_trace_candidates_are_capped():
+    retriever = FakeRetriever()
+    retriever.results_queue = [_chunks(*(f"chunk-{index}" for index in range(201)))]
+    trace = RetrievalTraceBuilder("req-1", "hi")
+    pipeline = RetrieverPipeline(retriever=retriever)
+
+    await pipeline.retrieve_docs(
+        partition=["p1"],
+        query=Query(query="hi"),
+        top_k=1,
+        trace=trace,
+    )
+
+    assert trace.stages["pre_rerank"].candidate_count == 201
+    assert len(trace.stages["pre_rerank"].candidates) == 200
+
+
+@pytest.mark.asyncio
+async def test_reranker_trace_marks_only_candidates_omitted_by_the_reranker():
+    r = FakeRetriever()
+    r.results_queue = [_chunks("a", "b", "c")]
+    trace = RetrievalTraceBuilder("req-1", "hi")
+    p = RetrieverPipeline(retriever=r, reranker=TruncatingReranker())
+
+    await p.retrieve_docs(partition=["p1"], query=Query(query="hi"), trace=trace)
+
+    pre = trace.stages["pre_rerank"].candidates
+    assert [c.removal_reason for c in pre if c.id in {"a", "c"}] == [None, None]
+    assert next(c for c in pre if c.id == "b").removal_reason.code == "reranker_top_n"
+    assert [c.id for c in trace.stages["post_rerank"].candidates] == ["c", "a"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("with_trace", [False, True])
+async def test_tracing_does_not_change_reranked_ids_order_or_scores(with_trace):
+    r = FakeRetriever()
+    r.results_queue = [_chunks("a", "b", "c")]
+    p = RetrieverPipeline(retriever=r, reranker=ScoringReranker())
+    trace = RetrievalTraceBuilder("req-1", "hi") if with_trace else None
+
+    out = await p.retrieve_docs(partition=["p1"], query=Query(query="hi"), top_k=2, trace=trace)
+
+    assert [(c.id, c.rerank_score) for c in out] == [("c", 0.91), ("a", 0.42)]
+
+
+@pytest.mark.asyncio
+async def test_trace_recording_errors_do_not_fail_retrieval():
+    class BrokenTrace:
+        def record_stage(self, *args, **kwargs):
+            raise RuntimeError("trace write failed")
+
+        def record_error(self, *args, **kwargs):
+            raise RuntimeError("trace error write failed")
+
+    r = FakeRetriever()
+    r.results_queue = [_chunks("a", "b", "c")]
+    p = RetrieverPipeline(retriever=r, reranker=ScoringReranker())
+
+    out = await p.retrieve_docs(
+        partition=["p1"],
+        query=Query(query="hi"),
+        top_k=2,
+        trace=BrokenTrace(),
+    )
+
+    assert [(c.id, c.rerank_score) for c in out] == [("c", 0.91), ("a", 0.42)]
 
 
 @pytest.mark.asyncio
@@ -207,6 +353,36 @@ async def test_retrieve_docs_expansion_path_re_reranks():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("with_reranker", [False, True])
+async def test_expansion_trace_marks_candidates_outside_seed_limit(with_reranker):
+    candidate_ids = [f"c{index}" for index in range(10)]
+    seed_ids = ["c9", "c8", "c7"] if with_reranker else ["c0", "c1", "c2"]
+    retriever = FakeRetriever(expansion_enabled=True)
+    retriever.results_queue = [_chunks(*candidate_ids)]
+    retriever.expand_result = _chunks(*seed_ids, "related")
+    trace = RetrievalTraceBuilder("req-1", "hi")
+    pipeline = RetrieverPipeline(
+        retriever=retriever,
+        reranker=FakeReranker() if with_reranker else None,
+        reranker_top_k=3,
+    )
+
+    await pipeline.retrieve_docs(partition=["p1"], query=Query(query="hi"), trace=trace)
+
+    assert retriever.expand_input is not None
+    assert [chunk.id for chunk in retriever.expand_input] == seed_ids
+    stage_name = "post_rerank" if with_reranker else "pre_rerank"
+    candidates = {candidate.id: candidate for candidate in trace.stages[stage_name].candidates}
+    assert set(candidates) == set(candidate_ids)
+    assert {
+        candidate_id
+        for candidate_id, candidate in candidates.items()
+        if candidate.removal_reason is not None and candidate.removal_reason.code == "expansion_top_n"
+    } == set(candidate_ids) - set(seed_ids)
+    assert {candidate.id for candidate in trace.stages["post_expansion"].candidates} == set(seed_ids) | {"related"}
+
+
+@pytest.mark.asyncio
 async def test_get_relevant_docs_runs_one_call_per_subquery_and_fuses():
     r = FakeRetriever()
     r.results_queue = [_chunks("a", "b"), _chunks("b", "c")]
@@ -217,6 +393,70 @@ async def test_get_relevant_docs_runs_one_call_per_subquery_and_fuses():
     assert {c.id for c in out} == {"a", "b", "c"}
     # 'b' appears in both lists -> highest fused score
     assert out[0].id == "b"
+
+
+@pytest.mark.asyncio
+async def test_multi_query_fusion_does_not_overwrite_store_hybrid_status():
+    retriever = FakeRetriever()
+    retriever.results_queue = [_chunks("a"), _chunks("b")]
+    trace = RetrievalTraceBuilder("req-1", "question")
+    trace.record_stage("hybrid_fused", status="unavailable", candidates=[])
+    pipeline = RetrieverPipeline(retriever=retriever)
+
+    await pipeline.get_relevant_docs(
+        partition=["p1"],
+        search_queries=SearchQueries(query_list=[Query(query="q1"), Query(query="q2")]),
+        trace=trace,
+    )
+
+    assert trace.stages["hybrid_fused"].status == "unavailable"
+    assert trace.stages["multi_query_fused"].status == "complete"
+    assert [item.query for item in trace.query_traces] == ["q1", "q2"]
+    assert all(
+        next(stage for stage in item.stages if stage.name == "pre_rerank").status == "complete"
+        for item in trace.query_traces
+    )
+    assert trace.stages["pre_rerank"].status == "unavailable"
+
+
+@pytest.mark.asyncio
+async def test_get_relevant_docs_survives_child_trace_merge_failure(monkeypatch):
+    retriever = FakeRetriever()
+    retriever.results_queue = [_chunks("a"), _chunks("b")]
+    trace = RetrievalTraceBuilder("req-1", "question")
+    pipeline = RetrieverPipeline(retriever=retriever)
+
+    def fail_merge(*_args, **_kwargs):
+        raise RuntimeError("trace merge failed")
+
+    monkeypatch.setattr("core.retrieval.pipeline.merge_child_traces", fail_merge)
+
+    out = await pipeline.get_relevant_docs(
+        partition=["p1"],
+        search_queries=SearchQueries(query_list=[Query(query="q1"), Query(query="q2")]),
+        trace=trace,
+    )
+
+    assert {chunk.id for chunk in out} == {"a", "b"}
+    assert [error.stage for error in trace.errors] == ["query_traces"]
+
+
+@pytest.mark.asyncio
+async def test_get_relevant_docs_traces_single_query_reranking_stages():
+    r = FakeRetriever()
+    r.results_queue = [_chunks("a", "b", "c")]
+    trace = RetrievalTraceBuilder("req-1", "q1")
+    p = RetrieverPipeline(retriever=r, reranker=ScoringReranker())
+
+    out = await p.get_relevant_docs(
+        partition=["p1"],
+        search_queries=SearchQueries(query_list=[Query(query="q1")]),
+        trace=trace,
+    )
+
+    assert [chunk.id for chunk in out] == ["c", "a", "b"]
+    assert [candidate.id for candidate in trace.stages["pre_rerank"].candidates] == ["a", "b", "c"]
+    assert [candidate.id for candidate in trace.stages["post_rerank"].candidates] == ["c", "a", "b"]
 
 
 @pytest.mark.asyncio
@@ -336,9 +576,10 @@ async def test_get_relevant_docs_passes_configured_rrf_k(monkeypatch):
     captured = {}
     real = pipeline_mod.rrf_reranking
 
-    def spy(ranked_lists, key_fn=None, k=60):
+    def spy(ranked_lists, key_fn=None, k=60, **kwargs):
         captured["k"] = k
-        return real(ranked_lists, key_fn=key_fn, k=k)
+        captured["trace_stage"] = kwargs.get("trace_stage")
+        return real(ranked_lists, key_fn=key_fn, k=k, **kwargs)
 
     monkeypatch.setattr(pipeline_mod, "rrf_reranking", spy)
 
@@ -349,6 +590,7 @@ async def test_get_relevant_docs_passes_configured_rrf_k(monkeypatch):
     await p.get_relevant_docs(partition=["p1"], search_queries=sq)
 
     assert captured["k"] == 17
+    assert captured["trace_stage"] == "multi_query_fused"
 
 
 def test_rrf_k_defaults_to_canonical_60():

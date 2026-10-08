@@ -24,6 +24,7 @@ TraceStageName = Literal[
     "partition_fused",
     "pre_rerank",
     "post_rerank",
+    "post_expansion",
     "final",
 ]
 TraceTimingName = (
@@ -44,6 +45,7 @@ RemovalReasonCode = Literal[
     "dense_threshold",
     "hybrid_top_k",
     "reranker_top_n",
+    "expansion_top_n",
     "final_top_n",
     "duplicate",
     "partition_filter",
