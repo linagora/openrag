@@ -37,6 +37,9 @@ export interface ModelEndpointResponse {
   context_size_detection_pending?: boolean;
   default_max_llm_context_size?: number | null;
   default_max_output_tokens?: number | null;
+  /** Dense vector field this embedder owns; null for other model types. Set
+   *  when the endpoint is created and kept through renames. */
+  vector_field?: string | null;
   created_at: string;
   updated_at: string;
 }

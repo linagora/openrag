@@ -368,3 +368,28 @@ async def test_static_reranker_model_changes_resolved_fingerprint(has_factory):
     assert first.public_configuration["partitions"][0]["reranker"]["model"] == "reranker-a"
     assert second.public_configuration["partitions"][0]["reranker"]["model"] == "reranker-b"
     assert first.configuration_fingerprint != second.configuration_fingerprint
+
+
+@pytest.mark.asyncio
+async def test_resolved_plan_reloads_an_embedder_switched_by_another_process():
+    config = _config()
+    config.partitions = {"tenant-a": _partition()}
+
+    class SwappedElsewhere:
+        async def try_refresh_if_stale(self) -> None:
+            config.partitions = {
+                "tenant-a": PartitionConfig(
+                    name="tenant-a",
+                    embedder="embed-b",
+                    indexation=IndexationPipelineConfig(),
+                    retrieval=RetrievalPipelineConfig(),
+                )
+            }
+
+    service = RetrievalService(
+        searcher=_Searcher(), reranker=None, llm=None, config=config, preset_service=SwappedElsewhere()
+    )
+    prompt = SimpleNamespace(content_hash="context-hash", name=None, source="default")
+    plan = await service.resolve_retrieval_plan(["tenant-a"], contextualizer_prompt=prompt, build_execution=False)
+
+    assert plan.public_configuration["partitions"][0]["embedder"]["name"] == "embed-b"
