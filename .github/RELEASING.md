@@ -407,7 +407,7 @@ recurring trap rather than a one-off slip: **always pass `--title "$VER"`.**
 
 ```bash
 gh release view "$VER" --json name,tagName,isDraft,isPrerelease,body \
-  --jq '{name, tag: .tagName, draft: .isDraft, prerelease: .isPrerelease, notes: (.body|length)}'
+  --jq '{name, tag: .tagName, draft: .isDraft, prerelease: .isPrerelease, notes: (.body|gsub("\\s"; "")|length)}'
 ```
 
 A hard gate:
@@ -434,13 +434,14 @@ name=$(printf '%s' "$rel" | jq -r '.name')
 [ "$(printf '%s' "$rel" | jq -r '.isPrerelease')" = "false" ] \
   && echo "OK    not flagged prerelease" || { echo "FAIL  GA release flagged as prerelease"; fail=1; }
 
+# Counts non-blank characters, so a body of spaces or newlines does not pass.
 # 200, not 0: a body of "." passes a >0 check while telling a user nothing.
-# Real releases run 2-5k chars (v2.1.1 2306, v2.1.0 4226, v2.2.0 4688), so this
-# only trips a release that genuinely shipped without notes.
-n=$(printf '%s' "$rel" | jq -r '.body|length')
+# Real notes are far longer (non-blank: v2.2.1 623, v2.2.2 709, v2.3.1 2270,
+# v2.3.0 11384), so this only trips a release that shipped without notes.
+n=$(printf '%s' "$rel" | jq -r '.body | gsub("\\s"; "") | length')
 [ "$n" -gt 200 ] \
-  && echo "OK    release notes present ($n chars)" \
-  || { echo "FAIL  release notes empty or near-empty ($n chars)"; fail=1; }
+  && echo "OK    release notes present ($n non-blank chars)" \
+  || { echo "FAIL  release notes empty or near-empty ($n non-blank chars)"; fail=1; }
 
 [ "$fail" -eq 0 ] && echo "step 9 PASS" || { echo "step 9 FAIL" >&2; exit 1; }
 ```
