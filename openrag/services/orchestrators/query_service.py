@@ -51,9 +51,11 @@ from core.prompts import (
     calendar_anchors,
     format_context,
     format_web_context,
+    message_tokens,
     prepend_system_prompt,
+    tool_definition_tokens,
 )
-from core.utils.exceptions import ValidationError, WorkspaceNotFoundError
+from core.utils.exceptions import ContextWindowExceededError, ValidationError, WorkspaceNotFoundError
 from core.utils.logging import get_logger
 from core.utils.source_filtering import (
     extract_and_strip_sources_block,
@@ -272,18 +274,14 @@ class QueryService:
             config.rag.chat_history_depth if config.rag.chat_history_depth >= 1 else self._CHAT_HISTORY_DEPTH_DEFAULT
         )
         self._max_contextualized_query_len = config.rag.max_contextualized_query_len
-        # Sized on the assumption that retrieval returns ~reranker.top_k chunks,
-        # but reranker_top_k is never actually applied as a cutoff in
-        # RetrieverPipeline.retrieve_docs() on the no-map-reduce path — retrieval
-        # can return up to retriever.top_k candidates, so this budget (not
-        # reranker.top_k) is what actually determines how many reach the prompt.
-        # Tracked separately: https://github.com/linagora/openrag/issues/851
-        self._max_context_tokens = config.reranker.top_k * config.chunker.chunk_size
 
         mr = config.map_reduce
         self._mr_initial = mr.initial_batch_size
         self._mr_expansion = mr.expansion_batch_size
         self._mr_max = mr.max_total_documents
+
+    async def refresh_partition_configs(self) -> None:
+        await self._retrieval.refresh_partition_configs()
 
     def _resolve_chat_history_depth(self, partition: list[str] | None) -> int:
         """Effective chat-history depth for this request.
@@ -315,6 +313,45 @@ class QueryService:
             if explicit:
                 return max(explicit)
         return self._default_chat_history_depth
+
+    def _resolve_top_n(self, partition: list[str] | None) -> int:
+        """How many sources this request's prompt takes: the retrieval preset's ``top_n``.
+
+        ``reranker.top_k`` when the preset leaves it unset. Retrieval already
+        cuts each partition to its own ``top_n``; this matters for a request
+        over several partitions, or ``"all"``, whose fused results can hold up
+        to the *sum* of them. It takes the largest ``top_n`` among them, so
+        about one partition's worth (in RRF order) reaches the prompt.
+        """
+        default = self._config.reranker.top_k
+        configs = self._config.partitions
+        if partition and configs:
+            names = list(configs) if "all" in partition else partition
+            top_ns = [
+                cfg.retrieval.effective_top_n(default) for name in names if (cfg := configs.get(name)) is not None
+            ]
+            if top_ns:
+                return max(top_ns)
+        return default
+
+    def _fit_sources(self, texts: list[str], partition: list[str] | None, headroom: int | None) -> list[int]:
+        """Positions of up to ``top_n`` of *texts*, within the *headroom* the answering model's window leaves.
+
+        *headroom* is ``None`` when the window is unknown: only ``top_n`` applies.
+        The window comes from the LLM endpoint's context size (admin-set, else
+        probed from vLLM, else ``MAX_LLM_CONTEXT_SIZE``), so a too-small value
+        there shows up here as fewer sources than ``top_n``: logged, because
+        nothing else surfaces it.
+        """
+        top_n = self._resolve_top_n(partition)
+        _, included = format_context(
+            texts, max_context_tokens=headroom, length_function=get_num_tokens(), max_sources=top_n
+        )
+        if len(included) < min(len(texts), top_n):
+            logger.bind(partition=partition, top_n=top_n, presented=len(included), headroom=headroom).info(
+                "Sources left out: they don't fit in the answering model's context window"
+            )
+        return included
 
     def _resolve_llm(self, partition: list[str] | None) -> LLM:
         """Effective LLM for this request — query generation and answering.
@@ -575,7 +612,13 @@ class QueryService:
     # Preparation (was RagPipeline._prepare_for_chat_completion)
     # ------------------------------------------------------------------
 
-    async def _prepare_chat(self, partition: list[str] | None, payload: dict, llm: LLM | None = None):
+    async def _prepare_chat(
+        self,
+        partition: list[str] | None,
+        payload: dict,
+        llm: LLM | None = None,
+        max_prompt_tokens: int | None = None,
+    ):
         messages = payload["messages"][-self._resolve_chat_history_depth(partition) :]
         custom_prompt, messages = _split_leading_system_prompt(payload["messages"], messages)
         if not messages:
@@ -651,6 +694,9 @@ class QueryService:
                 elif len(usable_queries) != len(queries.query_list):
                     queries = queries.model_copy(update={"query_list": usable_queries})
 
+        # The history as the model gets it, so the window is checked against what is sent.
+        messages = self._sanitize_messages(messages)
+
         if casual_policy is not None and not retrieval_forced:
             casual_prompt = build_casual_response_prompt(
                 casual_policy.intent, casual_policy.language, assistant_name=self._config.server.assistant_name
@@ -662,6 +708,10 @@ class QueryService:
                 current_date=datetime.now().strftime("%A, %B %d, %Y, %H:%M:%S"),
                 custom_prompt=custom_prompt,
             )
+            if max_prompt_tokens is not None:
+                sent = _messages_tokens(payload["messages"]) + tool_definition_tokens(payload, get_num_tokens())
+                if sent > max_prompt_tokens:
+                    raise ContextWindowExceededError(sent, max_prompt_tokens)
             return _PrepareChatResult(
                 payload,
                 [],
@@ -703,9 +753,29 @@ class QueryService:
         retrieved_docs = docs
         retrieved_web_results = web_results
 
+        prompt_type = "spoken_style_answer" if spoken_style else "sys_prompt"
+        tmpl = await self._prompt_service.resolve_prompt(
+            prompt_type, names=[self._generation_prompt_name(prompt_type, partition)]
+        )
+        current_date = datetime.now().strftime("%A, %B %d, %Y, %H:%M:%S")
+        # What the window leaves for sources once the instructions, the
+        # conversation and the client's tool definitions are in. A conversation
+        # it can't hold fails here, before map-reduce, rather than at the provider.
+        room = None
+        tools_tokens = tool_definition_tokens(payload, get_num_tokens())
+        if max_prompt_tokens is not None:
+            without_sources = prepend_system_prompt(
+                messages, tmpl, context="", current_date=current_date, custom_prompt=custom_prompt
+            )
+            room = max_prompt_tokens - _messages_tokens(without_sources) - tools_tokens
+            if room < 0:
+                raise ContextWindowExceededError(max_prompt_tokens - room, max_prompt_tokens)
+
         if use_map_reduce and docs:
             docs = await self._map_reduce(" ".join(q.query for q in queries.query_list), docs)
 
+        # Web results come out of the same room, so they can't take more than it either.
+        web_max_tokens = self._web.max_tokens if room is None else min(self._web.max_tokens, room)
         web_formatted, web_source_numbers, web_tokens = "", [], 0
         web_start_index = 1
         if web_results:
@@ -713,40 +783,46 @@ class QueryService:
                 web_results,
                 length_function=get_num_tokens(),
                 start_index=web_start_index,
-                max_tokens=self._web.max_tokens,
+                max_tokens=web_max_tokens,
             )
-        context, included = format_context(
-            [doc.page_content for doc in docs],
-            max_context_tokens=self._max_context_tokens - web_tokens,
-            length_function=get_num_tokens(),
-        )
-        docs = [docs[i] for i in included]
+        headroom = None if room is None else room - web_tokens
+        candidates = docs
+        docs = [docs[i] for i in self._fit_sources([doc.page_content for doc in docs], partition, headroom)]
 
-        if web_results:
-            if docs:
-                web_start_index = len(docs) + 1
-                web_formatted, web_source_numbers, _ = format_web_context(
-                    web_results,
-                    length_function=get_num_tokens(),
-                    start_index=web_start_index,
-                    max_tokens=self._web.max_tokens,
+        def assemble(docs: list, web_candidates: list) -> tuple[list[dict], list]:
+            """The answer messages with *docs*, then the *web_candidates* that fit after them."""
+            context = _documents_context(docs, any_retrieved=bool(candidates))
+            web_shown: list = []
+            if web_candidates:
+                start = len(docs) + 1
+                web_formatted, numbers, _ = format_web_context(
+                    web_candidates, length_function=get_num_tokens(), start_index=start, max_tokens=web_max_tokens
                 )
-            else:
-                context = ""
-            context = f"{context}{SOURCE_SEPARATOR}{web_formatted}" if context else web_formatted
-            web_results = [web_results[number - web_start_index] for number in web_source_numbers]
+                web_shown = [web_candidates[n - start] for n in numbers]
+                context = f"{context}{SOURCE_SEPARATOR}{web_formatted}" if docs else web_formatted
+            answer_messages = prepend_system_prompt(
+                messages, tmpl, context=context, current_date=current_date, custom_prompt=custom_prompt
+            )
+            return answer_messages, web_shown
 
-        prompt_type = "spoken_style_answer" if spoken_style else "sys_prompt"
-        tmpl = await self._prompt_service.resolve_prompt(
-            prompt_type, names=[self._generation_prompt_name(prompt_type, partition)]
-        )
-        new_messages = prepend_system_prompt(
-            messages,
-            tmpl,
-            context=context,
-            current_date=datetime.now().strftime("%A, %B %d, %Y, %H:%M:%S"),
-            custom_prompt=custom_prompt,
-        )
+        web_candidates = web_results
+        new_messages, web_results = assemble(docs, web_candidates)
+        # The sources were sized part by part, without the separators between
+        # documents and web results or the web results' final numbering: measure
+        # what is sent, and drop sources (documents first) until it fits. With
+        # none left, the prompt can still carry what the room above didn't
+        # measure: the no-document message when retrieval found nothing.
+        while max_prompt_tokens is not None:
+            sent = _messages_tokens(new_messages) + tools_tokens
+            if sent <= max_prompt_tokens:
+                break
+            if not (docs or web_results):
+                raise ContextWindowExceededError(sent, max_prompt_tokens)
+            if docs:
+                docs = docs[:-1]
+            else:
+                web_candidates = web_results[:-1]
+            new_messages, web_results = assemble(docs, web_candidates)
         payload["messages"] = new_messages
         return _PrepareChatResult(
             payload, docs, web_results, retrieved_docs, retrieved_web_results, True, indexed_attachment_ids
@@ -780,12 +856,37 @@ class QueryService:
         chunks, web_lists = await asyncio.gather(rag, web)
         return chunks, web_lists
 
-    async def _prepare_completions(self, partition: list[str], payload: dict, llm: LLM | None = None):
+    async def _prepare_completions(
+        self,
+        partition: list[str],
+        payload: dict,
+        llm: LLM | None = None,
+        max_prompt_tokens: int | None = None,
+    ):
         prompt = payload["prompt"]
         metadata = payload.get("metadata") or {}
         # partition= is ours: the retrieval preset's query_contextualizer is
         # resolved per partition. The skip below is from #807.
         queries = await self.generate_query([{"role": "user", "content": prompt}], llm=llm, partition=partition)
+        prompt_type = "spoken_style_answer" if metadata.get("spoken_style_answer", False) else "sys_prompt"
+        tmpl = await self._prompt_service.resolve_prompt(
+            prompt_type, names=[self._generation_prompt_name(prompt_type, partition)]
+        )
+        current_date = datetime.now().strftime("%A, %B %d, %Y, %H:%M:%S")
+
+        def render(context: str) -> str:
+            instructions = tmpl.format(context=context, current_date=current_date, custom_prompt="")
+            return f"{instructions}\n\n# User request\n{prompt}"
+
+        # What the window leaves for sources once the instructions and the
+        # prompt are in. A prompt it can't hold fails here rather than at the
+        # provider.
+        room = None
+        if max_prompt_tokens is not None:
+            room = max_prompt_tokens - get_num_tokens()(render(""))
+            if room < 0:
+                raise ContextWindowExceededError(max_prompt_tokens - room, max_prompt_tokens)
+
         retrieved_docs: list = []
         if not queries.query_list:
             if not queries.requires_retrieval and metadata.get("require_retrieval") is not True:
@@ -798,23 +899,20 @@ class QueryService:
             # Full retrieval set before the token-budget selection below, kept
             # separately for `all_retrieved_sources` (#847).
             retrieved_docs = docs
-            context, included = format_context(
-                [doc.page_content for doc in docs],
-                max_context_tokens=self._max_context_tokens,
-                length_function=get_num_tokens(),
-            )
-            docs = [docs[i] for i in included]
+            docs = [docs[i] for i in self._fit_sources([doc.page_content for doc in docs], partition, room)]
+            context = _documents_context(docs, any_retrieved=bool(retrieved_docs))
+            # Sized part by part: measure what is sent and drop documents until
+            # it fits. With none left, the no-document message can still overflow.
+            while max_prompt_tokens is not None:
+                sent = get_num_tokens()(render(context))
+                if sent <= max_prompt_tokens:
+                    break
+                if not docs:
+                    raise ContextWindowExceededError(sent, max_prompt_tokens)
+                docs = docs[:-1]
+                context = _documents_context(docs, any_retrieved=bool(retrieved_docs))
 
-        prompt_type = "spoken_style_answer" if metadata.get("spoken_style_answer", False) else "sys_prompt"
-        tmpl = await self._prompt_service.resolve_prompt(
-            prompt_type, names=[self._generation_prompt_name(prompt_type, partition)]
-        )
-        instructions = tmpl.format(
-            context=context,
-            current_date=datetime.now().strftime("%A, %B %d, %Y, %H:%M:%S"),
-            custom_prompt="",
-        )
-        payload["prompt"] = f"{instructions}\n\n# User request\n{prompt}"
+        payload["prompt"] = render(context)
         return payload, docs, retrieved_docs
 
     # ------------------------------------------------------------------
@@ -877,8 +975,16 @@ class QueryService:
         payload: dict,
         prepare_sources: PrepareSources,
         model_name: str,
+        max_prompt_tokens: int | None = None,
     ) -> dict:
-        """Non-streaming chat completion → finalized OpenAI dict."""
+        """Non-streaming chat completion → finalized OpenAI dict.
+
+        *max_prompt_tokens* is what the answering model's window leaves for the
+        prompt (window minus output); the retrieved sources are capped to fit
+        it. ``None`` means the window is unknown: only ``top_n`` caps them.
+        Raises ``ContextWindowExceededError`` (413) when the instructions and
+        the conversation alone don't fit in it.
+        """
         metadata = payload.get("metadata") or {}
         include_all_retrieved = metadata.get("include_all_retrieved_sources") is True
         llm = self._resolve_llm(partitions)
@@ -888,7 +994,7 @@ class QueryService:
             docs, web_results, retrieved_docs, retrieved_web_results = [], [], [], []
             attachments: list[str] = []
         else:
-            result = await self._prepare_chat(partitions, payload, llm)
+            result = await self._prepare_chat(partitions, payload, llm, max_prompt_tokens)
             payload = result.payload
             docs = result.docs
             web_results = result.web_results
@@ -973,8 +1079,9 @@ class QueryService:
         payload: dict,
         prepare_sources: PrepareSources,
         model_name: str,
+        max_prompt_tokens: int | None = None,
     ) -> AsyncIterator[str]:
-        """Streaming chat completion → SSE strings with filtered sources."""
+        """Streaming chat completion → SSE strings with filtered sources (*max_prompt_tokens*: see ``chat``)."""
         metadata = payload.get("metadata") or {}
         include_all_retrieved = metadata.get("include_all_retrieved_sources") is True
         llm = self._resolve_llm(partitions)
@@ -984,7 +1091,7 @@ class QueryService:
             docs, web_results, retrieved_docs, retrieved_web_results = [], [], [], []
             attachments: list[str] = []
         else:
-            result = await self._prepare_chat(partitions, payload, llm)
+            result = await self._prepare_chat(partitions, payload, llm, max_prompt_tokens)
             payload = result.payload
             docs = result.docs
             web_results = result.web_results
@@ -1035,8 +1142,9 @@ class QueryService:
         partitions: list[str] | None,
         payload: dict,
         prepare_sources: PrepareSources,
+        max_prompt_tokens: int | None = None,
     ) -> dict:
-        """Non-streaming text completion → finalized OpenAI dict."""
+        """Non-streaming text completion → finalized OpenAI dict (*max_prompt_tokens*: see ``chat``)."""
         metadata = payload.get("metadata") or {}
         include_all_retrieved = metadata.get("include_all_retrieved_sources") is True
         llm = self._resolve_llm(partitions)
@@ -1044,7 +1152,7 @@ class QueryService:
         if partitions is None:
             docs, retrieved_docs = [], []
         else:
-            payload, docs, retrieved_docs = await self._prepare_completions(partitions, payload, llm)
+            payload, docs, retrieved_docs = await self._prepare_completions(partitions, payload, llm, max_prompt_tokens)
         sources = prepare_sources(docs, [])
         all_sources = prepare_sources(retrieved_docs, []) if include_all_retrieved else None
         structured_output = _is_structured_output(payload)
@@ -1294,6 +1402,24 @@ def _dedupe_web(web_lists: list[list]) -> list:
             seen.add(url)
             out.append(r)
     return out
+
+
+def _documents_context(docs: list, *, any_retrieved: bool) -> str:
+    """*docs* as numbered ``[Source N]`` blocks.
+
+    Empty when retrieval found documents but none fit the prompt, and the
+    no-document message when it found none.
+    """
+    if not docs and any_retrieved:
+        return ""
+    texts = [doc.page_content for doc in docs]
+    return format_context(texts, max_context_tokens=None, length_function=get_num_tokens())[0]
+
+
+def _messages_tokens(messages: list[dict]) -> int:
+    """Tokens a chat message list takes, counted as the router's preflight does."""
+    length_function = get_num_tokens()
+    return sum(message_tokens(message, length_function) for message in messages)
 
 
 def _sampling(payload: dict, key: str = "messages") -> dict:

@@ -12,8 +12,10 @@ from __future__ import annotations
 import io
 import os
 import zipfile
+from pathlib import Path
 
 import filetype
+import pymupdf
 import pytest
 from core.indexing.validators import (
     CONTENT_SNIFF_BYTES,
@@ -113,10 +115,46 @@ def test_error_names_the_extension_and_what_was_found():
 
 
 def test_real_pdf_fixture_is_accepted():
-    from pathlib import Path
-
     fixture = Path(__file__).resolve().parents[3] / "resources" / "test_file.pdf"
     validate_content_matches_extension("pdf", fixture.read_bytes()[:CONTENT_SNIFF_BYTES])
+
+
+def test_pdf_with_short_preamble_is_accepted_by_validator_and_parser():
+    """A prefixed PDF remains valid and retains the original document's text."""
+    fixture = Path(__file__).resolve().parents[3] / "resources" / "test_file.pdf"
+    pdf = fixture.read_bytes()
+    content = b"\r\n\x00\x00JUNKHEADER\n" + pdf
+
+    validate_content_matches_extension("pdf", content[:CONTENT_SNIFF_BYTES])
+    with (
+        pymupdf.open(stream=pdf, filetype="pdf") as original,
+        pymupdf.open(stream=content, filetype="pdf") as prefixed,
+    ):
+        assert len(prefixed) == len(original) > 0
+        assert [page.get_text() for page in prefixed] == [page.get_text() for page in original]
+
+
+@pytest.mark.parametrize(
+    ("offset", "accepted"),
+    [(0, True), (1019, True), (1020, True), (1024, True), (1025, False)],
+)
+def test_pdf_header_start_offset_matches_pdfium_boundary(offset, accepted):
+    """Accept a PDF header starting through offset 1024 inclusive, but no later."""
+    content = b"x" * offset + b"%PDF-1.7"
+    if accepted:
+        validate_content_matches_extension("pdf", content)
+    else:
+        with pytest.raises(ValidationError) as exc_info:
+            validate_content_matches_extension("pdf", content)
+        assert exc_info.value.status_code == 415
+
+
+def test_known_image_signature_is_not_overridden_by_embedded_pdf_marker():
+    """A recognised non-PDF signature takes precedence over an embedded marker."""
+    with pytest.raises(ValidationError) as exc_info:
+        validate_content_matches_extension("pdf", PNG + b"%PDF-1.7")
+
+    assert exc_info.value.status_code == 415
 
 
 # ---------------------------------------------------------------------------

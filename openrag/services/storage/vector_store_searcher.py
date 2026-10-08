@@ -9,12 +9,14 @@ from __future__ import annotations
 import asyncio
 import uuid
 from collections.abc import Callable
+from time import perf_counter
 from typing import Any
 
 from core.embeddings import Embedder
 from core.models.chunk import Chunk, _coerce_chunk_type
 from core.ports.document_repo import DocumentRepository
 from core.retrieval.searcher import RetrievalSearcher, file_id_restriction
+from core.retrieval.trace import RetrievalTraceBuilder, merge_query_traces
 from core.utils.consts import RETRIEVAL_SCORE_KEYS, is_internal_metadata_key
 from core.utils.logging import get_logger
 from core.vector_stores import VectorStore
@@ -95,13 +97,20 @@ class VectorStoreSearcher(RetrievalSearcher):
         filter_params: dict | None = None,
         similarity_threshold: float = 0.0,
         with_surrounding_chunks: bool = True,
+        trace: RetrievalTraceBuilder | None = None,
     ) -> list[Chunk]:
+        embedding_started = perf_counter() if trace is not None else None
         (embedding,) = await self._embedder.embed([query])
+        if trace is not None and embedding_started is not None:
+            trace.timings["embedding"] = perf_counter() - embedding_started
         filters: dict[str, Any] = {"partition": partition}
         if filter:
             filters["expr"] = filter
         if filter_params:
             filters.update(filter_params)
+        trace_kwargs = {}
+        if trace is not None:
+            trace_kwargs["trace"] = trace
         results = await self._store.search(
             embedding=embedding,
             query_text=query,
@@ -110,6 +119,7 @@ class VectorStoreSearcher(RetrievalSearcher):
             top_k=top_k,
             similarity_threshold=similarity_threshold or None,
             vector_field=self._field(),
+            **trace_kwargs,
         )
         chunks = [_dict_to_chunk(r) for r in results]
         if with_surrounding_chunks and chunks:
@@ -127,14 +137,30 @@ class VectorStoreSearcher(RetrievalSearcher):
         filter_params: dict | None = None,
         similarity_threshold: float = 0.0,
         with_surrounding_chunks: bool = True,
+        trace: RetrievalTraceBuilder | None = None,
     ) -> list[Chunk]:
+        embedding_started = perf_counter() if trace is not None else None
         embeddings = await self._embedder.embed(queries)
+        if trace is not None and embedding_started is not None:
+            trace.timings["embedding"] = perf_counter() - embedding_started
         field = self._field()
         filters: dict[str, Any] = {"partition": partition}
         if filter:
             filters["expr"] = filter
         if filter_params:
             filters.update(filter_params)
+        query_traces = (
+            [
+                RetrievalTraceBuilder(
+                    request_id=f"{trace.request_id}:subquery:{index}",
+                    original_query=query,
+                    diagnostics=trace.diagnostics,
+                )
+                for index, query in enumerate(queries)
+            ]
+            if trace is not None
+            else []
+        )
         per_query = await asyncio.gather(
             *[
                 self._store.search(
@@ -145,10 +171,13 @@ class VectorStoreSearcher(RetrievalSearcher):
                     top_k=top_k_per_query,
                     similarity_threshold=similarity_threshold or None,
                     vector_field=field,
+                    **({"trace": query_traces[index]} if trace is not None else {}),
                 )
-                for emb, q in zip(embeddings, queries)
+                for index, (emb, q) in enumerate(zip(embeddings, queries, strict=True))
             ]
         )
+        if trace is not None:
+            merge_query_traces(trace, query_traces)
         seen_ids: set[str] = set()
         chunks: list[Chunk] = []
         for results in per_query:
@@ -176,6 +205,8 @@ class VectorStoreSearcher(RetrievalSearcher):
         limit: int,
         allowed_file_ids: list[str] | None = None,
     ) -> list[Chunk]:
+        if limit <= 0:
+            return []
         file_ids = await self._document_repo.get_file_ids_by_relationship(
             partition=partition, relationship_id=relationship_id
         )
@@ -187,6 +218,7 @@ class VectorStoreSearcher(RetrievalSearcher):
         rows = await self._store.query_chunks_by_filter(
             self._collection,
             {"partition": partition, "file_id": file_ids},
+            limit=limit,
         )
         return [_dict_to_chunk(r) for r in rows[:limit]]
 
@@ -198,6 +230,8 @@ class VectorStoreSearcher(RetrievalSearcher):
         max_ancestor_depth: int | None = None,
         allowed_file_ids: list[str] | None = None,
     ) -> list[Chunk]:
+        if limit <= 0:
+            return []
         ancestor_ids = await self._document_repo.get_ancestor_file_ids(
             partition=partition, file_id=file_id, max_ancestor_depth=max_ancestor_depth
         )
@@ -209,6 +243,7 @@ class VectorStoreSearcher(RetrievalSearcher):
         rows = await self._store.query_chunks_by_filter(
             self._collection,
             {"partition": partition, "file_id": ancestor_ids},
+            limit=limit,
         )
         return [_dict_to_chunk(r) for r in rows[:limit]]
 

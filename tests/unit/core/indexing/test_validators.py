@@ -2,13 +2,9 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
-import pymupdf
 import pytest
 from core.indexing.validators import (
     parse_metadata,
-    validate_content_matches_extension,
     validate_file_format,
     validate_file_id,
     validate_partition_name,
@@ -106,25 +102,3 @@ class TestValidateFileFormat:
         with pytest.raises(ValidationError) as exc:
             validate_file_format("", self.formats, self.mimetypes, mimetype="application/pdf")
         assert exc.value.status_code == 422
-
-
-class TestValidatePdfContent:
-    def test_pdf_with_short_preamble_is_accepted_by_validator_and_parser(self):
-        pdf = (Path.cwd() / "tests/resources/test_file.pdf").read_bytes()
-        content = b"\r\n\x00\x00JUNKHEADER\n" + pdf
-
-        validate_content_matches_extension("pdf", content[:8192])
-        with pymupdf.open(stream=content, filetype="pdf") as document:
-            assert len(document) > 0
-
-    def test_pdf_marker_must_fit_within_first_1024_bytes(self):
-        validate_content_matches_extension("pdf", b"x" * 1019 + b"%PDF-1.7")
-
-        with pytest.raises(ValidationError):
-            validate_content_matches_extension("pdf", b"x" * 1020 + b"%PDF-1.7")
-
-    def test_known_image_signature_is_not_overridden_by_embedded_pdf_marker(self):
-        with pytest.raises(ValidationError) as exc_info:
-            validate_content_matches_extension("pdf", b"\x89PNG\r\n\x1a\n" + b"x" * 20 + b"%PDF-1.7")
-
-        assert exc_info.value.status_code == 415
