@@ -129,6 +129,30 @@ def test_configuration_fingerprint_tracks_pipeline_settings(retrieval_type, sett
     assert service.configuration_fingerprint(["tenant-a"]) != first
 
 
+def test_public_configuration_reports_the_top_n_that_applies():
+    config = _config()
+    config.partitions = {
+        "tenant-a": _partition(name="tenant-a"),
+        "tenant-b": _partition(name="tenant-b", retrieval=RetrievalPipelineConfig(top_n=12)),
+    }
+    service = RetrievalService(searcher=_Searcher(), reranker=None, llm=None, config=config)
+
+    public = service.public_retrieval_configuration(["all"])
+
+    assert [partition["reranker"]["top_n"] for partition in public["partitions"]] == [5, 12]
+
+
+def test_configuration_fingerprint_tracks_global_top_n_when_preset_leaves_it_unset():
+    config = _config()
+    config.partitions = {"tenant-a": _partition()}
+    service = RetrievalService(searcher=_Searcher(), reranker=None, llm=None, config=config)
+
+    first = service.configuration_fingerprint(["tenant-a"])
+    config.reranker.top_k = 15
+
+    assert service.configuration_fingerprint(["tenant-a"]) != first
+
+
 def test_configuration_fingerprint_expands_all_partitions():
     config = _config()
     tenant_a = RetrievalPipelineConfig(rrf_k=42)
@@ -344,3 +368,28 @@ async def test_static_reranker_model_changes_resolved_fingerprint(has_factory):
     assert first.public_configuration["partitions"][0]["reranker"]["model"] == "reranker-a"
     assert second.public_configuration["partitions"][0]["reranker"]["model"] == "reranker-b"
     assert first.configuration_fingerprint != second.configuration_fingerprint
+
+
+@pytest.mark.asyncio
+async def test_resolved_plan_reloads_an_embedder_switched_by_another_process():
+    config = _config()
+    config.partitions = {"tenant-a": _partition()}
+
+    class SwappedElsewhere:
+        async def try_refresh_if_stale(self) -> None:
+            config.partitions = {
+                "tenant-a": PartitionConfig(
+                    name="tenant-a",
+                    embedder="embed-b",
+                    indexation=IndexationPipelineConfig(),
+                    retrieval=RetrievalPipelineConfig(),
+                )
+            }
+
+    service = RetrievalService(
+        searcher=_Searcher(), reranker=None, llm=None, config=config, preset_service=SwappedElsewhere()
+    )
+    prompt = SimpleNamespace(content_hash="context-hash", name=None, source="default")
+    plan = await service.resolve_retrieval_plan(["tenant-a"], contextualizer_prompt=prompt, build_execution=False)
+
+    assert plan.public_configuration["partitions"][0]["embedder"]["name"] == "embed-b"
