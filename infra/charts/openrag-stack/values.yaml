@@ -1133,15 +1133,18 @@ env:
     PDFLOADER: "PyMuPDFLoader"
     XDG_CACHE_HOME: "/app/model_weights"
     MARKER_MAX_TASKS_PER_CHILD: "10"
-    MARKER_MAX_PROCESSES: "15"
-    MARKER_POOL_SIZE: "3"
+    # Conservative defaults: every Marker process is a separate Python + torch
+    # process sharing the pod's memory and GPU. Raise per deployment once the
+    # headroom is known (up to MARKER_POOL_SIZE x MARKER_MAX_PROCESSES processes).
+    MARKER_MAX_PROCESSES: "4"
+    MARKER_POOL_SIZE: "1"
     MARKER_NUM_GPUS: "0.6"
     TRANSCRIBER_BASE_URL: 'http://{{ .Release.Name }}-whisper-engine-service/v1'
 
     # Ray
     # RAY_ADDRESS: 'ray://{{ include "openrag-stack.fullname" . }}-raycluster-head-svc:10001'
     RAY_NUM_GPUS: "0.1"
-    RAY_POOL_SIZE: "3"
+    RAY_POOL_SIZE: "1"
     RAY_MAX_TASKS_PER_WORKER: "50"
     RAY_DASHBOARD_PORT: "8265"
     RAY_task_retry_delay_ms: "3000"
