@@ -130,6 +130,7 @@ class MockVectorStore(VectorStore):
         collection: str,
         filters: dict[str, Any],
         output_fields: list[str] | None = None,
+        limit: int | None = None,
     ) -> list[dict[str, Any]]:
         return []
 
