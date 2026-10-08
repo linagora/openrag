@@ -40,6 +40,7 @@ import secrets
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Any
 
 from core.config.infrastructure import VectorDBConfig
@@ -206,14 +207,16 @@ def _scalar_output_fields(description: dict[str, Any]) -> list[str]:
 
 
 def _changed_by_float64(value: Any) -> bool:
-    """Whether *value* holds an integer, at any depth, that a float64 does not hold exactly."""
+    """Whether a Milvus partial upsert changes *value*, or an integer in it at any depth.
+
+    Milvus turns each number into a float64 and writes it back in its shortest
+    decimal form, so even 2**60, which a float64 holds exactly, comes back as
+    1152921504606847000.
+    """
     if isinstance(value, bool):
         return False
     if isinstance(value, int):
-        try:
-            return int(float(value)) != value
-        except OverflowError:
-            return True
+        return int(Decimal(repr(float(value)))) != value
     if isinstance(value, dict):
         return any(_changed_by_float64(item) for item in value.values())
     if isinstance(value, list):

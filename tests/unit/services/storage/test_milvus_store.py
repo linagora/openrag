@@ -39,6 +39,7 @@ from services.storage.milvus_store import (
     MAX_SECTION_ID,
     SCHEMA_VERSION_PROPERTY_KEY,
     MilvusVectorStore,
+    _changed_by_float64,
     analyzer_params,
 )
 
@@ -2211,6 +2212,32 @@ class TestNewFieldIsMadeSearchable:
         assert store._client.flush.call_count == 2
 
 
+@pytest.mark.parametrize(
+    ("value", "changed"),
+    [
+        # Measured on Milvus 3.0.2: inserted, partially upserted, read back.
+        (2**53, False),
+        (2**53 + 1, True),
+        (2**53 + 2, False),
+        (2**60, True),
+        (10**17, False),
+        (123456789012345678, True),
+        (9007199254740993000, False),
+        (10**18, False),
+        (1234567890123456789, True),
+        (2**63 - 1, True),
+        (-(2**63), True),
+        (-(2**53 + 1), True),
+        (42, False),
+        (True, False),
+        (0.5, False),
+        ({"ids": [1, 2**53 + 1]}, True),
+    ],
+)
+def test_changed_by_float64_matches_what_milvus_writes_back(value, changed: bool) -> None:
+    assert _changed_by_float64(value) is changed
+
+
 class TestWriteVectors:
     async def test_only_the_named_field_is_written(self, store: MilvusVectorStore) -> None:
         _section_ids(store, [{"_id": 11, "section_id": 5, "next_section_id": 6}, {"_id": 12, "prev_section_id": 5}])
@@ -2269,7 +2296,8 @@ class TestWriteVectors:
                         "section_id": 2**60 + 1,
                         "ext_id": 2**53 + 1,
                         "tags": {"ids": [7, 2**53 + 3]},
-                        "exact": 2**60,
+                        "shortest": 2**60,
+                        "kept": 2**53 + 2,
                         "ratio": 0.5,
                         "flag": True,
                     },
@@ -2282,10 +2310,10 @@ class TestWriteVectors:
         finally:
             _logger.remove(sink)
 
-        # The typed `_id` and the folded section ID are not rounded, and 2**60
-        # is a float64.
+        # The typed `_id` and the folded section ID are not rounded, and Milvus
+        # writes 2**53 + 2 back unchanged.
         (record,) = records
-        assert record["extra"]["rounded"] == {"f1": ["ext_id", "tags"]}
+        assert record["extra"]["rounded"] == {"f1": ["ext_id", "shortest", "tags"]}
         assert record["extra"]["field"] == "vector_bge_m3"
 
     async def test_a_failed_write_logs_no_rounding(self, store: MilvusVectorStore) -> None:
