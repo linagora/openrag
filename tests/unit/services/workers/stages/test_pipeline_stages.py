@@ -152,6 +152,9 @@ class FakeVectorStore(VectorStore):
     async def drop_vector_field(self, field: str) -> bool:
         return False
 
+    async def write_vectors(self, field: str, vectors: dict[str, list[float] | None]) -> int:
+        return 0
+
     async def drop_collection(self, name: str) -> None:
         return None
 

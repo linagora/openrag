@@ -27,6 +27,9 @@ class RecordingQueryService:
     def __init__(self) -> None:
         self.calls: dict[str, dict[str, Any]] = {}
 
+    async def refresh_partition_configs(self) -> None:
+        self.calls["refresh_partition_configs"] = {}
+
     async def chat(self, **kwargs: Any) -> dict:
         self.calls["chat"] = kwargs
         return {"choices": [], "extra": {}}
@@ -42,6 +45,9 @@ class RecordingQueryService:
 
 class OverWindowQueryService:
     """Answers every request as one whose instructions and conversation overflow the window."""
+
+    async def refresh_partition_configs(self) -> None:
+        pass
 
     async def chat(self, **kwargs: Any) -> dict:
         raise ContextWindowExceededError(9000, 8000)
@@ -105,6 +111,7 @@ async def test_chat_completions_pass_the_window_minus_the_output_budget(client, 
 
     assert response.status_code == 200
     assert service.calls[entry_point]["max_prompt_tokens"] == WINDOW - 2048
+    assert list(service.calls) == ["refresh_partition_configs", entry_point]
 
 
 @pytest.mark.asyncio
@@ -115,6 +122,7 @@ async def test_completions_pass_the_window_minus_the_output_budget(client, servi
 
     assert response.status_code == 200
     assert service.calls["complete"]["max_prompt_tokens"] == WINDOW - 2048
+    assert list(service.calls) == ["refresh_partition_configs", "complete"]
 
 
 @pytest.mark.asyncio

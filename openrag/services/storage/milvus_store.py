@@ -38,8 +38,9 @@ import math
 import re
 import secrets
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Any
 
 from core.config.infrastructure import VectorDBConfig
@@ -51,6 +52,7 @@ from core.utils.exceptions import (
     VDBConnectionError,
     VDBCreateOrLoadCollectionError,
     VDBDeleteError,
+    VDBError,
     VDBInsertError,
     VDBSchemaMigrationRequiredError,
     VDBSearchError,
@@ -103,6 +105,7 @@ MAX_VECTOR_FIELDS = 10
 #: Milvus partial upsert rewrites every number as a float64, and a float64
 #: rounds integers above 2**53 — so do JavaScript clients.
 MAX_SECTION_ID = 2**53 - 1
+SECTION_ID_KEYS = ("prev_section_id", "section_id", "next_section_id")
 
 
 #: Dense ANN search params for the HNSW/COSINE index on each dense field. ``ef``
@@ -135,6 +138,11 @@ RRF_K = 100
 #: *unreachable* server is already handled — ``MilvusClient`` connects eagerly in
 #: ``__init__`` and raises :class:`VDBConnectionError` before the probe runs.
 _SCHEMA_PROBE_TIMEOUT = 5.0
+
+#: How long :meth:`MilvusVectorStore.make_searchable` waits for a flushed field
+#: to answer, and how often it asks.
+_SEARCHABLE_TIMEOUT = 120.0
+_SEARCHABLE_POLL = 0.5
 
 #: Fallback dense-vector dimension for page sizing when the real one is
 #: unknown — i.e. a read-only process that never ran ``initialize`` AND the
@@ -198,6 +206,24 @@ def _scalar_output_fields(description: dict[str, Any]) -> list[str]:
     return fields
 
 
+def _changed_by_float64(value: Any) -> bool:
+    """Whether a Milvus partial upsert changes *value*, or an integer in it at any depth.
+
+    Milvus turns each number into a float64 and writes it back in its shortest
+    decimal form, so even 2**60, which a float64 holds exactly, comes back as
+    1152921504606847000.
+    """
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, int):
+        return int(Decimal(repr(float(value)))) != value
+    if isinstance(value, dict):
+        return any(_changed_by_float64(item) for item in value.values())
+    if isinstance(value, list):
+        return any(_changed_by_float64(item) for item in value)
+    return False
+
+
 class MilvusVectorStore(VectorStore):
     """Milvus 3.0 implementation of :class:`VectorStore`.
 
@@ -238,6 +264,8 @@ class MilvusVectorStore(VectorStore):
         self._search_schema_checked = False
         # Serializes adding and dropping dense fields.
         self._vector_field_lock = asyncio.Lock()
+        # Dense fields this process added and has not flushed a write into yet.
+        self._unflushed_fields: set[str] = set()
         # Dense field names on the live schema, ``None`` until read.
         self._dense_fields_cache: frozenset[str] | None = None
         # Default projection of `query_chunks_by_filter`, ``None`` until read.
@@ -1046,6 +1074,7 @@ class MilvusVectorStore(VectorStore):
                 collection_name=self._collection_name,
             ) from e
 
+        await self._flush_new_fields([field])
         # Milvus 3.0 returns {"insert_count": N, "ids": [...], "cost": ...}.
         # Fall back to len(entities) if the server omits insert_count.
         return int(result.get("insert_count", len(entities))) if isinstance(result, dict) else len(entities)
@@ -1952,6 +1981,81 @@ class MilvusVectorStore(VectorStore):
                 collection_name=self._collection_name,
             ) from e
 
+        await self._flush_new_fields(entities[0])
+        return int(result.get("upsert_count", len(entities))) if isinstance(result, dict) else len(entities)
+
+    async def write_vectors(self, field: str, vectors: dict[str, list[float] | None]) -> int:
+        """Partial upsert of ``{_id, field}`` per chunk.
+
+        Milvus keeps every field the upsert does not name, including the
+        dynamic ones, and accepts ``None`` for a nullable vector: the chunk then
+        drops out of that field's searches. On an auto-id collection it refuses
+        the whole batch when any ``_id`` no longer exists, so a chunk deleted
+        concurrently fails the write instead of leaving a row holding only a
+        vector (all verified on Milvus 3.0.1).
+
+        It does rewrite every number in the dynamic field as a float64, so an
+        integer beyond ±2**53 in a chunk's metadata comes back rounded, nested
+        ones too, even when the upsert passes the exact value back (verified
+        on Milvus 3.0.2). Section IDs above :data:`MAX_SECTION_ID` are written
+        back folded into their low 53 bits, as Milvus migration 3 does, which
+        keeps chunks linked to their neighbours. Any other integer the write
+        changes is logged as a warning, with its file and keys: Postgres keeps
+        each file's exact upload metadata, and search results now differ from
+        it. A full-row upsert would keep the numbers but reassign ``_id``, which
+        the collection auto-generates.
+
+        Once Storage V3 is enabled, Milvus can generate a field from a function
+        and backfill existing rows itself (``add_function_field``). Today that
+        backfill covers BM25 and MinHash only, and embedding providers are read
+        from ``milvus.yaml`` at startup; when Milvus supports text-embedding
+        functions on existing rows, re-embedding could move there instead of
+        computing vectors client-side and writing them here.
+        """
+        if not field.startswith(VECTOR_FIELD_PREFIX):
+            raise ValueError(f"'{field}' is not a per-embedder dense vector field.")
+        if not vectors:
+            return 0
+
+        entities = {int(chunk_id): {"_id": int(chunk_id), field: vector} for chunk_id, vector in vectors.items()}
+        rounded: dict[str, set[str]] = {}
+        try:
+            rows = await asyncio.to_thread(self._iter_query, f"_id in {list(entities)}", ["file_id", "$meta"])
+            for row in rows:
+                entities[row["_id"]].update(
+                    (key, row[key] & MAX_SECTION_ID)
+                    for key in SECTION_ID_KEYS
+                    if isinstance(row.get(key), int) and not 0 <= row[key] <= MAX_SECTION_ID
+                )
+                keys = {
+                    key
+                    for key, value in row.items()
+                    if key not in ("_id", "file_id", *SECTION_ID_KEYS) and _changed_by_float64(value)
+                }
+                if keys:
+                    rounded.setdefault(str(row.get("file_id")), set()).update(keys)
+            result = await self._async_client.upsert(
+                collection_name=self._collection_name,
+                data=list(entities.values()),
+                partial_update=True,
+            )
+        except MilvusException as e:
+            raise VDBInsertError(
+                f"Milvus partial upsert into `{field}` failed: {e!s}",
+                collection_name=self._collection_name,
+            ) from e
+        except Exception as e:
+            raise UnexpectedVDBError(
+                f"Unexpected error during Milvus partial upsert into `{field}`: {e!s}",
+                collection_name=self._collection_name,
+            ) from e
+
+        if rounded:
+            logger.bind(field=field, rounded={file_id: sorted(keys) for file_id, keys in rounded.items()}).warning(
+                "Milvus rounded integers beyond ±2**53 in these files' chunk metadata; "
+                "search results now show the rounded values, Postgres keeps the exact ones"
+            )
+        await self._flush_new_fields([field])
         return int(result.get("upsert_count", len(entities))) if isinstance(result, dict) else len(entities)
 
     async def insert_entities(self, entities: list[dict[str, Any]], collection: str = "default") -> int:
@@ -1976,7 +2080,52 @@ class MilvusVectorStore(VectorStore):
                 collection_name=self._collection_name,
             ) from e
 
+        await self._flush_new_fields(entities[0])
         return int(result.get("insert_count", len(entities))) if isinstance(result, dict) else len(entities)
+
+    async def make_searchable(self, field: str) -> None:
+        """Flush, then wait until ``field`` answers a search.
+
+        Milvus refuses searches on a dense field added to a loaded collection
+        until some of its data is flushed (verified on Milvus 3.0.2), and by
+        default seals a segment under 16 MB by itself only once it is a day old.
+        The flushed data then takes a moment to be indexed and loaded. After
+        that, later writes into the field are searchable at once.
+        """
+        try:
+            await asyncio.to_thread(self._client.flush, self._collection_name)
+        except MilvusException as e:
+            raise VDBInsertError(f"Milvus flush failed: {e!s}", collection_name=self._collection_name) from e
+        dimension = await self.vector_dimension(field)
+        if not dimension:
+            return
+        probe = [1.0] + [0.0] * (dimension - 1)
+        deadline = time.monotonic() + _SEARCHABLE_TIMEOUT
+        logger.bind(field=field).info("Flushed; waiting for the vector field to answer searches")
+        while True:
+            try:
+                await self._async_client.search(
+                    collection_name=self._collection_name, data=[probe], anns_field=field, limit=1
+                )
+                return
+            except MilvusException as e:
+                if time.monotonic() >= deadline:
+                    raise VDBSearchError(
+                        f"`{field}` still refuses searches {_SEARCHABLE_TIMEOUT:.0f}s after a flush: {e!s}",
+                        collection_name=self._collection_name,
+                    ) from e
+            await asyncio.sleep(_SEARCHABLE_POLL)
+
+    async def _flush_new_fields(self, fields: Iterable[str]) -> None:
+        """After the first write into a field this process added, make it searchable."""
+        for field in self._unflushed_fields.intersection(fields):
+            try:
+                await self.make_searchable(field)
+            except VDBError as e:
+                # The write itself landed; the next one into the field retries.
+                logger.bind(field=field).warning(f"New vector field not searchable yet: {e!s}")
+                continue
+            self._unflushed_fields.discard(field)
 
     async def ensure_collection(self, name: str, dimension: int, **kwargs: Any) -> None:
         """Public entry point for materialising the backing collection.
@@ -2058,6 +2207,7 @@ class MilvusVectorStore(VectorStore):
                     operation="create_index",
                 ) from e
             self._dense_fields_cache = None
+            self._unflushed_fields.add(field)
             logger.bind(field=field, dimension=dimension).info("Indexed per-embedder dense vector field")
         return created
 

@@ -563,6 +563,7 @@ async def openai_chat_completion(
             partition_service=partition_service,
             is_admin=user["is_admin"],
         )
+        await service.refresh_partition_configs()
         log.debug(f"Using partitions: {partitions}")
 
     # Bound the caller's input size in every mode, against the resolved
@@ -692,6 +693,7 @@ async def openai_completion(
             partition_service=partition_service,
             is_admin=user["is_admin"],
         )
+        await service.refresh_partition_configs()
 
     # Bound the caller's input size in every mode (RAG context is capped
     # separately), against the resolved partition's chat_llm preset budget
