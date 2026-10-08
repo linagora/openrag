@@ -588,15 +588,24 @@ class MarkerPool:
                     await self._queue.put(worker)
                     self.logger.debug(f"MarkerWorker returned to pool for {label} without recycling")
 
-        return await retry_with_backoff(
-            attempt,
-            max_retries=self.config.loader.marker_max_task_retry,
-            base_delay=self.config.loader.marker_retry_base_delay,
-            task_description=f"MarkerPool PDF {label} ({file_path})",
-            # A chunk over the ceiling is over it again every time, so retrying
-            # costs ~4x the parse plus backoff and ends with the same error.
-            no_retry=(MemoryError,),
-        )
+        try:
+            return await retry_with_backoff(
+                attempt,
+                max_retries=self.config.loader.marker_max_task_retry,
+                base_delay=self.config.loader.marker_retry_base_delay,
+                task_description=f"MarkerPool PDF {label} ({file_path})",
+                # A chunk over the ceiling is over it again every time, so retrying
+                # costs ~4x the parse plus backoff and ends with the same error.
+                no_retry=(MemoryError,),
+            )
+        except Exception as exc:
+            # Raise the type itself: this exception crosses one more actor
+            # boundary to `MarkerLoader`, and Ray carries the type across but
+            # not `__cause__`, so a RuntimeError caused by a MemoryError arrives
+            # there as a plain RuntimeError.
+            if not caused_by(exc, MemoryError):
+                raise
+            raise MemoryError(f"Marker parse of {label} ran out of memory") from exc
 
     async def process_pdf(self, file_path: str):
         chunk_size = self.config.loader.marker_chunk_size

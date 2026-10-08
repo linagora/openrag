@@ -602,7 +602,7 @@ async def test_process_chunk_recycles_the_slot_after_a_memory_error(monkeypatch)
     monkeypatch.setattr(pool, "_run_chunk", fake_run_chunk)
     monkeypatch.setattr(pool, "_reset_worker_pool", fake_reset)
 
-    with pytest.raises(RuntimeError):
+    with pytest.raises(MemoryError):
         await pool._process_chunk("f.pdf", None, "(all pages)")
 
     await asyncio.sleep(0)  # let the recycle task created in `finally` start
@@ -630,7 +630,7 @@ async def test_process_chunk_does_not_retry_a_memory_error(monkeypatch):
     monkeypatch.setattr(pool, "_run_chunk", fake_run_chunk)
     monkeypatch.setattr(pool, "_reset_worker_pool", lambda worker: _noop())
 
-    with pytest.raises(RuntimeError):
+    with pytest.raises(MemoryError):
         await pool._process_chunk("f.pdf", None, "(all pages)")
 
     assert len(attempts) == 1, f"MemoryError was retried {len(attempts)} times"
@@ -910,50 +910,102 @@ def test_worker_init_logs_before_it_applies_the_limit(monkeypatch):
     assert order == ["log", "limit"]
 
 
+def _across_an_actor_boundary(exc: BaseException, description: str) -> RuntimeError:
+    """What a caller of `call_ray_actor_with_timeout` gets when the actor raised *exc*.
+
+    Ray pickles the actor's exception, and pickling keeps the type but drops
+    `__cause__`; the wrapper then re-raises a RuntimeError with the Ray error as
+    its cause. Applied to the pool's exception, this is what `MarkerLoader` sees.
+    """
+    import pickle
+
+    from ray.exceptions import RayTaskError
+
+    produced = RuntimeError(f"{description} failed")
+    produced.__cause__ = RayTaskError("t", "traceback", pickle.loads(pickle.dumps(exc))).as_instanceof_cause()
+    return produced
+
+
+async def _pool_failure(monkeypatch, child_failure: BaseException) -> BaseException:
+    """Run the real `_process_chunk` over a child failure; return what the pool raises."""
+    pool = _bare_marker_pool()
+
+    async def fake_run_chunk(worker, file_path, page_range, label):
+        raise child_failure
+
+    monkeypatch.setattr(pool, "ensure_worker_pool_healthy", lambda worker: _noop())
+    monkeypatch.setattr(pool, "_run_chunk", fake_run_chunk)
+    monkeypatch.setattr(pool, "_reset_worker_pool", lambda worker: _noop())
+
+    with pytest.raises(Exception) as raised:
+        await pool._process_chunk("f.pdf", [10, 11], "[p10-11]")
+    await asyncio.sleep(0)  # let the recycle task created in `finally` run
+    return raised.value
+
+
 def _loader_raising(monkeypatch, exc: BaseException, limit_mb: int):
-    """A ``MarkerLoader`` whose pool call fails with *exc*, as the Ray wrapper raises it."""
-    from services.workers.parsers import marker_workers as mw
+    """A `MarkerLoader` whose pool call fails with *exc*."""
 
     async def fake_call(future, timeout, task_description):
         raise exc
 
-    monkeypatch.setattr(mw, "call_ray_actor_with_timeout", fake_call)
-    loader = mw.MarkerLoader.__new__(mw.MarkerLoader)
+    monkeypatch.setattr(marker_workers, "call_ray_actor_with_timeout", fake_call)
+    loader = marker_workers.MarkerLoader.__new__(marker_workers.MarkerLoader)
     loader.config = SimpleNamespace(loader=SimpleNamespace(marker_timeout=60, marker_parse_memory_limit_mb=limit_mb))
     loader._pool = lambda: SimpleNamespace(process_pdf=SimpleNamespace(remote=lambda path: None))
     return loader
 
 
-async def test_a_ceiling_failure_is_reported_as_the_ceiling(monkeypatch):
-    """The stored reason reads the top exception only. Without this it was the
-    wrapper's "RuntimeError: MarkerLoader PDF loading (...) failed" — the text a
-    corrupt PDF gets too — measured on an L4 with a 1418 MiB limit."""
+def test_an_actor_boundary_drops_the_cause_but_keeps_the_type():
+    """The premise of the two tests below. A RuntimeError caused by a MemoryError
+    arrives one hop later with no MemoryError left to find — which is why the
+    pool must raise the type itself."""
+    from services.workers.ray_utils import caused_by
+
+    caused = RuntimeError("MarkerPool PDF [p10-11] failed")
+    caused.__cause__ = MemoryError("ceiling")
+
+    assert not caused_by(_across_an_actor_boundary(caused, "MarkerLoader PDF loading"), MemoryError)
+    assert caused_by(_across_an_actor_boundary(MemoryError("ceiling"), "MarkerLoader PDF loading"), MemoryError)
+
+
+async def test_a_ceiling_failure_reaches_the_task_reason_through_both_hops(monkeypatch):
+    """Child -> pool -> loader, each hop as Ray delivers it. With only the loader
+    looking for the MemoryError, the reason stayed "RuntimeError: MarkerLoader PDF
+    loading (...) failed" — the text a corrupt PDF gets too — measured on an L4
+    with a 1418 MiB limit, while a one-hop test of the loader passed."""
     from core.utils.error_summary import failure_reason_from_exception
 
-    produced = _as_production_raises_it()
-    loader = _loader_raising(monkeypatch, produced, limit_mb=1418)
+    pool_raised = await _pool_failure(monkeypatch, _as_production_raises_it())
+    assert isinstance(pool_raised, MemoryError), "the pool must raise the type that survives the next hop"
 
+    loader = _loader_raising(monkeypatch, _across_an_actor_boundary(pool_raised, "MarkerLoader PDF loading"), 1418)
     with pytest.raises(MemoryError) as raised:
         await loader._convert_pdf("/tmp/doc.pdf")
 
     reason = failure_reason_from_exception(raised.value)
     assert reason.startswith("MemoryError: Marker ran out of memory")
     assert "MARKER_PARSE_MEMORY_LIMIT_MB=1418 MiB" in reason
-    assert raised.value.__cause__ is produced, "the remote traceback must stay on the chain"
+    assert raised.value.__cause__ is not None, "the remote traceback must stay on the chain"
 
 
 async def test_a_memory_error_without_a_ceiling_does_not_name_the_setting(monkeypatch):
-    loader = _loader_raising(monkeypatch, _as_production_raises_it(), limit_mb=0)
+    pool_raised = await _pool_failure(monkeypatch, _as_production_raises_it())
+    loader = _loader_raising(monkeypatch, _across_an_actor_boundary(pool_raised, "MarkerLoader PDF loading"), 0)
 
     with pytest.raises(MemoryError, match=r"^Marker ran out of memory parsing this PDF\.$"):
         await loader._convert_pdf("/tmp/doc.pdf")
 
 
-async def test_other_loader_failures_are_raised_unchanged(monkeypatch):
-    produced = RuntimeError("MarkerLoader PDF loading (/tmp/doc.pdf) failed")
-    produced.__cause__ = ValueError("not a PDF")
-    loader = _loader_raising(monkeypatch, produced, limit_mb=1418)
+async def test_other_failures_cross_both_hops_unchanged(monkeypatch):
+    child_failure = RuntimeError("MarkerPool PDF [p10-11] failed")
+    child_failure.__cause__ = ValueError("not a PDF")
 
+    pool_raised = await _pool_failure(monkeypatch, child_failure)
+    assert pool_raised is child_failure
+
+    produced = _across_an_actor_boundary(pool_raised, "MarkerLoader PDF loading")
+    loader = _loader_raising(monkeypatch, produced, 1418)
     with pytest.raises(RuntimeError) as raised:
         await loader._convert_pdf("/tmp/doc.pdf")
 
