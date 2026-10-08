@@ -2140,12 +2140,30 @@ class TestNewFieldIsMadeSearchable:
 
         store._client.flush.assert_called_once_with(store._collection_name)
 
-    async def test_an_upload_into_it_flushes_too(self, store: MilvusVectorStore) -> None:
+    @pytest.mark.parametrize(
+        "write",
+        [
+            # The upload path (stages/store.py).
+            pytest.param(
+                lambda store: store.upsert(
+                    [Chunk(id="c1", document_id="f1", text="hi", partition="p", embedding=[0.1, 0.2])],
+                    vector_field="vector_bge_m3",
+                ),
+                id="upsert",
+            ),
+            # A copy, and a metadata update, into the partition.
+            pytest.param(
+                lambda store: store.insert_entities([{"text": "hi", "vector_bge_m3": [0.1]}]), id="insert_entities"
+            ),
+            pytest.param(
+                lambda store: store.upsert_entities([{"text": "hi", "vector_bge_m3": [0.1]}]), id="upsert_entities"
+            ),
+        ],
+    )
+    async def test_an_upload_into_it_flushes_too(self, store: MilvusVectorStore, write) -> None:
         await self._new_field(store)
 
-        chunk = Chunk(id="c1", document_id="f1", text="hi", partition="p", embedding=[0.1, 0.2])
-        await store.upsert([chunk], vector_field="vector_bge_m3")
-        await store.insert_entities([{"text": "hi", "vector_bge_m3": [0.1]}])
+        await write(store)
 
         store._client.flush.assert_called_once_with(store._collection_name)
 
@@ -2165,8 +2183,9 @@ class TestNewFieldIsMadeSearchable:
         await self._new_field(store)
         store._async_client.search = AsyncMock(side_effect=MilvusException(1, "not loaded"))
 
+        # Fails instead of hanging if the deadline is no longer checked.
         with pytest.raises(VDBSearchError, match="still refuses searches"):
-            await store.make_searchable("vector_bge_m3")
+            await asyncio.wait_for(store.make_searchable("vector_bge_m3"), timeout=5)
 
     async def test_a_field_already_there_is_not_flushed(self, store: MilvusVectorStore) -> None:
         store._client.describe_collection.return_value = _descriptor(FIELD, "vector_bge_m3")
