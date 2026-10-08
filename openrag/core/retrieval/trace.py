@@ -554,3 +554,20 @@ class RetrievalTraceBuilder:
             trace["candidates_truncated"] = True
         public = safe_public_value(trace)
         return public  # type: ignore[return-value]
+
+
+def merge_query_traces(parent: RetrievalTraceBuilder, children: Sequence[RetrievalTraceBuilder]) -> None:
+    """Attach fan-out traces and retain max durations without copying candidates."""
+    merge_child_traces(parent, children)
+    for stage_name in TRACE_STAGE_NAMES:
+        durations = [
+            child.stages[stage_name].duration_seconds
+            for child in children
+            if child.stages[stage_name].duration_seconds is not None
+        ]
+        if durations and parent.stages[stage_name].status == "unavailable":
+            parent.stages[stage_name] = parent.stages[stage_name].model_copy(
+                update={"duration_seconds": max(durations)}
+            )
+    for key in sorted({key for child in children for key in child.timings}):
+        parent.timings[key] = max(child.timings[key] for child in children if key in child.timings)
