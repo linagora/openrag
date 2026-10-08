@@ -764,7 +764,7 @@ class QueryService:
 
         effective_retrieval_options = self._effective_retrieval_options(metadata)
         retrieval_top_k = effective_retrieval_options.get("top_k")
-        top_k = self._mr_max if use_map_reduce else retrieval_top_k
+        top_k = self._mr_max if use_map_reduce else None
         retrieval_overrides = {key: value for key, value in effective_retrieval_options.items() if key != "top_k"}
 
         filter_params = None
@@ -1126,10 +1126,16 @@ class QueryService:
         **retrieval_overrides,
     ) -> None:
         """Run an isolated diagnostic retrieval that cannot alter the answer."""
+        diagnostics = trace.diagnostics
         shadow = RetrievalTraceBuilder(
             request_id=f"{trace.request_id}:original",
             original_query=original_query,
-            diagnostics=trace.diagnostics,
+            diagnostics=RetrievalDiagnosticsContext(
+                candidate_limit=diagnostics.candidate_limit,
+                query_mode=diagnostics.query_mode,
+                compare_original_query=diagnostics.compare_original_query,
+                effective_options=diagnostics.effective_options,
+            ),
         )
         started = time.perf_counter()
         status = "complete"

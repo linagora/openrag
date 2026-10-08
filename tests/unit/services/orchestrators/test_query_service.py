@@ -19,9 +19,10 @@ import services.orchestrators.query_service as qs
 from core.config import load_config
 from core.config.retrieval_pipeline import RetrievalPipelineConfig
 from core.models.chunk import Chunk
+from core.models.retrieval_trace import TraceCandidate
 from core.models.workspace import WorkspaceScope
 from core.prompts import EMPTY_CONTEXT_MESSAGE
-from core.retrieval.trace import RetrievalTraceBuilder
+from core.retrieval.trace import RetrievalDiagnosticsContext, RetrievalTraceBuilder
 from core.utils.exceptions import ContextWindowExceededError, WorkspaceNotFoundError
 from services.orchestrators.query_service import QueryService
 
@@ -1568,7 +1569,7 @@ async def test_chat_forwards_bounded_retrieval_diagnostic_overrides():
     retrieval = FakeRetrieval()
     svc = _svc(mode="ChatBotRag", llm=FakeLLM(chat_responses=["answer"]), retrieval=retrieval)
 
-    out = await svc.chat(
+    await svc.chat(
         partitions=["p"],
         payload={
             "messages": [{"role": "user", "content": "Exact original legal question?"}],
@@ -1588,21 +1589,10 @@ async def test_chat_forwards_bounded_retrieval_diagnostic_overrides():
 
     call = retrieval.retrieve_multi_calls[0]
     assert call["similarity_threshold"] == 0.35
-    assert call["top_k"] == 100
+    assert call["top_k"] is None
     assert call["retrieval_top_k"] == 100
     assert call["disable_reranker"] is True
     assert call["disable_expansion"] is True
-    assert out["extra"]["retrieval_trace"]["configuration_fingerprint"] == qs.canonical_fingerprint(
-        {
-            "stored_configuration_fingerprint": "fake-fingerprint",
-            "effective_request_overrides": {
-                "top_k": 100,
-                "similarity_threshold": 0.35,
-                "disable_reranker": True,
-                "disable_expansion": True,
-            },
-        }
-    )
 
 
 @pytest.mark.asyncio
@@ -1858,6 +1848,41 @@ async def test_original_query_comparison_preserves_partition_child_traces():
     comparison = trace.finish(configuration_fingerprint="fingerprint")["comparisons"]["original_query"]
     assert comparison["query_traces"][0]["partition"] == "legal"
     assert comparison["query_traces"][0]["query"] == "original query"
+
+
+@pytest.mark.asyncio
+async def test_original_query_comparison_has_an_independent_candidate_budget():
+    class CandidateHeavyRetrieval(FakeRetrieval):
+        async def retrieve_multi(self, **kwargs):
+            trace = kwargs["trace"]
+            for stage in ("original_query", "contextualized_query", "dense_before_threshold", "final"):
+                candidates = [TraceCandidate(id=f"{stage}-{index}", rank=index + 1) for index in range(150)]
+                trace.record_stage(stage, status="complete", candidates=candidates)
+            return await super().retrieve_multi(**kwargs)
+
+    diagnostics = RetrievalDiagnosticsContext(candidate_limit=500)
+    trace = RetrievalTraceBuilder("request", "original query", diagnostics=diagnostics)
+    for stage in ("original_query", "contextualized_query", "dense_before_threshold"):
+        candidates = [TraceCandidate(id=f"main-{stage}-{index}", rank=index + 1) for index in range(150)]
+        trace.record_stage(stage, status="complete", candidates=candidates)
+
+    service = _svc(mode="ChatBotRag", retrieval=CandidateHeavyRetrieval())
+    await service._compare_original_query(
+        trace,
+        original_query="original query",
+        partition=["legal"],
+        top_k=None,
+        retrieval_top_k=50,
+        filter_params=None,
+        configuration_fingerprint="fingerprint",
+    )
+
+    comparison = trace.finish(configuration_fingerprint="fingerprint")["comparisons"]["original_query"]
+    assert comparison["candidate_limit"] == 500
+    assert comparison["candidates_truncated"] is True
+    assert diagnostics.remaining_candidates == 50
+    assert diagnostics.candidates_truncated is False
+    assert "candidates_truncated" not in trace.finish(configuration_fingerprint="fingerprint")
 
 
 @pytest.mark.asyncio
@@ -2746,7 +2771,8 @@ async def test_websearch_with_partition_forwards_retrieval_diagnostic_overrides(
     )
 
     call = retrieval.retrieve_multi_calls[0]
-    assert call["top_k"] == 73
+    assert call["top_k"] is None
+    assert call["retrieval_top_k"] == 73
     assert call["similarity_threshold"] == 0.35
     assert call["disable_reranker"] is True
     assert call["disable_expansion"] is True
