@@ -1619,7 +1619,11 @@
     "expected_queries": {
       "query_list": [
         {
-          "query": "Differences between trade secrets and patents in terms of protection duration and disclosure requirements",
+          "query": "Protection duration and disclosure requirements for trade secrets",
+          "temporal_filters": null
+        },
+        {
+          "query": "Protection duration and disclosure requirements for patents",
           "temporal_filters": null
         }
       ]
@@ -1727,7 +1731,11 @@
     "expected_queries": {
       "query_list": [
         {
-          "query": "Typical comparison of product return rates between summer and winter seasons",
+          "query": "Product return rates during summer seasons",
+          "temporal_filters": null
+        },
+        {
+          "query": "Product return rates during winter seasons",
           "temporal_filters": null
         }
       ]
@@ -1851,7 +1859,11 @@
     "expected_queries": {
       "query_list": [
         {
-          "query": "Application of differentiated instruction in elementary and middle school classrooms",
+          "query": "Application of differentiated instruction in elementary school classrooms",
+          "temporal_filters": null
+        },
+        {
+          "query": "Application of differentiated instruction in middle school classrooms",
           "temporal_filters": null
         }
       ]
@@ -2011,7 +2023,11 @@
     "expected_queries": {
       "query_list": [
         {
-          "query": "Comparison of lithium-ion battery systems and pumped hydro storage in terms of scalability and round-trip efficiency",
+          "query": "Scalability and round-trip efficiency of lithium-ion battery systems",
+          "temporal_filters": null
+        },
+        {
+          "query": "Scalability and round-trip efficiency of pumped hydro storage",
           "temporal_filters": null
         }
       ]
@@ -2020,6 +2036,38 @@
       {
         "role": "user",
         "content": "How do lithium-ion battery systems compare to pumped hydro storage in terms of scalability and round-trip efficiency?"
+      }
+    ]
+  },
+  {
+    "id": 81,
+    "difficulty": 2,
+    "domain": "healthcare",
+    "ambiguity_reason": "A 12-month trend exceeds the fan-out cap at monthly granularity, so adjacent months should be grouped into quarters without omitting part of the year.",
+    "expected_queries": {
+      "query_list": [
+        {
+          "query": "Malaria incidence from January through March 2024",
+          "temporal_filters": null
+        },
+        {
+          "query": "Malaria incidence from April through June 2024",
+          "temporal_filters": null
+        },
+        {
+          "query": "Malaria incidence from July through September 2024",
+          "temporal_filters": null
+        },
+        {
+          "query": "Malaria incidence from October through December 2024",
+          "temporal_filters": null
+        }
+      ]
+    },
+    "messages": [
+      {
+        "role": "user",
+        "content": "How did monthly malaria incidence change from January through December 2024?"
       }
     ]
   }

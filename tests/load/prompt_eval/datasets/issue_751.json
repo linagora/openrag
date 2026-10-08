@@ -1,16 +1,16 @@
 [
   {
     "id": 1,
-    "difficulty": 3,
-    "domain": "agriculture",
+    "difficulty": 2,
+    "domain": "technology",
     "expected_queries": {
       "query_list": [
         {
-          "query": "How seed coating inoculants improve native seed germination",
+          "query": "How contrastive predictive coding improves domain-specific text retrieval",
           "temporal_filters": null
         },
         {
-          "query": "How cold stratification improves native seed germination compared with inoculant coatings",
+          "query": "How masked language modeling improves domain-specific text retrieval",
           "temporal_filters": null
         }
       ]
@@ -18,30 +18,22 @@
     "messages": [
       {
         "role": "user",
-        "content": "How do inoculant coatings and cold stratification each improve native seed germination?"
+        "content": "How do contrastive predictive coding and masked language modeling each improve domain-specific text retrieval?"
       }
     ]
   },
   {
     "id": 2,
     "difficulty": 2,
-    "domain": "water",
+    "domain": "technology",
     "expected_queries": {
       "query_list": [
         {
-          "query": "Municipal water use in 2019",
+          "query": "How sparse attention processes long audio sequences",
           "temporal_filters": null
         },
         {
-          "query": "Municipal water use in 2020",
-          "temporal_filters": null
-        },
-        {
-          "query": "Municipal water use in 2021",
-          "temporal_filters": null
-        },
-        {
-          "query": "Municipal water use in 2022",
+          "query": "How state-space models process long audio sequences",
           "temporal_filters": null
         }
       ]
@@ -49,18 +41,22 @@
     "messages": [
       {
         "role": "user",
-        "content": "Show the municipal water use trend from 2019 through 2022."
+        "content": "What roles do sparse attention and state-space models each play in processing long audio sequences?"
       }
     ]
   },
   {
     "id": 3,
     "difficulty": 2,
-    "domain": "heating",
+    "domain": "energy",
     "expected_queries": {
       "query_list": [
         {
-          "query": "Comparison of geothermal and air-source heat pumps by installation cost and winter efficiency",
+          "query": "Installation cost and winter efficiency of geothermal heat pumps",
+          "temporal_filters": null
+        },
+        {
+          "query": "Installation cost and winter efficiency of air-source heat pumps",
           "temporal_filters": null
         }
       ]
@@ -74,7 +70,7 @@
   },
   {
     "id": 4,
-    "difficulty": 2,
+    "difficulty": 3,
     "domain": "environment",
     "expected_queries": {
       "query_list": [
@@ -93,16 +89,16 @@
   },
   {
     "id": 5,
-    "difficulty": 3,
-    "domain": "insurance",
+    "difficulty": 2,
+    "domain": "machine_learning",
     "expected_queries": {
       "query_list": [
         {
-          "query": "How telematics-based auto insurance policies set premiums and influence driver incentives",
+          "query": "How differential privacy protects sensitive training data",
           "temporal_filters": null
         },
         {
-          "query": "How mileage-based auto insurance policies set premiums and influence driver incentives compared with telematics-based policies",
+          "query": "How federated learning protects sensitive training data",
           "temporal_filters": null
         }
       ]
@@ -110,22 +106,18 @@
     "messages": [
       {
         "role": "user",
-        "content": "How do telematics-based and mileage-based auto policies determine premiums and influence driver incentives?"
+        "content": "How do differential privacy and federated learning each protect sensitive training data?"
       }
     ]
   },
   {
     "id": 6,
-    "difficulty": 1,
-    "domain": "climate",
+    "difficulty": 3,
+    "domain": "environment",
     "expected_queries": {
       "query_list": [
         {
-          "query": "Germany annual greenhouse gas emissions in 2022",
-          "temporal_filters": null
-        },
-        {
-          "query": "Canada annual greenhouse gas emissions in 2022",
+          "query": "Combined effect of reduced summer rainfall and wildfire frequency on Mediterranean forest loss",
           "temporal_filters": null
         }
       ]
@@ -133,7 +125,7 @@
     "messages": [
       {
         "role": "user",
-        "content": "What were Germany's and Canada's annual greenhouse gas emissions in 2022?"
+        "content": "How do reduced summer rainfall and wildfire frequency together contribute to forest loss in Mediterranean ecosystems?"
       }
     ]
   }
