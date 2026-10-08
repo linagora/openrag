@@ -226,10 +226,9 @@ class TestSeeding:
         assert actual_hash == prompt_module._CURRENT_SEED_HASHES[PromptType.QUERY_CONTEXTUALIZER.value]
 
     async def test_previous_bundled_contextualizer_hash_remains_refreshable(self):
-        assert (
-            "0f9b16fb4bde42ba863708c4956647b17735a2c4fe245b0ba0c6a106a56bf4dd"
-            in prompt_module._SUPERSEDED_SEED_HASHES[PromptType.QUERY_CONTEXTUALIZER.value]
-        )
+        superseded = prompt_module._SUPERSEDED_SEED_HASHES[PromptType.QUERY_CONTEXTUALIZER.value]
+        assert "0f9b16fb4bde42ba863708c4956647b17735a2c4fe245b0ba0c6a106a56bf4dd" in superseded
+        assert "87f5084a4cc922681730969ed98e769550a973bc4464f45e65b5342a7cfbf91e" in superseded
 
     async def test_seeding_skips_blank_non_asr_template(self, monkeypatch):
         repo = FakePromptRepo()
