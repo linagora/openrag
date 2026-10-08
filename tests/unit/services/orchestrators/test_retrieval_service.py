@@ -460,15 +460,40 @@ async def test_search_rerank_records_the_rerank_stages_in_the_trace():
 
     assert [c.id for c in out] == ["3", "2"]
     pre, post, final = (trace.stages[name] for name in ("pre_rerank", "post_rerank", "final"))
+    # Same shape as RetrieverPipeline.retrieve_docs: pre_rerank marks what the
+    # cut removed, post_rerank holds what was kept.
     assert (pre.status, pre.candidate_count, [c.id for c in pre.candidates]) == ("complete", 3, ["1", "2", "3"])
-    assert (post.status, post.candidate_count, [c.id for c in post.candidates]) == ("complete", 3, ["3", "2", "1"])
-    assert [c.removal_reason.code if c.removal_reason else None for c in post.candidates] == [
-        None,
-        None,
+    assert [c.removal_reason.code if c.removal_reason else None for c in pre.candidates] == [
         "reranker_top_n",
+        None,
+        None,
     ]
-    assert [c.scores["reranker"] for c in post.candidates] == [1.0, 0.9, 0.8]
+    assert (post.status, post.candidate_count, [c.id for c in post.candidates]) == ("complete", 2, ["3", "2"])
+    assert [c.scores["reranker"] for c in post.candidates] == [1.0, 0.9]
+    assert post.duration_seconds is not None
+    assert "reranking" in trace.timings
     assert [c.id for c in final.candidates] == ["3", "2"]
+
+
+@pytest.mark.asyncio
+async def test_search_rerank_survives_a_trace_failure():
+    s = FakeSearcher()
+    s.search_result = [_chunk("1", "one"), _chunk("2", "two")]
+    svc = RetrievalService(searcher=s, reranker=ReversingReranker(), llm=None, config=_config(reranker_enabled=True))
+    trace = RetrievalTraceBuilder("request-1", "hello")
+    original = trace.record_stage
+
+    def failing_record_stage(name, **kwargs):
+        if name in {"pre_rerank", "post_rerank"}:
+            raise RuntimeError("trace broke")
+        return original(name, **kwargs)
+
+    trace.record_stage = failing_record_stage
+
+    out = await svc.search(text="hello", partitions="p1", top_k=1, similarity_threshold=0.5, rerank=True, trace=trace)
+
+    assert [c.id for c in out] == ["2"]
+    assert {error.stage for error in trace.errors} >= {"pre_rerank", "post_rerank"}
 
 
 @pytest.mark.asyncio

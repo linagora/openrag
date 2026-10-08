@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -33,7 +34,7 @@ from typing import TYPE_CHECKING, Any
 from core.models.preset import resolve_partition_chat_llm
 from core.models.retrieval_trace import TraceRemovalReason
 from core.prompts import load_template_by_key
-from core.retrieval.pipeline import RetrieverPipeline, _rerank_chunks
+from core.retrieval.pipeline import RetrieverPipeline, _rerank_chunks, _safe_trace, _with_removal_reasons
 from core.retrieval.retriever import (
     HyDeRetriever,
     MultiQueryRetriever,
@@ -1137,41 +1138,49 @@ class RetrievalService:
     ) -> list[Chunk]:
         """The best ``top_k`` of ``hits`` by the reranker, as ``ScoredChunk``s.
 
-        With a trace, ``pre_rerank`` holds the candidates as fetched and
-        ``post_rerank`` the reranked list, the ones past ``top_k`` marked
-        ``reranker_top_n`` — the same shape ``partition_fused`` gives the
-        cross-embedder cut.
+        Traced the way ``RetrieverPipeline.retrieve_docs`` traces its rerank:
+        ``pre_rerank`` holds the candidates sent to the reranker, the ones cut
+        by ``top_k`` marked ``reranker_top_n``, and ``post_rerank`` the chunks
+        kept, with the reranker's duration. A tracing failure is recorded on
+        the trace and never fails the search.
         """
-        if trace is not None:
-            trace.record_stage(
+        started = time.perf_counter()
+        kept = (await _rerank_chunks(reranker, text, hits))[:top_k]
+        elapsed = time.perf_counter() - started
+        if trace is None:
+            return kept
+        kept_ids = {str(_chunk_key(chunk)) for chunk in kept}
+        _safe_trace(
+            trace,
+            "pre_rerank",
+            lambda: trace.record_stage(
                 "pre_rerank",
                 status="complete",
-                candidates=trace.project_chunks("pre_rerank", hits),
+                candidates=_with_removal_reasons(
+                    trace.project_chunks("pre_rerank", hits),
+                    {str(_chunk_key(chunk)) for chunk in hits} - kept_ids,
+                    "reranker_top_n",
+                    "Fell outside the reranked top_k.",
+                ),
                 candidate_count=len(hits),
-            )
-        reranked = await _rerank_chunks(reranker, text, hits)
-        kept = reranked[:top_k]
-        if trace is not None:
-            kept_ids = {_chunk_key(chunk) for chunk in kept}
-            trace_candidates = [
-                candidate
-                if candidate.id in kept_ids
-                else candidate.model_copy(
-                    update={
-                        "removal_reason": TraceRemovalReason(
-                            code="reranker_top_n",
-                            explanation="Candidate fell outside the reranked top-k.",
-                        )
-                    }
-                )
-                for candidate in trace.project_chunks("post_rerank", reranked)
-            ]
-            trace.record_stage(
+            ),
+        )
+        _safe_trace(
+            trace,
+            "post_rerank",
+            lambda: trace.record_stage(
                 "post_rerank",
                 status="complete",
-                candidates=trace_candidates,
-                candidate_count=len(reranked),
-            )
+                candidates=trace.project_chunks("post_rerank", kept),
+                candidate_count=len(kept),
+                duration_seconds=elapsed,
+            ),
+        )
+        _safe_trace(
+            trace,
+            "reranking",
+            lambda: trace.timings.__setitem__("reranking", trace.timings.get("reranking", 0.0) + elapsed),
+        )
         return kept
 
     async def _with_surrounding_chunks(
