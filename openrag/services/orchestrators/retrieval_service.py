@@ -968,7 +968,9 @@ class RetrievalService:
                         ),
                     )
                     for index, (names, group_searcher) in enumerate(groups)
-                ]
+                ],
+                child_traces=group_traces if trace is not None else None,
+                error_stage="partition_search",
             )
             if trace is None:
                 hits = self.fuse(group_hits, top_k=top_k)
@@ -1042,7 +1044,13 @@ class RetrievalService:
     # Pipeline retrieval (powers QueryService — 8C.2)
     # ------------------------------------------------------------------
 
-    async def _gather_partition_groups(self, legs: list[tuple[list[str], Awaitable[list]]]) -> list:
+    async def _gather_partition_groups(
+        self,
+        legs: list[tuple[list[str], Awaitable[list]]],
+        *,
+        child_traces: Sequence[RetrievalTraceBuilder] | None = None,
+        error_stage: str = "partition_search",
+    ) -> list:
         """Await one coroutine per partition group, bounding concurrency.
 
         Each leg is ``(partition_names, coroutine)``; the names are carried so a
@@ -1083,12 +1091,17 @@ class RetrievalService:
 
         ranked_lists = []
         first_error: BaseException | None = None
-        for (partition_names, _), result in zip(legs, results, strict=True):
+        for index, ((partition_names, _), result) in enumerate(zip(legs, results, strict=True)):
             if not isinstance(result, BaseException):
                 ranked_lists.append(result)
                 continue
             if isinstance(result, asyncio.CancelledError):
                 raise result
+            if child_traces is not None and isinstance(result, Exception):
+                try:
+                    child_traces[index].record_error(error_stage, result)
+                except Exception:
+                    pass
             if first_error is None:
                 first_error = result
             logger.bind(partitions=partition_names).warning(
@@ -1183,7 +1196,9 @@ class RetrievalService:
                     ),
                 )
                 for index, (partition_group, pipeline, default_top_k) in enumerate(groups)
-            ]
+            ],
+            child_traces=child_traces,
+            error_stage="partition_retrieval",
         )
         if trace is not None and child_traces is not None:
             self._safe_merge_child_traces(trace, child_traces)
@@ -1245,7 +1260,9 @@ class RetrievalService:
                     ),
                 )
                 for index, (partition_group, pipeline, default_top_k) in enumerate(groups)
-            ]
+            ],
+            child_traces=child_traces,
+            error_stage="partition_retrieval",
         )
         if trace is not None and child_traces is not None:
             self._safe_merge_child_traces(trace, child_traces)

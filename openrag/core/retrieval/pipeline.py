@@ -298,6 +298,17 @@ class RetrieverPipeline:
                         "reranking",
                         lambda: trace.timings.__setitem__("reranking", trace.timings.get("reranking", 0.0) + elapsed),
                     )
+                else:
+                    _safe_trace(
+                        trace,
+                        "pre_rerank",
+                        lambda: trace.record_stage(
+                            "pre_rerank",
+                            status="complete",
+                            candidates=trace.project_chunks("pre_rerank", chunks),
+                            candidate_count=len(chunks),
+                        ),
+                    )
 
         # `reranker_top_k` is NOT applied here as a final cutoff — only
         # `top_k` (an explicit caller-supplied value, e.g. map-reduce's
