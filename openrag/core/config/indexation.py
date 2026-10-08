@@ -174,6 +174,17 @@ class LoaderConfig(ConfigMixin):
     local_whisper: LocalWhisperConfig = Field(default_factory=LocalWhisperConfig)
     file_loaders: FileLoadersConfig = Field(default_factory=FileLoadersConfig)
     marker_max_tasks_per_child: int = 20
+    # Hard ceiling on what one Marker parse may allocate, enforced as RLIMIT_DATA
+    # in the slot's child process (#997). ``RLIMIT_DATA``, not ``RLIMIT_AS``:
+    # measured, ``RLIMIT_AS`` also refuses file-backed mappings, which would break
+    # the model weights and CUDA's device maps, while ``RLIMIT_DATA`` bounds the
+    # heap and private anonymous mappings the parse itself grows.
+    #
+    # 0 disables it. Off by default deliberately: too low a ceiling turns rare pod
+    # OOM kills into routine parse failures, and the right number depends on the
+    # documents and the GPU, so it has to be measured per deployment rather than
+    # guessed here.
+    marker_parse_memory_limit_mb: int = Field(default=0, ge=0)
     marker_pool_size: int = 1
     marker_max_processes: int = 2
     marker_num_gpus: float = 0.01
