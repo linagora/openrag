@@ -20,7 +20,8 @@ Options:
     --dataset PATH   Path to the dataset JSON file
                      (default: datasets/query_decomposition.json)
     --prompt PATH    Path to a specific prompt template file.
-                     If omitted, all *.txt files in ./prompts/ are evaluated.
+                     May point to a prompt anywhere inside the repository, including
+                     the production template. If omitted, evaluate ./prompts/*.txt.
     --output PATH    Write JSON results to this file.
 
 Required environment (candidate models under evaluation — semicolon-separated):
@@ -35,17 +36,44 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import importlib.util
 import json
 import os
+import sys
 from dataclasses import asdict, dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Literal
+from types import ModuleType
 
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field
 from tqdm.asyncio import tqdm
+
+_REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
+
+
+def _load_production_module(module_name: str, source_path: Path) -> ModuleType:
+    """Load a pure production module without importing the application packages."""
+    spec = importlib.util.spec_from_file_location(module_name, source_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Cannot load {source_path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+_OPENRAG = _REPOSITORY_ROOT / "openrag"
+SearchQueries = _load_production_module(
+    "prompt_eval_production_query_schema", _OPENRAG / "core/models/query.py"
+).SearchQueries
+calendar_anchors = _load_production_module(
+    "prompt_eval_production_calendar_anchors", _OPENRAG / "core/prompts/calendar_anchors.py"
+).calendar_anchors
+QUERY_CONTEXTUALIZER_JSON_HINT = _load_production_module(
+    "prompt_eval_production_contextualizer_hint", _OPENRAG / "core/prompts/query_contextualizer_hint.py"
+).QUERY_CONTEXTUALIZER_JSON_HINT
 
 load_dotenv()
 
@@ -97,39 +125,13 @@ def _judge_config() -> dict | None:
 # 2026-04-17; change this only if you regenerate the gold.
 # ---------------------------------------------------------------------------
 
-DATASET_CURRENT_DATE = datetime(2026, 4, 17).strftime("%A, %B %d, %Y, %H:%M:%S")
+DATASET_CURRENT_DATETIME = datetime(2026, 4, 17, tzinfo=UTC)
+DATASET_CURRENT_DATE = DATASET_CURRENT_DATETIME.strftime("%A, %B %d, %Y, %H:%M:%S")
 
 
 # ---------------------------------------------------------------------------
-# Pydantic models — mirrors openrag/components/pipeline.py
+# Pydantic model — use the production query schema, including its fan-out cap
 # ---------------------------------------------------------------------------
-
-
-class TemporalPredicate(BaseModel):
-    field: Literal["created_at"] = Field(
-        default="created_at",
-        description="Document metadata field to filter on. Always `created_at` for now.",
-    )
-    operator: Literal[">", "<", ">=", "<="] = Field(
-        description="Comparison operator applied to the date field.",
-    )
-    value: str = Field(
-        description='ISO 8601 datetime with timezone, e.g. "2026-03-15T00:00:00+00:00".',
-    )
-
-
-class Query(BaseModel):
-    query: str = Field(description="A semantically enriched, descriptive query for vector similarity search.")
-    temporal_filters: list[TemporalPredicate] | None = Field(
-        default=None,
-        description="Date predicates on `created_at`, AND-combined. Null when no temporal reference in the query.",
-    )
-
-
-class SearchQueries(BaseModel):
-    """Search queries for semantic retrieval."""
-
-    query_list: list[Query] = Field(..., description="Search sub-queries to retrieve relevant documents.")
 
 
 class CoverageJudgment(BaseModel):
@@ -189,10 +191,10 @@ class ModelReport:
 
 
 def build_llm_messages(prompt: str, messages: list[dict]) -> list[dict]:
-    """Build the two-message list sent to the LLM, mirroring pipeline.py."""
+    """Build the prompt messages sent by QueryService.generate_query."""
     chat_history = "".join(f"{m['role']}: {m['content']}\n" for m in messages)
     return [
-        {"role": "system", "content": prompt},
+        {"role": "system", "content": prompt + QUERY_CONTEXTUALIZER_JSON_HINT},
         {"role": "user", "content": f"Here is the chat history: \n{chat_history}\n"},
     ]
 
@@ -206,7 +208,7 @@ def _model_kwargs(base_url: str) -> dict:
 
 
 def format_prompt(template: str, last_message: str) -> str:
-    """Fill {current_date} and {query_language} placeholders."""
+    """Render production prompt placeholders against a pinned eval date."""
     try:
         from langdetect import detect  # type: ignore
 
@@ -214,10 +216,22 @@ def format_prompt(template: str, last_message: str) -> str:
     except Exception:
         lang = "en"
 
+    anchors = calendar_anchors(DATASET_CURRENT_DATETIME)
+    current_date = DATASET_CURRENT_DATE
+    if "{calendar_anchors}" not in template:
+        current_date = f"{current_date}\n{anchors}"
     return template.format(
-        current_date=DATASET_CURRENT_DATE,
+        current_date=current_date,
         query_language=lang,
+        calendar_anchors=anchors,
     )
+
+
+def _json_slice(text: str) -> str:
+    """Best-effort extract the first JSON object, matching QueryService."""
+    start = text.find("{")
+    end = text.rfind("}")
+    return text[start : end + 1] if start != -1 and end > start else text
 
 
 JUDGE_SYSTEM_PROMPT = """You are an impartial evaluator judging whether a set of GENERATED sub-queries semantically covers a set of EXPECTED sub-queries.
@@ -281,7 +295,11 @@ async def run_case(
     error: str | None = None
 
     try:
-        output: SearchQueries = await query_generator.bind(**_model_kwargs(model_base_url)).ainvoke(llm_messages)
+        response = await query_generator.bind(
+            **_model_kwargs(model_base_url),
+            response_format={"type": "json_object"},
+        ).ainvoke(llm_messages)
+        output = SearchQueries.model_validate_json(_json_slice(str(response.content)))
         generated_queries = [q.query for q in output.query_list]
         n_generated = len(generated_queries)
     except Exception as exc:
@@ -328,16 +346,14 @@ async def run_eval_for_model(
 ) -> ModelReport:
     """Run all dataset cases for one model, with a tqdm progress bar."""
     model_base_url = model_cfg["base_url"]
-    # Use function_calling (the LangChain default) so that the Pydantic schema is
-    # passed to the model as a tool definition. json_mode only forces "some JSON"
-    # and relies on the prompt to describe the schema — v0-style prompts that do
-    # not prescribe the output shape would otherwise fail every case.
+    # Match QueryService.generate_query: JSON-object response mode, deterministic
+    # extraction, and production SearchQueries validation.
     query_generator = ChatOpenAI(
         base_url=model_base_url,
         api_key=model_cfg.get("api_key", "EMPTY"),
         model=model_cfg["model"],
-        temperature=0.1,
-    ).with_structured_output(SearchQueries, method="function_calling")
+        temperature=0.0,
+    )
 
     judge_base_url = judge_cfg["base_url"]
     judge_base = ChatOpenAI(
@@ -458,6 +474,7 @@ def print_model_summary(report: ModelReport) -> None:
 # ---------------------------------------------------------------------------
 
 HERE = Path(__file__).parent
+PROJECT_ROOT = HERE.parents[2]
 
 
 def parse_args() -> argparse.Namespace:
@@ -472,7 +489,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--prompt",
         default=None,
-        help="Path to a specific prompt template file (default: evaluate all *.txt files in ./prompts/)",
+        help="Prompt template inside the repository (default: evaluate all *.txt files in ./prompts/)",
     )
     parser.add_argument("--output", default=None, help="Write JSON results to this file")
     return parser.parse_args()
@@ -514,9 +531,9 @@ async def main() -> None:
     if args.prompt:
         prompt_path = Path(args.prompt).resolve()
         try:
-            prompt_path.relative_to(HERE)
+            prompt_path.relative_to(PROJECT_ROOT)
         except ValueError:
-            print(f"Error: --prompt path must be inside {HERE}")
+            print(f"Error: --prompt path must be inside {PROJECT_ROOT}")
             return
         prompt_paths = [prompt_path]
     else:
@@ -536,7 +553,10 @@ async def main() -> None:
     output_prompts: list[dict] = []
     for prompt_path in prompt_paths:
         prompt_template = prompt_path.read_text()
-        prompt_rel = str(prompt_path.relative_to(HERE))
+        try:
+            prompt_rel = str(prompt_path.relative_to(HERE))
+        except ValueError:
+            prompt_rel = str(prompt_path.relative_to(PROJECT_ROOT))
         sep = "-" * 72
         print(f"\n{sep}")
         print(f"PROMPT: {prompt_path.name}")

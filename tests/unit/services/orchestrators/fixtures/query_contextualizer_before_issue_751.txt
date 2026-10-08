@@ -30,27 +30,7 @@ Emit MULTIPLE sub-queries ONLY when the question covers independent aspects that
 - Unrelated dimensions — "sales in US and in Europe" → one per region.
 - Exclusions — "last year except March" → one per remaining range.
 - Evolution / trend over a bounded range — "evolution of X between 2020 and 2024" → one sub-query per period (year, quarter, or month), inclusive on both ends. Only split when the range is explicit and bounded; open-ended trend questions ("how has X evolved recently") stay as one.
-- Conceptual or method comparisons — when a complete answer needs separate evidence about two or more methods, concepts, or approaches, emit one sub-query per method or concept. This includes questions about how named methods work, contribute to an outcome, or differ in their mechanisms. Make each query independently searchable and repeat the shared comparison criterion (for example, quality, performance, mechanism, or trade-offs). Keep the method or concept being retrieved as the focus; mention the other side only when it helps preserve the comparison context.
-- A concise side-by-side comparison of practical options on shared decision criteria can stay as ONE query when the question asks for the comparison itself and does not ask how each approach independently works or contributes to an outcome.
-- Do not split a question about a joint effect, interaction, combined design, or causal relationship: retrieve that relationship as one query. For a joint-effect question, do not add separate queries about each factor alongside the combined query. Do not split synonyms, paraphrases, or multiple components whose combined effect is the single information need.
-- Return no more than 8 sub-queries total. If a question contains more independent facets, group related facets while keeping each query focused on one retrievable information need.
 Otherwise emit ONE sub-query. Do not split for synonyms or rephrasings of the same question.
-
-Examples:
-User: "How do retrieval-augmented generation and fine-tuning differ in the mechanisms they use to adapt language models?"
-{{"intent":"other","requires_retrieval":true,"query_list":[{{"query":"How retrieval-augmented generation adapts language models, including its mechanism and trade-offs","temporal_filters":null}},{{"query":"How fine-tuning adapts language models, including its mechanism and trade-offs","temporal_filters":null}}]}}
-
-User: "How does the PBiGaBP framework's soft interference cancellation process differ from the tensor decomposition approach used in hybrid RIS systems?"
-{{"intent":"other","requires_retrieval":true,"query_list":[{{"query":"PBiGaBP framework soft interference cancellation process in hybrid RIS systems and how it handles interference","temporal_filters":null}},{{"query":"Tensor decomposition approach in hybrid RIS systems and how it handles interference compared with PBiGaBP soft interference cancellation","temporal_filters":null}}]}}
-
-User: "How do lithium-ion battery systems compare to pumped hydro storage in terms of scalability and round-trip efficiency?"
-{{"intent":"other","requires_retrieval":true,"query_list":[{{"query":"Comparison of lithium-ion battery systems and pumped hydro storage in terms of scalability and round-trip efficiency","temporal_filters":null}}]}}
-
-User: "How do rising interest rates and increasing housing supply together affect residential property investment returns?"
-{{"intent":"other","requires_retrieval":true,"query_list":[{{"query":"Combined effect of rising interest rates and increasing housing supply on residential property investment returns","temporal_filters":null}}]}}
-
-User: "What does the proposed method's use of ConvMLPs and global conditioning contribute to audio quality compared with SpecVQGAN and DiffFoley?"
-{{"intent":"other","requires_retrieval":true,"query_list":[{{"query":"How the proposed ConvMLP method uses global conditioning and contributes to audio generation quality","temporal_filters":null}},{{"query":"How SpecVQGAN generates audio and its audio quality compared with the proposed ConvMLP method","temporal_filters":null}},{{"query":"How DiffFoley generates audio and its audio quality compared with the proposed ConvMLP method","temporal_filters":null}}]}}
 
 # Temporal filters
 Emit `temporal_filters` when the user refers to WHEN a document was created / published / written. Leave null if the date only describes the topic.

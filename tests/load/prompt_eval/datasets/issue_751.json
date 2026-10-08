@@ -1,0 +1,132 @@
+[
+  {
+    "id": 1,
+    "difficulty": 3,
+    "domain": "audio_generation",
+    "expected_queries": {
+      "query_list": [
+        {
+          "query": "How the proposed method's ConvMLPs and global conditioning contribute to audio generation quality",
+          "temporal_filters": null
+        },
+        {
+          "query": "How SpecVQGAN generates audio and its audio quality compared with the proposed method",
+          "temporal_filters": null
+        },
+        {
+          "query": "How DiffFoley generates audio and its audio quality compared with the proposed method",
+          "temporal_filters": null
+        }
+      ]
+    },
+    "messages": [
+      {
+        "role": "user",
+        "content": "How does the proposed method's use of ConvMLPs and global conditioning contribute to its superior audio quality... compared to other approaches like SpecVQGAN and DiffFoley?"
+      }
+    ]
+  },
+  {
+    "id": 2,
+    "difficulty": 3,
+    "domain": "hybrid_ris",
+    "expected_queries": {
+      "query_list": [
+        {
+          "query": "PBiGaBP soft interference cancellation process and how it handles interference in hybrid RIS systems",
+          "temporal_filters": null
+        },
+        {
+          "query": "Tensor decomposition approach for handling interference in hybrid RIS systems compared with PBiGaBP",
+          "temporal_filters": null
+        }
+      ]
+    },
+    "messages": [
+      {
+        "role": "user",
+        "content": "How does the PBiGaBP framework's soft interference cancellation process differ from the tensor decomposition approach used in hybrid RIS systems...?"
+      }
+    ]
+  },
+  {
+    "id": 3,
+    "difficulty": 2,
+    "domain": "language_modeling",
+    "expected_queries": {
+      "query_list": [
+        {
+          "query": "Contrastive learning objectives and their role in pretraining language encoders",
+          "temporal_filters": null
+        },
+        {
+          "query": "Masked language modeling objectives and their role in pretraining language encoders",
+          "temporal_filters": null
+        }
+      ]
+    },
+    "messages": [
+      {
+        "role": "user",
+        "content": "How do contrastive learning and masked language modeling differ in their objectives for pretraining language encoders?"
+      }
+    ]
+  },
+  {
+    "id": 4,
+    "difficulty": 1,
+    "domain": "healthcare",
+    "expected_queries": {
+      "query_list": [
+        {
+          "query": "Known interactions between metformin and ibuprofen",
+          "temporal_filters": null
+        }
+      ]
+    },
+    "messages": [
+      {
+        "role": "user",
+        "content": "What are the known interactions between metformin and ibuprofen?"
+      }
+    ]
+  },
+  {
+    "id": 5,
+    "difficulty": 2,
+    "domain": "real_estate",
+    "expected_queries": {
+      "query_list": [
+        {
+          "query": "Combined effect of rising interest rates and increasing housing supply on residential property investment returns",
+          "temporal_filters": null
+        }
+      ]
+    },
+    "messages": [
+      {
+        "role": "user",
+        "content": "How do rising interest rates and increasing housing supply together affect residential property investment returns?"
+      }
+    ]
+  },
+  {
+    "id": 6,
+    "difficulty": 2,
+    "domain": "energy",
+    "expected_queries": {
+      "query_list": [
+        {
+          "query": "Comparison of lithium-ion battery systems and pumped hydro storage in terms of scalability and round-trip efficiency",
+          "temporal_filters": null
+        }
+      ]
+    },
+    "messages": [
+      {
+        "role": "user",
+        "content": "How do lithium-ion battery systems compare to pumped hydro storage in terms of scalability and round-trip efficiency?"
+      }
+    ]
+  }
+]

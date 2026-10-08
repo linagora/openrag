@@ -465,6 +465,60 @@ async def test_generate_query_chatbotrag_parses_json():
 
 
 @pytest.mark.asyncio
+async def test_generate_query_caps_model_generated_subqueries():
+    too_many = json.dumps({"query_list": [{"query": f"aspect {i}"} for i in range(9)]})
+    llm = FakeLLM(chat_responses=[too_many, too_many])
+    svc = _svc(llm=llm, mode="ChatBotRag")
+
+    sq = await svc.generate_query([{"role": "user", "content": "Compare these approaches"}])
+
+    assert len(llm.chat_calls) == 2
+    assert [q.query for q in sq.query_list] == ["Compare these approaches"]
+
+
+@pytest.mark.asyncio
+async def test_contextualizer_prompt_allows_bounded_conceptual_splits():
+    llm = FakeLLM(chat_responses=['{"query_list": [{"query": "method A quality"}]}'])
+    svc = _svc(llm=llm, mode="ChatBotRag")
+
+    await svc.generate_query([{"role": "user", "content": "How do method A and method B compare in quality?"}])
+
+    contextualizer_prompt = llm.chat_calls[0][0][0]["content"]
+    assert "Conceptual or method comparisons" in contextualizer_prompt
+    assert "query_list may contain one or more distinct sub-queries, up to 8" in contextualizer_prompt
+
+
+@pytest.mark.asyncio
+async def test_chatbotrag_passes_decomposed_queries_into_retrieval_and_context():
+    generated = {
+        "query_list": [
+            {"query": "method A mechanism", "temporal_filters": None},
+            {"query": "method B mechanism", "temporal_filters": None},
+        ]
+    }
+    llm = FakeLLM(chat_responses=[json.dumps(generated)])
+    retrieval = FakeRetrieval(
+        chunks=[
+            Chunk(id="gold-a", text="method A evidence", metadata={"_id": "gold-a"}),
+            Chunk(id="gold-b", text="method B evidence", metadata={"_id": "gold-b"}),
+        ]
+    )
+    svc = _svc(llm=llm, retrieval=retrieval, mode="ChatBotRag")
+
+    result = await svc._prepare_chat(
+        ["p"],
+        {"messages": [{"role": "user", "content": "How do method A and method B differ?"}], "metadata": {}},
+    )
+
+    passed_queries = retrieval.retrieve_multi_calls[0]["search_queries"].query_list
+    assert [query.query for query in passed_queries] == ["method A mechanism", "method B mechanism"]
+    assert [doc.metadata["_id"] for doc in result.retrieved_docs] == ["gold-a", "gold-b"]
+    final_context_prompt = "\n".join(message["content"] for message in result.payload["messages"])
+    assert "method A evidence" in final_context_prompt
+    assert "method B evidence" in final_context_prompt
+
+
+@pytest.mark.asyncio
 async def test_generate_query_chatbotrag_can_skip_retrieval():
     payload = json.dumps({"intent": "capability", "requires_retrieval": False, "query_list": []})
     svc = _svc(llm=FakeLLM(chat_responses=[payload]), mode="ChatBotRag")

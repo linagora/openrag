@@ -10,6 +10,10 @@ from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
 
+# Keep model-generated retrieval fan-out bounded while allowing the current
+# contextualizer to split trends spanning up to five periods.
+MAX_QUERY_SUBQUERIES = 8
+
 
 class RetrievalQuery(BaseModel):
     """A user query with retrieval parameters."""
@@ -101,7 +105,11 @@ class Query(BaseModel):
 class SearchQueries(BaseModel):
     """Collection of sub-queries produced by query decomposition."""
 
-    query_list: list[Query] = Field(..., description="Search sub-queries to retrieve relevant documents.")
+    query_list: list[Query] = Field(
+        ...,
+        max_length=MAX_QUERY_SUBQUERIES,
+        description=f"Up to {MAX_QUERY_SUBQUERIES} search sub-queries to retrieve relevant documents.",
+    )
     intent: Literal["greeting", "gratitude", "farewell", "capability", "other"] = Field(
         default="other",
         description="Conservative classification of the complete latest user message.",
