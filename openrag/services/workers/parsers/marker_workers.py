@@ -736,11 +736,29 @@ class MarkerLoader(BasePooledParser):
 
     async def _convert_pdf(self, file_path: str):
         pool = self._pool()
-        return await call_ray_actor_with_timeout(
-            pool.process_pdf.remote(file_path),
-            timeout=self.config.loader.marker_timeout,
-            task_description=f"MarkerLoader PDF loading ({file_path})",
-        )
+        try:
+            return await call_ray_actor_with_timeout(
+                pool.process_pdf.remote(file_path),
+                timeout=self.config.loader.marker_timeout,
+                task_description=f"MarkerLoader PDF loading ({file_path})",
+            )
+        except Exception as exc:
+            # A task's failure reason is read from the top exception only, and
+            # here that is the Ray wrapper's generic RuntimeError — the same text
+            # as a corrupt PDF or a crash. Name the memory failure, and the
+            # setting that decides it, so an admin can act from the jobs view.
+            if not caused_by(exc, MemoryError):
+                raise
+            raise MemoryError(self._out_of_memory_message()) from exc
+
+    def _out_of_memory_message(self) -> str:
+        limit_mb = self.config.loader.marker_parse_memory_limit_mb
+        if limit_mb > 0:
+            return (
+                "Marker ran out of memory parsing this PDF: the parse exceeded "
+                f"MARKER_PARSE_MEMORY_LIMIT_MB={limit_mb} MiB. Raise that limit to index this file."
+            )
+        return "Marker ran out of memory parsing this PDF."
 
     async def _dispatch(self, file_path: str) -> tuple[str, dict]:
         start = time.time()

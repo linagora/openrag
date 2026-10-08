@@ -908,3 +908,53 @@ def test_worker_init_logs_before_it_applies_the_limit(monkeypatch):
     mw.MarkerWorker._worker_init({}, 2048)
 
     assert order == ["log", "limit"]
+
+
+def _loader_raising(monkeypatch, exc: BaseException, limit_mb: int):
+    """A ``MarkerLoader`` whose pool call fails with *exc*, as the Ray wrapper raises it."""
+    from services.workers.parsers import marker_workers as mw
+
+    async def fake_call(future, timeout, task_description):
+        raise exc
+
+    monkeypatch.setattr(mw, "call_ray_actor_with_timeout", fake_call)
+    loader = mw.MarkerLoader.__new__(mw.MarkerLoader)
+    loader.config = SimpleNamespace(loader=SimpleNamespace(marker_timeout=60, marker_parse_memory_limit_mb=limit_mb))
+    loader._pool = lambda: SimpleNamespace(process_pdf=SimpleNamespace(remote=lambda path: None))
+    return loader
+
+
+async def test_a_ceiling_failure_is_reported_as_the_ceiling(monkeypatch):
+    """The stored reason reads the top exception only. Without this it was the
+    wrapper's "RuntimeError: MarkerLoader PDF loading (...) failed" — the text a
+    corrupt PDF gets too — measured on an L4 with a 1418 MiB limit."""
+    from core.utils.error_summary import failure_reason_from_exception
+
+    produced = _as_production_raises_it()
+    loader = _loader_raising(monkeypatch, produced, limit_mb=1418)
+
+    with pytest.raises(MemoryError) as raised:
+        await loader._convert_pdf("/tmp/doc.pdf")
+
+    reason = failure_reason_from_exception(raised.value)
+    assert reason.startswith("MemoryError: Marker ran out of memory")
+    assert "MARKER_PARSE_MEMORY_LIMIT_MB=1418 MiB" in reason
+    assert raised.value.__cause__ is produced, "the remote traceback must stay on the chain"
+
+
+async def test_a_memory_error_without_a_ceiling_does_not_name_the_setting(monkeypatch):
+    loader = _loader_raising(monkeypatch, _as_production_raises_it(), limit_mb=0)
+
+    with pytest.raises(MemoryError, match=r"^Marker ran out of memory parsing this PDF\.$"):
+        await loader._convert_pdf("/tmp/doc.pdf")
+
+
+async def test_other_loader_failures_are_raised_unchanged(monkeypatch):
+    produced = RuntimeError("MarkerLoader PDF loading (/tmp/doc.pdf) failed")
+    produced.__cause__ = ValueError("not a PDF")
+    loader = _loader_raising(monkeypatch, produced, limit_mb=1418)
+
+    with pytest.raises(RuntimeError) as raised:
+        await loader._convert_pdf("/tmp/doc.pdf")
+
+    assert raised.value is produced
