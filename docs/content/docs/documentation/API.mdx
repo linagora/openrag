@@ -541,7 +541,8 @@ move to another model later, which would leave the partition pointing at a field
 Writing the new vectors makes Milvus rewrite every number in a chunk's metadata as a 64-bit float, so an integer
 beyond ±2^53 in upload metadata comes back rounded on the re-embedded chunks, as after
 [Milvus migration version 3](/openrag/documentation/milvus_migration/#version-3--one-vector-field-per-embedder).
-The file's metadata in Postgres keeps the exact value.
+The file's metadata in Postgres keeps the exact value. Each rounding is logged as a warning naming the file and
+the metadata keys.
 
 :::caution
 While a swap runs, uploads, file replacements, metadata updates and copies **into** that partition return

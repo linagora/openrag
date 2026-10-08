@@ -205,6 +205,22 @@ def _scalar_output_fields(description: dict[str, Any]) -> list[str]:
     return fields
 
 
+def _changed_by_float64(value: Any) -> bool:
+    """Whether *value* holds an integer, at any depth, that a float64 does not hold exactly."""
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, int):
+        try:
+            return int(float(value)) != value
+        except OverflowError:
+            return True
+    if isinstance(value, dict):
+        return any(_changed_by_float64(item) for item in value.values())
+    if isinstance(value, list):
+        return any(_changed_by_float64(item) for item in value)
+    return False
+
+
 class MilvusVectorStore(VectorStore):
     """Milvus 3.0 implementation of :class:`VectorStore`.
 
@@ -1980,10 +1996,11 @@ class MilvusVectorStore(VectorStore):
         ones too, even when the upsert passes the exact value back (verified
         on Milvus 3.0.2). Section IDs above :data:`MAX_SECTION_ID` are written
         back folded into their low 53 bits, as Milvus migration 3 does, which
-        keeps chunks linked to their neighbours. Postgres keeps each file's
-        exact upload metadata. A
-        full-row upsert would keep the numbers but reassign ``_id``, which the
-        collection auto-generates.
+        keeps chunks linked to their neighbours. Any other integer the write
+        changes is logged as a warning, with its file and keys: Postgres keeps
+        each file's exact upload metadata, and search results now differ from
+        it. A full-row upsert would keep the numbers but reassign ``_id``, which
+        the collection auto-generates.
 
         Once Storage V3 is enabled, Milvus can generate a field from a function
         and backfill existing rows itself (``add_function_field``). Today that
@@ -1998,14 +2015,22 @@ class MilvusVectorStore(VectorStore):
             return 0
 
         entities = {int(chunk_id): {"_id": int(chunk_id), field: vector} for chunk_id, vector in vectors.items()}
+        rounded: dict[str, set[str]] = {}
         try:
-            rows = await asyncio.to_thread(self._iter_query, f"_id in {list(entities)}", list(SECTION_ID_KEYS))
+            rows = await asyncio.to_thread(self._iter_query, f"_id in {list(entities)}", ["file_id", "$meta"])
             for row in rows:
                 entities[row["_id"]].update(
                     (key, row[key] & MAX_SECTION_ID)
                     for key in SECTION_ID_KEYS
                     if isinstance(row.get(key), int) and not 0 <= row[key] <= MAX_SECTION_ID
                 )
+                keys = {
+                    key
+                    for key, value in row.items()
+                    if key not in ("_id", "file_id", *SECTION_ID_KEYS) and _changed_by_float64(value)
+                }
+                if keys:
+                    rounded.setdefault(str(row.get("file_id")), set()).update(keys)
             result = await self._async_client.upsert(
                 collection_name=self._collection_name,
                 data=list(entities.values()),
@@ -2022,6 +2047,11 @@ class MilvusVectorStore(VectorStore):
                 collection_name=self._collection_name,
             ) from e
 
+        if rounded:
+            logger.bind(field=field, rounded={file_id: sorted(keys) for file_id, keys in rounded.items()}).warning(
+                "Milvus rounded integers beyond ±2**53 in these files' chunk metadata; "
+                "search results now show the rounded values, Postgres keeps the exact ones"
+            )
         await self._flush_new_fields([field])
         return int(result.get("upsert_count", len(entities))) if isinstance(result, dict) else len(entities)
 

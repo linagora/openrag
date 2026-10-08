@@ -2242,7 +2242,7 @@ class TestWriteVectors:
 
         kwargs = store._client.query_iterator.call_args.kwargs
         assert kwargs["filter"] == "_id in [11, 12]"
-        assert kwargs["output_fields"] == ["prev_section_id", "section_id", "next_section_id"]
+        assert kwargs["output_fields"] == ["file_id", "$meta"]
         first, second = store._async_client.upsert.call_args.kwargs["data"]
         assert first == {
             "_id": 11,
@@ -2253,6 +2253,56 @@ class TestWriteVectors:
         assert first["next_section_id"] == second["section_id"]
         assert second["prev_section_id"] == first["section_id"]
         assert "next_section_id" not in second
+
+    async def test_metadata_integers_a_float64_changes_are_logged(self, store: MilvusVectorStore) -> None:
+        from loguru import logger as _logger
+
+        records: list[dict] = []
+        sink = _logger.add(lambda message: records.append(message.record), level="WARNING")
+        try:
+            _section_ids(
+                store,
+                [
+                    {
+                        "_id": 2**60 + 1,
+                        "file_id": "f1",
+                        "section_id": 2**60 + 1,
+                        "ext_id": 2**53 + 1,
+                        "tags": {"ids": [7, 2**53 + 3]},
+                        "exact": 2**60,
+                        "ratio": 0.5,
+                        "flag": True,
+                    },
+                    {"_id": 12, "file_id": "f2", "page": 4},
+                ],
+            )
+            store._async_client.upsert = AsyncMock(return_value={"upsert_count": 2})
+
+            assert await store.write_vectors("vector_bge_m3", {str(2**60 + 1): [0.1], "12": [0.2]}) == 2
+        finally:
+            _logger.remove(sink)
+
+        # The typed `_id` and the folded section ID are not rounded, and 2**60
+        # is a float64.
+        (record,) = records
+        assert record["extra"]["rounded"] == {"f1": ["ext_id", "tags"]}
+        assert record["extra"]["field"] == "vector_bge_m3"
+
+    async def test_a_failed_write_logs_no_rounding(self, store: MilvusVectorStore) -> None:
+        from loguru import logger as _logger
+
+        records: list[dict] = []
+        sink = _logger.add(lambda message: records.append(message.record), level="WARNING")
+        try:
+            _section_ids(store, [{"_id": 11, "file_id": "f1", "ext_id": 2**53 + 1}])
+            store._async_client.upsert = AsyncMock(side_effect=MilvusException(1, "boom"))
+
+            with pytest.raises(VDBInsertError):
+                await store.write_vectors("vector_bge_m3", {"11": [0.1]})
+        finally:
+            _logger.remove(sink)
+
+        assert records == []
 
     async def test_nothing_to_write_makes_no_call(self, store: MilvusVectorStore) -> None:
         store._async_client.upsert = AsyncMock()
