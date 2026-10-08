@@ -1,7 +1,11 @@
-"""Hashes of bundled query-contextualizer revisions stored as DB defaults."""
+"""Hashes of bundled query-contextualizer revisions stored as DB defaults.
+
+When the bundled template changes, move its previous current hash into the
+superseded set so existing unedited defaults can be refreshed on upgrade.
+"""
 
 _CURRENT_SEED_HASHES: dict[str, str] = {
-    "query_contextualizer": "0f9b16fb4bde42ba863708c4956647b17735a2c4fe245b0ba0c6a106a56bf4dd",
+    "query_contextualizer": "87f5084a4cc922681730969ed98e769550a973bc4464f45e65b5342a7cfbf91e",
 }
 
 _SUPERSEDED_SEED_HASHES: dict[str, frozenset[str]] = {
@@ -17,6 +21,7 @@ _SUPERSEDED_SEED_HASHES: dict[str, frozenset[str]] = {
             "bfaaf14620d277726db22903206c85c097de1a3263d7951678ae451c279e3977",
             "931a2e095ccc6443ecba0d2684d8dd32c9ffac6f484d659953f78bc96e229a0a",
             "0867f3358bd431ff625d65eafbd273d65928c84b49f915af6b4dc8a2c3c1f068",
+            "0f9b16fb4bde42ba863708c4956647b17735a2c4fe245b0ba0c6a106a56bf4dd",
         }
     ),
 }

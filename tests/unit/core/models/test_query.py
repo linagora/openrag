@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import pytest
 from core.models.query import Query, SearchQueries, TemporalPredicate
-from pydantic import ValidationError
 
 
 def _filter(*values: tuple[str, str]) -> str | None:
@@ -43,12 +41,14 @@ def test_a_non_utc_offset_is_kept_as_given():
     assert _filter((">=", "2026-09-07T02:00:00+02:00")) == 'created_at >= ISO "2026-09-07T02:00:00+02:00"'
 
 
-def test_search_queries_enforces_a_bounded_subquery_count():
+def test_search_queries_truncates_overflow_and_preserves_kept_filters():
     queries = [Query(query=f"aspect {i}") for i in range(8)]
     assert len(SearchQueries(query_list=queries).query_list) == 8
 
-    with pytest.raises(ValidationError):
-        SearchQueries(query_list=[*queries, Query(query="aspect 8")])
+    queries[0].temporal_filters = [TemporalPredicate(operator=">=", value="2026-01-01T00:00:00+00:00")]
+    overflow = SearchQueries(query_list=[*queries, Query(query="aspect 8")])
+    assert [query.query for query in overflow.query_list] == [f"aspect {i}" for i in range(8)]
+    assert overflow.query_list[0].to_milvus_filter() == 'created_at >= ISO "2026-01-01T00:00:00+00:00"'
 
 
 def test_an_unparseable_value_is_dropped_and_the_rest_kept():

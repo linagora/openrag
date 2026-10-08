@@ -22,6 +22,8 @@ def test_production_contextualizer_template_renders_for_prompt_evaluation():
     assert "{calendar_anchors}" not in rendered
     assert "Calendar anchors (use verbatim, do not recompute)" in rendered
     assert "Conceptual or method comparisons" in rendered
+    assert "Return no more than 8 sub-queries total" in rendered
+    assert rendered.index("Runtime calendar context") > rendered.index("Examples:")
 
 
 def test_eval_messages_include_the_production_query_hint():

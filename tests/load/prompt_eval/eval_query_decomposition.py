@@ -65,9 +65,11 @@ def _load_production_module(module_name: str, source_path: Path) -> ModuleType:
 
 
 _OPENRAG = _REPOSITORY_ROOT / "openrag"
-SearchQueries = _load_production_module(
-    "prompt_eval_production_query_schema", _OPENRAG / "core/models/query.py"
-).SearchQueries
+if str(_OPENRAG) not in sys.path:
+    sys.path.insert(0, str(_OPENRAG))
+_QUERY_SCHEMA = _load_production_module("prompt_eval_production_query_schema", _OPENRAG / "core/models/query.py")
+SearchQueries = _QUERY_SCHEMA.SearchQueries
+MAX_QUERY_SUBQUERIES = _QUERY_SCHEMA.MAX_QUERY_SUBQUERIES
 calendar_anchors = _load_production_module(
     "prompt_eval_production_calendar_anchors", _OPENRAG / "core/prompts/calendar_anchors.py"
 ).calendar_anchors
@@ -201,7 +203,7 @@ def build_llm_messages(prompt: str, messages: list[dict]) -> list[dict]:
 
 def _model_kwargs(base_url: str) -> dict:
     """Return call-time kwargs; omit vLLM-specific extra_body for OpenAI endpoints."""
-    kwargs: dict = {"max_completion_tokens": 512}
+    kwargs: dict = {"max_completion_tokens": 1024}
     # if "openai.com" not in base_url:
     #     kwargs["extra_body"] = {"chat_template_kwargs": {"enable_thinking": False}}
     return kwargs
@@ -224,6 +226,7 @@ def format_prompt(template: str, last_message: str) -> str:
         current_date=current_date,
         query_language=lang,
         calendar_anchors=anchors,
+        max_query_subqueries=MAX_QUERY_SUBQUERIES,
     )
 
 

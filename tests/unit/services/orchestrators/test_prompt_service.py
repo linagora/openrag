@@ -225,6 +225,12 @@ class TestSeeding:
         actual_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
         assert actual_hash == prompt_module._CURRENT_SEED_HASHES[PromptType.QUERY_CONTEXTUALIZER.value]
 
+    async def test_previous_bundled_contextualizer_hash_remains_refreshable(self):
+        assert (
+            "0f9b16fb4bde42ba863708c4956647b17735a2c4fe245b0ba0c6a106a56bf4dd"
+            in prompt_module._SUPERSEDED_SEED_HASHES[PromptType.QUERY_CONTEXTUALIZER.value]
+        )
+
     async def test_seeding_skips_blank_non_asr_template(self, monkeypatch):
         repo = FakePromptRepo()
         svc = _service(repo)
@@ -485,7 +491,7 @@ class TestCrud:
         p = await svc.create_prompt(
             prompt_type="query_contextualizer",
             name="anchored",
-            content="Date: {current_date}\n{calendar_anchors}\nLang: {query_language}",
+            content="Date: {current_date}\n{calendar_anchors}\nLang: {query_language}\nLimit: {max_query_subqueries}",
         )
         assert p.id
 

@@ -44,7 +44,7 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 from core.models.preset import resolve_partition_chat_llm
-from core.models.query import Query, SearchQueries
+from core.models.query import MAX_QUERY_SUBQUERIES, Query, SearchQueries
 from core.prompts import (
     SOURCE_SEPARATOR,
     build_casual_response_prompt,
@@ -505,6 +505,7 @@ class QueryService:
         now = datetime.now(UTC)
         prompt = contextualizer.format(
             query_language=detect_language(last_user),
+            max_query_subqueries=MAX_QUERY_SUBQUERIES,
             current_date=now.strftime("%A, %B %d, %Y, %H:%M:%S"),
             # Pre-computed week/month/year ranges: the model must not do the
             # calendar arithmetic itself (see core.prompts.calendar_anchors).

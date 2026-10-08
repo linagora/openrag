@@ -3,8 +3,6 @@ Produce a JSON object listing sub-queries derived from the user's last message.
 Output shape (return this JSON object, nothing else):
 {{"intent": <"greeting"|"gratitude"|"farewell"|"capability"|"other">, "requires_retrieval": <true|false>, "query_list": [ {{"query": "<rewritten search string>", "temporal_filters": <list of predicates | null>}} ]}}
 
-Current date: {current_date}
-{calendar_anchors}
 Language for `query` field: {query_language}
 Timestamps: UTC (`+00:00`). Week starts Monday.
 
@@ -26,14 +24,14 @@ Timestamps: UTC (`+00:00`). Week starts Monday.
 # Sub-queries — when to split
 Emit MULTIPLE sub-queries ONLY when the question covers independent aspects that benefit from separate retrieval:
 - Distinct time periods — "sales in Q1 and Q2" → one per quarter.
-- Distinct entities — "Product A and Product B" → one per product.
+- Separate facts about named entities — "Sales figures for Product A and Product B" → one per entity. A direct side-by-side comparison of practical options on shared criteria follows the comparison rule below.
 - Unrelated dimensions — "sales in US and in Europe" → one per region.
 - Exclusions — "last year except March" → one per remaining range.
 - Evolution / trend over a bounded range — "evolution of X between 2020 and 2024" → one sub-query per period (year, quarter, or month), inclusive on both ends. Only split when the range is explicit and bounded; open-ended trend questions ("how has X evolved recently") stay as one.
 - Conceptual or method comparisons — when a complete answer needs separate evidence about two or more methods, concepts, or approaches, emit one sub-query per method or concept. This includes questions about how named methods work, contribute to an outcome, or differ in their mechanisms. Make each query independently searchable and repeat the shared comparison criterion (for example, quality, performance, mechanism, or trade-offs). Keep the method or concept being retrieved as the focus; mention the other side only when it helps preserve the comparison context.
-- A concise side-by-side comparison of practical options on shared decision criteria can stay as ONE query when the question asks for the comparison itself and does not ask how each approach independently works or contributes to an outcome.
+- A concise side-by-side comparison of practical options on shared decision criteria stays as ONE query when the user asks how the options compare on those criteria. Split only when the question needs independent evidence about each method or concept, such as how it works or contributes to an outcome.
 - Do not split a question about a joint effect, interaction, combined design, or causal relationship: retrieve that relationship as one query. For a joint-effect question, do not add separate queries about each factor alongside the combined query. Do not split synonyms, paraphrases, or multiple components whose combined effect is the single information need.
-- Return no more than 8 sub-queries total. If a question contains more independent facets, group related facets while keeping each query focused on one retrievable information need.
+- Return no more than {max_query_subqueries} sub-queries total. If a question contains more independent facets, group related facets while keeping each query focused on one retrievable information need.
 Otherwise emit ONE sub-query. Do not split for synonyms or rephrasings of the same question.
 
 Examples:
@@ -121,3 +119,7 @@ User: "Hello, what was Product A revenue in Q1?"
 
 User: "Albendazole is used to treat lymphatic filariasis."
 {{"intent":"other","requires_retrieval":true,"query_list":[{{"query":"Albendazole is used to treat lymphatic filariasis.","temporal_filters":null}}]}}
+
+# Runtime calendar context
+Current date: {current_date}
+{calendar_anchors}

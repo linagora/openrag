@@ -154,7 +154,7 @@ class FakeWorkspace:
 
 def _config(mode="SimpleRag"):
     return SimpleNamespace(
-        rag=SimpleNamespace(mode=mode, chat_history_depth=4, max_contextualized_query_len=512),
+        rag=SimpleNamespace(mode=mode, chat_history_depth=4, max_contextualized_query_len=1024),
         reranker=SimpleNamespace(top_k=5),
         chunker=SimpleNamespace(chunk_size=512),
         map_reduce=SimpleNamespace(initial_batch_size=2, expansion_batch_size=2, max_total_documents=4),
@@ -466,14 +466,30 @@ async def test_generate_query_chatbotrag_parses_json():
 
 @pytest.mark.asyncio
 async def test_generate_query_caps_model_generated_subqueries():
-    too_many = json.dumps({"query_list": [{"query": f"aspect {i}"} for i in range(9)]})
+    too_many = json.dumps(
+        {
+            "query_list": [
+                {
+                    "query": f"month {i}",
+                    "temporal_filters": [
+                        {"operator": ">=", "value": f"2026-{i + 1:02d}-01T00:00:00+00:00"},
+                        {"operator": "<", "value": f"2026-{i + 2:02d}-01T00:00:00+00:00"},
+                    ],
+                }
+                for i in range(9)
+            ]
+        }
+    )
     llm = FakeLLM(chat_responses=[too_many, too_many])
     svc = _svc(llm=llm, mode="ChatBotRag")
 
     sq = await svc.generate_query([{"role": "user", "content": "Compare these approaches"}])
 
-    assert len(llm.chat_calls) == 2
-    assert [q.query for q in sq.query_list] == ["Compare these approaches"]
+    assert len(llm.chat_calls) == 1
+    assert [q.query for q in sq.query_list] == [f"month {i}" for i in range(8)]
+    assert sq.query_list[0].temporal_filters[0].value == "2026-01-01T00:00:00+00:00"
+    assert sq.query_list[-1].temporal_filters[1].value == "2026-09-01T00:00:00+00:00"
+    assert llm.chat_calls[0][1]["max_completion_tokens"] == 1024
 
 
 @pytest.mark.asyncio
@@ -485,6 +501,10 @@ async def test_contextualizer_prompt_allows_bounded_conceptual_splits():
 
     contextualizer_prompt = llm.chat_calls[0][0][0]["content"]
     assert "Conceptual or method comparisons" in contextualizer_prompt
+    assert "Separate facts about named entities" in contextualizer_prompt
+    assert "stays as ONE query when the user asks how the options compare" in contextualizer_prompt
+    assert "Return no more than 8 sub-queries total" in contextualizer_prompt
+    assert contextualizer_prompt.index("Runtime calendar context") > contextualizer_prompt.index("Examples:")
     assert "query_list may contain one or more distinct sub-queries, up to 8" in contextualizer_prompt
 
 

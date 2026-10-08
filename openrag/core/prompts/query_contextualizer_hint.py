@@ -1,5 +1,7 @@
 """Shared output and intent guidance appended to contextualizer prompts."""
 
+from core.models.query import MAX_QUERY_SUBQUERIES
+
 QUERY_CONTEXTUALIZER_JSON_HINT = (
     "\n\nClassify the complete latest user message conservatively. Retrieval is the default. "
     "Only a message consisting exclusively of a greeting or salutation, gratitude, farewell, or a question about "
@@ -13,6 +15,7 @@ QUERY_CONTEXTUALIZER_JSON_HINT = (
     "(using gratitude, farewell, or capability instead of greeting when appropriate), or "
     '{"intent": "other", "requires_retrieval": true, '
     '"query_list": [{"query": "<search query>", "temporal_filters": null}]} for everything else. '
-    "For retrieval, query_list may contain one or more distinct sub-queries, up to 8, when the contextualizer rules require a split. "
+    f"For retrieval, query_list may contain one or more distinct sub-queries, up to {MAX_QUERY_SUBQUERIES}, "
+    "when the contextualizer rules require a split. "
     "If uncertain, use intent other and require retrieval."
 )

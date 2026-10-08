@@ -220,6 +220,47 @@ async def test_get_relevant_docs_runs_one_call_per_subquery_and_fuses():
 
 
 @pytest.mark.asyncio
+async def test_get_relevant_docs_reranks_each_subquery_with_its_own_query():
+    class PerQueryRetriever(FakeRetriever):
+        async def retrieve(self, partition, query, filter=None, filter_params=None):
+            self.calls.append(
+                {"partition": partition, "query": query, "filter": filter, "filter_params": filter_params}
+            )
+            return {
+                "seed coating effect on germination": _chunks("coating", "stratification"),
+                "cold stratification effect on germination": _chunks("stratification", "coating"),
+            }[query]
+
+    class QueryAwareReranker:
+        def __init__(self):
+            self.calls = []
+
+        async def rerank(self, query, documents, top_k=None):
+            self.calls.append(query)
+            relevant = "coating" if query.startswith("seed coating") else "stratification"
+            return sorted(
+                ((index, 1.0 if relevant in document else 0.0) for index, document in enumerate(documents)),
+                key=lambda item: item[1],
+                reverse=True,
+            )
+
+    retriever = PerQueryRetriever()
+    reranker = QueryAwareReranker()
+    pipeline = RetrieverPipeline(retriever=retriever, reranker=reranker)
+    search_queries = SearchQueries(
+        query_list=[
+            Query(query="seed coating effect on germination"),
+            Query(query="cold stratification effect on germination"),
+        ]
+    )
+
+    results = await pipeline.get_relevant_docs(partition=["p1"], search_queries=search_queries)
+
+    assert set(reranker.calls) == {query.query for query in search_queries.query_list}
+    assert {chunk.id for chunk in results} == {"coating", "stratification"}
+
+
+@pytest.mark.asyncio
 async def test_get_relevant_docs_applies_top_k_cap():
     r = FakeRetriever()
     r.results_queue = [_chunks("a", "b", "c")]

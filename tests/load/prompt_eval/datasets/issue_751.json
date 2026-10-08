@@ -2,19 +2,15 @@
   {
     "id": 1,
     "difficulty": 3,
-    "domain": "audio_generation",
+    "domain": "agriculture",
     "expected_queries": {
       "query_list": [
         {
-          "query": "How the proposed method's ConvMLPs and global conditioning contribute to audio generation quality",
+          "query": "How seed coating inoculants improve native seed germination",
           "temporal_filters": null
         },
         {
-          "query": "How SpecVQGAN generates audio and its audio quality compared with the proposed method",
-          "temporal_filters": null
-        },
-        {
-          "query": "How DiffFoley generates audio and its audio quality compared with the proposed method",
+          "query": "How cold stratification improves native seed germination compared with inoculant coatings",
           "temporal_filters": null
         }
       ]
@@ -22,22 +18,30 @@
     "messages": [
       {
         "role": "user",
-        "content": "How does the proposed method's use of ConvMLPs and global conditioning contribute to its superior audio quality... compared to other approaches like SpecVQGAN and DiffFoley?"
+        "content": "How do inoculant coatings and cold stratification each improve native seed germination?"
       }
     ]
   },
   {
     "id": 2,
-    "difficulty": 3,
-    "domain": "hybrid_ris",
+    "difficulty": 2,
+    "domain": "water",
     "expected_queries": {
       "query_list": [
         {
-          "query": "PBiGaBP soft interference cancellation process and how it handles interference in hybrid RIS systems",
+          "query": "Municipal water use in 2019",
           "temporal_filters": null
         },
         {
-          "query": "Tensor decomposition approach for handling interference in hybrid RIS systems compared with PBiGaBP",
+          "query": "Municipal water use in 2020",
+          "temporal_filters": null
+        },
+        {
+          "query": "Municipal water use in 2021",
+          "temporal_filters": null
+        },
+        {
+          "query": "Municipal water use in 2022",
           "temporal_filters": null
         }
       ]
@@ -45,22 +49,18 @@
     "messages": [
       {
         "role": "user",
-        "content": "How does the PBiGaBP framework's soft interference cancellation process differ from the tensor decomposition approach used in hybrid RIS systems...?"
+        "content": "Show the municipal water use trend from 2019 through 2022."
       }
     ]
   },
   {
     "id": 3,
     "difficulty": 2,
-    "domain": "language_modeling",
+    "domain": "heating",
     "expected_queries": {
       "query_list": [
         {
-          "query": "Contrastive learning objectives and their role in pretraining language encoders",
-          "temporal_filters": null
-        },
-        {
-          "query": "Masked language modeling objectives and their role in pretraining language encoders",
+          "query": "Comparison of geothermal and air-source heat pumps by installation cost and winter efficiency",
           "temporal_filters": null
         }
       ]
@@ -68,18 +68,18 @@
     "messages": [
       {
         "role": "user",
-        "content": "How do contrastive learning and masked language modeling differ in their objectives for pretraining language encoders?"
+        "content": "Compare geothermal and air-source heat pumps on installation cost and winter efficiency."
       }
     ]
   },
   {
     "id": 4,
-    "difficulty": 1,
-    "domain": "healthcare",
+    "difficulty": 2,
+    "domain": "environment",
     "expected_queries": {
       "query_list": [
         {
-          "query": "Known interactions between metformin and ibuprofen",
+          "query": "Combined effect of road salt use and spring rainfall on freshwater chloride levels",
           "temporal_filters": null
         }
       ]
@@ -87,18 +87,22 @@
     "messages": [
       {
         "role": "user",
-        "content": "What are the known interactions between metformin and ibuprofen?"
+        "content": "How do road salt use and spring rainfall together affect chloride levels in freshwater?"
       }
     ]
   },
   {
     "id": 5,
-    "difficulty": 2,
-    "domain": "real_estate",
+    "difficulty": 3,
+    "domain": "insurance",
     "expected_queries": {
       "query_list": [
         {
-          "query": "Combined effect of rising interest rates and increasing housing supply on residential property investment returns",
+          "query": "How telematics-based auto insurance policies set premiums and influence driver incentives",
+          "temporal_filters": null
+        },
+        {
+          "query": "How mileage-based auto insurance policies set premiums and influence driver incentives compared with telematics-based policies",
           "temporal_filters": null
         }
       ]
@@ -106,18 +110,22 @@
     "messages": [
       {
         "role": "user",
-        "content": "How do rising interest rates and increasing housing supply together affect residential property investment returns?"
+        "content": "How do telematics-based and mileage-based auto policies determine premiums and influence driver incentives?"
       }
     ]
   },
   {
     "id": 6,
-    "difficulty": 2,
-    "domain": "energy",
+    "difficulty": 1,
+    "domain": "climate",
     "expected_queries": {
       "query_list": [
         {
-          "query": "Comparison of lithium-ion battery systems and pumped hydro storage in terms of scalability and round-trip efficiency",
+          "query": "Germany annual greenhouse gas emissions in 2022",
+          "temporal_filters": null
+        },
+        {
+          "query": "Canada annual greenhouse gas emissions in 2022",
           "temporal_filters": null
         }
       ]
@@ -125,7 +133,7 @@
     "messages": [
       {
         "role": "user",
-        "content": "How do lithium-ion battery systems compare to pumped hydro storage in terms of scalability and round-trip efficiency?"
+        "content": "What were Germany's and Canada's annual greenhouse gas emissions in 2022?"
       }
     ]
   }

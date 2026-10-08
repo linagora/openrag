@@ -104,7 +104,7 @@ RetrieverConfig = Annotated[
 class RAGConfig(ConfigMixin):
     mode: str = "ChatBotRag"
     chat_history_depth: int = 4
-    max_contextualized_query_len: int = 512
+    max_contextualized_query_len: int = 1024
 
 
 # ---------------------------------------------------------------------------
