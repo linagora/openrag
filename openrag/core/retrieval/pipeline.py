@@ -368,21 +368,28 @@ class RetrieverPipeline:
             else:
                 stage_name = "pre_rerank"
             if removed_ids and trace is not None:
-                _safe_trace(
-                    trace,
-                    stage_name,
-                    lambda: trace.record_stage(
+
+                def record_final_cutoff() -> None:
+                    stage = trace.stages.get(stage_name)
+                    if stage is None or stage.status != "complete":
+                        return
+                    trace.record_stage(
                         stage_name,
-                        status="complete",
+                        status=stage.status,
                         candidates=_with_removal_reasons(
-                            list(trace.stages[stage_name].candidates),
+                            list(stage.candidates),
                             removed_ids,
                             "final_top_n",
                             "Excluded by the final public result cutoff.",
                         ),
-                        candidate_count=trace.stages[stage_name].candidate_count,
-                        duration_seconds=trace.stages[stage_name].duration_seconds,
-                    ),
+                        candidate_count=stage.candidate_count,
+                        duration_seconds=stage.duration_seconds,
+                    )
+
+                _safe_trace(
+                    trace,
+                    stage_name,
+                    record_final_cutoff,
                 )
             chunks = chunks[:top_k]
         _safe_trace(
