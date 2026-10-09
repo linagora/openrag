@@ -137,8 +137,9 @@ the migration Job.
   ConfigMap, so its value wins. The chart can read it only when it renders the
   Secret itself, not from env.existingSecret or a secrets operator.
 - With migrations off in the app and no Job, nothing applies them: the app
-  starts without its services and answers 503 until someone does. That is a supported setup only when the
-  operator says so with postgresProvisioning.externalMigrations.
+  starts without its services and answers 503 until someone does. That is a
+  supported setup only when the operator says so with
+  postgresProvisioning.externalMigrations.
 - The Job is for an external PostgreSQL: it runs before Helm creates the
   bundled one, so on a first install it cannot reach it.
 */}}

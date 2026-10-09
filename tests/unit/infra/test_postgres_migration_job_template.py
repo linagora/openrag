@@ -345,6 +345,10 @@ def test_a_run_migrations_in_app_the_app_rejects_is_refused(tmp_path: Path) -> N
             id="secrets-unused-with-existing-secret",
         ),
         pytest.param(
+            (*_EXTERNAL_SECRET, "--set-string", "env.secrets.POSTGRES_RUN_MIGRATIONS=false"),
+            id="secrets-unused-with-external-secret",
+        ),
+        pytest.param(
             (
                 "--set",
                 "postgresProvisioning.runMigrationsInApp=false",
