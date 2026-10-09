@@ -2,7 +2,8 @@
 
 The lightweight, no-VLM, no-GPU PDF backend. Uses ``pymupdf`` (a.k.a.
 ``fitz``) for plain-text extraction and ``pymupdf4llm`` for Markdown
-extraction. Operates on ``Document.raw_bytes`` — file I/O is upstream.
+extraction. Operates on ``Document.raw_bytes``; a child process opens
+``Document.source_path`` instead when there is one (see :func:`_parse_source`).
 
 Neither mode produces ``ImageBlock``s: ``embed_images=False`` and
 ``write_images=False`` keep base64 data out of the text (small chunks, no
@@ -14,8 +15,9 @@ Concurrency note: PyMuPDF is **not** thread-safe — concurrent calls to
 ``page.get_text`` / ``pymupdf4llm.to_markdown`` from different threads
 can raise ``ValueError: not a textpage of this page`` (upstream
 maintainer position: documented limitation, won't fix). That is a
-*thread* constraint: each process gets its own MuPDF state, so parses
-are run in a pool of child processes rather than on one shared thread.
+*thread* constraint: each process gets its own MuPDF state, so once
+configured (``PYMUPDF_POOL_SIZE`` above 1, or a memory limit) parses run in
+a pool of child processes. Unconfigured, they keep the one dedicated thread.
 
 Two things follow, and both were measured (300-page PDF, 4 concurrent
 parses): threads cannot parallelize this at all — one dedicated thread took
@@ -33,6 +35,7 @@ from __future__ import annotations
 
 import asyncio
 import gc
+import os
 import pickle
 import re
 import threading
@@ -76,21 +79,23 @@ class PyMuPDFPoolSettings:
 #: limit is more likely a misconfiguration than a tight budget, so it is reported.
 _MIN_PARSE_HEADROOM_MB = 128
 
-#: MuPDF reports a refused allocation as an error whose message names the
-#: allocator call — ``code=2: calloc (18904 x 40 bytes) failed`` — not as
-#: ``MemoryError``. Measured under ``RLIMIT_DATA`` with PyMuPDF 1.26.
-_MUPDF_ALLOC_FAILURE = re.compile(r"\b(?:malloc|calloc|realloc)\b.*\bfailed\b")
+#: MuPDF reports a refused allocation as an error, not as ``MemoryError``:
+#: ``code=2: calloc (18904 x 40 bytes) failed`` from its allocator, or
+#: ``FT_New_Memory_Face(): out of memory`` from FreeType. Measured under
+#: ``RLIMIT_DATA`` with PyMuPDF 1.26.
+_MUPDF_ALLOC_FAILURE = re.compile(r"\b(?:malloc|calloc|realloc)\b.*\bfailed\b|\bout of memory\b")
 
-#: The ceiling this process runs under, set by the pool initializer. Read only
-#: to name it in the error a parse over it raises; 0 where none applies.
+#: The ceiling this process runs under, set by the pool initializer. Read to
+#: name it in the error a parse over it raises; 0 where none applies.
 _CHILD_MEMORY_LIMIT_MB = 0
 
 
 def _pool_worker_init(memory_limit_mb: int) -> None:
     """Cap what one parse may allocate, in the child that runs it."""
     global _CHILD_MEMORY_LIMIT_MB
-    _CHILD_MEMORY_LIMIT_MB = memory_limit_mb
-    apply_parse_memory_limit(
+    # The limit actually applied, which is 0 when it was refused and lower
+    # than asked when a hard limit clamped it, so the error names that one.
+    _CHILD_MEMORY_LIMIT_MB = apply_parse_memory_limit(
         memory_limit_mb,
         process="PyMuPDF child",
         setting="PYMUPDF_PARSE_MEMORY_LIMIT_MB",
@@ -99,12 +104,19 @@ def _pool_worker_init(memory_limit_mb: int) -> None:
 
 
 def _is_allocation_failure(exc: BaseException) -> bool:
-    """Whether *exc*, or anything it was raised from, is a refused allocation."""
+    """Whether *exc*, or anything it was raised from, is a refused allocation.
+
+    Under a ceiling, a ``SystemError`` counts too: measured, the binding can
+    fail to build its own exception when memory runs out and raises ``error
+    return without exception set`` instead.
+    """
     seen: set[int] = set()
     current: BaseException | None = exc
     while current is not None and id(current) not in seen:
         seen.add(id(current))
         if isinstance(current, MemoryError) or _MUPDF_ALLOC_FAILURE.search(str(current)):
+            return True
+        if isinstance(current, SystemError) and _CHILD_MEMORY_LIMIT_MB > 0:
             return True
         current = current.__cause__ or current.__context__
     return False
@@ -136,7 +148,7 @@ def _survives_pickling(exc: BaseException) -> bool:
 
 
 def _run_extract(
-    extract: Callable[[bytes, str], tuple[list[str], list[ImageBlock]]], raw: bytes, filename: str
+    extract: Callable[[bytes | str, str], tuple[list[str], list[ImageBlock]]], source: bytes | str, filename: str
 ) -> tuple[list[str], list[ImageBlock]]:
     """Run *extract* and turn its failure into one the parent can act on.
 
@@ -151,7 +163,7 @@ def _run_extract(
       itself; it becomes a ``RuntimeError`` carrying the original text.
     """
     try:
-        return extract(raw, filename)
+        return extract(source, filename)
     except Exception as exc:
         try:
             out_of_memory = _is_allocation_failure(exc)
@@ -192,7 +204,8 @@ class _ParsePool:
     """Runs parses on ``max_workers`` slots, one parse per slot at a time.
 
     Without a pool asked for — one worker, no ceiling — the single slot is the
-    one dedicated thread used before #997, so nothing changes. Otherwise each
+    one dedicated thread used before #997, so parses still run one at a time
+    in-process; only ``_run_extract``'s error handling is new there. Otherwise each
     slot is its own ``ProcessPoolExecutor`` with one child: replacing a slot's
     child cannot fail a parse running in another, which one shared executor
     with several children does (it breaks as a whole when any child dies).
@@ -310,9 +323,16 @@ def _get_pool() -> _ParsePool:
         return _POOL
 
 
-def _extract_text(raw: bytes, filename: str) -> tuple[list[str], list[ImageBlock]]:
+def _open_pdf(source: bytes | str) -> pymupdf.Document:
+    """Open *source*: the PDF's bytes, or the path of a file holding them."""
+    if isinstance(source, str):
+        return pymupdf.open(source, filetype="pdf")
+    return pymupdf.open(stream=source, filetype="pdf")
+
+
+def _extract_text(source: bytes | str, filename: str) -> tuple[list[str], list[ImageBlock]]:
     """Return one stripped plain-text string per page; no images."""
-    with pymupdf.open(stream=raw, filetype="pdf") as doc:
+    with _open_pdf(source) as doc:
         return [page.get_text().strip() for page in doc], []
 
 
@@ -357,7 +377,7 @@ def _pages_with_fallback(doc: pymupdf.Document, chunks: list[dict], filename: st
     return pages
 
 
-def _extract_markdown(raw: bytes, filename: str) -> tuple[list[str], list[ImageBlock]]:
+def _extract_markdown(source: bytes | str, filename: str) -> tuple[list[str], list[ImageBlock]]:
     """Return structured Markdown per page (no images).
 
     pymupdf is the lightweight, no-VLM backend. ``pymupdf4llm`` preserves
@@ -368,7 +388,7 @@ def _extract_markdown(raw: bytes, filename: str) -> tuple[list[str], list[ImageB
     (fast). Image-aware parsing is marker/docling's job, so no ``ImageBlock``s
     are produced here.
     """
-    with pymupdf.open(stream=raw, filetype="pdf") as doc:
+    with _open_pdf(source) as doc:
         try:
             chunks = _to_markdown(doc)
             pages = _pages_with_fallback(doc, chunks, filename)
@@ -391,12 +411,29 @@ def _extract_markdown(raw: bytes, filename: str) -> tuple[list[str], list[ImageB
             cleaned = doc.tobytes(garbage=4, clean=True)
     # Outside the `with`: the failed document is closed before the cleaned copy
     # is opened, so MuPDF's parsed structures for the first are released rather
-    # than held alongside the second. ``raw`` itself belongs to the caller's
+    # than held alongside the second. The source itself belongs to the caller's
     # Document and stays live either way (#846).
     with pymupdf.open(stream=cleaned, filetype="pdf") as clean_doc:
         chunks = _to_markdown(clean_doc)
         pages = _pages_with_fallback(clean_doc, chunks, filename)
     return pages, []
+
+
+def _parse_source(document: Document, pool: _ParsePool) -> bytes | str:
+    """What to hand the parse: the file's path where a child can open it.
+
+    A child gets its arguments pickled through a pipe, so passing the bytes
+    costs a transient copy in the parent per parse in flight and puts the
+    whole file in the child, twice over, before parsing starts. The child
+    shares this process's filesystem, so it opens the file itself. Measured on
+    an 82 MiB PDF, the parent's extra peak went from +82 MiB to +1 in both
+    modes, and the child's peak from 320 MiB to 238 in markdown mode (the
+    default) and from 235 MiB to 72 in text mode. On the thread there is
+    nothing to copy, and without a file there is nothing to open.
+    """
+    if pool.uses_processes and document.source_path and os.path.isfile(document.source_path):
+        return document.source_path
+    return document.raw_bytes
 
 
 @parser_registry.register("pymupdf")
@@ -425,7 +462,8 @@ class PyMuPDFParser(DocumentParser):
                 metadata=dict(document.metadata),
             )
 
-        pages, images = await _get_pool().run(_run_extract, self._extract, document.raw_bytes, document.filename)
+        pool = _get_pool()
+        pages, images = await pool.run(_run_extract, self._extract, _parse_source(document, pool), document.filename)
         # Keep one TextBlock per source page (including empties) so callers
         # can preserve a 1-to-1 mapping with the original PDF's pagination.
         text_blocks = [TextBlock(text=text, page_number=i) for i, text in enumerate(pages, start=1)]

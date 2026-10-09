@@ -398,11 +398,18 @@ def test_building_the_dispatcher_leaves_pymupdf_on_its_thread():
     the indexer worker gives PyMuPDF its process pool (``configure_pymupdf_pool``),
     so building a dispatcher — and the PyMuPDF parser in it — must not."""
     from core.indexing.parsers.pdf import pymupdf as pymupdf_mod
+    from services.workers.parsers.parser_dispatcher import build_parser_dispatcher
 
+    # A config that asks for a pool, so pushing it from here would show.
+    config = _config()
+    config.loader.pymupdf_pool_size = 2
+    config.loader.pymupdf_parse_memory_limit_mb = 512
+    config.loader.pymupdf_max_tasks_per_child = 7
     pymupdf_mod.configure_pool(pymupdf_mod.PyMuPDFPoolSettings())
-    disp = ParserDispatcher(_config())
+    disp = build_parser_dispatcher(config)
     disp._get("pymupdf")
 
+    assert pymupdf_mod._POOL_SETTINGS == pymupdf_mod.PyMuPDFPoolSettings()
     assert pymupdf_mod._get_pool().uses_processes is False
 
 

@@ -29,7 +29,7 @@ def child_vmdata_mb() -> int | None:
     return None
 
 
-def apply_parse_memory_limit(memory_limit_mb: int, *, process: str, setting: str, min_headroom_mb: int) -> None:
+def apply_parse_memory_limit(memory_limit_mb: int, *, process: str, setting: str, min_headroom_mb: int) -> int:
     """Cap what this process may allocate, so one parse cannot take the pod.
 
     Call it in the child that runs the parse. A parse that blows through the
@@ -52,9 +52,13 @@ def apply_parse_memory_limit(memory_limit_mb: int, *, process: str, setting: str
 
     Best-effort — a platform without ``RLIMIT_DATA``, or an existing hard limit
     below the request, must not stop the worker from starting.
+
+    Returns the ceiling applied, in MiB: lower than asked when an existing hard
+    limit clamped it, and 0 when none was applied — so an error can name the
+    limit the child really ran under.
     """
     if memory_limit_mb <= 0:
-        return
+        return 0
     try:
         # Imported here rather than at module scope: ``resource`` is Unix-only,
         # and a missing module raises at import time, where the best-effort
@@ -79,7 +83,7 @@ def apply_parse_memory_limit(memory_limit_mb: int, *, process: str, setting: str
                 f"of {baseline_mb} MiB, so it is NOT applied — this child runs without a ceiling. "
                 f"Raise {setting} well above {baseline_mb}, or unset it."
             )
-            return
+            return 0
         elif effective_mb - baseline_mb < min_headroom_mb:
             logger.warning(
                 f"{process} memory limit {effective_mb} MiB leaves only {effective_mb - baseline_mb} MiB "
@@ -96,3 +100,5 @@ def apply_parse_memory_limit(memory_limit_mb: int, *, process: str, setting: str
         resource.setrlimit(resource.RLIMIT_DATA, (limit, hard))
     except (ImportError, ValueError, OSError, AttributeError) as exc:
         logger.warning(f"Could not apply {process} memory limit ({memory_limit_mb} MiB): {exc}")
+        return 0
+    return effective_mb
