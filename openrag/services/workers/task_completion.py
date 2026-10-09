@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections import OrderedDict
 from datetime import UTC, datetime, timedelta
+from time import monotonic
 from typing import Any
 
 import ray
@@ -15,6 +16,7 @@ from core.models.catalog import (
 )
 from core.utils.error_summary import extract_task_error_reason
 from services.workers.ray_utils import call_ray_actor_method_with_timeout
+from services.workers.task_state import STALE_TASK_STATE_MANAGER_HINT
 
 _TERMINAL_STATES = frozenset(state.value for state in TERMINAL_TASK_STATES)
 _REFLESS_RECOVERY_POLL_SECONDS = 5.0
@@ -27,6 +29,9 @@ _MAX_PENDING_SETTLEMENTS = 1_000
 _ORPHANED_JOB_ERROR = "Indexing task was interrupted by a restart and no longer has a live worker."
 _SETTLED_STATE_POLL_ATTEMPTS = 5
 _SETTLED_STATE_POLL_INTERVAL_SECONDS = 0.05
+_ORPHANED_WORKER_POLL_SECONDS = 5.0
+_ORPHANED_WORKER_WARN_AFTER_SECONDS = 300.0
+_ORPHANED_WORKER_WARN_EVERY_SECONDS = 1800.0
 
 
 class TaskCompletionTracker:
@@ -66,7 +71,8 @@ class TaskCompletionTracker:
             return
         self._tracked_task_ids.add(task_id)
         try:
-            await asyncio.gather(ref, return_exceptions=True)
+            (outcome,) = await asyncio.gather(ref, return_exceptions=True)
+            await self._await_orphaned_worker(task_id, outcome)
             await self._record_finished_at(task_id)
         except Exception as exc:
             self._logger.warning(
@@ -171,7 +177,8 @@ class TaskCompletionTracker:
                 normalized_ref = _normalize_object_ref(object_ref)
                 if normalized_ref is not None:
                     ref = normalized_ref["ref"]
-                    await asyncio.gather(ref, return_exceptions=True)
+                    (outcome,) = await asyncio.gather(ref, return_exceptions=True)
+                    await self._await_orphaned_worker(task_id, outcome)
                     await self._record_finished_at(task_id)
                     await self._finish_cancellation(task_id)
                     return
@@ -197,6 +204,40 @@ class TaskCompletionTracker:
             )
         finally:
             self._tracked_task_ids.discard(task_id)
+
+    async def _await_orphaned_worker(self, task_id: str, outcome: Any) -> None:
+        """Hold the finished stamp while a worker whose ref lost its owner may still run.
+
+        ``OwnerDiedError`` means the pool actor that submitted the task died,
+        not that the worker stopped. The stamp releases the file fence and the
+        content claim, so it waits until the TaskStateManager's worker lease
+        says the worker settled; that lease lapses on its own if the worker
+        died too. An actor without that check keeps the previous behaviour.
+        """
+        if not isinstance(outcome, ray.exceptions.OwnerDiedError):
+            return
+        task_state_manager = self._task_state_manager()
+        method = getattr(task_state_manager, "has_worker_settled", None)
+        remote = getattr(method, "remote", None)
+        if remote is None:
+            self._logger.warning(
+                "TaskStateManager cannot tell whether an orphaned worker settled; stamping its task now. "
+                + STALE_TASK_STATE_MANAGER_HINT,
+                task_id=task_id,
+            )
+            return
+        started = monotonic()
+        warn_at = started + _ORPHANED_WORKER_WARN_AFTER_SECONDS
+        while not await self._call_task_state(lambda: remote(task_id), f"has_worker_settled({task_id})"):
+            now = monotonic()
+            if now >= warn_at:
+                self._logger.warning(
+                    "Still waiting for an orphaned indexing worker to settle; its file stays held until then",
+                    task_id=task_id,
+                    waited_seconds=round(now - started),
+                )
+                warn_at = now + _ORPHANED_WORKER_WARN_EVERY_SECONDS
+            await asyncio.sleep(_ORPHANED_WORKER_POLL_SECONDS)
 
     async def _record_finished_at(self, task_id: str) -> None:
         # Keep the handle in a variable: Ray's ActorMethod holds it weakly, so a

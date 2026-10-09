@@ -106,17 +106,26 @@ Upload a new file to a specific partition for indexing.
 **Responses:**
 - `201 Created`: Returns task status URL
 - `400 Bad Request`: `callback_url` is malformed or not a public `http(s)` URL
-- `409 Conflict`: File already exists in partition. Two more cases name a code,
+- `409 Conflict`: File already exists in partition. Three more cases name a code,
   as the `[CODE]` prefix of `detail` (`"[CODE]: message"`):
   - `DOCUMENT_INDEXING_IN_PROGRESS`: another task is still indexing this `file_id`.
-    `extra.existing_task_id` and `extra.task_status_url` point at it, so a client
-    that re-sent after a timeout can poll the first task instead of re-uploading.
+    `extra.existing_task_id` points at it, so a client that re-sent after a
+    timeout can poll the first task instead of re-uploading. `extra.task_status_url`
+    is added only when the caller owns that task or is an admin, since the
+    task-status route answers anyone else with `403`.
     Earlier releases answered such a retry with `409 DOCUMENT_CONTENT_EXISTS`
     naming the retried `file_id` itself when content deduplication is on (the
     default) and the bytes are the same; with deduplication off, or different
     bytes, they accepted it with `201` and let it fail at the end of the pipeline.
-  - `DOCUMENT_CONTENT_EXISTS`: content deduplication matched another file
-    (`extra.existing_file_id`).
+    A task counts as indexing until its worker has stopped, so a worker that hangs
+    keeps the `file_id` busy until the task is cancelled
+    (`DELETE /indexer/task/{task_id}`); a `PUT` is not refused meanwhile.
+  - `DOCUMENT_CONTENT_EXISTS`: content deduplication matched a file that already
+    holds these bytes (`extra.existing_file_id`). That can be the `file_id` you
+    sent, when an earlier upload of it still holds the content reservation but no
+    task is indexing it any more, for example because it settled a moment ago.
+  - `DOCUMENT_CONTENT_CLAIM_LOST`: the content reservation taken for this upload
+    expired before indexing started. Nothing was queued; retry the upload.
 
 ##### Indexing status callback
 
@@ -226,11 +235,15 @@ Replace an existing file in the partition. Deletes the current entry and creates
 **Request Body:** Same as POST endpoint
 **Responses:**
 - `202 Accepted`: Returns task status URL
+- `400 Bad Request`: `callback_url` is malformed or not a public `http(s)` URL
 - `404 Not Found`: File not found in partition
-- `409 Conflict`: `DOCUMENT_CONTENT_EXISTS`, when content deduplication finds the
-  same bytes held by another file, or by a task still indexing this one
-  (`extra.existing_file_id`). A replace is not refused for a task already
-  indexing the file, so it never returns `DOCUMENT_INDEXING_IN_PROGRESS`.
+- `409 Conflict`, with the code as the `[CODE]` prefix of `detail`:
+  - `DOCUMENT_CONTENT_EXISTS`: content deduplication finds the same bytes held by
+    another file, or by a task still indexing this one (`extra.existing_file_id`).
+    A replace is not refused for a task already indexing the file, so it never
+    returns `DOCUMENT_INDEXING_IN_PROGRESS`.
+  - `DOCUMENT_CONTENT_CLAIM_LOST`: the content reservation taken for this upload
+    expired before indexing started. Nothing was queued; retry the request.
 
 #### Update File Metadata
 ```http

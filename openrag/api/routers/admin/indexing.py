@@ -37,7 +37,7 @@ from core.utils.exceptions import ConflictError, OpenRAGError, indexing_worker_m
 from core.utils.filename import sanitize_filename
 from core.utils.logging import get_logger
 from core.utils.url_safety import is_safe_url
-from di.providers import get_auth_service, get_config, get_indexing_service, get_partition_service
+from di.providers import get_auth_service, get_config, get_indexing_service, get_job_service, get_partition_service
 from fastapi import (
     APIRouter,
     Depends,
@@ -85,18 +85,41 @@ def build_url(request: Request, route_name: str, *, preferred_url_scheme: str | 
     return str(url)
 
 
-def _point_conflict_at_running_task(exc: BaseException, request: Request, config) -> None:
+async def _point_conflict_at_running_task(
+    exc: BaseException,
+    request: Request,
+    config,
+    *,
+    user: dict[str, Any],
+    job_service,
+    auth_service,
+) -> None:
     """Tell a caller turned away by the admission fence where to look.
 
     The fence lives in the dispatcher, which has no ``Request`` and so cannot
     build the link itself. Left as an extra field on the 409 body: a client that
     retried after a timeout can poll the task it already started instead of
     treating the refusal as a lost upload.
+
+    The link is only given to someone the task-status route would serve (the
+    task's owner or an admin). Another editor of the partition still gets
+    ``existing_task_id``, but a URL that answers them 403 would only mislead.
     """
     if not isinstance(exc, ConflictError) or exc.code != "DOCUMENT_INDEXING_IN_PROGRESS":
         return
     existing_task_id = exc.extra.get("existing_task_id")
     if not existing_task_id:
+        return
+    try:
+        task_details = await job_service.get_task_details(existing_task_id)
+    except Exception as lookup_error:  # noqa: BLE001 - the 409 stands without the link
+        logger.warning(
+            "Could not read the running task's owner for a 409 link.",
+            task_id=existing_task_id,
+            error=str(lookup_error),
+        )
+        return
+    if not task_details or not auth_service.authorize(user=user, action="task:access", resource=task_details):
         return
     exc.extra["task_status_url"] = build_url(
         request,
@@ -172,7 +195,8 @@ Returns 201 Created with a task status URL for tracking indexing progress.
 - `DOCUMENT_INDEXING_IN_PROGRESS` — another task is still indexing this
   `file_id`. `extra.existing_task_id` / `extra.task_status_url` point at it, so
   a client that re-sent after a timeout can poll the first task instead of
-  re-uploading.
+  re-uploading. `task_status_url` is only included for the task's owner or an
+  admin, the callers the task-status route serves.
 - `DOCUMENT_CONTENT_EXISTS` — content deduplication matched an existing file
   (`extra.existing_file_id`).
 """,
@@ -193,6 +217,8 @@ async def add_file(
     _quota_check=Depends(check_user_file_quota),
     config=Depends(get_config),
     service=Depends(get_indexing_service),
+    job_service=Depends(get_job_service),
+    auth_service=Depends(get_auth_service),
 ):
     _validate_callback_url(callback_url, config)
 
@@ -270,7 +296,14 @@ async def add_file(
         # run that could still succeed. The worker cleans up its own input.
         if not indexing_worker_may_be_running(exc):
             file_path.unlink(missing_ok=True)
-        _point_conflict_at_running_task(exc, request, config)
+        await _point_conflict_at_running_task(
+            exc,
+            request,
+            config,
+            user=user,
+            job_service=job_service,
+            auth_service=auth_service,
+        )
         raise
 
     return JSONResponse(

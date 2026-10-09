@@ -818,3 +818,127 @@ async def test_recover_refless_stops_once_the_actor_forgets_the_task() -> None:
     tsm.get_state.remote.assert_not_awaited()
     tsm.get_object_ref.remote.assert_not_awaited()
     tsm.expire_refless_task_if_stale.remote.assert_not_awaited()
+
+
+def _owner_died_error() -> BaseException:
+    from ray.exceptions import OwnerDiedError
+
+    return OwnerDiedError("00" * 28, owner_address=None, call_site="")
+
+
+def _settled_details() -> dict[str, Any]:
+    return {"file_id": "file-1", "partition": "tenant-a", "metadata": {}, "user_id": 42}
+
+
+async def _track_until_settled(tsm: MagicMock, outcome: BaseException) -> None:
+    from services.workers.task_completion import TaskCompletionTracker
+
+    ref = asyncio.get_running_loop().create_future()
+    with patch("services.workers.task_completion.ray.get_actor", return_value=tsm):
+        tracker = TaskCompletionTracker()
+        watch = asyncio.create_task(tracker.track("task-1", {"ref": ref}))
+        await asyncio.sleep(0)
+        ref.set_exception(outcome)
+        await watch
+
+
+@pytest.mark.asyncio
+async def test_tracker_holds_the_finished_stamp_while_an_orphaned_worker_runs(monkeypatch) -> None:
+    """OwnerDiedError means the pool actor died, not the worker: the stamp would release its file."""
+    from services.workers import task_completion
+
+    monkeypatch.setattr(task_completion, "_ORPHANED_WORKER_POLL_SECONDS", 0)
+    tsm = _task_state_manager()
+    tsm.get_details.remote.return_value = _settled_details()
+    stamped_after: list[int] = []
+    tsm.has_worker_settled = _remote_mock()
+    tsm.has_worker_settled.remote.side_effect = [False, False, True]
+    tsm.set_details.remote.side_effect = lambda *_a, **_k: stamped_after.append(
+        tsm.has_worker_settled.remote.await_count
+    )
+
+    await _track_until_settled(tsm, _owner_died_error())
+
+    assert tsm.has_worker_settled.remote.await_count == 3
+    tsm.has_worker_settled.remote.assert_awaited_with("task-1")
+    assert stamped_after == [3]
+    tsm.finish_cancellation.remote.assert_awaited_once_with("task-1")
+
+
+@pytest.mark.asyncio
+async def test_tracker_stamps_an_orphaned_task_once_its_dead_worker_lease_lapsed() -> None:
+    tsm = _task_state_manager()
+    tsm.get_details.remote.return_value = _settled_details()
+    tsm.has_worker_settled = _remote_mock(True)
+
+    await _track_until_settled(tsm, _owner_died_error())
+
+    tsm.has_worker_settled.remote.assert_awaited_once_with("task-1")
+    tsm.set_details.remote.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_tracker_does_not_probe_the_lease_when_the_worker_itself_failed() -> None:
+    from ray.exceptions import ActorDiedError
+
+    tsm = _task_state_manager()
+    tsm.get_details.remote.return_value = _settled_details()
+    tsm.has_worker_settled = _remote_mock(False)
+
+    await _track_until_settled(tsm, ActorDiedError())
+
+    tsm.has_worker_settled.remote.assert_not_awaited()
+    tsm.set_details.remote.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_tracker_keeps_the_previous_behaviour_against_an_actor_without_the_lease_check() -> None:
+    tsm = _task_state_manager()
+    tsm.get_details.remote.return_value = _settled_details()
+    del tsm.has_worker_settled
+
+    await _track_until_settled(tsm, _owner_died_error())
+
+    tsm.set_details.remote.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_tracker_warns_while_an_orphaned_worker_holds_its_file(monkeypatch) -> None:
+    """Once after five minutes, then every half hour: the file stays held, so it must not be silent."""
+    from services.workers import task_completion
+    from services.workers.task_completion import TaskCompletionTracker
+
+    clock = [0.0]
+    monkeypatch.setattr(task_completion, "_ORPHANED_WORKER_POLL_SECONDS", 0)
+    monkeypatch.setattr(task_completion, "monotonic", lambda: clock[0])
+    polls = iter([False] * 40 + [True])
+
+    def has_worker_settled(_task_id: str) -> bool:
+        clock[0] += 120.0
+        return next(polls)
+
+    tsm = _task_state_manager()
+    tsm.has_worker_settled = _remote_mock()
+    tsm.has_worker_settled.remote.side_effect = has_worker_settled
+    with patch("services.workers.task_completion.ray.get_actor", return_value=tsm):
+        tracker = TaskCompletionTracker()
+        tracker._logger = MagicMock()
+        await tracker._await_orphaned_worker("task-1", _owner_died_error())
+
+    waits = [call.kwargs["waited_seconds"] for call in tracker._logger.warning.call_args_list]
+    assert waits == [360, 2160, 3960]
+
+
+@pytest.mark.asyncio
+async def test_tracker_warns_that_an_actor_without_the_lease_check_needs_a_ray_restart() -> None:
+    from services.workers.task_completion import TaskCompletionTracker
+
+    tsm = _task_state_manager()
+    del tsm.has_worker_settled
+    with patch("services.workers.task_completion.ray.get_actor", return_value=tsm):
+        tracker = TaskCompletionTracker()
+        tracker._logger = MagicMock()
+        await tracker._await_orphaned_worker("task-1", _owner_died_error())
+
+    tracker._logger.warning.assert_called_once()
+    assert "restart the Ray cluster" in tracker._logger.warning.call_args.args[0]

@@ -16,8 +16,9 @@ from api.dependencies.files import validate_file_format, validate_file_id, valid
 from api.error_handlers import register_error_handlers
 from api.routers.admin.indexing import router as indexer_router
 from core.utils.exceptions import ConflictError, mark_indexing_worker_may_be_running
-from di.providers import get_config, get_indexing_service
+from di.providers import get_auth_service, get_config, get_indexing_service, get_job_service
 from fastapi import FastAPI, UploadFile
+from services.orchestrators.auth_service import AuthService
 
 
 class _FakeIndexingService:
@@ -62,11 +63,33 @@ class _ExistingFileService(_FakeIndexingService):
         return "unexpected-task"
 
 
+class _FakeJobService:
+    """Owns the running task the fence names, unless told the lookup fails."""
+
+    def __init__(self, *, owner_id: int | None = 1, error: Exception | None = None) -> None:
+        self._owner_id = owner_id
+        self._error = error
+
+    async def get_task_details(self, task_id: str) -> dict | None:
+        if self._error is not None:
+            raise self._error
+        return {"task_id": task_id, "user_id": self._owner_id}
+
+
 def _empty_metadata() -> dict:
     return {}
 
 
-def _build_app(tmp_path, monkeypatch, content: bytes, *, service=None, deduplication_enabled=True) -> FastAPI:
+def _build_app(
+    tmp_path,
+    monkeypatch,
+    content: bytes,
+    *,
+    service=None,
+    deduplication_enabled=True,
+    user=None,
+    job_service=None,
+) -> FastAPI:
     # Cap at ~8 bytes so a small upload trips the limit.
     monkeypatch.setattr("api.dependencies.files._max_upload_size_bytes", lambda: 8)
 
@@ -83,7 +106,9 @@ def _build_app(tmp_path, monkeypatch, content: bytes, *, service=None, deduplica
     app.dependency_overrides[validate_file_id] = lambda: "f1"
     app.dependency_overrides[validate_file_format] = lambda: UploadFile(file=io.BytesIO(content), filename="big.bin")
     app.dependency_overrides[validate_metadata] = _empty_metadata
-    app.dependency_overrides[require_partition_editor] = lambda: {"id": 1, "is_admin": True}
+    app.dependency_overrides[require_partition_editor] = lambda: user or {"id": 1, "is_admin": True}
+    app.dependency_overrides[get_job_service] = lambda: job_service or _FakeJobService()
+    app.dependency_overrides[get_auth_service] = lambda: AuthService
     app.dependency_overrides[check_user_file_quota] = lambda: None
     app.dependency_overrides[get_config] = lambda: cfg
     app.dependency_overrides[get_indexing_service] = lambda: service or _FakeIndexingService()
@@ -143,6 +168,59 @@ async def test_add_file_already_indexing_returns_409_pointing_at_the_running_tas
     assert extra["existing_task_id"] == "task-running"
     assert extra["task_status_url"].endswith("/task/task-running")
     assert list((tmp_path / "data").iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    ("user", "owner_id", "linked"),
+    [
+        ({"id": 7, "is_admin": False}, 7, True),
+        ({"id": 1, "is_admin": True}, 7, True),
+        ({"id": 8, "is_admin": False}, 7, False),
+    ],
+    ids=["task-owner", "admin", "another-editor"],
+)
+@pytest.mark.asyncio
+async def test_add_file_already_indexing_links_the_task_only_for_whoever_may_read_it(
+    tmp_path, monkeypatch, user, owner_id, linked
+):
+    """The task-status route serves only the owner or an admin; anyone else would follow a link into a 403."""
+    app = _build_app(
+        tmp_path,
+        monkeypatch,
+        content=b"same",
+        service=_FileIndexingService(),
+        user=user,
+        job_service=_FakeJobService(owner_id=owner_id),
+    )
+    transport = httpx.ASGITransport(app=app)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        resp = await client.post("/indexer/partition/p1/file/f1", data={"_": "1"})
+
+    assert resp.status_code == 409
+    extra = resp.json()["extra"]
+    assert extra["existing_task_id"] == "task-running"
+    assert ("task_status_url" in extra) is linked
+
+
+@pytest.mark.asyncio
+async def test_add_file_already_indexing_keeps_the_409_when_the_owner_lookup_fails(tmp_path, monkeypatch):
+    app = _build_app(
+        tmp_path,
+        monkeypatch,
+        content=b"same",
+        service=_FileIndexingService(),
+        job_service=_FakeJobService(error=RuntimeError("task state unavailable")),
+    )
+    transport = httpx.ASGITransport(app=app)
+
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        resp = await client.post("/indexer/partition/p1/file/f1", data={"_": "1"})
+
+    assert resp.status_code == 409
+    extra = resp.json()["extra"]
+    assert extra["existing_task_id"] == "task-running"
+    assert "task_status_url" not in extra
 
 
 @pytest.mark.asyncio

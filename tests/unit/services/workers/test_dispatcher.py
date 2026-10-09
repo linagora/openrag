@@ -257,6 +257,41 @@ async def test_queue_registration_warns_when_the_actor_predates_the_admission_fe
 
 
 @pytest.mark.asyncio
+async def test_queue_registration_warns_on_the_split_write_fallback() -> None:
+    """Neither registration method: state and details go separately, unfenced, and the log says so."""
+    from services.workers.dispatcher import WorkerDispatcher
+
+    tsm = _task_state_manager()
+    tsm._ray_actor_method_names = {"set_state", "set_details"}
+    dispatcher = WorkerDispatcher(
+        pool=_pool_with_ref(object()),
+        task_state_manager=tsm,
+        completion_tracker=_completion_tracker(),
+        vector_store=_vector_store(),
+        document_repo=_document_repo(),
+        workspace_repo=_workspace_repo(),
+        collection="default",
+        timeout=1,
+    )
+
+    with patch("services.workers.dispatcher.logger") as mock_logger:
+        admission = await dispatcher._set_queued_details(
+            "task-1",
+            file_id="file-1",
+            partition="tenant-a",
+            metadata={},
+            user_id=42,
+            reject_if_file_active=False,
+        )
+
+    assert admission == _queue_admitted()
+    tsm.set_state.remote.assert_called_once_with("task-1", "QUEUED")
+    tsm.set_details.remote.assert_called_once()
+    mock_logger.bind.assert_called_once_with(task_id="task-1", file_id="file-1", partition="tenant-a")
+    assert "admission fence" in mock_logger.bind.return_value.warning.call_args.args[0]
+
+
+@pytest.mark.asyncio
 async def test_queue_registration_retries_actor_reconstruction() -> None:
     from services.workers.dispatcher import WorkerDispatcher
 
@@ -2467,6 +2502,100 @@ async def test_delete_file_does_not_cleanup_when_cancelled_task_does_not_settle(
     vector_store.delete_by_filter.assert_not_called()
     workspace_repo.remove_file_from_all_workspaces.assert_not_called()
     document_repo.remove_file_from_partition.assert_not_called()
+
+
+def _owner_died_ref() -> asyncio.Future[None]:
+    from ray.exceptions import OwnerDiedError
+
+    ref = asyncio.get_running_loop().create_future()
+    ref.set_exception(OwnerDiedError("00" * 28, owner_address=None, call_site=""))
+    return ref
+
+
+@pytest.mark.asyncio
+async def test_delete_file_waits_for_an_orphaned_worker_to_settle_before_cleanup() -> None:
+    """ray.cancel cannot reach a worker whose ref lost its owner: it would write the file back after the delete."""
+    from services.workers.dispatcher import WorkerDispatcher
+
+    tsm = _task_state_manager()
+    tsm.get_matching_active_task_refs_v2 = _remote_mock({"task-1": {"ref": _owner_died_ref()}})
+    calls: list[str] = []
+    tsm.set_state.remote.side_effect = lambda task_id, state: calls.append(f"set_state:{state}")
+    settled = iter([False, False, True])
+    tsm.has_worker_settled = _remote_mock()
+    tsm.has_worker_settled.remote.side_effect = lambda task_id: calls.append("has_worker_settled") or next(settled)
+    vector_store = _vector_store()
+    vector_store.delete_by_filter.side_effect = lambda *_a, **_k: calls.append("delete_chunks")
+    dispatcher = WorkerDispatcher(
+        pool=_pool_with_ref(object()),
+        task_state_manager=tsm,
+        completion_tracker=_completion_tracker(),
+        vector_store=vector_store,
+        document_repo=_document_repo(),
+        workspace_repo=_workspace_repo(),
+        collection="default",
+    )
+
+    with patch("services.workers.task_cancellation._ORPHANED_WORKER_POLL_SECONDS", 0), patch("ray.cancel"):
+        await dispatcher.delete_file("file-1", "tenant-a")
+
+    # Cancelled first, so the worker reads it on its next lease renewal and stops.
+    assert calls[:4] == ["set_state:CANCELLED", "has_worker_settled", "has_worker_settled", "has_worker_settled"]
+    assert calls.index("delete_chunks") > 3
+    tsm.has_worker_settled.remote.assert_called_with("task-1")
+    tsm.finish_cancellation.remote.assert_awaited_once_with("task-1")
+
+
+@pytest.mark.asyncio
+async def test_delete_file_does_not_cleanup_while_an_orphaned_worker_still_runs() -> None:
+    from services.workers.dispatcher import WorkerDispatcher
+
+    tsm = _task_state_manager()
+    tsm.get_matching_active_task_refs_v2 = _remote_mock({"task-1": {"ref": _owner_died_ref()}})
+    tsm.has_worker_settled = _remote_mock(False)
+    vector_store = _vector_store()
+    document_repo = _document_repo()
+    dispatcher = WorkerDispatcher(
+        pool=_pool_with_ref(object()),
+        task_state_manager=tsm,
+        completion_tracker=_completion_tracker(),
+        vector_store=vector_store,
+        document_repo=document_repo,
+        workspace_repo=_workspace_repo(),
+        collection="default",
+        timeout=0.05,
+    )
+
+    with (
+        patch("services.workers.task_cancellation._ORPHANED_WORKER_POLL_SECONDS", 0.01),
+        pytest.raises(TimeoutError, match="settle after cancellation request"),
+        patch("ray.cancel"),
+    ):
+        await dispatcher.delete_file("file-1", "tenant-a")
+
+    tsm.set_state.remote.assert_called_once_with("task-1", "CANCELLED")
+    assert tsm.has_worker_settled.remote.await_count >= 1
+    tsm.finish_cancellation.remote.assert_not_called()
+    vector_store.delete_by_filter.assert_not_called()
+    document_repo.remove_file_from_partition.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_orphaned_worker_wait_warns_that_an_older_task_state_manager_needs_a_ray_restart() -> None:
+    from time import monotonic
+
+    from services.workers import task_cancellation
+
+    tsm = MagicMock()
+    tsm._ray_actor_method_names = frozenset({"set_state"})
+    with patch.object(task_cancellation, "logger") as logger:
+        await task_cancellation._wait_for_orphaned_worker_to_settle(
+            tsm, task_id="task-1", deadline=monotonic() + 5, partition="tenant-a", file_id="file-1"
+        )
+
+    logger.warning.assert_called_once()
+    assert "restart the Ray cluster" in logger.warning.call_args.args[0]
+    tsm.set_state.remote.assert_not_called()
 
 
 @pytest.mark.asyncio
