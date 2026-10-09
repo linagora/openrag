@@ -61,6 +61,15 @@ _CONTENT_CLAIM_REGISTRATION_GRACE_SECONDS = 60
 # dead worker can hold its file after its owner died too.
 WORKER_LEASE_RENEW_INTERVAL_SECONDS = 15.0
 _WORKER_LEASE_TTL_SECONDS = 60.0
+# Keys the pool stores next to the worker ref: the hex id of the worker actor the
+# task was sent to, and that actor's restart count when it was sent. An orphaned
+# task that never started may still be queued on that actor, so only the
+# actor's own fate (read from the GCS) can settle it.
+WORKER_ACTOR_ID_KEY = "worker_actor_id"
+WORKER_RESTARTS_KEY = "worker_restarts"
+# How long a GCS read of a worker actor's state is reused, so a fence pass over
+# many orphaned tasks costs one read per worker actor rather than one per task.
+_WORKER_ACTOR_STATE_CACHE_SECONDS = 1.0
 # Terminal task records are progress receipts, not the system of record: the
 # durable per-file state lives in the Postgres catalog. They are kept only long
 # enough to answer the reads that follow a job settling, then dropped, with a
@@ -212,6 +221,8 @@ def _recovery_snapshot(info: TaskInfo, *, now: float | None = None) -> tuple[Tas
         object_ref=info.object_ref,
         worker_submitted=getattr(info, "worker_submitted", False),
         submission_started_at=getattr(info, "submission_started_at", None),
+        worker_started=getattr(info, "worker_started", False),
+        worker_finished=getattr(info, "worker_finished", False),
     )
     return snapshot, _tombstone_deadline(snapshot, now=timestamp)
 
@@ -294,6 +305,17 @@ class TaskInfo:
     # a deadline that kept running while nothing could renew it. Renewals are
     # not persisted, so a recovered value is stale anyway.
     worker_lease_expires_at: float | None = None
+    # The worker reports these itself: ``worker_started`` with its first lease
+    # renewal, when ``process_file`` begins, and ``worker_finished`` when it
+    # returns. Until it starts, a task may still be waiting in the worker
+    # actor's queue, where nothing renews its lease.
+    worker_started: bool = False
+    worker_finished: bool = False
+    # The worker actor's restart count when the pool sent it the task, or, if
+    # the pool could not read it, when the task's ref was first seen orphaned.
+    # A task still queued sits in the incarnation it was sent to; a restart
+    # past that count has dropped it.
+    worker_restarts_baseline: int | None = None
 
 
 _REF_PENDING = "pending"
@@ -343,17 +365,101 @@ def _worker_lease_is_live(info: TaskInfo, *, now: float | None = None) -> bool:
     return isinstance(expires_at, (int, float)) and expires_at > timestamp
 
 
+# actor id -> (monotonic read time, (alive, restarts)).
+_worker_actor_states: dict[str, tuple[float, tuple[bool, int]]] = {}
+
+
+def read_worker_actor_state(actor_id: str) -> tuple[bool, int] | None:
+    """Whether the worker actor is alive, and its restart count, from the GCS.
+
+    Read from the GCS actor table rather than by calling the worker, which
+    would queue the call behind the very work in question. ``None`` when the
+    read failed: the caller must then hold the task.
+    """
+    try:
+        from ray._private import state as ray_state
+
+        actor = ray_state.actors(actor_id=actor_id)
+    except Exception as exc:  # noqa: BLE001 - an unreadable GCS must hold, never release
+        from core.utils.logging import get_logger
+
+        get_logger().bind(worker_actor_id=actor_id).warning(
+            "Could not read the worker actor's state; holding its orphaned task.",
+            error=str(exc),
+        )
+        return None
+    if not actor:
+        # The id came from a live handle, so an unknown actor is one the GCS
+        # already dropped from its table of dead actors.
+        return False, 0
+    return actor.get("State") == "ALIVE", int(actor.get("NumRestarts") or 0)
+
+
+def _worker_actor_state(actor_id: str, *, fresh: bool) -> tuple[bool, int] | None:
+    now = time.monotonic()
+    cached = _worker_actor_states.get(actor_id)
+    if not fresh and cached is not None and now - cached[0] < _WORKER_ACTOR_STATE_CACHE_SECONDS:
+        return cached[1]
+    state = read_worker_actor_state(actor_id)
+    if state is not None:
+        _worker_actor_states[actor_id] = (now, state)
+    return state
+
+
+def _queued_orphan_has_settled(info: TaskInfo, actor_id: str) -> bool:
+    """Settle an orphaned task the worker never started only once it cannot run.
+
+    Ray still runs a task queued on a live worker actor after the task's owner
+    died, so elapsed time proves nothing here: a queue can hold a task for
+    longer than any lease. The task is gone once the actor incarnation holding
+    it is: the actor is no longer alive, or it restarted past the count the
+    pool read when it sent the task.
+
+    Without that count (the pool could not read the GCS), the first read after
+    the owner died stands in: the incarnation holding the task was alive no
+    later than that, so it is sound, only slower to notice a restart that came
+    first. That read is never served from the cache, which may predate the
+    owner's death and a restart the task survived. Later cached reads can only
+    lag the GCS, which is conservative: death is final and the count only grows.
+    """
+    baseline = getattr(info, "worker_restarts_baseline", None)
+    if baseline is None:
+        registered = info.object_ref.get(WORKER_RESTARTS_KEY) if isinstance(info.object_ref, dict) else None
+        if isinstance(registered, int) and not isinstance(registered, bool):
+            baseline = info.worker_restarts_baseline = registered
+    state = _worker_actor_state(actor_id, fresh=baseline is None)
+    if state is None:
+        return False
+    alive, restarts = state
+    if not alive:
+        return True
+    if baseline is None:
+        info.worker_restarts_baseline = restarts
+        return False
+    return restarts > baseline
+
+
 def _worker_ref_has_settled(info: TaskInfo) -> bool:
     """Whether the worker behind the stored ref can no longer write.
 
-    An orphaned ref says nothing about the worker, so its lease decides: the
-    worker renews it while it runs, and it lapses within
-    ``_WORKER_LEASE_TTL_SECONDS`` once the worker returns or dies.
+    An orphaned ref says nothing about the worker. Once the worker started,
+    its lease decides: it renews the lease while it runs, ends it when it
+    returns, and the lease lapses within ``_WORKER_LEASE_TTL_SECONDS`` if it
+    died. Before that, the task may be queued on the worker actor, and only
+    that actor's fate settles it. A ref registered without the worker actor's
+    id (a pool from an earlier release) falls back to the lease alone.
     """
     status = _object_ref_status(info.object_ref)
-    if status == _REF_OWNER_DIED:
+    if status != _REF_OWNER_DIED:
+        return status == _REF_SETTLED
+    if getattr(info, "worker_finished", False):
+        return True
+    if getattr(info, "worker_started", False):
         return not _worker_lease_is_live(info)
-    return status == _REF_SETTLED
+    actor_id = info.object_ref.get(WORKER_ACTOR_ID_KEY) if isinstance(info.object_ref, dict) else None
+    if not isinstance(actor_id, str) or not actor_id:
+        return not _worker_lease_is_live(info)
+    return _queued_orphan_has_settled(info, actor_id)
 
 
 def _worker_has_settled(info: TaskInfo) -> bool:
@@ -396,7 +502,9 @@ def _content_claim_registration_expired(details: dict[str, Any]) -> bool:
 
 @ray.remote(concurrency_groups={"set": 1000, "get": 1000, "queue_info": 1000})
 class TaskStateManager:
-    def __init__(self) -> None:
+    def __init__(self, worker_lease_ttl_seconds: float = _WORKER_LEASE_TTL_SECONDS) -> None:
+        # A parameter only so a test can watch a lease lapse in seconds.
+        self._worker_lease_ttl_seconds = worker_lease_ttl_seconds
         self.tasks, expiries = _load_recoverable_tasks()
         self.user_index: dict[int | None, set[str]] = {}
         # Terminal task ids in eviction order, mapped to the time they may go.
@@ -404,7 +512,7 @@ class TaskStateManager:
         now = time.time()
         for task_id, info in self.tasks.items():
             self.user_index.setdefault(info.details.get("user_id"), set()).add(task_id)
-            info.worker_lease_expires_at = now + _WORKER_LEASE_TTL_SECONDS
+            info.worker_lease_expires_at = now + worker_lease_ttl_seconds
             if info.state not in TERMINAL_TASK_STATES:
                 continue
             # A restart must not restart the clock: a record that was persisted
@@ -1023,34 +1131,70 @@ class TaskStateManager:
             info.submission_started_at = None
             # Covers the worker until its first renewal, and a worker from a
             # generation that never renews.
-            info.worker_lease_expires_at = time.time() + _WORKER_LEASE_TTL_SECONDS
+            info.worker_lease_expires_at = time.time() + self._worker_lease_ttl_seconds
             self._persist_task_locked(task_id, info)
             return True
 
     @ray.method(concurrency_group="set")
-    async def renew_worker_lease(self, task_id: str) -> bool:
-        """Record that the task's worker is still running ``process_file``."""
+    async def renew_worker_lease(self, task_id: str) -> bool | None:
+        """Record that the task's worker is running ``process_file``.
+
+        The first renewal also records that the worker started: from then on
+        an orphaned ref is settled by this lease rather than by the worker
+        actor's fate. Returns ``False`` once the task is cancelled: the worker
+        then cancels its own ``process_file``, because ``ray.cancel`` cannot
+        reach a task whose owner died. ``None`` for a task this actor does not
+        know, which the worker ignores.
+        """
         with self.lock:
             info = self.tasks.get(task_id)
             if info is None:
-                return False
-            info.worker_lease_expires_at = time.time() + _WORKER_LEASE_TTL_SECONDS
-            return True
+                return None
+            info.worker_lease_expires_at = time.time() + self._worker_lease_ttl_seconds
+            if not getattr(info, "worker_started", False):
+                info.worker_started = True
+                self._persist_task_locked(task_id, info)
+            return info.state != "CANCELLED"
+
+    @ray.method(concurrency_group="set")
+    async def end_worker_lease(self, task_id: str) -> None:
+        """Record that the task's worker returned from ``process_file``.
+
+        Settles an orphaned ref at once rather than when the lease lapses, so
+        a delete waiting on a worker it cancelled does not wait out the TTL.
+        """
+        with self.lock:
+            info = self.tasks.get(task_id)
+            if info is None or getattr(info, "worker_finished", False):
+                return
+            info.worker_started = True
+            info.worker_finished = True
+            self._persist_task_locked(task_id, info)
 
     @ray.method(concurrency_group="get")
     async def has_worker_settled(self, task_id: str) -> bool:
         """Whether the task's stored worker can no longer write.
 
         The completion tracker asks this after its own wait on the ref ended in
-        ``OwnerDiedError``, before it stamps the task finished. Unlike the
-        fence it ignores that stamp, since the stamp is what it is deciding on.
+        ``OwnerDiedError``, before it stamps the task finished, and so does a
+        delete that cancelled such a task. Unlike the fence it ignores that
+        stamp, since the stamp is what the tracker is deciding on.
+
+        A missing ref follows the fence: a record that can still get a worker
+        (an active task not yet registered, or a cancellation still holding a
+        submitted worker) has not settled. One whose ref was cleared after its
+        worker settled (``finish_cancellation``, ``finish_rejected_submission``)
+        has, and so has a record already evicted, which only ever happens to a
+        terminal record that fences no worker.
         """
         with self.lock:
             info = self.tasks.get(task_id)
             if info is None:
                 return True
             ref = info.object_ref.get("ref") if isinstance(info.object_ref, dict) else info.object_ref
-            return ref is None or _worker_ref_has_settled(info)
+            if ref is None:
+                return info.state not in CANCELLABLE_INDEXING_STATES and not _cancelled_task_has_worker_fence(info)
+            return _worker_ref_has_settled(info)
 
     @ray.method(concurrency_group="get")
     async def get_state(self, task_id: str) -> str | None:

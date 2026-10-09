@@ -1993,10 +1993,216 @@ async def test_a_value_that_is_not_a_ref_preserves_the_fence() -> None:
 
 @pytest.mark.asyncio
 async def test_worker_lease_renewal_and_settlement_for_unknown_or_refless_tasks() -> None:
+    """A missing ref reads the way the fence reads it: settled only once nothing can start a worker."""
     manager = _task_state_manager()
 
-    assert await manager.renew_worker_lease("missing") is False
+    assert await manager.renew_worker_lease("missing") is None
     assert await manager.has_worker_settled("missing") is True
 
     await manager.set_queued_details("task-1", file_id="file-1", partition="tenant-a", metadata={}, user_id=42)
+    assert await manager.has_worker_settled("task-1") is False
+    assert await manager.get_active_indexing_task_for_file(partition="tenant-a", file_id="file-1") == "task-1"
+
+    await manager.set_state("task-1", "FAILED")
+    assert await manager.has_worker_settled("task-1") is True
+
+
+@pytest.mark.asyncio
+async def test_a_cancellation_cleared_after_its_worker_settled_reads_settled() -> None:
+    manager = _task_state_manager()
+    worker_ref = _FakeWorkerRef()
+    await _serializing_task_for_file_1(manager, worker_ref)
+    assert await manager.set_cancelled_if_active("task-1") is True
+    assert await manager.has_worker_settled("task-1") is False
+
+    worker_ref.fail(ray_exceptions.TaskCancelledError())
+    assert await manager.finish_cancellation("task-1") is True
+
+    assert await manager.get_object_ref("task-1") is None
+    assert await manager.has_worker_settled("task-1") is True
+
+
+class _WorkerActorTable:
+    """Stands in for the GCS actor table the queued-orphan rule reads."""
+
+    def __init__(self) -> None:
+        self.alive = True
+        self.restarts = 0
+        self.error: Exception | None = None
+        self.reads: list[str] = []
+
+    def __call__(self, actor_id: str) -> tuple[bool, int] | None:
+        self.reads.append(actor_id)
+        if self.error is not None:
+            return None
+        return self.alive, self.restarts
+
+
+@pytest.fixture
+def actor_table(monkeypatch) -> _WorkerActorTable:
+    table = _WorkerActorTable()
+    monkeypatch.setattr(task_state_module, "read_worker_actor_state", table)
+    monkeypatch.setattr(task_state_module, "_worker_actor_states", {})
+    return table
+
+
+async def _orphaned_queued_task_for_file_1(
+    manager: Any, *, restarts_at_submission: int | None = None
+) -> _FakeWorkerRef:
+    """task-1 sent to worker actor ``w1``, never started, and its owner died."""
+    worker_ref = _FakeWorkerRef()
+    await manager.set_queued_details("task-1", file_id="file-1", partition="tenant-a", metadata={}, user_id=42)
+    registration: dict[str, Any] = {"ref": worker_ref, task_state_module.WORKER_ACTOR_ID_KEY: "w1"}
+    if restarts_at_submission is not None:
+        registration[task_state_module.WORKER_RESTARTS_KEY] = restarts_at_submission
+    assert await manager.set_object_ref("task-1", registration) is True
+    worker_ref.fail(_owner_died())
+    return worker_ref
+
+
+@pytest.mark.asyncio
+async def test_a_queued_orphan_holds_the_file_past_the_lease_while_its_worker_actor_lives(clock, actor_table) -> None:
+    """Nothing renews a lease for a task waiting in the actor's queue, so the lease cannot settle it."""
+    manager = _task_state_manager()
+    await _orphaned_queued_task_for_file_1(manager)
+
+    clock.now += 10 * task_state_module._WORKER_LEASE_TTL_SECONDS
+
+    assert await manager.has_worker_settled("task-1") is False
+    assert await manager.get_content_claim_task_ids(partition="tenant-a") == {"task-1"}
+    assert await _refuses_a_second_upload_of_file_1(manager) is True
+    assert set(actor_table.reads) == {"w1"}
+
+
+@pytest.mark.asyncio
+async def test_a_queued_orphan_settles_once_its_worker_actor_died(clock, actor_table) -> None:
+    manager = _task_state_manager()
+    await _orphaned_queued_task_for_file_1(manager)
+    assert await manager.has_worker_settled("task-1") is False
+
+    actor_table.alive = False
+    task_state_module._worker_actor_states.clear()
+
+    assert await manager.has_worker_settled("task-1") is True
+    assert await _refuses_a_second_upload_of_file_1(manager) is False
+
+
+@pytest.mark.asyncio
+async def test_a_queued_orphan_settles_once_its_worker_actor_restarted(clock, actor_table) -> None:
+    """A restart drops the queue of the incarnation the dead owner sent the task to."""
+    actor_table.restarts = 2
+    manager = _task_state_manager()
+    await _orphaned_queued_task_for_file_1(manager)
+    assert await manager.has_worker_settled("task-1") is False
+
+    actor_table.restarts = 3
+    task_state_module._worker_actor_states.clear()
+
+    assert await manager.has_worker_settled("task-1") is True
+
+
+@pytest.mark.asyncio
+async def test_a_queued_orphan_counts_restarts_from_when_the_pool_sent_it(clock, actor_table) -> None:
+    """The worker can restart before anything looks at the orphan, e.g. when a node takes both actors down."""
+    manager = _task_state_manager()
+    await _orphaned_queued_task_for_file_1(manager, restarts_at_submission=0)
+    actor_table.restarts = 1
+
+    assert await manager.has_worker_settled("task-1") is True
+
+
+@pytest.mark.asyncio
+async def test_a_queued_orphan_without_a_registered_count_takes_it_from_a_fresh_read(clock, actor_table) -> None:
+    """A cached read may predate the owner's death, and a restart the queued task survived."""
+    manager = _task_state_manager()
+    await _orphaned_queued_task_for_file_1(manager)
+    task_state_module._worker_actor_states["w1"] = (task_state_module.time.monotonic(), (True, 0))
+    actor_table.restarts = 1
+
+    assert await manager.has_worker_settled("task-1") is False
+    assert actor_table.reads == ["w1"]
+    assert manager.tasks["task-1"].worker_restarts_baseline == 1
+
+
+@pytest.mark.asyncio
+async def test_a_queued_orphan_holds_while_the_gcs_cannot_be_read(clock, actor_table) -> None:
+    manager = _task_state_manager()
+    await _orphaned_queued_task_for_file_1(manager)
+    actor_table.error = RuntimeError("GCS unavailable")
+
+    assert await manager.has_worker_settled("task-1") is False
+    assert await _refuses_a_second_upload_of_file_1(manager) is True
+
+
+@pytest.mark.asyncio
+async def test_a_started_orphan_follows_its_lease_and_settles_when_the_worker_returns(clock, actor_table) -> None:
+    manager = _task_state_manager()
+    await _orphaned_queued_task_for_file_1(manager)
+
+    assert await manager.renew_worker_lease("task-1") is True
+    clock.now += task_state_module._WORKER_LEASE_TTL_SECONDS - 1
+    assert await manager.has_worker_settled("task-1") is False
+
+    await manager.end_worker_lease("task-1")
+
+    assert await manager.has_worker_settled("task-1") is True
+    assert await _refuses_a_second_upload_of_file_1(manager) is False
+    assert actor_table.reads == []
+
+
+@pytest.mark.asyncio
+async def test_a_started_orphan_settles_once_its_dead_worker_lets_the_lease_lapse(clock, actor_table) -> None:
+    manager = _task_state_manager()
+    await _orphaned_queued_task_for_file_1(manager)
+    assert await manager.renew_worker_lease("task-1") is True
+
+    clock.now += task_state_module._WORKER_LEASE_TTL_SECONDS
+
+    assert await manager.has_worker_settled("task-1") is True
+
+
+@pytest.mark.asyncio
+async def test_lease_renewal_tells_a_cancelled_worker_to_stop() -> None:
+    manager = _task_state_manager()
+    await _serializing_task_for_file_1(manager, _FakeWorkerRef())
+    assert await manager.renew_worker_lease("task-1") is True
+
+    assert await manager.set_cancelled_if_active("task-1") is True
+
+    assert await manager.renew_worker_lease("task-1") is False
+    assert manager.tasks["task-1"].worker_started is True
+
+
+@pytest.mark.asyncio
+async def test_a_restarted_manager_keeps_what_the_worker_reported(monkeypatch) -> None:
+    """Without the started flag, a recovered orphan would wait on its worker actor instead of its lease."""
+    saved: dict[str, TaskInfo] = {}
+    monkeypatch.setattr(
+        task_state_module, "_save_recoverable_task", lambda task_id, info: saved.update({task_id: info})
+    )
+    manager = _task_state_manager()
+    await _serializing_task_for_file_1(manager, _FakeWorkerRef())
+    assert await manager.renew_worker_lease("task-1") is True
+    assert saved["task-1"].worker_started is True
+    await manager.end_worker_lease("task-1")
+    assert saved["task-1"].worker_finished is True
+
+    assert await manager.set_cancelled_if_active("task-1") is True
+    snapshot, _ = task_state_module._recovery_snapshot(manager.tasks["task-1"])
+
+    assert snapshot.worker_started is True
+    assert snapshot.worker_finished is True
+
+
+@pytest.mark.asyncio
+async def test_the_lease_ttl_is_a_constructor_argument(clock) -> None:
+    manager = TaskStateManager.__ray_metadata__.modified_class(worker_lease_ttl_seconds=2.0)
+    worker_ref = _FakeWorkerRef()
+    await _serializing_task_for_file_1(manager, worker_ref)
+    worker_ref.fail(_owner_died())
+    assert await manager.renew_worker_lease("task-1") is True
+
+    clock.now += 1.5
+    assert await manager.has_worker_settled("task-1") is False
+    clock.now += 0.5
     assert await manager.has_worker_settled("task-1") is True
