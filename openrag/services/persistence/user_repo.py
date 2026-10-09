@@ -532,7 +532,8 @@ class PgUserRepository(UserRepository):
         Runs in one transaction under an advisory lock, so API replicas booting
         together apply it once each, serially. Returns the outcome per
         ``external_user_id`` (``created``, ``updated``, ``untouched``,
-        ``skipped``, ``revoked``).
+        ``skipped``, ``revoked``); a revoked row without one is keyed
+        ``users.id=<id>``.
         """
         if not seed_users and not await self.pool.fetchval(
             "SELECT EXISTS (SELECT 1 FROM users WHERE managed_by_config AND id <> 1)"
@@ -561,15 +562,17 @@ class PgUserRepository(UserRepository):
                     return {seed.external_user_id: "skipped" for seed in seed_users}
 
                 # Revoke first: a token moved from a removed account to a new one
-                # must not collide with the old row's hash below.
+                # must not collide with the old row's hash below. ``IS NOT TRUE``
+                # also catches a managed row whose external_user_id is NULL.
                 stale = await conn.fetch(
                     """
                     SELECT id, external_user_id FROM users
-                    WHERE managed_by_config AND id <> 1 AND NOT (external_user_id = ANY($1::text[]))
+                    WHERE managed_by_config AND id <> 1 AND (external_user_id = ANY($1::text[])) IS NOT TRUE
                     """,
                     sorted(configured),
                 )
                 for row in stale:
+                    key = row["external_user_id"] or f"users.id={row['id']}"
                     revoked = await conn.fetchval(
                         """
                         UPDATE users SET token = NULL, is_admin = FALSE
@@ -580,10 +583,10 @@ class PgUserRepository(UserRepository):
                     )
                     dropped = await conn.execute("DELETE FROM partition_memberships WHERE user_id = $1", row["id"])
                     if revoked is not None or dropped != "DELETE 0":
-                        logger.bind(external_user_id=row["external_user_id"]).warning(
+                        logger.bind(external_user_id=row["external_user_id"], user_id=row["id"]).warning(
                             "Seed user removed from auth.seed_users: token revoked and memberships dropped"
                         )
-                    outcomes[row["external_user_id"]] = "revoked"
+                    outcomes[key] = "revoked"
 
                 for seed in seed_users:
                     if seed.external_user_id not in tokens:

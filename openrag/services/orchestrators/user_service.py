@@ -24,7 +24,7 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING, Any
 
-from core.utils.exceptions import UserNotFoundError, ValidationError
+from core.utils.exceptions import ConflictError, UserNotFoundError, ValidationError
 from core.utils.logging import get_logger
 
 if TYPE_CHECKING:
@@ -205,6 +205,17 @@ class UserService:
         existing_user = await self._user_repo.get_user(user_id)
         if existing_user is None:
             raise UserNotFoundError(f"User '{user_id}' not found")
+        if (
+            existing_user.managed_by_config
+            and "external_user_id" in updates
+            and updates["external_user_id"] != existing_user.external_user_id
+        ):
+            # auth.seed_users matches its rows on external_user_id: a rename
+            # would detach the row from its entry and keep its token alive.
+            raise ConflictError(
+                f"User '{user_id}' is managed by configuration (auth.seed_users): "
+                "change its external_user_id there, not through the API"
+            )
         demotes_admin = existing_user.is_admin and updates.get("is_admin") is False
 
         revoked = 0

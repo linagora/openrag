@@ -102,6 +102,13 @@ These accounts are for bearer tokens only. An OIDC login whose `sub` equals the
 to the account, and any OIDC session found on a managed account is deleted at the next
 startup.
 
+The configuration stays the source of truth for these accounts. Changing the
+`external_user_id` of a managed account through the admin API is refused with a 409:
+seeding matches rows on that field, so a renamed row would drop out of its entry. Other
+admin edits (display name, admin flag, partition memberships, a regenerated token) are
+accepted but only last until the next startup that has the entry's token, which rewrites
+them from the configuration. Make those changes in `auth.seed_users` instead.
+
 If the seeding step itself fails (a database error, for instance), the error is logged
 without the token or the driver's message and the API starts anyway; the accounts keep
 their previous state until the next startup.

@@ -338,6 +338,26 @@ class TestRemoval:
         moved = await repo.get_user_by_token(_hash_token(TOKEN_A))
         assert moved is not None and moved.external_user_id == "svc-b"
 
+    async def test_a_managed_account_whose_external_id_was_cleared_is_revoked(self, postgres_store: PostgresStore):
+        """``NULL = ANY(...)`` is NULL: such a row must not slip past the revoke query."""
+        repo = postgres_store.user_repo
+        auth = _auth_service(postgres_store)
+        both = [_seed(partitions=[], is_admin=True), _seed("svc-b", "SVC_B_TOKEN", partitions=[])]
+        env = {"SVC_A_TOKEN": TOKEN_A, "SVC_B_TOKEN": TOKEN_B}
+        await repo.ensure_seed_users(both, env=env)
+        cleared_id = (await _row(postgres_store, "svc-a"))["id"]
+        await postgres_store.pool.execute("UPDATE users SET external_user_id = NULL WHERE id = $1", cleared_id)
+
+        outcome = await repo.ensure_seed_users(both[1:], env=env)
+
+        assert outcome == {f"users.id={cleared_id}": "revoked", "svc-b": "updated"}
+        row = await postgres_store.pool.fetchrow("SELECT token, is_admin FROM users WHERE id = $1", cleared_id)
+        assert row["token"] is None and row["is_admin"] is False
+        assert await auth.get_user_by_token_for_request(TOKEN_A) is None
+        # Re-adding the entry works: the old row no longer holds its token.
+        outcome = await repo.ensure_seed_users(both, env=env)
+        assert outcome["svc-a"] == "created"
+
     async def test_an_entry_skipped_for_its_token_is_not_revoked(self, postgres_store: PostgresStore):
         repo = postgres_store.user_repo
         await repo.ensure_seed_users([_seed(partitions=[])], env={"SVC_A_TOKEN": TOKEN_A})
