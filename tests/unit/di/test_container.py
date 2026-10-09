@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from core.config.auth import AuthConfig, SeedUserConfig
 from core.config.infrastructure import RDBConfig, VectorDBConfig
 from core.config.model_endpoints import ModelEndpointConfig, ModelsConfig
 from core.config.root import Settings
@@ -268,6 +269,72 @@ class TestCatalogStoreWiring:
             "partition.load",
             "swaps.watch",
         ]
+
+    @staticmethod
+    def _seeding_container(calls: list, seed_users: list) -> ServiceContainer:
+        """A container whose startup steps only record their order."""
+
+        async def ensure_admin_user(token):
+            calls.append("admin")
+
+        async def ensure_seed_users(configured):
+            calls.append(("seed_users", [s.external_user_id for s in configured]))
+
+        class FakeCatalogStore:
+            user_repo = SimpleNamespace(ensure_admin_user=ensure_admin_user, ensure_seed_users=ensure_seed_users)
+
+            async def initialize(self):
+                calls.append("initialize")
+
+        settings = _settings().model_copy(update={"auth": AuthConfig(seed_users=seed_users)})
+        c = ServiceContainer(settings)
+        c._catalog_store = FakeCatalogStore()
+        c._model_endpoint_service = SimpleNamespace(
+            seed_defaults=lambda: _async_call(calls, "endpoint.seed"),
+            load_all=lambda: _async_call(calls, "endpoint.load"),
+        )
+        c._preset_service = SimpleNamespace(
+            seed_defaults=lambda: _async_call(calls, "preset.seed"),
+            load_all=lambda: _async_call(calls, "preset.load"),
+        )
+        c._prompt_service = SimpleNamespace(seed_defaults=lambda: _async_call(calls, "prompt.seed"))
+        c._partition_service = SimpleNamespace(
+            seed_default_partition=lambda: _async_call(calls, "partition.seed"),
+            load_partitions=lambda: _async_call(calls, "partition.load"),
+        )
+        c._embedder_swap_service = SimpleNamespace(watch=lambda: _async_call(calls, "swaps.watch"))
+        return c
+
+    @pytest.mark.asyncio
+    async def test_seed_users_run_after_the_partitions_when_asked(self):
+        """The API process seeds auth.seed_users once the partitions exist."""
+        calls: list = []
+        seeds = [SeedUserConfig(external_user_id="svc-a", token_env="SVC_A_TOKEN")]
+        c = self._seeding_container(calls, seeds)
+
+        await c.initialize(seed_users=True)
+
+        assert calls.index(("seed_users", ["svc-a"])) == calls.index("partition.seed") + 1
+        assert calls.index("partition.load") == calls.index("partition.seed") + 2
+
+    @pytest.mark.asyncio
+    async def test_seed_users_are_not_run_by_default(self):
+        """Chainlit and the MCP server initialise without the flag: no second writer."""
+        calls: list = []
+        c = self._seeding_container(calls, [SeedUserConfig(external_user_id="svc-a", token_env="SVC_A_TOKEN")])
+
+        await c.initialize()
+
+        assert not [call for call in calls if isinstance(call, tuple)]
+
+    @pytest.mark.asyncio
+    async def test_an_empty_seed_list_skips_the_step(self):
+        calls: list = []
+        c = self._seeding_container(calls, [])
+
+        await c.initialize(seed_users=True)
+
+        assert not [call for call in calls if isinstance(call, tuple)]
 
 
 class TestVectorStoreWiring:

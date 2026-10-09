@@ -213,8 +213,13 @@ class ServiceContainer:
     # Lifecycle
     # ------------------------------------------------------------------
 
-    async def initialize(self) -> None:
-        """Open the storage adapters (asyncpg pool + Alembic migrations)."""
+    async def initialize(self, *, seed_users: bool = False) -> None:
+        """Open the storage adapters (asyncpg pool + Alembic migrations).
+
+        ``seed_users`` provisions ``auth.seed_users``. Only the API process
+        passes it: Chainlit and the MCP server build their own container in a
+        separate process, and the accounts must have one writer.
+        """
         if self._catalog_store is not None:
             await self._initialize_step("initializing catalog store", self._catalog_store.initialize)
             await self._initialize_step(
@@ -230,6 +235,14 @@ class ServiceContainer:
             # only startup step.
             await self._initialize_step("seeding prompts", self.prompt_service.seed_defaults)
             await self._initialize_step("ensuring default partition", self.partition_service.seed_default_partition)
+            # After the partitions exist (memberships reference them) and after
+            # the admin owns users.id = 1.
+            if seed_users and self._settings is not None and self._settings.auth.seed_users:
+                configured = self._settings.auth.seed_users
+                await self._initialize_step(
+                    "ensuring seed users",
+                    lambda: self.user_repo.ensure_seed_users(configured),
+                )
             await self._initialize_step("loading partition configs", self.partition_service.load_partitions)
             # Swaps interrupted by the last shutdown continue where they
             # stopped, and ones another process lets go of later are claimed

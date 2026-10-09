@@ -31,15 +31,19 @@ Notes on the schema vs. the port:
 from __future__ import annotations
 
 import hashlib
+import os
 import secrets
-from collections.abc import Callable
-from typing import TYPE_CHECKING, Any
+from collections.abc import Callable, Mapping, Sequence
+from typing import Any
 
+import asyncpg
+from core.config.auth import ADMIN_TOKEN_ENV_VAR, SeedUserConfig
+from core.config.secrets_guard import ALLOW_INSECURE_SECRETS_ENV_VAR, MIN_SECRET_LENGTH, is_known_default
 from core.models.user import ApiKey, PartitionRole, User, UserPartition
 from core.ports.user_repo import UserRepository
+from core.utils.logging import get_logger
 
-if TYPE_CHECKING:
-    import asyncpg
+logger = get_logger()
 
 
 def _hash_token(token: str) -> str:
@@ -51,6 +55,74 @@ def _hash_token(token: str) -> str:
     without instantiating the repo.
     """
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+#: Serialises :meth:`PgUserRepository.ensure_seed_users` across API replicas
+#: booting together. Transaction-scoped: released on commit or rollback.
+_SEED_USERS_LOCK_SQL = "SELECT pg_advisory_xact_lock(hashtext('users.seed_users'))"
+
+
+def _resolve_seed_tokens(
+    seed_users: Sequence[SeedUserConfig],
+    env: Mapping[str, str],
+) -> tuple[dict[str, str | None], dict[str, str]]:
+    """Read and vet each seed user's token before any row is touched.
+
+    Returns ``(tokens, outcomes)``: ``tokens`` maps the ``external_user_id`` of
+    every entry that may proceed to its token (``None`` when the env var is
+    unset or blank); ``outcomes`` marks the refused entries ``skipped``. A token
+    is refused when it fails the boot-time secret policy (a published default,
+    or shorter than :data:`MIN_SECRET_LENGTH`; ``ALLOW_INSECURE_SECRETS=true``
+    downgrades that to a warning, as for every other credential), when it is
+    ``AUTH_TOKEN``'s value, or when two entries share it, in which case both are
+    refused since neither can be told apart from the other at lookup time.
+    Log lines name the entry and the env var, never the value.
+    """
+    allow_insecure = env.get(ALLOW_INSECURE_SECRETS_ENV_VAR, "").strip().lower() == "true"
+    admin_token = env.get(ADMIN_TOKEN_ENV_VAR) or None
+    tokens: dict[str, str | None] = {}
+    outcomes: dict[str, str] = {}
+
+    def refuse(seed: SeedUserConfig, reason: str) -> None:
+        logger.bind(external_user_id=seed.external_user_id, token_env=seed.token_env).error(
+            f"Seed user skipped: {reason}"
+        )
+        tokens.pop(seed.external_user_id, None)
+        outcomes[seed.external_user_id] = "skipped"
+
+    for seed in seed_users:
+        value = env.get(seed.token_env, "")
+        if not value.strip():
+            tokens[seed.external_user_id] = None
+            continue
+        weak = is_known_default(value) or len(value.strip()) < MIN_SECRET_LENGTH
+        if weak and not allow_insecure:
+            refuse(
+                seed,
+                f"its token is a published default or shorter than {MIN_SECRET_LENGTH} characters "
+                f"(set {ALLOW_INSECURE_SECRETS_ENV_VAR}=true to override on a disposable stack)",
+            )
+            continue
+        if weak:
+            logger.bind(external_user_id=seed.external_user_id, token_env=seed.token_env).warning(
+                f"{ALLOW_INSECURE_SECRETS_ENV_VAR}=true: seeding a token that fails the secret policy"
+            )
+        if admin_token is not None and value == admin_token:
+            refuse(seed, f"its token is the value of {ADMIN_TOKEN_ENV_VAR}")
+            continue
+        tokens[seed.external_user_id] = value
+
+    by_value: dict[str, list[SeedUserConfig]] = {}
+    for seed in seed_users:
+        value = tokens.get(seed.external_user_id)
+        if value is not None:
+            by_value.setdefault(value, []).append(seed)
+    for sharing in by_value.values():
+        if len(sharing) > 1:
+            names = ", ".join(s.external_user_id for s in sharing)
+            for seed in sharing:
+                refuse(seed, f"its token is shared by several seed users ({names})")
+    return tokens, outcomes
 
 
 class PgUserRepository(UserRepository):
@@ -425,6 +497,177 @@ class PgUserRepository(UserRepository):
                 # silently invalidating every admin client on each restart.
                 await conn.execute("UPDATE users SET is_admin = TRUE WHERE id = 1")
                 return ""
+
+    async def ensure_seed_users(
+        self,
+        seed_users: Sequence[SeedUserConfig],
+        env: Mapping[str, str] | None = None,
+    ) -> dict[str, str]:
+        """Provision the operator-managed accounts declared in ``auth.seed_users``.
+
+        The generalisation of :meth:`ensure_admin_user` to every account whose
+        token is decided outside OpenRag (OpenBao, a Kubernetes Secret): the
+        shape comes from configuration, the token from the environment variable
+        each entry names. Rows created here carry ``managed_by_config`` and the
+        configuration is their source of truth:
+
+        * token env var set: the account is upserted on ``external_user_id`` and
+          its stored hash rewritten, so a rotation is "change the secret,
+          restart". Listed memberships are upserted and unlisted ones dropped.
+        * token env var unset: an existing account is left untouched and a new
+          one is not created (it would have no credential). Warned, not fatal.
+        * a managed account no longer listed: its token is cleared (no hash
+          matches ``NULL``), admin rights and memberships dropped. The row stays.
+
+        A row that exists without the marker (created through the API, or by
+        an OIDC login matching on ``sub``) is never taken over, and
+        ``users.id = 1`` is never touched. Entries whose token fails the secret
+        policy, repeats another entry's token or ``AUTH_TOKEN``, or collides
+        with another account's hash are skipped. A partition that does not
+        exist is skipped too, never created. No log line carries a token or a
+        hash.
+
+        Runs in one transaction under an advisory lock, so API replicas booting
+        together apply it once each, serially. Returns the outcome per
+        ``external_user_id`` (``created``, ``updated``, ``untouched``,
+        ``skipped``, ``revoked``).
+        """
+        environ = os.environ if env is None else env
+        tokens, outcomes = _resolve_seed_tokens(seed_users, environ)
+        configured = {seed.external_user_id for seed in seed_users}
+
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                await conn.execute(_SEED_USERS_LOCK_SQL)
+                if await conn.fetchval("SELECT 1 FROM users WHERE id = 1") is None:
+                    # Without the admin row the next insert could take id 1,
+                    # which ensure_admin_user would then promote to admin.
+                    logger.error("Seed users not provisioned: the admin account (users.id = 1) does not exist yet")
+                    return {seed.external_user_id: "skipped" for seed in seed_users}
+
+                # Revoke first: a token moved from a removed account to a new one
+                # must not collide with the old row's hash below.
+                stale = await conn.fetch(
+                    """
+                    SELECT id, external_user_id FROM users
+                    WHERE managed_by_config AND id <> 1 AND NOT (external_user_id = ANY($1::text[]))
+                    """,
+                    sorted(configured),
+                )
+                for row in stale:
+                    revoked = await conn.fetchval(
+                        """
+                        UPDATE users SET token = NULL, is_admin = FALSE
+                        WHERE id = $1 AND token IS NOT NULL
+                        RETURNING id
+                        """,
+                        row["id"],
+                    )
+                    dropped = await conn.execute("DELETE FROM partition_memberships WHERE user_id = $1", row["id"])
+                    if revoked is not None or dropped != "DELETE 0":
+                        logger.bind(external_user_id=row["external_user_id"]).warning(
+                            "Seed user removed from auth.seed_users: token revoked and memberships dropped"
+                        )
+                    outcomes[row["external_user_id"]] = "revoked"
+
+                for seed in seed_users:
+                    if seed.external_user_id not in tokens:
+                        continue  # failed the token checks, already logged
+                    outcomes[seed.external_user_id] = await self._apply_seed_user(
+                        conn, seed, tokens[seed.external_user_id]
+                    )
+        return outcomes
+
+    async def _apply_seed_user(self, conn: asyncpg.Connection, seed: SeedUserConfig, token: str | None) -> str:
+        log = logger.bind(external_user_id=seed.external_user_id, token_env=seed.token_env)
+        existing = await conn.fetchrow(
+            "SELECT id, managed_by_config FROM users WHERE external_user_id = $1",
+            seed.external_user_id,
+        )
+        if existing is not None and (existing["id"] == 1 or not existing["managed_by_config"]):
+            log.error(
+                "Seed user skipped: an account with this external_user_id already exists and was not "
+                "created from auth.seed_users (API or OIDC); it is left untouched"
+            )
+            return "skipped"
+        if token is None:
+            if existing is not None:
+                log.warning("Seed user token env var is unset: existing account left untouched")
+                return "untouched"
+            log.warning("Seed user token env var is unset: account not created")
+            return "skipped"
+
+        token_hash = _hash_token(token)
+        holder = await conn.fetchval(
+            "SELECT id FROM users WHERE token = $1 AND external_user_id IS DISTINCT FROM $2",
+            token_hash,
+            seed.external_user_id,
+        )
+        if holder is not None:
+            log.error("Seed user skipped: its token is already the token of another account")
+            return "skipped"
+
+        if seed.is_admin:
+            log.warning("Seed user is provisioned with admin rights (is_admin: true)")
+        try:
+            # A savepoint, so a constraint violation the checks above could not
+            # foresee (a concurrent API insert) skips this entry only. The
+            # driver's message is not logged: it can quote the token hash.
+            async with conn.transaction():
+                row = await conn.fetchrow(
+                    """
+                    INSERT INTO users (external_user_id, display_name, token, is_admin,
+                                       file_count, created_at, managed_by_config)
+                    VALUES ($1, $2, $3, $4, 0, NOW(), TRUE)
+                    ON CONFLICT (external_user_id) DO UPDATE
+                      SET display_name = EXCLUDED.display_name,
+                          token = EXCLUDED.token,
+                          is_admin = EXCLUDED.is_admin
+                      WHERE users.managed_by_config AND users.id <> 1
+                    RETURNING id
+                    """,
+                    seed.external_user_id,
+                    seed.display_name,
+                    token_hash,
+                    seed.is_admin,
+                )
+                if row is None:
+                    log.error("Seed user skipped: the account was taken by an unmanaged row meanwhile")
+                    return "skipped"
+                await self._sync_seed_memberships(conn, row["id"], seed, log)
+        except asyncpg.UniqueViolationError as exc:
+            log.bind(constraint=exc.constraint_name).error("Seed user skipped: unique constraint violated")
+            return "skipped"
+        return "updated" if existing is not None else "created"
+
+    @staticmethod
+    async def _sync_seed_memberships(conn: asyncpg.Connection, user_id: int, seed: SeedUserConfig, log: Any) -> None:
+        listed = [m.name for m in seed.partitions]
+        present = {
+            r["partition"]
+            for r in await conn.fetch("SELECT partition FROM partitions WHERE partition = ANY($1::text[])", listed)
+        }
+        for membership in seed.partitions:
+            if membership.name not in present:
+                log.bind(partition=membership.name).warning(
+                    "Seed user membership skipped: partition does not exist (it is not created)"
+                )
+                continue
+            await conn.execute(
+                """
+                INSERT INTO partition_memberships (partition_name, user_id, role, added_at)
+                VALUES ($1, $2, $3, NOW())
+                ON CONFLICT (partition_name, user_id) DO UPDATE SET role = EXCLUDED.role
+                """,
+                membership.name,
+                user_id,
+                membership.role.value,
+            )
+        await conn.execute(
+            "DELETE FROM partition_memberships WHERE user_id = $1 AND NOT (partition_name = ANY($2::text[]))",
+            user_id,
+            listed,
+        )
 
     # ── Helpers ──────────────────────────────────────────────────────
 

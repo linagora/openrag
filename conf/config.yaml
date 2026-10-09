@@ -385,3 +385,15 @@ mcp:
   similarity_threshold: 0.8
   download_timeout: 30.0
   max_download_bytes: 104857600  # 100 MiB
+
+# Operator-managed accounts provisioned by the API at startup. Each entry names
+# the env var carrying its token (token_env), never the token. The SEED_USERS
+# env var (a JSON list) replaces this list; see docs/documentation/user_auth.md.
+auth:
+  seed_users: []
+  #  - external_user_id: svc-cozy-stack
+  #    display_name: cozy-stack
+  #    token_env: COZY_STACK_TOKEN
+  #    is_admin: false
+  #    partitions:
+  #      - { name: twake, role: editor }
