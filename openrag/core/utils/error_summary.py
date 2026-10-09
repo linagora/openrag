@@ -24,9 +24,10 @@ def elide_middle(text: str, max_length: int) -> str:
     if len(text) <= max_length:
         return text
     budget = max_length - len(_ELISION)
-    if budget <= 0:
+    if budget < 2:
+        # Too short to keep something on both sides of the marker.
         return text[:max_length]
-    head = budget // 3
+    head = max(1, budget // 3)
     tail = budget - head
     return f"{text[:head].rstrip()}{_ELISION}{text[len(text) - tail :].lstrip()}"
 

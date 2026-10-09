@@ -113,5 +113,22 @@ def test_elide_middle_respects_limits_too_small_for_the_marker(max_length: int) 
     assert len(elide_middle("abcdefghij", max_length)) <= max_length
 
 
+@pytest.mark.parametrize("max_length", range(1, 12))
+def test_elide_middle_keeps_both_ends_or_slices_at_small_limits(max_length: int) -> None:
+    elided = elide_middle("abcdefghijklmnop", max_length)
+
+    assert len(elided) <= max_length
+    if " ... " in elided:
+        assert elided.startswith("a")
+        assert elided.endswith("p")
+    else:
+        assert elided == "abcdefghijklmnop"[:max_length]
+
+
+def test_elide_middle_slices_when_the_marker_leaves_no_room_for_a_head() -> None:
+    assert elide_middle("abcdefghijklmnop", 6) == "abcdef"
+    assert elide_middle("abcdefghijklmnop", 7) == "a ... p"
+
+
 def test_elide_middle_leaves_short_text_alone() -> None:
     assert elide_middle("short", 5) == "short"

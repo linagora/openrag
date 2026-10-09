@@ -199,7 +199,7 @@ async def test_timeout_names_the_task_and_its_bound(monkeypatch):
     assert str(caught.value) == "MarkerPool PDF (f.pdf) timed out after 0.01s"
 
 
-async def test_timeout_raised_by_the_task_itself_keeps_its_message(monkeypatch):
+async def test_plain_timeout_from_the_awaited_task_reads_as_our_deadline(monkeypatch):
     monkeypatch.setattr(ray_utils.ray, "cancel", lambda *a, **k: None)
     error = TimeoutError("submit timed out")
 
@@ -210,4 +210,49 @@ async def test_timeout_raised_by_the_task_itself_keeps_its_message(monkeypatch):
             task_description="submit",
         )
 
-    assert caught.value is error
+    assert str(caught.value) == "submit timed out after 1s"
+    assert caught.value.__cause__ is error
+
+
+def _forbid_cancel(monkeypatch):
+    def cancel(*_args, **_kwargs):
+        raise AssertionError("a settled task must not be cancelled")
+
+    monkeypatch.setattr(ray_utils.ray, "cancel", cancel)
+
+
+async def test_timeout_raised_inside_the_actor_names_the_cause(monkeypatch):
+    _forbid_cancel(monkeypatch)
+    remote = _ray_task_error(TimeoutError("parse timed out"), "MarkerWorker.process_pdf")
+
+    produced = await _wrapped_failure(remote, "MarkerPool PDF [p10-14] (f.pdf)")
+
+    # Callers branch on the type, so a timeout stays a timeout.
+    assert type(produced) is TimeoutError
+    assert produced.__cause__ is remote
+    reason = failure_reason_from_exception(produced)
+    assert reason == "TimeoutError: MarkerPool PDF [p10-14] (f.pdf) failed: TimeoutError: parse timed out"
+    assert "ray::" not in reason
+    assert "\x1b" not in reason
+
+
+async def test_timeout_raised_two_actors_down_keeps_the_root_cause(monkeypatch):
+    _forbid_cancel(monkeypatch)
+    inner = await _wrapped_failure(
+        _ray_task_error(TimeoutError("parse timed out"), "MarkerWorker.process_pdf"),
+        "MarkerPool PDF [p10-14] (f.pdf)",
+    )
+
+    outer = await _wrapped_failure(
+        _ray_task_error(inner, "MarkerPool.process_pdf"),
+        "MarkerLoader PDF loading (f.pdf)",
+    )
+
+    assert type(outer) is TimeoutError
+    reason = failure_reason_from_exception(outer)
+    assert reason == (
+        "TimeoutError: MarkerLoader PDF loading (f.pdf) failed: "
+        "TimeoutError: MarkerPool PDF [p10-14] (f.pdf) failed: TimeoutError: parse timed out"
+    )
+    assert "ray::" not in reason
+    assert "\x1b" not in reason

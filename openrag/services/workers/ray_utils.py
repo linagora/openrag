@@ -13,6 +13,8 @@ call. Cancellation paths are translated into a predictable shape:
 
 - caller-side timeout → ``ray.cancel(future)`` then raise ``TimeoutError``
   naming the task and its bound
+- worker-side ``TimeoutError`` → ``TimeoutError`` whose message ends with the
+  remote cause (no cancel: the task has already settled)
 - caller-side ``asyncio.CancelledError`` → ``ray.cancel(future)`` then re-raise
 - worker-side ``TaskCancelledError`` → re-raise as-is
 - actor restart/unavailability → ``ServiceUnavailableError`` (503)
@@ -133,12 +135,13 @@ async def call_ray_actor_with_timeout(
         return result[0]
 
     except TimeoutError as exc:
+        if isinstance(exc, RayTaskError):
+            # The actor raised its own TimeoutError (e.g. a Marker child's
+            # bound), so the task has already settled: nothing to cancel. Keep
+            # the type, which callers branch on, and name the remote cause.
+            raise TimeoutError(f"{task_description} failed: {_remote_cause(exc)}") from exc
         logger.warning(f"{task_description} timed out, cancelling Ray task")
         ray.cancel(future, recursive=True)
-        if str(exc):
-            # Raised by the awaited task itself, not by our deadline: keep it.
-            raise
-        # asyncio.wait_for's own TimeoutError has an empty message.
         raise TimeoutError(f"{task_description} timed out after {timeout:g}s") from exc
 
     except asyncio.CancelledError:
