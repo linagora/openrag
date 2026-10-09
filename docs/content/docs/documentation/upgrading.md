@@ -421,8 +421,9 @@ If you change the PostgreSQL password (see [Secrets](#secrets)), do it now, befo
    update the source. With the Secret the chart renders from your values, the
    Job reads a copy rendered from your new values, so there is nothing to do.
 
-   Charts up to 0.7.1 (OpenRAG 2.3.1) have no copy: the Job reads the release's
-   Secret, so update that one now, rather than letting `helm upgrade` do it.
+   When you upgrade to chart 0.7.1 (OpenRAG 2.3.1) or earlier, there is no copy:
+   the Job reads the release's Secret, so update that one now, rather than
+   letting `helm upgrade` do it.
    With an external secrets provider, wait until it has synced. For the Secret
    the chart renders from your values:
 

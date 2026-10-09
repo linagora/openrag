@@ -97,8 +97,9 @@ hook reads it directly.
 The fullname is cut before the suffix, not after: cut after, a 62-character
 fullname would give the copy the same name as the app's Secret, and the copy's
 hook-delete-policy would then delete the app's Secret. Cutting before still
-collides for one length of a fullname ending in "-migration" (59 characters for
-the ConfigMap, 51 for the Secret), so the helpers refuse that case.
+collides for a fullname ending in "-migration" whose cut lands on or just after
+its "-" (58 or 59 characters for the ConfigMap, 50 or 51 for the Secret), so
+the helpers refuse that case.
 */}}
 {{- define "openrag-stack.migrationConfigMapName" -}}
 {{- $name := printf "%s-migration-env" (include "openrag-stack.fullname" . | trunc 49 | trimSuffix "-") }}

@@ -177,7 +177,9 @@ def test_a_long_fullname_keeps_the_copies_apart_from_the_originals(tmp_path: Pat
     ("fullname", "copy_name"),
     [
         pytest.param("a" * 49 + "-migration", "a" * 49 + "-migration-env", id="config-map"),
+        pytest.param("a" * 48 + "-migration", "a" * 48 + "-migration-env", id="config-map-cut-on-dash"),
         pytest.param("a" * 41 + "-migration", "a" * 41 + "-migration-env-secrets", id="secret"),
+        pytest.param("a" * 40 + "-migration", "a" * 40 + "-migration-env-secrets", id="secret-cut-on-dash"),
     ],
 )
 def test_a_fullname_that_names_a_copy_like_the_original_is_refused(
