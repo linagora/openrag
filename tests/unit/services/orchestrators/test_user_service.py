@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 from core.models.user import User, UserCreate, UserUpdate
-from core.utils.exceptions import UserNotFoundError, ValidationError
+from core.utils.exceptions import ConflictError, UserNotFoundError, ValidationError
 from services.orchestrators.user_service import UserService
 
 
@@ -369,6 +369,42 @@ async def test_update_user_does_not_revoke_oidc_sessions_for_regular_profile_upd
     await _svc(repo, auth_service=auth).update_user(2, UserUpdate(display_name="Renamed"))
 
     assert auth.revoked_users == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("new_external_id", ["svc-renamed", ""])
+async def test_update_user_refuses_external_id_change_on_a_managed_account(new_external_id):
+    """auth.seed_users matches its rows on external_user_id: renaming or clearing
+    it would orphan the row from its config entry (#1153)."""
+    repo = FakeUserRepo(existing={2})
+    repo._users[2] = User(id=2, display_name="svc", external_user_id="svc-a", managed_by_config=True)
+
+    with pytest.raises(ConflictError, match="managed by configuration"):
+        await _svc(repo).update_user(2, UserUpdate(external_user_id=new_external_id))
+
+    assert repo.updated == []
+    assert repo._users[2].external_user_id == "svc-a"
+
+
+@pytest.mark.asyncio
+async def test_update_user_allows_other_fields_and_same_external_id_on_a_managed_account():
+    repo = FakeUserRepo(existing={2})
+    repo._users[2] = User(id=2, display_name="svc", external_user_id="svc-a", managed_by_config=True)
+
+    out = await _svc(repo).update_user(2, UserUpdate(display_name="Renamed", external_user_id="svc-a"))
+
+    assert out["display_name"] == "Renamed"
+    assert out["external_user_id"] == "svc-a"
+
+
+@pytest.mark.asyncio
+async def test_update_user_allows_external_id_change_on_an_unmanaged_account():
+    repo = FakeUserRepo(existing={2})
+    repo._users[2] = User(id=2, display_name="u", external_user_id="old")
+
+    out = await _svc(repo).update_user(2, UserUpdate(external_user_id="new"))
+
+    assert out["external_user_id"] == "new"
 
 
 # --------------------------------------------------------------------------- #

@@ -32,6 +32,110 @@ When `AUTH_TOKEN` is set:
 
 This admin user serves as the global entry point for bootstrapping the system.
 
+### Operator-managed accounts (`auth.seed_users`)
+
+Service accounts whose token is decided outside OpenRAG (typically in OpenBao, shared with
+the client that uses it) can be declared in the configuration instead of being created
+through `POST /users/`. The API provisions them at every startup, right after the admin
+account and the default partition:
+
+```yaml
+# conf/config.yaml
+auth:
+  seed_users:
+    - external_user_id: svc-cozy-stack   # stable key, matched on every startup
+      display_name: cozy-stack
+      token_env: COZY_STACK_TOKEN        # name of the env var holding the token, never the value
+      is_admin: false
+      partitions:
+        - { name: twake, role: editor }
+```
+
+The account's shape lives in the configuration, the token stays in the environment. With
+cozy-stack, both sides read the same OpenBao key: OpenRAG gets it as `COZY_STACK_TOKEN`,
+cozy-stack puts the same value in the `rag:` section of its configuration, so the two
+cannot drift apart. Rotating the token is: change it in OpenBao, restart the API.
+
+On a deployment where `conf/config.yaml` is baked into the image (the Helm chart), pass
+the same list as JSON in the `SEED_USERS` environment variable, which replaces
+`auth.seed_users`. The chart renders it from `openrag.seedUsers` (see
+[Kubernetes](/openrag/documentation/kubernetes/#operator-managed-accounts)).
+
+Behaviour on each startup:
+
+- **Token env var set**: the account is created, or updated, matched on
+  `external_user_id`. Its stored hash is rewritten, its display name and admin flag follow
+  the configuration and the listed memberships are created or set to the listed role.
+  Memberships the entry does not list are never touched, including the owner membership
+  of a partition the account created through the API.
+- **Token env var unset or empty**: an existing account is left untouched and a warning is
+  logged. A new account is not created, since it would have no credential. Startup carries
+  on, so deployments that do not provide the variable keep working.
+- **Entry removed from the configuration**: the account's token is revoked (cleared, so no
+  bearer matches it), its admin flag is dropped and a warning is logged. The row is kept,
+  together with its memberships and what it uploaded, so partitions it owns are not left
+  without an owner. Listing it again with a token restores it.
+- **Partition that does not exist**: that membership is skipped with a warning. Partitions
+  are never created by this step.
+- **`is_admin: true`**: honoured, and a warning is logged on every startup.
+
+Seeding never deletes an account or a membership: removing a partition from an entry, or
+the entry itself, leaves the existing memberships in place. To take access away, remove
+the membership through the API (`DELETE /partition/{partition}/users/{user_id}`).
+
+What seeding refuses, each time with an error naming the entry and its env var, never the
+token or its hash:
+
+- An account created another way (through the API, or by an OIDC login, which stores the
+  IdP `sub` in `external_user_id`) is never taken over, even when its `external_user_id`
+  matches an entry. Only accounts created by this step are managed by it, and the admin
+  account (`users.id = 1`) never is. Pick identifiers that cannot be an IdP `sub`, such as
+  a `svc-` prefix.
+- A token that is a published example value or shorter than 12 characters, the same rules
+  as `AUTH_TOKEN` (`ALLOW_INSECURE_SECRETS=true` downgrades this to a warning on a
+  disposable stack).
+- A token equal to `AUTH_TOKEN`, to another entry's token (both entries are skipped), or to
+  the token of another existing account.
+
+A refused entry is skipped as a whole, and on an existing account the previous token hash
+stays in place: a rotation to a refused value leaves the old token valid until a startup
+with an accepted one.
+
+The configuration itself is validated when it is loaded, and an error stops the boot:
+`role` must be `owner`, `editor` or `viewer`, `external_user_id` and `token_env` must be
+unique across entries, a partition may be listed once per entry, `token_env` cannot be
+`AUTH_TOKEN`, and unknown keys (a plaintext `token:` for instance) are rejected.
+
+These accounts are for bearer tokens only. An OIDC login whose `sub` equals the
+`external_user_id` of a managed account is refused with a 403 before anything is written
+to the account, and any OIDC session found on a managed account is deleted at the next
+startup.
+
+The configuration stays the source of truth for these accounts. Changing the
+`external_user_id` of a managed account through the admin API is refused with a 409:
+seeding matches rows on that field, so a renamed row would drop out of its entry. Other
+admin edits (display name, admin flag, the role on a listed partition, a regenerated
+token) are accepted but only last until the next startup that has the entry's token, which
+rewrites them from the configuration. Make those changes in `auth.seed_users` instead.
+Memberships on partitions the entry does not list are left alone.
+
+If the seeding step itself fails (a database error, for instance), the error is logged
+without the token or the driver's message and the API starts anyway; the accounts keep
+their previous state until the next startup.
+
+Only the API process provisions these accounts. Several replicas starting together apply
+the list one after the other, under a database lock. The Chainlit and MCP processes never
+write them.
+
+Each process applies the configuration it booted with, so the last one to start wins. A
+replica still on the old configuration or token during a rollout, or a Ray pod that was
+not restarted, re-applies the old list or token hash when it boots. After changing the
+seed users or a token, complete the rollout and restart the Ray pods.
+
+The token is hashed exactly as the environment variable holds it, as for `AUTH_TOKEN`: a
+trailing newline in the Secret becomes part of the token and the client's bearer no longer
+matches.
+
 ---
 
 ## **3. Token Management**

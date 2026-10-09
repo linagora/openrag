@@ -412,6 +412,9 @@ users = Table(
     Column("created_at", DateTime, default=datetime.now, nullable=False),
     Column("file_quota", Integer, nullable=True, default=None),
     Column("file_count", Integer, nullable=False, default=0),
+    # Provisioned from ``auth.seed_users``: only these rows are updated or
+    # revoked by startup seeding (see ``PgUserRepository.ensure_seed_users``).
+    Column("managed_by_config", Boolean, server_default="false", nullable=False),
 )
 
 Index(

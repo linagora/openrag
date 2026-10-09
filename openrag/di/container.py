@@ -213,8 +213,13 @@ class ServiceContainer:
     # Lifecycle
     # ------------------------------------------------------------------
 
-    async def initialize(self) -> None:
-        """Open the storage adapters (asyncpg pool + Alembic migrations)."""
+    async def initialize(self, *, seed_users: bool = False) -> None:
+        """Open the storage adapters (asyncpg pool + Alembic migrations).
+
+        ``seed_users`` provisions ``auth.seed_users``. Only the API process
+        passes it: Chainlit and the MCP server build their own container in a
+        separate process, and the accounts must have one writer.
+        """
         if self._catalog_store is not None:
             await self._initialize_step("initializing catalog store", self._catalog_store.initialize)
             await self._initialize_step(
@@ -230,12 +235,32 @@ class ServiceContainer:
             # only startup step.
             await self._initialize_step("seeding prompts", self.prompt_service.seed_defaults)
             await self._initialize_step("ensuring default partition", self.partition_service.seed_default_partition)
+            # After the partitions exist (memberships reference them) and after
+            # the admin owns users.id = 1. Run on an empty list too: a removed
+            # entry is revoked, the last one included.
+            if seed_users and self._settings is not None:
+                await self._initialize_step("ensuring seed users", self._ensure_seed_users)
             await self._initialize_step("loading partition configs", self.partition_service.load_partitions)
             # Swaps interrupted by the last shutdown continue where they
             # stopped, and ones another process lets go of later are claimed
             # then. Only schedules the jobs; startup does not wait on them.
             await self._initialize_step("resuming embedder swaps", self.embedder_swap_service.watch)
         self._initialized = True
+
+    async def _ensure_seed_users(self) -> None:
+        """Provision ``auth.seed_users``; a failure is logged, never raised.
+
+        Seeding must not keep the API at 503: the accounts it would have
+        updated keep their previous state until the next boot. Only the
+        exception type is logged, since a driver message or a traceback with
+        locals can carry a token or its hash.
+        """
+        try:
+            await self.user_repo.ensure_seed_users(self._settings.auth.seed_users)
+        except Exception as exc:
+            logger.bind(error_type=type(exc).__name__).error(
+                "Seed users not provisioned: the step failed, the API starts without applying auth.seed_users"
+            )
 
     async def _initialize_step(self, label: str, operation: Callable[[], Awaitable[Any]]) -> None:
         """Run one startup step with consistent failure logging."""

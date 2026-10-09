@@ -368,6 +368,37 @@ async def test_callback_auto_provision_email_collision_returns_conflict():
 
 
 @pytest.mark.asyncio
+async def test_callback_refuses_an_account_managed_by_config():
+    """An IdP ``sub`` equal to a seed user's external_user_id must not log in as it (#1153).
+
+    Refused before any write: no profile sync, no claim mapping, no group sync,
+    no session.
+    """
+    managed = User(id=42, display_name="cozy-stack", external_user_id="svc-cozy", is_admin=True, managed_by_config=True)
+    urepo = FakeUserRepo({"svc-cozy": managed})
+    srepo = FakeSessionRepo()
+    mrepo = FakeMembershipRepo(seed=[(42, "twake", "editor")])
+    claims = {"sub": "svc-cozy", "name": "Mallory", "email": "m@evil.io", "groups": ["/openrag/other/owner"]}
+    svc = _service(
+        user_repo=urepo,
+        session_repo=srepo,
+        membership_repo=mrepo,
+        client=FakeOIDCClient(bundle=_bundle(claims=claims)),
+        cfg=_group_cfg(auto_provision_login=True, claim_mapping="display_name:name,email:email", group_sync_prune=True),
+    )
+
+    state, cookie = await _login_and_get_state(svc)
+    with pytest.raises(OIDCFlowError) as ei:
+        await svc.handle_oidc_callback(code="abc", state=state, state_cookie_raw=cookie)
+
+    assert ei.value.status_code == 403
+    assert urepo.updated == [] and urepo.created == []
+    assert (managed.display_name, managed.email, managed.is_admin) == ("cozy-stack", None, True)
+    assert mrepo.assigned == [] and mrepo.updated == [] and mrepo.removed == []
+    assert srepo.created == []
+
+
+@pytest.mark.asyncio
 async def test_callback_code_exchange_failure_is_masked():
     svc = _service(client=FakeOIDCClient(bundle=RuntimeError("idp 500")))
     state, cookie = await _login_and_get_state(svc)
@@ -753,3 +784,55 @@ async def test_membership_sync_survives_list_failure():
     # Must not raise.
     await svc._sync_oidc_memberships(User(id=1), {"groups": ["/openrag/alpha/owner"]})
     assert repo.assigned == []
+
+
+class _RacingUserRepo(FakeUserRepo):
+    """First lookup misses, the insert loses a race, the re-read finds ``winner``."""
+
+    def __init__(self, winner: User):
+        super().__init__({})
+        self._winner = winner
+        self._lookups = 0
+
+    async def get_user_by_external_id(self, external_id: str) -> User | None:
+        self._lookups += 1
+        return None if self._lookups == 1 else self._winner
+
+    async def create_user(self, user: User) -> User:
+        raise ValueError("duplicate key value violates unique constraint")
+
+
+@pytest.mark.asyncio
+async def test_callback_refuses_a_managed_account_found_on_the_provisioning_retry():
+    """The unique-conflict retry re-reads by ``sub``: a managed row found there is refused too (#1153)."""
+    managed = User(id=42, display_name="cozy-stack", external_user_id="svc-cozy", managed_by_config=True)
+    urepo = _RacingUserRepo(managed)
+    srepo = FakeSessionRepo()
+    svc = _service(
+        user_repo=urepo,
+        session_repo=srepo,
+        client=FakeOIDCClient(bundle=_bundle(claims={"sub": "svc-cozy", "name": "Mallory"})),
+        cfg=_cfg(auto_provision_login=True),
+    )
+
+    state, cookie = await _login_and_get_state(svc)
+    with pytest.raises(OIDCFlowError) as ei:
+        await svc.handle_oidc_callback(code="abc", state=state, state_cookie_raw=cookie)
+
+    assert ei.value.status_code == 403
+    assert urepo.updated == []
+    assert srepo.created == []
+
+
+@pytest.mark.asyncio
+async def test_callback_returns_an_unmanaged_account_found_on_the_provisioning_retry():
+    winner = User(id=43, display_name="Bob", external_user_id="kc-bob")
+    svc = _service(
+        user_repo=_RacingUserRepo(winner),
+        client=FakeOIDCClient(bundle=_bundle(claims={"sub": "kc-bob", "name": "Bob"})),
+        cfg=_cfg(auto_provision_login=True),
+    )
+
+    state, cookie = await _login_and_get_state(svc)
+    result = await svc.handle_oidc_callback(code="abc", state=state, state_cookie_raw=cookie)
+    assert result.next_url == "/home"

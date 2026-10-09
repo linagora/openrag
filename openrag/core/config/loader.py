@@ -13,6 +13,7 @@ from typing import Any
 
 import yaml
 
+from .auth import SEED_USERS_ENV_VAR
 from .root import Settings
 
 logger = logging.getLogger(__name__)
@@ -245,6 +246,22 @@ def _coerce(value: str, target_type: type, env_var: str = "") -> Any:
     return value
 
 
+def _parse_seed_users(raw: str) -> list[Any]:
+    """Parse ``SEED_USERS``: a JSON or YAML list of ``auth.seed_users`` entries.
+
+    The value carries env var *names*, never tokens, so it is safe to echo
+    the parser's complaint. A value that is not a list fails the boot: a
+    silently dropped list would leave service accounts unprovisioned.
+    """
+    try:
+        parsed = yaml.safe_load(raw)
+    except yaml.YAMLError as exc:
+        raise ValueError(f"Invalid value for {SEED_USERS_ENV_VAR}: not valid JSON or YAML ({exc})") from None
+    if not isinstance(parsed, list):
+        raise ValueError(f"Invalid value for {SEED_USERS_ENV_VAR}: expected a list, got {type(parsed).__name__}")
+    return parsed
+
+
 def _apply_env_overrides(data: dict) -> dict:
     """Apply environment variable overrides to the config dict."""
     for env_var, dotted_path, target_type in _ENV_OVERRIDES:
@@ -258,6 +275,10 @@ def _apply_env_overrides(data: dict) -> dict:
         sem = data.setdefault("semaphore", {})
         sem.setdefault("llm_semaphore", sem_value)
         sem.setdefault("vlm_semaphore", sem_value)
+
+    seed_users = os.environ.get(SEED_USERS_ENV_VAR, "")
+    if seed_users.strip():
+        data.setdefault("auth", {})["seed_users"] = _parse_seed_users(seed_users)
 
     audio_loader = os.environ.get("AUDIOLOADER")
     if audio_loader:

@@ -80,6 +80,9 @@ class User(BaseModel):
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     partitions: list[UserPartition] = Field(default_factory=list)
+    # Provisioned from ``auth.seed_users``: the config owns the account, so an
+    # OIDC login whose ``sub`` matches its external_user_id is refused.
+    managed_by_config: bool = False
 
 
 class UserPartition(BaseModel):

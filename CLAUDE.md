@@ -225,7 +225,7 @@ Grafana dashboards live once, in `infra/charts/openrag-stack/dashboards/` (Helm'
 The system uses token-based authentication with role-based access control (RBAC) for multi-tenant partition access.
 
 **Database Schema** (PostgreSQL with SQLAlchemy, in `openrag/services/persistence/schema.py`):
-- `users` - User accounts with `id`, `external_user_id`, `display_name`, `token` (SHA-256 hashed), `is_admin`, `file_quota`, `file_count`
+- `users` - User accounts with `id`, `external_user_id`, `display_name`, `token` (SHA-256 hashed), `is_admin`, `file_quota`, `file_count`, `managed_by_config` (provisioned from `auth.seed_users`)
 - `files` - File records with `file_id`, `partition_name`, `file_metadata`, `created_by` (FK to users), `relationship_id`, `parent_id`
 - `partition_memberships` - Join table linking users to partitions with roles (`owner`, `editor`, `viewer`)
 - `partitions` - Document collections with cascade delete to files and memberships
@@ -283,6 +283,8 @@ await vectordb.list_partition_members.remote(partition)
 **Token Format**: `"or-" + secrets.token_hex(16)` (34-char string, shown only once on creation/regeneration)
 
 **Bootstrap**: On startup, ensures admin user (id=1) exists using `AUTH_TOKEN` env var or generates a random token.
+
+**Seed users** (#1153): `auth.seed_users` (or the `SEED_USERS` env var, rendered by the chart from `openrag.seedUsers`) declares operator-managed accounts, provisioned by `PgUserRepository.ensure_seed_users` at API startup only, with each token read from the env var the entry names. Seeding only upserts rows it created (`users.managed_by_config`) and listed memberships; it never deletes, and a removed entry just has its token revoked. Full semantics: `docs/content/docs/documentation/user_auth.md`.
 
 **Multi-Partition Search**: Users can search across all their accessible partitions:
 - Search endpoint: `GET /search?partitions=all&text=query`
