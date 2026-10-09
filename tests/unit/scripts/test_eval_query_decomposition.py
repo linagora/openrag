@@ -169,6 +169,87 @@ async def test_eval_reports_relabelled_cases_against_develop_and_current_labels(
     assert report.comparison_policy["passed"] == 1
 
 
+@pytest.mark.asyncio
+async def test_eval_retries_oversized_query_lists_before_scoring():
+    class Generator:
+        def __init__(self, outputs):
+            self.outputs = list(outputs)
+            self.calls = []
+
+        def bind(self, **kwargs):
+            return self
+
+        async def ainvoke(self, messages):
+            self.calls.append(messages)
+            return SimpleNamespace(content=self.outputs.pop(0))
+
+    class Judge:
+        def bind(self, **kwargs):
+            return self
+
+        async def ainvoke(self, _messages):
+            return evaluator.CoverageJudgment(covered=True)
+
+    oversized = json.dumps({"query_list": [{"query": f"month {i}"} for i in range(9)]})
+    coarsened = json.dumps({"query_list": [{"query": f"quarter {i}"} for i in range(1, 5)]})
+    generator = Generator([oversized, coarsened])
+    case = {
+        "id": 1,
+        "difficulty": 2,
+        "domain": "healthcare",
+        "messages": [{"role": "user", "content": "How did monthly cases change over the year?"}],
+        "expected_queries": {"query_list": [{"query": f"quarter {i}"} for i in range(1, 5)]},
+    }
+
+    result = await evaluator.run_case(case, "test prompt", generator, "model", Judge(), "judge")
+
+    assert len(generator.calls) == 2
+    assert "coarser contiguous intervals" in generator.calls[1][0]["content"]
+    assert [query.removeprefix("quarter ") for query in result.generated_queries] == ["1", "2", "3", "4"]
+    assert result.decomposition_count_match is True
+    assert result.generation_fallback is None
+
+
+@pytest.mark.asyncio
+async def test_eval_falls_back_to_the_complete_user_query_after_oversized_retry_fails():
+    class Generator:
+        def __init__(self, output):
+            self.output = output
+            self.calls = 0
+
+        def bind(self, **kwargs):
+            return self
+
+        async def ainvoke(self, _messages):
+            self.calls += 1
+            return SimpleNamespace(content=self.output)
+
+    class Judge:
+        def bind(self, **kwargs):
+            return self
+
+        async def ainvoke(self, _messages):
+            return evaluator.CoverageJudgment(covered=True)
+
+    oversized = json.dumps({"query_list": [{"query": f"period {i}"} for i in range(9)]})
+    generator = Generator(oversized)
+    question = "How did monthly incidence change from January through December?"
+    case = {
+        "id": 2,
+        "difficulty": 2,
+        "domain": "healthcare",
+        "messages": [{"role": "user", "content": question}],
+        "expected_queries": {"query_list": [{"query": question}]},
+    }
+
+    result = await evaluator.run_case(case, "test prompt", generator, "model", Judge(), "judge")
+
+    assert generator.calls == 2
+    assert result.generated_queries == [question]
+    assert result.generation_fallback is not None
+    assert result.error is None
+
+
 def test_eval_messages_include_the_production_query_hint():
     messages = evaluator.build_llm_messages("contextualizer", [{"role": "user", "content": "compare A and B"}])
 

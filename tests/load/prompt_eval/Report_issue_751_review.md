@@ -9,7 +9,7 @@ The review checks used the configured Mistral model and the two PDFs already ind
 | Same outputs: semantic coverage against either label set | 4/4 |
 | One query per compared item, with each shared criterion preserved | 4/4 |
 
-The four changed labels each ask for two item-focused queries. The 81-case run scored 75/81 on query count and 74/81 on semantic coverage. Three judge calls returned no structured result (cases 41, 45, and 48), so those coverage results remain inconclusive. The rewritten held-out cases 79 and 81 both passed count and coverage checks; the held-out test now checks both evaluation datasets.
+The four changed labels each ask for two item-focused queries. The 81-case run scored 75/81 on query count and 74/81 on semantic coverage. Three judge calls returned no structured result (cases 50, 41, and 45), so those coverage results remain inconclusive. The rewritten held-out cases 79 and 81 both passed count and coverage checks; the held-out test now checks both evaluation datasets.
 
 For retrieval, two comparison questions each had the two PDFs as their manually judged relevant sources, one per compared method. With a two-hit search budget, `develop` retrieved 2/4 relevant sources; the candidate split retrieved 4/4. The rebuilt chat service also returned both source PDFs for both questions. Search results include adjacent context chunks, so this is source-file recall over this small set, not a general chunk-level recall claim.
 

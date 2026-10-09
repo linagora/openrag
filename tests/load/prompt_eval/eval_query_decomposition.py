@@ -49,6 +49,7 @@ from types import ModuleType
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field
+from pydantic import ValidationError as PydanticValidationError
 from tqdm.asyncio import tqdm
 
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
@@ -70,6 +71,7 @@ if str(_OPENRAG) not in sys.path:
     sys.path.insert(0, str(_OPENRAG))
 _QUERY_SCHEMA = _load_production_module("prompt_eval_production_query_schema", _OPENRAG / "core/models/query.py")
 SearchQueries = _QUERY_SCHEMA.SearchQueries
+Query = _QUERY_SCHEMA.Query
 MAX_QUERY_SUBQUERIES = _QUERY_SCHEMA.MAX_QUERY_SUBQUERIES
 calendar_anchors = _load_production_module(
     "prompt_eval_production_calendar_anchors", _OPENRAG / "core/prompts/calendar_anchors.py"
@@ -173,6 +175,7 @@ class CaseResult:
     develop_label_semantic_coverage: bool | None = None
     develop_label_coverage_reasoning: str | None = None
     develop_label_error: str | None = None
+    generation_fallback: str | None = None
     error: str | None = None
 
 
@@ -245,6 +248,52 @@ def _json_slice(text: str) -> str:
     start = text.find("{")
     end = text.rfind("}")
     return text[start : end + 1] if start != -1 and end > start else text
+
+
+def _is_oversized_query_list_error(error: Exception) -> bool:
+    """Recognize the production schema error caused by exceeding the fan-out cap."""
+    if not isinstance(error, PydanticValidationError):
+        return False
+    return any(
+        item.get("loc") == ("query_list",) and item.get("type") in {"too_long", "list_too_long"}
+        for item in error.errors()
+    )
+
+
+async def _generate_queries(
+    query_generator: ChatOpenAI,
+    model_base_url: str,
+    llm_messages: list[dict],
+    last_message: str,
+) -> tuple[SearchQueries, str | None]:
+    """Generate and validate queries, retrying over-cap output like QueryService."""
+    generator = query_generator.bind(
+        **_model_kwargs(model_base_url),
+        response_format={"type": "json_object"},
+    )
+    messages = llm_messages
+    last_error: Exception | None = None
+    for attempt in (1, 2):
+        try:
+            response = await generator.ainvoke(messages)
+            return SearchQueries.model_validate_json(_json_slice(str(response.content))), None
+        except Exception as exc:
+            last_error = exc
+            if attempt == 1 and _is_oversized_query_list_error(exc):
+                retry_instruction = (
+                    f"The previous JSON was rejected because it contained more than "
+                    f"{MAX_QUERY_SUBQUERIES} sub-queries. Regenerate the complete result within the cap. "
+                    "For time ranges, group adjacent periods into coarser contiguous intervals that cover "
+                    "the entire range. For other facets, group related details while retaining every item "
+                    "and shared criterion. Never omit trailing periods or any item. Return only the full JSON."
+                )
+                messages = [
+                    {**messages[0], "content": f"{messages[0]['content']}\n\n{retry_instruction}"},
+                    *messages[1:],
+                ]
+
+    fallback_reason = f"query generation failed after two attempts: {last_error}"
+    return SearchQueries(query_list=[Query(query=last_message)]), fallback_reason
 
 
 JUDGE_SYSTEM_PROMPT = """You are an impartial evaluator judging whether a set of GENERATED sub-queries semantically covers a set of EXPECTED sub-queries.
@@ -340,14 +389,16 @@ async def run_case(
 
     generated_queries: list[str] = []
     n_generated = 0
+    generation_fallback: str | None = None
     error: str | None = None
 
     try:
-        response = await query_generator.bind(
-            **_model_kwargs(model_base_url),
-            response_format={"type": "json_object"},
-        ).ainvoke(llm_messages)
-        output = SearchQueries.model_validate_json(_json_slice(str(response.content)))
+        output, generation_fallback = await _generate_queries(
+            query_generator,
+            model_base_url,
+            llm_messages,
+            last_message,
+        )
         generated_queries = [q.query for q in output.query_list]
         n_generated = len(generated_queries)
     except Exception as exc:
@@ -406,6 +457,7 @@ async def run_case(
         develop_label_semantic_coverage=develop_covered,
         develop_label_coverage_reasoning=develop_coverage_reasoning,
         develop_label_error=develop_label_error,
+        generation_fallback=generation_fallback,
         error=error,
     )
 
@@ -543,12 +595,8 @@ def build_model_report(
             "case_ids": [r.id for r in develop_labeled],
             "develop_count_matches": sum(r.develop_label_count_match is True for r in develop_labeled),
             "current_count_matches": sum(r.decomposition_count_match for r in develop_labeled),
-            "develop_semantic_coverage_passed": sum(
-                r.develop_label_semantic_coverage is True for r in develop_labeled
-            ),
-            "current_semantic_coverage_passed": sum(
-                r.decomposition_semantic_coverage for r in develop_labeled
-            ),
+            "develop_semantic_coverage_passed": sum(r.develop_label_semantic_coverage is True for r in develop_labeled),
+            "current_semantic_coverage_passed": sum(r.decomposition_semantic_coverage for r in develop_labeled),
             "cases": [
                 {
                     "id": r.id,
@@ -607,7 +655,9 @@ def print_model_summary(report: ModelReport) -> None:
             )
     if report.comparison_policy:
         comparison = report.comparison_policy
-        print(f"  comparison policy: {comparison['passed']}/{comparison['total']} cases follow one-query-per-item structure")
+        print(
+            f"  comparison policy: {comparison['passed']}/{comparison['total']} cases follow one-query-per-item structure"
+        )
         for case in comparison["cases"]:
             if not case["passed"]:
                 print(f"    case {case['id']}: {case['reason']}")
