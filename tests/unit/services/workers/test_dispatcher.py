@@ -257,6 +257,41 @@ async def test_queue_registration_warns_when_the_actor_predates_the_admission_fe
 
 
 @pytest.mark.asyncio
+async def test_queue_registration_warns_on_the_split_write_fallback() -> None:
+    """Neither registration method: state and details go separately, unfenced, and the log says so."""
+    from services.workers.dispatcher import WorkerDispatcher
+
+    tsm = _task_state_manager()
+    tsm._ray_actor_method_names = {"set_state", "set_details"}
+    dispatcher = WorkerDispatcher(
+        pool=_pool_with_ref(object()),
+        task_state_manager=tsm,
+        completion_tracker=_completion_tracker(),
+        vector_store=_vector_store(),
+        document_repo=_document_repo(),
+        workspace_repo=_workspace_repo(),
+        collection="default",
+        timeout=1,
+    )
+
+    with patch("services.workers.dispatcher.logger") as mock_logger:
+        admission = await dispatcher._set_queued_details(
+            "task-1",
+            file_id="file-1",
+            partition="tenant-a",
+            metadata={},
+            user_id=42,
+            reject_if_file_active=False,
+        )
+
+    assert admission == _queue_admitted()
+    tsm.set_state.remote.assert_called_once_with("task-1", "QUEUED")
+    tsm.set_details.remote.assert_called_once()
+    mock_logger.bind.assert_called_once_with(task_id="task-1", file_id="file-1", partition="tenant-a")
+    assert "admission fence" in mock_logger.bind.return_value.warning.call_args.args[0]
+
+
+@pytest.mark.asyncio
 async def test_queue_registration_retries_actor_reconstruction() -> None:
     from services.workers.dispatcher import WorkerDispatcher
 

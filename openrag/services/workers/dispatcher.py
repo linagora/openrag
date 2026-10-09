@@ -143,6 +143,12 @@ class WorkerDispatcher(IndexingDispatcher):
             )
             return _queue_admitted(accepted is not False)
 
+        # Unreachable while bootstrap replaces any TaskStateManager without
+        # set_queued_details_v2; kept for a handle that somehow predates both.
+        logger.bind(task_id=task_id, file_id=file_id, partition=partition).warning(
+            "TaskStateManager has no atomic queue registration; registering state and details separately, "
+            "without the file admission fence"
+        )
         await self._call_method(
             lambda: self._tsm.set_state.remote(task_id, "QUEUED"),
             task_description=f"set_state({task_id})",
