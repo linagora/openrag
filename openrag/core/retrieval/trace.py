@@ -508,11 +508,14 @@ class RetrievalTraceBuilder:
             self.diagnostics.release_candidates(len(previous.candidates))
         visible_count = min(len(candidates), MAX_TRACE_CANDIDATES_PER_STAGE)
         retained_count = self.diagnostics.claim_candidates(visible_count)
+        reported_candidate_count = len(candidates) if candidate_count is None else candidate_count
+        if reported_candidate_count > retained_count:
+            self.diagnostics.candidates_truncated = True
         self.stages[name] = TraceStage(
             name=name,
             status=status,
             duration_seconds=duration_seconds,
-            candidate_count=len(candidates) if candidate_count is None else candidate_count,
+            candidate_count=reported_candidate_count,
             candidates=list(candidates[:retained_count]),
             error=REDACTED_ERROR_MESSAGE if error is not None else None,
         )

@@ -280,6 +280,9 @@ class QueryService:
         self._mr_expansion = mr.expansion_batch_size
         self._mr_max = mr.max_total_documents
 
+    async def refresh_partition_configs(self) -> None:
+        await self._retrieval.refresh_partition_configs()
+
     def _resolve_chat_history_depth(self, partition: list[str] | None) -> int:
         """Effective chat-history depth for this request.
 

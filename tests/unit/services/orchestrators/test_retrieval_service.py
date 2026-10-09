@@ -206,6 +206,39 @@ async def test_search_uses_the_partition_embedder():
     assert call["with_surrounding_chunks"] is True
 
 
+class SwappingPresetService:
+    """Another process completed a swap of every partition onto *embedder*; a refresh loads it."""
+
+    def __init__(self, config, embedder: str) -> None:
+        self.config, self.embedder, self.refreshes = config, embedder, 0
+
+    async def try_refresh_if_stale(self) -> None:
+        self.refreshes += 1
+        self.config.partitions = {
+            name: _partition(name=name, embedder=self.embedder) for name in self.config.partitions
+        }
+
+
+@pytest.mark.asyncio
+async def test_search_reloads_an_embedder_switched_by_another_process():
+    svc, _, searchers = _embedder_svc({"p1": "embed-a"}, {"embed-a": "vector_embed_a", "embed-b": "vector_embed_b"})
+    svc._preset_service = SwappingPresetService(svc._config, "embed-b")
+
+    await svc.search(text="q", partitions="p1", top_k=5, similarity_threshold=0.5)
+
+    assert list(searchers) == ["embed-b"]
+
+
+@pytest.mark.asyncio
+async def test_retrieve_reloads_an_embedder_switched_by_another_process():
+    svc, _, searchers = _embedder_svc({"p1": "embed-a"}, {"embed-a": "vector_embed_a", "embed-b": "vector_embed_b"})
+    svc._preset_service = SwappingPresetService(svc._config, "embed-b")
+
+    await svc.retrieve_multi(partitions=["p1"], search_queries=SearchQueries(query_list=[Query(query="q")]))
+
+    assert list(searchers) == ["embed-b"]
+
+
 @pytest.mark.asyncio
 async def test_search_across_embedders_fuses_hits_then_adds_surrounding():
     svc, _, searchers = _embedder_svc(
