@@ -128,6 +128,16 @@ class RetrievalService:
         disable_reranker: bool = False,
         disable_expansion: bool = False,
     ) -> RetrieverPipeline:
+        """Pipeline built from the static ``settings.retriever``/``settings.reranker`` config.
+
+        Used when the partition cache (``Settings.partitions``) is empty, or
+        when an empty partition list is requested. A running service never
+        gets there: startup seeds the ``default`` partition and loads the
+        cache, that partition cannot be deleted, and the search, chat and MCP
+        routes answer 403 before an empty list reaches this service. Only unit
+        tests that build the service without partitions, or a partition table
+        emptied by hand in the database, still reach it.
+        """
         config = self._config
         rcfg = config.retriever
         common = {
@@ -580,11 +590,11 @@ class RetrievalService:
 
         Resolution order — mirrors ``QueryService._resolve_llm``:
 
-        1. The partition's configured ``reranker`` preset, resolved fresh via
+        1. The partition's configured ``reranker`` endpoint, resolved fresh via
            the model-endpoint catalog factory so a rename/promotion of that
            endpoint takes effect immediately.
         2. The **catalog default** endpoint (``is_default=True``) when the
-           partition sets no preset, or its preset name has gone stale (the
+           partition sets no reranker, or its endpoint name has gone stale (the
            endpoint was renamed/deleted after assignment — unlike
            ``chat_llm``, this field has no create/PATCH-time validation, so a
            stale name reaching here is expected, not a bug).
@@ -602,12 +612,12 @@ class RetrievalService:
                 reranker = self._reranker_factory(reranker_name)
             except KeyError:
                 logger.bind(reranker=reranker_name, partition=partition).warning(
-                    "Partition reranker preset not found in the model-endpoint catalog — "
+                    "Partition reranker endpoint not found in the model-endpoint catalog — "
                     "falling back to the default reranker"
                 )
             else:
                 logger.bind(reranker=reranker_name, partition=partition).debug(
-                    "Reranking with the partition's reranker preset"
+                    "Reranking with the partition's reranker endpoint"
                 )
                 return reranker, self._public_endpoint(self._config, "reranker", reranker_name)
         try:
@@ -616,7 +626,7 @@ class RetrievalService:
             pass
         else:
             logger.bind(reranker=self._default_reranker_name(), partition=partition).debug(
-                "Reranking with the default reranker preset"
+                "Reranking with the default reranker endpoint"
             )
             return reranker, self._public_endpoint(self._config, "reranker", "default")
         logger.bind(partition=partition).debug(

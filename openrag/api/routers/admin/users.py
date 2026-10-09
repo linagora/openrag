@@ -17,6 +17,7 @@ service once the queue is de-Ray'd.
 from api.dependencies.auth import current_user, require_admin, require_admin_or_self
 from api.runtime_flags import WITH_CHAINLIT_UI
 from api.schemas.admin.users import UserCreate, UserPublic, UserUpdate
+from core.utils.consts import DEFAULT_ADMIN_USER_ID
 from core.utils.logging import get_logger
 from di.providers import get_user_service
 from fastapi import APIRouter, Depends, HTTPException, Response, status
@@ -186,7 +187,7 @@ async def delete_user(
     service=Depends(get_user_service),
 ):
     """Delete a user."""
-    if user_id == 1:
+    if user_id == DEFAULT_ADMIN_USER_ID:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Cannot delete default admin user.",
@@ -267,7 +268,7 @@ async def update_user(
 ) -> UserPublic:
     """Update a user's profile fields."""
     # Only block if is_admin was explicitly set to False in the request.
-    if user_id == 1 and "is_admin" in body.model_fields_set and body.is_admin is False:
+    if user_id == DEFAULT_ADMIN_USER_ID and "is_admin" in body.model_fields_set and body.is_admin is False:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Cannot revoke admin privileges from the default admin user.",

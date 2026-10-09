@@ -358,9 +358,9 @@ class QueryService:
 
         Resolution order:
 
-        1. A partition's configured ``chat_llm`` model-endpoint preset (set
+        1. A partition's configured ``chat_llm`` model endpoint (set
            via the admin API) wins when the request scopes to one or more
-           named partitions that agree on a single preset. Resolved once per
+           named partitions that agree on a single endpoint. Resolved once per
            request (``chat`` / ``chat_stream`` / ``complete``) and used for
            both the query-contextualization call and the final answer.
            Map-reduce is the exception: its relevancy/summarisation passes
@@ -373,8 +373,8 @@ class QueryService:
            resolved fresh per request so promoting a new default endpoint at
            runtime takes effect immediately. This covers a direct/web-only
            request (no partition), the cross-partition ``"all"`` sentinel,
-           partitions that set no preset, and partitions whose presets
-           conflict (no single owning partition). Same partition semantics as
+           partitions that set no ``chat_llm``, and partitions whose ``chat_llm``
+           endpoints conflict (no single owning partition). Same partition semantics as
            ``_resolve_chat_history_depth``.
         3. The static ``self._llm`` (built from ``settings.llm`` at startup)
            only as a last resort — no endpoint factory is wired (unit tests)
@@ -387,7 +387,7 @@ class QueryService:
         unresolvable name here must not fail the chat request; it falls
         through to the catalog default with a warning.
 
-        The resolved preset name is always logged (at debug), including for
+        The resolved endpoint name is always logged (at debug), including for
         the default, so "which model answered?" is answerable from the logs.
         """
         chat_llm = self._agreed_partition_chat_llm(partition)
@@ -396,25 +396,25 @@ class QueryService:
                 llm = self._llm_factory(chat_llm)  # factory is not None when chat_llm is set
             except KeyError:
                 logger.warning(
-                    "Partition chat_llm preset not found in the model-endpoint catalog — "
+                    "Partition chat_llm endpoint not found in the model-endpoint catalog — "
                     "falling back to the default LLM",
                     chat_llm=chat_llm,
                     partitions=partition,
                 )
             else:
                 logger.bind(chat_llm=chat_llm, partitions=partition).debug(
-                    "Answering with the partition's chat_llm preset"
+                    "Answering with the partition's chat_llm endpoint"
                 )
                 return llm
         return self._default_llm(partition)
 
     def _agreed_partition_chat_llm(self, partition: list[str] | None) -> str | None:
-        """The single ``chat_llm`` preset the request's partitions agree on, else None.
+        """The single ``chat_llm`` endpoint the request's partitions agree on, else None.
 
         Returns None — meaning "use the catalog default" — when no endpoint
         factory is wired, the request has no partition or uses the ``"all"``
-        sentinel, no named partition sets a preset, or the named partitions
-        name more than one preset (a conflict with no single owning partition).
+        sentinel, no named partition sets one, or the named partitions
+        name more than one endpoint (a conflict with no single owning partition).
 
         The partition-consensus decision itself is delegated to the shared
         ``resolve_partition_chat_llm`` — the same rule the chat-completions
@@ -446,7 +446,7 @@ class QueryService:
                 pass
             else:
                 logger.bind(chat_llm=self._default_llm_name(), partitions=partition).debug(
-                    "Answering with the default chat_llm preset"
+                    "Answering with the default chat_llm endpoint"
                 )
                 return llm
         logger.bind(partitions=partition).debug("Answering with the static default LLM (no catalog default endpoint)")

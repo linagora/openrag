@@ -130,7 +130,7 @@ async def prime_max_model_tokens(settings: "Settings | None" = None) -> None:
     deprecated ``@router.on_event("startup")`` hook), after the model-endpoint
     registry is loaded. Probes every registered LLM endpoint's ``/v1/models``
     for ``max_model_len`` — not just the default — so a partition's
-    ``chat_llm`` preset gets its own auto-probed budget instead of silently
+    ``chat_llm`` endpoint gets its own auto-probed budget instead of silently
     falling back to the global ``llm_context`` default. Endpoints that alias
     the same underlying config (the ``"default"`` name always points at
     whichever endpoint is ``is_default``) are probed once and the result
@@ -323,11 +323,11 @@ def _resolve_llm_endpoint_name(config: "Settings", partitions: list[str] | None)
     the request — so the token preflight is checked against the budget of the
     model that will really be called, not always the global default. Falls
     back to the ``"default"`` alias (see ``ModelEndpointService``) when no
-    single partition-scoped preset applies.
+    single partition-scoped endpoint applies.
 
     A partition's ``chat_llm`` can also go **stale** — the endpoint it names
     may have been deleted or renamed after assignment (nothing cascades the
-    preset). ``QueryService._resolve_llm`` handles that by catching the
+    reference). ``QueryService._resolve_llm`` handles that by catching the
     factory ``KeyError`` and answering with the catalog default; the preflight
     must converge on the same endpoint, otherwise it would check the request
     against the global budget while a differently-sized default endpoint
@@ -351,7 +351,7 @@ def get_max_model_tokens(partitions: list[str] | None = None, settings: "Setting
 
     Precedence: the resolved LLM endpoint's admin-configured
     ``max_llm_context_size`` (editable in the admin UI; resolved from the
-    partition's ``chat_llm`` preset when the request is scoped to partitions
+    partition's ``chat_llm`` endpoint when the request is scoped to partitions
     that agree on one, else the "default" endpoint) > the value auto-probed
     from that same endpoint's ``/v1/models`` at startup (see
     ``prime_max_model_tokens`` — cached per endpoint name, not just the
@@ -424,7 +424,7 @@ def _apply_default_max_tokens(
 
     The request schema leaves ``max_tokens`` unset because it is parsed before
     the partition is resolved; defaulting it there could only ever read the
-    *default* endpoint's budget, so a partition whose ``chat_llm`` preset
+    *default* endpoint's budget, so a partition whose ``chat_llm`` endpoint
     allows more output would still be capped at the default endpoint's value
     (and that value was then sent downstream, since the payload forwards
     ``max_tokens`` verbatim). Resolving it here — once the partition, and
@@ -567,7 +567,7 @@ async def openai_chat_completion(
         log.debug(f"Using partitions: {partitions}")
 
     # Bound the caller's input size in every mode, against the resolved
-    # partition's chat_llm preset budget when one applies (else the default
+    # partition's chat_llm endpoint budget when one applies (else the default
     # LLM endpoint). RAG-injected context is added server-side and separately
     # capped (top_n, and max_prompt_tokens below), but the user's own messages
     # must be limited regardless of direct-LLM vs RAG.
@@ -696,7 +696,7 @@ async def openai_completion(
         await service.refresh_partition_configs()
 
     # Bound the caller's input size in every mode (RAG context is capped
-    # separately), against the resolved partition's chat_llm preset budget
+    # separately), against the resolved partition's chat_llm endpoint budget
     # when one applies.
     # Resolve the output budget now that the answering endpoint is known, so the
     # preflight below and the payload sent downstream both use the resolved
