@@ -723,25 +723,30 @@ reranker:
   # remember to also set enabled: false so the local Deployment/Service
   # aren't created alongside it.
   externalUrl: ""
-  rerankerModelName: &rerankerModel "Alibaba-NLP/gte-multilingual-reranker-base"
-  servicePort: &rerankerPort 7997
   image:
     repository: "michaelf34/infinity"
     tag: "0.0.77"
   nodeSelector: {}
+  # The model Infinity serves and OpenRAG asks for (RERANKER_MODEL), including
+  # an external reranker's. It replaces rerankerModelName.
   model:
     id: Alibaba-NLP/gte-multilingual-reranker-base
-  command:
-    - v2
-    - --model-id
-    - *rerankerModel
-    - --port
-    - *rerankerPort
+  # Flags appended to `v2 --model-id <model.id> --port <service.port>`, e.g.
+  # ["--batch-size", "16"]. They replace `command`, which was never read.
+  extraArgs: []
+  # Environment variables for the reranker container alone (Kubernetes EnvVar
+  # objects). They take precedence over the shared env.config ConfigMap the
+  # container also reads. On CPU, INFINITY_MODEL_WARMUP: "false" skips the
+  # warmup benchmark: on 4 CPUs the start dropped from 100-125 s to under 20 s
+  # in our tests.
+  extraEnv: []
   replicas: 1
   runtimeClassName: ""
+  # service.port is the port Infinity listens on, the Service port, and the one
+  # in RERANKER_BASE_URL. It replaces servicePort.
   service:
     type: ClusterIP
-    port: *rerankerPort
+    port: 7997
   resources:
     requests:
       cpu: "4"
@@ -758,6 +763,33 @@ reranker:
   # security.containerSecurityContext defaults for this workload specifically.
   # automountServiceAccountToken: false
   # containerSecurityContext: {}
+  # Infinity serves /health only once the model is loaded and its warmup
+  # benchmark has run, which took 100-125 s on 4 CPUs, 180-210 s on 2 and
+  # 340-380 s on 1 in our tests, cached model or not. The startup probe allows
+  # 10 minutes for that (plus a first-boot download); liveness and readiness
+  # start only after it passes. Set a probe to null to drop it, and its httpGet to null to give it
+  # another handler.
+  probes:
+    startup:
+      httpGet:
+        path: /health
+        port: reranker
+      periodSeconds: 10
+      failureThreshold: 60
+    readiness:
+      httpGet:
+        path: /health
+        port: reranker
+      initialDelaySeconds: 30
+      periodSeconds: 10
+      failureThreshold: 6
+    liveness:
+      httpGet:
+        path: /health
+        port: reranker
+      initialDelaySeconds: 60
+      periodSeconds: 30
+      failureThreshold: 3
 
 # === Admin UI (replaces indexer-ui) ===
 # React SPA served by an nginx bundled inside the image. VITE_BASE_PATH=/app/
@@ -1103,13 +1135,13 @@ env:
     EMBEDDER_BASE_URL: 'http://{{ .Release.Name }}-embedder-engine-service/v1'
 
     # Reranker
-    RERANKER_MODEL: '{{ .Values.reranker.rerankerModelName }}'
+    RERANKER_MODEL: '{{ .Values.reranker.model.id }}'
     # True when either the local Infinity reranker is deployed or an external
     # one is configured — false (and RERANKER_BASE_URL below moot) when
     # neither applies, so this never points at a Service that doesn't exist.
     RERANKER_ENABLED: '{{ or .Values.reranker.enabled (ne .Values.reranker.externalUrl "") }}'
     RERANKER_TOP_K: "4"
-    RERANKER_BASE_URL: '{{ if .Values.reranker.externalUrl }}{{ .Values.reranker.externalUrl }}{{ else }}http://{{ include "openrag-stack.fullname" . }}-reranker:{{ .Values.reranker.servicePort }}{{ end }}'
+    RERANKER_BASE_URL: '{{ if .Values.reranker.externalUrl }}{{ .Values.reranker.externalUrl }}{{ else }}http://{{ include "openrag-stack.fullname" . }}-reranker:{{ .Values.reranker.service.port }}{{ end }}'
     RERANKER_PROVIDER: "infinity"
 
     # Model Endpoint Registry: when true, re-syncs each type's env-seeded
