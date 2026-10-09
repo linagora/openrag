@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from core.models.query import Query, TemporalPredicate
+import pytest
+from core.models.query import Query, SearchQueries, TemporalPredicate
+from pydantic import ValidationError
 
 
 def _filter(*values: tuple[str, str]) -> str | None:
@@ -39,6 +41,14 @@ def test_a_zulu_suffix_is_normalised_to_an_explicit_offset():
 
 def test_a_non_utc_offset_is_kept_as_given():
     assert _filter((">=", "2026-09-07T02:00:00+02:00")) == 'created_at >= ISO "2026-09-07T02:00:00+02:00"'
+
+
+def test_search_queries_rejects_overflow_instead_of_truncating():
+    queries = [Query(query=f"aspect {i}") for i in range(8)]
+    assert len(SearchQueries(query_list=queries).query_list) == 8
+
+    with pytest.raises(ValidationError, match="at most 8 items"):
+        SearchQueries(query_list=[*queries, Query(query="aspect 8")])
 
 
 def test_an_unparseable_value_is_dropped_and_the_rest_kept():

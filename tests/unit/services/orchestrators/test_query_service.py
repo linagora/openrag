@@ -154,7 +154,7 @@ class FakeWorkspace:
 
 def _config(mode="SimpleRag"):
     return SimpleNamespace(
-        rag=SimpleNamespace(mode=mode, chat_history_depth=4, max_contextualized_query_len=512),
+        rag=SimpleNamespace(mode=mode, chat_history_depth=4, max_contextualized_query_len=1024),
         reranker=SimpleNamespace(top_k=5),
         chunker=SimpleNamespace(chunk_size=512),
         map_reduce=SimpleNamespace(initial_batch_size=2, expansion_batch_size=2, max_total_documents=4),
@@ -462,6 +462,101 @@ async def test_generate_query_chatbotrag_parses_json():
     sq = await svc.generate_query([{"role": "user", "content": "hi"}])
     assert sq.query_list[0].query == "rewritten"
     assert sq.requires_retrieval is True
+
+
+@pytest.mark.asyncio
+async def test_generate_query_retries_oversized_subqueries_with_coarser_periods():
+    too_many = json.dumps(
+        {
+            "query_list": [
+                {
+                    "query": f"month {i}",
+                    "temporal_filters": [
+                        {"operator": ">=", "value": f"2026-{i + 1:02d}-01T00:00:00+00:00"},
+                        {
+                            "operator": "<",
+                            "value": (f"2026-{i + 2:02d}-01T00:00:00+00:00" if i < 11 else "2027-01-01T00:00:00+00:00"),
+                        },
+                    ],
+                }
+                for i in range(12)
+            ]
+        }
+    )
+    coarsened = json.dumps({"query_list": [{"query": f"quarter {i}", "temporal_filters": None} for i in range(1, 5)]})
+    llm = FakeLLM(chat_responses=[too_many, coarsened])
+    svc = _svc(llm=llm, mode="ChatBotRag")
+
+    sq = await svc.generate_query([{"role": "user", "content": "How did monthly malaria incidence change in 2026?"}])
+
+    assert len(llm.chat_calls) == 2
+    assert [q.query for q in sq.query_list] == [f"quarter {i}" for i in range(1, 5)]
+    assert "coarser contiguous intervals" in llm.chat_calls[1][0][0]["content"]
+    assert "cover the entire range" in llm.chat_calls[1][0][0]["content"]
+    assert "Never omit trailing periods or any item" in llm.chat_calls[1][0][0]["content"]
+    assert llm.chat_calls[0][1]["max_completion_tokens"] == 1024
+
+
+@pytest.mark.asyncio
+async def test_generate_query_falls_back_to_complete_user_query_if_oversized_retry_fails():
+    too_many = json.dumps({"query_list": [{"query": f"period {i}"} for i in range(9)]})
+    llm = FakeLLM(chat_responses=[too_many, too_many])
+    svc = _svc(llm=llm, mode="ChatBotRag")
+    original = "How did monthly malaria incidence change from January through December 2026?"
+
+    sq = await svc.generate_query([{"role": "user", "content": original}])
+
+    assert len(llm.chat_calls) == 2
+    assert [query.query for query in sq.query_list] == [original]
+    assert "2026-01-01T00:00:00+00:00" not in str(sq)
+
+
+@pytest.mark.asyncio
+async def test_contextualizer_prompt_allows_bounded_conceptual_splits():
+    llm = FakeLLM(chat_responses=['{"query_list": [{"query": "method A quality"}]}'])
+    svc = _svc(llm=llm, mode="ChatBotRag")
+
+    await svc.generate_query([{"role": "user", "content": "How do method A and method B compare in quality?"}])
+
+    contextualizer_prompt = llm.chat_calls[0][0][0]["content"]
+    assert "Separate facts about independently documented entities" in contextualizer_prompt
+    assert "Independent comparisons" in contextualizer_prompt
+    assert "practical options, methods, or concepts" in contextualizer_prompt
+    assert "ALWAYS emit exactly one sub-query per item" in contextualizer_prompt
+    assert "Do not combine both sides into one query" in contextualizer_prompt
+    assert "Return no more than 8 sub-queries total" in contextualizer_prompt
+    assert contextualizer_prompt.index("Runtime calendar context") > contextualizer_prompt.index("Examples:")
+    assert "query_list may contain one or more distinct sub-queries, up to 8" in contextualizer_prompt
+
+
+@pytest.mark.asyncio
+async def test_chatbotrag_passes_decomposed_queries_into_retrieval_and_context():
+    generated = {
+        "query_list": [
+            {"query": "method A mechanism", "temporal_filters": None},
+            {"query": "method B mechanism", "temporal_filters": None},
+        ]
+    }
+    llm = FakeLLM(chat_responses=[json.dumps(generated)])
+    retrieval = FakeRetrieval(
+        chunks=[
+            Chunk(id="gold-a", text="method A evidence", metadata={"_id": "gold-a"}),
+            Chunk(id="gold-b", text="method B evidence", metadata={"_id": "gold-b"}),
+        ]
+    )
+    svc = _svc(llm=llm, retrieval=retrieval, mode="ChatBotRag")
+
+    result = await svc._prepare_chat(
+        ["p"],
+        {"messages": [{"role": "user", "content": "How do method A and method B differ?"}], "metadata": {}},
+    )
+
+    passed_queries = retrieval.retrieve_multi_calls[0]["search_queries"].query_list
+    assert [query.query for query in passed_queries] == ["method A mechanism", "method B mechanism"]
+    assert [doc.metadata["_id"] for doc in result.retrieved_docs] == ["gold-a", "gold-b"]
+    final_context_prompt = "\n".join(message["content"] for message in result.payload["messages"])
+    assert "method A evidence" in final_context_prompt
+    assert "method B evidence" in final_context_prompt
 
 
 @pytest.mark.asyncio

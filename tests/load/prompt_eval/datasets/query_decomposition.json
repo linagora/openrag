@@ -1619,7 +1619,11 @@
     "expected_queries": {
       "query_list": [
         {
-          "query": "Differences between trade secrets and patents in terms of protection duration and disclosure requirements",
+          "query": "Protection duration and disclosure requirements for trade secrets",
+          "temporal_filters": null
+        },
+        {
+          "query": "Protection duration and disclosure requirements for patents",
           "temporal_filters": null
         }
       ]
@@ -1637,7 +1641,20 @@
         "role": "user",
         "content": "How do trade secrets and patents differ in terms of protection duration and disclosure requirements?"
       }
-    ]
+    ],
+    "develop_expected_queries": [
+      "Differences between trade secrets and patents in terms of protection duration and disclosure requirements"
+    ],
+    "comparison_policy": {
+      "items": [
+        "trade secrets",
+        "patents"
+      ],
+      "shared_criteria": [
+        "protection duration",
+        "disclosure requirements"
+      ]
+    }
   },
   {
     "id": 65,
@@ -1727,7 +1744,11 @@
     "expected_queries": {
       "query_list": [
         {
-          "query": "Typical comparison of product return rates between summer and winter seasons",
+          "query": "Product return rates during summer seasons",
+          "temporal_filters": null
+        },
+        {
+          "query": "Product return rates during winter seasons",
           "temporal_filters": null
         }
       ]
@@ -1745,7 +1766,19 @@
         "role": "user",
         "content": "How do product return rates typically compare between the summer and winter seasons?"
       }
-    ]
+    ],
+    "develop_expected_queries": [
+      "Typical comparison of product return rates between summer and winter seasons"
+    ],
+    "comparison_policy": {
+      "items": [
+        "summer",
+        "winter"
+      ],
+      "shared_criteria": [
+        "product return rates"
+      ]
+    }
   },
   {
     "id": 69,
@@ -1851,7 +1884,11 @@
     "expected_queries": {
       "query_list": [
         {
-          "query": "Application of differentiated instruction in elementary and middle school classrooms",
+          "query": "Application of differentiated instruction in elementary school classrooms",
+          "temporal_filters": null
+        },
+        {
+          "query": "Application of differentiated instruction in middle school classrooms",
           "temporal_filters": null
         }
       ]
@@ -1861,7 +1898,19 @@
         "role": "user",
         "content": "How is differentiated instruction applied in elementary and middle school classrooms?"
       }
-    ]
+    ],
+    "develop_expected_queries": [
+      "Application of differentiated instruction in elementary and middle school classrooms"
+    ],
+    "comparison_policy": {
+      "items": [
+        "elementary school",
+        "middle school"
+      ],
+      "shared_criteria": [
+        "differentiated instruction"
+      ]
+    }
   },
   {
     "id": 74,
@@ -1991,7 +2040,7 @@
     "expected_queries": {
       "query_list": [
         {
-          "query": "Combined effect of rising interest rates and increasing housing supply on residential property investment returns",
+          "query": "Combined effect of higher mortgage borrowing costs and more homes listed for sale on residential rental returns",
           "temporal_filters": null
         }
       ]
@@ -1999,7 +2048,7 @@
     "messages": [
       {
         "role": "user",
-        "content": "How do rising interest rates and increasing housing supply together affect residential property investment returns?"
+        "content": "How do higher mortgage borrowing costs and a rise in homes listed for sale together shape returns from residential rentals?"
       }
     ]
   },
@@ -2011,7 +2060,11 @@
     "expected_queries": {
       "query_list": [
         {
-          "query": "Comparison of lithium-ion battery systems and pumped hydro storage in terms of scalability and round-trip efficiency",
+          "query": "Scalability and round-trip efficiency of lithium-ion battery systems",
+          "temporal_filters": null
+        },
+        {
+          "query": "Scalability and round-trip efficiency of pumped hydro storage",
           "temporal_filters": null
         }
       ]
@@ -2020,6 +2073,51 @@
       {
         "role": "user",
         "content": "How do lithium-ion battery systems compare to pumped hydro storage in terms of scalability and round-trip efficiency?"
+      }
+    ],
+    "develop_expected_queries": [
+      "Comparison of lithium-ion battery systems and pumped hydro storage in terms of scalability and round-trip efficiency"
+    ],
+    "comparison_policy": {
+      "items": [
+        "lithium-ion battery systems",
+        "pumped hydro storage"
+      ],
+      "shared_criteria": [
+        "scalability",
+        "round-trip efficiency"
+      ]
+    }
+  },
+  {
+    "id": 81,
+    "difficulty": 2,
+    "domain": "healthcare",
+    "ambiguity_reason": "A 12-month trend exceeds the fan-out cap at monthly granularity, so adjacent months should be grouped into quarters without omitting part of the year.",
+    "expected_queries": {
+      "query_list": [
+        {
+          "query": "Malaria incidence from January through March 2024",
+          "temporal_filters": null
+        },
+        {
+          "query": "Malaria incidence from April through June 2024",
+          "temporal_filters": null
+        },
+        {
+          "query": "Malaria incidence from July through September 2024",
+          "temporal_filters": null
+        },
+        {
+          "query": "Malaria incidence from October through December 2024",
+          "temporal_filters": null
+        }
+      ]
+    },
+    "messages": [
+      {
+        "role": "user",
+        "content": "Summarize the quarterly pattern in malaria incidence during 2024, using monthly counts from the start through the end of the calendar year."
       }
     ]
   }

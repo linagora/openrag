@@ -3,6 +3,8 @@ Produce a JSON object listing sub-queries derived from the user's last message.
 Output shape (return this JSON object, nothing else):
 {{"intent": <"greeting"|"gratitude"|"farewell"|"capability"|"other">, "requires_retrieval": <true|false>, "query_list": [ {{"query": "<rewritten search string>", "temporal_filters": <list of predicates | null>}} ]}}
 
+Current date: {current_date}
+{calendar_anchors}
 Language for `query` field: {query_language}
 Timestamps: UTC (`+00:00`). Week starts Monday.
 
@@ -24,36 +26,11 @@ Timestamps: UTC (`+00:00`). Week starts Monday.
 # Sub-queries — when to split
 Emit MULTIPLE sub-queries ONLY when the question covers independent aspects that benefit from separate retrieval:
 - Distinct time periods — "sales in Q1 and Q2" → one per quarter.
-- Separate facts about independently documented entities — "Sales figures for Product A and Product B" → one per entity. For comparisons, keep the shared criterion in every entity-focused query.
+- Distinct entities — "Product A and Product B" → one per product.
 - Unrelated dimensions — "sales in US and in Europe" → one per region.
 - Exclusions — "last year except March" → one per remaining range.
-- Evolution / trend over a bounded range — preserve the full range and choose periods that produce no more than {max_query_subqueries} queries. Split by month when that fits; otherwise group adjacent months into quarters, then use years or larger contiguous periods if needed. Cover every part of the range without gaps or dropped later periods. For example, a 12-month range can use four quarterly queries. Open-ended trend questions ("how has X evolved recently") stay as one.
-- Independent comparisons — for comparisons between different entities, practical options, methods, or concepts, ALWAYS emit exactly one sub-query per item, even when the user asks for a side-by-side comparison on several shared criteria. Carry every shared criterion into each item-focused query. Keep each query centered on exactly one item; do not mention the other compared items in that query. Do not combine both sides into one query or split the comparison into one query per criterion.
-- Keep one query for a joint effect, interaction, combined design, or causal relationship when that relationship itself is the information need. Do not add separate queries about each factor alongside the combined query. Do not split synonyms, paraphrases, or multiple components whose combined effect is the single information need.
-- Return no more than {max_query_subqueries} sub-queries total. If a question contains more independent facets, group related facets while keeping each query focused on one retrievable information need.
+- Evolution / trend over a bounded range — "evolution of X between 2020 and 2024" → one sub-query per period (year, quarter, or month), inclusive on both ends. Only split when the range is explicit and bounded; open-ended trend questions ("how has X evolved recently") stay as one.
 Otherwise emit ONE sub-query. Do not split for synonyms or rephrasings of the same question.
-
-Examples:
-User: "How do retrieval-augmented generation and fine-tuning differ in the mechanisms they use to adapt language models?"
-{{"intent":"other","requires_retrieval":true,"query_list":[{{"query":"How retrieval-augmented generation adapts language models, including its mechanism and trade-offs","temporal_filters":null}},{{"query":"How fine-tuning adapts language models, including its mechanism and trade-offs","temporal_filters":null}}]}}
-
-User: "How does the PBiGaBP framework's soft interference cancellation process differ from the tensor decomposition approach used in hybrid RIS systems?"
-{{"intent":"other","requires_retrieval":true,"query_list":[{{"query":"PBiGaBP framework soft interference cancellation process and how it handles interference","temporal_filters":null}},{{"query":"Tensor decomposition approach in hybrid RIS systems and how it handles interference","temporal_filters":null}}]}}
-
-User: "How do sodium-ion batteries and lithium-ion batteries compare in cycle life and cold-weather performance?"
-{{"intent":"other","requires_retrieval":true,"query_list":[{{"query":"Cycle life and cold-weather performance of sodium-ion batteries","temporal_filters":null}},{{"query":"Cycle life and cold-weather performance of lithium-ion batteries","temporal_filters":null}}]}}
-
-User: "Compare electric delivery vans and hydrogen fuel-cell vans in payload capacity and refueling time."
-{{"intent":"other","requires_retrieval":true,"query_list":[{{"query":"Payload capacity and refueling time for electric delivery vans","temporal_filters":null}},{{"query":"Payload capacity and refueling time for hydrogen fuel-cell vans","temporal_filters":null}}]}}
-
-User: "How did monthly rail delays change from January through December 2024?"
-{{"intent":"other","requires_retrieval":true,"query_list":[{{"query":"Rail delays from January through March 2024","temporal_filters":null}},{{"query":"Rail delays from April through June 2024","temporal_filters":null}},{{"query":"Rail delays from July through September 2024","temporal_filters":null}},{{"query":"Rail delays from October through December 2024","temporal_filters":null}}]}}
-
-User: "How do rising interest rates and increasing housing supply together affect residential property investment returns?"
-{{"intent":"other","requires_retrieval":true,"query_list":[{{"query":"Combined effect of rising interest rates and increasing housing supply on residential property investment returns","temporal_filters":null}}]}}
-
-User: "What does the proposed method's use of ConvMLPs and global conditioning contribute to audio quality compared with SpecVQGAN and DiffFoley?"
-{{"intent":"other","requires_retrieval":true,"query_list":[{{"query":"How the proposed ConvMLP method uses global conditioning and affects audio generation quality","temporal_filters":null}},{{"query":"How SpecVQGAN generates audio and its audio generation quality","temporal_filters":null}},{{"query":"How DiffFoley generates audio and its audio generation quality","temporal_filters":null}}]}}
 
 # Temporal filters
 Emit `temporal_filters` when the user refers to WHEN a document was created / published / written. Leave null if the date only describes the topic.
@@ -124,7 +101,3 @@ User: "Hello, what was Product A revenue in Q1?"
 
 User: "Albendazole is used to treat lymphatic filariasis."
 {{"intent":"other","requires_retrieval":true,"query_list":[{{"query":"Albendazole is used to treat lymphatic filariasis.","temporal_filters":null}}]}}
-
-# Runtime calendar context
-Current date: {current_date}
-{calendar_anchors}

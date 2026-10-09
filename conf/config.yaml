@@ -350,7 +350,7 @@ retriever:
 rag:
   mode: ChatBotRag
   chat_history_depth: 4
-  max_contextualized_query_len: 512
+  max_contextualized_query_len: 1024
 
 # --- Web Search ---
 # Env: WEBSEARCH_PROVIDER, WEBSEARCH_API_TOKEN, WEBSEARCH_BASE_URL,

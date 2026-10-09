@@ -9,6 +9,7 @@ up with the on-disk filenames for all managed types.
 from __future__ import annotations
 
 import hashlib
+from pathlib import Path
 from types import SimpleNamespace
 from typing import get_args
 
@@ -18,6 +19,7 @@ from core.config.infrastructure import PathsConfig, PromptsConfig
 from core.models.prompt import Prompt, PromptType
 from core.utils.exceptions import ConfigError, NotFoundError, ServiceUnavailableError, ValidationError
 from loguru import logger
+from services.orchestrators import prompt_service as prompt_module
 from services.orchestrators.prompt_service import PROMPT_TYPE_KEYS, PromptService
 
 
@@ -54,6 +56,15 @@ class FakePromptRepo:
             if k in fields:
                 setattr(p, k, fields[k])
         return p
+
+    async def update_default_content_if_unchanged(
+        self, prompt_id: str, expected_name: str, old_content: str, new_content: str
+    ) -> bool:
+        p = self.prompts.get(prompt_id)
+        if p is None or not p.is_default or p.name != expected_name or p.content != old_content:
+            return False
+        p.content = new_content
+        return True
 
     async def delete(self, prompt_id: str) -> bool:
         return self.prompts.pop(prompt_id, None) is not None
@@ -143,6 +154,82 @@ class TestSeeding:
         await svc.seed_defaults()
         assert (await repo.get_default("sys_prompt")).content == "OPERATOR EDIT"
         assert len(repo.prompts) == 9
+
+    async def test_refreshes_only_an_unchanged_shipped_contextualizer_default(self):
+        old_content = (Path(__file__).parent / "fixtures/query_contextualizer_before_issue_751.txt").read_text()
+        old_hash = hashlib.sha256(old_content.encode("utf-8")).hexdigest()
+        assert old_hash in prompt_module._SUPERSEDED_SEED_HASHES[PromptType.QUERY_CONTEXTUALIZER.value]
+        repo = FakePromptRepo()
+        old_default = Prompt(
+            prompt_type=PromptType.QUERY_CONTEXTUALIZER.value,
+            name="default_query_contextualizer",
+            content=old_content,
+            is_default=True,
+        )
+        await repo.create(old_default)
+        svc = _service(repo)
+        bundled = svc._disk_seed(PromptType.QUERY_CONTEXTUALIZER.value)
+
+        await svc.seed_defaults()
+
+        refreshed = await repo.get_default(PromptType.QUERY_CONTEXTUALIZER.value)
+        assert refreshed is not None
+        assert refreshed.content == bundled
+
+    async def test_keeps_a_customized_contextualizer_default(self):
+        old_content = (Path(__file__).parent / "fixtures/query_contextualizer_before_issue_751.txt").read_text()
+        edited_content = f"{old_content}\nAdministrator edit."
+        edited_hash = hashlib.sha256(edited_content.encode("utf-8")).hexdigest()
+        repo = FakePromptRepo()
+        await repo.create(
+            Prompt(
+                prompt_type=PromptType.QUERY_CONTEXTUALIZER.value,
+                name="default_query_contextualizer",
+                content=edited_content,
+                is_default=True,
+            )
+        )
+
+        await _service(repo).seed_defaults()
+
+        preserved = await repo.get_default(PromptType.QUERY_CONTEXTUALIZER.value)
+        assert preserved is not None
+        assert preserved.content == edited_content
+        assert edited_hash not in prompt_module._SUPERSEDED_SEED_HASHES[PromptType.QUERY_CONTEXTUALIZER.value]
+
+    async def test_does_not_refresh_a_default_from_a_custom_prompt_directory(self, tmp_path):
+        old_content = (Path(__file__).parent / "fixtures/query_contextualizer_before_issue_751.txt").read_text()
+        repo = FakePromptRepo()
+        await repo.create(
+            Prompt(
+                prompt_type=PromptType.QUERY_CONTEXTUALIZER.value,
+                name="default_query_contextualizer",
+                content=old_content,
+                is_default=True,
+            )
+        )
+        svc = _service(repo)
+        svc._config = SimpleNamespace(
+            paths=PathsConfig(prompts_dir=tmp_path),
+            prompts=PromptsConfig(),
+        )
+
+        await svc.seed_defaults()
+
+        preserved = await repo.get_default(PromptType.QUERY_CONTEXTUALIZER.value)
+        assert preserved is not None
+        assert preserved.content == old_content
+
+    async def test_bundled_contextualizer_hash_matches_registry(self):
+        content = _service()._disk_seed(PromptType.QUERY_CONTEXTUALIZER.value)
+        actual_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        assert actual_hash == prompt_module._CURRENT_SEED_HASHES[PromptType.QUERY_CONTEXTUALIZER.value]
+
+    async def test_previous_bundled_contextualizer_hash_remains_refreshable(self):
+        superseded = prompt_module._SUPERSEDED_SEED_HASHES[PromptType.QUERY_CONTEXTUALIZER.value]
+        assert "0f9b16fb4bde42ba863708c4956647b17735a2c4fe245b0ba0c6a106a56bf4dd" in superseded
+        assert "87f5084a4cc922681730969ed98e769550a973bc4464f45e65b5342a7cfbf91e" in superseded
+        assert "4377989d16e8e40b8849b723ab9e181293360928569ef7bbd3b66ce964c0fe9b" in superseded
 
     async def test_seeding_skips_blank_non_asr_template(self, monkeypatch):
         repo = FakePromptRepo()
@@ -404,7 +491,7 @@ class TestCrud:
         p = await svc.create_prompt(
             prompt_type="query_contextualizer",
             name="anchored",
-            content="Date: {current_date}\n{calendar_anchors}\nLang: {query_language}",
+            content="Date: {current_date}\n{calendar_anchors}\nLang: {query_language}\nLimit: {max_query_subqueries}",
         )
         assert p.id
 

@@ -76,6 +76,18 @@ class _DeletePool:
         return "DELETE 1" if "DELETE FROM prompts" in query else "UPDATE 1"
 
 
+class _ConditionalUpdatePool:
+    def __init__(self, result: str | None) -> None:
+        self.result = result
+        self.query: str | None = None
+        self.params: tuple = ()
+
+    async def fetchval(self, query: str, *params):
+        self.query = query
+        self.params = params
+        return self.result
+
+
 def _prompt_row(*, name: str) -> dict:
     return {
         "id": "prompt-id",
@@ -108,6 +120,27 @@ async def test_renaming_asr_prompt_updates_referencing_indexation_presets() -> N
         "indexation",
         "asr_transcription_prompt_name",
         "meeting-notes",
+    )
+
+
+@pytest.mark.asyncio
+async def test_default_prompt_refresh_uses_compare_and_swap_conditions() -> None:
+    from services.persistence.prompt_repo import PgPromptRepository
+
+    pool = _ConditionalUpdatePool("prompt-id")
+    repo = PgPromptRepository(pool_getter=lambda: pool)
+
+    updated = await repo.update_default_content_if_unchanged("prompt-id", "default_query_contextualizer", "old", "new")
+
+    assert updated is True
+    assert pool.query is not None
+    assert "WHERE id = $1 AND is_default = true AND name = $2 AND content = $3" in pool.query
+    assert pool.params == ("prompt-id", "default_query_contextualizer", "old", "new")
+
+    pool.result = None
+    assert (
+        await repo.update_default_content_if_unchanged("prompt-id", "default_query_contextualizer", "old", "new")
+        is False
     )
 
 
