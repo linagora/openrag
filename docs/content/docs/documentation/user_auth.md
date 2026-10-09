@@ -97,9 +97,27 @@ The configuration itself is validated when it is loaded, and an error stops the 
 unique across entries, a partition may be listed once per entry, `token_env` cannot be
 `AUTH_TOKEN`, and unknown keys (a plaintext `token:` for instance) are rejected.
 
+These accounts are for bearer tokens only. An OIDC login whose `sub` equals the
+`external_user_id` of a managed account is refused with a 403 before anything is written
+to the account, and any OIDC session found on a managed account is deleted at the next
+startup.
+
+If the seeding step itself fails (a database error, for instance), the error is logged
+without the token or the driver's message and the API starts anyway; the accounts keep
+their previous state until the next startup.
+
 Only the API process provisions these accounts. Several replicas starting together apply
 the list one after the other, under a database lock. The Chainlit and MCP processes never
 write them.
+
+Each process applies the configuration it booted with, so the last one to start wins. A
+replica still on the old configuration or token during a rollout, or a Ray pod that was
+not restarted, re-applies the old list or token hash when it boots. After changing the
+seed users or a token, complete the rollout and restart the Ray pods.
+
+The token is hashed exactly as the environment variable holds it, as for `AUTH_TOKEN`: a
+trailing newline in the Secret becomes part of the token and the client's bearer no longer
+matches.
 
 ---
 

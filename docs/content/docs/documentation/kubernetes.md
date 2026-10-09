@@ -211,7 +211,23 @@ Deployment. A rotated token is picked up on the next restart: `vaultStaticSecret
 the Deployment itself, while with `externalSecret` the Secret refreshes on its
 `refreshInterval` and the pods need a `kubectl rollout restart`. Under Ray Serve the API
 runs on the Ray head, which neither mechanism restarts: cycle the head pod after a change.
-Do not also set `SEED_USERS` in `env.config`; the render fails when both are present.
+Do not also set `SEED_USERS` in `env.config`; the render fails when both are present, and
+it also fails when an entry carries a `token` key, since that value would land in the
+ConfigMap.
+
+Each API process applies the list it booted with, so the last pod to start wins. A replica
+still running the old ConfigMap or Secret mid-rollout, or a Ray pod that was not cycled,
+re-applies the old list or the old token hash when it restarts. After changing
+`openrag.seedUsers` or a token, let the rollout complete and restart the Ray pods, so every
+process that can boot carries the new values.
+
+The Secret value is hashed exactly as stored, as for `AUTH_TOKEN`: a trailing newline
+(common with `echo` piped into `base64`) becomes part of the token and the client's bearer
+no longer matches. Use `printf '%s'` or `stringData` when writing the Secret.
+
+Restarting the pods automatically when an External Secrets Operator Secret rotates
+(Reloader, or a Secret checksum annotation) is not done here; it is tracked in
+[#985](https://github.com/linagora/openrag/issues/985).
 
 ## Monitoring
 
