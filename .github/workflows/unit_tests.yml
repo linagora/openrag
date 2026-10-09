@@ -14,6 +14,9 @@ concurrency:
 jobs:
   tests:
     runs-on: ubuntu-latest
+    # The suite takes about 5 minutes. A hung test otherwise holds the runner
+    # for GitHub's 6-hour default before anyone hears about it.
+    timeout-minutes: 20
 
     strategy:
       matrix:

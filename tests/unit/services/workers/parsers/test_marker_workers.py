@@ -460,6 +460,24 @@ def _child_alloc(mib: int) -> str:
         return "MemoryError"
 
 
+def _in_a_forked_child(fn, *args, timeout: float = 60):
+    """Run *fn* in a forked pool child and return its result.
+
+    Not ``with ProcessPoolExecutor(...)``: leaving that block waits for the
+    child to exit, and a child forked from this multi-threaded process can
+    deadlock on exit on a lock it inherited held (seen in this suite: the run
+    hung instead of failing). The child is killed once the answer is in, so
+    nothing waits on its exit.
+    """
+    pool = concurrent.futures.ProcessPoolExecutor(max_workers=1, mp_context=multiprocessing.get_context("fork"))
+    try:
+        return pool.submit(fn, *args).result(timeout=timeout)
+    finally:
+        for process in list(pool._processes.values()):
+            process.kill()
+        pool.shutdown(wait=True, cancel_futures=True)
+
+
 def _vmdata_mib() -> int:
     """This process's current private data size — what RLIMIT_DATA is measured against."""
     with open("/proc/self/status") as status:
@@ -513,9 +531,7 @@ def test_the_limit_actually_bounds_an_allocation_in_a_real_child(headroom_mb, al
     file-backed mappings, so Marker's weights and CUDA's device maps would fail).
     Only allocating against the live limit distinguishes them.
     """
-    ctx = multiprocessing.get_context("fork")
-    with concurrent.futures.ProcessPoolExecutor(max_workers=1, mp_context=ctx) as pool:
-        assert pool.submit(_child_probe, headroom_mb, alloc_mib).result(timeout=60) == expected
+    assert _in_a_forked_child(_child_probe, headroom_mb, alloc_mib) == expected
 
 
 def _child_mmap_probe(headroom_mb: int) -> str:
@@ -539,18 +555,14 @@ def _child_mmap_probe(headroom_mb: int) -> str:
 def test_a_disabled_limit_leaves_the_rlimit_untouched():
     """0 must not lower the ceiling at all, not merely leave room for the test's
     own allocation."""
-    ctx = multiprocessing.get_context("fork")
-    with concurrent.futures.ProcessPoolExecutor(max_workers=1, mp_context=ctx) as pool:
-        assert pool.submit(_child_limit_unchanged).result(timeout=60) is True
+    assert _in_a_forked_child(_child_limit_unchanged) is True
 
 
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="RLIMIT_DATA only covers mmap on Linux")
 def test_a_file_backed_mapping_is_not_counted_against_the_limit():
     """Mutation guard for the choice of resource: with ``RLIMIT_AS`` this returns
     ``refused: 12``, which is Marker failing to load its model weights."""
-    ctx = multiprocessing.get_context("fork")
-    with concurrent.futures.ProcessPoolExecutor(max_workers=1, mp_context=ctx) as pool:
-        assert pool.submit(_child_mmap_probe, 256).result(timeout=60) == "mapped"
+    assert _in_a_forked_child(_child_mmap_probe, 256) == "mapped"
 
 
 def test_a_refused_setrlimit_does_not_stop_the_worker_starting(monkeypatch):
@@ -827,10 +839,8 @@ def test_a_ceiling_failure_reaches_the_parent_as_memory_error(monkeypatch, conve
     # _process_pdf's `finally` would raise and replace the MemoryError.
     # Production starts these children with spawn, where that doesn't happen.
     monkeypatch.setattr(marker_workers.torch.cuda, "is_available", lambda: False)
-    ctx = multiprocessing.get_context("fork")
-    with concurrent.futures.ProcessPoolExecutor(max_workers=1, mp_context=ctx) as pool:
-        with pytest.raises(MemoryError):
-            pool.submit(_child_parse, 256).result(timeout=120)
+    with pytest.raises(MemoryError):
+        _in_a_forked_child(_child_parse, 256, timeout=120)
 
 
 def test_the_real_torch_allocator_error_is_recognised():
