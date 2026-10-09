@@ -513,11 +513,14 @@ class PgUserRepository(UserRepository):
 
         * token env var set: the account is upserted on ``external_user_id`` and
           its stored hash rewritten, so a rotation is "change the secret,
-          restart". Listed memberships are upserted and unlisted ones dropped.
+          restart". Listed memberships are upserted to the listed role;
+          unlisted ones (such as the owner row of a partition the account
+          created through the API) are never touched.
         * token env var unset: an existing account is left untouched and a new
           one is not created (it would have no credential). Warned, not fatal.
         * a managed account no longer listed: its token is cleared (no hash
-          matches ``NULL``), admin rights and memberships dropped. The row stays.
+          matches ``NULL``) and admin rights dropped. The row and its
+          memberships stay, so partitions it owns are not orphaned.
         * any OIDC session on a managed account is deleted: such accounts
           cannot log in through the IdP (see ``AuthService._resolve_user``).
 
@@ -546,6 +549,11 @@ class PgUserRepository(UserRepository):
         async with self.pool.acquire() as conn:
             async with conn.transaction():
                 await conn.execute(_SEED_USERS_LOCK_SQL)
+                if await conn.fetchval("SELECT 1 FROM users WHERE id = 1") is None:
+                    # Without the admin row the next insert could take id 1,
+                    # which ensure_admin_user would then promote to admin.
+                    logger.error("Seed users not provisioned: the admin account (users.id = 1) does not exist yet")
+                    return {seed.external_user_id: "skipped" for seed in seed_users}
                 # A managed account never logs in through the IdP. Sessions an
                 # older release let a matching ``sub`` open on one end here.
                 ended = await conn.execute(
@@ -555,11 +563,6 @@ class PgUserRepository(UserRepository):
                     logger.bind(count=int(ended.split()[-1])).warning(
                         "Seed users: ended OIDC sessions opened on managed accounts"
                     )
-                if await conn.fetchval("SELECT 1 FROM users WHERE id = 1") is None:
-                    # Without the admin row the next insert could take id 1,
-                    # which ensure_admin_user would then promote to admin.
-                    logger.error("Seed users not provisioned: the admin account (users.id = 1) does not exist yet")
-                    return {seed.external_user_id: "skipped" for seed in seed_users}
 
                 # Revoke first: a token moved from a removed account to a new one
                 # must not collide with the old row's hash below. ``IS NOT TRUE``
@@ -573,18 +576,20 @@ class PgUserRepository(UserRepository):
                 )
                 for row in stale:
                     key = row["external_user_id"] or f"users.id={row['id']}"
+                    # Memberships are kept: without a token the account cannot
+                    # authenticate, and dropping them would orphan the
+                    # partitions it owns. Access is removed through the API.
                     revoked = await conn.fetchval(
                         """
                         UPDATE users SET token = NULL, is_admin = FALSE
-                        WHERE id = $1 AND token IS NOT NULL
+                        WHERE id = $1 AND (token IS NOT NULL OR is_admin)
                         RETURNING id
                         """,
                         row["id"],
                     )
-                    dropped = await conn.execute("DELETE FROM partition_memberships WHERE user_id = $1", row["id"])
-                    if revoked is not None or dropped != "DELETE 0":
+                    if revoked is not None:
                         logger.bind(external_user_id=row["external_user_id"], user_id=row["id"]).warning(
-                            "Seed user removed from auth.seed_users: token revoked and memberships dropped"
+                            "Seed user removed from auth.seed_users: token revoked, memberships kept"
                         )
                     outcomes[key] = "revoked"
 
@@ -681,11 +686,6 @@ class PgUserRepository(UserRepository):
                 user_id,
                 membership.role.value,
             )
-        await conn.execute(
-            "DELETE FROM partition_memberships WHERE user_id = $1 AND NOT (partition_name = ANY($2::text[]))",
-            user_id,
-            listed,
-        )
 
     # ── Helpers ──────────────────────────────────────────────────────
 

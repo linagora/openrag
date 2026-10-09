@@ -207,6 +207,19 @@ class TestAdminFirst:
         assert outcome == {"svc-a": "skipped"}
         assert await postgres_store.pool.fetchval("SELECT count(*) FROM users") == 0
 
+    async def test_nothing_is_touched_before_the_admin_exists(self, postgres_store: PostgresStore):
+        repo = postgres_store.user_repo
+        await repo.ensure_seed_users([_seed(partitions=[])], env={"SVC_A_TOKEN": TOKEN_A})
+        a = await _row(postgres_store, "svc-a")
+        await _oidc_session(postgres_store, a["id"], "svc-a")
+        await postgres_store.pool.execute("DELETE FROM users WHERE id = 1")
+
+        outcome = await repo.ensure_seed_users([], env={})
+
+        assert outcome == {}
+        assert await _session_count(postgres_store, a["id"]) == 1
+        assert (await _row(postgres_store, "svc-a"))["token"] == _hash_token(TOKEN_A)
+
 
 class TestTokenChecks:
     async def test_duplicate_token_rejects_both_entries(self, postgres_store: PostgresStore, logs):
@@ -267,7 +280,7 @@ class TestTokenChecks:
 
 
 class TestMemberships:
-    async def test_unlisted_memberships_are_pruned_and_roles_updated(self, postgres_store: PostgresStore):
+    async def test_listed_roles_are_updated_and_unlisted_memberships_kept(self, postgres_store: PostgresStore):
         await _partitions(postgres_store, "twake", "drive")
         repo = postgres_store.user_repo
         env = {"SVC_A_TOKEN": TOKEN_A}
@@ -276,7 +289,20 @@ class TestMemberships:
         await repo.ensure_seed_users([_seed(partitions=[{"name": "twake", "role": "owner"}])], env=env)
 
         row = await _row(postgres_store, "svc-a")
-        assert await _memberships(postgres_store, row["id"]) == {"twake": "owner"}
+        assert await _memberships(postgres_store, row["id"]) == {"twake": "owner", "drive": "viewer"}
+
+    async def test_a_partition_the_account_created_keeps_its_owner(self, postgres_store: PostgresStore):
+        """The creator of a partition becomes its owner; the next boot must not drop that row."""
+        await _partitions(postgres_store, "twake")
+        repo = postgres_store.user_repo
+        env = {"SVC_A_TOKEN": TOKEN_A}
+        await repo.ensure_seed_users([_seed()], env=env)
+        row = await _row(postgres_store, "svc-a")
+        await postgres_store.partition_repo.create_partition("svc-owned", user_id=row["id"])
+
+        await repo.ensure_seed_users([_seed()], env=env)
+
+        assert await _memberships(postgres_store, row["id"]) == {"twake": "editor", "svc-owned": "owner"}
 
     async def test_missing_partition_is_skipped_not_created(self, postgres_store: PostgresStore, logs):
         await _partitions(postgres_store, "twake")
@@ -297,6 +323,8 @@ class TestRemoval:
         await _partitions(postgres_store, "twake")
         repo = postgres_store.user_repo
         await repo.ensure_seed_users([_seed(is_admin=True)], env={"SVC_A_TOKEN": TOKEN_A})
+        row = await _row(postgres_store, "svc-a")
+        await postgres_store.partition_repo.create_partition("svc-owned", user_id=row["id"])
         outcome = await repo.ensure_seed_users([], env={"SVC_A_TOKEN": TOKEN_A})
 
         assert outcome == {"svc-a": "revoked"}
@@ -304,7 +332,9 @@ class TestRemoval:
         assert row is not None
         assert row["token"] is None
         assert row["is_admin"] is False
-        assert await _memberships(postgres_store, row["id"]) == {}
+        # Memberships stay: the token is gone, and dropping them would orphan
+        # the partitions the account owns.
+        assert await _memberships(postgres_store, row["id"]) == {"twake": "editor", "svc-owned": "owner"}
         assert any("revoked" in line for line in logs)
 
     async def test_auth_path_rejects_a_revoked_account(self, postgres_store: PostgresStore):

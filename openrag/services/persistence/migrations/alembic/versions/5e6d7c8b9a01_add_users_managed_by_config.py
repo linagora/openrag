@@ -1,7 +1,7 @@
 """add users.managed_by_config
 
 Marks the accounts provisioned from ``auth.seed_users``. Startup seeding only
-ever updates, prunes or revokes rows carrying the flag, so an account created
+ever updates or revokes rows carrying the flag, so an account created
 through the API or by an OIDC login is never taken over by a config entry
 that happens to share its ``external_user_id``.
 

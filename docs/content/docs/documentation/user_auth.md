@@ -65,18 +65,23 @@ Behaviour on each startup:
 
 - **Token env var set**: the account is created, or updated, matched on
   `external_user_id`. Its stored hash is rewritten, its display name and admin flag follow
-  the configuration, the listed memberships are created or updated and memberships the
-  entry no longer lists are removed.
+  the configuration and the listed memberships are created or set to the listed role.
+  Memberships the entry does not list are never touched, including the owner membership
+  of a partition the account created through the API.
 - **Token env var unset or empty**: an existing account is left untouched and a warning is
   logged. A new account is not created, since it would have no credential. Startup carries
   on, so deployments that do not provide the variable keep working.
 - **Entry removed from the configuration**: the account's token is revoked (cleared, so no
-  bearer matches it), its admin flag and memberships are dropped and a warning is logged.
-  The row itself is kept, together with what it uploaded. Listing it again with a token
-  restores it.
+  bearer matches it), its admin flag is dropped and a warning is logged. The row is kept,
+  together with its memberships and what it uploaded, so partitions it owns are not left
+  without an owner. Listing it again with a token restores it.
 - **Partition that does not exist**: that membership is skipped with a warning. Partitions
   are never created by this step.
 - **`is_admin: true`**: honoured, and a warning is logged on every startup.
+
+Seeding never deletes an account or a membership: removing a partition from an entry, or
+the entry itself, leaves the existing memberships in place. To take access away, remove
+the membership through the API (`DELETE /partition/{partition}/users/{user_id}`).
 
 What seeding refuses, each time with an error naming the entry and its env var, never the
 token or its hash:
@@ -92,6 +97,10 @@ token or its hash:
 - A token equal to `AUTH_TOKEN`, to another entry's token (both entries are skipped), or to
   the token of another existing account.
 
+A refused entry is skipped as a whole, and on an existing account the previous token hash
+stays in place: a rotation to a refused value leaves the old token valid until a startup
+with an accepted one.
+
 The configuration itself is validated when it is loaded, and an error stops the boot:
 `role` must be `owner`, `editor` or `viewer`, `external_user_id` and `token_env` must be
 unique across entries, a partition may be listed once per entry, `token_env` cannot be
@@ -105,9 +114,10 @@ startup.
 The configuration stays the source of truth for these accounts. Changing the
 `external_user_id` of a managed account through the admin API is refused with a 409:
 seeding matches rows on that field, so a renamed row would drop out of its entry. Other
-admin edits (display name, admin flag, partition memberships, a regenerated token) are
-accepted but only last until the next startup that has the entry's token, which rewrites
-them from the configuration. Make those changes in `auth.seed_users` instead.
+admin edits (display name, admin flag, the role on a listed partition, a regenerated
+token) are accepted but only last until the next startup that has the entry's token, which
+rewrites them from the configuration. Make those changes in `auth.seed_users` instead.
+Memberships on partitions the entry does not list are left alone.
 
 If the seeding step itself fails (a database error, for instance), the error is logged
 without the token or the driver's message and the API starts anyway; the accounts keep
