@@ -130,11 +130,13 @@ class RetrievalService:
     ) -> RetrieverPipeline:
         """Pipeline built from the static ``settings.retriever``/``settings.reranker`` config.
 
-        Used only when the partition cache (``Settings.partitions``) is empty.
-        A running service never gets there: startup seeds the ``default``
-        partition and loads the cache, and that partition cannot be deleted.
-        Only unit tests that build the service without partitions, or a
-        partition table emptied by hand in the database, still reach it.
+        Used when the partition cache (``Settings.partitions``) is empty, or
+        when an empty partition list is requested. A running service never
+        gets there: startup seeds the ``default`` partition and loads the
+        cache, that partition cannot be deleted, and the search, chat and MCP
+        routes answer 403 before an empty list reaches this service. Only unit
+        tests that build the service without partitions, or a partition table
+        emptied by hand in the database, still reach it.
         """
         config = self._config
         rcfg = config.retriever
