@@ -6,7 +6,7 @@ import logging
 from datetime import UTC, datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
 
@@ -117,19 +117,6 @@ class SearchQueries(BaseModel):
         default=True,
         description="Whether the user's request needs document retrieval.",
     )
-
-    @field_validator("query_list", mode="before")
-    @classmethod
-    def truncate_query_list(cls, value: Any) -> Any:
-        """Keep the first bounded set of queries from an oversized model reply."""
-        if isinstance(value, list) and len(value) > MAX_QUERY_SUBQUERIES:
-            logger.warning(
-                "Query decomposition returned %d sub-queries; keeping the first %d",
-                len(value),
-                MAX_QUERY_SUBQUERIES,
-            )
-            return value[:MAX_QUERY_SUBQUERIES]
-        return value
 
     def __str__(self) -> str:
         return " --- ".join(str(q) for q in self.query_list)

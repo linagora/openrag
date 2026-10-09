@@ -465,7 +465,7 @@ async def test_generate_query_chatbotrag_parses_json():
 
 
 @pytest.mark.asyncio
-async def test_generate_query_caps_model_generated_subqueries():
+async def test_generate_query_retries_oversized_subqueries_with_coarser_periods():
     too_many = json.dumps(
         {
             "query_list": [
@@ -473,23 +473,42 @@ async def test_generate_query_caps_model_generated_subqueries():
                     "query": f"month {i}",
                     "temporal_filters": [
                         {"operator": ">=", "value": f"2026-{i + 1:02d}-01T00:00:00+00:00"},
-                        {"operator": "<", "value": f"2026-{i + 2:02d}-01T00:00:00+00:00"},
+                        {
+                            "operator": "<",
+                            "value": (f"2026-{i + 2:02d}-01T00:00:00+00:00" if i < 11 else "2027-01-01T00:00:00+00:00"),
+                        },
                     ],
                 }
-                for i in range(9)
+                for i in range(12)
             ]
         }
     )
-    llm = FakeLLM(chat_responses=[too_many, too_many])
+    coarsened = json.dumps({"query_list": [{"query": f"quarter {i}", "temporal_filters": None} for i in range(1, 5)]})
+    llm = FakeLLM(chat_responses=[too_many, coarsened])
     svc = _svc(llm=llm, mode="ChatBotRag")
 
-    sq = await svc.generate_query([{"role": "user", "content": "Compare these approaches"}])
+    sq = await svc.generate_query([{"role": "user", "content": "How did monthly malaria incidence change in 2026?"}])
 
-    assert len(llm.chat_calls) == 1
-    assert [q.query for q in sq.query_list] == [f"month {i}" for i in range(8)]
-    assert sq.query_list[0].temporal_filters[0].value == "2026-01-01T00:00:00+00:00"
-    assert sq.query_list[-1].temporal_filters[1].value == "2026-09-01T00:00:00+00:00"
+    assert len(llm.chat_calls) == 2
+    assert [q.query for q in sq.query_list] == [f"quarter {i}" for i in range(1, 5)]
+    assert "coarser contiguous intervals" in llm.chat_calls[1][0][0]["content"]
+    assert "cover the entire range" in llm.chat_calls[1][0][0]["content"]
+    assert "Never omit trailing periods or any item" in llm.chat_calls[1][0][0]["content"]
     assert llm.chat_calls[0][1]["max_completion_tokens"] == 1024
+
+
+@pytest.mark.asyncio
+async def test_generate_query_falls_back_to_complete_user_query_if_oversized_retry_fails():
+    too_many = json.dumps({"query_list": [{"query": f"period {i}"} for i in range(9)]})
+    llm = FakeLLM(chat_responses=[too_many, too_many])
+    svc = _svc(llm=llm, mode="ChatBotRag")
+    original = "How did monthly malaria incidence change from January through December 2026?"
+
+    sq = await svc.generate_query([{"role": "user", "content": original}])
+
+    assert len(llm.chat_calls) == 2
+    assert [query.query for query in sq.query_list] == [original]
+    assert "2026-01-01T00:00:00+00:00" not in str(sq)
 
 
 @pytest.mark.asyncio
@@ -503,7 +522,7 @@ async def test_contextualizer_prompt_allows_bounded_conceptual_splits():
     assert "Separate facts about independently documented entities" in contextualizer_prompt
     assert "Independent comparisons" in contextualizer_prompt
     assert "practical options, methods, or concepts" in contextualizer_prompt
-    assert "ALWAYS emit one sub-query per item" in contextualizer_prompt
+    assert "ALWAYS emit exactly one sub-query per item" in contextualizer_prompt
     assert "Do not combine both sides into one query" in contextualizer_prompt
     assert "Return no more than 8 sub-queries total" in contextualizer_prompt
     assert contextualizer_prompt.index("Runtime calendar context") > contextualizer_prompt.index("Examples:")

@@ -5,7 +5,7 @@ superseded set so existing unedited defaults can be refreshed on upgrade.
 """
 
 _CURRENT_SEED_HASHES: dict[str, str] = {
-    "query_contextualizer": "4377989d16e8e40b8849b723ab9e181293360928569ef7bbd3b66ce964c0fe9b",
+    "query_contextualizer": "a9ab41975b720c6b7718d88d35df69ebddf81f4a298e32c4c474a2b88f6ad463",
 }
 
 _SUPERSEDED_SEED_HASHES: dict[str, frozenset[str]] = {
@@ -23,6 +23,7 @@ _SUPERSEDED_SEED_HASHES: dict[str, frozenset[str]] = {
             "0867f3358bd431ff625d65eafbd273d65928c84b49f915af6b4dc8a2c3c1f068",
             "0f9b16fb4bde42ba863708c4956647b17735a2c4fe245b0ba0c6a106a56bf4dd",
             "87f5084a4cc922681730969ed98e769550a973bc4464f45e65b5342a7cfbf91e",
+            "4377989d16e8e40b8849b723ab9e181293360928569ef7bbd3b66ce964c0fe9b",
         }
     ),
 }

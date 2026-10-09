@@ -229,6 +229,7 @@ class TestSeeding:
         superseded = prompt_module._SUPERSEDED_SEED_HASHES[PromptType.QUERY_CONTEXTUALIZER.value]
         assert "0f9b16fb4bde42ba863708c4956647b17735a2c4fe245b0ba0c6a106a56bf4dd" in superseded
         assert "87f5084a4cc922681730969ed98e769550a973bc4464f45e65b5342a7cfbf91e" in superseded
+        assert "4377989d16e8e40b8849b723ab9e181293360928569ef7bbd3b66ce964c0fe9b" in superseded
 
     async def test_seeding_skips_blank_non_asr_template(self, monkeypatch):
         repo = FakePromptRepo()

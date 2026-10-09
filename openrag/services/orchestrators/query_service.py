@@ -65,6 +65,7 @@ from core.utils.source_filtering import (
 )
 from core.utils.text import get_num_tokens
 from core.utils.web_url import normalize_web_url
+from pydantic import ValidationError as PydanticValidationError
 from services.inference.runtime import detect_language, get_llm_semaphore
 
 if TYPE_CHECKING:
@@ -77,6 +78,15 @@ if TYPE_CHECKING:
 logger = get_logger()
 
 PrepareSources = Callable[[list, list], list]
+
+
+def _is_oversized_query_list_error(error: Exception) -> bool:
+    if not isinstance(error, PydanticValidationError):
+        return False
+    return any(
+        item.get("loc") == ("query_list",) and item.get("type") in {"too_long", "list_too_long"}
+        for item in error.errors()
+    )
 
 
 class CasualMessagePolicy(NamedTuple):
@@ -532,7 +542,21 @@ class QueryService:
                 return SearchQueries.model_validate_json(_json_slice(content))
             except Exception as exc:
                 if attempt == 1:
-                    logger.warning("Query generation parse error — retrying", error=str(exc))
+                    if _is_oversized_query_list_error(exc):
+                        retry_instruction = (
+                            f"The previous JSON was rejected because it contained more than "
+                            f"{MAX_QUERY_SUBQUERIES} sub-queries. Regenerate the complete result within the cap. "
+                            "For time ranges, group adjacent periods into coarser contiguous intervals that cover "
+                            "the entire range. For other facets, group related details while retaining every item "
+                            "and shared criterion. Never omit trailing periods or any item. Return only the full JSON."
+                        )
+                        llm_messages = [
+                            {**llm_messages[0], "content": f"{llm_messages[0]['content']}\n\n{retry_instruction}"},
+                            *llm_messages[1:],
+                        ]
+                        logger.warning("Query generation exceeded the sub-query limit — retrying with coarser coverage")
+                    else:
+                        logger.warning("Query generation parse error — retrying", error=str(exc))
                 else:
                     logger.warning(
                         "Query generation failed twice — falling back to raw user query",
