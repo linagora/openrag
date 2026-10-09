@@ -15,6 +15,13 @@ data:
   # Set env.config.RAY_LOG_TO_STDERR yourself to override.
   RAY_LOG_TO_STDERR: "1"
 {{- end }}
+{{- with .Values.openrag.seedUsers }}
+{{- if hasKey $.Values.env.config "SEED_USERS" }}
+{{- fail "openrag.seedUsers is set and env.config also defines SEED_USERS: keep one of the two." }}
+{{- end }}
+  # auth.seed_users (openrag.seedUsers): env var names only, no token.
+  SEED_USERS: {{ toJson . | quote }}
+{{- end }}
 {{- if .Values.proxy.enabled }}
 {{- if or (empty .Values.proxy.url) (eq .Values.proxy.url "http://192.168.100.100:80") }}
 {{- fail "proxy.enabled is true but proxy.url is not set or still uses the placeholder default. Set a valid proxy URL in proxy.url." }}
