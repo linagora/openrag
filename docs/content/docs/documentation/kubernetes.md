@@ -118,6 +118,63 @@ notes find that version in the `helm.sh/chart` label of the
 `networkPolicy.enabled: false` or under `--dry-run=client`, they print the steps
 that apply on every upgrade.
 
+## Upgrades that change the indexer generation
+
+Some releases bump the indexer actor generation (`_INDEXER_ACTOR_PROTOCOL_VERSION`
+in `openrag/services/workers/indexer_pool.py`; 2.3.0 moves `v12` to `v13`), and
+some of those also replace the shared `TaskStateManager` actor. This matters
+only when OpenRAG pods share a Ray cluster: with `ray.enabled: true`, or with an
+external cluster set through `RAY_ADDRESS`. With `ray.enabled: false` (the
+default) each pod runs its own Ray and restarts with it.
+
+The chart's Deployment sets no `strategy`, so Kubernetes rolls it with its default
+`RollingUpdate`: new pods start while old ones still serve, against the same Ray
+cluster. The first new pod replaces the `TaskStateManager` when it lacks a method
+the new generation needs. The old generation's workers keep a handle to the killed
+actor, so the files they are still indexing lose their state writes and stay
+`SERIALIZING` in the status API. For such an upgrade, never let the two releases
+run side by side:
+
+- Scale OpenRAG to zero before `helm upgrade`, and scale it back up afterwards:
+
+  ```bash
+  kubectl scale -n <release namespace> deploy/<fullname>-openrag --replicas=0
+  ```
+
+- Or switch the Deployment to `Recreate`, which stops every old pod before the
+  first new one starts. The chart does not manage the field, so the change
+  survives later `helm upgrade` runs:
+
+  ```bash
+  kubectl patch -n <release namespace> deploy/<fullname>-openrag \
+    -p '{"spec":{"strategy":{"type":"Recreate","rollingUpdate":null}}}'
+  ```
+
+The chart keeps the default rather than rendering `Recreate` with `ray.enabled`:
+`Recreate` takes the API down on every upgrade, not only on the few that change
+the generation, and under Ray Serve the API runs on the Ray pods, which the
+Deployment strategy does not reach. KubeRay does not recreate those pods when the
+chart changes either: follow the Ray step of the release's
+[upgrade guide](/openrag/documentation/upgrading/#3-plan-the-ray-restart), which
+restarts the Ray cluster and removes the old generation with it.
+
+On an **external Ray cluster**, which nothing in the chart restarts, retire the
+old generation once traffic to the old release has stopped and before the new
+release starts. For `v12`:
+
+```bash
+PYTHONPATH=openrag uv run python -m services.workers.retire_indexer_generation \
+  --ray-address "${RAY_ADDRESS}" \
+  --generation v12 \
+  --timeout 3600
+```
+
+It stops the old generation from accepting work, waits for the files it accepted
+to settle, then removes its actors. If the timeout expires, it leaves them running
+and accepting work again: do not start the new release then. Find out what is
+still indexing, and run the command again. See
+[Retire an old indexer actor generation](/openrag/documentation/deploy_ray_cluster/#retire-an-old-indexer-actor-generation).
+
 ## Notes
 
 For the default direct-API deployment, startup and liveness probes use
