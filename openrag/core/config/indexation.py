@@ -185,11 +185,10 @@ class LoaderConfig(ConfigMixin):
     # documents and the GPU, so it has to be measured per deployment rather than
     # guessed here.
     marker_parse_memory_limit_mb: int = Field(default=0, ge=0)
-    # PyMuPDF (the default PDF backend) parses in child processes, not threads:
-    # it is not thread-safe, so one shared thread used to serialize every PDF in
-    # a worker. Processes lift that and take a memory ceiling (#997, audit A2).
-    # 1 worker / 0 MiB keeps the previous behaviour, so an unconfigured
-    # deployment sees no change.
+    # PyMuPDF (the default PDF backend) is not thread-safe, so one shared thread
+    # serializes every PDF in a worker. More than one worker, or a memory
+    # ceiling, moves parsing into child processes, which lift that and take the
+    # ceiling (#997, audit A2). 1 worker / 0 MiB keeps the single thread.
     pymupdf_pool_size: int = Field(default=1, ge=1)
     pymupdf_parse_memory_limit_mb: int = Field(default=0, ge=0)
     pymupdf_max_tasks_per_child: int = Field(default=20, ge=0)

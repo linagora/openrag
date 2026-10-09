@@ -1132,9 +1132,10 @@ env:
     # Loaders
     PDFLOADER: "PyMuPDFLoader"
     # PyMuPDF parses one PDF at a time per indexer worker unless asked: each
-    # extra slot is a child process (~60 MiB before parsing). The ceiling (MiB)
-    # makes an oversized PDF fail on its own instead of OOM-killing the worker;
-    # the worker logs each child's baseline at startup. See env_vars.md.
+    # slot is then a child process (~80 MiB inside a Ray worker before parsing).
+    # The ceiling (MiB) makes an oversized PDF fail on its own instead of
+    # OOM-killing the worker; each child logs its baseline when it starts. See
+    # env_vars.md.
     # PYMUPDF_POOL_SIZE: "4"
     # PYMUPDF_PARSE_MEMORY_LIMIT_MB: "1024"
     XDG_CACHE_HOME: "/app/model_weights"
