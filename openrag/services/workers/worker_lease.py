@@ -11,6 +11,7 @@ task went to, which settles a task that never started (see
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from typing import Any
 
 from services.workers.task_state import (
@@ -25,12 +26,14 @@ def worker_ref_registration(ref: Any, worker: Any) -> dict[str, Any]:
     """The ``set_object_ref`` payload for a task just sent to ``worker``.
 
     Records the worker actor and its current restart count, read from the
-    GCS. A count read while the actor restarts is already the new
-    incarnation's, which is where the task goes. A restart that lands between
-    the submission and this read could drop the task and still be counted as
-    its incarnation; the miss is the safe way round (the task holds its file
-    until the next restart), and the window is the few milliseconds between
-    the two calls.
+    GCS. The count can be late both ways. A restart that lands between the
+    submission and this read drops the task yet counts as its incarnation, so
+    the task holds its file until the next restart. Worse, an actor that
+    crashed before the GCS noticed still reads ALIVE with the old count while
+    the task goes to the incarnation after it: that restart then reads as one
+    past the task, which settles it while it may still run. The task state
+    therefore marks a task it settles this way abandoned, and refuses its
+    pickup (``TaskStateManager.renew_worker_lease``) so it is dropped unindexed.
     """
     registration: dict[str, Any] = {"ref": ref}
     actor_id = getattr(worker, "_actor_id", None)
@@ -57,30 +60,41 @@ async def keep_worker_lease(
     worker_task: asyncio.Task[Any],
     logger: Any,
     renew_interval: float | None = None,
+    started: asyncio.Event | None = None,
+    is_working: Callable[[], bool] | None = None,
 ) -> None:
     """Renew the task's lease until cancelled, starting the moment work begins.
 
     The first renewal tells the TaskStateManager the task left the worker
-    actor's queue. A renewal answered ``False`` means the task was cancelled:
+    actor's queue, and ``started`` is set once it was answered (or failed), so
+    the worker can wait for it before doing any work. A renewal answered
+    ``False`` means the task was cancelled, or abandoned while queued:
     ``worker_task`` is cancelled then, since ``ray.cancel`` on a ref whose owner
     died does not reach the worker, and this is the one thing that still can.
+    It is left alone once ``is_working`` says the work is over, so a late
+    answer cannot cut short the cleanup that follows it.
     """
     remote = _remote_method(task_state_manager, "renew_worker_lease")
     if remote is None:
+        if started is not None:
+            started.set()
         return
     interval = WORKER_LEASE_RENEW_INTERVAL_SECONDS if renew_interval is None else renew_interval
     while True:
+        renewed = None
         try:
             # Awaited directly: the shared timeout helper ray.cancel()s the
             # call when this loop is cancelled, and a renewal needs no undo.
             (renewed,) = await asyncio.wait_for(asyncio.gather(remote(task_id)), timeout=interval)
         except Exception as exc:  # noqa: BLE001 - a missed renewal must never fail the file
             logger.warning(f"Failed to renew the worker lease of task {task_id}: {exc}")
-        else:
-            if renewed is False:
-                logger.warning(f"Task {task_id} was cancelled; stopping its worker")
-                worker_task.cancel()
-                return
+        if renewed is False and (is_working is None or is_working()):
+            logger.warning(f"Task {task_id} was cancelled or abandoned; stopping its worker")
+            worker_task.cancel()
+        if started is not None:
+            started.set()
+        if renewed is False:
+            return
         await asyncio.sleep(interval)
 
 

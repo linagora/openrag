@@ -2688,3 +2688,75 @@ def test_worker_ref_registration_omits_the_restart_count_when_the_gcs_cannot_be_
 
     assert worker_lease.worker_ref_registration(ref, worker) == {"ref": ref, WORKER_ACTOR_ID_KEY: "cd" * 16}
     assert worker_lease.worker_ref_registration(ref, SimpleNamespace()) == {"ref": ref}
+
+
+@pytest.mark.asyncio
+async def test_actor_drops_a_task_whose_pickup_the_task_state_refuses(monkeypatch, tmp_path) -> None:
+    """A queued orphan already settled by its worker actor's restart count must not index late."""
+    import services.workers.worker_lease as worker_lease
+
+    monkeypatch.setattr(worker_lease, "WORKER_LEASE_RENEW_INTERVAL_SECONDS", 0.01)
+    worker = _RecordingWorker()
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=worker)
+    renew = AsyncMock(return_value=False)
+    end = AsyncMock()
+    actor._task_state_manager.renew_worker_lease = SimpleNamespace(remote=renew)
+    actor._task_state_manager.end_worker_lease = SimpleNamespace(remote=end)
+
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(
+            actor.process_file(
+                task_id="t",
+                path=str(tmp_path / "doc.txt"),
+                metadata={"file_id": "f", "content_sha256": "abc123", CONTENT_CLAIM_TOKEN_METADATA_KEY: "attempt-1"},
+                partition="p",
+            ),
+            timeout=5,
+        )
+
+    assert worker.calls == 0
+    renew.assert_awaited_once_with("t")
+    actor._task_state_manager.get_object_ref.remote.assert_not_awaited()
+    actor._catalog_store.document_repo.release_content_sha256_claim.assert_awaited_once_with(
+        file_id="f", partition="p", content_sha256="abc123", claim_token="attempt-1"
+    )
+    end.assert_awaited_once_with("t")
+
+
+@pytest.mark.asyncio
+async def test_a_cancelling_renewal_during_cleanup_does_not_cut_it_short(monkeypatch, tmp_path) -> None:
+    """Once the file settled, a late False must not cancel the claim release or skip ending the lease."""
+    import services.workers.worker_lease as worker_lease
+
+    monkeypatch.setattr(worker_lease, "WORKER_LEASE_RENEW_INTERVAL_SECONDS", 0.01)
+    worker = _RecordingWorker()
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=worker)
+    cleaning_up = asyncio.Event()
+    released: list[str] = []
+
+    async def renew(_task_id: str) -> bool:
+        return not cleaning_up.is_set()
+
+    async def release(**_kwargs) -> None:
+        cleaning_up.set()
+        await asyncio.sleep(0.1)
+        released.append("claim")
+
+    end = AsyncMock()
+    actor._task_state_manager.renew_worker_lease = SimpleNamespace(remote=renew)
+    actor._task_state_manager.end_worker_lease = SimpleNamespace(remote=end)
+    actor._catalog_store.document_repo.release_content_sha256_claim = release
+
+    result = await asyncio.wait_for(
+        actor.process_file(
+            task_id="t",
+            path=str(tmp_path / "doc.txt"),
+            metadata={"file_id": "f", "content_sha256": "abc123", CONTENT_CLAIM_TOKEN_METADATA_KEY: "attempt-1"},
+            partition="p",
+        ),
+        timeout=5,
+    )
+
+    assert result == {"stored_count": 1, "stage": "stored"}
+    assert released == ["claim"]
+    end.assert_awaited_once_with("t")

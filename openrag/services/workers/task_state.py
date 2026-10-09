@@ -83,6 +83,16 @@ _MAX_TASK_ERROR_CHARS = 8_000
 STALE_REFLESS_TASK_ERROR = (
     "Indexing task never exposed a worker reference within the registration grace period; marking it failed as stale."
 )
+ABANDONED_QUEUED_TASK_ERROR = (
+    "Indexing task was lost while queued: its worker actor stopped or restarted before starting it, "
+    "after the pool that sent it died."
+)
+_FENCED_FAILURE_ERRORS = frozenset({STALE_REFLESS_TASK_ERROR, ABANDONED_QUEUED_TASK_ERROR})
+
+
+def _is_fenced_failure(info: TaskInfo) -> bool:
+    """A failure recorded for a worker that may still turn up, and so must keep refusing it."""
+    return info.state == "FAILED" and info.error in _FENCED_FAILURE_ERRORS
 
 
 def _task_state_storage_available() -> bool:
@@ -199,7 +209,7 @@ def _tombstone_deadline(info: TaskInfo, *, now: float | None = None) -> float | 
     settled gets no deadline and is held until its reference resolves.
     """
     timestamp = time.time() if now is None else now
-    if info.state == "FAILED" and info.error == STALE_REFLESS_TASK_ERROR:
+    if _is_fenced_failure(info):
         return timestamp + _CANCELLATION_TOMBSTONE_TTL_SECONDS
     if info.state != "CANCELLED" or _cancelled_task_has_worker_fence(info):
         return None
@@ -208,7 +218,7 @@ def _tombstone_deadline(info: TaskInfo, *, now: float | None = None) -> float | 
 
 def _recovery_snapshot(info: TaskInfo, *, now: float | None = None) -> tuple[TaskInfo, float | None]:
     timestamp = time.time() if now is None else now
-    if info.state == "FAILED" and info.error == STALE_REFLESS_TASK_ERROR:
+    if _is_fenced_failure(info):
         return info, _tombstone_deadline(info, now=timestamp)
     if info.state != "CANCELLED":
         return info, None
@@ -223,6 +233,7 @@ def _recovery_snapshot(info: TaskInfo, *, now: float | None = None) -> tuple[Tas
         submission_started_at=getattr(info, "submission_started_at", None),
         worker_started=getattr(info, "worker_started", False),
         worker_finished=getattr(info, "worker_finished", False),
+        worker_abandoned=getattr(info, "worker_abandoned", False),
     )
     return snapshot, _tombstone_deadline(snapshot, now=timestamp)
 
@@ -242,7 +253,7 @@ def _save_recoverable_task(task_id: str, info: TaskInfo) -> None:
     if not _task_state_storage_available():
         return
     key = _recoverable_task_key(task_id)
-    if info.state in RECOVERABLE_TASK_STATES or (info.state == "FAILED" and info.error == STALE_REFLESS_TASK_ERROR):
+    if info.state in RECOVERABLE_TASK_STATES or _is_fenced_failure(info):
         snapshot, expires_at = _recovery_snapshot(info)
         _internal_kv_put(
             key,
@@ -316,6 +327,11 @@ class TaskInfo:
     # A task still queued sits in the incarnation it was sent to; a restart
     # past that count has dropped it.
     worker_restarts_baseline: int | None = None
+    # Set when the worker actor's fate settled a task the worker never
+    # started. The restart count can be read late, already counting the
+    # incarnation the task went to, so the task may still be picked up; this
+    # makes its pickup refused instead of indexing a file already released.
+    worker_abandoned: bool = False
 
 
 _REF_PENDING = "pending"
@@ -421,7 +437,15 @@ def _queued_orphan_has_settled(info: TaskInfo, actor_id: str) -> bool:
     first. That read is never served from the cache, which may predate the
     owner's death and a restart the task survived. Later cached reads can only
     lag the GCS, which is conservative: death is final and the count only grows.
+
+    The registered count is not always sound, though: read just after a crash
+    the GCS has not noticed yet, it already names the incarnation the task is
+    delivered to, which then counts as a restart past it. So settling marks the
+    task ``worker_abandoned``, and the worker's pickup is refused should it
+    still come (see ``TaskStateManager.renew_worker_lease``).
     """
+    if getattr(info, "worker_abandoned", False):
+        return True
     baseline = getattr(info, "worker_restarts_baseline", None)
     if baseline is None:
         registered = info.object_ref.get(WORKER_RESTARTS_KEY) if isinstance(info.object_ref, dict) else None
@@ -431,12 +455,13 @@ def _queued_orphan_has_settled(info: TaskInfo, actor_id: str) -> bool:
     if state is None:
         return False
     alive, restarts = state
-    if not alive:
-        return True
-    if baseline is None:
+    if baseline is None and alive:
         info.worker_restarts_baseline = restarts
         return False
-    return restarts > baseline
+    if alive and restarts <= baseline:
+        return False
+    info.worker_abandoned = True
+    return True
 
 
 def _worker_ref_has_settled(info: TaskInfo) -> bool:
@@ -606,11 +631,9 @@ class TaskStateManager:
                 examined += 1
                 continue
             if info is not None and deadline > timestamp:
-                is_tombstone = info.state == "CANCELLED" or (
-                    info.state == "FAILED" and info.error == STALE_REFLESS_TASK_ERROR
-                )
+                is_tombstone = info.state == "CANCELLED" or _is_fenced_failure(info)
                 if is_tombstone:
-                    # A settled cancellation's or stale-refless task's worker has
+                    # A settled cancellation's or fenced failure's worker has
                     # already gone quiet, but the record itself still fences a
                     # late write through set_state's state_is_fenced check.
                     # Forgetting it here under cap pressure alone, before its own
@@ -711,6 +734,27 @@ class TaskStateManager:
         self._count_terminal(previous, "FAILED")
         return True
 
+    def _worker_settled_locked(self, task_id: str, info: TaskInfo, *, ignore_finished_stamp: bool = False) -> bool:
+        """``_worker_has_settled`` (or the ref alone), failing a task just found abandoned.
+
+        A queued task settled by its worker actor's fate is failed at once:
+        nothing else would settle its record, and its pickup is refused anyway.
+        A cancellation keeps its state, which refuses the pickup already.
+        """
+        abandoned = getattr(info, "worker_abandoned", False)
+        settled = _worker_ref_has_settled(info) if ignore_finished_stamp else _worker_has_settled(info)
+        if abandoned or not getattr(info, "worker_abandoned", False):
+            return settled
+        if info.state in CANCELLABLE_INDEXING_STATES:
+            previous = info.state
+            info.state = "FAILED"
+            info.error = ABANDONED_QUEUED_TASK_ERROR
+            self._persist_task_locked(task_id, info)
+            self._count_terminal(previous, "FAILED")
+        else:
+            self._persist_task_locked(task_id, info)
+        return settled
+
     def _expire_refless_tasks_if_stale_locked(self, task_ids: Iterable[str] | None = None) -> None:
         for task_id in self.tasks if task_ids is None else task_ids:
             info = self.tasks.get(task_id)
@@ -771,9 +815,7 @@ class TaskStateManager:
     async def set_state(self, task_id: str, state: str) -> bool:
         with self.lock:
             info = self._ensure_task(task_id)
-            state_is_fenced = info.state == DocumentStatus.CANCELLED or (
-                info.state == "FAILED" and info.error == STALE_REFLESS_TASK_ERROR
-            )
+            state_is_fenced = info.state == DocumentStatus.CANCELLED or _is_fenced_failure(info)
             if state_is_fenced and state != info.state:
                 return False
             if state == "CANCELLED":
@@ -866,7 +908,9 @@ class TaskStateManager:
                 return False
             object_ref = info.object_ref
             ref = object_ref.get("ref") if isinstance(object_ref, dict) else object_ref
-            if _cancelled_task_has_worker_fence(info) and (ref is None or not _worker_ref_has_settled(info)):
+            if _cancelled_task_has_worker_fence(info) and (
+                ref is None or not self._worker_settled_locked(task_id, info, ignore_finished_stamp=True)
+            ):
                 return False
             info.object_ref = None
             info.worker_submitted = False
@@ -1093,7 +1137,7 @@ class TaskStateManager:
             details = info.details or {}
             if details.get("partition") != partition or details.get("file_id") != file_id:
                 continue
-            if _worker_has_settled(info):
+            if self._worker_settled_locked(candidate_id, info):
                 continue
             return candidate_id
         return None
@@ -1116,7 +1160,7 @@ class TaskStateManager:
             info = self.tasks.get(task_id)
             if info is None:
                 return False
-            if info.state == "FAILED" and info.error == STALE_REFLESS_TASK_ERROR:
+            if _is_fenced_failure(info):
                 return False
             if self._expire_refless_task_if_stale_locked(task_id, info):
                 return False
@@ -1141,15 +1185,19 @@ class TaskStateManager:
 
         The first renewal also records that the worker started: from then on
         an orphaned ref is settled by this lease rather than by the worker
-        actor's fate. Returns ``False`` once the task is cancelled: the worker
-        then cancels its own ``process_file``, because ``ray.cancel`` cannot
-        reach a task whose owner died. ``None`` for a task this actor does not
-        know, which the worker ignores.
+        actor's fate. Returns ``False`` once the task is cancelled, or was
+        abandoned while queued: the worker then cancels its own
+        ``process_file``, because ``ray.cancel`` cannot reach a task whose owner
+        died. ``None`` for a task this actor does not know, which the worker
+        ignores.
         """
         with self.lock:
             info = self.tasks.get(task_id)
             if info is None:
                 return None
+            if getattr(info, "worker_abandoned", False):
+                # Settled as dropped and its file released: it must not start now.
+                return False
             info.worker_lease_expires_at = time.time() + self._worker_lease_ttl_seconds
             if not getattr(info, "worker_started", False):
                 info.worker_started = True
@@ -1194,7 +1242,7 @@ class TaskStateManager:
             ref = info.object_ref.get("ref") if isinstance(info.object_ref, dict) else info.object_ref
             if ref is None:
                 return info.state not in CANCELLABLE_INDEXING_STATES and not _cancelled_task_has_worker_fence(info)
-            return _worker_ref_has_settled(info)
+            return self._worker_settled_locked(task_id, info, ignore_finished_stamp=True)
 
     @ray.method(concurrency_group="get")
     async def get_state(self, task_id: str) -> str | None:
@@ -1278,7 +1326,7 @@ class TaskStateManager:
                 owns_claim = info.state in CANCELLABLE_INDEXING_STATES or _cancelled_task_has_worker_fence(info)
                 if not owns_claim:
                     continue
-                if _worker_has_settled(info):
+                if self._worker_settled_locked(task_id, info):
                     continue
                 details = info.details or {}
                 if details and details.get("partition") != partition:

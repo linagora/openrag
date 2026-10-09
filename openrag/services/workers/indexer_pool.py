@@ -497,17 +497,25 @@ class IndexerWorkerActor:
         content_claim_token = metadata.get(CONTENT_CLAIM_TOKEN_METADATA_KEY)
         worker_metadata = {key: value for key, value in metadata.items() if key != CONTENT_CLAIM_TOKEN_METADATA_KEY}
         # Started before anything else, so the first renewal also tells the
-        # task state this task left the actor's queue.
+        # task state this task left the actor's queue. Until the finally below,
+        # a renewal answered False cancels this task.
+        working = True
+        lease_started = asyncio.Event()
         worker_lease = asyncio.create_task(
             keep_worker_lease(
                 self._task_state_manager,
                 task_id,
                 worker_task=asyncio.current_task(),
                 logger=self._logger,
+                started=lease_started,
+                is_working=lambda: working,
             )
         )
         try:
             try:
+                # A pickup the task state refuses (a task cancelled or abandoned
+                # while queued) is cancelled here, before any work.
+                await lease_started.wait()
                 await self._await_worker_ref_registration(task_id)
                 await self._ensure_catalog()
                 from services.workers.parsers.parser_dispatcher import routes_to_openai_audio_loader
@@ -610,6 +618,10 @@ class IndexerWorkerActor:
                     )
             return result
         finally:
+            # Set before the first await: a cancellation the lease issued
+            # earlier was delivered to the work above, and none can land in
+            # the claim release or the lease teardown below.
+            working = False
             content_sha256 = metadata.get("content_sha256")
             file_id = metadata.get("file_id")
             if content_sha256 and file_id and content_claim_token:

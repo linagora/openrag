@@ -182,6 +182,8 @@ class _LeasedWorker:
     async def process_file(self, task_id: str, hold: bool) -> str:
         from services.workers.worker_lease import end_worker_lease, keep_worker_lease
 
+        working = True
+        lease_started = asyncio.Event()
         lease = asyncio.create_task(
             keep_worker_lease(
                 self._task_state_manager,
@@ -189,9 +191,12 @@ class _LeasedWorker:
                 worker_task=asyncio.current_task(),
                 logger=_QuietLogger(),
                 renew_interval=_LEASE_RENEW_SECONDS,
+                started=lease_started,
+                is_working=lambda: working,
             )
         )
         try:
+            await lease_started.wait()
             # IndexerWorker's first step: a cancelled task is refused here.
             if not await self._task_state_manager.set_state.remote(task_id, "SERIALIZING"):
                 raise RuntimeError(f"Task {task_id} was cancelled before indexing started")
@@ -200,6 +205,7 @@ class _LeasedWorker:
             await self._writes.record.remote(task_id)
             return task_id
         finally:
+            working = False
             lease.cancel()
             await asyncio.gather(lease, return_exceptions=True)
             await end_worker_lease(self._task_state_manager, task_id, logger=_QuietLogger())
