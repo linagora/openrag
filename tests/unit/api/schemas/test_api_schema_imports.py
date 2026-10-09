@@ -105,6 +105,137 @@ def test_chat_request_defaults_logprobs_off():
     assert OpenAIChatCompletionRequest.model_json_schema()["properties"]["logprobs"]["default"] is False
 
 
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {"bypass_query_contextualization": True},
+        {
+            "bypass_query_contextualization": True,
+            "include_retrieval_trace": True,
+        },
+        {
+            "bypass_query_contextualization": True,
+            "include_retrieval_trace": True,
+            "require_retrieval": True,
+            "compare_original_query": True,
+        },
+    ],
+)
+def test_contextualization_bypass_rejects_unsafe_or_ambiguous_combinations(metadata):
+    with pytest.raises(ValidationError):
+        OpenAIChatCompletionRequest.model_validate(
+            {
+                "messages": [{"role": "user", "content": "question"}],
+                "metadata": metadata,
+            }
+        )
+
+
+def test_contextualization_bypass_accepts_traced_required_retrieval():
+    request = OpenAIChatCompletionRequest.model_validate(
+        {
+            "messages": [{"role": "user", "content": "question"}],
+            "metadata": {
+                "bypass_query_contextualization": True,
+                "include_retrieval_trace": True,
+                "require_retrieval": True,
+            },
+        }
+    )
+
+    assert request.metadata["bypass_query_contextualization"] is True
+
+
+def test_original_query_comparison_requires_trace_even_without_bypass():
+    with pytest.raises(ValidationError, match="compare_original_query requires include_retrieval_trace"):
+        OpenAIChatCompletionRequest.model_validate(
+            {
+                "messages": [{"role": "user", "content": "question"}],
+                "metadata": {"compare_original_query": True},
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {"retrieval_similarity_threshold": 0.35},
+        {
+            "retrieval_similarity_threshold": 0.35,
+            "include_retrieval_trace": True,
+        },
+        {
+            "retrieval_similarity_threshold": -0.01,
+            "include_retrieval_trace": True,
+            "require_retrieval": True,
+        },
+        {
+            "retrieval_similarity_threshold": 1.01,
+            "include_retrieval_trace": True,
+            "require_retrieval": True,
+        },
+        {
+            "retrieval_top_k": 1001,
+            "include_retrieval_trace": True,
+            "require_retrieval": True,
+        },
+    ],
+)
+def test_retrieval_diagnostic_overrides_reject_unsafe_values_or_untraced_requests(metadata):
+    with pytest.raises(ValidationError):
+        OpenAIChatCompletionRequest.model_validate(
+            {
+                "messages": [{"role": "user", "content": "question"}],
+                "metadata": metadata,
+            }
+        )
+
+
+def test_retrieval_diagnostic_overrides_accept_bounded_traced_required_retrieval():
+    request = OpenAIChatCompletionRequest.model_validate(
+        {
+            "messages": [{"role": "user", "content": "question"}],
+            "metadata": {
+                "include_retrieval_trace": True,
+                "require_retrieval": True,
+                "retrieval_similarity_threshold": 0.35,
+                "retrieval_top_k": 1000,
+                "retrieval_disable_reranker": True,
+                "retrieval_disable_expansion": True,
+            },
+        }
+    )
+
+    assert request.metadata["retrieval_similarity_threshold"] == 0.35
+    assert request.metadata["retrieval_top_k"] == 1000
+
+
+def test_inactive_retrieval_diagnostic_defaults_do_not_require_trace_or_force_retrieval():
+    request = OpenAIChatCompletionRequest.model_validate(
+        {
+            "messages": [{"role": "user", "content": "question"}],
+            "metadata": {
+                "retrieval_similarity_threshold": None,
+                "retrieval_top_k": None,
+                "retrieval_disable_reranker": False,
+                "retrieval_disable_expansion": None,
+            },
+        }
+    )
+
+    assert request.metadata["retrieval_disable_reranker"] is False
+
+
+def test_retrieval_diagnostic_values_are_validated_before_trace_requirements():
+    with pytest.raises(ValidationError, match="retrieval_top_k must be an integer"):
+        OpenAIChatCompletionRequest.model_validate(
+            {
+                "messages": [{"role": "user", "content": "question"}],
+                "metadata": {"retrieval_top_k": "many"},
+            }
+        )
+
+
 @pytest.mark.parametrize("model", [OpenAIChatCompletionRequest, OpenAICompletionRequest])
 def test_openapi_example_is_a_valid_request(model):
     """The Swagger "Try it out" bodies are hand-written dicts in ``json_schema_extra``

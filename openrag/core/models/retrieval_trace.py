@@ -111,7 +111,7 @@ class TraceError(_TraceModel):
 
 
 class QueryRetrievalTrace(_TraceModel):
-    """Content-free retrieval stages produced for one partition or query."""
+    """Retrieval stages for one query; candidate records omit document content."""
 
     query: str | None = None
     partition: str | None = None

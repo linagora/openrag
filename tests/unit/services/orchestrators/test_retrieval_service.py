@@ -699,6 +699,41 @@ async def test_unset_top_n_follows_global_reranker_top_k():
 
 
 @pytest.mark.asyncio
+async def test_retrieval_depth_override_preserves_preset_final_top_n():
+    searcher = FakeSearcher()
+    searcher.search_result = [_chunk(str(index)) for index in range(20)]
+    cfg = _config()
+    cfg.partitions = {
+        "solo": _partition(
+            name="solo",
+            retrieval=RetrievalPipelineConfig(
+                top_k=50,
+                top_n=10,
+                enable_reranker=False,
+                include_related=False,
+                include_ancestors=False,
+            ),
+        )
+    }
+    service = RetrievalService(
+        searcher=searcher,
+        reranker=None,
+        llm=None,
+        config=cfg,
+        searcher_factory=lambda _name: searcher,
+    )
+    results = await service.retrieve_multi(
+        partitions=["solo"],
+        search_queries=SearchQueries(query_list=[Query(query="question")]),
+        top_k=None,
+        retrieval_top_k=100,
+    )
+
+    assert len(results) == 10
+    assert searcher.search_calls[0]["top_k"] == 100
+
+
+@pytest.mark.asyncio
 async def test_retrieve_all_falls_back_to_legacy_when_no_partitions_exist():
     """On a fresh system with zero hydrated partitions there is nothing to
     expand — keep the single legacy pipeline searching ["all"]."""
