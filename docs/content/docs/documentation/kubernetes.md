@@ -134,10 +134,25 @@ The chart's Deployment sets no `strategy`, so Kubernetes rolls it with its defau
 cluster. The first new pod replaces the `TaskStateManager` when it lacks a method
 the new generation needs. The old generation's workers keep a handle to the killed
 actor, so the files they are still indexing lose their state writes and stay
-`SERIALIZING` in the status API. For such an upgrade, never let the two releases
-run side by side:
+`SERIALIZING` in the status API.
 
-- Scale OpenRAG to zero before `helm upgrade`, and scale it back up afterwards:
+For such an upgrade, first stop traffic and wait until no indexing task is
+active, as in step 1 of the
+[upgrade guide](/openrag/documentation/upgrading/#1-stop-traffic-and-let-indexing-finish):
+
+```bash
+curl -s -H "Authorization: Bearer $ADMIN_TOKEN" \
+  "https://<openrag host>/queue/tasks?task_status=active"
+# {"tasks": []}
+```
+
+Scaling OpenRAG down does not stop the old workers: with `ray.enabled: true` or
+an external cluster they run on the Ray cluster, not in the OpenRAG pods, and
+keep indexing after the pods are gone. Then never let the two releases run side
+by side:
+
+- Scale OpenRAG to zero before `helm upgrade`. The upgrade sets the replica count
+  back to `openrag.replicas`, so there is nothing to scale up afterwards:
 
   ```bash
   kubectl scale -n <release namespace> deploy/<fullname>-openrag --replicas=0
@@ -189,6 +204,22 @@ to settle, then removes its actors. If the timeout expires, it leaves them runni
 and accepting work again: do not start the new release then. Find out what is
 still indexing, and run the command again. See
 [Retire an old indexer actor generation](/openrag/documentation/deploy_ray_cluster/#retire-an-old-indexer-actor-generation).
+
+### Upgrades that keep the generation
+
+A fix that lives in the Ray actors reaches a shared Ray cluster only when those
+actors are recreated, and a release that keeps the generation does not recreate
+them. The fence that holds a file while an orphaned indexing worker may still
+write to it is such a fix: an upgrade from 2.3.0 or 2.3.1 keeps `v13`, so the
+`TaskStateManager` and the indexer actors from the old release keep running, and
+an orphaned task can still release its file while its worker runs. The API then
+logs a warning that the running Ray actors predate the fence.
+
+Recreate them once, at a time when no indexing is running. With `ray.enabled:
+true`, delete every Ray pod, head included, as in step 4 of the
+[upgrade guide](/openrag/documentation/upgrading/#4-upgrade-the-release). Restart
+an external Ray cluster yourself. With `ray.enabled: false` (the default) Ray runs
+inside the OpenRAG pod, so the pod restart of the upgrade recreates the actors.
 
 ## Notes
 
