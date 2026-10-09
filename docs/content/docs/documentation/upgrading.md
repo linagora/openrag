@@ -400,9 +400,9 @@ Your values decide what applies the PostgreSQL migrations:
 
 | `postgresProvisioning` | What applies the migrations |
 |---|---|
-| `migrationJob.enabled: true` | The `pre-upgrade` migration Job, before the pods roll. A failing migration fails `helm upgrade`. |
+| `migrationJob.enabled: true` | The `pre-upgrade` migration Job, before the pods roll. A failing migration fails `helm upgrade`. With an external PostgreSQL only: charts after 0.7.1 refuse it with `postgresql.enabled`. |
 | `runMigrationsInApp: true` (the default), Job off | The new OpenRAG pod, when it starts. Under Ray Serve, the Serve replicas on the Ray pods, once you scale OpenRAG back up. |
-| Both off | Nothing: run them by hand after `helm upgrade`, as shown below. |
+| Both off | Nothing: run them by hand after `helm upgrade`, as shown below. Charts after 0.7.1 refuse this unless you also set `externalMigrations: true`. |
 
 If you change the PostgreSQL password (see [Secrets](#secrets)), do it now, before
 `helm upgrade`:
