@@ -91,9 +91,14 @@ class FakePartitionService:
 class FakeMembershipRepo:
     def __init__(self, owned: dict[int, list[dict]] | None = None):
         self._owned = owned or {}
+        self.assigned: list[tuple[int, str, str]] = []
 
     async def list_user_partitions_dict(self, user_id: int) -> list[dict]:
         return self._owned.get(user_id, [])
+
+    async def assign_partition(self, assignment):
+        self.assigned.append((assignment.user_id, assignment.partition, assignment.role.value))
+        return assignment
 
 
 class FakeJobService:
@@ -245,6 +250,32 @@ async def test_delete_user_keeps_the_default_partition_they_own():
     await _svc(repo, partition_service=ps, membership_repo=mem).delete_user(5)
     assert ps.deleted == ["p_owned"]
     assert repo.deleted == [5]
+
+
+@pytest.mark.asyncio
+async def test_delete_user_owning_default_makes_the_admin_its_owner():
+    # Without an owner nobody could manage the default partition's members,
+    # so the seeded admin (id 1) takes over ownership.
+    repo = FakeUserRepo(existing={5})
+    mem = FakeMembershipRepo({5: [{"partition": "default", "role": "owner"}]})
+    await _svc(repo, membership_repo=mem).delete_user(5)
+    assert mem.assigned == [(1, "default", "owner")]
+    assert repo.deleted == [5]
+
+
+@pytest.mark.asyncio
+async def test_delete_user_not_owning_default_leaves_its_owners_alone():
+    repo = FakeUserRepo(existing={5})
+    mem = FakeMembershipRepo(
+        {
+            5: [
+                {"partition": "default", "role": "editor"},
+                {"partition": "p_owned", "role": "owner"},
+            ]
+        }
+    )
+    await _svc(repo, membership_repo=mem).delete_user(5)
+    assert mem.assigned == []
 
 
 @pytest.mark.asyncio

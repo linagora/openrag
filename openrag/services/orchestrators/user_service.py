@@ -24,6 +24,7 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING, Any
 
+from core.models.user import PartitionRole, UserPartition
 from core.utils.consts import DEFAULT_PARTITION_NAME
 from core.utils.exceptions import UserNotFoundError, ValidationError
 from core.utils.logging import get_logger
@@ -47,6 +48,10 @@ _MAX_DISPLAY_NAME = 255
 # fields for internal flows, so this service-level whitelist keeps token,
 # file_count, id, and created_at out of user-update payloads.
 _UPDATABLE_USER_FIELDS = frozenset({"display_name", "external_user_id", "email", "is_admin", "file_quota"})
+
+# The seeded admin account: undeletable, and the owner
+# ``PartitionService.seed_default_partition`` gives the default partition.
+_DEFAULT_ADMIN_USER_ID = 1
 
 
 class UserService:
@@ -177,16 +182,27 @@ class UserService:
         user holds the ``owner`` role is deleted (vectors + relational
         rows, via PartitionService) before the user row is removed. The
         ``default`` partition is kept, since it cannot be deleted; only the
-        user's membership in it goes, with the user row.
+        user's membership in it goes, with the user row. If the user owned
+        it, the seeded admin is made its owner so it never ends up without
+        anyone allowed to manage its members.
         """
         await self._ensure_exists(user_id)
-        owned = [
+        owned_all = [
             p["partition"]
             for p in await self._membership_repo.list_user_partitions_dict(user_id)
-            if p.get("role") == "owner" and p["partition"] != DEFAULT_PARTITION_NAME
+            if p.get("role") == "owner"
         ]
+        owned = [p for p in owned_all if p != DEFAULT_PARTITION_NAME]
         for partition in owned:
             await self._partition_service.delete_partition(partition)
+        if DEFAULT_PARTITION_NAME in owned_all and user_id != _DEFAULT_ADMIN_USER_ID:
+            await self._membership_repo.assign_partition(
+                UserPartition(
+                    user_id=_DEFAULT_ADMIN_USER_ID,
+                    partition=DEFAULT_PARTITION_NAME,
+                    role=PartitionRole.OWNER,
+                )
+            )
         await self._user_repo.delete_user(user_id)
         logger.info("Deleted user", user_id=user_id, cascaded_partitions=len(owned))
 

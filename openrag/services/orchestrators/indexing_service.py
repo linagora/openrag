@@ -214,7 +214,8 @@ class IndexingService:
             # Legacy passthrough: the worker indexes with its static config and
             # the default embedder. A running service never has an empty cache
             # (startup seeds the undeletable ``default`` partition and loads
-            # it); only unit tests without partitions land here.
+            # it); only unit tests that build the service without partitions,
+            # or a partition table emptied by hand in the database, land here.
             return None, None
         if partition not in partitions:
             raise PartitionNotFoundError(f"Partition '{partition}' does not exist.")
