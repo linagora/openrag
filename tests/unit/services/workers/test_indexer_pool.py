@@ -2541,3 +2541,58 @@ def test_a_missing_default_embedder_reloads_the_registry_despite_a_global_embedd
     pool._last_miss_reload_at = None
 
     assert pool._reload_decision({"embedder": ["default"]}) == "miss"
+
+
+class _BlockingWorker(_RecordingWorker):
+    def __init__(self) -> None:
+        super().__init__()
+        self.release = asyncio.Event()
+
+    async def process_file(self, **kwargs) -> dict:
+        await self.release.wait()
+        return await super().process_file(**kwargs)
+
+
+@pytest.mark.asyncio
+async def test_actor_renews_the_worker_lease_only_while_the_file_is_processing(monkeypatch, tmp_path) -> None:
+    """The lease is how the task state tells a live worker from a dead one once the pool actor died."""
+    import services.workers.indexer_pool as indexer_pool
+
+    monkeypatch.setattr(indexer_pool, "WORKER_LEASE_RENEW_INTERVAL_SECONDS", 0.01)
+    worker = _BlockingWorker()
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=worker)
+    renew = AsyncMock(return_value=True)
+    actor._task_state_manager.renew_worker_lease = SimpleNamespace(remote=renew)
+
+    processing = asyncio.create_task(
+        actor.process_file(task_id="t", path=str(tmp_path / "doc.txt"), metadata={"file_id": "f"}, partition="p")
+    )
+    while renew.await_count < 3:
+        await asyncio.sleep(0.01)
+    worker.release.set()
+    assert await processing == {"stored_count": 1, "stage": "stored"}
+    renewals = renew.await_count
+    await asyncio.sleep(0.05)
+
+    assert renew.await_count == renewals
+    renew.assert_awaited_with("t")
+
+
+@pytest.mark.asyncio
+async def test_actor_keeps_processing_when_a_lease_renewal_fails(monkeypatch, tmp_path) -> None:
+    import services.workers.indexer_pool as indexer_pool
+
+    monkeypatch.setattr(indexer_pool, "WORKER_LEASE_RENEW_INTERVAL_SECONDS", 0.01)
+    worker = _BlockingWorker()
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=worker)
+    renew = AsyncMock(side_effect=RuntimeError("task state unavailable"))
+    actor._task_state_manager.renew_worker_lease = SimpleNamespace(remote=renew)
+
+    processing = asyncio.create_task(
+        actor.process_file(task_id="t", path=str(tmp_path / "doc.txt"), metadata={"file_id": "f"}, partition="p")
+    )
+    while renew.await_count < 2:
+        await asyncio.sleep(0.01)
+    worker.release.set()
+
+    assert await processing == {"stored_count": 1, "stage": "stored"}

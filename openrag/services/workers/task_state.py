@@ -54,6 +54,13 @@ _RECOVERABLE_TASK_KV_PREFIX = b"recoverable-task-v1:"
 _CANCELLATION_TOMBSTONE_TTL_SECONDS = 24 * 60 * 60
 _FILE_DELETE_FENCE_TTL_SECONDS = 2 * 60
 _CONTENT_CLAIM_REGISTRATION_GRACE_SECONDS = 60
+# A worker renews its task's lease on this actor while ``process_file`` runs.
+# The lease only matters once the ref's owner (the pool actor) has died: Ray
+# then reports the ref ready although the worker may still be writing, and the
+# lease is the one remaining sign of whether it is. The TTL bounds how long a
+# dead worker can hold its file after its owner died too.
+WORKER_LEASE_RENEW_INTERVAL_SECONDS = 15.0
+_WORKER_LEASE_TTL_SECONDS = 60.0
 # Terminal task records are progress receipts, not the system of record: the
 # durable per-file state lives in the Postgres catalog. They are kept only long
 # enough to answer the reads that follow a job settling, then dropped, with a
@@ -282,31 +289,82 @@ class TaskInfo:
     object_ref: ray.ObjectRef | None = None
     worker_submitted: bool = False
     submission_started_at: float | None = None
+    # In memory only: a restarted actor grants every recovered task a fresh
+    # lease rather than trusting a persisted deadline that kept running while
+    # nothing could renew it.
+    worker_lease_expires_at: float | None = None
 
 
-def _object_ref_is_ready(object_ref: Any) -> bool:
+_REF_PENDING = "pending"
+_REF_SETTLED = "settled"
+_REF_OWNER_DIED = "owner_died"
+
+
+def _object_ref_status(object_ref: Any) -> str:
+    """Classify a stored worker ref as pending, settled, or orphaned by its owner.
+
+    A ready ref normally means the worker returned, raised, was cancelled or
+    died. The exception is a ref whose owner died: the pool actor that
+    submitted the task owns its ref, and once that actor dies (a crash, or a
+    ``max_restarts`` restart) Ray reports the ref ready with ``OwnerDiedError``
+    while the worker may still be running. Only ``ray.get`` tells the two
+    apart; on a ref ``ray.wait`` reported ready it returns without blocking.
+    """
     ref = object_ref.get("ref") if isinstance(object_ref, dict) else object_ref
     if ref is None:
-        return False
+        return _REF_PENDING
     try:
         ready, _ = ray.wait([ref], num_returns=1, timeout=0)
     except Exception:
         # Readiness uncertainty must preserve the claim; reclaiming it could
         # let a second upload run alongside a worker that is still active.
-        return False
-    return bool(ready)
+        return _REF_PENDING
+    if not ready:
+        return _REF_PENDING
+    try:
+        ray.get(ref, timeout=0)
+    except ray.exceptions.OwnerDiedError:
+        return _REF_OWNER_DIED
+    except ray.exceptions.GetTimeoutError:
+        return _REF_PENDING
+    except ray.exceptions.RayError:
+        # The worker raised, was cancelled or died, or its result was lost
+        # while the owner lived: either way it has stopped writing.
+        return _REF_SETTLED
+    except Exception:
+        return _REF_PENDING
+    return _REF_SETTLED
+
+
+def _worker_lease_is_live(info: TaskInfo, *, now: float | None = None) -> bool:
+    expires_at = getattr(info, "worker_lease_expires_at", None)
+    timestamp = time.time() if now is None else now
+    return isinstance(expires_at, (int, float)) and expires_at > timestamp
+
+
+def _worker_ref_has_settled(info: TaskInfo) -> bool:
+    """Whether the worker behind the stored ref can no longer write.
+
+    An orphaned ref says nothing about the worker, so its lease decides: the
+    worker renews it while it runs, and it lapses within
+    ``_WORKER_LEASE_TTL_SECONDS`` once the worker returns or dies.
+    """
+    status = _object_ref_status(info.object_ref)
+    if status == _REF_OWNER_DIED:
+        return not _worker_lease_is_live(info)
+    return status == _REF_SETTLED
 
 
 def _worker_has_settled(info: TaskInfo) -> bool:
     """Whether the task's worker can no longer write, whatever the record says.
 
-    The completion tracker stamps ``TASK_FINISHED_AT`` once the worker ref
-    resolves, success or error; a ready ref says the same before the stamp.
+    The completion tracker stamps ``TASK_FINISHED_AT`` once the worker has
+    settled, success or error; a settled ref says the same before the stamp.
     """
     metadata = (info.details or {}).get("metadata")
     if isinstance(metadata, dict) and TASK_FINISHED_AT_METADATA_KEY in metadata:
         return True
-    return _object_ref_is_ready(info.object_ref)
+    return _worker_ref_has_settled(info)
 
 
 def _task_created_at(details: dict[str, Any] | None) -> str | None:
@@ -345,6 +403,7 @@ class TaskStateManager:
         now = time.time()
         for task_id, info in self.tasks.items():
             self.user_index.setdefault(info.details.get("user_id"), set()).add(task_id)
+            info.worker_lease_expires_at = now + _WORKER_LEASE_TTL_SECONDS
             if info.state not in TERMINAL_TASK_STATES:
                 continue
             # A restart must not restart the clock: a record that was persisted
@@ -698,7 +757,7 @@ class TaskStateManager:
                 return False
             object_ref = info.object_ref
             ref = object_ref.get("ref") if isinstance(object_ref, dict) else object_ref
-            if _cancelled_task_has_worker_fence(info) and (ref is None or not _object_ref_is_ready(object_ref)):
+            if _cancelled_task_has_worker_fence(info) and (ref is None or not _worker_ref_has_settled(info)):
                 return False
             info.object_ref = None
             info.worker_submitted = False
@@ -961,8 +1020,36 @@ class TaskStateManager:
             info.object_ref = object_ref
             info.worker_submitted = True
             info.submission_started_at = None
+            # Covers the worker until its first renewal, and a worker from a
+            # generation that never renews.
+            info.worker_lease_expires_at = time.time() + _WORKER_LEASE_TTL_SECONDS
             self._persist_task_locked(task_id, info)
             return True
+
+    @ray.method(concurrency_group="set")
+    async def renew_worker_lease(self, task_id: str) -> bool:
+        """Record that the task's worker is still running ``process_file``."""
+        with self.lock:
+            info = self.tasks.get(task_id)
+            if info is None:
+                return False
+            info.worker_lease_expires_at = time.time() + _WORKER_LEASE_TTL_SECONDS
+            return True
+
+    @ray.method(concurrency_group="get")
+    async def has_worker_settled(self, task_id: str) -> bool:
+        """Whether the task's stored worker can no longer write.
+
+        The completion tracker asks this after its own wait on the ref ended in
+        ``OwnerDiedError``, before it stamps the task finished. Unlike the
+        fence it ignores that stamp, since the stamp is what it is deciding on.
+        """
+        with self.lock:
+            info = self.tasks.get(task_id)
+            if info is None:
+                return True
+            ref = info.object_ref.get("ref") if isinstance(info.object_ref, dict) else info.object_ref
+            return ref is None or _worker_ref_has_settled(info)
 
     @ray.method(concurrency_group="get")
     async def get_state(self, task_id: str) -> str | None:

@@ -19,6 +19,7 @@ from services.workers.failure_reporting import submit_task_failure
 from services.workers.indexer_actor import IndexerWorker, _display_filename, delete_uploaded_file
 from services.workers.indexing_callback import send_indexing_callback
 from services.workers.ray_utils import retry_idempotent_ray_actor_method
+from services.workers.task_state import WORKER_LEASE_RENEW_INTERVAL_SECONDS
 
 # The indexer reloads the DB-backed model-endpoint registry at most once per
 # this window (and on a miss), bounding both staleness and DB load regardless
@@ -495,6 +496,7 @@ class IndexerWorkerActor:
     ) -> dict[str, Any]:
         content_claim_token = metadata.get(CONTENT_CLAIM_TOKEN_METADATA_KEY)
         worker_metadata = {key: value for key, value in metadata.items() if key != CONTENT_CLAIM_TOKEN_METADATA_KEY}
+        worker_lease = asyncio.create_task(self._keep_worker_lease(task_id))
         try:
             try:
                 await self._await_worker_ref_registration(task_id)
@@ -616,8 +618,33 @@ class IndexerWorkerActor:
             # success or failure. Enforced here rather than in the worker so it
             # also covers pre-processing failures (catalog/registry init, or the
             # SERIALIZING state update) that never enter the worker's try block.
-            if not self._save_uploaded_files:
-                await delete_uploaded_file(path, self._logger)
+            try:
+                if not self._save_uploaded_files:
+                    await delete_uploaded_file(path, self._logger)
+            finally:
+                worker_lease.cancel()
+                await asyncio.gather(worker_lease, return_exceptions=True)
+
+    async def _keep_worker_lease(self, task_id: str) -> None:
+        """Renew this task's worker lease until ``process_file`` returns.
+
+        The TaskStateManager only reads the lease once the pool actor that owns
+        this task's ref has died, which leaves the ref unable to say whether
+        this worker is still writing. A TaskStateManager from an earlier
+        release has no lease to renew.
+        """
+        method = getattr(self._task_state_manager, "renew_worker_lease", None)
+        remote = getattr(method, "remote", None)
+        if remote is None:
+            return
+        while True:
+            try:
+                # Awaited directly: the shared timeout helper ray.cancel()s the
+                # call when this loop is cancelled, and a renewal needs no undo.
+                await asyncio.wait_for(asyncio.gather(remote(task_id)), timeout=WORKER_LEASE_RENEW_INTERVAL_SECONDS)
+            except Exception as exc:  # noqa: BLE001 - a missed renewal must never fail the file
+                self._logger.warning(f"Failed to renew the worker lease of task {task_id}: {exc}")
+            await asyncio.sleep(WORKER_LEASE_RENEW_INTERVAL_SECONDS)
 
     async def _await_worker_ref_registration(self, task_id: str) -> None:
         """Do not start indexing until cancellation can target this worker."""

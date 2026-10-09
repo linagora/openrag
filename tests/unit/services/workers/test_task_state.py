@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 import pytest
+import ray.exceptions as ray_exceptions
 import services.workers.task_state as task_state_module
 from core.models.catalog import TASK_FINISHED_AT_METADATA_KEY
 from services.workers.task_state import (
@@ -18,6 +19,54 @@ from services.workers.task_state import (
 
 def _task_state_manager() -> Any:
     return TaskStateManager.__ray_metadata__.modified_class()
+
+
+class _FakeWorkerRef:
+    """A worker ``ObjectRef`` stand-in that ``ray.wait``/``ray.get`` answer for.
+
+    Pending until settled, like a real ref, so a "still running" test holds
+    because the ref is pending rather than because Ray rejected the argument.
+    """
+
+    def __init__(self) -> None:
+        self._outcome: tuple[str, Any] | None = None
+
+    def settle(self, value: Any = None) -> None:
+        self._outcome = ("value", value)
+
+    def fail(self, error: BaseException) -> None:
+        self._outcome = ("error", error)
+
+    def __deepcopy__(self, _memo: dict) -> _FakeWorkerRef:
+        return self
+
+
+def _owner_died() -> BaseException:
+    return ray_exceptions.OwnerDiedError("00" * 28, owner_address=None, call_site="")
+
+
+@pytest.fixture(autouse=True)
+def _fake_worker_refs(monkeypatch) -> None:
+    def _require_ref(ref: Any) -> _FakeWorkerRef:
+        if not isinstance(ref, _FakeWorkerRef):
+            raise TypeError(f"wait() expected a list of ray.ObjectRef, got {type(ref).__name__}")
+        return ref
+
+    def wait(refs: list[Any], *, num_returns: int = 1, timeout: float | None = None, **_kwargs: Any):
+        ready = [ref for ref in refs if _require_ref(ref)._outcome is not None]
+        return ready[:num_returns], [ref for ref in refs if ref not in ready[:num_returns]]
+
+    def get(ref: Any, *, timeout: float | None = None) -> Any:
+        outcome = _require_ref(ref)._outcome
+        if outcome is None:
+            raise ray_exceptions.GetTimeoutError("Get timed out: some object(s) not ready.")
+        kind, payload = outcome
+        if kind == "error":
+            raise payload
+        return payload
+
+    monkeypatch.setattr(task_state_module.ray, "wait", wait)
+    monkeypatch.setattr(task_state_module.ray, "get", get)
 
 
 def test_the_task_state_manager_starts_the_ingest_counters(monkeypatch) -> None:
@@ -126,9 +175,9 @@ async def test_set_object_ref_accepts_terminal_states_without_reopening_task() -
     await manager.set_state("failed-task", "FAILED")
     await manager.set_state("cancelled-task", "CANCELLED")
 
-    assert await manager.set_object_ref("completed-task", {"ref": object()}) is True
-    assert await manager.set_object_ref("failed-task", {"ref": object()}) is True
-    assert await manager.set_object_ref("cancelled-task", {"ref": object()}) is False
+    assert await manager.set_object_ref("completed-task", {"ref": _FakeWorkerRef()}) is True
+    assert await manager.set_object_ref("failed-task", {"ref": _FakeWorkerRef()}) is True
+    assert await manager.set_object_ref("cancelled-task", {"ref": _FakeWorkerRef()}) is False
 
     assert await manager.get_state("completed-task") == "COMPLETED"
     assert await manager.get_state("failed-task") == "FAILED"
@@ -138,7 +187,7 @@ async def test_set_object_ref_accepts_terminal_states_without_reopening_task() -
 @pytest.mark.asyncio
 async def test_late_worker_registration_does_not_reopen_a_settled_cancellation(monkeypatch) -> None:
     manager = _task_state_manager()
-    worker_ref = object()
+    worker_ref = _FakeWorkerRef()
     await manager.set_queued_details(
         "task-1",
         file_id="file-1",
@@ -148,11 +197,11 @@ async def test_late_worker_registration_does_not_reopen_a_settled_cancellation(m
     )
     assert await manager.set_object_ref("task-1", {"ref": worker_ref}) is True
     assert await manager.set_cancelled_if_active("task-1") is True
-    monkeypatch.setattr(task_state_module.ray, "wait", lambda *_args, **_kwargs: ([worker_ref], []))
+    worker_ref.settle()
     assert await manager.finish_cancellation("task-1") is True
     before = deepcopy(manager.tasks["task-1"])
 
-    assert await manager.set_object_ref("task-1", {"ref": object()}) is False
+    assert await manager.set_object_ref("task-1", {"ref": _FakeWorkerRef()}) is False
 
     assert manager.tasks["task-1"] == before
     assert await manager.get_content_claim_task_ids(partition="tenant-a") == set()
@@ -184,7 +233,7 @@ async def test_set_queued_details_records_active_state_and_routing_together() ->
 @pytest.mark.asyncio
 async def test_matching_active_task_refs_treat_detail_less_queued_tasks_as_pending_registration() -> None:
     manager = _task_state_manager()
-    ref = object()
+    ref = _FakeWorkerRef()
 
     await manager.set_state("queued-without-details", "QUEUED")
     await manager.set_object_ref("queued-without-details", {"ref": ref})
@@ -232,8 +281,8 @@ async def test_delete_cleanup_still_fences_legacy_indexing_states() -> None:
     # must keep matching them, otherwise cleanup misses the in-flight task and the
     # stale worker writes data back after the file is already gone.
     manager = _task_state_manager()
-    chunking_ref = {"ref": object()}
-    inserting_ref = {"ref": object()}
+    chunking_ref = {"ref": _FakeWorkerRef()}
+    inserting_ref = {"ref": _FakeWorkerRef()}
 
     for task_id, state, ref in (
         ("chunking-task", "CHUNKING", chunking_ref),
@@ -276,18 +325,14 @@ async def test_content_claim_owners_include_only_unsettled_workers(monkeypatch) 
             user_id=None,
         )
 
-    cancelled_ref = {"ref": object()}
-    ready_ref = object()
+    cancelled_ref = {"ref": _FakeWorkerRef()}
+    ready_ref = _FakeWorkerRef()
     await manager.set_object_ref("cancelled-task", cancelled_ref)
     await manager.set_object_ref("ready-active-task", {"ref": ready_ref})
     await manager.set_cancelled_if_active("cancelled-task")
     await manager.set_cancelled_if_active("settled-cancelled-task")
     await manager.set_state("completed-task", "COMPLETED")
-    monkeypatch.setattr(
-        task_state_module.ray,
-        "wait",
-        lambda refs, **_kwargs: ([ready_ref], []) if refs == [ready_ref] else ([], refs),
-    )
+    ready_ref.settle()
 
     assert await manager.get_content_claim_task_ids(partition="tenant-a") == {
         "active-task",
@@ -308,7 +353,7 @@ async def test_stale_refless_task_rejects_late_worker_registration() -> None:
     )
 
     assert await manager.expire_refless_task_if_stale("task-1") is True
-    assert await manager.set_object_ref("task-1", {"ref": object()}) is False
+    assert await manager.set_object_ref("task-1", {"ref": _FakeWorkerRef()}) is False
     assert await manager.set_state("task-1", "SERIALIZING") is False
     assert await manager.get_state("task-1") == "FAILED"
     assert await manager.get_object_ref("task-1") is None
@@ -376,7 +421,7 @@ async def test_worker_cannot_enter_serializing_before_ref_registration() -> None
     )
 
     assert await manager.begin_worker_submission("task-1") is True
-    worker_ref = {"ref": object()}
+    worker_ref = {"ref": _FakeWorkerRef()}
     assert await manager.set_state("task-1", "SERIALIZING") is False
     assert await manager.set_object_ref("task-1", worker_ref) is True
     assert await manager.set_state("task-1", "SERIALIZING") is True
@@ -397,7 +442,7 @@ async def test_submission_fence_persists_until_pool_reports_settlement(monkeypat
     )
 
     assert await manager.begin_worker_submission("task-1") is True
-    worker_ref = {"ref": object()}
+    worker_ref = {"ref": _FakeWorkerRef()}
     assert await manager.set_object_ref("task-1", worker_ref) is True
     assert await manager.set_state("task-1", "SERIALIZING") is True
     await manager.set_details(
@@ -425,7 +470,7 @@ async def test_elapsed_time_does_not_release_unready_worker_fences(monkeypatch) 
     now = 100.0
     monkeypatch.setattr(task_state_module.time, "time", lambda: now)
     manager = _task_state_manager()
-    worker_ref = object()
+    worker_ref = _FakeWorkerRef()
     await manager.set_queued_details(
         "task-1",
         file_id="file-1",
@@ -435,7 +480,6 @@ async def test_elapsed_time_does_not_release_unready_worker_fences(monkeypatch) 
     )
     assert await manager.set_object_ref("task-1", {"ref": worker_ref}) is True
     assert await manager.set_cancelled_if_active("task-1") is True
-    monkeypatch.setattr(task_state_module.ray, "wait", lambda refs, **_kwargs: ([], refs))
 
     assert await manager.has_unsettled_cancelled_worker("task-1") is True
     assert await manager.get_content_claim_task_ids(partition="tenant-a") == {"task-1"}
@@ -551,7 +595,7 @@ async def test_file_delete_fence_rejects_late_object_ref_registration() -> None:
     await manager.begin_file_delete(partition="tenant-a", file_id="file-1")
     before = deepcopy(manager.tasks["task-1"])
 
-    assert await manager.set_object_ref("task-1", {"ref": object()}) is False
+    assert await manager.set_object_ref("task-1", {"ref": _FakeWorkerRef()}) is False
     assert manager.tasks["task-1"] == before
 
 
@@ -732,7 +776,7 @@ async def test_active_task_registry_survives_actor_reconstruction(monkeypatch) -
     monkeypatch.setattr(task_state_module, "_save_recoverable_task", save)
 
     first_incarnation = _task_state_manager()
-    task_ref = {"ref": object()}
+    task_ref = {"ref": _FakeWorkerRef()}
     await first_incarnation.set_queued_details(
         "task-1",
         file_id="file-1",
@@ -793,7 +837,7 @@ def test_cancellation_recovery_snapshot_preserves_unsettled_claim_owner_without_
         state="CANCELLED",
         error="private traceback",
         details={"user_id": 42, "metadata": {"secret": "value"}},
-        object_ref={"ref": object()},
+        object_ref={"ref": _FakeWorkerRef()},
         worker_submitted=True,
     )
 
@@ -922,7 +966,7 @@ async def test_submitted_cancellation_keeps_claim_after_reconstruction(monkeypat
         user_id=42,
     )
     assert await first_incarnation.begin_worker_submission("task-1") is True
-    assert await first_incarnation.set_object_ref("task-1", {"ref": object()}) is True
+    assert await first_incarnation.set_object_ref("task-1", {"ref": _FakeWorkerRef()}) is True
     assert await first_incarnation.set_state("task-1", "SERIALIZING") is True
     assert await first_incarnation.set_cancelled_if_active("task-1") is True
 
@@ -938,10 +982,10 @@ async def test_finished_cancellation_drops_recoverable_worker_reference(monkeypa
     saved: list[TaskInfo] = []
     monkeypatch.setattr(task_state_module, "_save_recoverable_task", lambda _task_id, info: saved.append(info))
     manager = _task_state_manager()
-    ref = object()
+    ref = _FakeWorkerRef()
     manager.tasks["task-1"] = TaskInfo(state="CANCELLED", object_ref={"ref": ref}, worker_submitted=True)
 
-    monkeypatch.setattr(task_state_module.ray, "wait", lambda *_args, **_kwargs: ([ref], []))
+    ref.settle()
 
     assert await manager.finish_cancellation("task-1") is True
 
@@ -955,9 +999,8 @@ async def test_unsettled_cancellation_keeps_recoverable_worker_reference(monkeyp
     saved: list[TaskInfo] = []
     monkeypatch.setattr(task_state_module, "_save_recoverable_task", lambda _task_id, info: saved.append(info))
     manager = _task_state_manager()
-    ref = object()
+    ref = _FakeWorkerRef()
     manager.tasks["task-1"] = TaskInfo(state="CANCELLED", object_ref={"ref": ref})
-    monkeypatch.setattr(task_state_module.ray, "wait", lambda *_args, **_kwargs: ([], [ref]))
 
     assert await manager.finish_cancellation("task-1") is False
 
@@ -1047,7 +1090,7 @@ async def test_eviction_keeps_active_tasks_and_unsettled_cancellations(monkeypat
 
     for task_id in ("active-task", "cancelled-task", "completed-task"):
         await manager.set_queued_details(task_id, file_id=task_id, partition="tenant-a", metadata={}, user_id=None)
-    await manager.set_object_ref("cancelled-task", {"ref": object()})
+    await manager.set_object_ref("cancelled-task", {"ref": _FakeWorkerRef()})
     await manager.set_cancelled_if_active("cancelled-task")
     await manager.set_state("completed-task", "COMPLETED")
 
@@ -1586,7 +1629,7 @@ async def test_admission_fence_keeps_a_cancelled_task_whose_worker_has_not_settl
         metadata={},
         user_id=42,
     )
-    assert await manager.set_object_ref("task-1", {"ref": object()}) is True
+    assert await manager.set_object_ref("task-1", {"ref": _FakeWorkerRef()}) is True
     assert await manager.set_cancelled_if_active("task-1") is True
 
     refused = await manager.set_queued_details_v2(
@@ -1611,10 +1654,10 @@ async def test_admission_fence_releases_the_file_once_a_cancelled_worker_settles
         metadata={},
         user_id=42,
     )
-    worker_ref = object()
+    worker_ref = _FakeWorkerRef()
     assert await manager.set_object_ref("task-1", {"ref": worker_ref}) is True
     assert await manager.set_cancelled_if_active("task-1") is True
-    monkeypatch.setattr(task_state_module.ray, "wait", lambda *_args, **_kwargs: ([worker_ref], []))
+    worker_ref.fail(ray_exceptions.TaskCancelledError())
 
     admitted = await manager.set_queued_details_v2(
         "task-2",
@@ -1716,9 +1759,9 @@ async def _serializing_task_for_file_1(manager: Any, worker_ref: object) -> None
 async def test_admission_fence_releases_the_file_of_a_task_whose_worker_crashed(monkeypatch) -> None:
     """A dead worker leaves the record SERIALIZING; its ready ref must not hold the file forever."""
     manager = _task_state_manager()
-    worker_ref = object()
+    worker_ref = _FakeWorkerRef()
     await _serializing_task_for_file_1(manager, worker_ref)
-    monkeypatch.setattr(task_state_module.ray, "wait", lambda *_args, **_kwargs: ([worker_ref], []))
+    worker_ref.fail(ray_exceptions.ActorDiedError())
 
     admitted = await manager.set_queued_details_v2(
         "task-2",
@@ -1738,7 +1781,7 @@ async def test_admission_fence_releases_the_file_of_a_task_whose_worker_crashed(
 async def test_admission_fence_releases_the_file_of_a_task_stamped_finished() -> None:
     """A rollout can reload a SERIALIZING record whose worker already finished elsewhere."""
     manager = _task_state_manager()
-    await _serializing_task_for_file_1(manager, object())
+    await _serializing_task_for_file_1(manager, _FakeWorkerRef())
     await manager.set_details(
         "task-1",
         file_id="file-1",
@@ -1762,7 +1805,7 @@ async def test_admission_fence_releases_the_file_of_a_task_stamped_finished() ->
 @pytest.mark.asyncio
 async def test_admission_fence_keeps_a_serializing_task_whose_worker_is_running() -> None:
     manager = _task_state_manager()
-    await _serializing_task_for_file_1(manager, object())
+    await _serializing_task_for_file_1(manager, _FakeWorkerRef())
 
     refused = await manager.set_queued_details_v2(
         "task-2",
@@ -1792,3 +1835,168 @@ async def test_admission_fence_does_not_refuse_a_retried_registration_of_the_sam
         assert admitted == {"accepted": True, "reason": None, "existing_task_id": None}
 
     assert await manager.get_state("task-1") == "QUEUED"
+
+
+class _Clock:
+    def __init__(self, now: float = 1_000.0) -> None:
+        self.now = now
+
+    def __call__(self) -> float:
+        return self.now
+
+
+@pytest.fixture
+def clock(monkeypatch) -> _Clock:
+    current = _Clock()
+    monkeypatch.setattr(task_state_module.time, "time", current)
+    return current
+
+
+async def _refuses_a_second_upload_of_file_1(manager: Any) -> bool:
+    outcome = await manager.set_queued_details_v2(
+        "task-2",
+        file_id="file-1",
+        partition="tenant-a",
+        metadata={},
+        user_id=42,
+        reject_if_file_active=True,
+    )
+    if outcome["accepted"]:
+        return False
+    assert outcome == {"accepted": False, "reason": "file_indexing", "existing_task_id": "task-1"}
+    return True
+
+
+@pytest.mark.asyncio
+async def test_orphaned_ref_keeps_the_file_while_its_worker_renews_the_lease(clock) -> None:
+    """The pool actor died, so the ref reads ready, but the worker is still running."""
+    manager = _task_state_manager()
+    worker_ref = _FakeWorkerRef()
+    await _serializing_task_for_file_1(manager, worker_ref)
+    worker_ref.fail(_owner_died())
+
+    for _renewal in range(3):
+        clock.now += task_state_module.WORKER_LEASE_RENEW_INTERVAL_SECONDS
+        assert await manager.renew_worker_lease("task-1") is True
+        assert await manager.has_worker_settled("task-1") is False
+        assert await manager.get_content_claim_task_ids(partition="tenant-a") == {"task-1"}
+        assert await manager.get_active_indexing_task_for_file(partition="tenant-a", file_id="file-1") == "task-1"
+
+    assert await _refuses_a_second_upload_of_file_1(manager) is True
+
+
+@pytest.mark.asyncio
+async def test_orphaned_ref_releases_the_file_once_a_dead_worker_lets_the_lease_lapse(clock) -> None:
+    """Owner and worker both gone: nothing renews the lease, so the fence is bounded by its TTL."""
+    manager = _task_state_manager()
+    worker_ref = _FakeWorkerRef()
+    await _serializing_task_for_file_1(manager, worker_ref)
+    worker_ref.fail(_owner_died())
+    clock.now += task_state_module._WORKER_LEASE_TTL_SECONDS - 1
+    assert await manager.has_worker_settled("task-1") is False
+
+    clock.now += 1
+
+    assert await manager.has_worker_settled("task-1") is True
+    assert await manager.get_content_claim_task_ids(partition="tenant-a") == set()
+    assert await _refuses_a_second_upload_of_file_1(manager) is False
+
+
+@pytest.mark.asyncio
+async def test_orphaned_cancellation_finishes_only_once_the_worker_lease_lapses(clock) -> None:
+    manager = _task_state_manager()
+    worker_ref = _FakeWorkerRef()
+    await _serializing_task_for_file_1(manager, worker_ref)
+    assert await manager.set_cancelled_if_active("task-1") is True
+    worker_ref.fail(_owner_died())
+
+    assert await manager.finish_cancellation("task-1") is False
+    assert await manager.has_unsettled_cancelled_worker("task-1") is True
+
+    clock.now += task_state_module._WORKER_LEASE_TTL_SECONDS
+
+    assert await manager.finish_cancellation("task-1") is True
+    assert await manager.has_unsettled_cancelled_worker("task-1") is False
+
+
+@pytest.mark.asyncio
+async def test_a_restarted_manager_grants_recovered_tasks_a_fresh_worker_lease(monkeypatch, clock) -> None:
+    """A persisted lease kept ageing while nothing could renew it; it must not release a live worker."""
+    worker_ref = _FakeWorkerRef()
+    worker_ref.fail(_owner_died())
+    recovered = TaskInfo(
+        state="SERIALIZING",
+        details={"partition": "tenant-a", "file_id": "file-1", "metadata": {}},
+        object_ref={"ref": worker_ref},
+        worker_submitted=True,
+        worker_lease_expires_at=clock.now - 1,
+    )
+    monkeypatch.setattr(task_state_module, "_load_recoverable_tasks", lambda: ({"task-1": recovered}, {}))
+
+    manager = _task_state_manager()
+
+    assert await manager.has_worker_settled("task-1") is False
+    clock.now += task_state_module._WORKER_LEASE_TTL_SECONDS
+    assert await manager.has_worker_settled("task-1") is True
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        ray_exceptions.RayTaskError("process_file", "Traceback", ValueError("bad file")),
+        ray_exceptions.TaskCancelledError(),
+        ray_exceptions.ActorDiedError(),
+        ray_exceptions.ObjectLostError("00" * 28, owner_address=None, call_site=""),
+        ray_exceptions.ReferenceCountingAssertionError("00" * 28, owner_address=None, call_site=""),
+    ],
+    ids=["task-error", "cancelled", "worker-died", "object-lost-owner-alive", "ref-counting-assertion"],
+)
+@pytest.mark.asyncio
+async def test_a_ref_that_failed_for_any_other_reason_releases_the_file_at_once(error) -> None:
+    """Only a dead owner leaves the worker's fate open; the lease is not consulted otherwise."""
+    manager = _task_state_manager()
+    worker_ref = _FakeWorkerRef()
+    await _serializing_task_for_file_1(manager, worker_ref)
+    assert await manager.renew_worker_lease("task-1") is True
+    worker_ref.fail(error)
+
+    assert await manager.has_worker_settled("task-1") is True
+    assert await manager.get_content_claim_task_ids(partition="tenant-a") == set()
+    assert await _refuses_a_second_upload_of_file_1(manager) is False
+
+
+@pytest.mark.asyncio
+async def test_an_unexpected_failure_reading_a_ready_ref_preserves_the_fence(monkeypatch) -> None:
+    manager = _task_state_manager()
+    worker_ref = _FakeWorkerRef()
+    await _serializing_task_for_file_1(manager, worker_ref)
+    worker_ref.settle({"stored_count": 1})
+
+    def broken_get(_ref: Any, *, timeout: float | None = None) -> Any:
+        raise RuntimeError("object store unavailable")
+
+    monkeypatch.setattr(task_state_module.ray, "get", broken_get)
+
+    assert await manager.has_worker_settled("task-1") is False
+    assert await _refuses_a_second_upload_of_file_1(manager) is True
+
+
+@pytest.mark.asyncio
+async def test_a_value_that_is_not_a_ref_preserves_the_fence() -> None:
+    """Ray rejects a non-ref outright; uncertainty must never release a file."""
+    manager = _task_state_manager()
+    await _serializing_task_for_file_1(manager, object())
+
+    assert await manager.has_worker_settled("task-1") is False
+    assert await _refuses_a_second_upload_of_file_1(manager) is True
+
+
+@pytest.mark.asyncio
+async def test_worker_lease_renewal_and_settlement_for_unknown_or_refless_tasks() -> None:
+    manager = _task_state_manager()
+
+    assert await manager.renew_worker_lease("missing") is False
+    assert await manager.has_worker_settled("missing") is True
+
+    await manager.set_queued_details("task-1", file_id="file-1", partition="tenant-a", metadata={}, user_id=42)
+    assert await manager.has_worker_settled("task-1") is True
