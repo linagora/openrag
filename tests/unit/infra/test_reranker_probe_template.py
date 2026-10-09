@@ -15,7 +15,7 @@ requires_helm = pytest.mark.skipif(HELM is None, reason="Helm is not installed")
 
 DEFAULT_MODEL = "Alibaba-NLP/gte-multilingual-reranker-base"
 # Infinity 0.0.77 on CPU, cached model, measured to the first /health answer.
-SLOWEST_MEASURED_START_SECONDS = 341
+SLOWEST_MEASURED_START_SECONDS = 378
 # The reranker block as values files copied from chart 0.7.1 or earlier carry
 # it: the keys this chart removed, at the values they had.
 COPIED_LEGACY_VALUES = f"""
@@ -177,10 +177,10 @@ def test_a_values_file_copied_from_the_previous_chart_still_renders(tmp_path: Pa
 @pytest.mark.parametrize(
     ("override", "message"),
     [
-        ("reranker.rerankerModelName=BAAI/bge-reranker-v2-m3", "env.config.RERANKER_MODEL renders"),
-        ("reranker.model.id=BAAI/bge-reranker-v2-m3", "env.config.RERANKER_MODEL renders"),
-        ("reranker.servicePort=8000", "env.config.RERANKER_BASE_URL renders"),
-        ("reranker.service.port=8000", "env.config.RERANKER_BASE_URL renders"),
+        ("reranker.rerankerModelName=BAAI/bge-reranker-v2-m3", "reranker.rerankerModelName is"),
+        ("reranker.model.id=BAAI/bge-reranker-v2-m3", "reranker.rerankerModelName is"),
+        ("reranker.servicePort=8000", "reranker.servicePort is"),
+        ("reranker.service.port=8000", "reranker.servicePort is"),
     ],
 )
 def test_a_copied_values_file_changing_one_of_two_keys_is_refused(tmp_path: Path, override: str, message: str) -> None:
@@ -190,6 +190,46 @@ def test_a_copied_values_file_changing_one_of_two_keys_is_refused(tmp_path: Path
     legacy.write_text(COPIED_LEGACY_VALUES, encoding="utf-8")
 
     result = _render(tmp_path, "-f", str(legacy), "--set", override)
+
+    assert result.returncode != 0
+    assert message in result.stderr
+
+
+@requires_helm
+@pytest.mark.parametrize(
+    ("args", "message"),
+    [
+        pytest.param(
+            ("--set", "reranker.rerankerModelName=BAAI/bge-reranker-v2-m3"),
+            "reranker.rerankerModelName is",
+            id="old-model-key-alone",
+        ),
+        pytest.param(("--set", "reranker.servicePort=8000"), "reranker.servicePort is", id="old-port-key-alone"),
+        # rerankerModelName was the model OpenRAG asked an external reranker for.
+        pytest.param(
+            (
+                "--set",
+                "reranker.enabled=false",
+                "--set",
+                "reranker.externalUrl=http://reranker.example:8000",
+                "--set",
+                "reranker.rerankerModelName=BAAI/bge-reranker-v2-m3",
+            ),
+            "reranker.rerankerModelName is",
+            id="old-model-key-for-an-external-reranker",
+        ),
+        pytest.param(
+            ("--set-string", "env.config.RERANKER_MODEL=BAAI/bge-reranker-v2-m3"),
+            "env.config.RERANKER_MODEL renders",
+            id="env-model-unlike-model-id",
+        ),
+    ],
+)
+def test_a_removed_key_or_env_value_unlike_its_replacement_is_refused(
+    tmp_path: Path, args: tuple[str, ...], message: str
+) -> None:
+    """A removed key set alone would otherwise be ignored without a word."""
+    result = _render(tmp_path, *args)
 
     assert result.returncode != 0
     assert message in result.stderr

@@ -152,16 +152,17 @@ do not guarantee every request will succeed. Use an application image that
 includes `/ready` with these probes.
 
 The bundled Infinity reranker answers `/health` only once its model is loaded
-and its warmup benchmark has run: about 100 s on its default 4 CPUs, 180 s on 2
-and 340 s on 1, whether or not the model is already cached. Its startup probe
-allows 10 minutes for that, plus a first-boot model download, and the liveness
-and readiness probes start only once it passes. A start that hangs is therefore
+and its warmup benchmark has run. On our test machines that took 100 to 125 s on
+its default 4 CPUs, 180 to 210 s on 2 and 340 to 380 s on 1, whether or not the
+model was already cached. Its startup probe allows 10 minutes for that, plus a
+first-boot model download, and the liveness and readiness probes start only
+once it passes. A start that hangs is therefore
 restarted after 10 minutes. All three probes are set under `reranker.probes`.
 Raise `reranker.probes.startup.failureThreshold` for slower CPUs or a slow
 download. Set a probe to `null` to drop it, and its `httpGet` to `null` to give
 it another handler. On CPU, `reranker.extraEnv` with
 `INFINITY_MODEL_WARMUP: "false"` skips the warmup benchmark: on 4 CPUs the start
-drops to about 12 s, and the first rerank takes about 0.2 s longer.
+dropped to under 20 s.
 
 The reranker's model is set once, in `reranker.model.id`: Infinity loads it and
 OpenRAG names it (`RERANKER_MODEL`). Its port is set once, in

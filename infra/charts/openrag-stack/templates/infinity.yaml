@@ -1,12 +1,23 @@
-{{- if .Values.reranker.enabled }}
 {{- $reranker := .Values.reranker }}
+{{- /* rerankerModelName and servicePort are gone, so a values file that still
+   sets them would have them ignored without a word. rerankerModelName is the
+   model OpenRAG asked an external reranker for, so ignoring it would send that
+   reranker another model's name. Checked whether or not the bundled reranker
+   runs; equal values, as in a copy of the old defaults, pass. */}}
+{{- if and (hasKey $reranker "rerankerModelName") (ne (toString $reranker.rerankerModelName) (toString $reranker.model.id)) }}
+{{- fail (printf "reranker.rerankerModelName is %q but reranker.model.id is %q. This chart reads only reranker.model.id, for the bundled reranker and an external one alike: set the model there and delete reranker.rerankerModelName." (toString $reranker.rerankerModelName) (toString $reranker.model.id)) }}
+{{- end }}
+{{- if and (hasKey $reranker "servicePort") (ne (toString $reranker.servicePort) (toString $reranker.service.port)) }}
+{{- fail (printf "reranker.servicePort is %q but reranker.service.port is %q. This chart reads only reranker.service.port: set the port there and delete reranker.servicePort." (toString $reranker.servicePort) (toString $reranker.service.port)) }}
+{{- end }}
+{{- if .Values.reranker.enabled }}
 {{- $port := toString $reranker.service.port }}
 {{- $args := list "v2" "--model-id" (toString $reranker.model.id) "--port" $port }}
 {{- /* reranker.command was never read: the container always ran
-   `v2 --model-id <model> --port <port>`. A copy of that old default passes
-   whatever model and port it names (the checks below cover those); extra or
-   different flags were a change that never applied, so they fail here instead
-   of being ignored again. */}}
+   `v2 --model-id <model> --port <port>`, from reranker.model.id and
+   reranker.service.port. A copy of that old default passes whatever model and
+   port it names, which never applied either; extra or different flags were a
+   change that never applied, so they fail here instead of being ignored again. */}}
 {{- if not (kindIs "invalid" $reranker.command) }}
 {{- $shape := list }}
 {{- range $i, $arg := $reranker.command }}

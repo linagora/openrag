@@ -27,9 +27,11 @@ The bundled reranker's model and port each have one value now:
 A values file copied from an earlier chart still installs while each removed key
 holds the same value as the key that replaces it, which is the case unless you
 changed one of them. When they differ, the install fails and names the value to
-fix, because that configuration was already broken: OpenRAG named one model while
-Infinity reranked with another, or called a port Infinity did not listen on. Extra
-flags left in `reranker.command` fail the same way, since they never applied.
+fix. With the bundled reranker, that configuration was already broken: OpenRAG
+named one model while Infinity reranked with another, or called a port Infinity
+did not listen on. With an external reranker, `reranker.rerankerModelName` was
+the model OpenRAG asked for: move it to `reranker.model.id`. Extra flags left in
+`reranker.command` fail the same way, since they never applied.
 
 The reranker also has a startup probe now, and `reranker.probes` sets all three of
 its probes. A start that hangs is restarted after 10 minutes instead of 2. See

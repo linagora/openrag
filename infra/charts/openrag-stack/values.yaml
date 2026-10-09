@@ -737,8 +737,8 @@ reranker:
   # Environment variables for the reranker container alone (Kubernetes EnvVar
   # objects). They take precedence over the shared env.config ConfigMap the
   # container also reads. On CPU, INFINITY_MODEL_WARMUP: "false" skips the
-  # warmup benchmark: on 4 CPUs the start drops from about 100 s to 12 s, and the
-  # first rerank takes about 0.2 s longer.
+  # warmup benchmark: on 4 CPUs the start dropped from 100-125 s to under 20 s
+  # in our tests.
   extraEnv: []
   replicas: 1
   runtimeClassName: ""
@@ -764,10 +764,10 @@ reranker:
   # automountServiceAccountToken: false
   # containerSecurityContext: {}
   # Infinity serves /health only once the model is loaded and its warmup
-  # benchmark has run, which takes about 100 s on 4 CPUs, 180 s on 2 and 340 s
-  # on 1, cached model or not. The startup probe allows 10 minutes for that
-  # (plus a first-boot download); liveness and readiness start only after it
-  # passes. Set a probe to null to drop it, and its httpGet to null to give it
+  # benchmark has run, which took 100-125 s on 4 CPUs, 180-210 s on 2 and
+  # 340-380 s on 1 in our tests, cached model or not. The startup probe allows
+  # 10 minutes for that (plus a first-boot download); liveness and readiness
+  # start only after it passes. Set a probe to null to drop it, and its httpGet to null to give it
   # another handler.
   probes:
     startup:
