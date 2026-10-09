@@ -178,12 +178,12 @@ describe("model endpoint secret placeholders", () => {
     expect(
       prepareModelEndpointExtraForSubmit({
         auth: { token: "••••••••" },
-        headers: [{ api_key: "hf-********" }],
+        headers: [{ api_key: "hf-********", Authorization: "Bea********" }],
         note: "••••••••",
       }),
     ).toEqual({
       auth: { token: "<redacted>" },
-      headers: [{ api_key: "<redacted>" }],
+      headers: [{ api_key: "<redacted>", Authorization: "<redacted>" }],
       note: "••••••••",
     });
   });

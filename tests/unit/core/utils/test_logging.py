@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 import sys
 from types import SimpleNamespace
 
@@ -224,6 +225,29 @@ def test_get_logger_json_mode_installs_json_sink(capsys):
         get_logger(config).info("json mode")
         payload = json.loads(capsys.readouterr().err)
         assert payload["msg"] == "json mode"
+    finally:
+        _restore_default_logger()
+
+
+def _raise_with_a_secret_in_scope() -> None:
+    secret = "sk-local-variable-secret"
+    raise RuntimeError(f"failed after {len(secret)} characters")
+
+
+@pytest.mark.parametrize("log_format", ["text", "json"])
+def test_tracebacks_do_not_print_local_variables(capsys, log_format):
+    """loguru's ``diagnose`` annotates each frame with its variables' values,
+    which writes whatever a frame holds — tokens, settings, prompts — to the log."""
+    config = SimpleNamespace(verbose=SimpleNamespace(level="INFO", format=log_format))
+    try:
+        log = get_logger(config)
+        try:
+            _raise_with_a_secret_in_scope()
+        except RuntimeError:
+            log.exception("boom")
+        err = re.sub(r"\x1b\[[0-9;]*m", "", capsys.readouterr().err)
+        assert "RuntimeError: failed after 24 characters" in err
+        assert "sk-local-variable-secret" not in err
     finally:
         _restore_default_logger()
 

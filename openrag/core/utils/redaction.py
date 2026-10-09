@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from typing import Any
 
 REDACTED_SECRET = "<redacted>"
@@ -16,6 +16,7 @@ SECRET_FIELD_NAMES = frozenset(
         "api_token",
         "access_key",
         "auth_token",
+        "authorization",
         "chainlit_auth_secret",
         "client_secret",
         "hf_token",
@@ -88,6 +89,19 @@ def redact_secrets(value: Any) -> Any:
     if isinstance(value, tuple):
         return tuple(redact_secrets(item) for item in value)
     return value
+
+
+class RedactedExtraRepr:
+    """Model mixin: ``repr()`` and ``str()`` show ``extra`` with its secret keys redacted.
+
+    ``Field(repr=False)`` hides a whole field, but a model endpoint's API key is
+    one key of its ``extra`` dict, next to settings worth seeing in a log.
+    List it before ``BaseModel`` in the bases.
+    """
+
+    def __repr_args__(self) -> Iterator[tuple[str | None, Any]]:
+        for name, value in super().__repr_args__():  # type: ignore[misc]
+            yield name, redact_secrets(value) if name == "extra" else value
 
 
 def redact_secret_mapping(extra: Mapping[str, Any] | None) -> dict[str, Any]:
@@ -204,6 +218,7 @@ def _drop_unbacked_secret_placeholders(value: Any) -> Any:
 
 __all__ = [
     "REDACTED_SECRET",
+    "RedactedExtraRepr",
     "SECRET_FIELD_NAMES",
     "is_masked_secret_value",
     "is_secret_field",
