@@ -150,6 +150,29 @@ class IndexingService:
             and getattr(getattr(self._config, "loader", None), "content_deduplication_enabled", False)
         )
 
+    async def _ensure_no_embedder_swap(self, partition: str) -> None:
+        ensure = getattr(self._partition_service, "ensure_no_embedder_swap", None)
+        if ensure is not None:
+            await ensure(partition)
+
+    @asynccontextmanager
+    async def _embedder_swap_fence(self, partition: str) -> AsyncIterator[None]:
+        """Refuse a chunk rewrite while *partition*'s embedder is being swapped.
+
+        Held for the whole write, not just the check: a metadata update reads
+        whole rows and writes them back, so one interleaving with a swap's
+        partial writes would put the old, empty field back over new vectors.
+        A swap starts under the same fence.
+        """
+        lock = getattr(self._partition_service, "operation_lock", None)
+        if lock is None:
+            await self._ensure_no_embedder_swap(partition)
+            yield
+            return
+        async with lock(partition):
+            await self._ensure_no_embedder_swap(partition)
+            yield
+
     @asynccontextmanager
     async def _partition_admission(self, partition: str) -> AsyncIterator[bool]:
         if self._partition_service is None:
@@ -285,6 +308,7 @@ class IndexingService:
             content_sha256=content_sha256,
         )
         async with self._partition_admission(partition) as partition_existed_at_admission:
+            await self._ensure_no_embedder_swap(partition)
             await self._ensure_partition_exists(partition, user)
             await self._refresh_preset_config_if_stale()
             await self._pin_partition_embedder(partition)
@@ -329,7 +353,8 @@ class IndexingService:
                 f"Dropped protected metadata keys from file metadata update: {dropped}"
             )
         metadata["file_id"] = file_id
-        await self._dispatcher.update_file_metadata(file_id, metadata, partition, user)
+        async with self._embedder_swap_fence(partition):
+            await self._dispatcher.update_file_metadata(file_id, metadata, partition, user)
 
     async def copy_file(
         self,
@@ -357,9 +382,11 @@ class IndexingService:
         # Admitted like an upload, so a missing target is created and pinned.
         # The copy itself runs outside the fence, which uploads wait on: it can
         # re-embed for minutes. It holds the copy lock instead, taken under the
-        # fence, which keeps the target's embedder from changing meanwhile.
+        # fence, which keeps the target's embedder from changing, or a swap from
+        # starting, meanwhile.
         async with AsyncExitStack() as copying:
             async with self._partition_admission(target_partition):
+                await self._ensure_no_embedder_swap(target_partition)
                 await self._ensure_partition_exists(target_partition, user)
                 await self._refresh_preset_config_if_stale()
                 await self._pin_partition_embedder(target_partition)

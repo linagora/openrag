@@ -3004,6 +3004,7 @@ async def test_a_re_embedded_copy_records_the_target_embedder_and_is_checked_aga
         "embedder_model_name": "BAAI/bge-m3",
         "embedder_endpoint": "http://bge/v1",
         "embedder_dimension": 3,
+        "embedder_vector_field": "vector_bge_m3",
     }
     assert catalog["embedder_fingerprint"] == _TARGET_FINGERPRINT
 
@@ -3020,6 +3021,65 @@ async def test_a_copy_that_keeps_its_vectors_keeps_the_source_record() -> None:
     assert catalog["indexation_config"] == _SOURCE_CONFIG
     # Nothing was embedded now, so there is no run to check against the endpoint.
     assert "embedder_fingerprint" not in catalog
+
+
+@pytest.mark.asyncio
+async def test_a_copy_of_a_swapped_file_re_embeds_rather_than_reuse_the_old_fields_vectors() -> None:
+    """The file's partition moved from bge-m3 to e5: its chunks keep their old
+    bge-m3 vectors, and its record names the e5 field. Copied as they are, those
+    vectors may come from a model the endpoint was edited away from since, under
+    a record that names e5 — and with e5's own vectors stripped, a later swap of
+    the target to e5 would skip the file, then complete with it out of search."""
+    rows = [
+        {
+            "_id": 1,
+            "text": "hello",
+            "vector_bge_m3": [0.5, 0.5, 0.5],
+            "vector_e5": [0.1, 0.2],
+            "file_id": "file-1",
+            "partition": "a",
+        }
+    ]
+    embedder = _CopyEmbedder()
+    embedder.model_name, embedder.endpoint = "BAAI/bge-m3", "http://bge/v1"
+    repo = _document_repo()
+    repo.get_indexation_config = AsyncMock(return_value={**_SOURCE_CONFIG, "embedder_vector_field": "vector_e5"})
+
+    store = await _copy(rows, embedder, repo, embedder_reference="bge-m3", embedder_fingerprint=_TARGET_FINGERPRINT)
+
+    assert embedder.calls == [["hello"]]
+    inserted = store.insert_entities.await_args.args[0]
+    assert inserted[0]["vector_bge_m3"] == [1.0, 2.0, 3.0]
+    assert "vector_e5" not in inserted[0]
+    catalog = repo.add_file_to_partition.await_args.kwargs
+    assert catalog["indexation_config"]["embedder_vector_field"] == "vector_bge_m3"
+    assert catalog["embedder_fingerprint"] == _TARGET_FINGERPRINT
+
+
+@pytest.mark.asyncio
+async def test_a_copy_of_a_file_recorded_in_the_target_field_keeps_its_vectors() -> None:
+    rows = [
+        {
+            "_id": 1,
+            "text": "hello",
+            "vector_bge_m3": [0.5, 0.5, 0.5],
+            "vector_e5": [0.1, 0.2],
+            "file_id": "file-1",
+            "partition": "a",
+        }
+    ]
+    source_config = {**_SOURCE_CONFIG, "embedder_vector_field": "vector_bge_m3"}
+    embedder = _CopyEmbedder()
+    repo = _document_repo()
+    repo.get_indexation_config = AsyncMock(return_value=dict(source_config))
+
+    store = await _copy(rows, embedder, repo, embedder_reference="bge-m3", embedder_fingerprint=_TARGET_FINGERPRINT)
+
+    assert embedder.calls == []
+    inserted = store.insert_entities.await_args.args[0]
+    assert inserted[0]["vector_bge_m3"] == [0.5, 0.5, 0.5]
+    assert "vector_e5" not in inserted[0]
+    assert repo.add_file_to_partition.await_args.kwargs["indexation_config"] == source_config
 
 
 @pytest.mark.asyncio

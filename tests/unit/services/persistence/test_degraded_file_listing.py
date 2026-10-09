@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock
 
 import pytest
@@ -44,17 +45,46 @@ async def test_unfiltered_file_listing_keeps_the_existing_query_shape() -> None:
 @pytest.mark.asyncio
 async def test_file_metadata_lookup_is_partition_scoped() -> None:
     pool = AsyncMock()
-    pool.fetchval.return_value = {"title": "Report", "degraded_stages": ["caption"]}
+    indexed_at = datetime(2026, 10, 1, tzinfo=UTC)
+    pool.fetchrow.return_value = {
+        "file_metadata": {"title": "Report", "degraded_stages": ["caption"]},
+        "partition_name": "tenant-a",
+        "indexed_at": indexed_at,
+    }
     repo = PgDocumentRepository(lambda: pool)
 
     metadata = await repo.get_file_metadata("file-1", "tenant-a")
 
-    assert metadata == {"title": "Report", "degraded_stages": ["caption"]}
-    query, file_id, partition = pool.fetchval.call_args.args
+    assert metadata == {
+        "title": "Report",
+        "degraded_stages": ["caption"],
+        "partition": "tenant-a",
+        "indexed_at": indexed_at.isoformat(),
+    }
+    query, file_id, partition = pool.fetchrow.call_args.args
     assert "file_metadata" in query
     assert "file_id = $1" in query
     assert "partition_name = $2" in query
     assert (file_id, partition) == ("file-1", "tenant-a")
+
+
+@pytest.mark.asyncio
+async def test_file_metadata_lookup_returns_none_for_missing_row() -> None:
+    pool = AsyncMock()
+    pool.fetchrow.return_value = None
+
+    assert await PgDocumentRepository(lambda: pool).get_file_metadata("missing", "tenant-a") is None
+
+
+@pytest.mark.asyncio
+async def test_file_metadata_lookup_handles_null_metadata_and_timestamp() -> None:
+    pool = AsyncMock()
+    pool.fetchrow.return_value = {"file_metadata": None, "partition_name": "tenant-a", "indexed_at": None}
+
+    assert await PgDocumentRepository(lambda: pool).get_file_metadata("file-1", "tenant-a") == {
+        "partition": "tenant-a",
+        "indexed_at": None,
+    }
 
 
 @pytest.mark.asyncio
