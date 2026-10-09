@@ -448,3 +448,70 @@ class TestEmptyList:
 
         assert await postgres_store.user_repo.ensure_seed_users([], env={}) == {}
         assert logs == []
+
+
+async def _wait_until_blocked_by(store: PostgresStore, pid: int, task: asyncio.Task) -> None:
+    """Return once some backend waits on a lock held by ``pid``; fail if ``task`` ends first."""
+    for _ in range(1000):
+        if task.done():
+            task.result()
+            raise AssertionError("seeding finished without waiting on the partition delete")
+        if await store.pool.fetchval(
+            "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)))", pid
+        ):
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("seeding never waited on the partition delete")
+
+
+class TestConcurrentPartitionDelete:
+    """A partition deleted (``PgPartitionRepository`` path) while seeding runs."""
+
+    ENTRIES = (
+        _seed("svc-a", "SVC_A_TOKEN", partitions=[{"name": "doomed", "role": "editor"}]),
+        _seed("svc-b", "SVC_B_TOKEN", partitions=[{"name": "kept", "role": "viewer"}]),
+    )
+    ENV = {"SVC_A_TOKEN": TOKEN_A, "SVC_B_TOKEN": TOKEN_B}
+
+    async def _seed_during_delete(self, store: PostgresStore, before_commit=None) -> dict[str, str]:
+        async with store.pool.acquire() as deleter:
+            tx = deleter.transaction()
+            await tx.start()
+            try:
+                await deleter.execute("SELECT partition FROM partitions WHERE partition = 'doomed' FOR UPDATE")
+                await deleter.execute("DELETE FROM partitions WHERE partition = 'doomed'")
+                seeding = asyncio.create_task(store.user_repo.ensure_seed_users(list(self.ENTRIES), env=self.ENV))
+                await _wait_until_blocked_by(store, deleter.get_server_pid(), seeding)
+                if before_commit is not None:
+                    await before_commit(deleter)
+            except BaseException:
+                await tx.rollback()
+                raise
+            await tx.commit()
+        return await seeding
+
+    async def test_the_other_entries_are_still_seeded(self, postgres_store: PostgresStore, logs):
+        await _partitions(postgres_store, "doomed", "kept")
+
+        outcome = await self._seed_during_delete(postgres_store)
+
+        assert outcome == {"svc-a": "created", "svc-b": "created"}
+        assert await _memberships(postgres_store, (await _row(postgres_store, "svc-a"))["id"]) == {}
+        assert await _memberships(postgres_store, (await _row(postgres_store, "svc-b"))["id"]) == {"kept": "viewer"}
+        assert any("does not exist" in line for line in logs)
+
+    async def test_no_deadlock_when_the_delete_decrements_a_seeded_account(self, postgres_store: PostgresStore):
+        """The delete path updates ``users.file_count`` of the files' creators while it holds the partition."""
+        await _partitions(postgres_store, "doomed", "kept")
+        await postgres_store.user_repo.ensure_seed_users(list(self.ENTRIES), env=self.ENV)
+        svc_a = (await _row(postgres_store, "svc-a"))["id"]
+        await postgres_store.pool.execute("UPDATE users SET file_count = 1 WHERE id = $1", svc_a)
+
+        async def decrement(deleter):
+            await deleter.execute("UPDATE users SET file_count = GREATEST(file_count - 1, 0) WHERE id = $1", svc_a)
+
+        outcome = await self._seed_during_delete(postgres_store, before_commit=decrement)
+
+        assert outcome == {"svc-a": "updated", "svc-b": "updated"}
+        assert await _memberships(postgres_store, svc_a) == {}
+        assert await _memberships(postgres_store, (await _row(postgres_store, "svc-b"))["id"]) == {"kept": "viewer"}

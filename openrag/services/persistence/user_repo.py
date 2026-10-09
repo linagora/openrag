@@ -554,6 +554,23 @@ class PgUserRepository(UserRepository):
                     # which ensure_admin_user would then promote to admin.
                     logger.error("Seed users not provisioned: the admin account (users.id = 1) does not exist yet")
                     return {seed.external_user_id: "skipped" for seed in seed_users}
+                # Lock the listed partitions before any users row: a partition
+                # delete holds its row FOR UPDATE, then updates the file
+                # counters of the files' creators. Taken here, a delete either
+                # waits for this transaction or finishes first (its row is then
+                # skipped below), and neither side waits while holding a row the
+                # other needs. Locked later, it could deadlock, or the membership
+                # insert would fail its foreign key and abort the whole run.
+                present = {
+                    r["partition"]
+                    for r in await conn.fetch(
+                        """
+                        SELECT partition FROM partitions WHERE partition = ANY($1::text[])
+                        ORDER BY partition FOR KEY SHARE
+                        """,
+                        sorted({m.name for seed in seed_users for m in seed.partitions}),
+                    )
+                }
                 # A managed account never logs in through the IdP. Sessions an
                 # older release let a matching ``sub`` open on one end here.
                 ended = await conn.execute(
@@ -597,11 +614,13 @@ class PgUserRepository(UserRepository):
                     if seed.external_user_id not in tokens:
                         continue  # failed the token checks, already logged
                     outcomes[seed.external_user_id] = await self._apply_seed_user(
-                        conn, seed, tokens[seed.external_user_id]
+                        conn, seed, tokens[seed.external_user_id], present
                     )
         return outcomes
 
-    async def _apply_seed_user(self, conn: asyncpg.Connection, seed: SeedUserConfig, token: str | None) -> str:
+    async def _apply_seed_user(
+        self, conn: asyncpg.Connection, seed: SeedUserConfig, token: str | None, present: set[str]
+    ) -> str:
         log = logger.bind(external_user_id=seed.external_user_id, token_env=seed.token_env)
         existing = await conn.fetchrow(
             "SELECT id, managed_by_config FROM users WHERE external_user_id = $1",
@@ -657,19 +676,19 @@ class PgUserRepository(UserRepository):
                 if row is None:
                     log.error("Seed user skipped: the account was taken by an unmanaged row meanwhile")
                     return "skipped"
-                await self._sync_seed_memberships(conn, row["id"], seed, log)
+                await self._sync_seed_memberships(conn, row["id"], seed, present, log)
         except asyncpg.UniqueViolationError as exc:
             log.bind(constraint=exc.constraint_name).error("Seed user skipped: unique constraint violated")
+            return "skipped"
+        except asyncpg.ForeignKeyViolationError as exc:
+            log.bind(constraint=exc.constraint_name).error("Seed user skipped: foreign key constraint violated")
             return "skipped"
         return "updated" if existing is not None else "created"
 
     @staticmethod
-    async def _sync_seed_memberships(conn: asyncpg.Connection, user_id: int, seed: SeedUserConfig, log: Any) -> None:
-        listed = [m.name for m in seed.partitions]
-        present = {
-            r["partition"]
-            for r in await conn.fetch("SELECT partition FROM partitions WHERE partition = ANY($1::text[])", listed)
-        }
+    async def _sync_seed_memberships(
+        conn: asyncpg.Connection, user_id: int, seed: SeedUserConfig, present: set[str], log: Any
+    ) -> None:
         for membership in seed.partitions:
             if membership.name not in present:
                 log.bind(partition=membership.name).warning(
