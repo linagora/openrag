@@ -37,7 +37,7 @@ from core.config.retrieval_pipeline import RetrievalPipelineConfig
 from core.indexing.validators import validate_partition_name
 from core.models.embedder_swap import EmbedderSwapStatus
 from core.models.preset import PartitionConfig
-from core.utils.consts import is_internal_metadata_key
+from core.utils.consts import DEFAULT_PARTITION_NAME, is_internal_metadata_key
 from core.utils.exceptions import (
     ConfigError,
     ConflictError,
@@ -478,12 +478,24 @@ class PartitionService:
             )
 
     async def delete_partition(self, partition: str) -> None:
-        """Drop a partition's vectors *and* relational rows (cross-cutting)."""
+        """Drop a partition's vectors *and* relational rows (cross-cutting).
+
+        The ``default`` partition is refused with a 409: it is seeded at
+        startup and keeps the partition catalog from ever being empty. With no
+        partition left, the partition cache empties and indexing, search and
+        chat fall back to the static startup configuration instead of the
+        partition presets.
+        """
         async with self._partition_operation_lock(partition) as operation:
             await self._delete_partition_locked(partition, operation=operation)
 
     async def _delete_partition_locked(self, partition: str, *, operation: Any = None) -> None:
         await self._ensure_partition_for_operation(partition, operation=operation)
+        if partition == DEFAULT_PARTITION_NAME:
+            raise ConflictError(
+                f"The '{DEFAULT_PARTITION_NAME}' partition cannot be deleted. Delete its files instead.",
+                code="DEFAULT_PARTITION_PROTECTED",
+            )
         task_state_manager = self._task_state_manager
         if task_state_manager is None and self._task_state_manager_factory is not None:
             task_state_manager = self._task_state_manager_factory()
@@ -873,10 +885,10 @@ class PartitionService:
 
     async def seed_default_partition(self, user_id: int = 1) -> None:
         """Ensure the 'default' partition exists with default presets."""
-        if await self._partition_repo.partition_exists(name="default"):
+        if await self._partition_repo.partition_exists(name=DEFAULT_PARTITION_NAME):
             return
-        await self._partition_repo.create_partition(name="default", user_id=user_id)
-        logger.info("Seeded 'default' partition.")
+        await self._partition_repo.create_partition(name=DEFAULT_PARTITION_NAME, user_id=user_id)
+        logger.info(f"Seeded '{DEFAULT_PARTITION_NAME}' partition.")
 
     def _require_config(self) -> Settings:
         if self._config is None:

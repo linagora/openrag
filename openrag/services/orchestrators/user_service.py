@@ -24,6 +24,7 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING, Any
 
+from core.utils.consts import DEFAULT_PARTITION_NAME
 from core.utils.exceptions import UserNotFoundError, ValidationError
 from core.utils.logging import get_logger
 
@@ -174,13 +175,15 @@ class UserService:
 
         Mirrors the legacy Ray ``delete_user``: every partition where the
         user holds the ``owner`` role is deleted (vectors + relational
-        rows, via PartitionService) before the user row is removed.
+        rows, via PartitionService) before the user row is removed. The
+        ``default`` partition is kept, since it cannot be deleted; only the
+        user's membership in it goes, with the user row.
         """
         await self._ensure_exists(user_id)
         owned = [
             p["partition"]
             for p in await self._membership_repo.list_user_partitions_dict(user_id)
-            if p.get("role") == "owner"
+            if p.get("role") == "owner" and p["partition"] != DEFAULT_PARTITION_NAME
         ]
         for partition in owned:
             await self._partition_service.delete_partition(partition)

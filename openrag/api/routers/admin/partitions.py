@@ -108,7 +108,8 @@ async def list_existant_partitions(
 This permanently deletes the partition and all its documents. This action cannot be undone.
 
 **Response:**
-Returns 204 No Content on successful deletion.
+Returns 204 No Content on successful deletion, or 409 Conflict (`DEFAULT_PARTITION_PROTECTED`)
+for the `default` partition, which cannot be deleted.
 """,
 )
 async def delete_partition(

@@ -423,6 +423,36 @@ async def test_delete_partition_missing_raises_404():
 
 
 @pytest.mark.asyncio
+async def test_delete_default_partition_is_refused_before_any_cleanup():
+    # Deleting the seeded "default" partition could leave a deployment with no
+    # partition at all, an empty partition cache startup never produces.
+    # Refused before any vector or row is touched.
+    prepo = FakePartitionRepo(existing={"default", "p1"})
+    vstore = FakeVectorStore(ids=["c1"])
+    config = SimpleNamespace(partitions={"default": "cfg-default", "p1": "cfg-p1"})
+
+    with pytest.raises(ConflictError) as ei:
+        await _svc(prepo=prepo, vstore=vstore, config=config).delete_partition("default")
+
+    assert ei.value.status_code == 409
+    assert ei.value.code == "DEFAULT_PARTITION_PROTECTED"
+    assert prepo.deleted == []
+    assert vstore.deleted_filters == []
+    assert config.partitions == {"default": "cfg-default", "p1": "cfg-p1"}
+
+
+@pytest.mark.asyncio
+async def test_delete_other_partition_still_works_and_keeps_default_cached():
+    prepo = FakePartitionRepo(existing={"default", "p1"})
+    config = SimpleNamespace(partitions={"default": "cfg-default", "p1": "cfg-p1"})
+
+    await _svc(prepo=prepo, config=config).delete_partition("p1")
+
+    assert prepo.deleted == ["p1"]
+    assert config.partitions == {"default": "cfg-default"}
+
+
+@pytest.mark.asyncio
 async def test_delete_partition_deletes_vectors_before_rows():
     prepo = FakePartitionRepo(existing={"p1"})
     vstore = FakeVectorStore(ids=["c1", "c2"])

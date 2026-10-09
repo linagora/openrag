@@ -211,6 +211,10 @@ class IndexingService:
     def _resolve_indexation_dispatch_config(self, partition: str) -> tuple[dict | None, str | None]:
         partitions = self._partition_configs()
         if not partitions:
+            # Legacy passthrough: the worker indexes with its static config and
+            # the default embedder. A running service never has an empty cache
+            # (startup seeds the undeletable ``default`` partition and loads
+            # it); only unit tests without partitions land here.
             return None, None
         if partition not in partitions:
             raise PartitionNotFoundError(f"Partition '{partition}' does not exist.")

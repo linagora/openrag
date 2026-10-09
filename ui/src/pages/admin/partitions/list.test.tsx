@@ -160,6 +160,28 @@ describe("PartitionListPage bulk actions", () => {
     expect(deletePartitionMock).not.toHaveBeenCalledWith("viewer-b");
   });
 
+  it("never offers to delete the default partition", async () => {
+    listPartitionsMock.mockResolvedValue({
+      partitions: [makePartition("default"), makePartition("owned-a")],
+    });
+
+    renderPartitions();
+
+    expect(await screen.findByText("owned-a")).not.toBeNull();
+    expect(screen.queryByRole("button", { name: /delete default/i })).toBeNull();
+    expect(screen.getByRole("button", { name: /delete owned-a/i })).not.toBeNull();
+    expect(screen.getByRole("checkbox", { name: /select partition default/i }).hasAttribute("disabled")).toBe(true);
+
+    await userEvent.click(screen.getByRole("checkbox", { name: /select visible deletable partitions/i }));
+
+    expect(screen.getByText("1 selected")).not.toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: /delete selected partitions/i }));
+    await userEvent.click(screen.getByRole("button", { name: /confirm/i }));
+
+    await waitFor(() => expect(deletePartitionMock).toHaveBeenCalledWith("owned-a"));
+    expect(deletePartitionMock).not.toHaveBeenCalledWith("default");
+  });
+
   it("paginates partitions with 10 rows per page", async () => {
     listPartitionsMock.mockResolvedValue({
       partitions: Array.from({ length: 11 }, (_, i) =>

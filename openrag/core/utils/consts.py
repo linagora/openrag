@@ -1,6 +1,10 @@
 PARTITION_PREFIX = "openrag-"
 LEGACY_PARTITION_PREFIX = "ragondin-"
 
+# Seeded at startup and never deletable, so a deployment always has at least
+# one partition and the in-memory partition cache is never empty.
+DEFAULT_PARTITION_NAME = "default"
+
 FILE_READ_CHUNK_SIZE = 1024 * 1024  # Read file in blocks of 1MB to preserve RAM
 
 

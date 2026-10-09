@@ -229,6 +229,25 @@ async def test_delete_user_cascades_owned_partitions_first():
 
 
 @pytest.mark.asyncio
+async def test_delete_user_keeps_the_default_partition_they_own():
+    # The default partition cannot be deleted; the user is still removed and
+    # their membership in it goes with them.
+    repo = FakeUserRepo(existing={5})
+    ps = FakePartitionService()
+    mem = FakeMembershipRepo(
+        {
+            5: [
+                {"partition": "default", "role": "owner"},
+                {"partition": "p_owned", "role": "owner"},
+            ]
+        }
+    )
+    await _svc(repo, partition_service=ps, membership_repo=mem).delete_user(5)
+    assert ps.deleted == ["p_owned"]
+    assert repo.deleted == [5]
+
+
+@pytest.mark.asyncio
 async def test_regenerate_token_missing_user_404():
     repo = FakeUserRepo(existing=set())
     with pytest.raises(UserNotFoundError):
