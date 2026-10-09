@@ -500,9 +500,11 @@ async def test_contextualizer_prompt_allows_bounded_conceptual_splits():
     await svc.generate_query([{"role": "user", "content": "How do method A and method B compare in quality?"}])
 
     contextualizer_prompt = llm.chat_calls[0][0][0]["content"]
-    assert "Conceptual or method comparisons" in contextualizer_prompt
-    assert "Separate facts about named entities" in contextualizer_prompt
-    assert "stays as ONE query when the user asks how the options compare" in contextualizer_prompt
+    assert "Separate facts about independently documented entities" in contextualizer_prompt
+    assert "Independent comparisons" in contextualizer_prompt
+    assert "practical options, methods, or concepts" in contextualizer_prompt
+    assert "ALWAYS emit one sub-query per item" in contextualizer_prompt
+    assert "Do not combine both sides into one query" in contextualizer_prompt
     assert "Return no more than 8 sub-queries total" in contextualizer_prompt
     assert contextualizer_prompt.index("Runtime calendar context") > contextualizer_prompt.index("Examples:")
     assert "query_list may contain one or more distinct sub-queries, up to 8" in contextualizer_prompt
