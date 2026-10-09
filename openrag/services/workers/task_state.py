@@ -289,9 +289,10 @@ class TaskInfo:
     object_ref: ray.ObjectRef | None = None
     worker_submitted: bool = False
     submission_started_at: float | None = None
-    # In memory only: a restarted actor grants every recovered task a fresh
-    # lease rather than trusting a persisted deadline that kept running while
-    # nothing could renew it.
+    # Persisted with the rest of the record but never trusted across a
+    # restart: the actor grants every recovered task a fresh lease rather than
+    # a deadline that kept running while nothing could renew it. Renewals are
+    # not persisted, so a recovered value is stale anyway.
     worker_lease_expires_at: float | None = None
 
 
