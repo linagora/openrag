@@ -752,10 +752,10 @@ class MarkerLoader(BasePooledParser):
                 task_description=f"MarkerLoader PDF loading ({file_path})",
             )
         except Exception as exc:
-            # A task's failure reason is read from the top exception only, and
-            # here that is the Ray wrapper's generic RuntimeError — the same text
-            # as a corrupt PDF or a crash. Name the memory failure, and the
-            # setting that decides it, so an admin can act from the jobs view.
+            # The Ray wrapper's message names the remote cause, but only as
+            # "MemoryError" at the end of a chain of task names. Name the memory
+            # failure up front, and the setting that decides it, so an admin
+            # can act from the jobs view.
             if not caused_by(exc, MemoryError):
                 raise
             raise MemoryError(self._out_of_memory_message()) from exc

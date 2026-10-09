@@ -1351,7 +1351,7 @@ async def test_dispatch_indexing_keeps_claim_when_submission_outcome_is_unknown(
         patch("services.workers.ray_utils.ray.cancel"),
     ):
         mock_uuid.uuid4.return_value.hex = "task-1"
-        with pytest.raises(TimeoutError, match="submit timed out"):
+        with pytest.raises(TimeoutError, match=r"submit\(task-1\) timed out after"):
             await dispatcher.dispatch_indexing(
                 path="/data/report.txt",
                 metadata={"file_id": "file-1", "content_sha256": "abc123"},
@@ -1390,7 +1390,7 @@ async def test_dispatch_indexing_preserves_unknown_submission_without_content_cl
         patch("services.workers.ray_utils.ray.cancel"),
     ):
         mock_uuid.uuid4.return_value.hex = "task-1"
-        with pytest.raises(TimeoutError, match="submit timed out"):
+        with pytest.raises(TimeoutError, match=r"submit\(task-1\) timed out after"):
             await dispatcher.dispatch_indexing(
                 path="/data/report.txt",
                 metadata={"file_id": "file-1", "source": "/data/report.txt"},
