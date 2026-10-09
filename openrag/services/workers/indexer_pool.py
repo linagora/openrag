@@ -508,6 +508,7 @@ class IndexerWorkerActor:
                         include_selected_stt=routes_to_openai_audio_loader(
                             self._cfg,
                             _display_filename(path, metadata),
+                            metadata.get("mimetype"),
                         ),
                     )
                 )
