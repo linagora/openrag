@@ -135,7 +135,7 @@ async def test_upsert_job_persists_the_capped_failure_reason() -> None:
 
     query, params = pool.calls[0]
     assert len(reason) == 8_000
-    assert reason.endswith("...")
+    assert " ... " in reason
     assert params[6] == reason
     assert "THEN jobs.error_reason" in " ".join(query.split())
     assert job.error_reason == reason

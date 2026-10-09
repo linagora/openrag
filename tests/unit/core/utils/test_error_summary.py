@@ -1,5 +1,6 @@
 import pytest
 from core.utils.error_summary import (
+    elide_middle,
     extract_task_error_reason,
     failure_reason_from_exception,
     summarize_task_error,
@@ -76,9 +77,41 @@ def test_summary_prefers_stored_reason_and_caps_only_the_list_value() -> None:
 
     assert summary is not None
     assert len(summary) == 500
-    assert summary.endswith("...")
+    assert " ... " in summary
 
 
 @pytest.mark.parametrize("error", [None, "", "Traceback (most recent call last):\n"])
 def test_extract_task_error_reason_returns_none_without_an_exception_header(error: str | None) -> None:
     assert extract_task_error_reason(error) is None
+
+
+def test_summary_keeps_the_root_cause_of_a_long_wrapped_failure() -> None:
+    reason = (
+        "RuntimeError: MarkerLoader PDF loading (/app/data/" + "d" * 400 + ".pdf) failed: "
+        "RuntimeError: MarkerPool PDF [p10-14] (/app/data/" + "d" * 400 + ".pdf) failed: "
+        "ValueError: bad xref table"
+    )
+
+    summary = summarize_task_error(None, reason=reason)
+
+    assert summary is not None
+    assert len(summary) <= 500
+    assert summary.startswith("RuntimeError: MarkerLoader PDF loading")
+    assert summary.endswith("failed: ValueError: bad xref table")
+
+
+def test_failure_reason_from_exception_keeps_the_end_of_a_long_message() -> None:
+    reason = failure_reason_from_exception(RuntimeError("x" * 9_000 + " failed: ValueError: root"))
+
+    assert len(reason) <= 8_000
+    assert reason.startswith("RuntimeError: xxx")
+    assert reason.endswith("failed: ValueError: root")
+
+
+@pytest.mark.parametrize("max_length", [0, 3, 5])
+def test_elide_middle_respects_limits_too_small_for_the_marker(max_length: int) -> None:
+    assert len(elide_middle("abcdefghij", max_length)) <= max_length
+
+
+def test_elide_middle_leaves_short_text_alone() -> None:
+    assert elide_middle("short", 5) == "short"

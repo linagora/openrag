@@ -11,11 +11,13 @@ Use the decorator form when params are static (or pulled from a
 module-level config); use the function form when params are dynamic per
 call. Cancellation paths are translated into a predictable shape:
 
-- caller-side timeout → ``ray.cancel(future)`` then re-raise ``TimeoutError``
+- caller-side timeout → ``ray.cancel(future)`` then raise ``TimeoutError``
+  naming the task and its bound
 - caller-side ``asyncio.CancelledError`` → ``ray.cancel(future)`` then re-raise
 - worker-side ``TaskCancelledError`` → re-raise as-is
 - actor restart/unavailability → ``ServiceUnavailableError`` (503)
-- worker-side ``RayTaskError`` → re-raise as ``RuntimeError`` (cause preserved)
+- worker-side ``RayTaskError`` → re-raise as ``RuntimeError`` whose message
+  ends with the remote cause (cause also chained)
 """
 
 from __future__ import annotations
@@ -28,11 +30,15 @@ from collections.abc import Callable
 from typing import Any
 
 import ray
+from core.utils.error_summary import elide_middle, failure_reason_from_exception
 from core.utils.exceptions import ServiceUnavailableError
 from core.utils.logging import get_logger
 from ray.exceptions import ActorUnavailableError, RayActorError, RayTaskError, TaskCancelledError
 
 logger = get_logger()
+
+# Each actor hop appends its cause to the message, so the cap applies per hop.
+_REMOTE_CAUSE_MAX_LENGTH = 300
 
 __all__ = [
     "call_ray_actor_method_with_timeout",
@@ -54,6 +60,30 @@ def _actor_unavailable(task_description: str, exc: BaseException) -> ServiceUnav
         "Worker service is temporarily unavailable",
         code="RAY_ACTOR_UNAVAILABLE",
     )
+
+
+def _remote_cause(error: RayTaskError) -> str:
+    """``"<Type>: <first line>"`` of the exception the actor raised.
+
+    Not ``str(error)``: that is Ray's formatted remote traceback, headed by a
+    ``ray::Actor.method() (pid=...)`` line. ``error.cause`` is the actor's own
+    exception, and Ray does not nest one ``RayTaskError`` inside another, so a
+    failure that crossed several actors arrives as the innermost wrapper's
+    ``RuntimeError``, whose message already carries the deeper causes.
+    """
+    cause = getattr(error, "cause", None)
+    if cause is None:
+        return "RayTaskError"
+    try:
+        reason = failure_reason_from_exception(cause)
+    except Exception:
+        reason = type(cause).__name__
+    return elide_middle(reason, _REMOTE_CAUSE_MAX_LENGTH)
+
+
+def _task_failed(task_description: str, error: RayTaskError) -> RuntimeError:
+    """The ``RuntimeError`` :func:`call_ray_actor_with_timeout` raises for *error*."""
+    return RuntimeError(f"{task_description} failed: {_remote_cause(error)}")
 
 
 def _resolve_description(template: str, fn: Callable[..., Any], args: tuple[Any, ...], kwargs: dict[str, Any]) -> str:
@@ -91,19 +121,25 @@ async def call_ray_actor_with_timeout(
     """Await a Ray ``ObjectRef`` with a timeout, propagating cancellation.
 
     Raises:
-        TimeoutError: If the task exceeds ``timeout``.
+        TimeoutError: If the task exceeds ``timeout`` (or raised one itself).
         asyncio.CancelledError: If the calling coroutine is cancelled.
         TaskCancelledError: If the Ray task was cancelled by the worker.
-        RuntimeError: If the Ray task failed (original exception chained).
+        RuntimeError: If the Ray task failed. The message ends with the remote
+            cause, so it survives being pickled across further actor hops; the
+            Ray error is also chained as ``__cause__``.
     """
     try:
         result = await asyncio.wait_for(asyncio.gather(future), timeout=timeout)
         return result[0]
 
-    except TimeoutError:
+    except TimeoutError as exc:
         logger.warning(f"{task_description} timed out, cancelling Ray task")
         ray.cancel(future, recursive=True)
-        raise
+        if str(exc):
+            # Raised by the awaited task itself, not by our deadline: keep it.
+            raise
+        # asyncio.wait_for's own TimeoutError has an empty message.
+        raise TimeoutError(f"{task_description} timed out after {timeout:g}s") from exc
 
     except asyncio.CancelledError:
         logger.warning(f"{task_description} cancelled, cancelling Ray task")
@@ -118,7 +154,7 @@ async def call_ray_actor_with_timeout(
         raise _actor_unavailable(task_description, exc) from exc
 
     except RayTaskError as e:
-        raise RuntimeError(f"{task_description} failed") from e
+        raise _task_failed(task_description, e) from e
 
 
 async def call_ray_actor_method_with_timeout(
