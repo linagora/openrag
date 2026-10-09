@@ -183,6 +183,36 @@ counts without exposing partition or preset names.
   and an empty `BASE_URL` does not remove it, even with `MODEL_ENDPOINT_SYNC_ON_BOOT=true`. Chat keeps
   failing with `Connection error` until you repoint or remove that LLM endpoint in the admin UI.
 
+## Operator-managed accounts
+
+Service accounts whose token comes from your secret store (cozy-stack's, for example) are
+declared under `openrag.seedUsers`. The chart renders the list as `SEED_USERS` in the env
+ConfigMap, only when it is non-empty, and the API provisions the accounts at startup. The
+behaviour is described in
+[Operator-managed accounts](/openrag/documentation/user_auth/#operator-managed-accounts-authseed_users).
+
+```yaml
+openrag:
+  seedUsers:
+    - external_user_id: svc-cozy-stack
+      display_name: cozy-stack
+      token_env: COZY_STACK_TOKEN
+      partitions:
+        - { name: twake, role: editor }
+```
+
+The list carries env var names only. The token itself goes where the chart's other secrets
+go: `env.secrets.COZY_STACK_TOKEN`, or a `COZY_STACK_TOKEN` key in the KV path read by
+`env.secretsProvider.externalSecret` (`dataFrom`) or `vaultStaticSecret`, which project
+every key of that path as an environment variable. Point cozy-stack at the same key.
+
+A change to `openrag.seedUsers` changes the ConfigMap checksum and rolls the API
+Deployment. A rotated token is picked up on the next restart: `vaultStaticSecret` restarts
+the Deployment itself, while with `externalSecret` the Secret refreshes on its
+`refreshInterval` and the pods need a `kubectl rollout restart`. Under Ray Serve the API
+runs on the Ray head, which neither mechanism restarts: cycle the head pod after a change.
+Do not also set `SEED_USERS` in `env.config`; the render fails when both are present.
+
 ## Monitoring
 
 The chart ships OpenRAG's Grafana dashboards and a `ServiceMonitor` for the
