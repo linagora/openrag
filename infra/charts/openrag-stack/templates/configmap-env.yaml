@@ -19,6 +19,11 @@ data:
 {{- if hasKey $.Values.env.config "SEED_USERS" }}
 {{- fail "openrag.seedUsers is set and env.config also defines SEED_USERS: keep one of the two." }}
 {{- end }}
+{{- range . }}
+{{- if and (kindIs "map" .) (hasKey . "token") }}
+{{- fail (printf "openrag.seedUsers entry %q has a token key: the value would land in a ConfigMap. Put the token in the chart's Secret and name its env var in token_env." (toString (get . "external_user_id"))) }}
+{{- end }}
+{{- end }}
   # auth.seed_users (openrag.seedUsers): env var names only, no token.
   SEED_USERS: {{ toJson . | quote }}
 {{- end }}

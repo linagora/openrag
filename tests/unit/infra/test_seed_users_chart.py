@@ -73,3 +73,13 @@ def test_env_config_cannot_also_set_it(tmp_path):
 
     assert result.returncode != 0
     assert "SEED_USERS" in result.stderr
+
+
+def test_a_plaintext_token_fails_the_render(tmp_path):
+    """A ``token`` key would put the secret in a ConfigMap: refuse it."""
+    leaked = {**SEED, "token": "or-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}
+    result = _render(tmp_path, {"openrag": {"seedUsers": [SEED, leaked]}})
+
+    assert result.returncode != 0
+    assert "token_env" in result.stderr
+    assert leaked["token"] not in result.stderr
