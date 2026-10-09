@@ -691,8 +691,20 @@ class AuthService:
         return mapping
 
     async def _resolve_user(self, sub: str, claims: dict[str, Any]) -> User:
-        """Look the user up by ``sub``; auto-provision if configured."""
+        """Look the user up by ``sub``; auto-provision if configured.
+
+        An account provisioned from ``auth.seed_users`` is refused: its
+        external_user_id is an operator-chosen key, not an IdP ``sub``, and a
+        login on it would hand the IdP its profile, memberships and possibly
+        admin rights. Raised here, before any profile sync, claim mapping or
+        group sync writes to it.
+        """
         user = await self._user_repo.get_user_by_external_id(sub)
+        if user is not None and user.managed_by_config:
+            logger.bind(user_id=user.id).warning(
+                "OIDC login rejected: the matching account is managed by auth.seed_users"
+            )
+            raise OIDCFlowError("User not allowed to log in through the identity provider", status_code=403)
         if user is not None:
             return user
 

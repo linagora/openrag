@@ -3,14 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime, timedelta
 
 import pytest
 import pytest_asyncio
 from core.config.auth import SeedUserConfig
-from core.models.user import User
+from core.models.user import OIDCSession, User
 from loguru import logger
 from services.auth.session_tokens import hash_session_token
-from services.orchestrators.auth_service import AuthService
+from services.orchestrators.auth_service import AuthService, OIDCFlowError
 from services.persistence.user_repo import _hash_token
 from services.storage.postgres_store import PostgresStore
 
@@ -64,7 +65,7 @@ async def _partitions(store: PostgresStore, *names: str) -> None:
         await store.pool.execute("INSERT INTO partitions (partition, created_at) VALUES ($1, NOW())", name)
 
 
-def _auth_service(store: PostgresStore) -> AuthService:
+def _auth_service(store: PostgresStore, **oidc) -> AuthService:
     from core.config.auth import OIDCConfig
 
     return AuthService(
@@ -72,8 +73,26 @@ def _auth_service(store: PostgresStore) -> AuthService:
         oidc_session_repo=store.oidc_session_repo,
         membership_repo=store.membership_repo,
         oidc_client=None,
-        config=OIDCConfig(),
+        config=OIDCConfig(**oidc),
     )
+
+
+async def _oidc_session(store: PostgresStore, user_id: int, sub: str) -> None:
+    now = datetime.now(UTC).replace(tzinfo=None)
+    await store.oidc_session_repo.create_session(
+        OIDCSession(
+            session_token_hash=_hash_token(f"session-{user_id}-{sub}"),
+            user_id=user_id,
+            sub=sub,
+            access_token_expires_at=now + timedelta(hours=1),
+            session_expires_at=now + timedelta(days=1),
+            created_at=now,
+        )
+    )
+
+
+async def _session_count(store: PostgresStore, user_id: int) -> int:
+    return await store.pool.fetchval("SELECT count(*) FROM oidc_sessions WHERE user_id = $1", user_id)
 
 
 class TestCreateAndRotate:
@@ -326,3 +345,56 @@ class TestRemoval:
 
         assert outcome == {"svc-a": "skipped"}
         assert (await _row(postgres_store, "svc-a"))["token"] == _hash_token(TOKEN_A)
+
+
+class TestOidcLogin:
+    async def test_the_managed_flag_reaches_the_domain_model(self, postgres_store: PostgresStore):
+        repo = postgres_store.user_repo
+        await repo.ensure_seed_users([_seed(partitions=[])], env={"SVC_A_TOKEN": TOKEN_A})
+        unmanaged = await repo.create_user(User(display_name="Alice", external_user_id="kc-alice"))
+
+        assert (await repo.get_user_by_external_id("svc-a")).managed_by_config is True
+        assert (await repo.get_user(unmanaged.id)).managed_by_config is False
+
+    async def test_a_matching_sub_cannot_log_in_as_a_managed_account(self, postgres_store: PostgresStore):
+        await _partitions(postgres_store, "twake")
+        repo = postgres_store.user_repo
+        await repo.ensure_seed_users([_seed(is_admin=True)], env={"SVC_A_TOKEN": TOKEN_A})
+        before = await _row(postgres_store, "svc-a")
+        auth = _auth_service(postgres_store, auto_provision_login=True)
+
+        with pytest.raises(OIDCFlowError) as ei:
+            await auth._resolve_user("svc-a", {"sub": "svc-a", "name": "Mallory", "email": "m@evil.io"})
+
+        assert ei.value.status_code == 403
+        after = await _row(postgres_store, "svc-a")
+        assert dict(after) == dict(before)
+        assert await _memberships(postgres_store, after["id"]) == {"twake": "editor"}
+
+    async def test_seeding_ends_oidc_sessions_of_managed_accounts(self, postgres_store: PostgresStore, logs):
+        repo = postgres_store.user_repo
+        env = {"SVC_A_TOKEN": TOKEN_A, "SVC_B_TOKEN": TOKEN_B}
+        await repo.ensure_seed_users([_seed(partitions=[]), _seed("svc-b", "SVC_B_TOKEN", partitions=[])], env=env)
+        a = await _row(postgres_store, "svc-a")
+        b = await _row(postgres_store, "svc-b")
+        alice = await repo.create_user(User(display_name="Alice", external_user_id="kc-alice"))
+        # Sessions a login before the fix could have opened on the managed rows.
+        for user_id, sub in ((a["id"], "svc-a"), (b["id"], "svc-b"), (alice.id, "kc-alice"), (1, "kc-admin")):
+            await _oidc_session(postgres_store, user_id, sub)
+
+        # svc-a stays listed (updated), svc-b is removed (revoked).
+        await repo.ensure_seed_users([_seed(partitions=[])], env=env)
+
+        assert await _session_count(postgres_store, a["id"]) == 0
+        assert await _session_count(postgres_store, b["id"]) == 0
+        assert await _session_count(postgres_store, alice.id) == 1
+        assert await _session_count(postgres_store, 1) == 1
+        assert any("OIDC sessions" in line for line in logs)
+
+
+class TestEmptyList:
+    async def test_an_empty_list_without_managed_rows_is_a_silent_no_op(self, postgres_store: PostgresStore, logs):
+        await postgres_store.user_repo.create_user(User(display_name="Alice", external_user_id="kc-alice"))
+
+        assert await postgres_store.user_repo.ensure_seed_users([], env={}) == {}
+        assert logs == []

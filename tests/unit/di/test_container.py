@@ -34,6 +34,7 @@ from di.container import ServiceContainer
 from di.repositories import create_catalog_store
 from di.vector_stores import create_vector_store
 from fastapi import HTTPException
+from loguru import logger
 
 
 def _settings(database: str | None = None, collection: str = "vdb_test") -> Settings:
@@ -271,7 +272,7 @@ class TestCatalogStoreWiring:
         ]
 
     @staticmethod
-    def _seeding_container(calls: list, seed_users: list) -> ServiceContainer:
+    def _seeding_container(calls: list, seed_users: list, seed_error: Exception | None = None) -> ServiceContainer:
         """A container whose startup steps only record their order."""
 
         async def ensure_admin_user(token):
@@ -279,6 +280,8 @@ class TestCatalogStoreWiring:
 
         async def ensure_seed_users(configured):
             calls.append(("seed_users", [s.external_user_id for s in configured]))
+            if seed_error is not None:
+                raise seed_error
 
         class FakeCatalogStore:
             user_repo = SimpleNamespace(ensure_admin_user=ensure_admin_user, ensure_seed_users=ensure_seed_users)
@@ -328,13 +331,37 @@ class TestCatalogStoreWiring:
         assert not [call for call in calls if isinstance(call, tuple)]
 
     @pytest.mark.asyncio
-    async def test_an_empty_seed_list_skips_the_step(self):
+    async def test_an_empty_seed_list_still_runs_the_step(self):
+        """Removing the last entry must revoke it: the repo is called with []."""
         calls: list = []
         c = self._seeding_container(calls, [])
 
         await c.initialize(seed_users=True)
 
-        assert not [call for call in calls if isinstance(call, tuple)]
+        assert ("seed_users", []) in calls
+
+    @pytest.mark.asyncio
+    async def test_a_failed_seeding_step_does_not_fail_startup(self):
+        """Seeding errors are logged, never raised: the API still starts (#1153)."""
+        calls: list = []
+        secret = "or-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        c = self._seeding_container(
+            calls,
+            [SeedUserConfig(external_user_id="svc-a", token_env="SVC_A_TOKEN")],
+            seed_error=RuntimeError(f"duplicate key value (token)=({secret})"),
+        )
+        records: list[str] = []
+        sink = logger.add(lambda m: records.append(str(m) + repr(m.record["extra"])), level="DEBUG")
+        try:
+            await c.initialize(seed_users=True)
+        finally:
+            logger.remove(sink)
+
+        assert c._initialized is True
+        assert "partition.load" in calls and "swaps.watch" in calls
+        joined = "\n".join(records)
+        assert "Seed users not provisioned" in joined
+        assert secret not in joined
 
 
 class TestVectorStoreWiring:

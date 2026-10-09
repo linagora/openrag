@@ -518,6 +518,8 @@ class PgUserRepository(UserRepository):
           one is not created (it would have no credential). Warned, not fatal.
         * a managed account no longer listed: its token is cleared (no hash
           matches ``NULL``), admin rights and memberships dropped. The row stays.
+        * any OIDC session on a managed account is deleted: such accounts
+          cannot log in through the IdP (see ``AuthService._resolve_user``).
 
         A row that exists without the marker (created through the API, or by
         an OIDC login matching on ``sub``) is never taken over, and
@@ -532,6 +534,10 @@ class PgUserRepository(UserRepository):
         ``external_user_id`` (``created``, ``updated``, ``untouched``,
         ``skipped``, ``revoked``).
         """
+        if not seed_users and not await self.pool.fetchval(
+            "SELECT EXISTS (SELECT 1 FROM users WHERE managed_by_config AND id <> 1)"
+        ):
+            return {}  # nothing configured, nothing to revoke
         environ = os.environ if env is None else env
         tokens, outcomes = _resolve_seed_tokens(seed_users, environ)
         configured = {seed.external_user_id for seed in seed_users}
@@ -539,6 +545,15 @@ class PgUserRepository(UserRepository):
         async with self.pool.acquire() as conn:
             async with conn.transaction():
                 await conn.execute(_SEED_USERS_LOCK_SQL)
+                # A managed account never logs in through the IdP. Sessions an
+                # older release let a matching ``sub`` open on one end here.
+                ended = await conn.execute(
+                    "DELETE FROM oidc_sessions WHERE user_id IN (SELECT id FROM users WHERE managed_by_config AND id <> 1)"
+                )
+                if ended != "DELETE 0":
+                    logger.bind(count=int(ended.split()[-1])).warning(
+                        "Seed users: ended OIDC sessions opened on managed accounts"
+                    )
                 if await conn.fetchval("SELECT 1 FROM users WHERE id = 1") is None:
                     # Without the admin row the next insert could take id 1,
                     # which ensure_admin_user would then promote to admin.
@@ -700,6 +715,7 @@ class PgUserRepository(UserRepository):
             created_at=created,
             updated_at=created,
             partitions=memberships or [],
+            managed_by_config=bool(row.get("managed_by_config", False)),
         )
 
     @staticmethod
