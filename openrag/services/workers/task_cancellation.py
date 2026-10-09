@@ -13,6 +13,7 @@ from services.workers.task_state import (
     CANCELLABLE_INDEXING_STATES,
     PENDING_TASK_DETAILS,
     STALE_REFLESS_TASK_ERROR,
+    STALE_TASK_STATE_MANAGER_HINT,
     SUBMITTED_TASK_WITHOUT_REF,
 )
 
@@ -335,7 +336,8 @@ async def _wait_for_orphaned_worker_to_settle(
     has_worker_settled = _remote_actor_method(task_state_manager, "has_worker_settled")
     if has_worker_settled is None:
         logger.warning(
-            "TaskStateManager cannot tell whether an orphaned worker settled; treating it as settled",
+            "TaskStateManager cannot tell whether an orphaned worker settled; treating it as settled. "
+            + STALE_TASK_STATE_MANAGER_HINT,
             task_id=task_id,
             partition=partition,
             file_id=file_id,

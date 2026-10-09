@@ -19,7 +19,7 @@ from services.workers.failure_reporting import submit_task_failure
 from services.workers.indexer_actor import IndexerWorker, _display_filename, delete_uploaded_file
 from services.workers.indexing_callback import send_indexing_callback
 from services.workers.ray_utils import retry_idempotent_ray_actor_method
-from services.workers.worker_lease import end_worker_lease, keep_worker_lease, worker_ref_registration
+from services.workers.worker_lease import end_worker_lease, keep_worker_lease, worker_registration
 
 # The indexer reloads the DB-backed model-endpoint registry at most once per
 # this window (and on a miss), bounding both staleness and DB load regardless
@@ -784,6 +784,9 @@ class IndexerPool:
             await self._guard_prelaunch_rejection(task_id, claim)
             raise RuntimeError("IndexerPool is draining and cannot accept new tasks")
         idx = min(range(len(self._workers)), key=self._inflight.__getitem__)
+        # Before the submission, so a restart in between settles the task
+        # rather than counting as its incarnation (see ``worker_registration``).
+        registration = worker_registration(self._workers[idx])
         self._inflight[idx] += 1
         try:
             ref = self._workers[idx].process_file.remote(**kwargs)
@@ -798,7 +801,7 @@ class IndexerPool:
         self._release_tasks.add(task)
         task.add_done_callback(self._release_tasks.discard)
         try:
-            registered = await self._register_worker_ref(task_id, worker_ref_registration(ref, self._workers[idx]))
+            registered = await self._register_worker_ref(task_id, {"ref": ref, **registration})
         except BaseException:
             await self._guard_rejected_worker(task_id, ref)
             raise

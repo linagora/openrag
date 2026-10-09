@@ -4,6 +4,7 @@ import asyncio
 from contextlib import contextmanager
 from contextvars import ContextVar
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -2678,16 +2679,57 @@ async def test_pool_registers_the_worker_actor_with_the_ref(monkeypatch) -> None
     await _settle_pool_release_tasks(pool, ref)
 
 
-def test_worker_ref_registration_omits_the_restart_count_when_the_gcs_cannot_be_read(monkeypatch) -> None:
+@pytest.mark.asyncio
+async def test_pool_reads_the_worker_restart_count_before_it_submits(monkeypatch) -> None:
+    """Read after, a restart that drops the task would count as its incarnation and hold its file for good."""
+    import services.workers.worker_lease as worker_lease
+    from services.workers.task_state import WORKER_RESTARTS_KEY
+
+    restarts = [3]
+    monkeypatch.setattr(worker_lease, "read_worker_actor_state", lambda actor_id: (True, restarts[0]))
+    ref = asyncio.get_running_loop().create_future()
+
+    def submit_then_restart(**_kwargs: Any) -> asyncio.Future[Any]:
+        # The worker actor restarts right after the task is sent, dropping it.
+        restarts[0] += 1
+        return ref
+
+    worker = SimpleNamespace(
+        process_file=SimpleNamespace(remote=submit_then_restart),
+        _actor_id=SimpleNamespace(hex=lambda: "ab" * 16),
+    )
+    pool = _bare_pool([worker])
+
+    await pool.submit(task_id="task-1", path="/tmp/doc.txt", metadata={}, partition="p")
+
+    (_task_id, registration), _ = pool._task_state_manager.set_object_ref.remote.await_args
+    assert registration[WORKER_RESTARTS_KEY] == 3
+    await _settle_pool_release_tasks(pool, ref)
+
+
+def test_worker_registration_omits_the_restart_count_when_the_gcs_cannot_be_read(monkeypatch) -> None:
     import services.workers.worker_lease as worker_lease
     from services.workers.task_state import WORKER_ACTOR_ID_KEY
 
     monkeypatch.setattr(worker_lease, "read_worker_actor_state", lambda actor_id: None)
-    ref = object()
     worker = SimpleNamespace(_actor_id=SimpleNamespace(hex=lambda: "cd" * 16))
 
-    assert worker_lease.worker_ref_registration(ref, worker) == {"ref": ref, WORKER_ACTOR_ID_KEY: "cd" * 16}
-    assert worker_lease.worker_ref_registration(ref, SimpleNamespace()) == {"ref": ref}
+    assert worker_lease.worker_registration(worker) == {WORKER_ACTOR_ID_KEY: "cd" * 16}
+    assert worker_lease.worker_registration(SimpleNamespace()) == {}
+
+
+@pytest.mark.asyncio
+async def test_worker_lease_warns_that_an_older_task_state_manager_needs_a_ray_restart() -> None:
+    from services.workers.worker_lease import keep_worker_lease
+
+    logger = MagicMock()
+    started = asyncio.Event()
+
+    await keep_worker_lease(SimpleNamespace(), "t", worker_task=MagicMock(), logger=logger, started=started)
+
+    assert started.is_set()
+    logger.warning.assert_called_once()
+    assert "restart the Ray cluster" in logger.warning.call_args.args[0]
 
 
 @pytest.mark.asyncio

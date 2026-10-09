@@ -2125,6 +2125,32 @@ async def test_a_queued_orphan_without_a_registered_count_takes_it_from_a_fresh_
 
 
 @pytest.mark.asyncio
+async def test_a_restart_baseline_from_a_fresh_read_survives_a_manager_restart(clock, actor_table, monkeypatch) -> None:
+    """Recovered without it, the next read would stand in and miss a restart that already dropped the task."""
+    saved: list[int | None] = []
+    monkeypatch.setattr(
+        task_state_module,
+        "_save_recoverable_task",
+        lambda task_id, info: saved.append(info.worker_restarts_baseline),
+    )
+    manager = _task_state_manager()
+    await _orphaned_queued_task_for_file_1(manager)
+    actor_table.restarts = 2
+
+    assert await manager.has_worker_settled("task-1") is False
+
+    assert saved[-1] == 2
+
+
+def test_cancellation_recovery_snapshot_keeps_the_worker_restart_baseline() -> None:
+    info = TaskInfo(state="CANCELLED", object_ref={"ref": object()}, worker_restarts_baseline=4)
+
+    snapshot, _ = task_state_module._recovery_snapshot(info, now=100.0)
+
+    assert snapshot.worker_restarts_baseline == 4
+
+
+@pytest.mark.asyncio
 async def test_a_queued_orphan_holds_while_the_gcs_cannot_be_read(clock, actor_table) -> None:
     manager = _task_state_manager()
     await _orphaned_queued_task_for_file_1(manager)

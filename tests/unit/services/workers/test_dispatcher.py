@@ -2581,6 +2581,24 @@ async def test_delete_file_does_not_cleanup_while_an_orphaned_worker_still_runs(
 
 
 @pytest.mark.asyncio
+async def test_orphaned_worker_wait_warns_that_an_older_task_state_manager_needs_a_ray_restart() -> None:
+    from time import monotonic
+
+    from services.workers import task_cancellation
+
+    tsm = MagicMock()
+    tsm._ray_actor_method_names = frozenset({"set_state"})
+    with patch.object(task_cancellation, "logger") as logger:
+        await task_cancellation._wait_for_orphaned_worker_to_settle(
+            tsm, task_id="task-1", deadline=monotonic() + 5, partition="tenant-a", file_id="file-1"
+        )
+
+    logger.warning.assert_called_once()
+    assert "restart the Ray cluster" in logger.warning.call_args.args[0]
+    tsm.set_state.remote.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_delete_file_marks_stale_ref_less_task_failed_before_cleanup() -> None:
     from services.workers.dispatcher import WorkerDispatcher
 

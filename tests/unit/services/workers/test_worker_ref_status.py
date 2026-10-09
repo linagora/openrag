@@ -220,11 +220,11 @@ class _Pool:
         self._worker = worker
 
     async def submit(self, task_id: str, hold: bool) -> list[ray.ObjectRef]:
-        from services.workers.worker_lease import worker_ref_registration
+        from services.workers.worker_lease import worker_registration
 
+        registration = worker_registration(self._worker)
         ref = self._worker.process_file.remote(task_id, hold)
-        registration = worker_ref_registration(ref, self._worker)
-        assert await self._task_state_manager.set_object_ref.remote(task_id, registration) is True
+        assert await self._task_state_manager.set_object_ref.remote(task_id, {"ref": ref, **registration}) is True
         return [ref]
 
 

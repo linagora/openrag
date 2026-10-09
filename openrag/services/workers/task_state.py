@@ -67,6 +67,13 @@ _WORKER_LEASE_TTL_SECONDS = 60.0
 # actor's own fate (read from the GCS) can settle it.
 WORKER_ACTOR_ID_KEY = "worker_actor_id"
 WORKER_RESTARTS_KEY = "worker_restarts"
+# Logged where a TaskStateManager is too old for the orphaned-worker fence. The
+# actor is detached and outlives a rollout on a shared Ray cluster, so the fix
+# only takes effect once the Ray actors are recreated.
+STALE_TASK_STATE_MANAGER_HINT = (
+    "The running Ray actors predate the orphaned-worker fence; restart the Ray cluster "
+    "so they are recreated, or files of orphaned tasks can be released while their worker still runs."
+)
 # How long a GCS read of a worker actor's state is reused, so a fence pass over
 # many orphaned tasks costs one read per worker actor rather than one per task.
 _WORKER_ACTOR_STATE_CACHE_SECONDS = 1.0
@@ -233,6 +240,7 @@ def _recovery_snapshot(info: TaskInfo, *, now: float | None = None) -> tuple[Tas
         submission_started_at=getattr(info, "submission_started_at", None),
         worker_started=getattr(info, "worker_started", False),
         worker_finished=getattr(info, "worker_finished", False),
+        worker_restarts_baseline=getattr(info, "worker_restarts_baseline", None),
         worker_abandoned=getattr(info, "worker_abandoned", False),
     )
     return snapshot, _tombstone_deadline(snapshot, now=timestamp)
@@ -742,8 +750,13 @@ class TaskStateManager:
         A cancellation keeps its state, which refuses the pickup already.
         """
         abandoned = getattr(info, "worker_abandoned", False)
+        baseline = getattr(info, "worker_restarts_baseline", None)
         settled = _worker_ref_has_settled(info) if ignore_finished_stamp else _worker_has_settled(info)
         if abandoned or not getattr(info, "worker_abandoned", False):
+            if baseline is None and getattr(info, "worker_restarts_baseline", None) is not None:
+                # A baseline taken from a fresh read must survive a restart of
+                # this actor, or a later read would stand in for it.
+                self._persist_task_locked(task_id, info)
             return settled
         if info.state in CANCELLABLE_INDEXING_STATES:
             previous = info.state

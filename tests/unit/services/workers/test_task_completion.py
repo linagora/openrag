@@ -900,3 +900,45 @@ async def test_tracker_keeps_the_previous_behaviour_against_an_actor_without_the
     await _track_until_settled(tsm, _owner_died_error())
 
     tsm.set_details.remote.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_tracker_warns_while_an_orphaned_worker_holds_its_file(monkeypatch) -> None:
+    """Once after five minutes, then every half hour: the file stays held, so it must not be silent."""
+    from services.workers import task_completion
+    from services.workers.task_completion import TaskCompletionTracker
+
+    clock = [0.0]
+    monkeypatch.setattr(task_completion, "_ORPHANED_WORKER_POLL_SECONDS", 0)
+    monkeypatch.setattr(task_completion, "monotonic", lambda: clock[0])
+    polls = iter([False] * 40 + [True])
+
+    def has_worker_settled(_task_id: str) -> bool:
+        clock[0] += 120.0
+        return next(polls)
+
+    tsm = _task_state_manager()
+    tsm.has_worker_settled = _remote_mock()
+    tsm.has_worker_settled.remote.side_effect = has_worker_settled
+    with patch("services.workers.task_completion.ray.get_actor", return_value=tsm):
+        tracker = TaskCompletionTracker()
+        tracker._logger = MagicMock()
+        await tracker._await_orphaned_worker("task-1", _owner_died_error())
+
+    waits = [call.kwargs["waited_seconds"] for call in tracker._logger.warning.call_args_list]
+    assert waits == [360, 2160, 3960]
+
+
+@pytest.mark.asyncio
+async def test_tracker_warns_that_an_actor_without_the_lease_check_needs_a_ray_restart() -> None:
+    from services.workers.task_completion import TaskCompletionTracker
+
+    tsm = _task_state_manager()
+    del tsm.has_worker_settled
+    with patch("services.workers.task_completion.ray.get_actor", return_value=tsm):
+        tracker = TaskCompletionTracker()
+        tracker._logger = MagicMock()
+        await tracker._await_orphaned_worker("task-1", _owner_died_error())
+
+    tracker._logger.warning.assert_called_once()
+    assert "restart the Ray cluster" in tracker._logger.warning.call_args.args[0]

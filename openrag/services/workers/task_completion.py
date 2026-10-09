@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections import OrderedDict
 from datetime import UTC, datetime, timedelta
+from time import monotonic
 from typing import Any
 
 import ray
@@ -15,6 +16,7 @@ from core.models.catalog import (
 )
 from core.utils.error_summary import extract_task_error_reason
 from services.workers.ray_utils import call_ray_actor_method_with_timeout
+from services.workers.task_state import STALE_TASK_STATE_MANAGER_HINT
 
 _TERMINAL_STATES = frozenset(state.value for state in TERMINAL_TASK_STATES)
 _REFLESS_RECOVERY_POLL_SECONDS = 5.0
@@ -28,6 +30,8 @@ _ORPHANED_JOB_ERROR = "Indexing task was interrupted by a restart and no longer 
 _SETTLED_STATE_POLL_ATTEMPTS = 5
 _SETTLED_STATE_POLL_INTERVAL_SECONDS = 0.05
 _ORPHANED_WORKER_POLL_SECONDS = 5.0
+_ORPHANED_WORKER_WARN_AFTER_SECONDS = 300.0
+_ORPHANED_WORKER_WARN_EVERY_SECONDS = 1800.0
 
 
 class TaskCompletionTracker:
@@ -216,8 +220,23 @@ class TaskCompletionTracker:
         method = getattr(task_state_manager, "has_worker_settled", None)
         remote = getattr(method, "remote", None)
         if remote is None:
+            self._logger.warning(
+                "TaskStateManager cannot tell whether an orphaned worker settled; stamping its task now. "
+                + STALE_TASK_STATE_MANAGER_HINT,
+                task_id=task_id,
+            )
             return
+        started = monotonic()
+        warn_at = started + _ORPHANED_WORKER_WARN_AFTER_SECONDS
         while not await self._call_task_state(lambda: remote(task_id), f"has_worker_settled({task_id})"):
+            now = monotonic()
+            if now >= warn_at:
+                self._logger.warning(
+                    "Still waiting for an orphaned indexing worker to settle; its file stays held until then",
+                    task_id=task_id,
+                    waited_seconds=round(now - started),
+                )
+                warn_at = now + _ORPHANED_WORKER_WARN_EVERY_SECONDS
             await asyncio.sleep(_ORPHANED_WORKER_POLL_SECONDS)
 
     async def _record_finished_at(self, task_id: str) -> None:

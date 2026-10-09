@@ -15,6 +15,7 @@ from collections.abc import Callable
 from typing import Any
 
 from services.workers.task_state import (
+    STALE_TASK_STATE_MANAGER_HINT,
     WORKER_ACTOR_ID_KEY,
     WORKER_LEASE_RENEW_INTERVAL_SECONDS,
     WORKER_RESTARTS_KEY,
@@ -22,20 +23,23 @@ from services.workers.task_state import (
 )
 
 
-def worker_ref_registration(ref: Any, worker: Any) -> dict[str, Any]:
-    """The ``set_object_ref`` payload for a task just sent to ``worker``.
+def worker_registration(worker: Any) -> dict[str, Any]:
+    """What ``set_object_ref`` stores next to the ref of a task sent to ``worker``.
 
     Records the worker actor and its current restart count, read from the
-    GCS. The count can be late both ways. A restart that lands between the
-    submission and this read drops the task yet counts as its incarnation, so
-    the task holds its file until the next restart. Worse, an actor that
-    crashed before the GCS noticed still reads ALIVE with the old count while
-    the task goes to the incarnation after it: that restart then reads as one
-    past the task, which settles it while it may still run. The task state
-    therefore marks a task it settles this way abandoned, and refuses its
-    pickup (``TaskStateManager.renew_worker_lease``) so it is dropped unindexed.
+    GCS. The pool reads it BEFORE it submits the task: a restart that lands
+    after the read then drops the task from an incarnation past the recorded
+    count, which settles it. Read after the submission, that restart would
+    count as the task's own incarnation and hold its file until the next one.
+
+    The count can still be early: an actor that crashed before the GCS
+    noticed reads ALIVE with the old count while the task goes to the
+    incarnation after it, so that restart reads as one past the task and
+    settles it while it may still run. The task state therefore marks a task
+    it settles this way abandoned, and refuses its pickup
+    (``TaskStateManager.renew_worker_lease``) so it is dropped unindexed.
     """
-    registration: dict[str, Any] = {"ref": ref}
+    registration: dict[str, Any] = {}
     actor_id = getattr(worker, "_actor_id", None)
     hex_id = getattr(actor_id, "hex", None)
     actor_hex = hex_id() if callable(hex_id) else None
@@ -76,6 +80,7 @@ async def keep_worker_lease(
     """
     remote = _remote_method(task_state_manager, "renew_worker_lease")
     if remote is None:
+        logger.warning(f"Task {task_id} runs without a worker lease. {STALE_TASK_STATE_MANAGER_HINT}")
         if started is not None:
             started.set()
         return
