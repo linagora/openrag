@@ -31,6 +31,39 @@ spec:
         {{- end }}
     {{- end }}
 {{- end }}
+{{- if and .Values.networkPolicy.enabled .Values.networkPolicy.acmeHttp01.enabled }}
+{{- /* cert-manager answers an HTTP-01 challenge from a solver pod it starts in
+   this namespace, listening on 8089, and the request arrives through the
+   Ingress controller, from outside it: the default-deny policy above drops it,
+   and the Certificate never becomes Ready. This opens 8089 on the solver pods
+   alone, selected by the label cert-manager gives them. Rendered whatever the
+   ingress TLS settings, since the certificate may be requested elsewhere (a
+   Certificate object, another Ingress): with no challenge pending it selects
+   no pod. Any source by default, because a host-network Ingress controller
+   (k3s's Traefik, for one) connects from a node address that no
+   namespaceSelector matches; networkPolicy.acmeHttp01.from narrows it. */}}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "openrag-stack.fullname" . }}-acme-http01-solver
+  labels:
+    {{- include "openrag-stack.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      acme.cert-manager.io/http01-solver: "true"
+  policyTypes:
+    - Ingress
+  ingress:
+    - ports:
+        - port: 8089
+          protocol: TCP
+      {{- with .Values.networkPolicy.acmeHttp01.from }}
+      from:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}
 {{- if and .Values.networkPolicy.enabled .Values.monitoring.bundled }}
 {{- /* The Prometheus Operator's admission webhook validates PrometheusRule and
    AlertmanagerConfig objects before they are stored, and its caller is the API

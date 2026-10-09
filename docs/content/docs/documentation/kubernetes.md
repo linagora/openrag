@@ -165,6 +165,12 @@ counts without exposing partition or preset names.
   The ingress will then match all hosts.
 
 - If you later configure a hostname + TLS (via cert-manager), just update `ingress.host` and redeploy.
+  With an HTTP-01 issuer, cert-manager answers the challenge from a solver pod it starts in the
+  release namespace, on port 8089. The chart's `<fullname>-acme-http01-solver` NetworkPolicy lets
+  that port through on the solver pods only, from any source by default, since a host-network
+  Ingress controller (k3s's Traefik, for one) connects from a node address. Narrow it with
+  `networkPolicy.acmeHttp01.from`, and do not add 8089 to `networkPolicy.externalPorts`, which
+  would open it on every pod.
 
 - Ensure your GPU nodes have the correct NVIDIA drivers and `nvidia` `RuntimeClass` configured.
   The bundled vLLM engines run CUDA 12.9 builds (`v0.30.0-cu129`, and `v0.11.2` for the VLM). The

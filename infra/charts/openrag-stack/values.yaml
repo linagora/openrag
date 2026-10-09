@@ -24,7 +24,9 @@ enabled: true
 # ports below. Isolates the Ray dashboard, Postgres, Milvus, etc.
 networkPolicy:
   enabled: true
-  # Ports reachable from outside the namespace (e.g. via the Ingress controller).
+  # Ports reachable from outside the namespace (e.g. via the Ingress controller),
+  # on every pod. cert-manager's HTTP-01 solver port (8089) does not belong
+  # here: acmeHttp01 below opens it on the solver pods only.
   externalPorts:
     - 8080  # openrag API/UI & admin-ui
     # - 8265  # ray dashboard - Security issue, the ray dashboard is not protected by any auth, so it should not be exposed to the public internet.
@@ -57,6 +59,21 @@ networkPolicy:
   #   - ipBlock:
   #       cidr: 10.0.0.0/24
   webhookFrom: []
+  # cert-manager's HTTP-01 solver: the pod it starts in this namespace to answer
+  # an ACME challenge, on 8089, reached through the Ingress controller. Opens
+  # that port on the solver pods only (label
+  # acme.cert-manager.io/http01-solver: "true"), and selects nothing while no
+  # challenge is pending, so it is harmless with DNS-01 or your own
+  # certificates. Turn it off only if no Issuer here uses HTTP-01.
+  acmeHttp01:
+    enabled: true
+    # Empty means any source: a host-network Ingress controller (k3s's Traefik,
+    # for one) connects from a node address, which no namespaceSelector
+    # matches. Narrow it with standard NetworkPolicyPeers, e.g.
+    #   - namespaceSelector:
+    #       matchLabels:
+    #         kubernetes.io/metadata.name: ingress-nginx
+    from: []
 
 # === Monitoring artifacts ===
 # One set of dashboards, dashboards/ in this chart — the directory the Compose
