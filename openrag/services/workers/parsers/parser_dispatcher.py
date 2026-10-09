@@ -253,6 +253,28 @@ class ParserDispatcher(DocumentParser):
         return _create("core.indexing.parsers.audio.client_based", "audio_client", client=client)
 
 
+def configure_pymupdf_pool(config) -> None:
+    """Give PyMuPDF its configured process pool in *this* process.
+
+    Called by the indexer worker only. The API replicas build the same
+    dispatcher for the direct-extract path and keep the one dedicated thread:
+    there a spawned child would start on the loop that serves ``/health_check``,
+    and under ``-m api.main`` (the Ray Serve entrypoint) it re-imports the whole
+    app as ``__mp_main__``. ``core`` never reads config, so the numbers are
+    pushed in. Idempotent: identical settings leave a running pool alone.
+    """
+    from core.indexing.parsers.pdf.pymupdf import PyMuPDFPoolSettings, configure_pool
+
+    loader = config.loader
+    configure_pool(
+        PyMuPDFPoolSettings(
+            max_workers=loader.pymupdf_pool_size,
+            memory_limit_mb=loader.pymupdf_parse_memory_limit_mb,
+            max_tasks_per_child=loader.pymupdf_max_tasks_per_child,
+        )
+    )
+
+
 class _PdfStrategyParser(DocumentParser):
     """Force a specific PDF backend (a preset's ``parsing_strategy``) for PDF
     documents, delegating every other content type to the shared dispatcher so

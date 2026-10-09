@@ -391,3 +391,37 @@ async def test_a_pool_that_never_completes_still_seeds_the_watchdog_once(monkeyp
             await disp.parse(_text_document())
 
     assert stamped == ["text"]
+
+
+def test_building_the_dispatcher_leaves_pymupdf_on_its_thread():
+    """The API replicas build this dispatcher for the direct-extract path. Only
+    the indexer worker gives PyMuPDF its process pool (``configure_pymupdf_pool``),
+    so building a dispatcher — and the PyMuPDF parser in it — must not."""
+    from core.indexing.parsers.pdf import pymupdf as pymupdf_mod
+    from services.workers.parsers.parser_dispatcher import build_parser_dispatcher
+
+    # A config that asks for a pool, so pushing it from here would show.
+    config = _config()
+    config.loader.pymupdf_pool_size = 2
+    config.loader.pymupdf_parse_memory_limit_mb = 512
+    config.loader.pymupdf_max_tasks_per_child = 7
+    pymupdf_mod.configure_pool(pymupdf_mod.PyMuPDFPoolSettings())
+    disp = build_parser_dispatcher(config)
+    disp._get("pymupdf")
+
+    assert pymupdf_mod._POOL_SETTINGS == pymupdf_mod.PyMuPDFPoolSettings()
+    assert pymupdf_mod._get_pool().uses_processes is False
+
+
+def test_configure_pymupdf_pool_pushes_the_loader_settings():
+    from core.indexing.parsers.pdf import pymupdf as pymupdf_mod
+    from services.workers.parsers.parser_dispatcher import configure_pymupdf_pool
+
+    loader = SimpleNamespace(pymupdf_pool_size=3, pymupdf_parse_memory_limit_mb=512, pymupdf_max_tasks_per_child=7)
+    try:
+        configure_pymupdf_pool(SimpleNamespace(loader=loader))
+        assert pymupdf_mod._POOL_SETTINGS == pymupdf_mod.PyMuPDFPoolSettings(
+            max_workers=3, memory_limit_mb=512, max_tasks_per_child=7
+        )
+    finally:
+        pymupdf_mod.configure_pool(pymupdf_mod.PyMuPDFPoolSettings())

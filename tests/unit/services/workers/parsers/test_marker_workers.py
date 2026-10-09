@@ -8,6 +8,7 @@ import threading
 from types import SimpleNamespace
 
 import pytest
+from core.utils import process_limits
 from services.workers.parsers import marker_workers
 
 
@@ -459,6 +460,24 @@ def _child_alloc(mib: int) -> str:
         return "MemoryError"
 
 
+def _in_a_forked_child(fn, *args, timeout: float = 60):
+    """Run *fn* in a forked pool child and return its result.
+
+    Not ``with ProcessPoolExecutor(...)``: leaving that block waits for the
+    child to exit, and a child forked from this multi-threaded process can
+    deadlock on exit on a lock it inherited held (seen in this suite: the run
+    hung instead of failing). The child is killed once the answer is in, so
+    nothing waits on its exit.
+    """
+    pool = concurrent.futures.ProcessPoolExecutor(max_workers=1, mp_context=multiprocessing.get_context("fork"))
+    try:
+        return pool.submit(fn, *args).result(timeout=timeout)
+    finally:
+        for process in list(pool._processes.values()):
+            process.kill()
+        pool.shutdown(wait=True, cancel_futures=True)
+
+
 def _vmdata_mib() -> int:
     """This process's current private data size — what RLIMIT_DATA is measured against."""
     with open("/proc/self/status") as status:
@@ -512,9 +531,7 @@ def test_the_limit_actually_bounds_an_allocation_in_a_real_child(headroom_mb, al
     file-backed mappings, so Marker's weights and CUDA's device maps would fail).
     Only allocating against the live limit distinguishes them.
     """
-    ctx = multiprocessing.get_context("fork")
-    with concurrent.futures.ProcessPoolExecutor(max_workers=1, mp_context=ctx) as pool:
-        assert pool.submit(_child_probe, headroom_mb, alloc_mib).result(timeout=60) == expected
+    assert _in_a_forked_child(_child_probe, headroom_mb, alloc_mib) == expected
 
 
 def _child_mmap_probe(headroom_mb: int) -> str:
@@ -538,18 +555,14 @@ def _child_mmap_probe(headroom_mb: int) -> str:
 def test_a_disabled_limit_leaves_the_rlimit_untouched():
     """0 must not lower the ceiling at all, not merely leave room for the test's
     own allocation."""
-    ctx = multiprocessing.get_context("fork")
-    with concurrent.futures.ProcessPoolExecutor(max_workers=1, mp_context=ctx) as pool:
-        assert pool.submit(_child_limit_unchanged).result(timeout=60) is True
+    assert _in_a_forked_child(_child_limit_unchanged) is True
 
 
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="RLIMIT_DATA only covers mmap on Linux")
 def test_a_file_backed_mapping_is_not_counted_against_the_limit():
     """Mutation guard for the choice of resource: with ``RLIMIT_AS`` this returns
     ``refused: 12``, which is Marker failing to load its model weights."""
-    ctx = multiprocessing.get_context("fork")
-    with concurrent.futures.ProcessPoolExecutor(max_workers=1, mp_context=ctx) as pool:
-        assert pool.submit(_child_mmap_probe, 256).result(timeout=60) == "mapped"
+    assert _in_a_forked_child(_child_mmap_probe, 256) == "mapped"
 
 
 def test_a_refused_setrlimit_does_not_stop_the_worker_starting(monkeypatch):
@@ -560,7 +573,7 @@ def test_a_refused_setrlimit_does_not_stop_the_worker_starting(monkeypatch):
         raise OSError("not supported here")
 
     monkeypatch.setattr(resource, "setrlimit", _boom)
-    monkeypatch.setattr(marker_workers, "logger", _NullLogger())
+    monkeypatch.setattr(process_limits, "logger", _NullLogger())
 
     marker_workers._apply_parse_memory_limit(256)  # must not raise
 
@@ -574,7 +587,7 @@ def test_a_missing_resource_module_does_not_stop_the_worker_starting(monkeypatch
     it degrades to a worker with no ceiling, which is the intended behaviour.
     """
     monkeypatch.setitem(sys.modules, "resource", None)  # import raises ImportError
-    monkeypatch.setattr(marker_workers, "logger", _NullLogger())
+    monkeypatch.setattr(process_limits, "logger", _NullLogger())
 
     marker_workers._apply_parse_memory_limit(256)  # must not raise
 
@@ -751,8 +764,8 @@ def test_the_limit_reports_how_it_compares_to_the_child_baseline(monkeypatch, he
     from services.workers.parsers import marker_workers as mw
 
     recorder = _RecordingLogger()
-    monkeypatch.setattr(mw, "logger", recorder)
-    monkeypatch.setattr(mw, "_child_vmdata_mb", lambda: 1000)
+    monkeypatch.setattr(process_limits, "logger", recorder)
+    monkeypatch.setattr(process_limits, "child_vmdata_mb", lambda: 1000)
 
     import resource as real_resource
 
@@ -767,9 +780,7 @@ def test_the_limit_reports_how_it_compares_to_the_child_baseline(monkeypatch, he
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="/proc/self/status is Linux-only")
 def test_child_vmdata_is_readable_and_positive():
     """The baseline the log line reports has to be a real measurement."""
-    from services.workers.parsers.marker_workers import _child_vmdata_mb
-
-    assert (_child_vmdata_mb() or 0) > 0
+    assert (process_limits.child_vmdata_mb() or 0) > 0
 
 
 # ---------------------------------------------------------------------------
@@ -828,10 +839,8 @@ def test_a_ceiling_failure_reaches_the_parent_as_memory_error(monkeypatch, conve
     # _process_pdf's `finally` would raise and replace the MemoryError.
     # Production starts these children with spawn, where that doesn't happen.
     monkeypatch.setattr(marker_workers.torch.cuda, "is_available", lambda: False)
-    ctx = multiprocessing.get_context("fork")
-    with concurrent.futures.ProcessPoolExecutor(max_workers=1, mp_context=ctx) as pool:
-        with pytest.raises(MemoryError):
-            pool.submit(_child_parse, 256).result(timeout=120)
+    with pytest.raises(MemoryError):
+        _in_a_forked_child(_child_parse, 256, timeout=120)
 
 
 def test_the_real_torch_allocator_error_is_recognised():
@@ -882,8 +891,8 @@ def test_a_limit_at_or_below_the_baseline_is_not_applied(monkeypatch, headroom_m
     respawn the child for every chunk. The thin-headroom case stays applied."""
     from services.workers.parsers import marker_workers as mw
 
-    monkeypatch.setattr(mw, "logger", _RecordingLogger())
-    monkeypatch.setattr(mw, "_child_vmdata_mb", lambda: 1000)
+    monkeypatch.setattr(process_limits, "logger", _RecordingLogger())
+    monkeypatch.setattr(process_limits, "child_vmdata_mb", lambda: 1000)
 
     import resource as real_resource
 
