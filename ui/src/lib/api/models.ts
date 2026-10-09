@@ -96,6 +96,7 @@ const SECRET_FIELD_NAMES = new Set([
   "api_token",
   "access_key",
   "auth_token",
+  "authorization",
   "chainlit_auth_secret",
   "client_secret",
   "hf_token",

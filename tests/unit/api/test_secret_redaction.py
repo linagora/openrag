@@ -160,7 +160,11 @@ def _endpoint_models_holding_a_key():
     )
     from core.config.model_endpoints import ModelEndpointConfig, ModelEndpointRow
 
-    extra = {"api_key": "sk-endpoint-secret", "implementation": "vllm"}
+    extra = {
+        "api_key": "sk-endpoint-secret",
+        "headers": {"Authorization": "Bearer sk-header-secret"},
+        "implementation": "vllm",
+    }
     now = "2026-10-08T00:00:00+00:00"
     return [
         ModelEndpointConfig(endpoint="http://llm:8000/v1", extra=extra),
@@ -180,6 +184,8 @@ def test_endpoint_models_keep_their_api_key_out_of_repr_and_str():
     for model in _endpoint_models_holding_a_key():
         assert "sk-endpoint-secret" not in repr(model), type(model).__name__
         assert "sk-endpoint-secret" not in str(model), type(model).__name__
+        assert "sk-header-secret" not in repr(model), type(model).__name__
+        assert "sk-header-secret" not in str(model), type(model).__name__
 
 
 def test_endpoint_models_still_show_their_other_settings_and_keep_the_key():
