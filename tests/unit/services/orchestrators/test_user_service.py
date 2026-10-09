@@ -235,8 +235,8 @@ async def test_delete_user_cascades_owned_partitions_first():
 
 @pytest.mark.asyncio
 async def test_delete_user_keeps_the_default_partition_they_own():
-    # The default partition cannot be deleted; the user is still removed and
-    # their membership in it goes with them.
+    # The default partition cannot be deleted; the user is still removed,
+    # their membership in it goes with them and the admin takes it over.
     repo = FakeUserRepo(existing={5})
     ps = FakePartitionService()
     mem = FakeMembershipRepo(
@@ -249,6 +249,7 @@ async def test_delete_user_keeps_the_default_partition_they_own():
     )
     await _svc(repo, partition_service=ps, membership_repo=mem).delete_user(5)
     assert ps.deleted == ["p_owned"]
+    assert mem.assigned == [(1, "default", "owner")]
     assert repo.deleted == [5]
 
 

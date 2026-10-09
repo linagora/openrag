@@ -37,7 +37,7 @@ from core.config.retrieval_pipeline import RetrievalPipelineConfig
 from core.indexing.validators import validate_partition_name
 from core.models.embedder_swap import EmbedderSwapStatus
 from core.models.preset import PartitionConfig
-from core.utils.consts import DEFAULT_PARTITION_NAME, is_internal_metadata_key
+from core.utils.consts import DEFAULT_ADMIN_USER_ID, DEFAULT_PARTITION_NAME, is_internal_metadata_key
 from core.utils.exceptions import (
     ConfigError,
     ConflictError,
@@ -481,10 +481,10 @@ class PartitionService:
         """Drop a partition's vectors *and* relational rows (cross-cutting).
 
         The ``default`` partition is refused with a 409: it is seeded at
-        startup and keeps the partition catalog from ever being empty. With no
-        partition left, the partition cache empties and indexing, search and
-        chat fall back to the static startup configuration instead of the
-        partition presets.
+        startup and keeps the partition catalog from ever being empty. Without
+        this guard, deleting the last partition would empty the partition
+        cache, and indexing, search and chat would fall back to the static
+        startup configuration instead of the partition presets.
         """
         async with self._partition_operation_lock(partition) as operation:
             await self._delete_partition_locked(partition, operation=operation)
@@ -883,7 +883,7 @@ class PartitionService:
         cache.update(resolved)
         logger.info("Loaded partition configs.", n_partitions=len(resolved))
 
-    async def seed_default_partition(self, user_id: int = 1) -> None:
+    async def seed_default_partition(self, user_id: int = DEFAULT_ADMIN_USER_ID) -> None:
         """Ensure the 'default' partition exists with default presets."""
         if await self._partition_repo.partition_exists(name=DEFAULT_PARTITION_NAME):
             return

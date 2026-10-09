@@ -410,7 +410,7 @@ DELETE /partition/{partition}
 ```
 Permanently delete a partition and **all** its files and chunks. **Owner** only. Returns `204 No Content`. This cannot be undone.
 
-The `default` partition, created at startup, cannot be deleted: the request returns `409 Conflict` (`DEFAULT_PARTITION_PROTECTED`). Delete its files instead. Deleting a user who owns it keeps the partition and removes only their membership.
+The `default` partition, created at startup, cannot be deleted: the request returns `409 Conflict` (`DEFAULT_PARTITION_PROTECTED`). Delete its files instead. Deleting a user who owns it keeps the partition, removes their membership and makes the default admin (user 1) its owner.
 
 #### List Files in a Partition
 ```http
