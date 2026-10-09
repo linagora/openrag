@@ -19,9 +19,33 @@ data:
 {{- if hasKey $.Values.env.config "SEED_USERS" }}
 {{- fail "openrag.seedUsers is set and env.config also defines SEED_USERS: keep one of the two." }}
 {{- end }}
-{{- range . }}
-{{- if and (kindIs "map" .) (hasKey . "token") }}
-{{- fail (printf "openrag.seedUsers entry %q has a token key: the value would land in a ConfigMap. Put the token in the chart's Secret and name its env var in token_env." (toString (get . "external_user_id"))) }}
+{{- /* Only the documented keys reach the ConfigMap: anything else could be a
+     secret. Errors name the entry by index and the key, never a value. */}}
+{{- $hint := "Tokens never go here: put the token in the chart's Secret and name its env var in token_env." }}
+{{- $seedKeys := list "external_user_id" "display_name" "token_env" "is_admin" "partitions" }}
+{{- range $i, $seed := . }}
+{{- if not (kindIs "map" $seed) }}
+{{- fail (printf "openrag.seedUsers[%d] must be a map. %s" $i $hint) }}
+{{- end }}
+{{- range $key, $_ := $seed }}
+{{- if not (has $key $seedKeys) }}
+{{- fail (printf "openrag.seedUsers[%d] has unsupported key %q (allowed: %s). %s" $i $key (join ", " $seedKeys) $hint) }}
+{{- end }}
+{{- end }}
+{{- if hasKey $seed "partitions" }}
+{{- if not (kindIs "slice" $seed.partitions) }}
+{{- fail (printf "openrag.seedUsers[%d].partitions must be a list. %s" $i $hint) }}
+{{- end }}
+{{- range $j, $membership := $seed.partitions }}
+{{- if not (kindIs "map" $membership) }}
+{{- fail (printf "openrag.seedUsers[%d].partitions[%d] must be a map. %s" $i $j $hint) }}
+{{- end }}
+{{- range $key, $_ := $membership }}
+{{- if not (has $key (list "name" "role")) }}
+{{- fail (printf "openrag.seedUsers[%d].partitions[%d] has unsupported key %q (allowed: name, role). %s" $i $j $key $hint) }}
+{{- end }}
+{{- end }}
+{{- end }}
 {{- end }}
 {{- end }}
   # auth.seed_users (openrag.seedUsers): env var names only, no token.

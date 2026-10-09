@@ -75,11 +75,39 @@ def test_env_config_cannot_also_set_it(tmp_path):
     assert "SEED_USERS" in result.stderr
 
 
-def test_a_plaintext_token_fails_the_render(tmp_path):
-    """A ``token`` key would put the secret in a ConfigMap: refuse it."""
-    leaked = {**SEED, "token": "or-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}
-    result = _render(tmp_path, {"openrag": {"seedUsers": [SEED, leaked]}})
+SECRET = "or-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+
+
+@pytest.mark.parametrize(
+    ("entry", "key"),
+    [
+        ({**SEED, "token": SECRET}, "token"),
+        ({**SEED, "api_key": SECRET}, "api_key"),
+        ({**SEED, "partitions": [{"name": "twake", "role": "editor", "token": SECRET}]}, "token"),
+    ],
+    ids=["token", "any-other-key", "inside-partitions"],
+)
+def test_an_unknown_key_fails_the_render(tmp_path, entry, key):
+    """Only the documented keys may reach the ConfigMap: anything else could be a secret."""
+    result = _render(tmp_path, {"openrag": {"seedUsers": [SEED, entry]}})
 
     assert result.returncode != 0
+    assert key in result.stderr
     assert "token_env" in result.stderr
-    assert leaked["token"] not in result.stderr
+    assert SECRET not in result.stderr
+
+
+@pytest.mark.parametrize("entry", [SECRET, {**SEED, "partitions": [SECRET]}], ids=["entry", "partition"])
+def test_a_non_map_item_fails_the_render(tmp_path, entry):
+    result = _render(tmp_path, {"openrag": {"seedUsers": [SEED, entry]}})
+
+    assert result.returncode != 0
+    assert "openrag.seedUsers" in result.stderr
+    assert SECRET not in result.stderr
+
+
+def test_every_documented_key_renders(tmp_path):
+    full = {**SEED, "is_admin": True}
+    data = _data(_render(tmp_path, {"openrag": {"seedUsers": [full]}}))
+
+    assert json.loads(data["SEED_USERS"]) == [full]

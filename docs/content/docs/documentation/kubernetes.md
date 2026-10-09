@@ -212,8 +212,9 @@ the Deployment itself, while with `externalSecret` the Secret refreshes on its
 `refreshInterval` and the pods need a `kubectl rollout restart`. Under Ray Serve the API
 runs on the Ray head, which neither mechanism restarts: cycle the head pod after a change.
 Do not also set `SEED_USERS` in `env.config`; the render fails when both are present, and
-it also fails when an entry carries a `token` key, since that value would land in the
-ConfigMap.
+it also fails when an entry carries any key besides `external_user_id`, `display_name`,
+`token_env`, `is_admin` and `partitions` (`name` and `role` inside `partitions`), so a
+`token` or any other stray value never lands in the ConfigMap.
 
 Each API process applies the list it booted with, so the last pod to start wins. A replica
 still running the old ConfigMap or Secret mid-rollout, or a Ray pod that was not cycled,
