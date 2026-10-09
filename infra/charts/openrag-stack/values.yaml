@@ -1118,6 +1118,10 @@ env:
     # false to let endpoints edited from the admin UI stay as the source of
     # truth. See docs/content/docs/documentation/env_vars.md#model-endpoint-registry.
     MODEL_ENDPOINT_SYNC_ON_BOOT: "false"
+
+    # Refresh only saved defaults that still match a previous bundled prompt.
+    # Disable during a staged rollout while older application pods run.
+    PROMPTS_REFRESH_DEFAULTS: "true"
     # When true, /ready (the readiness probe) fails while the default embedder is
     # unavailable. Every replica shares it, so its outage or restart then takes
     # all of them out of the Service, admin API and UI included. Before enabling,

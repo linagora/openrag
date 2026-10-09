@@ -47,6 +47,7 @@ _ENV_OVERRIDES: list[tuple[str, str, type]] = [
     ("EMBEDDER_CONCURRENCY", "embedder.embed_concurrency", int),
     # Model endpoint registry
     ("MODEL_ENDPOINT_SYNC_ON_BOOT", "models.sync_on_boot", bool),
+    ("PROMPTS_REFRESH_DEFAULTS", "prompts.refresh_defaults", bool),
     ("READINESS_REQUIRE_EMBEDDER", "models.readiness_requires_embedder", bool),
     # VectorDB
     ("VDB_HOST", "vectordb.host", str),

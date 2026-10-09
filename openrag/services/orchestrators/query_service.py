@@ -521,12 +521,18 @@ class QueryService:
         # created_at timestamps, and near midnight the local date is a
         # different day.
         now = datetime.now(UTC)
+        anchors = calendar_anchors(now)
+        current_date = now.strftime("%A, %B %d, %Y, %H:%M:%S")
+        if "{calendar_anchors}" not in contextualizer:
+            # Older pods know only current_date. Keep the saved default
+            # renderable by them while newer pods still supply exact ranges.
+            current_date = f"{current_date}\n{anchors}"
         prompt = contextualizer.format(
             query_language=detect_language(last_user),
-            current_date=now.strftime("%A, %B %d, %Y, %H:%M:%S"),
+            current_date=current_date,
             # Pre-computed week/month/year ranges: the model must not do the
             # calendar arithmetic itself (see core.prompts.calendar_anchors).
-            calendar_anchors=calendar_anchors(now),
+            calendar_anchors=anchors,
         )
         llm_messages = [
             {"role": "system", "content": prompt + _QUERY_JSON_HINT},

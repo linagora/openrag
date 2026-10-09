@@ -133,7 +133,7 @@ class FakeWorkspace:
         # dict {partition: set(file_ids)} => partition-scoped existence.
         self._existing = existing
 
-    async def get_workspace(self, partition, wid):
+    async def get_workspace(self, wid):
         return None
 
     async def resolve_scope(self, workspace_id, allowed_partitions):
@@ -3381,8 +3381,7 @@ async def test_require_retrieval_keeps_generated_filters_and_allows_no_matches(h
 async def test_generate_query_hands_the_contextualizer_precomputed_calendar_anchors():
     """ "Last week" must reach Milvus as Monday-to-Monday. Mistral Small resolved
     it to the past seven days when left to do the arithmetic, so the system
-    prompt now carries the boundaries pre-computed through the template's
-    ``{calendar_anchors}`` placeholder.
+    prompt now carries pre-computed boundaries alongside the current date.
     """
     payload = json.dumps({"requires_retrieval": True, "query_list": [{"query": "q", "temporal_filters": None}]})
     llm = FakeLLM(chat_responses=[payload])
@@ -3396,6 +3395,14 @@ async def test_generate_query_hands_the_contextualizer_precomputed_calendar_anch
     assert "- last week [" in system["content"]
     # The bundled template points its resolution rules at those anchors.
     assert "copy the matching anchor under Current date verbatim" in system["content"]
+
+
+def test_bundled_query_prompt_accepts_v22_format_arguments():
+    """Older pods must format a refreshed shared default during rolling upgrades."""
+    template = _disk_prompt_service()._disk_seed("query_contextualizer")
+    rendered = template.format(query_language="en", current_date="Monday, September 28, 2026")
+    assert "Monday, September 28, 2026" in rendered
+    assert "{calendar_anchors}" not in rendered
 
 
 @pytest.mark.asyncio

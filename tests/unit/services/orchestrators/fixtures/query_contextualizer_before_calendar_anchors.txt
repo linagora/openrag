@@ -36,9 +36,14 @@ Emit `temporal_filters` when the user refers to WHEN a document was created / pu
 Each predicate: `field="created_at"`, `operator` ∈ {{`>=`, `>`, `<=`, `<`}}, `value` = ISO 8601 UTC.
 Predicates are AND-combined. Always use half-open intervals: `>= start` AND `< next_start`.
 
-Date resolution:
-- Relative periods (today, yesterday, last / this week, month, year, past N, recent) → copy the matching anchor under Current date verbatim; never recompute it.
-- Explicit dates (e.g. January 2024, 2023, Q3 2025) → `[start, next start)` computed from the stated date.
+Date resolution (vs Current date):
+- today / now → `[today, tomorrow)`
+- yesterday → `[yesterday, today)`
+- this / last week → Monday-to-Monday
+- this / last month → 1st-to-1st
+- this / last year → Jan 1-to-Jan 1
+- past N days/weeks/months/years → `[Current − N, tomorrow)`
+- recent / latest → past 90 days (~3 months, NOT a year): `[Current − 90 days, tomorrow)`
 - since X → ONE predicate only: `>= X`. Do NOT add an upper bound.
 - before X → one predicate `< X`
 - bare MONTH (no year) → nearest past occurrence

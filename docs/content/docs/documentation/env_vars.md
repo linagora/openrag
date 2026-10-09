@@ -510,6 +510,9 @@ To customize prompt:
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
 | `PROMPTS_DIR` | str | (bundled `openrag/prompts/templates`) | Path to a directory of prompt templates. Unset uses the templates bundled in the package; set it only to override with a custom directory. |
+| `PROMPTS_REFRESH_DEFAULTS` | bool | `true` | Refresh a saved default only when it still matches an older bundled version. Set `false` during a staged rollout if old instances must keep using their existing prompt; re-enable after they stop. Stale defaults remain visible in startup warnings. |
+
+Refreshing a default changes the saved database value. Turning the switch off or rolling back the image does not restore its earlier text; restore that text from the earlier release if you need the old behavior. Presets and partitions that fall back to the global default use the refreshed text; prompts they select by name keep their own text.
 
 ### Logging
 OpenRAG logs with Loguru on the process **stderr**, and nowhere else. Docker
