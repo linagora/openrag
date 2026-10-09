@@ -6,7 +6,7 @@ from typing import Any
 
 import ray
 from core.utils.logging import get_logger
-from ray.exceptions import TaskCancelledError
+from ray.exceptions import OwnerDiedError, TaskCancelledError
 from services.workers.failure_reporting import submit_task_failure
 from services.workers.ray_utils import call_ray_actor_method_with_timeout, call_ray_actor_with_timeout
 from services.workers.task_state import (
@@ -18,6 +18,7 @@ from services.workers.task_state import (
 
 logger = get_logger()
 _REF_WAIT_INTERVAL = 0.05
+_ORPHANED_WORKER_POLL_SECONDS = 0.5
 
 
 async def cancel_active_indexing_tasks(
@@ -233,6 +234,7 @@ async def _cancel_refs(
             )
             raise RuntimeError(f"Failed to cancel active indexing task {task_id}") from exc
         await _wait_for_task_to_settle(
+            task_state_manager,
             ref,
             task_id=task_id,
             deadline=deadline,
@@ -277,6 +279,7 @@ def _remote_actor_method(actor: Any, name: str) -> Any | None:
 
 
 async def _wait_for_task_to_settle(
+    task_state_manager: Any,
     ref: Any,
     *,
     task_id: str,
@@ -292,11 +295,16 @@ async def _wait_for_task_to_settle(
         )
     except TaskCancelledError:
         return
+    except OwnerDiedError:
+        await _wait_for_orphaned_worker_to_settle(
+            task_state_manager,
+            task_id=task_id,
+            deadline=deadline,
+            partition=partition,
+            file_id=file_id,
+        )
     except TimeoutError as exc:
-        raise TimeoutError(
-            "Timed out waiting for active indexing task to settle after cancellation request "
-            f"before deleting partition={partition!r}, file_id={file_id!r}, task_id={task_id!r}"
-        ) from exc
+        raise _settle_timeout(partition=partition, file_id=file_id, task_id=task_id) from exc
     except Exception as exc:
         logger.info(
             "Active indexing task settled after cancellation request",
@@ -306,6 +314,59 @@ async def _wait_for_task_to_settle(
             result="failed",
             error=str(exc),
         )
+
+
+async def _wait_for_orphaned_worker_to_settle(
+    task_state_manager: Any,
+    *,
+    task_id: str,
+    deadline: float,
+    partition: str,
+    file_id: str | None,
+) -> None:
+    """Wait for a worker whose ref lost its owner, by the rule the file fence uses.
+
+    ``OwnerDiedError`` only says the pool actor that submitted the task died:
+    ``ray.cancel`` then returns without reaching the worker, which may still be
+    running and would write the document back after the delete. The task is
+    marked cancelled first, so the worker reads it on its next lease renewal
+    and stops itself; a task still queued stops when the worker picks it up.
+    """
+    has_worker_settled = _remote_actor_method(task_state_manager, "has_worker_settled")
+    if has_worker_settled is None:
+        logger.warning(
+            "TaskStateManager cannot tell whether an orphaned worker settled; treating it as settled",
+            task_id=task_id,
+            partition=partition,
+            file_id=file_id,
+        )
+        return
+    await call_ray_actor_method_with_timeout(
+        submit=lambda: task_state_manager.set_state.remote(task_id, "CANCELLED"),
+        timeout=_remaining_timeout(deadline, partition=partition, file_id=file_id),
+        task_description=f"set_state({task_id}, CANCELLED) for an orphaned worker",
+    )
+    while not await call_ray_actor_method_with_timeout(
+        submit=lambda: has_worker_settled(task_id),
+        timeout=_remaining_timeout(deadline, partition=partition, file_id=file_id),
+        task_description=f"has_worker_settled({task_id}) for delete cleanup",
+    ):
+        if deadline - monotonic() <= _ORPHANED_WORKER_POLL_SECONDS:
+            raise _settle_timeout(partition=partition, file_id=file_id, task_id=task_id)
+        await asyncio.sleep(_ORPHANED_WORKER_POLL_SECONDS)
+    logger.info(
+        "Orphaned indexing task settled after cancellation request",
+        task_id=task_id,
+        partition=partition,
+        file_id=file_id,
+    )
+
+
+def _settle_timeout(*, partition: str, file_id: str | None, task_id: str) -> TimeoutError:
+    return TimeoutError(
+        "Timed out waiting for active indexing task to settle after cancellation request "
+        f"before deleting partition={partition!r}, file_id={file_id!r}, task_id={task_id!r}"
+    )
 
 
 async def _mark_ref_less_tasks_failed(
