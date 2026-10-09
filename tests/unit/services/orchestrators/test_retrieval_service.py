@@ -19,7 +19,8 @@ from core.models.chunk import Chunk
 from core.models.preset import PartitionConfig
 from core.models.query import Query, SearchQueries
 from core.retrieval.trace import RetrievalTraceBuilder
-from core.utils.exceptions import PartitionNotFoundError
+from core.utils.consts import MAX_RERANK_CANDIDATES
+from core.utils.exceptions import PartitionNotFoundError, ServiceUnavailableError
 from services.orchestrators.retrieval_service import RetrievalService
 
 
@@ -168,12 +169,12 @@ async def test_search_expands_related_when_requested():
     assert "1" in ids and "rel" in ids
 
 
-def _embedder_svc(partitions: dict[str, str], fields: dict[str, str]):
+def _embedder_svc(partitions: dict[str, str], fields: dict[str, str], *, reranker_enabled: bool = False):
     """A service whose partitions map to embedders, and embedders to vector fields.
 
     Returns the service, the default searcher and one searcher per embedder name.
     """
-    cfg = _config()
+    cfg = _config(reranker_enabled=reranker_enabled)
     cfg.partitions = {name: _partition(name=name, embedder=embedder) for name, embedder in partitions.items()}
     cfg.models = SimpleNamespace(
         reranker={}, embedder={name: SimpleNamespace(vector_field=field) for name, field in fields.items()}
@@ -412,6 +413,261 @@ async def test_search_across_embedders_keeps_hits_when_surrounding_lookup_fails(
     out = await svc.search(text="q", partitions=["p1", "p2"], top_k=5, similarity_threshold=0.5)
 
     assert [c.id for c in out] == ["b1"]
+
+
+class ReversingReranker:
+    """Ranks the last candidate first, scoring by rank."""
+
+    def __init__(self):
+        self.calls: list[dict] = []
+
+    async def rerank(self, *, query, documents, top_k):
+        self.calls.append({"query": query, "documents": documents, "top_k": top_k})
+        order = list(reversed(range(len(documents))))
+        return [(idx, 1.0 - rank / 10) for rank, idx in enumerate(order)]
+
+
+@pytest.mark.asyncio
+async def test_search_rerank_fetches_candidates_reorders_and_cuts_to_top_k():
+    s = FakeSearcher()
+    s.search_result = [_chunk("1", "one"), _chunk("2", "two"), _chunk("3", "three")]
+    reranker = ReversingReranker()
+    svc = RetrievalService(searcher=s, reranker=reranker, llm=None, config=_config(reranker_enabled=True))
+
+    out = await svc.search(
+        text="hello", partitions="p1", top_k=2, similarity_threshold=0.5, rerank=True, rerank_candidates=30
+    )
+
+    assert [c.id for c in out] == ["3", "2"]
+    assert [c.rerank_score for c in out] == [1.0, 0.9]
+    assert reranker.calls == [{"query": "hello", "documents": ["one", "two", "three"], "top_k": None}]
+    call = s.search_calls[0]
+    assert call["top_k"] == 30
+    # Only the requested candidates reach the reranker, not their neighbours.
+    assert call["with_surrounding_chunks"] is False
+
+
+@pytest.mark.asyncio
+async def test_search_rerank_records_the_rerank_stages_in_the_trace():
+    s = FakeSearcher()
+    s.search_result = [_chunk("1", "one"), _chunk("2", "two"), _chunk("3", "three")]
+    svc = RetrievalService(searcher=s, reranker=ReversingReranker(), llm=None, config=_config(reranker_enabled=True))
+    trace = RetrievalTraceBuilder("request-1", "hello")
+
+    out = await svc.search(
+        text="hello", partitions="p1", top_k=2, similarity_threshold=0.5, rerank=True, rerank_candidates=3, trace=trace
+    )
+
+    assert [c.id for c in out] == ["3", "2"]
+    pre, post, final = (trace.stages[name] for name in ("pre_rerank", "post_rerank", "final"))
+    # Same shape as RetrieverPipeline.retrieve_docs: pre_rerank marks what the
+    # cut removed, post_rerank holds what was kept.
+    assert (pre.status, pre.candidate_count, [c.id for c in pre.candidates]) == ("complete", 3, ["1", "2", "3"])
+    assert [c.removal_reason.code if c.removal_reason else None for c in pre.candidates] == [
+        "reranker_top_n",
+        None,
+        None,
+    ]
+    assert (post.status, post.candidate_count, [c.id for c in post.candidates]) == ("complete", 2, ["3", "2"])
+    assert [c.scores["reranker"] for c in post.candidates] == [1.0, 0.9]
+    assert post.duration_seconds is not None
+    assert "reranking" in trace.timings
+    assert [c.id for c in final.candidates] == ["3", "2"]
+
+
+@pytest.mark.asyncio
+async def test_search_rerank_survives_a_trace_failure():
+    s = FakeSearcher()
+    s.search_result = [_chunk("1", "one"), _chunk("2", "two")]
+    svc = RetrievalService(searcher=s, reranker=ReversingReranker(), llm=None, config=_config(reranker_enabled=True))
+    trace = RetrievalTraceBuilder("request-1", "hello")
+    original = trace.record_stage
+
+    def failing_record_stage(name, **kwargs):
+        if name in {"pre_rerank", "post_rerank"}:
+            raise RuntimeError("trace broke")
+        return original(name, **kwargs)
+
+    trace.record_stage = failing_record_stage
+
+    out = await svc.search(text="hello", partitions="p1", top_k=1, similarity_threshold=0.5, rerank=True, trace=trace)
+
+    assert [c.id for c in out] == ["2"]
+    assert {error.stage for error in trace.errors} >= {"pre_rerank", "post_rerank"}
+
+
+@pytest.mark.asyncio
+async def test_search_rerank_candidates_default_to_retriever_top_k_and_never_below_top_k():
+    s = FakeSearcher()
+    svc = RetrievalService(searcher=s, reranker=ReversingReranker(), llm=None, config=_config(reranker_enabled=True))
+
+    await svc.search(text="q", partitions=["p1", "p2"], top_k=2, similarity_threshold=0.5, rerank=True)
+    await svc.search(text="q", partitions=["p1"], top_k=40, similarity_threshold=0.5, rerank=True, rerank_candidates=10)
+
+    assert [call["top_k"] for call in s.search_calls] == [6, 40]
+
+
+@pytest.mark.asyncio
+async def test_search_rerank_candidates_are_capped():
+    s = FakeSearcher()
+    svc = RetrievalService(searcher=s, reranker=ReversingReranker(), llm=None, config=_config(reranker_enabled=True))
+
+    # A direct caller bypasses the router's bound, and a top_k above the cap
+    # would otherwise raise the candidate count past it.
+    await svc.search(
+        text="q",
+        partitions=["p1"],
+        top_k=5,
+        similarity_threshold=0.5,
+        rerank=True,
+        rerank_candidates=MAX_RERANK_CANDIDATES + 1,
+    )
+    await svc.search(
+        text="q", partitions=["p1"], top_k=MAX_RERANK_CANDIDATES * 2, similarity_threshold=0.5, rerank=True
+    )
+
+    assert [call["top_k"] for call in s.search_calls] == [MAX_RERANK_CANDIDATES, MAX_RERANK_CANDIDATES]
+
+
+@pytest.mark.asyncio
+async def test_search_rerank_uses_single_partition_preset():
+    s = FakeSearcher()
+    s.search_result = [_chunk("1")]
+    reranker_calls: list[str] = []
+    cfg = _config(reranker_enabled=True)
+    cfg.partitions = {
+        "tenant-a": _partition(
+            # With the deployment's reranker enabled, enable_reranker only
+            # governs the chat pipeline: an explicit rerank=true still reranks.
+            retrieval=RetrievalPipelineConfig(top_k=25, enable_reranker=False, reranker="fast-ranker")
+        ),
+        "tenant-b": _partition(name="tenant-b"),
+    }
+    svc = RetrievalService(
+        searcher=s,
+        reranker=None,
+        llm=None,
+        config=cfg,
+        reranker_factory=lambda name: reranker_calls.append(name) or ReversingReranker(),
+    )
+
+    await svc.search(text="q", partitions=["tenant-a"], top_k=5, similarity_threshold=0.5, rerank=True)
+    await svc.search(text="q", partitions=["tenant-a", "tenant-b"], top_k=5, similarity_threshold=0.5, rerank=True)
+
+    # One partition: its preset. Several: one list, so the default reranker.
+    assert reranker_calls == ["fast-ranker", "default"]
+    assert [call["top_k"] for call in s.search_calls] == [25, 6]
+
+
+@pytest.mark.asyncio
+async def test_search_rerank_keeps_expansion_after_the_cut():
+    s = FakeSearcher()
+    s.search_result = [
+        Chunk(id="1", text="t", partition="p", metadata={"_id": "1", "relationship_id": "r1"}),
+        Chunk(id="2", text="t", partition="p", metadata={"_id": "2", "relationship_id": "r1"}),
+    ]
+    s.related_result = [_chunk("rel")]
+    svc = RetrievalService(searcher=s, reranker=ReversingReranker(), llm=None, config=_config(reranker_enabled=True))
+
+    out = await svc.search(
+        text="q", partitions=["p"], top_k=1, similarity_threshold=0.5, rerank=True, include_related=True
+    )
+
+    assert [c.id for c in out] == ["2", "rel"]
+    assert not hasattr(out[1], "rerank_score")
+
+
+@pytest.mark.asyncio
+async def test_search_rerank_without_reranker_is_rejected_before_searching():
+    s = FakeSearcher()
+    with pytest.raises(ServiceUnavailableError) as exc:
+        await _svc(s, reranker_enabled=True).search(
+            text="q", partitions=["p"], top_k=5, similarity_threshold=0.5, rerank=True
+        )
+
+    assert exc.value.status_code == 503
+    assert exc.value.code == "RERANKER_UNAVAILABLE"
+    assert s.search_calls == []
+
+
+@pytest.mark.asyncio
+async def test_search_rerank_with_reranker_disabled_is_rejected_even_if_the_catalog_has_one():
+    # A deployment with reranker.enabled=false still seeds the reranker endpoint
+    # into the catalog (Helm points RERANKER_BASE_URL at a Service that doesn't
+    # exist), so a resolvable "default" reranker proves nothing: the request
+    # must fail as unavailable, not with a connection error after the search.
+    s = FakeSearcher()
+    reranker = ReversingReranker()
+    cfg = _config(reranker_enabled=False)
+    # Seeded retrieval presets inherit reranker.enabled, so neither partition opts in.
+    off = RetrievalPipelineConfig(enable_reranker=False)
+    cfg.partitions = {"tenant-a": _partition(retrieval=off), "tenant-b": _partition(name="tenant-b", retrieval=off)}
+    svc = RetrievalService(searcher=s, reranker=None, llm=None, config=cfg, reranker_factory=lambda name: reranker)
+
+    for partitions in (["tenant-a"], ["tenant-a", "tenant-b"], ["unknown"]):
+        with pytest.raises(ServiceUnavailableError) as exc:
+            await svc.search(text="q", partitions=partitions, top_k=5, similarity_threshold=0.5, rerank=True)
+        assert exc.value.code == "RERANKER_UNAVAILABLE"
+
+    assert s.search_calls == []
+    assert reranker.calls == []
+
+
+@pytest.mark.asyncio
+async def test_search_rerank_with_reranker_disabled_honours_the_partition_opt_in():
+    s = FakeSearcher()
+    s.search_result = [_chunk("1", "one"), _chunk("2", "two")]
+    reranker_calls: list[str] = []
+    cfg = _config(reranker_enabled=False)
+    cfg.partitions = {
+        "opted-in": _partition(name="opted-in", retrieval=RetrievalPipelineConfig(enable_reranker=True, reranker="r")),
+        "other": _partition(name="other", retrieval=RetrievalPipelineConfig(enable_reranker=True)),
+    }
+    svc = RetrievalService(
+        searcher=s,
+        reranker=None,
+        llm=None,
+        config=cfg,
+        reranker_factory=lambda name: reranker_calls.append(name) or ReversingReranker(),
+    )
+
+    out = await svc.search(text="q", partitions=["opted-in"], top_k=1, similarity_threshold=0.5, rerank=True)
+    # The opt-in is per partition: a search spanning several partitions reranks
+    # one list with the default reranker, which the deployment has disabled.
+    with pytest.raises(ServiceUnavailableError):
+        await svc.search(text="q", partitions=["opted-in", "other"], top_k=1, similarity_threshold=0.5, rerank=True)
+
+    assert [c.id for c in out] == ["2"]
+    assert reranker_calls == ["r"]
+    assert len(s.search_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_search_rerank_across_embedders_reranks_the_fused_candidates():
+    svc, _, searchers = _embedder_svc(
+        {"p1": "embed-a", "p2": "embed-b"},
+        {"embed-a": "vector_embed_a", "embed-b": "vector_embed_b"},
+        reranker_enabled=True,
+    )
+    reranker = ReversingReranker()
+    svc._reranker_factory = lambda name: reranker
+    searchers["embed-a"] = FakeSearcher()
+    searchers["embed-a"].search_result = [_chunk("a1"), _chunk("a2")]
+    searchers["embed-b"] = FakeSearcher()
+    searchers["embed-b"].search_result = [_chunk("b1"), _chunk("b2")]
+
+    out = await svc.search(
+        text="q", partitions=["p1", "p2"], top_k=2, similarity_threshold=0.5, rerank=True, rerank_candidates=3
+    )
+
+    for name in ("embed-a", "embed-b"):
+        (call,) = searchers[name].search_calls
+        assert call["top_k"] == 3
+        assert call["with_surrounding_chunks"] is False
+    # The fused list is cut to the candidates, reranked, then cut to top_k.
+    assert len(reranker.calls[0]["documents"]) == 3
+    assert [c.id for c in out] == ["a2", "b1"]
+    assert searchers["embed-a"].surrounding_calls == []
 
 
 # --------------------------------------------------------------------------- #
