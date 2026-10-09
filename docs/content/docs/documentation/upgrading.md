@@ -415,19 +415,24 @@ If you change the PostgreSQL password (see [Secrets](#secrets)), do it now, befo
    ```
 
    With an external PostgreSQL, run the same `ALTER ROLE` with your client.
-2. Update the Secret OpenRAG reads now, rather than letting `helm upgrade` do it:
-   if the migration Job is enabled, it runs before Helm updates that Secret, and
-   would log in with the old password. For the Secret the chart renders from
-   your values:
+2. If the migration Job is enabled, make sure it logs in with the new password.
+   It runs before Helm updates the release's Secret. With `env.existingSecret`,
+   it reads that Secret: update it now. With an external secrets provider,
+   update the source. With the Secret the chart renders from your values, the
+   Job reads a copy rendered from your new values, so there is nothing to do.
+
+   When you upgrade to chart 0.7.1 (OpenRAG 2.3.1) or earlier, there is no copy:
+   the Job reads the release's Secret, so update that one now, rather than
+   letting `helm upgrade` do it.
+   With an external secrets provider, wait until it has synced. For the Secret
+   the chart renders from your values:
 
    ```bash
    kubectl patch secret -n "$NS" "$FULLNAME-env-secrets" \
      -p '{"stringData":{"POSTGRES_PASSWORD":"<new password>"}}'
    ```
 
-   With `env.existingSecret`, update that Secret; with an external secrets
-   provider, update the source and wait until the Secret has synced. Your values
-   already carry the new value, from
+   Your values already carry the new value, from
    [Render the new chart offline](#render-the-new-chart-offline); with
    `postgresql.auth.existingSecret`, update that Secret's password too.
 

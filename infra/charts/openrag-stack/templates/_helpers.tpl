@@ -89,6 +89,39 @@ When env.existingSecret is set, that name is returned directly.
 {{- end }}
 
 {{/*
+Names of the env ConfigMap and Secret the migration hook reads: copies created
+as hooks themselves, since a pre-install hook runs before the release's own
+resources exist. An env.existingSecret is created before the install, so the
+hook reads it directly.
+
+The fullname is cut before the suffix, not after: cut after, a 62-character
+fullname would give the copy the same name as the app's Secret, and the copy's
+hook-delete-policy would then delete the app's Secret. Cutting before still
+collides for a fullname ending in "-migration" whose cut lands on or just after
+its "-" (58 or 59 characters for the ConfigMap, 50 or 51 for the Secret), so
+the helpers refuse that case.
+*/}}
+{{- define "openrag-stack.migrationConfigMapName" -}}
+{{- $name := printf "%s-migration-env" (include "openrag-stack.fullname" . | trunc 49 | trimSuffix "-") }}
+{{- if eq $name (printf "%s-env" (include "openrag-stack.fullname" .)) }}
+{{- fail (printf "the migration Job's ConfigMap copy would be named %q, like the app's ConfigMap, and deleting the copy would delete it; change the release name or fullnameOverride" $name) }}
+{{- end }}
+{{- $name }}
+{{- end }}
+
+{{- define "openrag-stack.migrationSecretName" -}}
+{{- if .Values.env.existingSecret }}
+{{- .Values.env.existingSecret }}
+{{- else }}
+{{- $name := printf "%s-migration-env-secrets" (include "openrag-stack.fullname" . | trunc 41 | trimSuffix "-") }}
+{{- if eq $name (include "openrag-stack.secretName" .) }}
+{{- fail (printf "the migration Job's Secret copy would be named %q, like the app's Secret, and deleting the copy would delete it; change the release name or fullnameOverride" $name) }}
+{{- end }}
+{{- $name }}
+{{- end }}
+{{- end }}
+
+{{/*
 Merge a component's security context override (e.g. just runAsUser/runAsGroup/
 fsGroup, tuned to that component's own Dockerfile) on top of a shared default
 from values.yaml's top-level `security` block — component keys win on
