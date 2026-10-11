@@ -682,8 +682,8 @@ function PipelineConfigTab({ partition }: { partition: PartitionConfig }) {
           <dl className="space-y-2">
             {Object.entries(pipeline).map(([key, value]) => (
               <div key={key} className="flex justify-between gap-4 text-sm">
-                <dt className="text-muted-foreground font-mono text-xs min-w-0 break-all">{key}</dt>
-                <dd className="font-medium text-right shrink-0">{renderConfigValue(value)}</dd>
+                <dt className="text-muted-foreground font-mono text-xs shrink-0">{key}</dt>
+                <dd className="font-medium text-right min-w-0 [overflow-wrap:anywhere]">{renderConfigValue(value)}</dd>
               </div>
             ))}
           </dl>
