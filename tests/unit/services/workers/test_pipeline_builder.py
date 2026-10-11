@@ -153,6 +153,63 @@ async def test_pipeline_runs_required_stages_in_order_and_keeps_row_object():
     assert "token" not in row
 
 
+def _save_markdown_pipeline(save_markdown: bool):
+    processed = ProcessedDocument(text_blocks=[TextBlock(text="# Title"), TextBlock(text=""), TextBlock(text="body")])
+    return build_indexing_pipeline(
+        parser=FakeParser(processed),
+        chunker=FakeChunker([Chunk(id="c1", text="body", partition="tenant-a")]),
+        embedder=FakeEmbedder([[1.0, 0.0]]),
+        vector_store=FakeVectorStore(),
+        save_markdown=save_markdown,
+    )
+
+
+@pytest.mark.asyncio
+async def test_save_markdown_writes_parsed_text_next_to_the_upload(tmp_path):
+    upload = tmp_path / "report.pdf"
+    upload.write_bytes(b"%PDF-1.4")
+    document = Document(filename="report.pdf", text="x", partition="tenant-a", source_path=str(upload))
+
+    await _save_markdown_pipeline(True).run({"document": document, "partition": "tenant-a"})
+
+    assert (tmp_path / "report.pdf.md").read_text(encoding="utf-8") == "# Title\n\nbody"
+    assert upload.read_bytes() == b"%PDF-1.4"
+
+
+@pytest.mark.asyncio
+async def test_save_markdown_does_not_overwrite_a_markdown_upload(tmp_path):
+    upload = tmp_path / "notes.md"
+    upload.write_text("original", encoding="utf-8")
+    document = Document(filename="notes.md", text="x", partition="tenant-a", source_path=str(upload))
+
+    await _save_markdown_pipeline(True).run({"document": document, "partition": "tenant-a"})
+
+    assert upload.read_text(encoding="utf-8") == "original"
+    assert (tmp_path / "notes.md.md").exists()
+
+
+@pytest.mark.asyncio
+async def test_save_markdown_off_writes_nothing(tmp_path):
+    upload = tmp_path / "report.pdf"
+    upload.write_bytes(b"%PDF-1.4")
+    document = Document(filename="report.pdf", text="x", partition="tenant-a", source_path=str(upload))
+
+    await _save_markdown_pipeline(False).run({"document": document, "partition": "tenant-a"})
+
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["report.pdf"]
+
+
+@pytest.mark.asyncio
+async def test_save_markdown_write_failure_does_not_fail_the_file(tmp_path):
+    missing_dir_upload = tmp_path / "gone" / "report.pdf"
+    document = Document(filename="report.pdf", text="x", partition="tenant-a", source_path=str(missing_dir_upload))
+    row = {"document": document, "partition": "tenant-a"}
+
+    await _save_markdown_pipeline(True).run(row)
+
+    assert row["stage"] == "stored"
+
+
 @pytest.mark.asyncio
 async def test_a_file_with_no_vector_field_to_index_into_fails_before_it_is_parsed():
     document = Document(filename="note.txt", text="hello", partition="tenant-a")

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import inspect
 import time
 from collections.abc import Callable, MutableMapping
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from core.chunking.chunking_strategy import ChunkingStrategy
@@ -12,7 +14,7 @@ from core.embeddings.embedder import Embedder
 from core.indexing.contextualize import ChunkContextualizer
 from core.indexing.parsers.document_parser import DocumentParser
 from core.indexing.topic_tags import TopicTagger
-from core.models.document import Document, DocumentType
+from core.models.document import Document, DocumentType, ProcessedDocument
 from core.observability.ray_metrics import observe_stage_duration
 from core.utils.exceptions import PipelineError
 from core.utils.logging import get_logger
@@ -114,6 +116,9 @@ class IndexingPipeline:
     # How many of a document's images may contend for the shared VLM gate at
     # once. ``None`` leaves the fan-out unbounded (one caller per image).
     caption_concurrency: int | None = None
+    # ``loader.save_markdown``: keep a copy of the parsed markdown next to the
+    # upload, for inspecting parser output.
+    save_markdown: bool = False
 
     async def run(self, row: MutableMapping[str, Any]) -> MutableMapping[str, Any]:
         """Run a single row through parse, optional enrichments, embed, and store.
@@ -237,6 +242,8 @@ class IndexingPipeline:
             # Outside the ``vlm is not None`` branch on purpose: if captioning
             # was skipped, the bytes were never going to be read at all.
             _release_image_bytes(row)
+            if self.save_markdown:
+                await _save_markdown(row)
             await _timed("chunk", chunk_stage(row, chunker, timeout=self.timeouts.chunk))
             if contextualizer is not None:
                 await _timed_enrichment(
@@ -669,6 +676,7 @@ def build_indexing_pipeline(
     topic_tagger_factory: Callable[[str], TopicTagger] | None = None,
     defer_replace_cleanup: bool = False,
     caption_concurrency: int | None = None,
+    save_markdown: bool = False,
 ) -> IndexingPipeline:
     """Build the default sequential indexing pipeline."""
 
@@ -694,7 +702,32 @@ def build_indexing_pipeline(
         topic_tagger_factory=topic_tagger_factory,
         defer_replace_cleanup=defer_replace_cleanup,
         caption_concurrency=caption_concurrency,
+        save_markdown=save_markdown,
     )
+
+
+async def _save_markdown(row: MutableMapping[str, Any]) -> None:
+    """Write the parsed markdown to ``<upload>.md`` next to the stored upload.
+
+    Runs after captioning, so the file holds the same text that gets chunked.
+    The suffix is appended rather than swapped so a markdown upload is never
+    overwritten. Rows without a ``source_path`` have nowhere to write and are
+    skipped. Best effort: a debugging copy must never fail the file, so a write
+    error is only logged.
+    """
+    document = row.get("document")
+    processed = row.get("processed_document")
+    source_path = getattr(document, "source_path", None)
+    if not source_path or not isinstance(processed, ProcessedDocument):
+        return
+    target = Path(f"{source_path}.md")
+    markdown = "\n\n".join(block.text for block in processed.text_blocks if block.text)
+    try:
+        await asyncio.to_thread(target.write_text, markdown, encoding="utf-8")
+    except Exception as exc:  # noqa: BLE001 - a debugging copy must not fail the file
+        logger.bind(task_id=row.get("task_id"), filename=row.get("filename", "")).warning(
+            f"SAVE_MARKDOWN: could not write {target}: {exc}"
+        )
 
 
 def _release_image_bytes(row: MutableMapping[str, Any]) -> None:
