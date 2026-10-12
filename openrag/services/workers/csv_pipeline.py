@@ -31,7 +31,7 @@ async def _next_batch(batches):
         raise
 
 
-async def run_csv_batches(pipeline, row, parser, *, topic_tagger=None, max_topic_tags=7):
+async def run_csv_batches(pipeline, row, parser, *, batch_context, topic_tagger=None, max_topic_tags=7):
     document = row["document"]
     # A task-specific marker lets failure cleanup delete only this attempt.
     if not row.get("task_id"):
@@ -51,7 +51,7 @@ async def run_csv_batches(pipeline, row, parser, *, topic_tagger=None, max_topic
 
     row.pop("_replace_old_chunk_ids", None)
     row.pop("_replace_old_chunk_collection", None)
-    old_ids = await pipeline._existing_chunk_ids(row) if row.get("replace") else []
+    old_ids = await pipeline.existing_chunk_ids(row) if row.get("replace") else []
     row["stored_count"] = 0
 
     try:
@@ -95,12 +95,12 @@ async def run_csv_batches(pipeline, row, parser, *, topic_tagger=None, max_topic
                 # Reuse the real chunking/embedding/storage path. Only parsing
                 # is bypassed because this batch has already been parsed.
                 store_attempted = True
-                await pipeline.run(
+                await pipeline.run_processed_batch(
                     child,
-                    _processed=processed,
-                    _chunk_offset=chunk_offset,
-                    _indexed_at=indexed_at,
-                    _skip_topic_tagging=True,
+                    processed,
+                    chunk_offset=chunk_offset,
+                    indexed_at=indexed_at,
+                    context=batch_context,
                 )
                 if topic_sample is not None:
                     topic_sample.add(child.get("chunks") or [])
@@ -148,11 +148,7 @@ async def run_csv_batches(pipeline, row, parser, *, topic_tagger=None, max_topic
         # Replacement cleanup happens once, after every new batch succeeds.
         # Workers defer deletion until the catalog write also succeeds.
         if old_ids and stored_total:
-            if pipeline.defer_replace_cleanup:
-                row["_replace_old_chunk_collection"] = "default"
-                row["_replace_old_chunk_ids"] = old_ids
-            else:
-                await pipeline._delete_replaced_chunks(row, old_ids)
+            await pipeline.finalize_replacement(row, old_ids)
         row["stage"] = "stored"
         row["chunk_count"] = chunk_offset
         row["batch_count"] = batch_number

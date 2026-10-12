@@ -165,6 +165,7 @@ class CatalogSearcher(RetrievalSearcher):
         partition: str,
         file_id: str,
         row_number: int,
+        limit: int = 10,
         allowed_file_ids: list[str] | None = None,
     ) -> list[Chunk]:
         return await self._filter(
@@ -172,6 +173,7 @@ class CatalogSearcher(RetrievalSearcher):
                 partition=partition,
                 file_id=file_id,
                 row_number=row_number,
+                limit=limit,
                 allowed_file_ids=allowed_file_ids,
             )
         )
