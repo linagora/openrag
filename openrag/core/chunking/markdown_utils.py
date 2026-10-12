@@ -367,7 +367,6 @@ def _chunk_wide_csv_row(
         metadata = {
             **(table_element.metadata or {}),
             "csv_columns": group_columns,
-            "csv_source_columns": columns,
             "csv_row_start": row_number,
             "csv_row_end": row_number,
             "csv_row_number": row_number,

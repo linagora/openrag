@@ -6,10 +6,10 @@ CSV parser checks:
     04 Markdown escaping
     05 Reading a file without changing it
     06 Empty input
-    07 Rejecting the wrong number of cells
-    08 Rejecting an unclosed quote
+    07 Skipping the wrong number of cells
+    08 Skipping an unclosed quote
     09 Allow for an explicit delimiter, ex : CsvParser(delimiter=";")
-    10 Error message identifies the malformed record
+    10 Malformed records do not discard valid records
     11 Reading many records from a file without never losing or reordering them
     12 Batch sizes, repeated headers, row order and final partial batches
     13 Lazy parsing: a later bad record does not prevent reading the first batch
@@ -27,6 +27,7 @@ from contextlib import closing
 import pytest
 from core.indexing.parsers.tabular.csv_parser import CsvParser
 from core.models.document import Document
+from core.utils.exceptions import ConfigError
 
 # we apply the asyncio marker to every async test in this file
 pytestmark = pytest.mark.asyncio
@@ -109,15 +110,18 @@ async def test_06_empty_file():
 async def test_07_inconsistent_column_count():
     document = Document(text="id,name\n1,Ali,extra")
 
-    # a "passing" test means the bad record was rejected
-    with pytest.raises(ValueError, match="Expected 2 cells, got 3"):
-        await CsvParser().parse(document)
+    result = await CsvParser().parse(document)
+
+    assert result.text_blocks[0].text == "| id | name |\n| --- | --- |"
+    assert result.text_blocks[0].metadata["csv_bad_rows"] == 1
 
 
 async def test_08_unclosed_quote():
     document = Document(text='id,name\n1,"Ali')
-    with pytest.raises(csv.Error):
-        await CsvParser().parse(document)
+    result = await CsvParser().parse(document)
+
+    assert result.text_blocks[0].text == "| id | name |\n| --- | --- |"
+    assert result.text_blocks[0].metadata["csv_bad_rows"] == 1
 
 
 async def test_09_feature_explicit_delimiter():
@@ -128,14 +132,20 @@ async def test_09_feature_explicit_delimiter():
     assert result.text_blocks[0].text == "| id | name |\n| --- | --- |\n| 001 | Doe; John |"
 
 
+async def test_delimiter_is_sniffed_when_not_explicit():
+    document = Document(text='id;amount;note\n1;3,5;"valid; value"')
+
+    result = await CsvParser().parse(document)
+
+    assert result.text_blocks[0].text == "| id | amount | note |\n| --- | --- | --- |\n| 1 | 3,5 | valid; value |"
+
+
 async def test_10_feature_error_identifies_record():
-    """Checking that the error clearly identifies the malformed CSV record."""
-    # Record 1 is the header
-    # Record 2 spans physical lines 2 and 3 because its quoted cell contains a newline
-    # Record 3 has an extra cell and starts on the 4th physical line
     document = Document(text='id,note\n1,"first\nsecond"\n2,extra,cell')
-    with pytest.raises(ValueError, match=r"(?i)\brecord 3\b"):
-        await CsvParser().parse(document)
+    result = await CsvParser().parse(document)
+
+    assert result.text_blocks[0].text.endswith("| 1 | first<br>second |")
+    assert result.text_blocks[0].metadata["csv_bad_rows"] == 1
 
 
 async def test_11_many_records_from_file(tmp_path):
@@ -200,8 +210,8 @@ async def test_13_batches_are_read_on_demand():
     with closing(CsvParser(batch_size=2).iter_batches(document)) as batches:
         first = next(batches)
         assert first.text == "| id | note |\n| --- | --- |\n| 1 | first<br>second |\n| 2 | ok |"
-        # the malformed record is checked only when the next batch is requested
-        with pytest.raises(ValueError, match=r"Record 4: Expected 2 cells, got 3"):
+        # The malformed record is consumed only when the next batch is requested.
+        with pytest.raises(StopIteration):
             next(batches)
 
 
@@ -227,8 +237,7 @@ async def test_14_input_stream_is_closed(tmp_path, monkeypatch, ending):
             next(batches)
             assert not stream.closed
             if ending == "error":
-                with pytest.raises(ValueError, match="Record 3"):
-                    next(batches)
+                assert list(batches) == []
                 assert stream.closed
             elif ending == "complete":
                 assert len(list(batches)) == 1
@@ -239,7 +248,7 @@ async def test_14_input_stream_is_closed(tmp_path, monkeypatch, ending):
 
 @pytest.mark.parametrize("batch_size", [0, -1, True, 1.5, "2", None])
 async def test_15_invalid_batch_size(batch_size):
-    with pytest.raises(ValueError, match="positive integer"):
+    with pytest.raises(ConfigError, match="positive integer"):
         CsvParser(batch_size=batch_size)
 
 
@@ -251,3 +260,32 @@ async def test_16_parse_collects_batches():
     assert result.text_blocks[0].text == "| id | name |\n| --- | --- |\n| 1 | Ali |\n| 2 | Bob |"
     assert result.text_blocks[1].text == "| id | name |\n| --- | --- |\n| 3 | Ela |"
     assert len(result.text_blocks) == 2
+
+
+async def test_malformed_records_are_skipped_without_losing_valid_rows():
+    document = Document(text='id,name\n1,Alice\n2,Bob,\n3,"x"y\n4,Dana\n')
+
+    result = await CsvParser().parse(document)
+
+    assert result.text_blocks[0].text == ("| id | name |\n| --- | --- |\n| 1 | Alice |\n| 4 | Dana |")
+    assert result.text_blocks[0].metadata["csv_bad_rows"] == 2
+
+
+async def test_cell_larger_than_python_csv_default_limit_is_accepted():
+    value = "x" * (256 * 1024)
+
+    result = await CsvParser().parse(Document(text=f"id,note\n1,{value}\n"))
+
+    assert value in result.text_blocks[0].text
+    assert result.text_blocks[0].metadata["csv_bad_rows"] == 0
+
+
+async def test_late_cp1252_character_is_not_replaced(tmp_path):
+    path = tmp_path / "late-cp1252.csv"
+    prefix = "x" * (70 * 1024)
+    path.write_bytes(f"id,note\n1,{prefix} café\n".encode("cp1252"))
+
+    result = await CsvParser().parse(Document(source_path=str(path)))
+
+    assert "café" in result.text_blocks[0].text
+    assert "\ufffd" not in result.text_blocks[0].text

@@ -208,6 +208,7 @@ class VectorStoreSearcher(RetrievalSearcher):
         partition: str,
         file_id: str,
         row_number: int,
+        limit: int = 10,
         allowed_file_ids: list[str] | None = None,
     ) -> list[Chunk]:
         """Return every stored continuation for one CSV row in part order."""
@@ -220,6 +221,7 @@ class VectorStoreSearcher(RetrievalSearcher):
                 "file_id": file_id,
                 "csv_row_number": row_number,
             },
+            limit=limit,
         )
         chunks = [_dict_to_chunk(row) for row in rows]
         return sorted(chunks, key=_csv_part_sort_key)

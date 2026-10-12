@@ -322,7 +322,6 @@ class TestChunkTable:
             assert chunk.metadata["csv_column_group"] == group_number
             assert chunk.metadata["csv_column_groups_total"] == len(chunks)
             assert chunk.metadata["csv_columns"] == group_columns
-            assert chunk.metadata["csv_source_columns"] == columns
             assert len(chunk.content.split()) <= 35
             recovered.update(dict(zip(group_columns[2:], group_values[2:], strict=True)))
 

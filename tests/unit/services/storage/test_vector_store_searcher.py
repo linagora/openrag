@@ -27,11 +27,12 @@ def _make_row(id_: str, text: str = "hello", partition: str = "p1", **extra) -> 
 def _filtering(rows: list[dict]):
     """A ``query_chunks_by_filter`` over ``rows`` that applies the filter, as Milvus does."""
 
-    async def query(_collection, filters, output_fields=None):
+    async def query(_collection, filters, output_fields=None, limit=None):
         def keep(row):
             return all(row.get(k) in (v if isinstance(v, list) else [v]) for k, v in filters.items())
 
-        return [r for r in rows if keep(r)]
+        matched = [r for r in rows if keep(r)]
+        return matched if limit is None else matched[:limit]
 
     return query
 
@@ -457,6 +458,16 @@ async def test_get_csv_row_chunks_scopes_and_orders_continuations():
         "file_id": "f1",
         "csv_row_number": 30,
     }
+    assert store.query_chunks_by_filter.call_args.kwargs["limit"] == 10
+
+
+@pytest.mark.asyncio
+async def test_get_csv_row_chunks_honors_expansion_limit():
+    searcher, store, _, _ = _make_searcher(filter_results=[])
+
+    await searcher.get_csv_row_chunks(partition="p1", file_id="f1", row_number=30, limit=4)
+
+    assert store.query_chunks_by_filter.call_args.kwargs["limit"] == 4
 
 
 @pytest.mark.asyncio

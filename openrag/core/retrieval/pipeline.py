@@ -28,7 +28,7 @@ from core.models.query import Query, SearchQueries
 from core.models.retrieval_result import ScoredChunk
 from core.models.retrieval_trace import TraceCandidate, TraceRemovalReason
 from core.rerankers.reranker import Reranker
-from core.retrieval.retriever import Retriever, order_csv_continuations
+from core.retrieval.retriever import Retriever, has_csv_row_siblings, order_csv_continuations
 from core.retrieval.rrf import rrf_reranking
 from core.retrieval.trace import RetrievalTraceBuilder, merge_child_traces
 
@@ -255,10 +255,13 @@ class RetrieverPipeline:
             )
 
         expansion_applied = False
-        if self.expansion_enabled:
+        if self.expansion_enabled or has_csv_row_siblings(chunks):
             limit = self.reranker_top_k if top_k is None else max(self.reranker_top_k, top_k)
-            expansion_seed_ids = {str(_chunk_key(chunk)) for chunk in chunks[:limit]}
-            head = copy.deepcopy(chunks[:limit])
+            selected = chunks[:limit]
+            if not self.expansion_enabled:
+                selected = [chunk for chunk in selected if has_csv_row_siblings([chunk])]
+            expansion_seed_ids = {str(_chunk_key(chunk)) for chunk in selected}
+            head = copy.deepcopy(selected)
             expanded = await self.retriever.expand_search_results(
                 results=head, filter_params=filter_params, filter=applied_filter
             )
@@ -266,7 +269,13 @@ class RetrieverPipeline:
                 expansion_applied = True
                 expanded_chunks = list(expanded)
                 expanded_candidate_ids = {str(_chunk_key(chunk)) for chunk in expanded_chunks}
-                chunks = expanded
+                # Expansion supplements the ranked list; it must not discard
+                # non-seed documents merely because a CSV row needed siblings.
+                expanded_chunks.extend(
+                    chunk for chunk in chunks if str(_chunk_key(chunk)) not in expanded_candidate_ids
+                )
+                expanded_candidate_ids = {str(_chunk_key(chunk)) for chunk in expanded_chunks}
+                chunks = expanded_chunks
                 if self.reranker_enabled:
                     if trace is not None:
                         omitted_seed_ids = (
