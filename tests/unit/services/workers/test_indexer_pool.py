@@ -2292,6 +2292,41 @@ async def test_actor_purges_upload_on_worker_failure(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("error", [None, RuntimeError("boom")])
+async def test_actor_purges_markdown_copy_with_upload(tmp_path, error) -> None:
+    # SAVE_MARKDOWN's <upload>.md holds the extracted text, so it must not
+    # outlive an upload that save_uploaded_files=False purges.
+    path = tmp_path / "doc.pdf"
+    path.write_bytes(b"x")
+    sidecar = tmp_path / "doc.pdf.md"
+    sidecar.write_text("parsed", encoding="utf-8")
+    actor = _bare_worker_actor(save_uploaded_files=False, worker=_RecordingWorker(error=error))
+
+    if error is None:
+        await actor.process_file(task_id="t", path=str(path), metadata={"file_id": "f"}, partition="p")
+    else:
+        with pytest.raises(RuntimeError, match="boom"):
+            await actor.process_file(task_id="t", path=str(path), metadata={"file_id": "f"}, partition="p")
+
+    assert not path.exists()
+    assert not sidecar.exists()
+
+
+@pytest.mark.asyncio
+async def test_actor_keeps_markdown_copy_when_saving(tmp_path) -> None:
+    path = tmp_path / "doc.pdf"
+    path.write_bytes(b"x")
+    sidecar = tmp_path / "doc.pdf.md"
+    sidecar.write_text("parsed", encoding="utf-8")
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=_RecordingWorker())
+
+    await actor.process_file(task_id="t", path=str(path), metadata={"file_id": "f"}, partition="p")
+
+    assert path.exists()
+    assert sidecar.read_text(encoding="utf-8") == "parsed"
+
+
+@pytest.mark.asyncio
 async def test_actor_purges_upload_on_pre_worker_failure(tmp_path) -> None:
     # The gap the old worker-level finally missed: catalog/registry init (or the
     # SERIALIZING state update) fails *before* the worker runs. The upload must

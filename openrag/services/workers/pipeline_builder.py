@@ -706,21 +706,30 @@ def build_indexing_pipeline(
     )
 
 
+def markdown_sidecar_path(source_path: str | Path) -> Path:
+    """Path of the ``SAVE_MARKDOWN`` copy for an upload stored at ``source_path``.
+
+    The suffix is appended rather than swapped so a markdown upload is never
+    overwritten. Shared with the upload purge so the copy is removed together
+    with the upload when ``save_uploaded_files`` is off.
+    """
+    return Path(f"{source_path}.md")
+
+
 async def _save_markdown(row: MutableMapping[str, Any]) -> None:
     """Write the parsed markdown to ``<upload>.md`` next to the stored upload.
 
     Runs after captioning, so the file holds the same text that gets chunked.
-    The suffix is appended rather than swapped so a markdown upload is never
-    overwritten. Rows without a ``source_path`` have nowhere to write and are
-    skipped. Best effort: a debugging copy must never fail the file, so a write
-    error is only logged.
+    Rows without a ``source_path`` have nowhere to write and are skipped. Best
+    effort: a debugging copy must never fail the file, so a write error is only
+    logged.
     """
     document = row.get("document")
     processed = row.get("processed_document")
     source_path = getattr(document, "source_path", None)
     if not source_path or not isinstance(processed, ProcessedDocument):
         return
-    target = Path(f"{source_path}.md")
+    target = markdown_sidecar_path(source_path)
     markdown = "\n\n".join(block.text for block in processed.text_blocks if block.text)
     try:
         await asyncio.to_thread(target.write_text, markdown, encoding="utf-8")
