@@ -228,7 +228,7 @@ class TaskCompletionTracker:
             return
         started = monotonic()
         warn_at = started + _ORPHANED_WORKER_WARN_AFTER_SECONDS
-        while not await self._call_task_state(lambda: remote(task_id), f"has_worker_settled({task_id})"):
+        while not await self._worker_settled_or_unknown(task_id, remote):
             now = monotonic()
             if now >= warn_at:
                 self._logger.warning(
@@ -238,6 +238,20 @@ class TaskCompletionTracker:
                 )
                 warn_at = now + _ORPHANED_WORKER_WARN_EVERY_SECONDS
             await asyncio.sleep(_ORPHANED_WORKER_POLL_SECONDS)
+
+    async def _worker_settled_or_unknown(self, task_id: str, remote: Any) -> bool:
+        # This poll can run for as long as the orphaned worker does. One failed
+        # read must not end it: that would drop the finished stamp until the
+        # next tracker restart. A failed read counts as not settled yet.
+        try:
+            return bool(await self._call_task_state(lambda: remote(task_id), f"has_worker_settled({task_id})"))
+        except Exception as exc:  # noqa: BLE001 - retried on the next poll
+            self._logger.warning(
+                "Failed to ask whether an orphaned indexing worker settled; asking again",
+                task_id=task_id,
+                error=str(exc),
+            )
+            return False
 
     async def _record_finished_at(self, task_id: str) -> None:
         # Keep the handle in a variable: Ray's ActorMethod holds it weakly, so a

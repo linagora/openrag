@@ -942,3 +942,20 @@ async def test_tracker_warns_that_an_actor_without_the_lease_check_needs_a_ray_r
 
     tracker._logger.warning.assert_called_once()
     assert "restart the Ray cluster" in tracker._logger.warning.call_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_tracker_keeps_polling_an_orphaned_worker_past_a_failed_read(monkeypatch) -> None:
+    """One failed read must not end the wait and drop the finished stamp until the next restart."""
+    from services.workers import task_completion
+
+    monkeypatch.setattr(task_completion, "_ORPHANED_WORKER_POLL_SECONDS", 0)
+    tsm = _task_state_manager()
+    tsm.get_details.remote.return_value = _settled_details()
+    tsm.has_worker_settled = _remote_mock()
+    tsm.has_worker_settled.remote.side_effect = [False, TimeoutError("busy"), True]
+
+    await _track_until_settled(tsm, _owner_died_error())
+
+    assert tsm.has_worker_settled.remote.await_count == 3
+    tsm.set_details.remote.assert_awaited_once()

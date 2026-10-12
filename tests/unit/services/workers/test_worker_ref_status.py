@@ -355,3 +355,31 @@ def test_cancelling_orphaned_tasks_stops_the_running_one_and_the_queued_one(loca
     assert ray.get(cluster.gate.waiting.remote()) == 1
     assert cluster.written() == []
     ray.kill(cluster.worker, no_restart=True)
+
+
+def test_a_delete_waits_out_orphaned_workers_it_cannot_reach_with_ray_cancel(local_ray) -> None:
+    """The delete path end to end: ray.cancel on an owner-died ref, then the wait on the lease."""
+    from services.workers.task_cancellation import cancel_active_indexing_tasks
+
+    cluster = _Cluster()
+    cluster.kill_pool()
+
+    async def delete_both() -> list[int]:
+        # One delete per file, run together: the queued task only stops once
+        # the running one has and frees the worker for its pickup.
+        return await asyncio.gather(
+            *(
+                cancel_active_indexing_tasks(
+                    cluster.tsm, partition="tenant-a", file_id=f"file-{task_id}", timeout=_SETTLE_TIMEOUT_SECONDS
+                )
+                for task_id in (cluster.held, cluster.queued)
+            )
+        )
+
+    assert asyncio.run(delete_both()) == [1, 1]
+    assert cluster.settled(cluster.held) is True
+    assert cluster.settled(cluster.queued) is True
+    assert ray.get(cluster.gate.waiting.remote()) == 1
+    time.sleep(2 * _LEASE_TTL_SECONDS)
+    assert cluster.written() == []
+    ray.kill(cluster.worker, no_restart=True)
