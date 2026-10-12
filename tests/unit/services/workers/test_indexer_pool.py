@@ -2295,9 +2295,9 @@ async def test_actor_purges_upload_on_worker_failure(tmp_path) -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("error", [None, RuntimeError("boom")])
-async def test_actor_purges_markdown_copy_with_upload(tmp_path, error) -> None:
-    # SAVE_MARKDOWN's <upload>.md holds the extracted text, so it must not
-    # outlive an upload that save_uploaded_files=False purges.
+async def test_actor_keeps_markdown_copy_when_purging_upload(tmp_path, error) -> None:
+    # SAVE_MARKDOWN is independent of save_uploaded_files: inspecting parser
+    # output must not require keeping every raw upload.
     path = tmp_path / "doc.pdf"
     path.write_bytes(b"x")
     sidecar = tmp_path / "doc.pdf.md"
@@ -2311,7 +2311,7 @@ async def test_actor_purges_markdown_copy_with_upload(tmp_path, error) -> None:
             await actor.process_file(task_id="t", path=str(path), metadata={"file_id": "f"}, partition="p")
 
     assert not path.exists()
-    assert not sidecar.exists()
+    assert sidecar.read_text(encoding="utf-8") == "parsed"
 
 
 @pytest.mark.asyncio

@@ -715,8 +715,7 @@ def markdown_sidecar_path(source_path: str | Path) -> Path:
     """Path of the ``SAVE_MARKDOWN`` copy for an upload stored at ``source_path``.
 
     The suffix is appended rather than swapped so a markdown upload is never
-    overwritten. Shared with the upload purge so the copy is removed together
-    with the upload when ``save_uploaded_files`` is off.
+    overwritten.
     """
     return Path(f"{source_path}.md")
 
@@ -727,8 +726,9 @@ async def _save_markdown(row: MutableMapping[str, Any], data_dir: Path | None) -
     Runs after captioning, so image descriptions are already in the text. Rows
     without a ``source_path`` have nowhere to write, and a ``source_path``
     outside ``data_dir`` (an MCP ``index_url`` temp download) would leave the
-    copy under a random name in a node's temp dir, so both are skipped. Best
-    effort: a debugging copy must never fail the file, so a write error is only
+    copy under a random name in a node's temp dir, so both are skipped.
+    Rendering and writing run together off the event loop. Best effort: a
+    debugging copy must never fail the file, so an error in either is only
     logged.
     """
     document = row.get("document")
@@ -741,9 +741,8 @@ async def _save_markdown(row: MutableMapping[str, Any], data_dir: Path | None) -
         log.debug(f"SAVE_MARKDOWN: skipping {source_path}, which is not under the data directory")
         return
     target = markdown_sidecar_path(source_path)
-    markdown = _render_markdown(processed)
     try:
-        await asyncio.to_thread(target.write_text, markdown, encoding="utf-8")
+        await asyncio.to_thread(lambda: target.write_text(_render_markdown(processed), encoding="utf-8"))
     except Exception as exc:  # noqa: BLE001 - a debugging copy must not fail the file
         log.warning(f"SAVE_MARKDOWN: could not write {target}: {exc}")
 

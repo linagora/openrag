@@ -17,7 +17,6 @@ from services.workers.pipeline_builder import (
     REPLACE_OLD_CHUNK_COLLECTION_ROW_KEY,
     REPLACE_OLD_CHUNK_IDS_ROW_KEY,
     IndexingPipeline,
-    markdown_sidecar_path,
 )
 from services.workers.ray_utils import retry_idempotent_ray_actor_method
 from services.workers.stages._common import run_with_optional_timeout
@@ -526,16 +525,14 @@ async def delete_uploaded_file(path: str, logger: Any) -> None:
     Called from the actor boundary (``IndexerWorkerActor.process_file``) when
     ``save_uploaded_files`` is off, so a client that manages its own files never
     has a disk copy left behind — even when indexing fails before the pipeline
-    runs. The ``SAVE_MARKDOWN`` copy holds the same extracted text, so it goes
-    with the upload. A failed delete must never turn indexing into a failure, so
-    the error is logged and discarded.
+    runs. A failed delete must never turn indexing into a failure, so the error
+    is logged and discarded.
     """
-    for target in (Path(path), markdown_sidecar_path(path)):
-        try:
-            await asyncio.to_thread(target.unlink, missing_ok=True)
-            logger.debug(f"Deleted input file: {target}")
-        except Exception as cleanup_err:  # noqa: BLE001 - cleanup must not fail the task
-            logger.warning(f"Failed to delete input file {target}: {cleanup_err}")
+    try:
+        await asyncio.to_thread(Path(path).unlink, missing_ok=True)
+        logger.debug(f"Deleted input file: {path}")
+    except Exception as cleanup_err:  # noqa: BLE001 - cleanup must not fail the task
+        logger.warning(f"Failed to delete input file {path}: {cleanup_err}")
 
 
 __all__ = ["IndexerWorker", "delete_uploaded_file"]
