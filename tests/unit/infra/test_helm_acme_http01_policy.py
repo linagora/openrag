@@ -61,8 +61,8 @@ def test_solver_port_is_open_by_default_on_solver_pods_only(chart: Path) -> None
     """Rendered with the default-deny, whatever the ingress TLS: the certificate
     may come from a Certificate object or another Ingress, and the policy
     selects nothing until cert-manager starts a solver. Any source, because a
-    host-network Ingress controller (k3s's Traefik) connects from a node
-    address no namespaceSelector matches."""
+    host-network Ingress controller (ingress-nginx with hostNetwork) connects
+    from a node address no namespaceSelector matches."""
     policies = _policies(chart)
 
     assert "openrag-default-deny" in policies

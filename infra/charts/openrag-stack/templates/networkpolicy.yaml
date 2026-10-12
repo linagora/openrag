@@ -40,8 +40,9 @@ spec:
    ingress TLS settings, since the certificate may be requested elsewhere (a
    Certificate object, another Ingress): with no challenge pending it selects
    no pod. Any source by default, because a host-network Ingress controller
-   (k3s's Traefik, for one) connects from a node address that no
-   namespaceSelector matches; networkPolicy.acmeHttp01.from narrows it. */}}
+   (ingress-nginx with hostNetwork, for one) connects from a node address
+   that no namespaceSelector matches; networkPolicy.acmeHttp01.from narrows
+   it. */}}
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy

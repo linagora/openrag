@@ -67,9 +67,9 @@ networkPolicy:
   # certificates. Turn it off only if no Issuer here uses HTTP-01.
   acmeHttp01:
     enabled: true
-    # Empty means any source: a host-network Ingress controller (k3s's Traefik,
-    # for one) connects from a node address, which no namespaceSelector
-    # matches. Narrow it with standard NetworkPolicyPeers, e.g.
+    # Empty means any source: a host-network Ingress controller (ingress-nginx
+    # with hostNetwork, for one) connects from a node address, which no
+    # namespaceSelector matches. Narrow it with standard NetworkPolicyPeers, e.g.
     #   - namespaceSelector:
     #       matchLabels:
     #         kubernetes.io/metadata.name: ingress-nginx
