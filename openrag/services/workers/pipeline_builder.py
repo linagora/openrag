@@ -119,6 +119,9 @@ class IndexingPipeline:
     # ``loader.save_markdown``: keep a copy of the parsed markdown next to the
     # upload, for inspecting parser output.
     save_markdown: bool = False
+    # ``paths.data_dir``. The markdown copy is only written for uploads stored
+    # under it; anything else (e.g. MCP ``index_url`` temp downloads) is skipped.
+    data_dir: Path | None = None
 
     async def run(self, row: MutableMapping[str, Any]) -> MutableMapping[str, Any]:
         """Run a single row through parse, optional enrichments, embed, and store.
@@ -243,7 +246,7 @@ class IndexingPipeline:
             # was skipped, the bytes were never going to be read at all.
             _release_image_bytes(row)
             if self.save_markdown:
-                await _save_markdown(row)
+                await _save_markdown(row, self.data_dir)
             await _timed("chunk", chunk_stage(row, chunker, timeout=self.timeouts.chunk))
             if contextualizer is not None:
                 await _timed_enrichment(
@@ -677,6 +680,7 @@ def build_indexing_pipeline(
     defer_replace_cleanup: bool = False,
     caption_concurrency: int | None = None,
     save_markdown: bool = False,
+    data_dir: Path | None = None,
 ) -> IndexingPipeline:
     """Build the default sequential indexing pipeline."""
 
@@ -703,6 +707,7 @@ def build_indexing_pipeline(
         defer_replace_cleanup=defer_replace_cleanup,
         caption_concurrency=caption_concurrency,
         save_markdown=save_markdown,
+        data_dir=data_dir,
     )
 
 
@@ -716,11 +721,13 @@ def markdown_sidecar_path(source_path: str | Path) -> Path:
     return Path(f"{source_path}.md")
 
 
-async def _save_markdown(row: MutableMapping[str, Any]) -> None:
+async def _save_markdown(row: MutableMapping[str, Any], data_dir: Path | None) -> None:
     """Write the parsed markdown to ``<upload>.md`` next to the stored upload.
 
-    Runs after captioning, so the file holds the same text that gets chunked.
-    Rows without a ``source_path`` have nowhere to write and are skipped. Best
+    Runs after captioning, so image descriptions are already in the text. Rows
+    without a ``source_path`` have nowhere to write, and a ``source_path``
+    outside ``data_dir`` (an MCP ``index_url`` temp download) would leave the
+    copy under a random name in a node's temp dir, so both are skipped. Best
     effort: a debugging copy must never fail the file, so a write error is only
     logged.
     """
@@ -729,14 +736,52 @@ async def _save_markdown(row: MutableMapping[str, Any]) -> None:
     source_path = getattr(document, "source_path", None)
     if not source_path or not isinstance(processed, ProcessedDocument):
         return
+    log = logger.bind(task_id=row.get("task_id"), filename=row.get("filename", ""))
+    if data_dir is None or not Path(source_path).resolve().is_relative_to(Path(data_dir).resolve()):
+        log.debug(f"SAVE_MARKDOWN: skipping {source_path}, which is not under the data directory")
+        return
     target = markdown_sidecar_path(source_path)
-    markdown = "\n\n".join(block.text for block in processed.text_blocks if block.text)
+    markdown = _render_markdown(processed)
     try:
         await asyncio.to_thread(target.write_text, markdown, encoding="utf-8")
     except Exception as exc:  # noqa: BLE001 - a debugging copy must not fail the file
-        logger.bind(task_id=row.get("task_id"), filename=row.get("filename", "")).warning(
-            f"SAVE_MARKDOWN: could not write {target}: {exc}"
-        )
+        log.warning(f"SAVE_MARKDOWN: could not write {target}: {exc}")
+
+
+def _render_markdown(processed: ProcessedDocument) -> str:
+    """Join a document's text blocks into a readable markdown file.
+
+    Once the document spans more than one page, a ``<!-- page N -->`` line
+    opens each run of blocks from page N. Images that were never described
+    still have their parser placeholder (``![](docling_img_3)``) in the text,
+    pointing at bytes released after the caption decision; each becomes its
+    alt text, or ``[Image]`` when it has none, the fallback
+    ``normalize_data_uri_images`` uses. Remote images keep their link, which
+    still resolves.
+    """
+    readable_refs: dict[str, str] = {}
+    for image in processed.images:
+        ref = image.metadata.get("markdown_ref")
+        if not ref or image.caption or image.source_url:
+            continue
+        readable_refs[ref] = (image.metadata.get("alt") or "").strip() or "[Image]"
+
+    pages = {block.page_number for block in processed.text_blocks if block.page_number is not None}
+    mark_pages = len(pages) > 1 or bool(pages - {1})
+
+    parts: list[str] = []
+    last_page: int | None = None
+    for block in processed.text_blocks:
+        text = block.text
+        for ref, readable in readable_refs.items():
+            text = text.replace(ref, readable)
+        if not text:
+            continue
+        if mark_pages and block.page_number is not None and block.page_number != last_page:
+            parts.append(f"<!-- page {block.page_number} -->")
+            last_page = block.page_number
+        parts.append(text)
+    return "\n\n".join(parts)
 
 
 def _release_image_bytes(row: MutableMapping[str, Any]) -> None:
