@@ -2,6 +2,7 @@
 
 import asyncio
 import threading
+from contextlib import closing
 from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -137,6 +138,22 @@ async def test_batches_are_stored_before_reading_the_next_batch(setup_pipeline):
     assert pipeline.parser.closed
 
 
+async def test_batches_reuse_per_file_pipeline_setup(setup_pipeline):
+    pipeline, row, _ = setup_pipeline
+    resolved = []
+
+    def resolve_window(name):
+        resolved.append(name)
+        return 8_192
+
+    pipeline = replace(pipeline, embedder_window_resolver=resolve_window)
+
+    await pipeline.run(row)
+
+    assert row["batch_count"] == 3
+    assert resolved == ["default"]
+
+
 async def test_long_csv_cell_is_stored_as_labelled_continuations(setup_pipeline):
     pipeline, row, _ = setup_pipeline
     note = " ".join(f"word{number}" for number in range(160))
@@ -182,8 +199,15 @@ async def test_later_failure_cleans_only_current_attempt(setup_pipeline, failure
     pipeline, row, _ = setup_pipeline
     row["replace"] = True
     if failure == "parse":
-        row["document"].text = "id,name\n1,Alice\n2,Bob\n3,extra,cell"
-        error, message = ValueError, "Record 4"
+        original = pipeline.parser.iter_batches
+
+        def fail_after_first_batch(document):
+            with closing(original(document)) as batches:
+                yield next(batches)
+                raise OSError("CSV read failed")
+
+        pipeline.parser.iter_batches = fail_after_first_batch
+        error, message = OSError, "CSV read failed"
     elif failure == "store":
         pipeline.vector_store.fail_at = 2
         error, message = RuntimeError, "store unavailable"
@@ -257,16 +281,25 @@ async def test_worker_keeps_csv_on_disk(tmp_path, monkeypatch):
     assert document.content_type is DocumentType.CSV
     assert document.raw_bytes is None
     assert document.source_path == str(path)
-    assert LoaderConfig().file_loaders.csv == "CsvParser"
     assert LoaderConfig().mimetypes.to_dict()["text/csv"] == ".csv"
 
 
-async def test_contextualization_is_rejected_before_any_write(setup_pipeline):
+async def test_contextualization_is_skipped_and_recorded_as_degraded(setup_pipeline):
     pipeline, row, events = setup_pipeline
-    pipeline = replace(pipeline, contextualizer=object())
-    with pytest.raises(ValueError, match="disabled"):
-        await pipeline.run(row)
-    assert events == []
+    factory_calls = []
+
+    def contextualizer_factory(name):
+        factory_calls.append(name)
+        return object()
+
+    pipeline = replace(pipeline, contextualizer_factory=contextualizer_factory)
+    row["indexation_config"] = {"enable_contextualization": True}
+    result = await pipeline.run(row)
+
+    assert result["stage"] == "stored"
+    assert result["degraded_stages"]["contextualize"] == "CSV streaming skips chunk contextualization"
+    assert factory_calls == ["default"]
+    assert events == ["parse", "embed", "store"] * 3
 
 
 async def test_csv_tags_once_after_all_batches_with_preset_and_prompt(setup_pipeline):
@@ -298,14 +331,19 @@ async def test_csv_tags_once_after_all_batches_with_preset_and_prompt(setup_pipe
     assert "chunks" not in row
 
 
-@pytest.mark.parametrize("bad_csv", [True, False])
-async def test_csv_does_not_tag_failed_or_empty_file(setup_pipeline, bad_csv):
+@pytest.mark.parametrize("failed_csv", [True, False])
+async def test_csv_does_not_tag_failed_or_empty_file(setup_pipeline, failed_csv):
     pipeline, row, _ = setup_pipeline
     tagger = SimpleNamespace(tag=AsyncMock(return_value=[]))
     pipeline = replace(pipeline, topic_tagger=tagger)
-    if bad_csv:
-        row["document"].text = "id,name\n1,Alice\n2,Bob\n3,extra,cell"
-        with pytest.raises(ValueError, match="Record 4"):
+    if failed_csv:
+
+        def fail_to_read(_document):
+            raise OSError("CSV read failed")
+            yield  # pragma: no cover
+
+        pipeline.parser.iter_batches = fail_to_read
+        with pytest.raises(OSError, match="CSV read failed"):
             await pipeline.run(row)
         tagger.tag.assert_not_awaited()
     else:

@@ -96,9 +96,7 @@ class BaseRetriever(Retriever):
         self.include_ancestors = include_ancestors
         self.related_limit = related_limit
         self.max_ancestor_depth = max_ancestor_depth
-        # CSV continuation expansion is always safe: it only activates when a
-        # retrieved chunk explicitly identifies a multi-part CSV row.
-        self.expansion_enabled = True
+        self.expansion_enabled = include_related or include_ancestors
 
     async def retrieve(
         self,
@@ -332,6 +330,7 @@ async def _expand_with_related_chunks(
                 partition=part,
                 file_id=file_id,
                 row_number=row_number,
+                limit=related_limit,
                 allowed_file_ids=allowed_file_ids,
             )
         except Exception:
@@ -386,6 +385,11 @@ def _csv_row_sibling_ref(chunk: Chunk) -> int | None:
         except (KeyError, TypeError, ValueError):
             continue
     return None
+
+
+def has_csv_row_siblings(chunks: list[Chunk]) -> bool:
+    """Whether any result identifies a logical CSV row split into chunks."""
+    return any(_csv_row_sibling_ref(chunk) is not None for chunk in chunks)
 
 
 def order_csv_row_siblings(chunks: list[Chunk]) -> list[Chunk]:
