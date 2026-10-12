@@ -13,8 +13,8 @@ call. Cancellation paths are translated into a predictable shape:
 
 - caller-side timeout → ``ray.cancel(future)`` then raise ``TimeoutError``
   naming the task and its bound
-- worker-side ``TimeoutError`` → ``TimeoutError`` whose message ends with the
-  remote cause (no cancel: the task has already settled)
+- worker-side ``TimeoutError`` → ``RemoteTimeoutError`` (a ``TimeoutError``)
+  whose message ends with the remote cause (no cancel: the task has settled)
 - caller-side ``asyncio.CancelledError`` → ``ray.cancel(future)`` then re-raise
 - worker-side ``TaskCancelledError`` → re-raise as-is
 - actor restart/unavailability → ``ServiceUnavailableError`` (503)
@@ -43,6 +43,7 @@ logger = get_logger()
 _REMOTE_CAUSE_MAX_LENGTH = 300
 
 __all__ = [
+    "RemoteTimeoutError",
     "call_ray_actor_method_with_timeout",
     "caused_by",
     "call_ray_actor_with_timeout",
@@ -51,6 +52,16 @@ __all__ = [
     "with_retry",
     "with_timeout",
 ]
+
+
+class RemoteTimeoutError(TimeoutError):
+    """A ``TimeoutError`` the Ray task raised itself, not the caller's deadline.
+
+    Still a ``TimeoutError``, so callers that map a timeout (the extractText
+    504, Marker's slot recycle) keep working. The task has already settled,
+    though, so a caller waiting for it to finish can tell this apart from its
+    own wait running out.
+    """
 
 
 def _actor_unavailable(task_description: str, exc: BaseException) -> ServiceUnavailableError:
@@ -123,7 +134,8 @@ async def call_ray_actor_with_timeout(
     """Await a Ray ``ObjectRef`` with a timeout, propagating cancellation.
 
     Raises:
-        TimeoutError: If the task exceeds ``timeout`` (or raised one itself).
+        TimeoutError: If the task exceeds ``timeout``.
+        RemoteTimeoutError: If the task raised a ``TimeoutError`` itself.
         asyncio.CancelledError: If the calling coroutine is cancelled.
         TaskCancelledError: If the Ray task was cancelled by the worker.
         RuntimeError: If the Ray task failed. The message ends with the remote
@@ -139,7 +151,7 @@ async def call_ray_actor_with_timeout(
             # The actor raised its own TimeoutError (e.g. a Marker child's
             # bound), so the task has already settled: nothing to cancel. Keep
             # the type, which callers branch on, and name the remote cause.
-            raise TimeoutError(f"{task_description} failed: {_remote_cause(exc)}") from exc
+            raise RemoteTimeoutError(f"{task_description} failed: {_remote_cause(exc)}") from exc
         logger.warning(f"{task_description} timed out, cancelling Ray task")
         ray.cancel(future, recursive=True)
         raise TimeoutError(f"{task_description} timed out after {timeout:g}s") from exc

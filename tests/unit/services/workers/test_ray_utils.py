@@ -10,6 +10,7 @@ from core.utils.error_summary import failure_reason_from_exception
 from core.utils.exceptions import ServiceUnavailableError
 from ray.exceptions import ActorDiedError, ActorUnavailableError, RayTaskError
 from services.workers.ray_utils import (
+    RemoteTimeoutError,
     call_ray_actor_method_with_timeout,
     call_ray_actor_with_timeout,
     retry_idempotent_ray_actor_method,
@@ -197,6 +198,7 @@ async def test_timeout_names_the_task_and_its_bound(monkeypatch):
         )
 
     assert str(caught.value) == "MarkerPool PDF (f.pdf) timed out after 0.01s"
+    assert not isinstance(caught.value, RemoteTimeoutError)
 
 
 async def test_plain_timeout_from_the_awaited_task_reads_as_our_deadline(monkeypatch):
@@ -227,11 +229,13 @@ async def test_timeout_raised_inside_the_actor_names_the_cause(monkeypatch):
 
     produced = await _wrapped_failure(remote, "MarkerPool PDF [p10-14] (f.pdf)")
 
-    # Callers branch on the type, so a timeout stays a timeout.
-    assert type(produced) is TimeoutError
+    # Callers branch on the type, so a timeout stays a timeout, marked as the
+    # task's own so a caller waiting for it can tell it has settled.
+    assert type(produced) is RemoteTimeoutError
+    assert isinstance(produced, TimeoutError)
     assert produced.__cause__ is remote
     reason = failure_reason_from_exception(produced)
-    assert reason == "TimeoutError: MarkerPool PDF [p10-14] (f.pdf) failed: TimeoutError: parse timed out"
+    assert reason == "RemoteTimeoutError: MarkerPool PDF [p10-14] (f.pdf) failed: TimeoutError: parse timed out"
     assert "ray::" not in reason
     assert "\x1b" not in reason
 
@@ -248,11 +252,11 @@ async def test_timeout_raised_two_actors_down_keeps_the_root_cause(monkeypatch):
         "MarkerLoader PDF loading (f.pdf)",
     )
 
-    assert type(outer) is TimeoutError
+    assert type(outer) is RemoteTimeoutError
     reason = failure_reason_from_exception(outer)
     assert reason == (
-        "TimeoutError: MarkerLoader PDF loading (f.pdf) failed: "
-        "TimeoutError: MarkerPool PDF [p10-14] (f.pdf) failed: TimeoutError: parse timed out"
+        "RemoteTimeoutError: MarkerLoader PDF loading (f.pdf) failed: "
+        "RemoteTimeoutError: MarkerPool PDF [p10-14] (f.pdf) failed: TimeoutError: parse timed out"
     )
     assert "ray::" not in reason
     assert "\x1b" not in reason
