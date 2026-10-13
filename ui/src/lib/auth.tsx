@@ -121,7 +121,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     try {
       setUser(await getMyInfo());
     } catch (e) {
-      localStorage.removeItem(TOKEN_KEY);
       setUser(null);
       throw e;
     }

@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useNavigate, Navigate } from "react-router-dom";
 import { useAuth } from "@/lib/auth";
+import { ApiError } from "@/lib/api/client";
 import { APP_NAME } from "@/lib/brand";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -30,8 +31,12 @@ export default function LoginPage() {
     try {
       await loginWithToken(token);
       navigate("/");
-    } catch {
-      setError("That token was rejected. Check it and try again.");
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) {
+        setError("That token was rejected. Check it and try again.");
+      } else {
+        setError("Couldn't verify your token because the service is unavailable. Try again.");
+      }
     } finally {
       setSubmitting(false);
     }
