@@ -252,9 +252,35 @@ class TestChunkTable:
             assert chunk.content.splitlines()[:2] == table.splitlines()[:2]
             assert chunk.metadata["csv_row_start"] == row_number
             assert chunk.metadata["csv_row_end"] == row_number
+            assert chunk.metadata["csv_row_numbers"] == [row_number]
         assert "001" in chunks[0].content
         assert "002" in chunks[1].content
         assert "003" in chunks[2].content
+
+    def test_csv_chunks_keep_source_record_numbers_after_a_skipped_row(self):
+        long_note = " ".join(f"detail{number}" for number in range(30))
+        table = f"| id | note |\n| --- | --- |\n| 001 | short |\n| 003 | {long_note} |"
+
+        chunks = chunk_table(
+            MDElement(
+                type="table",
+                content=table,
+                metadata={
+                    "csv_columns": ["id", "note"],
+                    "csv_row_start": 2,
+                    "csv_row_end": 4,
+                    "csv_row_numbers": [2, 4],
+                },
+            ),
+            chunk_size=20,
+            length_function=lambda text: len(text.split()),
+        )
+
+        continuation_chunks = [chunk for chunk in chunks if "continuation" in chunk.content]
+        assert continuation_chunks
+        assert all("[CSV row 4;" in chunk.content for chunk in continuation_chunks)
+        assert all(chunk.metadata["csv_row_number"] == 4 for chunk in continuation_chunks)
+        assert all(chunk.metadata["csv_row_numbers"] == [4] for chunk in continuation_chunks)
 
     def test_csv_long_cell_becomes_labelled_continuation_rows(self):
         long_note = " ".join(f"word{number}" for number in range(45))

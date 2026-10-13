@@ -330,7 +330,10 @@ class IndexingPipeline:
             # Outside the ``vlm is not None`` branch on purpose: if captioning
             # was skipped, the bytes were never going to be read at all.
             _release_image_bytes(row)
-            if self.save_markdown:
+            # A streamed CSV is parsed one batch at a time. Saving here would
+            # overwrite the same sidecar for every batch and leave only the
+            # final rows, so CSV sidecars are intentionally skipped.
+            if self.save_markdown and _batch_context is None:
                 await _save_markdown(row, self.data_dir)
             await _timed("chunk", chunk_stage(row, chunker, timeout=self.timeouts.chunk))
             # Emptiness is the chunk count. Caption is the only enrichment that

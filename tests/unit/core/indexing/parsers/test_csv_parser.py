@@ -27,7 +27,7 @@ from contextlib import closing
 import pytest
 from core.indexing.parsers.tabular.csv_parser import CsvParser
 from core.models.document import Document
-from core.utils.exceptions import ConfigError
+from core.utils.exceptions import ConfigError, NoIndexableContentError
 
 # we apply the asyncio marker to every async test in this file
 pytestmark = pytest.mark.asyncio
@@ -110,18 +110,19 @@ async def test_06_empty_file():
 async def test_07_inconsistent_column_count():
     document = Document(text="id,name\n1,Ali,extra")
 
-    result = await CsvParser().parse(document)
+    with pytest.raises(NoIndexableContentError) as exc_info:
+        await CsvParser().parse(document)
 
-    assert result.text_blocks[0].text == "| id | name |\n| --- | --- |"
-    assert result.text_blocks[0].metadata["csv_bad_rows"] == 1
+    assert exc_info.value.extra["skipped_rows"] == 1
 
 
 async def test_08_unclosed_quote():
     document = Document(text='id,name\n1,"Ali')
-    result = await CsvParser().parse(document)
 
-    assert result.text_blocks[0].text == "| id | name |\n| --- | --- |"
-    assert result.text_blocks[0].metadata["csv_bad_rows"] == 1
+    with pytest.raises(NoIndexableContentError) as exc_info:
+        await CsvParser().parse(document)
+
+    assert exc_info.value.extra["skipped_rows"] == 1
 
 
 async def test_09_feature_explicit_delimiter():
@@ -179,7 +180,7 @@ async def test_11_many_records_from_file(tmp_path):
 
 @pytest.mark.parametrize(
     ("row_count", "batch_size", "expected_sizes"),
-    [(0, 2, [0]), (1, 2, [1]), (2, 2, [2]), (3, 2, [2, 1]), (4, 2, [2, 2]), (5, 2, [2, 2, 1]), (5, 3, [3, 2])],
+    [(1, 2, [1]), (2, 2, [2]), (3, 2, [2, 1]), (4, 2, [2, 2]), (5, 2, [2, 2, 1]), (5, 3, [3, 2])],
 )
 async def test_12_batch_boundaries(row_count, batch_size, expected_sizes):
     text = "id,name\n" + "".join(f"{number:03d},Person {number}\n" for number in range(row_count))
@@ -196,8 +197,6 @@ async def test_12_batch_boundaries(row_count, batch_size, expected_sizes):
     expected_ranges = []
     for first_row in range(2, row_count + 2, batch_size):
         expected_ranges.append((first_row, min(first_row + batch_size - 1, row_count + 1)))
-    if row_count == 0:
-        expected_ranges = [(2, 1)]
     assert [(batch.metadata["csv_row_start"], batch.metadata["csv_row_end"]) for batch in batches] == expected_ranges
     assert all(batch.metadata["csv_columns"] == ["id", "name"] for batch in batches)
     assert sizes == expected_sizes
@@ -267,8 +266,29 @@ async def test_malformed_records_are_skipped_without_losing_valid_rows():
 
     result = await CsvParser().parse(document)
 
-    assert result.text_blocks[0].text == ("| id | name |\n| --- | --- |\n| 1 | Alice |\n| 4 | Dana |")
-    assert result.text_blocks[0].metadata["csv_bad_rows"] == 2
+    assert result.text_blocks[0].text == ("| id | name |\n| --- | --- |\n| 1 | Alice |\n| 2 | Bob |\n| 4 | Dana |")
+    assert result.text_blocks[0].metadata["csv_bad_rows"] == 1
+    assert result.text_blocks[0].metadata["csv_row_numbers"] == [2, 3, 5]
+
+
+async def test_missing_and_extra_trailing_empty_cells_are_normalized():
+    document = Document(text="id,name,note\n1,Alice\n2,Bob,,\n3,Cam,ok")
+
+    result = await CsvParser().parse(document)
+
+    assert result.text_blocks[0].text == (
+        "| id | name | note |\n| --- | --- | --- |\n| 1 | Alice |  |\n| 2 | Bob |  |\n| 3 | Cam | ok |"
+    )
+    assert result.text_blocks[0].metadata["csv_bad_rows"] == 0
+    assert result.text_blocks[0].metadata["csv_row_numbers"] == [2, 3, 4]
+
+
+async def test_header_without_indexable_rows_raises():
+    with pytest.raises(NoIndexableContentError) as exc_info:
+        await CsvParser().parse(Document(text="id,name\n1,Alice,unexpected\n"))
+
+    assert exc_info.value.code == "NO_INDEXABLE_CONTENT"
+    assert exc_info.value.extra == {"skipped_rows": 1}
 
 
 async def test_cell_larger_than_python_csv_default_limit_is_accepted():

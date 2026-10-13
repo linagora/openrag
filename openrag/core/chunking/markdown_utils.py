@@ -369,6 +369,7 @@ def _chunk_wide_csv_row(
             "csv_columns": group_columns,
             "csv_row_start": row_number,
             "csv_row_end": row_number,
+            "csv_row_numbers": [row_number],
             "csv_row_number": row_number,
             "csv_column_group": group_number,
             "csv_column_groups_total": total_groups,
@@ -491,20 +492,27 @@ def _chunk_csv_table(
     header_tokens = length_function(header_text)
     columns = list(table_element.metadata.get("csv_columns") or _table_cells(header_lines[0]))
     first_row_number = int(table_element.metadata.get("csv_row_start", 2))
+    source_row_numbers = table_element.metadata.get("csv_row_numbers")
+    if not isinstance(source_row_numbers, list) or len(source_row_numbers) != len(data_rows):
+        source_row_numbers = list(range(first_row_number, first_row_number + len(data_rows)))
+    else:
+        source_row_numbers = [int(row_number) for row_number in source_row_numbers]
     body_budget = max(1, chunk_size - header_tokens)
     chunks: list[MDElement] = []
     current_rows: list[str] = []
+    current_row_numbers: list[int] = []
     current_start: int | None = None
     current_end: int | None = None
 
     def emit_current() -> None:
-        nonlocal current_rows, current_start, current_end
+        nonlocal current_rows, current_row_numbers, current_start, current_end
         if not current_rows:
             return
         metadata = {
             **table_element.metadata,
             "csv_row_start": current_start,
             "csv_row_end": current_end,
+            "csv_row_numbers": list(current_row_numbers),
         }
         chunks.append(
             MDElement(
@@ -515,16 +523,17 @@ def _chunk_csv_table(
             )
         )
         current_rows = []
+        current_row_numbers = []
         current_start = None
         current_end = None
 
-    for offset, row in enumerate(data_rows):
-        row_number = first_row_number + offset
+    for row_number, row in zip(source_row_numbers, data_rows, strict=True):
         row_tokens = length_function(row)
         if row_tokens <= body_budget:
             if current_rows and length_function("\n".join([*current_rows, row])) > body_budget:
                 emit_current()
             current_rows.append(row)
+            current_row_numbers.append(row_number)
             current_start = row_number if current_start is None else current_start
             current_end = row_number
             continue
@@ -539,7 +548,12 @@ def _chunk_csv_table(
                     type="table",
                     content="\n".join([header_text, row]),
                     page_number=table_element.page_number,
-                    metadata={**table_element.metadata, "csv_row_start": row_number, "csv_row_end": row_number},
+                    metadata={
+                        **table_element.metadata,
+                        "csv_row_start": row_number,
+                        "csv_row_end": row_number,
+                        "csv_row_numbers": [row_number],
+                    },
                 )
             )
             continue
@@ -585,6 +599,7 @@ def _chunk_csv_table(
                         **table_element.metadata,
                         "csv_row_start": row_number,
                         "csv_row_end": row_number,
+                        "csv_row_numbers": [row_number],
                         "csv_row_number": row_number,
                         "csv_column": column_name,
                         "csv_part": part_number,
