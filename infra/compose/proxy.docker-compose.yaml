@@ -10,10 +10,10 @@
 # every API call. NPM only forwards the Upgrade/Connection headers Chainlit's
 # WebSocket needs when "Websockets Support" is on for the proxy host.
 #
-# Also set UVICORN_FORWARDED_ALLOW_IPS to this project's network subnet in
-# .env: NPM reaches the API from that network, not from loopback, so without
-# it uvicorn drops X-Forwarded-For/-Proto. Full walkthrough: docs,
-# "Reverse proxy (TLS)".
+# Also set UVICORN_FORWARDED_ALLOW_IPS=172.16.0.0/12 (Docker's default range
+# for Compose networks) in .env: NPM reaches the API from this project's
+# network, not from loopback, so without it uvicorn drops X-Forwarded-For/-Proto.
+# Full walkthrough: docs, "Reverse proxy (TLS)".
 #
 # An overlay rather than a profile: the API service declares `profiles: [""]`,
 # and passing any explicit --profile deselects that default profile — a
