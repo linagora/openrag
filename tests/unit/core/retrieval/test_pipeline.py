@@ -405,7 +405,7 @@ async def test_retrieve_docs_expansion_path_re_reranks():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("with_reranker", [False, True])
-async def test_expansion_trace_keeps_candidates_outside_seed_limit(with_reranker):
+async def test_regular_expansion_trace_marks_candidates_outside_seed_limit(with_reranker):
     candidate_ids = [f"c{index}" for index in range(10)]
     seed_ids = ["c9", "c8", "c7"] if with_reranker else ["c0", "c1", "c2"]
     retriever = FakeRetriever(expansion_enabled=True)
@@ -425,12 +425,38 @@ async def test_expansion_trace_keeps_candidates_outside_seed_limit(with_reranker
     stage_name = "post_rerank" if with_reranker else "pre_rerank"
     candidates = {candidate.id: candidate for candidate in trace.stages[stage_name].candidates}
     assert set(candidates) == set(candidate_ids)
-    assert not {
+    assert {
         candidate_id
         for candidate_id, candidate in candidates.items()
         if candidate.removal_reason is not None and candidate.removal_reason.code == "expansion_top_n"
-    }
-    assert {candidate.id for candidate in trace.stages["post_expansion"].candidates} == set(candidate_ids) | {"related"}
+    } == set(candidate_ids) - set(seed_ids)
+    assert {candidate.id for candidate in trace.stages["post_expansion"].candidates} == set(seed_ids) | {"related"}
+
+
+@pytest.mark.asyncio
+async def test_csv_sibling_expansion_keeps_ranked_non_seed_candidates():
+    seed = Chunk(
+        id="csv-seed",
+        text="first column group",
+        document_id="file-1",
+        partition="p1",
+        metadata={"csv_row_number": 7, "csv_column_group": 1, "csv_column_groups_total": 2},
+    )
+    sibling = Chunk(
+        id="csv-sibling",
+        text="second column group",
+        document_id="file-1",
+        partition="p1",
+        metadata={"csv_row_number": 7, "csv_column_group": 2, "csv_column_groups_total": 2},
+    )
+    retriever = FakeRetriever()
+    retriever.results_queue = [[seed, *_chunks("other-1", "other-2")]]
+    retriever.expand_result = [seed, sibling]
+    pipeline = RetrieverPipeline(retriever=retriever, reranker_top_k=1)
+
+    result = await pipeline.retrieve_docs(partition=["p1"], query=Query(query="hi"))
+
+    assert [chunk.id for chunk in result] == ["csv-seed", "csv-sibling", "other-1", "other-2"]
 
 
 @pytest.mark.asyncio
