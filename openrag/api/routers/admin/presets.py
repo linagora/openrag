@@ -12,7 +12,7 @@ from core.chunking import chunking_registry
 from core.config.indexation_pipeline import PARSING_STRATEGIES
 from core.rerankers.registry import reranker_registry
 from core.retrieval import retriever_registry
-from di.providers import get_preset_service
+from di.providers import get_config, get_preset_service
 from fastapi import APIRouter, Depends, Response, status
 
 router = APIRouter(dependencies=[Depends(require_admin)])
@@ -32,7 +32,7 @@ def _registered_or_default(registered: list[str], defaults: list[str]) -> list[s
 
 
 @router.get("/options", response_model=PresetOptionsResponse)
-async def get_preset_options():
+async def get_preset_options(config=Depends(get_config)):
     """Return available preset strategy choices."""
     return PresetOptionsResponse(
         chunking_strategies=chunking_registry.list_registered(),
@@ -42,6 +42,7 @@ async def get_preset_options():
             reranker_registry.list_registered(),
             _DEFAULT_RERANKER_PROVIDERS,
         ),
+        default_top_n=config.reranker.top_k,
     )
 
 

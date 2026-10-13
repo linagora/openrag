@@ -373,7 +373,7 @@ ray:
     registry: "ghcr.io"
     repository: "linagora/openrag-ray"
     # Pin to a release tag (ideally a digest) for reproducible deploys.
-    tag: "v2.3.0"
+    tag: "v2.3.1"
   resources:
     head:
       requests:
@@ -773,7 +773,7 @@ adminUi:
     repository: "linagoraai/openrag-admin-ui"
     # Pin to a release tag (ideally a digest) for reproducible deploys. Must be a
     # build from infra/docker/ui.Dockerfile (nginx-unprivileged, listens :8080).
-    tag: "v2.3.0"
+    tag: "v2.3.1"
     pullPolicy: IfNotPresent
   replicaCount: 1
   service:
@@ -830,7 +830,7 @@ openrag:
     registry: ""
     repository: "linagoraai/openrag"
     # Pin to a release tag (ideally a digest) for reproducible deploys.
-    tag: "v2.3.0"
+    tag: "v2.3.1"
     pullPolicy: IfNotPresent
   service:
     type: ClusterIP
@@ -1133,6 +1133,12 @@ env:
     PDFLOADER: "PyMuPDFLoader"
     XDG_CACHE_HOME: "/app/model_weights"
     MARKER_MAX_TASKS_PER_CHILD: "10"
+    # Ceiling (MiB) on what one Marker child may allocate, so an oversized parse
+    # raises MemoryError in that child instead of OOM-killing the pod. Left unset
+    # (off) on purpose: it bounds the child's whole memory, torch included, so a
+    # value below its baseline fails every parse. The worker logs the baseline at
+    # startup — measure there first, then set this well above it.
+    # MARKER_PARSE_MEMORY_LIMIT_MB: "6144"
     MARKER_MAX_PROCESSES: "15"
     MARKER_POOL_SIZE: "3"
     MARKER_NUM_GPUS: "0.6"

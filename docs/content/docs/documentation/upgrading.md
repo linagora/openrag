@@ -516,6 +516,19 @@ The dry run prints the collection's current version:
   (the dry run then says it is already up to date) or by a development build;
   for the latter, see [If you ran a development build](#if-you-ran-a-development-build).
 
+To size the maintenance window, take the number of rows from the dry run's
+``Splitting `vector` of '<collection>' (N rows, dim=…)`` line. The tested
+collection migrated 13,805 rows in 25 seconds. Assuming the duration grows
+linearly with the number of rows:
+
+```text
+duration (seconds) ≈ N × 25 / 13,805 ≈ N / 550
+```
+
+That is about 5 minutes for 150,000 rows and 30 minutes for 1,000,000. Treat it
+as an order of magnitude: it comes from a single run, and the hardware Milvus
+runs on and the vector dimension change it.
+
 Check that the plan routes every partition to an embedder field, and review any
 `row(s) belong to partitions that do not exist in Postgres` warning: those rows
 lose their vector. Then apply it:
@@ -579,6 +592,9 @@ once it reaches the number of rows the migration copied into that field; the
 migration logs both numbers (`N row(s) indexed, M copied`). For example, the
 tested collection reported 13,805 indexed rows, with `total_rows` 27,610 and
 13,805 pending: complete.
+The old copies also take disk and memory until you
+[compact the collection](#after-the-upgrade-compact-the-milvus-collection), once
+traffic is back.
 
 Then let traffic back in.
 
@@ -594,6 +610,8 @@ kubectl delete pvc -n "$NS" "$FULLNAME-logs"
 
 Logs now go to stderr only; see [Logs with Loki](/openrag/documentation/loki_logs/)
 to collect them.
+
+Then [compact the Milvus collection](#after-the-upgrade-compact-the-milvus-collection).
 
 ### Rolling back a Kubernetes upgrade
 
@@ -833,6 +851,19 @@ The dry run prints the collection's current version:
   (the dry run then says it is already up to date) or by a development build;
   for the latter, see [If you ran a development build](#if-you-ran-a-development-build).
 
+To size the maintenance window, take the number of rows from the dry run's
+``Splitting `vector` of '<collection>' (N rows, dim=…)`` line. The tested
+collection migrated 13,805 rows in 25 seconds. Assuming the duration grows
+linearly with the number of rows:
+
+```text
+duration (seconds) ≈ N × 25 / 13,805 ≈ N / 550
+```
+
+That is about 5 minutes for 150,000 rows and 30 minutes for 1,000,000. Treat it
+as an order of magnitude: it comes from a single run, and the hardware Milvus
+runs on and the vector dimension change it.
+
 Check that the plan routes every partition to an embedder field, and review any
 `row(s) belong to partitions that do not exist in Postgres` warning: those rows
 lose their vector. Then apply it:
@@ -881,6 +912,9 @@ once it reaches the number of rows the migration copied into that field; the
 migration logs both numbers (`N row(s) indexed, M copied`). For example, the
 tested collection reported 13,805 indexed rows, with `total_rows` 27,610 and
 13,805 pending: complete.
+The old copies also take disk and memory until you
+[compact the collection](#after-the-upgrade-compact-the-milvus-collection), once
+traffic is back.
 
 Then let traffic back in.
 
@@ -891,6 +925,8 @@ Then let traffic back in.
 - On a CPU host, once you no longer need to roll back, the locally built
   `openrag-vllm-openai-cpu` image: `docker image rm openrag-vllm-openai-cpu`. A
   rollback to 2.2.x would otherwise rebuild it from `extern/vllm`.
+- The old copies of the Milvus rows:
+  [compact the collection](#after-the-upgrade-compact-the-milvus-collection).
 
 ### Rolling back a Compose upgrade
 
@@ -957,3 +993,164 @@ restored `.env` to use the new password: the database still has it.
 Files indexed after the upgrade are kept. The chunk metadata the upgrade
 rewrote is not restored: integers above 2^53 stay rounded and section IDs stay
 folded. To recover it, roll back from the backups instead.
+
+## After the upgrade: compact the Milvus collection
+
+Run this once on Kubernetes or Docker Compose, after the upgrade, at a quiet
+time. Searches and uploads keep working while it runs.
+
+The version 3 migration rewrites every chunk, and Milvus keeps the old 2.2.x
+copies, marked deleted. Searches skip them, so answers are correct, but Milvus
+does not remove them on its own:
+
+- the collection holds about twice as many rows as it serves, on disk and in
+  query-node memory;
+- the old segments keep the data of the dropped `vector` field;
+- the index on the `vector_<embedder>` field stays `InProgress`.
+
+A plain compaction does not remove them. The old segments have no value for the
+new field, so Milvus never builds its index on them, and by default
+(`dataCoord.compaction.indexBasedCompaction`) Milvus only compacts segments whose
+indexes are built. Turn that setting off for one compaction, then back on.
+Milvus reads it from etcd, under `<etcd.rootPath>/config/`, without a
+restart.
+
+Set these variables, with the block for your deployment only: both set `RUN`,
+`ETCD` and `CONFIG`.
+
+With Docker Compose, from `infra/compose`:
+
+```bash
+# bash; in zsh, see the note at the top of this page
+DC="docker compose"   # add -p <project>, your -f overlays, and --profile cpu on a CPU host
+SVC=openrag           # openrag-cpu on a CPU host
+RUN="$DC exec $SVC"
+ETCD="$DC exec -T etcd etcdctl"
+CONFIG=by-dev/config  # <Milvus's etcd.rootPath>/config; the root path is by-dev unless you changed it
+```
+
+On Kubernetes:
+
+```bash
+NS=openrag            # the release namespace
+FULLNAME=openrag      # fullnameOverride; `kubectl get deploy -n $NS` shows it as <FULLNAME>-openrag
+ETCD_POD=<etcd pod>   # one of the etcd pods Milvus uses; `kubectl get pod -n $NS | grep etcd` lists them
+RUN="kubectl exec -n $NS deploy/$FULLNAME-openrag --"
+ETCD="kubectl exec -n $NS $ETCD_POD -- etcdctl"
+CONFIG=by-dev/config  # <Milvus's etcd.rootPath>/config; the root path is by-dev unless you changed it
+```
+
+And this check, which reads the collection from OpenRAG's configuration:
+
+```bash
+CHECK='
+from core.config import load_config
+from pymilvus import MilvusClient
+vdb = load_config().vectordb
+name = vdb.collection_name
+c = MilvusClient(uri=f"http://{vdb.host}:{vdb.port}")
+print("live rows:", c.query(name, filter="", output_fields=["count(*)"])[0]["count(*)"])
+s = c.get_collection_stats(name)
+print("physical rows:", s["row_count"])
+print("current-schema segments:", s.get("schema_version_consistent_segments"), "/", s.get("schema_version_total_segments"))
+for field in c.describe_collection(name)["fields"]:
+    if field["name"].startswith("vector_"):
+        for idx in c.list_indexes(name, field_name=field["name"]):
+            i = c.describe_index(name, idx)
+            print("index", idx, i["state"], "pending", i["pending_index_rows"])
+'
+```
+
+1. Run the check and keep its output:
+
+   ```bash
+   $RUN uv run --no-dev --no-sync python -c "$CHECK"
+   ```
+
+   Right after the migration, `physical rows` is about twice `live rows`, and the
+   index is `InProgress`. If `physical rows` is already close to `live rows`,
+   with the index `Finished`, there is nothing to do.
+2. List the overrides of this setting already in etcd:
+
+   ```bash
+   KEY=$CONFIG/datacoord.compaction.indexbasedcompaction
+   $ETCD get --prefix "$CONFIG/" --keys-only | grep -i indexbasedcompaction
+   ```
+
+   Milvus accepts the same setting under several spellings of its key. If this
+   prints a key other than `$KEY`, stop and ask whoever set it: step 4 restores
+   only `$KEY`, so the procedure would leave both in place. Otherwise, save the
+   current value of `$KEY`, then turn index-based compaction off:
+
+   ```bash
+   PREVIOUS=$($ETCD get "$KEY" --print-value-only)
+   echo "previous value: ${PREVIOUS:-none}"
+   $ETCD put "$KEY" false
+   ```
+
+   Note the previous value: step 4 needs it if you run it from another shell.
+3. Compact the collection:
+
+   ```bash
+   $RUN uv run --no-dev --no-sync python -c '
+   import sys, time
+   from core.config import load_config
+   from pymilvus import MilvusClient
+   TIMEOUT = 3600  # seconds; raise it for a large collection
+   vdb = load_config().vectordb
+   c = MilvusClient(uri=f"http://{vdb.host}:{vdb.port}")
+   deadline = time.monotonic() + TIMEOUT
+   def left():  # each call to Milvus may wait only until the deadline
+       seconds = deadline - time.monotonic()
+       if seconds <= 0:
+           sys.exit(f"compaction: still executing after {TIMEOUT} s")
+       return seconds
+   job = c.compact(vdb.collection_name, timeout=left())
+   print("job", job, flush=True)
+   while (state := c.get_compaction_state(job, timeout=left())) != "Completed":
+       if state != "Executing":
+           sys.exit(f"compaction {job}: unexpected state {state}")
+       print(state, flush=True)
+       time.sleep(min(15, left()))
+   print("done")
+   '
+   ```
+
+   It prints the job ID, then `Executing` every 15 seconds while the job runs.
+   It prints `done` once Milvus reports the job `Completed`, and stops with an
+   error on any state other than `Executing`, such as `UndefiedState`, or when
+   the job, or a call to Milvus that does not answer, outlasts `TIMEOUT`. Go to
+   step 4 either way. After a timeout, the compaction keeps running in Milvus.
+   `Completed` only means that no task of the job is still running (Milvus also
+   reports it for a job ID it does not know): step 5 checks what the compaction
+   did.
+4. Restore the previous value, even if step 3 failed:
+
+   ```bash
+   if [ -n "$PREVIOUS" ]; then $ETCD put "$KEY" "$PREVIOUS"; else $ETCD del "$KEY"; fi
+   $ETCD get --prefix "$CONFIG/" | grep -i -A1 indexbasedcompaction
+   ```
+
+   The `get` prints the previous key and value, or nothing if there was none.
+
+5. Wait a minute, then run the check again. The compaction worked when
+   `physical rows` is close to `live rows`, the two segment counts are equal,
+   and the index is `Finished` with `pending 0`; the index can take a few more
+   minutes. `live rows` must not drop. It can be slightly higher than
+   `physical rows` while new uploads are still in memory.
+
+   If `physical rows` has barely changed, Milvus did not apply the setting: turn
+   it off again with `$ETCD put "$KEY" false` alone, not all of step 2, which
+   would save `false` as the previous value. Then restart Milvus
+   (`$DC restart milvus`, or on Kubernetes the Milvus coordinator that
+   `kubectl get deploy -n "$NS" | grep milvus` lists), wait until it is ready,
+   and repeat steps 3 to 5.
+
+Milvus deletes the old files from its object storage after
+`dataCoord.gc.dropTolerance`, 3 hours by default, so the disk space comes back a
+few hours later. With Docker Compose, `$DC exec -T minio du -sh /minio_data`
+shows how much MinIO holds. Do not delete files from MinIO or the bucket
+yourself.
+
+On one deployment, this brought 291,628 physical rows down to 144,474 for
+144,683 live rows, with the index `Finished` and 0 pending.

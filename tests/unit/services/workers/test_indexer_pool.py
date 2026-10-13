@@ -1637,7 +1637,8 @@ def test_indexer_pool_wires_contextualizer_factory_and_worker_namespace(monkeypa
             batch_size=32,
             embed_concurrency=2,
         ),
-        loader=SimpleNamespace(parse_timeout=3600, save_uploaded_files=True),
+        loader=SimpleNamespace(parse_timeout=3600, save_uploaded_files=True, save_markdown=False),
+        paths=SimpleNamespace(data_dir="/tmp/data"),
         semaphore=SimpleNamespace(vlm_semaphore=7),
         vectordb=SimpleNamespace(collection_name="vdb_test"),
         rdb=RDBConfig(),
@@ -1732,7 +1733,8 @@ def test_indexer_pool_loads_caption_prompt_without_global_vlm_default(monkeypatc
             batch_size=32,
             embed_concurrency=2,
         ),
-        loader=SimpleNamespace(parse_timeout=3600, save_uploaded_files=True),
+        loader=SimpleNamespace(parse_timeout=3600, save_uploaded_files=True, save_markdown=False),
+        paths=SimpleNamespace(data_dir="/tmp/data"),
         semaphore=SimpleNamespace(vlm_semaphore=10),
         vectordb=SimpleNamespace(collection_name="vdb_test"),
         rdb=RDBConfig(),
@@ -2289,6 +2291,41 @@ async def test_actor_purges_upload_on_worker_failure(tmp_path) -> None:
 
     # The finally runs on failure too — don't leave the client's file behind.
     assert not path.exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error", [None, RuntimeError("boom")])
+async def test_actor_keeps_markdown_copy_when_purging_upload(tmp_path, error) -> None:
+    # SAVE_MARKDOWN is independent of save_uploaded_files: inspecting parser
+    # output must not require keeping every raw upload.
+    path = tmp_path / "doc.pdf"
+    path.write_bytes(b"x")
+    sidecar = tmp_path / "doc.pdf.md"
+    sidecar.write_text("parsed", encoding="utf-8")
+    actor = _bare_worker_actor(save_uploaded_files=False, worker=_RecordingWorker(error=error))
+
+    if error is None:
+        await actor.process_file(task_id="t", path=str(path), metadata={"file_id": "f"}, partition="p")
+    else:
+        with pytest.raises(RuntimeError, match="boom"):
+            await actor.process_file(task_id="t", path=str(path), metadata={"file_id": "f"}, partition="p")
+
+    assert not path.exists()
+    assert sidecar.read_text(encoding="utf-8") == "parsed"
+
+
+@pytest.mark.asyncio
+async def test_actor_keeps_markdown_copy_when_saving(tmp_path) -> None:
+    path = tmp_path / "doc.pdf"
+    path.write_bytes(b"x")
+    sidecar = tmp_path / "doc.pdf.md"
+    sidecar.write_text("parsed", encoding="utf-8")
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=_RecordingWorker())
+
+    await actor.process_file(task_id="t", path=str(path), metadata={"file_id": "f"}, partition="p")
+
+    assert path.exists()
+    assert sidecar.read_text(encoding="utf-8") == "parsed"
 
 
 @pytest.mark.asyncio

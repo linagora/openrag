@@ -15,7 +15,7 @@ from .base import ConfigMixin
 
 class _BaseRerankerConfig(ConfigMixin):
     model_name: str = "Alibaba-NLP/gte-multilingual-reranker-base"
-    top_k: int = 10
+    top_k: int = Field(default=10, gt=0)  # RERANKER_TOP_K: top_n of presets that leave it unset
     api_key: str = Field(default="EMPTY", repr=False)
     timeout: float = 60.0
     semaphore: int = 5

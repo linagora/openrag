@@ -28,6 +28,21 @@ logger = logging.getLogger(__name__)
 
 os.environ.setdefault("DOTNET_SYSTEM_GLOBALIZATION_INVARIANT", "1")
 
+# The free edition of Spire.Doc prepends this notice to every converted file.
+_SPIRE_WATERMARK = "Evaluation Warning: The document was created with Spire.Doc for Python."
+
+
+def _strip_watermark(text: str) -> str:
+    """Remove the Spire.Doc free-edition evaluation watermark from *text*.
+
+    The library inserts the warning as a standalone line at the start of
+    every converted document. Strip it wherever it appears as a line so it
+    cannot pollute indexed chunks.
+    """
+    lines = text.splitlines(keepends=True)
+    filtered = [ln for ln in lines if ln.rstrip("\r\n") != _SPIRE_WATERMARK]
+    return "".join(filtered)
+
 
 @parser_registry.register("doc")
 class DocParser(DocumentParser):
@@ -92,9 +107,21 @@ class DocParser(DocumentParser):
                         "filename": f"{Path(document.filename).stem}.docx",
                     }
                 )
-                return await self._docx.parse(docx_doc)
+                processed = await self._docx.parse(docx_doc)
+                cleaned_blocks = [
+                    block.model_copy(update={"text": _strip_watermark(block.text)})
+                    for block in processed.text_blocks
+                    if _strip_watermark(block.text).strip()
+                ]
+                has_content = bool(cleaned_blocks) or bool(processed.images)
+                return processed.model_copy(
+                    update={
+                        "text_blocks": cleaned_blocks,
+                        **({"page_count": 0} if not has_content else {}),
+                    }
+                )
 
-            text = (fallback_text or "").strip()
+            text = _strip_watermark(fallback_text or "").strip()
             text_blocks = [TextBlock(text=text, page_number=1)] if text else []
             return ProcessedDocument(
                 document_id=document.id,

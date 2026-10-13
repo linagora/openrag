@@ -175,6 +175,26 @@ class AmbiguousWorkspaceError(ValidationError):
         )
 
 
+class ContextWindowExceededError(ValidationError):
+    """The answer instructions and the request alone don't fit in the answering model's context window.
+
+    The router's preflight counts the caller's messages and the output budget,
+    not the instructions the answer prompt adds; this catches what that leaves,
+    instead of sending the provider a request it would reject.
+    """
+
+    def __init__(self, prompt_tokens: int, max_prompt_tokens: int, **kwargs):
+        super().__init__(
+            f"Request exceeds the answering model's context window: the instructions and the request take "
+            f"{prompt_tokens} tokens, and {max_prompt_tokens} are left once the requested output is reserved.",
+            status_code=413,
+            code="CONTEXT_WINDOW_EXCEEDED",
+            prompt_tokens=prompt_tokens,
+            max_prompt_tokens=max_prompt_tokens,
+            **kwargs,
+        )
+
+
 # ---------------------------------------------------------------------------
 # Not found
 # ---------------------------------------------------------------------------

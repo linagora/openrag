@@ -24,8 +24,12 @@ leak across this boundary.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from typing import TYPE_CHECKING
 
 from core.models.chunk import Chunk
+
+if TYPE_CHECKING:
+    from core.retrieval.trace import RetrievalTraceBuilder
 
 
 def file_id_restriction(filter_params: dict | None) -> list[str] | None:
@@ -58,6 +62,7 @@ class RetrievalSearcher(ABC):
         filter_params: dict | None = None,
         similarity_threshold: float = 0.0,
         with_surrounding_chunks: bool = True,
+        trace: RetrievalTraceBuilder | None = None,
     ) -> list[Chunk]:
         """Single-query similarity search."""
         ...
@@ -72,6 +77,7 @@ class RetrievalSearcher(ABC):
         filter_params: dict | None = None,
         similarity_threshold: float = 0.0,
         with_surrounding_chunks: bool = True,
+        trace: RetrievalTraceBuilder | None = None,
     ) -> list[Chunk]:
         """Run one similarity search per query, return the merged result."""
         ...

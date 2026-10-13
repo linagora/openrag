@@ -96,6 +96,14 @@
       "error": null
     },
     {
+      "name": "post_expansion",
+      "status": "not_run",
+      "duration_seconds": null,
+      "candidate_count": 0,
+      "candidates": [],
+      "error": null
+    },
+    {
       "name": "final",
       "status": "not_run",
       "duration_seconds": null,

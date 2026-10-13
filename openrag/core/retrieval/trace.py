@@ -508,11 +508,14 @@ class RetrievalTraceBuilder:
             self.diagnostics.release_candidates(len(previous.candidates))
         visible_count = min(len(candidates), MAX_TRACE_CANDIDATES_PER_STAGE)
         retained_count = self.diagnostics.claim_candidates(visible_count)
+        reported_candidate_count = len(candidates) if candidate_count is None else candidate_count
+        if reported_candidate_count > retained_count:
+            self.diagnostics.candidates_truncated = True
         self.stages[name] = TraceStage(
             name=name,
             status=status,
             duration_seconds=duration_seconds,
-            candidate_count=len(candidates) if candidate_count is None else candidate_count,
+            candidate_count=reported_candidate_count,
             candidates=list(candidates[:retained_count]),
             error=REDACTED_ERROR_MESSAGE if error is not None else None,
         )
@@ -554,3 +557,20 @@ class RetrievalTraceBuilder:
             trace["candidates_truncated"] = True
         public = safe_public_value(trace)
         return public  # type: ignore[return-value]
+
+
+def merge_query_traces(parent: RetrievalTraceBuilder, children: Sequence[RetrievalTraceBuilder]) -> None:
+    """Attach fan-out traces and retain max durations without copying candidates."""
+    merge_child_traces(parent, children)
+    for stage_name in TRACE_STAGE_NAMES:
+        durations = [
+            child.stages[stage_name].duration_seconds
+            for child in children
+            if child.stages[stage_name].duration_seconds is not None
+        ]
+        if durations and parent.stages[stage_name].status == "unavailable":
+            parent.stages[stage_name] = parent.stages[stage_name].model_copy(
+                update={"duration_seconds": max(durations)}
+            )
+    for key in sorted({key for child in children for key in child.timings}):
+        parent.timings[key] = max(child.timings[key] for child in children if key in child.timings)

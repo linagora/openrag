@@ -116,7 +116,7 @@ def require_metrics_token(request: Request, server: ServerConfig = Depends(get_m
             return
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=_DISABLED_DETAIL)
     scheme, _, credential = request.headers.get("Authorization", "").partition(" ")
-    if scheme.lower() != "bearer" or not secrets.compare_digest(credential.strip(), expected):
+    if scheme.lower() != "bearer" or not secrets.compare_digest(credential.strip().encode(), expected.encode()):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid metrics token")
 
 

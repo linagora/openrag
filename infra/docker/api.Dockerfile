@@ -63,7 +63,9 @@ COPY openrag/ .
 # Copy assets and config (prompt templates ship inside the package under openrag/prompts/)
 COPY scripts/ /app/scripts/
 COPY conf/ /app/conf/
-ENV PYTHONPATH=/app/openrag/
+ARG OPENRAG_COMMIT
+ENV PYTHONPATH=/app/openrag/ \
+    OPENRAG_COMMIT=${OPENRAG_COMMIT}
 ENV APP_iPORT=${APP_iPORT:-8080}
 
 # --- Run as an unprivileged, OpenShift-compatible user ---------------------
