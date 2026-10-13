@@ -18,6 +18,7 @@ from core.models.catalog import (
     TERMINAL_TASK_STATES,
     DocumentStatus,
     normalize_degraded_stages,
+    normalize_stage_timings,
 )
 from core.observability.ray_metrics import (
     initialize_ingest_counters,
@@ -284,6 +285,14 @@ class TaskInfo:
     submission_started_at: float | None = None
 
 
+def _record_stage_timings(info: TaskInfo, value: Any) -> None:
+    timings = normalize_stage_timings(value)
+    if timings:
+        info.details["stage_timings"] = timings
+    else:
+        info.details.pop("stage_timings", None)
+
+
 def _object_ref_is_ready(object_ref: Any) -> bool:
     ref = object_ref.get("ref") if isinstance(object_ref, dict) else object_ref
     if ref is None:
@@ -477,6 +486,8 @@ class TaskStateManager:
         }
         if "degraded_stages" in previous_details:
             info.details["degraded_stages"] = normalize_degraded_stages(previous_details["degraded_stages"])
+        if "stage_timings" in previous_details:
+            _record_stage_timings(info, previous_details["stage_timings"])
         self.user_index.setdefault(user_id, set()).add(task_id)
 
     def _prune_expired_file_delete_fences(self) -> None:
@@ -682,6 +693,50 @@ class TaskStateManager:
             return True
 
     @ray.method(concurrency_group="set")
+    async def set_failed_with_reason_and_stage_timings_if_not_cancelled(
+        self,
+        task_id: str,
+        tb_str: str,
+        error_reason: str,
+        stage_timings: dict[str, float],
+    ) -> bool:
+        """Atomically record failure reason and any stage timings already measured."""
+        with self.lock:
+            info = self.tasks.get(task_id)
+            if info is not None and info.state == "CANCELLED":
+                return False
+            if info is not None:
+                previous = info.state
+                info.state = "FAILED"
+                info.error = _truncate_error(tb_str)
+                info.error_reason = error_reason
+                _record_stage_timings(info, stage_timings)
+                self._settle_task_locked(task_id, info)
+                self._count_terminal(previous, "FAILED")
+            return True
+
+    @ray.method(concurrency_group="set")
+    async def set_failed_with_stage_timings_if_not_cancelled(
+        self,
+        task_id: str,
+        tb_str: str,
+        stage_timings: dict[str, float],
+    ) -> bool:
+        """Atomically record a failure and any stage timings already measured."""
+        with self.lock:
+            info = self.tasks.get(task_id)
+            if info is not None and info.state == "CANCELLED":
+                return False
+            if info is not None:
+                previous = info.state
+                info.state = "FAILED"
+                info.error = _truncate_error(tb_str)
+                _record_stage_timings(info, stage_timings)
+                self._settle_task_locked(task_id, info)
+                self._count_terminal(previous, "FAILED")
+            return True
+
+    @ray.method(concurrency_group="set")
     async def set_cancelled_if_active(self, task_id: str) -> bool:
         with self.lock:
             info = self.tasks.get(task_id)
@@ -780,6 +835,39 @@ class TaskStateManager:
             if info.state not in CANCELLABLE_INDEXING_STATES:
                 return "conflict"
             info.details["degraded_stages"] = normalized
+            previous = info.state
+            info.state = "COMPLETED"
+            self._settle_task_locked(task_id, info)
+            self._count_terminal(previous, "COMPLETED")
+            return "completed"
+
+    @ray.method(concurrency_group="set")
+    async def complete_with_degraded_stages_and_timings(
+        self,
+        task_id: str,
+        stages: list[str],
+        stage_timings: dict[str, float],
+    ) -> str:
+        """Atomically settle a task with its degradation and measured durations."""
+        normalized_stages = normalize_degraded_stages(stages)
+        normalized_timings = normalize_stage_timings(stage_timings)
+        with self.lock:
+            info = self.tasks.get(task_id)
+            if info is None:
+                return "missing"
+            if info.state == "COMPLETED":
+                if (
+                    normalize_degraded_stages(info.details.get("degraded_stages")) == normalized_stages
+                    and normalize_stage_timings(info.details.get("stage_timings")) == normalized_timings
+                ):
+                    return "completed"
+                return "conflict"
+            if info.state == "CANCELLED":
+                return "cancelled"
+            if info.state not in CANCELLABLE_INDEXING_STATES:
+                return "conflict"
+            info.details["degraded_stages"] = normalized_stages
+            _record_stage_timings(info, normalized_timings)
             previous = info.state
             info.state = "COMPLETED"
             self._settle_task_locked(task_id, info)
