@@ -57,6 +57,18 @@ class TestExtractMarkdownFallback:
 
         assert pages == ["hello world"]
         assert mock.call_count == 1
+        
+    def test_retries_once_against_cleaned_copy_on_runtime_error_and_falls_back_to_plain_text_when_markdown_is_nearly_empty(self):
+            raw = self._pdf_with_text("hello world this is a longer sentence to exceed the threshold")
+            # Simulate pymupdf4llm returning nearly nothing
+            good_chunks = [{"text": "x"}]
+    
+            with patch(_TO_MARKDOWN, side_effect=[RuntimeError("code=4: no font file for digest"), good_chunks]) as mock:
+                pages, images = _extract_markdown(raw, "broken.pdf")
+    
+            assert pages == ["x"]
+            assert images == []
+            assert mock.call_count == 2
 
 
 class TestPyMuPDFParserRecovery:
