@@ -114,6 +114,7 @@ def _svc(
     partition_service: FakePartitionService | None = None,
     membership_repo: FakeMembershipRepo | None = None,
     job_service: FakeJobService | None = None,
+    seed_user_ids: frozenset[str] = frozenset(),
 ) -> UserService:
     return UserService(
         user_repo=repo,
@@ -122,6 +123,7 @@ def _svc(
         partition_service=partition_service or FakePartitionService(),
         membership_repo=membership_repo or FakeMembershipRepo(),
         job_service=job_service or FakeJobService(),
+        seed_user_ids=seed_user_ids,
     )
 
 
@@ -205,6 +207,7 @@ async def test_delete_user_missing_raises_and_no_repo_call():
 @pytest.mark.asyncio
 async def test_delete_user_existing_no_owned_partitions():
     repo = FakeUserRepo(existing={5})
+    repo._users[5] = User(id=5, display_name="u")
     ps = FakePartitionService()
     await _svc(repo, partition_service=ps).delete_user(5)
     assert repo.deleted == [5]
@@ -214,6 +217,7 @@ async def test_delete_user_existing_no_owned_partitions():
 @pytest.mark.asyncio
 async def test_delete_user_cascades_owned_partitions_first():
     repo = FakeUserRepo(existing={5})
+    repo._users[5] = User(id=5, display_name="u")
     ps = FakePartitionService()
     mem = FakeMembershipRepo(
         {
@@ -226,6 +230,47 @@ async def test_delete_user_cascades_owned_partitions_first():
     await _svc(repo, partition_service=ps, membership_repo=mem).delete_user(5)
     assert ps.deleted == ["p_owned"]  # only owner-role partitions
     assert repo.deleted == [5]
+
+
+@pytest.mark.asyncio
+async def test_delete_user_refuses_a_managed_account_still_listed_in_seed_users():
+    """Deleting it would cascade its partitions, then the next startup would
+    recreate the entry under a new id (#1153)."""
+    repo = FakeUserRepo(existing={2})
+    repo._users[2] = User(id=2, display_name="svc", external_user_id="svc-a", managed_by_config=True)
+    ps = FakePartitionService()
+    mem = FakeMembershipRepo({2: [{"partition": "p_owned", "role": "owner"}]})
+    svc = _svc(repo, partition_service=ps, membership_repo=mem, seed_user_ids=frozenset({"svc-a"}))
+
+    with pytest.raises(ConflictError, match="remove its entry there"):
+        await svc.delete_user(2)
+
+    assert ps.deleted == []
+    assert repo.deleted == []
+
+
+@pytest.mark.asyncio
+async def test_delete_user_accepts_a_managed_account_removed_from_seed_users():
+    repo = FakeUserRepo(existing={2})
+    repo._users[2] = User(id=2, display_name="svc", external_user_id="svc-a", managed_by_config=True)
+    ps = FakePartitionService()
+    mem = FakeMembershipRepo({2: [{"partition": "p_owned", "role": "owner"}]})
+
+    await _svc(repo, partition_service=ps, membership_repo=mem, seed_user_ids=frozenset({"svc-b"})).delete_user(2)
+
+    assert ps.deleted == ["p_owned"]
+    assert repo.deleted == [2]
+
+
+@pytest.mark.asyncio
+async def test_delete_user_accepts_an_unmanaged_account_matching_a_seed_entry():
+    """Seeding never takes over an unmanaged row, so its deletion is not undone."""
+    repo = FakeUserRepo(existing={2})
+    repo._users[2] = User(id=2, display_name="svc", external_user_id="svc-a")
+
+    await _svc(repo, seed_user_ids=frozenset({"svc-a"})).delete_user(2)
+
+    assert repo.deleted == [2]
 
 
 @pytest.mark.asyncio

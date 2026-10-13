@@ -456,6 +456,7 @@ class ServiceContainer:
                 partition_service=self.partition_service,
                 membership_repo=self.membership_repo,
                 job_service=self.job_service,
+                seed_user_ids=frozenset(seed.external_user_id for seed in settings.auth.seed_users),
             )
         return self._user_service
 
