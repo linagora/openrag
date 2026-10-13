@@ -318,10 +318,12 @@ class QueryService:
         """How many sources this request's prompt takes: the retrieval preset's ``top_n``.
 
         ``reranker.top_k`` when the preset leaves it unset. Retrieval already
-        cuts each partition to its own ``top_n``; this matters for a request
-        over several partitions, or ``"all"``, whose fused results can hold up
-        to the *sum* of them. It takes the largest ``top_n`` among them, so
-        about one partition's worth (in RRF order) reaches the prompt.
+        cuts each group of partitions it retrieves together (one embedder, the
+        same retrieval settings) to the group's ``top_n``; this matters for a
+        request whose partitions, or ``"all"``, span several groups, whose fused
+        results can hold up to the *sum* of them. It takes the largest ``top_n``
+        among the partitions, so about one group's worth (in RRF order) reaches
+        the prompt.
         """
         default = self._config.reranker.top_k
         configs = self._config.partitions
