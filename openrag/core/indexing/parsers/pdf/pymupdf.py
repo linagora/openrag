@@ -81,7 +81,8 @@ def _pages_with_fallback(doc: pymupdf.Document, chunks: list[dict], filename: st
             pages.append(plain_text)
         else:
             pages.append(md_text)
-    logger.bind(
+    if len(fallen_back_pages)>0:
+        logger.bind(
                     filename=filename,
                     fallen_back_pages=fallen_back_pages,
                     fallen_back_pages_count=len(fallen_back_pages)
