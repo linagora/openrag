@@ -260,6 +260,7 @@ class RetrieverPipeline:
             selected = chunks[:limit]
             if not self.expansion_enabled:
                 selected = [chunk for chunk in selected if has_csv_row_siblings([chunk])]
+            preserve_ranked_candidates = has_csv_row_siblings(selected)
             expansion_seed_ids = {str(_chunk_key(chunk)) for chunk in selected}
             head = copy.deepcopy(selected)
             expanded = await self.retriever.expand_search_results(
@@ -269,11 +270,13 @@ class RetrieverPipeline:
                 expansion_applied = True
                 expanded_chunks = list(expanded)
                 expanded_candidate_ids = {str(_chunk_key(chunk)) for chunk in expanded_chunks}
-                # Expansion supplements the ranked list; it must not discard
-                # non-seed documents merely because a CSV row needed siblings.
-                expanded_chunks.extend(
-                    chunk for chunk in chunks if str(_chunk_key(chunk)) not in expanded_candidate_ids
-                )
+                if preserve_ranked_candidates:
+                    # Automatic CSV sibling expansion supplements the ranked
+                    # list. Regular document expansion keeps develop's
+                    # replacement behavior.
+                    expanded_chunks.extend(
+                        chunk for chunk in chunks if str(_chunk_key(chunk)) not in expanded_candidate_ids
+                    )
                 expanded_candidate_ids = {str(_chunk_key(chunk)) for chunk in expanded_chunks}
                 chunks = expanded_chunks
                 if self.reranker_enabled:

@@ -11,7 +11,7 @@ from pathlib import Path
 from core.indexing.parsers.document_parser import DocumentParser
 from core.indexing.parsers.registry import parser_registry
 from core.models.document import Document, ProcessedDocument, TextBlock
-from core.utils.exceptions import ConfigError
+from core.utils.exceptions import ConfigError, NoIndexableContentError
 from core.utils.logging import get_logger
 
 logger = get_logger()
@@ -173,6 +173,7 @@ class CsvParser(DocumentParser):
             batches_emitted = 0
             batch_first_record = record_number + 1
             batch_last_record = record_number
+            batch_record_numbers: list[int] = []
 
             while True:
                 record_number += 1
@@ -188,6 +189,11 @@ class CsvParser(DocumentParser):
                     continue
                 if not row:
                     continue
+                if len(row) < len(headers):
+                    row.extend([""] * (len(headers) - len(row)))
+                elif len(row) > len(headers):
+                    while len(row) > len(headers) and row[-1] == "":
+                        row.pop()
                 if len(row) != len(headers):
                     bad_rows += 1
                     logger.bind(
@@ -202,6 +208,7 @@ class CsvParser(DocumentParser):
                 lines.append(markdown_row(row))
                 rows_in_batch += 1
                 batch_last_record = record_number
+                batch_record_numbers.append(record_number)
 
                 if rows_in_batch == self.batch_size:
                     yield TextBlock(
@@ -211,6 +218,7 @@ class CsvParser(DocumentParser):
                             "csv_columns": list(headers),
                             "csv_row_start": batch_first_record,
                             "csv_row_end": batch_last_record,
+                            "csv_row_numbers": list(batch_record_numbers),
                             "csv_bad_rows": bad_rows,
                         },
                     )
@@ -218,8 +226,9 @@ class CsvParser(DocumentParser):
                     lines = header_lines.copy()
                     rows_in_batch = 0
                     batch_first_record = record_number + 1
+                    batch_record_numbers = []
 
-            if rows_in_batch > 0 or batches_emitted == 0:
+            if rows_in_batch > 0:
                 yield TextBlock(
                     text="\n".join(lines),
                     block_type="table",
@@ -227,8 +236,14 @@ class CsvParser(DocumentParser):
                         "csv_columns": list(headers),
                         "csv_row_start": batch_first_record,
                         "csv_row_end": batch_last_record,
+                        "csv_row_numbers": list(batch_record_numbers),
                         "csv_bad_rows": bad_rows,
                     },
+                )
+            elif batches_emitted == 0:
+                raise NoIndexableContentError(
+                    "CSV contains a header but no indexable data rows.",
+                    skipped_rows=bad_rows,
                 )
             if bad_rows:
                 logger.bind(skipped_rows=bad_rows).warning("CSV parsing completed with malformed records skipped")

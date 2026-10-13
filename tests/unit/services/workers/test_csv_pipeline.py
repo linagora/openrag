@@ -154,6 +154,18 @@ async def test_batches_reuse_per_file_pipeline_setup(setup_pipeline):
     assert resolved == ["default"]
 
 
+async def test_csv_batches_do_not_overwrite_a_markdown_sidecar(setup_pipeline, tmp_path):
+    pipeline, row, _ = setup_pipeline
+    upload = tmp_path / "people.csv"
+    upload.write_text(row["document"].text, encoding="utf-8")
+    row["document"].source_path = str(upload)
+    pipeline = replace(pipeline, save_markdown=True, data_dir=tmp_path)
+
+    await pipeline.run(row)
+
+    assert not (tmp_path / "people.csv.md").exists()
+
+
 async def test_long_csv_cell_is_stored_as_labelled_continuations(setup_pipeline):
     pipeline, row, _ = setup_pipeline
     note = " ".join(f"word{number}" for number in range(160))
