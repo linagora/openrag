@@ -38,6 +38,7 @@ import gc
 import os
 import pickle
 import re
+import signal
 import threading
 from collections.abc import Callable
 from concurrent.futures import Executor, ProcessPoolExecutor, ThreadPoolExecutor
@@ -94,7 +95,7 @@ def _pool_worker_init(memory_limit_mb: int) -> None:
     """Cap what one parse may allocate, in the child that runs it."""
     global _CHILD_MEMORY_LIMIT_MB
     # The limit actually applied, which is 0 when it was refused and lower
-    # than asked when a hard limit clamped it, so the error names that one.
+    # than asked when an existing limit clamped it, so the error names that one.
     _CHILD_MEMORY_LIMIT_MB = apply_parse_memory_limit(
         memory_limit_mb,
         process="PyMuPDF child",
@@ -137,6 +138,14 @@ def _child_died_message(limit_mb: int) -> str:
         f"PYMUPDF_PARSE_MEMORY_LIMIT_MB={limit_mb} MiB set, that limit is the likeliest cause: "
         "raise it to index this file."
     )
+
+
+def _child_killed_message(signal_number: int) -> str:
+    try:
+        name = signal.Signals(signal_number).name
+    except ValueError:
+        name = f"signal {signal_number}"
+    return f"PyMuPDF's child process was killed by {name} while parsing this PDF."
 
 
 def _survives_pickling(exc: BaseException) -> bool:
@@ -190,14 +199,27 @@ def _retire_executor(executor: Executor) -> None:
     ``shutdown()`` only asks a child to exit once its current parse finishes; a
     cancelled or timed-out parse may never finish, so its child is killed.
     ``_processes`` is private, as in Marker's ``_force_kill_executor``: no public
-    API names the process that runs a given task.
+    API names the process that runs a given task. ``shutdown()`` sets it to
+    ``None``, so a parse still awaiting an executor that was already retired
+    finds nothing left to kill here, rather than an ``AttributeError``.
     """
-    for process in list(getattr(executor, "_processes", {}).values()):
+    for process in list((getattr(executor, "_processes", None) or {}).values()):
         try:
             process.kill()
         except Exception:  # noqa: BLE001 - one unkillable child must not block the rest
             logger.warning("Could not kill a PyMuPDF child process", exc_info=True)
     executor.shutdown(wait=False, cancel_futures=True)
+
+
+def _child_exit_code(executor: Executor) -> int | None:
+    """The exit code of *executor*'s child, or ``None`` while it runs or if unknown.
+
+    Negative for a signal, as ``multiprocessing`` reports it. When a child dies,
+    the pool's thread joins it but keeps it in ``_processes`` (private, see
+    :func:`_retire_executor`), so it is readable until the executor is retired.
+    """
+    processes = list((getattr(executor, "_processes", None) or {}).values())
+    return processes[0].exitcode if processes else None
 
 
 class _ParsePool:
@@ -217,6 +239,8 @@ class _ParsePool:
     def __init__(self, settings: PyMuPDFPoolSettings) -> None:
         self._settings = settings
         self._slots: list[Executor | None] = [None] * max(1, settings.max_workers)
+        self._parses = [0] * len(self._slots)
+        self._closed = False
         self._free: asyncio.Queue[int] | None = None
         self._free_loop: asyncio.AbstractEventLoop | None = None
 
@@ -234,10 +258,16 @@ class _ParsePool:
         return self._free
 
     def _executor(self, slot: int) -> Executor:
+        if self._closed:
+            # A parse that waited for a slot while ``configure_pool`` replaced
+            # this pool: a child built now would belong to no pool, and nothing
+            # would ever stop it.
+            raise RuntimeError("The PyMuPDF parse pool was replaced while this parse waited for it; retry the file.")
         executor = self._slots[slot]
         if executor is None:
             executor = self._build_executor()
             self._slots[slot] = executor
+            self._parses[slot] = 0
         return executor
 
     def _build_executor(self) -> Executor:
@@ -256,7 +286,6 @@ class _ParsePool:
             initializer=_pool_worker_init,
             initargs=(self._settings.memory_limit_mb,),
             mp_context=get_context("spawn"),
-            max_tasks_per_child=self._settings.max_tasks_per_child or None,
         )
 
     def _replace(self, slot: int, executor: Executor) -> None:
@@ -264,14 +293,42 @@ class _ParsePool:
             self._slots[slot] = None
         _retire_executor(executor)
 
+    def _count_parse(self, slot: int, executor: Executor) -> None:
+        """Replace a slot's child once it has run ``max_tasks_per_child`` parses.
+
+        Done here rather than by ``ProcessPoolExecutor(max_tasks_per_child=...)``:
+        that spawns the next child on the executor's own thread, and when the
+        spawn fails the thread dies without marking the executor broken, so the
+        slot's next parse waits for the parse timeout (measured). Built here, the
+        next child starts in ``submit()``, which raises the failure instead.
+        """
+        limit = self._settings.max_tasks_per_child
+        if not self.uses_processes or limit <= 0 or self._slots[slot] is not executor:
+            return
+        self._parses[slot] += 1
+        if self._parses[slot] >= limit:
+            self._replace(slot, executor)
+
     async def run(self, fn: Callable[..., Any], *args: Any) -> Any:
         free = self._free_slots()
         slot = await free.get()
         try:
             executor = self._executor(slot)
             try:
-                return await asyncio.get_running_loop().run_in_executor(executor, fn, *args)
+                parse = asyncio.get_running_loop().run_in_executor(executor, fn, *args)
+            except Exception:
+                # ``submit()`` queues the parse before it starts the child, so a
+                # child that cannot start (no process slots or memory left) leaves
+                # this parse queued for whichever child starts next, ahead of that
+                # child's own file. A fresh executor drops it.
+                if self.uses_processes:
+                    self._replace(slot, executor)
+                raise
+            try:
+                return await parse
             except (BrokenProcessPool, MemoryError, asyncio.CancelledError) as exc:
+                # Read before the executor is retired, which clears it.
+                exit_code = _child_exit_code(executor)
                 # A dead child poisons its executor. A child over the ceiling
                 # survives, but freeing the parse's objects need not bring its
                 # heap back under the limit, so the next file would fail for a
@@ -280,21 +337,41 @@ class _ParsePool:
                 if self.uses_processes:
                     self._replace(slot, executor)
                 limit_mb = self._settings.memory_limit_mb
-                # Measured under a tight ceiling: the child can die receiving the
-                # next file (the pool's own unpickling raises MemoryError outside
-                # any parse code), or send back a MemoryError with no message.
-                if isinstance(exc, BrokenProcessPool) and limit_mb > 0:
-                    raise MemoryError(_child_died_message(limit_mb)) from exc
+                if isinstance(exc, BrokenProcessPool):
+                    if self._closed:
+                        # ``configure_pool`` killed it, and retiring the executor
+                        # cleared the exit code that would name the signal.
+                        raise BrokenProcessPool(
+                            "The PyMuPDF parse pool was replaced while this parse ran; retry the file."
+                        ) from exc
+                    # The ceiling can only end a child through a Python
+                    # MemoryError (exit code 1). A signal is something else: a
+                    # segfault on a malformed PDF, or the kernel's OOM killer,
+                    # which means the ceiling is too high, not too low.
+                    if exit_code is not None and exit_code < 0:
+                        raise BrokenProcessPool(_child_killed_message(-exit_code)) from exc
+                    # Measured under a tight ceiling: the child can die receiving
+                    # the next file (the pool's own unpickling raises MemoryError
+                    # outside any parse code).
+                    if limit_mb > 0 and exit_code != 0:
+                        raise MemoryError(_child_died_message(limit_mb)) from exc
+                # Also measured: a MemoryError sent back with no message.
                 if isinstance(exc, MemoryError) and not str(exc):
                     raise MemoryError(_out_of_memory_message(limit_mb)) from exc
                 raise
+            finally:
+                self._count_parse(slot, executor)
         finally:
             free.put_nowait(slot)
 
     def shutdown(self) -> None:
+        # Killed, not asked to exit: a running parse would otherwise outlive the
+        # pool, and once ``shutdown()`` has cleared the executor's processes
+        # nothing could kill it later, not even its own cancellation.
+        self._closed = True
         for executor in self._slots:
             if executor is not None:
-                executor.shutdown(wait=False, cancel_futures=True)
+                _retire_executor(executor)
         self._slots = [None] * len(self._slots)
 
 

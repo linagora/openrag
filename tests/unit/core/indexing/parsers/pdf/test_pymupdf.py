@@ -6,6 +6,7 @@ import asyncio
 import concurrent.futures
 import multiprocessing
 import os
+import signal
 import sys
 import threading
 import time
@@ -279,6 +280,83 @@ class TestParsesRunInChildProcesses:
             await asyncio.sleep(0.05)
         assert not _process_alive(old_pid), "the replaced pool's child is still running"
 
+    @pytest.mark.asyncio
+    async def test_reconfiguring_kills_a_parse_still_running_on_the_old_pool(self):
+        """``shutdown()`` clears an executor's processes, so a child it only asked
+        to exit could not be killed afterwards, by a cancellation or otherwise.
+        The old pool now kills it, and retiring the executor again finds nothing
+        left to kill instead of raising ``AttributeError``."""
+        pool = pymupdf_mod._get_pool()
+        stuck = asyncio.ensure_future(pool.run(_sleep_then_pid, 60.0))
+        pids: list[int] = []
+        deadline = time.monotonic() + 30
+        while not pids and time.monotonic() < deadline:
+            await asyncio.sleep(0.05)
+            pids = [pid for executor in pool._slots if executor is not None for pid in executor._processes or {}]
+        assert pids, "the parse never got a child"
+
+        pymupdf_mod.configure_pool(pymupdf_mod.PyMuPDFPoolSettings(max_workers=3))
+        with pytest.raises(concurrent.futures.process.BrokenProcessPool):
+            await asyncio.wait_for(stuck, timeout=30.0)
+        assert not any(_process_alive(pid) for pid in pids), "the old pool's running parse outlived it"
+
+    @pytest.mark.asyncio
+    async def test_a_parse_waiting_on_a_replaced_pool_builds_no_child_there(self):
+        """Nothing retires the old pool twice, so a child built in it after
+        ``configure_pool`` replaced it would run for as long as the actor."""
+        pymupdf_mod.configure_pool(pymupdf_mod.PyMuPDFPoolSettings(max_workers=1, memory_limit_mb=4096))
+        pool = pymupdf_mod._get_pool()
+        await pool.run(os.getpid)
+        running = asyncio.ensure_future(pool.run(_sleep_then_pid, 60.0))
+        waiting = asyncio.ensure_future(pool.run(os.getpid))
+        await asyncio.sleep(0.5)
+
+        pymupdf_mod.configure_pool(pymupdf_mod.PyMuPDFPoolSettings(max_workers=2))
+        with pytest.raises(concurrent.futures.process.BrokenProcessPool, match="replaced while this parse ran"):
+            await asyncio.wait_for(running, timeout=30.0)
+        with pytest.raises(RuntimeError, match="replaced while this parse waited"):
+            await asyncio.wait_for(waiting, timeout=30.0)
+        assert pool._slots == [None]
+
+    @pytest.mark.asyncio
+    async def test_a_child_that_cannot_start_leaves_no_parse_queued(self, tmp_path, monkeypatch):
+        """``submit()`` queues the parse before it starts the child. Kept, the
+        failed file would run first in the next child, on the next file's time."""
+        pymupdf_mod.configure_pool(pymupdf_mod.PyMuPDFPoolSettings(max_workers=1, memory_limit_mb=4096))
+        _fail_next_spawns(monkeypatch, 1)
+        pool = pymupdf_mod._get_pool()
+        ran = tmp_path / "ran"
+
+        with pytest.raises(BlockingIOError):
+            await pool.run(_record, str(ran), "A")
+        await asyncio.wait_for(pool.run(_record, str(ran), "B"), timeout=30.0)
+
+        assert ran.read_text() == "B"
+
+    @pytest.mark.asyncio
+    async def test_a_recycled_child_that_cannot_start_fails_its_parse_at_once(self, monkeypatch):
+        """Measured with the executor's own ``max_tasks_per_child``: the spawn
+        failed on its thread, which died, and the next parse waited for the
+        parse timeout."""
+        pymupdf_mod.configure_pool(
+            pymupdf_mod.PyMuPDFPoolSettings(max_workers=1, max_tasks_per_child=1, memory_limit_mb=4096)
+        )
+        # Installed first: the replacement can start as soon as the first parse
+        # returns, before the test gets to run again.
+        _fail_next_spawns(monkeypatch, 1, after=1)
+        pool = pymupdf_mod._get_pool()
+        first = await asyncio.wait_for(pool.run(os.getpid), timeout=30.0)
+        # The next file arrives once the first child is gone, as between two
+        # uploads; the executor's own thread would have tried its replacement.
+        deadline = time.monotonic() + 30
+        while _process_alive(first) and time.monotonic() < deadline:
+            await asyncio.sleep(0.05)
+        await asyncio.sleep(0.5)
+
+        with pytest.raises(BlockingIOError):
+            await asyncio.wait_for(pool.run(os.getpid), timeout=30.0)
+        assert await asyncio.wait_for(pool.run(os.getpid), timeout=30.0) != first
+
     def test_reconfiguring_replaces_a_pool_built_on_the_old_settings(self):
         pymupdf_mod.configure_pool(pymupdf_mod.PyMuPDFPoolSettings(max_workers=1))
         first = pymupdf_mod._get_pool()
@@ -387,6 +465,13 @@ class TestFailuresTheParentCanActOn:
             await pymupdf_mod._get_pool().run(os._exit, 9)
 
     @pytest.mark.asyncio
+    async def test_a_child_killed_by_a_signal_is_not_blamed_on_the_ceiling(self):
+        """The ceiling ends a child through a Python ``MemoryError``; a signal is a
+        segfault or the kernel's OOM killer, where raising the limit is wrong."""
+        with pytest.raises(concurrent.futures.process.BrokenProcessPool, match="killed by SIGKILL"):
+            await pymupdf_mod._get_pool().run(_kill_self)
+
+    @pytest.mark.asyncio
     async def test_an_empty_memory_error_from_the_child_gets_its_message(self):
         """Measured under a tight ceiling: the child can fail to build the
         message too, and send back a ``MemoryError`` with none."""
@@ -460,9 +545,9 @@ def _echo(value):
 
 
 def _drop_pool() -> None:
-    """Back to the default pool, with the old pool's children and threads gone.
+    """Back to the default pool, with the current pool's children and threads gone.
 
-    ``configure_pool`` only asks the old children to exit, so their executors'
+    ``configure_pool`` shuts the old executors down without waiting, so their
     manager threads can outlive the test that built them, and a later test that
     forks copies whatever lock one of those threads holds. The children are
     killed first so a parse still running cannot hold up the join, then one
@@ -498,6 +583,31 @@ def _signal_then_wait(started: str, release: str) -> int:
 def _signal_then_exit(started: str, release: str) -> None:
     _signal_then_wait(started, release)
     os._exit(9)
+
+
+def _kill_self() -> None:
+    os.kill(os.getpid(), signal.SIGKILL)
+
+
+def _record(path: str, tag: str) -> int:
+    with open(path, "a") as ran:
+        ran.write(tag)
+    return os.getpid()
+
+
+def _fail_next_spawns(monkeypatch, count: int, after: int = 0) -> None:
+    """Make *count* child starts fail, as in a pod out of process slots, once
+    *after* have succeeded."""
+    spawn = concurrent.futures.ProcessPoolExecutor._spawn_process
+    starts = [0]
+
+    def failing(executor):
+        starts[0] += 1
+        if after < starts[0] <= after + count:
+            raise BlockingIOError(11, "Resource temporarily unavailable")
+        spawn(executor)
+
+    monkeypatch.setattr(concurrent.futures.ProcessPoolExecutor, "_spawn_process", failing)
 
 
 def _sleep_then_pid(seconds: float) -> int:

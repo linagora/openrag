@@ -149,7 +149,7 @@ def _apply_parse_memory_limit(memory_limit_mb: int) -> None:
     never reported, so under a tight ceiling it can fail immediately with nothing
     logged about why.
 
-    Best-effort — a platform without ``RLIMIT_DATA``, or an existing hard limit
+    Best-effort — a platform without ``RLIMIT_DATA``, or an existing limit
     below the request, must not stop the worker from starting.
     """
     apply_parse_memory_limit(

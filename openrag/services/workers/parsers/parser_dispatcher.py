@@ -258,10 +258,9 @@ def configure_pymupdf_pool(config) -> None:
 
     Called by the indexer worker only. The API replicas build the same
     dispatcher for the direct-extract path and keep the one dedicated thread:
-    there a spawned child would start on the loop that serves ``/health_check``,
-    and under ``-m api.main`` (the Ray Serve entrypoint) it re-imports the whole
-    app as ``__mp_main__``. ``core`` never reads config, so the numbers are
-    pushed in. Idempotent: identical settings leave a running pool alone.
+    there a spawned child would start on the loop that serves ``/health_check``.
+    ``core`` never reads config, so the numbers are pushed in. Idempotent:
+    identical settings leave a running pool alone.
     """
     from core.indexing.parsers.pdf.pymupdf import PyMuPDFPoolSettings, configure_pool
 

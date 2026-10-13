@@ -50,12 +50,12 @@ def apply_parse_memory_limit(memory_limit_mb: int, *, process: str, setting: str
     *process* names the child in log lines ("Marker child"); *setting* is the
     environment variable an operator changes.
 
-    Best-effort — a platform without ``RLIMIT_DATA``, or an existing hard limit
+    Best-effort — a platform without ``RLIMIT_DATA``, or an existing limit
     below the request, must not stop the worker from starting.
 
-    Returns the ceiling applied, in MiB: lower than asked when an existing hard
-    limit clamped it, and 0 when none was applied — so an error can name the
-    limit the child really ran under.
+    Returns the ceiling applied, in MiB: lower than asked when a limit the
+    process inherited clamped it, and 0 when none was applied — so an error can name
+    the limit the child really ran under.
     """
     if memory_limit_mb <= 0:
         return 0
@@ -66,32 +66,41 @@ def apply_parse_memory_limit(memory_limit_mb: int, *, process: str, setting: str
         import resource
 
         limit = memory_limit_mb * 1024 * 1024
-        _, hard = resource.getrlimit(resource.RLIMIT_DATA)
-        if hard != resource.RLIM_INFINITY:
-            limit = min(limit, hard)
+        # Never above the limit already in force. Allocations are checked against
+        # the soft limit, and this process may raise it up to the hard one, so
+        # asking for more would loosen a ceiling it inherited. The soft limit is
+        # never above the hard one, so capping by it covers both.
+        soft, hard = resource.getrlimit(resource.RLIMIT_DATA)
+        inherits_limit = soft != resource.RLIM_INFINITY
+        clamped = inherits_limit and soft < limit
+        if clamped:
+            limit = soft
         effective_mb = limit // (1024 * 1024)
+        # Otherwise a log line of 4096 MiB for 8192 asked would say nothing of why.
+        lowered = f" (lowered from {memory_limit_mb} MiB by the limit this child inherited)" if clamped else ""
         baseline_mb = child_vmdata_mb()
         if baseline_mb is None:
-            logger.info(f"{process} memory limit set to {effective_mb} MiB (baseline unreadable)")
+            logger.info(f"{process} memory limit set to {effective_mb} MiB{lowered} (baseline unreadable)")
         elif effective_mb <= baseline_mb:
             # Applying it would fail every parse on this child, and with the
             # recycle on MemoryError each parse would also respawn the child —
             # churning processes while doing nothing. Keep it working unbounded
             # and say so loudly instead.
+            remaining = "it keeps the limit it inherited" if inherits_limit else "this child runs without a ceiling"
             logger.error(
-                f"{process} memory limit {effective_mb} MiB is at or below this child's baseline "
-                f"of {baseline_mb} MiB, so it is NOT applied — this child runs without a ceiling. "
+                f"{process} memory limit {effective_mb} MiB{lowered} is at or below this child's baseline "
+                f"of {baseline_mb} MiB, so it is NOT applied — {remaining}. "
                 f"Raise {setting} well above {baseline_mb}, or unset it."
             )
             return 0
         elif effective_mb - baseline_mb < min_headroom_mb:
             logger.warning(
-                f"{process} memory limit {effective_mb} MiB leaves only {effective_mb - baseline_mb} MiB "
+                f"{process} memory limit {effective_mb} MiB{lowered} leaves only {effective_mb - baseline_mb} MiB "
                 f"above this child's baseline of {baseline_mb} MiB; parses are likely to fail. "
                 f"Consider at least {baseline_mb + min_headroom_mb} MiB."
             )
         else:
-            logger.info(f"{process} memory limit set to {effective_mb} MiB (baseline {baseline_mb} MiB)")
+            logger.info(f"{process} memory limit set to {effective_mb} MiB{lowered} (baseline {baseline_mb} MiB)")
         # Applied last, deliberately. Reading /proc and formatting these lines
         # can each need an allocation, and a ceiling at or below current VmData
         # makes any allocation raise MemoryError — which this handler does not
