@@ -118,8 +118,9 @@ Upload a new file to a specific partition for indexing.
     default) and the bytes are the same; with deduplication off, or different
     bytes, they accepted it with `201` and let it fail at the end of the pipeline.
     A task counts as indexing until its worker has stopped, so a worker that hangs
-    keeps the `file_id` busy until the task is cancelled
-    (`DELETE /indexer/task/{task_id}`); a `PUT` is not refused meanwhile.
+    keeps the `file_id` busy until it actually stops. Cancelling the task
+    (`DELETE /indexer/task/{task_id}`) asks it to stop, but the `file_id` stays
+    busy until the worker has settled; a `PUT` is not refused meanwhile.
   - `DOCUMENT_CONTENT_EXISTS`: content deduplication matched a file that already
     holds these bytes (`extra.existing_file_id`). That can be the `file_id` you
     sent, when an earlier upload of it still holds the content reservation but no
