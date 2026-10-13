@@ -6,9 +6,14 @@
 #   /app  -> admin-ui:8080   (React SPA; prefix preserved, NOT stripped)
 #   /     -> openrag:8080    (API, /auth, /v1 and the Chainlit UI at /chainlit)
 #
-# `/` deliberately bypasses admin-ui's own catch-all proxy so Chainlit's
-# WebSocket upgrade goes through a single hop that sets the upgrade headers
-# (NPM does, at server scope). Full walkthrough: docs, "Reverse proxy (TLS)".
+# `/` deliberately bypasses admin-ui's own catch-all proxy, saving a hop on
+# every API call. NPM only forwards the Upgrade/Connection headers Chainlit's
+# WebSocket needs when "Websockets Support" is on for the proxy host.
+#
+# Also set UVICORN_FORWARDED_ALLOW_IPS to this project's network subnet in
+# .env: NPM reaches the API from that network, not from loopback, so without
+# it uvicorn drops X-Forwarded-For/-Proto. Full walkthrough: docs,
+# "Reverse proxy (TLS)".
 #
 # An overlay rather than a profile: the API service declares `profiles: [""]`,
 # and passing any explicit --profile deselects that default profile — a
@@ -16,7 +21,7 @@
 
 services:
   nginx:
-    image: jc21/nginx-proxy-manager:2.12.3
+    image: jc21/nginx-proxy-manager:2.16.0
     restart: unless-stopped
     ports:
       - "80:80"
@@ -33,7 +38,9 @@ services:
 
   # With TLS terminated here, the app ports must not stay on 0.0.0.0: that
   # would offer a plaintext path around TLS and the OIDC redirect (and, for
-  # admin-ui, its catch-all reverse proxy to the API). Rebind them to loopback.
+  # admin-ui, its catch-all reverse proxy to the API). Rebind every port the
+  # base file publishes to loopback; services from the *_COMPOSE includes keep
+  # their own bindings.
   # `!override` replaces the base list instead of appending to it (Compose
   # merges `ports` entries, so a plain list would publish both bindings and
   # collide on the host port); it needs Docker Compose >= 2.24.4.

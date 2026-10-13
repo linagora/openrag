@@ -31,7 +31,9 @@ def test_proxy_service_has_no_profile():
     nginx = _load("proxy.docker-compose.yaml")["services"]["nginx"]
 
     assert "profiles" not in nginx
-    assert not nginx["image"].endswith(":latest")
+    # An explicit version: neither `:latest` nor an untagged (implicit latest) image.
+    _, _, tag = nginx["image"].rpartition("/")[2].partition(":")
+    assert tag and tag != "latest", nginx["image"]
     assert "127.0.0.1:81:81" in nginx["ports"]
 
 
@@ -39,7 +41,11 @@ def test_proxy_overlay_rebinds_every_app_port_to_loopback():
     base = _load("docker-compose.yaml")["services"]
     overlay = _load("proxy.docker-compose.yaml")["services"]
 
-    for name in ("openrag", "openrag-cpu", "admin-ui"):
+    published = [name for name, service in base.items() if service.get("ports")]
+    assert published, "the base file publishes no ports"
+
+    for name in published:
+        assert name in overlay, f"{name} publishes ports but the overlay doesn't rebind them"
         ports = overlay[name]["ports"]
         # A plain list would be merged with the base one, publishing both bindings.
         assert isinstance(ports, _Override), name
