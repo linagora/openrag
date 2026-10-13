@@ -2520,7 +2520,7 @@ async def test_delete_file_waits_for_an_orphaned_worker_to_settle_before_cleanup
     tsm = _task_state_manager()
     tsm.get_matching_active_task_refs_v2 = _remote_mock({"task-1": {"ref": _owner_died_ref()}})
     calls: list[str] = []
-    tsm.set_state.remote.side_effect = lambda task_id, state: calls.append(f"set_state:{state}")
+    tsm.set_cancelled_if_active.remote.side_effect = lambda task_id: calls.append("set_cancelled_if_active")
     settled = iter([False, False, True])
     tsm.has_worker_settled = _remote_mock()
     tsm.has_worker_settled.remote.side_effect = lambda task_id: calls.append("has_worker_settled") or next(settled)
@@ -2540,7 +2540,7 @@ async def test_delete_file_waits_for_an_orphaned_worker_to_settle_before_cleanup
         await dispatcher.delete_file("file-1", "tenant-a")
 
     # Cancelled first, so the worker reads it on its next lease renewal and stops.
-    assert calls[:4] == ["set_state:CANCELLED", "has_worker_settled", "has_worker_settled", "has_worker_settled"]
+    assert calls[:4] == ["set_cancelled_if_active", "has_worker_settled", "has_worker_settled", "has_worker_settled"]
     assert calls.index("delete_chunks") > 3
     tsm.has_worker_settled.remote.assert_called_with("task-1")
     tsm.finish_cancellation.remote.assert_awaited_once_with("task-1")
@@ -2573,11 +2573,31 @@ async def test_delete_file_does_not_cleanup_while_an_orphaned_worker_still_runs(
     ):
         await dispatcher.delete_file("file-1", "tenant-a")
 
-    tsm.set_state.remote.assert_called_once_with("task-1", "CANCELLED")
+    tsm.set_cancelled_if_active.remote.assert_called_once_with("task-1")
+    tsm.set_state.remote.assert_not_called()
     assert tsm.has_worker_settled.remote.await_count >= 1
     tsm.finish_cancellation.remote.assert_not_called()
     vector_store.delete_by_filter.assert_not_called()
     document_repo.remove_file_from_partition.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_orphaned_worker_wait_keeps_the_state_of_a_task_that_completed_meanwhile() -> None:
+    from time import monotonic
+
+    from services.workers import task_cancellation
+
+    tsm = _task_state_manager()
+    tsm.set_cancelled_if_active = _remote_mock(False)
+    tsm.has_worker_settled = _remote_mock(True)
+
+    await task_cancellation._wait_for_orphaned_worker_to_settle(
+        tsm, task_id="task-1", deadline=monotonic() + 5, partition="tenant-a", file_id="file-1"
+    )
+
+    tsm.set_cancelled_if_active.remote.assert_awaited_once_with("task-1")
+    tsm.set_state.remote.assert_not_called()
+    tsm.has_worker_settled.remote.assert_awaited_with("task-1")
 
 
 @pytest.mark.asyncio

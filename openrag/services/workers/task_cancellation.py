@@ -330,8 +330,9 @@ async def _wait_for_orphaned_worker_to_settle(
     ``OwnerDiedError`` only says the pool actor that submitted the task died:
     ``ray.cancel`` then returns without reaching the worker, which may still be
     running and would write the document back after the delete. The task is
-    marked cancelled first, so the worker reads it on its next lease renewal
-    and stops itself; a task still queued stops when the worker picks it up.
+    marked cancelled first, unless it already finished, so the worker reads it
+    on its next lease renewal and stops itself; a task still queued stops when
+    the worker picks it up.
     """
     has_worker_settled = _remote_actor_method(task_state_manager, "has_worker_settled")
     if has_worker_settled is None:
@@ -343,10 +344,11 @@ async def _wait_for_orphaned_worker_to_settle(
             file_id=file_id,
         )
         return
+    # Only while the task is still active: one that completed meanwhile keeps its state.
     await call_ray_actor_method_with_timeout(
-        submit=lambda: task_state_manager.set_state.remote(task_id, "CANCELLED"),
+        submit=lambda: task_state_manager.set_cancelled_if_active.remote(task_id),
         timeout=_remaining_timeout(deadline, partition=partition, file_id=file_id),
-        task_description=f"set_state({task_id}, CANCELLED) for an orphaned worker",
+        task_description=f"set_cancelled_if_active({task_id}) for an orphaned worker",
     )
     while not await call_ray_actor_method_with_timeout(
         submit=lambda: has_worker_settled(task_id),
