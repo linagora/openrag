@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from contextlib import contextmanager
 from contextvars import ContextVar
 from types import SimpleNamespace
@@ -2616,24 +2617,148 @@ async def test_actor_renews_the_worker_lease_only_while_the_file_is_processing(m
     renew.assert_awaited_with("t")
 
 
-@pytest.mark.asyncio
-async def test_actor_keeps_processing_when_a_lease_renewal_fails(monkeypatch, tmp_path) -> None:
+def _renewals(outcomes: list[Any], then: Any) -> Callable[[str], Awaitable[Any]]:
+    """A renew_worker_lease answering ``outcomes`` in turn, then ``then`` for good; exceptions are raised."""
+    answers = iter(outcomes)
+
+    async def renew(_task_id: str) -> Any:
+        answer = next(answers, then)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    return renew
+
+
+class _StartRecordingWorker(_BlockingWorker):
+    def __init__(self) -> None:
+        super().__init__()
+        self.started_at: float | None = None
+        self.cancelled_at: float | None = None
+
+    async def process_file(self, **kwargs) -> dict:
+        self.started_at = asyncio.get_running_loop().time()
+        try:
+            return await super().process_file(**kwargs)
+        except asyncio.CancelledError:
+            self.cancelled_at = asyncio.get_running_loop().time()
+            raise
+
+
+def _lease_timing(monkeypatch, *, interval: float, ttl: float) -> None:
     import services.workers.worker_lease as worker_lease
 
-    monkeypatch.setattr(worker_lease, "WORKER_LEASE_RENEW_INTERVAL_SECONDS", 0.01)
+    monkeypatch.setattr(worker_lease, "WORKER_LEASE_RENEW_INTERVAL_SECONDS", interval)
+    monkeypatch.setattr(worker_lease, "_WORKER_LEASE_TTL_SECONDS", ttl)
+
+
+@pytest.mark.asyncio
+async def test_actor_keeps_processing_when_a_lease_renewal_fails(monkeypatch, tmp_path) -> None:
+    _lease_timing(monkeypatch, interval=0.01, ttl=5.0)
     worker = _BlockingWorker()
     actor = _bare_worker_actor(save_uploaded_files=True, worker=worker)
-    renew = AsyncMock(side_effect=RuntimeError("task state unavailable"))
+    renew = AsyncMock(side_effect=_renewals([True, RuntimeError("task state unavailable")], then=True))
     actor._task_state_manager.renew_worker_lease = SimpleNamespace(remote=renew)
 
     processing = asyncio.create_task(
         actor.process_file(task_id="t", path=str(tmp_path / "doc.txt"), metadata={"file_id": "f"}, partition="p")
     )
-    while renew.await_count < 2:
+    while renew.await_count < 4:
         await asyncio.sleep(0.01)
     worker.release.set()
 
     assert await processing == {"stored_count": 1, "stage": "stored"}
+
+
+@pytest.mark.asyncio
+async def test_actor_starts_only_once_a_failed_first_renewal_is_answered(monkeypatch, tmp_path) -> None:
+    """Until the task state recorded the pickup, it may settle the task as abandoned and release its file."""
+    _lease_timing(monkeypatch, interval=0.01, ttl=5.0)
+    worker = _StartRecordingWorker()
+    worker.release.set()
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=worker)
+    attempts: list[float] = []
+
+    async def renew(_task_id: str) -> bool:
+        attempts.append(asyncio.get_running_loop().time())
+        if len(attempts) <= 2:
+            raise RuntimeError("task state unavailable")
+        return True
+
+    actor._task_state_manager.renew_worker_lease = SimpleNamespace(remote=renew)
+
+    result = await actor.process_file(
+        task_id="t", path=str(tmp_path / "doc.txt"), metadata={"file_id": "f"}, partition="p"
+    )
+
+    assert result == {"stored_count": 1, "stage": "stored"}
+    assert worker.started_at is not None
+    assert worker.started_at >= attempts[2]
+
+
+@pytest.mark.asyncio
+async def test_actor_fails_a_task_whose_first_renewal_is_never_answered(monkeypatch, tmp_path) -> None:
+    from services.workers.worker_lease import WorkerLeaseLostError
+
+    _lease_timing(monkeypatch, interval=0.01, ttl=0.1)
+    worker = _StartRecordingWorker()
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=worker)
+    renew = AsyncMock(side_effect=RuntimeError("task state unavailable"))
+    end = AsyncMock()
+    set_failed = AsyncMock(return_value=True)
+    actor._task_state_manager.renew_worker_lease = SimpleNamespace(remote=renew)
+    actor._task_state_manager.end_worker_lease = SimpleNamespace(remote=end)
+    actor._tsm = SimpleNamespace(set_failed_if_not_cancelled=SimpleNamespace(remote=set_failed))
+
+    with pytest.raises(WorkerLeaseLostError):
+        await asyncio.wait_for(
+            actor.process_file(task_id="t", path=str(tmp_path / "doc.txt"), metadata={"file_id": "f"}, partition="p"),
+            timeout=5,
+        )
+
+    assert worker.started_at is None
+    assert renew.await_count >= 2
+    actor._task_state_manager.get_object_ref.remote.assert_not_awaited()
+    set_failed.assert_awaited_once()
+    assert set_failed.await_args.args[0] == "t"
+    end.assert_awaited_once_with("t")
+
+
+@pytest.mark.asyncio
+async def test_actor_stops_before_its_lease_lapses_when_renewals_keep_failing(monkeypatch, tmp_path) -> None:
+    """The task state releases the file once the lease lapses; a worker still writing then could undo a delete."""
+    from services.workers.worker_lease import WorkerLeaseLostError
+
+    ttl = 0.3
+    _lease_timing(monkeypatch, interval=0.05, ttl=ttl)
+    worker = _StartRecordingWorker()
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=worker)
+    sent_at: list[float] = []
+
+    async def renew(_task_id: str) -> bool:
+        sent_at.append(asyncio.get_running_loop().time())
+        if len(sent_at) > 2:
+            raise RuntimeError("task state unavailable")
+        return True
+
+    end = AsyncMock()
+    set_failed = AsyncMock(return_value=True)
+    actor._task_state_manager.renew_worker_lease = SimpleNamespace(remote=renew)
+    actor._task_state_manager.end_worker_lease = SimpleNamespace(remote=end)
+    actor._tsm = SimpleNamespace(set_failed_if_not_cancelled=SimpleNamespace(remote=set_failed))
+
+    with pytest.raises(WorkerLeaseLostError):
+        await asyncio.wait_for(
+            actor.process_file(task_id="t", path=str(tmp_path / "doc.txt"), metadata={"file_id": "f"}, partition="p"),
+            timeout=5,
+        )
+
+    last_answered = sent_at[1]
+    assert worker.cancelled_at is not None
+    assert worker.cancelled_at < last_answered + ttl
+    assert worker.calls == 0
+    set_failed.assert_awaited_once()
+    end.assert_awaited_once_with("t")
 
 
 @pytest.mark.asyncio

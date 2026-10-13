@@ -19,7 +19,13 @@ from services.workers.failure_reporting import submit_task_failure
 from services.workers.indexer_actor import IndexerWorker, _display_filename, delete_uploaded_file
 from services.workers.indexing_callback import send_indexing_callback
 from services.workers.ray_utils import retry_idempotent_ray_actor_method
-from services.workers.worker_lease import end_worker_lease, keep_worker_lease, worker_registration
+from services.workers.worker_lease import (
+    end_worker_lease,
+    keep_worker_lease,
+    wait_for_worker_lease_start,
+    worker_lease_loss,
+    worker_registration,
+)
 
 # The indexer reloads the DB-backed model-endpoint registry at most once per
 # this window (and on a miss), bounding both staleness and DB load regardless
@@ -516,8 +522,9 @@ class IndexerWorkerActor:
         try:
             try:
                 # A pickup the task state refuses (a task cancelled or abandoned
-                # while queued) is cancelled here, before any work.
-                await lease_started.wait()
+                # while queued) is cancelled here, before any work; one it never
+                # answers fails the task.
+                await wait_for_worker_lease_start(lease_started, worker_lease)
                 await self._await_worker_ref_registration(task_id)
                 await self._ensure_catalog()
                 from services.workers.parsers.parser_dispatcher import routes_to_openai_audio_loader
@@ -541,29 +548,15 @@ class IndexerWorkerActor:
             except Exception as exc:
                 # Not BaseException: a cancellation here must not notify or be
                 # reported as failed (same rule as set_failed_if_not_cancelled).
-                tb = traceback.format_exc()
-                error_reason = failure_reason_from_exception(exc)
-                try:
-                    was_failed = await retry_idempotent_ray_actor_method(
-                        lambda: submit_task_failure(
-                            self._tsm,
-                            task_id,
-                            tb,
-                            error_reason,
-                        ),
-                        task_description=f"set_failed_if_not_cancelled({task_id})",
-                    )
-                except Exception:
-                    was_failed = True
-                if was_failed:
-                    await send_indexing_callback(
-                        callback_url,
-                        partition,
-                        worker_metadata.get("file_id", ""),
-                        "error",
-                        worker_metadata,
-                        callback_token=callback_token,
-                    )
+                await self._report_task_failure(
+                    task_id,
+                    exc,
+                    traceback.format_exc(),
+                    partition=partition,
+                    worker_metadata=worker_metadata,
+                    callback_url=callback_url,
+                    callback_token=callback_token,
+                )
                 raise
             token = self._active_indexation_config.set(indexation_config)
             try:
@@ -619,6 +612,23 @@ class IndexerWorkerActor:
                         file_id, partition, workspace_ids
                     )
             return result
+        except asyncio.CancelledError:
+            # The lease stopped this worker because the task state stopped
+            # answering: no one cancelled the task, so it failed.
+            lost = worker_lease_loss(worker_lease)
+            if lost is None:
+                raise
+            asyncio.current_task().uncancel()
+            await self._report_task_failure(
+                task_id,
+                lost,
+                "".join(traceback.format_exception(lost)),
+                partition=partition,
+                worker_metadata=worker_metadata,
+                callback_url=callback_url,
+                callback_token=callback_token,
+            )
+            raise lost from None
         finally:
             # Set before the first await: a cancellation the lease issued
             # earlier was delivered to the work above, and none can land in
@@ -648,6 +658,39 @@ class IndexerWorkerActor:
                 worker_lease.cancel()
                 await asyncio.gather(worker_lease, return_exceptions=True)
                 await end_worker_lease(self._task_state_manager, task_id, logger=self._logger)
+
+    async def _report_task_failure(
+        self,
+        task_id: str,
+        exc: Exception,
+        tb: str,
+        *,
+        partition: str,
+        worker_metadata: dict[str, Any],
+        callback_url: str | None,
+        callback_token: str | None,
+    ) -> None:
+        try:
+            was_failed = await retry_idempotent_ray_actor_method(
+                lambda: submit_task_failure(
+                    self._tsm,
+                    task_id,
+                    tb,
+                    failure_reason_from_exception(exc),
+                ),
+                task_description=f"set_failed_if_not_cancelled({task_id})",
+            )
+        except Exception:
+            was_failed = True
+        if was_failed:
+            await send_indexing_callback(
+                callback_url,
+                partition,
+                worker_metadata.get("file_id", ""),
+                "error",
+                worker_metadata,
+                callback_token=callback_token,
+            )
 
     async def _await_worker_ref_registration(self, task_id: str) -> None:
         """Do not start indexing until cancellation can target this worker."""
