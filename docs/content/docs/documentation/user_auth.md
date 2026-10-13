@@ -99,7 +99,12 @@ token or its hash:
 
 A refused entry is skipped as a whole, and on an existing account the previous token hash
 stays in place: a rotation to a refused value leaves the old token valid until a startup
-with an accepted one.
+with an accepted one. This is deliberate, as for an unset token env var: a mistake in the
+new secret does not lock out the client still using the old one. When the old token must
+stop working at once (it leaked, for instance), do not rely on the rotation: call
+`POST /users/{user_id}/regenerate_token`, which replaces it immediately, or remove the
+entry from `auth.seed_users` and restart, which revokes it. Then fix the secret and
+restart.
 
 The configuration itself is validated when it is loaded, and an error stops the boot:
 `role` must be `owner`, `editor` or `viewer`, `external_user_id` and `token_env` must be
@@ -118,6 +123,12 @@ admin edits (display name, admin flag, the role on a listed partition, a regener
 token) are accepted but only last until the next startup that has the entry's token, which
 rewrites them from the configuration. Make those changes in `auth.seed_users` instead.
 Memberships on partitions the entry does not list are left alone.
+
+Deleting a managed account through `DELETE /users/{user_id}` is refused with a 409 while
+its entry is still in `auth.seed_users`: the delete would remove every partition the
+account owns, and the next startup would recreate the account under a new id with only
+its listed memberships. To delete it, remove the entry from `auth.seed_users` and restart
+the API (the account's token is revoked), then delete it.
 
 If the seeding step itself fails (a database error, for instance), the error is logged
 without the token or the driver's message and the API starts anyway; the accounts keep

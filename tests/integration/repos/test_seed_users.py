@@ -388,13 +388,32 @@ class TestRemoval:
         outcome = await repo.ensure_seed_users(both, env=env)
         assert outcome["svc-a"] == "created"
 
-    async def test_an_entry_skipped_for_its_token_is_not_revoked(self, postgres_store: PostgresStore):
+    @pytest.mark.parametrize(
+        ("env", "with_b"),
+        [
+            pytest.param({"SVC_A_TOKEN": "weak-tk1"}, False, id="too-short"),
+            pytest.param({"SVC_A_TOKEN": "or-openrag-1234"}, False, id="published-default"),
+            pytest.param({"SVC_A_TOKEN": ADMIN_TOKEN, "AUTH_TOKEN": ADMIN_TOKEN}, False, id="auth-token"),
+            pytest.param({"SVC_A_TOKEN": TOKEN_A2, "SVC_B_TOKEN": TOKEN_A2}, True, id="shared-by-entries"),
+        ],
+    )
+    async def test_a_rotation_refused_for_its_token_keeps_the_previous_one(
+        self, postgres_store: PostgresStore, env, with_b
+    ):
+        """Documented trade-off: a mistake in the new secret does not lock out the
+        client still on the old one. Cutting a leaked token goes through
+        regenerate_token or removing the entry (user_auth.md)."""
         repo = postgres_store.user_repo
         await repo.ensure_seed_users([_seed(partitions=[])], env={"SVC_A_TOKEN": TOKEN_A})
-        outcome = await repo.ensure_seed_users([_seed(partitions=[])], env={"SVC_A_TOKEN": "weak-tk1"})
+        seeds = [_seed(partitions=[])] + ([_seed("svc-b", "SVC_B_TOKEN", partitions=[])] if with_b else [])
 
-        assert outcome == {"svc-a": "skipped"}
-        assert (await _row(postgres_store, "svc-a"))["token"] == _hash_token(TOKEN_A)
+        outcome = await repo.ensure_seed_users(seeds, env=env)
+
+        assert outcome["svc-a"] == "skipped"
+        row = await _row(postgres_store, "svc-a")
+        assert row["token"] == _hash_token(TOKEN_A)
+        user = await _auth_service(postgres_store).get_user_by_token_for_request(TOKEN_A)
+        assert user is not None and user["id"] == row["id"]
 
 
 class TestOidcLogin:
