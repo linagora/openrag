@@ -56,6 +56,7 @@ if TYPE_CHECKING:
     from core.config.root import Settings
     from core.llm.llm import LLM
     from core.models.chunk import Chunk
+    from core.models.preset import PartitionConfig
     from core.models.query import Query, SearchQueries
     from core.rerankers.reranker import Reranker
     from core.retrieval.searcher import RetrievalSearcher
@@ -79,6 +80,27 @@ class ResolvedRetrievalPlan:
     groups: tuple[ResolvedRetrievalGroup, ...]
     public_configuration: dict[str, object]
     configuration_fingerprint: str
+
+
+@dataclass(frozen=True, slots=True)
+class _PipelineSettings:
+    """What a partition's retrieval pipeline is built from, after the caller's overrides.
+
+    Partitions searched on one vector field with equal settings build the same
+    pipeline, so they are retrieved together.
+    """
+
+    type: str
+    expansion_llm: str | None
+    expansion_prompt_name: str | None
+    rerank: bool
+    reranker: str | None
+    top_k: int
+    top_n: int
+    similarity_threshold: float
+    include_related: bool
+    include_ancestors: bool
+    rrf_k: int
 
 
 class RetrievalService:
@@ -178,7 +200,7 @@ class RetrievalService:
         template: str | None = None,
     ):
         # ``template`` is the already-resolved query-expansion prompt for this
-        # strategy (resolved from the preset's *_prompt_name in _pipeline_for_partition).
+        # strategy (resolved from the preset's *_prompt_name in _pipeline_from_settings).
         if rtype == "multiQuery":
             return MultiQueryRetriever(
                 llm=llm,
@@ -644,62 +666,52 @@ class RetrievalService:
                     return name
         return "default"
 
-    async def _resolved_pipeline_for_partition(
+    async def _pipeline_from_settings(
         self,
         partition: str,
-        *,
-        top_k: int | None = None,
-        similarity_threshold: float | None = None,
-        disable_reranker: bool = False,
-        disable_expansion: bool = False,
+        embedder: str,
+        settings: _PipelineSettings,
     ) -> tuple[RetrieverPipeline, int | None, dict[str, str | None] | None, dict[str, object] | None]:
-        # Callers only ever pass a concrete partition name — the "all" sentinel is
-        # expanded to concrete keys by _pipeline_groups_for_partitions before this
-        # runs. With no per-partition configs at all, fall back to the legacy pipeline.
-        if not self._partition_configs():
-            return self._pipeline, None, self._legacy_query_expansion_prompt_identity(self._pipeline), None
+        """The pipeline *settings* describe, searching *embedder*'s vectors.
 
-        partition_cfg = self._require_partition_config(partition)
-        pipeline_cfg = partition_cfg.retrieval
-        searcher = (
-            self._searcher_factory(partition_cfg.embedder) if self._searcher_factory is not None else self._searcher
-        )
+        It reads no partition config, so a group's pipeline is the one it was
+        grouped by, even when a config refresh lands while an earlier group
+        resolves its prompt. *partition* only names the group in the logs.
+        """
+        searcher = self._searcher_factory(embedder) if self._searcher_factory is not None else self._searcher
 
-        rtype = pipeline_cfg.type
         llm = self._legacy_llm
-        if rtype in {"multiQuery", "hyde"} and self._llm_factory is not None:
-            llm = self._llm_factory(pipeline_cfg.llm or partition_cfg.chat_llm or "default")
+        if settings.expansion_llm is not None and self._llm_factory is not None:
+            llm = self._llm_factory(settings.expansion_llm)
 
         # Only the expansion strategies need a prompt; type="single" (the common
         # case) resolves nothing, so the DB is never touched on that path.
         template = None
         prompt_identity = None
-        if rtype == "multiQuery":
+        if settings.type == "multiQuery":
             template, prompt_identity = await self._resolve_query_prompt(
-                "multi_query", pipeline_cfg.multi_query_prompt_name, "multi_query"
+                "multi_query", settings.expansion_prompt_name, "multi_query"
             )
             prompt_identity = {"type": "multi_query", **prompt_identity}
-        elif rtype == "hyde":
-            template, prompt_identity = await self._resolve_query_prompt("hyde", pipeline_cfg.hyde_prompt_name, "hyde")
+        elif settings.type == "hyde":
+            template, prompt_identity = await self._resolve_query_prompt("hyde", settings.expansion_prompt_name, "hyde")
             prompt_identity = {"type": "hyde", **prompt_identity}
 
         reranker = None
         reranker_identity = None
-        if pipeline_cfg.enable_reranker and not disable_reranker:
-            reranker, reranker_identity = self._resolve_reranker_with_identity(pipeline_cfg.reranker, partition)
+        if settings.rerank:
+            reranker, reranker_identity = self._resolve_reranker_with_identity(settings.reranker, partition)
 
         retriever = self._build_retriever(
-            rtype=rtype,
+            rtype=settings.type,
             template=template,
             common={
                 "searcher": searcher,
-                "top_k": top_k if top_k is not None else pipeline_cfg.top_k,
-                "similarity_threshold": (
-                    similarity_threshold if similarity_threshold is not None else pipeline_cfg.similarity_threshold
-                ),
+                "top_k": settings.top_k,
+                "similarity_threshold": settings.similarity_threshold,
                 "with_surrounding_chunks": self._legacy_retriever_value("with_surrounding_chunks", False),
-                "include_related": False if disable_expansion else pipeline_cfg.include_related,
-                "include_ancestors": False if disable_expansion else pipeline_cfg.include_ancestors,
+                "include_related": settings.include_related,
+                "include_ancestors": settings.include_ancestors,
                 "related_limit": self._legacy_retriever_value("related_limit", 10),
                 "max_ancestor_depth": self._legacy_retriever_value("max_ancestor_depth", None),
             },
@@ -707,15 +719,50 @@ class RetrievalService:
             k_queries=self._legacy_retriever_value("k_queries", 3),
             combine=self._legacy_retriever_value("combine", False),
         )
-        top_n = pipeline_cfg.effective_top_n(self._config.reranker.top_k)
         pipeline = RetrieverPipeline(
             retriever=retriever,
             reranker=reranker,
-            reranker_top_k=top_n,
+            reranker_top_k=settings.top_n,
             allow_filterless_fallback=self._legacy_retriever_value("allow_filterless_fallback", True),
-            rrf_k=pipeline_cfg.rrf_k,
+            rrf_k=settings.rrf_k,
         )
-        return pipeline, top_n, prompt_identity, reranker_identity
+        return pipeline, settings.top_n, prompt_identity, reranker_identity
+
+    def _pipeline_settings(
+        self,
+        partition_cfg: PartitionConfig,
+        *,
+        top_k: int | None,
+        similarity_threshold: float | None,
+        disable_reranker: bool,
+        disable_expansion: bool,
+    ) -> _PipelineSettings:
+        """The settings *partition_cfg*'s pipeline is built from, after the caller's overrides.
+
+        Only what the pipeline reads: a preset field it ignores (the reranker
+        when reranking is off, the query-rewriting LLM and prompts of a
+        ``single`` preset, the contextualizer prompt, which QueryService reads,
+        a value the caller overrides) cannot split partitions into separate
+        retrievals.
+        """
+        cfg = partition_cfg.retrieval
+        rerank = cfg.enable_reranker and not disable_reranker
+        expansion_prompt_names = {"multiQuery": cfg.multi_query_prompt_name, "hyde": cfg.hyde_prompt_name}
+        expands = cfg.type in expansion_prompt_names
+        return _PipelineSettings(
+            type=cfg.type,
+            # multiQuery and hyde rewrite the query with the preset's LLM, else the partition's chat LLM.
+            expansion_llm=(cfg.llm or partition_cfg.chat_llm or "default") if expands else None,
+            expansion_prompt_name=expansion_prompt_names.get(cfg.type),
+            rerank=rerank,
+            reranker=cfg.reranker if rerank else None,
+            top_k=top_k if top_k is not None else cfg.top_k,
+            top_n=cfg.effective_top_n(self._config.reranker.top_k),
+            similarity_threshold=similarity_threshold if similarity_threshold is not None else cfg.similarity_threshold,
+            include_related=cfg.include_related and not disable_expansion,
+            include_ancestors=cfg.include_ancestors and not disable_expansion,
+            rrf_k=cfg.rrf_k,
+        )
 
     @staticmethod
     def _legacy_query_expansion_prompt_identity(pipeline: RetrieverPipeline) -> dict[str, str | None] | None:
@@ -744,12 +791,20 @@ class RetrievalService:
         disable_reranker: bool = False,
         disable_expansion: bool = False,
     ) -> tuple[RetrieverPipeline, int | None]:
-        pipeline, default_top_k, _prompt_identity, _reranker_identity = await self._resolved_pipeline_for_partition(
-            partition,
+        # Callers only ever pass a concrete partition name. With no per-partition
+        # configs at all, fall back to the legacy pipeline.
+        if not self._partition_configs():
+            return self._pipeline, None
+        partition_cfg = self._require_partition_config(partition)
+        settings = self._pipeline_settings(
+            partition_cfg,
             top_k=top_k,
             similarity_threshold=similarity_threshold,
             disable_reranker=disable_reranker,
             disable_expansion=disable_expansion,
+        )
+        pipeline, default_top_k, _prompt_identity, _reranker_identity = await self._pipeline_from_settings(
+            partition, partition_cfg.embedder, settings
         )
         return pipeline, default_top_k
 
@@ -811,23 +866,34 @@ class RetrievalService:
             for partition_name in selected:
                 prompt_identities[partition_name] = legacy_identity
         else:
-            for partition_name in selected:
+            partition_groups = self._partitions_by_pipeline(
+                selected,
+                top_k=top_k,
+                similarity_threshold=similarity_threshold,
+                disable_reranker=disable_reranker,
+                disable_expansion=disable_expansion,
+            )
+            for names, embedder, settings in partition_groups:
+                # Every partition of a group shares the pipeline, prompt and reranker it was grouped by.
                 (
                     pipeline,
                     default_top_k,
                     prompt_identity,
                     reranker_identity,
-                ) = await self._resolved_pipeline_for_partition(
-                    partition_name,
-                    top_k=top_k,
-                    similarity_threshold=similarity_threshold,
-                    disable_reranker=disable_reranker,
-                    disable_expansion=disable_expansion,
-                )
-                groups.append(ResolvedRetrievalGroup((partition_name,), pipeline, default_top_k))
-                prompt_identities[partition_name] = prompt_identity
-                if reranker_identity is not None:
-                    reranker_identities[partition_name] = reranker_identity
+                ) = await self._pipeline_from_settings(names[0], embedder, settings)
+                groups.append(ResolvedRetrievalGroup(tuple(names), pipeline, default_top_k))
+                for partition_name in names:
+                    prompt_identities[partition_name] = prompt_identity
+                    if reranker_identity is not None:
+                        reranker_identities[partition_name] = reranker_identity
+            if len(groups) == 1:
+                # Keep the requested scope, so "all" stays unscoped, as in _pipeline_groups_for_partitions.
+                (group,) = groups
+                groups = [
+                    ResolvedRetrievalGroup(
+                        tuple(["all"] if "all" in requested else selected), group.pipeline, group.default_top_k
+                    )
+                ]
 
         public = self.public_retrieval_configuration(requested)
         for public_partition in public["partitions"]:
@@ -865,11 +931,21 @@ class RetrievalService:
         disable_reranker: bool = False,
         disable_expansion: bool = False,
     ) -> list[tuple[list[str], RetrieverPipeline, int | None]]:
+        """The partitions grouped by the pipeline that retrieves them, each with that pipeline.
+
+        See :meth:`_partitions_by_pipeline` for the grouping. The groups' lists
+        are fused with RRF by the caller.
+
+        ``"all"`` only reaches this layer post-authorization (a SUPER_ADMIN_MODE
+        admin; regular users are already expanded to their memberships upstream),
+        so every hydrated partition is in scope. With a single group it is kept,
+        so the search stays unscoped, as in :meth:`_search_groups`.
+        """
         await self.refresh_partition_configs()
         configs = self._partition_configs()
-        if "all" in partitions and configs:
-            partitions = list(configs.keys())
-        elif not partitions or not configs:
+        if not partitions or not configs:
+            # Nothing to expand (no partitions exist yet) — keep the single
+            # legacy pipeline; there is no per-partition config to honour.
             pipeline = self._pipeline
             if any((top_k is not None, similarity_threshold is not None, disable_reranker, disable_expansion)):
                 pipeline = self._build_legacy_pipeline(
@@ -882,16 +958,63 @@ class RetrievalService:
                 )
             return [(["all"] if "all" in partitions else partitions, pipeline, None)]
         groups: list[tuple[list[str], RetrieverPipeline, int | None]] = []
+        partition_groups = self._partitions_by_pipeline(
+            list(configs) if "all" in partitions else partitions,
+            top_k=top_k,
+            similarity_threshold=similarity_threshold,
+            disable_reranker=disable_reranker,
+            disable_expansion=disable_expansion,
+        )
+        for names, embedder, settings in partition_groups:
+            # Every partition of a group shares the pipeline it was grouped by.
+            pipeline, default_top_k, _prompt_identity, _reranker_identity = await self._pipeline_from_settings(
+                names[0], embedder, settings
+            )
+            groups.append((names, pipeline, default_top_k))
+        if len(groups) == 1:
+            # Keep the caller's partitions, so "all" stays unscoped.
+            _, pipeline, default_top_k = groups[0]
+            return [(partitions, pipeline, default_top_k)]
+        return groups
+
+    def _partitions_by_pipeline(
+        self,
+        partitions: Sequence[str],
+        *,
+        top_k: int | None,
+        similarity_threshold: float | None,
+        disable_reranker: bool,
+        disable_expansion: bool,
+    ) -> list[tuple[list[str], str, _PipelineSettings]]:
+        """Concrete partitions grouped by the retrieval pipeline they build, each with its embedder and settings.
+
+        A query embedding only matches vectors of the same model, so partitions
+        on different embedders need their own retrieval. Partitions on the same
+        vector field (so the ``default`` alias and the embedder behind it stay
+        together, as in :meth:`_search_groups`) with the same pipeline settings
+        (:meth:`_pipeline_settings`: the preset fields the pipeline reads, after
+        the caller's overrides) build the same pipeline, so one retrieval serves
+        them all: one query embedding, one search over all of them, one rerank
+        pass, and their chunks compete on score rather than being fused by rank.
+        """
+        configs = self._partition_configs()
+        endpoints = getattr(self._config.models, "embedder", None) or {}
+        grouped: dict[tuple[str, _PipelineSettings], tuple[str, list[str]]] = {}
         for partition in partitions:
-            pipeline, default_top_k = await self._pipeline_for_partition(
-                partition,
+            partition_cfg = self._require_partition_config(partition)
+            embedder, _endpoint, _vector_field, search_key = self._partition_search_identity(
+                partition, configs, endpoints
+            )
+            settings = self._pipeline_settings(
+                partition_cfg,
                 top_k=top_k,
                 similarity_threshold=similarity_threshold,
                 disable_reranker=disable_reranker,
                 disable_expansion=disable_expansion,
             )
-            groups.append(([partition], pipeline, default_top_k))
-        return groups
+            # A group's pipeline searches with its first partition's embedder, as in _search_groups.
+            grouped.setdefault((search_key, settings), (embedder, []))[1].append(partition)
+        return [(names, embedder, settings) for (_key, settings), (embedder, names) in grouped.items()]
 
     def _search_groups(self, partitions: list[str]) -> list[tuple[list[str], RetrievalSearcher]]:
         """The partitions grouped by the vector field they are searched on, each with its searcher.
@@ -980,7 +1103,7 @@ class RetrievalService:
                 else []
             )
             try:
-                group_hits = await self._gather_partition_groups(
+                group_legs = await self._gather_partition_groups(
                     [
                         (
                             names,
@@ -996,6 +1119,7 @@ class RetrievalService:
                     child_traces=group_traces if trace is not None else None,
                     error_stage="partition_search",
                 )
+                group_hits = [hits for _names, hits in group_legs]
             finally:
                 if trace is not None:
                     try:
@@ -1082,18 +1206,20 @@ class RetrievalService:
         *,
         child_traces: Sequence[RetrievalTraceBuilder] | None = None,
         error_stage: str = "partition_search",
-    ) -> list:
+    ) -> list[tuple[list[str], list]]:
         """Await one coroutine per partition group, bounding concurrency.
 
         Each leg is ``(partition_names, coroutine)``; the names are carried so a
-        dropped leg can be named in the log.
+        dropped leg can be named in the log. Returns ``(partition_names, result)``
+        for each leg that did not fail.
 
-        Small fan-outs (the common case: a handful of partitions) run fully
+        Small fan-outs (the common case: a handful of groups) run fully
         parallel via a plain gather — no added overhead, byte-identical to the
         prior behaviour. Only a fan-out larger than ``max_partition_concurrency``
-        (e.g. a SUPER_ADMIN_MODE ``openrag-all`` expanded to every partition) is
-        throttled through a per-call semaphore, so one request cannot launch a
-        partition-count-proportional flood of embed+Milvus calls (#708).
+        (e.g. a SUPER_ADMIN_MODE ``openrag-all`` over partitions on many
+        embedders or retrieval presets) is throttled through a per-call
+        semaphore, so one request cannot launch a group-count-proportional
+        flood of embed+Milvus calls (#708).
 
         The semaphore is per-call, not shared: it caps this request's own fan-out
         without coupling concurrent requests, and the caps compose safely across
@@ -1121,11 +1247,11 @@ class RetrievalService:
             coros = [_bounded(c) for c in coros]
         results = await asyncio.gather(*coros, return_exceptions=True)
 
-        ranked_lists = []
+        survivors: list[tuple[list[str], list]] = []
         first_error: BaseException | None = None
         for index, ((partition_names, _), result) in enumerate(zip(legs, results, strict=True)):
             if not isinstance(result, BaseException):
-                ranked_lists.append(result)
+                survivors.append((partition_names, result))
                 continue
             if isinstance(result, asyncio.CancelledError):
                 raise result
@@ -1140,9 +1266,9 @@ class RetrievalService:
                 f"Retrieval degraded: dropping partition(s) {partition_names} — {type(result).__name__}: {result}"
             )
 
-        if first_error is not None and not ranked_lists:
+        if first_error is not None and not survivors:
             raise first_error
-        return ranked_lists
+        return survivors
 
     @staticmethod
     def _record_degraded_final(
@@ -1216,7 +1342,7 @@ class RetrievalService:
             else None
         )
         try:
-            ranked_lists = await self._gather_partition_groups(
+            ranked_groups = await self._gather_partition_groups(
                 [
                     (
                         partition_group,
@@ -1236,12 +1362,17 @@ class RetrievalService:
         finally:
             if trace is not None and child_traces is not None:
                 self._safe_merge_child_traces(trace, child_traces)
-        if len(ranked_lists) == 1:
-            result = ranked_lists[0]
+        if len(ranked_groups) == 1:
+            ((_names, result),) = ranked_groups
             if len(groups) > 1:
                 self._record_degraded_final(trace, result)
             return result
-        return self.fuse(ranked_lists, top_k=top_k, trace=trace)
+        return self.fuse(
+            [chunks for _names, chunks in ranked_groups],
+            top_k=top_k,
+            trace=trace,
+            partition_counts=[len(names) for names, _chunks in ranked_groups],
+        )
 
     async def retrieve_multi(
         self,
@@ -1282,7 +1413,7 @@ class RetrievalService:
             else None
         )
         try:
-            ranked_lists = await self._gather_partition_groups(
+            ranked_groups = await self._gather_partition_groups(
                 [
                     (
                         partition_group,
@@ -1302,12 +1433,17 @@ class RetrievalService:
         finally:
             if trace is not None and child_traces is not None:
                 self._safe_merge_child_traces(trace, child_traces)
-        if len(ranked_lists) == 1:
-            result = ranked_lists[0]
+        if len(ranked_groups) == 1:
+            ((_names, result),) = ranked_groups
             if len(groups) > 1:
                 self._record_degraded_final(trace, result)
             return result
-        return self.fuse(ranked_lists, top_k=top_k, trace=trace)
+        return self.fuse(
+            [chunks for _names, chunks in ranked_groups],
+            top_k=top_k,
+            trace=trace,
+            partition_counts=[len(names) for names, _chunks in ranked_groups],
+        )
 
     async def retrieve_per_query(
         self,
@@ -1382,13 +1518,20 @@ class RetrievalService:
         doc_lists: list[list[Chunk]],
         top_k: int | None = None,
         trace: RetrievalTraceBuilder | None = None,
+        partition_counts: Sequence[int] | None = None,
     ) -> list[Chunk]:
-        """RRF-fuse ranked lists across partitions (and doc+web).
+        """RRF-fuse ranked lists across partition groups (and doc+web).
 
         Uses the canonical RRF constant (60) rather than a preset's ``rrf_k``:
-        this fuses lists from *different* partitions (and the web branch), so no
-        single partition's ``rrf_k`` applies. Per-partition ``rrf_k`` is honoured
+        this fuses lists from *different* partition groups (and the web branch),
+        so no single preset's ``rrf_k`` applies. A preset's ``rrf_k`` is honoured
         one layer down, in ``RetrieverPipeline.get_relevant_docs`` (#707).
+
+        ``partition_counts`` gives how many partitions each list ranks together.
+        A list over ``n`` partitions has its ranks divided by ``n``, so it takes
+        about ``n`` times the share of the fused top a one-partition list takes:
+        each partition keeps roughly the share it had as a list of its own, and
+        the partitions of a group split theirs by score.
         """
         fused = rrf_reranking(
             doc_lists,
@@ -1396,6 +1539,7 @@ class RetrievalService:
             top_k=top_k,
             trace=trace,
             trace_stage="partition_fused",
+            rank_scales=partition_counts,
         )
         if trace is not None:
             try:

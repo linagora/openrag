@@ -53,6 +53,28 @@ def test_rrf_rejects_negative_k():
         rrf_reranking([[{"id": "a"}], [{"id": "b"}]], key_fn=lambda x: x["id"], k=-1)
 
 
+def test_rrf_rank_scale_gives_a_list_the_share_of_the_lists_it_stands_for():
+    # The first list ranks three sources together: it takes three of every
+    # four fused places, as three lists of one source each would have.
+    merged = [{"id": f"m{i}"} for i in range(1, 7)]
+    single = [{"id": f"s{i}"} for i in range(1, 3)]
+    fused = rrf_reranking([merged, single], key_fn=lambda x: x["id"], rank_scales=[3, 1])
+    assert [item["id"] for item in fused] == ["m1", "m2", "m3", "s1", "m4", "m5", "m6", "s2"]
+
+
+def test_rrf_unit_rank_scales_change_nothing():
+    lists = [[{"id": "a"}, {"id": "b"}], [{"id": "c"}, {"id": "a"}]]
+    assert rrf_reranking(lists, key_fn=lambda x: x["id"], rank_scales=[1, 1]) == rrf_reranking(
+        lists, key_fn=lambda x: x["id"]
+    )
+
+
+@pytest.mark.parametrize("scales", [[1], [1, 0], [1, -2]])
+def test_rrf_rejects_rank_scales_that_do_not_fit_the_lists(scales):
+    with pytest.raises(ValueError, match="rank scale"):
+        rrf_reranking([[{"id": "a"}], [{"id": "b"}]], key_fn=lambda x: x["id"], rank_scales=scales)
+
+
 def test_rrf_trace_retains_duplicate_membership_and_fused_score():
     first_a = Chunk(id="a", text="first-a", partition="legal")
     duplicate_a = Chunk(id="a", text="duplicate-a", partition="science")
