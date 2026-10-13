@@ -56,3 +56,24 @@ async def test_initialize_skips_database_creation_when_auto_create_is_disabled(m
 
     ensure_database_exists.assert_not_called()
     create_pool.assert_awaited_once()
+
+
+def test_ensure_database_exists_tolerates_concurrent_creation(monkeypatch):
+    # Another process creates the database between our check and our create (#1045).
+    manager = ConnectionManager(RDBConfigStub())
+    exists = iter([False, True])
+
+    monkeypatch.setattr("sqlalchemy_utils.database_exists", lambda url: next(exists))
+    monkeypatch.setattr("sqlalchemy_utils.create_database", Mock(side_effect=RuntimeError("already exists")))
+
+    manager._ensure_database_exists()
+
+
+def test_ensure_database_exists_reraises_when_database_still_missing(monkeypatch):
+    manager = ConnectionManager(RDBConfigStub())
+
+    monkeypatch.setattr("sqlalchemy_utils.database_exists", lambda url: False)
+    monkeypatch.setattr("sqlalchemy_utils.create_database", Mock(side_effect=RuntimeError("permission denied")))
+
+    with pytest.raises(RuntimeError, match="permission denied"):
+        manager._ensure_database_exists()
