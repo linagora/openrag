@@ -69,10 +69,14 @@ networkPolicy:
     enabled: true
     # Empty means any source: a host-network Ingress controller (ingress-nginx
     # with hostNetwork, for one) connects from a node address, which no
-    # namespaceSelector matches. Narrow it with standard NetworkPolicyPeers, e.g.
+    # namespaceSelector matches. Narrow it with standard NetworkPolicyPeers:
+    # a namespaceSelector when the controller runs on the pod network, an
+    # ipBlock with the node addresses when it runs with hostNetwork, e.g.
     #   - namespaceSelector:
     #       matchLabels:
     #         kubernetes.io/metadata.name: ingress-nginx
+    #   - ipBlock:
+    #       cidr: 10.0.0.0/24
     from: []
 
 # === Monitoring artifacts ===
