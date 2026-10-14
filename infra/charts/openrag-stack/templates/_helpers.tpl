@@ -177,8 +177,8 @@ the migration Job.
 {{- fail (printf "%s.POSTGRES_RUN_MIGRATIONS is %q, which the app reads as %v (blank or unset reads as true), but postgresProvisioning.runMigrationsInApp is %v, and this value replaces it. Set postgresProvisioning.runMigrationsInApp and remove POSTGRES_RUN_MIGRATIONS from %s." $source $value $appMigrates $.Values.postgresProvisioning.runMigrationsInApp $source) }}
 {{- end }}
 {{- end }}
-{{- /* Compared as a string: under --set-string, "false" is a non-empty string, which a template reads as true. */}}
-{{- $external := eq (toString .Values.postgresProvisioning.externalMigrations | lower) "true" }}
+{{- /* Compared as a string: under --set-string, "false" is a non-empty string, which a template reads as true. Same spellings as runMigrationsInApp. */}}
+{{- $external := has (toString .Values.postgresProvisioning.externalMigrations | lower) $truthy }}
 {{- if not (or $inApp .Values.postgresProvisioning.migrationJob.enabled $external) }}
 {{- fail "postgresProvisioning.runMigrationsInApp and postgresProvisioning.migrationJob.enabled are both false, so nothing applies the PostgreSQL migrations: the app would start without its services and answer 503. Enable one of them, or set postgresProvisioning.externalMigrations: true if you apply them yourself." }}
 {{- end }}

@@ -357,6 +357,25 @@ def test_a_run_migrations_in_app_the_app_rejects_is_refused(tmp_path: Path) -> N
             ),
             id="applied-externally",
         ),
+        # The spellings runMigrationsInApp accepts.
+        pytest.param(
+            (
+                "--set",
+                "postgresProvisioning.runMigrationsInApp=false",
+                "--set-string",
+                "postgresProvisioning.externalMigrations=1",
+            ),
+            id="applied-externally-1",
+        ),
+        pytest.param(
+            (
+                "--set",
+                "postgresProvisioning.runMigrationsInApp=false",
+                "--set-string",
+                "postgresProvisioning.externalMigrations=YES",
+            ),
+            id="applied-externally-yes",
+        ),
     ],
 )
 def test_settings_that_apply_the_migrations_render(tmp_path: Path, args: tuple[str, ...]) -> None:
@@ -372,6 +391,8 @@ def test_settings_that_apply_the_migrations_render(tmp_path: Path, args: tuple[s
         pytest.param((), id="external-unset"),
         # A non-empty string, which a template condition reads as true.
         pytest.param(("--set-string", "postgresProvisioning.externalMigrations=false"), id="external-string-false"),
+        pytest.param(("--set-string", "postgresProvisioning.externalMigrations=0"), id="external-string-0"),
+        pytest.param(("--set-string", "postgresProvisioning.externalMigrations=no"), id="external-string-no"),
     ],
 )
 def test_nothing_applying_the_migrations_is_refused(tmp_path: Path, args: tuple[str, ...]) -> None:
