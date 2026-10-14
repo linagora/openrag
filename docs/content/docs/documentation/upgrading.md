@@ -13,6 +13,29 @@ The commands are written for bash. In zsh, run `setopt interactive_comments sh_w
 first. Without it, zsh does not treat `#` as the start of a comment and does not
 split `$DC` into `docker compose`, so the commands below fail.
 
+## Chart 0.7.2 (OpenRAG 2.3.2): migration settings the chart refuses
+
+Chart 0.7.2 checks how the PostgreSQL migrations are applied, and refuses to
+render values that leave them unapplied or that it cannot honour. `helm upgrade`
+then stops before it changes anything in the cluster, and the error names the
+setting to change. Render the new chart with your values first, as in
+[Render the new chart offline](#render-the-new-chart-offline), to find out before
+the upgrade.
+
+| The chart refuses | What to change |
+|---|---|
+| `POSTGRES_RUN_MIGRATIONS` in `env.config` or `env.secrets` that disagrees with `postgresProvisioning.runMigrationsInApp`. This includes `POSTGRES_RUN_MIGRATIONS: "false"` set for a managed PostgreSQL while `runMigrationsInApp` is left at its default, `true`. | Remove `POSTGRES_RUN_MIGRATIONS` and set `runMigrationsInApp`, which the chart turns into that variable. |
+| `POSTGRES_RUN_MIGRATIONS` in `env.config` or `env.secrets` with a value the app rejects at startup: anything but `true`, `1`, `yes`, `false`, `0`, `no` (in any case), or blank. | The same. |
+| `runMigrationsInApp` set to anything but `true`, `1`, `yes`, `false`, `0` or `no`. | Set it to `true` or `false`. |
+| `runMigrationsInApp: false` with `migrationJob.enabled: false`: nothing would apply the migrations. | Enable one of them, or set `postgresProvisioning.externalMigrations: true` if you apply them yourself. |
+| `migrationJob.enabled: true` with `postgresql.enabled: true`: the Job runs before Helm creates the bundled PostgreSQL. | Turn the Job off and let the app apply the migrations. |
+| With the Job on, a fullname ending in `-migration` of 50, 51, 58 or 59 characters, which would give a copy of the env the name of the app's ConfigMap or Secret. | Change the release name or `fullnameOverride`. |
+
+The chart can check `env.secrets` only when it renders the Secret itself. Do not
+put `POSTGRES_RUN_MIGRATIONS` in an `env.existingSecret` or in a secret from an
+external secrets operator: that value replaces `runMigrationsInApp` unchecked.
+See [Managed PostgreSQL](/openrag/documentation/kubernetes/#managed-postgresql).
+
 ## Changes in 2.3.0 for every deployment
 
 This section applies to every upgrade from OpenRAG 2.2.1 or 2.2.2, on Kubernetes
@@ -400,9 +423,9 @@ Your values decide what applies the PostgreSQL migrations:
 
 | `postgresProvisioning` | What applies the migrations |
 |---|---|
-| `migrationJob.enabled: true` | The `pre-upgrade` migration Job, before the pods roll. A failing migration fails `helm upgrade`. With an external PostgreSQL only: charts after 0.7.1 refuse it with `postgresql.enabled`. |
+| `migrationJob.enabled: true` | The `pre-upgrade` migration Job, before the pods roll. A failing migration fails `helm upgrade`. With an external PostgreSQL only: [chart 0.7.2 and later](#chart-072-openrag-232-migration-settings-the-chart-refuses) refuse it with `postgresql.enabled`. |
 | `runMigrationsInApp: true` (the default), Job off | The new OpenRAG pod, when it starts. Under Ray Serve, the Serve replicas on the Ray pods, once you scale OpenRAG back up. |
-| Both off | Nothing: run them by hand after `helm upgrade`, as shown below. Charts after 0.7.1 refuse this unless you also set `externalMigrations: true`. |
+| Both off | Nothing: run them by hand after `helm upgrade`, as shown below. [Chart 0.7.2 and later](#chart-072-openrag-232-migration-settings-the-chart-refuses) refuse this unless you also set `externalMigrations: true`. |
 
 If you change the PostgreSQL password (see [Secrets](#secrets)), do it now, before
 `helm upgrade`:

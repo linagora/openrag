@@ -43,7 +43,9 @@ pre-upgrade hook and abort the whole release.
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: {{ include "openrag-stack.fullname" . }}-postgres-migration
+  # Kubernetes copies a Job's name into a pod label, which allows 63 characters.
+  # Over that Helm cannot create the Job, and leaves the copies above behind.
+  name: {{ include "openrag-stack.fullname" . | trunc 44 | trimSuffix "-" }}-postgres-migration
   labels:
     {{- include "openrag-stack.labels" . | nindent 4 }}
     app.kubernetes.io/component: postgres-migration

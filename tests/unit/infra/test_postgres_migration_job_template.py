@@ -138,7 +138,9 @@ def _hook_weight(document: dict) -> int:
 
 def _job_env_from(documents: dict[tuple[str, str], dict]) -> list[str]:
     [job] = [document for (kind, _), document in documents.items() if kind == "Job"]
-    return [next(iter(source.values()))["name"] for source in job["spec"]["template"]["spec"]["containers"][0]["envFrom"]]
+    return [
+        next(iter(source.values()))["name"] for source in job["spec"]["template"]["spec"]["containers"][0]["envFrom"]
+    ]
 
 
 @requires_helm
@@ -160,11 +162,54 @@ def test_the_job_reads_env_copies_created_before_it(tmp_path: Path) -> None:
 
 
 @requires_helm
+@pytest.mark.parametrize(
+    ("args", "secret_kind"),
+    [
+        pytest.param((), "Secret", id="values"),
+        pytest.param(_EXTERNAL_SECRET, "ExternalSecret", id="external-secret"),
+        pytest.param(_VAULT_SECRET, "VaultStaticSecret", id="vault-static-secret"),
+    ],
+)
+def test_the_job_and_every_copy_run_on_install_and_upgrade(
+    tmp_path: Path, args: tuple[str, ...], secret_kind: str
+) -> None:
+    """The Job must run on a fresh install too (#1034), and so must each copy it
+    reads: a copy that is not a hook is created after the Job, which waits for
+    it until Helm times out. before-hook-creation lets the next run replace the
+    copies a failed run left behind."""
+    documents = _documents(tmp_path, *_JOB_ON, *args)
+    job = documents[("Job", "openrag-postgres-migration")]
+    copies = (
+        documents[("ConfigMap", "openrag-migration-env")],
+        documents[(secret_kind, "openrag-migration-env-secrets")],
+    )
+
+    assert job["metadata"]["annotations"]["helm.sh/hook"] == "pre-install,pre-upgrade"
+    for copy in copies:
+        annotations = copy["metadata"]["annotations"]
+        assert annotations["helm.sh/hook"] == "pre-install,pre-upgrade"
+        assert _hook_weight(copy) < _hook_weight(job)
+        assert set(annotations["helm.sh/hook-delete-policy"].split(",")) == {"before-hook-creation", "hook-succeeded"}
+
+
+@requires_helm
+def test_a_long_fullname_keeps_the_job_name_valid(tmp_path: Path) -> None:
+    """Kubernetes copies a Job's name into a pod label, so it allows 63
+    characters. Over that Helm cannot create the Job, and leaves the copies,
+    credentials included, in the namespace."""
+    documents = _documents(tmp_path, *_JOB_ON, "--set", "fullnameOverride=" + "a" * 63)
+
+    assert [name for kind, name in documents if kind == "Job"] == ["a" * 44 + "-postgres-migration"]
+
+
+@requires_helm
 def test_a_long_fullname_keeps_the_copies_apart_from_the_originals(tmp_path: Path) -> None:
     """Cut after the suffix, a 62-character fullname named the Secret copy like
     the app's Secret, and the copy's delete policy would delete the app's."""
     documents = _documents(tmp_path, *_JOB_ON, "--set", "fullnameOverride=" + "a" * 62)
-    names = {kind: [name for document_kind, name in documents if document_kind == kind] for kind in ("ConfigMap", "Secret")}
+    names = {
+        kind: [name for document_kind, name in documents if document_kind == kind] for kind in ("ConfigMap", "Secret")
+    }
 
     assert len(set(names["ConfigMap"])) == 2
     assert len(set(names["Secret"])) == 2
@@ -334,6 +379,10 @@ def test_a_run_migrations_in_app_the_app_rejects_is_refused(tmp_path: Path) -> N
     "args",
     [
         pytest.param((), id="defaults"),
+        # The spellings the app accepts for POSTGRES_RUN_MIGRATIONS, which it is rendered into.
+        pytest.param(("--set-string", "postgresProvisioning.runMigrationsInApp=1"), id="app-on-1"),
+        pytest.param(("--set-string", "postgresProvisioning.runMigrationsInApp=YES"), id="app-on-yes"),
+        pytest.param((*_JOB_ON, "--set-string", "postgresProvisioning.runMigrationsInApp=No"), id="app-off-no"),
         pytest.param(("--set", "env.config.POSTGRES_RUN_MIGRATIONS=True"), id="env-agrees-app-on"),
         pytest.param((*_JOB_ON, "--set-string", "env.config.POSTGRES_RUN_MIGRATIONS=0"), id="env-agrees-app-off"),
         pytest.param(("--set-string", "env.config.POSTGRES_RUN_MIGRATIONS=YES"), id="env-uppercase-agrees"),
