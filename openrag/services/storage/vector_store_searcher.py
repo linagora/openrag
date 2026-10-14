@@ -204,6 +204,7 @@ class VectorStoreSearcher(RetrievalSearcher):
         relationship_id: str,
         limit: int,
         allowed_file_ids: list[str] | None = None,
+        filter: str | None = None,
     ) -> list[Chunk]:
         if limit <= 0:
             return []
@@ -215,9 +216,12 @@ class VectorStoreSearcher(RetrievalSearcher):
             file_ids = [f for f in file_ids if f in allowed]
         if not file_ids:
             return []
+        filters: dict[str, Any] = {"partition": partition, "file_id": file_ids}
+        if filter:
+            filters["expr"] = filter
         rows = await self._store.query_chunks_by_filter(
             self._collection,
-            {"partition": partition, "file_id": file_ids},
+            filters,
             limit=limit,
         )
         return [_dict_to_chunk(r) for r in rows[:limit]]
@@ -229,6 +233,7 @@ class VectorStoreSearcher(RetrievalSearcher):
         limit: int,
         max_ancestor_depth: int | None = None,
         allowed_file_ids: list[str] | None = None,
+        filter: str | None = None,
     ) -> list[Chunk]:
         if limit <= 0:
             return []
@@ -240,9 +245,12 @@ class VectorStoreSearcher(RetrievalSearcher):
             ancestor_ids = [f for f in ancestor_ids if f in allowed]
         if not ancestor_ids:
             return []
+        filters: dict[str, Any] = {"partition": partition, "file_id": ancestor_ids}
+        if filter:
+            filters["expr"] = filter
         rows = await self._store.query_chunks_by_filter(
             self._collection,
-            {"partition": partition, "file_id": ancestor_ids},
+            filters,
             limit=limit,
         )
         return [_dict_to_chunk(r) for r in rows[:limit]]
