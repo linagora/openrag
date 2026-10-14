@@ -7,6 +7,7 @@ import { toast } from "sonner";
 import { useAuth } from "@/lib/auth";
 import { usePermissions } from "@/lib/permissions";
 import { StatusBadge } from "@/components/shared/status-badge";
+import { QueryErrorNotice } from "@/components/shared/query-error-notice";
 import {
   DegradedCompletionStatus,
   normalizeDegradedStages,
@@ -29,6 +30,7 @@ import {
 } from "@/lib/api/jobs";
 import { invalidateJobsQueries } from "@/lib/jobs-queries";
 import { copyToClipboard } from "@/lib/utils";
+import { ApiError } from "@/lib/api/client";
 
 const str = (v: unknown) => (v == null ? "" : String(v));
 
@@ -89,10 +91,25 @@ export default function JobDetailPage() {
     );
   }
 
-  if (taskQuery.isError) {
+  if (taskQuery.isError && taskQuery.error instanceof ApiError && taskQuery.error.status === 404) {
     return (
-      <div className="flex items-center justify-center py-12 text-destructive">
-        Failed to load task: {(taskQuery.error as Error).message}
+      <div className="space-y-4 py-12 text-center">
+        <p className="text-destructive">Task not found.</p>
+        <Button variant="outline" asChild><Link to="/jobs">Back to Jobs</Link></Button>
+      </div>
+    );
+  }
+
+  if (taskQuery.isLoadingError) {
+    return (
+      <div className="space-y-4">
+        <QueryErrorNotice
+          title="Task could not be loaded"
+          message="The job details are unavailable. Try again to reload them."
+          isRetrying={taskQuery.isFetching}
+          onRetry={() => void taskQuery.refetch()}
+        />
+        <Button variant="outline" asChild><Link to="/jobs">Back to Jobs</Link></Button>
       </div>
     );
   }
@@ -132,6 +149,15 @@ export default function JobDetailPage() {
 
   return (
     <div className="space-y-6">
+      {taskQuery.isRefetchError && (
+        <QueryErrorNotice
+          title="Task could not be refreshed"
+          message="Showing the previously loaded task. It may be out of date."
+          isRetrying={taskQuery.isFetching}
+          onRetry={() => void taskQuery.refetch()}
+          stale
+        />
+      )}
       <div className="flex items-center gap-4">
         <Button variant="ghost" size="sm" asChild>
           <Link to="/jobs">
@@ -244,12 +270,24 @@ export default function JobDetailPage() {
             </Button>
           </CardHeader>
           <CardContent className="space-y-4">
+            {errorQuery.isRefetchError && (
+              <QueryErrorNotice
+                title="Error details could not be refreshed"
+                message="Showing previously loaded diagnostics. They may be out of date."
+                isRetrying={errorQuery.isFetching}
+                onRetry={() => void errorQuery.refetch()}
+                stale
+              />
+            )}
             {errorQuery.isLoading ? (
               <p className="text-sm text-muted-foreground">Loading error…</p>
-            ) : errorQuery.isError ? (
-              <p className="text-sm text-destructive">
-                Failed to load error details: {(errorQuery.error as Error).message}
-              </p>
+            ) : errorQuery.isLoadingError ? (
+              <QueryErrorNotice
+                title="Error details could not be loaded"
+                message="The job diagnostics are unavailable. Try again to reload them."
+                isRetrying={errorQuery.isFetching}
+                onRetry={() => void errorQuery.refetch()}
+              />
             ) : errorQuery.data?.traceback?.length ? (
               <>
                 <div className="rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm">

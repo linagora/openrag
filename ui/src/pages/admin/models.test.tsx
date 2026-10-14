@@ -513,6 +513,24 @@ describe("ModelsPage validation", () => {
   });
 });
 
+describe("ModelsPage read errors", () => {
+  beforeEach(() => listModelEndpointsMock.mockReset());
+
+  it("shows a retryable load error instead of empty endpoint groups", async () => {
+    listModelEndpointsMock
+      .mockRejectedValueOnce(new Error("service unavailable"))
+      .mockResolvedValueOnce([]);
+    const user = userEvent.setup();
+    renderPage();
+
+    expect(await screen.findByText("Model endpoints could not be loaded")).not.toBeNull();
+    expect(screen.queryByText("No embedder endpoints configured.")).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Retry" }));
+    expect(await screen.findByText("No embedder endpoints configured.")).not.toBeNull();
+  });
+
+});
+
 describe("ModelsPage delete warning (#762)", () => {
   const embedder = (used_by_partitions: number) => ({
     name: "jina",

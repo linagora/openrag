@@ -88,11 +88,11 @@ describe("useActiveJobsCount", () => {
     expect(listTasksMock).not.toHaveBeenCalled();
   });
 
-  it("reports 0 before the first response and while signed out", async () => {
+  it("reports an unknown count before the first response and while signed out", async () => {
     auth.user = null;
     const { result, rerender } = renderHook(() => useActiveJobsCount(), { wrapper: createWrapper() });
 
-    expect(result.current).toBe(0);
+    expect(result.current).toBeNull();
     expect(getMyInfoMock).not.toHaveBeenCalled();
     expect(getQueueInfoMock).not.toHaveBeenCalled();
     expect(listTasksMock).not.toHaveBeenCalled();
@@ -100,8 +100,16 @@ describe("useActiveJobsCount", () => {
     auth.user = { id: 7, is_admin: false };
     getMyInfoMock.mockResolvedValue(myInfo(1));
     rerender();
-    expect(result.current).toBe(0);
+    expect(result.current).toBeNull();
     await waitFor(() => expect(result.current).toBe(1));
+  });
+
+  it("keeps a failed active-count request distinct from a zero count", async () => {
+    getMyInfoMock.mockRejectedValue(new Error("service unavailable"));
+    const { result } = renderHook(() => useActiveJobsCount(), { wrapper: createWrapper() });
+
+    await waitFor(() => expect(getMyInfoMock).toHaveBeenCalledOnce());
+    expect(result.current).toBeNull();
   });
 
   it("keeps caches apart per account so a re-login cannot inherit a count", async () => {
@@ -112,7 +120,7 @@ describe("useActiveJobsCount", () => {
     auth.user = { id: 8, is_admin: false };
     rerender();
 
-    expect(result.current).toBe(0);
+    expect(result.current).toBeNull();
     expect(jobsQueryKeys.activeCount({ userId: 7, isAdmin: false })).not.toEqual(
       jobsQueryKeys.activeCount({ userId: 8, isAdmin: false }),
     );
@@ -131,7 +139,7 @@ describe("useActiveJobsCount", () => {
     auth.user = { id: 7, is_admin: false };
     rerender();
 
-    expect(result.current).toBe(0);
+    expect(result.current).toBeNull();
     expect(getQueueInfoMock).toHaveBeenCalledTimes(1);
     expect(getMyInfoMock).toHaveBeenCalledTimes(1);
     expect(listTasksMock).not.toHaveBeenCalled();

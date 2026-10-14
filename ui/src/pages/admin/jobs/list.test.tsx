@@ -109,12 +109,15 @@ const task = (
   url: `/indexer/task/${task_id}`,
 });
 
-function renderJobs() {
+function renderJobs(cachedTasks?: TaskListItem[]) {
   const queryClient = new QueryClient({
     defaultOptions: {
       queries: { retry: false },
     },
   });
+  if (cachedTasks) {
+    queryClient.setQueryData(["tasks", 7, "admin", "all"], { tasks: cachedTasks }, { updatedAt: 0 });
+  }
 
   const rendered = render(
     <QueryClientProvider client={queryClient}>
@@ -137,6 +140,9 @@ describe("JobListPage filters", () => {
     permissions.isAdmin = true;
     auth.user = { id: 7, is_admin: true };
     vi.clearAllMocks();
+    cancelTaskMock.mockReset();
+    getQueueInfoMock.mockReset();
+    listTasksMock.mockReset();
     cancelTaskMock.mockResolvedValue({ message: "Cancellation signal sent" });
     getQueueInfoMock.mockResolvedValue({
       workers: { total_slots: 4, pool_size: 2, max_per_actor: 2 },
@@ -480,12 +486,48 @@ describe("JobListPage filters", () => {
   });
 
   it("handles unavailable queue information", async () => {
-    getQueueInfoMock.mockRejectedValue(new Error("queue unavailable"));
+    getQueueInfoMock
+      .mockRejectedValueOnce(new Error("queue unavailable"))
+      .mockResolvedValueOnce({
+        workers: { total_slots: 2, pool_size: 1, max_per_actor: 2 },
+        tasks: {
+          active: 0,
+          active_statuses: { QUEUED: 0, SERIALIZING: 0 },
+          total_completed: 20,
+          total_cancelled: 0,
+          total_failed: 1,
+        },
+      });
 
+    const user = userEvent.setup();
     renderJobs();
 
     expect(await screen.findByText("Queue unavailable")).not.toBeNull();
+    await user.click(screen.getByRole("button", { name: "Retry queue information" }));
+    expect(await screen.findByLabelText("Queue pressure")).not.toBeNull();
     expect(await screen.findByText("completed.pdf")).not.toBeNull();
+  });
+
+  it("keeps cached jobs visible and marks them stale after refresh fails", async () => {
+    listTasksMock.mockRejectedValue(new Error("service unavailable"));
+    renderJobs([task("cached-task", "COMPLETED", "cached.pdf")]);
+
+    expect(await screen.findByText(/Showing previously loaded jobs/)).not.toBeNull();
+    expect(screen.getByText("cached.pdf")).not.toBeNull();
+    expect(screen.queryByText("Jobs could not be loaded")).toBeNull();
+  });
+
+  it("shows a retryable task-load failure instead of an empty jobs table", async () => {
+    listTasksMock.mockRejectedValueOnce(new Error("network unavailable")).mockResolvedValueOnce({
+      tasks: [task("recovered-task", "COMPLETED", "recovered.pdf")],
+    });
+    const user = userEvent.setup();
+    renderJobs();
+
+    expect(await screen.findByText("Jobs could not be loaded")).not.toBeNull();
+    expect(screen.queryByText("No results.")).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Retry" }));
+    expect(await screen.findByText("recovered.pdf")).not.toBeNull();
   });
 
   it("does not fetch admin-only queue information for non-admin users", async () => {

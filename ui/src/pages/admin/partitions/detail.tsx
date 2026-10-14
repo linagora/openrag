@@ -48,7 +48,9 @@ import {
 } from "@/components/ui/table";
 import { NewBadge } from "@/components/shared/new-badge";
 import { PageHeader } from "@/components/shared/page-header";
+import { QueryErrorNotice } from "@/components/shared/query-error-notice";
 import { ConfirmDialog } from "@/components/shared/confirm-dialog";
+import { ApiError } from "@/lib/api/client";
 import { computeEmbedderDrift, driftSignature } from "./embedder-drift";
 import { ChangeEmbedderDialog, EmbedderSwapBanner } from "./embedder-swap";
 import { useEmbedderSwap } from "./use-embedder-swap";
@@ -887,79 +889,105 @@ function UsersTab({ partitionName }: { partitionName: string }) {
               <Skeleton key={i} className="h-10 w-full" />
             ))}
           </div>
-        ) : usersQuery.data && usersQuery.data.members.length > 0 ? (
-          <div className="overflow-x-auto rounded-md border">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>User</TableHead>
-                  <TableHead>Email</TableHead>
-                  <TableHead>Role</TableHead>
-                  <TableHead>Added</TableHead>
-                  {canManage && <TableHead>Actions</TableHead>}
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {usersQuery.data.members.map((user) => (
-                  <TableRow key={user.user_id}>
-                    <TableCell className="text-sm">
-                      <PartitionMemberIdentity member={user} />
-                    </TableCell>
-                    <TableCell className="text-sm">
-                      <PartitionMemberEmail member={user} />
-                    </TableCell>
-                    <TableCell>
-                      {canManage ? (
-                        <Select
-                          value={String(user.role)}
-                          onValueChange={(v) => {
-                            if (v !== user.role)
-                              roleMutation.mutate({ uid: user.user_id, newRole: v as PartitionRole });
-                          }}
-                        >
-                          <SelectTrigger className="h-8 w-32 capitalize" disabled={roleMutation.isPending}>
-                            <SelectValue />
-                          </SelectTrigger>
-                          <SelectContent>
-                            <SelectItem value="viewer">Viewer</SelectItem>
-                            <SelectItem value="editor">Editor</SelectItem>
-                            <SelectItem value="owner">Owner</SelectItem>
-                          </SelectContent>
-                        </Select>
-                      ) : (
-                        <span className="capitalize">{user.role}</span>
-                      )}
-                    </TableCell>
-                    <TableCell className="text-muted-foreground">
-                      {formatDate(user.added_at)}
-                    </TableCell>
-                    {canManage && (
-                      <TableCell>
-                        <ConfirmDialog
-                          title="Remove User"
-                          description={`Remove ${describePartitionMember(user)} from this partition? They will lose access to partition data.`}
-                          onConfirm={() => removeMutation.mutate(user.user_id)}
-                        >
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            disabled={removeMutation.isPending}
-                            aria-label={`Remove ${describePartitionMember(user)} from partition`}
-                          >
-                            <Trash2 className="h-3 w-3 text-destructive" />
-                          </Button>
-                        </ConfirmDialog>
-                      </TableCell>
-                    )}
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          </div>
+        ) : usersQuery.isLoadingError ? (
+          <QueryErrorNotice
+            title={usersQuery.error instanceof ApiError && usersQuery.error.status === 403
+              ? "Partition users are not available to your role"
+              : "Partition users could not be loaded"}
+            message={usersQuery.error instanceof ApiError && usersQuery.error.status === 403
+              ? "Only partition owners can view its members. Ask an owner to check this list."
+              : "The member list is unavailable. Try again to reload it."}
+            isRetrying={usersQuery.isFetching}
+            onRetry={() => void usersQuery.refetch()}
+          />
         ) : (
-          <p className="text-sm text-muted-foreground text-center py-6">
-            No users assigned to this partition yet.
-          </p>
+          <>
+            {usersQuery.isRefetchError && (
+              <div className="mb-3">
+                <QueryErrorNotice
+                  title="Partition users could not be refreshed"
+                  message="Showing the previously loaded members. They may be out of date."
+                  isRetrying={usersQuery.isFetching}
+                  onRetry={() => void usersQuery.refetch()}
+                  stale
+                />
+              </div>
+            )}
+            {usersQuery.data && usersQuery.data.members.length > 0 ? (
+              <div className="overflow-x-auto rounded-md border">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>User</TableHead>
+                      <TableHead>Email</TableHead>
+                      <TableHead>Role</TableHead>
+                      <TableHead>Added</TableHead>
+                      {canManage && <TableHead>Actions</TableHead>}
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {usersQuery.data.members.map((user) => (
+                      <TableRow key={user.user_id}>
+                        <TableCell className="text-sm">
+                          <PartitionMemberIdentity member={user} />
+                        </TableCell>
+                        <TableCell className="text-sm">
+                          <PartitionMemberEmail member={user} />
+                        </TableCell>
+                        <TableCell>
+                          {canManage ? (
+                            <Select
+                              value={String(user.role)}
+                              onValueChange={(v) => {
+                                if (v !== user.role)
+                                  roleMutation.mutate({ uid: user.user_id, newRole: v as PartitionRole });
+                              }}
+                            >
+                              <SelectTrigger className="h-8 w-32 capitalize" disabled={roleMutation.isPending}>
+                                <SelectValue />
+                              </SelectTrigger>
+                              <SelectContent>
+                                <SelectItem value="viewer">Viewer</SelectItem>
+                                <SelectItem value="editor">Editor</SelectItem>
+                                <SelectItem value="owner">Owner</SelectItem>
+                              </SelectContent>
+                            </Select>
+                          ) : (
+                            <span className="capitalize">{user.role}</span>
+                          )}
+                        </TableCell>
+                        <TableCell className="text-muted-foreground">
+                          {formatDate(user.added_at)}
+                        </TableCell>
+                        {canManage && (
+                          <TableCell>
+                            <ConfirmDialog
+                              title="Remove User"
+                              description={`Remove ${describePartitionMember(user)} from this partition? They will lose access to partition data.`}
+                              onConfirm={() => removeMutation.mutate(user.user_id)}
+                            >
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                disabled={removeMutation.isPending}
+                                aria-label={`Remove ${describePartitionMember(user)} from partition`}
+                              >
+                                <Trash2 className="h-3 w-3 text-destructive" />
+                              </Button>
+                            </ConfirmDialog>
+                          </TableCell>
+                        )}
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+            ) : (
+              <p className="text-sm text-muted-foreground text-center py-6">
+                No users assigned to this partition yet.
+              </p>
+            )}
+          </>
         )}
 
         <Dialog open={dialogOpen} onOpenChange={handleDialogOpenChange}>
@@ -1101,12 +1129,10 @@ export default function PartitionDetailPage() {
     );
   }
 
-  if (partitionQuery.isError) {
+  if (partitionQuery.isError && partitionQuery.error instanceof ApiError && partitionQuery.error.status === 404) {
     return (
       <div className="text-center py-12">
-        <p className="text-destructive mb-4">
-          Failed to load partition: {partitionQuery.error.message}
-        </p>
+        <p className="text-destructive mb-4">Partition not found.</p>
         <Button variant="outline" asChild>
           <Link to="/partitions">
             <ArrowLeft className="h-4 w-4" />
@@ -1116,6 +1142,24 @@ export default function PartitionDetailPage() {
       </div>
     );
   }
+
+  if (partitionQuery.isLoadingError) {
+    return (
+      <div className="space-y-4">
+        <QueryErrorNotice
+          title="Partition could not be loaded"
+          message="The partition details are unavailable. Try again to reload them."
+          isRetrying={partitionQuery.isFetching}
+          onRetry={() => void partitionQuery.refetch()}
+        />
+        <Button variant="outline" asChild>
+          <Link to="/partitions"><ArrowLeft className="h-4 w-4" />Back to Partitions</Link>
+        </Button>
+      </div>
+    );
+  }
+
+  if (!partitionQuery.data) return null;
 
   const partition = partitionQuery.data!;
 
@@ -1133,6 +1177,18 @@ export default function PartitionDetailPage() {
           </Button>
         }
       />
+
+      {partitionQuery.isRefetchError && (
+        <div className="mb-4">
+          <QueryErrorNotice
+            title="Partition could not be refreshed"
+            message="Showing the previously loaded partition. It may be out of date."
+            isRetrying={partitionQuery.isFetching}
+            onRetry={() => void partitionQuery.refetch()}
+            stale
+          />
+        </div>
+      )}
 
       <Tabs defaultValue="general">
         <TabsList>

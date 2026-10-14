@@ -25,6 +25,7 @@ import type { ModelEndpointResponse } from "@/lib/api/models";
 import { listPartitions } from "@/lib/api/partitions";
 import type { PartitionResponse } from "@/lib/api/partitions";
 import { PageHeader } from "@/components/shared/page-header";
+import { QueryErrorNotice } from "@/components/shared/query-error-notice";
 import { ConfirmDialog } from "@/components/shared/confirm-dialog";
 import { useNewOptions } from "@/components/shared/new-badge";
 import { Button } from "@/components/ui/button";
@@ -85,10 +86,11 @@ export default function PresetsPage() {
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editing, setEditing] = useState<PresetResponse | null>(null);
 
-  const { data, isLoading } = useQuery({
+  const presetsQuery = useQuery({
     queryKey: ["presets"],
     queryFn: () => listPresets(),
   });
+  const { data, isLoading } = presetsQuery;
 
   const createMut = useMutation({
     mutationFn: createPreset,
@@ -178,82 +180,102 @@ export default function PresetsPage() {
                   <Skeleton key={i} className="h-48" />
                 ))}
               </div>
+            ) : presetsQuery.isLoadingError ? (
+              <QueryErrorNotice
+                title="Presets could not be loaded"
+                message="The preset list is unavailable. Try again to reload it."
+                isRetrying={presetsQuery.isFetching}
+                onRetry={() => void presetsQuery.refetch()}
+              />
             ) : (
-              <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-                {presets
-                  .filter((p) => p.preset_type === type)
-                  .map((preset) => (
-                    <Card key={`${preset.preset_type}-${preset.name}`} className="flex flex-col">
-                      <CardHeader className="pb-3">
-                        <div className="flex items-center justify-between gap-2">
-                          <CardTitle className="text-base truncate min-w-0">{preset.name}</CardTitle>
-                          <Badge
-                            variant="outline"
-                            className={
-                              preset.used_by_partitions > 0
-                                ? "text-xs h-fit shrink-0 bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-950/30 dark:text-amber-100 dark:border-amber-900/60"
-                                : "text-xs h-fit shrink-0 bg-muted text-muted-foreground border-transparent"
-                            }
-                          >
-                            {preset.used_by_partitions > 0
-                              ? `used by ${preset.used_by_partitions} partition${preset.used_by_partitions === 1 ? "" : "s"}`
-                              : "unused"}
-                          </Badge>
-                        </div>
-                      </CardHeader>
-                      <CardContent className="flex flex-col flex-1 text-sm">
-                        <div className="flex flex-wrap gap-1 flex-1">
-                          {summarizeConfig(preset.config).map((s, i) => (
-                            <Badge
-                              key={i}
-                              variant="secondary"
-                              className="text-xs h-fit max-w-full whitespace-normal break-words text-left"
-                            >
-                              {s}
-                            </Badge>
-                          ))}
-                          {Object.keys(preset.config).length > 5 && (
-                            <Badge variant="outline" className="text-xs h-fit">
-                              +{Object.keys(preset.config).length - 5} more
-                            </Badge>
-                          )}
-                        </div>
-                        <div className="text-xs text-muted-foreground mt-3">
-                          Updated {formatDate(preset.updated_at)}
-                        </div>
-                        <div className="flex flex-wrap gap-2 pt-3">
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            onClick={() => { setEditing(preset); setDialogOpen(true); }}
-                          >
-                            <Pencil className="mr-1 h-3 w-3" /> Edit
-                          </Button>
-                          <ConfirmDialog
-                            title="Delete preset?"
-                            description={
-                              preset.used_by_partitions > 0
-                                ? `"${preset.name}" is used by ${preset.used_by_partitions} partition${preset.used_by_partitions === 1 ? "" : "s"}. Reassign them to a different preset before deleting.`
-                                : `This will permanently delete "${preset.name}".`
-                            }
-                            onConfirm={() =>
-                              deleteMut.mutate({ type: preset.preset_type, name: preset.name })
-                            }
-                          >
-                            <Button size="sm" variant="outline" className="text-destructive">
-                              <Trash2 className="mr-1 h-3 w-3" /> Delete
-                            </Button>
-                          </ConfirmDialog>
-                        </div>
-                      </CardContent>
-                    </Card>
-                  ))}
-                {presets.filter((p) => p.preset_type === type).length === 0 && (
-                  <p className="col-span-full text-center py-8 text-muted-foreground">
-                    No {type} presets configured.
-                  </p>
+              <>
+                {presetsQuery.isRefetchError && (
+                  <div className="mb-4">
+                    <QueryErrorNotice
+                      title="Presets could not be refreshed"
+                      message="Showing previously loaded presets. They may be out of date."
+                      isRetrying={presetsQuery.isFetching}
+                      onRetry={() => void presetsQuery.refetch()}
+                      stale
+                    />
+                  </div>
                 )}
-              </div>
+                <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+                  {presets
+                    .filter((p) => p.preset_type === type)
+                    .map((preset) => (
+                      <Card key={`${preset.preset_type}-${preset.name}`} className="flex flex-col">
+                        <CardHeader className="pb-3">
+                          <div className="flex items-center justify-between gap-2">
+                            <CardTitle className="text-base truncate min-w-0">{preset.name}</CardTitle>
+                            <Badge
+                              variant="outline"
+                              className={
+                                preset.used_by_partitions > 0
+                                  ? "text-xs h-fit shrink-0 bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-950/30 dark:text-amber-100 dark:border-amber-900/60"
+                                  : "text-xs h-fit shrink-0 bg-muted text-muted-foreground border-transparent"
+                              }
+                            >
+                              {preset.used_by_partitions > 0
+                                ? `used by ${preset.used_by_partitions} partition${preset.used_by_partitions === 1 ? "" : "s"}`
+                                : "unused"}
+                            </Badge>
+                          </div>
+                        </CardHeader>
+                        <CardContent className="flex flex-col flex-1 text-sm">
+                          <div className="flex flex-wrap gap-1 flex-1">
+                            {summarizeConfig(preset.config).map((s, i) => (
+                              <Badge
+                                key={i}
+                                variant="secondary"
+                                className="text-xs h-fit max-w-full whitespace-normal break-words text-left"
+                              >
+                                {s}
+                              </Badge>
+                            ))}
+                            {Object.keys(preset.config).length > 5 && (
+                              <Badge variant="outline" className="text-xs h-fit">
+                                +{Object.keys(preset.config).length - 5} more
+                              </Badge>
+                            )}
+                          </div>
+                          <div className="text-xs text-muted-foreground mt-3">
+                            Updated {formatDate(preset.updated_at)}
+                          </div>
+                          <div className="flex flex-wrap gap-2 pt-3">
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              onClick={() => { setEditing(preset); setDialogOpen(true); }}
+                            >
+                              <Pencil className="mr-1 h-3 w-3" /> Edit
+                            </Button>
+                            <ConfirmDialog
+                              title="Delete preset?"
+                              description={
+                                preset.used_by_partitions > 0
+                                  ? `"${preset.name}" is used by ${preset.used_by_partitions} partition${preset.used_by_partitions === 1 ? "" : "s"}. Reassign them to a different preset before deleting.`
+                                  : `This will permanently delete "${preset.name}".`
+                              }
+                              onConfirm={() =>
+                                deleteMut.mutate({ type: preset.preset_type, name: preset.name })
+                              }
+                            >
+                              <Button size="sm" variant="outline" className="text-destructive">
+                                <Trash2 className="mr-1 h-3 w-3" /> Delete
+                              </Button>
+                            </ConfirmDialog>
+                          </div>
+                        </CardContent>
+                      </Card>
+                    ))}
+                  {presets.filter((p) => p.preset_type === type).length === 0 && (
+                    <p className="col-span-full text-center py-8 text-muted-foreground">
+                      No {type} presets configured.
+                    </p>
+                  )}
+                </div>
+              </>
             )}
           </TabsContent>
         ))}
@@ -1174,32 +1196,38 @@ function PresetDialog({
   }, [open, editing]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
-  const { data: options } = useQuery({
+  const optionsQuery = useQuery({
     queryKey: ["preset-options"],
     queryFn: getPresetOptions,
     enabled: open,
   });
 
-  const { data: llmData } = useQuery({
+  const llmQuery = useQuery({
     queryKey: ["model-endpoints", "llm"],
     queryFn: () => listModelEndpoints("llm"),
     enabled: open,
   });
-  const { data: vlmData } = useQuery({
+  const vlmQuery = useQuery({
     queryKey: ["model-endpoints", "vlm"],
     queryFn: () => listModelEndpoints("vlm"),
     enabled: open && presetType === "indexation",
   });
-  const { data: sttData } = useQuery({
+  const sttQuery = useQuery({
     queryKey: ["model-endpoints", "stt"],
     queryFn: () => listModelEndpoints("stt"),
     enabled: open && presetType === "indexation",
   });
-  const { data: rerankerData } = useQuery({
+  const rerankerQuery = useQuery({
     queryKey: ["model-endpoints", "reranker"],
     queryFn: () => listModelEndpoints("reranker"),
     enabled: open && presetType === "retrieval",
   });
+
+  const { data: options } = optionsQuery;
+  const { data: llmData } = llmQuery;
+  const { data: vlmData } = vlmQuery;
+  const { data: sttData } = sttQuery;
+  const { data: rerankerData } = rerankerQuery;
 
   const llms = (llmData ?? []).map((e) => e.name);
   const vlms = (vlmData ?? []).map((e) => e.name);
@@ -1212,12 +1240,26 @@ function PresetDialog({
   // reranker model endpoints, like the embedder/LLM pickers.
   const rerankers = (rerankerData ?? []).map((e) => e.name);
 
-  const { data: promptData } = useQuery({
+  const promptQuery = useQuery({
     queryKey: ["prompts-for-presets"],
     queryFn: () => listAllPrompts(),
     enabled: open,
   });
+  const { data: promptData } = promptQuery;
   const allPrompts = promptData ?? [];
+
+  const optionQueries = [
+    optionsQuery,
+    llmQuery,
+    promptQuery,
+    ...(presetType === "indexation" ? [vlmQuery, sttQuery] : [rerankerQuery]),
+  ];
+  const optionLoading = open && optionQueries.some((query) => query.isLoading);
+  const optionReadFailed = optionQueries.some((query) => query.isError);
+  const optionInitialLoadFailed = optionQueries.some((query) => query.isLoadingError);
+  const retryOptionReads = () => {
+    optionQueries.filter((query) => query.isError).forEach((query) => void query.refetch());
+  };
 
   const topNChanged =
     editing?.preset_type === "retrieval" && (editing.config.top_n ?? null) !== (config.top_n ?? null);
@@ -1247,6 +1289,22 @@ function PresetDialog({
             {editing ? `Edit ${editing.name}` : `Create ${activeTab} preset`}
           </DialogTitle>
         </DialogHeader>
+        {optionLoading && (
+          <p className="text-sm text-muted-foreground" role="status">
+            Loading preset options…
+          </p>
+        )}
+        {open && optionReadFailed && (
+          <QueryErrorNotice
+            title={optionInitialLoadFailed ? "Preset options could not be loaded" : "Preset options could not be refreshed"}
+            message={optionInitialLoadFailed
+              ? "Some model, prompt, or configuration options are unavailable. Retry before relying on the choices below."
+              : "Showing previously loaded preset options. They may be out of date."}
+            isRetrying={optionQueries.some((query) => query.isFetching)}
+            onRetry={retryOptionReads}
+            stale={!optionInitialLoadFailed}
+          />
+        )}
         <form onSubmit={handleSubmit} className="space-y-4">
           <div className="space-y-2">
             <Label>Name</Label>

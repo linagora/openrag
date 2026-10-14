@@ -28,6 +28,13 @@ const queryData = vi.hoisted(() => ({
   partitions: [makePartition()],
   isError: false,
   isLoading: false,
+  isLoadingError: false,
+  isRefetchError: false,
+  tasksIsLoadingError: false,
+  tasksIsError: false,
+  tasksIsRefetchError: false,
+  tasksIsLoading: false,
+  refetch: vi.fn(),
 }));
 const permissions = vi.hoisted(() => ({
   canCreatePartition: true,
@@ -42,15 +49,24 @@ vi.mock("@tanstack/react-query", () => ({
     const key = queryKey[0];
     if (key === "partitions") {
       return {
-        data: { partitions: queryData.partitions },
+        data: queryData.isLoadingError ? undefined : { partitions: queryData.partitions },
         isError: queryData.isError,
         isLoading: queryData.isLoading,
+        isLoadingError: queryData.isLoadingError,
+        isRefetchError: queryData.isRefetchError,
+        isFetching: false,
+        refetch: queryData.refetch,
       };
     }
     if (key === "tasks") {
       return {
-        data: { tasks: [] },
-        isLoading: false,
+        data: queryData.tasksIsLoadingError ? undefined : { tasks: [] },
+        isLoading: queryData.tasksIsLoading,
+        isError: queryData.tasksIsError,
+        isLoadingError: queryData.tasksIsLoadingError,
+        isRefetchError: queryData.tasksIsRefetchError,
+        isFetching: false,
+        refetch: queryData.refetch,
       };
     }
     return {
@@ -91,6 +107,13 @@ describe("OverviewPage quick actions", () => {
     authUser.is_admin = false;
     queryData.isError = false;
     queryData.isLoading = false;
+    queryData.isLoadingError = false;
+    queryData.isRefetchError = false;
+    queryData.tasksIsLoadingError = false;
+    queryData.tasksIsError = false;
+    queryData.tasksIsRefetchError = false;
+    queryData.tasksIsLoading = false;
+    queryData.refetch.mockClear();
     queryData.partitions = [makePartition()];
   });
 
@@ -219,6 +242,7 @@ describe("OverviewPage quick actions", () => {
 
   it("does not show a derived upload action while partitions fail to load", () => {
     queryData.isError = true;
+    queryData.isLoadingError = true;
 
     render(
       <MemoryRouter>
@@ -229,6 +253,49 @@ describe("OverviewPage quick actions", () => {
     expect(screen.queryByRole("button", { name: /upload documents/i })).toBeNull();
     expect(screen.queryByRole("link", { name: /upload documents/i })).toBeNull();
     expect(screen.queryByText("Create Partition to Upload")).toBeNull();
+  });
+
+  it("keeps derived actions based on cached partitions after a refresh failure", () => {
+    queryData.isError = true;
+    queryData.isRefetchError = true;
+
+    render(
+      <MemoryRouter>
+        <OverviewPage />
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByRole("button", { name: /upload documents/i })).not.toBeNull();
+    expect(screen.getAllByText(/previously loaded value/)).not.toHaveLength(0);
+  });
+
+  it("does not show a zero-job summary when the task request fails", () => {
+    queryData.tasksIsLoadingError = true;
+    queryData.tasksIsError = true;
+
+    render(
+      <MemoryRouter>
+        <OverviewPage />
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByText("Active Jobs unavailable")).not.toBeNull();
+    expect(screen.getByText("Recent jobs could not be loaded")).not.toBeNull();
+    expect(screen.queryByText("No jobs found.")).toBeNull();
+    expect(screen.getAllByRole("button", { name: "Retry" })).not.toHaveLength(0);
+  });
+
+  it("keeps the recent-job summary visible and labels it stale after refresh fails", () => {
+    queryData.tasksIsRefetchError = true;
+
+    render(
+      <MemoryRouter>
+        <OverviewPage />
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByText(/Showing previously loaded jobs/)).not.toBeNull();
+    expect(screen.queryByText("Recent jobs could not be loaded")).toBeNull();
   });
 
   it("hides upload guidance when nothing is writable and partition creation is unavailable", () => {

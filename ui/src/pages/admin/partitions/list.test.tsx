@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { deletePartition, listPartitions } from "@/lib/api/partitions";
+import { listModelEndpoints } from "@/lib/api/models";
 import PartitionListPage from "./list";
 
 const permissions = vi.hoisted(() => ({
@@ -35,6 +36,7 @@ vi.mock("@/lib/api/models", () => ({
 
 const listPartitionsMock = vi.mocked(listPartitions);
 const deletePartitionMock = vi.mocked(deletePartition);
+const listModelEndpointsMock = vi.mocked(listModelEndpoints);
 
 function makePartition(name: string, role = "owner") {
   return {
@@ -57,13 +59,14 @@ function makePartition(name: string, role = "owner") {
   };
 }
 
-function renderPartitions() {
+function renderPartitions(cachedPartitions?: ReturnType<typeof makePartition>[]) {
   const queryClient = new QueryClient({
     defaultOptions: {
       queries: { retry: false },
       mutations: { retry: false },
     },
   });
+  if (cachedPartitions) queryClient.setQueryData(["partitions"], { partitions: cachedPartitions });
 
   return render(
     <QueryClientProvider client={queryClient}>
@@ -73,6 +76,51 @@ function renderPartitions() {
     </QueryClientProvider>,
   );
 }
+
+describe("PartitionListPage read errors", () => {
+  beforeEach(() => {
+    listPartitionsMock.mockReset();
+  });
+
+  it("shows a retryable load error instead of an empty state and recovers on retry", async () => {
+    listPartitionsMock
+      .mockRejectedValueOnce(new Error("service unavailable"))
+      .mockResolvedValueOnce({ partitions: [makePartition("recovered")] });
+    renderPartitions();
+
+    expect(await screen.findByText("Partitions could not be loaded")).not.toBeNull();
+    expect(screen.queryByText("No partitions.")).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(await screen.findByText("recovered")).not.toBeNull();
+  });
+
+  it("keeps cached partitions visible and labels them stale after refresh fails", async () => {
+    listPartitionsMock.mockResolvedValueOnce({ partitions: [makePartition("cached-partition")] });
+    renderPartitions([makePartition("cached-partition")]);
+
+    expect(await screen.findByText("cached-partition")).not.toBeNull();
+    await waitFor(() => expect(listPartitionsMock).toHaveBeenCalledOnce());
+    listPartitionsMock.mockRejectedValueOnce(new Error("service unavailable"));
+    await userEvent.click(screen.getByRole("button", { name: "Refresh partitions" }));
+    expect(await screen.findByText(/Showing previously loaded partitions/)).not.toBeNull();
+    expect(screen.getByText("cached-partition")).not.toBeNull();
+    expect(screen.queryByText("No partitions.")).toBeNull();
+  });
+
+  it("shows and retries failures while loading partition setup options", async () => {
+    permissions.canManagePartitions = true;
+    listModelEndpointsMock.mockReset().mockRejectedValueOnce(new Error("service unavailable"));
+    const user = userEvent.setup();
+    renderPartitions();
+
+    await user.click(screen.getByRole("button", { name: "Create Partition" }));
+    expect(await screen.findByText("Partition setup options could not be loaded")).not.toBeNull();
+    listModelEndpointsMock.mockResolvedValue([]);
+    await user.click(screen.getByRole("button", { name: "Retry" }));
+    expect(await screen.findByText("Embedder *")).not.toBeNull();
+    expect(screen.queryByText("Partition setup options could not be loaded")).toBeNull();
+  });
+});
 
 describe("PartitionListPage bulk actions", () => {
   beforeEach(() => {

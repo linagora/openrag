@@ -6,6 +6,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { toast } from "sonner";
 import { getTaskError, getTaskStatus, cancelTask } from "@/lib/api/jobs";
 import { copyToClipboard } from "@/lib/utils";
+import { ApiError } from "@/lib/api/client";
 import JobDetailPage from "./detail";
 
 vi.mock("sonner", () => ({
@@ -79,6 +80,10 @@ describe("JobDetailPage", () => {
     permissions.isAdmin = true;
     auth.user = { id: 7, is_admin: true };
     vi.clearAllMocks();
+    getTaskStatusMock.mockReset();
+    getTaskErrorMock.mockReset();
+    cancelTaskMock.mockReset();
+    copyToClipboardMock.mockReset();
     getTaskStatusMock.mockResolvedValue({
       task_id: "task-1",
       task_state: "FAILED",
@@ -121,6 +126,29 @@ describe("JobDetailPage", () => {
     expect(copyToClipboardMock.mock.calls[0][0]).toContain("ValueError: canonical parser failure");
     expect(copyToClipboardMock.mock.calls[0][0]).toContain("Failed stage: chunking");
     expect(toastSuccessMock).toHaveBeenCalledWith("Diagnostics copied to clipboard");
+  });
+
+  it("offers retry for a transient task-load failure", async () => {
+    getTaskStatusMock
+      .mockRejectedValueOnce(new Error("service unavailable"))
+      .mockResolvedValueOnce({
+        task_id: "task-1",
+        task_state: "COMPLETED",
+        details: { file_id: "file-1", partition: "docs", metadata: {}, user_id: 1 },
+      });
+    renderJobDetail();
+
+    expect(await screen.findByText("Task could not be loaded")).not.toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(await screen.findByRole("heading", { name: "Task task-1" })).not.toBeNull();
+  });
+
+  it("reports a task as missing only for a 404 response", async () => {
+    getTaskStatusMock.mockRejectedValue(new ApiError(404, { detail: "Task not found" }));
+    renderJobDetail();
+
+    expect(await screen.findByText("Task not found.")).not.toBeNull();
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
   });
 
   it("uses the complete reason in details and copied diagnostics", async () => {

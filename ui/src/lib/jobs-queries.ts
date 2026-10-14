@@ -60,11 +60,11 @@ export function jobsQueueInfoQueryOptions(scope: JobsQueryScope) {
 }
 
 /**
- * Active tasks the caller may see — 0 until the first response lands. Admins
+ * Active tasks the caller may see — null until the first response lands. Admins
  * reuse the global queue summary; regular users reuse the lightweight pending
  * count already returned with their current-user information.
  */
-export function useActiveJobsCount(): number {
+export function useActiveJobsCount(): number | null {
   const { user } = useAuth();
   const scope = { userId: user?.id ?? 0, isAdmin: user?.is_admin === true };
   const adminQuery = useQuery({
@@ -75,5 +75,5 @@ export function useActiveJobsCount(): number {
     ...jobsUserActiveCountQueryOptions(scope),
     enabled: !!user && !scope.isAdmin,
   });
-  return scope.isAdmin ? (adminQuery.data?.tasks.active ?? 0) : (userQuery.data ?? 0);
+  return scope.isAdmin ? (adminQuery.data?.tasks.active ?? null) : (userQuery.data ?? null);
 }

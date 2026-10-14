@@ -5,7 +5,7 @@ import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { SidebarProvider } from "@/components/ui/sidebar";
 import { AppSidebar } from "./sidebar";
 
-const activeJobs = vi.hoisted(() => ({ count: 7 }));
+const activeJobs = vi.hoisted(() => ({ count: 7 as number | null }));
 const permissions = vi.hoisted(() => ({
   isAdmin: true,
   superAdmin: true,
@@ -93,6 +93,16 @@ describe("AppSidebar Jobs badge", () => {
     expect(jobsLink.className).toContain("bg-sidebar-accent");
     expect(jobsLink.querySelector(".bg-sidebar-primary")).not.toBeNull();
     expect(screen.getByRole("link", { name: "Jobs" })).toBe(jobsLink);
+  });
+
+  it("marks an unavailable count instead of implying there are no active jobs", () => {
+    activeJobs.count = null;
+    renderSidebar();
+
+    expect(jobsBadge()?.textContent).toBe("!");
+    expect(screen.getByRole("link", { name: "Jobs, active job count unavailable" })).toBe(
+      screen.getByTitle("Jobs"),
+    );
   });
 
   it("hands the right edge to the badge while it is showing", () => {
