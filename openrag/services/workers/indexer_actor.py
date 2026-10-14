@@ -6,10 +6,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from core.models.catalog import DEGRADABLE_ENRICHMENT_STAGES, DocumentStatus, IndexationJob, normalize_degraded_stages
+from core.models.catalog import DocumentStatus, IndexationJob, normalize_degraded_stages
 from core.models.document import Document
 from core.utils.error_summary import failure_reason_from_exception
-from core.utils.exceptions import NoIndexableContentError, PipelineError
+from core.utils.exceptions import NoIndexableContentError
 from core.utils.logging import get_logger
 from services.workers.failure_reporting import submit_task_failure
 from services.workers.indexing_callback import send_indexing_callback
@@ -190,14 +190,6 @@ class IndexerWorker:
             row = await self._pipeline.run(row)
             stored_count = row.get("stored_count", 0)
             if stored_count == 0:
-                # Enrichment failures are recorded and skipped (#986). If one of
-                # them is why nothing was stored, name that failure instead of
-                # reporting an empty file (#1077).
-                degraded = row.get("degraded_stages")
-                if isinstance(degraded, dict):
-                    for stage, detail in degraded.items():
-                        if isinstance(stage, str) and stage in DEGRADABLE_ENRICHMENT_STAGES:
-                            raise PipelineError(f"{stage} stage failed: {detail}")
                 raise NoIndexableContentError("No indexable content was extracted from this document.")
             indexed_at = row.get("indexed_at")
             catalog_config = _with_embedder_provenance(indexation_config, row.get("embedder_provenance"))

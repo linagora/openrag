@@ -471,35 +471,6 @@ async def test_process_file_fails_when_no_chunks_are_produced(
 
 
 @pytest.mark.asyncio
-async def test_process_file_names_degraded_stage_when_nothing_was_stored(tmp_path: Path) -> None:
-    path = tmp_path / "photo.png"
-    path.write_bytes(b"png")
-
-    class CaptionFailedPipeline:
-        async def run(self, row: dict[str, Any]) -> dict[str, Any]:
-            row["stored_count"] = 0
-            row["degraded_stages"] = {
-                "caption": "INFERENCE_CONNECTION_ERROR: Cannot reach VLM at http://127.0.0.1:9",
-            }
-            return row
-
-    tsm = _fake_tsm()
-    worker = IndexerWorker(pipeline=CaptionFailedPipeline(), task_state_manager=tsm)
-
-    with pytest.raises(PipelineError, match="Cannot reach VLM"):
-        await worker.process_file(
-            task_id="t-caption-down",
-            path=str(path),
-            metadata={"file_id": "f-photo"},
-            partition="p",
-        )
-
-    failure = tsm.set_failed_if_not_cancelled.remote.await_args.args
-    assert failure[0] == "t-caption-down"
-    assert "Cannot reach VLM" in failure[1]
-
-
-@pytest.mark.asyncio
 async def test_process_file_zero_chunk_replacement_keeps_existing_catalog_and_vectors(tmp_path: Path) -> None:
     path = tmp_path / "empty.txt"
     path.write_bytes(b"")
