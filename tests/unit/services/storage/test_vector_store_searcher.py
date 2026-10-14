@@ -450,6 +450,16 @@ async def test_get_related_chunks_queries_store_with_file_ids():
 
 
 @pytest.mark.asyncio
+async def test_related_and_ancestor_queries_keep_the_search_filter():
+    expr = 'created_at >= ISO "2026-01-01T00:00:00+00:00"'
+    searcher, store, _, _ = _make_searcher(file_ids_by_rel=["f1"], ancestor_ids=["a1"], filter_results=[_make_row("1")])
+    await searcher.get_related_chunks(partition="p1", relationship_id="r1", limit=10, filter=expr)
+    await searcher.get_ancestor_chunks(partition="p1", file_id="f1", limit=10, filter=expr)
+    assert store.query_chunks_by_filter.await_args_list[0].args[1]["expr"] == expr
+    assert store.query_chunks_by_filter.await_args_list[1].args[1]["expr"] == expr
+
+
+@pytest.mark.asyncio
 async def test_get_related_chunks_accepts_limit_with_shared_vector_store(mock_vector_store):
     doc_repo = MagicMock()
     doc_repo.get_file_ids_by_relationship = AsyncMock(return_value=["f1"])
