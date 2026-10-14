@@ -87,7 +87,7 @@ def _pages_with_fallback(doc: pymupdf.Document, chunks: list[dict], filename: st
                     fallen_back_pages=fallen_back_pages,
                     fallen_back_pages_count=len(fallen_back_pages)
                 ).warning(
-                    "pymupdf4llm returned much less text than the text layer; falling back to page.get_text() for this page"
+                    f"pymupdf4llm returned much less text than the text layer for {len(fallen_back_pages)}; the pages are {fallen_back_pages}"
                 )
     return pages
 
