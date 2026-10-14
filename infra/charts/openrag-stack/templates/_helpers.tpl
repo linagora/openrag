@@ -122,6 +122,72 @@ the helpers refuse that case.
 {{- end }}
 
 {{/*
+Refuse migration settings that leave the schema to chance. Alembic is the only
+thing that creates the schema, either in the app at startup
+(POSTGRES_RUN_MIGRATIONS, from postgresProvisioning.runMigrationsInApp) or in
+the migration Job.
+
+- POSTGRES_RUN_MIGRATIONS is read as the app reads it (_coerce in
+  core/config/loader.py): blank means unset, which the app reads as true;
+  true/1/yes and false/0/no in any case, with no trimming; anything else stops
+  the app at startup, so the chart refuses it.
+- env.config.POSTGRES_RUN_MIGRATIONS replaces the value derived from
+  runMigrationsInApp, so the two can disagree without a word. So does
+  env.secrets.POSTGRES_RUN_MIGRATIONS: the pods read the env Secret after the
+  ConfigMap, so its value wins. The chart can read it only when it renders the
+  Secret itself, not from env.existingSecret or a secrets operator.
+- With migrations off in the app and no Job, nothing applies them: the app
+  starts without its services and answers 503 until someone does. That is a
+  supported setup only when the operator says so with
+  postgresProvisioning.externalMigrations.
+- The Job is for an external PostgreSQL: it runs before Helm creates the
+  bundled one, so on a first install it cannot reach it.
+*/}}
+{{- define "openrag-stack.validateMigrationSettings" -}}
+{{- $truthy := list "true" "1" "yes" }}
+{{- $falsy := list "false" "0" "no" }}
+{{- $inAppValue := printf "%v" .Values.postgresProvisioning.runMigrationsInApp | lower }}
+{{- if not (has $inAppValue (concat $truthy $falsy)) }}
+{{- fail (printf "postgresProvisioning.runMigrationsInApp is %q; set it to true or false." (printf "%v" .Values.postgresProvisioning.runMigrationsInApp)) }}
+{{- end }}
+{{- $inApp := has $inAppValue $truthy }}
+{{- /* hasKey, not `default`: to `default`, a boolean false is empty. A key
+   removed from env.config is unset in the ConfigMap, which the app reads as
+   true, as it reads a blank. */}}
+{{- $configValue := "" }}
+{{- if hasKey .Values.env.config "POSTGRES_RUN_MIGRATIONS" }}
+{{- $configValue = index .Values.env.config "POSTGRES_RUN_MIGRATIONS" }}
+{{- end }}
+{{- $sources := list (list "env.config" $configValue) }}
+{{- $secrets := .Values.env.secrets | default dict }}
+{{- if and (not .Values.env.existingSecret) (eq (.Values.env.secretsProvider.type | default "values") "values") (hasKey $secrets "POSTGRES_RUN_MIGRATIONS") }}
+{{- $sources = append $sources (list "env.secrets" (index $secrets "POSTGRES_RUN_MIGRATIONS")) }}
+{{- end }}
+{{- range $sources }}
+{{- $source := index . 0 }}
+{{- $value := tpl (printf "%v" (index . 1)) $ }}
+{{- $appMigrates := true }}
+{{- if $value }}
+{{- if not (has (lower $value) (concat $truthy $falsy)) }}
+{{- fail (printf "%s.POSTGRES_RUN_MIGRATIONS is %q, which the app rejects at startup. Remove it from %s and set postgresProvisioning.runMigrationsInApp instead." $source $value $source) }}
+{{- end }}
+{{- $appMigrates = has (lower $value) $truthy }}
+{{- end }}
+{{- if ne $appMigrates $inApp }}
+{{- fail (printf "%s.POSTGRES_RUN_MIGRATIONS is %q, which the app reads as %v (blank or unset reads as true), but postgresProvisioning.runMigrationsInApp is %v, and this value replaces it. Set postgresProvisioning.runMigrationsInApp and remove POSTGRES_RUN_MIGRATIONS from %s." $source $value $appMigrates $.Values.postgresProvisioning.runMigrationsInApp $source) }}
+{{- end }}
+{{- end }}
+{{- /* Compared as a string: under --set-string, "false" is a non-empty string, which a template reads as true. */}}
+{{- $external := eq (toString .Values.postgresProvisioning.externalMigrations | lower) "true" }}
+{{- if not (or $inApp .Values.postgresProvisioning.migrationJob.enabled $external) }}
+{{- fail "postgresProvisioning.runMigrationsInApp and postgresProvisioning.migrationJob.enabled are both false, so nothing applies the PostgreSQL migrations: the app would start without its services and answer 503. Enable one of them, or set postgresProvisioning.externalMigrations: true if you apply them yourself." }}
+{{- end }}
+{{- if and .Values.postgresProvisioning.migrationJob.enabled .Values.postgresql.enabled }}
+{{- fail "postgresProvisioning.migrationJob is for an external PostgreSQL: it runs before Helm creates the bundled one (postgresql.enabled), so it cannot reach it on a first install. With the bundled PostgreSQL, turn the Job off and let the app apply the migrations (postgresProvisioning.runMigrationsInApp: true)." }}
+{{- end }}
+{{- end }}
+
+{{/*
 Merge a component's security context override (e.g. just runAsUser/runAsGroup/
 fsGroup, tuned to that component's own Dockerfile) on top of a shared default
 from values.yaml's top-level `security` block — component keys win on
