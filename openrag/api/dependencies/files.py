@@ -7,6 +7,7 @@ from typing import Any
 
 import aiofiles
 from core.indexing import validators as core_validators
+from core.models.document import Document
 from core.utils import consts
 from core.utils.exceptions import ValidationError
 from core.utils.filename import make_unique_filename
@@ -53,15 +54,17 @@ async def validate_file_format(
 ):
     accepted_file_formats = config.loader.file_loaders.model_dump().keys()
     mimetypes = config.loader.mimetypes.to_dict()
-    extension = core_validators.validate_file_format(
+    core_validators.validate_file_format(
         filename=file.filename,
         accepted_formats=accepted_file_formats,
         accepted_mimetypes=mimetypes.keys(),
         mimetype=metadata.get("mimetype"),
     )
-    # The extension alone selects the parser, so check the bytes agree with it
-    # before the body is written to disk or a task is queued. Reads only the
-    # head and rewinds, leaving the streamed save below unaffected.
+    # The extension, or the mimetype standing in for an unknown one, selects
+    # the parser, so check the bytes agree with it before the body is written
+    # to disk or a task is queued. Reads only the head and rewinds, leaving the
+    # streamed save below unaffected.
+    extension = Document.type_extension(file.filename, metadata.get("mimetype"))
     head = await file.read(core_validators.CONTENT_SNIFF_BYTES)
     await file.seek(0)
     core_validators.validate_content_matches_extension(extension, head)
@@ -79,6 +82,7 @@ async def save_file_to_disk(
     dest_dir: Path,
     chunk_size: int = consts.FILE_READ_CHUNK_SIZE,
     with_random_prefix: bool = False,
+    mimetype: str | None = None,
 ) -> Path:
     """Save an uploaded file to disk in chunks and return the saved path."""
     saved = await _save_file_to_disk(
@@ -86,6 +90,7 @@ async def save_file_to_disk(
         dest_dir=dest_dir,
         chunk_size=chunk_size,
         with_random_prefix=with_random_prefix,
+        mimetype=mimetype,
         calculate_sha256=False,
     )
     return saved.path
@@ -96,6 +101,7 @@ async def save_file_to_disk_with_sha256(
     dest_dir: Path,
     chunk_size: int = consts.FILE_READ_CHUNK_SIZE,
     with_random_prefix: bool = False,
+    mimetype: str | None = None,
 ) -> SavedUpload:
     """Save an upload and calculate its SHA-256 digest in the same pass."""
     return await _save_file_to_disk(
@@ -103,6 +109,7 @@ async def save_file_to_disk_with_sha256(
         dest_dir=dest_dir,
         chunk_size=chunk_size,
         with_random_prefix=with_random_prefix,
+        mimetype=mimetype,
         calculate_sha256=True,
     )
 
@@ -113,6 +120,7 @@ async def _save_file_to_disk(
     dest_dir: Path,
     chunk_size: int,
     with_random_prefix: bool,
+    mimetype: str | None,
     calculate_sha256: bool,
 ) -> SavedUpload:
     dest_dir.mkdir(parents=True, exist_ok=True)
@@ -124,6 +132,13 @@ async def _save_file_to_disk(
         raise ValidationError("Uploaded file must have a filename.", status_code=400)
 
     filename = make_unique_filename(safe_basename) if with_random_prefix else safe_basename
+    # Stored under the suffix it is parsed as: ``report`` sent as
+    # ``application/pdf`` is saved as ``….pdf``, so ``Document.as_temporary_file``
+    # hands the path-based parsers this shared-volume file instead of a
+    # node-local copy that a worker on another node cannot open.
+    suffix = Document.type_suffix(safe_basename, mimetype)
+    if suffix and Path(filename).suffix != suffix:
+        filename += suffix
     file_path = (dest_dir / filename).resolve()
     try:
         file_path.relative_to(dest_dir)
