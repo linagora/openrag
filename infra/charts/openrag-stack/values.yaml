@@ -1101,6 +1101,9 @@ env:
     # Embedder
     EMBEDDER_MODEL_NAME: '{{ .Values.vllm.embedderModelName }}'
     EMBEDDER_BASE_URL: 'http://{{ .Release.Name }}-embedder-engine-service/v1'
+    # Client for an external embedder: vllm (default, needs GET /models), ollama,
+    # or tei (Hugging Face text-embeddings-inference, which has no /models).
+    # EMBEDDER_PROVIDER: "tei"
 
     # Reranker
     RERANKER_MODEL: '{{ .Values.reranker.rerankerModelName }}'
@@ -1122,7 +1125,7 @@ env:
     # unavailable. Every replica shares it, so its outage or restart then takes
     # all of them out of the Service, admin API and UI included. Before enabling,
     # check that /ready reports checks.embedder: ok (the probe looks the model
-    # name up in GET /models). See
+    # name up in GET /models, or checks /health for EMBEDDER_PROVIDER=tei). See
     # docs/content/docs/documentation/env_vars.md#model-endpoint-registry.
     READINESS_REQUIRE_EMBEDDER: "false"
 

@@ -274,6 +274,9 @@ def _model_probe_request(config: ModelEndpointConfig, model_type: str | None = N
     implementation = model_implementation(config, model_type)
     if implementation == "ollama" and not base.endswith("/v1"):
         base += "/v1"
+    if implementation == "tei":
+        # TEI has no /models, and serves /health at its root next to /v1/embeddings.
+        base = base.removesuffix("/v1")
     health_only = implementation in {"infinity", "tei"}
     # Keep non-STT keys as configured (``EMPTY`` is real for the bundled
     # reranker). The audio client trims STT keys and treats whitespace-only as

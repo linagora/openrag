@@ -146,9 +146,12 @@ admin API and admin UI too, which leaves `kubectl port-forward` as the only way 
 Before enabling it, check that `/ready` reports `checks.embedder: ok`: the probe
 looks the configured model name up in the endpoint's `GET /models` list, so an
 embedder that works can still read `unavailable`, for example behind a gateway that
-lists the model under another name, or on an endpoint without a `/models` route. On
-Ollama, recognized by its `GET /api/version`, an untagged name also matches its
-`:latest` tag, as Ollama resolves it. Checks use short timeouts and results are cached
+lists the model under another name, or on another endpoint without a `/models` route.
+A Hugging Face text-embeddings-inference (TEI) embedder has no such route: set
+`EMBEDDER_PROVIDER=tei` in `env.config` (or pick the `tei` vendor in the admin UI)
+and its `/health` is probed instead, without checking the model name. On Ollama,
+recognized by its `GET /api/version`, an untagged name also matches its `:latest`
+tag, as Ollama resolves it. Checks use short timeouts and results are cached
 for two seconds. Model probes check availability without running inference; they
 do not guarantee every request will succeed. Use an application image that
 includes `/ready` with these probes.

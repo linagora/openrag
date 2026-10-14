@@ -189,6 +189,9 @@ async def test_snapshot_separates_identical_urls_with_different_api_keys(respx_m
         ("llm", "ollama", "/v1", "/v1/models"),
         ("reranker", "infinity", "", "/health"),
         ("reranker", "tei", "", "/health"),
+        # TEI serves /health at its root, next to /v1/embeddings.
+        ("embedder", "tei", "", "/health"),
+        ("embedder", "tei", "/v1/", "/health"),
     ],
 )
 async def test_snapshot_uses_provider_specific_probe_path(respx_mock, kind, implementation, base, path):
@@ -490,6 +493,39 @@ async def test_model_list_404_is_unavailable(respx_mock, endpoint, models_url):
 
     assert route.call_count == 1
     assert snapshot.checks["embedder"] == "unavailable"
+
+
+@pytest.mark.parametrize(("implementation", "expected_status"), [("tei", "ok"), ("vllm", "unavailable")])
+async def test_an_embedder_without_a_model_list_is_ready_only_when_declared_tei(
+    respx_mock, implementation, expected_status
+):
+    # TEI embeds on /v1/embeddings and has no /models. Declared ``tei``, it is
+    # probed on /health; left as ``vllm``, its /models 404 is what a malformed
+    # vLLM base URL answers, so it stays unavailable.
+    models = respx_mock.get("http://tei.test/v1/models").respond(404)
+    health = respx_mock.get("http://tei.test/health").respond(200)
+    discovery = AsyncMock(
+        return_value=ModelEndpointDiscovery(
+            targets=(
+                ModelEndpointTarget(
+                    provider="default",
+                    kind="embedder",
+                    config=ModelEndpointConfig(
+                        endpoint="http://tei.test/v1",
+                        model_name="BAAI/bge-m3",
+                        extra={"implementation": implementation},
+                    ),
+                    is_default=True,
+                ),
+            )
+        )
+    )
+    service = ReadinessService({}, discover_model_endpoints=discovery, summary_model_kinds=("embedder",))
+
+    snapshot = await service.snapshot()
+
+    assert (health.called, models.called) == (implementation == "tei", implementation == "vllm")
+    assert snapshot.checks["embedder"] == expected_status
 
 
 async def test_missing_endpoint_config_is_unresolvable_without_http_request(respx_mock):
