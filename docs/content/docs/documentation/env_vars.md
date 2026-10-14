@@ -70,7 +70,7 @@ Openrag loads all files into a pivot markdown file format before proceeding to c
 |----------|------|---------|-------------|
 | `IMAGE_CAPTIONING` | `bool` | `true` | If `true`, an LLM is used to describe images and convert them into text using a [specific prompt](https://github.com/linagora/openrag/blob/main/openrag/prompts/templates/image_captioning_tmpl.txt). The image in files are replaced by their descriptions |
 | `IMAGE_CAPTIONING_URL` | `bool` | `true` | If `true`, HTTP/HTTPS image URLs in markdown files are fetched and described by the VLM. |
-| `SAVE_MARKDOWN` | `bool` | `false` | If `true`, the pivot-format markdown produced during parsing is saved. Useful for debugging and verifying the correctness of the generated markdown. |
+| `SAVE_MARKDOWN` | `bool` | `false` | If `true`, the pivot-format markdown produced during parsing (after image captioning) is saved next to the uploaded file as `<file>.md`. Useful for debugging and verifying the correctness of the generated markdown. Page changes are marked with `<!-- page N -->`, and images left without a description show their alt text (or `[Image]`). Only files stored under `DATA_DIR` get a copy, so URLs indexed through MCP are skipped. The copy is kept whatever `SAVE_UPLOADED_FILES` says, and nothing deletes it afterwards (deleting the file or its partition doesn't either), so turn the flag off once you're done. |
 |`SAVE_UPLOADED_FILES`|`bool`|`true`| When `true`, uploaded files are stored on disk. You must enable this option if you want Chainlit to show sources while chatting.|
 | `CONTENT_DEDUPLICATION_ENABLED` | `bool` | `true` | Rejects a file when identical content already exists in the same partition. Set it to `false` when a test intentionally indexes duplicates. |
 | `PDFLOADER` | `str` | `PyMuPDFLoader` | PDF parsing engine. `PyMuPDFLoader` (default) is a lightweight, fast, CPU-friendly backend for searchable PDFs. Switch to `MarkerLoader` for OCR / scanned documents, complex layouts and embedded images (heavier; GPU-friendly). Other options: `DoclingLoader`, `DotsOCRLoader`.|
@@ -445,7 +445,7 @@ The retriever fetches relevant documents from the vector database based on query
 | `RELATED_LIMIT` | `int` | 10 | Maximum number of related/ancestor chunks fetched per matched result when expansion is enabled. |
 | `MAX_DEPTH` | `int` | 10 | Maximum ancestor depth traversed when `INCLUDE_ANCESTORS` is enabled. |
 | `RETRIEVER_ALLOW_FILTERLESS_FALLBACK` | `bool` | true | When a temporally-filtered retrieval returns no documents, re-run the query without the filter. Set to `false` for strict temporal retrieval. |
-| `RETRIEVER_MAX_PARTITION_CONCURRENCY` | `int` | 16 | Upper bound on how many per-partition retrievals run concurrently **per retrieval call**. Bounds fan-out for multi-partition / `openrag-all` searches; small fan-outs stay fully parallel. Note: a multi-query request (multiQuery/hyde) issues one such call per sub-query, so peak concurrency can reach `N × this value`, not a flat per-request cap. |
+| `RETRIEVER_MAX_PARTITION_CONCURRENCY` | `int` | 16 | Upper bound on how many partition-group retrievals run concurrently **per retrieval call**. Partitions sharing an embedder (and, for chat, a retrieval preset) are retrieved together, so a multi-partition / `openrag-all` search fans out one retrieval per group; small fan-outs stay fully parallel. Note: a multi-query request (multiQuery/hyde) issues one such call per sub-query, so peak concurrency can reach `N × this value`, not a flat per-request cap. |
 
 #### Retrieval Strategies
 

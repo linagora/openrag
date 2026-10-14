@@ -188,6 +188,8 @@ class IndexerWorkerActor:
             # No point letting more of one document's images queue on the VLM
             # gate than the gate will ever admit at once.
             caption_concurrency=cfg.semaphore.vlm_semaphore,
+            save_markdown=cfg.loader.save_markdown,
+            data_dir=cfg.paths.data_dir,
         )
         self._catalog_store = PostgresStore(_catalog_rdb_config(cfg), run_migrations=False)
         self._catalog_initialized = False
@@ -508,6 +510,7 @@ class IndexerWorkerActor:
                         include_selected_stt=routes_to_openai_audio_loader(
                             self._cfg,
                             _display_filename(path, metadata),
+                            metadata.get("mimetype"),
                         ),
                     )
                 )
