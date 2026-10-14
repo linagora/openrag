@@ -13,17 +13,26 @@ services:
     <<: *reranker_template
     image: michaelf34/infinity:0.0.77 # same tag as the chart's reranker.image.tag
     runtime: nvidia
+    # Infinity turns TF32 matmuls on and has no flag to turn them off; with
+    # them on, float32 scores still move with the batch.
+    environment:
+      NVIDIA_TF32_OVERRIDE: "0"
     deploy:
       resources:
         reservations:
           devices:
             - driver: nvidia
-              count: all 
+              count: all
               capabilities: [gpu]
+    # --dtype: on GPU, Infinity's default picks bfloat16, where a document's
+    # score depends on what shares its batch, so near-tied chunks swap places
+    # between identical requests. RERANKER_DTYPE=bfloat16 trades that for
+    # about three times the throughput.
     command: >
       v2
       --model-id ${RERANKER_MODEL:-Alibaba-NLP/gte-multilingual-reranker-base}
       --api-key ${RERANKER_API_KEY:-"EMPTY"}
+      --dtype ${RERANKER_DTYPE:-float32}
       --port 7997
     profiles:
       - ''
