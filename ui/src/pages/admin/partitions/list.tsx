@@ -210,7 +210,8 @@ export default function PartitionListPage() {
   const embedderEndpoints = embedderEndpointsQuery.data;
   const setupQueries = [presetsQuery, llmEndpointsQuery, embedderEndpointsQuery];
   const setupReadFailed = canManagePartitions && setupQueries.some((query) => query.isError);
-  const setupInitialReadFailed = setupQueries.some((query) => query.isLoadingError);
+  const setupInitialReadFailed =
+    canManagePartitions && setupQueries.some((query) => query.isLoadingError);
   const setupLoading = canManagePartitions && setupQueries.some((query) => query.isLoading);
   const retrySetupReads = () => {
     setupQueries.filter((query) => query.isError).forEach((query) => void query.refetch());

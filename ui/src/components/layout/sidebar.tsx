@@ -71,6 +71,7 @@ export function AppSidebar() {
     // The badge and the active dot share the right edge, so only one shows.
     const isJobsItem = item.href === "/jobs";
     const badgeCount = isJobsItem ? activeJobs : 0;
+    const hasActiveJobs = typeof badgeCount === "number" && badgeCount > 0;
     const jobsCountUnavailable = isJobsItem && badgeCount === null;
     return (
       <SidebarMenuItem key={item.href}>
@@ -80,14 +81,14 @@ export function AppSidebar() {
           // Collapsed, the label is display:none and drops out of the
           // accessible name, so the count is spelled out on the link itself.
           aria-label={
-            badgeCount !== null && badgeCount > 0
+            hasActiveJobs
               ? `${item.title}, ${badgeCount} active job${badgeCount === 1 ? "" : "s"}`
               : jobsCountUnavailable
                 ? "Jobs, active job count unavailable"
                 : undefined
           }
           className={`${sidebarItemClassName} ${
-            (badgeCount !== null && badgeCount > 0) || jobsCountUnavailable
+            hasActiveJobs || jobsCountUnavailable
               ? "pr-11 group-data-[collapsible=icon]:pr-0"
               : ""
           } ${
@@ -98,7 +99,7 @@ export function AppSidebar() {
         >
           <item.icon className="h-4.5 w-4.5 shrink-0" />
           <span className="truncate group-data-[collapsible=icon]:hidden">{item.title}</span>
-          {((badgeCount !== null && badgeCount > 0) || jobsCountUnavailable) && (
+          {(hasActiveJobs || jobsCountUnavailable) && (
             <Badge
               variant={jobsCountUnavailable ? "outline" : "destructive"}
               aria-hidden="true"
@@ -106,7 +107,11 @@ export function AppSidebar() {
               title={jobsCountUnavailable ? "Active job count unavailable" : undefined}
               className="pointer-events-none absolute right-2 top-1/2 h-5 min-w-5 -translate-y-1/2 px-1.5 text-[10px] leading-none font-bold tabular-nums group-data-[collapsible=icon]:right-0 group-data-[collapsible=icon]:top-0 group-data-[collapsible=icon]:h-4 group-data-[collapsible=icon]:min-w-4 group-data-[collapsible=icon]:translate-y-0 group-data-[collapsible=icon]:px-1 group-data-[collapsible=icon]:text-[9px]"
             >
-              {jobsCountUnavailable ? "!" : badgeCount !== null && badgeCount > 99 ? "99+" : badgeCount}
+              {jobsCountUnavailable
+                ? "!"
+                : typeof badgeCount === "number" && badgeCount > 99
+                  ? "99+"
+                  : badgeCount}
             </Badge>
           )}
           {active && badgeCount === 0 && (

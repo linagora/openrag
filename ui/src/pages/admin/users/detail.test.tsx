@@ -68,7 +68,7 @@ describe("UserDetailPage read errors", () => {
     renderUserDetail();
 
     expect(await screen.findByText("User could not be loaded")).not.toBeNull();
-    expect(screen.queryByText("User not found")).toBeNull();
+    expect(screen.queryByText("User not found.")).toBeNull();
     await user.click(screen.getByRole("button", { name: "Retry" }));
     expect(await screen.findByRole("heading", { name: "Ada Lovelace" })).not.toBeNull();
   });
