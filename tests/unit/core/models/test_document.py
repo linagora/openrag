@@ -134,3 +134,84 @@ class TestSuffixMismatchFallsBack:
             assert path.read_bytes() == b"in-memory"
 
         assert src.exists(), "the fallback deleted the source file"
+
+
+class TestMimetypePicksTheType:
+    @pytest.mark.parametrize(
+        ("filename", "mimetype", "expected"),
+        [
+            ("minutes.cozy-note", "text/markdown", DocumentType.MARKDOWN),
+            ("report", "application/pdf", DocumentType.PDF),
+            ("minutes.cozy-note", "application/x-unknown", DocumentType.TEXT),
+            ("report", None, DocumentType.TEXT),
+        ],
+    )
+    def test_a_known_mimetype_types_an_unknown_or_missing_extension(self, filename, mimetype, expected):
+        assert Document.detect_content_type(filename, mimetype) is expected
+
+    @pytest.mark.parametrize(
+        ("filename", "mimetype", "expected"),
+        [
+            # text/plain has no signature to sniff: if it won, PDF bytes would be
+            # indexed as text.
+            ("report.pdf", "text/plain", DocumentType.PDF),
+            ("notes.md", "text/plain", DocumentType.MARKDOWN),
+            ("report.pdf", None, DocumentType.PDF),
+            ("report.pdf", "application/x-unknown", DocumentType.PDF),
+        ],
+    )
+    def test_a_recognised_extension_is_never_overridden(self, filename, mimetype, expected):
+        assert Document.detect_content_type(filename, mimetype) is expected
+
+    @pytest.mark.parametrize(
+        ("filename", "mimetype", "expected"),
+        [
+            ("Report.PDF", None, ".PDF"),
+            ("report.pdf", "text/plain", ".pdf"),
+            ("memo", "audio/mpeg", ".mp3"),
+            ("minutes.cozy-note", "text/markdown", ".md"),
+            ("minutes.cozy-note", None, ".cozy-note"),
+            ("notes", None, ""),
+        ],
+    )
+    def test_type_suffix_follows_the_resolved_extension(self, filename, mimetype, expected):
+        assert Document.type_suffix(filename, mimetype) == expected
+
+    @pytest.mark.asyncio
+    async def test_temp_file_takes_the_mimetype_suffix_not_the_type_default(self):
+        """Audio defaults to ``.wav``: MP3 bytes written under it would reach
+        the transcription backend as WAV and skip conversion."""
+        doc = Document(
+            filename="memo",
+            content_type=Document.detect_content_type("memo", "audio/mpeg"),
+            raw_bytes=b"ID3",
+            metadata={"mimetype": "audio/mpeg"},
+        )
+
+        async with doc.as_temporary_file() as path:
+            assert path.suffix == ".mp3"
+
+    @pytest.mark.asyncio
+    async def test_an_upload_saved_under_the_mimetype_suffix_is_yielded_as_is(self, tmp_path: Path):
+        """The upload routes save ``report`` sent as a PDF as ``….pdf``; that
+        shared-volume file is what a worker on another node must receive."""
+        src = _upload(tmp_path, name="1713700000000_a1b2_report.pdf")
+        doc = Document(
+            filename="report",
+            content_type=DocumentType.PDF,
+            raw_bytes=b"in-memory",
+            source_path=str(src),
+            metadata={"mimetype": "application/pdf"},
+        )
+
+        async with doc.as_temporary_file() as path:
+            assert path == src
+
+    @pytest.mark.asyncio
+    async def test_temp_file_takes_the_type_suffix_when_the_filename_disagrees(self):
+        """The sync libraries dispatch on the suffix, so a PDF sent as
+        ``report.bin`` must not be written out as ``.bin``."""
+        doc = Document(filename="report.bin", content_type=DocumentType.PDF, raw_bytes=b"%PDF-1.4")
+
+        async with doc.as_temporary_file() as path:
+            assert path.suffix == ".pdf"
