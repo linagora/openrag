@@ -13,9 +13,9 @@ The commands are written for bash. In zsh, run `setopt interactive_comments sh_w
 first. Without it, zsh does not treat `#` as the start of a comment and does not
 split `$DC` into `docker compose`, so the commands below fail.
 
-## Chart 0.7.2 (OpenRAG 2.3.2): migration settings the chart refuses
+## OpenRAG 2.3.2 on Kubernetes: migration settings the chart refuses
 
-Chart 0.7.2 checks how the PostgreSQL migrations are applied, and refuses to
+From OpenRAG 2.3.2, the chart checks how the PostgreSQL migrations are applied, and refuses to
 render values that leave them unapplied or that it cannot honour. `helm upgrade`
 then stops before it changes anything in the cluster, and the error names the
 setting to change. Render the new chart with your values first, as in
@@ -423,9 +423,9 @@ Your values decide what applies the PostgreSQL migrations:
 
 | `postgresProvisioning` | What applies the migrations |
 |---|---|
-| `migrationJob.enabled: true` | The `pre-upgrade` migration Job, before the pods roll. A failing migration fails `helm upgrade`. With an external PostgreSQL only: [chart 0.7.2 and later](#chart-072-openrag-232-migration-settings-the-chart-refuses) refuse it with `postgresql.enabled`. |
+| `migrationJob.enabled: true` | The `pre-upgrade` migration Job, before the pods roll. A failing migration fails `helm upgrade`. With an external PostgreSQL only: [the chart released with OpenRAG 2.3.2 and later](#openrag-232-on-kubernetes-migration-settings-the-chart-refuses) refuses it with `postgresql.enabled`. |
 | `runMigrationsInApp: true` (the default), Job off | The new OpenRAG pod, when it starts. Under Ray Serve, the Serve replicas on the Ray pods, once you scale OpenRAG back up. |
-| Both off | Nothing: run them by hand after `helm upgrade`, as shown below. [Chart 0.7.2 and later](#chart-072-openrag-232-migration-settings-the-chart-refuses) refuse this unless you also set `externalMigrations: true`. |
+| Both off | Nothing: run them by hand after `helm upgrade`, as shown below. [The chart released with OpenRAG 2.3.2 and later](#openrag-232-on-kubernetes-migration-settings-the-chart-refuses) refuses this unless you also set `externalMigrations: true`. |
 
 If you change the PostgreSQL password (see [Secrets](#secrets)), do it now, before
 `helm upgrade`:
