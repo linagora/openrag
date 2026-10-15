@@ -58,6 +58,12 @@ _ENV_OWNED_TUNABLES: dict[str, dict[str, str]] = {
     },
     "llm": {},
 }
+# The same rule for the ``extra`` keys env owns. The embedder's client only:
+# ``RERANKER_PROVIDER`` is set by default, so owning it would undo every admin's
+# reranker choice on each boot.
+_ENV_OWNED_EXTRA: dict[str, dict[str, str]] = {
+    "embedder": {"implementation": "EMBEDDER_PROVIDER"},
+}
 
 
 def _build_stt_validation_wav() -> bytes:
@@ -389,9 +395,10 @@ class ModelEndpointService:
         Only fields the environment actually owns are written. ``endpoint`` and
         ``model_name`` always are — they are what "point this at the configured
         model" means. ``batch_size``/``timeout`` are written only when their env
-        var is set (see ``_ENV_OWNED_TUNABLES``); the seed carries a value for
-        them regardless, so trusting the seed would overwrite an admin's tuning
-        with the config default.
+        var is set (see ``_ENV_OWNED_TUNABLES``), and the embedder's client only
+        when ``EMBEDDER_PROVIDER`` is (``_ENV_OWNED_EXTRA``); the seed carries a
+        value for them regardless, so trusting the seed would overwrite an
+        admin's choice with the config default.
 
         ``extra`` is merged, never replaced: the marker and the API key come from
         env, everything else an admin put there survives. The key is only
@@ -408,6 +415,10 @@ class ModelEndpointService:
         env_api_key = seed_extra.get("api_key")
         if not is_placeholder_api_key(env_api_key):
             new_extra["api_key"] = env_api_key
+        for key, env_var in _ENV_OWNED_EXTRA.get(model_type, {}).items():
+            # Empty is unset, as for the config loader.
+            if os.getenv(env_var) and key in seed_extra:
+                new_extra[key] = seed_extra[key]
 
         fields: dict[str, Any] = {
             "endpoint": data["endpoint"],
@@ -423,10 +434,11 @@ class ModelEndpointService:
         # after an upgrade, #1099) would otherwise write vectors from another
         # model into the field every indexed file was embedded with, and search
         # would compare the two. Only the model is guarded. A new URL is how an
-        # operator moves the same model to another server, and if that server
-        # serves another model the readiness probe reports the embedder
-        # unavailable (not for infinity/tei: their probe checks only /health).
-        # Refused, the row keeps its model and takes the rest.
+        # operator moves the same model to another server, and EMBEDDER_PROVIDER
+        # how they name the client that server needs; if that server serves
+        # another model the readiness probe reports the embedder unavailable
+        # (not for tei: its probe checks only /health). Refused, the row keeps
+        # its model and takes the rest.
         guard = None
         if model_type == "embedder":
             guard = functools.partial(
@@ -482,7 +494,7 @@ class ModelEndpointService:
                 "model_name": os.getenv("EMBEDDING_MODEL", s.embedder.model_name),
                 "batch_size": s.embedder.batch_size,
                 "timeout": s.embedder.timeout,
-                "extra": _with_api_key({"implementation": "vllm"}, s.embedder.api_key),
+                "extra": _with_api_key({"implementation": s.embedder.provider}, s.embedder.api_key),
             },
             "llm": {
                 "endpoint": os.getenv("LLM_ENDPOINT", s.llm.base_url),
@@ -951,6 +963,7 @@ class ModelEndpointService:
             return result
         if model_type != "stt":
             from services.orchestrators.readiness_service import (
+                LatestAliasTimeoutError,
                 ModelEndpointProbeError,
                 ModelListUnavailableError,
                 ModelNotFoundError,
@@ -980,18 +993,20 @@ class ModelEndpointService:
                 result["reachable"] = True
                 result["models_served"] = exc.model_ids
                 result["model_found"] = False
+            except LatestAliasTimeoutError as exc:
+                result["reachable"] = True
+                result["models_served"] = exc.model_ids
+                result["detail"] = (
+                    f'Reachable, but the endpoint did not say in time whether it serves "{normalized_model_name}" '
+                    f'as "{normalized_model_name}:latest".'
+                )
             except Exception as exc:
                 result["detail"] = str(exc)
             else:
                 result["reachable"] = True
                 result["models_served"] = model_ids
-                result["model_found"] = (
-                    None
-                    if model_ids is None
-                    else True
-                    if normalized_model_name is None
-                    else normalized_model_name in model_ids
-                )
+                # check_model_endpoint raises ModelNotFoundError for a model it does not serve.
+                result["model_found"] = None if model_ids is None or not normalized_model_name else True
             return result
         base_url = url.rstrip("/")
         models_url = base_url + "/models"

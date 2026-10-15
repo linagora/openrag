@@ -137,6 +137,10 @@ class RetrieverPipeline:
     ) -> list[Chunk]:
         """Run a single ``Query`` through retrieval, expansion, and reranking."""
         milvus_filter = query.to_milvus_filter()
+        # The expression the chunks below were actually retrieved with. A
+        # filterless fallback replaces it, and expansion must follow that
+        # attempt rather than re-imposing a filter the retry dropped.
+        applied_filter = milvus_filter
         attempt_traces: list[RetrievalTraceBuilder] = []
         retrieval_trace = trace
         if trace is not None and milvus_filter and self.allow_filterless_fallback:
@@ -171,6 +175,7 @@ class RetrieverPipeline:
                 )
                 attempt_traces.append(fallback_trace)
             fallback_trace_kwargs = {"trace": fallback_trace} if fallback_trace is not None else {}
+            applied_filter = None
             chunks = await self.retriever.retrieve(
                 partition=partition,
                 query=query.query,
@@ -254,7 +259,9 @@ class RetrieverPipeline:
             limit = self.reranker_top_k if top_k is None else max(self.reranker_top_k, top_k)
             expansion_seed_ids = {str(_chunk_key(chunk)) for chunk in chunks[:limit]}
             head = copy.deepcopy(chunks[:limit])
-            expanded = await self.retriever.expand_search_results(results=head, filter_params=filter_params)
+            expanded = await self.retriever.expand_search_results(
+                results=head, filter_params=filter_params, filter=applied_filter
+            )
             if len(expanded) > len(head):
                 expansion_applied = True
                 expanded_chunks = list(expanded)

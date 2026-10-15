@@ -158,9 +158,20 @@ class ConnectionManager:
             port=self._conn_kwargs["port"],
             database=self._conn_kwargs["database"],
         )
-        if not database_exists(url):
+        if database_exists(url):
+            return
+        try:
             create_database(url)
-            logger.info(f"Created Postgres database `{self._conn_kwargs['database']}`.")
+        except Exception as exc:
+            # Another process starting against the same fresh Postgres can
+            # create the database between our check and our create (#1045).
+            if not database_exists(url):
+                raise
+            logger.info(
+                f"Postgres database `{self._conn_kwargs['database']}` was created by another process: {exc}",
+            )
+            return
+        logger.info(f"Created Postgres database `{self._conn_kwargs['database']}`.")
 
     async def shutdown(self) -> None:
         if self._pool is None:
