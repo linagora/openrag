@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useNavigate, Navigate } from "react-router-dom";
 import { useAuth } from "@/lib/auth";
-import { ApiError } from "@/lib/api/client";
+import { isTokenRejection, TOKEN_KEY } from "@/lib/api/client";
 import { APP_NAME } from "@/lib/brand";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -32,7 +32,7 @@ export default function LoginPage() {
       await loginWithToken(token);
       navigate("/");
     } catch (error) {
-      if (error instanceof ApiError && error.status === 401) {
+      if (isTokenRejection(error)) {
         setError("That token was rejected. Check it and try again.");
       } else {
         setError("Couldn't verify your token because the service is unavailable. Try again.");
@@ -84,7 +84,15 @@ export default function LoginPage() {
           </div>
 
           <Button variant="outline" className="w-full" asChild>
-            <a href={SSO_LOGIN_URL}>Sign in with SSO</a>
+            <a
+              href={SSO_LOGIN_URL}
+              onClick={() => {
+                // Switching to SSO must not send a previously entered bearer token with the session cookie.
+                localStorage.removeItem(TOKEN_KEY);
+              }}
+            >
+              Sign in with SSO
+            </a>
           </Button>
         </CardContent>
       </Card>

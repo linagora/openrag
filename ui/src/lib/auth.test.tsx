@@ -88,6 +88,21 @@ describe("useAuth (token model)", () => {
     expect(result.current.isAuthenticated).toBe(false);
   });
 
+  it("clears a legacy token rejected with 403 Invalid token", async () => {
+    mockInfo.mockRejectedValueOnce(new Error("Not signed in"));
+    const { result } = renderHook(() => useAuth(), { wrapper });
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+
+    const error = new ApiError(403, { detail: "Invalid token" });
+    mockInfo.mockRejectedValueOnce(error);
+    await act(async () => {
+      await expect(result.current.loginWithToken("or-invalid-token")).rejects.toBe(error);
+    });
+
+    expect(localStorage.getItem("openrag_token")).toBeNull();
+    expect(result.current.isAuthenticated).toBe(false);
+  });
+
   it("logout clears the token and user", async () => {
     mockInfo.mockResolvedValue(user(true));
     const { result } = renderHook(() => useAuth(), { wrapper });

@@ -3,7 +3,7 @@ import "@testing-library/jest-dom/vitest";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
-import { ApiError } from "@/lib/api/client";
+import { ApiError, TOKEN_KEY } from "@/lib/api/client";
 
 const { loginWithToken } = vi.hoisted(() => ({ loginWithToken: vi.fn() }));
 
@@ -68,5 +68,31 @@ describe("LoginPage token validation", () => {
     );
     expect(tokenInput).toHaveValue("or-invalid-token");
     expect(submit).toBeEnabled();
+  });
+
+  it("shows rejected-token feedback for the token-mode 403 response", async () => {
+    loginWithToken.mockRejectedValueOnce(new ApiError(403, { detail: "Invalid token" }));
+    const user = userEvent.setup();
+    renderLoginPage();
+
+    const tokenInput = screen.getByLabelText("API token");
+    await user.type(tokenInput, "or-invalid-token");
+    await user.click(screen.getByRole("button", { name: "Sign in" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "That token was rejected. Check it and try again.",
+    );
+  });
+
+  it("clears a retained bearer token when the user switches to SSO", async () => {
+    localStorage.setItem(TOKEN_KEY, "or-retryable-token");
+    const user = userEvent.setup();
+    renderLoginPage();
+
+    const ssoLink = screen.getByRole("link", { name: "Sign in with SSO" });
+    ssoLink.addEventListener("click", (event) => event.preventDefault(), { once: true });
+    await user.click(ssoLink);
+
+    expect(localStorage.getItem(TOKEN_KEY)).toBeNull();
   });
 });
