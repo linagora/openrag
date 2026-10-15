@@ -645,7 +645,9 @@ async def test_search_rerank_with_reranker_disabled_honours_the_partition_opt_in
 
 
 @pytest.mark.asyncio
-async def test_search_rerank_across_embedders_reranks_the_fused_candidates():
+# The fused list is cut on a separate path when the trace is on.
+@pytest.mark.parametrize("traced", [False, True])
+async def test_search_rerank_across_embedders_reranks_the_fused_candidates(traced):
     svc, _, searchers = _embedder_svc(
         {"p1": "embed-a", "p2": "embed-b"},
         {"embed-a": "vector_embed_a", "embed-b": "vector_embed_b"},
@@ -659,7 +661,13 @@ async def test_search_rerank_across_embedders_reranks_the_fused_candidates():
     searchers["embed-b"].search_result = [_chunk("b1"), _chunk("b2")]
 
     out = await svc.search(
-        text="q", partitions=["p1", "p2"], top_k=2, similarity_threshold=0.5, rerank=True, rerank_candidates=3
+        text="q",
+        partitions=["p1", "p2"],
+        top_k=2,
+        similarity_threshold=0.5,
+        rerank=True,
+        rerank_candidates=3,
+        trace=RetrievalTraceBuilder("request-1", "q") if traced else None,
     )
 
     for name in ("embed-a", "embed-b"):
