@@ -314,7 +314,7 @@ export const handlers = [
       indexed_at: doc?.indexed_at,
       page: chunks[0]?.page_number,
     };
-    return HttpResponse.json({ metadata, documents: chunks.map((c) => ({ link: `/extract/${c.id}` })) });
+    return HttpResponse.json({ metadata, documents: chunks.map((c) => ({ link: `/extract/${c.id}` })), topic_tags: [] });
   }),
 
   http.get(`${API}/partition/:name/chunks`, ({ params }) => {

@@ -84,4 +84,25 @@ describe("DocumentDetailPage", () => {
     expect(screen.getByText("page")).not.toBeNull();
     expect(screen.getByText("7")).not.toBeNull();
   });
+
+  it("shows an empty state when the file has no topic tags", async () => {
+    renderDocumentDetail();
+
+    expect(await screen.findByLabelText("Topic tags")).not.toBeNull();
+    expect(screen.getByText("No topic tags")).not.toBeNull();
+  });
+
+  it("renders stored topic tags as badges", async () => {
+    getFileDetailMock.mockResolvedValue({
+      metadata: { filename: "catalog.pdf" },
+      documents: [],
+      topic_tags: ["finance", "risk"],
+    });
+    renderDocumentDetail();
+
+    const group = await screen.findByLabelText("Topic tags");
+    expect(group).not.toBeNull();
+    expect(screen.getByText("finance")).not.toBeNull();
+    expect(screen.getByText("risk")).not.toBeNull();
+  });
 });
