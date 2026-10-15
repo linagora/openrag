@@ -143,7 +143,7 @@ tunnel (`ssh -L 81:127.0.0.1:81 <host>`). Create a proxy host for your domain:
 
 | Path        | Forward to                | When                                                                                |
 |-------------|---------------------------|-------------------------------------------------------------------------------------|
-| `/`         | `openrag:8080`            | Always. Serves the API, `/auth`, `/v1` and Chainlit at `/chainlit`.                 |
+| `/`         | `openrag:<APP_iPORT>`     | Always. Serves the API, `/auth`, `/v1` and Chainlit at `/chainlit`. `APP_iPORT` is `8080` unless you set it. |
 | `/app`      | `admin-ui:8080`           | Always. Serves the Admin UI. Do not strip the `/app` prefix.                        |
 | `/grafana`  | `admin-ui:8080`           | With the monitoring overlay. The Admin UI proxies it on to Grafana. See below.      |
 | `/chainlit` | `openrag:<CHAINLIT_PORT>` | With `ENABLE_RAY_SERVE=true` only. Chainlit then runs as its own server on that port. |
@@ -171,10 +171,13 @@ docker compose -f docker-compose.yaml -f proxy.docker-compose.yaml \
 ### Check the setup
 
 The Chainlit WebSocket must answer `101 Switching Protocols`, and plain HTTP
-must redirect to HTTPS:
+must redirect to HTTPS. Keep `--http1.1` in the first check: with **HTTP/2
+Support** on in NPM, curl would otherwise use HTTP/2, which drops the
+`Connection` and `Upgrade` headers, and the check would fail even though
+browsers connect.
 
 ```bash
-curl -sS -o /dev/null -D- \
+curl -sS --http1.1 -o /dev/null -D- \
   -H "Connection: Upgrade" -H "Upgrade: websocket" \
   -H "Sec-WebSocket-Key: $(head -c16 /dev/urandom | base64)" \
   -H "Sec-WebSocket-Version: 13" \

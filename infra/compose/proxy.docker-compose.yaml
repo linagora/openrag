@@ -4,7 +4,8 @@
 #
 # Terminates TLS on 80/443. Route by path in NPM's proxy host for your domain:
 #   /app  -> admin-ui:8080   (React SPA; prefix preserved, NOT stripped)
-#   /     -> openrag:8080    (API, /auth, /v1 and the Chainlit UI at /chainlit)
+#   /     -> openrag:8080    (API, /auth, /v1 and the Chainlit UI at /chainlit;
+#                             APP_iPORT instead of 8080 if you set it)
 #
 # `/` deliberately bypasses admin-ui's own catch-all proxy, saving a hop on
 # every API call. NPM only forwards the Upgrade/Connection headers Chainlit's
