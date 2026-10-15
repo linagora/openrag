@@ -1,0 +1,66 @@
+{
+  "model": "Mistral-Small-3.2-24B-Instruct-2506-FP8",
+  "cases": [
+    {
+      "question": "Compare the cost and durability of documents about basalt, granite, marble, slate, limestone, sandstone, quartzite and travertine published between January 1 and December 31, 2025.",
+      "output_budget": 512,
+      "queries": {
+        "query_list": [
+          {
+            "query": "Cost and durability of basalt, granite, marble, slate, limestone, sandstone, quartzite and travertine",
+            "temporal_filters": [
+              {
+                "field": "created_at",
+                "operator": ">=",
+                "value": "2025-01-01T00:00:00+00:00"
+              },
+              {
+                "field": "created_at",
+                "operator": "<",
+                "value": "2026-01-01T00:00:00+00:00"
+              }
+            ]
+          }
+        ],
+        "intent": "other",
+        "requires_retrieval": true
+      },
+      "calls": [
+        {
+          "usage": {
+            "completion_tokens": 105,
+            "prompt_tokens": 4006,
+            "total_tokens": 4111
+          },
+          "finish_reason": "stop",
+          "content": "{\"query_list\":[{\"query\":\"Cost and durability of basalt, granite, marble, slate, limestone, sandstone, quartzite and travertine\",\"temporal_filters\":[{\"operator\":\">=\",\"value\":\"2025-01-01T00:00:00+00:00\"},{\"operator\":\"<\",\"value\":\"2026-01-01T00:00:00+00:00\"}]}]}"
+        }
+      ]
+    },
+    {
+      "question": "Compare the cost and durability of basalt, granite, marble, slate, limestone, sandstone, quartzite, travertine, gneiss and schist.",
+      "output_budget": 512,
+      "queries": {
+        "query_list": [
+          {
+            "query": "Compare the cost and durability of basalt, granite, marble, slate, limestone, sandstone, quartzite, travertine, gneiss and schist",
+            "temporal_filters": null
+          }
+        ],
+        "intent": "other",
+        "requires_retrieval": true
+      },
+      "calls": [
+        {
+          "usage": {
+            "completion_tokens": 48,
+            "prompt_tokens": 3995,
+            "total_tokens": 4043
+          },
+          "finish_reason": "stop",
+          "content": "{\"query_list\":[{\"query\":\"Compare the cost and durability of basalt, granite, marble, slate, limestone, sandstone, quartzite, travertine, gneiss and schist\",\"temporal_filters\":null}]}"
+        }
+      ]
+    }
+  ]
+}

@@ -46,7 +46,7 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 from core.models.preset import resolve_partition_chat_llm
-from core.models.query import Query, SearchQueries
+from core.models.query import MAX_QUERY_SUBQUERIES, Query, SearchQueries
 from core.models.retrieval_trace import (
     ContextualizationTrace,
     ContextualizedSubqueryTrace,
@@ -64,6 +64,12 @@ from core.prompts import (
     prepend_system_prompt,
     tool_definition_tokens,
 )
+from core.prompts.query_contextualizer_hint import (
+    QUERY_CONTEXTUALIZER_JSON_HINT,
+    QUERY_CONTEXTUALIZER_OVER_CAP_RETRY_INSTRUCTION,
+    QUERY_CONTEXTUALIZER_TRUNCATED_RETRY_INSTRUCTION,
+    contextualizer_budget_hint,
+)
 from core.retrieval.trace import (
     TRACE_FILE_SCOPE_KIND_KEY,
     RetrievalDiagnosticsContext,
@@ -79,6 +85,7 @@ from core.utils.source_filtering import (
 )
 from core.utils.text import get_num_tokens
 from core.utils.web_url import normalize_web_url
+from pydantic import ValidationError as PydanticValidationError
 from services.inference.runtime import detect_language, get_llm_semaphore
 from services.orchestrators.prompt_service import ResolvedPrompt
 
@@ -92,6 +99,15 @@ if TYPE_CHECKING:
 logger = get_logger()
 
 PrepareSources = Callable[[list, list], list]
+
+
+def _is_oversized_query_list_error(error: Exception) -> bool:
+    if not isinstance(error, PydanticValidationError):
+        return False
+    return any(
+        item.get("loc") == ("query_list",) and item.get("type") in {"too_long", "list_too_long"}
+        for item in error.errors()
+    )
 
 
 class CasualMessagePolicy(NamedTuple):
@@ -227,22 +243,6 @@ _MAP_USER_PROMPT = """Here is a text:
 
 From this document, identify and comprehensively summarize the information useful for answering the following question:
 {query}"""
-
-_QUERY_JSON_HINT = (
-    "\n\nClassify the complete latest user message conservatively. Retrieval is the default. "
-    "Only a message consisting exclusively of a greeting or salutation, gratitude, farewell, or a question about "
-    "the assistant's capabilities may skip retrieval. A factual, informational, analytical, ambiguous, or mixed "
-    "message must require retrieval, even when it has no question mark or also contains a social phrase. "
-    "A brief acknowledgement after a social, wellbeing, or feedback question remains gratitude and may skip "
-    "retrieval. It requires retrieval only when it accepts factual, informational, analytical, or document-backed "
-    "continuation from the assistant's previous turn. "
-    "Respond ONLY with one of these JSON forms: "
-    '{"intent": "greeting", "requires_retrieval": false, "query_list": []} for an exclusively casual message '
-    "(using gratitude, farewell, or capability instead of greeting when appropriate), or "
-    '{"intent": "other", "requires_retrieval": true, '
-    '"query_list": [{"query": "<search query>", "temporal_filters": null}]} for everything else. '
-    "If uncertain, use intent other and require retrieval."
-)
 
 
 class RAGMODE(Enum):
@@ -548,15 +548,23 @@ class QueryService:
         # created_at timestamps, and near midnight the local date is a
         # different day.
         now = datetime.now(UTC)
+        anchors = calendar_anchors(now)
+        current_date = now.strftime("%A, %B %d, %Y, %H:%M:%S")
         prompt = contextualizer.content.format(
             query_language=detect_language(last_user),
-            current_date=now.strftime("%A, %B %d, %Y, %H:%M:%S"),
+            max_query_subqueries=MAX_QUERY_SUBQUERIES,
+            current_date=current_date,
             # Pre-computed week/month/year ranges: the model must not do the
             # calendar arithmetic itself (see core.prompts.calendar_anchors).
-            calendar_anchors=calendar_anchors(now),
+            calendar_anchors=anchors,
         )
         llm_messages = [
-            {"role": "system", "content": prompt + _QUERY_JSON_HINT},
+            {
+                "role": "system",
+                "content": prompt
+                + QUERY_CONTEXTUALIZER_JSON_HINT
+                + contextualizer_budget_hint(self._max_contextualized_query_len),
+            },
             {"role": "user", "content": f"Here is the chat history: \n{chat_history}\n"},
         ]
         params = {
@@ -571,8 +579,12 @@ class QueryService:
         for attempt in (1, 2):
             try:
                 resp = await llm.chat(llm_messages, **params)
+                if resp["choices"][0].get("finish_reason") == "length":
+                    raise ValueError("Contextualizer response truncated")
                 content = resp["choices"][0]["message"]["content"]
                 queries = SearchQueries.model_validate_json(_json_slice(content))
+                if queries.requires_retrieval and not queries.query_list:
+                    queries.query_list = [Query(query=last_user)]
                 self._record_contextualization(
                     trace,
                     queries,
@@ -585,7 +597,24 @@ class QueryService:
             except Exception as exc:
                 last_error = exc
                 if attempt == 1:
-                    logger.warning("Query generation parse error — retrying", error=str(exc))
+                    if _is_oversized_query_list_error(exc):
+                        llm_messages = [
+                            {
+                                **llm_messages[0],
+                                "content": f"{llm_messages[0]['content']}\n\n{QUERY_CONTEXTUALIZER_OVER_CAP_RETRY_INSTRUCTION}",
+                            },
+                            *llm_messages[1:],
+                        ]
+                        logger.warning("Query generation exceeded the sub-query limit — retrying with coarser coverage")
+                    else:
+                        llm_messages = [
+                            {
+                                **llm_messages[0],
+                                "content": f"{llm_messages[0]['content']}\n\n{QUERY_CONTEXTUALIZER_TRUNCATED_RETRY_INSTRUCTION}",
+                            },
+                            *llm_messages[1:],
+                        ]
+                        logger.warning("Query generation parse error — retrying with compact JSON", error=str(exc))
                 else:
                     logger.warning(
                         "Query generation failed twice — falling back to raw user query",
@@ -930,7 +959,7 @@ class QueryService:
                 **({"resolved_plan": resolved_retrieval_plan} if resolved_retrieval_plan is not None else {}),
             )
         else:
-            web_results = _dedupe_web(await asyncio.gather(*[self._web.search(q.query) for q in queries.query_list]))
+            web_results = _dedupe_web(await self._search_web(queries))
             chunks = []
 
         if trace is not None and partition is not None and metadata.get("compare_original_query") is True:
@@ -1067,6 +1096,13 @@ class QueryService:
             found = {fid for r in results for fid in r}
         return [fid for fid in dict.fromkeys(file_ids) if fid in found]
 
+    async def _search_web(self, queries: SearchQueries):
+        texts = list(dict.fromkeys(q.query.strip() for q in queries.query_list if q.query.strip()))
+        budget = getattr(getattr(self._config, "websearch", None), "max_queries", 1)
+        # Preserve contextualized facets when combining them to respect the provider budget.
+        groups = [texts[i::budget] for i in range(min(budget, len(texts)))]
+        return await asyncio.gather(*(self._web.search("; ".join(group)) for group in groups))
+
     async def _gather_rag_and_web(
         self,
         queries,
@@ -1094,7 +1130,7 @@ class QueryService:
             **trace_kwargs,
             **({"resolved_plan": resolved_plan} if resolved_plan is not None else {}),
         )
-        web = asyncio.gather(*[self._web.search(q.query) for q in queries.query_list])
+        web = self._search_web(queries)
         chunks, web_lists = await asyncio.gather(rag, web)
         return chunks, web_lists
 

@@ -1,0 +1,68 @@
+{
+  "date_utc": "2026-10-09T12:30:33.203697+00:00",
+  "endpoint": "POST /v1/chat/completions",
+  "partition": "issue751-e2e-20261008",
+  "measurement": "Elapsed time from request start until first non-empty streamed content delta; stream=true, max_tokens=1, temperature=0, include_all_retrieved_sources=true.",
+  "question_set": [
+    "Compare how PBiGaBP and PARAFAC-ALS obtain channel information in their OTFS and hybrid STAR-RIS systems.",
+    "How does each approach reduce channel-estimation overhead: PBiGaBP in OTFS, and PARAFAC-ALS in hybrid STAR-RIS?",
+    "What computational trade-offs do the PBiGaBP channel-estimation method and the PARAFAC-ALS tensor-decomposition approach report?"
+  ],
+  "baseline_16be4aa_warm": {
+    "samples_ms": {
+      "question_1": [
+        4993.7,
+        4584.5,
+        4136.3
+      ],
+      "question_2": [
+        4629.2,
+        4918.8,
+        4452.4
+      ],
+      "question_3": [
+        3986.2,
+        3832.5,
+        3973.9
+      ]
+    },
+    "summary": {
+      "n": 9,
+      "median_ms": 4452.4,
+      "min_ms": 3832.5,
+      "max_ms": 4993.7,
+      "nearest_rank_p90_ms": 4993.7
+    }
+  },
+  "candidate_after_restart_first_request_ms": 20091.3,
+  "candidate_after_restart_first_request_note": "Cold-start sample; followed by an explicit warm-up before the measured candidate set.",
+  "candidate_warm": {
+    "warmup_ms": 4457.9,
+    "samples_ms": {
+      "question_1": [
+        4485.0,
+        4352.2,
+        4394.9
+      ],
+      "question_2": [
+        4139.9,
+        4178.0,
+        4261.2
+      ],
+      "question_3": [
+        3931.2,
+        4001.6,
+        4002.1
+      ]
+    },
+    "summary": {
+      "n": 9,
+      "median_ms": 4178.0,
+      "min_ms": 3931.2,
+      "max_ms": 4485.0,
+      "nearest_rank_p90_ms": 4485.0
+    }
+  },
+  "median_change_ms": -274.4,
+  "median_change_percent": -6.2
+}

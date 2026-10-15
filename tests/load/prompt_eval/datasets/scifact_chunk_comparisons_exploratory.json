@@ -1,0 +1,168 @@
+[
+  {
+    "id": "thermogenesis",
+    "question": "Compare how chenodeoxycholic acid treatment and cold exposure affect thermogenesis and energy expenditure.",
+    "gold_chunk_ids": [
+      "1568684",
+      "970012"
+    ],
+    "source_claim_ids": [
+      "248",
+      "268"
+    ],
+    "gold_source": "SciFact BEIR test qrels, one abstract per independent facet; labels fixed before running either revision"
+  },
+  {
+    "id": "neuronal-damage",
+    "question": "Compare APOE4, TDP-43 and FoxO3a in their mechanisms of neuronal injury and degeneration.",
+    "gold_chunk_ids": [
+      "4709641",
+      "16966326",
+      "28937856"
+    ],
+    "source_claim_ids": [
+      "56",
+      "180",
+      "431"
+    ],
+    "gold_source": "SciFact BEIR test qrels, one abstract per independent facet; labels fixed before running either revision"
+  },
+  {
+    "id": "breast-cancer",
+    "question": "Compare ALDH1, CHEK2 and Scribble in their relationship to breast cancer development and prognosis.",
+    "gold_chunk_ids": [
+      "45638119",
+      "13519661",
+      "8774475"
+    ],
+    "source_claim_ids": [
+      "51",
+      "208",
+      "354"
+    ],
+    "gold_source": "SciFact BEIR test qrels, one abstract per independent facet; labels fixed before running either revision"
+  },
+  {
+    "id": "inflammation",
+    "question": "Compare basophils, CX3CR1 and Raptor in their effects on inflammatory disease pathways.",
+    "gold_chunk_ids": [
+      "12670680",
+      "21366394",
+      "2014909"
+    ],
+    "source_claim_ids": [
+      "171",
+      "218",
+      "324"
+    ],
+    "gold_source": "SciFact BEIR test qrels, one abstract per independent facet; labels fixed before running either revision"
+  },
+  {
+    "id": "aging",
+    "question": "Compare declining autophagy and cellular senescence as biological explanations of organismal aging.",
+    "gold_chunk_ids": [
+      "1084345",
+      "14079881"
+    ],
+    "source_claim_ids": [
+      "148",
+      "239"
+    ],
+    "gold_source": "SciFact BEIR test qrels, one abstract per independent facet; labels fixed before running either revision"
+  },
+  {
+    "id": "surgical-risk",
+    "question": "Compare dexamethasone and C-reactive protein in their relationship to postoperative outcomes and risk assessment.",
+    "gold_chunk_ids": [
+      "23349986",
+      "13625993"
+    ],
+    "source_claim_ids": [
+      "338",
+      "213"
+    ],
+    "gold_source": "SciFact BEIR test qrels, one abstract per independent facet; labels fixed before running either revision"
+  },
+  {
+    "id": "ion-and-gene",
+    "question": "Compare methionine restriction and Golli deficiency in their effects on cellular regulatory pathways.",
+    "gold_chunk_ids": [
+      "2251426",
+      "14767844"
+    ],
+    "source_claim_ids": [
+      "238",
+      "478"
+    ],
+    "gold_source": "SciFact BEIR test qrels, one abstract per independent facet; labels fixed before running either revision"
+  },
+  {
+    "id": "infection",
+    "question": "Compare antibiotic-induced gut microbiome alterations and helminth interference with macrophages in their effects on infection resistance.",
+    "gold_chunk_ids": [
+      "6372244",
+      "30774694"
+    ],
+    "source_claim_ids": [
+      "118",
+      "507"
+    ],
+    "gold_source": "SciFact BEIR test qrels, one abstract per independent facet; labels fixed before running either revision"
+  },
+  {
+    "id": "stem-cells",
+    "question": "Compare GATA-3 function and hematopoietic stem cell purification in their implications for studying hematopoietic stem cells.",
+    "gold_chunk_ids": [
+      "10165258",
+      "13980338"
+    ],
+    "source_claim_ids": [
+      "443",
+      "508"
+    ],
+    "gold_source": "SciFact BEIR test qrels, one abstract per independent facet; labels fixed before running either revision"
+  },
+  {
+    "id": "neural-mechanisms",
+    "question": "Compare APOE4 and FoxO3a in their mechanisms and consequences of neuronal degeneration.",
+    "gold_chunk_ids": [
+      "4709641",
+      "28937856"
+    ],
+    "source_claim_ids": [
+      "56",
+      "431"
+    ],
+    "gold_source": "SciFact BEIR test qrels, one abstract per independent facet; labels fixed before running either revision"
+  },
+  {
+    "id": "metabolism",
+    "question": "Compare chenodeoxycholic acid treatment, cold exposure and glycolysis in their contribution to cellular or whole-body energy metabolism.",
+    "gold_chunk_ids": [
+      "1568684",
+      "970012",
+      "18678095"
+    ],
+    "source_claim_ids": [
+      "248",
+      "268",
+      "475"
+    ],
+    "gold_source": "SciFact BEIR test qrels, one abstract per independent facet; labels fixed before running either revision"
+  },
+  {
+    "id": "tumor-and-neuron",
+    "question": "Compare ALDH1 expression, APOE4 expression and Scribble mislocalization in their effects on cell survival and disease progression.",
+    "gold_chunk_ids": [
+      "45638119",
+      "4709641",
+      "8774475"
+    ],
+    "source_claim_ids": [
+      "51",
+      "56",
+      "354"
+    ],
+    "gold_source": "SciFact BEIR test qrels, one abstract per independent facet; labels fixed before running either revision"
+  }
+]
