@@ -141,6 +141,15 @@ async def test_delimiter_is_sniffed_when_not_explicit():
     assert result.text_blocks[0].text == "| id | amount | note |\n| --- | --- | --- |\n| 1 | 3,5 | valid; value |"
 
 
+async def test_semicolon_delimiter_is_sniffed_with_trailing_empty_cells():
+    document = Document(text="a;b\n1;2;\n3;4;\n")
+
+    result = await CsvParser().parse(document)
+
+    assert result.text_blocks[0].text == "| a | b |\n| --- | --- |\n| 1 | 2 |\n| 3 | 4 |"
+    assert result.text_blocks[0].metadata["csv_columns"] == ["a", "b"]
+
+
 async def test_10_feature_error_identifies_record():
     document = Document(text='id,note\n1,"first\nsecond"\n2,extra,cell')
     result = await CsvParser().parse(document)
@@ -289,6 +298,21 @@ async def test_header_without_indexable_rows_raises():
 
     assert exc_info.value.code == "NO_INDEXABLE_CONTENT"
     assert exc_info.value.extra == {"skipped_rows": 1}
+
+
+async def test_unclosed_quote_in_header_raises():
+    with pytest.raises(NoIndexableContentError) as exc_info:
+        await CsvParser().parse(Document(text='a,"b\n1,2\n'))
+
+    assert exc_info.value.code == "NO_INDEXABLE_CONTENT"
+    assert exc_info.value.extra == {"skipped_rows": 1}
+
+
+async def test_trailing_empty_header_names_are_removed():
+    result = await CsvParser().parse(Document(text="a,b,\n1,2\n"))
+
+    assert result.text_blocks[0].text == "| a | b |\n| --- | --- |\n| 1 | 2 |"
+    assert result.text_blocks[0].metadata["csv_columns"] == ["a", "b"]
 
 
 async def test_cell_larger_than_python_csv_default_limit_is_accepted():

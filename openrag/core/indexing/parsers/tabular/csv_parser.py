@@ -129,8 +129,17 @@ class CsvParser(DocumentParser):
         try:
             return csv.Sniffer().sniff(sample, delimiters=",;\t|").delimiter
         except csv.Error:
-            logger.warning("Could not detect CSV delimiter; falling back to comma")
-            return ","
+            # A common spreadsheet export leaves an extra delimiter at the
+            # end of every data row. That gives the header and data records
+            # different widths, which prevents ``Sniffer`` from identifying
+            # an otherwise unambiguous dialect. Retry with only line-ending
+            # candidate delimiters removed; the original stream is untouched.
+            normalized_sample = "\n".join(line.rstrip(",;\t|") for line in sample.splitlines())
+            try:
+                return csv.Sniffer().sniff(normalized_sample, delimiters=",;\t|").delimiter
+            except csv.Error:
+                logger.warning("Could not detect CSV delimiter; falling back to comma")
+                return ","
 
     def iter_batches(self, document: Document) -> Iterator[TextBlock]:
         """Yield tables with at most batch_size data rows by repeating their header.
@@ -153,6 +162,11 @@ class CsvParser(DocumentParser):
                 try:
                     row = next(reader)
                 except StopIteration:
+                    if bad_rows:
+                        raise NoIndexableContentError(
+                            "CSV contains no valid header row.",
+                            skipped_rows=bad_rows,
+                        )
                     return
                 except csv.Error as exc:
                     bad_rows += 1
@@ -162,6 +176,10 @@ class CsvParser(DocumentParser):
                     continue
                 if row:
                     headers = row
+            while headers and headers[-1] == "":
+                headers.pop()
+            if not headers:
+                raise NoIndexableContentError("CSV contains no named columns.", skipped_rows=bad_rows)
             header_lines = [
                 markdown_row(headers),
                 markdown_row(["---"] * len(headers)),  # markdown table separator row
