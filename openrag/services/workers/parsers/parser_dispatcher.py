@@ -139,7 +139,8 @@ class ParserDispatcher(DocumentParser):
 
     def resolve(self, document: Document) -> DocumentParser:
         """Return the concrete parser (does not require parsing the document)."""
-        backend = self._resolve_backend(document.content_type, _suffix(document.filename))
+        ext = Document.type_extension(document.filename, document.metadata.get("mimetype"))
+        backend = self._resolve_backend(document.content_type, ext)
         return self._get(backend)
 
     # ----- backend resolution -----
