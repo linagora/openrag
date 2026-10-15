@@ -394,35 +394,44 @@ git show "$VER:infra/charts/openrag-stack/Chart.yaml" | grep -E '^version:'
 
 ## 9. The GitHub Release itself is correctly formed
 
-Steps 1-8 verify what was *built*. Nothing so far looks at the Release object
-users actually land on. A release whose `name` is empty renders with the tagged
-commit's subject as its title — so a perfectly good release displays as
-`Merge pull request #NNN from linagora/release/vX.Y.Z`. v2.2.0 published with
-the commit subject as its title and was corrected by hand minutes later — which
-is the point: nothing catches it, so the title is only right when someone
-happens to notice.
+Run this once the GitHub Release is published, after steps 1-8 pass: the
+Release comes last (rule 3 below), so before then this step fails.
 
-`gh release create` leaves `name` empty unless `--title` is passed, so this is a
-recurring trap rather than a one-off slip: **always pass `--title "$VER"`.**
+Steps 1-8 verify what was *built*. Nothing so far looks at the Release object
+users actually land on. v2.2.0 was published displaying
+`Merge pull request #895 from linagora/release/v2.2.0` — the release merge
+commit's subject — as its title, and corrected by hand minutes later. Nothing
+caught it: the title is only right when someone happens to notice.
+
+The convention is a title that is the tag: **always pass `--title "$VER"`**,
+however the notes are written. Run non-interactively, `gh release create` sets
+no title unless `--title` or `--generate-notes` is passed, and an untitled
+release displays whatever GitHub falls back to — the tag, sometimes followed by
+the tagged commit's subject. This step rejects an untitled release either way.
 
 ```bash
-gh release view "$VER" --json name,tagName,isDraft,isPrerelease,body \
+: "${VER:?set VER to the release tag first}"
+gh release view "$VER" -R linagora/openrag --json name,tagName,isDraft,isPrerelease,body \
   --jq '{name, tag: .tagName, draft: .isDraft, prerelease: .isPrerelease, notes: (.body|gsub("\\s"; "")|length)}'
 ```
 
 A hard gate:
 
 ```bash
+: "${VER:?set VER to the release tag first}"
 fail=0
-rel=$(gh release view "$VER" --json name,tagName,isDraft,isPrerelease,body) || {
-  echo "FAIL  no GitHub Release for $VER" >&2; exit 1; }
+rel=$(gh release view "$VER" -R linagora/openrag --json name,tagName,isDraft,isPrerelease,body) || {
+  echo "FAIL  could not read the GitHub Release for $VER (see the error above)" >&2; exit 1; }
 
-# The title must be the tag. Empty renders as the commit subject; anything else
-# breaks the convention every prior GA release follows.
+# The title must be the tag, optionally followed by a space and a description
+# (v2.0.0 is "v2.0.0 — Hexagonal architecture"). A commit subject, an empty
+# title, "v2.0.0-rc.1" or "v2.0.01" fails; the tag check below is what pins the
+# version, so a description is not checked.
 name=$(printf '%s' "$rel" | jq -r '.name')
-[ "$name" = "$VER" ] \
-  && echo "OK    title=$name" \
-  || { echo "FAIL  title=${name:-<empty — will render as the commit subject>} (want $VER)"; fail=1; }
+case "$name" in
+  "$VER"|"$VER "*) echo "OK    title=$name" ;;
+  *) echo "FAIL  title=${name:-<empty>} (want $VER)"; fail=1 ;;
+esac
 
 [ "$(printf '%s' "$rel" | jq -r '.tagName')" = "$VER" ] \
   && echo "OK    tag=$VER" || { echo "FAIL  tag mismatch"; fail=1; }
@@ -437,7 +446,7 @@ name=$(printf '%s' "$rel" | jq -r '.name')
 # Counts non-blank characters, so a body of spaces or newlines does not pass.
 # 200, not 0: a body of "." passes a >0 check while telling a user nothing.
 # Real notes are far longer (non-blank: v2.2.1 623, v2.2.2 709, v2.3.1 2270,
-# v2.3.0 11384), so this only trips a release that shipped without notes.
+# v2.3.0 11384), so this only trips empty or one-line notes.
 n=$(printf '%s' "$rel" | jq -r '.body | gsub("\\s"; "") | length')
 [ "$n" -gt 200 ] \
   && echo "OK    release notes present ($n non-blank chars)" \
@@ -451,7 +460,7 @@ n=$(printf '%s' "$rel" | jq -r '.body | gsub("\\s"; "") | length')
 Fixing a bad title needs no rebuild and no retag — it is metadata only:
 
 ```bash
-gh release edit "$VER" --title "$VER"
+gh release edit "$VER" -R linagora/openrag --title "$VER"
 ```
 
 ---
