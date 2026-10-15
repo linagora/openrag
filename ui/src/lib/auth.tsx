@@ -122,7 +122,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setUser(await getMyInfo());
     } catch (e) {
       // The API client already clears 401s; token mode uses 403 for "Invalid token".
-      if (isTokenRejection(e) && e.status === 403) localStorage.removeItem(TOKEN_KEY);
+      if (isTokenRejection(e)) localStorage.removeItem(TOKEN_KEY);
       setUser(null);
       throw e;
     }

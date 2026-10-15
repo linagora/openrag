@@ -47,7 +47,7 @@ export class ApiError extends Error {
 }
 
 /** Whether `/users/info` rejected the submitted credential rather than failing transiently. */
-export function isTokenRejection(error: unknown): error is ApiError {
+export function isTokenRejection(error: unknown): boolean {
   return (
     error instanceof ApiError &&
     (error.status === 401 || (error.status === 403 && error.message === "Invalid token"))
