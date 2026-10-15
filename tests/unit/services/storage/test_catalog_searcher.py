@@ -38,10 +38,20 @@ from services.storage.vector_store_searcher import VectorStoreSearcher
                 "with_surrounding_chunks": False,
             },
         ),
-        ("get_related_chunks", {"partition": "a", "relationship_id": "r", "limit": 4, "allowed_file_ids": ["f"]}),
+        (
+            "get_related_chunks",
+            {"partition": "a", "relationship_id": "r", "limit": 4, "allowed_file_ids": ["f"], "filter": None},
+        ),
         (
             "get_ancestor_chunks",
-            {"partition": "a", "file_id": "f", "limit": 4, "max_ancestor_depth": 2, "allowed_file_ids": ["f"]},
+            {
+                "partition": "a",
+                "file_id": "f",
+                "limit": 4,
+                "max_ancestor_depth": 2,
+                "allowed_file_ids": ["f"],
+                "filter": None,
+            },
         ),
     ],
 )

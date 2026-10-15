@@ -38,6 +38,7 @@ _ENV_OVERRIDES: list[tuple[str, str, type]] = [
     ("LLM_SEMAPHORE", "semaphore.llm_semaphore", int),
     ("VLM_SEMAPHORE", "semaphore.vlm_semaphore", int),
     # Embedder
+    ("EMBEDDER_PROVIDER", "embedder.provider", str),
     ("EMBEDDER_MODEL_NAME", "embedder.model_name", str),
     ("EMBEDDER_BASE_URL", "embedder.base_url", str),
     ("EMBEDDER_API_KEY", "embedder.api_key", str),

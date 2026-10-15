@@ -72,7 +72,7 @@ class ParserFileSerializer(FileSerializer):
             # shared volume, so path-based parsers can be dispatched to a
             # worker on another node (#911).
             source_path=str(p),
-            content_type=Document.detect_content_type(name_for_type),
+            content_type=Document.detect_content_type(name_for_type, metadata.get("mimetype")),
             metadata=metadata,
         )
 
