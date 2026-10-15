@@ -188,6 +188,8 @@ class IndexerWorkerActor:
             # No point letting more of one document's images queue on the VLM
             # gate than the gate will ever admit at once.
             caption_concurrency=cfg.semaphore.vlm_semaphore,
+            save_markdown=cfg.loader.save_markdown,
+            data_dir=cfg.paths.data_dir,
         )
         self._catalog_store = PostgresStore(_catalog_rdb_config(cfg), run_migrations=False)
         self._catalog_initialized = False
@@ -508,6 +510,7 @@ class IndexerWorkerActor:
                         include_selected_stt=routes_to_openai_audio_loader(
                             self._cfg,
                             _display_filename(path, metadata),
+                            metadata.get("mimetype"),
                         ),
                     )
                 )
@@ -1473,7 +1476,7 @@ def _global_embedder_endpoint_config(cfg: Any) -> Any | None:
         batch_size=getattr(embed_cfg, "batch_size", 32),
         timeout=getattr(embed_cfg, "timeout", 120),
         extra={
-            "implementation": "vllm",
+            "implementation": getattr(embed_cfg, "provider", "vllm"),
             "api_key": getattr(embed_cfg, "api_key", ""),
             "max_model_len": getattr(embed_cfg, "max_model_len", None),
             "embed_concurrency": getattr(embed_cfg, "embed_concurrency", 4),

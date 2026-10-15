@@ -18,6 +18,7 @@ from services.inference._circuit_breaker import _breakers
 from services.inference._retry import _is_retryable
 from services.inference.vllm_client import (
     _SUSPECT_UNICODE_ESCAPE,
+    TEIEmbedder,
     VLLMClient,
     VLLMEmbedder,
     VLLMVision,
@@ -1070,6 +1071,25 @@ class TestVLLMEmbedder:
         assert await embedder.served_window() is None
         assert await embedder.served_window() is None
         assert len(gets) == 1
+
+    @pytest.mark.asyncio
+    async def test_tei_embeds_without_asking_for_a_model_list(self):
+        from core.embeddings import embedder_registry
+
+        requests: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return httpx.Response(200, json={"data": [{"index": 0, "embedding": [0.1, 0.2]}]})
+
+        embedder = embedder_registry.create("tei", endpoint="http://tei:80/v1", model_name="bge-m3", max_model_len=8192)
+        embedder._client = httpx.AsyncClient(transport=_make_transport(handler))
+
+        assert isinstance(embedder, TEIEmbedder)
+        # TEI has no /models: the configured window stands, with no request for it.
+        assert await embedder.served_window() is None
+        assert await embedder.embed(["a"]) == [[0.1, 0.2]]
+        assert [(request.method, request.url.path) for request in requests] == [("POST", "/v1/embeddings")]
 
     @pytest.mark.asyncio
     async def test_other_bad_requests_are_raised_without_probing(self):

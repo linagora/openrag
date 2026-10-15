@@ -374,7 +374,7 @@ export function mergeModelEndpointMossSpeakerAware(
 export const IMPLEMENTATION_KEY = "implementation";
 
 export const VENDOR_OPTIONS_BY_TYPE: Record<ModelType, string[]> = {
-  embedder: ["vllm", "ollama"],
+  embedder: ["vllm", "ollama", "tei"],
   reranker: ["infinity", "openai", "tei"],
   llm: ["vllm", "ollama"],
   vlm: ["vllm"],

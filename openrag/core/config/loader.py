@@ -38,6 +38,7 @@ _ENV_OVERRIDES: list[tuple[str, str, type]] = [
     ("LLM_SEMAPHORE", "semaphore.llm_semaphore", int),
     ("VLM_SEMAPHORE", "semaphore.vlm_semaphore", int),
     # Embedder
+    ("EMBEDDER_PROVIDER", "embedder.provider", str),
     ("EMBEDDER_MODEL_NAME", "embedder.model_name", str),
     ("EMBEDDER_BASE_URL", "embedder.base_url", str),
     ("EMBEDDER_API_KEY", "embedder.api_key", str),
@@ -109,6 +110,7 @@ _ENV_OVERRIDES: list[tuple[str, str, type]] = [
     ("PDFLOADER", "loader.file_loaders.pdf", str),
     ("AUDIOLOADER", "loader.file_loaders.wav", str),
     ("MARKER_MAX_TASKS_PER_CHILD", "loader.marker_max_tasks_per_child", int),
+    ("MARKER_PARSE_MEMORY_LIMIT_MB", "loader.marker_parse_memory_limit_mb", int),
     ("MARKER_POOL_SIZE", "loader.marker_pool_size", int),
     ("MARKER_MAX_PROCESSES", "loader.marker_max_processes", int),
     ("MARKER_NUM_GPUS", "loader.marker_num_gpus", float),

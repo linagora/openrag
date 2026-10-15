@@ -21,6 +21,11 @@ from fastapi import FastAPI
 WINDOW = 16384
 
 
+@pytest.fixture(autouse=True)
+def _deterministic_token_counter(monkeypatch):
+    monkeypatch.setattr(chat, "get_num_tokens", lambda: lambda text: len(text.split()))
+
+
 class RecordingQueryService:
     """Records the keyword arguments each QueryService entry point is called with."""
 
@@ -151,3 +156,57 @@ async def test_a_streamed_prompt_over_the_window_is_an_error_event(make_client):
     events = [line[len("data: ") :] for line in response.text.splitlines() if line.startswith("data: ")]
     assert json.loads(events[0])["error"]["code"] == "CONTEXT_WINDOW_EXCEEDED"
     assert events[-1] == "[DONE]"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_stage", ["initialization", "invocation"])
+@pytest.mark.parametrize("model", [None, "openrag-p"])
+@pytest.mark.parametrize(
+    ("path", "body"),
+    [
+        ("/v1/chat/completions", {"messages": [{"role": "user", "content": "private question"}]}),
+        ("/v1/chat/completions", {"messages": [{"role": "user", "content": "private question"}], "stream": True}),
+        ("/v1/completions", {"prompt": "private question"}),
+    ],
+)
+async def test_counter_failure_returns_503_before_processing(
+    client, service, monkeypatch, failure_stage, model, path, body
+):
+    def fail_counting(*_args):
+        raise RuntimeError("secret tokenizer details")
+
+    monkeypatch.setattr(
+        chat, "get_num_tokens", fail_counting if failure_stage == "initialization" else lambda: fail_counting
+    )
+    async with client:
+        response = await client.post(path, json={**body, "model": model})
+
+    assert response.status_code == 503
+    assert response.headers["content-type"].startswith("application/json")
+    assert response.json()["detail"].startswith(
+        "[TOKEN_VALIDATION_UNAVAILABLE]: Unable to validate request token limit"
+    )
+    assert "secret" not in response.text
+    assert "private question" not in response.text
+    assert "data:" not in response.text
+    assert not {"chat", "chat_stream", "complete"}.intersection(service.calls)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("path", "body"),
+    [
+        ("/v1/chat/completions", {"messages": [{"role": "user", "content": "hello"}]}),
+        ("/v1/chat/completions", {"messages": [{"role": "user", "content": "hello"}], "stream": True}),
+        ("/v1/completions", {"prompt": "hello"}),
+    ],
+)
+async def test_over_budget_request_returns_413_before_processing(client, service, path, body):
+    async with client:
+        response = await client.post(path, json={**body, "model": "openrag-p", "max_tokens": WINDOW})
+
+    assert response.status_code == 413
+    assert response.headers["content-type"].startswith("application/json")
+    assert "Request exceeds maximum token limit" in response.json()["detail"]
+    assert "Requested output: 16384 tokens" in response.json()["detail"]
+    assert not {"chat", "chat_stream", "complete"}.intersection(service.calls)
