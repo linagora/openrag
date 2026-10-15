@@ -536,6 +536,7 @@ class IndexerWorkerActor:
                         include_selected_stt=routes_to_openai_audio_loader(
                             self._cfg,
                             _display_filename(path, metadata),
+                            metadata.get("mimetype"),
                         ),
                     )
                 )
@@ -1549,7 +1550,7 @@ def _global_embedder_endpoint_config(cfg: Any) -> Any | None:
         batch_size=getattr(embed_cfg, "batch_size", 32),
         timeout=getattr(embed_cfg, "timeout", 120),
         extra={
-            "implementation": "vllm",
+            "implementation": getattr(embed_cfg, "provider", "vllm"),
             "api_key": getattr(embed_cfg, "api_key", ""),
             "max_model_len": getattr(embed_cfg, "max_model_len", None),
             "embed_concurrency": getattr(embed_cfg, "embed_concurrency", 4),

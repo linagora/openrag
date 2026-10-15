@@ -1386,7 +1386,7 @@ async def test_dispatch_indexing_keeps_claim_when_submission_outcome_is_unknown(
         patch("services.workers.ray_utils.ray.cancel"),
     ):
         mock_uuid.uuid4.return_value.hex = "task-1"
-        with pytest.raises(TimeoutError, match="submit timed out"):
+        with pytest.raises(TimeoutError, match=r"submit\(task-1\) timed out after"):
             await dispatcher.dispatch_indexing(
                 path="/data/report.txt",
                 metadata={"file_id": "file-1", "content_sha256": "abc123"},
@@ -1425,7 +1425,7 @@ async def test_dispatch_indexing_preserves_unknown_submission_without_content_cl
         patch("services.workers.ray_utils.ray.cancel"),
     ):
         mock_uuid.uuid4.return_value.hex = "task-1"
-        with pytest.raises(TimeoutError, match="submit timed out"):
+        with pytest.raises(TimeoutError, match=r"submit\(task-1\) timed out after"):
             await dispatcher.dispatch_indexing(
                 path="/data/report.txt",
                 metadata={"file_id": "file-1", "source": "/data/report.txt"},
@@ -3272,3 +3272,96 @@ async def test_a_copy_the_catalog_refuses_leaves_none_of_its_chunks() -> None:
     store.delete_by_filter.assert_awaited_once_with(
         {"partition": "b", "file_id": "copy-1", INDEXING_TASK_ID_METADATA_KEY: marker}
     )
+
+
+def _ref_failed_on_its_own_timeout() -> asyncio.Future[None]:
+    """A task ref whose task already failed with a TimeoutError it raised itself
+    (a parse bound, say), shaped the way Ray hands it back to the caller."""
+    from ray.exceptions import RayTaskError
+
+    ref = asyncio.get_running_loop().create_future()
+    ref.set_exception(
+        RayTaskError(
+            "IndexerWorker.process_file", "traceback", TimeoutError("parse timed out after 3600s for 'f.pdf'")
+        ).as_instanceof_cause()
+    )
+    return ref
+
+
+@pytest.mark.asyncio
+async def test_cancel_submitted_task_treats_a_task_raised_timeout_as_settled() -> None:
+    from services.workers.dispatcher import WorkerDispatcher
+
+    dispatcher = WorkerDispatcher(
+        pool=_pool_with_ref(object()),
+        task_state_manager=_task_state_manager(),
+        completion_tracker=_completion_tracker(),
+        vector_store=_vector_store(),
+        document_repo=_document_repo(),
+        workspace_repo=_workspace_repo(),
+        collection="default",
+        timeout=5,
+    )
+
+    with patch("ray.cancel"):
+        cancelled = await dispatcher._cancel_submitted_task("task-1", _ref_failed_on_its_own_timeout())
+
+    assert cancelled is False
+
+
+@pytest.mark.asyncio
+async def test_cancel_submitted_task_still_times_out_on_its_own_wait() -> None:
+    from services.workers.dispatcher import WorkerDispatcher
+
+    dispatcher = WorkerDispatcher(
+        pool=_pool_with_ref(object()),
+        task_state_manager=_task_state_manager(),
+        completion_tracker=_completion_tracker(),
+        vector_store=_vector_store(),
+        document_repo=_document_repo(),
+        workspace_repo=_workspace_repo(),
+        collection="default",
+        timeout=0.01,
+    )
+    never_settles = asyncio.get_running_loop().create_future()
+
+    with patch("ray.cancel"), pytest.raises(TimeoutError, match="to settle after dispatch failure"):
+        await dispatcher._cancel_submitted_task("task-1", never_settles)
+
+
+@pytest.mark.asyncio
+async def test_wait_for_task_to_settle_treats_a_task_raised_timeout_as_settled() -> None:
+    from time import monotonic
+
+    from services.workers.task_cancellation import _wait_for_task_to_settle
+
+    with patch("ray.cancel") as cancel:
+        await _wait_for_task_to_settle(
+            MagicMock(),
+            _ref_failed_on_its_own_timeout(),
+            task_id="task-1",
+            deadline=monotonic() + 5,
+            partition="tenant-a",
+            file_id="file-1",
+        )
+
+    cancel.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_wait_for_task_to_settle_still_times_out_on_its_own_wait() -> None:
+    from time import monotonic
+
+    from services.workers.task_cancellation import _wait_for_task_to_settle
+
+    never_settles = asyncio.get_running_loop().create_future()
+
+    with patch("ray.cancel"), pytest.raises(TimeoutError, match="to settle after cancellation request"):
+        await _wait_for_task_to_settle(
+            MagicMock(),
+            never_settles,
+            task_id="task-1",
+            deadline=monotonic() + 0.01,
+            partition="tenant-a",
+            file_id="file-1",
+        )

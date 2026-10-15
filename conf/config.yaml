@@ -43,10 +43,10 @@ semaphore:
   vlm_semaphore: 10
 
 # --- Embedder ---
-# Env: EMBEDDER_MODEL_NAME, EMBEDDER_BASE_URL, EMBEDDER_API_KEY, MAX_MODEL_LEN,
-#      EMBEDDER_TIMEOUT, EMBEDDER_BATCH_SIZE, EMBEDDER_CONCURRENCY
+# Env: EMBEDDER_PROVIDER, EMBEDDER_MODEL_NAME, EMBEDDER_BASE_URL, EMBEDDER_API_KEY,
+#      MAX_MODEL_LEN, EMBEDDER_TIMEOUT, EMBEDDER_BATCH_SIZE, EMBEDDER_CONCURRENCY
 embedder:
-  provider: openai
+  provider: vllm # client: vllm (any server with GET /models), ollama, or tei (no /models)
   model_name: Qwen/Qwen3-Embedding-0.6B
   base_url: http://vllm:8000/v1
   api_key: EMPTY

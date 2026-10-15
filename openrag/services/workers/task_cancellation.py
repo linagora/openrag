@@ -8,7 +8,11 @@ import ray
 from core.utils.logging import get_logger
 from ray.exceptions import OwnerDiedError, TaskCancelledError
 from services.workers.failure_reporting import submit_task_failure
-from services.workers.ray_utils import call_ray_actor_method_with_timeout, call_ray_actor_with_timeout
+from services.workers.ray_utils import (
+    RemoteTimeoutError,
+    call_ray_actor_method_with_timeout,
+    call_ray_actor_with_timeout,
+)
 from services.workers.task_state import (
     CANCELLABLE_INDEXING_STATES,
     PENDING_TASK_DETAILS,
@@ -304,9 +308,12 @@ async def _wait_for_task_to_settle(
             partition=partition,
             file_id=file_id,
         )
-    except TimeoutError as exc:
-        raise _settle_timeout(partition=partition, file_id=file_id, task_id=task_id) from exc
     except Exception as exc:
+        # A RemoteTimeoutError is the task failing on a timeout of its own (a
+        # parse bound, say): it has settled, so only our own wait running out
+        # blocks the delete.
+        if isinstance(exc, TimeoutError) and not isinstance(exc, RemoteTimeoutError):
+            raise _settle_timeout(partition=partition, file_id=file_id, task_id=task_id) from exc
         logger.info(
             "Active indexing task settled after cancellation request",
             task_id=task_id,
