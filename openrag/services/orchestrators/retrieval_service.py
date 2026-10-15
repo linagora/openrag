@@ -459,7 +459,7 @@ class RetrievalService:
                     }
                 )
         hybrid_enabled = getattr(getattr(self._config, "vectordb", None), "hybrid_search", None)
-        return {
+        configuration: dict[str, object] = {
             "operation": "raw_search",
             "hybrid": {
                 "enabled": hybrid_enabled,
@@ -468,6 +468,18 @@ class RetrievalService:
             "partitions": public_partitions,
             "request": dict(effective_options),
         }
+        if effective_options.get("rerank"):
+            # What the rerank ran with, resolved as search() does: the request
+            # holds rerank_candidates as sent (None when it follows the preset).
+            rerank_partitions = list(partitions)
+            _reranker, reranker_identity = self._search_reranker(rerank_partitions)
+            configuration["rerank"] = {
+                "reranker": reranker_identity,
+                "candidates": self._search_rerank_candidates(
+                    rerank_partitions, effective_options["top_k"], effective_options.get("rerank_candidates")
+                ),
+            }
+        return configuration
 
     def search_configuration_fingerprint(
         self,
@@ -659,10 +671,6 @@ class RetrievalService:
             "Reranking with the static default reranker (no catalog default endpoint)"
         )
         return self._legacy_reranker, self._legacy_reranker_identity()
-
-    def _resolve_reranker(self, reranker_name: str | None, partition: str) -> Reranker | None:
-        reranker, _identity = self._resolve_reranker_with_identity(reranker_name, partition)
-        return reranker
 
     def _default_reranker_name(self) -> str:
         """Real endpoint name behind the catalog reranker ``"default"`` alias, for logging.
@@ -1063,8 +1071,8 @@ class RetrievalService:
         partition_cfg = self._partition_configs().get(partitions[0])
         return partition_cfg.retrieval if partition_cfg is not None else None
 
-    def _search_reranker(self, partitions: list[str]) -> Reranker:
-        """Reranker for an explicit ``search(rerank=True)``.
+    def _search_reranker(self, partitions: list[str]) -> tuple[Reranker, dict[str, object]]:
+        """Reranker for an explicit ``search(rerank=True)``, with its public identity.
 
         A single-partition search uses that partition's reranker preset, same
         resolution as the chat pipeline. A search spanning several partitions is
@@ -1090,18 +1098,26 @@ class RetrievalService:
                 "only a search over one partition whose retrieval preset enables it can rerank.",
                 code="RERANKER_UNAVAILABLE",
             )
-        reranker = self._resolve_reranker(pipeline_cfg.reranker if pipeline_cfg else None, ",".join(partitions))
+        reranker, identity = self._resolve_reranker_with_identity(
+            pipeline_cfg.reranker if pipeline_cfg else None, ",".join(partitions)
+        )
         if reranker is None:
             raise ServiceUnavailableError(
                 "Reranking was requested but no reranker is configured on this deployment.",
                 code="RERANKER_UNAVAILABLE",
             )
-        return reranker
+        return reranker, identity
 
-    def _search_rerank_candidates(self, partitions: list[str]) -> int:
-        """Default number of vector candidates handed to the reranker by ``search``."""
+    def _search_rerank_candidates(self, partitions: list[str], top_k: int, requested: int | None) -> int:
+        """Number of vector candidates handed to the reranker by ``search``.
+
+        ``requested`` defaults to the partition preset's ``top_k``
+        (``retriever.top_k`` over several partitions), is never below
+        ``top_k`` and is clamped to ``MAX_RERANK_CANDIDATES``.
+        """
         pipeline_cfg = self._single_partition_retrieval_config(partitions)
-        return pipeline_cfg.top_k if pipeline_cfg else self._config.retriever.top_k
+        default = pipeline_cfg.top_k if pipeline_cfg else self._config.retriever.top_k
+        return min(max(top_k, requested or default), MAX_RERANK_CANDIDATES)
 
     # ------------------------------------------------------------------
     # Raw semantic search (powers routers/search.py — was indexer.asearch)
@@ -1145,12 +1161,11 @@ class RetrievalService:
         """
         await self.refresh_partition_configs()
         parts = [partitions] if isinstance(partitions, str) else list(partitions)
-        reranker = self._search_reranker(parts) if rerank else None
+        reranker = None
         candidates = top_k
-        if reranker is not None:
-            candidates = min(
-                max(top_k, rerank_candidates or self._search_rerank_candidates(parts)), MAX_RERANK_CANDIDATES
-            )
+        if rerank:
+            reranker, _identity = self._search_reranker(parts)
+            candidates = self._search_rerank_candidates(parts, top_k, rerank_candidates)
         if trace is not None:
             trace.record_stage("original_query", status="complete", candidates=[])
         groups = self._search_groups(parts)
