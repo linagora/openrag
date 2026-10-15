@@ -1,0 +1,132 @@
+[
+  {
+    "id": 1,
+    "difficulty": 2,
+    "domain": "technology",
+    "expected_queries": {
+      "query_list": [
+        {
+          "query": "How contrastive predictive coding improves domain-specific text retrieval",
+          "temporal_filters": null
+        },
+        {
+          "query": "How masked language modeling improves domain-specific text retrieval",
+          "temporal_filters": null
+        }
+      ]
+    },
+    "messages": [
+      {
+        "role": "user",
+        "content": "How do contrastive predictive coding and masked language modeling each improve domain-specific text retrieval?"
+      }
+    ]
+  },
+  {
+    "id": 2,
+    "difficulty": 2,
+    "domain": "technology",
+    "expected_queries": {
+      "query_list": [
+        {
+          "query": "How sparse attention processes long audio sequences",
+          "temporal_filters": null
+        },
+        {
+          "query": "How state-space models process long audio sequences",
+          "temporal_filters": null
+        }
+      ]
+    },
+    "messages": [
+      {
+        "role": "user",
+        "content": "What roles do sparse attention and state-space models each play in processing long audio sequences?"
+      }
+    ]
+  },
+  {
+    "id": 3,
+    "difficulty": 2,
+    "domain": "energy",
+    "expected_queries": {
+      "query_list": [
+        {
+          "query": "Installation cost and winter efficiency of geothermal heat pumps",
+          "temporal_filters": null
+        },
+        {
+          "query": "Installation cost and winter efficiency of air-source heat pumps",
+          "temporal_filters": null
+        }
+      ]
+    },
+    "messages": [
+      {
+        "role": "user",
+        "content": "Compare geothermal and air-source heat pumps on installation cost and winter efficiency."
+      }
+    ]
+  },
+  {
+    "id": 4,
+    "difficulty": 3,
+    "domain": "environment",
+    "expected_queries": {
+      "query_list": [
+        {
+          "query": "Combined effect of road salt use and spring rainfall on freshwater chloride levels",
+          "temporal_filters": null
+        }
+      ]
+    },
+    "messages": [
+      {
+        "role": "user",
+        "content": "How do road salt use and spring rainfall together affect chloride levels in freshwater?"
+      }
+    ]
+  },
+  {
+    "id": 5,
+    "difficulty": 2,
+    "domain": "machine_learning",
+    "expected_queries": {
+      "query_list": [
+        {
+          "query": "How differential privacy protects sensitive training data",
+          "temporal_filters": null
+        },
+        {
+          "query": "How federated learning protects sensitive training data",
+          "temporal_filters": null
+        }
+      ]
+    },
+    "messages": [
+      {
+        "role": "user",
+        "content": "How do differential privacy and federated learning each protect sensitive training data?"
+      }
+    ]
+  },
+  {
+    "id": 6,
+    "difficulty": 3,
+    "domain": "environment",
+    "expected_queries": {
+      "query_list": [
+        {
+          "query": "Combined effect of reduced summer rainfall and wildfire frequency on Mediterranean forest loss",
+          "temporal_filters": null
+        }
+      ]
+    },
+    "messages": [
+      {
+        "role": "user",
+        "content": "How do reduced summer rainfall and wildfire frequency together contribute to forest loss in Mediterranean ecosystems?"
+      }
+    ]
+  }
+]

@@ -1,0 +1,100 @@
+{
+  "date_utc": "2026-10-12",
+  "endpoint": "POST /v1/chat/completions",
+  "model": "Mistral-Small-3.2-24B-Instruct-2506-FP8",
+  "candidate_commit": "d9db441e",
+  "develop_commit": "db7f6c66f50848b20e6f6d0904b71b196a0a620a",
+  "setup": "Separate fresh Compose projects with branch-specific seeded prompts and storage; same compose environment, external inference endpoints, and independently indexed identical PDFs.",
+  "partition": "issue751-latency-20261012",
+  "corpus": [
+    {
+      "file": "otfs_pbigabp.pdf",
+      "source": "https://ir.library.osaka-u.ac.jp/repo/ouka/all/98350/IEEEopenJComSoc_5_6090.pdf"
+    },
+    {
+      "file": "hybrid_star_ris.pdf",
+      "source": "https://arxiv.org/pdf/2608.12085"
+    }
+  ],
+  "measurement": "Elapsed time from request start until first non-empty streamed content delta; stream=true, max_tokens=1, temperature=0, include_all_retrieved_sources=true.",
+  "question_set": [
+    "Compare how PBiGaBP and PARAFAC-ALS obtain channel information in their OTFS and hybrid STAR-RIS systems.",
+    "How does each approach reduce channel-estimation overhead: PBiGaBP in OTFS, and PARAFAC-ALS in hybrid STAR-RIS?",
+    "What computational trade-offs do the PBiGaBP channel-estimation method and the PARAFAC-ALS tensor-decomposition approach report?"
+  ],
+  "warmup_ms_excluded": {
+    "develop": 6503.3,
+    "candidate": 7407.6
+  },
+  "develop": {
+    "samples_ms": [
+      {
+        "question": 1,
+        "samples_ms": [
+          3793.1,
+          3636.2,
+          3551.8
+        ]
+      },
+      {
+        "question": 2,
+        "samples_ms": [
+          3821.0,
+          3986.1,
+          3930.1
+        ]
+      },
+      {
+        "question": 3,
+        "samples_ms": [
+          3967.1,
+          4079.8,
+          3572.8
+        ]
+      }
+    ],
+    "summary": {
+      "n": 9,
+      "median_ms": 3821.0,
+      "min_ms": 3551.8,
+      "max_ms": 4079.8
+    }
+  },
+  "candidate": {
+    "samples_ms": [
+      {
+        "question": 1,
+        "samples_ms": [
+          4317.5,
+          4173.1,
+          4240.2
+        ]
+      },
+      {
+        "question": 2,
+        "samples_ms": [
+          4091.3,
+          4723.6,
+          4364.1
+        ]
+      },
+      {
+        "question": 3,
+        "samples_ms": [
+          3996.6,
+          3899.1,
+          4008.1
+        ]
+      }
+    ],
+    "summary": {
+      "n": 9,
+      "median_ms": 4173.1,
+      "min_ms": 3899.1,
+      "max_ms": 4723.6
+    }
+  },
+  "median_change_ms": 352.1,
+  "median_change_percent": 9.2,
+  "interpretation": "The candidate was slower in this small warm-sample run; this is an observed comparison, not a general latency claim."
+}

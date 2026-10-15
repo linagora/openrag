@@ -105,7 +105,7 @@ RetrieverConfig = Annotated[
 class RAGConfig(ConfigMixin):
     mode: str = "ChatBotRag"
     chat_history_depth: int = 4
-    max_contextualized_query_len: int = 512
+    max_contextualized_query_len: int = 1024
 
 
 # ---------------------------------------------------------------------------
@@ -131,6 +131,7 @@ class _BaseWebSearchConfig(ConfigMixin):
     top_k: int = 5
     lang: str = "fr-FR"
     max_tokens: int = 2000
+    max_queries: int = Field(default=1, ge=1, le=8)
     fetch_content: bool = True
     fetch_max_results: int = 3
     fetch_timeout: float = 1.0

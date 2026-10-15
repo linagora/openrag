@@ -30,7 +30,8 @@ _PROMPT_SEED_HASH_HISTORY: dict[str, tuple[str, ...]] = {
         "931a2e095ccc6443ecba0d2684d8dd32c9ffac6f484d659953f78bc96e229a0a",  # v2.1.0-v2.2.1
         "8a3b0fc89b47a189b8e696f9383ad1f1f5023759b1ab3e01636c9455694c0b4e",  # v2.2.2
         "d7b5f06862e57587c6bc2965af4a70dcc5327dfccae8172c32ab02623878f6f6",  # v2.3.0-v2.3.1
-        "2a950346e27dd815fd42af0849caf0065f615c3bef4bff6d61d1621b39fcd066",  # current bundled template
+        "2a950346e27dd815fd42af0849caf0065f615c3bef4bff6d61d1621b39fcd066",  # current before Issue 751
+        "fc57abfb829839adf82a3b8e8038b1226b20cf00d1f4d5b9b2a7a17ac5cd708d",  # current bundled template
     ),
     "spoken_style_answer": (
         "36d3df218283f91de2ca62693afcdd9b844ba5645fba929a98c7b7ddd0d320b1",  # v2.1.0-v2.1.1

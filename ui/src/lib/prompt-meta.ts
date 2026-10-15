@@ -80,6 +80,11 @@ export const PROMPT_TYPE_VARIABLES: Record<string, TemplateVariable[]> = {
     { name: "custom_prompt", description: "Client-supplied custom system instructions (wrapped in unsafe_custom_prompt tags)", sample: "Always respond in French" },
   ],
   query_contextualizer: [
+    {
+      name: "max_query_subqueries",
+      description: "Maximum number of search sub-queries generated for one user request",
+      sample: "8",
+    },
     { name: "current_date", description: "Today's date, injected at request time", sample: "2026-07-27" },
     {
       name: "calendar_anchors",

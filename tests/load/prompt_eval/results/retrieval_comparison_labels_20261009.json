@@ -1,0 +1,245 @@
+{
+  "dataset": "datasets/query_decomposition.json",
+  "judge_model": "Mistral-Small-3.2-24B-Instruct-2506-FP8",
+  "prompts": [
+    {
+      "prompt": "openrag/prompts/templates/query_contextualizer_tmpl.txt",
+      "models": [
+        {
+          "model_name": "Mistral-Small-3.2-24B-Instruct-2506-FP8",
+          "timestamp": "2026-10-09T14:24:30.676727",
+          "prompt_path": "openrag/prompts/templates/query_contextualizer_tmpl.txt",
+          "dataset_path": "datasets/query_decomposition.json",
+          "judge_model": "Mistral-Small-3.2-24B-Instruct-2506-FP8",
+          "total": 4,
+          "errors": 0,
+          "count_match_passed": 4,
+          "count_match_accuracy": 1.0,
+          "semantic_coverage_passed": 4,
+          "semantic_coverage_accuracy": 1.0,
+          "by_difficulty": {
+            "3": {
+              "total": 4,
+              "errors": 0,
+              "count_match_passed": 4,
+              "semantic_coverage_passed": 4,
+              "count_match_accuracy": 1.0,
+              "semantic_coverage_accuracy": 1.0
+            }
+          },
+          "comparison_policy": {
+            "total": 4,
+            "passed": 4,
+            "cases": [
+              {
+                "id": 64,
+                "passed": true,
+                "reason": null,
+                "generated_queries": [
+                  "Protection duration and disclosure requirements for trade secrets",
+                  "Protection duration and disclosure requirements for patents"
+                ]
+              },
+              {
+                "id": 80,
+                "passed": true,
+                "reason": null,
+                "generated_queries": [
+                  "Scalability and round-trip efficiency of lithium-ion battery systems",
+                  "Scalability and round-trip efficiency of pumped hydro storage"
+                ]
+              },
+              {
+                "id": 73,
+                "passed": true,
+                "reason": null,
+                "generated_queries": [
+                  "How differentiated instruction is applied in elementary school classrooms",
+                  "How differentiated instruction is applied in middle school classrooms"
+                ]
+              },
+              {
+                "id": 68,
+                "passed": true,
+                "reason": null,
+                "generated_queries": [
+                  "Product return rates in summer seasons",
+                  "Product return rates in winter seasons"
+                ]
+              }
+            ]
+          },
+          "develop_label_comparison": {
+            "total": 4,
+            "case_ids": [
+              64,
+              80,
+              73,
+              68
+            ],
+            "develop_count_matches": 0,
+            "current_count_matches": 4,
+            "develop_semantic_coverage_passed": 4,
+            "current_semantic_coverage_passed": 4,
+            "cases": [
+              {
+                "id": 64,
+                "generated_query_count": 2,
+                "develop_expected_query_count": 1,
+                "current_expected_query_count": 2,
+                "develop_count_match": false,
+                "current_count_match": true,
+                "develop_semantic_coverage": true,
+                "current_semantic_coverage": true
+              },
+              {
+                "id": 80,
+                "generated_query_count": 2,
+                "develop_expected_query_count": 1,
+                "current_expected_query_count": 2,
+                "develop_count_match": false,
+                "current_count_match": true,
+                "develop_semantic_coverage": true,
+                "current_semantic_coverage": true
+              },
+              {
+                "id": 73,
+                "generated_query_count": 2,
+                "develop_expected_query_count": 1,
+                "current_expected_query_count": 2,
+                "develop_count_match": false,
+                "current_count_match": true,
+                "develop_semantic_coverage": true,
+                "current_semantic_coverage": true
+              },
+              {
+                "id": 68,
+                "generated_query_count": 2,
+                "develop_expected_query_count": 1,
+                "current_expected_query_count": 2,
+                "develop_count_match": false,
+                "current_count_match": true,
+                "develop_semantic_coverage": true,
+                "current_semantic_coverage": true
+              }
+            ]
+          },
+          "cases": [
+            {
+              "id": 64,
+              "difficulty": 3,
+              "domain": "legal",
+              "n_expected_queries": 2,
+              "n_generated_queries": 2,
+              "decomposition_count_match": true,
+              "decomposition_semantic_coverage": true,
+              "coverage_reasoning": null,
+              "expected_queries": [
+                "Protection duration and disclosure requirements for trade secrets",
+                "Protection duration and disclosure requirements for patents"
+              ],
+              "generated_queries": [
+                "Protection duration and disclosure requirements for trade secrets",
+                "Protection duration and disclosure requirements for patents"
+              ],
+              "comparison_policy_passed": true,
+              "comparison_policy_reason": null,
+              "develop_expected_queries": [
+                "Differences between trade secrets and patents in terms of protection duration and disclosure requirements"
+              ],
+              "develop_label_count_match": false,
+              "develop_label_semantic_coverage": true,
+              "develop_label_coverage_reasoning": null,
+              "develop_label_error": null,
+              "error": null
+            },
+            {
+              "id": 80,
+              "difficulty": 3,
+              "domain": "energy",
+              "n_expected_queries": 2,
+              "n_generated_queries": 2,
+              "decomposition_count_match": true,
+              "decomposition_semantic_coverage": true,
+              "coverage_reasoning": null,
+              "expected_queries": [
+                "Scalability and round-trip efficiency of lithium-ion battery systems",
+                "Scalability and round-trip efficiency of pumped hydro storage"
+              ],
+              "generated_queries": [
+                "Scalability and round-trip efficiency of lithium-ion battery systems",
+                "Scalability and round-trip efficiency of pumped hydro storage"
+              ],
+              "comparison_policy_passed": true,
+              "comparison_policy_reason": null,
+              "develop_expected_queries": [
+                "Comparison of lithium-ion battery systems and pumped hydro storage in terms of scalability and round-trip efficiency"
+              ],
+              "develop_label_count_match": false,
+              "develop_label_semantic_coverage": true,
+              "develop_label_coverage_reasoning": null,
+              "develop_label_error": null,
+              "error": null
+            },
+            {
+              "id": 73,
+              "difficulty": 3,
+              "domain": "education",
+              "n_expected_queries": 2,
+              "n_generated_queries": 2,
+              "decomposition_count_match": true,
+              "decomposition_semantic_coverage": true,
+              "coverage_reasoning": null,
+              "expected_queries": [
+                "Application of differentiated instruction in elementary school classrooms",
+                "Application of differentiated instruction in middle school classrooms"
+              ],
+              "generated_queries": [
+                "How differentiated instruction is applied in elementary school classrooms",
+                "How differentiated instruction is applied in middle school classrooms"
+              ],
+              "comparison_policy_passed": true,
+              "comparison_policy_reason": null,
+              "develop_expected_queries": [
+                "Application of differentiated instruction in elementary and middle school classrooms"
+              ],
+              "develop_label_count_match": false,
+              "develop_label_semantic_coverage": true,
+              "develop_label_coverage_reasoning": null,
+              "develop_label_error": null,
+              "error": null
+            },
+            {
+              "id": 68,
+              "difficulty": 3,
+              "domain": "retail",
+              "n_expected_queries": 2,
+              "n_generated_queries": 2,
+              "decomposition_count_match": true,
+              "decomposition_semantic_coverage": true,
+              "coverage_reasoning": null,
+              "expected_queries": [
+                "Product return rates during summer seasons",
+                "Product return rates during winter seasons"
+              ],
+              "generated_queries": [
+                "Product return rates in summer seasons",
+                "Product return rates in winter seasons"
+              ],
+              "comparison_policy_passed": true,
+              "comparison_policy_reason": null,
+              "develop_expected_queries": [
+                "Typical comparison of product return rates between summer and winter seasons"
+              ],
+              "develop_label_count_match": false,
+              "develop_label_semantic_coverage": true,
+              "develop_label_coverage_reasoning": null,
+              "develop_label_error": null,
+              "error": null
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,151 @@
+{
+  "run_timestamp": "2026-10-09T14:33:04.834559",
+  "dataset": "datasets/query_decomposition.json",
+  "model": "Mistral-Small-3.2-24B-Instruct-2506-FP8",
+  "judge_model": "Mistral-Small-3.2-24B-Instruct-2506-FP8",
+  "concurrency": 4,
+  "overall": {
+    "total": 81,
+    "errors": 3,
+    "count_match_passed": 75,
+    "count_match_accuracy": 0.9259259259259259,
+    "semantic_coverage_passed": 74,
+    "semantic_coverage_accuracy": 0.9135802469135802
+  },
+  "judge_error_cases": [
+    {
+      "id": 50,
+      "error": "coverage_judge: 'NoneType' object has no attribute 'covered'"
+    },
+    {
+      "id": 41,
+      "error": "coverage_judge: 'NoneType' object has no attribute 'covered'"
+    },
+    {
+      "id": 45,
+      "error": "coverage_judge: 'NoneType' object has no attribute 'covered'"
+    }
+  ],
+  "relabeled_case_comparison": {
+    "total": 4,
+    "case_ids": [
+      80,
+      64,
+      68,
+      73
+    ],
+    "develop_count_matches": 0,
+    "current_count_matches": 4,
+    "develop_semantic_coverage_passed": 4,
+    "current_semantic_coverage_passed": 4,
+    "cases": [
+      {
+        "id": 80,
+        "generated_query_count": 2,
+        "develop_expected_query_count": 1,
+        "current_expected_query_count": 2,
+        "develop_count_match": false,
+        "current_count_match": true,
+        "develop_semantic_coverage": true,
+        "current_semantic_coverage": true
+      },
+      {
+        "id": 64,
+        "generated_query_count": 2,
+        "develop_expected_query_count": 1,
+        "current_expected_query_count": 2,
+        "develop_count_match": false,
+        "current_count_match": true,
+        "develop_semantic_coverage": true,
+        "current_semantic_coverage": true
+      },
+      {
+        "id": 68,
+        "generated_query_count": 2,
+        "develop_expected_query_count": 1,
+        "current_expected_query_count": 2,
+        "develop_count_match": false,
+        "current_count_match": true,
+        "develop_semantic_coverage": true,
+        "current_semantic_coverage": true
+      },
+      {
+        "id": 73,
+        "generated_query_count": 2,
+        "develop_expected_query_count": 1,
+        "current_expected_query_count": 2,
+        "develop_count_match": false,
+        "current_count_match": true,
+        "develop_semantic_coverage": true,
+        "current_semantic_coverage": true
+      }
+    ]
+  },
+  "comparison_policy": {
+    "total": 4,
+    "passed": 4,
+    "cases": [
+      {
+        "id": 80,
+        "passed": true,
+        "reason": null,
+        "generated_queries": [
+          "Scalability and round-trip efficiency of lithium-ion battery systems",
+          "Scalability and round-trip efficiency of pumped hydro storage"
+        ]
+      },
+      {
+        "id": 64,
+        "passed": true,
+        "reason": null,
+        "generated_queries": [
+          "Protection duration and disclosure requirements for trade secrets",
+          "Protection duration and disclosure requirements for patents"
+        ]
+      },
+      {
+        "id": 68,
+        "passed": true,
+        "reason": null,
+        "generated_queries": [
+          "Product return rates in summer seasons",
+          "Product return rates in winter seasons"
+        ]
+      },
+      {
+        "id": 73,
+        "passed": true,
+        "reason": null,
+        "generated_queries": [
+          "Differentiated instruction in elementary school classrooms",
+          "Differentiated instruction in middle school classrooms"
+        ]
+      }
+    ]
+  },
+  "held_out_cases": [
+    {
+      "id": 79,
+      "generated_queries": [
+        "Combined effect of higher mortgage borrowing costs and a rise in homes listed for sale on returns from residential rentals"
+      ],
+      "expected_query_count": 1,
+      "generated_query_count": 1,
+      "count_match": true,
+      "semantic_coverage": true
+    },
+    {
+      "id": 81,
+      "generated_queries": [
+        "Malaria incidence in January, February, and March 2024",
+        "Malaria incidence in April, May, and June 2024",
+        "Malaria incidence in July, August, and September 2024",
+        "Malaria incidence in October, November, and December 2024"
+      ],
+      "expected_query_count": 4,
+      "generated_query_count": 4,
+      "count_match": true,
+      "semantic_coverage": true
+    }
+  ]
+}
