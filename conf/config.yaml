@@ -146,6 +146,8 @@ paths:
 
 # --- Prompt template filenames ---
 prompts:
+  # Refresh saved defaults only when they still match an older bundled version.
+  refresh_defaults: true
   sys_prompt: sys_prompt_tmpl.txt
   query_contextualizer: query_contextualizer_tmpl.txt
   chunk_contextualizer: chunk_contextualizer_tmpl.txt
