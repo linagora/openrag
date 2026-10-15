@@ -410,17 +410,17 @@ release displays whatever GitHub falls back to — the tag, sometimes followed b
 the tagged commit's subject. This step rejects an untitled release either way.
 
 ```bash
-: "${VER:?set VER to the release tag first}"
-gh release view "$VER" -R linagora/openrag --json name,tagName,isDraft,isPrerelease,body \
+gh release view "${VER:?set VER to the release tag first}" -R linagora/openrag \
+  --json name,tagName,isDraft,isPrerelease,body \
   --jq '{name, tag: .tagName, draft: .isDraft, prerelease: .isPrerelease, notes: (.body|gsub("\\s"; "")|length)}'
 ```
 
 A hard gate:
 
 ```bash
-: "${VER:?set VER to the release tag first}"
 fail=0
-rel=$(gh release view "$VER" -R linagora/openrag --json name,tagName,isDraft,isPrerelease,body) || {
+rel=$(gh release view "${VER:?set VER to the release tag first}" -R linagora/openrag \
+  --json name,tagName,isDraft,isPrerelease,body) || {
   echo "FAIL  could not read the GitHub Release for $VER (see the error above)" >&2; exit 1; }
 
 # The title must be the tag, optionally followed by a space and a description
@@ -446,7 +446,8 @@ esac
 # Counts non-blank characters, so a body of spaces or newlines does not pass.
 # 200, not 0: a body of "." passes a >0 check while telling a user nothing.
 # Real notes are far longer (non-blank: v2.2.1 623, v2.2.2 709, v2.3.1 2270,
-# v2.3.0 11384), so this only trips empty or one-line notes.
+# v2.3.0 11384), so this trips empty or near-empty bodies. It does not prove the
+# notes were edited: an unedited --generate-notes body listing one PR passes.
 n=$(printf '%s' "$rel" | jq -r '.body | gsub("\\s"; "") | length')
 [ "$n" -gt 200 ] \
   && echo "OK    release notes present ($n non-blank chars)" \
