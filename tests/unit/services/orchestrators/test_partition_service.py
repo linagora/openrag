@@ -277,6 +277,19 @@ class FakeVectorStore:
         return [row for row in self._rows if all(row.get(key) == value for key, value in filters.items())]
 
 
+class FakeTopicTagRepo:
+    def __init__(self, rows: list[dict] | None = None, error: Exception | None = None):
+        self._rows = rows if rows is not None else []
+        self._error = error
+        self.calls: list[tuple[str, str]] = []
+
+    async def get_by_document(self, document_id: str, partition: str) -> list[dict]:
+        self.calls.append((document_id, partition))
+        if self._error is not None:
+            raise self._error
+        return list(self._rows)
+
+
 class FakeUserRepo:
     def __init__(
         self,
@@ -325,6 +338,7 @@ def _svc(
     tsm=None,
     task_cancel_timeout=60.0,
     config=None,
+    trepo=None,
 ) -> PartitionService:
     return PartitionService(
         partition_repo=prepo or FakePartitionRepo(),
@@ -336,6 +350,7 @@ def _svc(
         task_state_manager=tsm,
         task_cancel_timeout=task_cancel_timeout,
         config=config,
+        topic_tag_repo=trepo,
     )
 
 
@@ -846,6 +861,40 @@ async def test_get_file_metadata_rejects_a_missing_catalog_row() -> None:
         await svc.get_file_metadata("p", "missing")
 
     assert exc_info.value.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_get_file_topic_tags_returns_stored_tags_in_order() -> None:
+    trepo = FakeTopicTagRepo(
+        rows=[
+            {"document_id": "f", "partition": "p", "tag": "finance"},
+            {"document_id": "f", "partition": "p", "tag": "risk"},
+        ]
+    )
+    svc = _svc(trepo=trepo)
+
+    assert await svc.get_file_topic_tags("p", "f") == ["finance", "risk"]
+    assert trepo.calls == [("f", "p")]
+
+
+@pytest.mark.asyncio
+async def test_get_file_topic_tags_returns_empty_when_untagged() -> None:
+    svc = _svc(trepo=FakeTopicTagRepo(rows=[]))
+
+    assert await svc.get_file_topic_tags("p", "f") == []
+
+
+@pytest.mark.asyncio
+async def test_get_file_topic_tags_returns_empty_without_a_repo() -> None:
+    assert await _svc(trepo=None).get_file_topic_tags("p", "f") == []
+
+
+@pytest.mark.asyncio
+async def test_get_file_topic_tags_propagates_repository_errors() -> None:
+    svc = _svc(trepo=FakeTopicTagRepo(error=RuntimeError("db down")))
+
+    with pytest.raises(RuntimeError, match="db down"):
+        await svc.get_file_topic_tags("p", "f")
 
 
 @pytest.mark.asyncio
