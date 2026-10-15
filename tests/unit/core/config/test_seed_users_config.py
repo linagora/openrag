@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 from core.config import load_config
 from core.config.auth import AuthConfig, SeedUserConfig
@@ -131,3 +133,26 @@ class TestLoading:
         monkeypatch.setenv("SEED_USERS", raw)
         with pytest.raises(ValueError, match="SEED_USERS"):
             load_config(config_path=tmp_path)
+
+    @pytest.mark.parametrize(
+        "entry",
+        [
+            {"external_user_id": "svc", "token_env": "SVC_TOKEN", "token": "sk-leaked-1"},
+            {"external_user_id": "svc", "token_env": "sk-leaked-1"},
+        ],
+    )
+    def test_a_misplaced_token_stays_out_of_the_error(self, monkeypatch, tmp_path, entry):
+        _write_minimal_config(tmp_path)
+        monkeypatch.setenv("SEED_USERS", json.dumps([entry]))
+        with pytest.raises(ValidationError) as excinfo:
+            load_config(config_path=tmp_path)
+        assert "auth.seed_users.0" in str(excinfo.value)
+        assert "sk-leaked-1" not in str(excinfo.value)
+        assert excinfo.value.__cause__ is None and excinfo.value.__context__ is None
+
+    def test_a_malformed_seed_users_env_is_not_quoted_back(self, monkeypatch, tmp_path):
+        _write_minimal_config(tmp_path)
+        monkeypatch.setenv("SEED_USERS", '[{"external_user_id": "svc", "token": "sk-leaked-2"')
+        with pytest.raises(ValueError, match="SEED_USERS.*line 1, column") as excinfo:
+            load_config(config_path=tmp_path)
+        assert "sk-leaked-2" not in str(excinfo.value)

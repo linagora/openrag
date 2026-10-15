@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from pydantic import ValidationError
 
 from .auth import SEED_USERS_ENV_VAR
 from .root import Settings
@@ -249,14 +250,19 @@ def _coerce(value: str, target_type: type, env_var: str = "") -> Any:
 def _parse_seed_users(raw: str) -> list[Any]:
     """Parse ``SEED_USERS``: a JSON or YAML list of ``auth.seed_users`` entries.
 
-    The value carries env var *names*, never tokens, so it is safe to echo
-    the parser's complaint. A value that is not a list fails the boot: a
-    silently dropped list would leave service accounts unprovisioned.
+    The value should carry env var *names* only, but a token pasted in by
+    mistake would be quoted back by PyYAML's error snippet, so the complaint
+    names the problem and its position, never the text. A value that is not a
+    list fails the boot: a silently dropped list would leave service accounts
+    unprovisioned.
     """
     try:
         parsed = yaml.safe_load(raw)
     except yaml.YAMLError as exc:
-        raise ValueError(f"Invalid value for {SEED_USERS_ENV_VAR}: not valid JSON or YAML ({exc})") from None
+        problem = getattr(exc, "problem", None) or "parse error"
+        mark = getattr(exc, "problem_mark", None)
+        where = f" at line {mark.line + 1}, column {mark.column + 1}" if mark else ""
+        raise ValueError(f"Invalid value for {SEED_USERS_ENV_VAR}: not valid JSON or YAML ({problem}{where})") from None
     if not isinstance(parsed, list):
         raise ValueError(f"Invalid value for {SEED_USERS_ENV_VAR}: expected a list, got {type(parsed).__name__}")
     return parsed
@@ -328,4 +334,20 @@ def load_config(
         if key in paths and paths[key]:
             paths[key] = str(Path(paths[key]).resolve())
 
-    return Settings(**data)
+    try:
+        return Settings(**data)
+    except ValidationError as exc:
+        error = _without_auth_inputs(exc)
+    # Raised outside the handler so the original, with its inputs, is not chained.
+    raise error
+
+
+def _without_auth_inputs(exc: ValidationError) -> ValidationError:
+    """Drop the offending values when an ``auth`` entry fails validation.
+
+    A token typed under ``token:`` or pasted where a ``token_env`` name belongs
+    would otherwise reach the boot log as ``input_value``.
+    """
+    if not any(error["loc"][:1] == ("auth",) for error in exc.errors()):
+        return exc
+    return ValidationError.from_exception_data(exc.title, exc.errors(include_url=False), hide_input=True)
