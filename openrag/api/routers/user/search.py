@@ -233,6 +233,7 @@ async def retrieval_diagnostics(
     diagnostics_guard=Depends(get_retrieval_diagnostics_guard),
 ):
     await diagnostics_guard.authorize(partition_viewer)
+    await service.refresh_partition_configs()
     token_request = OpenAIChatCompletionRequest(
         messages=[OpenAIMessage(**message.model_dump()) for message in payload.messages],
         max_tokens=config.rag.max_contextualized_query_len,

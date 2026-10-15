@@ -348,6 +348,8 @@ POST /search/partition/{partition}/diagnostics
 Runs contextualization, retrieval, and reranking without generating an answer. This experimental administrator-only
 endpoint is intended for reproducible evaluations that should not pay for an unused answer. It supports contextualized,
 original, and paired comparison modes with bounded retrieval overrides. Responses contain only the sanitized trace.
+Requests accept up to 100 plain-text messages with non-empty content and roles `system`, `developer`, `user`, or `assistant`;
+the last message must be a non-empty user turn. Tool-role messages and tool-call payloads are not supported.
 
 * Search Within Specific File
 ```http

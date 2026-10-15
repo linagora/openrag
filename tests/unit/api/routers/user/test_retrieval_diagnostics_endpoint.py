@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 
 import api.routers.user.chat as chat_router
+import api.routers.user.search as search_module
 import pytest
 from api.dependencies.auth import require_partition_viewer
 from api.dependencies.retrieval_diagnostics import get_retrieval_diagnostics_guard
@@ -39,8 +40,13 @@ def _client(*, max_context_tokens=4096, user=None):
     class _QueryService:
         def __init__(self):
             self.calls = []
+            self.events = []
+
+        async def refresh_partition_configs(self):
+            self.events.append("refresh")
 
         async def diagnose_retrieval(self, **kwargs):
+            self.events.append("diagnose")
             self.calls.append(kwargs)
             return {
                 "schema_version": 1,
@@ -63,6 +69,25 @@ def _client(*, max_context_tokens=4096, user=None):
     app.dependency_overrides[get_query_service] = lambda: service
     app.dependency_overrides[get_config] = lambda: _config(max_context_tokens)
     return TestClient(app), service
+
+
+def test_endpoint_refreshes_partition_configs_before_token_validation(monkeypatch):
+    client, service = _client()
+    check_tokens_limit = search_module.check_tokens_limit
+
+    def record_token_check(*args, **kwargs):
+        service.events.append("token_check")
+        return check_tokens_limit(*args, **kwargs)
+
+    monkeypatch.setattr(search_module, "check_tokens_limit", record_token_check)
+
+    response = client.post(
+        "/search/partition/legal/diagnostics",
+        json={"messages": [{"role": "user", "content": "What changed?"}]},
+    )
+
+    assert response.status_code == 200
+    assert service.events == ["refresh", "token_check", "diagnose"]
 
 
 def test_endpoint_runs_typed_retrieval_without_answer_generation():
