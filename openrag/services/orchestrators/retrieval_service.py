@@ -1240,7 +1240,8 @@ class RetrievalService:
                         update={
                             "removal_reason": TraceRemovalReason(
                                 code="partition_top_k",
-                                explanation="Candidate fell outside the cross-embedder top-k.",
+                                explanation="Candidate fell outside the cross-embedder top-k "
+                                "(rerank_candidates when reranking).",
                             )
                         }
                     )
