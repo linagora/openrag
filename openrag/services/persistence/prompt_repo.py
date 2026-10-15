@@ -213,6 +213,22 @@ class PgPromptRepository(PromptRepository):
             raise _as_conflict(exc, existing.prompt_type if existing else "") from exc
         return self._to_model(rec) if rec else None
 
+    async def update_default_content_if_unchanged(
+        self, prompt_id: str, expected_name: str, old_content: str, new_content: str
+    ) -> bool:
+        updated_id = await self.pool.fetchval(
+            """
+            UPDATE prompts SET content = $4, updated_at = now()
+            WHERE id = $1 AND is_default = true AND name = $2 AND content = $3
+            RETURNING id
+            """,
+            prompt_id,
+            expected_name,
+            old_content,
+            new_content,
+        )
+        return updated_id is not None
+
     async def delete(self, prompt_id: str) -> bool:
         # Presets reference prompts by name in JSONB, rather than through a FK.
         # ASR selection is strict at indexing time, so clearing a deleted ASR
