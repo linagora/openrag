@@ -2842,6 +2842,73 @@ async def test_pool_registers_the_worker_actor_with_the_ref(monkeypatch) -> None
 
 
 @pytest.mark.asyncio
+async def test_pool_reads_the_worker_registration_off_the_event_loop(monkeypatch) -> None:
+    """A slow GCS read must not stall other submissions; their slots are reserved meanwhile."""
+    import threading
+
+    import services.workers.worker_lease as worker_lease
+
+    loop_thread = threading.get_ident()
+    read_threads: list[int] = []
+    first_read_started = threading.Event()
+    release_first_read = threading.Event()
+
+    def slow_read(actor_id: str) -> tuple[bool, int]:
+        read_threads.append(threading.get_ident())
+        if actor_id == "ab" * 16:
+            first_read_started.set()
+            release_first_read.wait(timeout=5)
+        return True, 0
+
+    monkeypatch.setattr(worker_lease, "read_worker_actor_state", slow_read)
+    loop = asyncio.get_running_loop()
+    refs = [loop.create_future(), loop.create_future()]
+    workers = [
+        SimpleNamespace(
+            process_file=SimpleNamespace(remote=lambda _ref=ref, **_kwargs: _ref),
+            _actor_id=SimpleNamespace(hex=lambda _hex=hex_id: _hex),
+        )
+        for ref, hex_id in zip(refs, ("ab" * 16, "cd" * 16))
+    ]
+    pool = _bare_pool(workers)
+
+    first = asyncio.create_task(pool.submit(task_id="task-1", metadata={}, partition="p"))
+    assert await asyncio.to_thread(first_read_started.wait, 5)
+    # The loop is free while the first read blocks, and the first slot is taken.
+    assert (await pool.status())["inflight_jobs"] == 1
+    assert await pool.submit(task_id="task-2", metadata={}, partition="p") == [refs[1]]
+    release_first_read.set()
+    assert await first == [refs[0]]
+
+    assert pool._inflight == [1, 1]
+    assert loop_thread not in read_threads
+    await _settle_pool_release_tasks(pool, *refs)
+
+
+@pytest.mark.asyncio
+async def test_pool_rolls_back_inflight_when_the_registration_read_raises(monkeypatch) -> None:
+    import services.workers.worker_lease as worker_lease
+
+    def failing_read(_actor_id: str) -> tuple[bool, int]:
+        raise RuntimeError("gcs unavailable")
+
+    monkeypatch.setattr(worker_lease, "read_worker_actor_state", failing_read)
+    submitted = []
+    worker = SimpleNamespace(
+        process_file=SimpleNamespace(remote=lambda **kwargs: submitted.append(kwargs)),
+        _actor_id=SimpleNamespace(hex=lambda: "ab" * 16),
+    )
+    pool = _bare_pool([worker])
+
+    with pytest.raises(RuntimeError, match="gcs unavailable"):
+        await pool.submit(task_id="a", metadata={}, partition="p")
+
+    assert submitted == []
+    assert pool._inflight == [0]
+    pool._task_state_manager.finish_rejected_submission.remote.assert_awaited_once_with("a")
+
+
+@pytest.mark.asyncio
 async def test_pool_reads_the_worker_restart_count_before_it_submits(monkeypatch) -> None:
     """Read after, a restart that drops the task would count as its incarnation and hold its file for good."""
     import services.workers.worker_lease as worker_lease

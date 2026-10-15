@@ -830,15 +830,20 @@ class IndexerPool:
             await self._guard_prelaunch_rejection(task_id, claim)
             raise RuntimeError("IndexerPool is draining and cannot accept new tasks")
         idx = min(range(len(self._workers)), key=self._inflight.__getitem__)
-        # Before the submission, so a restart in between settles the task
-        # rather than counting as its incarnation (see ``worker_registration``).
-        registration = worker_registration(self._workers[idx])
+        # Reserve the slot before the await below, so a concurrent submit picks
+        # another worker and a drain counts this task as in flight.
         self._inflight[idx] += 1
         try:
+            # Before the submission, so a restart in between settles the task
+            # rather than counting as its incarnation (see ``worker_registration``).
+            # It is a synchronous GCS read: off the loop, so it can't stall
+            # other submissions and release callbacks.
+            registration = await asyncio.to_thread(worker_registration, self._workers[idx])
             ref = self._workers[idx].process_file.remote(**kwargs)
-        except Exception:
-            # Submission failed before a ref exists (e.g. unserializable args or
-            # a dead actor); roll back so load balancing stays accurate.
+        except BaseException:
+            # Submission failed before a ref exists (e.g. the GCS read failed,
+            # unserializable args or a dead actor); roll back so load balancing
+            # stays accurate.
             self._inflight[idx] -= 1
             await self._guard_prelaunch_rejection(task_id, claim)
             raise
