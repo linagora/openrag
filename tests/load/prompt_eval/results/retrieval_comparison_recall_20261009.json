@@ -1,0 +1,289 @@
+{
+  "date_utc": "2026-10-09T12:25:52.506981+00:00",
+  "model": "Mistral-Small-3.2-24B-Instruct-2506-FP8",
+  "partition": "issue751-e2e-20261008",
+  "base_sha": "6815baf0152ec6f6d80d5cd1d046d36ee3fe9ff6",
+  "candidate_template_sha256": "a9ab41975b720c6b7718d88d35df69ebddf81f4a298e32c4c474a2b88f6ad463",
+  "budget": "2 top-level retrieval hits per question (1 query x top_k=2 or 2 queries x top_k=1)",
+  "metric": "source-file recall over two manually relevant source papers; adjacent-context chunks are retained and deduplicated only for source coverage",
+  "cases": [
+    {
+      "variant": "develop",
+      "case_id": "channel-acquisition",
+      "user_question": "How does PBiGaBP compare with PARAFAC-ALS in channel estimation for OTFS and hybrid STAR-RIS systems?",
+      "gold_source_files": [
+        "otfs_pbigabp.pdf",
+        "hybrid_star_ris.pdf"
+      ],
+      "generated_queries": [
+        "Comparison of PBiGaBP and PARAFAC-ALS in channel estimation for OTFS and hybrid STAR-RIS systems"
+      ],
+      "top_k_per_query": 2,
+      "retrieved_chunk_count": 6,
+      "retrieved_source_files": [
+        "hybrid_star_ris.pdf"
+      ],
+      "gold_source_hits": [
+        "hybrid_star_ris.pdf"
+      ],
+      "source_recall": 0.5,
+      "sources": [
+        {
+          "id": "469618247940709972",
+          "file": "hybrid_star_ris.pdf",
+          "page": "6",
+          "index": 28
+        },
+        {
+          "id": "469618247940709950",
+          "file": "hybrid_star_ris.pdf",
+          "page": "3",
+          "index": 6
+        },
+        {
+          "id": "469618247940709949",
+          "file": "hybrid_star_ris.pdf",
+          "page": "2-3",
+          "index": 5
+        },
+        {
+          "id": "469618247940709951",
+          "file": "hybrid_star_ris.pdf",
+          "page": "3",
+          "index": 7
+        },
+        {
+          "id": "469618247940709971",
+          "file": "hybrid_star_ris.pdf",
+          "page": "6",
+          "index": 27
+        },
+        {
+          "id": "469618247940709973",
+          "file": "hybrid_star_ris.pdf",
+          "page": "6",
+          "index": 29
+        }
+      ]
+    },
+    {
+      "variant": "develop",
+      "case_id": "estimated-quantities",
+      "user_question": "What does each method estimate in its system: PBiGaBP for OTFS and PARAFAC-ALS for hybrid STAR-RIS?",
+      "gold_source_files": [
+        "otfs_pbigabp.pdf",
+        "hybrid_star_ris.pdf"
+      ],
+      "generated_queries": [
+        "What does each method estimate in its system: PBiGaBP for OTFS and PARAFAC-ALS for hybrid STAR-RIS?"
+      ],
+      "top_k_per_query": 2,
+      "retrieved_chunk_count": 6,
+      "retrieved_source_files": [
+        "hybrid_star_ris.pdf"
+      ],
+      "gold_source_hits": [
+        "hybrid_star_ris.pdf"
+      ],
+      "source_recall": 0.5,
+      "sources": [
+        {
+          "id": "469618247940709972",
+          "file": "hybrid_star_ris.pdf",
+          "page": "6",
+          "index": 28
+        },
+        {
+          "id": "469618247940710016",
+          "file": "hybrid_star_ris.pdf",
+          "page": "12",
+          "index": 72
+        },
+        {
+          "id": "469618247940709971",
+          "file": "hybrid_star_ris.pdf",
+          "page": "6",
+          "index": 27
+        },
+        {
+          "id": "469618247940709973",
+          "file": "hybrid_star_ris.pdf",
+          "page": "6",
+          "index": 29
+        },
+        {
+          "id": "469618247940710015",
+          "file": "hybrid_star_ris.pdf",
+          "page": "12",
+          "index": 71
+        },
+        {
+          "id": "469618247940710017",
+          "file": "hybrid_star_ris.pdf",
+          "page": "12-13",
+          "index": 73
+        }
+      ]
+    },
+    {
+      "variant": "candidate",
+      "case_id": "channel-acquisition",
+      "user_question": "How does PBiGaBP compare with PARAFAC-ALS in channel estimation for OTFS and hybrid STAR-RIS systems?",
+      "gold_source_files": [
+        "otfs_pbigabp.pdf",
+        "hybrid_star_ris.pdf"
+      ],
+      "generated_queries": [
+        "PBiGaBP channel estimation for OTFS and hybrid STAR-RIS systems",
+        "PARAFAC-ALS channel estimation for OTFS and hybrid STAR-RIS systems"
+      ],
+      "top_k_per_query": 1,
+      "retrieved_chunk_count": 6,
+      "retrieved_source_files": [
+        "hybrid_star_ris.pdf",
+        "otfs_pbigabp.pdf"
+      ],
+      "gold_source_hits": [
+        "hybrid_star_ris.pdf",
+        "otfs_pbigabp.pdf"
+      ],
+      "source_recall": 1.0,
+      "sources": [
+        {
+          "id": "469618247940710041",
+          "file": "otfs_pbigabp.pdf",
+          "page": "2",
+          "index": 2
+        },
+        {
+          "id": "469618247940710040",
+          "file": "otfs_pbigabp.pdf",
+          "page": "1-2",
+          "index": 1
+        },
+        {
+          "id": "469618247940710042",
+          "file": "otfs_pbigabp.pdf",
+          "page": "2",
+          "index": 3
+        },
+        {
+          "id": "469618247940709972",
+          "file": "hybrid_star_ris.pdf",
+          "page": "6",
+          "index": 28
+        },
+        {
+          "id": "469618247940709971",
+          "file": "hybrid_star_ris.pdf",
+          "page": "6",
+          "index": 27
+        },
+        {
+          "id": "469618247940709973",
+          "file": "hybrid_star_ris.pdf",
+          "page": "6",
+          "index": 29
+        }
+      ]
+    },
+    {
+      "variant": "candidate",
+      "case_id": "estimated-quantities",
+      "user_question": "What does each method estimate in its system: PBiGaBP for OTFS and PARAFAC-ALS for hybrid STAR-RIS?",
+      "gold_source_files": [
+        "otfs_pbigabp.pdf",
+        "hybrid_star_ris.pdf"
+      ],
+      "generated_queries": [
+        "What does PBiGaBP estimate in its system for OTFS",
+        "What does PARAFAC-ALS estimate in its system for hybrid STAR-RIS"
+      ],
+      "top_k_per_query": 1,
+      "retrieved_chunk_count": 6,
+      "retrieved_source_files": [
+        "hybrid_star_ris.pdf",
+        "otfs_pbigabp.pdf"
+      ],
+      "gold_source_hits": [
+        "hybrid_star_ris.pdf",
+        "otfs_pbigabp.pdf"
+      ],
+      "source_recall": 1.0,
+      "sources": [
+        {
+          "id": "469618247940710045",
+          "file": "otfs_pbigabp.pdf",
+          "page": "3",
+          "index": 6
+        },
+        {
+          "id": "469618247940710044",
+          "file": "otfs_pbigabp.pdf",
+          "page": "3",
+          "index": 5
+        },
+        {
+          "id": "469618247940710046",
+          "file": "otfs_pbigabp.pdf",
+          "page": "3-4",
+          "index": 7
+        },
+        {
+          "id": "469618247940709972",
+          "file": "hybrid_star_ris.pdf",
+          "page": "6",
+          "index": 28
+        },
+        {
+          "id": "469618247940709971",
+          "file": "hybrid_star_ris.pdf",
+          "page": "6",
+          "index": 27
+        },
+        {
+          "id": "469618247940709973",
+          "file": "hybrid_star_ris.pdf",
+          "page": "6",
+          "index": 29
+        }
+      ]
+    }
+  ],
+  "candidate_end_to_end_chat": [
+    {
+      "case_id": "channel-acquisition",
+      "gold_source_files": [
+        "otfs_pbigabp.pdf",
+        "hybrid_star_ris.pdf"
+      ],
+      "retrieved_source_files": [
+        "hybrid_star_ris.pdf",
+        "otfs_pbigabp.pdf"
+      ],
+      "gold_source_hits": [
+        "hybrid_star_ris.pdf",
+        "otfs_pbigabp.pdf"
+      ],
+      "source_recall": 1.0,
+      "retrieved_chunk_count": 10
+    },
+    {
+      "case_id": "estimated-quantities",
+      "gold_source_files": [
+        "otfs_pbigabp.pdf",
+        "hybrid_star_ris.pdf"
+      ],
+      "retrieved_source_files": [
+        "hybrid_star_ris.pdf",
+        "otfs_pbigabp.pdf"
+      ],
+      "gold_source_hits": [
+        "hybrid_star_ris.pdf",
+        "otfs_pbigabp.pdf"
+      ],
+      "source_recall": 1.0,
+      "retrieved_chunk_count": 10
+    }
+  ]
+}
