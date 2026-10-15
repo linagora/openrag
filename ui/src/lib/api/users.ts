@@ -1,4 +1,4 @@
-import { request } from "./client";
+import { ApiError, request } from "./client";
 import {
   listPartitions,
   listPartitionMembers,
@@ -117,20 +117,38 @@ export interface UserMembership {
   added_at: string | null;
 }
 
-export async function listUserMemberships(userId: number): Promise<UserMembership[]> {
+export interface UserMembershipsResult {
+  memberships: UserMembership[];
+  unavailablePartitions: string[];
+}
+
+export async function listUserMemberships(userId: number): Promise<UserMembershipsResult> {
   const { partitions } = await listPartitions();
   const rows = await Promise.all(
     partitions.map(async (p) => {
       try {
         const { members } = await listPartitionMembers(p.name);
         const m = members.find((mm) => mm.user_id === userId);
-        return m ? { partition: p.name, role: m.role as PartitionRole, added_at: m.added_at } : null;
-      } catch {
-        return null;
+        return {
+          membership: m ? { partition: p.name, role: m.role as PartitionRole, added_at: m.added_at } : null,
+          unavailable: false,
+        };
+      } catch (error) {
+        // Partition membership reads require owner access. A 403 is expected for
+        // partitions outside the caller's management scope; a 404 can occur if
+        // a partition was removed after the initial list. Other failures must
+        // propagate so the UI does not present a partial scan as complete.
+        if (error instanceof ApiError && (error.status === 403 || error.status === 404)) {
+          return { membership: null, unavailable: true };
+        }
+        throw error;
       }
     }),
   );
-  return rows.filter((r): r is UserMembership => r !== null);
+  return {
+    memberships: rows.flatMap((row) => row.membership ? [row.membership] : []),
+    unavailablePartitions: rows.flatMap((row, index) => row.unavailable ? [partitions[index].name] : []),
+  };
 }
 
 export function grantMembership(partition: string, userId: number, role: PartitionRole) {

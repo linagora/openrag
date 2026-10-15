@@ -8,6 +8,7 @@ import { useAuth } from "@/lib/auth";
 import { usePermissions } from "@/lib/permissions";
 
 import { PageHeader } from "@/components/shared/page-header";
+import { QueryErrorNotice } from "@/components/shared/query-error-notice";
 import { DataTable, SortableHeader } from "@/components/shared/data-table";
 import { StatusBadge } from "@/components/shared/status-badge";
 import { DegradedCompletionStatus } from "@/components/shared/degraded-stages";
@@ -57,20 +58,31 @@ function formatDuration(durationMs: number | null | undefined): string {
 function QueuePressureSummary({
   queueInfo,
   isLoading,
-  isError,
+  isLoadingError,
+  isRefetchError,
+  isFetching,
+  onRetry,
 }: {
   queueInfo?: QueueInfo;
   isLoading: boolean;
-  isError: boolean;
+  isLoadingError: boolean;
+  isRefetchError: boolean;
+  isFetching: boolean;
+  onRetry: () => void;
 }) {
   if (isLoading) {
     return <p className="text-sm text-muted-foreground">Queue: loading...</p>;
   }
-  if (isError || !queueInfo) {
+  if (isLoadingError || !queueInfo) {
     return (
-      <p className="text-sm text-muted-foreground" title="Queue information is currently unavailable">
-        Queue unavailable
-      </p>
+      <div className="flex items-center gap-2">
+        <p className="text-sm text-muted-foreground" title="Queue information is currently unavailable">
+          Queue unavailable
+        </p>
+        <Button variant="outline" size="sm" aria-label="Retry queue information" onClick={onRetry} disabled={isFetching}>
+          {isFetching ? "Retrying…" : "Retry"}
+        </Button>
+      </div>
     );
   }
 
@@ -82,15 +94,24 @@ function QueuePressureSummary({
   const status = saturated ? "Saturated" : busy ? "Busy" : "Idle";
 
   return (
-    <div className="flex flex-wrap items-center gap-2 text-sm text-muted-foreground" aria-label="Queue pressure">
-      <Badge variant="outline" className={saturated ? "text-destructive" : undefined}>
-        {status}
-      </Badge>
-      <span>Queued {queued}</span>
-      <span>Running {running}/{totalSlots}</span>
-      <span>
-        Workers {queueInfo.workers.pool_size} x {queueInfo.workers.max_per_actor}
-      </span>
+    <div className="space-y-2">
+      <div className="flex flex-wrap items-center gap-2 text-sm text-muted-foreground" aria-label="Queue pressure">
+        <Badge variant="outline" className={saturated ? "text-destructive" : undefined}>
+          {status}
+        </Badge>
+        <span>Queued {queued}</span>
+        <span>Running {running}/{totalSlots}</span>
+        <span>Workers {queueInfo.workers.pool_size} x {queueInfo.workers.max_per_actor}</span>
+      </div>
+      {isRefetchError && (
+        <QueryErrorNotice
+          title="Queue information could not be refreshed"
+          message="Showing the previously loaded queue summary. It may be out of date."
+          isRetrying={isFetching}
+          onRetry={onRetry}
+          stale
+        />
+      )}
     </div>
   );
 }
@@ -320,7 +341,11 @@ export default function JobListPage() {
           </Select>
           <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
             <p className="text-sm text-muted-foreground">
-              {filteredTasks.length} job{filteredTasks.length === 1 ? "" : "s"}
+              {tasksQuery.isLoading
+                ? "Loading jobs…"
+                : tasksQuery.isLoadingError
+                  ? "Jobs unavailable"
+                  : `${filteredTasks.length} job${filteredTasks.length === 1 ? "" : "s"}`}
             </p>
             {selectedActiveTasks.length > 0 && (
               <>
@@ -343,7 +368,10 @@ export default function JobListPage() {
               <QueuePressureSummary
                 queueInfo={queueInfoQuery.data}
                 isLoading={queueInfoQuery.isLoading}
-                isError={queueInfoQuery.isError}
+                isLoadingError={queueInfoQuery.isLoadingError}
+                isRefetchError={queueInfoQuery.isRefetchError}
+                isFetching={queueInfoQuery.isFetching}
+                onRetry={() => void queueInfoQuery.refetch()}
               />
             )}
             <Button
@@ -386,22 +414,38 @@ export default function JobListPage() {
           <TabsContent key={tab} value={tab}>
             {tasksQuery.isLoading ? (
               <div className="flex items-center justify-center py-12 text-muted-foreground">Loading tasks...</div>
-            ) : tasksQuery.isError ? (
-              <div className="flex items-center justify-center py-12 text-destructive">
-                Failed to load tasks: {(tasksQuery.error as Error).message}
-              </div>
-            ) : (
-              // Remounting resets pagination for a new tab/search context; sort state resets with it.
-              <DataTable
-                key={`${statusTab}:${debouncedSearch}:${partitionFilter}`}
-                columns={isAdmin ? adminColumns : columns}
-                data={filteredTasks}
-                enableSelection
-                canSelectRow={(task) => isActiveState(task.state)}
-                getRowId={(task) => task.task_id}
-                rowSelection={rowSelection}
-                onRowSelectionChange={setRowSelection}
+            ) : tasksQuery.isLoadingError ? (
+              <QueryErrorNotice
+                title="Jobs could not be loaded"
+                message="The job list is unavailable. Try again to reload it."
+                isRetrying={tasksQuery.isFetching}
+                onRetry={() => void tasksQuery.refetch()}
               />
+            ) : (
+              <>
+                {tasksQuery.isRefetchError && (
+                  <div className="mb-3">
+                    <QueryErrorNotice
+                      title="Jobs could not be refreshed"
+                      message="Showing previously loaded jobs. They may be out of date."
+                      isRetrying={tasksQuery.isFetching}
+                      onRetry={() => void tasksQuery.refetch()}
+                      stale
+                    />
+                  </div>
+                )}
+                {/* Remounting resets pagination for a new tab/search context; sort state resets with it. */}
+                <DataTable
+                  key={`${statusTab}:${debouncedSearch}:${partitionFilter}`}
+                  columns={isAdmin ? adminColumns : columns}
+                  data={filteredTasks}
+                  enableSelection
+                  canSelectRow={(task) => isActiveState(task.state)}
+                  getRowId={(task) => task.task_id}
+                  rowSelection={rowSelection}
+                  onRowSelectionChange={setRowSelection}
+                />
+              </>
             )}
           </TabsContent>
         ))}

@@ -149,6 +149,34 @@ describe("PresetsPage usage badge", () => {
   });
 });
 
+describe("PresetsPage read errors", () => {
+  beforeEach(() => listPresetsMock.mockReset());
+
+  it("shows a retryable load error instead of an empty preset list", async () => {
+    listPresetsMock
+      .mockRejectedValueOnce(new Error("service unavailable"))
+      .mockResolvedValueOnce([]);
+    const user = userEvent.setup();
+    renderPage();
+
+    expect(await screen.findByText("Presets could not be loaded")).not.toBeNull();
+    expect(screen.queryByText("No indexation presets configured.")).toBeNull();
+    await user.click(screen.getByRole("button", { name: "Retry" }));
+    expect(await screen.findByText("No indexation presets configured.")).not.toBeNull();
+  });
+
+  it("shows a retryable error when preset form options fail to load", async () => {
+    listPresetsMock.mockResolvedValue([]);
+    listModelEndpointsMock.mockRejectedValueOnce(new Error("service unavailable"));
+    const user = userEvent.setup();
+    renderPage();
+
+    await user.click(screen.getByRole("button", { name: "Add Preset" }));
+    expect(await screen.findByText("Preset options could not be loaded")).not.toBeNull();
+    expect(screen.getByRole("button", { name: "Retry" })).not.toBeNull();
+  });
+});
+
 describe("PresetsPage parsing configuration", () => {
   beforeEach(() => {
     listPresetsMock.mockReset();

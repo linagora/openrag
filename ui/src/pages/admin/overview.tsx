@@ -35,6 +35,7 @@ import {
 } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { PageHeader } from "@/components/shared/page-header";
+import { QueryErrorNotice } from "@/components/shared/query-error-notice";
 import { StatusBadge } from "@/components/shared/status-badge";
 import { listPartitions } from "@/lib/api/partitions";
 import { listUsers } from "@/lib/api/users";
@@ -49,11 +50,19 @@ function StatCard({
   value,
   icon: Icon,
   isLoading,
+  isLoadingError,
+  isRefetchError,
+  isFetching,
+  onRetry,
 }: {
   title: string;
   value: string | number;
   icon: ComponentType<{ className?: string }>;
   isLoading: boolean;
+  isLoadingError: boolean;
+  isRefetchError: boolean;
+  isFetching: boolean;
+  onRetry: () => void;
 }) {
   return (
     <Card>
@@ -62,7 +71,31 @@ function StatCard({
         <Icon className="h-4 w-4 text-muted-foreground" />
       </CardHeader>
       <CardContent>
-        {isLoading ? <Skeleton className="h-8 w-20" /> : <div className="text-2xl font-bold">{value}</div>}
+        {isLoading ? (
+          <Skeleton className="h-8 w-20" />
+        ) : isLoadingError ? (
+          <QueryErrorNotice
+            title={`${title} unavailable`}
+            message={`Could not load ${title.toLowerCase()}.`}
+            isRetrying={isFetching}
+            onRetry={onRetry}
+          />
+        ) : (
+          <>
+            <div className="text-2xl font-bold">{value}</div>
+            {isRefetchError && (
+              <div className="mt-2">
+                <QueryErrorNotice
+                  title={`${title} could not be refreshed`}
+                  message="Showing the previously loaded value. It may be out of date."
+                  isRetrying={isFetching}
+                  onRetry={onRetry}
+                  stale
+                />
+              </div>
+            )}
+          </>
+        )}
       </CardContent>
     </Card>
   );
@@ -70,7 +103,21 @@ function StatCard({
 
 // OpenRag exposes per-file indexing tasks (not batch jobs), with no timestamp
 // or doc-count on the list row — so the table shows task/file/partition/state.
-function RecentTasks({ isLoading, tasks }: { isLoading: boolean; tasks: TaskListItem[] }) {
+function RecentTasks({
+  isLoading,
+  isLoadingError,
+  isRefetchError,
+  isFetching,
+  onRetry,
+  tasks,
+}: {
+  isLoading: boolean;
+  isLoadingError: boolean;
+  isRefetchError: boolean;
+  isFetching: boolean;
+  onRetry: () => void;
+  tasks: TaskListItem[];
+}) {
   return (
     <Card>
       <CardHeader className="flex flex-row items-center justify-between">
@@ -89,42 +136,64 @@ function RecentTasks({ isLoading, tasks }: { isLoading: boolean; tasks: TaskList
               <Skeleton key={i} className="h-10 w-full" />
             ))}
           </div>
-        ) : tasks.length > 0 ? (
-          <div className="rounded-md border">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Task</TableHead>
-                  <TableHead>File</TableHead>
-                  <TableHead>Partition</TableHead>
-                  <TableHead>State</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {tasks.map((task) => (
-                  <TableRow key={task.task_id}>
-                    <TableCell>
-                      <Link
-                        to={`/jobs/${task.task_id}`}
-                        className="font-mono text-xs text-primary hover:underline"
-                      >
-                        {task.task_id.slice(0, 8)}
-                      </Link>
-                    </TableCell>
-                    <TableCell className="max-w-[220px] truncate">
-                      {str(task.details?.metadata?.filename) || str(task.details?.file_id) || "—"}
-                    </TableCell>
-                    <TableCell>{str(task.details?.partition) || "—"}</TableCell>
-                    <TableCell>
-                      <StatusBadge status={task.state} />
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          </div>
+        ) : isLoadingError ? (
+          <QueryErrorNotice
+            title="Recent jobs could not be loaded"
+            message="The job summary is unavailable. Try again to reload it."
+            isRetrying={isFetching}
+            onRetry={onRetry}
+          />
         ) : (
-          <p className="text-sm text-muted-foreground text-center py-6">No jobs found.</p>
+          <>
+            {isRefetchError && (
+              <div className="mb-3">
+                <QueryErrorNotice
+                  title="Recent jobs could not be refreshed"
+                  message="Showing previously loaded jobs. They may be out of date."
+                  isRetrying={isFetching}
+                  onRetry={onRetry}
+                  stale
+                />
+              </div>
+            )}
+            {tasks.length > 0 ? (
+              <div className="rounded-md border">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Task</TableHead>
+                      <TableHead>File</TableHead>
+                      <TableHead>Partition</TableHead>
+                      <TableHead>State</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {tasks.map((task) => (
+                      <TableRow key={task.task_id}>
+                        <TableCell>
+                          <Link
+                            to={`/jobs/${task.task_id}`}
+                            className="font-mono text-xs text-primary hover:underline"
+                          >
+                            {task.task_id.slice(0, 8)}
+                          </Link>
+                        </TableCell>
+                        <TableCell className="max-w-[220px] truncate">
+                          {str(task.details?.metadata?.filename) || str(task.details?.file_id) || "—"}
+                        </TableCell>
+                        <TableCell>{str(task.details?.partition) || "—"}</TableCell>
+                        <TableCell>
+                          <StatusBadge status={task.state} />
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+            ) : (
+              <p className="text-sm text-muted-foreground text-center py-6">No jobs found.</p>
+            )}
+          </>
         )}
       </CardContent>
     </Card>
@@ -193,7 +262,7 @@ export default function OverviewPage() {
     (partition) => partition.partition === rememberedPartition || partition.name === rememberedPartition,
   );
   const writablePartition = rememberedWritablePartition ?? writablePartitions[0];
-  const uploadQuickAction = partitionsQuery.isLoading || partitionsQuery.isError
+  const uploadQuickAction = partitionsQuery.isLoading || partitionsQuery.isLoadingError
     ? null
     : writablePartition
       ? {
@@ -221,21 +290,42 @@ export default function OverviewPage() {
           value={partitionCount}
           icon={Database}
           isLoading={partitionsQuery.isLoading}
+          isLoadingError={partitionsQuery.isLoadingError}
+          isRefetchError={partitionsQuery.isRefetchError}
+          isFetching={partitionsQuery.isFetching}
+          onRetry={() => void partitionsQuery.refetch()}
         />
         <StatCard
           title="Documents"
           value={documentTotal}
           icon={FileText}
           isLoading={partitionsQuery.isLoading}
+          isLoadingError={partitionsQuery.isLoadingError}
+          isRefetchError={partitionsQuery.isRefetchError}
+          isFetching={partitionsQuery.isFetching}
+          onRetry={() => void partitionsQuery.refetch()}
         />
         {canManageUsers && (
-          <StatCard title="Users" value={userCount} icon={Users} isLoading={usersQuery.isLoading} />
+          <StatCard
+            title="Users"
+            value={userCount}
+            icon={Users}
+            isLoading={usersQuery.isLoading}
+            isLoadingError={usersQuery.isLoadingError}
+            isRefetchError={usersQuery.isRefetchError}
+            isFetching={usersQuery.isFetching}
+            onRetry={() => void usersQuery.refetch()}
+          />
         )}
         <StatCard
           title="Active Jobs"
           value={activeTasks}
           icon={Activity}
           isLoading={tasksQuery.isLoading}
+          isLoadingError={tasksQuery.isLoadingError}
+          isRefetchError={tasksQuery.isRefetchError}
+          isFetching={tasksQuery.isFetching}
+          onRetry={() => void tasksQuery.refetch()}
         />
       </div>
 
@@ -373,7 +463,14 @@ export default function OverviewPage() {
         </DialogContent>
       </Dialog>
 
-      <RecentTasks isLoading={tasksQuery.isLoading} tasks={tasks.slice(0, 5)} />
+      <RecentTasks
+        isLoading={tasksQuery.isLoading}
+        isLoadingError={tasksQuery.isLoadingError}
+        isRefetchError={tasksQuery.isRefetchError}
+        isFetching={tasksQuery.isFetching}
+        onRetry={() => void tasksQuery.refetch()}
+        tasks={tasks.slice(0, 5)}
+      />
     </div>
   );
 }

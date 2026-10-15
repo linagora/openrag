@@ -50,6 +50,8 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { formatDate, copyToClipboard } from "@/lib/utils";
+import { ApiError } from "@/lib/api/client";
+import { QueryErrorNotice } from "@/components/shared/query-error-notice";
 
 export default function UserDetailPage() {
   // Remount the entire detail view when the route's user id changes. React Router
@@ -67,11 +69,12 @@ function UserDetail() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
 
-  const { data: user, isLoading } = useQuery({
+  const userQuery = useQuery({
     queryKey: ["user", id],
     queryFn: () => getUser(id!),
     enabled: !!id,
   });
+  const user = userQuery.data;
 
   const [displayName, setDisplayName] = useState("");
   const [email, setEmail] = useState("");
@@ -116,8 +119,29 @@ function UserDetail() {
     onError: (e) => toast.error((e as Error).message),
   });
 
-  if (isLoading) return <Skeleton className="h-96" />;
-  if (!user) return <p>User not found</p>;
+  if (userQuery.isLoading) return <Skeleton className="h-96" />;
+  if (userQuery.isError && userQuery.error instanceof ApiError && userQuery.error.status === 404) {
+    return (
+      <div className="space-y-4 py-8">
+        <p>User not found.</p>
+        <Button variant="outline" asChild><Link to="/users">Back to Users</Link></Button>
+      </div>
+    );
+  }
+  if (userQuery.isLoadingError) {
+    return (
+      <div className="space-y-4">
+        <QueryErrorNotice
+          title="User could not be loaded"
+          message="The user record is unavailable. Try again to reload it."
+          isRetrying={userQuery.isFetching}
+          onRetry={() => void userQuery.refetch()}
+        />
+        <Button variant="outline" asChild><Link to="/users">Back to Users</Link></Button>
+      </div>
+    );
+  }
+  if (!user) return null;
 
   const title = user.display_name || user.external_user_id || `User #${user.id}`;
   const isSso = !!user.external_user_id;
@@ -146,6 +170,18 @@ function UserDetail() {
           </div>
         }
       />
+
+      {userQuery.isRefetchError && (
+        <div className="mb-4">
+          <QueryErrorNotice
+            title="User could not be refreshed"
+            message="Showing the previously loaded user record. It may be out of date."
+            isRetrying={userQuery.isFetching}
+            onRetry={() => void userQuery.refetch()}
+            stale
+          />
+        </div>
+      )}
 
       <Tabs defaultValue="profile">
         <TabsList>
@@ -245,7 +281,7 @@ function PartitionsTab({ userId }: { userId: number }) {
     queryKey: ["user-memberships", userId],
     queryFn: () => listUserMemberships(userId),
   });
-  const memberships = membershipsQuery.data ?? [];
+  const memberships = membershipsQuery.data?.memberships ?? [];
 
   const partitionsQuery = useQuery({ queryKey: ["partitions"], queryFn: listPartitions });
   const assigned = new Set(memberships.map((m) => m.partition));
@@ -296,58 +332,92 @@ function PartitionsTab({ userId }: { userId: number }) {
       <CardContent>
         {membershipsQuery.isLoading ? (
           <Skeleton className="h-24" />
-        ) : memberships.length === 0 ? (
-          <p className="text-muted-foreground text-sm py-4 text-center">
-            No partition access yet. Click &quot;Grant access&quot; to add one.
-          </p>
+        ) : membershipsQuery.isLoadingError ? (
+          <QueryErrorNotice
+            title="Partition access could not be loaded"
+            message="The membership list is unavailable. Try again to reload it."
+            isRetrying={membershipsQuery.isFetching}
+            onRetry={() => void membershipsQuery.refetch()}
+          />
         ) : (
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Partition</TableHead>
-                <TableHead>Role</TableHead>
-                <TableHead>Granted</TableHead>
-                <TableHead></TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {memberships.map((m) => (
-                <TableRow key={m.partition}>
-                  <TableCell>{m.partition}</TableCell>
-                  <TableCell>
-                    <Select
-                      value={m.role}
-                      onValueChange={(v) => {
-                        if (v !== m.role)
-                          roleMut.mutate({ part: m.partition, newRole: v as PartitionRole });
-                      }}
-                    >
-                      <SelectTrigger className="h-8 w-32 capitalize" disabled={roleMut.isPending}>
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="viewer">Viewer</SelectItem>
-                        <SelectItem value="editor">Editor</SelectItem>
-                        <SelectItem value="owner">Owner</SelectItem>
-                      </SelectContent>
-                    </Select>
-                  </TableCell>
-                  <TableCell>{formatDate(m.added_at)}</TableCell>
-                  <TableCell>
-                    <ConfirmDialog
-                      title="Remove access?"
-                      description={`Remove this user's access to "${m.partition}"?`}
-                      onConfirm={() => revokeMut.mutate(m.partition)}
-                    >
-                      <Button size="sm" variant="ghost" className="text-destructive">
-                        <Trash2 className="h-3 w-3" />
-                      </Button>
-                    </ConfirmDialog>
-                  </TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
+          <>
+            {membershipsQuery.isRefetchError && (
+              <div className="mb-3">
+                <QueryErrorNotice
+                  title="Partition access could not be refreshed"
+                  message="Showing previously loaded memberships. They may be out of date."
+                  isRetrying={membershipsQuery.isFetching}
+                  onRetry={() => void membershipsQuery.refetch()}
+                  stale
+                />
+              </div>
+            )}
+            {!!membershipsQuery.data?.unavailablePartitions.length && (
+              <div className="mb-3">
+                <QueryErrorNotice
+                  title="Some partition access could not be checked"
+                  message="Some partitions could not be checked because access was restricted or a partition was removed. The list below may be incomplete."
+                  isRetrying={membershipsQuery.isFetching}
+                  onRetry={() => void membershipsQuery.refetch()}
+                />
+              </div>
+            )}
+            {memberships.length === 0 ? (
+              <p className="text-muted-foreground text-sm py-4 text-center">
+                {membershipsQuery.data?.unavailablePartitions.length
+                  ? "No visible partition access was found; some partitions could not be checked."
+                  : "No partition access yet. Click \"Grant access\" to add one."}
+              </p>
+            ) : (
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Partition</TableHead>
+                    <TableHead>Role</TableHead>
+                    <TableHead>Granted</TableHead>
+                    <TableHead></TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {memberships.map((m) => (
+                    <TableRow key={m.partition}>
+                      <TableCell>{m.partition}</TableCell>
+                      <TableCell>
+                        <Select
+                          value={m.role}
+                          onValueChange={(v) => {
+                            if (v !== m.role)
+                              roleMut.mutate({ part: m.partition, newRole: v as PartitionRole });
+                          }}
+                        >
+                          <SelectTrigger className="h-8 w-32 capitalize" disabled={roleMut.isPending}>
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="viewer">Viewer</SelectItem>
+                            <SelectItem value="editor">Editor</SelectItem>
+                            <SelectItem value="owner">Owner</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </TableCell>
+                      <TableCell>{formatDate(m.added_at)}</TableCell>
+                      <TableCell>
+                        <ConfirmDialog
+                          title="Remove access?"
+                          description={`Remove this user's access to "${m.partition}"?`}
+                          onConfirm={() => revokeMut.mutate(m.partition)}
+                        >
+                          <Button size="sm" variant="ghost" className="text-destructive">
+                            <Trash2 className="h-3 w-3" />
+                          </Button>
+                        </ConfirmDialog>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            )}
+          </>
         )}
 
         <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
@@ -355,15 +425,45 @@ function PartitionsTab({ userId }: { userId: number }) {
             <DialogHeader>
               <DialogTitle>Grant partition access</DialogTitle>
             </DialogHeader>
+            {partitionsQuery.isLoadingError && (
+              <QueryErrorNotice
+                title="Partitions could not be loaded"
+                message="Reload the partition list before granting access."
+                isRetrying={partitionsQuery.isFetching}
+                onRetry={() => void partitionsQuery.refetch()}
+              />
+            )}
+            {partitionsQuery.isRefetchError && (
+              <QueryErrorNotice
+                title="Partition list could not be refreshed"
+                message="Showing previously loaded partitions. They may be out of date."
+                isRetrying={partitionsQuery.isFetching}
+                onRetry={() => void partitionsQuery.refetch()}
+                stale
+              />
+            )}
+            {partitionsQuery.isLoading && (
+              <p className="text-sm text-muted-foreground" role="status">
+                Loading partitions…
+              </p>
+            )}
             <div className="space-y-4">
               <div className="space-y-2">
                 <Label>Partition</Label>
-                <Select value={partition} onValueChange={setPartition}>
+                <Select
+                  value={partition}
+                  onValueChange={setPartition}
+                  disabled={partitionsQuery.isLoading || partitionsQuery.isLoadingError}
+                >
                   <SelectTrigger>
                     <SelectValue placeholder="Select a partition" />
                   </SelectTrigger>
                   <SelectContent>
-                    {available.length === 0 ? (
+                    {partitionsQuery.isLoading ? (
+                      <div className="px-2 py-1.5 text-sm text-muted-foreground">
+                        Loading partitions…
+                      </div>
+                    ) : available.length === 0 ? (
                       <div className="px-2 py-1.5 text-sm text-muted-foreground">
                         No more partitions available
                       </div>
@@ -392,7 +492,10 @@ function PartitionsTab({ userId }: { userId: number }) {
               </div>
             </div>
             <DialogFooter>
-              <Button onClick={() => grantMut.mutate()} disabled={grantMut.isPending || !partition}>
+              <Button
+                onClick={() => grantMut.mutate()}
+                disabled={grantMut.isPending || !partition || partitionsQuery.isLoadingError}
+              >
                 {grantMut.isPending ? "Granting…" : "Grant access"}
               </Button>
             </DialogFooter>
