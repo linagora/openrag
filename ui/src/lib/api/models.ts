@@ -129,10 +129,11 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /** Whether a key holds a secret, and so comes back redacted rather than as its
- *  stored value — which is why a diff has to leave it alone. */
+ *  stored value — which is why a diff has to leave it alone. Hyphens count as
+ *  underscores, as on the backend, so a header such as `X-API-Key` matches too. */
 export function isSecretField(key: string | undefined): boolean {
   if (!key) return false;
-  const normalized = key.toLowerCase();
+  const normalized = key.toLowerCase().replaceAll("-", "_");
   return SECRET_FIELD_NAMES.has(normalized) || SECRET_FIELD_SUFFIXES.some((suffix) => normalized.endsWith(suffix));
 }
 

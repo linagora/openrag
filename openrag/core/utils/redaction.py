@@ -49,8 +49,9 @@ SECRET_FIELD_SUFFIXES = frozenset(
 
 
 def is_secret_field(key: str) -> bool:
-    """Return true only for known secret field names, not fuzzy token matches."""
-    normalized = key.lower()
+    """Return true only for known secret field names, not fuzzy token matches.
+    Hyphens count as underscores, so a header such as ``X-API-Key`` matches too."""
+    normalized = key.lower().replace("-", "_")
     return normalized in SECRET_FIELD_NAMES or any(normalized.endswith(suffix) for suffix in SECRET_FIELD_SUFFIXES)
 
 

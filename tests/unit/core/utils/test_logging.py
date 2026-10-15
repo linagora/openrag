@@ -237,7 +237,9 @@ def _raise_with_a_secret_in_scope() -> None:
 @pytest.mark.parametrize("log_format", ["text", "json"])
 def test_tracebacks_do_not_print_local_variables(capsys, log_format):
     """loguru's ``diagnose`` annotates each frame with its variables' values,
-    which writes whatever a frame holds — tokens, settings, prompts — to the log."""
+    which writes whatever a frame holds — tokens, settings, prompts — to the log.
+    Only the ``text`` case guards that: the JSON sink formats exceptions itself,
+    so the ``json`` case passes with or without ``diagnose``."""
     config = SimpleNamespace(verbose=SimpleNamespace(level="INFO", format=log_format))
     try:
         log = get_logger(config)

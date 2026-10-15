@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
 import {
   displayModelEndpointExtra,
+  isSecretField,
   mergeModelEndpointApiKeyExtra,
   mergeModelEndpointLlmContext,
   mergeModelEndpointMossSpeakerAware,
@@ -144,6 +145,12 @@ describe("revealModelEndpointApiKey", () => {
 });
 
 describe("model endpoint secret placeholders", () => {
+  it("counts hyphenated header names as secrets, like the backend", () => {
+    expect(isSecretField("X-API-Key")).toBe(true);
+    expect(isSecretField("X-Auth-Token")).toBe(true);
+    expect(isSecretField("X-Request-Id")).toBe(false);
+  });
+
   it("shows backend redacted secret sentinels as password-style bullets", () => {
     expect(
       displayModelEndpointExtra({

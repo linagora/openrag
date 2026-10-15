@@ -24,6 +24,7 @@ def test_redact_secrets_fully_hides_known_secret_keys_without_false_token_matche
                 "token_encryption_key": "fernet-secret",
             }
         ],
+        "headers": {"X-API-Key": "header-api-key", "X-Auth-Token": "header-token", "X-Request-Id": "req-1"},
     }
 
     redacted = redact_secrets(payload)
@@ -42,6 +43,7 @@ def test_redact_secrets_fully_hides_known_secret_keys_without_false_token_matche
     assert redacted["nested"][0]["refresh_token"] == "<redacted>"
     assert redacted["nested"][0]["signing_key"] == "<redacted>"
     assert redacted["nested"][0]["token_encryption_key"] == "<redacted>"
+    assert redacted["headers"] == {"X-API-Key": "<redacted>", "X-Auth-Token": "<redacted>", "X-Request-Id": "req-1"}
     assert payload["llm"]["api_key"] == "sk-llm-secret"
 
 
@@ -162,7 +164,7 @@ def _endpoint_models_holding_a_key():
 
     extra = {
         "api_key": "sk-endpoint-secret",
-        "headers": {"Authorization": "Bearer sk-header-secret"},
+        "headers": {"Authorization": "Bearer sk-header-secret", "X-API-Key": "sk-hyphen-header-secret"},
         "implementation": "vllm",
     }
     now = "2026-10-08T00:00:00+00:00"
@@ -186,6 +188,8 @@ def test_endpoint_models_keep_their_api_key_out_of_repr_and_str():
         assert "sk-endpoint-secret" not in str(model), type(model).__name__
         assert "sk-header-secret" not in repr(model), type(model).__name__
         assert "sk-header-secret" not in str(model), type(model).__name__
+        assert "sk-hyphen-header-secret" not in repr(model), type(model).__name__
+        assert "sk-hyphen-header-secret" not in str(model), type(model).__name__
 
 
 def test_endpoint_models_still_show_their_other_settings_and_keep_the_key():
