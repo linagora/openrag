@@ -1183,6 +1183,7 @@ class RetrievalService:
                 related_limit=related_limit,
                 max_ancestor_depth=max_ancestor_depth,
                 filter_params=filter_params,
+                filter=filter,
             )
         if trace is not None:
             try:
