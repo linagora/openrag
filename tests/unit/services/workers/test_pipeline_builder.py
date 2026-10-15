@@ -8,7 +8,7 @@ from core.indexing.topic_tags import TopicTagger
 from core.models.chunk import Chunk
 from core.models.document import Document, DocumentType, ImageBlock, ProcessedDocument, TextBlock
 from core.prompts.vlm_prompt_builder import wrap_caption
-from core.utils.exceptions import ConfigError, InferenceError
+from core.utils.exceptions import ConfigError, InferenceError, NoIndexableContentError, PipelineError
 from services.workers.pipeline_builder import build_indexing_pipeline
 from services.workers.stages import caption as caption_module
 
@@ -151,6 +151,148 @@ async def test_pipeline_runs_required_stages_in_order_and_keeps_row_object():
     assert row["stored_count"] == 1
     assert row["chunks"][0].embedding == [1.0, 0.0]
     assert "token" not in row
+
+
+def _save_markdown_pipeline(save_markdown: bool, data_dir, processed: ProcessedDocument | None = None):
+    if processed is None:
+        processed = ProcessedDocument(
+            text_blocks=[TextBlock(text="# Title"), TextBlock(text=""), TextBlock(text="body")]
+        )
+    return build_indexing_pipeline(
+        parser=FakeParser(processed),
+        chunker=FakeChunker([Chunk(id="c1", text="body", partition="tenant-a")]),
+        embedder=FakeEmbedder([[1.0, 0.0]]),
+        vector_store=FakeVectorStore(),
+        save_markdown=save_markdown,
+        data_dir=data_dir,
+    )
+
+
+@pytest.mark.asyncio
+async def test_save_markdown_writes_parsed_text_next_to_the_upload(tmp_path):
+    upload = tmp_path / "report.pdf"
+    upload.write_bytes(b"%PDF-1.4")
+    document = Document(filename="report.pdf", text="x", partition="tenant-a", source_path=str(upload))
+
+    await _save_markdown_pipeline(True, tmp_path).run({"document": document, "partition": "tenant-a"})
+
+    assert (tmp_path / "report.pdf.md").read_text(encoding="utf-8") == "# Title\n\nbody"
+    assert upload.read_bytes() == b"%PDF-1.4"
+
+
+@pytest.mark.asyncio
+async def test_save_markdown_does_not_overwrite_a_markdown_upload(tmp_path):
+    upload = tmp_path / "notes.md"
+    upload.write_text("original", encoding="utf-8")
+    document = Document(filename="notes.md", text="x", partition="tenant-a", source_path=str(upload))
+
+    await _save_markdown_pipeline(True, tmp_path).run({"document": document, "partition": "tenant-a"})
+
+    assert upload.read_text(encoding="utf-8") == "original"
+    assert (tmp_path / "notes.md.md").exists()
+
+
+@pytest.mark.asyncio
+async def test_save_markdown_off_writes_nothing(tmp_path):
+    upload = tmp_path / "report.pdf"
+    upload.write_bytes(b"%PDF-1.4")
+    document = Document(filename="report.pdf", text="x", partition="tenant-a", source_path=str(upload))
+
+    await _save_markdown_pipeline(False, tmp_path).run({"document": document, "partition": "tenant-a"})
+
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["report.pdf"]
+
+
+@pytest.mark.asyncio
+async def test_save_markdown_write_failure_does_not_fail_the_file(tmp_path):
+    missing_dir_upload = tmp_path / "gone" / "report.pdf"
+    document = Document(filename="report.pdf", text="x", partition="tenant-a", source_path=str(missing_dir_upload))
+    row = {"document": document, "partition": "tenant-a"}
+
+    await _save_markdown_pipeline(True, tmp_path).run(row)
+
+    assert row["stage"] == "stored"
+
+
+def _upload(tmp_path) -> Document:
+    upload = tmp_path / "report.pdf"
+    upload.write_bytes(b"%PDF-1.4")
+    return Document(filename="report.pdf", text="x", partition="tenant-a", source_path=str(upload))
+
+
+@pytest.mark.asyncio
+async def test_save_markdown_skips_a_source_path_outside_the_data_dir(tmp_path):
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    temp_download = tmp_path / "tmp" / "tmpk3x9q2"
+    temp_download.parent.mkdir()
+    temp_download.write_bytes(b"%PDF-1.4")
+    document = Document(filename="page.pdf", text="x", partition="tenant-a", source_path=str(temp_download))
+    row = {"document": document, "partition": "tenant-a"}
+
+    await _save_markdown_pipeline(True, data_dir).run(row)
+
+    assert row["stage"] == "stored"
+    assert sorted(p.name for p in temp_download.parent.iterdir()) == ["tmpk3x9q2"]
+    assert list(data_dir.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_save_markdown_marks_page_changes(tmp_path):
+    document = _upload(tmp_path)
+    processed = ProcessedDocument(
+        text_blocks=[
+            TextBlock(text="intro", page_number=1),
+            TextBlock(text="more intro", page_number=1),
+            TextBlock(text="results", page_number=2),
+            TextBlock(text="appendix", page_number=4),
+        ]
+    )
+
+    await _save_markdown_pipeline(True, tmp_path, processed).run({"document": document, "partition": "tenant-a"})
+
+    assert (tmp_path / "report.pdf.md").read_text(encoding="utf-8") == (
+        "<!-- page 1 -->\n\nintro\n\nmore intro\n\n<!-- page 2 -->\n\nresults\n\n<!-- page 4 -->\n\nappendix"
+    )
+
+
+@pytest.mark.asyncio
+async def test_save_markdown_adds_no_page_marker_to_a_single_page_document(tmp_path):
+    document = _upload(tmp_path)
+    processed = ProcessedDocument(text_blocks=[TextBlock(text="a", page_number=1), TextBlock(text="b", page_number=1)])
+
+    await _save_markdown_pipeline(True, tmp_path, processed).run({"document": document, "partition": "tenant-a"})
+
+    assert (tmp_path / "report.pdf.md").read_text(encoding="utf-8") == "a\n\nb"
+
+
+@pytest.mark.asyncio
+async def test_save_markdown_replaces_undescribed_image_placeholders(tmp_path):
+    document = _upload(tmp_path)
+    processed = ProcessedDocument(
+        text_blocks=[
+            TextBlock(text="before ![](docling_img_1) after"),
+            TextBlock(text="![chart](openrag-embedded-image-1)"),
+            TextBlock(text="![logo](https://example.com/logo.png)"),
+        ],
+        images=[
+            ImageBlock(image_bytes=b"png", metadata={"markdown_ref": "![](docling_img_1)"}),
+            ImageBlock(
+                image_bytes=b"png",
+                metadata={"markdown_ref": "![chart](openrag-embedded-image-1)", "alt": "chart"},
+            ),
+            ImageBlock(
+                source_url="https://example.com/logo.png",
+                metadata={"markdown_ref": "![logo](https://example.com/logo.png)", "alt": "logo"},
+            ),
+        ],
+    )
+
+    await _save_markdown_pipeline(True, tmp_path, processed).run({"document": document, "partition": "tenant-a"})
+
+    assert (tmp_path / "report.pdf.md").read_text(encoding="utf-8") == (
+        "before [Image] after\n\nchart\n\n![logo](https://example.com/logo.png)"
+    )
 
 
 @pytest.mark.asyncio
@@ -991,13 +1133,8 @@ async def test_reindex_defers_cleanup_delete_to_worker():
 
 @pytest.mark.asyncio
 async def test_reindex_with_zero_new_chunks_keeps_old_chunks():
-    # Regression guard: a blank/whitespace-only file, or a parser that extracts
-    # no text, legitimately chunks down to [] without raising (chunk_stage /
-    # BaseChunker.chunk both treat this as success). If the old snapshot were
-    # deleted whenever it was merely non-empty, a re-index that stores zero new
-    # chunks would wipe the file's entire previous chunk set — worse than the
-    # pre-fix duplication bug, and a violation of the "no empty window"
-    # guarantee. The old chunks must survive when nothing new was stored.
+    # A blank file chunks to [] without chunk_stage raising. run() fails before
+    # store, so the previous chunk set is never deleted.
     vs = RecordingVectorStore(existing_ids=["101", "102"])
     document = Document(filename="blank.txt", text="", partition="tenant-a")
     processed = ProcessedDocument(document_id=document.id, text_blocks=[])
@@ -1008,11 +1145,66 @@ async def test_reindex_with_zero_new_chunks_keeps_old_chunks():
         vector_store=vs,
     )
 
-    row = await pipeline.run({"document": document, "partition": "tenant-a", "replace": True})
+    with pytest.raises(NoIndexableContentError, match="No indexable content was extracted"):
+        await pipeline.run({"document": document, "partition": "tenant-a", "replace": True})
 
-    assert row["stored_count"] == 0
     assert vs.deleted == []
     assert "delete" not in vs.events
+
+
+@pytest.mark.asyncio
+async def test_empty_chunks_after_a_failed_caption_name_the_caption_error():
+    document = Document(filename="photo.png", text="", content_type=DocumentType.IMAGE, partition="tenant-a")
+    processed = ProcessedDocument(
+        document_id=document.id,
+        text_blocks=[],
+        images=[ImageBlock(image_bytes=b"png")],
+    )
+    embedder = FakeEmbedder([])
+    vector_store = FakeVectorStore()
+    pipeline = build_indexing_pipeline(
+        parser=FakeParser(processed),
+        chunker=FakeChunker([]),
+        embedder=embedder,
+        vector_store=vector_store,
+        vlm=FailingVLM(),
+    )
+
+    with pytest.raises(PipelineError, match="image captioning failed: vlm unreachable") as exc_info:
+        await pipeline.run({"document": document, "partition": "tenant-a", "filename": "photo.png"})
+
+    assert type(exc_info.value) is PipelineError
+    assert embedder.calls == []
+    assert vector_store.calls == []
+
+
+@pytest.mark.asyncio
+async def test_empty_chunks_name_images_that_were_never_captioned():
+    document = Document(filename="scan.pdf", text="", content_type=DocumentType.PDF, partition="tenant-a")
+    processed = ProcessedDocument(
+        document_id=document.id,
+        text_blocks=[],
+        images=[ImageBlock(image_bytes=b"png"), ImageBlock(image_bytes=b"png")],
+    )
+    embedder = FakeEmbedder([])
+    pipeline = build_indexing_pipeline(
+        parser=FakeParser(processed),
+        chunker=FakeChunker([]),
+        embedder=embedder,
+        vector_store=FakeVectorStore(),
+    )
+
+    with pytest.raises(NoIndexableContentError, match=r"document's 2 image\(s\) were not captioned"):
+        await pipeline.run(
+            {
+                "document": document,
+                "partition": "tenant-a",
+                "filename": "scan.pdf",
+                "indexation_config": {"enable_image_captioning": False},
+            }
+        )
+
+    assert embedder.calls == []
 
 
 def test_ingest_flag_defaults_come_from_the_model_not_from_absence():

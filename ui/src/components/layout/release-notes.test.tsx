@@ -60,6 +60,13 @@ describe("ReleaseNotes", () => {
     expect(screen.getByRole("button", { name: triggerLabel }).textContent).not.toContain("New");
   });
 
+  it("shows the new badge again after an older release was viewed", () => {
+    localStorage.setItem(LAST_VIEWED_RELEASE_NOTES_KEY, "2.2.1");
+    render(<ReleaseNotes />);
+
+    expect(screen.getByRole("button", { name: `${triggerLabel}, new` }).textContent).toContain("New");
+  });
+
   it("closes with Escape and returns focus to the trigger", async () => {
     const user = userEvent.setup();
     render(<ReleaseNotes />);

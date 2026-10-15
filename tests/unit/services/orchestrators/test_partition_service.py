@@ -18,14 +18,26 @@ from services.orchestrators.partition_service import PartitionService
 
 
 class FakePartitionRepo:
-    def __init__(self, existing: set[str] | None = None, *, owned_count: int = 0):
+    def __init__(
+        self,
+        existing: set[str] | None = None,
+        *,
+        owned_count: int = 0,
+        embedders: dict[str, str] | None = None,
+    ):
         self._existing = existing if existing is not None else set()
         self._owned_count = owned_count
+        self._embedders = embedders or {}
         self.created: list[tuple[str, int]] = []
         self.deleted: list[str] = []
 
     async def partition_exists(self, name: str) -> bool:
         return name in self._existing
+
+    async def get_partition_row(self, name: str) -> dict | None:
+        if name not in self._existing:
+            return None
+        return {"partition": name, "embedder": self._embedders.get(name, "default")}
 
     async def list_partitions(self) -> list[dict]:
         return [{"partition": p} for p in sorted(self._existing)]
@@ -241,6 +253,7 @@ class FakeVectorStore:
         self.deleted_ids: list[str] = []
         self.deleted_filters: list[dict] = []
         self.last_chunk_filters: dict | None = None
+        self.last_output_fields: list[str] | None = None
 
     async def collection_exists(self, name) -> bool:
         return self._exists
@@ -260,6 +273,7 @@ class FakeVectorStore:
 
     async def query_chunks_by_filter(self, collection, filters, output_fields=None):
         self.last_chunk_filters = dict(filters)
+        self.last_output_fields = output_fields
         return [row for row in self._rows if all(row.get(key) == value for key, value in filters.items())]
 
 
@@ -851,19 +865,23 @@ async def test_get_file_chunks_strips_text_keeps_id_and_caps_limit():
             "page": i,
             "partition": "p",
             "file_id": "f",
+            "vector": [0.1, 0.2],
             "_openrag_indexing_task_id": "task-1",
         }
         for i in range(5)
     ]
+    vstore = FakeVectorStore(rows=rows)
     svc = _svc(
         drepo=FakeDocumentRepo(files={("f", "p")}),
-        vstore=FakeVectorStore(rows=rows),
+        vstore=vstore,
     )
     out = await svc.get_file_chunks("p", "f", limit=3)
     assert len(out) == 3
     assert all("text" not in r for r in out)
+    assert all("vector" not in r for r in out)
     assert all("_id" in r for r in out)
     assert all("_openrag_indexing_task_id" not in r for r in out)
+    assert vstore.last_output_fields == ["_id", "page"]
 
 
 @pytest.mark.asyncio
@@ -885,12 +903,53 @@ async def test_list_all_chunks_excludes_vector_when_no_embedding():
     assert "_openrag_indexing_task_id" not in out[0]["metadata"]
 
 
+def _embedder_config(**fields: str | None):
+    """A config whose embedder endpoints own the given dense fields."""
+    return SimpleNamespace(
+        models=SimpleNamespace(embedder={name: SimpleNamespace(vector_field=field) for name, field in fields.items()})
+    )
+
+
 @pytest.mark.asyncio
 async def test_list_all_chunks_stringifies_vector_when_included():
-    rows = [{"text": "t", "_id": "1", "partition": "p", "vector": [0.1, 0.2]}]
-    svc = _svc(prepo=FakePartitionRepo({"p"}), vstore=FakeVectorStore(rows=rows))
+    rows = [{"text": "t", "_id": "1", "partition": "p", "vector_e5": [0.1, 0.2]}]
+    svc = _svc(
+        prepo=FakePartitionRepo({"p"}, embedders={"p": "e5"}),
+        vstore=FakeVectorStore(rows=rows),
+        config=_embedder_config(e5="vector_e5"),
+    )
     out = await svc.list_all_chunks("p", include_embedding=True)
     assert isinstance(out[0]["metadata"]["vector"], str)
+
+
+@pytest.mark.asyncio
+async def test_list_all_chunks_exports_the_partitions_own_vector_not_a_leftover():
+    """A swap leaves the old embedder's vector in place, so rows carry two."""
+    rows = [{"text": "t", "_id": "1", "partition": "p", "vector_old": [9.0], "vector_e5": [0.1, 0.2]}]
+    svc = _svc(
+        prepo=FakePartitionRepo({"p"}, embedders={"p": "e5"}),
+        vstore=FakeVectorStore(rows=rows),
+        config=_embedder_config(e5="vector_e5", old="vector_old"),
+    )
+
+    out = await svc.list_all_chunks("p", include_embedding=True)
+
+    assert out[0]["metadata"]["vector"] == str([0.1, 0.2])
+
+
+@pytest.mark.asyncio
+async def test_list_all_chunks_omits_the_vector_when_the_field_is_unresolvable():
+    """Better no embedding than one from a field nothing searches."""
+    rows = [{"text": "t", "_id": "1", "partition": "p", "vector_e5": [0.1, 0.2]}]
+    svc = _svc(
+        prepo=FakePartitionRepo({"p"}, embedders={"p": "gone"}),
+        vstore=FakeVectorStore(rows=rows),
+        config=_embedder_config(e5="vector_e5"),
+    )
+
+    out = await svc.list_all_chunks("p", include_embedding=True)
+
+    assert "vector" not in out[0]["metadata"]
 
 
 async def test_list_all_chunks_without_file_id_filters_partition_only():

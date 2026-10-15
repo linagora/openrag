@@ -46,6 +46,27 @@ async def test_wiring_checks_core_dependencies_and_database_endpoint_discovery(m
     publisher.assert_called_once()
 
 
+@pytest.mark.parametrize("env_value,expected", [(None, False), ("true", True)])
+def test_wiring_gates_on_the_embedder_only_when_the_env_opts_in(monkeypatch, tmp_path, env_value, expected):
+    """READINESS_REQUIRE_EMBEDDER reaches the service /ready consults, and is off
+    when unset (#1106): every replica shares the embedder."""
+    from core.config import load_config
+
+    (tmp_path / "config.yaml").write_text("retriever:\n  type: single\n", encoding="utf-8")
+    monkeypatch.delenv("READINESS_REQUIRE_EMBEDDER", raising=False)
+    if env_value is not None:
+        monkeypatch.setenv("READINESS_REQUIRE_EMBEDDER", env_value)
+    settings = load_config(config_path=tmp_path)
+    container = SimpleNamespace(
+        _require_settings=lambda: settings,
+        catalog_store=SimpleNamespace(check_health=AsyncMock()),
+        vector_store=SimpleNamespace(check_health=AsyncMock()),
+        model_endpoint_repo=SimpleNamespace(discover_readiness_targets=AsyncMock()),
+    )
+
+    assert create_readiness_service(container).requires_embedder is expected
+
+
 async def test_wiring_includes_stt_default_only_for_remote_audio_loader(monkeypatch):
     settings = Settings(
         rdb={"password": "test"},

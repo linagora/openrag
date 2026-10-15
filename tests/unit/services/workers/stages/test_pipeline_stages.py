@@ -152,6 +152,9 @@ class FakeVectorStore(VectorStore):
     async def drop_vector_field(self, field: str) -> bool:
         return False
 
+    async def write_vectors(self, field: str, vectors: dict[str, list[float] | None]) -> int:
+        return 0
+
     async def drop_collection(self, name: str) -> None:
         return None
 
@@ -164,8 +167,21 @@ class FakeVectorStore(VectorStore):
     async def query_ids_by_filter(self, collection: str, filters: dict) -> list[str]:
         return []
 
-    async def query_chunks_by_filter(self, collection: str, filters: dict, output_fields=None) -> list[dict]:
+    async def query_chunks_by_filter(
+        self,
+        collection: str,
+        filters: dict,
+        output_fields: list[str] | None = None,
+        limit: int | None = None,
+    ) -> list[dict]:
         return []
+
+
+@pytest.mark.asyncio
+async def test_fake_vector_store_accepts_filter_query_limit():
+    store = FakeVectorStore(count=0)
+
+    assert await store.query_chunks_by_filter("collection", {}, limit=1) == []
 
 
 @pytest.mark.asyncio

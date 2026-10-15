@@ -54,11 +54,19 @@ capacity or the network, `error` at the endpoint itself.
 
 1. **The endpoint is down or unreachable.** Deployments using external inference have no
    bundled fallback.
-2. **A credential expired or rotated** on the registry entry — for the `embedder`,
-   `reranker` and `vlm` breakers. The `llm` breaker ignores a 401: callers shape LLM
-   requests and can provoke one, so a revoked LLM key shows as its calls going
-   `rejected` instead (see [OpenRagInferenceProviderDown](OpenRagInferenceProviderDown.md)).
-3. **The model was unloaded or renamed** at the provider.
+2. **Not a credential.** No breaker opens on a 4xx, 401 and 403 included: a breaker is
+   shared by every endpoint of its kind, so one endpoint's revoked key would stop all of
+   them. A revoked embedder, reranker or VLM key that the provider answers with 401 fires
+   [OpenRagInferenceProviderDown](OpenRagInferenceProviderDown.md) for that endpoint
+   instead. One answered with 403 fires no alert at all: it is recorded as `rejected`,
+   which that alert ignores. Look for an endpoint whose calls all go `rejected`:
+
+   ```promql
+   sum by (provider, operation) (rate(openrag_inference_requests_total{outcome="rejected"}[10m]))
+   ```
+3. **Rarely a renamed model.** A provider answering an unknown model with a 4xx (vLLM: 404)
+   cannot open a breaker; only one answering with a 5xx can. See
+   [OpenRagInferenceProviderDown](OpenRagInferenceProviderDown.md) for the 4xx case.
 4. **Sustained overload** — enough timeouts in a row to trip it.
 
 ## Recovery

@@ -43,10 +43,10 @@ semaphore:
   vlm_semaphore: 10
 
 # --- Embedder ---
-# Env: EMBEDDER_MODEL_NAME, EMBEDDER_BASE_URL, EMBEDDER_API_KEY, MAX_MODEL_LEN,
-#      EMBEDDER_TIMEOUT, EMBEDDER_BATCH_SIZE, EMBEDDER_CONCURRENCY
+# Env: EMBEDDER_PROVIDER, EMBEDDER_MODEL_NAME, EMBEDDER_BASE_URL, EMBEDDER_API_KEY,
+#      MAX_MODEL_LEN, EMBEDDER_TIMEOUT, EMBEDDER_BATCH_SIZE, EMBEDDER_CONCURRENCY
 embedder:
-  provider: openai
+  provider: vllm # client: vllm (any server with GET /models), ollama, or tei (no /models)
   model_name: Qwen/Qwen3-Embedding-0.6B
   base_url: http://vllm:8000/v1
   api_key: EMPTY
@@ -124,9 +124,10 @@ verbose:
   format: text
 
 # --- Server ---
-# Env: PREFERRED_URL_SCHEME
+# Env: PREFERRED_URL_SCHEME, ASSISTANT_NAME
 server:
   preferred_url_scheme: null
+  assistant_name: ""
 
 # --- LLM Context ---
 # Env: MAX_LLM_CONTEXT_SIZE, MAX_OUTPUT_TOKENS
@@ -222,7 +223,9 @@ loader:
 
   # Env: MARKER_MAX_TASKS_PER_CHILD, MARKER_POOL_SIZE, MARKER_MAX_PROCESSES,
   #      MARKER_NUM_GPUS, MARKER_TIMEOUT, MARKER_CHILD_TIMEOUT_RATIO,
-  #      MARKER_PDFTEXT_WORKERS, MARKER_CHUNK_SIZE
+  #      MARKER_PDFTEXT_WORKERS, MARKER_CHUNK_SIZE,
+  #      MARKER_PARSE_MEMORY_LIMIT_MB (0 = off; per-child RLIMIT_DATA ceiling,
+  #      must sit well above the child's baseline — see env_vars.md)
   marker_max_tasks_per_child: 20
   marker_pool_size: 1
   marker_max_processes: 2

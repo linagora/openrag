@@ -700,6 +700,44 @@ async def test_index_url_removes_download_when_content_is_duplicate(monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_index_url_names_the_running_task_when_the_file_is_already_indexing(monkeypatch):
+    from core.utils.exceptions import ConflictError
+
+    parts = FakePartitions(exists=False, partition_exists=True, members=[{"user_id": 7, "role": "editor"}])
+    indexing = FakeIndexing(
+        add_error=ConflictError(
+            "File 'f2' is already being indexed in partition 'p1'.",
+            code="DOCUMENT_INDEXING_IN_PROGRESS",
+            existing_task_id="task-running",
+        )
+    )
+    svc = _service(partitions=parts, indexing=indexing)
+    downloaded_path = None
+
+    async def fake_download(url, dest):
+        nonlocal downloaded_path
+        downloaded_path = dest
+        dest.write_bytes(_PDF_HEADER + b"retry")
+
+    monkeypatch.setattr(svc, "_safe_download", fake_download)
+
+    with pytest.raises(ConflictError) as caught:
+        await svc.index_url(
+            url="https://example.com/report.pdf",
+            partition="p1",
+            file_id="f2",
+            allowed_partitions=["p1"],
+            user_id=7,
+        )
+
+    assert caught.value.code == "DOCUMENT_INDEXING_IN_PROGRESS"
+    assert caught.value.extra == {"existing_task_id": "task-running"}
+    assert "get_indexation_task_status with task_id='task-running'" in str(caught.value)
+    assert downloaded_path is not None
+    assert not downloaded_path.exists()
+
+
+@pytest.mark.asyncio
 async def test_index_url_removes_download_when_dispatch_is_cancelled(monkeypatch):
     parts = FakePartitions(exists=False, partition_exists=True, members=[{"user_id": 7, "role": "editor"}])
     indexing = FakeIndexing(add_error=asyncio.CancelledError())
@@ -784,6 +822,55 @@ async def test_index_url_removes_download_when_the_content_contradicts_the_url(m
 
     assert downloaded_path is not None
     assert not downloaded_path.exists()
+
+
+@pytest.mark.asyncio
+async def test_index_url_downloads_an_extensionless_url_under_its_mimetype_suffix(monkeypatch):
+    parts = FakePartitions(exists=False, partition_exists=True, members=[{"user_id": 7, "role": "editor"}])
+    indexing = FakeIndexing()
+    svc = _service(partitions=parts, indexing=indexing)
+    downloaded_path = None
+
+    async def fake_download(url, dest):
+        nonlocal downloaded_path
+        downloaded_path = dest
+        dest.write_bytes(_PDF_HEADER + b"data")
+
+    monkeypatch.setattr(svc, "_safe_download", fake_download)
+
+    await svc.index_url(
+        url="https://example.com/download",
+        partition="p1",
+        file_id="f5",
+        allowed_partitions=["p1"],
+        user_id=7,
+        extra_metadata={"mimetype": "application/pdf"},
+    )
+
+    assert downloaded_path is not None and downloaded_path.suffix == ".pdf"
+    assert indexing.added[0]["file_path"] == str(downloaded_path)
+    downloaded_path.unlink(missing_ok=True)
+
+
+@pytest.mark.asyncio
+async def test_index_url_checks_an_extensionless_url_against_its_mimetype(monkeypatch):
+    parts = FakePartitions(exists=False, partition_exists=True, members=[{"user_id": 7, "role": "editor"}])
+    svc = _service(partitions=parts, indexing=FakeIndexing())
+
+    async def fake_download(url, dest):
+        dest.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 64)
+
+    monkeypatch.setattr(svc, "_safe_download", fake_download)
+
+    with pytest.raises(ValidationError):
+        await svc.index_url(
+            url="https://example.com/download",
+            partition="p1",
+            file_id="f6",
+            allowed_partitions=["p1"],
+            user_id=7,
+            extra_metadata={"mimetype": "application/pdf"},
+        )
 
 
 @pytest.mark.asyncio

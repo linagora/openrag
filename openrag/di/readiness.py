@@ -88,5 +88,6 @@ def create_readiness_service(container: ServiceContainer) -> ReadinessService:
         checks,
         discover_model_endpoints=discover_model_endpoints,
         summary_model_kinds=tuple(summary_model_kinds),
+        requires_embedder=settings.models.readiness_requires_embedder,
         publish=MODEL_ENDPOINT_READINESS_METRICS.publish,
     )

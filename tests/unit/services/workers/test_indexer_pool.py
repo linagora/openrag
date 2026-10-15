@@ -157,7 +157,7 @@ def test_build_indexer_pool_uses_current_protocol_dispatcher_name(
     opts = options_calls[0]
     # A protocol-specific name prevents a rolling deployment from attaching to
     # a detached actor that still runs the previous claim implementation.
-    assert opts["name"] == "IndexerPoolDispatcher-v12"
+    assert opts["name"] == "IndexerPoolDispatcher-v13"
     assert opts["namespace"] == "openrag"
     assert opts["get_if_exists"] is True
     assert opts["lifetime"] == "detached"
@@ -198,9 +198,9 @@ def test_indexer_pool_actor_spawns_pool_size_detached_workers(
     # One detached worker actor per pool_size slot, each capped at max_tasks_per_worker.
     assert len(pool._workers) == 3
     assert {c["name"] for c in calls} == {
-        "IndexerWorker-v12-0",
-        "IndexerWorker-v12-1",
-        "IndexerWorker-v12-2",
+        "IndexerWorker-v13-0",
+        "IndexerWorker-v13-1",
+        "IndexerWorker-v13-2",
     }
     for c in calls:
         assert c["lifetime"] == "detached"
@@ -1316,7 +1316,7 @@ async def test_pool_drain_rejects_new_work_and_reports_accepted_work(monkeypatch
     await pool.submit(task_id="accepted-before-drain")
 
     assert await pool.begin_drain() == {
-        "protocol_version": "v12",
+        "protocol_version": "v13",
         "accepting_tasks": False,
         "inflight_jobs": 1,
         "worker_names": ["test-worker-0"],
@@ -1349,7 +1349,7 @@ async def test_pool_drain_rejects_new_work_and_reports_accepted_work(monkeypatch
 
     await _settle_pool_release_tasks(pool, worker.futures[0])
     assert await pool.status() == {
-        "protocol_version": "v12",
+        "protocol_version": "v13",
         "accepting_tasks": False,
         "inflight_jobs": 0,
         "worker_names": ["test-worker-0"],
@@ -1384,7 +1384,7 @@ async def test_pool_abort_drain_restores_acceptance() -> None:
         await pool.submit(task_id="rejected-while-draining")
 
     assert await pool.abort_drain() == {
-        "protocol_version": "v12",
+        "protocol_version": "v13",
         "accepting_tasks": True,
         "inflight_jobs": 0,
         "worker_names": ["test-worker-0"],
@@ -1399,7 +1399,7 @@ async def test_pool_abort_drain_restores_acceptance() -> None:
 async def test_pool_reports_current_protocol_version() -> None:
     pool = _bare_pool([_FakeWorker()])
 
-    assert await pool.protocol_version() == "v12"
+    assert await pool.protocol_version() == "v13"
 
 
 @pytest.mark.asyncio
@@ -1637,7 +1637,8 @@ def test_indexer_pool_wires_contextualizer_factory_and_worker_namespace(monkeypa
             batch_size=32,
             embed_concurrency=2,
         ),
-        loader=SimpleNamespace(parse_timeout=3600, save_uploaded_files=True),
+        loader=SimpleNamespace(parse_timeout=3600, save_uploaded_files=True, save_markdown=False),
+        paths=SimpleNamespace(data_dir="/tmp/data"),
         semaphore=SimpleNamespace(vlm_semaphore=7),
         vectordb=SimpleNamespace(collection_name="vdb_test"),
         rdb=RDBConfig(),
@@ -1732,7 +1733,8 @@ def test_indexer_pool_loads_caption_prompt_without_global_vlm_default(monkeypatc
             batch_size=32,
             embed_concurrency=2,
         ),
-        loader=SimpleNamespace(parse_timeout=3600, save_uploaded_files=True),
+        loader=SimpleNamespace(parse_timeout=3600, save_uploaded_files=True, save_markdown=False),
+        paths=SimpleNamespace(data_dir="/tmp/data"),
         semaphore=SimpleNamespace(vlm_semaphore=10),
         vectordb=SimpleNamespace(collection_name="vdb_test"),
         rdb=RDBConfig(),
@@ -2289,6 +2291,41 @@ async def test_actor_purges_upload_on_worker_failure(tmp_path) -> None:
 
     # The finally runs on failure too — don't leave the client's file behind.
     assert not path.exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error", [None, RuntimeError("boom")])
+async def test_actor_keeps_markdown_copy_when_purging_upload(tmp_path, error) -> None:
+    # SAVE_MARKDOWN is independent of save_uploaded_files: inspecting parser
+    # output must not require keeping every raw upload.
+    path = tmp_path / "doc.pdf"
+    path.write_bytes(b"x")
+    sidecar = tmp_path / "doc.pdf.md"
+    sidecar.write_text("parsed", encoding="utf-8")
+    actor = _bare_worker_actor(save_uploaded_files=False, worker=_RecordingWorker(error=error))
+
+    if error is None:
+        await actor.process_file(task_id="t", path=str(path), metadata={"file_id": "f"}, partition="p")
+    else:
+        with pytest.raises(RuntimeError, match="boom"):
+            await actor.process_file(task_id="t", path=str(path), metadata={"file_id": "f"}, partition="p")
+
+    assert not path.exists()
+    assert sidecar.read_text(encoding="utf-8") == "parsed"
+
+
+@pytest.mark.asyncio
+async def test_actor_keeps_markdown_copy_when_saving(tmp_path) -> None:
+    path = tmp_path / "doc.pdf"
+    path.write_bytes(b"x")
+    sidecar = tmp_path / "doc.pdf.md"
+    sidecar.write_text("parsed", encoding="utf-8")
+    actor = _bare_worker_actor(save_uploaded_files=True, worker=_RecordingWorker())
+
+    await actor.process_file(task_id="t", path=str(path), metadata={"file_id": "f"}, partition="p")
+
+    assert path.exists()
+    assert sidecar.read_text(encoding="utf-8") == "parsed"
 
 
 @pytest.mark.asyncio

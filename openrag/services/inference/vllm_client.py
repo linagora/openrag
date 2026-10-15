@@ -457,6 +457,7 @@ class VLLMClient(LLM):
             raise InferenceError(
                 f"LLM error ({exc.response.status_code}): {exc.response.text[:500]}",
                 status_code=exc.response.status_code,
+                caller_shaped=overridden,
             ) from exc
         return _parse_response(resp)
 
@@ -484,6 +485,7 @@ class VLLMClient(LLM):
             raise InferenceError(
                 f"LLM error ({exc.response.status_code}): {exc.response.text[:500]}",
                 status_code=exc.response.status_code,
+                caller_shaped=overridden,
             ) from exc
         return _parse_response(resp)
 
@@ -517,6 +519,7 @@ class VLLMClient(LLM):
                     error = InferenceError(
                         f"LLM streaming error ({resp.status_code}): {resp.text[:500]}",
                         status_code=resp.status_code,
+                        caller_shaped=overridden,
                     )
                     outcome = outcome_for(error, operation="chat")
                     raise error
@@ -856,6 +859,20 @@ class VLLMEmbedder(Embedder):
 
     async def aclose(self) -> None:
         await self._client.aclose()
+
+
+@embedder_registry.register("tei")
+class TEIEmbedder(VLLMEmbedder):
+    """Embedding client for Hugging Face text-embeddings-inference.
+
+    TEI serves the OpenAI-compatible ``/embeddings`` route (with or without
+    ``/v1``) but no ``/models``: the model is the one the server was started
+    with, and its input limit comes from that model, with ``--auto-truncate``
+    deciding whether a longer input is cut or refused.
+    """
+
+    async def _fetch_served_max_model_len(self) -> int | None:
+        return None
 
 
 # ---------------------------------------------------------------------------

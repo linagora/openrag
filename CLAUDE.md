@@ -137,13 +137,13 @@ The RAG pipeline filters out false-positive sources by having the LLM self-repor
 5. For streaming, the OpenAI router buffers the last 100 chars to catch the sources tag before it reaches the client
 
 The `extra` field in API responses is a JSON object with these keys. It was a
-JSON-encoded *string* up to and including v2.2.0 — a breaking change for readers
+JSON-encoded *string* up to and including v2.2.2 — a breaking change for readers
 written against the old shape, which must stop calling `json.loads` on it:
 
-- `sources` — legacy field, kept as-is for existing clients (e.g. Twake): cited sources, or every presented source as a fallback when no `[Sources: ...]` tag was found.
+- `sources` — legacy field, kept as-is for existing clients (e.g. Twake): cited sources, or every presented source as a fallback when the model reported no citations — neither a `[Sources: ...]` tag nor an inline `[Source N]` marker — or the request skips citation reporting (structured output, direct LLM, web search with no results).
 - `presented_sources` — every source actually shown to the LLM (after `format_context()`/`format_web_context()` truncation), regardless of citation. Always present; a client can fall back to this ("sources consulted") when nothing was cited.
-- `cited_sources` — strictly what the model cited via the tag; unlike `sources`, this never falls back to "everything" — it's `[]` whenever no tag was found. Chainlit uses this field directly so its source panel never presents uncited retrieval candidates.
-- `citations_reported` (bool) — `true` only when the model actually emitted a `[Sources: ...]` tag (even an empty/`none` one); `false` when the tag was missing entirely, which is the only case where `sources` falls back to keeping everything. Lets a client tell "the model cited every source" apart from "the model didn't report citations at all".
+- `cited_sources` — strictly what the model cited, in the tag or inline `[Source N]` markers; unlike `sources`, this never falls back to "everything" — it's `[]` whenever nothing was cited or citations weren't reported. Chainlit uses this field directly so its source panel never presents uncited retrieval candidates.
+- `citations_reported` (bool) — `true` when the model reported citations: a `[Sources: ...]` tag with sources or `none`, or inline `[Source N]` markers (an empty `[Sources: ]` counts as no tag); `false` otherwise, which is exactly when `sources` falls back to keeping everything. Lets a client tell "the model cited every source" apart from "the model didn't report citations at all".
 - `all_retrieved_sources` — the complete retrieval set, captured before the context-token-budget truncation, so it also includes documents/web results that didn't fit in the prompt (and, on the map-reduce path, the original retrieved docs rather than the LLM-generated summaries). Only included when the request sets `metadata.include_all_retrieved_sources: true` — it's debug/eval telemetry, gated off by default since retrieval is uncapped up to `retriever.top_k` while the context budget only fits a handful of documents.
 
 Each document source entry (`build_document_source_link`) is shaped:

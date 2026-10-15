@@ -64,6 +64,7 @@ export const NEW_SINCE: Readonly<Record<string, string>> = {
   // key and nothing else — see FEATURE_TAG.md.
   //   "models.reranker": "UNRELEASED",
   "chunking.structured_section": "v2.2.0",
+  "partitions.embedder_swap": "UNRELEASED",
   "models.stt": "v2.2.0",
   "models.stt.moss_speaker_aware": "v2.2.0",
   "prompts.asr_transcription": "v2.2.0",

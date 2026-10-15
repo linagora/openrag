@@ -29,7 +29,11 @@ DEFAULT_ENDPOINT_ALIAS = "default"
 
 
 def is_placeholder_api_key(value: object) -> bool:
-    """Return whether a configured API key represents anonymous access."""
+    """Return whether a configured API key is unset or the config default ``EMPTY``.
+
+    Boot sync uses this to avoid overwriting stored credentials with a placeholder.
+    Default STT seeding also uses it to omit unset and placeholder keys.
+    """
     return value is None or (isinstance(value, str) and value.strip() in PLACEHOLDER_API_KEYS)
 
 
@@ -148,6 +152,12 @@ class ModelsConfig(ConfigMixin):
     # never touched. Default False preserves the "DB is the editable source of
     # truth after first boot" behavior.
     sync_on_boot: bool = False
+
+    # When True, /ready fails while the default embedder is unavailable or
+    # unresolvable. Off by default: every replica shares the embedder, so under
+    # Kubernetes its outage or restart takes all of them out of the Service at
+    # once, admin API and UI included, and no healthy replica is left (#1106).
+    readiness_requires_embedder: bool = False
 
     def llm_extra(self, name: str = "default") -> dict[str, Any]:
         """``extra`` payload of the named LLM endpoint (``{}`` if unregistered).

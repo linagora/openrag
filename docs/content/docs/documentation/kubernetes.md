@@ -3,6 +3,7 @@ title: Deploying OpenRAG on Kubernetes
 ---
 
 This guide explains how to deploy the **OpenRAG** stack on a Kubernetes cluster using Helm.
+To upgrade a running release to 2.3.0, follow [Upgrading OpenRAG — 2.2.x to 2.3.0 on Kubernetes](/openrag/documentation/upgrading/#22x-to-230-on-kubernetes).
 
 ---
 
@@ -123,7 +124,8 @@ that apply on every upgrade.
 For the default direct-API deployment, startup and liveness probes use
 `/health_check`, while the readiness probe uses `/ready`. When
 `ENABLE_RAY_SERVE=true`, the chart automatically uses exec probes against the
-Ray head because the Ray Serve HTTP proxy does not run on the API pod. Ray
+Ray head because the Ray Serve HTTP proxy does not run on the API pod, on the
+same paths. Ray
 Serve requires `ray.enabled=true`; Helm rejects that invalid combination. The
 reverse is rejected too: with `ray.enabled=true` the API must either run on Ray
 Serve (`ENABLE_RAY_SERVE=true`) or be pointed at the cluster with
@@ -137,7 +139,20 @@ the chart cannot read that Secret, and the Secret's copy still wins at runtime.
 Readiness returns 503 when startup is incomplete or PostgreSQL, Milvus, or Ray is
 unavailable. Model checks are reported in the response but do not gate the whole
 API, so optional VLM/STT and partition-specific model endpoints do not remove
-healthy replicas from service. Checks use short timeouts and results are cached
+healthy replicas from service. `READINESS_REQUIRE_EMBEDDER=true` also gates on
+the default embedder being `unavailable` or `unresolvable` (not on a probe
+timeout). Every replica shares that embedder, so its outage, or a restart while
+vLLM loads the model, then takes all of them out of the Service at once: the
+admin API and admin UI too, which leaves `kubectl port-forward` as the only way in.
+Before enabling it, check that `/ready` reports `checks.embedder: ok`: the probe
+looks the configured model name up in the endpoint's `GET /models` list, so an
+embedder that works can still read `unavailable`, for example behind a gateway that
+lists the model under another name, or on another endpoint without a `/models` route.
+A Hugging Face text-embeddings-inference (TEI) embedder has no such route: set
+`EMBEDDER_PROVIDER=tei` in `env.config` (or pick the `tei` vendor in the admin UI)
+and its `/health` is probed instead, without checking the model name. On Ollama,
+recognized by its `GET /api/version`, an untagged name also matches its `:latest`
+tag, as Ollama resolves it. Checks use short timeouts and results are cached
 for two seconds. Model probes check availability without running inference; they
 do not guarantee every request will succeed. Use an application image that
 includes `/ready` with these probes.
@@ -398,7 +413,7 @@ In `values.yaml`, disable the bundled PostgreSQL chart, set `postgresProvisionin
 
 The migration Job (`templates/postgres-migration-job.yaml`) is a Helm hook, annotated with `helm.sh/hook: pre-install,pre-upgrade`. You never invoke it directly: Helm runs it automatically as part of each `helm install` and `helm upgrade`, before it creates or updates the OpenRAG Deployment, and waits for it to finish. It applies the Alembic migrations against the pre-created database (it migrates the schema but does not create the database). The OpenRAG API then starts against an already-migrated schema.
 
-When `postgresProvisioning.migrationJob` is disabled (the default), the Job is not rendered at all and the application runs migrations itself at startup instead.
+When `postgresProvisioning.migrationJob` is disabled (the default), the Job is not rendered at all, and the application runs the migrations itself at startup while `postgresProvisioning.runMigrationsInApp` is on (the default). With both off, nothing applies them.
 
 ## GPU metrics
 

@@ -191,6 +191,28 @@ async def test_list_tasks_computes_running_duration_from_legacy_actor_metadata()
 
 
 @pytest.mark.asyncio
+async def test_list_tasks_admin_after_a_refused_duplicate_upload():
+    """A registration refused by the admission fence must not break the admin list."""
+    from services.workers.task_state import TaskStateManager
+
+    manager = TaskStateManager.__ray_metadata__.modified_class()
+    await manager.set_queued_details("task-a", file_id="file-1", partition="tenant-a", metadata={}, user_id=1)
+    refused = await manager.set_queued_details_v2(
+        "task-b",
+        file_id="file-1",
+        partition="tenant-a",
+        metadata={},
+        user_id=1,
+        reject_if_file_active=True,
+    )
+    assert refused["accepted"] is False
+
+    rows = await JobService(FakeTSM(info=await manager.get_all_info())).list_tasks(is_admin=True, user_id=1)
+
+    assert [(row["task_id"], row["state"]) for row in rows] == [("task-a", "QUEUED")]
+
+
+@pytest.mark.asyncio
 async def test_list_tasks_user_scoped():
     info = {
         "t1": {"state": "QUEUED", "details": {}, "user": 1},
