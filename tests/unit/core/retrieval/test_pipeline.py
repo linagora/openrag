@@ -460,6 +460,39 @@ async def test_csv_sibling_expansion_keeps_ranked_non_seed_candidates():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("top_k", "expected_ids"),
+    [
+        (None, ["pdf-1", "pdf-2", "csv-seed", "csv-sibling"]),
+        (2, ["pdf-1", "pdf-2"]),
+    ],
+)
+async def test_csv_sibling_expansion_preserves_seed_rank_without_reranking(top_k, expected_ids):
+    seed = Chunk(
+        id="csv-seed",
+        text="first column group",
+        document_id="file-1",
+        partition="p1",
+        metadata={"csv_row_number": 7, "csv_column_group": 1, "csv_column_groups_total": 2},
+    )
+    sibling = Chunk(
+        id="csv-sibling",
+        text="second column group",
+        document_id="file-1",
+        partition="p1",
+        metadata={"csv_row_number": 7, "csv_column_group": 2, "csv_column_groups_total": 2},
+    )
+    retriever = FakeRetriever()
+    retriever.results_queue = [[*_chunks("pdf-1", "pdf-2"), seed]]
+    retriever.expand_result = [seed, sibling]
+    pipeline = RetrieverPipeline(retriever=retriever)
+
+    result = await pipeline.retrieve_docs(partition=["p1"], query=Query(query="hi"), top_k=top_k)
+
+    assert [chunk.id for chunk in result] == expected_ids
+
+
+@pytest.mark.asyncio
 async def test_get_relevant_docs_runs_one_call_per_subquery_and_fuses():
     r = FakeRetriever()
     r.results_queue = [_chunks("a", "b"), _chunks("b", "c")]

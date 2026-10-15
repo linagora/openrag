@@ -268,15 +268,19 @@ class RetrieverPipeline:
             )
             if len(expanded) > len(head):
                 expansion_applied = True
-                expanded_chunks = list(expanded)
-                expanded_candidate_ids = {str(_chunk_key(chunk)) for chunk in expanded_chunks}
                 if preserve_ranked_candidates:
                     # Automatic CSV sibling expansion supplements the ranked
-                    # list. Regular document expansion keeps develop's
-                    # replacement behavior.
-                    expanded_chunks.extend(
-                        chunk for chunk in chunks if str(_chunk_key(chunk)) not in expanded_candidate_ids
+                    # list at the seed's position. Regular document expansion
+                    # keeps develop's replacement behavior.
+                    ranked_candidate_ids = {str(_chunk_key(chunk)) for chunk in chunks}
+                    expanded_chunks = order_csv_continuations(
+                        [
+                            *chunks,
+                            *(chunk for chunk in expanded if str(_chunk_key(chunk)) not in ranked_candidate_ids),
+                        ]
                     )
+                else:
+                    expanded_chunks = list(expanded)
                 expanded_candidate_ids = {str(_chunk_key(chunk)) for chunk in expanded_chunks}
                 chunks = expanded_chunks
                 if self.reranker_enabled:
