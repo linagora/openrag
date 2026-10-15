@@ -4,7 +4,7 @@ Partition CRUD, membership, file/chunk reads and the relationship
 queries live in ``services.orchestrators.partition_service.PartitionService``.
 This module keeps HTTP transport only: request-scoped authorization (the
 shared ``Depends`` wrappers in :mod:`api.dependencies.auth`),
-``request.url_for`` link building, and the conflict / not-found guards
+build_url link building, and the conflict / not-found guards
 whose exact non-bracketed ``{"detail": ...}`` body the endpoints return
 via ``HTTPException``.
 """
@@ -12,6 +12,7 @@ via ``HTTPException``.
 import os
 from typing import Literal
 from urllib.parse import quote
+from api.dependencies.build_url import build_url
 
 from api.dependencies.auth import (
     partitions_with_details,
@@ -28,7 +29,7 @@ from api.schemas.admin.partition_schemas import (
 from core.utils.exceptions import ConfigError
 from core.utils.logging import get_logger
 from core.utils.partition_limits import max_partitions_for_user
-from di.providers import get_embedder_swap_service, get_partition_service
+from di.providers import get_embedder_swap_service, get_partition_service, get_config
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request, Response, status
 from fastapi.responses import JSONResponse
 
@@ -144,6 +145,7 @@ Returns a list of files with:
 async def list_files(
     request: Request,
     partition: str,
+    config=Depends(get_config),
     limit: int | None = None,
     degraded_stage: Literal["caption", "contextualize", "topic_tag"] | None = Query(default=None),
     partition_viewer=Depends(require_partition_viewer),
@@ -155,12 +157,12 @@ async def list_files(
     def process_file(file_dict):
         """Add a canonical file-detail link to one file row."""
         return {
-            "link": str(
-                request.url_for(
-                    "get_file",
-                    partition=_quote_param_value(file_dict.get("partition")),
-                    file_id=_quote_param_value(file_dict.get("file_id")),
-                )
+            "link": build_url(
+                request,
+                "get_file",
+                preferred_url_scheme=config.server.preferred_url_scheme,
+                partition=_quote_param_value(file_dict.get("partition")),
+                file_id=_quote_param_value(file_dict.get("file_id")),
             ),
             **file_dict,
         }
@@ -169,7 +171,6 @@ async def list_files(
         status_code=status.HTTP_200_OK,
         content={"files": list(map(process_file, file_dicts))},
     )
-
 
 @router.get(
     "/{partition}/file/{file_id}",
@@ -192,6 +193,7 @@ Returns file information including:
 async def get_file(
     request: Request,
     partition: str,
+    config=Depends(get_config),
     limit: int = Query(default=2000, ge=0),
     file_id: str = Depends(validate_file_id),
     partition_viewer=Depends(require_partition_viewer),
@@ -200,7 +202,12 @@ async def get_file(
     """Return metadata and chunk links for one file in a partition."""
     catalog_metadata = await service.get_file_metadata(partition=partition, file_id=file_id)
     rows = await service.get_file_chunks(partition=partition, file_id=file_id, limit=limit) if limit else []
-    documents = [{"link": str(request.url_for("get_extract", extract_id=row["_id"]))} for row in rows]
+    documents = [{"link": build_url(
+            request,
+            "get_extract",
+            preferred_url_scheme=config.server.preferred_url_scheme,
+            extract_id=row["_id"],
+        )} for row in rows]
     # Preserve the legacy first-page hint, but do not merge an entire chunk
     # into file metadata: chunks also carry vectors, text and internal fields.
     first_page = {"page": rows[0]["page"]} if rows and "page" in rows[0] else {}
@@ -210,7 +217,6 @@ async def get_file(
         status_code=status.HTTP_200_OK,
         content={"metadata": metadata, "documents": documents},
     )
-
 
 @router.get(
     "/{partition}/chunks",
@@ -239,6 +245,7 @@ Returns all chunks with:
 async def list_all_chunks(
     request: Request,
     partition: str,
+    config=Depends(get_config),
     include_embedding: bool = True,
     file_id: str | None = None,
     limit: int | None = Query(default=None, ge=0),
@@ -254,14 +261,18 @@ async def list_all_chunks(
     )
     chunks = [
         {
-            "link": str(request.url_for("get_extract", extract_id=it["metadata"]["_id"])),
+            "link": build_url(
+                request,
+                "get_extract",
+                preferred_url_scheme=config.server.preferred_url_scheme,
+                extract_id=it["metadata"]["_id"],
+            ),
             "content": it["content"],
             "metadata": it["metadata"],
         }
         for it in items
     ]
     return JSONResponse(status_code=status.HTTP_200_OK, content={"chunks": chunks})
-
 
 @router.post(
     "/{partition}",

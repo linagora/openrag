@@ -6,7 +6,7 @@ map-reduce, context/prompt assembly, streaming, and the
 ``services.orchestrators.query_service.QueryService``. This module keeps
 HTTP transport only: model→partition resolution, token-limit validation,
 the OpenAI ``/models`` listing, request-bound source-link building
-(``__prepare_sources`` uses ``request.url_for`` so it stays here and is
+(``__prepare_sources`` uses ``build.url`` so it stays here and is
 handed to the service as a callable), and ``StreamingResponse`` /
 ``JSONResponse`` wrapping with the SSE error envelope.
 """
@@ -14,6 +14,7 @@ handed to the service as a callable), and ``StreamingResponse`` /
 import asyncio
 import json
 from typing import TYPE_CHECKING
+from api.dependencies.build_url import build_url
 
 from api.dependencies.auth import (
     current_user,
@@ -239,14 +240,24 @@ async def list_models(
     return JSONResponse(content={"object": "list", "data": models})
 
 
-def __prepare_sources(request: Request, docs: list, web_results: list | None = None):
+def __prepare_sources(request: Request, docs: list, config, web_results: list | None = None):
     def static_url(extract_id) -> str:
         # Authorized, partition-checked download keyed by chunk id (replaces the
         # open /static mount). The file is resolved server-side from the chunk.
-        return str(request.url_for("download_source", extract_id=extract_id))
+        return build_url(
+                    request,
+                    "download_source",
+                    preferred_url_scheme=config.server.preferred_url_scheme,
+                    extract_id=extract_id,
+                )
 
     def chunk_url(extract_id) -> str:
-        return str(request.url_for("get_extract", extract_id=extract_id))
+        return build_url(
+                        request,
+                        "get_extract",
+                        preferred_url_scheme=config.server.preferred_url_scheme,
+                        extract_id=extract_id,
+                    )
 
     links = []
     for doc in docs:
@@ -589,7 +600,7 @@ async def openai_chat_completion(
     max_prompt_tokens = _max_prompt_tokens(request, config, partitions)
 
     def prep(docs, web):
-        return __prepare_sources(request2, docs, web)
+        return __prepare_sources(request2, docs, config, web)
 
     if request.stream:
 
@@ -730,8 +741,8 @@ async def openai_completion(
     resp = await service.complete(
         partitions=partitions,
         payload=request.model_dump(exclude_none=True),
-        prepare_sources=lambda docs, _web: __prepare_sources(request2, docs),
+        prepare_sources=lambda docs, _web: __prepare_sources(request2, docs, config),
         max_prompt_tokens=_max_prompt_tokens(request, config, partitions),
     )
     log.debug("Returning completion response.")
-    return JSONResponse(content=resp)
+    return JSONResponse(content=resp)   

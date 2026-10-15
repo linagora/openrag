@@ -3,13 +3,14 @@
 Phase 8D.2: queue aggregation and the ``?task_status=`` filtering moved
 to ``services.orchestrators.job_service.JobService``. This module keeps
 HTTP transport only: the shared admin/current-user ``Depends`` wrappers
-and the ``request.url_for`` link building.
+and uses the build_url function for link building.
 """
 
 from api.dependencies.auth import current_user, require_admin
 from di.providers import get_job_service
 from fastapi import APIRouter, Depends, Request, status
 from fastapi.responses import JSONResponse
+from api.dependencies.build_url import build_url
 
 router = APIRouter()
 
@@ -87,6 +88,7 @@ Returns list of tasks with:
 )
 async def list_tasks(
     request: Request,
+    config,
     task_status: str | None = None,
     user=Depends(current_user),
     service=Depends(get_job_service),
@@ -114,11 +116,21 @@ async def list_tasks(
             "duration_ms": row["duration_ms"],
             **({"error_summary": row["error_summary"]} if user.get("is_admin") and row.get("error_summary") else {}),
             **(
-                {"error_url": str(request.url_for("get_task_error", task_id=task_id))}
+                {"error_url": build_url(
+            request,
+            "get_task_error",
+            preferred_url_scheme=config.server.preferred_url_scheme,
+            task_id=task_id,
+        )}
                 if row["state"] == "FAILED"
                 else {}
             ),
-            "url": str(request.url_for("get_task_status", task_id=task_id)),
+            "url": build_url(
+            request,
+            "get_task_status",
+            preferred_url_scheme=config.server.preferred_url_scheme,
+            task_id=task_id,
+        ),
         }
         tasks.append(item)
 

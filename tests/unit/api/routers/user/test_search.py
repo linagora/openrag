@@ -1,4 +1,7 @@
 from types import SimpleNamespace
+import pytest
+from core.config.root import Settings
+from api.routers.admin.partitions import router as partitions_router
 
 from api.dependencies.auth import (
     current_user,
@@ -7,7 +10,7 @@ from api.dependencies.auth import (
 )
 from api.error_handlers import register_error_handlers
 from api.routers.user.search import router as search_router
-from di.providers import get_auth_service, get_partition_service, get_retrieval_service, get_workspace_service
+from di.providers import get_config, get_auth_service, get_partition_service, get_retrieval_service, get_workspace_service
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -245,3 +248,93 @@ def test_search_one_partition_invalid_workspace_404s():
     assert resp.status_code == 404
     assert resp.json()["detail"] == "Workspace not found"
     assert retrieval.calls == []
+
+@pytest.mark.parametrize(
+    ("preferred_scheme", "request_scheme", "expected_scheme"),
+    [
+        ("https", "http", "https"),
+        (None, "https", "https"),
+        (None, "http", "http"),
+    ],
+)
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/search",
+        "/search/partition/mine",
+        "/search/partition/mine/file/abc123",
+    ],
+)
+def test_search_source_urls_use_preferred_scheme(
+    preferred_scheme, request_scheme, expected_scheme, path
+):
+    from api.dependencies.auth import require_partition_viewer
+    from api.dependencies.files import validate_file_id
+    from di.providers import get_config
+
+    retrieval = _CapturingRetrieval()
+
+    # Return one chunk so that the response contains a link to assert on.
+    chunk = SimpleNamespace(
+        id="chunk-1",
+        text="hello",
+        to_langchain=lambda: SimpleNamespace(
+            metadata={"_id": "chunk-1", "file_id": "file-1"}
+        ),
+    )
+
+    class _SearchRetrieval:
+        async def search(self, **kwargs):
+            return [chunk]
+
+    retrieval = _SearchRetrieval()
+
+    app = FastAPI()
+    register_error_handlers(app)
+    @app.get("/extract/{extract_id}", name="get_extract")
+    async def fake_get_extract(extract_id: str):
+        return {"extract_id": extract_id}
+    
+    @app.middleware("http")
+    async def set_request_scheme(request, call_next):
+        request.scope["scheme"] = request_scheme
+        return await call_next(request)
+
+    app.include_router(search_router, prefix="/search")
+    app.include_router(partitions_router)
+
+    settings = Settings()
+    settings = settings.model_copy(
+        update={
+            "server": settings.server.model_copy(
+                update={"preferred_url_scheme": preferred_scheme}
+            )
+        }
+    )
+
+    app.dependency_overrides[require_partition_viewer] = lambda: None
+    app.dependency_overrides[validate_file_id] = lambda: "abc123"
+    app.dependency_overrides[get_retrieval_service] = lambda: retrieval
+    app.dependency_overrides[get_config] = lambda: settings
+    app.dependency_overrides[get_workspace_service] = lambda: _FakeWorkspaces()
+    app.dependency_overrides[current_user] = lambda: {"id": 7, "is_admin": False}
+    app.dependency_overrides[current_user_partitions] = lambda: [
+        {"partition": "mine", "role": "viewer"}
+    ]
+    app.dependency_overrides[current_user_or_admin_partitions_list] = lambda: ["mine"]
+    app.dependency_overrides[get_auth_service] = lambda: _AuthService
+    app.dependency_overrides[get_partition_service] = lambda: _PartitionService()
+
+    client = TestClient(app)
+
+    response = client.get(
+        path,
+        params={"text": "hello"},
+        headers={"X-Forwarded-Proto": request_scheme},
+    )
+
+    assert response.status_code == 200
+
+    links = [document["link"] for document in response.json()["documents"]]
+    assert links
+    assert all(link.startswith(f"{expected_scheme}://") for link in links)

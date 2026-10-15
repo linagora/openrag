@@ -11,11 +11,12 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock
+from types import SimpleNamespace
 
 import pytest
 from api.dependencies.auth import partitions_with_details, require_partition_viewer
 from api.routers.admin import partitions
-from di.providers import get_partition_service
+from di.providers import get_partition_service, get_config
 from fastapi import FastAPI
 from services.orchestrators.partition_service import PartitionService
 from services.persistence.document_repo import PgDocumentRepository
@@ -67,6 +68,7 @@ def _build_app(
     principal_partitions: list[dict],
     *,
     is_admin: bool = False,
+    preferred_url_scheme: str | None = None,
 ) -> FastAPI:
     app = FastAPI()
 
@@ -83,6 +85,8 @@ def _build_app(
     app.dependency_overrides[partitions_with_details] = lambda: principal_partitions
     app.dependency_overrides[get_partition_service] = lambda: service
     app.dependency_overrides[require_partition_viewer] = lambda: {"partition": "legal", "role": "viewer"}
+    app.dependency_overrides[get_config] = lambda: SimpleNamespace(server=SimpleNamespace(preferred_url_scheme=preferred_url_scheme))
+    
     return app
 
 
@@ -147,7 +151,7 @@ async def test_file_list_accepts_a_bounded_degraded_stage_filter(async_client_fa
     async with async_client_factory(app) as client:
         response = await client.get("/partition/legal", params={"limit": 20, "degraded_stage": "caption"})
 
-    assert response.status_code == 200
+    assert response.status_code == 200, response.text
     assert service.file_calls == [{"partition": "legal", "limit": 20, "degraded_stage": "caption"}]
 
 
@@ -164,7 +168,17 @@ async def test_file_list_rejects_an_unbounded_degraded_stage(async_client_factor
 
 
 @pytest.mark.asyncio
-async def test_file_detail_uses_authoritative_catalog_metadata(async_client_factory) -> None:
+@pytest.mark.parametrize(
+    ("preferred_url_scheme", "expected_scheme"),
+    [
+        ("https", "https"),
+        (None, "http"),
+    ],
+)
+async def test_file_detail_uses_authoritative_catalog_metadata(async_client_factory,
+    preferred_url_scheme: str | None,
+    expected_scheme: str,
+) -> None:
     service = _FakeService({})
     service.file_chunks = [
         {
@@ -175,7 +189,7 @@ async def test_file_detail_uses_authoritative_catalog_metadata(async_client_fact
             "text": "private chunk text",
         }
     ]
-    app = _build_app(service, [])
+    app = _build_app(service, [], preferred_url_scheme=preferred_url_scheme,)
 
     async with async_client_factory(app) as client:
         response = await client.get("/partition/legal/file/file-1")
@@ -188,7 +202,7 @@ async def test_file_detail_uses_authoritative_catalog_metadata(async_client_fact
         "degraded_stages": ["caption"],
     }
     assert body["documents"] == [
-        {"link": "http://testserver/extract/chunk-1"},
+        {"link": f"{expected_scheme}://testserver/extract/chunk-1"},
     ]
 
 
@@ -251,3 +265,77 @@ async def test_file_detail_preserves_catalog_columns(async_client_factory, limit
     }
     if not limit:
         vector_store.query_chunks_by_filter.assert_not_awaited()
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("preferred_url_scheme", "expected_scheme"),
+    [
+        ("https", "https"),
+        (None, "http"),
+    ],
+)
+async def test_file_list_link_uses_configured_or_request_scheme(
+    async_client_factory,
+    preferred_url_scheme: str | None,
+    expected_scheme: str,
+) -> None:
+    service = _FakeService({})
+    # The list route generates links for each returned file.
+    service.list_files = AsyncMock(
+        return_value=[
+            {"partition": "legal", "file_id": "file-1", "filename": "catalog.pdf"}
+        ]
+    )
+    app = _build_app(
+        service,
+        [],
+        preferred_url_scheme=preferred_url_scheme,
+    )
+
+    async with async_client_factory(app) as client:
+        response = await client.get("/partition/legal")
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+
+    assert body["files"][0]["link"] == (
+    f"{expected_scheme}://testserver/partition/legal/file/file-1"
+    )
+    
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("preferred_url_scheme", "expected_scheme"),
+    [
+        ("https", "https"),
+        (None, "http"),
+    ],
+)
+async def test_list_all_chunks_link_uses_configured_or_request_scheme(
+    async_client_factory,
+    preferred_url_scheme: str | None,
+    expected_scheme: str,
+) -> None:
+    service = _FakeService({})
+    service.list_all_chunks = AsyncMock(
+        return_value=[
+            {
+                "content": "Example chunk",
+                "metadata": {"_id": "chunk-1"},
+            }
+        ]
+    )
+    app = _build_app(
+        service,
+        [],
+        preferred_url_scheme=preferred_url_scheme,
+    )
+
+    async with async_client_factory(app) as client:
+        response = await client.get("/partition/legal/chunks")
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+
+    assert body["chunks"][0]["link"] == (
+        f"{expected_scheme}://testserver/extract/chunk-1"
+    )
