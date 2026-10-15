@@ -50,6 +50,14 @@ class ModelListUnavailableError(ValueError):
         super().__init__("Endpoint returned an invalid model list.")
 
 
+class LatestAliasTimeoutError(TimeoutError):
+    """The endpoint lists a model under ``:latest`` alone and did not say in time whether it resolves it."""
+
+    def __init__(self, model_ids: list[str]) -> None:
+        super().__init__("Endpoint did not answer GET /api/version in time.")
+        self.model_ids = model_ids
+
+
 @dataclass(frozen=True, slots=True)
 class _ModelProbeRequest:
     url: str
@@ -208,6 +216,7 @@ class ReadinessService:
                 ModelEndpointReadiness(provider=target.provider, kind=target.kind, status="timeout")
                 for target in targets
             )
+        deadline = time.monotonic() + timeout
         try:
             model_ids = await asyncio.wait_for(_request_model_probe(request, timeout), timeout=timeout)
         except (TimeoutError, httpx.TimeoutException):
@@ -215,13 +224,23 @@ class ReadinessService:
         except Exception:
             status = "unavailable"
         else:
+            model_names = [target.config.model_name for target in targets if target.config and target.config.model_name]
+            alias_status: ReadinessStatus = "unavailable"
+            try:
+                resolves_latest_alias = await _resolves_latest_alias(
+                    request, model_ids, model_names, deadline - time.monotonic()
+                )
+            except LatestAliasTimeoutError:
+                resolves_latest_alias, alias_status = False, "timeout"
             results = []
             for target in targets:
                 assert target.config is not None
                 try:
-                    _validate_model(target.config, model_ids)
-                except ModelNotFoundError:
-                    target_status: ReadinessStatus = "unavailable"
+                    _validate_model(target.config, model_ids, resolves_latest_alias=resolves_latest_alias)
+                except ModelNotFoundError as exc:
+                    # Only a name the :latest tag alone could serve waited on the version check.
+                    needed_alias = _is_latest_alias(target.config.model_name or "", exc.model_ids)
+                    target_status: ReadinessStatus = alias_status if needed_alias else "unavailable"
                 else:
                     target_status = "ok"
                 results.append(ModelEndpointReadiness(provider=target.provider, kind=target.kind, status=target_status))
@@ -255,6 +274,9 @@ def _model_probe_request(config: ModelEndpointConfig, model_type: str | None = N
     implementation = model_implementation(config, model_type)
     if implementation == "ollama" and not base.endswith("/v1"):
         base += "/v1"
+    if implementation == "tei":
+        # TEI has no /models, and serves /health at its root next to /v1/embeddings.
+        base = base.removesuffix("/v1")
     health_only = implementation in {"infinity", "tei"}
     # Keep non-STT keys as configured (``EMPTY`` is real for the bundled
     # reranker). The audio client trims STT keys and treats whitespace-only as
@@ -298,9 +320,66 @@ async def _request_model_probe(request: _ModelProbeRequest, timeout: float) -> l
     return [item["id"] for item in models]
 
 
-def _validate_model(config: ModelEndpointConfig, model_ids: list[str] | None) -> None:
-    if model_ids is not None and config.model_name and config.model_name not in model_ids:
-        raise ModelNotFoundError(model_ids)
+async def _resolves_latest_alias(
+    request: _ModelProbeRequest, model_ids: list[str] | None, model_names: list[str], timeout: float
+) -> bool:
+    """Whether the endpoint serves an untagged name as its ``:latest`` tag.
+
+    Asking the endpoint costs a second request, so it is only asked when one of
+    ``model_names`` is listed under its ``:latest`` tag alone. A failed answer
+    reads as "no", and no answer within ``timeout`` raises
+    ``LatestAliasTimeoutError``. Neither concerns a name listed as configured,
+    which is found without asking.
+    """
+    if model_ids is None or not any(_is_latest_alias(name, model_ids) for name in model_names):
+        return False
+    if timeout <= 0:
+        raise LatestAliasTimeoutError(model_ids)
+    try:
+        return await asyncio.wait_for(_is_ollama(request, timeout), timeout=timeout)
+    except (TimeoutError, httpx.TimeoutException) as exc:
+        raise LatestAliasTimeoutError(model_ids) from exc
+    except Exception:
+        return False
+
+
+def _is_latest_alias(model_name: str, model_ids: list[str]) -> bool:
+    """Whether ``model_name`` is untagged and listed only as its ``:latest`` tag."""
+    untagged = ":" not in model_name.rpartition("/")[2]
+    return untagged and model_name not in model_ids and f"{model_name}:latest" in model_ids
+
+
+async def _is_ollama(request: _ModelProbeRequest, timeout: float) -> bool:
+    """Whether the endpoint is Ollama, which serves an untagged name as its ``:latest`` tag.
+
+    Ollama lists every model with its tag and resolves an untagged name to
+    ``:latest``, and only to that, so ``nomic-embed-text`` is served by
+    ``nomic-embed-text:latest`` but not by ``nomic-embed-text:v1.5``. vLLM
+    accepts only the names it lists. The configured implementation cannot tell
+    them apart, since an Ollama endpoint seeded from env runs as ``vllm``, so
+    ask the server: Ollama answers ``GET /api/version`` next to its ``/v1``.
+    """
+    root = request.url.removesuffix("/models").removesuffix("/v1")
+    headers = {"Authorization": request.authorization} if request.authorization else {}
+    async with httpx.AsyncClient(timeout=timeout, headers=headers, follow_redirects=False) as client:
+        response = await client.get(root + "/api/version")
+    if response.status_code != 200:
+        return False
+    try:
+        payload = response.json()
+    except ValueError:
+        return False
+    return isinstance(payload, dict) and isinstance(payload.get("version"), str)
+
+
+def _validate_model(
+    config: ModelEndpointConfig, model_ids: list[str] | None, *, resolves_latest_alias: bool = False
+) -> None:
+    if model_ids is None or not config.model_name or config.model_name in model_ids:
+        return
+    if resolves_latest_alias and _is_latest_alias(config.model_name, model_ids):
+        return
+    raise ModelNotFoundError(model_ids)
 
 
 async def check_model_endpoint(
@@ -310,6 +389,10 @@ async def check_model_endpoint(
     timeout: float = 2.0,
 ) -> list[str] | None:
     """Check availability without generating tokens or running embeddings."""
-    model_ids = await _request_model_probe(_model_probe_request(config, model_type), timeout)
-    _validate_model(config, model_ids)
+    request = _model_probe_request(config, model_type)
+    deadline = time.monotonic() + timeout
+    model_ids = await _request_model_probe(request, timeout)
+    model_names = [config.model_name] if config.model_name else []
+    resolves_latest_alias = await _resolves_latest_alias(request, model_ids, model_names, deadline - time.monotonic())
+    _validate_model(config, model_ids, resolves_latest_alias=resolves_latest_alias)
     return model_ids

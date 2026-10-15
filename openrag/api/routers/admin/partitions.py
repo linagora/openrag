@@ -201,8 +201,10 @@ async def get_file(
     catalog_metadata = await service.get_file_metadata(partition=partition, file_id=file_id)
     rows = await service.get_file_chunks(partition=partition, file_id=file_id, limit=limit) if limit else []
     documents = [{"link": str(request.url_for("get_extract", extract_id=row["_id"]))} for row in rows]
-    chunk_metadata = {k: v for k, v in rows[0].items() if k != "_id"} if rows else {}
-    metadata = {**chunk_metadata, **catalog_metadata}
+    # Preserve the legacy first-page hint, but do not merge an entire chunk
+    # into file metadata: chunks also carry vectors, text and internal fields.
+    first_page = {"page": rows[0]["page"]} if rows and "page" in rows[0] else {}
+    metadata = {**first_page, **catalog_metadata}
 
     return JSONResponse(
         status_code=status.HTTP_200_OK,

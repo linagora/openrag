@@ -236,8 +236,10 @@ def validate_content_matches_extension(extension: str, head: bytes) -> None:
     renamed to ``.pdf`` is handed to the PDF backend whatever it actually
     contains. For the formats in :data:`_VERIFIABLE_SIGNATURES` the signature
     ``filetype`` reports must match; an unrecognised signature is a failure too,
-    because arbitrary content is exactly what this rejects. The formats in
-    :data:`_TOLERANT_SIGNATURES` invert that: their parser accepts several
+    because arbitrary content is exactly what this rejects. PDF is an exception:
+    when no signature is recognised, a ``%PDF-`` header starting at an offset
+    from 0 through 1024 inclusive is accepted, matching pdfium's boundary.
+    The formats in :data:`_TOLERANT_SIGNATURES` invert that: their parser accepts several
     formats, so anything ``filetype`` recognises as *something else* is refused
     and everything it cannot place is allowed.
 
@@ -265,6 +267,11 @@ def validate_content_matches_extension(extension: str, head: bytes) -> None:
 
     kind = filetype.guess(head)
     detected = kind.extension if kind is not None else None
+    # PDF readers accept a small preamble before the header. ``filetype`` only
+    # checks offset zero, so also recognise a header starting at offset <= 1024.
+    # A known non-PDF signature at offset zero still takes precedence.
+    if extension == "pdf" and detected is None and 0 <= head.find(b"%PDF-") <= 1024:
+        return
     if detected in expected:
         return
 
